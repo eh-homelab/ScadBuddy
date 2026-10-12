@@ -126,6 +126,15 @@ describe('flow tools (#1057)', () => {
     expect(result.isError).toBe(true)
   })
 
+  it('lists the reset points as a read (#2350)', async () => {
+    expect(tool('get_flow_reset_points').risk).toBe('read')
+    const RUN = '7a1c2b0e-1d2a-4c3b-9e8f-0a1b2c3d4e5f'
+    const answer = { workflow_run_id: 'w1', as_of_event_id: 40, points: [{ event_id: 12, first_step: 1 }] }
+    server.use(http.get(`${BACKEND}/api/v1/workflow-runs/${RUN}/reset-points`, () => HttpResponse.json(answer)))
+    const result = await runTool(tool('get_flow_reset_points'), { run_id: RUN }, ctx())
+    expect(firstText(result)).toEqual(answer)
+  })
+
   it('previews as a read and resets as an outward call with one key', async () => {
     expect([tool('preview_flow_reset').risk, tool('reset_flow_run').risk]).toEqual(['read', 'outward'])
     const RUN = '7a1c2b0e-1d2a-4c3b-9e8f-0a1b2c3d4e5f'

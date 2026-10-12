@@ -238,7 +238,7 @@ export const flowTools: Tool[] = [
     description:
       'What resetting a flow run to an earlier point would send again: its outward calls (queue_print, arrange, an outward tool, an agent turn that made one) ' +
       'after `event_id`, a completed workflow task of the run\'s Temporal history after its script started ' +
-      '(`valid`). Every host call after the point runs again; answers and approvals after it are undone. ' +
+      '(`valid`; get_flow_reset_points lists them). Every host call after the point runs again; answers and approvals after it are undone. ' +
       'Pass the answer\'s `as_of_event_id` and `workflow_run_id` to reset_flow_run.',
     input: z.object({ run_id: runId, event_id: z.number().int().min(1) }),
     risk: 'read',
@@ -250,6 +250,24 @@ export const flowTools: Tool[] = [
             params: { path: { run_id }, query: { event_id } },
           }),
           `preview reset of flow run ${run_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'get_flow_reset_points',
+    description:
+      'Every point a Reset of a flow run takes (`event_id`s of its current execution, oldest first), each with ' +
+      '`first_step`, the seq of the first step a Reset there runs again or reopens (null: none). Preview one ' +
+      'with preview_flow_reset before reset_flow_run.',
+    input: z.object({ run_id: runId }),
+    risk: 'read',
+    routes: ['GET /api/v1/workflow-runs/{run_id}/reset-points'],
+    handler: async ({ run_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/workflow-runs/{run_id}/reset-points', { params: { path: { run_id } } }),
+          `reset points of flow run ${run_id}`,
         ),
       ),
   }),
