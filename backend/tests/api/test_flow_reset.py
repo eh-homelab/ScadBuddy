@@ -130,6 +130,40 @@ def test_a_run_parked_before_resets_recorded_where_is_refused(
     assert response.json()["type"].endswith("/flow-reset-unrecorded")
 
 
+def test_the_reset_points_are_the_points_a_preview_calls_valid(client: TestClient) -> None:
+    """#2350: the run page offers these instead of probing `reset-preview` id by id."""
+    definition = register(
+        client,
+        script("a = await wait_for_human('A?', 600)", "b = await wait_for_human('B?', 600)"),
+    )
+    run_id = start(client, definition["id"], "points").json()["id"]
+    first = until(client, run_id, lambda v: [p["prompt"] for p in v["pending"]] == ["A?"])
+    answered = client.post(
+        f"/api/v1/workflow-runs/{run_id}/answer",
+        json={"call_id": first["pending"][0]["call_id"], "answer": "1"},
+        headers={"Idempotency-Key": "a"},
+    )
+    assert answered.status_code == 200, answered.text
+    second = until(client, run_id, lambda v: [p["prompt"] for p in v["pending"]] == ["B?"])
+    response = client.get(f"/api/v1/workflow-runs/{run_id}/reset-points")
+    assert response.status_code == 200, response.text
+    found = response.json()
+    assert found["workflow_run_id"] == second["run"]["workflow_run_id"]
+    last = found["as_of_event_id"]
+    assert [p["event_id"] for p in found["points"]] == [
+        e for e in range(1, last + 1) if preview(client, run_id, e)["valid"]
+    ]
+    assert found["points"], found
+    # Even the latest point, the task that took the answer, asks 'A?' again (the test
+    # above): every point reopens the first step.
+    assert {p["first_step"] for p in found["points"]} == {1}
+
+
+def test_an_unknown_run_has_no_reset_points(client: TestClient) -> None:
+    response = client.get("/api/v1/workflow-runs/00000000-0000-0000-0000-000000000000/reset-points")
+    assert response.status_code == 404
+
+
 def test_an_unknown_run_has_no_preview(client: TestClient) -> None:
     response = client.get(
         "/api/v1/workflow-runs/00000000-0000-0000-0000-000000000000/reset-preview",

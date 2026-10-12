@@ -706,15 +706,6 @@ async def gather_options(
 Inventory = tuple[list[Spool], list[SpoolAssignment]]
 
 
-def settled[T](result: T | BaseException) -> T:
-    """One result of ``asyncio.gather(..., return_exceptions=True)``, its failure raised.
-    Taking the results in the order the reads once ran in keeps which error a
-    concurrent read surfaces the serial one's (#2504)."""
-    if isinstance(result, BaseException):
-        raise result
-    return result
-
-
 async def read_inventory(client: BambuddyClient) -> Inventory:
     """The spools, then their assignments, in the order every reader reads them."""
     spools = await client.spools()

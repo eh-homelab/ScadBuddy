@@ -637,6 +637,15 @@ class Catalogue:
         #: is made once per commit, not on every record of the template (#1469).
         self._ui_versions: dict[str, tuple[str, str | None]] = {}
 
+    def forget(self, model_ids: list[str] | None = None) -> None:
+        """Drop what is cached about these templates' revisions -- every template's,
+        for None -- because another replica moved them (#2507)."""
+        if model_ids is None:
+            self._ui_versions.clear()
+            return
+        for model_id in model_ids:
+            self._ui_versions.pop(model_id, None)
+
     def notify_change(self, *slugs: str) -> None:
         """Tell :attr:`on_change` about a change made other than through this class
         -- a revision restored straight through the history."""

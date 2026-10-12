@@ -23,7 +23,7 @@ import pytest
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import history as history_module
 from scadbuddy.library.catalogue import Catalogue, ModelMeta, StaleVersionError
-from scadbuddy.library.history import GitError, ModelHistory
+from scadbuddy.library.history import GitError, HeadChange, ModelHistory
 from scadbuddy.library.repo_lock import PgRepoCoordinator, RepoLockError
 from scadbuddy.render.pg_store import migrate
 from scadbuddy.render.solids import WRAPPER_PREFIX
@@ -240,8 +240,8 @@ class _Unrecordable:
 
     expected: str | None = None
 
-    def record(self, commit: str) -> None:
-        raise RepoLockError(f"could not record {commit[:7]} as the models HEAD")
+    def record(self, change: HeadChange) -> None:
+        raise RepoLockError(f"could not record {change.commit[:7]} as the models HEAD")
 
 
 class _LosesPostgres:

@@ -183,6 +183,19 @@ function markdown(text: string): Token[] {
   return out
 }
 
+/** How each token kind reads: the Tailwind classes a viewer gives its `<span>`. */
+export const TOKEN_CLASS: Record<TokenKind, string | undefined> = {
+  plain: undefined,
+  comment: 'text-muted italic',
+  string: 'text-ok',
+  number: 'text-accent',
+  keyword: 'text-accent font-semibold',
+  key: 'text-accent',
+  heading: 'font-semibold',
+  meta: 'text-muted',
+  punct: 'text-muted',
+}
+
 export function highlight(text: string, language: Language): Token[] {
   if (language === 'plain') return text ? [{ kind: 'plain', text }] : []
   if (language === 'markdown') return markdown(text)

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.filaments import settled
+from scadbuddy.bambuddy.concurrent import settled
 from scadbuddy.bambuddy.models import LocalPreset, Preset, PresetRef
 
 logger = logging.getLogger(__name__)

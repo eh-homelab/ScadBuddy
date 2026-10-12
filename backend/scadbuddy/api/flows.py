@@ -46,7 +46,7 @@ from scadbuddy.flows.definitions import (
     UnknownFlowError,
 )
 from scadbuddy.flows.forget import forget_run
-from scadbuddy.flows.history import ResetPreview, outward_since
+from scadbuddy.flows.history import ResetPoints, ResetPreview, outward_since, reset_points
 from scadbuddy.flows.images import BLOB_NAME, RunImage, open_image, run_images
 from scadbuddy.flows.manifest import raise_tiers, tiers
 from scadbuddy.flows.models import (
@@ -711,6 +711,23 @@ async def preview_flow_reset(
     if flows.client is None:
         raise _unavailable()
     return await outward_since(flows.client, run, event_id)
+
+
+@router.get(
+    "/workflow-runs/{run_id}/reset-points",
+    response_model=ResetPoints,
+    summary="The points a Reset of a run takes",
+)
+async def flow_reset_points(run_id: str, flows: FlowsDep) -> ResetPoints:
+    """Every completed workflow task of the run's current execution a Reset takes, each
+    with the first step it runs again (#2350): what the run page offers, so nobody
+    probes `reset-preview` id by id. The preview of the chosen point says what it sends."""
+    run = await flows.store.get_run(run_id)
+    if run is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.")
+    if flows.client is None:
+        raise _unavailable()
+    return await reset_points(flows.client, run, floor=await flows.store.reset_floor(run.id))
 
 
 @router.post(
