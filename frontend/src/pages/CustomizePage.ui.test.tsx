@@ -356,6 +356,54 @@ describe('CustomizePage with a template UI', () => {
     expect(await screen.findByText('Changed from Plain')).toBeInTheDocument()
   })
 
+  /** A UI that seeds its tab after a pick, as in the #1775 test; the host it was given. */
+  async function pickPlainWithSeededTab() {
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (root: ShadowRoot, given: Host) => {
+        host = given
+        const tab = document.createElement('button')
+        tab.textContent = 'Colour tab'
+        root.append(tab)
+        const seed = (inputs: Record<string, unknown>) => {
+          if (inputs['tab'] === undefined) setTimeout(() => given.inputs.set({ tab: 'shape' }), 0)
+        }
+        seed(given.inputs.get())
+        given.inputs.subscribe(seed)
+      },
+    }))
+    setMockPresets(UI_DEMO_SLUG, [
+      { id: 'd'.repeat(32), name: 'Plain', origin: 'mine', params: { name: 'Plain' }, inputs: { params: { name: 'Plain' } }, description: '', tags: [] },
+    ])
+    const { user } = open(UI_DEMO_SLUG)
+    await waitFor(() => expect(host?.inputs.get()['tab']).toBe('shape'), { timeout: 5000 })
+    const preset = () => screen.getByRole('combobox', { name: 'Preset' })
+    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Plain' })).toBeInTheDocument(), { timeout: 5000 })
+    await user.selectOptions(preset(), 'Plain')
+    await waitFor(() => expect((host?.inputs.get()['params'] as Record<string, unknown>)['name']).toBe('Plain'))
+    await waitFor(() => expect(host?.inputs.get()['tab']).toBe('shape'))
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(screen.queryByText('Changed from Plain')).not.toBeInTheDocument()
+    return host!
+  }
+
+  it("takes a UI-state write that lands well after a pick as a change, not the preset's (#2132)", async () => {
+    const host = await pickPlainWithSeededTab()
+    // A timer or a fetch in the template UI, long after it answered the pick; no input.
+    await new Promise((resolve) => setTimeout(resolve, 1200))
+    host.inputs.set({ tab: 'colour' })
+    expect(await screen.findByText('Changed from Plain')).toBeInTheDocument()
+  })
+
+  it('takes a UI-state change made with the wheel as a change to the preset (#2132)', async () => {
+    const host = await pickPlainWithSeededTab()
+    shadow()
+      .querySelector('button')!
+      .dispatchEvent(new WheelEvent('wheel', { bubbles: true, composed: true, deltaY: 100 }))
+    host.inputs.set({ tab: 'colour' })
+    expect(await screen.findByText('Changed from Plain', {}, { timeout: 500 })).toBeInTheDocument()
+  })
+
   it('a UI-state-only set starts no new render', async () => {
     let host: Host | undefined
     setUiModuleLoader(async () => ({

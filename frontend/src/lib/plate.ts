@@ -82,6 +82,10 @@ function plateLimit(plate: Plate, axis: NonNullable<Param['plate_max']>): number
   return plate.height
 }
 
+function decimalsOf(value: number | null | undefined): number {
+  return String(value ?? '').split('.')[1]?.length ?? 0
+}
+
 /**
  * #81 — the schema with each `// plate name = x` parameter's max shrunk to the plate in
  * view, so its widget's range is what fits that printer. Never under the parameter's
@@ -97,11 +101,15 @@ export function boundByPlate<S extends { parameters?: Param[] }>(schema: S, plat
       if (!param.plate_max) return param
       const room = plateLimit(plate, param.plate_max)
       const min = param.min ?? -Infinity
-      // A slider's bound lands on its step grid, counted from its min.
-      const decimals = String(param.step ?? '').split('.')[1]?.length ?? 0
+      // A slider's bound lands on its step grid, counted from its min: rounded to the
+      // finer of the two, or a min of 1.65 by 0.1 rounds 299.95 up past the plate (#2148).
+      const decimals = Math.max(decimalsOf(param.step), decimalsOf(param.min))
       const onGrid =
         param.step && param.min != null
-          ? Number((param.min + Math.floor((room - param.min) / param.step + 1e-9) * param.step).toFixed(decimals))
+          ? Math.min(
+              room,
+              Number((param.min + Math.floor((room - param.min) / param.step + 1e-9) * param.step).toFixed(decimals)),
+            )
           : room
       const limit = Math.max(onGrid, min)
       return param.max != null && param.max <= limit ? param : { ...param, max: limit }
