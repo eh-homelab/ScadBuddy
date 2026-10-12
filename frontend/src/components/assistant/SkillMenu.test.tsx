@@ -1,5 +1,5 @@
 import { screen, waitFor, within } from '@testing-library/react'
-import { HttpResponse, http } from 'msw'
+import { HttpResponse, delay, http } from 'msw'
 import { Route, Routes } from 'react-router'
 import type { ClientMessage } from '../../agent/chat/protocol'
 import { createMockAgentTransport, type MockAgentTransport } from '../../mocks/agent'
@@ -181,6 +181,62 @@ describe('the "/" skill menu (#1920)', () => {
     await view.user.type(box, '/')
     const list = await screen.findByRole('listbox', { name: 'Skills' }, SLOW)
     await waitFor(() => expect(optionNames(list)).toEqual(['/scadbuddy:print', '/greeter:hello']))
+  })
+
+  it('holds Enter while the skills are loading, rather than sending the half-typed command (#2104)', async () => {
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    server.use(
+      http.get('/api/v1/ai/plugin-packages', async () => {
+        await held
+        return undefined
+      }),
+    )
+    const { view, box } = await openComposer()
+    await view.user.type(box, '/pr')
+    const list = await screen.findByRole('listbox', { name: 'Skills' }, SLOW)
+    expect(notice(list, 'Loading skills…')).toBeInTheDocument()
+    await view.user.keyboard('{Enter}')
+    expect(box).toHaveValue('/pr')
+    await delay(50)
+    expect(sentMessages()).toHaveLength(0)
+
+    release()
+    await waitFor(() => expect(optionNames(list)).toEqual(['/scadbuddy:print']))
+    await view.user.keyboard('{Enter}')
+    expect(box).toHaveValue('/scadbuddy:print ')
+    expect(sentMessages()).toHaveLength(0)
+  })
+
+  it('sends on the first Enter when the draft already names the highlighted skill (#2104)', async () => {
+    const { view, box } = await openComposer()
+    await view.user.type(box, '/scadbuddy:print')
+    const list = await screen.findByRole('listbox', { name: 'Skills' }, SLOW)
+    await waitFor(() => expect(optionNames(list)).toEqual(['/scadbuddy:print']))
+    await view.user.keyboard('{Enter}')
+    await waitFor(() => expect(sentMessages().map((m) => m.text)).toEqual(['/scadbuddy:print']))
+  })
+
+  it('scrolls the highlighted option into view only when the highlight moves (#2104)', async () => {
+    const scroll = vi.fn()
+    const original = Element.prototype.scrollIntoView
+    Element.prototype.scrollIntoView = scroll
+    try {
+      const { view, box } = await openComposer()
+      await view.user.type(box, '/')
+      const list = await screen.findByRole('listbox', { name: 'Skills' }, SLOW)
+      await waitFor(() => expect(within(list).getAllByRole('option')).toHaveLength(3))
+      await waitFor(() => expect(scroll).toHaveBeenCalled())
+      const before = scroll.mock.calls.length
+      // Re-renders that leave the first option highlighted do not scroll it again.
+      await view.user.type(box, 'sc')
+      await waitFor(() => expect(optionNames(list)).toHaveLength(3))
+      expect(scroll).toHaveBeenCalledTimes(before)
+      await view.user.keyboard('{ArrowDown}')
+      expect(scroll).toHaveBeenCalledTimes(before + 1)
+    } finally {
+      Element.prototype.scrollIntoView = original
+    }
   })
 
   it('says when the skills cannot be read', async () => {

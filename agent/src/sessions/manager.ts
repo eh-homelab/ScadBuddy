@@ -24,7 +24,14 @@ import {
   type HarnessRun,
   runHarness,
 } from '../harness/run.js'
-import { browserTierOf, browserToolsGuide, GRANT_SERVER, SETTING_HEADLESS_BROWSER } from '../harness/headlessBrowser.js'
+import { drainDownloads } from '../harness/browserDownloads.js'
+import {
+  browserDownloadsDir,
+  browserTierOf,
+  browserToolsGuide,
+  GRANT_SERVER,
+  SETTING_HEADLESS_BROWSER,
+} from '../harness/headlessBrowser.js'
 import { headlessGrantServer } from '../harness/headlessGrants.js'
 import {
   HTTP_SERVER,
@@ -49,7 +56,8 @@ import {
   type MemoryHooksOptions,
   hindsightTarget,
 } from '../memory/hindsight.js'
-import type { PackagesForRun } from '../plugins/packages/install.js'
+import type { LoadedPackage, PackagesForRun } from '../plugins/packages/install.js'
+import { type PackageServers, withoutRemoteServers } from '../plugins/packages/mcp.js'
 import {
   ensureSessionDir,
   isUuid,
@@ -84,7 +92,7 @@ import {
 import { SessionBlobs, sessionImage, type StoredBlob } from './blobs.js'
 import { SessionFiles } from '../workspace/store.js'
 import { SessionEdits } from './edits.js'
-import { forkHistory, transcriptCut } from './forkPoint.js'
+import { blobNames, forkHistory, transcriptCut } from './forkPoint.js'
 import { scrubForLog, SdkEventMapper, ShownCalls, type TitleResolver } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
 import { UnpricedSpend } from './unpricedSpend.js'
@@ -631,7 +639,7 @@ export type SessionManagerDeps = {
     session: SessionRecord,
     turn: TurnPrincipal,
     /** #815 §2: how a browser_* call that finds no tab waits for it; only in a session the browser user owns. */
-    extras?: { waitForTab?: WaitForTab; turnContext?: () => Context; builtIn?: BuiltInPolicy },
+    extras?: { waitForTab?: WaitForTab; turnContext?: () => Context; builtIn?: BuiltInPolicy; secrets?: () => readonly string[] },
   ) => Record<string, McpSdkServerConfigWithInstance>
   /**
    * Settings → Plugins' overrides of the built-in tools (#1953,
@@ -657,6 +665,11 @@ export type SessionManagerDeps = {
    * package that cannot be loaded is reported in the session and left out.
    */
   packagePlugins?: () => Promise<PackagesForRun>
+  /**
+   * A turn's vetted packages' http MCP servers, registered with the loopback forwarder
+   * as remote plugins are (plugins/packages/mcp.ts `forwardPackageServers`, #2320).
+   */
+  packageServers?: (loaded: readonly LoadedPackage[]) => Promise<PackageServers>
   /**
    * Automatic memory (memory/hindsight.ts): when a turn's remote plugins
    * include an enabled `hindsight` plugin, its prompt is recalled against and
@@ -1093,13 +1106,17 @@ export class SessionManager {
     hb: NonNullable<SessionManagerDeps['headlessBrowser']>,
     livePublicUrl: string | undefined,
   ): Promise<UiReachMap | undefined> {
-    let ui: readonly string[]
+    let origins: ReturnType<typeof browserOrigins>
     try {
-      ui = browserOrigins({ backendUrl: hb.backendUrl, publicUrl: hb.publicUrl, livePublicUrl, uiOrigins: hb.uiOrigins }).ui
+      origins = browserOrigins({ backendUrl: hb.backendUrl, publicUrl: hb.publicUrl, livePublicUrl, uiOrigins: hb.uiOrigins })
     } catch {
       return undefined
     }
-    return hb.probe?.(ui).catch(() => undefined)
+    // With no UI origin configured the backend is the only one (dev, in-process
+    // runs): there is nowhere else to send the browser, so it is not asked, and
+    // one slow /healthz cannot refuse every navigation (#2155).
+    if (origins.ui.length === 1 && origins.ui[0] === origins.backend) return undefined
+    return hb.probe?.(origins.ui).catch(() => undefined)
   }
 
   // -- writes ------------------------------------------------------------------
@@ -1576,6 +1593,7 @@ export class SessionManager {
       }
       let forwarded: PluginsForRun | undefined
       let packages: PackagesForRun | undefined
+      let packageServers: PackageServers | undefined
       let pluginCheck: ((message: SDKMessage) => Promise<void>) | undefined
       /** The in-process MCP servers this turn gives Claude Code (`run.mcpServers`), for pluginCheck. */
       let inProcessServers: string[] = []
@@ -1589,7 +1607,7 @@ export class SessionManager {
         secrets = candidates.map((c) => c.credential.secret)
         builtIn = this.deps.builtInTools ? await this.deps.builtInTools() : undefined
         forwarded = this.deps.remotePlugins ? await this.deps.remotePlugins() : undefined
-        const remotePlugins = forwarded?.plugins ?? []
+        const remotePlugins = [...(forwarded?.plugins ?? [])]
         // Plugin header values (and their bare tokens) are redacted from the
         // event log like the credential. Claude Code never holds them (the
         // forwarder adds them), but a plugin could echo one in a tool result.
@@ -1601,6 +1619,37 @@ export class SessionManager {
             ? this.deps.ownPlugin
             : undefined
         packages = this.deps.packagePlugins ? await this.deps.packagePlugins() : undefined
+        // Each loaded directory's package, by the path Claude Code is handed (a stripped copy's too).
+        const packageNames = new Map<string, string>()
+        if (packages) {
+          // Loaded without their own http MCP servers, which come through the forwarder
+          // below: a query with strictMcpConfig off would start them itself (run.ts).
+          const loaded = packages
+          const problems = [...loaded.problems]
+          // A package that cannot be stripped is left out and said, as one that cannot be loaded.
+          const stripped = async (dir: string): Promise<string | undefined> => {
+            const pkg = loaded.loaded.find((p) => p.dir === dir)
+            if (!pkg) return dir
+            try {
+              const loadedDir = await withoutRemoteServers(dir, pkg.contentHash, path.join(this.deps.paths.stateDir, 'plugins-local'))
+              packageNames.set(loadedDir, pkg.name)
+              return loadedDir
+            } catch (err) {
+              problems.push(`plugin package ${pkg.name} was not loaded: ${(err as Error).message}`)
+              return undefined
+            }
+          }
+          const kept = async (dirs: readonly string[]) => (await Promise.all(dirs.map(stripped))).filter((d): d is string => d !== undefined)
+          packages = { ...loaded, paths: await kept(loaded.paths), allowedPaths: await kept(loaded.allowedPaths), problems }
+        }
+        // Every package's http MCP servers, through the forwarder like a remote
+        // plugin's (#2320); Claude Code loads the packages without them (above).
+        packageServers =
+          packages && this.deps.packageServers
+            ? await this.deps.packageServers(packages.loaded)
+            : undefined
+        remotePlugins.push(...(packageServers?.plugins ?? []))
+        secrets.push(...(packageServers?.secrets ?? []))
         const pluginTiers = harnessTierOf({
           remotePlugins,
           tierOf,
@@ -1618,7 +1667,7 @@ export class SessionManager {
           this.deps.stderr?.(`${problem}\n`)
           await unavailable(problem)
         }
-        for (const problem of packages?.problems ?? []) {
+        for (const problem of [...(packages?.problems ?? []), ...(packageServers?.problems ?? [])]) {
           this.deps.stderr?.(`${problem}\n`)
           await unavailable(problem)
         }
@@ -1635,7 +1684,7 @@ export class SessionManager {
           }
           for (const dir of [...(packages?.paths ?? []), ...allowedPluginPaths]) {
             if (!loaded.has(path.resolve(dir))) {
-              await unavailable(`plugin package ${path.basename(path.dirname(dir))} was not loaded by Claude Code`)
+              await unavailable(`plugin package ${packageNames.get(dir) ?? path.basename(path.dirname(dir))} was not loaded by Claude Code`)
             }
           }
           // #1255: Claude Code drops an in-process server it cannot connect, and every
@@ -1735,6 +1784,8 @@ export class SessionManager {
                   : {}),
                 dir: sessionBrowserDir(this.deps.paths, id),
                 tmpDir: sessionBrowserTmpDir(id),
+                // Its downloads land in the session's workspace (#2329, harness/browserDownloads.ts).
+                downloads: { files: this.files, ref: { kind: 'session' as const, sessionId: id } },
                 ...(hb.executablePath ? { executablePath: hb.executablePath } : {}),
               }
             : undefined
@@ -1785,6 +1836,8 @@ export class SessionManager {
                             : {}),
                           turnContext: () => traced.context(),
                           ...(builtIn ? { builtIn } : {}),
+                          // The turn's credentials and plugin tokens, which workspace_read redacts (#2329).
+                          secrets: () => secrets,
                         },
                       )
                     : {}),
@@ -1854,6 +1907,7 @@ export class SessionManager {
         }
       } finally {
         forwarded?.release()
+        packageServers?.release()
         packages?.release()
         local.settling = true
         clearInterval(renew)
@@ -1864,6 +1918,14 @@ export class SessionManager {
         // The query has ended, and with it the playwright server and Chromium:
         // its screenshots and profile go now, not when the volume fills.
         if (browserDirs) {
+          // A download that ended after the turn's last drain is kept, also when
+          // the turn ended without its Stop hook (#2397, harness/browserDownloads.ts).
+          await drainDownloads(browserDownloadsDir(sessionBrowserDir(this.deps.paths, id)), {
+            files: this.files,
+            ref: { kind: 'session', sessionId: id },
+          }).catch((err: unknown) =>
+            this.deps.stderr?.(`cannot keep the headless-browser downloads of session ${id}: ${String(err)}\n`),
+          )
           await removeSessionBrowserDirs(this.deps.paths, id).catch((err: unknown) =>
             this.deps.stderr?.(`cannot remove the headless-browser folders of session ${id}: ${String(err)}\n`),
           )
@@ -2372,22 +2434,10 @@ export class SessionManager {
       // A fork copies the SDK transcript, which only a classic session has.
       mode: 'classic',
     }, { rateLimited: options.rateLimited ?? true, ...(fresh ? {} : { budgetOf: parent }) })
-    if (options.audit) {
-      await this.deps.audit?.record({
-        kind: 'resource',
-        action: 'session_fork',
-        surface: options.audit.surface,
-        actor: principal,
-        clientIp: options.audit.clientIp,
-        sessionId: childId,
-        outcome: 'ok',
-        detail: `forked from ${id}${options.upTo === undefined ? '' : ` up to ${options.upTo}`}`,
-        startedAt,
-        finishedAt: new Date(),
-      })
-    }
-    // The images those results name (#782), before the events that name them.
-    await this.blobs.copy(id, childId)
+    // The images the copied events name (#782, #2150), before the events that name them: the
+    // parent's others (a later turn's, past `upTo`) stay the parent's, so a fork chain does not
+    // copy every image of every ancestor.
+    await this.blobs.copy(id, childId, blobNames(history))
     // Its workspace files (#2329), so the fork carries on with what the parent had.
     await this.files.copy(id, childId)
     await this.events.append(childId, [
@@ -2404,6 +2454,22 @@ export class SessionManager {
       ...history.map((e) => ({ ...e, sessionId: childId })),
       event({ type: 'session.status', sessionId: childId, status: 'idle' }),
     ])
+    // Recorded once the child is complete (#2159): a fork that failed after the insert has only
+    // the failures-only mount's `error` row (app.ts), never an `ok` one beside it.
+    if (options.audit) {
+      await this.deps.audit?.record({
+        kind: 'resource',
+        action: 'session_fork',
+        surface: options.audit.surface,
+        actor: principal,
+        clientIp: options.audit.clientIp,
+        sessionId: childId,
+        outcome: 'ok',
+        detail: `forked from ${id}${options.upTo === undefined ? '' : ` up to ${options.upTo}`}`,
+        startedAt,
+        finishedAt: new Date(),
+      })
+    }
     return child
   }
 

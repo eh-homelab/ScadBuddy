@@ -1,13 +1,16 @@
 import { fixedCredentials } from './support/fixedCredentials.js'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
+import { readdir } from 'node:fs/promises'
+import { setTimeout as sleep } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { connectDatabase, type Database } from '../src/db.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { AGENT_ACTOR_HEADER, AUTHORIZE_TOOL_NAME, SETTING_HEADLESS_BROWSER, TOOL_PREFIX } from '../src/harness/headlessBrowser.js'
-import { ensureStateDirs } from '../src/harness/stateDirs.js'
+import { browserDownloadsDir } from '../src/harness/headlessBrowser.js'
+import { ensureStateDirs, sessionBrowserDir } from '../src/harness/stateDirs.js'
 import type { SessionManager } from '../src/sessions/manager.js'
-import { type PageServer, startOtherOrigin, startUi, testChromium } from './support/browserPages.js'
+import { DOWNLOAD_BODY, LATER_MS, type PageServer, startOtherOrigin, startUi, testChromium } from './support/browserPages.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, collectUntil, manager, tempPaths } from './support/sessions.js'
@@ -92,8 +95,10 @@ describe.skipIf(skip !== undefined)(`the headless browser in a session turn${ski
     await drop()
   })
 
+  let paths: { stateDir: string }
+
   async function replica(enabled: boolean, browserAllowedOrigins?: string): Promise<SessionManager> {
-    const paths = await tempPaths()
+    paths = await tempPaths()
     await ensureStateDirs(paths)
     const pool = connectDatabase(url, { searchPath: schema })
     pools.push(pool)
@@ -177,6 +182,69 @@ describe.skipIf(skip !== undefined)(`the headless browser in a session turn${ski
     const origins = await db.sql<{ origin: string; approval_id: string }[]>`
       SELECT origin, approval_id FROM ai_browser_origins WHERE session_id = ${session.id}`
     expect(origins).toEqual([{ origin: other.origin, approval_id: required.id }])
+  }, 120_000)
+
+  async function workspaceFiles(sessionId: string) {
+    return db.sql<{ path: string; data: Buffer; source: unknown }[]>`
+      SELECT path, data, source FROM ai_session_files WHERE workspace = ${`session:${sessionId}`} ORDER BY path`
+  }
+  const told = () => fake.messageCalls().some((c) => JSON.stringify(c.body?.messages ?? []).includes('Headless-browser downloads'))
+
+  it('moves a download into the session workspace after the browser call, and tells the model (#2398)', async () => {
+    const steps: Reply[] = [
+      { toolUse: { name: `${TOOL_PREFIX}browser_navigate`, input: { url: `${ui.origin}/` } } },
+      { toolUse: { name: `${TOOL_PREFIX}browser_click`, input: { element: 'Download part', target: '#download' } } },
+      { text: 'Downloaded.' },
+    ]
+    fake = await startFakeAnthropic((r) => steps[toolResults(r).length] ?? { text: 'Done.' })
+
+    const m = await replica(true)
+    const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'download the part' })
+    expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
+
+    const files = await workspaceFiles(session.id)
+    expect(files.map((f) => [f.path, f.data.toString('utf8'), f.source])).toEqual([
+      // The URL's query (?token=abc) is dropped.
+      ['downloads/part.stl', DOWNLOAD_BODY, { tool: 'browser', url: `${ui.origin}/files/part.stl` }],
+    ])
+    // Told after the click, as the PostToolUse hook's additionalContext.
+    const last = JSON.stringify(fake.messageCalls().at(-1)!.body?.messages ?? [])
+    expect(last).toMatch(/Headless-browser downloads[^"]*downloads\/part\.stl/)
+    expect(existsSync(sessionBrowserDir(paths, session.id))).toBe(false)
+  }, 120_000)
+
+  it('keeps a download that starts after the turn\'s last browser call, drained as the turn ends (#2397)', async () => {
+    // Set once the session has an id, before the turn's last request.
+    const where = { downloads: '' }
+    const steps: Reply[] = [
+      { toolUse: { name: `${TOOL_PREFIX}browser_navigate`, input: { url: `${ui.origin}/` } } },
+      // The page clicks "Download part" LATER_MS after this call, so the call's own drain finds nothing.
+      { toolUse: { name: `${TOOL_PREFIX}browser_click`, input: { element: 'Download later', target: '#download-later' } } },
+    ]
+    fake = await startFakeAnthropic(async (r) => {
+      const step = steps[toolResults(r).length]
+      if (step) return step
+      // The last reply waits until the download is on the disk (running or ended,
+      // not yet drained), so the turn ends with it there.
+      for (let waited = 0; waited < 30_000; waited += 50) {
+        if (where.downloads && (await readdir(where.downloads).catch(() => [])).some((n) => /\.(pending|json)$/.test(n))) break
+        await sleep(50)
+      }
+      return { text: 'Done.' }
+    })
+
+    const m = await replica(true)
+    const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'download the part later' })
+    where.downloads = browserDownloadsDir(sessionBrowserDir(paths, session.id))
+    const started = performance.now()
+    expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
+
+    const files = await workspaceFiles(session.id)
+    expect(files.map((f) => [f.path, f.data.toString('utf8')])).toEqual([['downloads/part.stl', DOWNLOAD_BODY]])
+    // No browser call drained it, so the model was never told; workspace_list shows it.
+    expect(told()).toBe(false)
+    expect(performance.now() - started).toBeGreaterThan(LATER_MS)
+    expect(existsSync(sessionBrowserDir(paths, session.id))).toBe(false)
   }, 120_000)
 
   it('gives a turn no browser while the setting is off', async () => {

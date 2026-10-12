@@ -112,6 +112,7 @@ class StandInTools:
         self.describe_refuses = False
         # turn_tools' answer (agent temporal/turnTools.ts, #2320): none unless a test offers one.
         self.turn_offered: list[dict[str, Any]] = []
+        self.turn_packages: list[dict[str, Any]] = []
         # memory_recall's block (agent temporal/memoryActivities.ts, #2320), and each
         # memory activity's (name, turn); memory_fails makes both fail.
         self.memory_context: str | None = None
@@ -192,7 +193,7 @@ class StandInTools:
         async def turn_tools() -> dict[str, Any]:
             if self.turn_tools_fails:
                 raise ApplicationError("the agent is away", non_retryable=True)
-            return {"tools": self.turn_offered}
+            return {"tools": self.turn_offered, "packages": self.turn_packages}
 
         # As httpRequest.ts httpTierOf tiers http_request: no method, a GET or a HEAD is
         # read, anything else outward.

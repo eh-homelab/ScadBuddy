@@ -345,6 +345,25 @@ def test_an_image_whose_exif_cannot_be_read_is_its_own_thumbnail(
     assert response.headers["content-type"] == "image/jpeg"
 
 
+def test_a_thumbnail_that_fails_to_save_is_logged_by_type(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failure of ScadBuddy's own, not malformed EXIF, still falls back to the
+    original, but leaves a trace naming only the error's type (#2096)."""
+
+    def broken_save(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("secret detail")
+
+    source = io.BytesIO(_real_image((64, 64), "PNG"))
+    monkeypatch.setattr(Image.Image, "save", broken_save)
+    with caplog.at_level("INFO", logger="scadbuddy.api.media"):
+        small = media_api._shrink(source)
+
+    assert small is None
+    messages = [r.getMessage() for r in caplog.records if r.name == "scadbuddy.api.media"]
+    assert messages == ["thumbnail fell back to the original: RuntimeError"]
+
+
 def test_an_undecodable_image_is_its_own_thumbnail(client: TestClient, model: str) -> None:
     item = _upload(client, model, PNG).json()["media"][0]
 

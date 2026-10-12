@@ -319,6 +319,8 @@ def _read_parts(path: Path, plate: int) -> tuple[list[ColourPart], int]:
         # objects across plates (spec §6.4), so each part's extruder is read from
         # the part list rather than assumed.
         extruders: dict[int, int] = {}
+        # Negative parts (an arranged library file's, #1863): cut out, never checked.
+        negative: set[int] = set()
         if MODEL_SETTINGS_NAME in names:
             listing = ET.fromstring(archive.read(MODEL_SETTINGS_NAME))
             for part_node in listing.iter("part"):
@@ -326,7 +328,11 @@ def _read_parts(path: Path, plate: int) -> tuple[list[ColourPart], int]:
                 part_id, extruder = part_node.get("id") or "", metadata.get("extruder") or ""
                 if part_id.isdigit() and extruder.isdigit():
                     extruders[int(part_id)] = int(extruder)
+                if part_id.isdigit() and part_node.get("subtype") == "negative_part":
+                    negative.add(int(part_id))
         for index in indices:
+            if index in negative:
+                continue
             model = parse_model(archive, f"3D/Objects/object_{index}.model")
             obj = model.root.find(f".//{{{CORE_NS}}}object")
             meshes = list(model.meshes.values())

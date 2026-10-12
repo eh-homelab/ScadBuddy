@@ -5,8 +5,18 @@ import { HTTP_READ_TOOL_NAME, HTTP_SERVER, httpRequestEnabled, httpRequestServer
 import type { HttpLimits } from '../harness/httpRequest.js'
 import type { Resolver } from '../http/egress.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
+import type { LoadedPackage, PackagesForRun } from '../plugins/packages/install.js'
+import type { PackageServers } from '../plugins/packages/mcp.js'
 import { pluginTierResolver } from '../plugins/registry.js'
-import { connectHttp, connectInProcess, type TurnContext, type TurnServer, type TurnServers } from './turnTools.js'
+import { localPackageServers, sharePackage, unparkableBuiltins } from './turnPackages.js'
+import {
+  connectHttp,
+  connectInProcess,
+  type TurnContext,
+  type TurnPackage,
+  type TurnServer,
+  type TurnServers,
+} from './turnTools.js'
 
 // What a durable turn's other tools are built from (#2320): the same pieces a classic
 // turn's `runTurn` hands Claude Code (sessions/manager.ts), built again for each listing
@@ -30,6 +40,21 @@ export type TurnServerDeps = {
         audit?: AuditSink | undefined
         resolve?: Resolver
         limits?: Partial<HttpLimits>
+      }
+    | undefined
+  /**
+   * The enabled plugin packages (`loadPackagesForRun`, as a classic turn's), shared with
+   * the segment runner under `packages.root` (turnPackages.ts) on a listing, and their
+   * MCP servers offered as turn tools.
+   */
+  packages?:
+    | {
+        load: () => Promise<PackagesForRun>
+        root: string | undefined
+        /** Where a package's copy without its http MCP servers is made, on this pod (as a classic turn's). */
+        localRoot: string
+        /** Their http MCP servers through the loopback forwarder (plugins/packages/mcp.ts). */
+        forward: (loaded: readonly LoadedPackage[]) => Promise<PackageServers>
       }
     | undefined
   /** More servers for the turn: the headless browser and its grant tool (turnBrowser.ts). */
@@ -83,13 +108,58 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
         pinned: true,
       })
     }
+    const problems = [...(forwarded?.problems ?? [])]
+    const loaded = deps.packages ? await deps.packages.load() : undefined
+    let forwardedPackages: PackageServers | undefined
+    let shared: TurnPackage[] | undefined
+    if (loaded) {
+      problems.push(...loaded.problems)
+      servers.push(...localPackageServers(loaded.loaded, problems))
+      // As a remote plugin's: the forwarder URL, which carries its token, is a secret too.
+      forwardedPackages = await deps.packages!.forward(loaded.loaded)
+      problems.push(...forwardedPackages.problems)
+      secrets.push(...forwardedPackages.secrets)
+      for (const plugin of forwardedPackages.plugins) {
+        servers.push({ name: plugin.name, connect: () => connectHttp(plugin.url), tierOf: () => 'outward' })
+      }
+      if (context.listing) {
+        shared = []
+        const root = deps.packages!.root
+        for (const pkg of loaded.loaded) {
+          if (root === undefined) {
+            problems.push(
+              `plugin package ${pkg.name} was not loaded: a durable session reads packages from the payload volume, and SCADBUDDY_PAYLOAD_DIR is not set`,
+            )
+            continue
+          }
+          try {
+            const turnPackage = await sharePackage(pkg, root, deps.packages!.localRoot)
+            const dark = unparkableBuiltins(turnPackage)
+            if (dark.length) {
+              problems.push(
+                `plugin package ${pkg.name} names ${dark.join(', ')}: a durable session cannot ask you before ` +
+                  'such a call runs, so they are not offered here; a classic session offers them',
+              )
+            }
+            shared.push({ ...turnPackage, builtin_tools: turnPackage.builtin_tools.filter((t) => !dark.includes(t)) })
+          } catch (err) {
+            problems.push(`plugin package ${pkg.name} was not loaded: ${(err as Error).message}`)
+          }
+        }
+      }
+    }
     // The browser and its grant are a session's: a flow has neither, as it has no browser_* tools.
     if (deps.extra && !context.flow) servers.push(...(await deps.extra(context)))
     return {
       servers,
-      problems: forwarded?.problems ?? [],
+      problems,
       secrets,
-      release: () => forwarded?.release(),
+      ...(shared ? { packages: shared } : {}),
+      release: () => {
+        forwardedPackages?.release()
+        loaded?.release()
+        return forwarded?.release()
+      },
     }
   }
 }

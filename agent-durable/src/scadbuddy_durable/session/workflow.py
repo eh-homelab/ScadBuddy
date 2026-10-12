@@ -82,6 +82,7 @@ with workflow.unsafe.imports_passed_through():
         SendAnswer,
         SessionStart,
         TurnOutcome,
+        TurnPackage,
         TurnStart,
         TurnTools,
     )
@@ -91,6 +92,8 @@ DESCRIBE_CALL = "gate.describe_call"
 TURN_TOOLS = "turn_tools"
 TURN_TOOL_TIER = "turn_tool_tier"
 TURN_TOOLS_PATCH = "turn-tools-2320"
+# The built-ins a package may name that run as their own activities, so a call can park.
+ENGINE_PARKED = frozenset({"Bash", "PowerShell"})
 TURN_TOOLS_TIMEOUT = timedelta(minutes=2)
 # agent/src/temporal/memoryActivities.ts (#2320, superseding #825): automatic Hindsight
 # memory around a turn, as a classic turn's hooks do it.
@@ -171,6 +174,8 @@ class DurableSession:
         # This turn's other tools (plugins, http_request, the headless browser; #2320):
         # offered from what turn_tools listed, replaced every turn.
         self._turn_tools: set[str] = set()
+        # This turn's plugin packages (#2320), from turn_tools: the segment runner loads them.
+        self._packages: list[TurnPackage] = []
         self._turn: TurnStart | None = start.turn
         self._message: Message | None = None
         self._parked: dict[str, Parked] = {}
@@ -264,6 +269,16 @@ class DurableSession:
             self._turn_tools = manifest.offer_turn_tools(
                 self._agent._tools, self._tools, self._turn_tools, offered.tools
             )
+            self._packages = list(offered.packages)
+            # The built-ins the allowed packages name, as a classic turn offers them; each
+            # call is outward there, so here it runs as its own activity after a human
+            # approved it (the agent offers only Bash and PowerShell, which can).
+            named = sorted({t for p in offered.packages for t in p.builtin_tools} - {"Skill"})
+            parked = [t for t in named if t in ENGINE_PARKED]
+            # Only those: one the agent should have left out never runs unasked here.
+            self._agent._builtin_tools = ["Skill", *parked]
+            self._agent._tool_activities = parked
+            self._agent._tool_approvals = parked
         if prompt is not None and workflow.patched(MEMORY_PATCH):
             prompt += await self._recall(turn_id)
         follow = workflow.start_activity(
@@ -652,6 +667,7 @@ class DurableSession:
             images=list(self._turn.images) if self._turn else [],
             system_append=self._start.system_append,
             disabled_tools=list(self._settings.disabled_tools),
+            packages=list(self._packages),
         )
 
     @workflow.query(name=TURN_QUERY)

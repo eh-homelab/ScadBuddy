@@ -76,6 +76,14 @@ export interface RenderBusy {
 export const TRANSIENT_RETRIES = 5
 
 /**
+ * #2101 — the most seconds a submit waits out a snapshot still uploading before it is
+ * shown as an error the person can try again. An upload that never completes (the blob
+ * store keeps refusing it, so the background pin keeps failing) answers
+ * `snapshot_pending` for ever; without a ceiling the page said "uploading" for ever.
+ */
+export const SNAPSHOT_PENDING_MAX_SECONDS = 300
+
+/**
  * #1040 — failed reads of a job in a row before the preview stops following it. A 5xx,
  * a gateway's 502/504 or a dropped connection says nothing about the render, which goes
  * on and settles on the server: the read is tried again after `readBackoffMs`, and the
@@ -116,6 +124,8 @@ export function canRetry(error: unknown): boolean {
   if (error instanceof LostRenderError) return true
   if (error instanceof TypeError) return true // fetch's own network failure
   if (!(error instanceof ApiError)) return false
+  // A snapshot upload it gave up waiting for (#2101): it may have finished since.
+  if (error.problem['code'] === SNAPSHOT_PENDING_CODE) return true
   const { type } = error.problem
   return type === TEMPORAL_UNAVAILABLE || type === STILL_ACCEPTING || type === UNANSWERED || type === OFFLINE
 }
@@ -315,6 +325,7 @@ export function useRenderJob(
       // names rather than showing a failure. A refused submit created no job, so
       // the same `supersedes` still applies.
       let requestId = newRequestId()
+      let snapshotWaited = 0
       for (let transient = 0; ; ) {
         try {
           const { job_id } = await api.render(
@@ -328,14 +339,17 @@ export function useRenderJob(
           if (!isStale()) setBusy(undefined)
           return job_id
         } catch (cause) {
-          // A full queue, or a snapshot still uploading, is waited out; any other wait is
-          // retried `TRANSIENT_RETRIES` times, then shown as an error the person can try
-          // again.
+          // A full queue is waited out; a snapshot still uploading for up to
+          // `SNAPSHOT_PENDING_MAX_SECONDS` (#2101); any other wait is retried
+          // `TRANSIENT_RETRIES` times. Past either, it is shown as an error the person can
+          // try again.
           const wait = retryAfterSeconds(cause)
           if (wait === undefined || isStale()) throw cause
           const reason = busyReason(cause as ApiError)
-          const waitedOut = reason === 'queue-full' || reason === 'snapshot-pending'
-          if (!waitedOut && transient++ >= TRANSIENT_RETRIES) throw cause
+          if (reason === 'snapshot-pending') {
+            if (snapshotWaited >= SNAPSHOT_PENDING_MAX_SECONDS) throw cause
+            snapshotWaited += wait
+          } else if (reason !== 'queue-full' && transient++ >= TRANSIENT_RETRIES) throw cause
           if (claimedNothing(cause)) requestId = newRequestId()
           setBusy({ seconds: wait, reason })
           await waitUnlessStale(wait)

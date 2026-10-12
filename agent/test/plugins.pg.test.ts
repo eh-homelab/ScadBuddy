@@ -210,6 +210,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
           tool_prefix: 'mcp__hindsight__',
           auth: { header: 'Authorization', last4: TOKEN.slice(-4) },
           usable: true,
+          problem: null,
           tool_tiers: { recall: 'read' },
         })
 

@@ -556,6 +556,9 @@ The assistant has a workspace of its own for files: a session's files stay with 
 there (an output's 3MF, a model's file or picture, a print's photo or timelapse, a
 Bambuddy library file), download one from the web into it, and read, write, edit and
 delete its files, so a file it fetched does not have to pass through the conversation.
+What the headless browser downloads lands there too. It sends a workspace file on by
+name to any upload (an asset, a picture or video for the gallery, a thumbnail, a
+model's source, a README), and an approval it asks for names the file and its sha256.
 A file holds at most 25 MB and a session's workspace 200 MB. An MCP client working
 outside any session gets a workspace of its own whose files are deleted a day after
 they were last written ([operating.md §13](ai/operating.md#13-the-workspace-2329)).

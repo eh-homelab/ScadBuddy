@@ -5,6 +5,7 @@ import { EVAL_BACKEND_URL, EvalBackend, keychain3mf } from '../evals/backend.js'
 import { claimsOf, REPO_ROOT, repoSources, scoreCitations, suggestionsOf } from '../evals/citations.js'
 import { RealBackend } from '../evals/realBackend.js'
 import { collectRenders, keychainProblems, KEYCHAIN_HEIGHTS } from '../evals/render.js'
+import { collectWithin } from '../evals/runner.js'
 import { createBackendClient } from '../src/api/backend.js'
 import { readBambu3mf, readZip, writeZip } from '../evals/threemf.js'
 
@@ -218,6 +219,39 @@ describe('real-render checks: a backend over HTTP', () => {
     const real = new RealBackend('http://127.0.0.1:1')
     await real.fetch('http://backend.eval/api/v1/models/builtin%3Aname-keychain/render', { method: 'POST', body: '{}' }).catch(() => undefined)
     expect(real.log[0]?.path).toBe('/api/v1/models/builtin:name-keychain/render')
+  })
+})
+
+describe('real-render checks: the scenario budget (#2110)', () => {
+  it('cuts the collection to what is left of the budget', () => {
+    expect(collectWithin({ collect: { pollMs: 5, deadlineMs: 180_000 }, budgetMs: 480_000 }, 400_000)).toEqual({
+      pollMs: 5,
+      deadlineMs: 80_000,
+    })
+    expect(collectWithin({ budgetMs: 480_000 }, 10_000)).toEqual({ deadlineMs: 180_000 })
+    expect(collectWithin({ collect: { deadlineMs: 50 }, budgetMs: 10 }, 20)).toEqual({ deadlineMs: 0 })
+    expect(collectWithin({ collect: { deadlineMs: 50 } }, 1_000_000)).toEqual({ deadlineMs: 50 })
+  })
+
+  it('reports a render that never settles once the budget is spent, instead of waiting out the deadline', async () => {
+    const backend = {
+      log: [
+        {
+          method: 'POST',
+          path: '/api/v1/models/name-keychain/render',
+          status: 202,
+          body: { params: {} },
+          response: { job_id: 'j1' },
+        },
+      ],
+      fetch: () => Promise.reject(new Error('not used')),
+      peek: () => Promise.resolve(Response.json({ status: 'running' })),
+    } as unknown as Parameters<typeof collectRenders>[0]
+    const started = Date.now()
+    // The run took all but 50 ms of the budget; the 180 s deadline must not apply.
+    const renders = await collectRenders(backend, collectWithin({ collect: { pollMs: 10 }, budgetMs: 1_000 }, 950))
+    expect(Date.now() - started).toBeLessThan(2_000)
+    expect(renders).toMatchObject([{ jobId: 'j1', status: 'running' }])
   })
 })
 

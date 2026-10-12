@@ -25,6 +25,7 @@ from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore, PrintSend
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import LibraryCopy, SlicedCopy
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.library.outputs import MODEL_NAME
 from tests.api.test_send import API, BASE, configure, make_output
 from tests.bambuddy.conftest import recording
 
@@ -795,6 +796,31 @@ def test_a_library_prints_plate_is_named_by_what_it_holds(client: TestClient) ->
     assert detail.status_code == 200, detail.text
     assert detail.json()["media"]["plate_thumbnails"] == [
         {"index": 2, "url": "/api/v1/prints/90/plates/2/thumbnail", "name": "Lid"}
+    ]
+
+
+@pytest.mark.parametrize("damage", ["deleted", "not-a-zip"])
+@respx.mock
+def test_an_output_prints_plates_that_cannot_be_read_leave_the_number(
+    client: TestClient, model: str, damage: str
+) -> None:
+    """#2097: an output whose model.3mf is gone or damaged still answers, unnamed."""
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 35, printer_id=1, plate_id=1)
+    mock_archive(35)
+    mock_detail_reads()
+    model_3mf = state(client).outputs.directory(output_id) / MODEL_NAME
+    if damage == "deleted":
+        model_3mf.unlink()
+    else:
+        model_3mf.write_bytes(b"not a zip")
+
+    detail = client.get("/api/v1/prints/35")
+
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["media"]["plate_thumbnails"] == [
+        {"index": 1, "url": "/api/v1/prints/35/plates/1/thumbnail", "name": None}
     ]
 
 

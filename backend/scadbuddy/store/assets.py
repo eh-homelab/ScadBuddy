@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from collections.abc import Iterable
 from datetime import datetime
 
@@ -133,10 +134,14 @@ class RemoteAssets:
         ]
         return await self.drop(orphans, cutoff=cutoff)
 
-    async def backfill(self, store: AssetStore) -> int:
-        """Mirror every upload the store has no copy of on this backend."""
+    async def backfill(self, store: AssetStore, *, stop: threading.Event | None = None) -> int:
+        """Mirror every upload the store has no copy of on this backend. Once ``stop`` is
+        set it mirrors no further upload (#2128): the shutdown waits for the one in hand
+        rather than cancelling it with its thread still running."""
         done = 0
         for asset_id in await asyncio.to_thread(store.ids):
+            if stop is not None and stop.is_set():
+                break
             stat = await asyncio.to_thread(self.content.index.get, asset_key(asset_id))
             if stat is None or stat.ref.backend != self.content.name:
                 try:

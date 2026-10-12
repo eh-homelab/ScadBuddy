@@ -865,7 +865,7 @@ export const settingsDefaults = {
   media_upload_max_bytes: 1024 * 1024 * 1024,
   read_max_objects: 200,
   read_max_visits: 20_000,
-  read_max_triangles: 5_000_000,
+  read_max_triangles: 0,
   read_max_paint_digits: 20_000_000,
   render_timeout: 120,
   template_activity_max_timeout: 1800,

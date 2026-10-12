@@ -99,6 +99,8 @@ export type TurnServers = {
    * agent, as a classic turn scrubs its event log (sessions/sdkEvents.ts `scrubForLog`).
    */
   secrets: readonly string[]
+  /** The plugin packages the turn's Claude Code loads; only for a listing (`TurnContext.listing`). */
+  packages?: TurnPackage[]
   release(): void | Promise<void>
 }
 
@@ -111,6 +113,8 @@ export type TurnContext = {
   signal: AbortSignal
   /** The call being made, for a server built for it (the browser's grant names its approval). */
   call?: { requestId: string; toolUseId: string }
+  /** The turn's listing (`turn_tools`): the plugin packages are shared with the segment runner. */
+  listing?: boolean
 }
 
 export type TurnToolsDeps = {
@@ -143,7 +147,21 @@ export type TurnToolEntry = {
   task_queue?: string
 }
 
-export type TurnToolsResult = { tools: TurnToolEntry[] }
+/**
+ * A plugin package a durable turn loads into its Claude Code (#2320, turnPackages.ts):
+ * copied to the payload volume both sidecars mount, under `dir` there, and checked
+ * against `content_hash` again by the segment runner before it loads it.
+ */
+export type TurnPackage = {
+  name: string
+  dir: string
+  content_hash: string
+  /** Approved with `allow_refused`: loaded as it is, with `builtin_tools`. */
+  allowed: boolean
+  builtin_tools: string[]
+}
+
+export type TurnToolsResult = { tools: TurnToolEntry[]; packages: TurnPackage[] }
 
 /** A client on an in-process MCP server (an SDK server's `instance`), made fresh for each use. */
 export async function connectInProcess(create: () => McpServer): Promise<Client> {
@@ -155,9 +173,11 @@ export async function connectInProcess(create: () => McpServer): Promise<Client>
 }
 
 /** A client on a Streamable HTTP MCP endpoint (a remote plugin's loopback forwarder URL). */
-export async function connectHttp(url: string): Promise<Client> {
+export async function connectHttp(url: string, headers?: Record<string, string>): Promise<Client> {
   const client = new Client({ name: 'scadbuddy-durable-turn', version: '1' })
-  await client.connect(new StreamableHTTPClientTransport(new URL(url)))
+  await client.connect(
+    new StreamableHTTPClientTransport(new URL(url), headers ? { requestInit: { headers } } : undefined),
+  )
   return client
 }
 
@@ -279,7 +299,7 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
     [TURN_TOOLS_ACTIVITY]: async (): Promise<TurnToolsResult> => {
       const { session, owner } = await durableSession(TURN_TOOLS_ACTIVITY, deps.sessions)
       const signal = Context.current().cancellationSignal
-      return withServers(deps, { session, owner, signal }, async (set) => {
+      return withServers(deps, { session, owner, signal, listing: true }, async (set) => {
         const scrub = (text: string) => redact(text, set.secrets)
         // Listed side by side, each within LIST_TIMEOUT_MS: a plugin that stalls is
         // reported and left out, never the whole listing's deadline.
@@ -309,7 +329,7 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
         // Said once, after the listing, so a retried attempt does not say it again.
         const problems = [...set.problems, ...listings.flatMap((l) => (l.problem ? [l.problem] : []))]
         if (problems.length) await deps.report?.(session, problems.map(scrub))
-        return { tools }
+        return { tools, packages: set.packages ?? [] }
       })
     },
     [TURN_TOOL_TIER_ACTIVITY]: async (args: unknown): Promise<{ tier: RiskTier; task_queue?: string }> => {

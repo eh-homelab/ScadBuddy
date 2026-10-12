@@ -20,7 +20,6 @@ from scadbuddy.library.history import (
     DEFAULT_TIMEOUT,
     GITIGNORE_NAME,
     LOCK_NAME,
-    MAINTAIN_LOOSE_OBJECTS,
     MAX_SUBJECT,
     RECOVERED_MESSAGE,
     BlobTooLargeError,
@@ -251,20 +250,34 @@ def test_maintain_leaves_a_small_repository_alone(models: Path, history: ModelHi
     assert history.object_counts()["count"] > 0
 
 
-def test_maintain_packs_once_loose_objects_pile_up(models: Path, history: ModelHistory) -> None:
-    """#2289: thousands of loose objects on NFS made every listing's history walk 11 s."""
+def test_maintain_packs_once_loose_objects_pile_up(
+    models: Path, history: ModelHistory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2289: thousands of loose objects on NFS made every listing's history walk 11 s.
+    The threshold is lowered so the test makes a handful of commits, not 256 (#2344)."""
+    threshold = 8
+    monkeypatch.setattr("scadbuddy.library.history.MAINTAIN_LOOSE_OBJECTS", threshold)
     write_model(models, "box", "cube(1);")
     head = history.ensure_repo()
-    for n in range(MAINTAIN_LOOSE_OBJECTS):
+    for n in range(threshold):
         write_model(models, "box", f"cube({n + 2});")
         history.commit(f"edit {n}", "box")
-    assert history.object_counts()["count"] >= MAINTAIN_LOOSE_OBJECTS
+    assert history.object_counts()["count"] >= threshold
     assert history.maintain() is True
     counts = history.object_counts()
     assert counts["count"] == 0
     assert counts["packs"] == 1
     assert history.last_commit("box") is not None
-    assert head in {r.commit for r in history.log(limit=MAINTAIN_LOOSE_OBJECTS + 1)}
+    assert head in {r.commit for r in history.log(limit=threshold + 1)}
+
+
+def test_an_explicit_timeout_of_zero_is_not_the_default(
+    models: Path, history: ModelHistory
+) -> None:
+    """#2343: ``None`` means the default; ``0`` is a timeout of its own."""
+    history.ensure_repo()
+    with pytest.raises(GitTimeoutError, match="after 0s"):
+        history._run("status", timeout=0)
 
 
 def test_maintain_is_a_no_op_without_a_repository(models: Path, history: ModelHistory) -> None:

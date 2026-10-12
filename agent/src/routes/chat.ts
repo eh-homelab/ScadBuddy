@@ -8,7 +8,7 @@ import { contextFrom } from '../telemetry/trace.js'
 import type { TabHub } from '../bridge/hub.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { type AttachmentRef, AttachmentError, type AttachmentStore, type ResolvedAttachment } from '../attachments/store.js'
-import { type ClientMessage, parseClientFrame, renderPageContext } from '../sessions/clientProtocol.js'
+import { type ClientMessage, isAnswerId, isSessionId, parseClientFrame, renderPageContext } from '../sessions/clientProtocol.js'
 import { UserImagesSchema } from '../sessions/images.js'
 import { type SessionManager, SessionError } from '../sessions/manager.js'
 import { event, type Owner, type ServerEvent } from '../sessions/protocol.js'
@@ -157,8 +157,8 @@ function refusedAnswer(raw: string): { sessionId: string; questionId: string } |
     const frame: unknown = JSON.parse(raw)
     if (typeof frame !== 'object' || frame === null) return {}
     const { type, sessionId, id } = frame as Record<string, unknown>
-    const named = (v: unknown): v is string => typeof v === 'string' && v.length > 0 && v.length <= 100
-    return type === 'question.answer' && named(sessionId) && named(id) ? { sessionId, questionId: id } : {}
+    // The schema's own bounds, so an echoed id is one it would take.
+    return type === 'question.answer' && isSessionId(sessionId) && isAnswerId(id) ? { sessionId, questionId: id } : {}
   } catch {
     return {}
   }

@@ -301,7 +301,7 @@ async def start_flow_run(
         logger.warning("could not reach Temporal to start a flow run", exc_info=True)
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE,
-            "ScadBuddy cannot reach Temporal, where flows run. Send it again.",
+            "ScadBuddy's background service did not answer. Try again shortly.",
             headers={"Retry-After": "5"},
         ) from err
     return RunAnswer(id=run_id, status="starting")

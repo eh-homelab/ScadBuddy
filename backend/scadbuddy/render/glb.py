@@ -42,7 +42,9 @@ def _linear_rgba(colour: str) -> list[float]:
 
 
 def bounding_box(parts: Sequence[ColourPart]) -> BoundingBox:
-    bounds = np.array([part.mesh.bounds for part in parts])
+    """The box of the parts that print: a negative part is cut out, never placed."""
+    printed = [part for part in parts if not part.negative] or list(parts)
+    bounds = np.array([part.mesh.bounds for part in printed])
     low = bounds[:, 0, :].min(axis=0)
     high = bounds[:, 1, :].max(axis=0)
     return BoundingBox(
@@ -52,7 +54,28 @@ def bounding_box(parts: Sequence[ColourPart]) -> BoundingBox:
     )
 
 
+def footprint_box(parts: Sequence[ColourPart]) -> BoundingBox:
+    """The box Arrange packs and places an object by: :func:`bounding_box`'s, widened
+    in X and Y to its negative parts' reach. An arranged plate is one object to the
+    slicer, which cuts a negative part out of all of it, so no neighbour may sit where
+    a negative part reaches (#1863). Z stays the printed parts': the object sits on the
+    plate by what prints."""
+    box = bounding_box(parts)
+    cuts = [part.mesh.bounds for part in parts if part.negative]
+    if not cuts:
+        return box
+    low = np.minimum(np.array(box.min[:2]), np.min([c[0][:2] for c in cuts], axis=0))
+    high = np.maximum(np.array(box.max[:2]), np.max([c[1][:2] for c in cuts], axis=0))
+    return BoundingBox(
+        min=(float(low[0]), float(low[1]), box.min[2]),
+        max=(float(high[0]), float(high[1]), box.max[2]),
+        size=(float(high[0] - low[0]), float(high[1] - low[1]), box.size[2]),
+    )
+
+
 def write_glb(parts: Sequence[ColourPart], out_path: Path) -> BoundingBox:
+    # A negative part is cut out by the slicer: the preview shows what prints.
+    parts = [part for part in parts if not part.negative]
     if not parts:
         raise ValueError("a GLB needs at least one colour part")
     scene = trimesh.Scene()

@@ -390,6 +390,29 @@ def test_the_output_listing_says_which_outputs_failed_before_queueing(
     assert listed() is False
 
 
+def test_the_output_listing_answers_when_print_runs_are_unreadable(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2137: a Postgres hiccup reading ``print_runs`` lists the outputs without the
+    flag rather than turning History, and every page that lists outputs, into a 500."""
+    output_id = prepared(client, model)
+
+    async def unreadable(output_ids: list[str]) -> set[str]:
+        raise psycopg.OperationalError("connection lost")
+
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    monkeypatch.setattr(state.print_runs.store, "failed_before_queueing", unreadable)
+
+    listing = client.get(f"/api/v1/models/{model}/outputs")
+    single = client.get(f"/api/v1/outputs/{output_id}")
+
+    assert listing.status_code == 200, listing.text
+    assert output_id in {output["id"] for output in listing.json()}
+    assert all(output["failed_before_queueing"] is False for output in listing.json())
+    assert single.status_code == 200, single.text
+    assert single.json()["failed_before_queueing"] is False
+
+
 @respx.mock
 def test_a_failed_slice_is_the_runs_failure_in_bambuddys_words(
     client: TestClient, model: str
@@ -672,7 +695,7 @@ def test_only_a_failed_connect_says_nothing_was_queued(
 
     assert response.status_code == 503, response.text
     assert response.json()["type"].endswith("/temporal-unavailable")
-    assert "cannot reach Temporal" in response.text
+    assert "background service" in response.text and "Temporal" not in response.text
     assert "Nothing was queued" in response.text
     assert response.json()["may_have_started"] is False
 
@@ -701,9 +724,9 @@ def test_an_unavailable_temporal_may_have_started_the_run(
 
     assert response.status_code == 503, response.text
     assert response.json()["type"].endswith("/temporal-unavailable")
-    assert "cannot reach Temporal" in response.text
+    assert "background service" in response.text and "Temporal" not in response.text
     assert "Nothing was queued" not in response.text
-    assert "follow it if it started" in response.text
+    assert "a retry picks this request up" in response.text
     # The client re-sends the same request_id, never a new one (review #1316 (13) 1a).
     assert response.json()["may_have_started"] is True
 
@@ -742,13 +765,13 @@ def test_a_transient_rpc_error_is_temporal_unavailable(
     assert response.json()["type"].endswith("/temporal-unavailable")
     # Each may follow a persisted start, as `DEADLINE_EXCEEDED` does (review #1316 (8) 1).
     assert "Nothing was queued" not in response.text
-    assert "follow it if it started" in response.text
+    assert "a retry picks this request up" in response.text
     # The client re-sends the same request_id, never a new one (review #1316 (13) 1a).
     assert response.json()["may_have_started"] is True
     # Temporal answered (or gRPC ended the call): not a network problem (review #1316
     # (9) 1b).
-    assert "cannot reach" not in response.text
-    assert "could not start this print right now" in response.text
+    assert "answer" not in response.json()["detail"]
+    assert "busy right now" in response.text
 
 
 @respx.mock

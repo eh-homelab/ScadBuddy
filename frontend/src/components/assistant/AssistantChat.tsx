@@ -250,6 +250,8 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   }, [])
   const [preparing, setPreparing] = useState(0)
   const preparingNow = useRef(0)
+  /** #2119 — bytes of images still uploading, which count against the total like attached ones. */
+  const uploadingBytes = useRef(0)
   const nextKey = useRef(0)
   const [imageErrors, setImageErrors] = useState<string[]>([])
   const [dropping, setDropping] = useState(false)
@@ -267,7 +269,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
     setPreparing(preparingNow.current)
     const results = await Promise.allSettled(taken.map((file) => prepareImage(file, undefined, imageEdge)))
     const ready: { name: string; image: UserImage }[] = []
-    let total = attachedNow.current.reduce((sum, a) => sum + a.image.data.length, 0)
+    let total = attachedNow.current.reduce((sum, a) => sum + a.image.data.length, uploadingBytes.current)
     results.forEach((result, index) => {
       const name = taken[index]?.name ?? 'image'
       if (result.status === 'rejected') {
@@ -279,8 +281,12 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
         ready.push({ name, image: result.value })
       }
     })
+    // #2119 — held until the uploads settle, so an attach started meanwhile counts them.
+    const reserved = ready.reduce((sum, { image }) => sum + image.data.length, 0)
+    uploadingBytes.current += reserved
     // #1941 — each image goes to the agent now, and the message sends its id.
     const uploads = await Promise.allSettled(ready.map(({ image }) => api.uploadAttachment(image)))
+    uploadingBytes.current -= reserved
     preparingNow.current -= taken.length
     setPreparing(preparingNow.current)
     const added: Attached[] = []

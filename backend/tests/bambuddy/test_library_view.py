@@ -94,7 +94,8 @@ async def test_a_file_bambuddy_names_no_hash_for_is_read_each_time(
     await library_preview(bambuddy, cache, 7, 1)
     await library_preview(bambuddy, cache, 7, 1)
     assert download.call_count == 2
-    assert not cache.exists() or not any(cache.iterdir())
+    # Nothing is kept: the only thing under the cache is the spool, empty again.
+    assert not cache.exists() or not [path for path in cache.rglob("*") if path.is_file()]
 
 
 @respx.mock

@@ -26,6 +26,11 @@ export type UiReachSummary = 'reachable' | 'none reachable' | 'not checked'
 export type UiOriginProbeOptions = {
   /** How long an answer is kept. Default 30 s. */
   ttlMs?: number
+  /**
+   * How long an `unreachable` answer is kept: shorter, so one dropped request
+   * does not keep the browser off an origin for the whole `ttlMs`. Default 5 s.
+   */
+  failureTtlMs?: number
   /** How long to wait for an answer. Default 2 s, as /healthz waits for the backend. */
   timeoutMs?: number
   now?: () => number
@@ -36,16 +41,18 @@ export type UiOriginProbeOptions = {
 /** Asks UI origins whether they answer without a login, keeping each answer briefly. */
 export class UiOriginProbe {
   private readonly ttlMs: number
+  private readonly failureTtlMs: number
   private readonly timeoutMs: number
   private readonly now: () => number
   private readonly log: (line: string) => void
-  private readonly cache = new Map<string, { at: number; answer: Promise<UiReach> }>()
+  private readonly cache = new Map<string, { at: number; ttl: number; answer: Promise<UiReach> }>()
   private readonly answered = new Map<string, UiReach>()
   /** The latest turn's answers. */
   private latest: UiReachMap | undefined
 
   constructor(options: UiOriginProbeOptions = {}) {
     this.ttlMs = options.ttlMs ?? 30_000
+    this.failureTtlMs = Math.min(options.failureTtlMs ?? 5_000, this.ttlMs)
     this.timeoutMs = options.timeoutMs ?? 2_000
     this.now = options.now ?? Date.now
     this.log = options.log ?? ((line) => console.warn(line))
@@ -67,17 +74,23 @@ export class UiOriginProbe {
   private one(origin: string): Promise<UiReach> {
     const now = this.now()
     const cached = this.cache.get(origin)
-    if (cached && now - cached.at <= this.ttlMs) return cached.answer
-    const answer = this.ask(origin).then((reach) => {
-      const before = this.answered.get(origin)
-      if (before?.reach !== reach.reach) {
-        this.log(`headless browser: ${origin} answers ${reach.reach}${reach.reach === 'ok' ? '' : ` (${reach.detail})`}`)
-      }
-      this.answered.set(origin, reach)
-      return reach
-    })
-    this.cache.set(origin, { at: now, answer })
-    return answer
+    if (cached && now - cached.at <= cached.ttl) return cached.answer
+    // Shared while in flight; an unreachable answer is then kept for less.
+    const entry: { at: number; ttl: number; answer: Promise<UiReach> } = {
+      at: now,
+      ttl: this.ttlMs,
+      answer: this.ask(origin).then((reach) => {
+        if (reach.reach === 'unreachable') entry.ttl = this.failureTtlMs
+        const before = this.answered.get(origin)
+        if (before?.reach !== reach.reach) {
+          this.log(`headless browser: ${origin} answers ${reach.reach}${reach.reach === 'ok' ? '' : ` (${reach.detail})`}`)
+        }
+        this.answered.set(origin, reach)
+        return reach
+      }),
+    }
+    this.cache.set(origin, entry)
+    return entry.answer
   }
 
   private async ask(origin: string): Promise<UiReach> {
