@@ -55,6 +55,12 @@ export const TURN_TOOL_TIER_ACTIVITY = 'turn_tool_tier'
 /** The activity type a turn tool's call runs as: `turn:<server>__<tool>`. */
 export const TURN_TOOL_PREFIX = 'turn:'
 const SEPARATOR = '__'
+/**
+ * The longest turn-tool name the durable session can declare: the Temporal Claude
+ * Agent SDK refuses longer ones (`_check_tool_name`, 1 to 50 of [A-Za-z0-9_-]), and one
+ * refused there failed every workflow task of its session.
+ */
+export const MAX_TURN_TOOL_NAME = 50
 /** How long one server's tool listing may take before it is left out of the turn. */
 const LIST_TIMEOUT_MS = 20_000
 
@@ -315,10 +321,19 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
           }),
         )
         const tools: TurnToolEntry[] = []
+        const tooLong: string[] = []
         for (const { server, offered } of listings) {
           for (const { tool, name } of offered ?? []) {
+            const turnName = turnToolName(server.name, tool.name)
+            if (turnName.length > MAX_TURN_TOOL_NAME) {
+              tooLong.push(
+                `tool ${tool.name} of plugin ${server.name} is not available in this turn: its name ` +
+                  `${turnName} is over ${MAX_TURN_TOOL_NAME} characters`,
+              )
+              continue
+            }
             tools.push({
-              name: turnToolName(server.name, tool.name),
+              name: turnName,
               description: tool.description ?? '',
               input_schema: tool.inputSchema as Record<string, unknown>,
               may_park: server.mayPark?.(`mcp__${server.name}__${name}`) ?? true,
@@ -327,7 +342,7 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
           }
         }
         // Said once, after the listing, so a retried attempt does not say it again.
-        const problems = [...set.problems, ...listings.flatMap((l) => (l.problem ? [l.problem] : []))]
+        const problems = [...set.problems, ...listings.flatMap((l) => (l.problem ? [l.problem] : [])), ...tooLong]
         if (problems.length) await deps.report?.(session, problems.map(scrub))
         return { tools, packages: set.packages ?? [] }
       })

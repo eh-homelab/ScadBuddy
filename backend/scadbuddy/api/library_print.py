@@ -321,7 +321,8 @@ async def get_library_choices(
     settings = store.load()
     remembered = store.library_choices(file_id)
     async with client_for(settings) as client:
-        source = await LibrarySource.load(client, file_id, uploads=uploads, settings=settings)
+        # Loaded alongside the printers and presets (#2504).
+        source = LibrarySource.load(client, file_id, uploads=uploads, settings=settings)
         return await choices_for(
             client, source, settings, remembered=remembered, printer_id=printer_id, rack=rack
         )

@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import { describe, expect, it } from 'vitest'
 import { originPolicy } from '../src/http/origins.js'
 import type { SettingsRepo } from '../src/routes/headlessBrowser.js'
+import type { SettingsWriter } from '../src/routes/mcpAuthMode.js'
 import {
   MAX_FILE_BYTES,
   MAX_WORKSPACE_BYTES,
@@ -35,14 +36,25 @@ function setup(options: { ready?: boolean; settings?: boolean; stored?: Record<s
       return Promise.resolve()
     },
   }
+  // Both caps in one write (#2469): `writes` holds each call's keys.
+  const writes: string[][] = []
+  const writer: SettingsWriter = {
+    setMany: async (written, check, context) => {
+      if (!(await check({ get: repo.get }))) return false
+      writes.push(Object.keys(written))
+      for (const [key, value] of Object.entries(written)) await repo.set(key, value, context)
+      return true
+    },
+  }
   const app = new Hono()
   registerWorkspaceSettingsRoutes(app, {
     settings: options.settings === false ? undefined : repo,
+    writer: options.settings === false ? undefined : writer,
     ready: () => Promise.resolve(options.ready ?? true),
     remoteAddress: () => '10.0.0.7',
     origins: originPolicy('https://scadbuddy.example', '10.0.0.0/8'),
   })
-  return { app, repo, values, contexts }
+  return { app, repo, values, contexts, writes }
 }
 
 const get = (app: Hono, headers: Record<string, string> = { host: UI.host, 'x-forwarded-proto': 'https' }) =>
@@ -54,7 +66,7 @@ const bounds = { min: MIN_WORKSPACE_BYTES, file_max: MAX_FILE_BYTES, workspace_m
 
 describe('the workspace caps setting', () => {
   it('is 25 MiB a file and 200 MiB a workspace until set, and the store reads what is saved', async () => {
-    const { app, repo, values, contexts } = setup()
+    const { app, repo, values, contexts, writes } = setup()
     const before = await get(app)
     expect(before.status).toBe(200)
     expect(await before.json()).toEqual({ file_max_bytes: 25 * MiB, workspace_max_bytes: 200 * MiB, ...bounds })
@@ -65,7 +77,8 @@ describe('the workspace caps setting', () => {
     expect(await saved.json()).toEqual({ file_max_bytes: 5 * MiB, workspace_max_bytes: 50 * MiB, ...bounds })
     expect(values.get(WORKSPACE_FILE_MAX_SETTING)).toBe(5 * MiB)
     expect(values.get(WORKSPACE_MAX_SETTING)).toBe(50 * MiB)
-    // One audited write per key, as the UI user from the request's address.
+    expect(writes).toEqual([[WORKSPACE_FILE_MAX_SETTING, WORKSPACE_MAX_SETTING]])
+    // One audit row per key, as the UI user from the request's address.
     expect(contexts).toEqual([
       expect.objectContaining({ surface: 'http', clientIp: '10.0.0.7' }),
       expect.objectContaining({ surface: 'http', clientIp: '10.0.0.7' }),
