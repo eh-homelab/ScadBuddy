@@ -41,6 +41,7 @@ from scadbuddy.bambuddy.models import LibraryFile
 from scadbuddy.bambuddy.print_source import (
     SLICED_TYPE,
     LibrarySource,
+    ReadOutOfMemoryError,
     SpoolFullError,
     printable,
 )
@@ -191,13 +192,17 @@ async def read_library_objects(
                 await _keep(path, _Kept(refused=reason, budget=ReadBudget.widest()))
                 raise NotArrangeableError(file_id, file.filename, reason)
             digest = await asyncio.to_thread(_digest, payload)
-            read = await asyncio.to_thread(read_objects, payload, spend)
+            try:
+                read = await asyncio.to_thread(read_objects, payload, spend)
+            except MemoryError:
+                raise ReadOutOfMemoryError from None
     except UnreadableObjectsError as error:
         # A budget refusal of an STL, or a 3MF that cannot be read.
         await _keep(path, _Kept(refused=str(error), budget=spend))
         raise NotArrangeableError(file_id, file.filename, str(error)) from None
-    except SpoolFullError as error:
-        # The volume's, not the file's: never kept, so the next try reads it again.
+    except (SpoolFullError, ReadOutOfMemoryError) as error:
+        # The volume's or the process's, not the file's: never kept, so the next try
+        # (with room, memory or a triangle limit) reads it again.
         raise NotArrangeableError(file_id, file.filename, str(error)) from None
     objects = []
     for index, obj in enumerate(read):

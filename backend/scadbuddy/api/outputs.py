@@ -299,8 +299,9 @@ MAX_ARRANGE_COPIES = 2000
 
 
 #: Arrange's 422 for a library file whose objects cannot be read from its 3MF (#1863): a
-#: sliced file, one past the download cap, one painted in PrusaSlicer or cut by a negative
-#: part. A part painted in Bambu Studio is arranged with its painting (#1965).
+#: sliced file, one past the download cap, one painted in PrusaSlicer or coloured by a
+#: texture (#2147), or one cut by a negative part. A part painted in Bambu Studio is
+#: arranged with its painting (#1965).
 LIBRARY_FILE_NOT_ARRANGEABLE = "library_file_not_arrangeable"
 
 

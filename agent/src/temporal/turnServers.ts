@@ -1,0 +1,165 @@
+import { mkdir } from 'node:fs/promises'
+import path from 'node:path'
+import type { AuditSink } from '../audit/log.js'
+import { HTTP_READ_TOOL_NAME, HTTP_SERVER, httpRequestEnabled, httpRequestServer, httpTierOf, SETTING_HTTP_REQUEST } from '../harness/httpRequest.js'
+import type { HttpLimits } from '../harness/httpRequest.js'
+import type { Resolver } from '../http/egress.js'
+import type { PluginsForRun } from '../plugins/forwarder.js'
+import type { LoadedPackage, PackagesForRun } from '../plugins/packages/install.js'
+import type { PackageServers } from '../plugins/packages/mcp.js'
+import { pluginTierResolver } from '../plugins/registry.js'
+import { localPackageServers, sharePackage, unparkableBuiltins } from './turnPackages.js'
+import {
+  connectHttp,
+  connectInProcess,
+  type TurnContext,
+  type TurnPackage,
+  type TurnServer,
+  type TurnServers,
+} from './turnTools.js'
+
+// What a durable turn's other tools are built from (#2320): the same pieces a classic
+// turn's `runTurn` hands Claude Code (sessions/manager.ts), built again for each listing
+// and each call, so a plugin disabled, removed or failing its egress check since is gone
+// at once, as it would be from a classic turn's next query.
+
+export type TurnServerDeps = {
+  /** The enabled remote plugins through the loopback forwarder (main.ts `remotePlugins`). */
+  remotePlugins?: (() => Promise<PluginsForRun>) | undefined
+  settings?: { get<T>(key: string): Promise<T | undefined> } | undefined
+  /** Every usable credential's secret (fallback.ts candidates): never in a request, never in a result. */
+  credentialSecrets?: (() => Promise<readonly string[]>) | undefined
+  /**
+   * http_request, as a classic turn has it; its saved bodies under `saveRoot/<session>/http`,
+   * on this pod's own disk as a classic turn's are (never the shared payload volume), so
+   * the server is pinned to this replica.
+   */
+  httpRequest?:
+    | {
+        saveRoot: string
+        audit?: AuditSink | undefined
+        resolve?: Resolver
+        limits?: Partial<HttpLimits>
+      }
+    | undefined
+  /**
+   * The enabled plugin packages (`loadPackagesForRun`, as a classic turn's), shared with
+   * the segment runner under `packages.root` (turnPackages.ts) on a listing, and their
+   * MCP servers offered as turn tools.
+   */
+  packages?:
+    | {
+        load: () => Promise<PackagesForRun>
+        root: string | undefined
+        /** Where a package's copy without its http MCP servers is made, on this pod (as a classic turn's). */
+        localRoot: string
+        /** Their http MCP servers through the loopback forwarder (plugins/packages/mcp.ts). */
+        forward: (loaded: readonly LoadedPackage[]) => Promise<PackageServers>
+      }
+    | undefined
+  /** More servers for the turn: the headless browser and its grant tool (turnBrowser.ts). */
+  extra?: ((context: TurnContext) => Promise<TurnServer[]>) | undefined
+}
+
+export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Promise<TurnServers> {
+  return async (context) => {
+    const servers: TurnServer[] = []
+    const forwarded = deps.remotePlugins ? await deps.remotePlugins() : undefined
+    // The forwarder URLs carry the registration's token: as secret as the header it adds.
+    const secrets: string[] = [
+      ...(forwarded?.secrets ?? []),
+      ...(forwarded?.plugins ?? []).map((p) => p.url),
+      ...(deps.credentialSecrets ? await deps.credentialSecrets() : []),
+    ]
+    for (const plugin of forwarded?.plugins ?? []) {
+      const tiers = pluginTierResolver([plugin])
+      servers.push({
+        name: plugin.name,
+        connect: () => connectHttp(plugin.url),
+        // An unlisted plugin tool is outward (registry.ts), as in a classic turn.
+        tierOf: (name) => tiers(name) ?? 'outward',
+        mayPark: (name) => (tiers(name) ?? 'outward') === 'outward',
+      })
+    }
+    const http = deps.httpRequest
+    if (http && httpRequestEnabled(await deps.settings?.get<unknown>(SETTING_HTTP_REQUEST))) {
+      const saveDir = path.join(http.saveRoot, context.session, 'http')
+      await mkdir(saveDir, { recursive: true })
+      servers.push({
+        name: HTTP_SERVER,
+        connect: () =>
+          connectInProcess(
+            () =>
+              httpRequestServer({
+                saveDir,
+                secrets: () => secrets,
+                audit: http.audit,
+                actor: context.owner,
+                // A flow's call has no session to audit it under (its saved bodies are under `flow-<run>`).
+                sessionId: context.flow ? undefined : context.session,
+                signal: context.signal,
+                ...(http.resolve ? { resolve: http.resolve } : {}),
+                ...(http.limits ? { limits: http.limits } : {}),
+              }).instance,
+          ),
+        tierOf: (name, input) => httpTierOf(name, input) ?? 'outward',
+        // http_request is outward by its method; only reading a saved body never is.
+        mayPark: (name) => name !== HTTP_READ_TOOL_NAME,
+        pinned: true,
+      })
+    }
+    const problems = [...(forwarded?.problems ?? [])]
+    const loaded = deps.packages ? await deps.packages.load() : undefined
+    let forwardedPackages: PackageServers | undefined
+    let shared: TurnPackage[] | undefined
+    if (loaded) {
+      problems.push(...loaded.problems)
+      servers.push(...localPackageServers(loaded.loaded, problems))
+      // As a remote plugin's: the forwarder URL, which carries its token, is a secret too.
+      forwardedPackages = await deps.packages!.forward(loaded.loaded)
+      problems.push(...forwardedPackages.problems)
+      secrets.push(...forwardedPackages.secrets)
+      for (const plugin of forwardedPackages.plugins) {
+        servers.push({ name: plugin.name, connect: () => connectHttp(plugin.url), tierOf: () => 'outward' })
+      }
+      if (context.listing) {
+        shared = []
+        const root = deps.packages!.root
+        for (const pkg of loaded.loaded) {
+          if (root === undefined) {
+            problems.push(
+              `plugin package ${pkg.name} was not loaded: a durable session reads packages from the payload volume, and SCADBUDDY_PAYLOAD_DIR is not set`,
+            )
+            continue
+          }
+          try {
+            const turnPackage = await sharePackage(pkg, root, deps.packages!.localRoot)
+            const dark = unparkableBuiltins(turnPackage)
+            if (dark.length) {
+              problems.push(
+                `plugin package ${pkg.name} names ${dark.join(', ')}: a durable session cannot ask you before ` +
+                  'such a call runs, so they are not offered here; a classic session offers them',
+              )
+            }
+            shared.push({ ...turnPackage, builtin_tools: turnPackage.builtin_tools.filter((t) => !dark.includes(t)) })
+          } catch (err) {
+            problems.push(`plugin package ${pkg.name} was not loaded: ${(err as Error).message}`)
+          }
+        }
+      }
+    }
+    // The browser and its grant are a session's: a flow has neither, as it has no browser_* tools.
+    if (deps.extra && !context.flow) servers.push(...(await deps.extra(context)))
+    return {
+      servers,
+      problems,
+      secrets,
+      ...(shared ? { packages: shared } : {}),
+      release: () => {
+        forwardedPackages?.release()
+        loaded?.release()
+        return forwarded?.release()
+      },
+    }
+  }
+}

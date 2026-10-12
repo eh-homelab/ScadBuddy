@@ -134,13 +134,20 @@ function field(value: unknown, key: string): unknown {
  * only where the call names it (`base`, which apply_patch requires and
  * update_source takes), else null. With no new commit in the answer the model
  * is recorded as changed, never its slug as a revision id.
+ *
+ * A call that names its `base` was refused (409) unless the model was at it, so
+ * the commit it made is `base`'s child. The record is read after the write and
+ * can already name another writer's commit (#2158), so a `previous_version` that
+ * is not `base` (or `base` spelled out: it may be a short id) loses to `base`.
  */
 function revision(input: Record<string, unknown>, result: unknown): Touch[] {
   const slug = str(field(result, 'slug')) ?? str(input.slug)
   const after = str(field(result, 'version'))
   if (!slug) return []
   if (!after) return [{ type: 'model', id: slug, action: 'modified', model: slug }]
-  const before = str(field(result, 'previous_version')) ?? str(input.base)
+  const previous = str(field(result, 'previous_version'))
+  const base = str(input.base)
+  const before = base !== null && !previous?.startsWith(base) ? base : previous
   return [{ type: 'revision', id: after, action: 'created', model: slug, before, after }]
 }
 

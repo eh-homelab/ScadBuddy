@@ -3,7 +3,8 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from '../src/db.js'
 import { AUTHORIZE_TOOL_NAME } from '../src/harness/headlessBrowser.js'
-import { recordGrant } from '../src/harness/headlessGrants.js'
+import { recordDurableGrant, recordGrant } from '../src/harness/headlessGrants.js'
+import { loadApprovedOrigins, rememberDurableOrigin } from '../src/harness/browserOrigins.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
@@ -75,6 +76,50 @@ describe.skipIf(!TEST_DATABASE_URL)(`headless-browser grants${TEST_DATABASE_URL 
     const rows = await db.sql.unsafe(text, order.map((name) => values[name]!))
     return rows.length === 1
   }
+
+  /** A durable session running a turn, and its call's gate entry resolved with `outcome` (#2320). */
+  async function durableInTurn(outcome = 'approved') {
+    const { session } = await m.start(agentA, { origin: 'mcp', title: 't' })
+    const turnId = '6a1f2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d'
+    await db.sql`UPDATE ai_sessions SET mode = 'durable', status = 'running', durable_turn_id = ${turnId} WHERE id = ${session.id}`
+    const requestId = `durable:${session.id}:run-1:toolu_1`
+    await db.sql`
+      INSERT INTO ai_input_responses (request_id, session_id, kind, outcome, responder)
+      VALUES (${requestId}, ${session.id}, 'approval', ${outcome}, ${db.sql.json({ kind: 'browser', id: 'browser', label: 'You' })})`
+    return { session, turnId, requestId, context: { sql: db.sql, sessionId: session.id, requestId } }
+  }
+
+  it("turns a durable call's approval into a grant the backend uses once while its turn runs (#2320)", async () => {
+    const { session, context } = await durableInTurn()
+    expect((await recordDurableGrant(context, INPUT)).ok).toBe(true)
+    expect(await backendUses(session.id, 'POST', RUN)).toBe(true)
+    expect(await backendUses(session.id, 'POST', RUN)).toBe(false)
+    // One approval, one grant.
+    expect(await recordDurableGrant(context, INPUT)).toMatchObject({ ok: false })
+  })
+
+  it('refuses a durable grant without an approved call, outside a running turn, or once the turn ended', async () => {
+    const denied = await durableInTurn('denied')
+    expect(await recordDurableGrant(denied.context, INPUT)).toMatchObject({ ok: false })
+    await drop()
+    ;({ db, drop } = await throwawayDatabase())
+    m = manager({ sql: db.sql, paths: await tempPaths(), run: scriptedRunner(() => ({ reply: 'ok' })).runner })
+    const ended = await durableInTurn()
+    await db.sql`UPDATE ai_sessions SET durable_turn_id = NULL WHERE id = ${ended.session.id}`
+    expect(await recordDurableGrant(ended.context, INPUT)).toMatchObject({ ok: false })
+    await db.sql`UPDATE ai_sessions SET durable_turn_id = ${ended.turnId} WHERE id = ${ended.session.id}`
+    expect((await recordDurableGrant(ended.context, INPUT)).ok).toBe(true)
+    // finish_turn: the turn is over, and so is its grant.
+    await db.sql`UPDATE ai_sessions SET status = 'idle', durable_turn_id = NULL WHERE id = ${ended.session.id}`
+    expect(await backendUses(ended.session.id, 'POST', RUN)).toBe(false)
+  })
+
+  it("remembers an origin a durable navigation was approved for, and only under an approved call", async () => {
+    const { session, requestId } = await durableInTurn()
+    await rememberDurableOrigin(db.sql, session.id, 'https://makerworld.com', requestId)
+    expect(await loadApprovedOrigins(db.sql, session.id)).toEqual(['https://makerworld.com'])
+    await expect(rememberDurableOrigin(db.sql, session.id, 'https://evil.example', 'durable:x:y:z')).rejects.toThrow()
+  })
 
   it('turns an approved, consumed call into a grant the backend uses once for that exact request', async () => {
     const { session, context } = await approvedInTurn()

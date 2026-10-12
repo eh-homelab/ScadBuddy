@@ -1,5 +1,5 @@
 import type { Sql } from 'postgres'
-import { type AuditLog, safeDetail, SYSTEM_ACTOR } from '../audit/log.js'
+import { type AuditContext, type AuditLog, safeDetail, SYSTEM_ACTOR } from '../audit/log.js'
 import { inputResolved } from '../gate/classic.js'
 import { isDoneSummary } from '../questions/waiting.js'
 import type { EventLog } from './eventLog.js'
@@ -54,7 +54,13 @@ export class SessionEdits {
     this.deps = deps
   }
 
-  async update(id: string, principal: Owner, edit: SessionEdit): Promise<SessionRecord> {
+  /**
+   * With `context`, a successful edit is a `resource` row on the session (action
+   * `session_update`, #2159), as a fork is; a refused or failed one is recorded by
+   * app.ts's failures-only mount from the route's status.
+   */
+  async update(id: string, principal: Owner, edit: SessionEdit, context?: Omit<AuditContext, 'actor'>): Promise<SessionRecord> {
+    const startedAt = new Date()
     const session = await this.deps.get(id, principal)
     if (!sameOwner(principal, session.owner)) {
       throw new SessionError('forbidden', `session ${id} is controlled by ${session.owner.label}; take it over first`)
@@ -118,6 +124,25 @@ export class SessionEdits {
       return gone
     })
     if (logged) this.deps.events.committed(id, logged.events, logged.seqs)
+    if (context) {
+      const changes = [
+        ...(title === undefined ? [] : ['renamed']),
+        ...(done ? ['marked done'] : []),
+        ...(archive ? ['archived'] : unarchive ? ['unarchived'] : []),
+      ]
+      await this.deps.audit?.record({
+        kind: 'resource',
+        action: 'session_update',
+        surface: context.surface,
+        actor: principal,
+        clientIp: context.clientIp,
+        sessionId: id,
+        outcome: 'ok',
+        detail: changes.join(', ') || 'no change',
+        startedAt,
+        finishedAt: new Date(),
+      })
+    }
     // Audited as a cancelled question, as one cancelled when its turn ends is (questions/service.ts).
     const audit = this.deps.audit
     if (audit && dismissed.length) {

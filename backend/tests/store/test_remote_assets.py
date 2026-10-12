@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -53,6 +54,20 @@ async def test_backfill_mirrors_uploads_made_before_the_store(
     assert await remote.backfill(api) == 1
     assert await remote.backfill(api) == 0
     assert remote.content.index.get(asset_key(meta.id)) is not None
+
+
+async def test_a_stopped_backfill_mirrors_nothing_more(
+    tmp_path: Path, pool: Pool, pg_pool: PgPool
+) -> None:
+    """#2128: the shutdown sets ``stop`` and waits for the upload in hand."""
+    remote = RemoteAssets(local_content(tmp_path / "remote", pool))
+    api = AssetStore(tmp_path / "assets", pg_pool)
+    meta = api.put(SVG, "old.svg")
+    stop = threading.Event()
+    stop.set()
+    assert await remote.backfill(api, stop=stop) == 0
+    assert remote.content.index.get(asset_key(meta.id)) is None
+    assert await remote.backfill(api) == 1
 
 
 def test_adopt_refuses_bytes_that_are_not_the_id(tmp_path: Path) -> None:

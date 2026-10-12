@@ -15,7 +15,9 @@ import { ToolError, type ToolContext } from './registry.js'
 // bytes: an approval card and the audit row (both the call's input, scrubbed,
 // approvals/service.ts `summariseInput`) show the path and the sha256, never the
 // bytes, and an approval binds to that content, not to whatever the path holds
-// when the call runs. The size is answered in each tool's result.
+// when the call runs. An approval card also shows the file's size, read from the
+// row the sha256 pins (workspace/store.ts `withWorkspaceSize`, #2396), and the
+// size is answered in each tool's result.
 //
 // Binary uploads stream from Postgres (SessionFiles.chunks) into the backend's
 // multipart route; text goes as the route's JSON body, decoded as UTF-8 first

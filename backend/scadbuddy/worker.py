@@ -28,7 +28,7 @@ from temporalio.service import RPCError
 from temporalio.worker import Worker
 
 from scadbuddy.bambuddy.archive_cache import ArchiveCache
-from scadbuddy.bambuddy.client import DEFAULT_SLICE_TIMEOUT, client_for
+from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.follow import FollowActivities, Follower
 from scadbuddy.bambuddy.operations import bambuddy_kinds_over
 from scadbuddy.bambuddy.output_reader import RemoteOutputs
@@ -39,7 +39,7 @@ from scadbuddy.bambuddy.progress import (
     library_progress,
     progress_for,
 )
-from scadbuddy.bambuddy.runs import REPEAT_WINDOW, PrintRunStore, newest_failed_from
+from scadbuddy.bambuddy.runs import PrintRunStore, newest_failed_from
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, INSTALL_CONCURRENCY, Config
@@ -93,7 +93,6 @@ from scadbuddy.workflows.client import (
 from scadbuddy.workflows.flow_activities import FlowActivities
 from scadbuddy.workflows.flow_routes import FlowRoutes, api_client
 from scadbuddy.workflows.flows_client import connect_flows
-from scadbuddy.workflows.follow import FOLLOW_WORKFLOW
 from scadbuddy.workflows.operation_activities import operation_activities
 from scadbuddy.workflows.pipeline_activities import PipelineActivities
 from scadbuddy.workflows.pipelines import TRANSFER
@@ -688,16 +687,6 @@ async def run_inprocess_worker(
     await _poll(settings, deps, client, stop, drain=False)
 
 
-#: The longest a print run stays open (#1060): its plates' slices, then
-#: ``REPEAT_WINDOW`` on a timer. A stopping print worker drains its pinned runs for at
-#: most this; ``FollowPrint`` is AUTO_UPGRADE and never holds it.
-PRINT_DRAIN_TIMEOUT = (
-    REPEAT_WINDOW + 2 * timedelta(seconds=DEFAULT_SLICE_TIMEOUT)
-).total_seconds() + 120
-#: The workflow types the print worker's drain does not wait for (AUTO_UPGRADE).
-PRINT_UNPINNED = (FOLLOW_WORKFLOW,)
-
-
 @dataclass
 class PrintWorkerDeps:
     """What ``--queue bambuddy`` holds (#1060, spec 2026-10-01 §5.5): Postgres, the
@@ -812,7 +801,8 @@ async def run_print_worker(
     client: Client | None = None,
 ) -> None:
     """``python -m scadbuddy.worker --queue bambuddy``: the ``scadbuddy-print`` worker
-    (#1060), versioned and drained like the render worker, ``stop_now`` included."""
+    (#1060), versioned like the render worker but not drained: its workflows are
+    AUTO_UPGRADE (`print_deployment`, #2066), so the next build takes them over."""
     stop = stop or asyncio.Event()
     deps = await asyncio.to_thread(build_print_deps, settings)
     try:
@@ -838,8 +828,7 @@ async def run_print_worker(
                 stop,
                 build_id=build_id,
                 deployment_name=PRINT_DEPLOYMENT_NAME,
-                drain_timeout=PRINT_DRAIN_TIMEOUT,
-                ignore_types=PRINT_UNPINNED,
+                drain_timeout=None,
                 stop_now=stop_now,
             )
         finally:

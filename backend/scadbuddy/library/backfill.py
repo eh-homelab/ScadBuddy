@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import threading
 from collections.abc import Callable, Coroutine, Iterator
 from typing import Any
 
@@ -58,13 +59,15 @@ def attach_backfills(
     refs: BlobRefs,
     read_job: Callable[[str], Job],
     events: EventBus | None = None,
+    stop: threading.Event | None = None,
 ) -> int:
     """Attach every finished re-render to its output. Returns how many it attached; one
     that failed is marked with why, and is not tried again. Each output is on its own:
     one that cannot be attached costs only itself, and a transient failure (the
     database, the disk) is left for the next pass. Either outcome is announced as
-    ``output.updated`` on ``events`` (#1970)."""
-    return _attach_all(outputs, refs, read_job, outputs.pending_backfills(), events)
+    ``output.updated`` on ``events`` (#1970). Once ``stop`` is set it attaches no
+    further output: the boot's pass runs in a thread the shutdown cannot cancel (#2128)."""
+    return _attach_all(outputs, refs, read_job, outputs.pending_backfills(), events, stop)
 
 
 def attach_job_backfills(
@@ -156,9 +159,12 @@ def _attach_all(
     read_job: Callable[[str], Job],
     pending: list[tuple[str, BackfillState]],
     events: EventBus | None,
+    stop: threading.Event | None = None,
 ) -> int:
     attached = 0
     for output_id, state in pending:
+        if stop is not None and stop.is_set():
+            break  # what is left waits for the next pass
         try:
             with _claimed(refs, output_id) as mine:
                 if not mine:

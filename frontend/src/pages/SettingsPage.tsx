@@ -16,6 +16,7 @@ import { HeadlessBrowserSetting } from '../components/HeadlessBrowserSetting'
 import { HttpRequestSetting } from '../components/HttpRequestSetting'
 import { ImageSettingsSetting } from '../components/ImageSettingsSetting'
 import { SessionLimitsSetting } from '../components/SessionLimitsSetting'
+import { WorkspaceSettingsSetting } from '../components/WorkspaceSettingsSetting'
 import { SessionModeSetting } from '../components/SessionModeSetting'
 import { ModelSetting } from '../components/ModelSetting'
 import { PrinterCameraSetting } from '../components/PrinterCameraSetting'
@@ -1018,7 +1019,7 @@ export function SettingsPage() {
                 help={
                   projectsState.error
                     ? `Could not list the projects: ${projectsState.error instanceof ApiError ? projectsState.error.detail : 'no answer'}`
-                    : 'Where the project picker opens, and the project a send without one is filed under.'
+                    : "Where a library file's print opens its project picker, and the project a send without one is filed under. A model opens on the project it was last filed in."
                 }
               >
                 <select
@@ -1213,6 +1214,8 @@ export function SettingsPage() {
             <SessionLimitsSetting />
             {/* Saves on its own; hidden without the agent's database, like the limits above. */}
             <ImageSettingsSetting />
+            {/* #2329 — the workspace caps; saves on its own, hidden without the agent's database. */}
+            <WorkspaceSettingsSetting />
             {/* Plan 5d — saves on its own; hidden without the agent's database, like the limits above. */}
             <SessionModeSetting />
             {/* The agent service serves these routes, so they show only where the assistant

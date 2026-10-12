@@ -334,6 +334,24 @@ describe('ChatConnection inbound limits', () => {
     connection.close()
   })
 
+  it('names the session and question of a refused answer by the schema\'s own bounds (#2175)', async () => {
+    const fake = fakeManager()
+    const out: ServerEvent[] = []
+    const connection = new ChatConnection(fake.manager, (e) => out.push(e), { log: () => {} })
+    await connection.open()
+    // Malformed (no answers), but its ids are ones the schema takes: up to 200 characters.
+    const sessionId = 's'.repeat(150)
+    const id = 'q'.repeat(200)
+    await connection.receive(JSON.stringify({ v: 1, type: 'question.answer', sessionId, id, answers: [] }))
+    expect(out.at(-1)).toEqual(expect.objectContaining({ type: 'error', code: 'invalid', sessionId, questionId: id }))
+    // One the schema would refuse is not echoed.
+    await connection.receive(JSON.stringify({ v: 1, type: 'question.answer', sessionId: 's'.repeat(201), id, answers: [] }))
+    expect(out.at(-1)).toMatchObject({ type: 'error', code: 'invalid' })
+    expect(out.at(-1)).not.toHaveProperty('sessionId')
+    expect(out.at(-1)).not.toHaveProperty('questionId')
+    connection.close()
+  })
+
   it("passes the manager's new-session refusal (per owner, not per connection) on as rate_limited", async () => {
     const fake = fakeManager()
     const refusing = {

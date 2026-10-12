@@ -4,8 +4,11 @@ import { USER_ONLY } from '../agent/dom'
 import { ApiError, api } from '../api/client'
 import type { CustomizerSchema, LibraryCopy, ModelLibrary, Output } from '../api/types'
 import { ArrangeDialog } from '../components/ArrangeDialog'
+import { ArrangedNext } from '../components/ArrangedNext'
+import { BlobDownload } from '../components/BlobDownload'
 import { BomTable } from '../components/BomTable'
 import { ColorStrip } from '../components/ColorStrip'
+import { PrintPicker } from '../components/PrintPicker'
 import { SendDialog } from '../components/SendDialog'
 import { Button } from '../components/ui/Button'
 import { Dialog } from '../components/ui/Dialog'
@@ -19,7 +22,6 @@ import { diffFromDefaults } from '../lib/params'
 import { useAsync } from '../lib/useAsync'
 import { bambuddyBase, webUrls } from '../lib/bambuddyLinks'
 import { libraryLabel, pinChange } from '../lib/libraryPins'
-import { isEmbedded } from '../lib/embed'
 
 /** Output ids are 32 hex characters; only the head of one is worth showing. */
 function shortId(id: string): string {
@@ -47,6 +49,10 @@ export function HistoryPage() {
   /** §7 — outputs ticked for the next Arrange (#314). */
   const [picked, setPicked] = useState<string[]>([])
   const [arranging, setArranging] = useState(false)
+  /** #2287 — the last Arrange's result, with its next step, until the page is left. */
+  const [arrangedOutput, setArrangedOutput] = useState<Output | null>(null)
+  /** #2287 — the output in the print dialog (History's Print, or the arranged result's). */
+  const [printFor, setPrintFor] = useState<Output | undefined>(undefined)
   /** #902 — the outputs the last Arrange could not re-render, said once it has closed. */
   const [skipped, setSkipped] = useState<string | null>(null)
   /** #2284 — the last Arrange's result, said by where it was filed: maybe another model. */
@@ -109,6 +115,16 @@ export function HistoryPage() {
 
         {!loading && schema && outputsState.data && outputsState.data.length > 0 && (
           <>
+            {/* Gone from the list (deleted): nothing to offer a next step for. */}
+            {arrangedOutput && outputsState.data.some((o) => o.id === arrangedOutput.id) && (
+              <div className="mb-2">
+                <ArrangedNext
+                  output={arrangedOutput}
+                  sent={(outputsState.data ?? []).some((o) => o.id === arrangedOutput.id && wasSent(o))}
+                  onPrint={() => setPrintFor(arrangedOutput)}
+                />
+              </div>
+            )}
             <div className="mb-2 flex justify-end">
               <Button
                 size="sm"
@@ -155,6 +171,7 @@ export function HistoryPage() {
                     })
                   }
                   onSend={() => setSendFor(output)}
+                  onPrint={() => setPrintFor(output)}
                   onDelete={() => requestDelete(output)}
                   bambuddyUrl={bambuddyUrl}
                   pinned={modelState.data?.libraries}
@@ -175,6 +192,12 @@ export function HistoryPage() {
         onConfirm={(output, deleteInboxCopies) => remove(output.id, deleteInboxCopies)}
       />
 
+      <PrintPicker
+        open={printFor !== undefined}
+        source={printFor ? { kind: 'output', output: printFor } : undefined}
+        onClose={() => setPrintFor(undefined)}
+        onRan={() => outputsState.reload()}
+      />
       <SendDialog
         open={sendFor !== undefined}
         output={sendFor}
@@ -190,10 +213,21 @@ export function HistoryPage() {
           setSaved(arranged)
           setArranging(false)
           setPicked([])
+          setArrangedOutput(arranged.output)
           outputsState.reload()
         }}
       />
     </div>
+  )
+}
+
+/** #2287 — whether any of the output reached Bambuddy: a library copy, a queue item, a print. */
+function wasSent(output: Output): boolean {
+  return (
+    (output.library_files ?? []).length > 0 ||
+    output.queue_item_id != null ||
+    (output.plates ?? []).length > 0 ||
+    output.print_route != null
   )
 }
 
@@ -351,9 +385,17 @@ function OutputLibraries({
       {libraries.map((library, index) => {
         const change = pinChange(library, pinned)
         return (
+          // #2109: real text separators, so the line does not read (or copy) as one run-together
+          // token; the comma is for the text only, the margin spaces the line on screen.
           <span key={library.name} className={index > 0 ? 'ml-3' : undefined}>
+            {index > 0 && <span className="sr-only">, </span>}
             {libraryLabel(library)}
-            {change && <span className="ml-1 text-warn">({change})</span>}
+            {change && (
+              <>
+                {' '}
+                <span className="text-warn">({change})</span>
+              </>
+            )}
           </span>
         )
       })}
@@ -369,6 +411,7 @@ function OutputRow({
   onPick,
   onEdit,
   onSend,
+  onPrint,
   onDelete,
   bambuddyUrl,
   pinned,
@@ -381,6 +424,7 @@ function OutputRow({
   onPick: () => void
   onEdit: () => void
   onSend: () => void
+  onPrint: () => void
   onDelete: () => void
   bambuddyUrl: string | undefined
   /** The model's current pins; undefined until the model has loaded, so nothing is flagged. */
@@ -395,6 +439,7 @@ function OutputRow({
     () => (queuedPlates.length > 1 ? api.getOutputPlates(output.id).catch(() => []) : Promise.resolve([])),
     [output.id, queuedPlates.length > 1],
   ).data ?? []
+  const sent = wasSent(output)
   /** An arranged output has no template inputs to reopen in the customizer. */
   const arrangedFrom = (output.arranged_from ?? []).length
   // #975 — what each row's buttons are named after, so a list of them can tell the rows apart.
@@ -455,8 +500,12 @@ function OutputRow({
               Edit
             </Button>
           )}
-          <Button size="sm" onClick={onSend} aria-label={`Send again ${label}`}>
-            Send again
+          {/* #2287 — "again" only for an output that went to Bambuddy before. */}
+          <Button size="sm" onClick={onPrint} aria-label={`Print ${label}`}>
+            Print
+          </Button>
+          <Button size="sm" onClick={onSend} aria-label={`${sent ? 'Send again' : 'Send'} ${label}`}>
+            {sent ? 'Send again' : 'Send'}
           </Button>
           <Button
             size="sm"
@@ -499,17 +548,10 @@ function OutputRow({
         <ul className="mt-2 flex flex-wrap gap-3 text-[12px]">
           {(output.files ?? []).map((name) => (
             <li key={name}>
-              {/* Bambuddy's iframe sandbox has no allow-downloads: there the file opens in
-                  a tab that escapes it (allow-popups-to-escape-sandbox), as lib/embed.ts does. */}
-              <a
-                className="text-accent underline"
-                href={api.outputFileUrl(output.id, name)}
-                download
-                rel="noopener"
-                target={isEmbedded() ? '_blank' : undefined}
-              >
+              {/* #2287 — through downloadBlob: a plain link is dropped in Bambuddy's frame (#612). */}
+              <BlobDownload url={api.outputFileUrl(output.id, name)} filename={name}>
                 {name}
-              </a>
+              </BlobDownload>
             </li>
           ))}
         </ul>

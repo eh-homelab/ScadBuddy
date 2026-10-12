@@ -415,6 +415,11 @@ function RemoteCard({
           </span>
         )}
       </div>
+      {plugin.problem && (
+        <p role="alert" className="mt-1 text-[12px] text-warn">
+          Not loaded: {plugin.problem}
+        </p>
+      )}
       <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[12px]">
         <dt className="text-muted">Endpoint</dt>
         <dd className="sb-num break-all">{plugin.url}</dd>

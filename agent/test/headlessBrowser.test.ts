@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
-import { mkdtemp } from 'node:fs/promises'
+import { mkdtemp, readdir, readFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -21,6 +21,7 @@ import {
   PLAYWRIGHT_MCP_VERSION,
   playwrightMcpCli,
   redirectGuardSource,
+  SPOOL_OVER_BYTES,
   TOOL_PREFIX,
   VENDORED_PLUGIN_DIR,
 } from '../src/harness/headlessBrowser.js'
@@ -406,6 +407,7 @@ describe('the per-session plugin', () => {
         downloadsDir: path.join(dir, 'downloads'),
         budgetFile: path.join(dir, 'download-budget.json'),
         outputDir: path.join(dir, 'output'),
+        spoolDir: path.join(dir, 'spool'),
       }),
     )
     // No download may run until the harness writes a budget before a browser call.
@@ -454,6 +456,128 @@ describe('the per-session plugin', () => {
     expect(own.removeOwn(downloadsDir, 'x.bin')).toBe(true)
     expect(readFileSync(outside, 'utf8')).toBe('keep me')
     expect(existsSync(guardFile)).toBe(true)
+  })
+
+  describe('reading a body (#2401)', () => {
+    const CHUNK = 64 * 1024
+    type Reply = { over: string | null; limit: number; body?: Buffer; spooled?: string }
+    type Route = { fulfill(options: { status: number; headers: Record<string, string>; body: Buffer }): Promise<void> }
+    type Bodies = {
+      readBounded: (request: { isNavigationRequest(): boolean }, fetched: unknown) => Promise<Reply>
+      fulfillRead: (route: Route, status: number, headers: Record<string, string>, reply: Reply) => Promise<void>
+    }
+    async function guardFor(fileMaxBytes = 0) {
+      const dir = await mkdtemp(path.join(os.tmpdir(), 'hb-spool-'))
+      const spoolDir = path.join(dir, 'spool')
+      mkdirSync(spoolDir)
+      const budgetFile = path.join(dir, 'budget.json')
+      writeFileSync(budgetFile, JSON.stringify({ ...NO_DOWNLOADS, fileMaxBytes }))
+      const guardFile = path.join(dir, 'guard.cjs')
+      writeFileSync(guardFile, redirectGuardSource({ ui: [ORIGIN], sessionId: 's', approvedFile: path.join(dir, 'a.json'), budgetFile, spoolDir }))
+      const { bodies } = createRequire(import.meta.url)(guardFile) as { bodies: Bodies }
+      return { dir, spoolDir, bodies }
+    }
+    /**
+     * A response of `total` bytes (endless when undefined), 64 KiB a pull, as
+     * boundedFetch hands it on; `pulled` is how far the guard read, and
+     * `seen(n)` runs once the stream has given out more than n bytes.
+     */
+    function streamed(contentType: string, total?: number, seen?: { after: number; run: () => void }) {
+      const state = { pulled: 0, aborted: false }
+      const stream = new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            if (total !== undefined && state.pulled >= total) return controller.close()
+            if (seen && state.pulled > seen.after) seen.run()
+            const n = total === undefined ? CHUNK : Math.min(CHUNK, total - state.pulled)
+            state.pulled += n
+            controller.enqueue(new Uint8Array(n).fill(0x61))
+          },
+        },
+        { highWaterMark: 0 },
+      )
+      const fetched = {
+        status: 200,
+        headers: { 'content-type': contentType },
+        response: new Response(stream),
+        abort: () => (state.aborted = true),
+        timer: setTimeout(() => {}, 0),
+      }
+      return { fetched, state }
+    }
+    const page = { isNavigationRequest: () => false }
+    const navigation = { isNavigationRequest: () => true }
+    const captured = () => {
+      const bodies: Buffer[] = []
+      return { bodies, route: { fulfill: async (o: { body: Buffer }) => void bodies.push(o.body) } }
+    }
+
+    it('keeps a body up to the spool threshold in memory and writes nothing', async () => {
+      const { spoolDir, bodies } = await guardFor()
+      const { fetched } = streamed('text/html', SPOOL_OVER_BYTES)
+      const reply = await bodies.readBounded(page, fetched)
+      expect(reply.over).toBeNull()
+      expect(reply.body?.byteLength).toBe(SPOOL_OVER_BYTES)
+      expect(reply.spooled).toBeUndefined()
+      expect(await readdir(spoolDir)).toEqual([])
+    })
+
+    it('spools a larger body to a file while reading it, hands it on whole, then removes the file', async () => {
+      const { spoolDir, bodies } = await guardFor()
+      const total = 4 * SPOOL_OVER_BYTES
+      // Halfway through, what the guard holds is already on the disk, not in memory.
+      const midway: number[] = []
+      const { fetched } = streamed('text/html', total, {
+        after: 2 * SPOOL_OVER_BYTES,
+        run: () => {
+          if (midway.length) return
+          for (const name of readdirSync(spoolDir)) midway.push(lstatSync(path.join(spoolDir, name)).size)
+        },
+      })
+      const reply = await bodies.readBounded(page, fetched)
+      expect(reply.over).toBeNull()
+      expect(reply.body).toBeUndefined()
+      expect(midway).toHaveLength(1)
+      expect(midway[0]).toBeGreaterThan(SPOOL_OVER_BYTES)
+      expect(await readdir(spoolDir)).toEqual([reply.spooled])
+      expect((await readFile(path.join(spoolDir, reply.spooled!))).byteLength).toBe(total)
+      const { bodies: handed, route } = captured()
+      await bodies.fulfillRead(route, 200, {}, reply)
+      expect(handed.map((b) => b.byteLength)).toEqual([total])
+      expect(await readdir(spoolDir)).toEqual([])
+    })
+
+    it('still cuts an endless download off at its cap mid-stream, and removes what it spooled', async () => {
+      const cap = 3 * SPOOL_OVER_BYTES
+      const { spoolDir, bodies } = await guardFor(cap)
+      const { fetched, state } = streamed('application/octet-stream')
+      const reply = await bodies.readBounded(navigation, fetched)
+      expect(reply).toEqual({ over: 'download', limit: cap })
+      expect(state.aborted).toBe(true)
+      // One chunk past the cap, at most the stream's own queue more.
+      expect(state.pulled).toBeLessThanOrEqual(cap + 2 * CHUNK)
+      expect(await readdir(spoolDir)).toEqual([])
+    })
+
+    it('removes the spool file when the handoff fails, and never reads through a link', async () => {
+      const { dir, spoolDir, bodies } = await guardFor()
+      const { fetched } = streamed('text/html', 2 * SPOOL_OVER_BYTES)
+      const reply = await bodies.readBounded(page, fetched)
+      const failing = { fulfill: () => Promise.reject(new Error('target closed')) }
+      await expect(bodies.fulfillRead(failing, 200, {}, reply)).rejects.toThrow('target closed')
+      expect(await readdir(spoolDir)).toEqual([])
+      const outside = path.join(dir, 'outside.txt')
+      writeFileSync(outside, 'keep me')
+      symlinkSync(outside, path.join(spoolDir, 'x.body'))
+      const { bodies: handed, route } = captured()
+      await expect(bodies.fulfillRead(route, 200, {}, { over: null, limit: 0, spooled: 'x.body' })).rejects.toThrow()
+      for (const name of ['../outside.txt', outside]) {
+        await expect(bodies.fulfillRead(route, 200, {}, { over: null, limit: 0, spooled: name })).rejects.toThrow()
+      }
+      expect(handed).toEqual([])
+      expect(await readdir(spoolDir)).toEqual([])
+      expect(readFileSync(outside, 'utf8')).toBe('keep me')
+    })
   })
 
   it('sets the server allow-list to the UI origins and the listed origins, and drops it under `*`', async () => {

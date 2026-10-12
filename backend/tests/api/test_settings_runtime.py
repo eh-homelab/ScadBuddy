@@ -212,7 +212,16 @@ def test_the_upload_limit_is_editable_and_the_gate_follows_it(
 # -- remembered choices ----------------------------------------------------------------
 
 
+def _catalogue(client: TestClient, *slugs: str) -> None:
+    """Models a project can be remembered for: the route refuses one not catalogued."""
+    paths = _state(client).paths
+    for slug in slugs:
+        paths.model_dir(slug).mkdir(parents=True, exist_ok=True)
+        paths.model_source(slug).write_text("cube(1);\n", encoding="utf-8")
+
+
 def _remember_everything(client: TestClient) -> None:
+    _catalogue(client, "gear")
     client.put("/api/v1/print/models/gear/choices", json={"tier": "fine"})
     client.put("/api/v1/print/models/box/choices", json={"tier": "draft"})
     client.put("/api/v1/print/printers/1/bed-type", json={"bed_type": "Cool Plate"})
@@ -225,6 +234,7 @@ def _remember_everything(client: TestClient) -> None:
         "/api/v1/settings/print-options",
         json={"scope": "global", "options": {"use_ams": True}},
     )
+    client.put("/api/v1/print/models/gear/project", json={"project_id": 5})
 
 
 def test_the_remembered_choices_are_listed(client: TestClient) -> None:
@@ -249,8 +259,111 @@ def test_forget_all_forgets_every_remembered_choice(client: TestClient) -> None:
         "model_print_options": {},
         "printer_rack_algorithms": {},
         "project_print_targets": {},
+        "model_projects": {},
     }
     assert client.get("/api/v1/settings").json()["printer_id"] == 4
+    assert client.get("/api/v1/print/models/gear/projects").json() == {"projects": []}
+
+
+def test_each_model_and_preset_remembers_its_own_project(client: TestClient) -> None:
+    """#1660: one model, three presets, each filed in its own project."""
+    _catalogue(client, "critter", "critter-2")
+    assert client.get("/api/v1/print/models/critter/projects").json() == {"projects": []}
+    client.put("/api/v1/print/models/critter/project", json={"project_id": 1})
+    client.put(
+        "/api/v1/print/models/critter/project",
+        json={"preset_id": "template-fish", "preset_name": "Fish", "project_id": 2},
+    )
+    body = client.put(
+        "/api/v1/print/models/critter/project",
+        json={"preset_id": "template-snake", "preset_name": "Snake", "project_id": 3},
+    ).json()
+    # Another model whose id starts the same is not this one's.
+    client.put("/api/v1/print/models/critter-2/project", json={"project_id": 9})
+    expected = [
+        {"preset_id": None, "project_id": 1, "preset_name": None},
+        {"preset_id": "template-fish", "project_id": 2, "preset_name": "Fish"},
+        {"preset_id": "template-snake", "project_id": 3, "preset_name": "Snake"},
+    ]
+    assert sorted(body["projects"], key=lambda p: p["project_id"]) == expected
+    listed = client.get("/api/v1/print/models/critter/projects").json()["projects"]
+    assert sorted(listed, key=lambda p: p["project_id"]) == expected
+    remembered = client.get("/api/v1/settings/remembered").json()["model_projects"]
+    assert remembered == {
+        "critter": {"project_id": 1},
+        "critter/template-fish": {"project_id": 2, "preset_name": "Fish"},
+        "critter/template-snake": {"project_id": 3, "preset_name": "Snake"},
+        "critter-2": {"project_id": 9},
+    }
+
+
+def test_forgetting_one_model_project_leaves_the_rest(client: TestClient) -> None:
+    _catalogue(client, "critter")
+    client.put("/api/v1/print/models/critter/project", json={"project_id": 1})
+    client.put(
+        "/api/v1/print/models/critter/project",
+        json={"preset_id": "template-fish", "project_id": 2},
+    )
+    body = client.put(
+        "/api/v1/print/models/critter/project",
+        json={"preset_id": "template-fish", "project_id": None},
+    ).json()
+    assert body == {"projects": [{"preset_id": None, "project_id": 1, "preset_name": None}]}
+    # Forgetting what is not remembered is not an error.
+    response = client.put(
+        "/api/v1/print/models/critter/project",
+        json={"preset_id": "template-fish", "project_id": None},
+    )
+    assert response.status_code == 200
+
+
+def test_a_preset_id_with_a_separator_is_refused(client: TestClient) -> None:
+    response = client.put(
+        "/api/v1/print/models/critter/project", json={"preset_id": "a/b", "project_id": 1}
+    )
+    assert response.status_code == 422
+
+
+def test_a_project_is_not_remembered_for_a_model_not_in_the_catalogue(
+    client: TestClient,
+) -> None:
+    response = client.put("/api/v1/print/models/nowhere/project", json={"project_id": 1})
+    assert response.status_code == 404
+    assert client.get("/api/v1/settings/remembered").json()["model_projects"] == {}
+    # An entry left from before can still be forgotten.
+    response = client.put("/api/v1/print/models/nowhere/project", json={"project_id": None})
+    assert response.status_code == 200
+
+
+def test_deleting_a_preset_or_a_model_forgets_its_projects(client: TestClient) -> None:
+    _catalogue(client, "critter", "critter-2")
+    preset = client.post(
+        "/api/v1/models/critter/presets",
+        json={"name": "Fish", "params": {}},
+        headers=press(),
+    ).json()["id"]
+    client.put("/api/v1/print/models/critter/project", json={"project_id": 1})
+    for preset_id, project_id in ((preset, 2), ("template-snake", 3)):
+        client.put(
+            "/api/v1/print/models/critter/project",
+            json={"preset_id": preset_id, "project_id": project_id},
+        )
+    client.put("/api/v1/print/models/critter-2/project", json={"project_id": 9})
+
+    deleted = client.delete(f"/api/v1/models/critter/presets/{preset}", headers=press())
+    assert deleted.status_code == 204, deleted.text
+    assert set(client.get("/api/v1/settings/remembered").json()["model_projects"]) == {
+        "critter",
+        "critter/template-snake",
+        "critter-2",
+    }
+
+    deleted = client.delete("/api/v1/models/critter", headers=press())
+    assert deleted.status_code == 204, deleted.text
+    # Another model whose id starts the same keeps its own.
+    assert client.get("/api/v1/settings/remembered").json()["model_projects"] == {
+        "critter-2": {"project_id": 9}
+    }
 
 
 def _remember_project_targets(client: TestClient) -> None:

@@ -64,4 +64,22 @@ describe('SendDialog · plates (#986)', () => {
     await screen.findByRole('button', { name: 'Send' })
     expect(screen.queryByTestId('send-plates')).not.toBeInTheDocument()
   })
+
+  // #2117: the plates read is a nicety; a failed one leaves the dialog working.
+  it('still sends, with no plates line, when the plates cannot be read', async () => {
+    let read = false
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () => {
+        read = true
+        return HttpResponse.json({ detail: 'Bambuddy is down' }, { status: 500 })
+      }),
+    )
+    const onSent = vi.fn()
+    const { user } = renderPage(<SendDialog open output={outputs[0]!} onClose={() => {}} onSent={onSent} />)
+    await waitFor(() => expect(read).toBe(true))
+    await user.click(await screen.findByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(onSent).toHaveBeenCalled())
+    expect(screen.queryByTestId('send-plates')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Bambuddy is down/)).not.toBeInTheDocument()
+  })
 })

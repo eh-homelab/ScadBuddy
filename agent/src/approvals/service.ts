@@ -20,6 +20,7 @@ import { isNotDoneSummary } from '../questions/waiting.js'
 import { type AuditOutcome, type AuditSink, type AuditSurface, SYSTEM_ACTOR } from '../audit/log.js'
 import { context as otelContext, type Span, SpanKind } from '@opentelemetry/api'
 import { contextFrom, linkTo, recordFailure, traceparentOf, tracer } from '../telemetry/trace.js'
+import { type SessionFiles, type WorkspaceRef, withWorkspaceSize } from '../workspace/store.js'
 
 // Approvals of outward tool calls (#258, spec §8.2: "Outward tools always need
 // a human approval in the ScadBuddy UI, in every auth mode"). Stored in
@@ -223,6 +224,8 @@ export type ApprovalServiceDeps = {
    * and void is recorded as an `approval` row.
    */
   audit?: AuditSink
+  /** The workspace (#2329): a workspace upload's size is read from it for the card (`withWorkspaceSize`). */
+  workspace?: SessionFiles
 }
 
 /** The input-hash key, derived from the key-encryption key (HKDF-SHA256, its own label). */
@@ -421,6 +424,8 @@ export type CreateApproval = {
   secrets?: readonly string[]
   /** The parked tool span's traceparent (ParkTrace.traceparent). */
   traceparent?: string
+  /** The workspace the call runs in (workspaceOf), for an upload's size; a session's own when omitted. */
+  workspace?: WorkspaceRef
 }
 
 export type DecideOptions = {
@@ -670,10 +675,17 @@ export class ApprovalService {
     return row
   }
 
+  /** The row's and the card's summary of the call: its input with a workspace upload's size (never hashed). */
+  private async summary(request: Omit<CreateApproval, 'sessionId' | 'turnId'> & { sessionId?: string | null }): Promise<string> {
+    const ws = request.workspace ?? (request.sessionId ? { kind: 'session' as const, sessionId: request.sessionId } : undefined)
+    const shown = await withWorkspaceSize(this.deps.workspace, ws, request.input)
+    return summariseInput(request.tool, shown, request.secrets ?? [])
+  }
+
   /** Records a pending approval (and, in a session, emits `approval.required`). */
   async create(request: CreateApproval): Promise<ApprovalRecord> {
     const secrets = request.secrets ?? []
-    const summary = summariseInput(request.tool, request.input, secrets)
+    const summary = await this.summary(request)
     // The row and its `approval.required` commit together: a decision can only
     // see the row once it has committed, so its `approval.resolved` cannot be
     // logged before the event that asked for it.
@@ -1090,7 +1102,7 @@ export class ApprovalService {
     request: Omit<CreateApproval, 'sessionId' | 'turnId'>,
     bounds: { perPrincipal: number; total: number; evictReason: string },
   ): Promise<ApprovalRecord | undefined> {
-    const summary = summariseInput(request.tool, request.input, request.secrets ?? [])
+    const summary = await this.summary(request)
     const by = request.requestedBy
     // An eviction is a system cancellation: each evicted row gets its root
     // `agent.approval` span and `decision_traceparent` in this transaction, as

@@ -348,6 +348,13 @@ public URL or listed in `SCADBUDDY_ALLOWED_ORIGINS`: from any other, browser wri
 are refused with a `403` and a `refused a ... from origin ...` log line (#962), and
 live updates are unavailable.
 
+Never mount a container-runtime socket (Docker, containerd, any CRI socket) or any
+other privileged Unix socket into the API container. The editor's language server,
+`openscad-lsp`, reads user-supplied source and is kept off the network by a seccomp
+filter (`backend/scadbuddy/editor/nonet.py`), but that filter still allows `AF_UNIX`:
+the process can connect to any filesystem socket the container can see, and a runtime
+socket would give it root on the node.
+
 A deploy that rolls the pod also migrates the database at startup
 (`backend/scadbuddy/migrations/`: `20260928T0630Z_events.sql` adds the `events`
 log, `20260928T0724Z_analyzer_decisions.sql` the print analyzers'
@@ -536,14 +543,14 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   URL and key as the API has them (they only seed a database never saved). Its build id
   is `SCADBUDDY_REVISION`, stamped in the image.
 - **Versioning:** the worker deployment `scadbuddy-print`, made current at start as the
-  render worker's is. `PrintRun` and `Operation` are pinned to the build that started
-  them; `FollowPrint` is AUTO_UPGRADE, since it lasts as long as the print, and moves to
-  the new build. Changes to any of them are still made with `workflow.patched`.
-- **Shutdown:** SIGTERM drains the build's pinned runs, as the render worker does, for at
-  most 1920 s (`REPEAT_WINDOW` 600 s, two slice timeouts of 600 s, and 120 s): a print run
-  stays open for `REPEAT_WINDOW` after it ends, so repeats of the same press find it. Set
-  `terminationGracePeriodSeconds` to **2000** and roll with `RollingUpdate`,
-  `maxSurge >= 1`.
+  render worker's is. Every workflow on it (`PrintRun`, `Operation`, `FollowPrint`) is
+  AUTO_UPGRADE: a run moves to each new build (#2066). They were pinned, and the
+  Deployment rolls with `Recreate`, so the old build was still current when its pod
+  stopped, it stopped without draining, and every run pinned to it waited forever.
+  So every change to them goes behind `workflow.patched`, and `tests/test_print_replay.py`
+  replays committed `PrintRun` histories to hold that.
+- **Shutdown:** SIGTERM does not drain: the next build takes the runs over. Activities
+  still in flight get the worker's graceful shutdown timeout.
 - **The API** serves the queue itself only with `SCADBUDDY_TEMPORAL_WORKER_INPROCESS`
   (dev, tests) or `SCADBUDDY_TEMPORAL_PRINT_WORKER_INPROCESS` (a deployment without the
   `scadbuddy-print` Deployment yet), unversioned, on its own volume. Either way the API
