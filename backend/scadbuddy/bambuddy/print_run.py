@@ -8,6 +8,7 @@ choose from here. The send bar only uploads (#312); this is the only path that p
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from scadbuddy.bambuddy.catalogue import _Catalogue, _catalogue
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
+from scadbuddy.bambuddy.concurrent import settled
 from scadbuddy.bambuddy.dispatch import QueueOutcome, RackChoice, SlicePlan, enqueue_plate
 from scadbuddy.bambuddy.errors import not_configured
 from scadbuddy.bambuddy.extruders import (
@@ -60,7 +62,12 @@ from scadbuddy.bambuddy.models import (
 )
 from scadbuddy.bambuddy.nozzle_plan import NozzlePlan, plan_for
 from scadbuddy.bambuddy.options import PrintOptions
-from scadbuddy.bambuddy.print_source import LibrarySource, OutputSource, PrintSource
+from scadbuddy.bambuddy.print_source import (
+    FilamentReader,
+    LibrarySource,
+    OutputSource,
+    PrintSource,
+)
 from scadbuddy.bambuddy.resolver import (
     PRINTER_MODEL,
     PrintChoices,
@@ -249,6 +256,15 @@ class PrintRunResult(BaseModel):
     rack_picks: list[RackSentPick] = Field(default_factory=list)
 
 
+def known_slots(source: PrintSource) -> Callable[[int | None], FilamentRequirements] | None:
+    """A library file's slots as read from the file itself, for every plate (#2550):
+    every copy of it has the same slots, so they answer for whichever copy is read.
+    ``None`` when they came from Bambuddy, which is then asked per plate."""
+    if isinstance(source, LibrarySource) and source.local is not None:
+        return source.local.for_plate
+    return None
+
+
 async def filament_options(
     client: BambuddyClient,
     source: PrintSource,
@@ -256,6 +272,7 @@ async def filament_options(
     printer_id: int | None = None,
     plate_id: int = 1,
     all_plates: bool = False,
+    status: asyncio.Future[PrinterStatus | None] | None = None,
 ) -> FilamentOptions:
     """The filament step's whole payload for one output (#87).
 
@@ -270,25 +287,48 @@ async def filament_options(
     With a printer it also carries that printer's mounted nozzles (#78). Without one
     there are no nozzles to read. An offline printer's status is unreadable the same way (spec §3):
     the step still opens, with no mounted nozzles to compare against.
+
+    The file, the spools and the printer's status are read concurrently (#2504);
+    ``status`` is that read when the caller has started it already: a task the caller
+    keeps, and cancels if it must, since this never does.
     """
-    read_file = await source.file_to_read(client)
-    library_file_id = read_file.id
-    plate_ids = ((await source.plate_ids(client)) or [1]) if all_plates else [plate_id]
-    read = await gather_plate_options(
-        client,
-        library_file_id=library_file_id,
-        printer_id=printer_id,
-        plate_ids=plate_ids,
-        fallback_colours=list(source.colours),
-        own_colours=read_file.own_colours,
+    reading = (
+        status
+        if status is not None
+        else asyncio.ensure_future(read_status(client, printer_id))
+        if printer_id is not None
+        else None
     )
-    options = read[0] if len(read) == 1 else every_plate(read)
-    if printer_id is None:
-        return options
     try:
-        printer_status = await client.printer_status(printer_id)
-    except (ApiError, ValueError):
-        logger.info("printer status unreadable; the filament step opens with no nozzles known")
+        read_file, inventory = await asyncio.gather(
+            source.file_to_read(client), read_inventory(client), return_exceptions=True
+        )
+        file = settled(read_file)
+        plate_ids = ((await source.plate_ids(client)) or [1]) if all_plates else [plate_id]
+        read = await gather_plate_options(
+            client,
+            library_file_id=file.id,
+            printer_id=printer_id,
+            plate_ids=plate_ids,
+            fallback_colours=list(source.colours),
+            own_colours=file.own_colours,
+            inventory=settled(inventory),
+            known=known_slots(source),
+        )
+    finally:
+        # Awaited even when a read failed, so the status read never outlives the call.
+        # One the caller started (``choices_for`` shares it with the rack) is the
+        # caller's to cancel: `wait` leaves it running when this call is cancelled,
+        # where `gather` would cancel it (#2509 review).
+        if reading is not None and status is not None:
+            await asyncio.wait([reading])
+        elif reading is not None:
+            await asyncio.gather(reading, return_exceptions=True)
+    options = read[0] if len(read) == 1 else every_plate(read)
+    if reading is None or printer_id is None:
+        return options
+    printer_status = reading.result()
+    if printer_status is None:
         options.nozzles = []
         return options
     options.nozzles = printer_status.nozzles
@@ -337,7 +377,7 @@ def chosen_project(request: ChoosesProject, settings: StoredSettings) -> int | N
     return settings.last_project_id
 
 
-async def _read_status(client: BambuddyClient, printer_id: int) -> PrinterStatus | None:
+async def read_status(client: BambuddyClient, printer_id: int) -> PrinterStatus | None:
     """The printer's live status, read once per run; unreadable is ``None``."""
     try:
         return await client.printer_status(printer_id)
@@ -548,6 +588,7 @@ async def _slot_errors(
         plate_ids=prepared.plate_ids,
         fallback_colours=list(source.colours),
         own_colours=read_file.own_colours,
+        known=known_slots(source),
     )
     per_plate = [
         with_trays(options, prepared.printer_status, prepared.printer_id) for options in per_plate
@@ -803,11 +844,15 @@ async def check_for_library(
     request: PrintRunRequest,
     *,
     rack: RackUsage | None = None,
+    filaments: FilamentReader | None = None,
 ) -> PrintCheck:
-    """:func:`check_print` for a file already in Bambuddy's library."""
+    """:func:`check_print` for a file already in Bambuddy's library; with ``filaments``,
+    its slots read from the file itself (#2550)."""
     return await check_print(
         client,
-        await LibrarySource.load(client, file_id, uploads=uploads, settings=settings),
+        await LibrarySource.load(
+            client, file_id, uploads=uploads, settings=settings, filaments=filaments
+        ),
         settings,
         request,
         rack=rack,
@@ -881,7 +926,7 @@ async def prepare_run(
     refused = choice_errors(request.choices, catalogue)
     if refused:
         raise RunRefusalError(" ".join(error.message for error in refused))
-    printer_status = await _read_status(client, printer_id)
+    printer_status = await read_status(client, printer_id)
     await record_seen(rack, printer_id, printer_status)
     if refuse_manual_pick and request.rack_position is not None:
         # Only a manual pick needs the file judged, which reads its 3MF (#1752).
@@ -1098,6 +1143,7 @@ async def plan_run(
         plate_ids=plate_ids,
         fallback_colours=list(source.colours),
         inventory=inventory,
+        known=known_slots(source),
     )
     per_plate = [with_trays(options, printer_status, printer_id) for options in per_plate]
     every, errors = await resolve_plates(
@@ -1307,11 +1353,15 @@ async def filament_options_for_library(
     printer_id: int | None = None,
     plate_id: int = 1,
     all_plates: bool = False,
+    filaments: FilamentReader | None = None,
 ) -> FilamentOptions:
-    """:func:`filament_options` for a file already in Bambuddy's library (#313)."""
+    """:func:`filament_options` for a file already in Bambuddy's library (#313); with
+    ``filaments``, its slots read from the file itself (#2550)."""
     return await filament_options(
         client,
-        await LibrarySource.load(client, file_id, uploads=uploads, settings=settings),
+        await LibrarySource.load(
+            client, file_id, uploads=uploads, settings=settings, filaments=filaments
+        ),
         printer_id=printer_id,
         plate_id=plate_id,
         all_plates=all_plates,

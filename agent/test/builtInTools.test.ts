@@ -1,7 +1,4 @@
-import { randomBytes, randomUUID } from 'node:crypto'
-import { mkdtemp } from 'node:fs/promises'
-import os from 'node:os'
-import path from 'node:path'
+import { randomBytes } from 'node:crypto'
 import { MockActivityEnvironment } from '@temporalio/testing'
 import { ApplicationFailure } from '@temporalio/common'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
@@ -12,13 +9,12 @@ import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { createApp } from '../src/app.js'
 import { tiersUpTo } from '../src/auth/principal.js'
-import { BROWSER_TOOL_TIERS, SETTING_HEADLESS_BROWSER, TOOL_PREFIX as BROWSER_PREFIX } from '../src/harness/headlessBrowser.js'
 import { buildHarnessOptions, type HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
 import { BuiltInTools, builtInToolSets, builtInToolsSetting } from '../src/plugins/builtInTools.js'
 import { BUILT_INS } from '../src/plugins/packages/builtins.js'
 import type { PluginRepo } from '../src/plugins/registry.js'
-import type { SettingsRepo } from '../src/routes/headlessBrowser.js'
+import type { SettingsRepo } from '../src/routes/httpRequest.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { toolActivities } from '../src/temporal/toolActivities.js'
 import { harnessTools } from '../src/tools/harness.js'
@@ -73,9 +69,6 @@ describe('the built-in tool sets', () => {
     const own = sets.find((s) => s.name === 'scadbuddy')!
     expect(own.tools.map((t) => [t.name, t.risk])).toEqual(ALL_TOOLS.map((t) => [t.name, t.risk]))
     expect(own.tools[0]!.harness_name).toBe(OWN(ALL_TOOLS[0]!.name))
-    const browser = sets.find((s) => s.name === 'playwright')!
-    expect(Object.fromEntries(browser.tools.map((t) => [t.name, t.risk]))).toEqual(BROWSER_TOOL_TIERS)
-    expect(browser.tools[0]!.harness_name.startsWith(BROWSER_PREFIX)).toBe(true)
   })
 
   it('ignore a stored entry that would lower a tier or names no tool', async () => {
@@ -157,13 +150,10 @@ describe('/api/v1/ai/plugins with built-ins', () => {
     }[]
     expect(list.map((p) => [p.name, p.built_in])).toEqual([
       ['scadbuddy', true],
-      ['playwright', true],
       ['hindsight', false],
     ])
     expect(list[0]!.tools!.map((t) => t.name)).toEqual(ALL_TOOLS.map((t) => t.name))
     expect(list[0]!.enabled).toBe(true)
-    // The headless browser's switch: off until stored true.
-    expect(list[1]!.enabled).toBe(false)
   })
 
   it('accepts a raised tier and a disabled tool, and stores them in ai_settings', async () => {
@@ -198,18 +188,6 @@ describe('/api/v1/ai/plugins with built-ins', () => {
     expect(values.size).toBe(0)
   })
 
-  it('raises a headless-browser tool and switches the browser with its existing setting', async () => {
-    const { settings, values } = memorySettings()
-    const res = await patch(app(settings), 'playwright', {
-      tool_tiers: { browser_navigate: 'write' },
-      enabled: true,
-    })
-    expect(res.status).toBe(200)
-    expect(await res.json()).toMatchObject({ enabled: true, tool_tiers: { browser_navigate: 'write' } })
-    expect(values.get(SETTING_HEADLESS_BROWSER)).toBe(true)
-    expect((await patch(app(settings), 'playwright', { tool_tiers: { browser_click: 'read' } })).status).toBe(400)
-  })
-
   it('answers 409 built_in to add, remove, test, re-point or switch off a built-in', async () => {
     const { settings, values } = memorySettings()
     const repo = remoteRepo()
@@ -220,11 +198,10 @@ describe('/api/v1/ai/plugins with built-ins', () => {
         headers: UI,
         body: JSON.stringify({ name: 'scadbuddy', url: 'https://x.example/mcp' }),
       }),
-      await a.request('/api/v1/ai/plugins/playwright', { method: 'DELETE', headers: UI }),
       await a.request('/api/v1/ai/plugins/scadbuddy', { method: 'DELETE', headers: UI }),
       await a.request('/api/v1/ai/plugins/scadbuddy/test', { method: 'POST', headers: UI }),
       await patch(a, 'scadbuddy', { url: 'https://x.example/mcp' }),
-      await patch(a, 'playwright', { secret: 'abcd' }),
+      await patch(a, 'scadbuddy', { secret: 'abcd' }),
       // ScadBuddy's own tools have no switch as a set: they are switched one by one.
       await patch(a, 'scadbuddy', { enabled: false }),
     ]
@@ -328,33 +305,6 @@ describe('the harness', () => {
     expect(calls).toBeGreaterThan(0)
   })
 
-  it('enforces a raised headless-browser tier at the seam', async () => {
-    const { settings } = memorySettings({
-      [builtInToolsSetting('playwright')]: { tool_tiers: { browser_snapshot: 'outward' }, disabled_tools: [] },
-    })
-    const stateDir = await mkdtemp(path.join(os.tmpdir(), 'bt-'))
-    const sessionId = randomUUID()
-    const options = buildHarnessOptions({
-      ...base,
-      paths: { stateDir },
-      headlessBrowser: { sessionId, backendUrl: 'http://backend.test', dir: path.join(stateDir, 'browser', sessionId) },
-      builtInPolicy: await new BuiltInTools(settings).policy(),
-    })
-    const ask = (name: string) => options.canUseTool!(name, {}, { signal, toolUseID: 't', requestId: 'r' })
-    expect(await ask(`${BROWSER_PREFIX}browser_snapshot`)).toMatchObject({ behavior: 'deny', message: expect.stringMatching(/approval/) })
-    expect(await ask(`${BROWSER_PREFIX}browser_take_screenshot`)).toMatchObject({ behavior: 'allow' })
-  })
-
-  it('raises a headless-browser tool and disables one', async () => {
-    const { settings } = memorySettings({
-      [builtInToolsSetting('playwright')]: { tool_tiers: { browser_snapshot: 'outward' }, disabled_tools: ['browser_click'] },
-    })
-    const policy = await new BuiltInTools(settings).policy()
-    expect(policy.tierOf(`${BROWSER_PREFIX}browser_snapshot`, 'read')).toBe('outward')
-    expect(policy.tierOf(`${BROWSER_PREFIX}browser_navigate`, 'read')).toBe('read')
-    const options = buildHarnessOptions({ ...base, builtInPolicy: policy })
-    expect(options.disallowedTools).toContain(`${BROWSER_PREFIX}browser_click`)
-  })
 })
 
 describe('/mcp', () => {

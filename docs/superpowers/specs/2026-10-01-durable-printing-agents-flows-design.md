@@ -140,15 +140,21 @@ Non-goals
     - **Built-in tools run inside the model segment.** Claude Code's own tools (Bash,
       Edit and the rest) are not activities, so a segment that runs again can run them
       again.
-      - In ScadBuddy this reaches only `Skill`. The plugin enables built-in tools only
-        when `builtin_tools` is passed, and a durable session passes exactly
-        `["Skill"]` (§6.3b). Running `Skill` again reads the same instructions again,
-        which is harmless. Since #2320 a durable session also gets `Agent`, and a
-        package's named built-ins as a classic turn does. A package's built-ins are
-        outward, so they park before they run.
+      - In ScadBuddy this reaches `Skill` and `Agent`. The plugin enables built-in tools
+        only when `builtin_tools` is passed, and a durable session passes
+        `["Skill", "Agent"]` (`session/workflow.py`), plus `Bash` and `PowerShell` when
+        an `allow_refused` package names them (`ENGINE_PARKED`). Running `Skill` again
+        reads the same instructions again, which is harmless. `Agent` starts a subagent,
+        which has ScadBuddy's own tools only (§6.3b), so a subagent run again repeats
+        reads and refused outward calls. `Bash` and `PowerShell` run as their own
+        activities (`tool_activities`), parked for approval, never in the segment. A
+        package's other built-ins are not offered (#2393).
       - Every tool with an effect is a durable tool (§6.3).
-      - Phase 5 asserts in a test that a durable session's engine is started with no
-        built-in tool but `Skill`.
+      - `tests/test_session_workflow.py`
+        `test_a_package_built_in_parks_runs_once_approved_and_the_runner_gets_the_package`
+        asserts the parked `Bash`; `tests/test_subagents.py`
+        `test_the_bundled_claude_code_gives_the_server_to_the_subagent_only` runs `Agent`
+        on the bundled Claude Code.
     - **One durable tool call at a time.** The engine keeps one paused call per run. When
       Claude asks for several in one message, the first pauses, and each of the others
       is told to call again after its result.
@@ -752,19 +758,34 @@ subagents, the model setting, credential fallback and MCP sender tiers. The pari
   with the turn (`ai_sessions.turn_tiers`) and applied by the tool activities only while
   that sender owns the session.
 - **Every other tool a classic turn hands Claude Code is a turn tool** (`agent/src/temporal/turnTools.ts`):
-  remote plugins through the forwarder, `http_request`, the headless browser with its
-  grant tool, and package MCP servers. The TS agent builds them the way a classic turn
+  remote plugins through the forwarder (a browser among them, as the `playwright` remote
+  plugin since #2568 removed the built-in one), `http_request`, and package MCP servers. The TS agent builds them the way a classic turn
   does, lists them per turn (`turn_tools`), tiers each call from its input
   (`turn_tool_tier`) before it may park, and runs each call as the `default` activity
   `turn:<server>__<tool>`. That activity checks tier, principal, the deny list and the
   approval bound to the input, so `harness/plugins.ts` and `plugins/packages/vet.ts`
-  stay the one vetting, in TypeScript. A server whose state lives on a pod (the browser,
-  `http_request`'s saved bodies) is pinned to that replica's `agent-tools.<hostname>` queue.
-- **Plugin packages' skills and agents, subagents, Hindsight recall and retain, and
-  tool-result images**: see the plan's phases 4–7.
+  stay the one vetting, in TypeScript. A server whose state lives on a pod
+  (`http_request`'s saved bodies) is pinned to that replica's `agent-tools.<hostname>` queue.
+- **Plugin packages' skills and agents** (#2334): `turn_tools` copies each loaded
+  package to the payload volume, `<SCADBUDDY_PAYLOAD_DIR>/plugins/<content hash>/`,
+  without its http MCP servers (which run as turn tools through the forwarder). The
+  segment runner hashes each copy again and loads only one that matches its pin
+  (`session/package_hash.py`). Copies no turn has shared for 7 days are swept (#2395).
+- **Subagents** (#2336, #2562): ScadBuddy's subagent definitions are given to Claude
+  Code with the agent's loopback MCP server inline (`AgentDefinition.mcpServers`), for
+  that subagent only, under a token minted per segment. The agent decides each call from
+  the session as it is then and refuses an outward one. A subagent has none of the
+  turn's plugin or `http_request` tools: the Temporal plugin refuses every durable tool
+  to a subagent.
+- **Hindsight recall and retain** (#2331): the `memory_recall` activity runs at a turn's
+  start and adds what it finds to the prompt; `memory_retain` runs before the turn ends.
+  A failure of either never fails the turn.
+- **Tool-result images** (#2325): a tool result's images are stored as the session's
+  blobs and named in its text; the model reads them with `view_tool_images`.
 
-The only real difference left between the modes is forking: a durable session cannot be
-forked.
+The differences left between the modes: a durable session cannot be forked; a durable
+subagent has ScadBuddy's own tools only; and of an `allow_refused` package's named
+built-ins only `Bash` and `PowerShell` are offered (#2393).
 
 ### 6.4 Human-in-the-loop
 
@@ -830,6 +851,10 @@ mechanism for this is a **Payload Codec**, and with it deletion is crypto-shredd
   checks, not through the Temporal UI link (#668).
 
 ### 6.6 Waiting on a person: the tool-call gate
+
+> **Amended** for flow runs and the sessions they drive by
+> `2026-10-11-flow-grants-and-git-design.md` (#2480): run grants, the escalation chain,
+> and one queue per run.
 
 This follows Temporal's
 [human-in-the-loop cookbook](https://docs.temporal.io/ai/cookbook/human-in-the-loop-python):
@@ -1308,6 +1333,10 @@ happens, and there is no separate request system.
   user (§9).
 
 ### 7.3 Records and API
+
+> **Amended** by `2026-10-11-flow-grants-and-git-design.md` (#2480): flow scripts are
+> versioned in git (`data/flows`), `workflow_definitions` becomes an index, runs record
+> their commit, and runs carry a grant.
 
 - **Tables** (backend migrations, our system of record):
   - `workflow_definitions(id, name, version, script, created_by, created_at)`; versions

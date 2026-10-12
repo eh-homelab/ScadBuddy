@@ -57,7 +57,7 @@ export type SettingsWriter = {
   /** `context` says who wrote them, for the audit rows (#831). */
   setMany(
     values: Record<string, unknown>,
-    check: (current: SettingsReader) => Promise<boolean>,
+    check: ((current: SettingsReader) => Promise<boolean>) | undefined,
     context: AuditContext,
   ): Promise<boolean>
 }

@@ -8,10 +8,10 @@ scripts and to coerce their arguments.
 import json
 import re
 from datetime import timedelta
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError, ApplicationError
@@ -38,6 +38,7 @@ with workflow.unsafe.imports_passed_through():
 
 MIN_WAIT_S = 10
 MAX_WAIT_S = 86_400
+DEFAULT_WAIT_S = 3_600
 
 
 class HumanAnswer(BaseModel):
@@ -54,12 +55,12 @@ async def human_answer(question: str) -> HumanAnswer:  # type: ignore[empty-body
 
 @agent.tool_defn(inherently_safe=True)
 async def wait_for_human(
-    question: str, timeout_s: int, runner: agent.Injected[AgentWorkflowRunner]
+    question: str,
+    runner: agent.Injected[AgentWorkflowRunner],
+    timeout_s: int = DEFAULT_WAIT_S,
 ) -> HumanAnswer:
-    """Ask a person `question` and wait up to `timeout_s` seconds (10 to 86400) for the
-    answer. Raises TimeoutError if nobody answers in time."""
-    # timeout_s has no default: the pinned harness's stubs render every parameter as
-    # required (code_mode/stubs.py at 04a49d1), so a default would never be used.
+    """Ask a person `question` and wait up to `timeout_s` seconds (10 to 86400, an hour
+    if left out) for the answer. Raises TimeoutError if nobody answers in time."""
     if not MIN_WAIT_S <= timeout_s <= MAX_WAIT_S:
         raise ValueError(f"timeout_s must be {MIN_WAIT_S} to {MAX_WAIT_S} seconds")
     call_id = str(workflow.uuid4())
@@ -102,6 +103,24 @@ class ArrangeResult(BaseModel):
     status: str
     output_id: str | None = None
     error: str | None = None
+
+
+class Image(BaseModel):
+    """An image a flow holds: a pointer to bytes kept with the run, never the bytes
+    (#2477). `bytes` is its size. Pass it to `agent` or `ask_session` as
+    `images`, or return it; the run page shows the run's images."""
+
+    name: str = Field(pattern=r"^[0-9a-f]{64}\.(png|jpg|gif|webp)$")
+    mediaType: Literal["image/png", "image/jpeg", "image/gif", "image/webp"]  # noqa: N815
+    bytes: int = Field(gt=0)
+
+
+class ToolResult(BaseModel):
+    """An agent tool's answer: its text (each image named in it as `[image <name>]`) and
+    the images it returned."""
+
+    text: str
+    images: list[Image]
 
 
 class RouteRefusedError(Exception):
@@ -356,6 +375,15 @@ async def arrange(
     return result
 
 
+def _tool_result(answer: Any) -> ToolResult:
+    """The agent's answer: its text, or, when the call returned images, `{text, images}`
+    with each image a pointer to the bytes it kept under the run
+    (`agent/src/temporal/toolActivities.ts` `flowResult`)."""
+    if isinstance(answer, str):
+        return ToolResult(text=answer, images=[])
+    return ToolResult.model_validate(answer)
+
+
 async def _call_tool(
     call_id: str,
     name: str,
@@ -364,18 +392,18 @@ async def _call_tool(
     attempts: int,
     activity: str | None = None,
     queue: str | None = None,
-) -> str:
+) -> ToolResult:
     """The agent tool `name` as an activity on the agent's `agent-tools` queue, under the
     activity id `tool-<call id>` the agent reads the call (and its approval) from. A turn
     tool's call is the activity `turn:<name>`, on the queue `turn_tool_tier` named."""
     owner: StepOwner = workflow.instance()
     try:
-        text: str = await workflow.execute_activity(
+        # Untyped: a string, or `{text, images}` (#2477); a history from before either replays.
+        answer: Any = await workflow.execute_activity(
             activity or name,
             args,
             activity_id=f"{TOOL_PREFIX}{call_id}",
             task_queue=queue or owner.tools_queue,
-            result_type=str,
             start_to_close_timeout=_TOOL_TIMEOUT,
             retry_policy=RetryPolicy(
                 maximum_attempts=attempts, non_retryable_error_types=_TOOL_REFUSALS
@@ -385,18 +413,18 @@ async def _call_tool(
         if isinstance(err.cause, ApplicationError):
             raise ToolFailedError(err.cause.message) from None
         raise
-    return text
+    return _tool_result(answer)
 
 
 @agent.tool_defn()
-async def approved_tool(call: str, name: str, args: dict[str, Any]) -> str:
+async def approved_tool(call: str, name: str, args: dict[str, Any]) -> ToolResult:
     """An outward agent tool, run once a person approved it, and at most once."""
     await _approved(call)
     return await _call_tool(call, name, args, attempts=1)
 
 
 @agent.tool_defn()
-async def approved_turn_tool(call: str, name: str, args: dict[str, Any], queue: str) -> str:
+async def approved_turn_tool(call: str, name: str, args: dict[str, Any], queue: str) -> ToolResult:
     """An outward plugin or http_request call, run once a person approved it, at most once."""
     await _approved(call)
     return await _call_tool(
@@ -404,7 +432,7 @@ async def approved_turn_tool(call: str, name: str, args: dict[str, Any], queue: 
     )
 
 
-async def _turn_tool(name: str, args: dict[str, Any], runner: AgentWorkflowRunner) -> str:
+async def _turn_tool(name: str, args: dict[str, Any], runner: AgentWorkflowRunner) -> ToolResult:
     """A tool a durable turn has beside ScadBuddy's own (a remote plugin's,
     `scadbuddy_http__http_request`), named `<server>__<tool>` (agent/src/temporal/turnTools.ts).
     The agent tiers it from its input as the run's starter, and refuses one no enabled
@@ -430,7 +458,7 @@ async def _turn_tool(name: str, args: dict[str, Any], runner: AgentWorkflowRunne
     queue = str(tiered.get("task_queue") or owner.tools_queue)
     call_id = str(workflow.uuid4())
     if tier == "outward":
-        text: str = await _gated(
+        result: ToolResult = await _gated(
             f"tool:{name}",
             runner,
             approved_turn_tool,
@@ -440,7 +468,7 @@ async def _turn_tool(name: str, args: dict[str, Any], runner: AgentWorkflowRunne
             args=args,
             queue=queue,
         )
-        return text
+        return result
     async with step(f"tool:{name}", call_id, outward=False):
         return await _call_tool(
             call_id,
@@ -452,13 +480,7 @@ async def _turn_tool(name: str, args: dict[str, Any], runner: AgentWorkflowRunne
         )
 
 
-@agent.tool_defn(inherently_safe=True)
-async def tool(name: str, args: dict[str, Any], runner: agent.Injected[AgentWorkflowRunner]) -> str:
-    """Call ScadBuddy's agent tool `name` with `args`, as the person or session that
-    started this run; returns its text. `name` may also be a plugin's tool or
-    `scadbuddy_http__http_request`, named `<server>__<tool>` as the assistant sees them.
-    An outward tool (one that changes something outside ScadBuddy) waits for a person
-    to approve it first."""
+async def _run_tool(name: str, args: dict[str, Any], runner: AgentWorkflowRunner) -> ToolResult:
     owner: StepOwner = workflow.instance()
     tier = owner.tool_tier(name)
     if tier is None:
@@ -469,14 +491,34 @@ async def tool(name: str, args: dict[str, Any], runner: agent.Injected[AgentWork
         raise ValueError(f"there is no tool {name!r}")
     call_id = str(workflow.uuid4())
     if tier == "outward":
-        text: str = await _gated(
+        result: ToolResult = await _gated(
             f"tool:{name}", runner, approved_tool, call_id, call=call_id, name=name, args=args
         )
-        return text
+        return result
     async with step(f"tool:{name}", call_id, outward=False):
         # Only a read is retried: a write that landed and then lost its answer would
         # land again.
         return await _call_tool(call_id, name, args, attempts=3 if tier == "read" else 1)
+
+
+@agent.tool_defn(inherently_safe=True)
+async def tool(name: str, args: dict[str, Any], runner: agent.Injected[AgentWorkflowRunner]) -> str:
+    """Call ScadBuddy's agent tool `name` with `args`, as the person or session that
+    started this run; returns its text, each image it returned named as `[image <name>]`
+    (`tool_result` gives the images themselves). `name` may also be a plugin's tool or
+    `scadbuddy_http__http_request`, named `<server>__<tool>` as the assistant sees them.
+    An outward tool (one that changes something outside ScadBuddy) waits for a person
+    to approve it first."""
+    return (await _run_tool(name, args, runner)).text
+
+
+@agent.tool_defn(inherently_safe=True)
+async def tool_result(
+    name: str, args: dict[str, Any], runner: agent.Injected[AgentWorkflowRunner]
+) -> ToolResult:
+    """`tool`, answering `{"text": ..., "images": [...]}`: the images the tool returned,
+    each an `Image` pointer kept with this run. An outward tool waits for approval."""
+    return await _run_tool(name, args, runner)
 
 
 #: The agent's refusals of a session (`agent/src/temporal/flowSessions.ts`) and a turn
@@ -589,27 +631,26 @@ def _prompt(prompt: str, skills: list[str], schema: dict[str, Any] | None) -> st
     return text
 
 
-async def _agent_session(
-    prompt: str, skills: list[str], result_schema: dict[str, Any] | None
+def _refs(images: list[Image]) -> dict[str, Any]:
+    """Images as the `flow_image` references `sessions_start`/`sessions_send` take: the
+    agent resolves each from this run's own images (`agent/src/tools/imageRefs.ts`)."""
+    if not images:
+        return {}
+    return {"images": [{"kind": "flow_image", "name": image.name} for image in images]}
+
+
+async def _start_session(
+    prompt: str, skills: list[str], result_schema: dict[str, Any] | None, images: list[Image]
 ) -> Any:
-    """Start a durable agent session with `prompt`, as the person who started this run,
-    and wait for its answer. `skills` names ScadBuddy skills for it to use (may be
-    empty). With `result_schema` (a JSON Schema, or None) the answer is the JSON value
-    it answered with, checked against the schema; without, its text. The session's own
-    outward calls wait for approval in its chat."""
     if result_schema is not None:
         _check_schema(result_schema)
     call_id = str(workflow.uuid4())
     async with step("agent", call_id, outward=False) as at:
         # Never retried: a lost answer would start a second session (Ruling 4's key is
         # not one a session start takes).
+        body: dict[str, Any] = {"prompt": _prompt(prompt, skills, result_schema), "mode": "durable"}
         started = _untrusted(
-            await _call_tool(
-                call_id,
-                "sessions_start",
-                {"prompt": _prompt(prompt, skills, result_schema), "mode": "durable"},
-                attempts=1,
-            )
+            (await _call_tool(call_id, "sessions_start", body | _refs(images), attempts=1)).text
         )
         try:
             session_id, turn_id = str(started["session"]["id"]), str(started["turn_id"])
@@ -619,28 +660,63 @@ async def _agent_session(
         return _answer(await _wait_turn("agent", call_id, session_id, turn_id), result_schema)
 
 
+async def _agent_session(
+    prompt: str,
+    skills: list[str],
+    result_schema: dict[str, Any] | None,
+    images: list[Image] | None = None,
+) -> Any:
+    """Start a durable agent session with `prompt`, as the person who started this run,
+    and wait for its answer. `skills` names ScadBuddy skills for it to use (may be
+    empty). With `result_schema` (a JSON Schema, or None) the answer is the JSON value
+    it answered with, checked against the schema; without, its text. `images` (this
+    run's, from `tool_result`) are sent with the prompt: the session sees them as images
+    its user sent, never as text. The session's own outward calls wait for approval in
+    its chat."""
+    return await _start_session(prompt, skills, result_schema, images or [])
+
+
 # `agent` is the harness's module here; the host function takes the name the script calls.
 _agent_session.__name__ = _agent_session.__qualname__ = "agent"
 agent_session = agent.tool_defn(inherently_safe=True)(_agent_session)
 
 
 @agent.tool_defn(inherently_safe=True)
-async def ask_session(session_id: str, message: str) -> str:
-    """Send `message` to the durable agent session `session_id` (one the person who
-    started this run owns) and wait for its answer's text."""
+async def agent_with_images(
+    prompt: str, skills: list[str], result_schema: dict[str, Any] | None, images: list[Image]
+) -> Any:
+    """Deprecated: call `agent(prompt, skills, result_schema, images)`, which takes
+    `images` now (#2636). Kept so scripts registered before keep running."""
+    return await _start_session(prompt, skills, result_schema, images)
+
+
+async def _ask(session_id: str, message: str, images: list[Image]) -> str:
     call_id = str(workflow.uuid4())
     async with step("ask_session", call_id, outward=False) as at:
         await _check_session(session_id)
         await at.note_session(session_id)
         # Never retried: a lost answer would send the message twice.
-        sent = _untrusted(
-            await _call_tool(
-                call_id, "sessions_send", {"session_id": session_id, "text": message}, attempts=1
-            )
-        )
+        body: dict[str, Any] = {"session_id": session_id, "text": message} | _refs(images)
+        sent = _untrusted((await _call_tool(call_id, "sessions_send", body, attempts=1)).text)
         if "turn_id" not in sent:
             raise ToolFailedError("the agent started no turn")
         return await _wait_turn("ask_session", call_id, session_id, str(sent["turn_id"]))
+
+
+@agent.tool_defn(inherently_safe=True)
+async def ask_session(session_id: str, message: str, images: list[Image] | None = None) -> str:
+    """Send `message` to the durable agent session `session_id` (one the person who
+    started this run owns) and wait for its answer's text. `images` (this run's, from
+    `tool_result`) are sent with the message: the session sees them as images its user
+    sent, never as text."""
+    return await _ask(session_id, message, images or [])
+
+
+@agent.tool_defn(inherently_safe=True)
+async def ask_session_with_images(session_id: str, message: str, images: list[Image]) -> str:
+    """Deprecated: call `ask_session(session_id, message, images)`, which takes `images`
+    now (#2636). Kept so scripts registered before keep running."""
+    return await _ask(session_id, message, images)
 
 
 #: Registered with the harness plugin. `human_answer` is the callback behind
@@ -656,10 +732,13 @@ FLOW_TOOLS: list[Any] = [
     approved_print,
     approved_arrange,
     tool,
+    tool_result,
     approved_tool,
     approved_turn_tool,
     agent_session,
+    agent_with_images,
     ask_session,
+    ask_session_with_images,
 ]
 _INNER = (human_answer, approved_print, approved_arrange, approved_tool, approved_turn_tool)
 SCRIPT_TOOLS: list[Any] = [t for t in FLOW_TOOLS if t not in _INNER]

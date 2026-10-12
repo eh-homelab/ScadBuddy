@@ -91,6 +91,19 @@ describe('SessionFiles', () => {
     expect(onInsert).toHaveBeenCalledWith('[workspace file uploads/dropped.bin]')
   })
 
+  it('takes the next free name when the list it numbered from was stale (#2469)', async () => {
+    const user = userEvent.setup()
+    const { onInsert } = render()
+    await screen.findByText(/No files yet/)
+    // The assistant writes uploads/a.txt after the list was read.
+    seedSessionFile('sess-f', 'uploads/a.txt', text('theirs'), 'text/plain', null)
+    vi.mocked(api.uploadAiSessionFile).mockRejectedValueOnce(new ApiError(409, 'uploads/a.txt already exists'))
+    await user.upload(screen.getByLabelText('Upload files to the workspace'), new File(['x'], 'a.txt'))
+    expect(await screen.findByText('uploads/a-2.txt')).toBeInTheDocument()
+    expect(onInsert).toHaveBeenCalledWith('[workspace file uploads/a-2.txt]')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
   it('shows why an upload was refused', async () => {
     vi.mocked(api.uploadAiSessionFile).mockRejectedValueOnce(
       new ApiError(413, 'the workspace would hold 300 bytes; it holds at most 200'),

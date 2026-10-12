@@ -96,6 +96,10 @@ class SnapshotStore:
         self._pins: dict[str, tuple[asyncio.Task[str], float]] = {}
         #: The stores `pin` stopped waiting for, held so they run to the end.
         self._storing: set[asyncio.Task[str]] = set()
+        #: Set for a key once an interactive pin joins its background store (#2140): a
+        #: store still queued for the background slot then takes an interactive one, so
+        #: a stalled preview upload does not hold up the render someone waits for.
+        self._promoted: dict[str, asyncio.Event] = {}
 
     async def pin(self, slug: str, revision: str | None, *, background: bool = False) -> str | None:
         """The revision a render uses, with its snapshot stored. An unpinned request
@@ -153,6 +157,8 @@ class SnapshotStore:
         key = snapshot_key(slug, revision)
         running = self._pins.get(key)
         if running is not None and not running[0].done():
+            if not background:
+                self._promoted.setdefault(key, asyncio.Event()).set()
             return running
         storing = asyncio.create_task(self.ensure(slug, revision, background=background))
         self._pins[key] = (storing, self._clock())
@@ -160,6 +166,7 @@ class SnapshotStore:
         def ended(task: asyncio.Task[str]) -> None:
             if self._pins.get(key, (None,))[0] is task:
                 del self._pins[key]
+                self._promoted.pop(key, None)
 
         storing.add_done_callback(ended)
         return self._pins[key]
@@ -186,9 +193,42 @@ class SnapshotStore:
         async with self.locks.hold(key):
             if await self._stored(key):
                 return key
-            async with self._background_stores if background else self._stores:
+            slot = await self._slot(key, background=background)
+            try:
                 await self._export_and_put(slug, revision, key)
+            finally:
+                slot.release()
         return key
+
+    async def _slot(self, key: str, *, background: bool) -> asyncio.Semaphore:
+        """The slot this store runs in, acquired: an interactive one, or a background
+        one until an interactive pin joins the store while it still waits (#2140). One
+        that already holds the background slot keeps it: its upload is under way, and
+        the joining pin is bounded by `pin_timeout` as any is."""
+        if not background:
+            await self._stores.acquire()
+            return self._stores
+        promoted = self._promoted.setdefault(key, asyncio.Event())
+        queued = asyncio.ensure_future(self._background_stores.acquire())
+        joined = asyncio.ensure_future(promoted.wait())
+        try:
+            await asyncio.wait({queued, joined}, return_when=asyncio.FIRST_COMPLETED)
+        except BaseException:
+            joined.cancel()
+            queued.cancel()
+            await asyncio.gather(queued, return_exceptions=True)
+            if not queued.cancelled():
+                self._background_stores.release()
+            raise
+        joined.cancel()
+        if not queued.done():
+            queued.cancel()
+        # A cancel that lost the race to the acquire leaves the slot held: keep it.
+        await asyncio.gather(queued, return_exceptions=True)
+        if not queued.cancelled():
+            return self._background_stores
+        await self._stores.acquire()
+        return self._stores
 
     async def _export_and_put(self, slug: str, revision: str, key: str) -> None:
         directory = self.paths.model_revision_dir(slug, revision)

@@ -99,6 +99,7 @@ export class ApprovalActions implements OutwardActions {
         input: call.input,
         tier: 'outward',
         requestedBy: ownerOf(principal),
+        ...(call.workspace ? { workspace: call.workspace } : {}),
       },
       { perPrincipal: this.#perPrincipal, total: this.#total, evictReason: 'superseded: the caller prepared too many actions' },
     )

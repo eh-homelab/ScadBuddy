@@ -8,12 +8,9 @@ import {
   ensureSessionDir,
   ensureStateDirs,
   isUuid,
-  removeSessionBrowserDirs,
-  sessionBrowserDir,
-  sessionBrowserTmpDir,
+  removeLegacyBrowserDir,
   sessionWorkDir,
   StateDirError,
-  sweepBrowserDirs,
 } from '../src/harness/stateDirs.js'
 
 describe('ensureStateDirs', () => {
@@ -77,37 +74,14 @@ describe('ensureStateDirs', () => {
     expect(isUuid('0F8FAD5B-D9CB-469F-A165-70867728950E')).toBe(true)
   })
 
-  it("removes a session's headless-browser folders, and only that session's", async () => {
+  it('removes the folders the removed headless browser left on the volume, and nothing else', async () => {
     const paths = { stateDir: root }
-    const id = '0f8fad5b-d9cb-469f-a165-70867728950e'
-    const other = '1f8fad5b-d9cb-469f-a165-70867728950e'
-    const tmp = sessionBrowserTmpDir(id)
-    expect(tmp).toBe(path.join(tmpdir(), `sb-browser-${id}`))
-    for (const dir of [sessionBrowserDir(paths, id), tmp, sessionBrowserDir(paths, other)]) {
-      await mkdir(path.join(dir, 'output'), { recursive: true })
-      await writeFile(path.join(dir, 'output', 'page.png'), 'png')
-    }
-    await removeSessionBrowserDirs(paths, id)
-    expect(existsSync(sessionBrowserDir(paths, id))).toBe(false)
-    expect(existsSync(tmp)).toBe(false)
-    expect(existsSync(sessionBrowserDir(paths, other))).toBe(true)
-    // Nothing there is not an error.
-    await expect(removeSessionBrowserDirs(paths, id)).resolves.toBeUndefined()
-    expect(() => sessionBrowserTmpDir('../x')).toThrow(StateDirError)
-  })
-
-  it('sweeps leftover headless-browser folders at start, and nothing else in the tmp dir', async () => {
-    const paths = { stateDir: root }
-    const tmp = path.join(root, 'tmp')
-    const id = '0f8fad5b-d9cb-469f-a165-70867728950e'
-    await mkdir(path.join(sessionBrowserDir(paths, id), 'output'), { recursive: true })
-    for (const name of [`sb-browser-${id}`, 'sb-browser-not-a-uuid', 'other']) {
-      await mkdir(path.join(tmp, name), { recursive: true })
-    }
-    await sweepBrowserDirs(paths, tmp)
+    await mkdir(path.join(root, 'browser', '0f8fad5b-d9cb-469f-a165-70867728950e', 'output'), { recursive: true })
+    await mkdir(path.join(root, 'work'), { recursive: true })
+    await removeLegacyBrowserDir(paths)
     expect(existsSync(path.join(root, 'browser'))).toBe(false)
-    expect(existsSync(path.join(tmp, `sb-browser-${id}`))).toBe(false)
-    expect(existsSync(path.join(tmp, 'sb-browser-not-a-uuid'))).toBe(true)
-    expect(existsSync(path.join(tmp, 'other'))).toBe(true)
+    expect(existsSync(path.join(root, 'work'))).toBe(true)
+    // Nothing there is not an error.
+    await expect(removeLegacyBrowserDir(paths)).resolves.toBeUndefined()
   })
 })

@@ -7,13 +7,11 @@ tools, the tab's socket to the agent, and pairing) is the follow-up PR for #254.
 [`docs/superpowers/specs/2026-09-27-ai-integration-design.md`](../superpowers/specs/2026-09-27-ai-integration-design.md).
 The code is in [`frontend/src/agent/`](../../frontend/src/agent/).
 
-Sessions that have **no** user tab use a different tool: a headless Chromium in the
-agent container, driven through the Playwright plugin (#349,
-[headless-browser.md](headless-browser.md)). The two do not overlap: the headless
-browser loads ScadBuddy's UI on its own and never sees the user's tab, and the bridge
-stays the only way to act in that tab. The headless browser does not honour
-`data-agent-user-only` (it clicks like a user would); what it cannot do is complete an
-outward request, which the backend refuses for it (`AgentActorGate`).
+Sessions that have **no** user tab can use a different tool: Microsoft's Playwright
+MCP server added as a remote plugin ([headless-browser.md](headless-browser.md)). The
+two do not overlap: that browser never sees the user's tab, and the bridge stays the
+only way to act in that tab. It does not honour `data-agent-user-only` (it clicks like
+a user would).
 
 > **Status.** The bridge has three callers: the agent service, over the tab's socket
 > (below, [The agent's side](#the-agents-side-browser_-tools)); WebMCP, which is opt-in
@@ -234,8 +232,8 @@ tools, so the two lists stay equal (`test/projections.test.ts`).
   [`link.ts`](../../frontend/src/agent/link.ts)), because the agent's tab socket takes
   frames up to 256 KiB (`routes/bridge.ts` `BRIDGE_FRAME_MAX`).
 - **Not here:** `screenshot()`, which PR #339 left out of the tab on purpose; and the
-  headless browser (#349, [headless-browser.md](headless-browser.md)), a separate
-  Chromium whose Playwright tools are `mcp__plugin_playwright_playwright__browser_*`.
+  Playwright MCP plugin ([headless-browser.md](headless-browser.md)), a separate
+  browser whose tools are `mcp__playwright__browser_*`.
 
 ## The tab's socket
 

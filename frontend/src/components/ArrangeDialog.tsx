@@ -73,7 +73,10 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
   const [read, setRead] = useState<Record<string, Output | { error: string }>>({})
   /** #1863 — the objects of each library file ScadBuddy did not make, or why not. */
   const [objects, setObjects] = useState<Record<number, LibraryFileObjects | { error: string }>>({})
-  /** Every template, for a result of library files alone to be filed under. */
+  /**
+   * Every template: their names for "File under" and the saved line, and what a result
+   * with a library file in it may be filed under (#2284).
+   */
   const [models, setModels] = useState<ModelSummary[] | null>(null)
   /** Outputs re-rendered here, read back with their objects. */
   const [refreshed, setRefreshed] = useState<Record<string, Output>>({})
@@ -120,9 +123,14 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
   const rows = rowsOf(outputs.filter((output) => !unusable.includes(output)))
   const fileRows = fileRowsOf(plain)
   const ownTemplates = templatesOf(outputs.filter((output) => !unusable.includes(output)))
-  // Library files alone: filed under any template the user picks.
-  const anyTemplate = ownTemplates.length === 0 && outputs.length === 0 && fileRows.length > 0
-  const templates = anyTemplate ? (models ?? []).map((model) => model.slug) : ownTemplates
+  // A library file ScadBuddy did not make belongs to no template: with one in the mix the
+  // result may be filed under any template the user picks, its outputs' first (#2284).
+  const anyTemplate = fileRows.length > 0
+  const templates = anyTemplate
+    ? [...new Set([...ownTemplates, ...(models ?? []).map((model) => model.slug)])]
+    : ownTemplates
+  /** A template by its name, as "File under" says it (#2284); its slug until the list is read. */
+  const modelName = (slug: string) => models?.find((model) => model.slug === slug)?.name ?? slug
   const [counts, setCounts] = useState<Record<string, number>>({})
   const [goal, setGoal] = useState<ArrangeGoal>('fewest_plates')
   const [name, setName] = useState('')
@@ -176,16 +184,18 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
     }
   }, [open, toList])
   useEffect(() => {
-    if (!open || !anyTemplate || models !== null) return
+    if (!open || models !== null) return
     let live = true
     api
       .listModels()
       .then((found) => live && setModels(found))
+      // #2541 — deliberate: a failed list costs only names. "File under" then offers the
+      // outputs' own templates by slug, and the saved line says no name (`savedNote`).
       .catch(() => live && setModels([]))
     return () => {
       live = false
     }
-  }, [open, anyTemplate, models])
+  }, [open, models])
 
   useEffect(() => {
     if (!open || !toRead) return
@@ -266,9 +276,9 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
         )
       }
       // The chosen template, unless every output of it was left out: then the first one's.
-      // Library files alone go under the template picked from every one (#1863).
+      // With a library file in the mix, any template picked from every one (#1863, #2284).
       const kept = templatesOf(usable)
-      const choices = kept.length > 0 ? kept : templates
+      const choices = anyTemplate ? [...new Set([...kept, ...templates])] : kept
       const slug = filing && choices.includes(filing) ? filing : choices[0]
       if (!slug) throw new Error('Nothing to arrange.')
       const body: ArrangeRequest = {
@@ -302,7 +312,10 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
       // Closed while the output was being saved: it is saved, a normal output in
       // History, but this dialog no longer acts on it.
       if (controller.signal.aborted) return
-      onArranged(skipped ? { ...arranged, skipped } : arranged)
+      // Only a name the model list gave: a slug is not a name (#2541).
+      const filedUnder = models?.find((model) => model.slug === arranged.output.slug)?.name
+      const filed = filedUnder ? { ...arranged, filedUnder } : arranged
+      onArranged(skipped ? { ...filed, skipped } : filed)
     } catch (cause) {
       if (controller.signal.aborted) return
       const ids = backfillIds(cause)
@@ -415,6 +428,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
             onCancel={() => setAdding(null)}
           />
         )}
+        {/* Shown whenever there is a choice, a library file in the mix too (#2284). */}
         {(templates.length > 1 || anyTemplate) && templates.length > 0 && (
           <>
             <label htmlFor="arrange-filing" className="text-[12px] text-muted">
@@ -428,7 +442,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
             >
               {templates.map((slug) => (
                 <option key={slug} value={slug}>
-                  {slug}
+                  {modelName(slug)}
                 </option>
               ))}
             </select>

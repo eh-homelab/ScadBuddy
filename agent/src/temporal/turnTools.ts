@@ -27,7 +27,7 @@ import {
 
 // The rest of a turn's tools in a durable session (#2320). A classic turn hands Claude
 // Code more MCP servers than ScadBuddy's own (sessions/manager.ts `runTurn`): the remote
-// plugins through the loopback forwarder, `http_request`, the headless browser. A
+// plugins through the loopback forwarder and `http_request`. A
 // durable turn's tools are the workflow's durable tools, each an activity on
 // `agent-tools`, so the same servers are offered there as durable tools too:
 //
@@ -48,15 +48,23 @@ import {
 // (backend/scadbuddy/workflows/flow_tools.py): `turn_tool_tier`, then the call, as the
 // run's starter (flowRuns.ts), an outward one only with the backend's
 // `workflow_run_decisions` approval, as a flow's ScadBuddy tools are. A flow has no
-// session, so no headless browser (TurnContext.flow), and it lists nothing.
+// session, and it lists nothing.
 
 export const TURN_TOOLS_ACTIVITY = 'turn_tools'
 export const TURN_TOOL_TIER_ACTIVITY = 'turn_tool_tier'
 /** The activity type a turn tool's call runs as: `turn:<server>__<tool>`. */
 export const TURN_TOOL_PREFIX = 'turn:'
 const SEPARATOR = '__'
+/**
+ * The longest turn-tool name the durable session can declare: the Temporal Claude
+ * Agent SDK refuses longer ones (`_check_tool_name`, 1 to 50 of [A-Za-z0-9_-]), and one
+ * refused there failed every workflow task of its session.
+ */
+export const MAX_TURN_TOOL_NAME = 50
 /** How long one server's tool listing may take before it is left out of the turn. */
 const LIST_TIMEOUT_MS = 20_000
+/** How long a keyed server's listing is reused (TurnServer.listingKey). */
+export const LISTING_KEPT_MS = 30_000
 
 /** One MCP server a turn offers beside ScadBuddy's own tools. */
 export type TurnServer = {
@@ -69,24 +77,22 @@ export type TurnServer = {
   /**
    * Whether some call of the tool could be outward, whatever its input. Listed as
    * `may_park`: only a tool listed so is ever asked about, so a tool whose tier depends
-   * on its input (http_request's method, the headless browser's origin) must say yes.
+   * on its input (http_request's method) must say yes.
    * Absent: every tool may (fail toward asking).
    */
   mayPark?(harnessName: string): boolean
   /**
    * Whether its calls must run on the replica that listed it (`TurnToolsDeps.hostQueue`):
    * a server whose state lives in this process or on this pod's disk (http_request's
-   * saved bodies, the headless browser).
+   * saved bodies).
    */
   pinned?: boolean
-  /** A long-lived client the server owns (the headless browser's process): never closed after a use. */
-  keepOpen?: boolean
-  /** Why a call must not run at all, by its input (the browser's filename and origin rules); undefined: it may. */
-  refusal?(harnessName: string, input: unknown): string | undefined
-  /** Whether a tool the server lists is offered (the browser's fixed deny list, Settings → Plugins). */
-  offers?(tool: string): boolean
-  /** Once an outward call's approval is verified, before it runs (an approved origin is remembered). */
-  approved?(harnessName: string, input: unknown, requestId: string): Promise<void>
+  /**
+   * What its tool list depends on (a remote plugin's name and the tools Settings disabled):
+   * with one, a listing is kept for LISTING_KEPT_MS, so a tier check and the call after it
+   * do not list the plugin again (#2497). The forwarder still refuses a disabled tool's call.
+   */
+  listingKey?: string
 }
 
 export type TurnServers = {
@@ -107,12 +113,12 @@ export type TurnServers = {
 export type TurnContext = {
   /** The session, or `flow-<run id>` for a flow run's call (then `flow` is set). */
   session: string
-  /** The flow run a call comes from: it has no session, so no session-bound server (the browser). */
+  /** The flow run a call comes from: it has no session. */
   flow?: string
+  /** The durable turn running now (`ai_sessions.durable_turn_id`), for audit rows; none for a flow. */
+  turnId?: string
   owner: Owner
   signal: AbortSignal
-  /** The call being made, for a server built for it (the browser's grant names its approval). */
-  call?: { requestId: string; toolUseId: string }
   /** The turn's listing (`turn_tools`): the plugin packages are shared with the segment runner. */
   listing?: boolean
 }
@@ -196,7 +202,7 @@ async function withClient<T>(server: TurnServer, use: (client: Client) => Promis
   try {
     return await use(client)
   } finally {
-    if (!server.keepOpen) await client.close().catch(() => {})
+    await client.close().catch(() => {})
   }
 }
 
@@ -205,14 +211,26 @@ async function withClient<T>(server: TurnServer, use: (client: Client) => Promis
  * Tools whose harness names collide are left out, as a classic turn hides them
  * (plugins/forwarder.ts), so a name never stands for two tools.
  */
-async function listed(server: TurnServer, signal: AbortSignal) {
-  return withClient(server, async (client) => {
+type Listed = { tool: Awaited<ReturnType<Client['listTools']>>['tools'][number]; name: string }[]
+
+const kept = new Map<string, { at: number; tools: Listed }>()
+
+async function listed(server: TurnServer, signal: AbortSignal, reuse = false): Promise<Listed> {
+  const key = server.listingKey === undefined ? undefined : `${server.name}\0${server.listingKey}`
+  const hit = key === undefined ? undefined : kept.get(key)
+  if (reuse && hit && Date.now() - hit.at < LISTING_KEPT_MS) return hit.tools
+  const tools = await withClient(server, async (client) => {
     const { tools } = await client.listTools(undefined, { signal })
-    const named = tools.filter((tool) => server.offers?.(tool.name) ?? true).map((tool) => ({ tool, name: harnessToolName(tool.name) }))
+    const named = tools.map((tool) => ({ tool, name: harnessToolName(tool.name) }))
     const seen = new Map<string, number>()
     for (const { name } of named) seen.set(name, (seen.get(name) ?? 0) + 1)
     return named.filter(({ name }) => seen.get(name) === 1)
   })
+  if (key !== undefined) {
+    for (const [k, v] of kept) if (Date.now() - v.at >= LISTING_KEPT_MS) kept.delete(k)
+    kept.set(key, { at: Date.now(), tools })
+  }
+  return tools
 }
 
 /** `promise`, or the signal's reason once it aborts (a connect that stalls takes no signal). */
@@ -234,14 +252,20 @@ async function withServers<T>(deps: TurnToolsDeps, context: TurnContext, use: (s
   }
 }
 
-/** The tool a turn tool's name names now, or a non-retryable refusal saying why not. */
-async function resolve(set: TurnServers, name: string, signal: AbortSignal) {
+/** The server a turn tool's name names now, or a non-retryable refusal saying why not. */
+function serverOf(set: TurnServers, name: string) {
   const parts = split(name)
   const server = parts && set.servers.find((s) => s.name === parts.server)
   if (!parts || !server) {
     throw ApplicationFailure.nonRetryable(`${name} is not offered any more: its plugin or setting was turned off`, TOOL_ERROR)
   }
-  const found = (await listed(server, signal)).find((t) => t.name === parts.tool)
+  return { parts, server }
+}
+
+/** The tool a turn tool's name names now, or a non-retryable refusal saying why not. */
+async function resolve(set: TurnServers, name: string, signal: AbortSignal) {
+  const { parts, server } = serverOf(set, name)
+  const found = (await listed(server, signal, true)).find((t) => t.name === parts.tool)
   if (!found) throw ApplicationFailure.nonRetryable(`${name} is not offered any more by ${server.name}`, TOOL_ERROR)
   return { server, tool: found.tool, harnessName: `mcp__${server.name}__${parts.tool}` }
 }
@@ -278,9 +302,9 @@ async function turnCaller(deps: TurnToolsDeps, name: string, toolUseId: string):
       approved: (requestId) => flows.approved(requestId),
     }
   }
-  const { session, owner, turnTiers: sent } = await durableSession(name, deps.sessions)
+  const { session, owner, turnTiers: sent, turnId } = await durableSession(name, deps.sessions)
   return {
-    context: { session, owner },
+    context: { session, owner, ...(turnId ? { turnId } : {}) },
     owner,
     sessionId: session,
     requestId: durableRequestId(session, runId, toolUseId),
@@ -297,9 +321,9 @@ function inputObject(input: unknown): Record<string, unknown> {
 export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: unknown) => Promise<unknown>> {
   return {
     [TURN_TOOLS_ACTIVITY]: async (): Promise<TurnToolsResult> => {
-      const { session, owner } = await durableSession(TURN_TOOLS_ACTIVITY, deps.sessions)
+      const { session, owner, turnId } = await durableSession(TURN_TOOLS_ACTIVITY, deps.sessions)
       const signal = Context.current().cancellationSignal
-      return withServers(deps, { session, owner, signal, listing: true }, async (set) => {
+      return withServers(deps, { session, owner, signal, listing: true, ...(turnId ? { turnId } : {}) }, async (set) => {
         const scrub = (text: string) => redact(text, set.secrets)
         // Listed side by side, each within LIST_TIMEOUT_MS: a plugin that stalls is
         // reported and left out, never the whole listing's deadline.
@@ -315,10 +339,19 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
           }),
         )
         const tools: TurnToolEntry[] = []
+        const tooLong: string[] = []
         for (const { server, offered } of listings) {
           for (const { tool, name } of offered ?? []) {
+            const turnName = turnToolName(server.name, tool.name)
+            if (turnName.length > MAX_TURN_TOOL_NAME) {
+              tooLong.push(
+                `tool ${tool.name} of plugin ${server.name} is not available in this turn: its name ` +
+                  `${turnName} is over ${MAX_TURN_TOOL_NAME} characters`,
+              )
+              continue
+            }
             tools.push({
-              name: turnToolName(server.name, tool.name),
+              name: turnName,
               description: tool.description ?? '',
               input_schema: tool.inputSchema as Record<string, unknown>,
               may_park: server.mayPark?.(`mcp__${server.name}__${name}`) ?? true,
@@ -327,7 +360,7 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
           }
         }
         // Said once, after the listing, so a retried attempt does not say it again.
-        const problems = [...set.problems, ...listings.flatMap((l) => (l.problem ? [l.problem] : []))]
+        const problems = [...set.problems, ...listings.flatMap((l) => (l.problem ? [l.problem] : [])), ...tooLong]
         if (problems.length) await deps.report?.(session, problems.map(scrub))
         return { tools, packages: set.packages ?? [] }
       })
@@ -341,8 +374,6 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
         const { server, harnessName } = await resolve(set, tool, signal)
         // A flow takes its call's queue from here, since it lists nothing (turn_tools).
         const queue = server.pinned && deps.hostQueue ? { task_queue: deps.hostQueue } : {}
-        // A call that will be refused is not parked: its activity says why.
-        if (server.refusal?.(harnessName, input) !== undefined) return { tier: 'read' as const, ...queue }
         return { tier: server.tierOf(harnessName, input), ...queue }
       })
     },
@@ -368,7 +399,7 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
     const principal = turnPrincipal(owner, caller.tiers ? { tiers: [...caller.tiers] } : undefined)
     const fields = inputObject(input)
     const signal = context.cancellationSignal
-    return withServers(deps, { ...caller.context, signal, call: { requestId, toolUseId } }, async (set) => {
+    return withServers(deps, { ...caller.context, signal }, async (set) => {
       const scrub = (text: string) => redact(text, set.secrets)
       const { server, tool, harnessName } = await resolve(set, name, signal)
       const tier = server.tierOf(harnessName, input)
@@ -380,6 +411,7 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
           surface: 'harness',
           actor: owner,
           sessionId: session,
+          turnId: caller.context.turnId ?? null,
           toolUseId,
           requestId,
           tier,
@@ -394,8 +426,6 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
         await record('refused', message)
         throw ApplicationFailure.nonRetryable(message, type)
       }
-      const refused = server.refusal?.(harnessName, input)
-      if (refused !== undefined) await refuse(refused, TOOL_ERROR)
       if (!principal.tiers.includes(tier)) {
         const who = caller.context.flow ? "this flow run's starter" : "this session's turn"
         await refuse(`${name} needs the "${tier}" tier, which ${who} does not hold`, TOOL_ERROR)
@@ -406,7 +436,6 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
         if (!(await caller.approved(requestId, binding))) {
           await refuse(`${name} needs an approval, and none is recorded for this call`, NOT_APPROVED)
         }
-        await server.approved?.(harnessName, input, requestId)
       }
       const heartbeat = setInterval(() => context.heartbeat(), 10_000)
       let result: Awaited<ReturnType<Client['callTool']>>

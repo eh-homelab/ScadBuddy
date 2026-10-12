@@ -3,13 +3,21 @@ import { z } from 'zod'
 import { ok } from './call.js'
 import { answered, command } from './command.js'
 import { page, PAGED, pageInput } from './pagination.js'
-import { defineTool, json, type Tool } from './registry.js'
+import { defineTool, json, text, type Tool } from './registry.js'
 
 // Flows (#1057, spec 2026-10-01 §7): a Python script over ScadBuddy's host functions,
 // registered by name and run durably as a ProjectWorkflow. Routes:
 // backend/scadbuddy/api/flows.py. Deleting a run is a person's (coverage.ts).
 
-const definitionId = z.string().uuid().describe('A flow version id, as register_flow or list_flows returns it')
+const definitionId = z
+  .string()
+  .uuid()
+  .describe('A flow version id, as register_flow, list_flows or list_flow_versions returns it')
+const flowName = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/).describe("A flow's name")
+const flowCommit = z
+  .string()
+  .regex(/^[0-9a-f]{7,40}$/)
+  .describe("One of the flow's versions' commits, as list_flow_versions returns it")
 const runId = z.string().uuid().describe('A flow run id, as start_flow_run returns it')
 const approvalTimeout = z
   .union([z.number().int().min(10).max(2_592_000), z.literal('never')])
@@ -20,23 +28,28 @@ export const flowTools: Tool[] = [
     name: 'register_flow',
     description:
       'Register a flow: a Python script that runs durably, for as long as it needs, over the host functions ' +
-      '`sleep(seconds)`, `wait_for_human(question, timeout_s)` (10 to 86400 s; returns {answer}), ' +
+      '`sleep(seconds)`, `wait_for_human(question, timeout_s)` (10 to 86400 s, default 3600; returns {answer}), ' +
       '`render(slug, params)` (returns {job_id, status, error}; status done, failed or cancelled), ' +
       '`save_output(slug, job_id, name)` (returns the output id), and two that wait for a person to approve them ' +
       'in ScadBuddy: `queue_print(source, request)` (source {output_id} or {file_id}; request is the print ' +
       "route's body, filament_plan and choices; returns {run_id, status, may_have_queued, error}) and " +
       "`arrange(request)` (the arrange route's body; returns {job_id, status, output_id, error}). " +
-      '`agent(prompt, skills, result_schema)` starts a durable agent session as the run\'s starter and returns ' +
+      '`agent(prompt, skills, result_schema, images=None)` starts a durable agent session as the run\'s starter and returns ' +
       'its answer (skills a list, maybe empty; with a JSON Schema the JSON value it answered, else its text), and ' +
-      '`ask_session(session_id, message)` sends to a durable session the starter owns and returns its answer; ' +
+      '`ask_session(session_id, message, images=None)` sends to a durable session the starter owns and returns its answer; ' +
       "a session's own outward calls wait for approval in its chat. `tool(name, args)` calls a tool as the " +
       "run's starter and returns its text: one of ScadBuddy's, or an enabled plugin's or http_request named " +
-      '`<server>__<tool>` (e.g. `scadbuddy_http__http_request`); an outward one waits for approval. Results are ' +
+      '`<server>__<tool>` (e.g. `scadbuddy_http__http_request`); an outward one waits for approval. ' +
+      '`tool_result(name, args)` returns {text, images}, each image a pointer {name, mediaType, bytes} kept with ' +
+      'the run (never its bytes), which `agent` and `ask_session` send to a session as `images`, and a ' +
+      'script may return (`agent_with_images` and `ask_session_with_images` are deprecated names for them); the ' +
+      "run page shows the run's images. Results are " +
       'dicts; a refusal is an exception in ScadBuddy\'s words, and a denial a ToolApprovalDenied. The script ' +
       'is `import asyncio`, an `async def main()` that awaits host functions, and `asyncio.run(main())`; it may ' +
       'compute for at most a second between host calls. It is type-checked first: a 422 lists `problems` by line. ' +
-      'Registering an existing `name` adds its next version; a version never changes. `approval_timeout` sets ' +
-      'how long its runs wait for approvals (omit for the global setting).',
+      'Registering an existing `name` adds its next version, one commit in its history (list_flow_versions), ' +
+      'an unchanged script too; a version never changes. `approval_timeout` sets how long its runs wait for ' +
+      'approvals (omit for the global setting).',
     input: z.object({
       name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/, 'lower-case letters, digits and dashes'),
       script: z.string().min(1).max(65_536),
@@ -71,6 +84,84 @@ export const flowTools: Tool[] = [
         await ok(
           backend.GET('/api/v1/workflows/{definition_id}', { params: { path: { definition_id } } }),
           `get flow ${definition_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'list_flow_versions',
+    description:
+      "A flow's history, newest first, from git: each version's id, commit, version number, message and who " +
+      'made it (a person, or an agent with its principal and session). Pass a version id to get_flow or ' +
+      'start_flow_run.' +
+      PAGED,
+    input: z.object({ name: flowName, ...pageInput }),
+    risk: 'read',
+    routes: ['GET /api/v1/workflows/names/{name}/versions'],
+    handler: async ({ name, ...args }, { backend }) => {
+      const items = await ok(
+        backend.GET('/api/v1/workflows/names/{name}/versions', {
+          params: { path: { name }, query: { limit: 500 } },
+        }),
+        `list versions of flow ${name}`,
+      )
+      return json(page(items, { name, ...args }, (item) => item.commit, 'list_flow_versions'))
+    },
+  }),
+
+  defineTool({
+    name: 'get_flow_version_source',
+    description: "A flow's script at one of its versions, by commit.",
+    input: z.object({ name: flowName, commit: flowCommit }),
+    risk: 'read',
+    routes: ['GET /api/v1/workflows/names/{name}/versions/{commit}/source'],
+    handler: async ({ name, commit }, { backend }) =>
+      text(
+        await ok(
+          backend.GET('/api/v1/workflows/names/{name}/versions/{commit}/source', {
+            params: { path: { name, commit } },
+            parseAs: 'text',
+          }),
+          `get flow ${name}@${commit}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'diff_flow_version',
+    description:
+      "The unified diff of a flow's script at a version against the version before it, or against `base` " +
+      '(another of its versions) when given.',
+    input: z.object({ name: flowName, commit: flowCommit, base: flowCommit.optional() }),
+    risk: 'read',
+    routes: ['GET /api/v1/workflows/names/{name}/versions/{commit}/diff'],
+    handler: async ({ name, commit, base }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/workflows/names/{name}/versions/{commit}/diff', {
+            params: { path: { name, commit }, query: { base } },
+          }),
+          `diff flow ${name}@${commit}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'restore_flow_version',
+    description:
+      "Restore a flow's script at one of its versions as its newest version: a new commit and version, " +
+      'type-checked first, with that version\'s approval timeout (nothing is lost). Runs already started keep ' +
+      'the version they ran.',
+    input: z.object({ name: flowName, commit: flowCommit }),
+    risk: 'write',
+    routes: ['POST /api/v1/workflows/names/{name}/versions/{commit}/restore'],
+    handler: async ({ name, commit }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/workflows/names/{name}/versions/{commit}/restore', {
+            params: { path: { name, commit } },
+          }),
+          `restore flow ${name}@${commit}`,
         ),
       ),
   }),
@@ -147,7 +238,7 @@ export const flowTools: Tool[] = [
     description:
       'What resetting a flow run to an earlier point would send again: its outward calls (queue_print, arrange, an outward tool, an agent turn that made one) ' +
       'after `event_id`, a completed workflow task of the run\'s Temporal history after its script started ' +
-      '(`valid`). Every host call after the point runs again; answers and approvals after it are undone. ' +
+      '(`valid`; get_flow_reset_points lists them). Every host call after the point runs again; answers and approvals after it are undone. ' +
       'Pass the answer\'s `as_of_event_id` and `workflow_run_id` to reset_flow_run.',
     input: z.object({ run_id: runId, event_id: z.number().int().min(1) }),
     risk: 'read',
@@ -159,6 +250,24 @@ export const flowTools: Tool[] = [
             params: { path: { run_id }, query: { event_id } },
           }),
           `preview reset of flow run ${run_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'get_flow_reset_points',
+    description:
+      'Every point a Reset of a flow run takes (`event_id`s of its current execution, oldest first), each with ' +
+      '`first_step`, the seq of the first step a Reset there runs again or reopens (null: none). Preview one ' +
+      'with preview_flow_reset before reset_flow_run.',
+    input: z.object({ run_id: runId }),
+    risk: 'read',
+    routes: ['GET /api/v1/workflow-runs/{run_id}/reset-points'],
+    handler: async ({ run_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/workflow-runs/{run_id}/reset-points', { params: { path: { run_id } } }),
+          `reset points of flow run ${run_id}`,
         ),
       ),
   }),

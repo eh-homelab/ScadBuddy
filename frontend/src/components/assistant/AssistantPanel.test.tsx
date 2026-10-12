@@ -823,6 +823,8 @@ describe('assistant panel', () => {
       size: 3,
     })
     expect(await within(panel).findByText('uploads/new.stl')).toBeInTheDocument()
+    // The feed notes it too (#2399).
+    expect(await screen.findByTestId('agent-file')).toHaveTextContent('You uploaded uploads/new.stl (3 B) to the workspace')
   })
 
   it('reports a malformed frame instead of rendering it', async () => {

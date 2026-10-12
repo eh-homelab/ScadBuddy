@@ -277,10 +277,6 @@ run.
 Still missing from issue #259's list: an external MCP client starts a session, and the
 browser takes it over (#300, #1056).
 
-For the headless browser, spec §13 adds a container e2e: clicking *Print* without an
-approval is refused by the backend; an off-allowlist navigation is blocked; two
-sessions don't share storage.
-
 ## Real-render checks
 
 Issue [#1924](https://github.com/eh-homelab/ScadBuddy/issues/1924). After a run,

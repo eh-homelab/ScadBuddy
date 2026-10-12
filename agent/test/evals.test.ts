@@ -218,7 +218,7 @@ describe.skipIf(cliMissing !== undefined)(`eval scenarios, scripted${cliMissing 
         // The model sees what a session's turn appends (manager.ts `systemAppend`),
         // and no eval-only defence on top of it.
         const system = JSON.stringify(call.body?.system ?? '')
-        expect(system).toContain(JSON.stringify(systemAppend(false)).slice(1, -1))
+        expect(system).toContain(JSON.stringify(systemAppend()).slice(1, -1))
         expect(system).not.toMatch(/ScadBuddy assistant/)
       }
     }, 90_000)
