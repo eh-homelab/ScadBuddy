@@ -35,8 +35,9 @@ today), mesh repair beyond what reading already refuses, sculpting or vertex edi
   returns each object as closed meshes per colour (`ReadObject.parts`, `ColourPart`),
   with Bambu Studio per-part extruders, `basematerials` colours, and Bambu `paint_color`
   painting carried as `ColourPart.paint` (#1965). It refuses sliced files, PrusaSlicer
-  painting, painted-and-mirrored parts and negative parts, and bounds work by
-  `ReadBudget`.
+  painting and painted-and-mirrored parts, carries a negative part as
+  `ColourPart.negative` (#2337; a mesh model cuts it out of the object's printed parts),
+  and bounds work by `ReadBudget`.
 - **File 688 is painted.** `render/paint.py` `MAX_CODE_DIGITS`'s comment: a two-colour
   Bambu Studio project, 13,873 painted faces. So paint is part of the acceptance case,
   not an edge case (§7).

@@ -250,6 +250,9 @@ class Part(_Strict):
     colour: str = Field(pattern=COLOUR)
     #: Painted in Bambu Studio; its codes are ``<mesh stem>.paint.json`` (spec §7).
     painted: bool = False
+    #: A Bambu Studio negative part (``ColourPart.negative``, #2337): cut out of the
+    #: object's other parts, never printed, so never measured, coloured or pegged.
+    negative: bool = False
 
 
 class Cut(_Strict):
@@ -722,6 +725,17 @@ def test_a_coloured_add_carves_its_space_out_of_the_rest() -> None:
     assert f"    difference() {{\n      o1_parts();\n      {shape}\n    }}\n    color(\"#0ACC38\") {shape}" in text
 
 
+def test_a_negative_part_is_cut_out_of_the_printed_parts() -> None:
+    obj = carrot()
+    holed = obj.model_copy(update={"parts": [obj.parts[0], obj.parts[1].model_copy(update={"negative": True})]})
+    text = compile_scene(scene(holed))
+    assert (
+        "module o1_parts() {\n  difference() {\n    union() {\n"
+        '      color("#F08A24") import("meshes/o1-p1.3mf");\n    }\n'
+        '    import("meshes/o1-p2.3mf");\n  }\n}'
+    ) in text
+
+
 def test_a_custom_op_is_a_module_given_the_geometry_as_children() -> None:
     text = compile_scene(scene(carrot(ops=[Custom(scad="minkowski() { children(); sphere(0.5); }")])))
     assert "module o1_op0() {\nminkowski() { children(); sphere(0.5); }\n}" in text
@@ -867,8 +881,15 @@ def _wrap(obj: SceneObject, index: int, op: Op, inner: list[str]) -> list[str]:
 
 
 def _modules(obj: SceneObject) -> list[str]:
+    solids = [f'color("{p.colour}") import("{p.mesh}");' for p in obj.parts if not p.negative]
+    cuts = [f'import("{p.mesh}");' for p in obj.parts if p.negative]
     out = [f"module {obj.id}_parts() {{"]
-    out += [f'  color("{p.colour}") import("{p.mesh}");' for p in obj.parts]
+    if cuts:
+        # The negative parts cut every printed part, as Bambu Studio cuts them (#2337).
+        out += ["  difference() {", "    union() {", *_indent(_indent(_indent(solids))), "    }"]
+        out += [*_indent(_indent(cuts)), "  }"]
+    else:
+        out += _indent(solids)
     out.append("}")
     for index, op in enumerate(obj.ops):
         if isinstance(op, Custom):
@@ -1103,7 +1124,7 @@ git commit -m "feat(meshmodel): measure a section and the points cuts keep (#214
 - Test: `backend/tests/meshmodel/test_ingest.py`
 
 **Interfaces:**
-- Consumes: `render.objects3mf.ReadObject` (`name`, `count`, `parts: list[ColourPart]`, `notes`), `render.split.ColourPart` (`material_index`, `name`, `colour`, `mesh`, `paint: Paint | None`), `render.split.Paint` (`codes`, `colours`), `render.bambu3mf.CORE_NS`, `MODEL_RELATIONSHIP`, `MODEL_CONTENT_TYPE`, `RELS_CONTENT_TYPE`, `ROOT_MODEL_NAME`, `ZIP_TIMESTAMP`; Task 1's models.
+- Consumes: `render.objects3mf.ReadObject` (`name`, `count`, `parts: list[ColourPart]`, `notes`), `render.split.ColourPart` (`material_index`, `name`, `colour`, `mesh`, `paint: Paint | None`, `negative: bool`, #2337), `render.split.Paint` (`codes`, `colours`), `render.bambu3mf.CORE_NS`, `MODEL_RELATIONSHIP`, `MODEL_CONTENT_TYPE`, `RELS_CONTENT_TYPE`, `ROOT_MODEL_NAME`, `ZIP_TIMESTAMP`; Task 1's models.
 - Produces: `part_mesh_3mf(mesh) -> bytes`, `scene_from_objects(read: list[ReadObject], source: SceneSource, *, gap: float = 5.0) -> tuple[Scene, dict[str, bytes]]` (the scene without `generated_sha256`, and the files by path relative to the model directory).
 
 - [ ] **Step 1: Write the failing tests**
@@ -1188,6 +1209,14 @@ def test_a_painted_part_keeps_its_codes_beside_its_mesh() -> None:
     assert scene.objects[0].parts[0].painted
     assert json.loads(files["meshes/o1-p1.paint.json"])["codes"][-1] == "4"
     assert any("paint" in note for note in scene.notes)
+
+
+def test_a_negative_part_is_kept_as_one() -> None:
+    hole = ColourPart(1, "Negative part", "#F08A24", box(0), negative=True)
+    scene, _ = scene_from_objects(
+        [ReadObject(name="Keychain", count=1, parts=[part(0, "#F08A24", box(0)), hole])], SOURCE
+    )
+    assert [p.negative for p in scene.objects[0].parts] == [False, True]
 
 
 def test_reading_notes_are_kept() -> None:
@@ -1287,7 +1316,15 @@ def scene_from_objects(
             if painted:
                 assert colour_part.paint is not None
                 files[f"{stem}-p{number}.paint.json"] = json.dumps(dataclasses.asdict(colour_part.paint)).encode()
-            parts.append(Part(id=f"p{number}", mesh=path, colour=colour_part.colour.upper(), painted=painted))
+            parts.append(
+                Part(
+                    id=f"p{number}",
+                    mesh=path,
+                    colour=colour_part.colour.upper(),
+                    painted=painted,
+                    negative=colour_part.negative,
+                )
+            )
         if any(p.painted for p in parts):
             notes.append(f"{obj.name}: painted in Bambu Studio; the paint is kept for printing, not yet shown in renders")
         notes += [f"{obj.name}: {note}" for note in obj.notes]
@@ -1954,8 +1991,10 @@ def _cuts(obj: SceneObject) -> list[tuple[Sequence[float], Sequence[float], Lite
 
 
 def object_mesh(obj: SceneObject, mesh_of: MeshOf) -> trimesh.Trimesh:
-    """The object's parts as one mesh in its own frame, before its ops."""
-    return trimesh.util.concatenate([mesh_of(part.mesh) for part in obj.parts])
+    """The object's printed parts as one mesh in its own frame, before its ops (its
+    negative parts print nothing, so a section, a flat face or a drop never counts
+    them)."""
+    return trimesh.util.concatenate([mesh_of(part.mesh) for part in obj.parts if not part.negative])
 
 
 def _matrix(t: Transform) -> tuple[np.ndarray, np.ndarray]:
@@ -2015,7 +2054,8 @@ def _split(scene: Scene, edit: SplitEdit, mesh_of: MeshOf) -> Scene:
         axis = tuple(-x for x in n) if spec.peg_on == "above" else n
         at = (float(section.centroid[0]), float(section.centroid[1]), float(section.centroid[2]))
         # The peg prints with the part the cut goes through most (on the carrot, the green neck).
-        widest = max(obj.parts, key=lambda part: _section_area(obj, mesh_of(part.mesh), point, normal))
+        printed = [part for part in obj.parts if not part.negative]
+        widest = max(printed, key=lambda part: _section_area(obj, mesh_of(part.mesh), point, normal))
         joint = {"at": at, "axis": axis, "diameter": diameter, "depth": spec.depth, "clearance": spec.clearance, "key": spec.key, "colour": widest.colour}
         peg, socket = Joint(role="peg", **joint), Joint(role="socket", **joint)
         if spec.peg_on == "above":
@@ -3777,6 +3817,6 @@ git commit -m "test(meshmodel): open real MakerWorld files, anchor the carrot ne
 
 - **Spec coverage (phases 1–2):** §3 representation → Tasks 1, 3; §3.3 colourless meshes → Task 5 (`test_a_part_file_is_a_colourless_closed_3mf`), Task 9; §4 sources (library, upload, output), cap, provenance, nothing to Bambuddy → Tasks 5, 6, 8; OBJ refused → Task 8 (`test_an_obj_upload_is_refused`); §5 edits, hash check, presets → Tasks 7, 8; §6 kinds on `library`, tools, flows (`tool(name, args)` needs nothing new) → Tasks 8, 10; §10 tests for phases 1–2 → Tasks 1–11; §11 phases 1–2 acceptance → Tasks 8, 9, 11. Deferred, stated in the header: §7, §8, §9, the eval scenario.
 - **Deviation from the spec, stated:** §4 says the library read reuses `library_objects.py`. Its pieces are `piece_mesh` 3MFs with `basematerials`, which §3.3 forbids in a part file, so `mesh_model_create` reuses only its fetch (`LibrarySource.fetch_3mf`), its reader (`read_objects`) and its refusals. Model-level `scene: true` is not written into `model.json`: a model is a mesh model when it has `scene.json`; `model.json` keeps `mesh_source` so the origin survives an eject. `drop_from_presets` drops from saved presets; the model's own `model.json` presets are refused with "edit them first". Beyond the spec, and added to spec §3 and §5 (#2388 and its follow-up): a coloured `add` (`Add.colour`) carves its shape out of the object's other colours and fills it in its own, and never colours a peg; `lay_flat`'s drop to the bed counts pegs and `add` shapes, and `largest_flat` never picks a cut face carrying a peg (otherwise the peg goes into the bed); a peg takes the colour of the part the cut goes through; a jointed cut, a joint's numbers and a jointed half's scale cannot be exposed or (scale) changed (review of #2388: one side would move without the other).
-- **Real files (Task 13):** the fixtures from PR #2389. The two negative-part files (1943, 2154) and the three over 256 MiB inflated (2464, 381, 2602) are refused by `read_objects` today, so Task 13 skips them by the manifest; Arrange cutting negative parts out is its own PR (the reader, not mesh models), and the inflate cap its own issue. When either lands, the manifest's `arrange_reads` changes and Task 13 picks the files up.
+- **Real files (Task 13):** the fixtures from PR #2389. Since #2337 every one reads (a negative part as `ColourPart.negative`, files past the old 256 MiB cap), so Task 13 opens all sixteen; a negative part becomes a `Part(negative=True)`, cut out of the object's printed parts in `<o>_parts()` and left out of every measurement (sections, flats, drops, a peg's colour), so the 1943 ankylosaurs keychain opens with its keyring hole.
 - **Bambuddy from the `library` queue:** `mesh_model_create` fetches a library file from a `library`-queue kind, while #1060 moves Bambuddy calls to the `bambuddy` queue. Kept here because the fetch is a read into the data volume, which only the `library` worker holds; when #1060 splits reads too, this becomes a `bambuddy` prelude kind like `output_delete`'s (review of #2388).
 - **Type consistency:** `compiled(scene) -> tuple[Scene, str]` (Task 8) is used by Task 11's `make.py`; `mesh_of(path) -> trimesh.Trimesh` everywhere; `Exposed(expose, value)` in Tasks 1, 3, 7, 10 (zod `num`).
