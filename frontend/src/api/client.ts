@@ -1337,9 +1337,9 @@ export const api = {
 
   /**
    * #79 — Bambuddy's projects, each with the library folder that belongs to it, plus
-   * the one the last send went to so the picker opens where it was left. ScadBuddy
-   * models no relationship between a model and a project: which prints belong to a
-   * project is on the project's own page.
+   * the one the last send went to. ScadBuddy keeps no project membership: which prints
+   * belong to a project is on the project's own page. What it remembers per model is
+   * only the default the Customize page's picker opens on (#1660).
    */
   getProjects: () => request<ProjectChoices>('/print/projects'),
 
