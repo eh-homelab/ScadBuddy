@@ -55,6 +55,9 @@ class TurnStart:
     turn_id: str
     author: Owner
     images: list[ImageRef] = field(default_factory=list)
+    # workflow.now() as the turn started (ISO 8601), the plugin's events' `at` clock:
+    # a subscriber of a turn carried over by continue-as-new ignores an end before it.
+    started_at: str | None = None
 
 
 @dataclass
@@ -170,6 +173,8 @@ class FollowArgs:
     workflow_id: str
     # The turn sent a prompt: it ends only on an end that follows its `prompt` event.
     prompted: bool = False
+    # TurnStart.started_at: an end published before it is an earlier turn's (#2123).
+    since: str | None = None
 
 
 @dataclass
