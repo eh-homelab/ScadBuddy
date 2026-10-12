@@ -251,7 +251,8 @@ class Part(_Strict):
     #: Painted in Bambu Studio; its codes are ``<mesh stem>.paint.json`` (spec §7).
     painted: bool = False
     #: A Bambu Studio negative part (``ColourPart.negative``, #2337): cut out of the
-    #: object's other parts, never printed, so never measured, coloured or pegged.
+    #: object's other parts and never printed. A split's section has its hole taken out
+    #: (`measure`'s ``holes``); nothing else measures, colours or pegs it.
     negative: bool = False
 
 
@@ -936,7 +937,7 @@ git commit -m "feat(meshmodel): compile a scene to model.scad (#2146)"
 
 **Interfaces:**
 - Consumes: Task 2's `unit`.
-- Produces: `Section(area: float, centroid: np.ndarray, room: float, inside: bool)`, `measure(mesh, point, normal) -> Section | None`, `kept(points, cuts) -> np.ndarray` (rows of `points` on the kept side of every `(point, normal, keep)` in `cuts`), `cut_points(mesh, cuts) -> np.ndarray` (the vertices an object's cuts keep plus each cut's section points the other cuts keep: what the cut mesh's vertices would be).
+- Produces: `Section(area: float, centroid: np.ndarray, room: float, inside: bool)`, `measure(mesh, point, normal, holes=()) -> Section | None` (`holes`: meshes whose sections are taken out, an object's negative parts), `kept(points, cuts) -> np.ndarray` (rows of `points` on the kept side of every `(point, normal, keep)` in `cuts`), `cut_points(mesh, cuts) -> np.ndarray` (the vertices an object's cuts keep plus each cut's section points the other cuts keep: what the cut mesh's vertices would be).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -987,6 +988,23 @@ def test_the_neck_is_measured_where_the_plane_is() -> None:
 
 def test_a_plane_that_misses_measures_nothing() -> None:
     assert measure(neck(), (0, 0, 100), (0, 0, 1)) is None
+
+
+def test_a_hole_is_taken_out_of_the_section() -> None:
+    cylinder = trimesh.creation.cylinder(radius=5, height=10, sections=64)
+    through = trimesh.creation.cylinder(radius=2, height=20, sections=64)
+    holed = measure(cylinder, (0, 0, 0), (0, 0, 1), holes=[through])
+    assert holed is not None
+    polygon = 0.5 * 64 * math.sin(2 * math.pi / 64)
+    assert holed.area == pytest.approx(polygon * (25 - 4), rel=1e-6)
+    assert not holed.inside  # the centre is in the hole: a ring
+    beside = trimesh.creation.cylinder(radius=1, height=20, sections=64)
+    beside.apply_translation((3, 0, 0))
+    offset = measure(cylinder, (0, 0, 0), (0, 0, 1), holes=[beside])
+    assert offset is not None and offset.inside
+    # The hole's edge is a wall: the room is no more than the centre's distance to it
+    # (its 64-gon's edges are within cos(pi/64) of its radius, hence the tolerance).
+    assert offset.room <= float(np.linalg.norm(offset.centroid[:2] - (3, 0))) - 1 + 0.01
 
 
 def test_a_ring_has_its_centroid_outside() -> None:
@@ -1059,13 +1077,27 @@ def _segments(mesh: trimesh.Trimesh, point: np.ndarray, n: np.ndarray) -> tuple[
     return np.where(flip[:, None], end, start), np.where(flip[:, None], start, end)
 
 
-def measure(mesh: trimesh.Trimesh, point: Sequence[float], normal: Sequence[float]) -> Section | None:
+def measure(
+    mesh: trimesh.Trimesh,
+    point: Sequence[float],
+    normal: Sequence[float],
+    holes: Sequence[trimesh.Trimesh] = (),
+) -> Section | None:
+    """``mesh``'s section at the plane, less each of ``holes`` (an object's negative
+    parts). A hole's boundary goes in reversed, so its area and moments subtract, its
+    edge is a wall the room is measured to, and a centre inside it is outside the
+    section (a keyring hole makes a ring). A hole reaching past the mesh's own section
+    subtracts that part too, which only makes the section smaller: a stricter fit."""
     n = unit(normal)
     origin = np.asarray(point, dtype=float)
     found = _segments(mesh, origin, n)
     if found is None:
         return None
     start, end = found
+    for hole in holes:
+        cut = _segments(hole, origin, n)
+        if cut is not None:
+            start, end = np.concatenate([start, cut[1]]), np.concatenate([end, cut[0]])
     u, v = _basis(n)
     a = np.stack([(start - origin) @ u, (start - origin) @ v], axis=1)
     b = np.stack([(end - origin) @ u, (end - origin) @ v], axis=1)
@@ -1217,6 +1249,7 @@ def test_a_negative_part_is_kept_as_one() -> None:
         [ReadObject(name="Keychain", count=1, parts=[part(0, "#F08A24", box(0)), hole])], SOURCE
     )
     assert [p.negative for p in scene.objects[0].parts] == [False, True]
+    assert scene.objects[0].parts[1].colour == "#F08A24"  # upper-cased like any part's
 
 
 def test_reading_notes_are_kept() -> None:
@@ -1653,6 +1686,20 @@ def test_split_refuses_a_plane_that_misses() -> None:
         apply_edits(garden(1), edits(split(z=500)), mesh_of)
 
 
+def test_a_joint_through_a_negative_parts_hole_is_refused_as_a_ring() -> None:
+    """The 1943 keychain's case: a plane through the keyring hole must not put a peg in
+    the hole (review of #2452)."""
+    holed = garden(1).model_copy(update={"objects": [garden(1).objects[0].model_copy(update={"parts": [
+        Part(id="p1", mesh="meshes/o1-p1.3mf", colour="#F08A24"),
+        Part(id="p2", mesh="meshes/o1-p2.3mf", colour="#F08A24", negative=True),
+    ]})]})
+    hole = trimesh.creation.cylinder(radius=1.5, height=40, sections=64)
+    hole.apply_translation((0, 0, 20))
+    meshes = {"meshes/o1-p1.3mf": neck(), "meshes/o1-p2.3mf": hole}
+    with pytest.raises(SceneEditError, match="centre"):
+        apply_edits(holed, edits(split(depth=4)), meshes.__getitem__)
+
+
 def test_joint_refuses_a_centroid_outside_the_section() -> None:
     ring = trimesh.creation.annulus(r_min=4, r_max=5, height=10, sections=64)
     with pytest.raises(SceneEditError, match="centre"):
@@ -1994,7 +2041,10 @@ def object_mesh(obj: SceneObject, mesh_of: MeshOf) -> trimesh.Trimesh:
     """The object's printed parts as one mesh in its own frame, before its ops (its
     negative parts print nothing, so a section, a flat face or a drop never counts
     them)."""
-    return trimesh.util.concatenate([mesh_of(part.mesh) for part in obj.parts if not part.negative])
+    printed = [mesh_of(part.mesh) for part in obj.parts if not part.negative]
+    if not printed:
+        raise SceneEditError(f"{obj.id} has only negative parts, so nothing of it prints")
+    return trimesh.util.concatenate(printed)
 
 
 def _matrix(t: Transform) -> tuple[np.ndarray, np.ndarray]:
@@ -2012,10 +2062,22 @@ def _replace(scene: Scene, index: int, *objects: SceneObject) -> Scene:
     return scene.model_copy(update={"objects": [*scene.objects[:index], *objects, *scene.objects[index + 1 :]]})
 
 
-def _section_area(obj: SceneObject, mesh: trimesh.Trimesh, point: np.ndarray, normal: np.ndarray) -> float:
-    """A part's section at the plane, counted only where the object's earlier cuts keep
-    it: a part cut away above the plane is no part a peg can stand on."""
-    found = measure(mesh, point, normal)
+def _holes(obj: SceneObject, mesh_of: MeshOf) -> list[trimesh.Trimesh]:
+    """The object's negative parts: printed nowhere, but holes in every section."""
+    return [mesh_of(part.mesh) for part in obj.parts if part.negative]
+
+
+def _section_area(
+    obj: SceneObject,
+    mesh: trimesh.Trimesh,
+    point: np.ndarray,
+    normal: np.ndarray,
+    holes: list[trimesh.Trimesh],
+) -> float:
+    """A part's section at the plane, less the object's negative parts, counted only
+    where the object's earlier cuts keep it: a part cut away above the plane is no
+    part a peg can stand on."""
+    found = measure(mesh, point, normal, holes)
     if found is None or not len(kept(found.centroid[None, :], _cuts(obj))):
         return 0.0
     return found.area
@@ -2029,7 +2091,8 @@ def _split(scene: Scene, edit: SplitEdit, mesh_of: MeshOf) -> Scene:
         point, normal = to_object_plane(_floats(t.translate), _floats(t.rotate), _floats(t.scale), edit.point, edit.normal)
     except ValueError as error:
         raise SceneEditError(str(error)) from None
-    section = measure(object_mesh(obj, mesh_of), point, normal)
+    holes = _holes(obj, mesh_of)
+    section = measure(object_mesh(obj, mesh_of), point, normal, holes)
     if section is None:
         raise SceneEditError(f"the plane does not cut {obj.id}")
     p = (float(point[0]), float(point[1]), float(point[2]))
@@ -2055,7 +2118,7 @@ def _split(scene: Scene, edit: SplitEdit, mesh_of: MeshOf) -> Scene:
         at = (float(section.centroid[0]), float(section.centroid[1]), float(section.centroid[2]))
         # The peg prints with the part the cut goes through most (on the carrot, the green neck).
         printed = [part for part in obj.parts if not part.negative]
-        widest = max(printed, key=lambda part: _section_area(obj, mesh_of(part.mesh), point, normal))
+        widest = max(printed, key=lambda part: _section_area(obj, mesh_of(part.mesh), point, normal, holes))
         joint = {"at": at, "axis": axis, "diameter": diameter, "depth": spec.depth, "clearance": spec.clearance, "key": spec.key, "colour": widest.colour}
         peg, socket = Joint(role="peg", **joint), Joint(role="socket", **joint)
         if spec.peg_on == "above":
@@ -3817,6 +3880,6 @@ git commit -m "test(meshmodel): open real MakerWorld files, anchor the carrot ne
 
 - **Spec coverage (phases 1–2):** §3 representation → Tasks 1, 3; §3.3 colourless meshes → Task 5 (`test_a_part_file_is_a_colourless_closed_3mf`), Task 9; §4 sources (library, upload, output), cap, provenance, nothing to Bambuddy → Tasks 5, 6, 8; OBJ refused → Task 8 (`test_an_obj_upload_is_refused`); §5 edits, hash check, presets → Tasks 7, 8; §6 kinds on `library`, tools, flows (`tool(name, args)` needs nothing new) → Tasks 8, 10; §10 tests for phases 1–2 → Tasks 1–11; §11 phases 1–2 acceptance → Tasks 8, 9, 11. Deferred, stated in the header: §7, §8, §9, the eval scenario.
 - **Deviation from the spec, stated:** §4 says the library read reuses `library_objects.py`. Its pieces are `piece_mesh` 3MFs with `basematerials`, which §3.3 forbids in a part file, so `mesh_model_create` reuses only its fetch (`LibrarySource.fetch_3mf`), its reader (`read_objects`) and its refusals. Model-level `scene: true` is not written into `model.json`: a model is a mesh model when it has `scene.json`; `model.json` keeps `mesh_source` so the origin survives an eject. `drop_from_presets` drops from saved presets; the model's own `model.json` presets are refused with "edit them first". Beyond the spec, and added to spec §3 and §5 (#2388 and its follow-up): a coloured `add` (`Add.colour`) carves its shape out of the object's other colours and fills it in its own, and never colours a peg; `lay_flat`'s drop to the bed counts pegs and `add` shapes, and `largest_flat` never picks a cut face carrying a peg (otherwise the peg goes into the bed); a peg takes the colour of the part the cut goes through; a jointed cut, a joint's numbers and a jointed half's scale cannot be exposed or (scale) changed (review of #2388: one side would move without the other).
-- **Real files (Task 13):** the fixtures from PR #2389. Since #2337 every one reads (a negative part as `ColourPart.negative`, files past the old 256 MiB cap), so Task 13 opens all sixteen; a negative part becomes a `Part(negative=True)`, cut out of the object's printed parts in `<o>_parts()` and left out of every measurement (sections, flats, drops, a peg's colour), so the 1943 ankylosaurs keychain opens with its keyring hole.
+- **Real files (Task 13):** the fixtures from PR #2389. Since #2337 every one reads (a negative part as `ColourPart.negative`, files past the old 256 MiB cap), so Task 13 opens all sixteen; a negative part becomes a `Part(negative=True)`, cut out of the object's printed parts in `<o>_parts()`. A split's section has the negative parts' holes taken out (`measure`'s `holes`), so a joint through the 1943 keychain's keyring hole is refused as a ring and a peg is never sized across a hole; flats, the drop to the bed and a peg's colour count only the printed parts.
 - **Bambuddy from the `library` queue:** `mesh_model_create` fetches a library file from a `library`-queue kind, while #1060 moves Bambuddy calls to the `bambuddy` queue. Kept here because the fetch is a read into the data volume, which only the `library` worker holds; when #1060 splits reads too, this becomes a `bambuddy` prelude kind like `output_delete`'s (review of #2388).
 - **Type consistency:** `compiled(scene) -> tuple[Scene, str]` (Task 8) is used by Task 11's `make.py`; `mesh_of(path) -> trimesh.Trimesh` everywhere; `Exposed(expose, value)` in Tasks 1, 3, 7, 10 (zod `num`).
