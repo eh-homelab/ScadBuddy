@@ -362,6 +362,10 @@ describe.skipIf(!chromium)(`@playwright/mcp as configured for a session${chromiu
       expect((await click({ call: 2, turn: 'turn-a' })).refused).toEqual([{ name: 'part.stl', reason: expect.stringMatching(/more than 1 downloads in one turn/) }])
       expect((await click({ call: 1, turn: 'turn-b' })).saved).toHaveLength(1)
       expect(written).toHaveLength(2)
+      // The next turn's call with the same number as the last turn's downloading one
+      // starts its call totals over too (review of #2579).
+      expect((await click({ call: 1, turn: 'turn-c', callMaxCount: 1 })).saved).toHaveLength(1)
+      expect(written).toHaveLength(3)
     }, 90_000)
 
     it('downloads nothing before the harness writes a budget', async () => {

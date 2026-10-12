@@ -920,9 +920,13 @@ const watchDownloads = (page) => {
       writeFileSync(pending, '', { flag: 'wx' })
       const b = budget()
       if (b.turn !== null && tally.turn !== b.turn) {
+        // A new turn numbers its calls from 1 again: its call totals start over too.
         tally.turn = b.turn
         tally.turnCount = 0
         tally.turnBytes = 0
+        tally.call = undefined
+        tally.callCount = 0
+        tally.callBytes = 0
       }
       if (tally.call !== b.call) {
         tally.call = b.call
