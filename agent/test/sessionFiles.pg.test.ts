@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
 import { AuditLog, type AuditRecord } from '../src/audit/log.js'
 import type { Database } from '../src/db.js'
@@ -184,6 +184,24 @@ describe.skipIf(skip !== undefined)(`session files${skip ? ` (skipped: ${skip})`
     expect((await download(id, '..%2F..%2Fetc%2Fpasswd')).status).toBe(400)
     expect((await download(id, '%E0%A4%A')).status).toBe(400)
     expect((await remove(id, '')).status).toBe(400)
+    // Each checked path is refused and audited; an empty one is a missing field, not a path.
+    expect((await rows('workspace_upload')).map((r) => r.outcome)).toEqual(Array(5).fill('refused'))
+    expect((await rows('workspace_delete')).map((r) => r.outcome)).toEqual(['refused'])
+  })
+
+  it("answers a refusal with its own status when its audit row can't be written", async () => {
+    const id = await session()
+    expect((await upload(id, 'a.txt', 'one')).status).toBe(201)
+    const record = vi.spyOn(audit, 'record').mockRejectedValue(new Error('the audit insert failed'))
+    const quiet = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    try {
+      expect((await upload(id, 'a.txt', 'two')).status).toBe(409)
+      expect((await remove(id, 'missing.txt')).status).toBe(404)
+      expect(quiet).toHaveBeenCalledTimes(2)
+    } finally {
+      record.mockRestore()
+      quiet.mockRestore()
+    }
   })
 
   it('needs a file and a path in a multipart body', async () => {

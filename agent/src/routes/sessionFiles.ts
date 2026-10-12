@@ -188,6 +188,15 @@ export function registerSessionFileRoutes(app: Hono, deps: SessionFileRouteDeps)
     )
   }
 
+  /** A refusal's audit row; its own failure is logged, never put in place of the refusal. */
+  async function auditRefused(c: Context, action: string, sessionId: string, summary: string): Promise<void> {
+    try {
+      await audited(c, action, sessionId, 'refused', summary)
+    } catch (err) {
+      console.error(`the ${action} refusal could not be audited: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
   /** The upload's body cap: the per-file cap and the multipart around it, read at each request, after the guard. */
   const uploadLimit: MiddlewareHandler = async (c, next) => {
     const problem = uiRequestProblem(c, deps.origins, deps.remoteAddress, 'session file changes')
@@ -252,13 +261,14 @@ export function registerSessionFileRoutes(app: Hono, deps: SessionFileRouteDeps)
       if (expected !== undefined && (typeof expected !== 'string' || !SHA256.test(expected))) {
         return c.json({ detail: 'expected_sha256: a lowercase hex sha256' }, 400)
       }
-      const name = workspacePath(rawPath)
-      const bytes = new Uint8Array(await file.arrayBuffer())
       // A part with no type of its own arrives as application/octet-stream: the store then guesses.
       const declared = cleanMediaType(file.type)
       const mediaType = declared === 'application/octet-stream' ? undefined : declared
+      let name = rawPath
       let stored: WorkspaceFileInfo
       try {
+        name = workspacePath(rawPath)
+        const bytes = new Uint8Array(await file.arrayBuffer())
         stored = await files.write(ws, name, bytes, {
           ...(mediaType ? { mediaType } : {}),
           source: { kind: 'upload', by: 'browser', ...(file.name ? { filename: file.name.slice(0, 255) } : {}) },
@@ -266,7 +276,7 @@ export function registerSessionFileRoutes(app: Hono, deps: SessionFileRouteDeps)
           expectedSha256: expected ?? null,
         })
       } catch (err) {
-        if (err instanceof WorkspaceError) await audited(c, 'workspace_upload', sessionId, 'refused', `${name}: ${err.code}`)
+        if (err instanceof WorkspaceError) await auditRefused(c, 'workspace_upload', sessionId, `${JSON.stringify(name.slice(0, 200))}: ${err.code}`)
         throw err
       }
       await audited(c, 'workspace_upload', sessionId, 'ok', `${name} (${stored.size} bytes, ${stored.mediaType}, sha256 ${stored.sha256})`)
@@ -293,13 +303,14 @@ export function registerSessionFileRoutes(app: Hono, deps: SessionFileRouteDeps)
       if (expected !== undefined && !SHA256.test(expected)) {
         return c.json({ detail: 'expected_sha256: a lowercase hex sha256' }, 400)
       }
-      const name = workspacePath(filePathOf(c) ?? '')
+      let name = filePathOf(c) ?? ''
       try {
+        name = workspacePath(name)
         if (!(await files.delete(ws, name, expected === undefined ? {} : { expectedSha256: expected }))) {
           throw new WorkspaceError('not_found', `no file ${name} in this session's workspace`)
         }
       } catch (err) {
-        if (err instanceof WorkspaceError) await audited(c, 'workspace_delete', sessionId, 'refused', `${name}: ${err.code}`)
+        if (err instanceof WorkspaceError) await auditRefused(c, 'workspace_delete', sessionId, `${JSON.stringify(name.slice(0, 200))}: ${err.code}`)
         throw err
       }
       await audited(c, 'workspace_delete', sessionId, 'ok', name)
