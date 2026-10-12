@@ -46,6 +46,10 @@ The session id is the one in your `Claude-Session:` trailer (`session_01…`).
 bash .claude/skills/shepherding-prs/shepherd.sh --owner <session-id> --hours 4
 ```
 
+It only acts on PRs authored by the authenticated `gh` user (`--author` to
+override) from branches of the repo itself, and only rewrites that user's own
+claim comments: the marker is plain text anyone can paste.
+
 Run it in the background; its log is the status. Each pass it:
 - enqueues green, reviewed PRs (`gh pr merge --auto`; the merge queue rejects
   `--squash`);

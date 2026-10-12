@@ -9,25 +9,30 @@
 # claim comment on every issue its body closes. A red check or a conflict is logged
 # once per head SHA and never stops the loop: fix it and the next pass picks it up.
 # Stacked PRs (base is another branch) are left to `gh stack submit --auto`.
+# The marker is only text anyone can paste, so a PR is also required to be authored
+# by the authenticated gh user (or --author) and to come from a branch of the repo
+# itself, never a fork: otherwise anyone could get a PR enqueued by copying it.
 set -uo pipefail
-owner="" repo="eh-homelab/ScadBuddy" hours=4 every=180
+owner="" author="" repo="eh-homelab/ScadBuddy" hours=4 every=180
 while [ $# -gt 0 ]; do
   case "$1" in
     --owner) owner=$2; shift 2 ;;
     --repo) repo=$2; shift 2 ;;
+    --author) author=$2; shift 2 ;;
     --hours) hours=$2; shift 2 ;;
     --every) every=$2; shift 2 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 [ -n "$owner" ] || { echo "--owner <session marker id> is required" >&2; exit 2; }
+[ -n "$author" ] || author=$(gh api user -q .login)
 here=$(cd "$(dirname "$0")" && pwd)
 default=$(gh repo view "$repo" --json defaultBranchRef -q .defaultBranchRef.name)
 declare -A tracked noted done_
 end=$(( $(date +%s) + hours * 3600 ))
 while [ "$(date +%s)" -lt "$end" ]; do
-  for pr in $(gh pr list -R "$repo" --state open --limit 100 --json number,body \
-      -q ".[]|select(.body|contains(\"claude-agent-owner: $owner\"))|.number" 2>/dev/null); do
+  for pr in $(gh pr list -R "$repo" --state open --limit 100 --author "$author" --json number,body,isCrossRepository \
+      -q ".[]|select(.isCrossRepository|not)|select(.body|contains(\"claude-agent-owner: $owner\"))|.number" 2>/dev/null); do
     tracked[$pr]=1
   done
   queued=" $(gh api graphql -f query="{repository(owner:\"${repo%/*}\",name:\"${repo#*/}\"){mergeQueue(branch:\"$default\"){entries(first:100){nodes{pullRequest{number}}}}}}" \
@@ -39,7 +44,7 @@ while [ "$(date +%s)" -lt "$end" ]; do
     if [ "$state" = MERGED ]; then
       done_[$pr]=1
       for iss in $(jq -r .body <<<"$j" | grep -oiE '(closes|fixes|resolves) #[0-9]+' | grep -oE '[0-9]+'); do
-        bash "$here/release-claim.sh" --repo "$repo" --owner "$owner" "$pr" "$iss" >/dev/null 2>&1
+        bash "$here/release-claim.sh" --repo "$repo" --owner "$owner" --author "$author" "$pr" "$iss" >/dev/null 2>&1
       done
       echo "$(date +%H:%M) merged #$pr"; continue
     fi
