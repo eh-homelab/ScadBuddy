@@ -53,7 +53,7 @@ from scadbuddy_durable.gate.names import (
     PENDING_INPUT_QUERY,
     RESPOND_UPDATE,
 )
-from scadbuddy_durable.gate.store import ResolveInput
+from scadbuddy_durable.gate.store import OpenInput, ResolveInput
 from scadbuddy_durable.payload_store import OFFLOAD_BYTES, external_storage
 from scadbuddy_durable.secrets import kek_from_base64
 from scadbuddy_durable.session import tools
@@ -715,6 +715,56 @@ async def test_a_stop_survives_a_database_outage_while_it_cancels_a_parked_call(
         assert await settled(connect, sid) == "idle"
     log = await events(agent_db, sid)
     assert [e["code"] for e in log if e["type"] == "error"] == ["interrupted"]
+
+
+class SlowOpen(GateActivities):
+    """open_input writes its row, then its result is slow to reach the workflow."""
+
+    def __init__(self, connect: Connect) -> None:
+        super().__init__(connect)
+        self.written = asyncio.Event()
+        self.release = asyncio.Event()
+
+    @activity.defn(name="open_input")
+    async def open_input(self, args: OpenInput) -> bool:
+        opened = await super().open_input(args)
+        self.written.set()
+        await self.release.wait()
+        return opened
+
+
+async def test_a_respond_as_soon_as_the_row_is_written_is_taken(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """A respond read from ai_pending_input before open_input's result reached the
+    workflow was refused stale (flowSessions.e2e on #2582's CI). It now waits for the
+    open, then resolves the call."""
+    await harness.agent.shutdown()
+    gate = SlowOpen(connect)
+    harness.gate_activities = gate
+    async with harness.restart_agent():
+        sid, handle = await harness.session(agent_db)
+        await send(handle, "print it")
+        await asyncio.wait_for(gate.written.wait(), 60)
+        cur = await agent_db.execute(
+            "SELECT request_id FROM ai_pending_input WHERE session_id = %s", (sid,)
+        )
+        [(request_id,)] = await cur.fetchall()
+        answer = asyncio.create_task(
+            handle.execute_update(
+                RESPOND_UPDATE,
+                _respond({"id": request_id}, {"kind": "approval", "decision": "deny"}),
+            )
+        )
+        await asyncio.sleep(1)
+        # Taken, and waiting for the open: no response was written before the row's open ended.
+        assert not answer.done()
+        gate.release.set()
+        assert await answer == {"kind": "approval", "outcome": "denied"}
+        assert await settled(connect, sid) == "idle"
+    assert harness.stand_in.ran == []
+    resolved = [e for e in await events(agent_db, sid) if e["type"] == "input.resolved"]
+    assert [e["outcome"] for e in resolved] == ["denied"]
 
 
 class Outage(GateActivities):
