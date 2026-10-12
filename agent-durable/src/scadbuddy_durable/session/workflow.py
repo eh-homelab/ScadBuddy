@@ -116,6 +116,11 @@ IMAGES_NOTE = (
 TURN_ENDED = "the turn ended"
 INTERRUPTED = "the turn was interrupted"
 NOBODY_ANSWERED = "nobody answered in time"
+# workflow.patched ids (#2123): each changes the commands of a path an older history
+# may have taken, so that history replays the old way.
+STOPPED_BEFORE_RUN = "stop-before-run-skips-the-turn"
+SETTLE_PARKED = "turn-end-settles-resolving-entries"
+STOP_FIRST = "stop-cancels-the-run-first"
 
 
 def prompt_of(message: Message) -> str:
@@ -171,7 +176,7 @@ class DurableSession:
         # The plugin keeps these objects and reads needs_approval as each call comes:
         # a turn sets it from Settings → Plugins (manifest.apply_overrides, #2088).
         self._tools = {t.name: t for t in manifest.durable_tools(entries)}
-        # This turn's other tools (plugins, http_request, the headless browser; #2320):
+        # This turn's other tools (plugins, http_request; #2320):
         # offered from what turn_tools listed, replaced every turn.
         self._turn_tools: set[str] = set()
         # This turn's plugin packages (#2320), from turn_tools: the segment runner loads them.
@@ -225,7 +230,11 @@ class DurableSession:
                 message, self._message = self._message, None
                 assert message is not None
                 self._turn = TurnStart(
-                    message.turn_id, message.author, list(message.images), message.system_append
+                    message.turn_id,
+                    message.author,
+                    list(message.images),
+                    message.system_append,
+                    started_at=workflow.now().isoformat(),
                 )
                 await self._run_turn(prompt_of(message))
             self._turn = None
@@ -286,12 +295,20 @@ class DurableSession:
             self._agent._tool_approvals = parked
         if prompt is not None and workflow.patched(MEMORY_PATCH):
             prompt += await self._recall(turn_id)
+        if self._interrupted is not None and workflow.patched(STOPPED_BEFORE_RUN):
+            # Stopped before its run began (#2123): a run cancelled before its first
+            # step publishes nothing, not even its prompt, so a subscriber would wait
+            # the whole FOLLOW_DRAIN for an end that never comes. Nothing ran, so
+            # there is nothing to follow, park or cancel.
+            await self._finish(sid, turn_id, "interrupted", None)
+            return
         follow = workflow.start_activity(
             "follow_session",
             FollowArgs(
                 session_id=sid,
                 workflow_id=workflow.info().workflow_id,
                 prompted=prompt is not None,
+                since=self._turn.started_at if self._turn else None,
             ),
             start_to_close_timeout=FOLLOW_TIMEOUT,
             heartbeat_timeout=FOLLOW_HEARTBEAT,
@@ -322,6 +339,8 @@ class DurableSession:
         watcher.cancel()
         reason = self._interrupted or TURN_ENDED
         await self._cancel_parked(reason)
+        if workflow.patched(SETTLE_PARKED):
+            await self._settle_parked(reason)
         for park in self._parks:
             park.cancel()
         self._parks = []
@@ -333,6 +352,11 @@ class DurableSession:
             follow.cancel()
         if workflow.patched(MEMORY_PATCH):
             await self._retain(turn_id)
+        await self._finish(sid, turn_id, outcome, message)
+
+    async def _finish(
+        self, sid: str, turn_id: str, outcome: TurnOutcome, message: str | None
+    ) -> None:
         await workflow.execute_activity(
             "finish_turn",
             FinishTurn(session_id=sid, turn_id=turn_id, outcome=outcome, message=message),
@@ -552,6 +576,17 @@ class DurableSession:
             await self._resolve(parked, "cancelled", SYSTEM, None, reason, timer=not bounded)
         return bool(pending)
 
+    async def _settle_parked(self, reason: str) -> None:
+        """Lets every resolve_input in flight finish before the parks are cancelled (#2123):
+        one whose timer fired is in a park task, and cancelling it there would leave its
+        row pending. One that fails (a respond's bounded attempt) is cancelled after."""
+        while True:
+            await workflow.wait_condition(
+                lambda: all(p.entry.state != "resolving" for p in self._parked.values())
+            )
+            if not await self._cancel_parked(reason):
+                return
+
     # ---- handlers ----
     @workflow.update(name=SEND_MESSAGE_UPDATE)
     async def send_message(self, message: Message) -> SendAnswer:
@@ -632,6 +667,11 @@ class DurableSession:
         if self._task.done():
             return
         self._interrupted = INTERRUPTED
+        if workflow.patched(STOP_FIRST):
+            # The run stops now, even with Postgres down (#2123); the turn's end then
+            # cancels the parked entries with this reason, retrying until it can.
+            self._task.cancel()
+            return
         await self._cancel_parked(INTERRUPTED)
         if self._task is not None:
             self._task.cancel()

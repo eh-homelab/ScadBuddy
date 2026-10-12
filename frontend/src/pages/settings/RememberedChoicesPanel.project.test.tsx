@@ -38,23 +38,30 @@ describe('RememberedChoicesPanel · model projects (#1660)', () => {
     )
   })
 
-  it("names a preset by its name now, the remembered one only when it is gone", async () => {
+  it('names presets from the one remembered read, never a preset list per model', async () => {
+    // The server names each preset by its name now and drops one that is gone, so the
+    // panel needs no `listPresets` per model (#2142 review).
+    const presetReads: string[] = []
     server.use(
       http.get('/api/v1/settings/remembered', () =>
         HttpResponse.json({
           model_projects: {
-            'critter/saved-1': { project_id: 1, preset_name: 'Fish' },
-            'critter/saved-2': { project_id: 1, preset_name: 'Snake' },
+            'critter/saved-1': { project_id: 1, preset_name: 'Big fish' },
+            'gear/template-small': { project_id: 1 },
+            'box/saved-9': { project_id: 1, preset_name: 'Lid' },
           },
         }),
       ),
-      http.get('/api/v1/models/critter/presets', () =>
-        HttpResponse.json([{ id: 'saved-1', name: 'Big fish', params: {}, source: 'saved' }]),
-      ),
+      http.get('/api/v1/models/:slug/presets', ({ params }) => {
+        presetReads.push(String(params['slug']))
+        return HttpResponse.json([])
+      }),
     )
     renderPage(<RememberedChoicesPanel targets={undefined} projects={null} />)
     expect(await screen.findByText('critter · Big fish')).toBeInTheDocument()
-    // Deleted since: the name it was remembered with.
-    expect(screen.getByText('critter · Snake')).toBeInTheDocument()
+    expect(screen.getByText('box · Lid')).toBeInTheDocument()
+    // No name sent: the preset's id.
+    expect(screen.getByText('gear · template-small')).toBeInTheDocument()
+    expect(presetReads).toEqual([])
   })
 })

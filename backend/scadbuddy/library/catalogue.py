@@ -41,6 +41,7 @@ from scadbuddy.core.paths import (
     DataPaths,
     is_builtin,
     model_path,
+    revalidate_dirs,
 )
 from scadbuddy.library.history import (
     GitError,
@@ -636,6 +637,15 @@ class Catalogue:
         #: is made once per commit, not on every record of the template (#1469).
         self._ui_versions: dict[str, tuple[str, str | None]] = {}
 
+    def forget(self, model_ids: list[str] | None = None) -> None:
+        """Drop what is cached about these templates' revisions -- every template's,
+        for None -- because another replica moved them (#2507)."""
+        if model_ids is None:
+            self._ui_versions.clear()
+            return
+        for model_id in model_ids:
+            self._ui_versions.pop(model_id, None)
+
     def notify_change(self, *slugs: str) -> None:
         """Tell :attr:`on_change` about a change made other than through this class
         -- a revision restored straight through the history."""
@@ -758,7 +768,19 @@ class Catalogue:
             return {}
 
     def exists(self, slug: str) -> bool:
-        return self.paths.model_source(slug).is_file()
+        """Whether the template is there. A miss is looked up again once its
+        directories are revalidated: another replica may have just created it, or
+        replaced its source, and this one's NFS client goes on answering from the
+        entries it cached until they expire -- "no model named" for a minute after a
+        create or a save on another replica (#2384). A hit costs nothing extra."""
+        source = self.paths.model_source(slug)
+        if source.is_file():
+            return True
+        # `models/`, then down to the template's own directory, parents first.
+        models = self.paths.models
+        below = [source.parent, *source.parent.parents]
+        revalidate_dirs(*reversed([path for path in below if path.is_relative_to(models)]))
+        return source.is_file()
 
     def _require(self, slug: str) -> None:
         if not self.exists(slug):
@@ -1110,7 +1132,18 @@ class Catalogue:
             # half-written one left behind would hold the slug for good.
             _remove_tree(directory)
             raise
-        self._commit(f"Add {slug}", slug)
+        if self._has_history:
+            assert self.history is not None
+            # Not `_commit`, which logs a failed commit and carries on: a template
+            # with no revision cannot be rendered (409 `snapshot_unavailable`) until it
+            # is saved again, and nothing says so (#2385). Undone and raised instead,
+            # so the create answers as failed and can simply be tried again.
+            try:
+                self.history.commit(f"Add {slug}", slug)
+            except (GitError, OSError):
+                _remove_tree(directory)
+                raise
+        self.notify_change(slug)
         return self.record(slug)
 
     def duplicate(self, upstream_id: str, slug: str, name: str) -> ModelRecord:

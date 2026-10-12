@@ -67,6 +67,52 @@ describe('flow tools (#1057)', () => {
     expect(JSON.parse(seen[0]!.body)).toEqual({ approval_timeout: 'never' })
   })
 
+  it("reads a flow's history and restores a commit as a write (#2503)", async () => {
+    expect(
+      ['list_flow_versions', 'get_flow_version_source', 'diff_flow_version', 'restore_flow_version'].map(
+        (n) => tool(n).risk,
+      ),
+    ).toEqual(['read', 'read', 'read', 'write'])
+    const COMMIT = 'a'.repeat(40)
+    const restored: string[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/workflows/names/swap/versions`, ({ request }) =>
+        HttpResponse.json(
+          [2, 1].map((version) => ({
+            id: DEFINITION,
+            commit: String(version).repeat(40),
+            short: String(version).repeat(7),
+            version,
+            message: 'Register swap',
+            created_by: { kind: 'browser' },
+            created_at: '2026-10-11T00:00:00Z',
+            current: version === 2 && new URL(request.url).searchParams.get('limit') === '500',
+          })),
+        ),
+      ),
+      http.get(`${BACKEND}/api/v1/workflows/names/swap/versions/${COMMIT}/diff`, ({ request }) =>
+        HttpResponse.json({ name: 'swap', base: new URL(request.url).searchParams.get('base'), head: COMMIT, patch: '' }),
+      ),
+      http.post(`${BACKEND}/api/v1/workflows/names/swap/versions/${COMMIT}/restore`, ({ request }) => {
+        restored.push(request.url)
+        return HttpResponse.json({ id: DEFINITION, name: 'swap', version: 3, commit: 'c'.repeat(40), script: 'x' })
+      }),
+    )
+    const listed = firstText(await runTool(tool('list_flow_versions'), { name: 'swap' }, ctx())) as {
+      items: { version: number; current: boolean }[]
+    }
+    expect(listed.items.map((v) => [v.version, v.current])).toEqual([
+      [2, true],
+      [1, false],
+    ])
+    const base = 'b'.repeat(40)
+    const diff = await runTool(tool('diff_flow_version'), { name: 'swap', commit: COMMIT, base }, ctx())
+    expect((firstText(diff) as { base: string }).base).toBe(base)
+    const done = await runTool(tool('restore_flow_version'), { name: 'swap', commit: COMMIT }, ctx())
+    expect((firstText(done) as { version: number }).version).toBe(3)
+    expect(restored).toHaveLength(1)
+  })
+
   it('registers a script and reports its problems', async () => {
     server.use(
       http.post(`${BACKEND}/api/v1/workflows`, () =>
@@ -78,6 +124,15 @@ describe('flow tools (#1057)', () => {
     )
     const result = await runTool(tool('register_flow'), { name: 'swap', script: 'x' }, ctx())
     expect(result.isError).toBe(true)
+  })
+
+  it('lists the reset points as a read (#2350)', async () => {
+    expect(tool('get_flow_reset_points').risk).toBe('read')
+    const RUN = '7a1c2b0e-1d2a-4c3b-9e8f-0a1b2c3d4e5f'
+    const answer = { workflow_run_id: 'w1', as_of_event_id: 40, points: [{ event_id: 12, first_step: 1 }] }
+    server.use(http.get(`${BACKEND}/api/v1/workflow-runs/${RUN}/reset-points`, () => HttpResponse.json(answer)))
+    const result = await runTool(tool('get_flow_reset_points'), { run_id: RUN }, ctx())
+    expect(firstText(result)).toEqual(answer)
   })
 
   it('previews as a read and resets as an outward call with one key', async () => {

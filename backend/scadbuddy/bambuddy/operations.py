@@ -308,8 +308,13 @@ def bambuddy_kinds_over(
             subject: str
             if request.get("library_file_id") is not None:
                 subject = PrintSubject.library(request["library_file_id"]).run_subject
+                # Its slots from the download it uploads (#2550).
                 source = await LibrarySource.load(
-                    client, request["library_file_id"], uploads=uploads, settings=settings
+                    client,
+                    request["library_file_id"],
+                    uploads=uploads,
+                    settings=settings,
+                    read_own=True,
                 )
             else:
                 meta = await require(outputs, request["output_id"])

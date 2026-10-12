@@ -718,12 +718,15 @@ async def test_project_for_an_unknown_job_returns(
 
 async def _make_current(client: Client) -> None:
     """As the worker does: Temporal 1.28 takes the build only once it polls."""
-    assert await make_current_until_polled(
-        lambda: make_current(client, namespace=client.namespace, build_id="test"),
-        build_id="test",
-        backoff=(0.1,),
-        every=0.2,
-        deadline=30,
+    await asyncio.wait_for(
+        make_current_until_polled(
+            lambda: make_current(client, namespace=client.namespace, build_id="test"),
+            build_id="test",
+            backoff=(0.1,),
+            every=0.2,
+            error_after=30,
+        ),
+        30,
     )
 
 

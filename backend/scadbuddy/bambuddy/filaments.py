@@ -47,6 +47,7 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import (
+    FilamentRequirements,
     NozzleInfo,
     Printer,
     SlotChoice,
@@ -705,6 +706,15 @@ async def gather_options(
 Inventory = tuple[list[Spool], list[SpoolAssignment]]
 
 
+def settled[T](result: T | BaseException) -> T:
+    """One result of ``asyncio.gather(..., return_exceptions=True)``, its failure raised.
+    Taking the results in the order the reads once ran in keeps which error a
+    concurrent read surfaces the serial one's (#2504)."""
+    if isinstance(result, BaseException):
+        raise result
+    return result
+
+
 async def read_inventory(client: BambuddyClient) -> Inventory:
     """The spools, then their assignments, in the order every reader reads them."""
     spools = await client.spools()
@@ -720,6 +730,7 @@ async def gather_plate_options(
     fallback_colours: list[str] | None = None,
     own_colours: list[str] | None = None,
     inventory: Inventory | None = None,
+    known: Callable[[int | None], FilamentRequirements] | None = None,
 ) -> list[FilamentOptions]:
     """:func:`gather_options` for several plates of one file, in ``plate_ids`` order.
 
@@ -728,12 +739,14 @@ async def gather_plate_options(
     keep the single-plate order, spools, assignments, the plates, then the printer and
     its inventory-remain, so the same failure surfaces either way: a plate's error beats
     the printer's, and among plates the first failing one in ``plate_ids`` order wins.
-    ``inventory`` is the spools and assignments when the caller has read them already."""
+    ``inventory`` is the spools and assignments when the caller has read them already.
+    ``known`` answers each plate's slots in place of Bambuddy's ``filament-requirements``
+    when they were read from the file itself (#2550)."""
     spools, assignments = inventory if inventory is not None else await read_inventory(client)
 
     answers = await asyncio.gather(
         *(
-            _requirements(client, library_file_id, plate, fallback_colours, own_colours)
+            _requirements(client, library_file_id, plate, fallback_colours, own_colours, known)
             for plate in plate_ids
         ),
         return_exceptions=True,
@@ -769,6 +782,7 @@ async def _requirements(
     plate_id: int | None,
     fallback_colours: list[str] | None,
     own_colours: list[str] | None = None,
+    known: Callable[[int | None], FilamentRequirements] | None = None,
 ) -> list[SlotNeed]:
     """The plate's slots, from Bambuddy, falling back to the output's own colours.
 
@@ -776,7 +790,11 @@ async def _requirements(
     ScadBuddy generated does carry. If it ever does not, the output's colour list is
     the same information in the same order, so the picker still opens.
     """
-    answer = await client.filament_requirements(library_file_id, plate_id=plate_id)
+    answer = (
+        known(plate_id)
+        if known is not None
+        else await client.filament_requirements(library_file_id, plate_id=plate_id)
+    )
     slots = [
         SlotNeed(
             slot_id=filament.slot_id,

@@ -46,3 +46,32 @@ async def test_a_literal_wait_timeout_in_range() -> None:
 async def test_an_oversized_script() -> None:
     problems = await check_script("#" * (MAX_SCRIPT_BYTES + 1))
     assert [p.message for p in problems] == ["script is over 64 KiB"]
+
+
+async def test_tool_still_answers_text_and_tool_result_its_images() -> None:
+    """#2477: `tool()` keeps its `str`; `tool_result()` adds the images, as pointers."""
+    assert (
+        await check_script(
+            _script(
+                "text = await tool('get_model', {'slug': 'box'})",
+                "print(text.upper())",
+                "r = await tool_result('get_render_preview', {'job_id': 'j'})",
+                "first = r['images'][0]",
+                "print(r['text'], first['name'], first['mediaType'], first['bytes'])",
+                "await agent_with_images('What is this?', [], None, r['images'])",
+                "await ask_session_with_images('s', 'And this?', [first])",
+                "return first",
+            )
+        )
+        == []
+    )
+
+
+async def test_an_image_is_a_typed_pointer() -> None:
+    problems = await check_script(
+        _script(
+            "r = await tool_result('get_render_preview', {'job_id': 'j'})",
+            "await agent_with_images('x', [], None, ['not an image'])",
+        )
+    )
+    assert [p.line for p in problems] == [4]

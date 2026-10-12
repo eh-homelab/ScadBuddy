@@ -162,6 +162,26 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(principals.at(-1)).toEqual({})
     })
 
+    it("starts a session with images by reference, given to the model with its first turn (#2477)", async () => {
+      const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4])
+      const OUT = 'a'.repeat(32)
+      const backend = createBackendClient(BACKEND, () =>
+        Promise.resolve(new Response(new Uint8Array(PNG), { headers: { 'content-type': 'image/png' } })),
+      )
+      const { agent, runs } = await setup(undefined, { backend })
+      const a = await agent('write')
+      const started = ok<{ turn: { finished: boolean } }>(
+        await a.call('sessions_start', { prompt: 'what is this?', images: [{ kind: 'output_thumbnail', output_id: OUT }], wait_seconds: 10 }),
+      )
+      expect(started.turn).toMatchObject({ finished: true })
+      const messages: SDKUserMessage[] = []
+      for await (const m of runs[0]!.prompt as AsyncIterable<SDKUserMessage>) messages.push(m)
+      const content = messages[0]!.message.content as { type: string }[]
+      expect(content.map((c) => c.type)).toEqual(['image', 'text'])
+      // Images need the prompt they go with.
+      expect(errorText(await a.call('sessions_start', { images: [{ kind: 'output_thumbnail', output_id: OUT }] }))).toMatch(/images/)
+    })
+
     it('sends images by reference: fetched from the backend, given to the model before the text (#1894)', async () => {
       const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4])
       const OUT = 'a'.repeat(32)
@@ -229,7 +249,11 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const { agent, runs } = await setup(undefined, { attachments: store })
       const a = await agent('write')
       const b = await agent('write')
-      const image = { mediaType: 'image/png' as const, data: PNG, preview: { mediaType: 'image/jpeg' as const, data: JPEG } }
+      const image = {
+        mediaType: 'image/png' as const,
+        bytes: Buffer.from(PNG, 'base64'),
+        preview: { mediaType: 'image/jpeg' as const, bytes: Buffer.from(JPEG, 'base64') },
+      }
       const mine = await store.put(a.owner, image)
       const theirs = await store.put(b.owner, image)
       const browsers = await store.put(BROWSER_USER, image)
@@ -258,7 +282,8 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(content[0]!.source).toMatchObject({ data: PNG })
       const left = (await db.sql`SELECT id FROM ai_attachments`).map((r) => r.id as string).sort()
       expect(left).toEqual([theirs.id, browsers.id].sort())
-      expect(await db.sql`SELECT 1 FROM ai_session_blobs WHERE session_id = ${session.id}`).toHaveLength(1)
+      // The image and its preview (#2479).
+      expect(await db.sql`SELECT 1 FROM ai_session_blobs WHERE session_id = ${session.id}`).toHaveLength(2)
     })
 
     it("takes a new session's mode, and says when the default ran classic (plan 5d)", async () => {

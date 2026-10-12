@@ -9,7 +9,8 @@ import {
   WORKSPACE_MAX_SETTING,
 } from '../workspace/store.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
-import type { SettingsRepo } from './headlessBrowser.js'
+import type { SettingsRepo } from './httpRequest.js'
+import type { SettingsWriter } from './mcpAuthMode.js'
 import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/settings/workspace (#2329): the caps on the assistant's workspace
@@ -25,7 +26,8 @@ import { ready, type RouteModule } from './module.js'
 // of an upload or a read is held in memory once, and a row is one bytea), a
 // workspace at most 2 GiB. Guarded and audited like the other AI settings
 // routes (routes/imageSettings.ts): the write passes `uiRequestProblem` and is a
-// `settings` audit row per key, the read passes `uiReadProblem`.
+// `settings` audit row per key, the read passes `uiReadProblem`. Both keys are
+// written in one transaction (#2469), so no reader sees one cap without the other.
 
 export const WORKSPACE_SETTINGS_PATH = '/api/v1/ai/settings/workspace'
 export const MIN_WORKSPACE_BYTES = 1024 * 1024
@@ -35,6 +37,8 @@ export const MAX_WORKSPACE_BYTES = 2 * 1024 * 1024 * 1024
 export type WorkspaceSettingsRouteDeps = {
   /** Undefined when there is no database (spec §9). */
   settings: SettingsRepo | undefined
+  /** Writes both caps at once; undefined when there is no database. */
+  writer: SettingsWriter | undefined
   ready: () => Promise<boolean>
   remoteAddress: RemoteAddress
   origins: OriginPolicy
@@ -83,6 +87,10 @@ export function registerWorkspaceSettingsRoutes(app: Hono, deps: WorkspaceSettin
     if (!deps.settings) return NO_DATABASE
     return (await deps.ready()) ? deps.settings : NOT_READY
   }
+  async function writer(): Promise<SettingsWriter | string> {
+    if (!deps.writer) return NO_DATABASE
+    return (await deps.ready()) ? deps.writer : NOT_READY
+  }
 
   app.get(WORKSPACE_SETTINGS_PATH, async (c) => {
     const problem = uiReadProblem(c, deps.origins, deps.remoteAddress, WHAT)
@@ -99,7 +107,7 @@ export function registerWorkspaceSettingsRoutes(app: Hono, deps: WorkspaceSettin
   app.put(WORKSPACE_SETTINGS_PATH, async (c) => {
     const problem = uiRequestProblem(c, deps.origins, deps.remoteAddress, `changes to ${WHAT}`)
     if (problem) return c.json({ detail: problem }, 403)
-    const settings = await repo()
+    const settings = await writer()
     if (typeof settings === 'string') return c.json({ detail: settings }, 503)
     let body: z.infer<typeof PutBody>
     try {
@@ -112,17 +120,21 @@ export function registerWorkspaceSettingsRoutes(app: Hono, deps: WorkspaceSettin
       return c.json({ detail }, 400)
     }
     const context = { actor: UI_ACTOR, surface: 'http' as const, clientIp: deps.remoteAddress(c) }
-    await settings.set(WORKSPACE_FILE_MAX_SETTING, body.file_max_bytes, context)
-    await settings.set(WORKSPACE_MAX_SETTING, body.workspace_max_bytes, context)
+    await settings.setMany(
+      { [WORKSPACE_FILE_MAX_SETTING]: body.file_max_bytes, [WORKSPACE_MAX_SETTING]: body.workspace_max_bytes },
+      undefined,
+      context,
+    )
     return c.json(workspaceSettings(body.file_max_bytes, body.workspace_max_bytes))
   })
 }
 
-/** The workspace caps. `deps.settings` is declared in routes/headlessBrowser.ts. */
+/** The workspace caps. `deps.settings` is declared in routes/httpRequest.ts, `deps.aiSettings` in routes/mcpAuthMode.ts. */
 export const route: RouteModule = {
   register(app, deps) {
     registerWorkspaceSettingsRoutes(app, {
       settings: deps.settings,
+      writer: deps.database ? deps.aiSettings : undefined,
       ready: ready(deps),
       remoteAddress: deps.remoteAddress,
       origins: deps.origins,

@@ -45,7 +45,7 @@ def test_choices_offer_every_size_the_rack_and_the_last_plate(
     printers_route()
     inventory_routes()
     h2c_presets()
-    respx.get(f"{API}/printers/1/status").mock(
+    status_read = respx.get(f"{API}/printers/1/status").mock(
         return_value=httpx.Response(200, json=recording("printer-status-rack.json"))
     )
     respx.get(f"{API}/archives/").mock(
@@ -53,6 +53,9 @@ def test_choices_offer_every_size_the_rack_and_the_last_plate(
     )
 
     body = client.get(f"/api/v1/print/outputs/{output_id}/choices?printer_id=1").json()
+
+    # #2504: one read, shared by the rack and the filament step.
+    assert status_read.call_count == 1
 
     assert body["nozzle_sizes"] == ["0.2", "0.4", "0.6", "0.8"]
     assert {(n["size"], n["flow"]) for n in body["installed"]} >= {("0.2", "standard")}

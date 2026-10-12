@@ -7,11 +7,6 @@ import type { Principal } from '../auth/principal.js'
 // one; the backend (backend/scadbuddy/core/authorship.py) authors any commit
 // that request makes as "ScadBuddy agent", with the two as git trailers, and
 // the versions API reports them as `agent` (list_versions).
-//
-// Not the agent-actor marker (`X-ScadBuddy-Agent-Session`,
-// harness/headlessBrowser.ts): that one makes the backend refuse outward routes
-// (#349), which is right for the headless browser and wrong for a tool call a
-// human already approved.
 
 export const AUTHOR_HEADER = 'X-ScadBuddy-Agent-Author'
 export const AUTHOR_SESSION_HEADER = 'X-ScadBuddy-Agent-Author-Session'

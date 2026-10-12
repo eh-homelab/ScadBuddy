@@ -172,7 +172,9 @@ Workflow/Dockerfile lint (the `lint` job): actionlint, hadolint with `.hadolint.
 `shellcheck .github/scripts/*.sh models/*/verify.sh`, `lint-verify-labels.sh`,
 `lint-dashboard.sh` (the Grafana dashboard, #988; it needs `KUSTOMIZE` pointing at
 kustomize v5.6.0, which the job downloads and checks by sha256 because ArgoCD's
-repo-server runs that version), and the `.github/scripts/*.test.sh` suites. Every
+repo-server runs that version), `lint-base64-images.sh` (#2479: no image is built as
+base64 in JSON or text outside its allowlisted Messages API boundaries; images move as
+blobs and `{name, mediaType}` pointers), and the `.github/scripts/*.test.sh` suites. Every
 `docker run` in a `verify.sh` must carry
 `--label "scadbuddy-verify=${SCADBUDDY_VERIFY_LABEL:-local}"` (Python:
 `"--label", "scadbuddy-verify=" + os.environ.get("SCADBUDDY_VERIFY_LABEL", "local")`) on
@@ -248,7 +250,7 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   Monty's builtin shadows); `tool(name, args)` takes a manifest tool, or a
   `<server>__<tool>` turn tool (a remote plugin's, `scadbuddy_http__http_request`;
   #2320, behind `patched("flow-turn-tools-2320")`) that the agent's `turn_tool_tier`
-  tiers and names the queue of, as the run's starter, never the headless browser;
+  tiers and names the queue of, as the run's starter;
   `flow_activities.py`, `flow_models.py`,
   `projects_worker.py`, on the `projects` queue
   (`SCADBUDDY_TEMPORAL_TASK_QUEUE_PROJECTS`), unversioned: a change must replay
@@ -342,6 +344,13 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   (`library/output_prints.py`), laid over an older `meta.json`'s. A kind may name a
   `prelude`, another kind run first on its own queue: `output_delete` (library) names
   `output_inbox_delete` (bambuddy).
+- `backend/scadbuddy/core/gitrepo.py` — `GitRepo`, the hermetic git core (#2503) under
+  model history (`library/history.py` `ModelHistory`) and flow scripts
+  (`flows/repository.py` `FlowHistory`: `data/flows/<name>/flow.py`, one commit per
+  version; `flows/backfill.py` is the start-time backfill and reconciler;
+  `flows/history.py` is the Reset preview, not git). Both repositories are shared by
+  every replica over NFS, so each writer holds a Postgres lock that carries the last HEAD
+  (`library/repo_lock.py`: `models_repo_head`, and `flows_coordinator`'s `flows_repo_head`).
 - `backend/scadbuddy/library/` — catalogue, outputs, git-backed model history
   (`history.py`), fonts (`fonts.py`, `googlefonts.py`), per-template presets
   (`presets.py`: saved ones in Postgres, the `saved_presets` table (#332), outside git so
@@ -470,8 +479,7 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     run's starter, in no session; a gated call needs the backend's `workflow_run_decisions`
     approval; no browser or answer tools)), a durable turn's other tools (#2320,
     `turnTools.ts`, built by `turnServers.ts` as a classic turn builds them: remote plugins
-    through the forwarder, `http_request`, and `turnBrowser.ts`'s headless browser and
-    its grant tool): `turn_tools` lists them per turn as
+    through the forwarder and `http_request`): `turn_tools` lists them per turn as
     `<server>__<tool>`, `turn_tool_tier` tiers a call from its input before it may park,
     and each call is the worker's `default` activity `turn:<server>__<tool>`, which builds
     the servers again and checks tier, principal and approval as it runs (a `flow-<id>`
@@ -520,9 +528,7 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     `http_request`'s `save_to_workspace` gets the session's from `sessions/manager.ts`.
     Never a file on the pod. Uploads take `workspace_path` + `workspace_sha256` instead of
     inline content (`src/tools/workspaceUploads.ts`: binary streamed by
-    `SessionFiles.chunks` into the multipart route, text decoded as UTF-8); the headless
-    browser's downloads are drained into `downloads/` after each browser call by a
-    `PostToolUse` hook (`src/harness/browserDownloads.ts`).
+    `SessionFiles.chunks` into the multipart route, text decoded as UTF-8).
     The panel's Files (part 3) are `routes/sessionFiles.ts`
     (list, download as an attachment, multipart upload, delete; the session routes'
     guards, writes owner-only, each write a `workspace.file` event) and the caps' route

@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { UI_ACTOR } from '../audit/writes.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
-import type { SettingsRepo } from './headlessBrowser.js'
+import type { SettingsRepo } from './httpRequest.js'
 import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/settings/images: the long edge, in pixels, the assistant panel
@@ -100,7 +100,7 @@ export function registerImageSettingsRoutes(app: Hono, deps: ImageSettingsRouteD
   })
 }
 
-/** The assistant panel's image long edge. `deps.settings` is declared in routes/headlessBrowser.ts. */
+/** The assistant panel's image long edge. `deps.settings` is declared in routes/httpRequest.ts. */
 export const route: RouteModule = {
   register(app, deps) {
     registerImageSettingsRoutes(app, {

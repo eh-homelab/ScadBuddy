@@ -1,12 +1,6 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
 import type { AuditContext } from '../../audit/log.js'
-import {
-  PLAYWRIGHT_MCP_VERSION,
-  PLUGIN_NAME as BROWSER_PLUGIN_NAME,
-  SETTING_HEADLESS_BROWSER,
-  VENDORED_PLUGIN_DIR,
-} from '../../harness/headlessBrowser.js'
 import { OWN_PLUGIN_DIR } from '../../harness/ownPlugin.js'
 import type { PackageFileEntry } from './files.js'
 import { OWN_PLUGIN_NAME, type PackageReview, vetPackage } from './vet.js'
@@ -18,9 +12,6 @@ import { OWN_PLUGIN_NAME, type PackageReview, vetPackage } from './vet.js'
 //
 //   - `scadbuddy`: ScadBuddy's own plugin (harness/ownPlugin.ts, #896), its
 //     skills and subagents. On unless `scadbuddy_plugin_enabled` is stored false.
-//   - `playwright`: the vendored headless browser (harness/headlessBrowser.ts,
-//     #349). Its switch IS the `headless_browser_enabled` setting, off unless
-//     stored true, so this list and Settings → AI headless browser agree.
 
 export const SETTING_OWN_PLUGIN = 'scadbuddy_plugin_enabled'
 
@@ -46,17 +37,6 @@ export const BUILT_INS: readonly BuiltIn[] = [
     enabledByDefault: true,
     installRefusal:
       "ScadBuddy's own plugin is built in: the assistant already loads its skills and subagents, with its tools in-process. There is nothing to install.",
-  },
-  {
-    name: BROWSER_PLUGIN_NAME,
-    dir: VENDORED_PLUGIN_DIR,
-    path: 'agent/plugins/playwright',
-    setting: SETTING_HEADLESS_BROWSER,
-    enabledByDefault: false,
-    installRefusal:
-      'The Playwright plugin is built in as the headless browser, pinned to @playwright/mcp ' +
-      `${PLAYWRIGHT_MCP_VERSION}. Enable it in the plugin list instead of installing it.`,
-    version: PLAYWRIGHT_MCP_VERSION,
   },
 ]
 

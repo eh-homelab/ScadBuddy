@@ -119,6 +119,68 @@ describe.skipIf(!TEMPORAL_CLI)(`the agent-tools worker${TEMPORAL_SKIP}`, () => {
     }
   }, 120_000)
 
+  it("keeps a flow call's image out of the run's history: a pointer crosses, never the bytes (#2477)", async () => {
+    const run = randomUUID()
+    const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='
+    const bytes = Buffer.from(PNG, 'base64')
+    const pic = defineTool({
+      name: 'pic',
+      description: 'an image',
+      input: z.object({}),
+      risk: 'read',
+      routes: [],
+      handler: async () => ({ content: [{ type: 'image' as const, data: PNG, mimeType: 'image/png' }] }),
+    })
+    const kept = new Map<string, Buffer>()
+    const agent = AgentWorker.start({
+      address: env.address,
+      namespace: 'default',
+      activities: toolActivities([pic], {
+        services: services(),
+        sessions: { ownerOf: async () => undefined },
+        flows: {
+          startedBy: async (id) => (id === run ? { kind: 'browser', id: 'browser', label: 'You' } : undefined),
+          approved: async () => false,
+        },
+        flowBlobs: {
+          put: async (subject, images) => void images.forEach((i) => kept.set(`${subject}/${i.name}`, i.bytes)),
+          get: async () => undefined,
+        },
+      }),
+    })
+    const flowWorker = await Worker.create({
+      connection: env.nativeConnection,
+      taskQueue: 'project-workflow-standin',
+      workflowsPath: fileURLToPath(new URL('./support/toolWorkflows.ts', import.meta.url)),
+    })
+    try {
+      await agent.running()
+      const workflowId = `flow-${run}`
+      const answer = (await flowWorker.runUntil(
+        env.client.workflow.execute('callTool', { workflowId, taskQueue: 'project-workflow-standin', args: ['pic', {}, 'call_1'] }),
+      )) as { images: { name: string; bytes: number }[] }
+      const [image] = answer.images
+      expect(image).toMatchObject({ mediaType: 'image/png', bytes: bytes.length })
+      expect(kept.get(`${workflowId}/${image!.name}`)).toEqual(bytes)
+      // No payload of the run's history holds the image: not its bytes, not their base64.
+      const history = await env.client.workflow.getHandle(workflowId).fetchHistory()
+      // Every byte string anywhere in the history, as text: payload data and metadata alike.
+      const found: Buffer[] = []
+      const walk = (value: unknown): void => {
+        if (value instanceof Uint8Array) found.push(Buffer.from(value))
+        else if (Array.isArray(value)) value.forEach(walk)
+        else if (value && typeof value === 'object') Object.values(value).forEach(walk)
+      }
+      walk(history.events)
+      const all = Buffer.concat(found)
+      expect(all.toString('latin1')).toContain(image!.name)
+      expect(all.includes(bytes.subarray(0, 8))).toBe(false)
+      expect(all.toString('latin1')).not.toContain(PNG.slice(0, 24))
+    } finally {
+      await agent.stop()
+    }
+  }, 120_000)
+
   it('keeps trying while Temporal cannot be reached, and stops cleanly', async () => {
     const agent = AgentWorker.start({
       address: '127.0.0.1:1',

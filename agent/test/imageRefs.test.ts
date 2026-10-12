@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { createBackendClient } from '../src/api/backend.js'
-import { IMAGE_DATA_MAX, IMAGES_MAX, PREVIEW_DATA_MAX } from '../src/sessions/images.js'
-import { ImageRefsSchema, NO_PREVIEW, resolveImageRefs } from '../src/tools/imageRefs.js'
+import { IMAGE_BYTES_MAX, IMAGES_MAX, PREVIEW_BYTES_MAX } from '../src/sessions/images.js'
+import { ImageRefsSchema, NO_PREVIEW, resolveImageRefs, resolveSendImages } from '../src/tools/imageRefs.js'
 import { ToolError } from '../src/tools/registry.js'
 import { BACKEND } from './helpers/mcp.js'
 
@@ -53,9 +53,10 @@ describe('image references (#1894)', () => {
     ])
     const images = await resolveImageRefs(refs, client)
     expect(images.map((i) => i.mediaType)).toEqual(['image/png', 'image/png', 'image/jpeg', 'image/png'])
-    expect(images[0]!.data).toBe(PNG.toString('base64'))
-    expect(images[0]!.preview).toEqual({ mediaType: 'image/png', data: PNG.toString('base64') })
-    expect(images[2]!.preview).toEqual({ mediaType: 'image/jpeg', data: JPEG.toString('base64') })
+    // Bytes, never base64 (#2479).
+    expect(images[0]!.bytes.equals(PNG)).toBe(true)
+    expect(images[0]!.preview).toEqual({ mediaType: 'image/png', bytes: PNG })
+    expect(images[2]!.preview).toEqual({ mediaType: 'image/jpeg', bytes: JPEG })
     expect(seen).toHaveLength(4)
 
     const [print] = await resolveImageRefs(ImageRefsSchema.parse([{ kind: 'print_thumbnail', archive_id: 7 }]), client)
@@ -63,7 +64,7 @@ describe('image references (#1894)', () => {
   })
 
   it("previews a view by the backend's own small drawing of it", async () => {
-    const big = padded(PNG, (PREVIEW_DATA_MAX / 4) * 3 + 100)
+    const big = padded(PNG, PREVIEW_BYTES_MAX + 100)
     const { client, seen } = backend({
       [`/api/v1/outputs/${OUT}/views/top.png?size=1024`]: { body: big, type: 'image/png' },
       [`/api/v1/outputs/${OUT}/views/top.png?size=128`]: { body: PNG, type: 'image/png' },
@@ -72,13 +73,13 @@ describe('image references (#1894)', () => {
       ImageRefsSchema.parse([{ kind: 'output_view', output_id: OUT, view: 'top', size: 1024 }]),
       client,
     )
-    expect(image!.data).toBe(big.toString('base64'))
-    expect(image!.preview.data).toBe(PNG.toString('base64'))
+    expect(image!.bytes.equals(big)).toBe(true)
+    expect(image!.preview.bytes.equals(PNG)).toBe(true)
     expect(seen).toEqual([`/api/v1/outputs/${OUT}/views/top.png?size=1024`, `/api/v1/outputs/${OUT}/views/top.png?size=128`])
   })
 
   it('previews a media item by its thumbnail', async () => {
-    const big = padded(JPEG, (PREVIEW_DATA_MAX / 4) * 3 + 100)
+    const big = padded(JPEG, PREVIEW_BYTES_MAX + 100)
     const { client } = backend({
       ['/api/v1/models/keychain/media/photo-1']: { body: big, type: 'image/jpeg' },
       ['/api/v1/models/keychain/media/photo-1/thumbnail']: { body: WEBP, type: 'image/webp' },
@@ -88,11 +89,11 @@ describe('image references (#1894)', () => {
       client,
     )
     expect(image!.mediaType).toBe('image/jpeg')
-    expect(image!.preview).toEqual({ mediaType: 'image/webp', data: WEBP.toString('base64') })
+    expect(image!.preview).toEqual({ mediaType: 'image/webp', bytes: WEBP })
   })
 
   it('gives a large image with no small copy the placeholder preview', async () => {
-    const big = padded(PNG, (PREVIEW_DATA_MAX / 4) * 3 + 100)
+    const big = padded(PNG, PREVIEW_BYTES_MAX + 100)
     const { client } = backend({ [`/api/v1/outputs/${OUT}/thumbnail`]: { body: big, type: 'image/png' } })
     const [image] = await resolveImageRefs(ImageRefsSchema.parse([{ kind: 'output_thumbnail', output_id: OUT }]), client)
     expect(image!.preview).toEqual(NO_PREVIEW)
@@ -112,7 +113,7 @@ describe('image references (#1894)', () => {
   })
 
   it('refuses an image over the per-image cap without reading it whole', async () => {
-    const huge = padded(PNG, (IMAGE_DATA_MAX / 4) * 3 + 3)
+    const huge = padded(PNG, IMAGE_BYTES_MAX + 3)
     const { client } = backend({ [`/api/v1/outputs/${OUT}/thumbnail`]: { body: huge, type: 'image/png' } })
     await expect(
       resolveImageRefs(ImageRefsSchema.parse([{ kind: 'output_thumbnail', output_id: OUT }]), client),
@@ -124,6 +125,21 @@ describe('image references (#1894)', () => {
     await expect(
       resolveImageRefs(ImageRefsSchema.parse([{ kind: 'model_thumbnail', slug: 'nope' }]), client),
     ).rejects.toThrow(/images\[0\].*HTTP 404/)
+  })
+
+  // #2477: a flow hands on an image one of its calls returned, by its name.
+  it("resolves a flow_image from the run's own images, and refuses one outside a flow run", async () => {
+    const { client, seen } = backend({})
+    const name = `${'d'.repeat(64)}.png`
+    const flowImages = { get: async (n: string) => (n === name ? { mediaType: 'image/png' as const, bytes: PNG } : undefined) }
+    const refs = ImageRefsSchema.parse([{ kind: 'flow_image', name }])
+    const { images } = await resolveSendImages(refs, client, undefined, flowImages)
+    expect(images.map((i) => [i.mediaType, i.bytes])).toEqual([['image/png', PNG]])
+    expect(seen).toEqual([])
+    await expect(resolveSendImages(refs, client)).rejects.toThrow(/images\[0\].*only inside a flow run/)
+    const other = ImageRefsSchema.parse([{ kind: 'flow_image', name: `${'e'.repeat(64)}.png` }])
+    await expect(resolveSendImages(other, client, undefined, flowImages)).rejects.toThrow(/images\[0\].*this run has no image/)
+    expect(() => ImageRefsSchema.parse([{ kind: 'flow_image', name: '../etc/passwd' }])).toThrow()
   })
 
   it('takes at most IMAGES_MAX references, and no inline bytes', () => {

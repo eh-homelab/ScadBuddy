@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Markdown } from '../../agent/chat/Markdown'
 import { aiPlugins, type PackageFilesOf, type PackageReview } from '../../api/aiPlugins'
 import { formatBytes } from '../../lib/format'
-import { highlight, languageOf, type TokenKind } from '../../lib/highlight'
+import { highlight, languageOf, TOKEN_CLASS } from '../../lib/highlight'
 import { useAsync } from '../../lib/useAsync'
 import { Button } from '../ui/Button'
 import { Spinner } from '../ui/Spinner'
@@ -105,18 +105,6 @@ function FileBrowser({ review, of }: { review: PackageReview; of: PackageFilesOf
       )}
     </div>
   )
-}
-
-const TOKEN_CLASS: Record<TokenKind, string | undefined> = {
-  plain: undefined,
-  comment: 'text-muted italic',
-  string: 'text-ok',
-  number: 'text-accent',
-  keyword: 'text-accent font-semibold',
-  key: 'text-accent',
-  heading: 'font-semibold',
-  meta: 'text-muted',
-  punct: 'text-muted',
 }
 
 const FRONTMATTER = /^---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/

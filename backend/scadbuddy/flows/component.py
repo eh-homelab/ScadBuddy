@@ -21,9 +21,12 @@ from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import transactional_events
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.core.settings import Settings
+from scadbuddy.flows.definitions import FlowDefinitions
 from scadbuddy.flows.keys import payload_keys
 from scadbuddy.flows.manifest import load_manifest
+from scadbuddy.flows.repository import FlowHistory
 from scadbuddy.flows.store import FlowStore
+from scadbuddy.library.repo_lock import flows_coordinator
 from scadbuddy.workflows.flow_activities import FlowActivities
 from scadbuddy.workflows.flow_routes import FlowRoutes, api_client
 from scadbuddy.workflows.flows_client import connect_flows
@@ -40,6 +43,8 @@ class Flows:
 
     store: FlowStore
     settings: Settings
+    #: The versions: scripts in `data/flows`, indexed in `store` (#2503).
+    definitions: FlowDefinitions
     #: The payload keys, with the KEK; None without one.
     keys: PgPayloadKeys | None
     #: A connection to the database holding the keys (forgetting a run takes its lock).
@@ -75,9 +80,17 @@ def _build(core: Core, components: Components) -> Flows:
         kinds = {name: kind for name, kind in ops.kinds.items() if kind.queue == "projects"}
         return operation_activities(ops.store, core.settings_store, kinds)
 
+    store = FlowStore(core.projection.pool, events=transactional_events(core.events))
+    # Every replica commits to the one repository on the share, as for models (#2385).
+    history = FlowHistory(
+        core.paths.flows,
+        timeout=core.config.git_timeout,
+        coordinator=flows_coordinator(core.settings.database_url),
+    )
     return Flows(
-        store=FlowStore(core.projection.pool, events=transactional_events(core.events)),
+        store=store,
         settings=core.settings,
+        definitions=FlowDefinitions(history, store),
         keys=keys[0] if keys is not None else None,
         connect=keys[1] if keys is not None else None,
         operation_activities=projects_operations,
@@ -92,6 +105,8 @@ def serves_projects(settings: Settings) -> bool:
 @asynccontextmanager
 async def _run(flows: Flows) -> AsyncIterator[None]:
     settings = flows.settings
+    # Before anything serves: the versions Postgres held move into git first (#2503).
+    await flows.definitions.start()
     if flows.keys is None or not settings.temporal_address:
         yield
         return

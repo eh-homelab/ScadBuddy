@@ -15,7 +15,9 @@ import { ToolError, type ToolContext } from './registry.js'
 // bytes: an approval card and the audit row (both the call's input, scrubbed,
 // approvals/service.ts `summariseInput`) show the path and the sha256, never the
 // bytes, and an approval binds to that content, not to whatever the path holds
-// when the call runs. The size is answered in each tool's result.
+// when the call runs. An approval card also shows the file's size, read from the
+// row the sha256 pins (workspace/store.ts `withWorkspaceSize`, #2396), and the
+// size is answered in each tool's result.
 //
 // Binary uploads stream from Postgres (SessionFiles.chunks) into the backend's
 // multipart route; text goes as the route's JSON body, decoded as UTF-8 first
@@ -39,8 +41,8 @@ export const workspaceShaInput = z
 export function fromWorkspace(inline: string): string {
   return (
     ` Give ${inline}, or \`workspace_path\` (with its \`workspace_sha256\`) to send a file from your workspace: ` +
-    'exactly one of the two. Save a file there first with workspace_save, http_request `save_to_workspace`, a ' +
-    'headless-browser download or workspace_write.'
+    'exactly one of the two. Save a file there first with workspace_save, http_request `save_to_workspace` ' +
+    'or workspace_write.'
   )
 }
 
