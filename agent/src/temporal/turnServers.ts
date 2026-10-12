@@ -166,22 +166,19 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
     let shared: TurnPackage[] | undefined
     if (loaded) {
       problems.push(...loaded.problems)
-      servers.push(...localPackageServers(loaded.loaded, problems))
-      // As a remote plugin's: the forwarder URL, which carries its token, is a secret too.
-      forwardedPackages = await deps.packages!.forward(loaded.loaded)
-      problems.push(...forwardedPackages.problems)
-      secrets.push(...forwardedPackages.secrets)
-      for (const plugin of forwardedPackages.plugins) {
-        servers.push({ name: plugin.name, connect: () => connectHttp(plugin.url), tierOf: () => 'outward' })
-      }
+      // A listing shares each package first: one that fails to share (or to be stripped
+      // of its http servers) is not loaded, so its servers are not offered either (#2563).
+      let offered = loaded.loaded
       if (context.listing) {
         shared = []
         const root = deps.packages!.root
+        const failed = new Set<string>()
         for (const pkg of loaded.loaded) {
           if (root === undefined) {
             problems.push(
               `plugin package ${pkg.name} was not loaded: a durable session reads packages from the payload volume, and SCADBUDDY_PAYLOAD_DIR is not set`,
             )
+            failed.add(pkg.name)
             continue
           }
           try {
@@ -196,8 +193,18 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
             shared.push({ ...turnPackage, builtin_tools: turnPackage.builtin_tools.filter((t) => !dark.includes(t)) })
           } catch (err) {
             problems.push(`plugin package ${pkg.name} was not loaded: ${(err as Error).message}`)
+            failed.add(pkg.name)
           }
         }
+        offered = loaded.loaded.filter((pkg) => !failed.has(pkg.name))
+      }
+      servers.push(...localPackageServers(offered, problems))
+      // As a remote plugin's: the forwarder URL, which carries its token, is a secret too.
+      forwardedPackages = await deps.packages!.forward(offered)
+      problems.push(...forwardedPackages.problems)
+      secrets.push(...forwardedPackages.secrets)
+      for (const plugin of forwardedPackages.plugins) {
+        servers.push({ name: plugin.name, connect: () => connectHttp(plugin.url), tierOf: () => 'outward' })
       }
     }
     return {

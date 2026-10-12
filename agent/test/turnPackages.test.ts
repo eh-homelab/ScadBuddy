@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, symlink, utimes, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -8,7 +8,7 @@ import type { LoadedPackage, PackagesForRun } from '../src/plugins/packages/inst
 import { declaresRemoteServers, forwardPackageServers, type PackageServers, withoutRemoteServers } from '../src/plugins/packages/mcp.js'
 import { buildHarnessOptions } from '../src/harness/run.js'
 import { PluginRefusedError } from '../src/harness/plugins.js'
-import { localPackageServers, sharePackage, sharedName } from '../src/temporal/turnPackages.js'
+import { localPackageServers, PACKAGE_COPY_KEPT_MS, sharePackage, sharedName, sweepPackageCopies } from '../src/temporal/turnPackages.js'
 import { turnServers } from '../src/temporal/turnServers.js'
 import { connectHttp } from '../src/temporal/turnTools.js'
 import { startFakeMcp } from './support/fakeMcp.js'
@@ -55,6 +55,35 @@ describe('plugin packages in a durable turn', () => {
     await sharePackage(pkg, root, local)
     expect(await readFile(skill, 'utf8')).toContain('Jot it down.')
     expect(() => sharedName('sha256:../../etc')).toThrow()
+  })
+
+  it('sweeps copies no turn shared for a week, and half-made ones; a share keeps its copy (#2395)', async () => {
+    const pkg = await fakePackage({ mcpServers: { api: { type: 'http', url: 'https://mcp.example.test/' } } })
+    const root = await mkdtemp(path.join(os.tmpdir(), 'turn-share-'))
+    const local = await mkdtemp(path.join(os.tmpdir(), 'turn-local-'))
+    const shared = await sharePackage(pkg, root, local)
+    const week = Date.now() + PACKAGE_COPY_KEPT_MS + 60_000
+    const old = new Date(Date.now() - PACKAGE_COPY_KEPT_MS - 60_000)
+    const stale = 'f'.repeat(64)
+    await mkdir(path.join(root, stale))
+    await mkdir(path.join(root, '.tmp-half'))
+    await mkdir(path.join(root, 'lost+found'))
+    for (const name of [shared.dir, stale, '.tmp-half']) await utimes(path.join(root, name), old, old)
+    // A turn shares it again, as each listing does: it is the one kept.
+    await sharePackage(pkg, root, local)
+    expect((await sweepPackageCopies(root)).sort()).toEqual(['.tmp-half', stale].sort())
+    expect((await readdir(root)).sort()).toEqual([shared.dir, 'lost+found'].sort())
+    // The stripped copy under the pod's own folder is kept the same way, and goes once unused.
+    const [localCopy] = await readdir(local)
+    expect(await sweepPackageCopies(local)).toEqual([])
+    expect(await sweepPackageCopies(local, week)).toEqual([localCopy])
+    expect(await sweepPackageCopies(path.join(root, 'missing'))).toEqual([])
+    // A link on the shared volume is never followed or removed, nor what it points at.
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'turn-outside-'))
+    await writeFile(path.join(outside, 'keep'), 'x')
+    await symlink(outside, path.join(root, 'e'.repeat(64)))
+    expect(await sweepPackageCopies(root, week)).toEqual([shared.dir])
+    expect(await readdir(outside)).toEqual(['keep'])
   })
 
   it('shares a package that declares an http MCP server without it, named by that copy (review of #2334)', async () => {
@@ -161,10 +190,37 @@ describe('plugin packages in a durable turn', () => {
     await listing.release()
     await call.release()
     expect(released).toBe(2)
-    // Without the payload volume nothing can be shared, and the session is told.
+    // Without the payload volume nothing can be shared, and the session is told; nor is a
+    // package that fails to share offered its servers (#2563).
     const unshared = await turnServers({ packages: { load, root: undefined, localRoot: root, forward: none } })({ session: 's', owner: OWNER, signal, listing: true })
     expect(unshared.packages).toEqual([])
     expect(unshared.problems.join('\n')).toContain('SCADBUDDY_PAYLOAD_DIR is not set')
+  })
+
+  it("offers no server of a package that failed to share, on the listing (#2563)", async () => {
+    const pkg = { ...(await fakePackage({ mcpServers: { local: { command: 'node', args: ['s.mjs'] } } })), allowed: true }
+    const load = async (): Promise<PackagesForRun> => ({ paths: [], allowedPaths: [pkg.dir], builtinTools: [], loaded: [pkg], problems: [], release: () => {} })
+    const signal = new AbortController().signal
+    const names = (s: { servers: { name: string }[] }) => s.servers.map((x) => x.name)
+    const good = await mkdtemp(path.join(os.tmpdir(), 'turn-share-'))
+    const listed = await turnServers({ packages: { load, root: good, localRoot: good, forward: none } })({ session: 's', owner: OWNER, signal, listing: true })
+    expect(names(listed)).toEqual(['plugin_notes_local'])
+    // A root that is a file: the copy cannot be made.
+    const file = path.join(good, 'not-a-dir')
+    await writeFile(file, '')
+    for (const root of [file, undefined]) {
+      const failed = await turnServers({ packages: { load, root, localRoot: good, forward: none } })({ session: 's', owner: OWNER, signal, listing: true })
+      expect(failed.packages).toEqual([])
+      expect(names(failed)).toEqual([])
+      expect(failed.problems.join('\n')).toContain('plugin package notes was not loaded')
+    }
+  })
+
+  it('reads a null command as none, as the segment runner does (#2563)', async () => {
+    const pkg = await fakePackage({ mcpServers: { api: { command: null, url: 'https://mcp.example.test/' } } })
+    expect(declaresRemoteServers(pkg.dir)).toBe(true)
+    const copy = await withoutRemoteServers(pkg.dir, pkg.contentHash, await mkdtemp(path.join(os.tmpdir(), 'turn-strip-')))
+    expect(declaresRemoteServers(copy)).toBe(false)
   })
 
   it("refuses a package header or URL a remote plugin's registration would refuse", async () => {
