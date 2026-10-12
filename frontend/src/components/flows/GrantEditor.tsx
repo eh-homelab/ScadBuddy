@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { USER_ONLY } from '../../agent/dom'
 import { api } from '../../api/client'
 import type { BambuddyTargets, FlowGrantRule, FlowGrantSpec, ModelSummary } from '../../api/types'
 import { BOUNDS, type Bound, grantProblems, type HostFn, HOUR, isUnbounded, MAX_GRANT_MS, unboundedText } from '../../lib/grants'
@@ -179,6 +180,9 @@ function Form({ initial, submitLabel, busy, onSubmit, onCancel, outwardTools }: 
 
   return (
     <form
+      // A grant is a person's alone (spec §3.2): the browser bridge acts as the browser
+      // user, so every field and the submit refuse it (`dom.ts` `isUserOnly`).
+      {...USER_ONLY}
       className="flex flex-col gap-3 text-[13px]"
       onSubmit={(event) => {
         event.preventDefault()

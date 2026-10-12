@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
+import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
 import type { FlowDefinition, FlowGrantSpec, FlowRegister, FlowScriptProblem, FlowVersion } from '../api/types'
 import { FlowScript } from '../components/flows/FlowScript'
@@ -113,7 +114,7 @@ export function FlowPage() {
                 <Button variant="primary" onClick={() => void start()} disabled={starting}>
                   {starting ? <Spinner /> : 'Start run'}
                 </Button>
-                <Button onClick={() => setGranting(true)} disabled={starting}>
+                <Button onClick={() => setGranting(true)} disabled={starting} {...USER_ONLY}>
                   Start with a grant…
                 </Button>
                 {!phone && viewed && !viewed.current && (

@@ -1,6 +1,8 @@
-import { fireEvent, screen, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { bridge } from '../agent/bridge'
+import { useGlobalAgentTools } from '../agent/global'
 import { api } from '../api/client'
 import type { FlowHostInterface, FlowScriptProblem } from '../api/types'
 import { flowRequests } from '../mocks/features/flows'
@@ -199,6 +201,27 @@ describe('FlowPage', () => {
       ask_starter_session: true,
       rules: [{ fn: 'arrange', max_calls: 2 }],
     })
+  })
+
+  it('keeps "Start with a grant…" from the browser bridge (#2481)', async () => {
+    function Agent() {
+      useGlobalAgentTools()
+      return null
+    }
+    renderPage(
+      <>
+        <Agent />
+        <Routes>
+          <Route path="/workflows/flows/:id" element={<FlowPage />} />
+        </Routes>
+      </>,
+      { route: '/workflows/flows/def-swap' },
+    )
+    await screen.findByRole('button', { name: 'Start with a grant…' })
+    await waitFor(() => expect(bridge.liveNames()).toContain('click'))
+    const outcome = await bridge.call('click', { role: 'button', name: 'Start with a grant…' })
+    expect(!outcome.ok && outcome.error.code).toBe('refused')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
   it('on a phone, shows the script and a diff read only: no editor, Save or Restore', async () => {

@@ -1,5 +1,9 @@
-import { screen, within } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
+import type { ReactNode } from 'react'
 import { describe, expect, it, vi } from 'vitest'
+import { bridge } from '../../agent/bridge'
+import { isUserOnly } from '../../agent/dom'
+import { useGlobalAgentTools } from '../../agent/global'
 import type { FlowGrantSpec } from '../../api/types'
 import { renderPage } from '../../test/utils'
 import { grantProblems } from '../../lib/grants'
@@ -99,6 +103,36 @@ describe('GrantEditor', () => {
     expect(spec.sessions).toBe(true)
     expect(spec.ask_starter_session).toBe(false)
     expect(Math.abs(new Date(spec.expires_at).getTime() - new Date(initial.expires_at).getTime())).toBeLessThan(60_000)
+  })
+})
+
+function Agent({ children }: { children: ReactNode }) {
+  useGlobalAgentTools()
+  return <>{children}</>
+}
+
+// The browser bridge acts in the person's own tab, so the server sees the browser user:
+// the user-only marker on the whole form is what keeps an agent from writing a grant.
+// The bridge has no key press, so with every field refused there is nothing to submit.
+describe('GrantEditor and the browser bridge', () => {
+  it('refuses every field and the submit, so no grant is filled in or sent by an agent', async () => {
+    const onSubmit = vi.fn()
+    renderPage(
+      <Agent>
+        <GrantEditor submitLabel="Use grant" onSubmit={onSubmit} />
+      </Agent>,
+    )
+    await waitFor(() => expect(bridge.liveNames()).toContain('fill'))
+    const print = await rule('queue_print')
+    expect(isUserOnly(print.closest('form')!)).toBe(true)
+
+    const allow = await bridge.call('click', { role: 'checkbox', name: 'Allow without asking', index: 0 })
+    expect(!allow.ok && allow.error.code).toBe('refused')
+    const expires = await bridge.call('fill', { label: 'Expires', value: '2026-10-13T12:00' })
+    expect(!expires.ok && expires.error.code).toBe('refused')
+    const submit = await bridge.call('click', { role: 'button', name: 'Use grant' })
+    expect(!submit.ok && submit.error.code).toBe('refused')
+    expect(onSubmit).not.toHaveBeenCalled()
   })
 })
 

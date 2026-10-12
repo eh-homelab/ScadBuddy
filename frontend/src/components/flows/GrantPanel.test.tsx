@@ -1,5 +1,8 @@
 import { screen, waitFor, within } from '@testing-library/react'
+import type { ReactNode } from 'react'
 import { describe, expect, it, vi } from 'vitest'
+import { bridge } from '../../agent/bridge'
+import { useGlobalAgentTools } from '../../agent/global'
 import { api } from '../../api/client'
 import type { FlowGrantView } from '../../api/types'
 import { flowRequests } from '../../mocks/features/flows'
@@ -13,6 +16,11 @@ import { GrantPanel } from './GrantPanel'
 async function grantOf(runId: string): Promise<FlowGrantView> {
   const view = await api.getFlowRun(runId)
   return view.grant!
+}
+
+function Agent({ children }: { children: ReactNode }) {
+  useGlobalAgentTools()
+  return <>{children}</>
 }
 
 async function render(runId: string) {
@@ -74,6 +82,32 @@ describe('GrantPanel', () => {
     await waitFor(() => expect(onChange).toHaveBeenCalled())
     expect(flowRequests().map((r) => r.path)).toEqual(['/api/v1/workflow-runs/run-ask/grant/decline'])
     expect((await grantOf('run-ask')).status).toBe('declined')
+  })
+
+  // The browser bridge acts in the person's tab, as the browser user: every grant
+  // decision is user-only, the openers included.
+  it('refuses every grant control to the browser bridge', async () => {
+    for (const [runId, names] of [
+      ['run-ask', ['Approve grant…', 'Decline grant']],
+      ['run-done', ['Revoke grant']],
+    ] as const) {
+      const grant = await grantOf(runId)
+      const onChange = vi.fn()
+      const { unmount } = renderPage(
+        <Agent>
+          <GrantPanel runId={runId} grant={grant} onChange={onChange} />
+        </Agent>,
+      )
+      await waitFor(() => expect(bridge.liveNames()).toContain('click'))
+      for (const name of names) {
+        const outcome = await bridge.call('click', { role: 'button', name })
+        expect(!outcome.ok && outcome.error.code).toBe('refused')
+      }
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+      expect(onChange).not.toHaveBeenCalled()
+      unmount()
+    }
+    expect(flowRequests()).toEqual([])
   })
 
   it('says a rule with no bounds lets anything through', async () => {

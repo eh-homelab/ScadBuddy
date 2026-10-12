@@ -180,7 +180,7 @@ export function GrantPanel({ runId, grant, onChange }: Props) {
           </>
         )}
         {live && (
-          <Button variant="danger" size="sm" onClick={() => setRevoking(true)} disabled={busy}>
+          <Button variant="danger" size="sm" onClick={() => setRevoking(true)} disabled={busy} {...USER_ONLY}>
             Revoke grant
           </Button>
         )}
