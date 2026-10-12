@@ -90,6 +90,19 @@ export const flowTools: Tool[] = [
   }),
 
   defineTool({
+    name: 'check_flow_script',
+    description:
+      'Type-check a flow script as register_flow would, without registering it: no version, no commit. ' +
+      'Answers {problems}, each with its 1-based `line` (null for the whole script) and `message`; empty when ' +
+      'register_flow would accept it.',
+    input: z.object({ script: z.string().min(1).max(65_536) }),
+    risk: 'read',
+    routes: ['POST /api/v1/workflow-script/check'],
+    handler: async (body, { backend }) =>
+      json(await ok(backend.POST('/api/v1/workflow-script/check', { body }), 'check flow script')),
+  }),
+
+  defineTool({
     name: 'list_flows',
     description: 'The registered flows, each at its newest version (no script; get_flow has it).' + PAGED,
     input: z.object({ ...pageInput }),

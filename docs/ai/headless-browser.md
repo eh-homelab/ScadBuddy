@@ -73,6 +73,33 @@ Playwright MCP with `--isolated` gives each MCP session a fresh browser context.
 - **Classic turn**: one Claude Code process per turn, which connects to each plugin once
   and keeps that MCP session for the turn. A page opened by `browser_navigate` is
   still there for the next call in the same turn, and gone in the next turn.
-- **Durable turn**: each turn-tool call is its own activity, which connects to the
-  plugin afresh (`agent/src/temporal/turnTools.ts`, `withClient`), so each call gets
-  a new MCP session. A page opened by one call is not there for the next.
+- **Durable turn**: the session keeps one MCP session per plugin across its calls and
+  its turns (#2581), so a page opened by `browser_navigate` is still there for the
+  next call, and the next turn, as it would be for a person using Playwright MCP from
+  Claude Code.
+
+How a durable session keeps it (`agent/src/temporal/sessionClients.ts`):
+
+- The agent replica that lists a turn's tools holds one connected MCP client per
+  (durable session, plugin, plugin config). The turn's listing and every call use it.
+  It has its own forwarder route, so the route outlives the activity that opened it.
+- Every remote plugin's calls are pinned to that replica's own task queue
+  (`agent-tools.<host>`), the mechanism `http_request` already uses. The next turn is
+  listed on that queue first, so the pin carries over. If that replica does not pick
+  the listing up within 5 s, it is gone: the turn is listed anywhere, and its plugins
+  start new MCP sessions there. The browser state is lost; nothing fails.
+- A client is ended with the session `DELETE` (`terminateSession`), then closed:
+  when the durable session ends (`turn_tools_close`, run on the pinned replica), after
+  10 minutes unused (`CLIENT_IDLE_MS`), when the plugin's config changes or it is
+  disabled or removed, when the replica holds more than 64 (`MAX_KEPT_CLIENTS`, least
+  recently used first), and when the agent stops. A Playwright MCP browser context
+  therefore lives as long as the durable session uses it, and no longer.
+- If the server no longer knows the session (a 404 on its id, after a Playwright MCP
+  restart for example), or the request could not be sent at all, the call never ran:
+  the agent opens a new MCP session and runs it once more. Its result starts with a
+  note that the MCP session was reset, so earlier state (the open page) is gone. Any
+  other broken connection may have run the call, so it is never retried: the call
+  fails, saying the session was reset and the call not retried, and the next call
+  starts a new MCP session.
+- A flow run's calls, and a tier check on a replica that holds no client for the
+  session, use a client for that one use and end it with its `DELETE`.

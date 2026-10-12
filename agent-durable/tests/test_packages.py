@@ -85,6 +85,8 @@ def test_the_runner_loads_only_a_copy_that_hashes_to_its_pin(tmp_path: Path) -> 
             True,
         ),
         ({".mcp.json": {"local": {"command": "node", "args": ["s.js"]}}}, False),
+        # A null command is no command, as plugins/packages/mcp.ts reads it (#2563).
+        ({".mcp.json": {"n": {"command": None, "url": "https://x"}}}, True),
         ({".claude-plugin/plugin.json": {"name": "p"}}, False),
         ({}, False),
     ],

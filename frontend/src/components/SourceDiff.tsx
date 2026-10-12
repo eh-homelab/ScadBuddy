@@ -18,7 +18,19 @@ type Disposable = { dispose(): void }
  * suren-atoyan/monaco-react#647). So the library is told to keep both models, and this
  * component disposes them itself once the library has disposed the editor.
  */
-export function SourceDiff({ original, modified }: { original: string; modified: string }) {
+export function SourceDiff({
+  original,
+  modified,
+  language = OPENSCAD_LANGUAGE_ID,
+  sideBySide = true,
+}: {
+  original: string
+  modified: string
+  /** #2487 — a flow's script is `python`. */
+  language?: string
+  /** Inline (one column) where two would not fit, as on a phone. */
+  sideBySide?: boolean
+}) {
   const models = useRef<Disposable[]>([])
 
   useEffect(
@@ -36,7 +48,7 @@ export function SourceDiff({ original, modified }: { original: string; modified:
       <DiffEditor
         original={original}
         modified={modified}
-        language={OPENSCAD_LANGUAGE_ID}
+        language={language}
         theme={editorTheme()}
         keepCurrentOriginalModel
         keepCurrentModifiedModel
@@ -44,7 +56,7 @@ export function SourceDiff({ original, modified }: { original: string; modified:
           const model = editor.getModel()
           models.current = model ? [model.original, model.modified] : []
         }}
-        options={{ readOnly: true, originalEditable: false, renderSideBySide: true, minimap: { enabled: false } }}
+        options={{ readOnly: true, originalEditable: false, renderSideBySide: sideBySide, minimap: { enabled: false } }}
       />
     </div>
   )

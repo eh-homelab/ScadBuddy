@@ -18,9 +18,14 @@ import 'monaco-editor/editor/contrib/gotoSymbol/browser/goToCommands.js'
 import 'monaco-editor/editor/contrib/gotoSymbol/browser/link/goToDefinitionAtPosition.js'
 import 'monaco-editor/editor/contrib/suggest/browser/suggestController.js'
 
+// #2487 — a flow's script. Registers the id only; the tokenizer is its own small chunk,
+// loaded when a Python model first opens.
+import 'monaco-editor/languages/definitions/python/register.js'
+
 import { registerOpenscad } from './openscadLanguage'
 
 export const OPENSCAD_LANGUAGE_ID = 'openscad'
+export const PYTHON_LANGUAGE_ID = 'python'
 
 /**
  * Monaco is bundled, never fetched from a CDN: `@monaco-editor/react`'s default
