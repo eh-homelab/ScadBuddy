@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, mkdtemp, readdir, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -15,6 +15,7 @@ import {
   drainDownloads,
   MAX_DOWNLOADS_PER_CALL,
   MAX_DOWNLOADS_PER_TURN,
+  turnEndDownloadsHook,
 } from '../src/harness/browserDownloads.js'
 import { NO_DOWNLOADS, TOOL_PREFIX } from '../src/harness/headlessBrowser.js'
 import { runHttpRequest, withDefaults } from '../src/harness/httpRequest.js'
@@ -205,6 +206,47 @@ describe('headless-browser downloads', () => {
     expect(out.hookSpecificOutput.additionalContext).toContain(`downloads/p.stl (model/stl, 7 bytes, sha256 ${'b'.repeat(64)})`)
     expect(out.hookSpecificOutput.additionalContext).toContain('q.zip: not saved, the download failed in the browser')
     expect(await readdir(dir)).toEqual([])
+  })
+
+  it('are drained when the turn ends, waiting a bounded time for one still running (#2397)', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'dl-'))
+    const written: string[] = []
+    const target: DownloadTarget = {
+      ref: { kind: 'session', sessionId: 's' },
+      files: {
+        limits: async () => ({ fileMaxBytes: 1000, workspaceMaxBytes: 5000 }),
+        usage: async () => ({ files: 0, bytes: 0 }),
+        write: async (_ws, p, bytes) => {
+          written.push(p)
+          return { path: p, mediaType: 'model/stl', size: bytes.byteLength, sha256: 'b'.repeat(64), source: null, createdAt: new Date(), updatedAt: new Date() }
+        },
+      },
+    }
+    const signal = new AbortController().signal
+    const hook = turnEndDownloadsHook(dir, target, { waitMs: 5_000 })
+    // Stop has no matcher: it runs whatever tool came last.
+    expect(hook.matcher).toBeUndefined()
+    expect(await hook.hooks[0]!({ hook_event_name: 'PostToolUse', tool_name: `${TOOL_PREFIX}browser_click` } as never, undefined, { signal })).toEqual({})
+    // One running as the turn ends, which ends while the hook waits.
+    const id = randomUUID()
+    await writeFile(path.join(dir, `${id}.pending`), '')
+    setTimeout(() => {
+      void (async () => {
+        await writeFile(path.join(dir, `${id}.bin`), 'solid x')
+        await writeFile(path.join(dir, `${id}.json`), JSON.stringify({ url: 'https://a.example/p.stl', name: 'p.stl', error: null }))
+        await rm(path.join(dir, `${id}.pending`))
+      })()
+    }, 100)
+    expect(await hook.hooks[0]!({ hook_event_name: 'Stop' } as never, undefined, { signal })).toEqual({})
+    expect(written).toEqual(['downloads/p.stl'])
+    expect(await readdir(dir)).toEqual([])
+
+    // One that never ends does not hold the turn past the wait.
+    await writeFile(path.join(dir, `${randomUUID()}.pending`), '')
+    const started = performance.now()
+    await turnEndDownloadsHook(dir, target, { waitMs: 200 }).hooks[0]!({ hook_event_name: 'Stop' } as never, undefined, { signal })
+    expect(performance.now() - started).toBeLessThan(2_000)
+    expect(written).toEqual(['downloads/p.stl'])
   })
 
   it('are held to a budget the harness writes before every browser call: the room left in the workspace', async () => {

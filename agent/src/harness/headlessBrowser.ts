@@ -1043,6 +1043,11 @@ export function serverCommand(options: {
   }
 }
 
+/** Where the request guard saves downloads, under a browser directory (`HeadlessBrowserOptions.dir`). */
+export function browserDownloadsDir(dir: string): string {
+  return path.join(path.resolve(dir), 'downloads')
+}
+
 /**
  * Writes the session's copy of the plugin: the vendored manifest, a `.mcp.json`
  * that starts the pinned server with the session's config, and that config.
@@ -1068,7 +1073,7 @@ export function materializeHeadlessBrowser(options: HeadlessBrowserOptions): Hea
   const configFile = path.join(dir, 'playwright-mcp.json')
   const guardFile = path.join(dir, 'redirect-guard.cjs')
   const approvedFile = path.join(dir, 'approved-origins.json')
-  const downloadsDir = path.join(dir, 'downloads')
+  const downloadsDir = browserDownloadsDir(dir)
   const budgetFile = path.join(dir, 'download-budget.json')
   const spoolDir = path.join(dir, 'spool')
   for (const d of [path.join(pluginDir, '.claude-plugin'), outputDir, home, downloadsDir, spoolDir]) {

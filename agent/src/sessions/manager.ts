@@ -24,7 +24,14 @@ import {
   type HarnessRun,
   runHarness,
 } from '../harness/run.js'
-import { browserTierOf, browserToolsGuide, GRANT_SERVER, SETTING_HEADLESS_BROWSER } from '../harness/headlessBrowser.js'
+import { drainDownloads } from '../harness/browserDownloads.js'
+import {
+  browserDownloadsDir,
+  browserTierOf,
+  browserToolsGuide,
+  GRANT_SERVER,
+  SETTING_HEADLESS_BROWSER,
+} from '../harness/headlessBrowser.js'
 import { headlessGrantServer } from '../harness/headlessGrants.js'
 import {
   HTTP_SERVER,
@@ -1814,6 +1821,14 @@ export class SessionManager {
         // The query has ended, and with it the playwright server and Chromium:
         // its screenshots and profile go now, not when the volume fills.
         if (browserDirs) {
+          // A download that ended after the turn's last drain is kept, also when
+          // the turn ended without its Stop hook (#2397, harness/browserDownloads.ts).
+          await drainDownloads(browserDownloadsDir(sessionBrowserDir(this.deps.paths, id)), {
+            files: this.files,
+            ref: { kind: 'session', sessionId: id },
+          }).catch((err: unknown) =>
+            this.deps.stderr?.(`cannot keep the headless-browser downloads of session ${id}: ${String(err)}\n`),
+          )
           await removeSessionBrowserDirs(this.deps.paths, id).catch((err: unknown) =>
             this.deps.stderr?.(`cannot remove the headless-browser folders of session ${id}: ${String(err)}\n`),
           )

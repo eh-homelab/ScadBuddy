@@ -24,6 +24,14 @@ import { type DownloadBudget, NO_DOWNLOADS, PLAIN_FILE_NAME, TOOL_PREFIX } from 
 // The model is told what landed, as the hook's `additionalContext`, by path,
 // size and sha256 (never the URL: workspace_list shows the source).
 //
+// A download that ends after the turn's last browser call is drained when the
+// turn ends (#2397): a Stop hook (`turnEndDownloadsHook`) waits up to
+// DOWNLOAD_WAIT_MS for any still running, while Chromium still lives, and
+// drains the directory; the session manager drains it once more, without
+// waiting, before it removes the browser directory, for a turn that ended
+// without a Stop (stopped, failed, out of turns). Nothing is told to the model
+// then; workspace_list shows the files.
+//
 // The caps hold WHILE a download happens, not only when it is drained, so no
 // download can fill the pod's disk: before every browser call a PreToolUse hook
 // (`downloadBudgetHook`) writes the call's budget (the per-file cap, the room
@@ -38,7 +46,7 @@ import { type DownloadBudget, NO_DOWNLOADS, PLAIN_FILE_NAME, TOOL_PREFIX } from 
 /** Where downloads land in the workspace. */
 export const DOWNLOADS_PREFIX = 'downloads'
 
-/** How long the hook waits for a download the call started to finish. */
+/** How long the hook waits for a download the call started to finish, and the turn's end for one still running. */
 export const DOWNLOAD_WAIT_MS = 10_000
 
 const ENTRY = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.(bin|json|pending)$/
@@ -291,6 +299,31 @@ export function downloadsHook(
   }
 }
 
+/**
+ * The Stop hook that drains `dir` when the turn ends, waiting up to `waitMs`
+ * for a download still running (#2397): the query, and with it Chromium, ends
+ * right after, so one left running then is lost. Never fails the turn.
+ */
+export function turnEndDownloadsHook(
+  dir: string,
+  target: DownloadTarget,
+  options: { waitMs?: number; onError?: (err: unknown) => void } = {},
+): HookCallbackMatcher {
+  return {
+    hooks: [
+      async (input) => {
+        if (input.hook_event_name !== 'Stop') return {}
+        try {
+          await drainDownloads(dir, target, { waitMs: options.waitMs ?? DOWNLOAD_WAIT_MS })
+        } catch (err) {
+          options.onError?.(err)
+        }
+        return {}
+      },
+    ],
+  }
+}
+
 /** What the model is told after a call that downloaded something; undefined when nothing happened. */
 export function describeDrained(drained: Drained): string | undefined {
   const lines: string[] = []
@@ -298,7 +331,7 @@ export function describeDrained(drained: Drained): string | undefined {
     lines.push(`- ${f.path} (${f.media_type}, ${f.size_bytes} bytes, sha256 ${f.sha256})`)
   }
   for (const r of drained.refused) lines.push(`- ${r.name}: not saved, ${r.reason}`)
-  if (drained.running > 0) lines.push(`- ${drained.running} still downloading; it lands after a later browser call`)
+  if (drained.running > 0) lines.push(`- ${drained.running} still downloading; it lands after a later browser call or when the turn ends`)
   if (lines.length === 0) return undefined
   return (
     'Headless-browser downloads, now in your workspace (workspace_read reads them; an upload tool sends one ' +
