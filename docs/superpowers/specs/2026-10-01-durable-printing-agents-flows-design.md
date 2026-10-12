@@ -820,6 +820,10 @@ mechanism for this is a **Payload Codec**, and with it deletion is crypto-shredd
 
 ### 6.6 Waiting on a person: the tool-call gate
 
+> **Amended** for flow runs and the sessions they drive by
+> `2026-10-11-flow-grants-and-git-design.md` (#2480): run grants, the escalation chain,
+> and one queue per run.
+
 This follows Temporal's
 [human-in-the-loop cookbook](https://docs.temporal.io/ai/cookbook/human-in-the-loop-python):
 the workflow keeps its pending requests in its own state, waits with
@@ -1297,6 +1301,10 @@ happens, and there is no separate request system.
   user (§9).
 
 ### 7.3 Records and API
+
+> **Amended** by `2026-10-11-flow-grants-and-git-design.md` (#2480): flow scripts are
+> versioned in git (`data/flows`), `workflow_definitions` becomes an index, runs record
+> their commit, and runs carry a grant.
 
 - **Tables** (backend migrations, our system of record):
   - `workflow_definitions(id, name, version, script, created_by, created_at)`; versions
