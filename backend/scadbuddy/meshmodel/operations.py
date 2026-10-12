@@ -1,0 +1,336 @@
+"""Mesh models' operations (#2146, spec 2026-10-11 §6): ``mesh_model_create``,
+``scene_edit`` and ``scene_eject``, on the ``library`` queue, whose worker runs in the
+API process with the data volume and the Bambuddy client. The source's bytes arrive by
+claim (an upload) or are read in the run (a library file, an output); a scene edit reads
+the scene under the history's write lock (`Catalogue.update_files`). Every write names
+only the scene's own files (:data:`SCENE_FILE`), never ``model.json`` or ``.git``."""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import io
+import re
+from collections.abc import Callable, Coroutine, Mapping
+from functools import partial, wraps
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+import trimesh
+from fastapi import status
+from pydantic import TypeAdapter
+
+from scadbuddy.api import models as models_api
+from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.print_source import SLICED_TYPE, LibrarySource, printable
+from scadbuddy.core.events import ModelEvent, emit
+from scadbuddy.core.problems import ApiError
+from scadbuddy.library.catalogue import ModelExistsError, ModelMeta, UnsafeModelPathError
+from scadbuddy.library.operations import answered_as_routes
+from scadbuddy.library.presets import ParamPresetUpdate
+from scadbuddy.meshmodel.compile import compile_scene
+from scadbuddy.meshmodel.edits import Edit, MeshOf, SceneEditError, apply_edits, removed_parameters
+from scadbuddy.meshmodel.ingest import scene_from_objects
+from scadbuddy.meshmodel.scene import (
+    SCENE_NAME,
+    Scene,
+    SceneSource,
+    dump_scene,
+    exposed_values,
+    load_scene,
+    text_sha256,
+)
+from scadbuddy.operations.claims import ClaimStore
+from scadbuddy.operations.kinds import KindsBuild, OperationKind, waiting_on_bambuddy
+from scadbuddy.render.bambu3mf import stl_3mf
+from scadbuddy.render.objects3mf import UnreadableObjectsError, check_stl, read_objects
+from scadbuddy.render.read_budget import ReadBudget
+
+if TYPE_CHECKING:
+    from scadbuddy.api.deps import AppState
+    from scadbuddy.core.components import Components, Core
+
+EDITS: TypeAdapter[list[Edit]] = TypeAdapter(list[Edit])
+SOURCE_NAME = "model.scad"
+#: What a mesh model's writes may name: the scene, its compiled source, and the meshes
+#: (each part's, and a painted part's codes beside it, `ingest.py`).
+SCENE_FILE = re.compile(r"(?:scene\.json|model\.scad|meshes/[A-Za-z0-9_-]+\.(?:3mf|paint\.json))")
+HAND_EDITED = (
+    "model.scad was edited by hand since the scene last wrote it; eject the scene "
+    "(scene_eject) to keep editing it as source"
+)
+
+
+def scene_files[V](files: Mapping[str, V]) -> Mapping[str, V]:
+    """``files``, or :class:`UnsafeModelPathError` naming those outside :data:`SCENE_FILE`:
+    `Catalogue.update_files` writes any path inside the model, ``model.json`` included."""
+    stray = sorted(name for name in files if not SCENE_FILE.fullmatch(name))
+    if stray:
+        raise UnsafeModelPathError(", ".join(stray))
+    return files
+
+
+def compiled(scene: Scene) -> tuple[Scene, str]:
+    text = compile_scene(scene)
+    return scene.model_copy(update={"generated_sha256": text_sha256(text)}), text
+
+
+def hand_edited(directory: Path, scene: Scene) -> bool:
+    """Whether ``model.scad`` is no longer what the scene compiled (spec §5): by its
+    hash, never a fresh compile."""
+    source = (directory / SOURCE_NAME).read_text(encoding="utf-8")
+    return text_sha256(source) != scene.generated_sha256
+
+
+def read_scene(directory: Path, slug: str) -> Scene:
+    path = directory / SCENE_NAME
+    if not path.is_file():
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} is not a mesh model (it has no scene)")
+    return load_scene(path.read_text(encoding="utf-8"))
+
+
+def mesh_loader(directory: Path) -> MeshOf:
+    """Each part mesh read once per run."""
+    cache: dict[str, trimesh.Trimesh] = {}
+
+    def mesh_of(path: str) -> trimesh.Trimesh:
+        if path not in cache:
+            data = (directory / path).read_bytes()
+            mesh = trimesh.load(io.BytesIO(data), file_type="3mf", force="mesh")
+            if not isinstance(mesh, trimesh.Trimesh):
+                raise SceneEditError(f"{path} holds no mesh")
+            cache[path] = mesh
+        return cache[path]
+
+    return mesh_of
+
+
+#: A kind's check or run.
+Step = Callable[..., Coroutine[Any, Any, dict[str, Any]]]
+
+
+def _answered(fn: Step) -> Step:
+    """The routes' answers (`answered_as_routes`), and an unreadable file, a refused
+    edit or a stray path as a 422 rather than the operation's unexpected 500."""
+    routed = answered_as_routes(fn)
+
+    @wraps(fn)
+    async def answered(*args: Any) -> dict[str, Any]:
+        try:
+            return await routed(*args)
+        except SceneEditError as error:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+        except UnreadableObjectsError as error:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+        except UnsafeModelPathError as error:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"a mesh model writes only scene.json, model.scad and meshes/, not {error}",
+            ) from None
+
+    return answered
+
+
+def mesh_kinds(state: AppState) -> list[OperationKind]:
+    def _record(record: Any) -> dict[str, Any]:
+        dumped: dict[str, Any] = record.model_dump(mode="json")
+        return dumped
+
+    async def _uploaded(source: dict[str, Any]) -> bytes:
+        try:
+            data = await asyncio.to_thread(ClaimStore(state.paths.claims).get, source["claim"])
+        except LookupError:
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                # Not "send it again": a re-send with the same key replays this answer.
+                "this request's upload is no longer held; upload the file again",
+            ) from None
+        name: str = source["name"]
+        if not name.lower().endswith(".stl"):
+            return data
+
+        def wrapped() -> bytes:
+            # Refused past the triangle budget before trimesh loads it whole.
+            check_stl(io.BytesIO(data), ReadBudget())
+            try:
+                return stl_3mf(data, model_name=Path(name).stem or "model")
+            except ValueError:
+                raise UnreadableObjectsError(f"{name} holds no mesh") from None
+
+        return await asyncio.to_thread(wrapped)
+
+    async def source_bytes(
+        request: dict[str, Any], checked: dict[str, Any]
+    ) -> tuple[bytes, SceneSource]:
+        source = request["source"]
+        if source["kind"] == "upload":
+            data, name = await _uploaded(source), source["name"]
+        elif source["kind"] == "output":
+            found = await state.outputs.model_3mf(source["output_id"])
+            if found is None:
+                raise ApiError(
+                    status.HTTP_404_NOT_FOUND, f"output {source['output_id']!r} has no 3MF"
+                )
+            data, name = found, f"{source['output_id']}.3mf"
+        else:
+            # The check read the file's record; only its bytes are fetched here.
+            filename, kind = checked["filename"], checked["file_type"]
+            library = LibrarySource(
+                file_id=source["file_id"], colours=[], plates=[], filename=filename, file_type=kind
+            )
+            settings = await asyncio.to_thread(state.settings_store.load)
+            async with client_for(settings) as client:
+                payload = await library.fetch_3mf(client)
+            if payload is None:
+                raise ApiError(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    f"{filename} is too large to read, or holds no mesh",
+                )
+            data, name = payload, filename
+        return data, SceneSource(
+            kind=source["kind"],
+            name=name,
+            sha256=hashlib.sha256(data).hexdigest(),
+            file_id=source.get("file_id"),
+            output_id=source.get("output_id"),
+        )
+
+    async def create_check(request: dict[str, Any]) -> dict[str, Any]:
+        models_api._require_new(state.catalogue, request["slug"])
+        source = request["source"]
+        if source["kind"] != "bambuddy_library":
+            return {}
+        settings = await asyncio.to_thread(state.settings_store.load)
+        async with waiting_on_bambuddy(), client_for(settings) as client:
+            file = await client.library_file(source["file_id"])
+        kind = (file.file_type or "").lower()
+        if kind == SLICED_TYPE or not printable(kind):
+            what = "sliced" if kind == SLICED_TYPE else f"a {kind or 'file of unknown type'}"
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"{file.filename} is {what}; only an unsliced 3MF or an STL opens as a mesh model",
+            )
+        return {"filename": file.filename, "file_type": kind}
+
+    async def create_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        data, source = await source_bytes(request, checked)
+        read = await asyncio.to_thread(read_objects, data, ReadBudget())
+        if not read:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, f"{source.name} holds no objects")
+        scene, files = scene_from_objects(read, source)
+        scene, text = compiled(scene)
+        files[SCENE_NAME] = dump_scene(scene).encode()
+        meta = ModelMeta(
+            name=request["name"], description=request.get("description") or "", mesh_source=source
+        )
+        create = partial(
+            state.catalogue.create, request["slug"], text, meta, files=scene_files(files)
+        )
+        try:
+            record = await asyncio.to_thread(create)
+        except ModelExistsError:
+            raise ApiError(
+                status.HTTP_409_CONFLICT, f"a model named {request['slug']!r} already exists"
+            ) from None
+        emit(state.events, ModelEvent(kind="model.created", slug=request["slug"]))
+        return _record(record)
+
+    async def edit_check(request: dict[str, Any]) -> dict[str, Any]:
+        slug = request["slug"]
+        models_api.require_model_exists(state.catalogue, slug)
+        directory = state.paths.model_dir(slug)
+        scene = await asyncio.to_thread(read_scene, directory, slug)
+        if await asyncio.to_thread(hand_edited, directory, scene):
+            raise ApiError(status.HTTP_409_CONFLICT, HAND_EDITED)
+        return {}
+
+    def trim_saved_presets(slug: str) -> None:
+        """Drop from each saved preset the parameters the scene no longer exposes."""
+        kept = exposed_values(read_scene(state.paths.model_dir(slug), slug))
+        for preset in state.presets.saved_presets(slug):
+            if set(preset.params) - set(kept):
+                params = {k: v for k, v in preset.params.items() if k in kept}
+                state.presets.update(slug, preset.id, ParamPresetUpdate(params=params))
+
+    async def edit_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        slug = request["slug"]
+        edits = EDITS.validate_python(request["edits"])
+
+        def compute(directory: Path) -> Mapping[str, bytes | None]:
+            scene = read_scene(directory, slug)
+            if hand_edited(directory, scene):
+                raise ApiError(status.HTTP_409_CONFLICT, HAND_EDITED)
+            after = apply_edits(scene, edits, mesh_loader(directory))
+            removed = removed_parameters(scene, after)
+            if removed:
+                names = ", ".join(removed)
+                own = [
+                    p.name
+                    for p in state.presets.template_presets(slug)
+                    if set(removed) & set(p.params)
+                ]
+                if own:
+                    raise ApiError(
+                        status.HTTP_409_CONFLICT,
+                        f"the model's own presets {', '.join(own)} set {names}; edit them first",
+                    )
+                saved = [
+                    p for p in state.presets.saved_presets(slug) if set(removed) & set(p.params)
+                ]
+                if saved and not request["drop_from_presets"]:
+                    raise ApiError(
+                        status.HTTP_409_CONFLICT,
+                        f"the saved presets {', '.join(p.name for p in saved)} set {names}; "
+                        "send drop_from_presets to remove it from them",
+                    )
+            after, text = compiled(after)
+            return scene_files({SCENE_NAME: dump_scene(after).encode(), SOURCE_NAME: text.encode()})
+
+        update = partial(state.catalogue.update_files, slug, compute, message=request["message"])
+        record = await asyncio.to_thread(update)
+        # After the revision, and on every run whatever it removed: a saved preset naming a
+        # parameter the scene no longer exposes cannot render, so trimming it is always the
+        # repair. That makes a run that died between the commit and this loop (the revision
+        # kept, the presets not trimmed) mended by the next edit (review of #2388).
+        await asyncio.to_thread(trim_saved_presets, slug)
+        models_api.announce_source_change(state.events, slug)
+        return _record(record)
+
+    async def eject_check(request: dict[str, Any]) -> dict[str, Any]:
+        slug = request["slug"]
+        models_api.require_model_exists(state.catalogue, slug)
+        await asyncio.to_thread(read_scene, state.paths.model_dir(slug), slug)
+        return {}
+
+    async def eject_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        slug = request["slug"]
+
+        def drop(directory: Path) -> Mapping[str, bytes | None]:
+            return scene_files({SCENE_NAME: None})
+
+        update = partial(state.catalogue.update_files, slug, drop, message="Eject the scene")
+        record = await asyncio.to_thread(update)
+        models_api.announce_source_change(state.events, slug)
+        return _record(record)
+
+    def kind(name: str, check: Step, run: Step) -> OperationKind:
+        return OperationKind(name, _answered(check), _answered(run), queue="library")
+
+    return [
+        kind("mesh_model_create", create_check, create_run),
+        kind("scene_edit", edit_check, edit_run),
+        kind("scene_eject", eject_check, eject_run),
+    ]
+
+
+def _kinds(core: Core, components: Components) -> list[OperationKind]:
+    from scadbuddy.api.deps import AppState
+
+    if not isinstance(core, AppState):
+        raise TypeError(
+            f"the mesh model kinds need the API's AppState, not a {type(core).__name__}"
+        )
+    return mesh_kinds(core)
+
+
+OPERATION_KINDS: KindsBuild = _kinds
