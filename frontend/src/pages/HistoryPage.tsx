@@ -11,7 +11,7 @@ import { Button } from '../components/ui/Button'
 import { Dialog } from '../components/ui/Dialog'
 import { Spinner } from '../components/ui/Spinner'
 import { editPath, editTargetFor, modelPath, type EditNavigationState } from '../lib/deeplink'
-import { fromOutputs } from '../lib/arrange'
+import { arrangedSources, fromOutputs, savedNote, type Arranged } from '../lib/arrange'
 import { formatBbox, formatValue, timeAgo } from '../lib/format'
 import { plateLabel } from '../lib/plate'
 import { useDisplayUnit } from '../lib/units'
@@ -49,6 +49,8 @@ export function HistoryPage() {
   const [arranging, setArranging] = useState(false)
   /** #902 — the outputs the last Arrange could not re-render, said once it has closed. */
   const [skipped, setSkipped] = useState<string | null>(null)
+  /** #2284 — the last Arrange's result, said by where it was filed: maybe another model. */
+  const [saved, setSaved] = useState<Arranged | null>(null)
   const togglePicked = (id: string) =>
     setPicked((current) => (current.includes(id) ? current.filter((p) => p !== id) : [...current, id]))
 
@@ -113,6 +115,7 @@ export function HistoryPage() {
                 disabled={picked.length === 0}
                 onClick={() => {
                   setSkipped(null)
+                  setSaved(null)
                   setArranging(true)
                 }}
               >
@@ -122,6 +125,19 @@ export function HistoryPage() {
             {skipped && (
               <p role="alert" className="mb-2 text-[13px] text-warn">
                 {skipped}
+              </p>
+            )}
+            {saved && (
+              <p role="status" aria-label="Arranged" className="mb-2 text-[13px] text-ink">
+                {savedNote(saved)}
+                {saved.output.slug !== slug && (
+                  <>
+                    {' '}
+                    <Link to={modelPath(saved.output.slug, 'history')} className="text-accent underline">
+                      Open in History
+                    </Link>
+                  </>
+                )}
               </p>
             )}
             <ul data-testid="outputs" aria-label="Generated outputs" className="space-y-2">
@@ -171,6 +187,7 @@ export function HistoryPage() {
         onClose={() => setArranging(false)}
         onArranged={(arranged) => {
           setSkipped(arranged.skipped ?? null)
+          setSaved(arranged)
           setArranging(false)
           setPicked([])
           outputsState.reload()
@@ -431,7 +448,7 @@ function OutputRow({
         <div className="flex shrink-0 items-center gap-2">
           {arrangedFrom > 0 ? (
             <span className="text-[12px] text-muted">
-              {`Arranged from ${arrangedFrom} ${arrangedFrom === 1 ? 'output' : 'outputs'}`}
+              {`Arranged from ${arrangedSources(output.arranged_from ?? [])}`}
             </span>
           ) : (
             <Button size="sm" onClick={onEdit} aria-label={`Edit ${label}`}>

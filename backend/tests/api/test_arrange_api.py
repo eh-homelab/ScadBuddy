@@ -393,10 +393,36 @@ def test_a_plain_library_file_arranges_beside_an_output(
     assert item.part.colours == ["#FF0000", "#0000FF"]
     assert "#FF0000" in inputs.colours and "#0000FF" in inputs.colours
     assert inputs.provenance[key].library_file_id == 88
-    assert inputs.provenance[key].slug == "demo"
-    assert inputs.sources == [meta.id]
+    # #2284: filing the result under a template does not make the file its.
+    assert inputs.provenance[key].slug == ""
+    assert inputs.sources == [meta.id, "library:88"]
     state: AppState = getattr(app.state, STATE_ATTR)
     assert (state.store.blobs.dir_for(key) / LAYOUT_NAME).is_file()
+
+
+@respx.mock
+def test_a_mixed_arrange_is_filed_under_any_template(
+    client: TestClient, app: FastAPI, tmp_path: Path
+) -> None:
+    """#2284: with a library file in the mix the result may be filed under a template
+    none of its outputs is of, so long as it is one."""
+    configure(client)
+    paths, meta, written = asyncio.run(saved_output(tmp_path))
+    other = copied_output(paths, meta, slug="other", output_id=SECOND)
+    library_file(88, content=two_colour_3mf(tmp_path))
+    arranger = Arranger()
+    app.dependency_overrides[get_render] = lambda: arranger
+    objects = [
+        {"output_id": other.id, "part": written.manifest[0].part, "count": 1},
+        {"library_file_id": 88},
+    ]
+    unknown = client.post("/api/v1/outputs/arrange", json={"objects": objects, "slug": "nope"})
+    assert unknown.status_code == 404, unknown.text
+    named = client.post("/api/v1/outputs/arrange", json={"objects": objects, "slug": "demo"})
+    assert named.status_code == 202, named.text
+    assert named.json()["slug"] == "demo"
+    [inputs] = arranger.inputs
+    assert inputs.sources == [other.id, "library:88"]
 
 
 @respx.mock

@@ -37,6 +37,25 @@ export interface Arranged {
   plates: number
   /** #902 — which outputs could not be re-rendered first, and why: left out of the arrange. */
   skipped?: string
+  /** #2284 — the name of the model whose History the result is filed in. */
+  filedUnder?: string
+}
+
+/** #2284 — where an arrange's result went: "Saved as X in Lemon's history." */
+export function savedNote(arranged: Arranged): string {
+  const model = `${arranged.filedUnder ?? arranged.output.slug}'s history`
+  return arranged.output.name ? `Saved as ${arranged.output.name} in ${model}.` : `Saved in ${model}.`
+}
+
+/** #2284 — an arranged output's `arranged_from` counted, files too: "3 outputs and 1 library file". */
+export function arrangedSources(sources: string[]): string {
+  const files = sources.filter((source) => source.startsWith('library:')).length
+  const outputs = sources.length - files
+  const counted = [
+    ...(outputs > 0 ? [`${outputs} ${outputs === 1 ? 'output' : 'outputs'}`] : []),
+    ...(files > 0 ? [`${files} ${files === 1 ? 'library file' : 'library files'}`] : []),
+  ]
+  return counted.join(' and ')
 }
 
 const ARRANGED = ' (arranged)'

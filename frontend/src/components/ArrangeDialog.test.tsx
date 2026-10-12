@@ -96,6 +96,34 @@ describe('ArrangeDialog: sources of any kind (#1864)', () => {
     expect(await screen.findByLabelText('Copies of wall — Reagan')).toBeVisible()
   })
 
+  it('shows where one template and a library file are filed, and files them under another (#2284)', async () => {
+    const onArranged = vi.fn()
+    const { user } = renderPage(
+      <ArrangeDialog open sources={[...fromOutputs([first]), ...fromFiles([wand])]} onClose={vi.fn()} onArranged={onArranged} />,
+    )
+    expect(await screen.findByLabelText(`Copies of Wand — ${wand.filename}`)).toHaveValue(1)
+    const filing = await screen.findByLabelText('File under')
+    expect(filing).toHaveValue('name-keychain')
+    await waitFor(() => expect(within(filing).getAllByRole('option')).toHaveLength(fixtures.models.length))
+    expect(within(filing).getAllByRole('option')[0]).toHaveTextContent('Name Keychain')
+    await user.selectOptions(filing, 'gridfinity-bin')
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+    expect(lastArrangeRequest()).toMatchObject({ slug: 'gridfinity-bin' })
+    const binName = fixtures.models.find((m) => m.slug === 'gridfinity-bin')!.name
+    expect(onArranged).toHaveBeenCalledWith(
+      expect.objectContaining({
+        filedUnder: binName,
+        output: expect.objectContaining({
+          slug: 'gridfinity-bin',
+          arranged_from: [first.id, `library:${wand.id}`],
+          // The file's objects are no template's, wherever the result is filed.
+          manifest: expect.arrayContaining([expect.objectContaining({ library_file_id: wand.id, slug: '' })]),
+        }),
+      }),
+    )
+  })
+
   it('lists an output once when its library file is added too', async () => {
     renderPage(
       <ArrangeDialog open sources={[...fromOutputs([first]), ...fromFiles([clip])]} onClose={vi.fn()} onArranged={vi.fn()} />,
@@ -138,8 +166,9 @@ describe('ArrangeDialog: sources of any kind (#1864)', () => {
     )
     expect(await screen.findByLabelText(`Copies of Wand — ${wand.filename}`)).toHaveValue(1)
     const filing = await screen.findByLabelText('File under')
+    // #2284 — by name, not slug.
     expect(within(filing).getAllByRole('option').map((o) => o.textContent)).toEqual(
-      fixtures.models.map((m) => m.slug),
+      fixtures.models.map((m) => m.name),
     )
     await user.selectOptions(filing, 'gridfinity-bin')
     await user.click(screen.getByRole('button', { name: 'Arrange' }))
@@ -173,6 +202,7 @@ describe('ArrangeDialog', () => {
     expect(onArranged).toHaveBeenCalledWith({
       output: expect.objectContaining({ arranged_from: [first.id] }),
       plates: 2,
+      filedUnder: 'Name Keychain',
     })
     expect(lastArrangeRequest()).toMatchObject({
       goal: 'by_colour',

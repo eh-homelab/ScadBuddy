@@ -9,7 +9,7 @@ import { PrintPicker } from '../components/PrintPicker'
 import { libraryPrintsPath } from '../components/prints/prints'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
-import { arrangedNote, fromFiles, type Arranged } from '../lib/arrange'
+import { arrangedNote, fromFiles, savedNote, type Arranged } from '../lib/arrange'
 import { modelPath } from '../lib/deeplink'
 import { formatBytes } from '../lib/format'
 import { folderIdOf, folderSegments, libraryPath } from '../lib/libraryPath'
@@ -293,7 +293,8 @@ export function LibraryPage() {
           )}
           {arranged && (
             <p role="status" aria-label="Arranged" className="text-[13px] text-ink">
-              {[arrangedNote(arranged.plates), arranged.skipped].filter(Boolean).join(' ')}{' '}
+              {/* #2284 — names where it went: the Library page is not the model's History. */}
+              {[arrangedNote(arranged.plates), arranged.skipped, savedNote(arranged)].filter(Boolean).join(' ')}{' '}
               <Link to={modelPath(arranged.output.slug, 'history')} className="text-accent underline">
                 Open in History
               </Link>

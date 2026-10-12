@@ -6,7 +6,15 @@ import * as fixtures from '../mocks/fixtures'
 import { resetMockState } from '../mocks/handlers'
 import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
-import { backfillFailures, backfillOutputs, listNames, MAX_REASON_CHARS, runArrange } from './arrange'
+import {
+  arrangedSources,
+  backfillFailures,
+  backfillOutputs,
+  listNames,
+  MAX_REASON_CHARS,
+  runArrange,
+  savedNote,
+} from './arrange'
 import { getRealtime } from './realtime'
 import { followUntil } from './waitForJob'
 import { fakeRealtime } from './realtime.fake'
@@ -297,6 +305,21 @@ describe('backfillFailures (#1007)', () => {
     expect(backfillFailures([{ output: ref, error: 'revision abc is gone.' }])).toBe(
       'Nova could not be re-rendered: revision abc is gone.',
     )
+  })
+})
+
+describe('where an arrange went (#2284)', () => {
+  const output = { ...(fixtures.outputs[0] as Output), slug: 'lemon', name: 'pw-arrange-test' }
+
+  it("names the result and the model it is filed under", () => {
+    expect(savedNote({ output, plates: 1, filedUnder: 'Lemon' })).toBe("Saved as pw-arrange-test in Lemon's history.")
+    expect(savedNote({ output: { ...output, name: null }, plates: 1 })).toBe("Saved in lemon's history.")
+  })
+
+  it('counts every source, library files too', () => {
+    expect(arrangedSources(['a', 'b', 'c', 'library:89'])).toBe('3 outputs and 1 library file')
+    expect(arrangedSources(['a'])).toBe('1 output')
+    expect(arrangedSources(['library:1', 'library:2'])).toBe('2 library files')
   })
 })
 

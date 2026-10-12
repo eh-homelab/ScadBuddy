@@ -2692,7 +2692,8 @@ export const handlers = [
         'a result of library files alone is filed under a template: name one in slug',
       )
     }
-    if (slugs.length > 0 && body.slug != null && !slugs.includes(body.slug)) {
+    // #2284 — with a library file in the mix, any template.
+    if (slugs.length > 0 && library.length === 0 && body.slug != null && !slugs.includes(body.slug)) {
       return problem(
         422,
         'Unprocessable Content',
@@ -2714,7 +2715,8 @@ export const handlers = [
           manifest.push({
             part: entry.part,
             file: entry.name,
-            slug: filed,
+            // #2284 — a library file's objects are no template's, wherever it is filed.
+            slug: '',
             revision: null,
             bbox: { min: [0, 0, 0], max: [x, y, z], size: [x, y, z] },
             footprint: [x, y],
@@ -2750,7 +2752,7 @@ export const handlers = [
     }
     state.jobs.set(jobId, job)
     state.arranged.set(jobId, {
-      sources: chosen,
+      sources: [...chosen, ...new Set(library.map((o) => `library:${o.library_file_id}`))],
       manifest,
     })
     return HttpResponse.json(job, { status: 202 })

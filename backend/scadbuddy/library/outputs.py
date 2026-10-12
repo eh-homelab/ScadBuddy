@@ -436,7 +436,8 @@ class OutputStore:
         ]
 
     def arranged_from(self, output_id: str) -> list[str]:
-        """For an arranged output, the outputs its objects came from."""
+        """For an arranged output, the outputs its objects came from, and each library
+        file ScadBuddy did not make as `library:<id>` (#2284)."""
         try:
             path = self.directory(output_id) / ARRANGED_NAME
         except OutputNotFoundError:
