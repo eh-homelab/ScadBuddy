@@ -2267,23 +2267,54 @@ class Catalogue:
         ``compute`` reads the directory and answers each path (relative to it) to write,
         or None to remove. Both run under the history's write lock
         (:meth:`_commit_change`), so no other edit lands between the read and the write.
-        ``compute`` raising, or naming a path outside the model
-        (:class:`UnsafeModelPathError`), writes nothing. The cached schema is dropped,
+        ``compute`` raising, naming a path outside the model
+        (:class:`UnsafeModelPathError`), a write failing part way or a commit failing
+        leaves every file as it was. The cached schema is dropped,
         as a source edit drops it."""
         self._require(slug)
         directory = self.paths.model_dir(slug)
 
-        def change() -> None:
-            writes = {_inside(directory, name): data for name, data in compute(directory).items()}
-            for path, data in writes.items():
-                if data is None:
+        # What each path held before this run touched it (None: absent), for those
+        # already written: what `undo` puts back, as `write_file`'s does.
+        applied: dict[Path, bytes | None] = {}
+
+        def undo() -> None:
+            for path, previous in reversed(list(applied.items())):
+                if previous is None:
                     path.unlink(missing_ok=True)
                 else:
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    write_atomic(path, data)
+                    write_atomic(path, previous)
+            applied.clear()
+
+        def change() -> None:
+            applied.clear()
+            writes = {_inside(directory, name): data for name, data in compute(directory).items()}
+            try:
+                for path, data in writes.items():
+                    previous = path.read_bytes() if path.is_file() else None
+                    if data is None:
+                        path.unlink(missing_ok=True)
+                    else:
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        write_atomic(path, data)
+                    applied[path] = previous
+            except BaseException:
+                undo()
+                raise
             self.paths.model_schema_cache(slug).unlink(missing_ok=True)
 
-        self._commit_change(message, change, slug)
+        history = self.history
+        if history is None or not history.available:
+            change()
+            self.notify_change(slug)
+            return self.record(slug)
+        # A commit that fails undoes the files and raises, as `write_file`'s based
+        # write does, so no half-applied state waits for the next commit to sweep it.
+        try:
+            history.commit(message, slug, prepare=change, rollback=undo)
+        finally:
+            if applied:
+                self.notify_change(slug)
         return self.record(slug)
 
     # ── upstream (#157) ───────────────────────────────────────────────────────

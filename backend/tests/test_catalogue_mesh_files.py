@@ -9,7 +9,7 @@ import pytest
 
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.catalogue import Catalogue, ModelMeta, UnsafeModelPathError
-from scadbuddy.library.history import ModelHistory
+from scadbuddy.library.history import GitError, ModelHistory
 from scadbuddy.meshmodel.scene import SceneSource
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.support.media import MemoryMediaStore
@@ -93,3 +93,41 @@ def test_update_files_refuses_a_path_outside_the_model(catalogue: Catalogue) -> 
     catalogue.create("carrot", "a\n", ModelMeta(name="Carrot"))
     with pytest.raises(UnsafeModelPathError):
         catalogue.update_files("carrot", lambda _d: {"../x": b"1"}, message="no")
+
+
+def test_update_files_restores_earlier_writes_when_a_later_one_fails(catalogue: Catalogue) -> None:
+    catalogue.create("carrot", "a\n", ModelMeta(name="Carrot"), files={"one.txt": b"old"})
+    directory = catalogue.paths.model_dir("carrot")
+    (directory / "blocked").mkdir()
+    (directory / "blocked" / "keep").write_bytes(b"x")
+    before = _log(catalogue)
+
+    def compute(_d: Path) -> dict[str, bytes | None]:
+        return {"one.txt": b"new", "fresh.txt": b"f", "blocked": b"boom"}
+
+    with pytest.raises(OSError):
+        catalogue.update_files("carrot", compute, message="never")
+    assert (directory / "one.txt").read_bytes() == b"old"
+    assert not (directory / "fresh.txt").exists()
+    assert _log(catalogue) == before
+
+
+def test_update_files_restores_the_files_when_the_commit_fails(
+    catalogue: Catalogue, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalogue.create("carrot", "a\n", ModelMeta(name="Carrot"), files={"one.txt": b"old"})
+    assert catalogue.history is not None
+    directory = catalogue.paths.model_dir("carrot")
+    before = _log(catalogue)
+
+    def fail(*_args: object, **_kwargs: object) -> str:
+        raise GitError("boom")
+
+    monkeypatch.setattr(catalogue.history, "_commit_locked", fail)
+    with pytest.raises(GitError):
+        catalogue.update_files(
+            "carrot", lambda _d: {"one.txt": b"new", "fresh.txt": b"f"}, message="x"
+        )
+    assert (directory / "one.txt").read_bytes() == b"old"
+    assert not (directory / "fresh.txt").exists()
+    assert _log(catalogue) == before
