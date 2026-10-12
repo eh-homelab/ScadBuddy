@@ -54,7 +54,7 @@ from scadbuddy.store.factory import StoreBundle
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.worker import (
     MAKE_CURRENT_BACKOFF,
-    MAKE_CURRENT_DEADLINE,
+    MAKE_CURRENT_ERROR_AFTER,
     MAKE_CURRENT_EVERY,
     _drain,
     _on_signal,
@@ -394,12 +394,15 @@ async def test_drained_sees_a_running_pinned_workflow() -> None:
         ),
     ):
         # As the worker does: Temporal 1.28 takes the build only once it polls.
-        assert await make_current_until_polled(
-            lambda: make_current(client, namespace=client.namespace, build_id=build_id),
-            build_id=build_id,
-            backoff=(0.1,),
-            every=0.2,
-            deadline=30,
+        await asyncio.wait_for(
+            make_current_until_polled(
+                lambda: make_current(client, namespace=client.namespace, build_id=build_id),
+                build_id=build_id,
+                backoff=(0.1,),
+                every=0.2,
+                error_after=30,
+            ),
+            30,
         )
         handle = await client.start_workflow(
             _BlocksUntilReleased.run, id=f"blocks-{uuid.uuid4().hex}", task_queue=queue
@@ -429,12 +432,15 @@ async def test_is_current_names_the_deployments_current_build() -> None:
             ),
         ),
     ):
-        assert await make_current_until_polled(
-            lambda: make_current(client, namespace=client.namespace, build_id=build_id),
-            build_id=build_id,
-            backoff=MAKE_CURRENT_BACKOFF,
-            every=MAKE_CURRENT_EVERY,
-            deadline=MAKE_CURRENT_DEADLINE,
+        await asyncio.wait_for(
+            make_current_until_polled(
+                lambda: make_current(client, namespace=client.namespace, build_id=build_id),
+                build_id=build_id,
+                backoff=MAKE_CURRENT_BACKOFF,
+                every=MAKE_CURRENT_EVERY,
+                error_after=MAKE_CURRENT_ERROR_AFTER,
+            ),
+            MAKE_CURRENT_ERROR_AFTER,
         )
         assert await _is_current_answer(client, build_id)
         assert not await _is_current_answer(client, "other")
@@ -716,14 +722,13 @@ async def test_making_the_build_current_retries_until_the_server_takes_it(
             raise _not_found()
 
     with caplog.at_level(logging.INFO, logger="scadbuddy.worker"):
-        made = await asyncio.wait_for(
+        await asyncio.wait_for(
             make_current_until_polled(
-                set_current, build_id="b", backoff=(0.01, 0.01), every=0.01, deadline=5
+                set_current, build_id="b", backoff=(0.01, 0.01), every=0.01, error_after=5
             ),
             5,
         )
 
-    assert made
     assert calls == 3
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert [r.__dict__["attempt"] for r in warnings] == [1, 2]
@@ -731,6 +736,34 @@ async def test_making_the_build_current_retries_until_the_server_takes_it(
         "made this build current"
     ]
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+async def test_making_the_build_current_does_not_give_up(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Past ``error_after`` it logs errors and keeps trying, and still takes (#2341): a
+    worker that gave up left the deployment's current build with no poller."""
+    calls = 0
+
+    async def set_current() -> None:
+        nonlocal calls
+        calls += 1
+        if calls <= 20:
+            raise _not_found()
+
+    with caplog.at_level(logging.INFO, logger="scadbuddy.worker"):
+        await asyncio.wait_for(
+            make_current_until_polled(
+                set_current, build_id="b", backoff=(0.01,), every=0.01, error_after=0.05
+            ),
+            5,
+        )
+
+    assert calls == 21
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert errors
+    assert {r.getMessage() for r in errors} == {"could not make this build current yet"}
+    assert caplog.records[-1].getMessage() == "made this build current"
 
 
 @pytest.mark.requires_temporal
@@ -747,7 +780,7 @@ async def test_a_build_never_made_current_keeps_the_worker_polling(
     monkeypatch.setattr(worker_module, "make_current", refuses)
     monkeypatch.setattr(worker_module, "MAKE_CURRENT_BACKOFF", (0.01, 0.02))
     monkeypatch.setattr(worker_module, "MAKE_CURRENT_EVERY", 0.05)
-    monkeypatch.setattr(worker_module, "MAKE_CURRENT_DEADLINE", 0.3)
+    monkeypatch.setattr(worker_module, "MAKE_CURRENT_ERROR_AFTER", 0.3)
     settings, deps = _in_process_settings(tmp_path)
     stop = asyncio.Event()
 
@@ -762,19 +795,23 @@ async def test_a_build_never_made_current_keeps_the_worker_polling(
                     while not errors():
                         assert not polling.done(), polling.result()
                         await asyncio.sleep(0.02)
-                # Gave up, and the worker polls on: Temporal sees its poller.
+                # Still refused, and the worker polls on: Temporal sees its poller.
                 async with asyncio.timeout(10):
                     while not await _pollers(client, settings.temporal_task_queue_render):
                         await asyncio.sleep(0.1)
+                # And it keeps trying rather than giving up (#2341).
+                seen = attempts
+                async with asyncio.timeout(10):
+                    while attempts == seen:
+                        await asyncio.sleep(0.02)
                 assert not polling.done()
             finally:
                 stop.set()
                 await asyncio.wait_for(polling, 30)
 
     assert attempts >= 3
-    [error] = errors()
-    assert error.getMessage() == "could not make this build current; polling anyway"
-    assert error.__dict__["attempts"] == attempts
+    error = errors()[0]
+    assert error.getMessage() == "could not make this build current yet"
     assert "workflow not found" in error.__dict__["error"]
 
 
