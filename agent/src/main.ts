@@ -59,7 +59,8 @@ import { forwardPackageServers } from './plugins/packages/mcp.js'
 import { subagentKey } from './temporal/subagentToken.js'
 import { pgRunning } from './routes/subagentMcp.js'
 import { DURABLE_TURNS_DIR, sweepTurnDirs, turnServers } from './temporal/turnServers.js'
-import { turnToolActivities, turnToolActivity } from './temporal/turnTools.js'
+import { SessionClients } from './temporal/sessionClients.js'
+import { type ListedTools, turnToolActivities, turnToolActivity } from './temporal/turnTools.js'
 import { DURABLE_TOOLS } from './tools/manifest.js'
 import { PgAnswers } from './gate/answers.js'
 import { AgentWorker } from './temporal/worker.js'
@@ -430,6 +431,9 @@ const durableCredentialSecrets = async () => {
   const pool = new CredentialPool({ repo: credentials, kek, audit })
   return (await pool.candidates().catch(() => [])).map((c) => c.credential.secret)
 }
+// A durable session's MCP client on each remote plugin, kept on the replica its calls
+// are pinned to (#2581): a stateful plugin (Playwright MCP) keeps its page between calls.
+const turnClients = new SessionClients<ListedTools>()
 const turnToolDeps = temporal
   ? {
       sessions: new PgSessionOwners(temporal.sql),
@@ -454,6 +458,7 @@ const turnToolDeps = temporal
           : {}),
       }),
       hostQueue: HOST_QUEUE,
+      clients: turnClients,
       approvals: new PgApprovalRecords(temporal.sql),
       audit,
       currentTiers: liveTokenTiers(tokens),
@@ -685,6 +690,8 @@ async function stop(): Promise<void> {
     hostWorker?.stop(),
     sessions?.stopTurns({ graceMs: TURN_DRAIN_MS, abortWaitMs: TURN_ABORT_WAIT_MS }),
   ])
+  // Kept plugin MCP sessions end with their DELETE while the forwarder still routes it.
+  await turnClients.closeAll()
   stopSessionWake?.()
   stopHeartbeat()
   tabs.close()

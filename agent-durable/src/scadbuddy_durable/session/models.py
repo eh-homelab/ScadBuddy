@@ -78,6 +78,9 @@ class SessionStart:
     turn: TurnStart | None = None
     # A Stop recorded in the activation that continued as new, carried to the turn.
     interrupted: str | None = None
+    # The replica the session's plugin calls are pinned to (#2581): it holds the session's
+    # MCP clients, so the next turn is listed there too; carried over a continue-as-new.
+    host_queue: str | None = None
 
 
 @dataclass
