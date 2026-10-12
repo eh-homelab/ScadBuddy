@@ -244,7 +244,7 @@ export const aiPluginHandlers = [
     if (!/^[a-z][a-z0-9-]{0,30}[a-z0-9]$/.test(body.name)) {
       return detail(400, 'name must be 2–32 characters: lower-case letters, digits and single hyphens')
     }
-    if (!/^https:\/\//.test(body.url)) return detail(400, 'url must be https: plain http is allowed only to loopback')
+    if (!/^https:\/\//.test(body.url)) return detail(400, 'url must be https: plain http is allowed only to loopback or private addresses')
     if (BUILT_IN_SETS.has(body.name)) {
       return detail(409, `"${body.name}" is built in: it cannot be added: it ships with the agent`, { built_in: true })
     }
