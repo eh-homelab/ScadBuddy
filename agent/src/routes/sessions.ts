@@ -1,7 +1,6 @@
 import type { Context, Hono } from 'hono'
 import { streamSSE } from 'hono/streaming'
 import { z } from 'zod'
-import { AGENT_ACTOR_HEADER } from '../harness/headlessBrowser.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { MESSAGE_MAX } from '../sessions/clientProtocol.js'
 import {
@@ -82,9 +81,8 @@ import { ready, type RouteModule } from './module.js'
 //                                                 a new chat" (#790, #794). A `resource` audit row.
 //   POST /api/v1/ai/sessions/:id/budget           {add_usd} → {session}: adds to that session's
 //                                                 budget (#790). User-only and owner-only
-//                                                 (manager.ts raiseBudget): a request with the
-//                                                 headless browser's agent-actor marker is refused,
-//                                                 and no tool reaches it. Audited, refusals included.
+//                                                 (manager.ts raiseBudget): no tool reaches it.
+//                                                 Audited, refusals included.
 //
 // Error bodies are `{ detail }`, the backend's FastAPI shape; a SessionError's
 // status is used as it is (404, 403, 409, 429, 400).
@@ -422,10 +420,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...(body.value.up_to === undefined ? {} : { upTo: body.value.up_to }),
         audit: { surface: 'http', clientIp: deps.remoteAddress(c) },
         rateLimited: true,
-        // A budget of its own is the user's to give, like a raise (#823); the manager refuses it to the
-        // headless browser's marked request, whose fork shares the parent's.
+        // A budget of its own is the user's to give, like a raise (#823).
         freshBudget: true,
-        agentActor: c.req.header(AGENT_ACTOR_HEADER) !== undefined,
       })
       return c.json({ session: sessionView(child, BROWSER_USER) }, 201)
     }),
@@ -455,7 +451,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const session = await sessions.raiseBudget(idOf(c), BROWSER_USER, body.value.add_usd, {
         surface: 'http',
         clientIp: deps.remoteAddress(c),
-        agentActor: c.req.header(AGENT_ACTOR_HEADER) !== undefined,
       })
       return c.json({ session: sessionView(session, BROWSER_USER) })
     }),

@@ -18,7 +18,6 @@ import type {
   FilamentOptions,
   FontCatalogue,
   FontFamily,
-  HeadlessBrowserSetting,
   HttpRequestSetting,
   ModelSetting,
   PrinterCameraSetting,
@@ -671,6 +670,8 @@ export const api = {
   },
 
   getFlowRun: (id: string) => request<FlowRunView>(`/workflow-runs/${seg(id)}`),
+  /** #2477: one of a run's images, from its blob route. */
+  flowRunImageUrl: (id: string, name: string) => `${API_BASE}/workflow-runs/${seg(id)}/images/${seg(name)}`,
 
   answerFlowRun: (id: string, callId: string, answer: string) =>
     command<FlowDecided>(`/workflow-runs/${seg(id)}/answer`, {
@@ -1659,19 +1660,6 @@ export const api = {
 
   registerSidebar: () =>
     command<SidebarLink>('/settings/register-sidebar', { method: 'POST' }),
-
-  /**
-   * The AI agent's headless browser (#349), served by the agent service under
-   * `/api/v1/ai/*`. Fails (404 or 503) when there is no agent or no AI database.
-   */
-  getHeadlessBrowserSetting: () =>
-    request<HeadlessBrowserSetting>('/ai/settings/headless-browser'),
-
-  putHeadlessBrowserSetting: (enabled: boolean) =>
-    request<HeadlessBrowserSetting>('/ai/settings/headless-browser', {
-      method: 'PUT',
-      body: JSON.stringify({ enabled }),
-    }),
 
   /**
    * The assistant's `http_request` tool (#827), served by the agent service. On by

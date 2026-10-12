@@ -160,7 +160,7 @@ function withoutRemote(map: unknown): unknown {
 
 /**
  * The package as Claude Code may load it when its own MCP configs are read (a query with
- * `strictMcpConfig` off, for the headless browser or an allowed package, harness/run.ts):
+ * `strictMcpConfig` off, for an allowed package, harness/run.ts):
  * `dir` itself when it declares no server reached by URL, else a copy under `root`
  * whose `.mcp.json` and manifest keep only its local servers. Its http servers reach
  * the turn through the forwarder instead (`forwardPackageServers`). The copy is named

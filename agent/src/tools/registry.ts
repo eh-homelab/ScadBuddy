@@ -1,4 +1,5 @@
 import type { AttachmentStore } from '../attachments/store.js'
+import type { StoredBlob } from '../sessions/blobs.js'
 import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import type { BackendClient } from '../api/backend.js'
@@ -138,8 +139,13 @@ export async function effectiveTool(tool: Tool, services: Pick<ToolServices, 'to
   return { risk, gated: tool.gated || (risk === 'outward' && tool.risk !== 'outward'), disabled: override?.disabled === true }
 }
 
+/** A flow run's own images (#2477, temporal/flowBlobs.ts): what a `flow_image` reference names. */
+export type FlowImages = { get(name: string): Promise<StoredBlob | undefined> }
+
 export type ToolContext = ToolServices & {
   principal: Principal
+  /** In a flow run's call only: that run's images, by name. */
+  flowImages?: FlowImages | undefined
   /** The assistant session a harness call runs in (#252: its commits name it; authorship.ts). */
   session?: string | undefined
   /** The harness call's tool_use id, when Claude Code sent one (`_meta`, projections.ts). */

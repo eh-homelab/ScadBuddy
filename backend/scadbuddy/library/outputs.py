@@ -101,17 +101,23 @@ class BackfillState(BaseModel):
 
 def _replace(path: Path, text: str) -> None:
     """Write ``path`` whole or not at all: a reader never sees half a file."""
+    _replace_bytes(path, text.encode("utf-8"))
+
+
+def _replace_bytes(path: Path, data: bytes) -> None:
+    """`_replace` for bytes."""
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
-    temporary.write_text(text, encoding="utf-8")
+    temporary.write_bytes(data)
     temporary.replace(path)
 
 
 def _cover_from_3mf(model: Path, thumbnail: Path) -> None:
     """Plate 1's cover out of ``model`` as ``thumbnail``; nothing when the 3MF has none
-    (its cover render timed out or failed, `render.jobs.plate_thumbnails`)."""
+    (its cover render timed out or failed, `render.jobs.plate_thumbnails`). Written
+    whole or not at all (#2556): ``has_thumbnail`` would report a truncated one."""
     with zipfile.ZipFile(model) as archive:
         if PLATE_THUMBNAIL in archive.namelist():
-            thumbnail.write_bytes(archive.read(PLATE_THUMBNAIL))
+            _replace_bytes(thumbnail, archive.read(PLATE_THUMBNAIL))
 
 
 class OutputMeta(BaseModel):
@@ -135,11 +141,20 @@ class OutputMeta(BaseModel):
     colors: list[str] = Field(default_factory=list)
     parts: list[PartInfo] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
-    #: Every plate of the output's 3MF (spec §6.4), as the job's result lists them: an
-    #: arranged output's plates (#2281), a multi-plate template's. Empty for a one-plate
-    #: output, whose plate is ``bbox_mm`` and ``colors``, and on records written before
-    #: the field existed. Not ``plates`` below, which is what a print queued.
-    layout_plates: list[PlateInfo] = Field(default_factory=list)
+    #: Kept deliberately though no UI reads it yet (#2557); the description is the
+    #: published contract, see spec 2026-09-27 §7.
+    layout_plates: list[PlateInfo] = Field(
+        default_factory=list,
+        description=(
+            "Every plate of the output's 3MF (spec §6.4) as the render recorded it: index,"
+            " bounding box and colours per plate, for an arranged output (#2281) or a"
+            " multi-plate template's. Lets a reader (History, the Print dialog, an agent)"
+            " check or summarise each plate against a printer without opening the 3MF."
+            " Empty for a one-plate output, whose plate is `bbox_mm` and `colors`, and on"
+            " outputs saved before the field existed. Not `plates`, which is what the last"
+            " print queued."
+        ),
+    )
     # The output's uploads to Bambuddy's file library are in Postgres
     # (`bambuddy.uploads`, #455), not here. The keys an older record carries for them
     # (``library_file_id``, ``library_file_plate``, ``library_files``) are ignored, as

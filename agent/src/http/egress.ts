@@ -46,6 +46,20 @@ const BLOCKED_NAMES = new Set([
   'instance-data.ec2.internal',
 ])
 
+/** Private ranges: an in-cluster Service or a LAN host. Plain http is allowed to these (and loopback) for an MCP endpoint. */
+const PRIVATE = new BlockList()
+PRIVATE.addSubnet('10.0.0.0', 8, 'ipv4')
+PRIVATE.addSubnet('172.16.0.0', 12, 'ipv4')
+PRIVATE.addSubnet('192.168.0.0', 16, 'ipv4')
+PRIVATE.addSubnet('fc00::', 7, 'ipv6')
+
+/** Whether `address` is in 10/8, 172.16/12, 192.168/16 or fc00::/7. */
+export function isPrivateAddress(address: string): boolean {
+  const plain = address.replace(/^\[|\]$/g, '').replace(/^::ffff:(?=\d+\.)/i, '')
+  const family = isIP(plain)
+  return family !== 0 && PRIVATE.check(plain, family === 4 ? 'ipv4' : 'ipv6')
+}
+
 export type Resolver = (hostname: string) => Promise<string[]>
 
 export const systemResolver: Resolver = async (hostname) =>

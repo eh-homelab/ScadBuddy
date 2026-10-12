@@ -60,7 +60,7 @@ export function SessionFiles({ sessionId, refreshKey, canWrite, onInsert }: Prop
           await api.uploadAiSessionFile(sessionId, file, path)
         } catch (caught) {
           // The list was stale: something else took the path meanwhile (#2469). Read it again and take the next free one, once.
-          if (!(caught instanceof ApiError && caught.status === 409)) throw caught
+          if (!(caught instanceof ApiError && caught.status === 409 && /already exists/.test(caught.detail))) throw caught
           for (const f of (await api.listAiSessionFiles(sessionId)).files) taken.add(f.path)
           path = uploadPath(file.name, taken)
           taken.add(path)

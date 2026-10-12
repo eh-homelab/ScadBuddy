@@ -564,7 +564,7 @@ describe('chatReducer', () => {
 })
 
 describe('workspace changes (#2329)', () => {
-  it('counts each workspace.file event, so the Files list reads again, and adds nothing to the feed', () => {
+  it('counts each workspace.file event, so the Files list reads again, and notes each in the feed (#2399)', () => {
     const state = run(
       [
         server({ type: 'workspace.file', sessionId: 's1', path: 'uploads/a.stl', change: 'uploaded', by: you, size: 3 }),
@@ -573,6 +573,9 @@ describe('workspace changes (#2329)', () => {
       started,
     )
     expect(state.sessions.s1?.workspaceChanges).toBe(2)
-    expect(state.sessions.s1?.items).toEqual(started.sessions.s1?.items)
+    expect(state.sessions.s1?.items.slice(started.sessions.s1?.items.length)).toEqual([
+      { kind: 'file', id: expect.stringMatching(/^file-/), path: 'uploads/a.stl', change: 'uploaded', by: you, size: 3 },
+      { kind: 'file', id: expect.stringMatching(/^file-/), path: 'uploads/a.stl', change: 'deleted', by: you },
+    ])
   })
 })

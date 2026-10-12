@@ -20,9 +20,11 @@ from scadbuddy.flows.history import outward_since
 from scadbuddy.flows.manifest import use_manifest
 from scadbuddy.flows.operations import FLOW_DECIDE, flow_kinds, request_id
 from tests.flows.fake_api import Outward
-from tests.flows.flows_support import HASH_KEY, Keys, script
+from tests.flows.flows_support import HASH_KEY, Keys, history_payloads, script
 
 pytestmark = [pytest.mark.requires_temporal, pytest.mark.requires_postgres]
+
+IMAGE = {"name": "a" * 64 + ".png", "mediaType": "image/png", "bytes": 68}
 
 
 class Tools:
@@ -55,7 +57,13 @@ class Tools:
             self._record("broken", args)
             raise ApplicationError("the model is gone", type="ToolError", non_retryable=True)
 
-        return [get_model, send_to_bambuddy, make_thing, broken]
+        @activity.defn(name="snapshot")
+        async def snapshot(args: dict[str, Any]) -> Any:
+            self._record("snapshot", args)
+            # As the agent answers a flow call that returned images (#2477): pointers only.
+            return {"text": f"a view\n[image {IMAGE['name']}]", "images": [IMAGE]}
+
+        return [get_model, send_to_bambuddy, make_thing, broken, snapshot]
 
 
 @pytest.fixture(autouse=True)
@@ -66,6 +74,7 @@ def manifest() -> Iterator[None]:
             "send_to_bambuddy": "outward",
             "make_thing": "write",
             "broken": "read",
+            "snapshot": "read",
         }
     )
     yield
@@ -320,3 +329,32 @@ async def test_a_turn_tool_nothing_offers_is_refused_before_any_call(
     )
     assert served.tiered == ["gone__thing"]
     assert served.calls == []
+
+
+async def test_tool_answers_text_and_tool_result_answers_the_images_as_pointers(
+    outward: Outward, tools: tuple[Tools, str]
+) -> None:
+    """#2477: `tool()` keeps answering `str` for a call that returned images; `tool_result()`
+    gives the images as pointers, which a flow can return."""
+    _, queue = tools
+    text_run = await outward.run(
+        script("return (await tool('snapshot', {})).upper()"), tools_queue=queue
+    )
+    upper = f"A VIEW\n[IMAGE {str(IMAGE['name']).upper()}]"
+    assert (await outward.finished(text_run)).result == f"result: {upper!r}"
+    run_id = await outward.run(
+        script(
+            "r = await tool_result('snapshot', {})",
+            "plain = await tool_result('get_model', {'slug': 'box'})",
+            "return [r['images'], plain['images'], plain['text']]",
+        ),
+        tools_queue=queue,
+    )
+    run = await outward.finished(run_id)
+    assert run.result == f"result: [[{IMAGE!r}], [], 'model box']"
+    assert [s.fn for s in run.steps] == ["tool:snapshot", "tool:get_model"]
+    # The run's history holds the pointer and nothing of an image: no PNG bytes, no base64.
+    payloads = await history_payloads(outward.client, run.workflow_id)
+    assert str(IMAGE["name"]).encode() in payloads
+    assert b"\x89PNG" not in payloads
+    assert b"iVBORw0KGgo" not in payloads

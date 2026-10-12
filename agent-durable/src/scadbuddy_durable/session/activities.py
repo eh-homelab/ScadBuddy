@@ -113,7 +113,6 @@ class SessionActivities:
             turns, budget, spent = int(row[0]), float(row[1]), float(row[2] or 0)
             events = turn_events(sid, args, spent=spent, budget=budget, turns=turns)
             await conn.execute(
-                # The turn is over: a headless-browser grant made in it dies (#2320).
                 "UPDATE ai_sessions SET status = %s, durable_turn_id = NULL, updated_at = now()"
                 " WHERE id = %s",
                 (events[-1]["status"], sid),
