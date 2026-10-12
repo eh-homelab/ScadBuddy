@@ -15,6 +15,7 @@ import {
   validateHeaderName,
   validateSecret,
 } from '../registry.js'
+import { hashTree, PackageContentError } from './hash.js'
 import type { LoadedPackage } from './install.js'
 
 // A plugin package's http MCP servers, reached the way a remote plugin is (#2320):
@@ -137,7 +138,19 @@ export function declaresRemoteServers(dir: string): boolean {
   return declaredConfigs(dir).mcp.some(({ map }) => entries(map).some(([, config]) => isRemoteEntry(config)))
 }
 
+async function hashesTo(dir: string, hash: string): Promise<boolean> {
+  if (!existsSync(dir)) return false
+  try {
+    return (await hashTree(dir)).hash === hash
+  } catch (err) {
+    if (err instanceof PackageContentError || (err as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw err
+  }
+}
+
 function withoutRemote(map: unknown): unknown {
+  // A manifest's mcpServers may be a list of config paths and inline maps (harness/plugins.ts).
+  if (Array.isArray(map)) return map.map((entry: unknown) => (typeof entry === 'string' ? entry : withoutRemote(entry)))
   const nested = isRecord(map) && isRecord(map.mcpServers)
   const servers = nested ? (map.mcpServers as Record<string, unknown>) : map
   if (!isRecord(servers)) return map
@@ -151,12 +164,13 @@ function withoutRemote(map: unknown): unknown {
  * `dir` itself when it declares no server reached by URL, else a copy under `root`
  * whose `.mcp.json` and manifest keep only its local servers. Its http servers reach
  * the turn through the forwarder instead (`forwardPackageServers`). The copy is named
- * by the content hash and kept: the original is never written to.
+ * by the content hash and made again from `dir` (re-hashed by its loader) on every
+ * load: one already there is kept only while it hashes to the fresh copy, so it is
+ * never trusted as it is. The original is never written to.
  */
 export async function withoutRemoteServers(dir: string, contentHash: string, root: string): Promise<string> {
   if (!declaresRemoteServers(dir)) return dir
   const target = path.join(root, contentHash.replace(/^sha256:/, ''))
-  if (existsSync(target) && !declaresRemoteServers(target)) return target
   await mkdir(root, { recursive: true })
   const tmp = path.join(root, `.tmp-${randomUUID()}`)
   try {
@@ -174,9 +188,12 @@ export async function withoutRemoteServers(dir: string, contentHash: string, roo
       }
     }
     if (declaresRemoteServers(tmp)) throw new Error(`could not strip the http MCP servers of ${dir}`)
+    const want = (await hashTree(tmp)).hash
+    if (await hashesTo(target, want)) return target
     await rm(target, { recursive: true, force: true })
     await rename(tmp, target).catch(async (err: NodeJS.ErrnoException) => {
-      if ((err.code !== 'ENOTEMPTY' && err.code !== 'EEXIST') || declaresRemoteServers(target)) throw err
+      // Another turn placed it first: fine when it is the same copy.
+      if ((err.code !== 'ENOTEMPTY' && err.code !== 'EEXIST') || !(await hashesTo(target, want))) throw err
     })
   } finally {
     await rm(tmp, { recursive: true, force: true })

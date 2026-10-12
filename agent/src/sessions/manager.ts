@@ -1614,17 +1614,22 @@ export class SessionManager {
           // Loaded without their own http MCP servers, which come through the forwarder
           // below: a query with strictMcpConfig off would start them itself (run.ts).
           const loaded = packages
-          const stripped = async (dir: string) => {
+          const problems = [...loaded.problems]
+          // A package that cannot be stripped is left out and said, as one that cannot be loaded.
+          const stripped = async (dir: string): Promise<string | undefined> => {
             const pkg = loaded.loaded.find((p) => p.dir === dir)
-            const loadedDir = pkg ? await withoutRemoteServers(dir, pkg.contentHash, path.join(this.deps.paths.stateDir, 'plugins-local')) : dir
-            if (pkg) packageNames.set(loadedDir, pkg.name)
-            return loadedDir
+            if (!pkg) return dir
+            try {
+              const loadedDir = await withoutRemoteServers(dir, pkg.contentHash, path.join(this.deps.paths.stateDir, 'plugins-local'))
+              packageNames.set(loadedDir, pkg.name)
+              return loadedDir
+            } catch (err) {
+              problems.push(`plugin package ${pkg.name} was not loaded: ${(err as Error).message}`)
+              return undefined
+            }
           }
-          packages = {
-            ...loaded,
-            paths: await Promise.all(loaded.paths.map(stripped)),
-            allowedPaths: await Promise.all(loaded.allowedPaths.map(stripped)),
-          }
+          const kept = async (dirs: readonly string[]) => (await Promise.all(dirs.map(stripped))).filter((d): d is string => d !== undefined)
+          packages = { ...loaded, paths: await kept(loaded.paths), allowedPaths: await kept(loaded.allowedPaths), problems }
         }
         // Every package's http MCP servers, through the forwarder like a remote
         // plugin's (#2320); Claude Code loads the packages without them (above).

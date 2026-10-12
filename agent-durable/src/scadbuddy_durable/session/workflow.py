@@ -275,7 +275,8 @@ class DurableSession:
             # approved it (the agent offers only Bash and PowerShell, which can).
             named = sorted({t for p in offered.packages for t in p.builtin_tools} - {"Skill"})
             parked = [t for t in named if t in ENGINE_PARKED]
-            self._agent._builtin_tools = ["Skill", *named]
+            # Only those: one the agent should have left out never runs unasked here.
+            self._agent._builtin_tools = ["Skill", *parked]
             self._agent._tool_activities = parked
             self._agent._tool_approvals = parked
         if prompt is not None and workflow.patched(MEMORY_PATCH):
