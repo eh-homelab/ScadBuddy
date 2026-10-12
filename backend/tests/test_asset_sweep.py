@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -18,6 +19,9 @@ class _Remote:
 
     async def clock(self) -> datetime:
         return datetime(2026, 9, 28, tzinfo=UTC)
+
+    async def mark_swept(self, ids: list[str], *, cutoff: datetime) -> None:
+        self.calls.append(f"mark {','.join(ids)}")
 
     async def drop(self, ids: list[str], *, cutoff: datetime) -> list[str]:
         self.calls.append("drop")
@@ -42,6 +46,26 @@ async def test_the_sweep_drops_then_reconciles_and_backfills(
     state = SimpleNamespace(store=SimpleNamespace(remote_assets=remote), assets=object())
     await main._sweep_assets_logged(state)  # type: ignore[arg-type]
     assert remote.calls == ["drop", "reconcile", "backfill"]
+
+
+async def test_a_stopped_sweep_marks_what_it_removed_and_converges_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2140: a sweep the shutdown stopped still hands what it removed to the store,
+    marked for the next sweep's `reconcile` (the only thing that retries a drop), and
+    skips the round trips of the drop, reconcile and backfill."""
+    remote = _Remote()
+    stop = threading.Event()
+
+    def sweeping(state: Any, stop_: threading.Event | None = None) -> list[str]:
+        assert stop_ is stop
+        stop.set()
+        return ["a1"]
+
+    monkeypatch.setattr(main, "sweep_assets", sweeping)
+    state = SimpleNamespace(store=SimpleNamespace(remote_assets=remote), assets=object())
+    await main._sweep_assets_logged(state, stop)  # type: ignore[arg-type]
+    assert remote.calls == ["mark a1"]
 
 
 @pytest.mark.parametrize("content", [False, True])

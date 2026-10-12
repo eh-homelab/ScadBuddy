@@ -263,13 +263,20 @@ async def _sweep_assets_logged(state: AppState, stop: threading.Event | None = N
         remote = _remote_assets(state)
         cutoff = await remote.clock() if remote is not None else None
         removed = await asyncio.to_thread(sweep_assets, state, stop)
-        stopped = stop is not None and stop.is_set()
-        if remote is not None and cutoff is not None and not stopped:
-            await drop_swept_assets(state, removed, cutoff=cutoff)
-            # What an earlier drop failed to remove, and what the store lost (a copy an
-            # `ensure` dropped, a race with a delete): both converge here, per sweep.
-            await remote.reconcile(state.assets, cutoff=cutoff)
-            await remote.backfill(state.assets)
+        if remote is None or cutoff is None:
+            return
+        if stop is not None and stop.is_set():
+            # Stopped (#2140): only mark what it removed, which no later sweep could
+            # find otherwise -- `reconcile` retries marked copies, never a diff against
+            # the volume. The next sweep's reconcile removes them.
+            if removed:
+                await remote.mark_swept(removed, cutoff=cutoff)
+            return
+        await drop_swept_assets(state, removed, cutoff=cutoff)
+        # What an earlier drop failed to remove, and what the store lost (a copy an
+        # `ensure` dropped, a race with a delete): both converge here, per sweep.
+        await remote.reconcile(state.assets, cutoff=cutoff)
+        await remote.backfill(state.assets)
     except Exception:
         logger.exception("could not sweep unused uploads")
         raise
