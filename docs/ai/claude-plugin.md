@@ -66,9 +66,11 @@ What the server does (spec §8.2–§8.4; [`agent/src/mcp/http.ts`](../../agent/
 
 In Claude Code the tools appear as `mcp__plugin_scadbuddy_scadbuddy__<tool>`
 (plugin README, citing [plugin components](https://code.claude.com/docs/en/plugins/components)).
-The subagents' `tools` field lists both `mcp__scadbuddy` and
-`mcp__plugin_scadbuddy_scadbuddy`, so the same files work inside ScadBuddy's own harness
-and in an external install.
+The subagents list no `tools` (#2320), so they inherit the session's tools under
+whichever name the session has them, inside ScadBuddy's own harness and in an external
+install alike ([Subagents](https://code.claude.com/docs/en/sub-agents): a subagent with no
+`tools` inherits the main thread's). An allowlist kept them from the session's plugins, the HTTP
+request tool and the headless browser.
 
 ## Inside ScadBuddy
 
@@ -90,12 +92,27 @@ A query that loads the plugin gets the `Skill` and `Agent` tools, both at the `r
 tier, and no other built-in ([`agent/src/harness/ownPlugin.ts`](../../agent/src/harness/ownPlugin.ts)).
 A subagent's calls go through the same permission checks as the session's own. One asked
 to run in the background runs inside the turn instead (#946).
+
+In a durable session (#2320) the subagents run in the segment's Claude Code, in the
+`agent-durable` container. The Temporal plugin refuses them every durable tool, because
+a subagent cannot pause the segment. So each segment gives that Claude Code the agent's
+loopback MCP server under the name `scadbuddy`, and the subagents' tool names stay
+`mcp__scadbuddy__<tool>`
+([`agent/src/routes/subagentMcp.ts`](../../agent/src/routes/subagentMcp.ts),
+[`agent-durable/.../session/subagents.py`](../../agent-durable/src/scadbuddy_durable/session/subagents.py)).
+The server answers only a loopback peer, with a token the segment runner mints from the
+KEK for the session's running turn and owner. Every call is decided from the session as
+it is when the call runs: the turn still running, the owner unchanged, the turn sender's
+tiers cut to what its credential holds now, and Settings → Plugins applied. An outward
+call is refused with a note telling the subagent to leave it to the main agent, where it
+parks for approval. The main agent is kept to its `mcp__durable__` tools by a PreToolUse
+hook. The image copies the plugin's `agents/` beside its `skills/` for the durable
+worker. That Claude Code loads agents from a directory without a manifest is expected
+from the [plugin layout](https://code.claude.com/docs/en/plugins-reference) but has not
+been measured.
 Claude Code refuses `AskUserQuestion` inside a subagent, so in a session the user is in
 the harness also serves `mcp__scadbuddy_questions__ask_user`, which asks the user through
-the same panel card (#940). The subagents' `tools` field lists that server too. The entry
-is harness-only: an external install has no such server, and Claude Code ignores a listed
-server that is absent, as the harness does `mcp__plugin_scadbuddy_scadbuddy`
-(`claude plugin validate plugins/scadbuddy` passes on 2.1.283 and 2.1.287).
+the same panel card (#940), which the subagents inherit.
 [`agent/test/harnessWiring.test.ts`](../../agent/test/harnessWiring.test.ts) runs all three
 against the bundled Claude Code.
 
