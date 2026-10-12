@@ -59,7 +59,7 @@ from scadbuddy.core.problems import ApiError, install_problem_handlers
 from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
 from scadbuddy.flows.component import FLOWS
-from scadbuddy.flows.sweep import sweep_flow_runs
+from scadbuddy.flows.sweep import sweep_flow_runs, sweep_orphan_grants
 from scadbuddy.library.assets import referenced_asset_ids
 from scadbuddy.library.backfill import attach_backfills, attach_job_backfills, follow_backfills
 from scadbuddy.library.history import GitError
@@ -522,11 +522,14 @@ async def _sweep_flow_runs_logged(state: AppState) -> None:
         return
     try:
         ended = await sweep_flow_runs(flows.store, flows.client)
+        orphans = await sweep_orphan_grants(flows.store, flows.client)
     except Exception:
         logger.exception("could not sweep flow runs")
         raise
     if ended:
         logger.info("ended flow runs whose execution closed", extra={"count": len(ended)})
+    if orphans:
+        logger.info("deleted grants whose run never started", extra={"count": len(orphans)})
 
 
 async def _sweep_preview_slices_logged(state: AppState) -> None:
