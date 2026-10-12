@@ -190,10 +190,15 @@ async def flow_grant_approve(req: GrantApprove) -> bool
 # then AgentClient.approve_tool(call_id, approved=True, update_id=f"grant-{call_id}")
 ```
 
-`facts_of` (in `flow_grants.py`) resolves `CallFacts`: the configured printer
-(`bambuddy` settings), the output's slug and plate count (outputs store), grams from the
-output's plate filament options when known, and `copies` defaulted as
-`print_run.py` resolves it. A failing lookup returns facts that admit nothing.
+`facts_of` (in `flow_grants.py`) resolves `CallFacts` through the backend API, never the
+data volume: the `projects` worker has none (`worker.py` `run_projects_worker`: Postgres,
+the KEK and `SCADBUDDY_API_INTERNAL_URL` only). It reads with the same internal httpx
+client and `api_internal_url` the host functions use (`flow_routes.py`): the configured
+printer and the remembered quantity from the print options read, the output's slug and
+plate count from `GET /api/v1/outputs/{id}`, grams from the output's print filament
+options when known, and `copies` defaulted as `print_run.py` resolves it. A failing
+lookup returns facts that admit nothing. A test runs it against a fake API with no
+volume mounted, as a split deployment runs it.
 
 **Pinned args:** an inside verdict's `args` replace the call's (amendment §3.3 step 6):
 `queue_print` runs `approved_print` with `request.printer_id` and `request.copies` set to
@@ -457,7 +462,9 @@ date=None) -> str | None` (author trailers from `current_author()`, then `traile
 `None` only when nothing changed and `allow_empty` is false, as `ModelHistory` behaves
 today; `date` sets `GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE` for the backfill), `head()`, `resolve(commit)`, `log(path=None, *, limit)`,
 `show(commit, path) -> bytes`, `revision_range(base, head)`, `diff(range, path=None)`,
-`restore(path, commit, message) -> str`, `maintain()`, and a hook
+`restore(path, commit, message, *, trailers=(), allow_empty=False) -> str` (always one
+commit when `allow_empty`, even restoring the head's own content, so
+`FlowHistory.restore` carries its version trailer), `maintain()`, and a hook
 `_gitignore_body() -> str | None` for subclasses.
 
 - [ ] Write `test_gitrepo.py` against a bare `GitRepo` (commit with trailers, log, show,
@@ -542,7 +549,8 @@ commit and `index`, and computes `version` as the commit's position. `store.py`'
 - Modify: `backend/scadbuddy/flows/component.py` (run at start, after migrations, under the repository's lock)
 - Test: `backend/tests/flows/test_flow_backfill.py` (`requires_postgres`, `requires_git`)
 
-**Behaviour (amendment §6.4):** rows without `commit`, ordered `(created_at, version)`:
+**Behaviour (amendment §6.4):** rows without `commit`, ordered `(name, version)` (never
+`created_at`, which concurrent registrations can have out of version order):
 write, commit with `GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE` = `created_at` and trailers from
 `created_by`, set `commit`; then map runs. Reconciler: a commit whose `ScadBuddy-Flow-Version`
 trailer no row names gets a row with that id (`created_by` from its trailers); a row

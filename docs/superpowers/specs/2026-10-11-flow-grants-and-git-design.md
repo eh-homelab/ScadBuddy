@@ -156,7 +156,9 @@ grants: the TypeScript agent only reads whether a recorded match is still in for
    is an `agent` or `ask_session` step that recorded `session_id` (`note_session`):
    the call is in a flow turn of that run (§3.4).
 3. Resolves what the bounds need (the configured printer, the output's slug and plate
-   count, known grams). A lookup that fails is **outside**: fail toward asking.
+   count, known grams) through the backend API at `api_internal_url`, as the host
+   functions do: the `projects` worker mounts no data volume. A lookup that fails is
+   **outside**: fail toward asking.
 4. Finds the first rule that admits the call, intersected with the script's narrowing
    for that child (§4.3).
 5. **Consumes** the rule's counters and records the match in one transaction:
@@ -576,8 +578,10 @@ tool per the coverage rule (`list_flow_versions`, `get_flow_version_source`,
 ### 6.4 Migration
 
 - A one-time backfill at backend start (`flows/backfill.py`), under the flows
-  repository's lock: every `workflow_definitions` row with no `commit`, oldest first by
-  `(created_at, version)`, is written to `<name>/flow.py` and committed with
+  repository's lock: every `workflow_definitions` row with no `commit`, in
+  `(name, version)` order (not `created_at`: it is the transaction's start, taken before
+  the advisory lock in `flows/store.py`, so two concurrent registrations can have it in
+  the opposite order to their versions), is written to `<name>/flow.py` and committed with
   `GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE` set to `created_at` and trailers from
   `created_by`, one commit per row (`--allow-empty` for a script equal to the previous
   version's), carrying the row's id in `ScadBuddy-Flow-Version`; then the row's `commit`
