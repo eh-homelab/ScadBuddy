@@ -210,6 +210,24 @@ describe('ArrangeDialog', () => {
     })
   })
 
+  it('passes no name, never a slug, when the model list cannot be read (#2541)', async () => {
+    let failed = false
+    server.use(
+      http.get('/api/v1/models', () => {
+        failed = true
+        return problem(503, 'Service Unavailable', 'down')
+      }),
+    )
+    const onArranged = vi.fn()
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={onArranged} />,
+    )
+    await waitFor(() => expect(failed).toBe(true))
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+    expect(onArranged.mock.calls[0]![0]).not.toHaveProperty('filedUnder')
+  })
+
   it('says which outputs need a re-render', () => {
     renderPage(
       <ArrangeDialog open sources={fromOutputs([second])} onClose={vi.fn()} onArranged={vi.fn()} />,

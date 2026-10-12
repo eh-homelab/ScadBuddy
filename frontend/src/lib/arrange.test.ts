@@ -313,7 +313,15 @@ describe('where an arrange went (#2284)', () => {
 
   it("names the result and the model it is filed under", () => {
     expect(savedNote({ output, plates: 1, filedUnder: 'Lemon' })).toBe("Saved as pw-arrange-test in Lemon's history.")
-    expect(savedNote({ output: { ...output, name: null }, plates: 1 })).toBe("Saved in lemon's history.")
+    expect(savedNote({ output: { ...output, name: null }, plates: 1, filedUnder: 'Lemon' })).toBe(
+      "Saved in Lemon's history.",
+    )
+  })
+
+  it('never names the model by its slug when its name is unknown (#2541)', () => {
+    expect(savedNote({ output, plates: 1 }, 'lemon')).toBe("Saved as pw-arrange-test in this model's history.")
+    expect(savedNote({ output, plates: 1 }, 'lime')).toBe("Saved as pw-arrange-test in its model's history.")
+    expect(savedNote({ output: { ...output, name: null }, plates: 1 })).toBe("Saved in its model's history.")
   })
 
   it('counts every source, library files too', () => {

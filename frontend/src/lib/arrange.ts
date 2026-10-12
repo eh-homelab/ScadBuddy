@@ -37,13 +37,26 @@ export interface Arranged {
   plates: number
   /** #902 — which outputs could not be re-rendered first, and why: left out of the arrange. */
   skipped?: string
-  /** #2284 — the name of the model whose History the result is filed in. */
+  /**
+   * #2284 — the name of the model whose History the result is filed in. Absent when the
+   * model list could not be read: then no name is known, and a slug is not one (#2541).
+   */
   filedUnder?: string
 }
 
-/** #2284 — where an arrange's result went: "Saved as X in Lemon's history." */
-export function savedNote(arranged: Arranged): string {
-  const model = `${arranged.filedUnder ?? arranged.output.slug}'s history`
+/**
+ * #2284 — where an arrange's result went: "Saved as X in Lemon's history." Without the
+ * model's name it never falls back to the slug (#2541): it is "this model's" on `here`,
+ * the History page of the model it was filed under, and "its model's" anywhere else,
+ * where an "Open in History" link beside it names the place.
+ */
+export function savedNote(arranged: Arranged, here?: string): string {
+  const owner = arranged.filedUnder
+    ? `${arranged.filedUnder}'s`
+    : arranged.output.slug === here
+      ? "this model's"
+      : "its model's"
+  const model = `${owner} history`
   return arranged.output.name ? `Saved as ${arranged.output.name} in ${model}.` : `Saved in ${model}.`
 }
 

@@ -416,6 +416,32 @@ def test_a_mixed_arrange_is_filed_under_any_template(
 
 
 @respx.mock
+def test_a_library_file_that_places_nothing_is_no_source(
+    client: TestClient, app: FastAPI, tmp_path: Path
+) -> None:
+    """#2540: a library file whose every object is at count 0 placed nothing, so it
+    neither frees the result from its outputs' template nor shows in "Arranged from"."""
+    configure(client)
+    paths, meta, written = asyncio.run(saved_output(tmp_path))
+    copied_output(paths, meta, slug="other", output_id=SECOND)
+    library_file(88, content=two_colour_3mf(tmp_path))
+    arranger = Arranger()
+    app.dependency_overrides[get_render] = lambda: arranger
+    objects = [
+        {"output_id": meta.id, "part": written.manifest[0].part, "count": 1},
+        {"library_file_id": 88, "count": 0},
+    ]
+    elsewhere = client.post("/api/v1/outputs/arrange", json={"objects": objects, "slug": "other"})
+    assert elsewhere.status_code == 422, elsewhere.text
+    assert "not other" in elsewhere.json()["detail"]
+    response = client.post("/api/v1/outputs/arrange", json={"objects": objects})
+    assert response.status_code == 202, response.text
+    assert response.json()["slug"] == "demo"
+    [inputs] = arranger.inputs
+    assert inputs.sources == [meta.id]
+
+
+@respx.mock
 def test_a_library_file_whose_output_was_deleted_arranges_as_a_plain_file(
     client: TestClient, app: FastAPI, tmp_path: Path
 ) -> None:

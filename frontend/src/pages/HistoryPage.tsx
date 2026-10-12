@@ -15,6 +15,7 @@ import { Dialog } from '../components/ui/Dialog'
 import { Spinner } from '../components/ui/Spinner'
 import { editPath, editTargetFor, modelPath, type EditNavigationState } from '../lib/deeplink'
 import { arrangedSources, fromOutputs, savedNote, type Arranged } from '../lib/arrange'
+import { wasSent } from '../lib/sent'
 import { formatBbox, formatValue, timeAgo } from '../lib/format'
 import { plateLabel } from '../lib/plate'
 import { useDisplayUnit } from '../lib/units'
@@ -79,6 +80,8 @@ export function HistoryPage() {
 
   const loading = schemaState.loading || outputsState.loading
   const schema = schemaState.data
+  /** #2287 — the arranged result's row as the list has it now: gone once deleted. */
+  const arrangedRow = arrangedOutput ? outputsState.data?.find((o) => o.id === arrangedOutput.id) : undefined
 
   return (
     <div className="h-full overflow-y-auto">
@@ -116,11 +119,11 @@ export function HistoryPage() {
         {!loading && schema && outputsState.data && outputsState.data.length > 0 && (
           <>
             {/* Gone from the list (deleted): nothing to offer a next step for. */}
-            {arrangedOutput && outputsState.data.some((o) => o.id === arrangedOutput.id) && (
+            {arrangedOutput && arrangedRow && (
               <div className="mb-2">
                 <ArrangedNext
                   output={arrangedOutput}
-                  sent={(outputsState.data ?? []).some((o) => o.id === arrangedOutput.id && wasSent(o))}
+                  sent={wasSent(arrangedRow)}
                   onPrint={() => setPrintFor(arrangedOutput)}
                 />
               </div>
@@ -145,7 +148,7 @@ export function HistoryPage() {
             )}
             {saved && (
               <p role="status" aria-label="Arranged" className="mb-2 text-[13px] text-ink">
-                {savedNote(saved)}
+                {savedNote(saved, slug)}
                 {saved.output.slug !== slug && (
                   <>
                     {' '}
@@ -218,16 +221,6 @@ export function HistoryPage() {
         }}
       />
     </div>
-  )
-}
-
-/** #2287 — whether any of the output reached Bambuddy: a library copy, a queue item, a print. */
-function wasSent(output: Output): boolean {
-  return (
-    (output.library_files ?? []).length > 0 ||
-    output.queue_item_id != null ||
-    (output.plates ?? []).length > 0 ||
-    output.print_route != null
   )
 }
 
@@ -500,10 +493,10 @@ function OutputRow({
               Edit
             </Button>
           )}
-          {/* #2287 — "again" only for an output that went to Bambuddy before. */}
           <Button size="sm" onClick={onPrint} aria-label={`Print ${label}`}>
             Print
           </Button>
+          {/* #2287 — "again" only for an output that went to Bambuddy before. */}
           <Button size="sm" onClick={onSend} aria-label={`${sent ? 'Send again' : 'Send'} ${label}`}>
             {sent ? 'Send again' : 'Send'}
           </Button>

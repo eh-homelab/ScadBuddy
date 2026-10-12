@@ -453,6 +453,8 @@ def arrange_inputs(
     # name a slot no part uses, so it is never paired with `parts` by index.
     colours: list[str] = list(body.colours or [])
     slugs: list[str] = []
+    # Library files that placed an object, as `library:<id>` (#2284, #2540).
+    files: list[str] = []
     # Every output first, so one refusal names all that need a re-render (#902).
     chosen = list(dict.fromkeys(o.output_id for o in body.objects if o.output_id is not None))
     for output_id in chosen:
@@ -510,6 +512,9 @@ def arrange_inputs(
                     " output as it is",
                 )
             items.append(PackItem(part=part_of(entry), count=count, group=obj.group))
+            if obj.output_id is None and source not in files:
+                # Only a file that placed something is a source (#2540).
+                files.append(source)
             provenance.setdefault(
                 entry.part,
                 entry
@@ -533,7 +538,6 @@ def arrange_inputs(
         )
     # #2284: with a library file in the mix the result is anyone's to file, so it may go
     # under any template (`arrange_outputs` checks it exists), not only its outputs'.
-    files = [f"library:{obj.library_file_id}" for obj in body.objects if obj.output_id is None]
     if slugs and not files and body.slug is not None and body.slug not in slugs:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -553,7 +557,7 @@ def arrange_inputs(
         name=body.name,
         provenance=provenance,
         # Every source, library files as `library:<id>` (#2284): "Arranged from" counts them.
-        sources=[*chosen, *dict.fromkeys(files)],
+        sources=[*chosen, *files],
     )
 
 
