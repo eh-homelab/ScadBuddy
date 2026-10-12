@@ -13,6 +13,9 @@ answers. What is tested here is that ScadBuddy sends it what it needs to answer 
 
 from __future__ import annotations
 
+import asyncio
+from typing import ClassVar, cast
+
 import httpx
 import pytest
 import respx
@@ -37,11 +40,14 @@ from scadbuddy.bambuddy.filaments import (
 )
 from scadbuddy.bambuddy.models import (
     Printer,
+    PrinterStatus,
     SlotChoice,
     SlotMaterial,
     Spool,
     SpoolAssignment,
 )
+from scadbuddy.bambuddy.print_run import filament_options
+from scadbuddy.bambuddy.print_source import PrintSource, ReadFile
 from scadbuddy.core.problems import ApiError
 from tests.bambuddy.conftest import BASE_URL, recording
 
@@ -740,3 +746,59 @@ def test_a_colourless_spool_fits_every_coloured_slot() -> None:
     assert _seed(SlotNeed(slot_id=1, colour="#FF0000"), shelf, remembered=30) == [
         SlotChoice(slot_id=1, spool_id=30)
     ]
+
+
+class _ReadSource:
+    """Just what `filament_options` reads of a source: library file 62, one plate."""
+
+    colours: ClassVar[list[str]] = ["#FF0000"]
+
+    async def file_to_read(self, client: BambuddyClient) -> ReadFile:
+        return ReadFile(62)
+
+    async def plate_ids(self, client: BambuddyClient) -> list[int]:
+        return [1]
+
+
+@respx.mock
+async def test_a_cancelled_filament_step_leaves_the_callers_status_read_running(
+    bambuddy: BambuddyClient,
+) -> None:
+    """#2509 review: ``choices_for`` shares one status read with the rack, so the
+    filament step waiting on it must not cancel it when the step itself is cancelled."""
+    respx.get(f"{API}/inventory/spools").mock(
+        return_value=httpx.Response(200, json=recording("inventory-spools.json"))
+    )
+    respx.get(f"{API}/inventory/assignments").mock(
+        return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
+    )
+    respx.get(f"{API}/library/files/62/filament-requirements").mock(
+        return_value=httpx.Response(200, json=recording("filament-requirements.json"))
+    )
+    respx.get(f"{API}/printers/1").mock(
+        return_value=httpx.Response(200, json=recording("printer.json"))
+    )
+    remain = respx.get(f"{API}/printers/1/inventory-remain").mock(
+        return_value=httpx.Response(200, json=recording("inventory-remain.json"))
+    )
+    release = asyncio.Event()
+
+    async def slow_status() -> PrinterStatus | None:
+        await release.wait()
+        return None
+
+    reading = asyncio.ensure_future(slow_status())
+    step = asyncio.ensure_future(
+        filament_options(bambuddy, cast(PrintSource, _ReadSource()), printer_id=1, status=reading)
+    )
+    # Every other read done: the step now waits on the status alone.
+    while not remain.called:
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.01)
+    step.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await step
+
+    assert not reading.done()
+    release.set()
+    assert await reading is None

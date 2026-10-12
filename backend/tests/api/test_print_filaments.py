@@ -158,6 +158,26 @@ def test_the_filament_step_shows_the_mounted_nozzles(client: TestClient, model: 
 
 @pytest.mark.requires_postgres
 @respx.mock
+def test_an_unreadable_status_opens_the_filament_step_with_no_nozzles(
+    client: TestClient, model: str
+) -> None:
+    """#2509 review: the filament step reads the status itself when no caller shares
+    one, alongside the spools; an offline printer still opens it, with no nozzles."""
+    output_id = prepared(client, model)
+    upload_route()
+    inventory_routes()
+    status = respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(503))
+
+    response = client.get(f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["nozzles"] == []
+    assert response.json()["slots"]
+    assert status.call_count == 1
+
+
+@pytest.mark.requires_postgres
+@respx.mock
 def test_each_loaded_spool_says_which_extruder_it_feeds(client: TestClient, model: str) -> None:
     """#469 — the recorded H2C has the Filament Track Switch: AMS 0/1 on inlet B (the
     right extruder), AMS 2 on inlet A (the left). A shelf spool has no side."""

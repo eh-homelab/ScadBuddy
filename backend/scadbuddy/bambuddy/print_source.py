@@ -27,8 +27,9 @@ import psycopg
 from fastapi import status
 
 from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.concurrent import settled
 from scadbuddy.bambuddy.dispatch import QueueOutcome
-from scadbuddy.bambuddy.filaments import FilamentPlan, normalise_colour, settled
+from scadbuddy.bambuddy.filaments import FilamentPlan, normalise_colour
 from scadbuddy.bambuddy.models import LibraryFile
 from scadbuddy.bambuddy.nozzle_plan import NozzlePlan
 from scadbuddy.bambuddy.options import options_scope

@@ -337,6 +337,24 @@ def test_a_file_deleted_in_bambuddy_is_a_404_with_nothing_sliced(client: TestCli
 
 
 @respx.mock
+def test_a_deleted_files_choices_are_its_404_whatever_else_fails(client: TestClient) -> None:
+    """#2509 review: the file, the printers and the presets are read together now, and
+    the file's 404 still beats the printers' failure, as when it was read first."""
+    configure(client)
+    respx.get(f"{API}/library/files/89").mock(
+        return_value=httpx.Response(404, json={"detail": "File not found"})
+    )
+    respx.get(f"{API}/printers/").mock(return_value=httpx.Response(500))
+    respx.get(f"{API}/slicer/presets").mock(return_value=httpx.Response(500))
+    respx.get(f"{API}/local-presets/").mock(return_value=httpx.Response(500))
+
+    response = client.get("/api/v1/print/library/89/choices")
+
+    assert response.status_code == 404, response.text
+    assert response.json()["type"].endswith("/bambuddy-not-found")
+
+
+@respx.mock
 def test_a_sliced_file_is_a_422_before_anything_is_sliced(client: TestClient) -> None:
     configure(client)
     library_file(104, file_type="gcode.3mf")

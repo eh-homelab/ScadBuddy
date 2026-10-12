@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from scadbuddy.bambuddy.catalogue import _Catalogue, _catalogue
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
+from scadbuddy.bambuddy.concurrent import settled
 from scadbuddy.bambuddy.dispatch import QueueOutcome, RackChoice, SlicePlan, enqueue_plate
 from scadbuddy.bambuddy.errors import not_configured
 from scadbuddy.bambuddy.extruders import (
@@ -44,7 +45,6 @@ from scadbuddy.bambuddy.filaments import (
     gather_plate_options,
     queue_filaments,
     read_inventory,
-    settled,
 )
 from scadbuddy.bambuddy.hardware import (
     installed_nozzles,
@@ -299,13 +299,19 @@ async def filament_options(
         )
     finally:
         # Awaited even when a read failed, so the status read never outlives the call.
-        printer_status = (
-            (await asyncio.gather(reading, return_exceptions=True))[0] if reading else None
-        )
+        # One the caller started (``choices_for`` shares it with the rack) is the
+        # caller's to cancel: `wait` leaves it running when this call is cancelled,
+        # where `gather` would cancel it (#2509 review).
+        if reading is None:
+            pass
+        elif status is not None:
+            await asyncio.wait([reading])
+        else:
+            await asyncio.gather(reading, return_exceptions=True)
     options = read[0] if len(read) == 1 else every_plate(read)
-    if printer_id is None:
+    if reading is None or printer_id is None:
         return options
-    printer_status = settled(printer_status)
+    printer_status = reading.result()
     if printer_status is None:
         options.nozzles = []
         return options
