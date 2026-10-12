@@ -28,8 +28,9 @@ import psycopg
 from fastapi import status
 
 from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.concurrent import settled
 from scadbuddy.bambuddy.dispatch import QueueOutcome
-from scadbuddy.bambuddy.filaments import FilamentPlan, normalise_colour, settled
+from scadbuddy.bambuddy.filaments import FilamentPlan, normalise_colour
 from scadbuddy.bambuddy.filaments3mf import (
     LocalFilaments,
     UnreadableFilamentsError,
@@ -693,7 +694,7 @@ class LibrarySource(PrintPipeline):
 
     async def fetch_3mf(self, client: BambuddyClient) -> bytes | None:
         """The file's bytes, an STL wrapped in a 3MF of ScadBuddy's own (#1752)."""
-        payload = await self._download(client)
+        payload = await self.download(client)
         if payload is None or self.file_type != "stl":
             return payload
         try:
@@ -755,7 +756,7 @@ class LibrarySource(PrintPipeline):
         out.truncate()
         out.write(wrapped)
 
-    async def _download(self, client: BambuddyClient) -> bytes | None:
+    async def download(self, client: BambuddyClient) -> bytes | None:
         """The file's bytes, counted as they stream in; ``None`` past
         :data:`MAX_DOWNLOAD_BYTES`, the stream closed there and nothing kept."""
         data = bytearray()

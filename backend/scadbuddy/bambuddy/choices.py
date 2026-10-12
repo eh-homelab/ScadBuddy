@@ -10,8 +10,9 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.catalogue import PresetChoice, _Catalogue, _catalogue
 from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.concurrent import settled
 from scadbuddy.bambuddy.extruders import default_nozzles
-from scadbuddy.bambuddy.filaments import FilamentOptions, settled
+from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.hardware import (
     InstalledNozzle,
     installed_nozzles,
@@ -125,7 +126,10 @@ async def choices_for(
     """The dialog's choices, read in two waves (#2504): ``source``, the printers and the
     presets together, then everything that needs the chosen printer together, its
     status read once. A failure surfaces as it did when the reads ran one by one:
-    the source's, then the printers', the presets' and the filament step's."""
+    the source's, then the printers', the presets' and the filament step's. So a
+    library file that is gone or unprintable still answers its 404 or 422, though the
+    printers and presets have been read beside it by then: a few wasted reads on a
+    rare path, for not waiting on the file every time."""
     loaded, listed, presets = await asyncio.gather(
         source, client.printers(), _catalogue(client), return_exceptions=True
     )

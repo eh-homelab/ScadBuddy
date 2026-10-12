@@ -65,6 +65,16 @@ describe('UnpricedSpend', () => {
     expect(s.usd()).toBeCloseTo(0.3 + 0.015, 10)
   })
 
+  it('prices a request Claude Code closed itself after the user stopped it (SDK 0.3.295)', () => {
+    const s = new UnpricedSpend()
+    s.observe(start('claude-sonnet-4-5', { input_tokens: 100_000, output_tokens: 1 }))
+    s.observe(text('x'.repeat(4000)))
+    s.observe(ev({ type: 'content_block_stop', index: 0 }))
+    s.observe(ev({ type: 'message_delta', delta: { stop_reason: null }, usage: { input_tokens: 100_000, output_tokens: 1 } }))
+    s.observe(ev({ type: 'message_stop' }))
+    expect(s.usd()).toBeCloseTo(0.3 + 0.015, 10)
+  })
+
   it('uses a reported output count over the estimate', () => {
     const s = new UnpricedSpend()
     s.observe(start('claude-sonnet-4-5', { input_tokens: 0 }))

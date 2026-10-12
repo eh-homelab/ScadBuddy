@@ -956,7 +956,13 @@ so a change applies from the next turn.
 - Limits: 30 s per request by default (the model may ask for up to 120 s), 5
   redirects, 1 MiB inline and 20 MiB read. A longer or binary body is saved under the
   state volume, in `work/sessions/<id>/http/` (the 10 newest per session), so size
-  that volume for it.
+  that volume for it. A durable session's go to `durable-turns/<id>/http/` on the replica
+  whose `turn_tools` listed the turn: its `http_request` calls are pinned to that
+  replica's own queue for the turn, so a body saved in one turn may be on another pod in
+  the next, and `http_response_read` then answers that there is no such saved response
+  (#2497; save to the workspace to keep one across turns). They are removed with the
+  session by `forgetSubject` on its pod, and by every pod's hourly sweep once the
+  session's row is gone (a flow run's after 7 days; #2496).
 - Every request is listed in Settings → **AI activity** under **HTTP requests**, with
   its method, host, status and size. A request whose body was saved has a **View /
   download body** link (#1292): plain text and JSON open as text, anything else
@@ -987,9 +993,9 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   a print's image, timelapse or file, or a Bambuddy library file into the workspace
   through the backend's own routes, so the bytes never pass through the model).
   `workspace_read` pages text as `read_file` does, returns an image as an image (a
-  durable session sees a note in its place), and only the metadata of other binary
-  files. `workspace_edit` is made against the sha256 the model read.
-- `http_request` takes `save_to_workspace: "<path>"` (classic sessions): the whole body
+  durable session gets its name, to see it with `view_tool_images`, #2402), and only the
+  metadata of other binary files. `workspace_edit` is made against the sha256 the model read.
+- `http_request` takes `save_to_workspace: "<path>"` (classic and durable sessions, #2496): the whole body
   becomes a workspace file instead of a saved body on the state volume (§12). A body cut
   at the 20 MiB read cap, or one over the workspace caps, is not stored, and the result
   says why.

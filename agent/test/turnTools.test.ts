@@ -1,4 +1,4 @@
-import { mkdtemp } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
@@ -11,7 +11,7 @@ import type { Tier } from '../src/auth/principal.js'
 import type { RiskTier } from '../src/harness/permissions.js'
 import type { Owner } from '../src/sessions/protocol.js'
 import { HTTP_READ_TOOL, HTTP_SERVER, HTTP_TOOL } from '../src/harness/httpRequest.js'
-import { turnServers } from '../src/temporal/turnServers.js'
+import { FLOW_BODIES_KEPT_MS, removeTurnDir, sweepTurnDirs, turnServers } from '../src/temporal/turnServers.js'
 import {
   connectInProcess,
   TURN_TOOL_TIER_ACTIVITY,
@@ -83,6 +83,7 @@ function harness(
     starterTiers?: Tier[]
     server?: (calls: string[]) => () => McpServer
     mayPark?: boolean
+    listingKey?: string
   } = {},
 ) {
   const contexts: TurnContext[] = []
@@ -91,9 +92,11 @@ function harness(
   const reported: string[] = []
   const stored: string[] = []
   const owner = options.owner ?? BROWSER
+  let connects = 0
   const server: TurnServer = {
     name: 'notes',
-    connect: () => connectInProcess((options.server ?? notes)(calls)),
+    connect: () => (connects++, connectInProcess((options.server ?? notes)(calls))),
+    ...(options.listingKey === undefined ? {} : { listingKey: options.listingKey }),
     tierOf,
     ...(options.mayPark === false ? {} : { mayPark }),
     ...(options.pinned ? { pinned: true } : {}),
@@ -123,7 +126,16 @@ function harness(
     report: async (_session, problems) => void reported.push(...problems),
     blobs: { put: async (session, images) => void stored.push(...images.map((i) => `${session}/${i.name}`)) },
   }
-  return { contexts, calls, audits, reported, stored, activities: turnToolActivities(deps), call: turnToolActivity(deps) }
+  return {
+    contexts,
+    calls,
+    audits,
+    reported,
+    stored,
+    connects: () => connects,
+    activities: turnToolActivities(deps),
+    call: turnToolActivity(deps),
+  }
 }
 
 function env(activityType: string, activityId = 'tool-toolu_01', workflowId = `session-${SESSION}`) {
@@ -243,6 +255,27 @@ describe('turn tools in a durable session', () => {
     expect(h.audits).toEqual([expect.objectContaining({ action: 'notes__read_note', tier: 'read', outcome: 'ok', sessionId: SESSION })])
   })
 
+  it("records the durable turn on a call's audit row and in its servers' context, as a classic turn's (#2497)", async () => {
+    const turnId = '6a1f2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d'
+    const h = harness({ owner: { ...BROWSER, turnId } as never })
+    await env('turn:notes__read_note').run(h.call, { id: 'a' })
+    expect(h.audits).toEqual([expect.objectContaining({ turnId })])
+    expect(h.contexts.at(-1)?.turnId).toBe(turnId)
+  })
+
+  it('lists a keyed server once for a tier check and the call after it (#2497)', async () => {
+    const h = harness({ listingKey: 'k1' })
+    await env(TURN_TOOL_TIER_ACTIVITY).run(h.activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: 'notes__read_note', input: {} })
+    await env('turn:notes__read_note').run(h.call, { id: 'a' })
+    // One listing, kept; then the call's own connection.
+    expect(h.connects()).toBe(2)
+    // An unkeyed server is listed for each.
+    const u = harness()
+    await env(TURN_TOOL_TIER_ACTIVITY).run(u.activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: 'notes__read_note', input: {} })
+    await env('turn:notes__read_note').run(u.call, { id: 'a' })
+    expect(u.connects()).toBe(3)
+  })
+
   it('runs an outward call only with an approval recorded for it', async () => {
     const h = harness()
     const refused = await failure(env('turn:notes__post').run(h.call, { method: 'POST', body: 'x' }))
@@ -343,5 +376,30 @@ describe('turn tools in a durable session', () => {
       expect(gone.message).toContain('not offered')
       expect(h.calls).toEqual([])
     })
+  })
+})
+
+describe('saved http bodies on this pod (#2496)', () => {
+  const GONE = '1b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f61'
+  const sql = ((_s: TemplateStringsArray, ...values: unknown[]) =>
+    Promise.resolve(((values[0] as string[]) ?? []).filter((id) => id === SESSION).map((id) => ({ id })))) as never
+
+  it("sweeps a session's bodies once its row is gone, and a flow run's once old; keeps the rest", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'turn-dirs-'))
+    for (const name of [SESSION, GONE, `flow-${FLOW}`, 'not-ours']) await mkdir(path.join(root, name, 'http'), { recursive: true })
+    expect((await sweepTurnDirs(root, sql)).sort()).toEqual([GONE])
+    expect(await sweepTurnDirs(root, sql, Date.now() + FLOW_BODIES_KEPT_MS + 1000)).toEqual([`flow-${FLOW}`])
+    expect((await readdir(root)).sort()).toEqual([SESSION, 'not-ours'].sort())
+    expect(await sweepTurnDirs(path.join(root, 'missing'), sql)).toEqual([])
+  })
+
+  it("removes a forgotten subject's bodies, and only a subject's", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'turn-dirs-'))
+    await mkdir(path.join(root, SESSION, 'http'), { recursive: true })
+    await mkdir(path.join(root, `flow-${FLOW}`), { recursive: true })
+    await removeTurnDir(root, `session-${SESSION}`)
+    await removeTurnDir(root, `flow-${FLOW}`)
+    await removeTurnDir(root, '..')
+    expect(await readdir(root)).toEqual([])
   })
 })

@@ -11,6 +11,7 @@ import { guideTools } from './guide.js'
 import { historyTools } from './history.js'
 import { inspectTools } from './inspect.js'
 import { libraryTools } from './libraries.js'
+import { meshModelTools } from './meshModels.js'
 import { outputTools } from './outputs.js'
 import { printTools } from './print.js'
 import { printHistoryTools, printMediaTools } from './prints.js'
@@ -30,6 +31,7 @@ import { workspaceTools } from './workspace.js'
 
 export const ALL_TOOLS: readonly Tool[] = [
   ...catalogueTools,
+  ...meshModelTools,
   ...customizerTools,
   ...outputTools,
   ...arrangeTools,

@@ -8,6 +8,7 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 import pytest
 import trimesh
@@ -370,7 +371,9 @@ async def test_each_colour_is_a_solid_span_with_its_export_beneath(
 
     finished = spans.get_finished_spans()
     solid_spans = [s for s in finished if s.name == "render.solid"]
-    assert sorted((s.attributes or {})["scadbuddy.colour_index"] for s in solid_spans) == [1, 2]
+    assert sorted(
+        cast(int, (s.attributes or {})["scadbuddy.colour_index"]) for s in solid_spans
+    ) == [1, 2]
     exports = [s for s in finished if s.name == "openscad.export"]
     assert len(exports) == 2
     for solid_span in solid_spans:

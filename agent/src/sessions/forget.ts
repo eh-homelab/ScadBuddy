@@ -32,6 +32,8 @@ export type ForgetDeps = {
   keys?: { forget(subject: string): void } | undefined
   /** Where its large payloads are kept (FilePayloadStore); without one, they stay, unreadable. */
   payloads?: { forget(subject: string): Promise<void> } | undefined
+  /** Its saved http bodies on this pod (turnServers.ts `removeTurnDir`); other pods' go to their sweep. */
+  turnDirs?: ((subject: string) => Promise<void>) | undefined
 }
 
 export type Forgotten = {
@@ -79,6 +81,7 @@ export async function forgetSubject(deps: ForgetDeps, subject: string): Promise<
     }
   }
   await deps.payloads?.forget(subject)
+  await deps.turnDirs?.(subject)
   let rows = 0
   if (subject.startsWith('session-')) {
     const id = subject.slice('session-'.length)
