@@ -72,6 +72,9 @@ def test_a_library_file_matches_only_through_library_files() -> None:
 def test_max_prints_counts_what_was_used() -> None:
     assert admits(rule(max_prints=4), facts(prints=2), RuleUse(prints=2)) is None
     assert admits(rule(max_prints=4), facts(prints=2), RuleUse(prints=3)) is not None
+    # An all-plates print of a library file is not counted: no print bound matches it.
+    assert admits(rule(max_prints=4), facts(prints=None), RuleUse()) == "prints unknown"
+    assert admits(rule(), facts(prints=None), RuleUse()) is None
 
 
 def test_max_filament_refuses_unknown_grams() -> None:

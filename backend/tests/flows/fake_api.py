@@ -4,7 +4,7 @@ route activities reach it through `httpx.ASGITransport`."""
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -15,15 +15,17 @@ from starlette.routing import Route
 from temporal_agent_harness.harness.agent_client import AgentClient
 from temporal_agent_harness.harness.agent_protocol import AgentConfig
 
+from scadbuddy.flows.grants import GrantSpec
 from scadbuddy.flows.manifest import tiers
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.workflows.flow_activities import FlowActivities
+from scadbuddy.workflows.flow_grants import FlowGrants
 from scadbuddy.workflows.flow_routes import FlowRoutes
 from scadbuddy.workflows.flows_client import connect_flows
 from scadbuddy.workflows.project import PROJECT_WORKFLOW, FlowStart, RunFlow
 from scadbuddy.workflows.projects_worker import projects_worker
-from tests.flows.flows_support import Flows, Keys, define
+from tests.flows.flows_support import HASH_KEY, Flows, Keys, define
 
 PROBLEM = "application/problem+json"
 STILL_ACCEPTING = "https://scadbuddy.dev/problems/command-still-accepting"
@@ -49,6 +51,11 @@ class FakeApi:
         self.accepting = 0
         #: Refuse every print, as a printer that is offline.
         self.refuse_prints = False
+        #: The configured printer and the remembered quantity (#2481's grant checks).
+        self.printer_id: int | None = None
+        self.quantity: int | None = None
+        #: Fail every output read, as an API that is away.
+        self.outputs_fail = False
         self.app = Starlette(
             routes=[
                 Route("/api/v1/models/{slug}/render", self.render, methods=["POST"]),
@@ -58,6 +65,8 @@ class FakeApi:
                 Route("/api/v1/print/outputs/{output_id}/run", self.print, methods=["POST"]),
                 Route("/api/v1/print/runs/{run_id}", self.run),
                 Route("/api/v1/outputs/arrange", self.arrange, methods=["POST"]),
+                Route("/api/v1/outputs/{output_id}", self.output),
+                Route("/api/v1/settings/print-options", self.print_options),
             ]
         )
 
@@ -115,16 +124,48 @@ class FakeApi:
         await self._record(request)
         return JSONResponse({"id": "arr-1", "slug": "box", "status": "pending"}, status_code=202)
 
+    async def output(self, request: Request) -> JSONResponse:
+        if self.outputs_fail:
+            return problem(500, "the outputs are away")
+        return JSONResponse(
+            {"id": request.path_params["output_id"], "slug": "box", "layout_plates": []}
+        )
+
+    async def print_options(self, request: Request) -> JSONResponse:
+        return JSONResponse(
+            {
+                "defaults": {},
+                "global_options": {"quantity": self.quantity},
+                "printers": {},
+                "models": {},
+                "printer_id": self.printer_id,
+            }
+        )
+
     def to(self, path: str) -> list[tuple[dict[str, Any], str | None]]:
         return [(body, key) for p, body, key in self.sent if p == path]
 
 
 class Outward(Flows):
     async def run(
-        self, body: str, *, approval_timeout_s: int = 0, tools_queue: str = "agent-tools"
+        self,
+        body: str,
+        *,
+        approval_timeout_s: int = 0,
+        tools_queue: str = "agent-tools",
+        grant: GrantSpec | None = None,
+        before: Callable[[str], Awaitable[None]] | None = None,
     ) -> str:
+        """Start a run of `body`, with `grant` approved by the browser, and `before` run
+        once the grant is in."""
         definition = await define(self.store, "t")
         run_id = str(uuid.uuid4())
+        if grant is not None:
+            await self.store.insert_grant(
+                run_id, grant, status="approved", requested_by={"kind": "browser"}
+            )
+        if before is not None:
+            await before(run_id)
         await AgentClient(self.client, f"flow-{run_id}").start_and_submit_message(
             "execute",
             RunFlow(script=body).model_dump(),
@@ -168,5 +209,7 @@ async def outward_worker(
     store = FlowStore(jobs.pool)
     queue = f"projects-{uuid.uuid4().hex[:8]}"
     routes = FlowRoutes(api)
-    async with projects_worker(client, queue, [*FlowActivities(store).all(), *routes.all()]):
+    grants = FlowGrants(store, api, HASH_KEY)
+    activities = [*FlowActivities(store).all(), *routes.all(), *grants.all()]
+    async with projects_worker(client, queue, activities):
         yield Outward(client, queue, store)

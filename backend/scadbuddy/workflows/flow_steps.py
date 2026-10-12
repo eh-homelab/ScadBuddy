@@ -77,10 +77,12 @@ async def step(
     outward: bool,
     waiting: Literal["approval", "answer"] | None = None,
     prompt: str | None = None,
+    grant_id: str | None = None,
 ) -> AsyncIterator[StepHandle]:
     """Record a host call around its body: `running` on enter (and parked, with
-    `waiting`), `succeeded` or `failed` on exit. A failure records only the exception's
-    type, never its message, and is re-raised."""
+    `waiting`; or let through by the run grant `grant_id`), `succeeded` or `failed` on
+    exit. A failure records only the exception's type, never its message, and is
+    re-raised."""
     owner: StepOwner = workflow.instance()
     info = workflow.info()
     started = FlowStep(
@@ -91,6 +93,7 @@ async def step(
         outward=outward,
         started_at=workflow.now(),
         history_length=info.get_current_history_length(),
+        grant_id=grant_id,
     )
     parked = (
         FlowWaiting(

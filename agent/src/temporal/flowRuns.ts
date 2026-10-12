@@ -30,6 +30,11 @@ export interface FlowRuns {
    * as hashed now. Without a hash nothing is approved.
    */
   approved(requestId: string, inputHash?: string): Promise<boolean>
+  /**
+   * Whether the call's approval for this `inputHash` came from the run's grant (#2481),
+   * now revoked or expired: `approved` is false for it, and it is refused GrantRevoked.
+   */
+  lapsed?(requestId: string, inputHash?: string): Promise<boolean>
 }
 
 /** `started_by` as the backend writes it (core/authorship.py `current_author()`). */
@@ -78,9 +83,25 @@ export class PgFlowRuns implements FlowRuns {
   async approved(requestId: string, inputHash?: string): Promise<boolean> {
     if (inputHash === undefined) return false
     const rows = await this.#sql`
-      SELECT 1 FROM workflow_run_decisions
-      WHERE request_id = ${requestId} AND kind = 'approval' AND outcome = 'approved'
-        AND input_hash = ${inputHash}`
+      SELECT 1 FROM workflow_run_decisions d
+      WHERE d.request_id = ${requestId} AND d.kind = 'approval' AND d.outcome = 'approved'
+        AND d.input_hash = ${inputHash}
+        -- A run grant's approval holds only while the grant is in force (#2481).
+        AND (d.responder NOT LIKE 'grant:%' OR EXISTS (
+          SELECT 1 FROM flow_grants g
+          WHERE 'grant:' || g.id = d.responder AND g.status = 'approved'
+            AND g.revoked_at IS NULL AND now() < g.expires_at))`
+    return rows.length > 0
+  }
+
+  async lapsed(requestId: string, inputHash?: string): Promise<boolean> {
+    if (inputHash === undefined) return false
+    const rows = await this.#sql`
+      SELECT 1 FROM workflow_run_decisions d
+      JOIN flow_grants g ON 'grant:' || g.id = d.responder
+      WHERE d.request_id = ${requestId} AND d.kind = 'approval' AND d.outcome = 'approved'
+        AND d.input_hash = ${inputHash}
+        AND (g.status <> 'approved' OR g.revoked_at IS NOT NULL OR g.expires_at IS NULL OR now() >= g.expires_at)`
     return rows.length > 0
   }
 }

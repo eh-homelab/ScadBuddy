@@ -9,6 +9,14 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
+from scadbuddy.flows.grants import Narrowing
+
+#: A run grant at the gate (#2481): `workflows/flow_grants.py`'s activities.
+FLOW_GRANT_CHECK = "flow_grant_check"
+FLOW_GRANT_APPROVE = "flow_grant_approve"
+#: The harness refused the grant's Update for good (not "not parked yet").
+GRANT_REFUSED = "GrantApprovalRefused"
+
 
 class FlowStep(BaseModel):
     """One host call of a run."""
@@ -31,6 +39,8 @@ class FlowStep(BaseModel):
     error: str | None = None
     #: The agent session an `agent` or `ask_session` call talks to, for the page's link.
     session_id: str | None = None
+    #: The run grant that let this outward call through without asking (#2481).
+    grant_id: str | None = None
 
 
 class FlowWaiting(BaseModel):
@@ -79,3 +89,45 @@ class FlowRecord(BaseModel):
     approval_timeout_s: int = 0
     #: The commit of the version it runs (#2503); "" from a run started before.
     commit: str = ""
+
+
+class GrantCheck(BaseModel):
+    """One call to check against the run's grant (#2481). It carries the call's
+    arguments, so it is sealed under the run's key like the rest of its history."""
+
+    run_id: str
+    #: `flow:<run>:<workflow run>:<call>` for a flow-own call; a child's
+    #: `durable:<session>:<workflow run>:<tool use>`.
+    request_id: str
+    fn: str
+    tool: str | None = None
+    args: dict[str, Any] = {}
+    #: A child session's call: the session, and the run's step that sent its turn.
+    session_id: str | None = None
+    flow_call_id: str | None = None
+    narrowing: Narrowing | None = None
+
+
+class GrantVerdict(BaseModel):
+    """`flows.grants.Inside` or `Outside`, flattened for the history."""
+
+    verdict: Literal["inside", "outside"]
+    grant_id: str | None = None
+    rule_index: int | None = None
+    input_hash: str | None = None
+    #: The call's arguments with the defaults the check resolved pinned in: what runs.
+    args: dict[str, Any] | None = None
+    reason: str | None = None
+    timeout_s: int = 0
+    parent_hop: bool = False
+
+
+class GrantApprove(BaseModel):
+    """Let one parked flow-own call through on the grant's say."""
+
+    run_id: str
+    workflow_id: str
+    workflow_run_id: str
+    call_id: str
+    grant_id: str
+    input_hash: str

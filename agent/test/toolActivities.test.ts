@@ -382,6 +382,22 @@ describe('flow runs in tool activities', () => {
     expect(refused.type).toBe('NotApproved')
   })
 
+  it("refuses a grant's call as GrantRevoked once its grant was revoked or expired (#2481)", async () => {
+    const audits: unknown[] = []
+    const flows: FlowRuns = {
+      ...flowRuns(),
+      lapsed: async (requestId, inputHash) => requestId.endsWith(':call_lapsed') && inputHash === 'hash:send',
+    }
+    const h = harness({ flows, audit: { record: async (row) => void audits.push(row), hash: () => 'hash:send', summarise: (tool) => tool } })
+    const refused = await failure(env(FLOW, 'tool-call_lapsed').run(h.activities.send!, { to: 'printer' }))
+    expect(refused.nonRetryable).toBe(true)
+    expect(refused.type).toBe('GrantRevoked')
+    expect(refused.message).toContain("the run's grant was revoked or expired before this call ran")
+    expect(audits).toEqual([expect.objectContaining({ action: 'send', outcome: 'refused' })])
+    // Not approved and no grant behind it: still NotApproved.
+    expect((await failure(env(FLOW, 'tool-call_2').run(h.activities.send!, { to: 'printer' }))).type).toBe('NotApproved')
+  })
+
   it("runs a token starter's call with the tiers its token holds now (#2320)", async () => {
     const live = harness({ flows: flowRuns(BEARER), currentTiers: async () => ['read', 'write', 'outward'] })
     const content = await env(FLOW, 'tool-call_ok').run(live.activities.send!, { to: 'x' })

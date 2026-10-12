@@ -109,7 +109,8 @@ class CallFacts(BaseModel):
     printer_id: int | None = None
     models: list[str] = []
     library_file: int | None = None
-    prints: int = 0
+    #: Print items (copies times plates); None when they could not be counted.
+    prints: int | None = 0
     filament_g: float | None = None
 
 
@@ -295,8 +296,11 @@ def admits(rule: GrantRule, facts: CallFacts, used: RuleUse) -> str | None:
         facts.library_file is None or facts.library_file not in rule.library_files
     ):
         return "library file not in the grant"
-    if rule.max_prints is not None and used.prints + facts.prints > rule.max_prints:
-        return "print limit reached"
+    if rule.max_prints is not None:
+        if facts.prints is None:
+            return "prints unknown"
+        if used.prints + facts.prints > rule.max_prints:
+            return "print limit reached"
     if rule.max_filament_g is not None:
         if facts.filament_g is None:
             return "filament unknown"
@@ -463,7 +467,7 @@ async def match_grant(
                 tool=tool,
                 input_hash=input_hash,
                 rule_index=rule_index,
-                prints=facts.prints,
+                prints=facts.prints or 0,
                 filament_g=facts.filament_g or 0,
                 session_id=session_id,
                 narrowed_by=flow_call_id if narrowing is not None else None,

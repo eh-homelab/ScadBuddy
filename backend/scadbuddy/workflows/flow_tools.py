@@ -5,10 +5,13 @@ Every function records its step on the run's row (plan 2026-10-09 Ruling 7). No
 scripts and to coerce their arguments.
 """
 
+import asyncio
+import contextlib
 import json
 import re
+from collections.abc import Callable
 from datetime import timedelta
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 from urllib.parse import quote
 
 from pydantic import BaseModel, Field
@@ -23,7 +26,15 @@ with workflow.unsafe.imports_passed_through():
     from temporal_agent_harness.harness.agent_workflow import AgentWorkflowRunner
 
     from scadbuddy.workflows.flow_entries import run_callback, run_gated
-    from scadbuddy.workflows.flow_models import ProjectionWrite
+    from scadbuddy.workflows.flow_models import (
+        FLOW_GRANT_APPROVE,
+        FLOW_GRANT_CHECK,
+        GRANT_REFUSED,
+        GrantApprove,
+        GrantCheck,
+        GrantVerdict,
+        ProjectionWrite,
+    )
     from scadbuddy.workflows.flow_routes import (
         API_URL_MISSING,
         FLOW_ROUTE_FOLLOW,
@@ -132,7 +143,7 @@ class ToolFailedError(Exception):
 
 #: The agent's activity refusals (`agent/src/temporal/toolActivities.ts`) and a tool's
 #: own error: final, the call is never sent again.
-_TOOL_REFUSALS = ["ToolError", "NotApproved", "UnknownFlow", "NotForFlows"]
+_TOOL_REFUSALS = ["ToolError", "NotApproved", "GrantRevoked", "UnknownFlow", "NotForFlows"]
 _TOOL_TIMEOUT = timedelta(seconds=120)
 
 
@@ -325,10 +336,90 @@ async def approved_arrange(call: str, request: dict[str, Any]) -> ArrangeResult:
     return result
 
 
+#: The run grant's check at the gate (#2481): a run recorded before it replays without.
+FLOW_GRANT_PATCH = "flow-grant-check"
+_GRANT_CHECK = timedelta(seconds=10)
+_GRANT_CHECK_RETRY = RetryPolicy(maximum_attempts=5)
+#: Retried until the parked call takes it; only a definite refusal is final.
+_GRANT_APPROVE_RETRY = RetryPolicy(non_retryable_error_types=[GRANT_REFUSED])
+
+
+class GrantCall(NamedTuple):
+    """A gated call as a run grant sees it: the host function (`queue_print`, `arrange`
+    or `tool`), the agent tool for `tool`, its arguments, and how the arguments the
+    check pinned become the gated body's."""
+
+    fn: str
+    tool: str | None
+    args: dict[str, Any]
+    pinned: Callable[[dict[str, Any]], dict[str, Any]]
+
+
+async def _grant_verdict(call_id: str, grant: GrantCall) -> GrantVerdict | None:
+    """The run grant's verdict on the call; None when the check could not be made, which
+    asks the person (fail toward asking)."""
+    owner: StepOwner = workflow.instance()
+    try:
+        verdict: GrantVerdict = await workflow.execute_activity(
+            FLOW_GRANT_CHECK,
+            GrantCheck(
+                run_id=owner.run_id,
+                request_id=f"flow:{owner.run_id}:{workflow.info().run_id}:{call_id}",
+                fn=grant.fn,
+                tool=grant.tool,
+                args=grant.args,
+            ),
+            result_type=GrantVerdict,
+            start_to_close_timeout=_GRANT_CHECK,
+            retry_policy=_GRANT_CHECK_RETRY,
+        )
+    except ActivityError:
+        return None
+    return verdict
+
+
 async def _gated(
-    fn: str, runner: AgentWorkflowRunner, tool: Any, call_id: str, **kwargs: Any
+    fn: str,
+    runner: AgentWorkflowRunner,
+    tool: Any,
+    call_id: str,
+    *,
+    grant: GrantCall | None = None,
+    **kwargs: Any,
 ) -> Any:
     owner: StepOwner = workflow.instance()
+    verdict = None
+    if grant is not None and workflow.patched(FLOW_GRANT_PATCH):
+        verdict = await _grant_verdict(call_id, grant)
+    if grant is not None and verdict is not None and verdict.verdict == "inside":
+        assert verdict.grant_id is not None
+        pinned = grant.pinned(verdict.args or {})
+        # Inside the grant (spec 2026-10-11 §3.3): nothing is listed and nobody asked.
+        # The call parks in the harness as any gated call does, and the grant's approval
+        # lets it through, bound to the call as it runs, with its defaults pinned.
+        async with step(fn, call_id, outward=True, grant_id=verdict.grant_id):
+            call = asyncio.ensure_future(runner.run_tool(call_id, tool, **{**kwargs, **pinned}))
+            try:
+                await workflow.execute_activity(
+                    FLOW_GRANT_APPROVE,
+                    GrantApprove(
+                        run_id=owner.run_id,
+                        workflow_id=workflow.info().workflow_id,
+                        workflow_run_id=workflow.info().run_id,
+                        call_id=call_id,
+                        grant_id=verdict.grant_id,
+                        input_hash=verdict.input_hash or "",
+                    ),
+                    result_type=bool,
+                    start_to_close_timeout=_GRANT_CHECK,
+                    retry_policy=_GRANT_APPROVE_RETRY,
+                )
+            except ActivityError:
+                call.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await call
+                raise
+            return await call
     async with step(fn, call_id, outward=True, waiting="approval"):
         return await run_gated(
             runner.run_tool,
@@ -356,7 +447,19 @@ async def queue_print(
         path = f"/api/v1/print/outputs/{_segment(output_id, 'output id')}/run"
     call_id = str(workflow.uuid4())
     outcome: PrintOutcome = await _gated(
-        "queue_print", runner, approved_print, call_id, call=call_id, path=path, request=request
+        "queue_print",
+        runner,
+        approved_print,
+        call_id,
+        grant=GrantCall(
+            "queue_print",
+            None,
+            {"source": source, "request": request},
+            lambda args: {"request": args["request"]},
+        ),
+        call=call_id,
+        path=path,
+        request=request,
     )
     return outcome
 
@@ -369,7 +472,15 @@ async def arrange(
     POST /outputs/arrange: `objects`, `goal`, ...) and save the result as an output."""
     call_id = str(workflow.uuid4())
     result: ArrangeResult = await _gated(
-        "arrange", runner, approved_arrange, call_id, call=call_id, request=request
+        "arrange",
+        runner,
+        approved_arrange,
+        call_id,
+        grant=GrantCall(
+            "arrange", None, {"request": request}, lambda args: {"request": args["request"]}
+        ),
+        call=call_id,
+        request=request,
     )
     return result
 
@@ -491,7 +602,14 @@ async def _run_tool(name: str, args: dict[str, Any], runner: AgentWorkflowRunner
     call_id = str(workflow.uuid4())
     if tier == "outward":
         result: ToolResult = await _gated(
-            f"tool:{name}", runner, approved_tool, call_id, call=call_id, name=name, args=args
+            f"tool:{name}",
+            runner,
+            approved_tool,
+            call_id,
+            grant=GrantCall("tool", name, args, lambda pinned: {"args": pinned}),
+            call=call_id,
+            name=name,
+            args=args,
         )
         return result
     async with step(f"tool:{name}", call_id, outward=False):
