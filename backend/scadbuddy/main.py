@@ -177,20 +177,19 @@ async def _close_quietly(state: AppState) -> None:
             logger.exception("could not release what a failed start opened")
 
 
-def sweep_assets(state: AppState) -> list[str]:
+def sweep_assets(state: AppState, stop: threading.Event | None = None) -> list[str]:
     """Remove the uploads nothing references or has used for the grace (#296).
 
     The references are read first -- every job in the projection, then every
     saved preset, output and template (`referenced_asset_ids`) -- and any failure to read
     them raises before anything is removed. What is referenced after that is kept by
     its last use, which the sweep re-checks under the store's lock per asset.
+    ``stop``, once set, ends it before its next asset (#2140).
     """
     jobs = state.render.store.list_jobs()
     params = [job.params for job in jobs] + state.presets.saved_params()
     referenced = referenced_asset_ids(state.paths, params)
-    removed = state.assets.sweep(
-        referenced, grace=state.config.asset_sweep_grace, stop=state.sweeps_stop
-    )
+    removed = state.assets.sweep(referenced, grace=state.config.asset_sweep_grace, stop=stop)
     state.metrics.assets_swept.inc(len(removed))
     if removed:
         logger.info("removed unused uploads", extra={"count": len(removed)})
@@ -256,15 +255,16 @@ async def drop_swept_assets(state: AppState, removed: list[str], *, cutoff: date
         await remote.drop(removed, cutoff=cutoff)
 
 
-async def _sweep_assets_logged(state: AppState) -> None:
+async def _sweep_assets_logged(state: AppState, stop: threading.Event | None = None) -> None:
     # Best effort: a store or volume error skips this sweep (removing nothing it could
     # not prove unused) and the next one retries. Only the Schedule's sweep runs it, so
     # a failure is logged and fails its activity, which reports it.
     try:
         remote = _remote_assets(state)
         cutoff = await remote.clock() if remote is not None else None
-        removed = await asyncio.to_thread(sweep_assets, state)
-        if remote is not None and cutoff is not None and not state.sweeps_stop.is_set():
+        removed = await asyncio.to_thread(sweep_assets, state, stop)
+        stopped = stop is not None and stop.is_set()
+        if remote is not None and cutoff is not None and not stopped:
             await drop_swept_assets(state, removed, cutoff=cutoff)
             # What an earlier drop failed to remove, and what the store lost (a copy an
             # `ensure` dropped, a race with a delete): both converge here, per sweep.
@@ -416,7 +416,11 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
 
     @activity.defn(name=SWEEPS[1])
     async def sweep_assets() -> None:
-        await _heartbeating(_sweep_assets_logged(state), state.sweeps_stop)
+        # Its own stop, per run (#2140): one a worker's shutdown sets ends this run only,
+        # never the sweeps of the worker `_run_library_worker` starts after it. A sweep
+        # added here that runs a thread passes its own the same way.
+        stop = threading.Event()
+        await _heartbeating(_sweep_assets_logged(state, stop), stop)
 
     @activity.defn(name=SWEEPS[2])
     async def sweep_blobs() -> None:

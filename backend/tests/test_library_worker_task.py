@@ -405,6 +405,44 @@ async def test_a_sweep_that_checks_the_stop_ends_inside_the_join(
     assert "still running" not in caplog.text
 
 
+async def test_a_stop_at_one_shutdown_does_not_stop_the_next_workers_sweep(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2140: the stop a worker's shutdown sets ends that run's asset sweep only. The
+    worker `_run_library_worker` starts after it sweeps with a stop that is not set,
+    or its sweeps would remove nothing until the pod restarts."""
+    monkeypatch.setattr(main, "HEARTBEAT_EVERY", 0.01)
+    monkeypatch.setattr(main, "SWEEP_SHUTDOWN_JOIN", 5.0)
+    entered = threading.Event()
+    stops: list[threading.Event] = []
+
+    def sweeping(state: Any, stop: threading.Event | None = None) -> list[str]:
+        assert stop is not None
+        stops.append(stop)
+        if len(stops) == 1:
+            entered.set()
+            while not stop.wait(0.01):
+                pass
+        return []
+
+    monkeypatch.setattr(main, "sweep_assets", sweeping)
+    state = SimpleNamespace(store=SimpleNamespace(remote_assets=None))
+    first = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
+    env = ActivityEnvironment()
+    task = asyncio.ensure_future(env.run(first[SWEEPS[1]]))
+    assert await asyncio.to_thread(entered.wait, 5)
+    env.worker_shutdown()
+    env.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 2)
+    assert stops[0].is_set()
+
+    # The restarted worker, on the same state.
+    second = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
+    await ActivityEnvironment().run(second[SWEEPS[1]])
+    assert not stops[1].is_set()
+
+
 async def test_a_sweep_cancelled_while_the_worker_runs_stops_at_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

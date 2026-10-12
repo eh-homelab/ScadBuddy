@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import threading
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -39,10 +38,8 @@ async def test_the_sweep_drops_then_reconciles_and_backfills(
     """The Schedule's sweep is the only one (review #1095 1): it drops what it removed,
     then converges with the store."""
     remote = _Remote()
-    monkeypatch.setattr(main, "sweep_assets", lambda state: ["a1"])
-    state = SimpleNamespace(
-        store=SimpleNamespace(remote_assets=remote), assets=object(), sweeps_stop=threading.Event()
-    )
+    monkeypatch.setattr(main, "sweep_assets", lambda state, stop=None: ["a1"])
+    state = SimpleNamespace(store=SimpleNamespace(remote_assets=remote), assets=object())
     await main._sweep_assets_logged(state)  # type: ignore[arg-type]
     assert remote.calls == ["drop", "reconcile", "backfill"]
 
