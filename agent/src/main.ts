@@ -58,7 +58,7 @@ import { SHARED_PACKAGES, sweepPackageCopies } from './temporal/turnPackages.js'
 import { forwardPackageServers } from './plugins/packages/mcp.js'
 import { subagentKey } from './temporal/subagentToken.js'
 import { pgRunning } from './routes/subagentMcp.js'
-import { turnServers } from './temporal/turnServers.js'
+import { DURABLE_TURNS_DIR, sweepTurnDirs, turnServers } from './temporal/turnServers.js'
 import { turnToolActivities, turnToolActivity } from './temporal/turnTools.js'
 import { DURABLE_TOOLS } from './tools/manifest.js'
 import { PgAnswers } from './gate/answers.js'
@@ -394,10 +394,6 @@ if (temporal && !payloadKeys) {
 const workerDataConverter = dataConverter
   ? { ...dataConverter, failureConverterPath: fileURLToPath(new URL('./temporal/failureConverter.js', import.meta.url)) }
   : undefined
-// What a durable turn offers beside ScadBuddy's own tools (#2320): the servers a
-// classic turn would hand Claude Code, built again for every listing and call. One whose
-// state lives on this pod (http_request's saved bodies) runs its calls on this replica's
-// own queue, HOST_QUEUE, served by `hostWorker` below.
 // Package copies no turn has used for a week (#2395): the shared ones on the payload
 // volume, and this pod's own copies without their http servers. Every hour.
 {
@@ -409,6 +405,20 @@ const workerDataConverter = dataConverter
   sweep()
   setInterval(sweep, 3600_000).unref()
 }
+// Each replica's saved http bodies of durable sessions gone since (#2496), every hour.
+if (database) {
+  const sweepRoot = path.join(paths.stateDir, DURABLE_TURNS_DIR)
+  const sweep = () =>
+    void sweepTurnDirs(sweepRoot, database.sql).catch((err: unknown) =>
+      console.error('durable http body sweep failed:', (err as Error).message),
+    )
+  sweep()
+  setInterval(sweep, 3600_000).unref()
+}
+// What a durable turn offers beside ScadBuddy's own tools (#2320): the servers a
+// classic turn would hand Claude Code, built again for every listing and call. One whose
+// state lives on this pod (http_request's saved bodies) runs its calls on this replica's
+// own queue, HOST_QUEUE, served by `hostWorker` below.
 const HOST_QUEUE = `${TASK_QUEUE}.${os.hostname()}`
 // The enabled remote plugins and every usable credential's secret, as a classic turn
 // reads them, for a durable turn's tools and its automatic memory.
@@ -430,7 +440,7 @@ const turnToolDeps = temporal
         ...(settings ? { settings } : {}),
         credentialSecrets: durableCredentialSecrets,
         // This pod's own disk, as a classic turn's: the calls are pinned here (hostQueue).
-        httpRequest: { saveRoot: path.join(paths.stateDir, 'durable-turns'), audit },
+        httpRequest: { saveRoot: path.join(paths.stateDir, DURABLE_TURNS_DIR), audit, ...(workspace ? { files: workspace } : {}) },
         // Shared with agent-durable on the payload volume, which its runner loads them from.
         ...(pluginPackages
           ? {

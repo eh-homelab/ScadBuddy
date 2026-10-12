@@ -1,5 +1,6 @@
-import { mkdir } from 'node:fs/promises'
+import { mkdir, readdir, rm, stat } from 'node:fs/promises'
 import path from 'node:path'
+import type { Sql } from 'postgres'
 import type { AuditSink } from '../audit/log.js'
 import { HTTP_READ_TOOL_NAME, HTTP_SERVER, httpRequestEnabled, httpRequestServer, httpTierOf, SETTING_HTTP_REQUEST } from '../harness/httpRequest.js'
 import type { HttpLimits } from '../harness/httpRequest.js'
@@ -8,6 +9,7 @@ import type { PluginsForRun } from '../plugins/forwarder.js'
 import type { LoadedPackage, PackagesForRun } from '../plugins/packages/install.js'
 import type { PackageServers } from '../plugins/packages/mcp.js'
 import { pluginTierResolver } from '../plugins/registry.js'
+import type { SessionFiles } from '../workspace/store.js'
 import { localPackageServers, sharePackage, unparkableBuiltins } from './turnPackages.js'
 import {
   connectHttp,
@@ -22,6 +24,49 @@ import {
 // turn's `runTurn` hands Claude Code (sessions/manager.ts), built again for each listing
 // and each call, so a plugin disabled, removed or failing its egress check since is gone
 // at once, as it would be from a classic turn's next query.
+
+/** Under the state dir: a durable session's (or flow run's) saved http bodies, `<id>/http` (#2496). */
+export const DURABLE_TURNS_DIR = 'durable-turns'
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+/** How long a flow run's saved bodies are kept: its run has no row here to outlive. */
+export const FLOW_BODIES_KEPT_MS = 7 * 24 * 3600_000
+
+/** Removes one subject's saved bodies on this pod (`session-<id>` or `flow-<id>`, forget.ts). */
+export async function removeTurnDir(root: string, subject: string): Promise<void> {
+  const name = subject.startsWith('session-') ? subject.slice('session-'.length) : subject
+  if (!UUID.test(name) && !(name.startsWith('flow-') && UUID.test(name.slice('flow-'.length)))) return
+  await rm(path.join(root, name), { recursive: true, force: true })
+}
+
+/**
+ * The saved bodies of durable sessions that no longer exist, and of flow runs older than
+ * FLOW_BODIES_KEPT_MS, on this pod (#2496): each replica keeps its own (the server is
+ * pinned), so each sweeps its own, whichever pod the session was forgotten on.
+ */
+export async function sweepTurnDirs(root: string, sql: Sql, now = Date.now()): Promise<string[]> {
+  const names = await readdir(root).catch((err: NodeJS.ErrnoException) => {
+    if (err.code === 'ENOENT') return [] as string[]
+    throw err
+  })
+  const sessions = names.filter((n) => UUID.test(n))
+  const live = new Set(
+    sessions.length ? (await sql<{ id: string }[]>`SELECT id::text FROM ai_sessions WHERE id = ANY(${sessions}::uuid[])`).map((r) => r.id) : [],
+  )
+  const removed: string[] = []
+  for (const name of names) {
+    const dir = path.join(root, name)
+    let stale = false
+    if (UUID.test(name)) stale = !live.has(name)
+    else if (name.startsWith('flow-') && UUID.test(name.slice('flow-'.length))) {
+      stale = now - (await stat(dir)).mtimeMs >= FLOW_BODIES_KEPT_MS
+    }
+    if (!stale) continue
+    await rm(dir, { recursive: true, force: true })
+    removed.push(name)
+  }
+  return removed
+}
 
 export type TurnServerDeps = {
   /** The enabled remote plugins through the loopback forwarder (main.ts `remotePlugins`). */
@@ -40,6 +85,8 @@ export type TurnServerDeps = {
         audit?: AuditSink | undefined
         resolve?: Resolver
         limits?: Partial<HttpLimits>
+        /** The sessions' workspaces, where `save_to_workspace` stores a body (#2496), as a classic turn's. */
+        files?: SessionFiles | undefined
       }
     | undefined
   /**
@@ -74,6 +121,8 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
       servers.push({
         name: plugin.name,
         connect: () => connectHttp(plugin.url),
+        // Its forwarder URL is new each run; its tools change with what Settings disabled.
+        listingKey: JSON.stringify(plugin.disabledTools),
         // An unlisted plugin tool is outward (registry.ts), as in a classic turn.
         tierOf: (name) => tiers(name) ?? 'outward',
         mayPark: (name) => (tiers(name) ?? 'outward') === 'outward',
@@ -93,8 +142,13 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
                 secrets: () => secrets,
                 audit: http.audit,
                 actor: context.owner,
-                // A flow's call has no session to audit it under (its saved bodies are under `flow-<run>`).
+                // A flow's call has no session to audit it under (its saved bodies are under `flow-<run>`),
+                // nor a workspace to save to.
                 sessionId: context.flow ? undefined : context.session,
+                ...(context.turnId ? { turnId: context.turnId } : {}),
+                ...(http.files && !context.flow
+                  ? { workspace: { files: http.files, ref: { kind: 'session' as const, sessionId: context.session } } }
+                  : {}),
                 signal: context.signal,
                 ...(http.resolve ? { resolve: http.resolve } : {}),
                 ...(http.limits ? { limits: http.limits } : {}),

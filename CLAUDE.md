@@ -595,9 +595,12 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` and skip without one; `tests/fake_anthropic.py`
   is the Python fake endpoint the bundled Claude Code is pointed at.
   A segment's subagents (#2320) get ScadBuddy's tools from the agent's loopback
-  `routes/subagentMcp.ts` as `mcp__scadbuddy__*` (`session/subagents.py` mints the
-  per-turn token from the KEK, `temporal/subagentToken.ts` the same format); every call
-  is resolved from the session as it is then, and an outward one is refused to the main agent.
+  `routes/subagentMcp.ts` (`/internal/durable/subagent-mcp`) as `mcp__scadbuddy__*`
+  (`session/subagents.py` mints the per-turn token from the KEK,
+  `temporal/subagentToken.ts` the same format); every call is resolved from the session
+  as it is then, and an outward one is refused to the main agent. The server is inline in
+  each subagent's definition (`load_agents`, `with_server`, from
+  `SCADBUDDY_DURABLE_AGENTS_DIR`, outside the plugin dir), so the main agent never has it.
   `scadbuddy_durable/gate/` is the gate's Python half (5b): ids, the `respond`
   validator (the same vectors), `build_entry`, and the `open_input` / `resolve_input`
   activities that write `ai_pending_input`, `ai_input_responses`, the session's events
@@ -647,9 +650,9 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
 
 ## Verified OpenSCAD facts (do not re-derive; re-measure if the base image moves)
 
-- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-10-05@sha256:…`
+- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-10-12@sha256:…`
   (tag plus index digest; the only stable release, 2021.01, has no Manifold). The
-  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.10.05). Bump
+  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.10.12). Bump
   deliberately: re-verify spec §3 against the new build, then change the tag,
   digest and `OPENSCAD_VERSION` in the same commit. The weekly `OpenSCAD Bump`
   workflow (`openscad-bump.yml`) opens that PR when a newer nightly exists; its CI

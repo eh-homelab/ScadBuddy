@@ -370,7 +370,7 @@ jobs:
       # backend's spec with uv: the spec and the generated clients are not
       # committed (#492). Same pinned action as the `freshness` job.
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
@@ -493,7 +493,7 @@ jobs:
       # session's end-to-end test (test/durable.e2e.test.ts) runs agent-durable's
       # worker with uv too.
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
           cache-dependency-glob: |
@@ -621,7 +621,7 @@ jobs:
           fetch-depth: 1
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
           cache-dependency-glob: agent-durable/uv.lock
@@ -1031,7 +1031,7 @@ jobs:
       - name: List the LFS fixtures
         id: lfs
         run: echo "key=$(git lfs ls-files --long --include 'test-fixtures/**' | sha256sum | cut -c1-64)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         id: cache
         with:
           path: .git/lfs/objects
@@ -1071,7 +1071,7 @@ jobs:
       # The real 3MFs under test-fixtures/ (Git LFS, ~290 MB, #2146), from the cache
       # `lfs-fixtures` filled: no shard pulls from LFS itself. They are mounted into
       # the test container below; no image carries them (.dockerignore).
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v6
         with:
           path: .git/lfs/objects
           key: lfs-fixtures-${{ needs.lfs-fixtures.outputs.key }}
@@ -1164,7 +1164,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: backend-pytest-count-*
           merge-multiple: true
@@ -1338,7 +1338,7 @@ jobs:
       # python3 the runner already has.
       - name: Set up uv
         if: ${{ steps.select.outputs.count != '0' }}
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@v10.3.0
 
       - name: Run the selected verify.sh scripts
         if: ${{ steps.select.outputs.count != '0' }}
@@ -1470,7 +1470,7 @@ jobs:
       # github-actions ecosystem bumps this line.
       - name: Set up uv
         if: ${{ steps.detect.outputs.backend == 'true' }}
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock

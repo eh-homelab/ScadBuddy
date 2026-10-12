@@ -11,7 +11,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -91,6 +91,7 @@ from scadbuddy.library.upstream import (
     plan_merge,
     state_of,
 )
+from scadbuddy.meshmodel.scene import SceneSource
 
 if TYPE_CHECKING:
     # Type-only: `library.outputs` reaches this module again through
@@ -165,6 +166,21 @@ class ModelNotFoundError(KeyError):
 class SidecarNotFoundError(KeyError):
     """The model exists, but the sidecar being removed does not: the thumbnail, the
     README, a named sidecar file, or a sibling `.scad` file (`write_file`, #252)."""
+
+
+class UnsafeModelPathError(ValueError):
+    """A file named outside the model's directory."""
+
+
+def _inside(directory: Path, name: str) -> Path:
+    """``name`` under ``directory``, or :class:`UnsafeModelPathError`."""
+    if not name or name.startswith("/") or "\\" in name:
+        raise UnsafeModelPathError(name)
+    root = directory.resolve()
+    path = (directory / name).resolve()
+    if not path.is_relative_to(root) or path == root:
+        raise UnsafeModelPathError(name)
+    return path
 
 
 class TooManySourceFilesError(ValueError):
@@ -339,6 +355,9 @@ class ModelMeta(BaseModel):
     #: Set by a duplicate (#156). Not in `ModelPatch` either, so a metadata edit
     #: never clobbers it.
     upstream: Upstream | None = None
+    #: Where a mesh model's meshes came from (#2146): kept after an eject, so the
+    #: origin and licence stay recorded. Not in `ModelPatch`: it records a fact.
+    mesh_source: SceneSource | None = None
     #: The third-party libraries (#93) this model renders with, each pinned for this
     #: model alone: the only ones on its OPENSCADPATH. Not in `ModelPatch`: a pin is
     #: a fetched commit, set by `pin_library`, never typed in.
@@ -1107,15 +1126,22 @@ class Catalogue:
         *,
         thumbnail: bytes | None = None,
         readme: str | None = None,
+        files: Mapping[str, bytes] | None = None,
     ) -> ModelRecord:
+        """Add a model. ``files`` are written beside the source, in the same revision;
+        a name outside the model's directory is :class:`UnsafeModelPathError`, checked
+        before the slug is claimed."""
         if self.exists(slug):
             raise ModelExistsError(slug)
+        extra = {name: _inside(self.paths.model_dir(slug), name) for name in files or {}}
         directory = self._claim(slug)
         try:
             self.paths.model_source(slug).write_text(source, encoding="utf-8")
             # A template of mine's media list is rows (#274), never model.json.
             # No print settings is no key, as a hand-written model.json leaves it (#770).
             excluded = {"media"} if meta.print_settings else {"media", "print_settings"}
+            if meta.mesh_source is None:
+                excluded.add("mesh_source")
             raw = meta.model_dump(exclude=excluded)
             if meta.unread_ui is not None:
                 raw["ui"] = meta.unread_ui
@@ -1127,6 +1153,10 @@ class Catalogue:
                 self.thumbnail_path(slug).write_bytes(thumbnail)
             if readme is not None:
                 self.readme_path(slug).write_text(readme, encoding="utf-8")
+            for name, data in (files or {}).items():
+                path = extra[name]
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
         except BaseException:
             # The claim is exclusive, so the directory is this create's alone: a
             # half-written one left behind would hold the slug for good.
@@ -2232,6 +2262,67 @@ class Catalogue:
             history.commit(message, slug, prepare=change, rollback=undo)
         finally:
             if written:
+                self.notify_change(slug)
+        return self.record(slug)
+
+    def update_files(
+        self,
+        slug: str,
+        compute: Callable[[Path], Mapping[str, bytes | None]],
+        *,
+        message: str,
+    ) -> ModelRecord:
+        """A read-modify-write of several of the model's files as one revision (#2146):
+        ``compute`` reads the directory and answers each path (relative to it) to write,
+        or None to remove. Both run under the history's write lock
+        (:meth:`_commit_change`), so no other edit lands between the read and the write.
+        ``compute`` raising, naming a path outside the model
+        (:class:`UnsafeModelPathError`), a write failing part way or a commit failing
+        leaves every file as it was. The cached schema is dropped,
+        as a source edit drops it."""
+        self._require(slug)
+        directory = self.paths.model_dir(slug)
+
+        # What each path held before this run touched it (None: absent), for those
+        # already written: what `undo` puts back, as `write_file`'s does.
+        applied: dict[Path, bytes | None] = {}
+
+        def undo() -> None:
+            for path, previous in reversed(list(applied.items())):
+                if previous is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    write_atomic(path, previous)
+            applied.clear()
+
+        def change() -> None:
+            applied.clear()
+            writes = {_inside(directory, name): data for name, data in compute(directory).items()}
+            try:
+                for path, data in writes.items():
+                    previous = path.read_bytes() if path.is_file() else None
+                    if data is None:
+                        path.unlink(missing_ok=True)
+                    else:
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        write_atomic(path, data)
+                    applied[path] = previous
+            except BaseException:
+                undo()
+                raise
+            self.paths.model_schema_cache(slug).unlink(missing_ok=True)
+
+        history = self.history
+        if history is None or not history.available:
+            change()
+            self.notify_change(slug)
+            return self.record(slug)
+        # A commit that fails undoes the files and raises, as `write_file`'s based
+        # write does, so no half-applied state waits for the next commit to sweep it.
+        try:
+            history.commit(message, slug, prepare=change, rollback=undo)
+        finally:
+            if applied:
                 self.notify_change(slug)
         return self.record(slug)
 

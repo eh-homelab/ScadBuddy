@@ -28,14 +28,18 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const owners = new PgSessionOwners(db.sql)
       expect(await owners.ownerOf(session.id)).toBeUndefined()
       await db.sql`UPDATE ai_sessions SET mode = 'durable' WHERE id = ${session.id}`
-      expect(await owners.ownerOf(session.id)).toEqual({ ...browser, turnTiers: null })
+      expect(await owners.ownerOf(session.id)).toEqual({ ...browser, turnTiers: null, turnId: null })
       // The tiers its current turn was sent with (#2320), only while the sender owns it.
       const sent = (by: { kind: string; id: string }, tiers: string[]) =>
         db.sql`UPDATE ai_sessions SET turn_tiers = ${db.sql.json({ by, tiers })} WHERE id = ${session.id}`
       await sent({ kind: 'browser', id: 'browser' }, ['read', 'write', 'admin'])
-      expect(await owners.ownerOf(session.id)).toEqual({ ...browser, turnTiers: ['read', 'write'] })
+      expect(await owners.ownerOf(session.id)).toEqual({ ...browser, turnTiers: ['read', 'write'], turnId: null })
       await sent({ kind: 'bearer', id: 'token:old-owner' }, ['read', 'write', 'outward'])
-      expect(await owners.ownerOf(session.id)).toEqual({ ...browser, turnTiers: null })
+      expect(await owners.ownerOf(session.id)).toEqual({ ...browser, turnTiers: null, turnId: null })
+      // The durable turn running now, for its calls' audit rows (#2497).
+      const turn = '6a1f2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d'
+      await db.sql`UPDATE ai_sessions SET durable_turn_id = ${turn} WHERE id = ${session.id}`
+      expect((await owners.ownerOf(session.id))?.turnId).toBe(turn)
       await expect(db.sql`UPDATE ai_sessions SET mode = 'other' WHERE id = ${session.id}`).rejects.toThrow()
     })
 

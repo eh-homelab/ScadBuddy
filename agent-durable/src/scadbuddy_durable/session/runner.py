@@ -59,7 +59,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 import psycopg
-from claude_agent_sdk import ResultError, create_sdk_mcp_server, tool
+from claude_agent_sdk import AgentDefinition, ResultError, create_sdk_mcp_server, tool
 from temporalio import activity
 from temporalio.claude_agent_sdk import ClaudeAgentSdkRunner, SegmentInput, SegmentOutput
 from temporalio.exceptions import ApplicationError
@@ -433,6 +433,7 @@ class ScadBuddyRunner:
         plugin_dir: str | None = None,
         package_root: str | None = None,
         subagent_url: str | None = None,
+        agents_dir: str | None = None,
         make_runner: MakeRunner = ClaudeAgentSdkRunner,
     ) -> None:
         self._connect = connect
@@ -441,6 +442,9 @@ class ScadBuddyRunner:
         self._plugin_dir = plugin_dir
         self._package_root = package_root
         self._subagent_url = subagent_url
+        # Read once, at the first segment that gives subagents: the files are the image's.
+        self._agents_dir = agents_dir
+        self._agents: dict[str, AgentDefinition] | None = None
         self._make = make_runner
 
     def __repr__(self) -> str:
@@ -466,9 +470,9 @@ class ScadBuddyRunner:
         )
 
     async def _subagent_tools(self, session: str, extra: dict[str, Any]) -> None:
-        """ScadBuddy's tools for the segment's subagents (#2320, subagents.py): the agent's
-        loopback server, with a token for this session's running turn and owner."""
-        if self._subagent_url is None:
+        """ScadBuddy's subagents (#2320, subagents.py), each with the agent's loopback
+        server inline and a token for this session's running turn and owner."""
+        if self._subagent_url is None or self._agents_dir is None:
             return
         async with self._connect() as conn:
             cur = await conn.execute(
@@ -479,13 +483,12 @@ class ScadBuddyRunner:
             row = await cur.fetchone()
         if row is None or row[2] is None:
             return
+        if self._agents is None:
+            self._agents = subagents.load_agents(self._agents_dir)
         token = subagents.token_for(self._kek, session, str(row[2]), row[0], row[1])
-        extra["mcp_servers"] = {
-            **extra.get("mcp_servers", {}),
-            subagents.SERVER: subagents.server_config(self._subagent_url, token),
-        }
+        extra["agents"] = subagents.with_server(self._agents, self._subagent_url, token)
+        # Pre-approved for the subagents that have the server; the main agent has none.
         extra["allowed_tools"] = [*extra.get("allowed_tools", []), f"mcp__{subagents.SERVER}"]
-        extra["hooks"] = subagents.hooks()
 
     def _packages(self, workflow_id: str, context: SegmentContext) -> list[str]:
         """The turn's plugin packages (#2320) that hash to their pins on the shared volume,
@@ -640,7 +643,9 @@ class ScadBuddyRunner:
             IMAGES_SERVER: images_server(images, tool_images_loader(self._connect, session))
         }
         extra["allowed_tools"] = [VIEW_TOOL_IMAGES_TOOL, *([VIEW_IMAGES_TOOL] if images else [])]
-        await self._subagent_tools(session, extra)
+        if self._plugin_dir and settings.own_plugin:
+            # The own plugin's subagents, as a classic turn has them only with the plugin.
+            await self._subagent_tools(session, extra)
         plugins = (
             [{"type": "local", "path": self._plugin_dir}]
             if (self._plugin_dir and settings.own_plugin)

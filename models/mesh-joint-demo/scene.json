@@ -1,0 +1,162 @@
+{
+  "version": 1,
+  "generated_sha256": "38e9fb8ca295ffd046c705d24444c3e18e279320010b4be83a0f183b963a9b48",
+  "source": {
+    "kind": "upload",
+    "name": "carrot (made by make.py)",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "file_id": null,
+    "output_id": null,
+    "licence": null
+  },
+  "objects": [
+    {
+      "id": "o1",
+      "name": "Carrot (bottom)",
+      "parts": [
+        {
+          "id": "p1",
+          "mesh": "meshes/o1-p1.3mf",
+          "colour": "#F08A24",
+          "painted": false,
+          "negative": false
+        },
+        {
+          "id": "p2",
+          "mesh": "meshes/o1-p2.3mf",
+          "colour": "#3A7D2C",
+          "painted": false,
+          "negative": false
+        }
+      ],
+      "ops": [
+        {
+          "op": "cut",
+          "point": [
+            0.0,
+            0.0,
+            32.0
+          ],
+          "normal": [
+            0.0,
+            0.0,
+            1.0
+          ],
+          "keep": "below"
+        },
+        {
+          "op": "joint",
+          "at": [
+            1.4158531621258805e-16,
+            4.4777994971168614e-17,
+            32.0
+          ],
+          "axis": [
+            0.0,
+            0.0,
+            1.0
+          ],
+          "diameter": 3.6,
+          "depth": 4.0,
+          "clearance": 0.2,
+          "key": "flat",
+          "role": "peg",
+          "colour": "#3A7D2C"
+        }
+      ],
+      "transform": {
+        "translate": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "rotate": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      }
+    },
+    {
+      "id": "o2",
+      "name": "Carrot (top)",
+      "parts": [
+        {
+          "id": "p1",
+          "mesh": "meshes/o1-p1.3mf",
+          "colour": "#F08A24",
+          "painted": false,
+          "negative": false
+        },
+        {
+          "id": "p2",
+          "mesh": "meshes/o1-p2.3mf",
+          "colour": "#3A7D2C",
+          "painted": false,
+          "negative": false
+        }
+      ],
+      "ops": [
+        {
+          "op": "cut",
+          "point": [
+            0.0,
+            0.0,
+            32.0
+          ],
+          "normal": [
+            0.0,
+            0.0,
+            1.0
+          ],
+          "keep": "above"
+        },
+        {
+          "op": "joint",
+          "at": [
+            1.4158531621258805e-16,
+            4.4777994971168614e-17,
+            32.0
+          ],
+          "axis": [
+            0.0,
+            0.0,
+            1.0
+          ],
+          "diameter": 3.6,
+          "depth": 4.0,
+          "clearance": 0.2,
+          "key": "flat",
+          "role": "socket",
+          "colour": "#3A7D2C"
+        }
+      ],
+      "transform": {
+        "translate": [
+          {
+            "expose": "leaves_x",
+            "value": 70.0
+          },
+          0.0,
+          5.999999999999998
+        ],
+        "rotate": [
+          0.0,
+          90.0,
+          -180.0
+        ],
+        "scale": [
+          1.0,
+          1.0,
+          1.0
+        ]
+      }
+    }
+  ],
+  "notes": []
+}

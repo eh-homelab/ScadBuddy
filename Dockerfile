@@ -25,14 +25,14 @@ ARG BOSL2_COMMIT=f47030c41d88d0676bca73be1c6b7ba58564f9dd
 # A FROM line, not `COPY --from=ghcr.io/astral-sh/uv:...`, so Dependabot's
 # docker ecosystem sees the version and can bump it. The image is scratch-based
 # and holds nothing but the two static binaries.
-FROM ghcr.io/astral-sh/uv:0.12.23 AS uv
+FROM ghcr.io/astral-sh/uv:0.13.0 AS uv
 
 # ── base: OS packages, fonts, users ───────────────────────────────────────────
 # Pinned to a dated nightly by tag AND index digest (amd64 + arm64), so the base
 # cannot move under a build. OpenSCAD's only stable release (2021.01) has no
 # Manifold backend, so a nightly it has to be. Bump deliberately: tag, digest and
 # OPENSCAD_VERSION below together, after re-verifying §3 of the design spec.
-FROM openscad/openscad:dev.2026-10-05@sha256:6c1a07342e37afcd7e360d1cfa98d0e1cad3f32f2ac91a2943691e117ce4d3b4 AS base
+FROM openscad/openscad:dev.2026-10-12@sha256:4098a7c2c37d5a9110121635a568e6596b8619362ced5c84cc67f47d395e7fd0 AS base
 
 # DL3008 (pin apt versions) is disabled repo-wide in .hadolint.yaml: the base is
 # a nightly on Debian trixie, so a pinned version here would break the
@@ -310,8 +310,10 @@ RUN uv sync --frozen --no-dev
 # (checked 2026-10-10 on 2.1.292 with --debug-to-stderr: "Loaded 3 skills from
 # plugin scadbuddy"). SCADBUDDY_DURABLE_SKILLS_DIR below points at it.
 COPY plugins/scadbuddy/skills /app/plugins/scadbuddy/skills
-# Its subagents too (#2320), with ScadBuddy's tools through the agent's loopback server.
-COPY plugins/scadbuddy/agents /app/plugins/scadbuddy/agents
+# Its subagents (#2320, #2562), outside the plugin directory: the runner gives each the
+# agent's loopback MCP server inline, which a plugin's own subagents cannot carry
+# (https://code.claude.com/docs/en/sub-agents). SCADBUDDY_DURABLE_AGENTS_DIR below.
+COPY plugins/scadbuddy/agents /app/subagents
 # The agent's tool manifest (agent `pnpm build` writes dist/tools.json): each entry
 # becomes an `activity_as_tool` on `agent-tools`, which the agent container of the
 # same build serves, so the two never disagree on a tool's name or schema (#1056, 5e).
@@ -330,6 +332,7 @@ ENV PATH=/app/agent-durable/.venv/bin:$PATH \
     CLAUDE_CONFIG_DIR=/srv/agent/claude \
     SCADBUDDY_DURABLE_TOOLS_JSON=/app/agent-durable/tools.json \
     SCADBUDDY_DURABLE_SKILLS_DIR=/app/plugins/scadbuddy \
+    SCADBUDDY_DURABLE_AGENTS_DIR=/app/subagents \
     SCADBUDDY_DURABLE_CWD=/srv/agent \
     SCADBUDDY_REVISION=${SCADBUDDY_REVISION} \
     SCADBUDDY_VERSION=${SCADBUDDY_VERSION}
@@ -428,7 +431,7 @@ FROM base AS app
 # never fire; it stays as the check that the tag, digest and version agree. When
 # bumping the base, re-verify §3 of the design spec against the new build and
 # change the FROM line and the default below in the same commit.
-ARG OPENSCAD_VERSION=2026.10.05
+ARG OPENSCAD_VERSION=2026.10.12
 # Written to a file rather than piped into sed: every `run:`-style pipe here
 # trips hadolint's DL4006, and `SHELL -o pipefail` for one command is a worse
 # trade than a temp file.

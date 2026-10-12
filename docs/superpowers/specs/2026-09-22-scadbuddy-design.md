@@ -197,6 +197,15 @@ Measured 2026-09-22 against `docker.io/openscad/openscad:dev`
   "Please log in to download models". Some PMM sources are also marked
   `protected`. So the URL import refuses MakerWorld links with a pointer to
   Upload, and a resolver needs a signed-in token (#174).
+- **OpenSCAD imports a colourless 3MF inside `color()` and cuts it** (measured
+  2026-10-12, #2146, in an image built from the Dockerfile's `test` target on the pinned
+  `openscad/openscad:dev.2026-10-05`, `openscad --version` 2026.10.05, `--backend=Manifold`,
+  by `backend/tests/test_mesh_models_openscad.py`). A core 3MF with no `basematerials`
+  imported as `color("#F08A24") import("part.3mf")` renders in that colour; the same
+  import cut with `intersection()` against a half-space cube and joined with a
+  `difference()`-ed socket exports a closed solid per piece (watertight once the split
+  parts' per-triangle vertices are welded); a socket cut as the peg grown by the clearance
+  has the expected cross-section (within 2 %).
 
 ## 4. Architecture
 
