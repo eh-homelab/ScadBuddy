@@ -6,6 +6,7 @@ import { catalogueTools } from './catalogue.js'
 import { customizerTools } from './customizer.js'
 import { farmTools } from './farm.js'
 import { fileTools } from './files.js'
+import { flowTools } from './flows.js'
 import { guideTools } from './guide.js'
 import { historyTools } from './history.js'
 import { inspectTools } from './inspect.js'
@@ -19,6 +20,7 @@ import { sessionTools } from './sessions.js'
 import { settingsTools } from './settings.js'
 import { sourceFileTools } from './sourceFiles.js'
 import { templateTools } from './templates.js'
+import { workspaceTools } from './workspace.js'
 
 // Every ScadBuddy tool, in one list both projections read (spec §5.1, D3).
 // Not here yet: the tools in coverage.ts `PENDING_ROUTES`. The browser_*
@@ -34,6 +36,7 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...historyTools,
   ...sourceFileTools,
   ...fileTools,
+  ...workspaceTools,
   ...templateTools,
   ...authoringTools,
   ...inspectTools,
@@ -47,6 +50,7 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...browserTools,
   ...approvalTools,
   ...sessionTools,
+  ...flowTools,
 ]
 
 const byName = new Map<string, Tool>()

@@ -53,6 +53,23 @@ describe('PluginPackagesPanel', () => {
     expect(await within(browser).findByText('Enabled')).toBeInTheDocument()
   })
 
+  it('applies a change announced as soon as the list shows, before effects have run (#2238)', async () => {
+    // A MutationObserver fires in the microtask after the commit that adds the row,
+    // ahead of React's passive effects: the gap where a listener closing over the
+    // previous list would map the empty one and drop every row.
+    const observer = new MutationObserver(() => {
+      if (document.querySelector('[aria-label="Built-in plugin playwright"]')) {
+        observer.disconnect()
+        announceHeadlessBrowser(true)
+      }
+    })
+    observer.observe(document.body, { childList: true, subtree: true })
+    renderPage(<PluginPackagesPanel />)
+    const browser = await screen.findByRole('listitem', { name: 'Built-in plugin playwright' })
+    expect(await within(browser).findByText('Enabled')).toBeInTheDocument()
+    observer.disconnect()
+  })
+
   it('keeps a built-in and a package stored under its name apart', async () => {
     seedStoredPackage('playwright')
     const { user } = renderPage(<PluginPackagesPanel />)
@@ -374,6 +391,33 @@ describe('PluginPackagesPanel', () => {
     expect(within(viewer).getByText(/Showing the first 66 kB of 91 kB\./)).toBeInTheDocument()
     await user.click(within(viewer).getByRole('button', { name: 'Show all' }))
     await waitFor(() => expect(within(viewer).getByTestId('file-content').textContent).toBe(LONG_CHANGELOG))
+    expect(within(viewer).queryByRole('button', { name: 'Show all' })).not.toBeInTheDocument()
+  })
+
+  it('offers no "Show all" for a file too large to send whole (#2151)', async () => {
+    const huge = 'y'.repeat(PREVIEW_CHARS)
+    server.use(
+      http.get('/api/v1/ai/plugin-packages/:name/file', () =>
+        HttpResponse.json({
+          path: 'CHANGELOG.txt',
+          size: 2 * 1024 * 1024,
+          binary: false,
+          media_type: 'text/plain',
+          truncated: true,
+          too_large: true,
+          content: huge,
+        }),
+      ),
+    )
+    const { user } = renderPage(<PluginPackagesPanel />)
+    await screen.findByText('No plugin packages installed.')
+    await install(user, 'https://git.example/greeter.git')
+    const card = await screen.findByRole('listitem', { name: 'Plugin package greeter' })
+    await openFiles(user, card)
+    await user.click(await within(card).findByRole('button', { name: 'CHANGELOG.txt' }))
+    const viewer = await within(card).findByRole('region', { name: 'greeter: CHANGELOG.txt' })
+    expect(await within(viewer).findByTestId('file-content')).toHaveTextContent(huge)
+    expect(within(viewer).getByText(/Too large to show whole\./)).toBeInTheDocument()
     expect(within(viewer).queryByRole('button', { name: 'Show all' })).not.toBeInTheDocument()
   })
 

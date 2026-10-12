@@ -26,8 +26,16 @@ export function refKey(ref: PresetRef): string {
  * what `POST /print/outputs/{id}/run` sends and the analyzers judge (#284).
  */
 export function printChoicesOf(selection: PrintSelection): PrintChoices | null {
-  const { nozzles, tier, processName, bedType, overrides } = selection
+  const { nozzles, tier, processName, bedType, overrides, sides } = selection
   return bedType === null
     ? null
-    : { nozzles, tier, process_name: processName, bed_type: bedType, filament_overrides: overrides }
+    : {
+        nozzles,
+        tier,
+        process_name: processName,
+        bed_type: bedType,
+        filament_overrides: overrides,
+        // Sent only when a side was chosen by hand (#2166), so a request is what it was.
+        ...(Object.keys(sides).length > 0 ? { sides } : {}),
+      }
 }

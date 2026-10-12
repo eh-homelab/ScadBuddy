@@ -84,12 +84,12 @@ export const TRANSIENT_RETRIES = 5
 export const READ_RETRIES = 5
 
 /** The wait before a failed read's `n`th retry (0-based): 400 ms doubling, capped. */
-function readBackoffMs(n: number): number {
+export function readBackoffMs(n: number): number {
   return Math.min(POLL_MS * 2 ** n, 8_000)
 }
 
 /** A read that says the job will never be readable: it is gone, or this is refused. */
-function definitive(cause: unknown): boolean {
+export function definitive(cause: unknown): boolean {
   return cause instanceof ApiError && cause.status >= 400 && cause.status < 500 && cause.status !== 408 && cause.status !== 429
 }
 

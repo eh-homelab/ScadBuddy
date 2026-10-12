@@ -62,4 +62,77 @@ test.describe('library', () => {
     await expect(first.locator('time')).toHaveAttribute('datetime', '2026-09-26T17:05:45Z')
     await expect(first).toContainText('110 kB')
   })
+
+  // #2165 — the folders are a tree, and the URL follows the page.
+  test('walks the folder tree by mouse and keyboard, with Back and Forward', async ({ page }) => {
+    await page.goto('/library')
+    const tree = page.getByRole('tree', { name: 'Library folders' })
+    const spec = tree.getByRole('treeitem', { name: 'Spec' })
+    await expect(spec).toHaveAttribute('aria-expanded', 'false')
+    await page.getByTestId('library-folder-toggle-10').click()
+    await expect(spec).toHaveAttribute('aria-expanded', 'true')
+    await tree.getByRole('treeitem', { name: 'MakerWorld' }).nth(1).click()
+    await expect(page).toHaveURL(/\/library\/Spec\/MakerWorld$/)
+
+    await page.keyboard.press('ArrowRight')
+    await page.keyboard.press('ArrowRight')
+    await expect(page.getByTestId('library-folder-12')).toBeFocused()
+    await page.keyboard.press('Enter')
+    await expect(page).toHaveURL(/\/library\/Spec\/MakerWorld\/Work$/)
+    await expect(page.getByTestId('library-file-120')).toBeVisible()
+
+    await page.goBack()
+    await expect(page).toHaveURL(/\/library\/Spec\/MakerWorld$/)
+    await expect(page.getByTestId('library-folder-11')).toHaveAttribute('aria-selected', 'true')
+    await page.goForward()
+    await expect(page.getByTestId('library-file-120')).toBeVisible()
+  })
+
+  test('deep links open a folder, a file and its print dialog', async ({ page }) => {
+    await page.goto('/library/Spec/MakerWorld/Work')
+    await expect(page.getByTestId('library-folder-12')).toHaveAttribute('aria-selected', 'true')
+    await expect(page.getByTestId('library-file-121')).toBeVisible()
+
+    await page.goto('/library?file=67')
+    await expect(page).toHaveURL(/\/library\/MakerWorld\?file=67$/)
+    await expect(page.getByTestId('library-file-67')).toHaveAttribute('aria-current', 'true')
+
+    await page.getByTestId('library-print-67').click()
+    await expect(page).toHaveURL(/print=67/)
+    await expect(page.getByRole('dialog', { name: 'Print' })).toBeVisible()
+    await page.goBack()
+    await expect(page.getByRole('dialog', { name: 'Print' })).toHaveCount(0)
+    await page.goForward()
+    await expect(page.getByRole('dialog', { name: 'Print' })).toBeVisible()
+
+    await page.goto('/library?print=89')
+    await expect(page.getByRole('dialog', { name: 'Print' })).toBeVisible()
+  })
+
+  // #2167 — deletes go to Bambuddy's trash, through a confirmation, with Undo.
+  test('deletes one file and undoes it, then several, reporting the one skipped', async ({ page }) => {
+    await page.goto('/library/Spec/MakerWorld/Work')
+    await page.getByRole('button', { name: 'Delete drawer-label.3mf' }).click()
+    let dialog = page.getByRole('dialog', { name: 'Delete drawer-label.3mf?' })
+    await expect(dialog).toContainText("It goes to Bambuddy's trash.")
+    await dialog.getByRole('button', { name: 'Delete file' }).click()
+    const toast = page.getByTestId('library-deleted')
+    await expect(toast).toContainText("Moved 1 file to Bambuddy's trash.")
+    await expect(page.getByTestId('library-file-120')).toHaveCount(0)
+    await toast.getByRole('button', { name: 'Undo' }).click()
+    await expect(toast).toContainText('Restored 1 file.')
+    await expect(page.getByTestId('library-file-120')).toBeVisible()
+
+    for (const name of ['drawer-label.3mf', 'alex-headphone-hook.3mf', 'nas-share-bracket.3mf']) {
+      await page.getByRole('checkbox', { name: `Select ${name}` }).check()
+    }
+    await page.getByRole('button', { name: 'Delete selected (3)' }).click()
+    dialog = page.getByRole('dialog', { name: 'Delete 3 files?' })
+    await expect(dialog.getByTestId('library-delete-external')).toContainText('cannot be restored')
+    await dialog.getByRole('button', { name: 'Delete 3 files' }).click()
+    await expect(toast).toContainText('Removed 1 external file for good.')
+    await expect(toast.getByTestId('library-skipped')).toContainText('alex-headphone-hook.3mf')
+    await expect(page.getByTestId('library-file-121')).toBeVisible()
+    await expect(page.getByTestId('library-file-122')).toHaveCount(0)
+  })
 })

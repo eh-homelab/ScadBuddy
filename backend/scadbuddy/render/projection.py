@@ -191,8 +191,12 @@ class JobProjection:
             name="scadbuddy-jobs",
         )
 
-    def open(self) -> None:
+    def open(self, *, migrate_schema: bool = True) -> None:
+        """Connect, and bring the schema up to date unless ``migrate_schema`` is False:
+        the render worker never migrates (#601, `render/worker_role.py`)."""
         self._pool.open(wait=True, timeout=self.connect_timeout)
+        if not migrate_schema:
+            return
         with self._pool.connection() as conn:
             applied = migrate(conn)
         if applied:

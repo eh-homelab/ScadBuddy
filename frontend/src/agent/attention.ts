@@ -50,6 +50,10 @@ export function fetchPendingInput(timeoutMs = ATTENTION_TIMEOUT_MS): Promise<Pen
  * #1125 — the user's sessions with a turn under way: `GET /api/v1/ai/sessions?status=running`
  * (agent routes/sessions.ts), every origin the browser user can see, so a background or MCP
  * session counts as one this tab's socket never hears of. One row says yes.
+ *
+ * Only `running` on purpose, not `durable.ts`'s `RUNNING` set: a turn parked in
+ * `waiting_approval` or `waiting_input` is waiting on the user, which the waiting badge
+ * already shows, so the "working" dot is off for it.
  */
 export const RUNNING_PATH = '/api/v1/ai/sessions?status=running&limit=1'
 const RunningSchema = z.object({ sessions: z.array(z.unknown()) })
@@ -139,12 +143,19 @@ export function useAttention(enabled: boolean): Attention {
     if (!enabled || inflight.current === generation.current) return
     const started = generation.current
     inflight.current = started
-    void Promise.all([fetchPendingInput(), fetchRunning()]).then(([c, r]) => {
+    // Each answer is shown as it lands, so a slow sessions list does not hold back the
+    // waiting count, or the reverse. A failed read keeps the last answer: an outage is
+    // not "nothing is waiting", or "idle". The slot frees once both have settled.
+    const current = () => started === generation.current
+    void Promise.all([
+      fetchPendingInput().then((c) => {
+        if (current() && c !== null) setCounts(c)
+      }),
+      fetchRunning().then((r) => {
+        if (current() && r !== null) setRunning(r)
+      }),
+    ]).then(() => {
       if (inflight.current === started) inflight.current = null
-      if (started !== generation.current) return
-      // A failed read keeps the last answer: an outage is not "nothing is waiting", or "idle".
-      if (c !== null) setCounts(c)
-      if (r !== null) setRunning(r)
     })
   }, [enabled])
 

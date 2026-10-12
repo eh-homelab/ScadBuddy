@@ -103,6 +103,28 @@ describe('every call has a deadline (#1918)', () => {
     }
   })
 
+  it('answers a Stop at once, even from a handler that ignores its signal (#2099)', async () => {
+    let release = () => {}
+    const t = tool('get_schema')
+    const deaf: Tool = {
+      ...t,
+      execute: () => new Promise((resolve) => {
+        release = () => resolve({ content: [] })
+      }),
+    }
+    const stop = new AbortController()
+    setTimeout(() => stop.abort(), 10)
+    const started = Date.now()
+    try {
+      const result = await runTool(deaf, { slug: 'cable-clip' }, ctx({ signal: stop.signal, toolDeadlineMs: 60_000 }))
+      expect(result.isError).toBe(true)
+      expect(firstText(result)).toContain('the call was cancelled')
+      expect(Date.now() - started).toBeLessThan(5_000)
+    } finally {
+      release()
+    }
+  })
+
   it('allows a tool its own designed wait on top', () => {
     const c = ctx()
     expect(tool('get_schema').deadlineMs({ slug: 'x' }, c)).toBe(TOOL_DEADLINE_MS)
@@ -1112,6 +1134,21 @@ describe('tools that make the backend fetch a URL (exfiltration, not SSRF)', () 
     libraries = [{ name: 'MCAD' }, { name: 'BOSL2' }]
     expect(firstText(await runTool(tool('pin_library'), { slug: 'box', name: 'BOSL2' }, ctx()))).toMatchObject({ pinned_before: true })
     expect(firstText(await runTool({ ...tool('pin_library_from_url'), gated: false }, fromUrl, ctx()))).toMatchObject({ pinned_before: true })
+  })
+
+  it('a pin goes ahead when the read before it fails outright, and leaves pinned_before out (#2124)', async () => {
+    let put = false
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box`, () => HttpResponse.error()),
+      http.put(`${BACKEND}/api/v1/models/box/libraries/:name`, () => {
+        put = true
+        return HttpResponse.json({ slug: 'box', version: 'c'.repeat(40) })
+      }),
+    )
+    const result = await runTool(tool('pin_library'), { slug: 'box', name: 'BOSL2' }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(put).toBe(true)
+    expect(firstText(result)).not.toHaveProperty('pinned_before')
   })
 
   it('pin_library refuses a non-catalogue URL and points to the outward tool', async () => {

@@ -62,6 +62,17 @@ describe('SettingsPage section links (#1307)', () => {
     }
   })
 
+  it('still opens, unscrolled, at a hash with a malformed escape (#2113)', async () => {
+    const { scrolled, restore } = stubScroll()
+    try {
+      renderPage(<SettingsPage />, { route: '/settings#%E0%A4%A' })
+      await seeded()
+      expect(scrolled).toEqual([])
+    } finally {
+      restore()
+    }
+  })
+
   it('leaves the page at the top without a hash', async () => {
     const { scrolled, restore } = stubScroll()
     try {
@@ -492,10 +503,11 @@ describe('SettingsPage connection and About (#322)', () => {
     await seeded()
     await user.click(screen.getByRole('button', { name: 'Test connection' }))
     const scopes = await screen.findByRole('list', { name: 'Scopes' })
-    expect(within(scopes).getAllByRole('listitem')).toHaveLength(5)
+    expect(within(scopes).getAllByRole('listitem')).toHaveLength(6)
     expect(scopes).toHaveTextContent('Read Status: granted.')
     expect(scopes).toHaveTextContent('Manage Queue: not checked.')
     expect(scopes).toHaveTextContent('Manage Archives (optional): not checked.')
+    expect(scopes).toHaveTextContent('Manage Inventory (optional): not checked.')
   })
 
   it('says Bambuddy takes no finish photo, with a link to turn it on', async () => {

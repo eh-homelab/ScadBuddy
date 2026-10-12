@@ -6,8 +6,8 @@ import logging
 import os
 import secrets
 import shutil
-import threading
 import time
+import uuid
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Executor
 from contextlib import (
@@ -210,6 +210,7 @@ class PlateLayout:
                         "colour": part.colour,
                         "file": source.file,
                         "solid": source.solid,
+                        **({"negative": True} if part.negative else {}),
                     }
                     for part, source in zip(plate.parts, sources, strict=True)
                 ],
@@ -247,7 +248,14 @@ class PlateLayout:
                 )
                 mesh, paint = split.mesh, split.paint
             return (
-                ColourPart(entry["material_index"], entry["name"], entry["colour"], mesh, paint),
+                ColourPart(
+                    entry["material_index"],
+                    entry["name"],
+                    entry["colour"],
+                    mesh,
+                    paint,
+                    negative=bool(entry.get("negative", False)),
+                ),
                 source,
             )
 
@@ -493,6 +501,8 @@ async def plates_thumbnails(
     documents: a multi-plate render (spec §6.4) is still one job to bound. All or
     none, as the 3MF writer takes them."""
     loop = asyncio.get_running_loop()
+    # Covers show what prints: a negative part is cut out.
+    plates = [[part for part in parts if not part.negative] for parts in plates]
     faces = sum(len(part.mesh.faces) for parts in plates for part in parts)
 
     def render_all() -> list[PlateThumbnails]:
@@ -719,10 +729,10 @@ def export_revision(history: ModelHistory, slug: str, version: str, directory: P
 
     Renders are debounced, so two of the same revision overlap routinely, and a
     reader that finds `model.scad` present while the other writer is still
-    extracting `model.json` would render against half a revision.
+    extracting `model.json` would render against half a revision. The staging name
+    is random, not the pid and thread: every API pod is pid 1 on the shared volume.
     """
-    staging = directory.with_name(f"{directory.name}.{os.getpid()}.{threading.get_ident()}")
-    shutil.rmtree(staging, ignore_errors=True)
+    staging = directory.with_name(f"{directory.name}.{uuid.uuid4().hex}")
     try:
         history.export(model_path(slug), version, staging)
         directory.parent.mkdir(parents=True, exist_ok=True)

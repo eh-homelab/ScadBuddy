@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from claude_agent_sdk import ProcessError, ResultError
 from fake_anthropic import FakeAnthropic
 from session_support import (
     MANIFEST,
@@ -29,6 +30,7 @@ from session_support import (
     send,
     settled,
     start_session,
+    status,
     tools_worker,
 )
 from temporalio.claude_agent_sdk import ClaudeAgentSdkRunner, SegmentInput, SegmentOutput
@@ -41,7 +43,15 @@ from scadbuddy_durable.credentials import credential_aad
 from scadbuddy_durable.secrets import Kek, kek_from_base64, seal_bytes
 from scadbuddy_durable.session import tools
 from scadbuddy_durable.session.models import ImageRef
-from scadbuddy_durable.session.runner import NO_CREDENTIAL, VIEW_IMAGES_TOOL, ScadBuddyRunner
+from scadbuddy_durable.session.runner import (
+    IMAGE_TOO_LARGE,
+    NO_CREDENTIAL,
+    VIEW_IMAGES_TOOL,
+    Image,
+    ScadBuddyRunner,
+    image_problem,
+    image_size,
+)
 from scadbuddy_durable.worker import build_worker
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
@@ -54,15 +64,18 @@ PNG = base64.b64decode(
 )
 
 
-async def insert_gateway(conn: Conn, kek: Kek, base_url: str, secret: str = TOKEN) -> None:
+async def insert_gateway(
+    conn: Conn, kek: Kek, base_url: str, secret: str = TOKEN, priority: int = 0
+) -> None:
     cid = str(uuid.uuid4())
     aad = credential_aad(cid, "gateway", base_url)
     dek = os.urandom(32)
     await conn.execute(
         "INSERT INTO ai_credentials (id, priority, kind, base_url, secret_sealed, dek_sealed,"
-        " kek_id, last4, status) VALUES (%s, 0, 'gateway', %s, %s, %s, %s, '', 'active')",
+        " kek_id, last4, status) VALUES (%s, %s, 'gateway', %s, %s, %s, %s, '', 'active')",
         (
             cid,
+            priority,
             base_url,
             seal_bytes(dek, secret.encode(), aad),
             seal_bytes(kek.key, dek, f"dek:{aad}"),
@@ -283,3 +296,333 @@ async def test_a_turn_with_an_image_gets_it_from_view_user_images(
     finally:
         fake.close()
         await asyncio.sleep(0)
+
+
+class Failing:
+    """make_runner for the runner: each segment raises the next of ``errors``, then the
+    scripted model answers."""
+
+    def __init__(self, *errors: BaseException) -> None:
+        self.errors = list(errors)
+        self.calls = 0
+        self.scripted = ScriptedClaude(lambda prompt, _: Final("done"))
+
+    def __call__(self, **kwargs: Any) -> Any:
+        return self
+
+    async def run(self, inp: SegmentInput, attempt: int) -> SegmentOutput:
+        self.calls += 1
+        if self.errors:
+            raise self.errors.pop(0)
+        return await self.scripted.run(inp, attempt)
+
+
+def _result_error(text: str, status: int | None = None) -> ResultError:
+    data: dict[str, Any] = {"subtype": "success", "is_error": True, "result": text}
+    if status is not None:
+        data["api_error_status"] = status
+    err = ResultError(f"Claude Code returned an error result: {text}", data=data, exit_code=1)
+    err.__cause__ = ProcessError("Command failed with exit code 1", 1, "Check stderr output")
+    return err
+
+
+async def _turn(
+    env: WorkflowEnvironment, conn: Conn, connect: Connect, cwd: Path, failing: Failing
+) -> tuple[str, Any]:
+    await insert_gateway(conn, KEK, "http://127.0.0.1:9")
+    runner = ScadBuddyRunner(connect, KEK, cwd=str(cwd), make_runner=failing)
+    async with running(env, connect, runner) as (client, queue):
+        sid = await insert_session(conn)
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "hi")
+            await settled(connect, sid)
+            history = await handle.fetch_history()
+        finally:
+            await handle.terminate()
+    return sid, history
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        _result_error("Prompt is too long"),
+        _result_error("API Error: 413", status=413),
+        ProcessError("the request is too large for the model", 1, "x" * 3_000_000),
+    ],
+)
+async def test_a_failure_no_retry_fixes_ends_the_turn_once(
+    temporal_env: WorkflowEnvironment,
+    agent_db: Conn,
+    connect: Connect,
+    tmp_path: Path,
+    error: BaseException,
+) -> None:
+    """#2243: an oversized request looped for ever, 100 s apart; it now ends the turn."""
+    failing = Failing(error, error, error)
+    sid, _ = await _turn(temporal_env, agent_db, connect, tmp_path, failing)
+    assert failing.calls == 1
+    assert await status(agent_db, sid) == "failed"
+    [event] = [e for e in await events(agent_db, sid) if e["type"] == "error"]
+    assert event["code"] == "turn_failed"
+    assert len(event["message"]) <= 500
+    assert str(error).splitlines()[0][:40] in event["message"]
+
+
+async def test_a_retried_failure_reaches_temporal_bounded(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """A transient failure is retried, and what the server keeps of it is readable: 3 MB of
+    stderr once came back as only "Failure exceeds size limit."."""
+    huge = ProcessError("Command failed with exit code 1", 1, "overloaded\n" + "x" * 3_000_000)
+    huge.__cause__ = RuntimeError("y" * 100_000)
+    failing = Failing(huge)
+    sid, history = await _turn(temporal_env, agent_db, connect, tmp_path, failing)
+    assert failing.calls == 2
+    assert await status(agent_db, sid) == "idle"
+    [started] = [
+        e.activity_task_started_event_attributes
+        for e in history.events
+        if e.HasField("activity_task_started_event_attributes")
+        and e.activity_task_started_event_attributes.attempt == 2
+    ]
+    failure = started.last_failure
+    assert failure.ByteSize() < 4096  # limit.mutableStateActivityFailureSize.error
+    assert failure.message != "Failure exceeds size limit."
+    assert failure.application_failure_info.type == "ProcessError"
+    assert not failure.application_failure_info.non_retryable
+    assert not failure.HasField("cause")
+
+
+def _png(width: int, height: int) -> bytes:
+    """A PNG's signature and IHDR: all image_size reads."""
+    return (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+        + width.to_bytes(4, "big")
+        + height.to_bytes(4, "big")
+        + b"\x08\x02\x00\x00\x00"
+    )
+
+
+def test_image_sizes_are_read_from_the_header() -> None:
+    assert image_size(PNG) == (1, 1)
+    assert image_size(_png(4000, 300)) == (4000, 300)
+    assert image_size(b"GIF89a" + (640).to_bytes(2, "little") + (480).to_bytes(2, "little")) == (
+        640,
+        480,
+    )
+    jpeg = b"\xff\xd8\xff\xe0\x00\x04xx\xff\xc0\x00\x11\x08" + (300).to_bytes(2, "big")
+    assert image_size(jpeg + (500).to_bytes(2, "big") + b"\x03") == (500, 300)
+    webp = b"RIFF\x00\x00\x00\x00WEBPVP8X" + bytes(8) + (799).to_bytes(3, "little")
+    assert image_size(webp + (599).to_bytes(3, "little")) == (800, 600)
+    assert image_size(b"not an image") is None
+
+
+def test_image_problems() -> None:
+    ok = Image("a.png", "image/png", _png(1568, 900))
+    assert image_problem([ok], 1568) is None
+    assert IMAGE_TOO_LARGE in (
+        image_problem([Image("b.png", "image/png", _png(4000, 3000))], 1568) or ""
+    )
+    assert "at most 4" in (image_problem([ok] * 5, 1568) or "")
+    huge = Image("c.png", "image/png", _png(10, 10) + bytes(4 * 1024 * 1024))
+    assert "over 3.75 MB" in (image_problem([huge], 1568) or "")
+    assert "cannot be read" in (image_problem([Image("d.png", "image/png", b"xx")], 1568) or "")
+
+
+async def test_an_image_over_the_long_edge_ends_the_turn_before_any_model_call(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """#2243: an image nothing scaled made a request Claude refused, again on every retry."""
+    await insert_gateway(agent_db, KEK, "http://127.0.0.1:9")
+    await agent_db.execute(
+        "INSERT INTO ai_settings (key, value) VALUES ('image_long_edge', '1000')"
+    )
+    recording = Recording()
+    runner = ScadBuddyRunner(connect, KEK, cwd=str(tmp_path), make_runner=recording)
+    big = _png(1200, 800)
+    name = hashlib.sha256(big).hexdigest() + ".png"
+    async with running(temporal_env, connect, runner) as (client, queue):
+        sid = await insert_session(agent_db)
+        await agent_db.execute(
+            "INSERT INTO ai_session_blobs (session_id, name, media_type, data)"
+            " VALUES (%s, %s, 'image/png', %s)",
+            (sid, name, big),
+        )
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "look", [ImageRef(name, "image/png")])
+            assert await settled(connect, sid) == "failed"
+        finally:
+            await handle.terminate()
+    assert recording.made == []
+    [event] = [e for e in await events(agent_db, sid) if e["type"] == "error"]
+    assert "input too large" in event["message"]
+    assert "1200x800" in event["message"] and "1000 px" in event["message"]
+
+
+async def _segment_options(
+    temporal_env: WorkflowEnvironment,
+    agent_db: Conn,
+    connect: Connect,
+    tmp_path: Path,
+    *,
+    plugin_dir: str | None = None,
+) -> dict[str, Any]:
+    await insert_gateway(agent_db, KEK, "http://127.0.0.1:9")
+    recording = Recording()
+    runner = ScadBuddyRunner(
+        connect, KEK, cwd=str(tmp_path), plugin_dir=plugin_dir, make_runner=recording
+    )
+    async with running(temporal_env, connect, runner) as (client, queue):
+        sid = await insert_session(agent_db)
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "hi")
+            assert await settled(connect, sid) == "idle"
+        finally:
+            await handle.terminate()
+    [made] = recording.made
+    return made
+
+
+async def _setting(conn: Conn, key: str, value: str) -> None:
+    await conn.execute(
+        "INSERT INTO ai_settings (key, value) VALUES (%s, %s::jsonb)"
+        " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        (key, value),
+    )
+
+
+async def test_a_segment_runs_on_the_model_chosen_in_settings(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    await _setting(agent_db, "model", '"claude-sonnet-test"')
+    made = await _segment_options(temporal_env, agent_db, connect, tmp_path)
+    assert made["model"] == "claude-sonnet-test"
+
+
+async def test_no_model_setting_leaves_the_engine_default(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    await _setting(agent_db, "model", '""')
+    made = await _segment_options(temporal_env, agent_db, connect, tmp_path)
+    assert "model" not in made
+
+
+async def test_the_own_plugin_loads_unless_settings_switched_it_off(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    on = await _segment_options(temporal_env, agent_db, connect, tmp_path, plugin_dir="/skills")
+    assert on["extra_options"]["plugins"] == [{"type": "local", "path": "/skills"}]
+    await _setting(agent_db, "scadbuddy_plugin_enabled", "false")
+    await agent_db.execute("DELETE FROM ai_credentials")
+    off = await _segment_options(temporal_env, agent_db, connect, tmp_path, plugin_dir="/skills")
+    assert "plugins" not in off["extra_options"]
+
+
+class Refusing:
+    """make_runner for the runner: a segment on a credential in ``refused`` raises
+    ``error``; any other answers. Records each runner's token."""
+
+    def __init__(self, refused: set[str], error: BaseException) -> None:
+        self.refused = refused
+        self.error = error
+        self.tokens: list[str] = []
+        self.scripted = ScriptedClaude(lambda prompt, _: Final("done"), cost_per_segment=0.25)
+
+    def __call__(self, **kwargs: Any) -> Any:
+        token = kwargs["env"]["ANTHROPIC_AUTH_TOKEN"]
+        self.tokens.append(token)
+        if token in self.refused:
+            error = self.error
+
+            class Raises:
+                async def run(self, inp: SegmentInput, attempt: int) -> SegmentOutput:
+                    raise error
+
+            return Raises()
+        return self.scripted
+
+
+async def _two_credentials(conn: Conn) -> None:
+    await insert_gateway(conn, KEK, "http://127.0.0.1:9", secret=TOKEN)
+    await insert_gateway(conn, KEK, "http://127.0.0.1:10", secret=TOKEN + "-second", priority=1)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        _result_error("API Error: 401 invalid x-api-key", status=401),
+        _result_error("API Error: 429 rate limited", status=429),
+        _result_error("API Error: 400 Your credit balance is too low", status=400),
+    ],
+)
+async def test_a_refused_credential_falls_back_to_the_next(
+    temporal_env: WorkflowEnvironment,
+    agent_db: Conn,
+    connect: Connect,
+    tmp_path: Path,
+    error: BaseException,
+) -> None:
+    """As a classic turn does (harness/fallback.ts): the credential's own failure moves
+    the segment to the next credential, once each, instead of retrying the same key."""
+    await _two_credentials(agent_db)
+    refusing = Refusing({TOKEN}, error)
+    runner = ScadBuddyRunner(connect, KEK, cwd=str(tmp_path), make_runner=refusing)
+    async with running(temporal_env, connect, runner) as (client, queue):
+        sid = await insert_session(agent_db)
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "hi")
+            assert await settled(connect, sid) == "idle"
+        finally:
+            await handle.terminate()
+    assert refusing.tokens == [TOKEN, TOKEN + "-second"]
+
+
+async def test_a_failure_of_the_request_does_not_try_another_credential(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    await _two_credentials(agent_db)
+    refusing = Refusing({TOKEN}, _result_error("API Error: 400 bad tool schema", status=400))
+    runner = ScadBuddyRunner(connect, KEK, cwd=str(tmp_path), make_runner=refusing)
+    async with running(temporal_env, connect, runner) as (client, queue):
+        sid = await insert_session(agent_db)
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "hi")
+            # The segment is retried (on the same key, as the plugin retries any failure).
+            for _ in range(100):
+                if len(refusing.tokens) >= 2:
+                    break
+                await asyncio.sleep(0.1)
+        finally:
+            await handle.terminate()
+    assert len(refusing.tokens) >= 2
+    assert set(refusing.tokens) == {TOKEN}
+
+
+async def test_a_fallback_never_runs_past_the_budget_a_refused_attempt_spent(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """What the refused attempt cost is spent: with nothing left, no other credential
+    runs, and the turn ends as the budget's (security review of the fallback)."""
+    await _two_credentials(agent_db)
+    error = _result_error("API Error: 429 rate limited", status=429)
+    error.data["total_cost_usd"] = 1.0
+    refusing = Refusing({TOKEN}, error)
+    runner = ScadBuddyRunner(connect, KEK, cwd=str(tmp_path), make_runner=refusing)
+    async with running(temporal_env, connect, runner) as (client, queue):
+        sid = await insert_session(agent_db, budget=1.0)
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "hi")
+            assert await settled(connect, sid) == "idle"
+        finally:
+            await handle.terminate()
+    assert refusing.tokens == [TOKEN]
+    [event] = [e for e in await events(agent_db, sid) if e["type"] == "error"]
+    assert event["code"] == "error_max_budget_usd"
+    cost, _ = await _row(agent_db, sid)
+    assert cost == pytest.approx(1.0)

@@ -8,6 +8,7 @@ import { raiseTier } from '../harness/permissions.js'
 import type { BrowserTabs } from '../bridge/hub.js'
 import type { SessionManager } from '../sessions/manager.js'
 import type { TouchedSink } from '../sessions/touched.js'
+import type { SessionFiles } from '../workspace/store.js'
 import { DEFAULT_SOURCE, markUntrusted, wrapUntrustedText } from '../safety/untrusted.js'
 import { authored, authorHeaders } from './authorship.js'
 import { type OutwardActions, PendingStoreFullError } from './pending.js'
@@ -82,6 +83,18 @@ export type ToolServices = {
   sessions?: SessionManager | undefined
   /** Uploaded images `sessions_send` may name (#1941, attachments/store.ts); none without a database. */
   attachments?: AttachmentStore | undefined
+  /**
+   * The assistant's workspace (#2329, workspace/store.ts): the session's files, or
+   * the principal's own outside a session. The workspace_* tools refuse without it.
+   */
+  workspace?: SessionFiles | undefined
+  /**
+   * The secrets a tool must never hand the model (#2329): every saved Claude
+   * credential's (main.ts), and in a classic turn the turn's plugin tokens too
+   * (tools/harness.ts). workspace_read redacts them from text, as the event log
+   * is redacted of them (sessions/sdkEvents.ts `scrubForLog`).
+   */
+  secrets?: (() => Promise<readonly string[]>) | undefined
   /** The tabs the browser_* tools drive (bridge/hub.ts, #254); without it they answer "no browser attached". */
   browser?: BrowserTabs | undefined
   /**
@@ -149,6 +162,19 @@ export type ToolContext = ToolServices & {
    * (`needs_approval`, spec 2026-10-01 §6.4) has passed. Not prepared again either.
    */
   gate?: 'harness' | 'workflow'
+  /**
+   * Under `harness`: the tier the turn's permission seam applied to this tool.
+   * The seam reads Settings → Plugins once per turn (sessions/manager.ts), so a
+   * tool raised to `outward` since then was not parked, and is refused here
+   * rather than run unasked (#2100).
+   */
+  seamTier?: Risk
+  /**
+   * The tier and Settings state the caller already resolved for this call and checked
+   * it against (toolActivities.ts, #2088). Used as given, never read again, so the
+   * check and the run cannot see two different overrides.
+   */
+  effective?: EffectiveTool
   /**
    * What the handler itself knows about how the call went, for the audit row
    * (`ToolRun`): `confirm_action` reports the approval it ran on and the tool
@@ -466,7 +492,7 @@ async function runJudgedByResult(
 ): Promise<ToolRun> {
   let effective: EffectiveTool
   try {
-    effective = await effectiveTool(tool, ctx)
+    effective = ctx.effective ?? (await effectiveTool(tool, ctx))
   } catch {
     // Fails closed: a database blip never runs a tool Settings disabled.
     return refused(`${tool.name} is refused: its Settings → Plugins entry cannot be read`)
@@ -481,6 +507,12 @@ async function runJudgedByResult(
   }
   const off = await ctx.switchedOff?.(tool.name)
   if (off) return refused(off)
+  if (ctx.gate === 'harness' && effective.risk === 'outward' && ctx.seamTier !== undefined && ctx.seamTier !== 'outward') {
+    return refused(
+      `${tool.name} was raised to "outward" during this turn, so it needs a human approval this turn did not ask for; ` +
+        'nothing was sent. It asks for one from the next turn.',
+    )
+  }
   try {
     if (effective.gated && ctx.gate === undefined) {
       // The prepare half of spec §8.2's prepare/confirm: record, do not act.
@@ -541,32 +573,56 @@ async function runJudgedByResult(
 
 const TIMED_OUT = Symbol('timed out')
 
+/** How long a stopped call's handler has to answer before the Stop is answered for it (#2099). */
+const STOP_GRACE_MS = 1_000
+
 /**
  * `run`'s result, or `TIMED_OUT` once `ms` passes, when the signal it was given
- * is aborted. The deadline answers whether or not the handler heeds that
- * signal; one that does not is left to finish unobserved.
+ * is aborted, or an `AbortError` shortly after `outer` is (a user Stop). Both
+ * answer whether or not the handler heeds that signal; one that does not is
+ * left to finish unobserved.
  */
 async function withDeadline<T>(
   ms: number,
   outer: AbortSignal,
   run: (signal: AbortSignal) => Promise<T>,
 ): Promise<T | typeof TIMED_OUT> {
-  if (!Number.isFinite(ms)) return run(outer)
   const timer = new AbortController()
   let handle: ReturnType<typeof setTimeout> | undefined
-  const expired = new Promise<typeof TIMED_OUT>((resolve) => {
-    handle = setTimeout(() => {
-      // Settled before the abort, so the handler's own AbortError cannot win the race.
-      resolve(TIMED_OUT)
-      timer.abort()
-    }, ms)
-  })
+  const racers: Promise<T | typeof TIMED_OUT>[] = []
+  if (Number.isFinite(ms)) {
+    racers.push(
+      new Promise<typeof TIMED_OUT>((resolve) => {
+        handle = setTimeout(() => {
+          // Settled before the abort, so the handler's own AbortError cannot win the race.
+          resolve(TIMED_OUT)
+          timer.abort()
+        }, ms)
+      }),
+    )
+  }
+  // A Stop is answered for the handler only once it has had STOP_GRACE_MS to answer
+  // itself: one that heeds the signal can say what it had already done (a submitted
+  // render's job id), and that is worth more to the model than a bare cancel.
+  let grace: ReturnType<typeof setTimeout> | undefined
+  let stop = () => {}
+  racers.push(
+    new Promise<never>((_, reject) => {
+      stop = () => {
+        grace = setTimeout(() => reject(new DOMException('the call was cancelled', 'AbortError')), STOP_GRACE_MS)
+      }
+      if (outer.aborted) stop()
+      else outer.addEventListener('abort', stop, { once: true })
+    }),
+  )
   const running = run(AbortSignal.any([outer, timer.signal]))
   running.catch(() => {})
   try {
-    return await Promise.race([running, expired])
+    return await Promise.race([running, ...racers])
   } finally {
     clearTimeout(handle)
+    clearTimeout(grace)
+    outer.removeEventListener('abort', stop)
   }
 }
 

@@ -28,6 +28,7 @@ from temporalio.exceptions import ApplicationError
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, client_for
 from scadbuddy.bambuddy.dispatch import SliceStarted, start_slice, wait_slice
 from scadbuddy.bambuddy.output_reader import OutputReader, invalid_meta, require
+from scadbuddy.bambuddy.preview import reusable_slice
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.print_run import (
     PlannedRun,
@@ -238,6 +239,8 @@ class PrintActivities:
                     library_file_id=input.library_file_id,
                     plan=input.plan,
                     plate_id=input.plate_id,
+                    # The dialog's background slice of the same, when there is one (#2169).
+                    reuse=reusable_slice(client, self.d.uploads, printing=True),
                 )
         except ApiError as error:
             raise raised_as(error, FAILED) from None
@@ -308,6 +311,7 @@ class PrintActivities:
                         planned.project_id,
                         printer_id=planned.printer_id,
                         nozzle_size=planned.nozzle_size,
+                        nozzle_plan=planned.nozzle_plan,
                     )
             except Exception:
                 logger.exception("could not remember project %s", planned.project_id)

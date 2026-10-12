@@ -4,7 +4,8 @@ import { z } from 'zod'
 import { ACCEPTING_MS, command, reattach } from './command.js'
 import { binary } from './binary.js'
 import { ok } from './call.js'
-import { CAMERA, cameraQuery, decodeBase64, fileForm, params, slug, VIEW, VIEW_SIZE, withQuery } from './common.js'
+import { CAMERA, cameraQuery, params, slug, VIEW, VIEW_SIZE, withQuery } from './common.js'
+import { binarySource, fromWorkspace, uploadInit, uploadName, withSent, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 import { blob, defineTool, image, json, type Tool, type ToolContext, ToolError, toolErrorText } from './registry.js'
 import { DEFAULT_RENDER_LIMITER } from './renderLimits.js'
 import { validateParams } from './validate.js'
@@ -461,28 +462,36 @@ export const customizerTools: Tool[] = [
   defineTool({
     name: 'upload_asset',
     description:
-      'Upload an SVG or PNG (base64) for a `// file` parameter. Returns its asset id, the value to pass ' +
-      'for that parameter. SVGs are sanitised and PNGs downscaled by the backend.',
+      'Upload an SVG or PNG for a `// file` parameter. Returns its asset id, the value to pass ' +
+      'for that parameter. SVGs are sanitised and PNGs downscaled by the backend.' +
+      fromWorkspace('`content_base64`'),
     input: z.object({
       slug,
-      filename: z.string().min(1).describe('e.g. "logo.svg"; the content is sniffed, not trusted by name'),
-      content_base64: z.string().min(1),
+      filename: z
+        .string()
+        .min(1)
+        .optional()
+        .describe('e.g. "logo.svg"; the content is sniffed, not trusted by name. With workspace_path, the file\'s own name by default'),
+      content_base64: z.string().min(1).optional().describe("The file's bytes as base64"),
+      workspace_path: workspacePathInput.optional(),
+      workspace_sha256: workspaceShaInput.optional(),
     }),
     risk: 'write',
     routes: ['POST /api/v1/models/{slug}/assets'],
-    handler: async ({ slug, filename, content_base64 }, ctx) => {
-      const type = filename.toLowerCase().endsWith('.svg') ? 'image/svg+xml' : 'image/png'
-      const form = fileForm(decodeBase64(content_base64, 'content_base64'), filename, type)
-      return json(
-        await command(ctx, `upload ${filename}`, (headers) =>
-          ctx.backend.POST('/api/v1/models/{slug}/assets', {
-            params: { path: { slug } },
-            body: { file: filename },
-            bodySerializer: () => form,
-            headers,
-          }),
-        ),
+    title: ({ slug, filename, workspace_path }) => `Upload ${filename ?? workspace_path ?? 'asset'} → ${slug}`,
+    handler: async ({ slug, filename, content_base64, workspace_path, workspace_sha256 }, ctx) => {
+      const source = await binarySource(ctx, { upload: 'upload_asset', base64: content_base64, base64Name: 'content_base64', path: workspace_path, sha256: workspace_sha256 })
+      const name = filename ?? ('info' in source ? uploadName(source.info.path) : undefined)
+      if (name === undefined) throw new ToolError('give `filename` with `content_base64`')
+      const type = name.toLowerCase().endsWith('.svg') ? 'image/svg+xml' : 'image/png'
+      const answer = await command(ctx, `upload ${name}`, (headers) =>
+        ctx.backend.POST('/api/v1/models/{slug}/assets', {
+          params: { path: { slug } },
+          body: { file: name },
+          ...uploadInit(ctx, source, { name: 'file', filename: name, type }, headers),
+        }),
       )
+      return json(withSent(answer, 'info' in source ? source.info : undefined))
     },
   }),
 

@@ -10,8 +10,11 @@ import { payloadKeyLock, subjectOf } from '../temporal/payloadCodec.js'
 //      copy of its payloads (history, Visibility, Archival) is undecryptable, whatever
 //      fails next. A process that read the key keeps it in memory 30 s at most
 //      (payloadCodec.ts, codec.py);
+//      Its large payloads, files on the data share (#2243), are ciphertext under that
+//      key, so they are unreadable from here on too; step 3 removes them;
 //   2. terminate the workflow if it is open, then DeleteWorkflowExecution;
-//   3. delete our rows, as a session's deletion always did: `ai_sessions`, whose
+//   3. remove its stored payloads' directory (when this process has the share), and
+//      delete our rows, as a session's deletion always did: `ai_sessions`, whose
 //      cascade takes its events, `ai_pending_input`, `ai_input_responses`, blobs,
 //      resources, approvals and questions, and `ai_session_entries`, which is not keyed
 //      to it. The audit log keeps its rows, as it does for every session.
@@ -26,6 +29,8 @@ export type ForgetDeps = {
   namespace?: string
   /** Drops the subject's data key from this process's cache too. */
   keys?: { forget(subject: string): void } | undefined
+  /** Where its large payloads are kept (FilePayloadStore); without one, they stay, unreadable. */
+  payloads?: { forget(subject: string): Promise<void> } | undefined
 }
 
 export type Forgotten = {
@@ -70,6 +75,7 @@ export async function forgetSubject(deps: ForgetDeps, subject: string): Promise<
       workflow = 'not_found'
     }
   }
+  await deps.payloads?.forget(subject)
   let rows = 0
   if (subject.startsWith('session-')) {
     const id = subject.slice('session-'.length)

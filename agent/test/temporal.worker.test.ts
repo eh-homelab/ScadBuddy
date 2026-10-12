@@ -85,6 +85,40 @@ describe.skipIf(!TEMPORAL_CLI)(`the agent-tools worker${TEMPORAL_SKIP}`, () => {
     expect(agent.state()).not.toBe('connecting')
   }, 120_000)
 
+  it("runs a flow run's tool call as its starter (#1057)", async () => {
+    const run = randomUUID()
+    const agent = AgentWorker.start({
+      address: env.address,
+      namespace: 'default',
+      activities: toolActivities([echo], {
+        services: services(),
+        sessions: { ownerOf: async () => undefined },
+        flows: {
+          startedBy: async (id) => (id === run ? { kind: 'browser', id: 'browser', label: 'You' } : undefined),
+          approved: async () => false,
+        },
+      }),
+    })
+    const flowWorker = await Worker.create({
+      connection: env.nativeConnection,
+      taskQueue: 'project-workflow-standin',
+      workflowsPath: fileURLToPath(new URL('./support/toolWorkflows.ts', import.meta.url)),
+    })
+    try {
+      await agent.running()
+      const content = await flowWorker.runUntil(
+        env.client.workflow.execute('callTool', {
+          workflowId: `flow-${run}`,
+          taskQueue: 'project-workflow-standin',
+          args: ['echo', { say: 'hi' }, 'call_1'],
+        }),
+      )
+      expect(JSON.parse(unwrapUntrusted(content as string))).toEqual({ said: 'hi' })
+    } finally {
+      await agent.stop()
+    }
+  }, 120_000)
+
   it('keeps trying while Temporal cannot be reached, and stops cleanly', async () => {
     const agent = AgentWorker.start({
       address: '127.0.0.1:1',

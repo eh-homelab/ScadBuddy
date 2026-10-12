@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
@@ -21,8 +21,9 @@ from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.filaments import SpoolOption, normalise_colour, spool_label
 from scadbuddy.bambuddy.follow import SettledHook
-from scadbuddy.bambuddy.models import ArchiveDetail, PrinterStatus
+from scadbuddy.bambuddy.models import ArchiveDetail, FilamentRequirement, PrinterStatus
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
@@ -76,12 +77,41 @@ RACK_STORE_FALLBACKS = frozenset(
 )
 
 
+class PickedSpool(BaseModel):
+    """One filament slot of a picked group, and the spool it printed from (#2170)."""
+
+    slot_id: int
+    #: Bambuddy's inventory spool; ``None`` when the slot had none.
+    spool_id: int | None = None
+    label: str | None = None
+    material: str | None = None
+    #: ``#RRGGBB``.
+    colour: str | None = None
+    #: The slicer's grams for one plate; ``None`` when it did not say.
+    grams: float | None = None
+
+
 class PickedHotend(BaseModel):
     """A sent pick with the hotend it named. Carries a serial: backend only (spec §7)."""
 
     group_id: int
     position: int
     serial: str = Field(repr=False)
+    #: The spools the group printed from (#2170), recorded with the pick.
+    spools: list[PickedSpool] = Field(default_factory=list)
+
+
+class SpoolUse(BaseModel):
+    """One spool's settled prints on one hotend (#2170). A slot that printed from no
+    inventory spool is one row per label, with ``spool_id`` ``None``."""
+
+    spool_id: int | None
+    label: str | None
+    material: str | None
+    colour: str | None
+    prints: int
+    grams: float
+    last_used_at: datetime | None
 
 
 class RackUsage(Protocol):
@@ -235,10 +265,55 @@ class RackUsageStore:
             for row in rows
         }
 
+    async def spool_history(self, serials: Iterable[str]) -> dict[str, list[SpoolUse]]:
+        """Each serial's settled spools, most used first (#2170). A serial with none is
+        missing from the answer."""
+        unique = sorted({serial for serial in serials if serial})
+        if not unique:
+            return {}
+        return await asyncio.to_thread(self._spool_history, unique)
+
+    def _spool_history(self, unique: list[str]) -> dict[str, list[SpoolUse]]:
+        with self._ready().connection() as conn:
+            rows = conn.execute(
+                "SELECT p.serial, s.spool_id,"
+                # A spool's newest label, colour and material: it may have been renamed.
+                " (array_agg(s.label ORDER BY p.settled_at DESC))[1] AS label,"
+                " (array_agg(s.material ORDER BY p.settled_at DESC))[1] AS material,"
+                " (array_agg(s.colour ORDER BY p.settled_at DESC))[1] AS colour,"
+                " count(DISTINCT p.archive_id) AS prints,"
+                " coalesce(sum(s.grams), 0) AS grams,"
+                " max(p.settled_at) AS last_used_at"
+                " FROM rack_nozzle_prints AS p"
+                " JOIN rack_nozzle_pick_spools AS s"
+                "  ON s.queue_item_id = p.queue_item_id AND s.group_id = p.group_id"
+                " WHERE p.serial = ANY(%s)"
+                # No inventory spool: one row per label instead.
+                " GROUP BY p.serial, s.spool_id,"
+                "  CASE WHEN s.spool_id IS NULL THEN s.label END"
+                " ORDER BY p.serial, prints DESC, last_used_at DESC",
+                (unique,),
+            ).fetchall()
+        history: dict[str, list[SpoolUse]] = {}
+        for row in rows:
+            history.setdefault(str(row["serial"]), []).append(
+                SpoolUse(
+                    spool_id=row["spool_id"],
+                    label=row["label"],
+                    material=row["material"],
+                    colour=row["colour"],
+                    prints=int(row["prints"]),
+                    grams=float(row["grams"]),
+                    last_used_at=row["last_used_at"],
+                )
+            )
+        return history
+
     async def record_picks(
         self, queue_item_id: int, printer_id: int, picks: Sequence[PickedHotend]
     ) -> int:
-        """The picks for one queue item; the rows actually written (#1015)."""
+        """The picks for one queue item, with their spools; the pick rows actually
+        written (#1015)."""
         if not picks:
             return 0
         return await asyncio.to_thread(self._record_picks, queue_item_id, printer_id, list(picks))
@@ -254,6 +329,23 @@ class RackUsageStore:
                     (queue_item_id, pick.group_id, printer_id, pick.serial),
                 )
                 written += cursor.rowcount
+                for spool in pick.spools:
+                    conn.execute(
+                        "INSERT INTO rack_nozzle_pick_spools"
+                        " (queue_item_id, group_id, slot_id, spool_id, label, material,"
+                        " colour, grams) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
+                        " ON CONFLICT (queue_item_id, group_id, slot_id) DO NOTHING",
+                        (
+                            queue_item_id,
+                            pick.group_id,
+                            spool.slot_id,
+                            spool.spool_id,
+                            spool.label,
+                            spool.material,
+                            spool.colour,
+                            spool.grams,
+                        ),
+                    )
         return written
 
     async def picked_items(self, queue_item_ids: Iterable[int]) -> set[int]:
@@ -321,6 +413,31 @@ class RackUsageStore:
                 (archive_id, settled_at, print_seconds, grams, queue_item_id),
             )
         return cursor.rowcount
+
+
+def group_spools(
+    filaments: Sequence[FilamentRequirement],
+    spools_by_slot: Mapping[int, SpoolOption],
+    group_id: int,
+) -> list[PickedSpool]:
+    """The used slots of one sliced group and the spool each printed from (#2170)."""
+    picked: list[PickedSpool] = []
+    for filament in filaments:
+        if not filament.used_in_plate or filament.group_id != group_id:
+            continue
+        spool = spools_by_slot.get(filament.slot_id)
+        picked.append(
+            PickedSpool(
+                slot_id=filament.slot_id,
+                spool_id=spool.spool_id if spool else None,
+                label=spool_label(spool) if spool else filament.type,
+                material=(spool.material if spool else None) or filament.type,
+                colour=normalise_colour(spool.colour if spool and spool.colour else filament.color),
+                # 0 is "not sliced", not "none" (``FilamentRequirement``).
+                grams=filament.used_grams or None,
+            )
+        )
+    return picked
 
 
 async def record_seen(

@@ -196,6 +196,11 @@ export const SessionSummarySchema = z.object({
   budgetUsd: z.number().positive().optional(),
   /** Plan 5d — how it runs; absent from an older agent (classic). */
   mode: SessionModeSchema.optional(),
+  /**
+   * #1284 — a live handoff offer: to whom, until when. Absent from an older agent. The
+   * target's id is left out for a viewer that may not see it (agent `ownerSeenBy`).
+   */
+  offer: z.object({ to: OwnerSchema.partial({ id: true }), until: z.string() }).nullable().optional(),
 })
 export type SessionSummary = z.infer<typeof SessionSummarySchema>
 

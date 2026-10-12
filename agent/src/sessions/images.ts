@@ -4,10 +4,9 @@ import { z } from 'zod'
 // Images the user pastes, drops or attaches in the assistant panel (#1866).
 //
 // The panel uploads each one (#1941, routes/attachments.ts, checked with
-// UserImageSchema below) and its `user.message` names them by id; a tab loaded
-// before that sent them inline in the frame. Either way an image is the full
-// image, base64, for the model, and a small preview the panel made of it. The model
-// gets the full images as `image` content blocks in the turn's user message
+// UserImageSchema below) and its `user.message` names them by id (inline images
+// are refused, #1959). An image is the full image, base64, for the model, and a
+// small preview the panel made of it. The model gets the full images as `image` content blocks in the turn's user message
 // (`userPrompt`), so they are kept only where Claude Code keeps the turn: the
 // SDK transcript (ai_session_entries), which resume reads and no watcher is sent.
 // The `user.turn` event, which the event log keeps and every watcher replays,
@@ -16,7 +15,7 @@ import { z } from 'zod'
 // refusal never quotes them.
 //
 // The types are the four the Messages API reads. The bytes must start with
-// their type's signature, so a frame cannot pass off other content as an image.
+// their type's signature, so an upload cannot pass off other content as an image.
 
 /** What the Messages API takes as an image. */
 export const IMAGE_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'] as const

@@ -12,6 +12,13 @@ export type BlankTemplateView = { source: string }
 /** The blank starter template, for the UI. */
 export const route: RouteModule = {
   register(app) {
-    app.get('/api/v1/ai/templates/blank', (c) => c.json({ source: BLANK_TEMPLATE } satisfies BlankTemplateView))
+    app.get('/api/v1/ai/templates/blank', (c) => {
+      // A constant of the image: a browser may keep it for an hour, so for up to an hour
+      // after an upgrade that changes it, New model can start from the old starter while
+      // create_from_template writes the new one. Accepted for a starter. Private, so no
+      // shared cache in front of the ingress holds it as well (#2218).
+      c.header('Cache-Control', 'private, max-age=3600')
+      return c.json({ source: BLANK_TEMPLATE } satisfies BlankTemplateView)
+    })
   },
 }

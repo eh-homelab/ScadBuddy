@@ -2,6 +2,7 @@ import { Client, Connection } from '@temporalio/client'
 import { loadConfig } from './config.js'
 import { connectDatabase } from './db.js'
 import { forgetSubject } from './sessions/forget.js'
+import { FilePayloadStore } from './temporal/payloadCodec.js'
 
 // `node dist/forget-subject.js session-<uuid>`: an operator's forgetSubject
 // (spec 2026-10-01 §6.5, sessions/forget.ts), with the agent service's own
@@ -26,7 +27,9 @@ const connection = config.temporalAddress ? await Connection.connect({ address: 
 if (!connection) console.error('forget-subject: SCADBUDDY_TEMPORAL_ADDRESS is not set; the workflow is left to retention')
 try {
   const client = connection ? new Client({ connection, namespace: config.temporalNamespace }) : undefined
-  const done = await forgetSubject({ sql: database.sql, client }, subject)
+  const payloads = config.payloadDir ? new FilePayloadStore(config.payloadDir) : undefined
+  if (!payloads) console.error('forget-subject: SCADBUDDY_PAYLOAD_DIR is not set; stored payloads stay (unreadable)')
+  const done = await forgetSubject({ sql: database.sql, client, payloads }, subject)
   console.log(JSON.stringify({ subject, ...done }))
 } finally {
   await connection?.close()

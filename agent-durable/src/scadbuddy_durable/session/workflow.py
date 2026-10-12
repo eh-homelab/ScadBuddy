@@ -5,6 +5,10 @@
 ``send_message``, and continues as new between turns when the server suggests it
 (and, the plugin's ``auto_continue_as_new``, between the steps of a long turn).
 
+A tool parks by its effective tier (#2088): ``gate_settings`` reads Settings → Plugins
+as each turn starts, a tool raised to ``outward`` parks like any outward tool, and a
+disabled one is left out of what the segment runner declares (``segment_context``).
+
 The gate (§6.6, 5b): when the plugin's ``pending_approvals()`` gains a call, the call
 is described (an approval's summary and hash come from the agent, ``gate.describe_call``;
 an answer's card is built and checked here, ``gate.entry``), opened (``open_input``),
@@ -43,6 +47,7 @@ with workflow.unsafe.imports_passed_through():
     from scadbuddy_durable.gate.ids import durable_request_id
     from scadbuddy_durable.gate.names import (
         CANCEL_INPUT_UPDATE,
+        END_SIGNAL,
         INTERRUPT_SIGNAL,
         PENDING_INPUT_QUERY,
         RESPOND_UPDATE,
@@ -60,6 +65,8 @@ with workflow.unsafe.imports_passed_through():
     from scadbuddy_durable.session.models import (
         BUDGET_EXHAUSTED,
         MAX_SEGMENTS,
+        MESSAGE_MAX,
+        SEGMENT_ATTEMPTS,
         SEGMENT_CONTEXT_QUERY,
         SEND_MESSAGE_UPDATE,
         TOOLS_QUEUE,
@@ -138,7 +145,11 @@ class DurableSession:
     def __init__(self, start: SessionStart) -> None:
         self._start = start
         entries = manifest.manifest()
+        self._entries = entries
         self._kinds = {e.name: e.hitl for e in entries}
+        # The plugin keeps these objects and reads needs_approval as each call comes:
+        # a turn sets it from Settings → Plugins (manifest.apply_overrides, #2088).
+        self._tools = {t.name: t for t in manifest.durable_tools(entries)}
         self._turn: TurnStart | None = start.turn
         self._message: Message | None = None
         self._parked: dict[str, Parked] = {}
@@ -149,9 +160,11 @@ class DurableSession:
         # run() returns before the gate is drained and the turn is written (review of #1958).
         self._in_turn = start.turn is not None
         self._interrupted: str | None = start.interrupted
+        # Marked done (#1056): the run returns once no turn runs.
+        self._ended = False
         self._settings = GateSettings(approval_expiry_s=600, question_expiry_s=3600)
         self._agent = DurableClaudeAgent(
-            tools=manifest.durable_tools(entries),
+            tools=list(self._tools.values()),
             max_turns=start.max_turns,
             builtin_tools=["Skill"],
             tool_activities=(),
@@ -160,6 +173,9 @@ class DurableSession:
             auto_continue_as_new=True,
             continue_as_new_args=self._next_run,
             live_output=True,
+            segment_retry_policy=RetryPolicy(
+                maximum_interval=timedelta(seconds=100), maximum_attempts=SEGMENT_ATTEMPTS
+            ),
         )
 
     def _next_run(self, state: AgentState) -> list[Any]:
@@ -176,7 +192,9 @@ class DurableSession:
                 # A turn handed over by continue-as-new: the prompt was sent already.
                 await self._run_turn(None)
             else:
-                await workflow.wait_condition(lambda: self._message is not None)
+                await workflow.wait_condition(lambda: self._message is not None or self._ended)
+                if self._message is None:
+                    return
                 message, self._message = self._message, None
                 assert message is not None
                 self._turn = TurnStart(message.turn_id, message.author, list(message.images))
@@ -195,6 +213,14 @@ class DurableSession:
         turn_id = self._turn.turn_id if self._turn else ""
         self._settings = await workflow.execute_activity(
             "gate_settings", start_to_close_timeout=SHORT, result_type=GateSettings
+        )
+        # From the activity's result, so a replay sets the same gates: a turn an older
+        # worker started read no overrides, and parks by the manifest as it did then.
+        manifest.apply_overrides(
+            self._tools,
+            self._entries,
+            self._settings.tool_tiers,
+            set(self._settings.disabled_tools),
         )
         follow = workflow.start_activity(
             "follow_session",
@@ -226,7 +252,7 @@ class DurableSession:
             elif BUDGET_EXHAUSTED in text or "max_budget_usd" in text:
                 outcome = "budget_exhausted"
             else:
-                outcome, message = "failed", text
+                outcome, message = "failed", text[:MESSAGE_MAX]
         finally:
             self._task = None
         watcher.cancel()
@@ -419,6 +445,8 @@ class DurableSession:
     def _validate_send(self, message: Message) -> None:
         if self._in_turn or self._message is not None or self._task is not None or self._agent.busy:
             raise ApplicationError("the session is running a turn", type="busy", non_retryable=True)
+        if self._ended:
+            raise ApplicationError("the session was marked done", type="ended", non_retryable=True)
 
     def _request(self, args: dict[str, Any]) -> RespondRequest:
         responder = args.get("responder") or {}
@@ -490,6 +518,10 @@ class DurableSession:
         if self._task is not None:
             self._task.cancel()
 
+    @workflow.signal(name=END_SIGNAL)
+    def end(self, args: dict[str, Any]) -> None:
+        self._ended = True
+
     @workflow.query(name=PENDING_INPUT_QUERY)
     def pending_input(self) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
@@ -521,6 +553,7 @@ class DurableSession:
         return SegmentContext(
             images=list(self._turn.images) if self._turn else [],
             system_append=self._start.system_append,
+            disabled_tools=list(self._settings.disabled_tools),
         )
 
     @workflow.query(name=TURN_QUERY)

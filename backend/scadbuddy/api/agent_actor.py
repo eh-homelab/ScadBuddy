@@ -102,6 +102,8 @@ AGENT_ALLOWED_WRITES: tuple[str, ...] = (
     "DELETE /api/v1/models/{slug}/readme",
     "PUT /api/v1/models/{slug}/thumbnail",
     "DELETE /api/v1/models/{slug}/thumbnail",
+    "POST /api/v1/models/{slug}/media",
+    "PUT /api/v1/outputs/{output_id}/thumbnail",
     "POST /api/v1/models/{slug}/render",
     "POST /api/v1/models/{slug}/presets",
     "PATCH /api/v1/models/{slug}/presets/{preset_id}",
@@ -120,6 +122,8 @@ AGENT_ALLOWED_WRITES: tuple[str, ...] = (
     "PUT /api/v1/print/library/{file_id}/choices",
     "PUT /api/v1/print/printers/{printer_id}/bed-type",
     "PUT /api/v1/print/projects/last",
+    "POST /api/v1/workflows",
+    "POST /api/v1/workflows/{definition_id}/runs",
 )
 # agent-allowed-writes:end
 

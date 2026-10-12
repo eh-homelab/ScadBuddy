@@ -112,6 +112,11 @@ class SettingsView(BaseModel):
     #: The largest media upload (#274), in bytes, which the UI checks a file against
     #: before sending it.
     media_upload_max_bytes: int
+    #: What one read of a library 3MF may spend (#2087), each at most its ceiling.
+    read_max_objects: int
+    read_max_visits: int
+    read_max_triangles: int
+    read_max_paint_digits: int
 
     render_timeout: float
     template_activity_max_timeout: float
@@ -138,6 +143,7 @@ class SettingsView(BaseModel):
     fonts_catalogue_ttl: float
     event_log_retention_seconds: float
     event_log_retention_rows: int
+    flow_approval_timeout_seconds: int
     log_level: str
     #: The Temporal web UI, which Settings → Administration links to (#668).
     temporal_ui_url: str | None = None
@@ -542,6 +548,7 @@ SCOPES: tuple[tuple[Scope, bool, str], ...] = (
     (Scope.MANAGE_QUEUE, True, "Queueing prints."),
     (Scope.MANAGE_PROJECTS, False, "Sending to a Bambuddy project."),
     (Scope.MANAGE_ARCHIVES, False, "Attaching photos and timelapses to a print."),
+    (Scope.MANAGE_INVENTORY, False, "Recording which spool is in a tray, when you confirm it."),
 )
 
 

@@ -26,6 +26,11 @@ TURN_QUERY = "turn"
 BUDGET_EXHAUSTED = "budget_exhausted: the chat used its budget"
 # A task fails after this many segments (the plugin's max_segments, Ruling 3).
 MAX_SEGMENTS = 50
+# A segment that keeps failing ends its turn after this many attempts, about 25 minutes
+# of the server's backoff (1 s doubling to 100 s), instead of retrying without end (#2243).
+SEGMENT_ATTEMPTS = 20
+# The most characters of a failed turn's message that reach FinishTurn and its event.
+MESSAGE_MAX = 500
 
 
 @dataclass
@@ -83,6 +88,8 @@ class Message:
 class SegmentContext:
     images: list[ImageRef] = field(default_factory=list)
     system_append: str | None = None
+    # The tools Settings → Plugins disabled: the segment runner leaves them undeclared.
+    disabled_tools: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -93,10 +100,15 @@ class SendAnswer:
 
 @dataclass
 class GateSettings:
-    """The timers of the session's entries (ai_settings), read when a turn starts."""
+    """The timers of the session's entries (ai_settings), read when a turn starts, and
+    the tools' Settings → Plugins overrides (#2088), sanitised against the manifest
+    (tools.sanitise_overrides). Defaulted: a turn an older worker started read none."""
 
     approval_expiry_s: int
     question_expiry_s: int
+    # Raised tiers by tool name: only raises, never lowers.
+    tool_tiers: dict[str, str] = field(default_factory=dict)
+    disabled_tools: list[str] = field(default_factory=list)
 
 
 @dataclass

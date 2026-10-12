@@ -220,6 +220,11 @@ function setting(id: string | null, extra: Partial<Touch> = {}): Touch[] {
 
 /** Tool name → extractor. A name that is not a registered tool fails test/touched.test.ts. */
 export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
+  // Flows (#1057) touch no kind of resource here: a session's runs are found by
+  // list_flow_runs' `session`, and a run's own steps say what it did.
+  register_flow: () => [],
+  start_flow_run: () => [],
+  reset_flow_run: () => [],
   // Models.
   create_model: (_input, result) => modelCreated(result),
   import_model: (_input, result) => modelCreated(result),
@@ -254,6 +259,7 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   delete_readme: revision,
   set_model_thumbnail: revision,
   delete_model_thumbnail: revision,
+  add_model_media: revision,
   // Presets.
   save_preset: (input, result) => {
     const id = str(field(result, 'id'))
@@ -292,6 +298,10 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   save_output: (input, result) => output(result, str(input.slug)),
   // #1864: nothing is recorded until the arrange is saved; a still-running one is not.
   arrange: (_input, result) => output(field(result, 'output'), str(field(result, 'slug'))),
+  set_output_thumbnail: (input) => {
+    const id = str(input.output_id)
+    return id ? [{ type: 'output', id, action: 'modified', model: null }] : []
+  },
   // The answer names the output's model (#1071), read before it was deleted.
   delete_output: (input, result) => {
     const id = str(input.output_id)
@@ -336,6 +346,14 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
       model: scope === 'model' && !key?.startsWith('library:') ? key : null,
     })
   },
+  // #2167: only the files Bambuddy deleted or restored; a skipped one was not touched.
+  delete_library_files: (_input, result) =>
+    (Array.isArray(field(result, 'deleted')) ? (field(result, 'deleted') as unknown[]) : []).flatMap((file) => {
+      const id = bambuddyId(field(file, 'id'))
+      return id ? [{ type: 'bambuddy_file' as const, id, action: 'deleted' as const }] : []
+    }),
+  restore_library_files: (_input, result) =>
+    ids(field(result, 'restored')).map((id) => ({ type: 'bambuddy_file' as const, id, action: 'created' as const })),
   remember_model_print_choices: (input) => {
     const slug = str(input.slug)
     const file = bambuddyId(input.library_file_id)
@@ -426,6 +444,11 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   // checkout is a cache on the volume, swept at boot when nothing pins it.
   'check_library_candidate',
   'check_library_candidate_from_pinned_url',
+  // The session's own workspace (#2329): its files are the session's, listed by
+  // workspace_list (and the panel's Files tab), not ScadBuddy resources it touched.
+  'workspace_write',
+  'workspace_edit',
+  'workspace_delete',
   // The user's tab: these change only what the open page shows or holds unsaved (a
   // parameter, the editor, a Settings field, a dialog a human then confirms). What is
   // saved is saved by a tool that records it. browser_click and browser_fill are not

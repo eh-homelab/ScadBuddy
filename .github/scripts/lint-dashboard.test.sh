@@ -71,6 +71,12 @@ run() {
 
 f=deploy/grafana/scadbuddy.json
 k=deploy/grafana/kustomization.yaml
+# overview_only: drop every dashboard but the overview (and its ConfigMaps), for the
+# cases below that assert on the overview's agent panels alone.
+overview_only() {
+  find "$r/deploy/grafana" -name '*.json' ! -name scadbuddy.json -delete
+  yq -i '.configMapGenerator |= map(select(.name == "scadbuddy-dashboard"))' "$r/$k"
+}
 
 good
 check 'the real dashboard passes against the real backend' '0:' "$(run)"
@@ -280,6 +286,7 @@ check 'a TraceQL query naming two services fails' \
 
 # The agent's span names are checked once its tracing module exists (row 3).
 good
+overview_only
 rm -rf "$r/agent"
 mkdir -p "$r/agent/src"
 mkdir -p "$r/agent/src/telemetry" && : > "$r/agent/src/telemetry/setup.ts"
@@ -290,6 +297,7 @@ check 'agent span names absent from agent/src fail once it traces' \
   "$(run)"
 
 good
+overview_only
 rm -rf "$r/agent"
 mkdir -p "$r/agent/src"
 mkdir -p "$r/agent/src/telemetry" && : > "$r/agent/src/telemetry/setup.ts"
@@ -297,6 +305,7 @@ printf 'const t = tracer()\nt.startSpan("agent.turn")\nwithSpan("agent.approval"
 check 'agent span names passed to a tracer call pass' '0:' "$(run)"
 
 good
+overview_only
 rm -rf "$r/agent"
 mkdir -p "$r/agent/src"
 mkdir -p "$r/agent/src/telemetry" && : > "$r/agent/src/telemetry/setup.ts"
@@ -305,6 +314,7 @@ check 'agent span-name constants pass' '0:' "$(run)"
 
 # Only a constant named *_SPAN is a span name; other SPAN-ish constants are not.
 good
+overview_only
 rm -rf "$r/agent"
 mkdir -p "$r/agent/src"
 mkdir -p "$r/agent/src/telemetry" && : > "$r/agent/src/telemetry/setup.ts"
@@ -315,6 +325,7 @@ check 'SPAN_ATTR_* and SPAN_NAME_* constants are not span names' \
 
 # A name that is only quoted somewhere else is not a span the agent emits.
 good
+overview_only
 rm -rf "$r/agent"
 mkdir -p "$r/agent/src/mocks" "$r/agent/test"
 mkdir -p "$r/agent/src/telemetry" && : > "$r/agent/src/telemetry/setup.ts"
@@ -335,13 +346,39 @@ check 'agent span names are unchecked, with a notice, before the agent traces' \
 good
 yq -i '.configMapGenerator[0].options.labels = {}' "$r/$k"
 check 'a ConfigMap without the sidecar label fails' \
-  "1:$k: must build exactly one ConfigMap scadbuddy-dashboard in cattle-dashboards labelled grafana_dashboard: \"1\" (got 1 document(s): ConfigMap scadbuddy-dashboard cattle-dashboards )" \
+  "1:$k: $f must build into one ConfigMap scadbuddy-dashboard in cattle-dashboards labelled grafana_dashboard: \"1\" holding only scadbuddy.json (got: ConfigMap scadbuddy-dashboard cattle-dashboards - scadbuddy.json)" \
   "$(run)"
 
 good
 yq -i 'del(.configMapGenerator[0].namespace)' "$r/$k"
 check 'a ConfigMap outside cattle-dashboards fails' \
-  "1:$k: must build exactly one ConfigMap scadbuddy-dashboard in cattle-dashboards labelled grafana_dashboard: \"1\" (got 1 document(s): ConfigMap scadbuddy-dashboard  1)" \
+  "1:$k: $f must build into one ConfigMap scadbuddy-dashboard in cattle-dashboards labelled grafana_dashboard: \"1\" holding only scadbuddy.json (got: ConfigMap scadbuddy-dashboard - 1 scadbuddy.json)" \
+  "$(run)"
+
+# Every dashboard in deploy/grafana is linted, not only the overview (#2289).
+a=deploy/grafana/scadbuddy-api.json
+good
+jq '.uid = "scadbuddy-http"' "$r/$a" > "$r/$a.new" && mv "$r/$a.new" "$r/$a"
+check 'a dashboard whose uid is not its file name fails' \
+  "1:$a: uid must be \"scadbuddy-api\", not \"scadbuddy-http\"" \
+  "$(run)"
+
+good
+jq '(.panels[] | select(.type == "stat") | .targets[0].expr) |= sub("scadbuddy_http_requests_total"; "scadbuddy_http_requests")' "$r/$a" > "$r/$a.new" && mv "$r/$a.new" "$r/$a"
+check 'an undeclared series in another dashboard is named under its file' \
+  "1:$a: scadbuddy_http_requests is not a metric backend/scadbuddy/core/metrics.py declares" \
+  "$(run)"
+
+good
+jq '.uid = "scadbuddy-extra"' "$r/$a" > "$r/deploy/grafana/scadbuddy-extra.json"
+check 'a dashboard with no ConfigMap fails' \
+  "1:$k: must build one ConfigMap per dashboard (7), not 6 document(s)|$k: deploy/grafana/scadbuddy-extra.json must build into one ConfigMap scadbuddy-extra-dashboard in cattle-dashboards labelled grafana_dashboard: \"1\" holding only scadbuddy-extra.json (got: none)" \
+  "$(run)"
+
+good
+yq -i '.configMapGenerator[0].files += ["scadbuddy-api.json"]' "$r/$k"
+check 'a ConfigMap holding two dashboards fails' \
+  "1:$k: $f must build into one ConfigMap scadbuddy-dashboard in cattle-dashboards labelled grafana_dashboard: \"1\" holding only scadbuddy.json (got: ConfigMap scadbuddy-dashboard cattle-dashboards 1 scadbuddy-api.json,scadbuddy.json)" \
   "$(run)"
 
 good

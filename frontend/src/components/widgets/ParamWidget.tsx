@@ -1,4 +1,4 @@
-import type { FontFamily, Param, ParamValue } from '../../api/types'
+import type { FontFamily, InstalledFamily, Param, ParamValue } from '../../api/types'
 import { BooleanWidget } from './BooleanWidget'
 import { ColorWidget } from './ColorWidget'
 import { FileWidget } from './FileWidget'
@@ -20,6 +20,12 @@ export interface ParamWidgetProps {
   sampleText?: string
   /** 1-based extruder index for `color` params (spec §7); null when the render did not use it (#938). */
   extruder?: number | null
+  /** #1286 — for a `font` param: the families its value names that are not installed. */
+  missingFonts?: string[]
+  /** The refusal `missingFonts` comes from, by identity (FontWidget `refusal`, #2215). */
+  fontRefusal?: object
+  /** For a `font` param: one of `missingFonts` was installed from the field. */
+  onFontInstalled?: (installed: InstalledFamily) => void
   onChange: (next: ParamValue) => void
 }
 
@@ -31,6 +37,9 @@ export function ParamWidget({
   fonts,
   sampleText,
   extruder,
+  missingFonts,
+  fontRefusal,
+  onFontInstalled,
   onChange,
 }: ParamWidgetProps) {
   switch (param.type) {
@@ -59,6 +68,9 @@ export function ParamWidget({
           value={String(value)}
           fonts={fonts}
           sampleText={sampleText}
+          missing={missingFonts}
+          refusal={fontRefusal}
+          onInstalled={onFontInstalled}
           onChange={onChange}
         />
       )

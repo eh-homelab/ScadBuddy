@@ -109,7 +109,8 @@ def open_bytes(key: bytes, sealed: bytes, context: str) -> bytes:
 
 
 def seal_bytes(key: bytes, data: bytes, context: str, iv: bytes | None = None) -> bytes:
-    """secrets.ts ``sealBytes``: the current version. ``iv`` is for the vectors only.
+    """secrets.ts ``sealBytes``: the current version. ``iv`` is for the vectors, and for
+    the codec's synthetic IV of a large payload (codec.dedup_iv).
 
     Only the payload codec seals here (its data keys and payloads); a credential is
     never sealed by this process.

@@ -13,6 +13,7 @@ import {
 } from '@anthropic-ai/claude-agent-sdk'
 import type { Credential } from '../credentials.js'
 import { buildQueryOptions, type HarnessPaths } from './options.js'
+import { downloadBudgetHook, downloadsHook } from './browserDownloads.js'
 import {
   assertHeadlessPlugin,
   browserInputGuard,
@@ -94,7 +95,9 @@ import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/regi
 //     HTTP servers with their own tier maps (remotePluginOptions below);
 //   - the headless browser (#349, headlessBrowser.ts) when the session has it
 //     enabled: a per-session copy of the vendored `playwright` plugin, its
-//     tier map, its disallowed tools and its origin/file-name guard;
+//     tier map, its disallowed tools and its origin/file-name guard, and a
+//     `PostToolUse` hook that moves its downloads into the session's
+//     workspace after each browser call (browserDownloads.ts, #2329);
 //   - in-process memory hooks (memory/hindsight.ts): `UserPromptSubmit`,
 //     `Stop` and optionally `PostToolUse` callbacks that recall from and
 //     retain to the enabled `hindsight` plugin's bank. SDK callbacks, run in
@@ -309,15 +312,22 @@ export function remotePluginOptions(
   return { mcpServers, disallowedTools }
 }
 
+/** Whether the run loads any plugin with skills or agents: the own plugin or a package. */
+function loadsPlugins(run: Pick<HarnessRun, 'ownPlugin' | 'pluginPaths' | 'allowedPluginPaths'>): boolean {
+  return run.ownPlugin !== undefined || !!run.pluginPaths?.length || !!run.allowedPluginPaths?.length
+}
+
 /**
- * The tier resolver a run uses: the own plugin's Skill and Agent when it is
- * loaded, then its plugins' tiers, then `run.tierOf`.
+ * The tier resolver a run uses: Skill and Agent when any plugin is loaded,
+ * then its plugins' tiers, then `run.tierOf`.
  */
-export function harnessTierOf(run: Pick<HarnessRun, 'remotePlugins' | 'tierOf' | 'ownPlugin'>): TierResolver {
+export function harnessTierOf(
+  run: Pick<HarnessRun, 'remotePlugins' | 'tierOf' | 'ownPlugin' | 'pluginPaths' | 'allowedPluginPaths'>,
+): TierResolver {
   const given = run.tierOf ?? (() => undefined)
   const remote = run.remotePlugins?.length ? pluginTierResolver(run.remotePlugins) : undefined
   const base: TierResolver = remote ? (toolName, input) => remote(toolName) ?? given(toolName, input) : given
-  if (run.ownPlugin === undefined) return base
+  if (!loadsPlugins(run)) return base
   return (toolName, input) => ownPluginTierOf(toolName) ?? base(toolName, input)
 }
 
@@ -398,11 +408,21 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
   let guard: InputGuard | undefined
   let gate = run.approvalGate
   let browserPlugin: string | undefined
+  let downloadHooks: Partial<Record<HookEvent, HookCallbackMatcher[]>> | undefined
   if (run.headlessBrowser) {
     const browser = materializeHeadlessBrowser(run.headlessBrowser)
     const remember = run.headlessBrowser.rememberOrigin
     assertHeadlessPlugin(browser.pluginDir)
     browserPlugin = browser.pluginDir
+    // Its downloads go into the session's workspace after each browser call (#2329).
+    const downloads = run.headlessBrowser.downloads
+    // Before each one, the budget the request guard holds them to while they run.
+    if (downloads) {
+      downloadHooks = {
+        PreToolUse: [downloadBudgetHook(browser.budgetFile, downloads)],
+        PostToolUse: [downloadsHook(browser.downloadsDir, downloads)],
+      }
+    }
     tierOf = (name, input) => browserTierOf(name) ?? ownTiers(name, input)
     guard = (name, input) => browserInputGuard(name, input, browser.origins, browser.approved)
     const inner = gate
@@ -483,13 +503,16 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     canUseTool: questions ? answeringQuestions(questions, permission) : permission,
     hooks: mergeHooks(
       mergeHooks(
-        {
-          PreToolUse: [
-            makePreToolUseHook(tierOf, run.onDecision, gate, guard),
-            ...(questions ? [QUESTION_PROMPT_HOOK] : []),
-          ],
-        },
-        run.memoryHooks,
+        mergeHooks(
+          {
+            PreToolUse: [
+              makePreToolUseHook(tierOf, run.onDecision, gate, guard),
+              ...(questions ? [QUESTION_PROMPT_HOOK] : []),
+            ],
+          },
+          run.memoryHooks,
+        ),
+        downloadHooks,
       ),
       run.traceHooks,
     ),
@@ -521,7 +544,9 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
   for (const p of run.allowedPluginPaths ?? []) plugins.push({ type: 'local', path: path.resolve(p) })
   const builtins = [
     ...new Set([
-      ...(run.ownPlugin !== undefined ? OWN_PLUGIN_TOOLS : []),
+      // Every loaded plugin's skills and agents need these, not only the own plugin's:
+      // a package's stayed dark with the own plugin switched off (#2320).
+      ...(loadsPlugins(run) ? OWN_PLUGIN_TOOLS : []),
       ...(questions ? [ASK_USER_QUESTION] : []),
       ...(run.allowedPluginPaths?.length ? (run.builtinTools ?? []) : []),
     ]),

@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes } from 'react-router'
 import type { ClientMessage } from '../../agent/chat/protocol'
-import { EXTERNAL_SESSION_ID, createMockAgentTransport, type MockAgentOptions, type MockAgentTransport } from '../../mocks/agent'
+import { EXTERNAL_SESSION_ID, createMockAgentTransport, mockAgentSessions, type MockAgentOptions, type MockAgentTransport } from '../../mocks/agent'
 import { sessionWrites } from '../../mocks/features/assistantSessions'
 import { renderPage } from '../../test/utils'
 import { AppShell } from '../AppShell'
@@ -242,6 +242,20 @@ describe('archive (#1885)', () => {
     expect(screen.queryByText(/This chat is archived/)).toBeNull()
   })
 
+  it('drops a chat unarchived elsewhere from a still-open Archived view (#2118)', async () => {
+    const { user } = await ownChat()
+    await user.click(within(picker()).getByRole('button', { name: `Archive ${OWN}` }))
+    await waitFor(() => expect(composerBox()).toBeDisabled())
+    await user.click(within(picker()).getByRole('button', { name: 'Archived' }))
+    const archived = await within(picker()).findByRole('list', { name: 'Archived chats' })
+    expect(within(archived).getByText(OWN)).toBeInTheDocument()
+
+    // Unarchived from the composer's note, with the Archived view still mounted.
+    await user.click(screen.getByRole('button', { name: 'Unarchive' }))
+    await waitFor(() => expect(composerBox()).toBeEnabled())
+    expect(await within(picker()).findByText('No archived chats.')).toBeInTheDocument()
+  })
+
   it('offers no Archive while a turn runs', async () => {
     const { user } = renderShell({ stepMs: 60_000 })
     await user.click(screen.getByRole('button', { name: 'Assistant' }))
@@ -249,5 +263,41 @@ describe('archive (#1885)', () => {
     await screen.findByRole('button', { name: 'Stop' })
     await user.click(screen.getByRole('button', { name: /^Sessions/ }))
     expect(within(picker()).queryByRole('button', { name: /^Archive / })).toBeNull()
+  })
+})
+
+describe('handoff offers (#1284)', () => {
+  const OWN = `${PARENT} (fork)`
+
+  it("shows who the user's chat is offered to, and withdraws the offer", async () => {
+    const { user } = await openParent()
+    await user.click(screen.getByRole('button', { name: 'Fork' }))
+    await waitFor(() => expect(activeTitle()).toHaveTextContent(OWN))
+    await user.click(screen.getByRole('button', { name: /^Sessions/ }))
+    // The desktop agent's chat is offered too, but it is not the user's: its offer
+    // shows, and there is nothing for the user to cancel there.
+    mockAgentSessions()!.offerChat(PARENT, { kind: 'bearer', id: 'token:t2', label: 'MCP token:t2' })
+    expect(await within(picker()).findByText('Offered to MCP token t2')).toBeInTheDocument()
+    expect(within(picker()).queryByRole('button', { name: `Cancel the offer of ${PARENT}` })).toBeNull()
+
+    mockAgentSessions()!.offerChat(OWN, { kind: 'bearer', id: 'token:t1', label: 'MCP token:t1' })
+    expect(await within(picker()).findByText('Offered to MCP token t1')).toBeInTheDocument()
+
+    await user.click(within(picker()).getByRole('button', { name: `Cancel the offer of ${OWN}` }))
+    expect(sessionWrites().at(-1)).toEqual({ method: 'DELETE', path: expect.stringMatching(/^\/sessions\/.+\/handoff$/), body: {} })
+    await waitFor(() => expect(within(picker()).queryByText('Offered to MCP token t1')).toBeNull())
+    expect(within(picker()).queryByRole('button', { name: `Cancel the offer of ${OWN}` })).toBeNull()
+  })
+  it('drops an offer once it lapses, with no new snapshot', async () => {
+    const { user } = await openParent()
+    await user.click(screen.getByRole('button', { name: 'Fork' }))
+    await waitFor(() => expect(activeTitle()).toHaveTextContent(OWN))
+    await user.click(screen.getByRole('button', { name: /^Sessions/ }))
+
+    mockAgentSessions()!.offerChat(OWN, { kind: 'bearer', id: 'token:t1', label: 'MCP token:t1' }, 400)
+    expect(await within(picker()).findByText('Offered to MCP token t1')).toBeInTheDocument()
+    // The agent sends nothing when the offer lapses; the row stops showing it anyway.
+    await waitFor(() => expect(within(picker()).queryByText('Offered to MCP token t1')).toBeNull(), { timeout: 3000 })
+    expect(within(picker()).queryByRole('button', { name: `Cancel the offer of ${OWN}` })).toBeNull()
   })
 })

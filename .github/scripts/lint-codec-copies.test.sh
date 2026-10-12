@@ -33,4 +33,21 @@ sed -i 's/pg_advisory_xact_lock/pg_advisory_lock/' "$work/r/backend/scadbuddy/wo
 if out="$("$here/lint-codec-copies.sh" "$work/r" 2>&1)" || ! grep -q "differ in: PgPayloadKeys" <<<"$out"; then
   echo "FAIL: a drifted codec passed: $out"; exit 1
 fi
-echo "ok: stale copies and drifted codecs fail"
+copy
+python3 - "$work/r/backend/scadbuddy/workflows/payload_codec.py" <<'PY'
+import ast
+import sys
+
+# A method gains a docstring the other copy lacks: wording, not the codec.
+path = sys.argv[1]
+lines = open(path).read().split("\n")
+tree = ast.parse("\n".join(lines))
+cls = next(n for n in tree.body if getattr(n, "name", None) == "PgPayloadKeys")
+first = next(n for n in cls.body if isinstance(n, ast.AsyncFunctionDef | ast.FunctionDef)).body[0]
+lines.insert(first.lineno - 1, " " * first.col_offset + '"""Only in this copy."""')
+open(path, "w").write("\n".join(lines))
+PY
+if ! out="$("$here/lint-codec-copies.sh" "$work/r" 2>&1)"; then
+  echo "FAIL: a docstring inside a method failed the check: $out"; exit 1
+fi
+echo "ok: stale copies and drifted codecs fail; docstrings do not"

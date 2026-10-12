@@ -60,6 +60,12 @@ export type Config = {
    * once the deployment has registered them.
    */
   temporalSearchAttributes: boolean
+  /**
+   * SCADBUDDY_PAYLOAD_DIR: where a durable session's large Temporal payloads are kept,
+   * on the data share agent-durable mounts at the same path (#2243). Unset → none are
+   * stored, and a stored one cannot be read.
+   */
+  payloadDir: string | undefined
 }
 
 export const DEFAULT_BACKEND_URL = 'http://127.0.0.1:8080'
@@ -79,6 +85,7 @@ export const ENV_VARS = [
   'SCADBUDDY_TEMPORAL_ADDRESS',
   'SCADBUDDY_TEMPORAL_NAMESPACE',
   'SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES',
+  'SCADBUDDY_PAYLOAD_DIR',
 ] as const
 
 type Env = Readonly<Partial<Record<(typeof ENV_VARS)[number], string>>>
@@ -171,5 +178,6 @@ export function loadConfig(env: Env = process.env): Config {
       'SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES',
       present(env.SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES),
     ),
+    payloadDir: present(env.SCADBUDDY_PAYLOAD_DIR),
   }
 }

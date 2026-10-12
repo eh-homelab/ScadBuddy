@@ -1,14 +1,27 @@
 {
   "uid": "scadbuddy",
   "title": "ScadBuddy",
-  "description": "Renders, HTTP, the agent and the browser: Prometheus metrics beside Tempo trace searches. Deployed from eh-homelab/ScadBuddy deploy/grafana at the serving build's revision (spec 2026-10-01 §7).",
+  "description": "At a glance, renders, HTTP, the agent, the browser and trace coverage: Prometheus metrics beside Tempo trace searches. The other ScadBuddy dashboards (API, Browser, Renders, Printing, Agent) are in the links menu. Deployed from eh-homelab/ScadBuddy deploy/grafana at the serving build's revision (spec 2026-10-01 §7).",
   "tags": ["scadbuddy"],
   "editable": false,
   "graphTooltip": 1,
   "schemaVersion": 42,
   "time": { "from": "now-6h", "to": "now" },
   "refresh": "1m",
-  "links": [],
+  "links": [
+    {
+      "type": "dashboards",
+      "title": "ScadBuddy",
+      "tags": ["scadbuddy"],
+      "asDropdown": true,
+      "includeVars": true,
+      "keepTime": true,
+      "targetBlank": false,
+      "icon": "external link",
+      "tooltip": "",
+      "url": ""
+    }
+  ],
   "annotations": { "list": [] },
   "templating": {
     "list": [
@@ -56,11 +69,223 @@
   },
   "panels": [
     {
+      "id": 19,
+      "type": "row",
+      "title": "At a glance",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 },
+      "panels": []
+    },
+    {
+      "id": 20,
+      "type": "stat",
+      "title": "API mean latency",
+      "description": "Mean API request time over the range (_sum/_count; not capped at the 10 s top bucket). Details: ScadBuddy / API.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 0, "y": 1, "w": 4, "h": 4 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 0.5 },
+              { "color": "red", "value": 2 }
+            ]
+          },
+          "color": { "mode": "thresholds" }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum(increase(scadbuddy_http_request_duration_seconds_sum{namespace=\"$namespace\", route!=\"other\"}[$__range])) / sum(increase(scadbuddy_http_request_duration_seconds_count{namespace=\"$namespace\", route!=\"other\"}[$__range]))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+    },
+    {
+      "id": 21,
+      "type": "stat",
+      "title": "API requests over 5 s",
+      "description": "Share of API requests that took over 5 s in the range.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 4, "y": 1, "w": 4, "h": 4 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 0.005 },
+              { "color": "red", "value": 0.02 }
+            ]
+          },
+          "color": { "mode": "thresholds" }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "1 - sum(increase(scadbuddy_http_request_duration_seconds_bucket{namespace=\"$namespace\", route!=\"other\", le=\"5.0\"}[$__range])) / sum(increase(scadbuddy_http_request_duration_seconds_count{namespace=\"$namespace\", route!=\"other\"}[$__range]))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+    },
+    {
+      "id": 22,
+      "type": "stat",
+      "title": "API 5xx share",
+      "description": "Share of API requests answered 5xx in the range.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 8, "y": 1, "w": 4, "h": 4 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 0.01 },
+              { "color": "red", "value": 0.05 }
+            ]
+          },
+          "color": { "mode": "thresholds" }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum(increase(scadbuddy_http_requests_total{namespace=\"$namespace\", route!=\"other\", status=~\"5..\"}[$__range])) / sum(increase(scadbuddy_http_requests_total{namespace=\"$namespace\", route!=\"other\"}[$__range]))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+    },
+    {
+      "id": 23,
+      "type": "stat",
+      "title": "Still accepting (503)",
+      "description": "Requests answered 503 command-still-accepting in the range (Arrange backfills, renders). Details: ScadBuddy / Renders.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 12, "y": 1, "w": 4, "h": 4 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 10 }
+            ]
+          },
+          "color": { "mode": "thresholds" }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum(increase(scadbuddy_render_accept_pending_total{namespace=\"$namespace\"}[$__range]))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+    },
+    {
+      "id": 24,
+      "type": "stat",
+      "title": "Failed renders",
+      "description": "Render jobs that settled failed in the range.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 16, "y": 1, "w": 4, "h": 4 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          },
+          "color": { "mode": "thresholds" }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum(increase(scadbuddy_render_jobs_finished_total{namespace=\"$namespace\", outcome=\"failed\"}[$__range]))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+    },
+    {
+      "id": 25,
+      "type": "stat",
+      "title": "Lost trace batches",
+      "description": "Browser trace batches the relay did not forward in the range (any outcome but forwarded).",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 20, "y": 1, "w": 4, "h": 4 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 20 }
+            ]
+          },
+          "color": { "mode": "thresholds" }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum(increase(scadbuddy_trace_relay_batches_total{namespace=\"$namespace\", outcome!=\"forwarded\"}[$__range]))",
+          "legendFormat": "",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" }
+    },
+    {
       "id": 1,
       "type": "row",
       "title": "Renders",
       "collapsed": false,
-      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 },
+      "gridPos": { "x": 0, "y": 5, "w": 24, "h": 1 },
       "panels": []
     },
     {
@@ -69,7 +294,7 @@
       "title": "Queue",
       "description": "Jobs waiting and running (read from the queue on every scrape, so the max across pods), against SCADBUDDY_RENDER_QUEUE_DEPTH_SLO.",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "gridPos": { "x": 0, "y": 1, "w": 8, "h": 8 },
+      "gridPos": { "x": 0, "y": 6, "w": 8, "h": 8 },
       "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
       "targets": [
         {
@@ -98,7 +323,7 @@
       "title": "Oldest waiting job",
       "description": "Age of the oldest job still waiting for a worker, read from the queue on every scrape (the max across pods).",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "gridPos": { "x": 8, "y": 1, "w": 8, "h": 8 },
+      "gridPos": { "x": 8, "y": 6, "w": 8, "h": 8 },
       "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] },
       "targets": [
         {
@@ -115,7 +340,7 @@
       "title": "Submit to settled (p95) against the SLO",
       "description": "What the user waits for, by outcome, against SCADBUDDY_RENDER_LATENCY_SLO. Until the worker's render metrics are scraped (clusters#1596 Phase 5) only API-side outcomes appear (superseded, reconciler-failed; no done or failed), so this is a partial picture, not an empty panel.",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "gridPos": { "x": 16, "y": 1, "w": 8, "h": 8 },
+      "gridPos": { "x": 16, "y": 6, "w": 8, "h": 8 },
       "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] },
       "targets": [
         {
@@ -138,7 +363,7 @@
       "title": "Outcomes",
       "description": "Render jobs leaving the queue, by outcome, and submits refused because the queue was full. Until the worker's render metrics are scraped (clusters#1596 Phase 5) only API-side outcomes appear (superseded, reconciler-failed; no done or failed), so this is a partial picture, not an empty panel.",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "gridPos": { "x": 0, "y": 9, "w": 8, "h": 8 },
+      "gridPos": { "x": 0, "y": 14, "w": 8, "h": 8 },
       "fieldConfig": { "defaults": { "unit": "ops", "min": 0 }, "overrides": [] },
       "targets": [
         {
@@ -161,7 +386,7 @@
       "title": "Stage time (p95)",
       "description": "Time in each render stage; render.<stage> spans in the traces below carry the same names. Needs the worker's render metrics scraped (clusters#1596 Phase 5).",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "gridPos": { "x": 8, "y": 9, "w": 8, "h": 8 },
+      "gridPos": { "x": 8, "y": 14, "w": 8, "h": 8 },
       "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] },
       "targets": [
         {
@@ -178,7 +403,7 @@
       "title": "Recent renders (by duration)",
       "description": "The 20 most recent render.render spans on the worker, sorted by duration. Tempo search returns recent traces, so this is the slowest of those 20, not of the time range. Needs the Tempo datasource (clusters#1596 Phase 4).",
       "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
-      "gridPos": { "x": 16, "y": 9, "w": 8, "h": 8 },
+      "gridPos": { "x": 16, "y": 14, "w": 8, "h": 8 },
       "options": { "sortBy": [{ "displayName": "Duration", "desc": true }] },
       "targets": [
         {
@@ -198,7 +423,7 @@
       "title": "Render attempts that errored",
       "description": "Worker spans, any render stage, that ended in ERROR, with scadbuddy.failure_class naming the cause. Attempts that Temporal retried and that later succeeded are included (activities retry up to 3 times), so a row here is not necessarily a failed job. Needs the Tempo datasource (clusters#1596 Phase 4).",
       "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
-      "gridPos": { "x": 0, "y": 17, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 22, "w": 24, "h": 8 },
       "targets": [
         {
           "refId": "A",
@@ -216,7 +441,7 @@
       "type": "row",
       "title": "HTTP",
       "collapsed": false,
-      "gridPos": { "x": 0, "y": 25, "w": 24, "h": 1 },
+      "gridPos": { "x": 0, "y": 30, "w": 24, "h": 1 },
       "panels": []
     },
     {
@@ -224,7 +449,7 @@
       "type": "timeseries",
       "title": "Requests by route",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "gridPos": { "x": 0, "y": 26, "w": 8, "h": 8 },
+      "gridPos": { "x": 0, "y": 31, "w": 8, "h": 8 },
       "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 }, "overrides": [] },
       "targets": [
         {
@@ -240,7 +465,7 @@
       "type": "timeseries",
       "title": "Duration by route (p95)",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-      "gridPos": { "x": 8, "y": 26, "w": 8, "h": 8 },
+      "gridPos": { "x": 8, "y": 31, "w": 8, "h": 8 },
       "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] },
       "targets": [
         {
@@ -257,7 +482,7 @@
       "title": "Recent API traces (by duration)",
       "description": "The 20 most recent server spans on the API, sorted by duration. Tempo search returns recent traces, so this is the slowest of those 20, not of the time range. Needs the Tempo datasource (clusters#1596 Phase 4).",
       "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
-      "gridPos": { "x": 16, "y": 26, "w": 8, "h": 8 },
+      "gridPos": { "x": 16, "y": 31, "w": 8, "h": 8 },
       "options": { "sortBy": [{ "displayName": "Duration", "desc": true }] },
       "targets": [
         {
@@ -276,7 +501,7 @@
       "type": "row",
       "title": "Agent",
       "collapsed": false,
-      "gridPos": { "x": 0, "y": 34, "w": 24, "h": 1 },
+      "gridPos": { "x": 0, "y": 39, "w": 24, "h": 1 },
       "panels": []
     },
     {
@@ -285,7 +510,7 @@
       "title": "Turns and their tool calls",
       "description": "Recent agent.turn spans. Target B lists every turn with its scadbuddy.outcome, so a turn that parks or errors before any tool call still appears; target A lists the turns that made tool calls, through those child spans (expand a row for them and their count). A parked turn ends with scadbuddy.outcome=parked. Needs the Tempo datasource (clusters#1596 Phase 4).",
       "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
-      "gridPos": { "x": 0, "y": 35, "w": 8, "h": 8 },
+      "gridPos": { "x": 0, "y": 40, "w": 8, "h": 8 },
       "targets": [
         {
           "refId": "A",
@@ -313,7 +538,7 @@
       "title": "Approvals",
       "description": "agent.approval spans: each human decision on a parked call, linked to the call it decided. Needs the Tempo datasource (clusters#1596 Phase 4).",
       "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
-      "gridPos": { "x": 8, "y": 35, "w": 8, "h": 8 },
+      "gridPos": { "x": 8, "y": 40, "w": 8, "h": 8 },
       "targets": [
         {
           "refId": "A",
@@ -332,7 +557,7 @@
       "title": "Agent errors",
       "description": "Agent spans that ended in ERROR. Needs the Tempo datasource (clusters#1596 Phase 4).",
       "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
-      "gridPos": { "x": 16, "y": 35, "w": 8, "h": 8 },
+      "gridPos": { "x": 16, "y": 40, "w": 8, "h": 8 },
       "targets": [
         {
           "refId": "A",
@@ -350,7 +575,7 @@
       "type": "row",
       "title": "Browser",
       "collapsed": false,
-      "gridPos": { "x": 0, "y": 43, "w": 24, "h": 1 },
+      "gridPos": { "x": 0, "y": 48, "w": 24, "h": 1 },
       "panels": []
     },
     {
@@ -359,7 +584,7 @@
       "title": "Browser actions",
       "description": "Recent traces that start in the browser; Name is the root span, the action (Generate, Print, Send, page load). Browser spans are untrusted input (spec §5.2): every other panel filters on server-side services. Needs the Tempo datasource (clusters#1596 Phase 4).",
       "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
-      "gridPos": { "x": 0, "y": 44, "w": 24, "h": 8 },
+      "gridPos": { "x": 0, "y": 49, "w": 24, "h": 8 },
       "options": { "sortBy": [{ "displayName": "Name", "desc": false }] },
       "targets": [
         {
@@ -370,6 +595,78 @@
           "limit": 50,
           "spss": 3,
           "tableType": "traces"
+        }
+      ]
+    },
+    {
+      "id": 26,
+      "type": "row",
+      "title": "Trace coverage",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 57, "w": 24, "h": 1 },
+      "panels": []
+    },
+    {
+      "id": 27,
+      "type": "timeseries",
+      "title": "Trace coverage: spans per second by service",
+      "description": "Spans Tempo holds per second, one series per service, so a service that stops reporting shows as a gap. Known gaps, not health: parentless browser fetches are never sampled (#2291), so page loads after the first and every render or arrange they start have no trace; Arrange, backfill and save are not traceAction'd (#2292); render and print workers both report as scadbuddy-worker (#2292). A TraceQL metrics query: it needs Tempo's metrics-generator local-blocks processor (clusters#1596, spec 2026-10-01 §7). Without it this panel is empty, which means not configured, not zero traces.",
+      "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+      "gridPos": { "x": 0, "y": 58, "w": 16, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+          "queryType": "traceql",
+          "metricsQueryType": "range",
+          "query": "{resource.service.name=\"scadbuddy-api\"} | rate()",
+          "legendFormat": "scadbuddy-api",
+          "limit": 20
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+          "queryType": "traceql",
+          "metricsQueryType": "range",
+          "query": "{resource.service.name=\"scadbuddy-worker\"} | rate()",
+          "legendFormat": "scadbuddy-worker",
+          "limit": 20
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+          "queryType": "traceql",
+          "metricsQueryType": "range",
+          "query": "{resource.service.name=\"scadbuddy-web\"} | rate()",
+          "legendFormat": "scadbuddy-web",
+          "limit": 20
+        },
+        {
+          "refId": "D",
+          "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+          "queryType": "traceql",
+          "metricsQueryType": "range",
+          "query": "{resource.service.name=\"scadbuddy-agent\"} | rate()",
+          "legendFormat": "scadbuddy-agent",
+          "limit": 20
+        }
+      ]
+    },
+    {
+      "id": 28,
+      "type": "timeseries",
+      "title": "Browser relay batches",
+      "description": "Browser trace batches the relay received, by outcome; anything but forwarded is lost (#1161).",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "gridPos": { "x": 16, "y": 58, "w": 8, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "expr": "sum by (outcome) (rate(scadbuddy_trace_relay_batches_total{namespace=\"$namespace\"}[$__rate_interval]))",
+          "legendFormat": "{{outcome}}"
         }
       ]
     }

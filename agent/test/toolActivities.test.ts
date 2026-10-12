@@ -11,6 +11,7 @@ import type { TouchedCall } from '../src/sessions/touched.js'
 import { answerResult } from '../src/gate/answers.js'
 import { answeredText, timedOutText } from '../src/harness/attention.js'
 import { answersText } from '../src/harness/questions.js'
+import type { FlowRuns } from '../src/temporal/flowRuns.js'
 import { DESCRIBE_CALL_ACTIVITY, DURABLE_IMAGE_NOTE, gateActivities, toolActivities, type ToolActivityDeps } from '../src/temporal/toolActivities.js'
 import { DURABLE_ONLY_TOOLS } from '../src/tools/answerTools.js'
 import { AUTHOR_SESSION_HEADER } from '../src/tools/authorship.js'
@@ -276,12 +277,130 @@ describe('tool activities', () => {
     }
   })
 
+  it("runs a turn sent with its sender's tiers with those tiers, cut to what the owner holds now (#2320)", async () => {
+    const sent = { ...BEARER, turnTiers: ['read', 'write', 'outward'] as const }
+    const h = harness({ currentTiers: async () => ['read', 'write', 'outward'] }, TOOLS, sent)
+    const content = await env(`session-${SESSION}`, 'tool-toolu_approved').run(h.activities.send!, { to: 'x' })
+    expect(text(content)).toContain('"sent": "x"')
+    // The token was cut to read since the turn was sent.
+    const cut = harness({ currentTiers: async () => ['read'] }, TOOLS, sent)
+    const refused = await failure(env(`session-${SESSION}`, 'tool-toolu_approved').run(cut.activities.send!, { to: 'x' }))
+    expect(refused.message).toContain('needs the "outward" tier')
+    // A turn sent with no tiers keeps the owner's default: a token owner reads only.
+    const plain = harness({}, TOOLS, BEARER)
+    const read = await failure(env(`session-${SESSION}`, 'tool-toolu_approved').run(plain.activities.send!, { to: 'x' }))
+    expect(read.message).toContain('needs the "outward" tier')
+  })
+
   it("aborts the tool's signal when the activity is cancelled", async () => {
     const h = harness({ heartbeatMs: 5 })
     const e = env()
     const running = e.run(h.activities.slow!, {})
     setTimeout(() => e.cancel(), 20)
     await expect(running).rejects.toBeInstanceOf(CancelledFailure)
+  })
+})
+
+// #1057 (plan 2026-10-09 Task D1): a flow run's call, from ProjectWorkflow
+// (`flow-<run id>`), runs as the run's starter, and an outward one only with a person's
+// approval recorded for `flow:<run>:<workflow run>:<call>`.
+describe('flow runs in tool activities', () => {
+  const RUN = '7e2a1c3b-4d5e-4f60-8a9b-0c1d2e3f4a5b'
+  const FLOW = `flow-${RUN}`
+
+  /** A run whose `call_ok` is approved, for the input the default audit hashes as `hash:send`. */
+  function flowRuns(owner: Owner | undefined = BROWSER, asked: string[] = [], hash = 'hash:send'): FlowRuns {
+    return {
+      startedBy: async (id) => (id === RUN ? owner : undefined),
+      approved: async (requestId, inputHash) => {
+        asked.push(requestId)
+        return requestId.endsWith(':call_ok') && inputHash === hash
+      },
+    }
+  }
+
+  it("runs a flow's read tool as the run's starter, in no session, and asks no session owner", async () => {
+    const owners: string[] = []
+    const h = harness({ flows: flowRuns(), sessions: { ownerOf: async (id) => void owners.push(id) } })
+    const content = await env(FLOW, 'tool-call_1').run(h.activities.whoami!, {})
+    expect(text(content)).toContain('"id": "browser"')
+    expect(text(content)).toContain('"gate": "workflow"')
+    expect(text(content)).not.toContain('"session"')
+    expect(owners).toEqual([])
+    expect(h.headers[0]!.get(AUTHOR_SESSION_HEADER)).toBeNull()
+    expect(h.audits).toEqual([
+      expect.objectContaining({
+        action: 'whoami',
+        actor: BROWSER,
+        sessionId: null,
+        toolUseId: 'call_1',
+        requestId: `flow:${RUN}:run-1:call_1`,
+        outcome: 'ok',
+      }),
+    ])
+    expect(h.touched).toEqual([])
+  })
+
+  it('refuses a gated call with no approval recorded for it, and runs it once one is', async () => {
+    const asked: string[] = []
+    const h = harness({ flows: flowRuns(BROWSER, asked) })
+    const refused = await failure(env(FLOW, 'tool-call_2').run(h.activities.send!, { to: 'printer' }))
+    expect(refused.nonRetryable).toBe(true)
+    expect(refused.type).toBe('NotApproved')
+    expect(asked).toEqual([`flow:${RUN}:run-1:call_2`])
+    expect(h.audits).toEqual([
+      expect.objectContaining({ action: 'send', outcome: 'refused', sessionId: null, requestId: `flow:${RUN}:run-1:call_2` }),
+    ])
+    const content = await env(FLOW, 'tool-call_ok').run(h.activities.send!, { to: 'printer' })
+    expect(text(content)).toContain('"sent": "printer"')
+  })
+
+  it('runs an approved call only with the tool and input the approval was given for (#2318)', async () => {
+    const hash = (tool: string, input: Record<string, unknown>) => `${tool}:${JSON.stringify(input)}`
+    const approvedFor = hash('send', { to: 'printer' })
+    const h = harness({
+      flows: flowRuns(BROWSER, [], approvedFor),
+      audit: { record: async () => {}, hash, summarise: (tool) => tool },
+    })
+    const content = await env(FLOW, 'tool-call_ok').run(h.activities.send!, { to: 'printer' })
+    expect(text(content)).toContain('"sent": "printer"')
+    // The same call id with other input: not what the person approved.
+    const refused = await failure(env(FLOW, 'tool-call_ok').run(h.activities.send!, { to: 'elsewhere' }))
+    expect(refused.nonRetryable).toBe(true)
+    expect(refused.type).toBe('NotApproved')
+  })
+
+  it("runs a token starter's call with the tiers its token holds now (#2320)", async () => {
+    const live = harness({ flows: flowRuns(BEARER), currentTiers: async () => ['read', 'write', 'outward'] })
+    const content = await env(FLOW, 'tool-call_ok').run(live.activities.send!, { to: 'x' })
+    expect(text(content)).toContain('"sent": "x"')
+    // A revoked token holds nothing, and a starter whose tiers are kept nowhere reads only.
+    const revoked = harness({ flows: flowRuns(BEARER), currentTiers: async () => [] })
+    expect((await failure(env(FLOW, 'tool-call_ok').run(revoked.activities.whoami!, {}))).message).toContain('needs the "read" tier')
+    const unknown = harness({ flows: flowRuns(BEARER), currentTiers: async () => undefined })
+    expect((await failure(env(FLOW, 'tool-call_ok').run(unknown.activities.send!, { to: 'x' }))).message).toContain(
+      'needs the "outward" tier',
+    )
+  })
+
+  it('refuses a flow with no run recorded, or with no store to read it from, and runs nothing', async () => {
+    const other = `flow-${'1'.repeat(8)}-0000-4000-8000-000000000000`
+    const unknown = await failure(env(other, 'tool-call_1').run(harness({ flows: flowRuns() }).activities.whoami!, {}))
+    expect(unknown.nonRetryable).toBe(true)
+    expect(unknown.type).toBe('UnknownFlow')
+    const unread = await failure(env(FLOW, 'tool-call_1').run(harness().activities.whoami!, {}))
+    expect(unread.type).toBe('UnknownFlow')
+  })
+
+  it('refuses the browser and answer tools: a flow has no tab and no session', async () => {
+    const tools = [...browserTools, ...DURABLE_ONLY_TOOLS]
+    const h = harness({ flows: flowRuns() }, tools)
+    for (const name of ['browser_click', DURABLE_ONLY_TOOLS[0]!.name]) {
+      const refused = await failure(env(FLOW, 'tool-call_1').run(h.activities[name]!, {}))
+      expect(refused.nonRetryable).toBe(true)
+      expect(refused.type).toBe('NotForFlows')
+    }
+    expect(h.audits).toEqual([])
   })
 })
 

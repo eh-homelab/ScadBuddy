@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { toolTitle } from './labels'
+import { principalLabel, toolTitle } from './labels'
 
 describe('toolTitle (#782)', () => {
   it('uses the title the tool declared', () => {
@@ -22,5 +22,22 @@ describe('toolTitle (#782)', () => {
     expect(toolTitle({ name: 'Skill', input: { skill: 'customize' } })).toBe('Skill: customize')
     expect(toolTitle({ name: 'AskUserQuestion', input: {} })).toBe('Ask you')
     expect(toolTitle({ name: 'browser_navigate', input: {} })).toBe('Browser navigate')
+  })
+})
+
+describe('principalLabel (#1288)', () => {
+  it('names each kind of principal an agent revision can carry', () => {
+    expect(principalLabel('browser')).toBe('you')
+    expect(principalLabel('token:ci-bot')).toBe('MCP token ci-bot')
+    expect(principalLabel('oidc:https://id.example.com/realms/home#alice')).toBe('OIDC user alice')
+    expect(principalLabel('anonymous:3f2a')).toBe('an anonymous MCP client')
+    expect(principalLabel('flow:nightly')).toBe('a flow')
+    expect(principalLabel(null)).toBe('an unknown caller')
+    expect(principalLabel('something-else')).toBe('something-else')
+  })
+
+  it('never shows an OIDC issuer as the user when the id carries no subject', () => {
+    expect(principalLabel('oidc:https://id.example.com/realms/home')).toBe('an OIDC user')
+    expect(principalLabel('oidc:https://id.example.com/realms/home#')).toBe('an OIDC user')
   })
 })

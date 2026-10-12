@@ -3,10 +3,13 @@ ScadBuddy output stands behind has no manifest, so its objects are read from the
 the library print path fetches (:meth:`LibrarySource.fetch_3mf`, #1882: the file's
 bytes, an STL wrapped in ScadBuddy's own 3MF) and each is written into the blob store
 as a piece, the shape a render's Part has, so `write_output` places it like any other.
+The file is downloaded whole whatever its size, spooled to the cache volume
+(:func:`~scadbuddy.bambuddy.library_view.spooled_3mf`): its read budget, not its size,
+says whether it can be read.
 
 A piece's key is the file's sha256 and the object's place in it: the same bytes are
 the same pieces, whichever arrange reads them, and a changed file is new ones. A sliced
-file, one past the download cap, and one whose objects cannot be read faithfully
+file, an STL with no mesh, and one whose objects cannot be read faithfully
 (:mod:`scadbuddy.render.objects3mf`) are :class:`NotArrangeableError`, saying why.
 
 A file is read once per hash (#1973): reading took 13.5 s for a 13 MB file idle and
@@ -16,6 +19,10 @@ the file's SHA-256 as Bambuddy states it (as :mod:`~scadbuddy.bambuddy.library_v
 keeps a preview), so the dialog's next listing and the arrange after it download and
 parse nothing. A kept list whose pieces were swept since is read again; a file Bambuddy
 states no hash for is read each time.
+
+Each read runs within a :class:`~scadbuddy.render.read_budget.ReadBudget` (#2087). A kept
+list answers any budget, since keeping it costs nothing to read; a kept refusal answers
+only a budget its own covers, so a request with a larger one reads the file again.
 """
 
 from __future__ import annotations
@@ -24,14 +31,20 @@ import asyncio
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 
 from pydantic import BaseModel, ValidationError
 
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.library_view import _HASH, _store
+from scadbuddy.bambuddy.library_view import _HASH, _store, spooled_3mf
 from scadbuddy.bambuddy.models import LibraryFile
-from scadbuddy.bambuddy.print_source import SLICED_TYPE, LibrarySource, printable
-from scadbuddy.render.glb import bounding_box
+from scadbuddy.bambuddy.print_source import (
+    SLICED_TYPE,
+    LibrarySource,
+    SpoolFullError,
+    printable,
+)
+from scadbuddy.render.glb import footprint_box
 from scadbuddy.render.job_models import ManifestObject
 from scadbuddy.render.jobs import LAYOUT_NAME
 from scadbuddy.render.objects3mf import (
@@ -40,6 +53,7 @@ from scadbuddy.render.objects3mf import (
     read_objects,
     write_piece,
 )
+from scadbuddy.render.read_budget import ReadBudget
 from scadbuddy.store import BlobStore
 from scadbuddy.store.bambuddy import SHARED_TITLE
 from scadbuddy.store.cache import StaleBlobError
@@ -48,11 +62,13 @@ from scadbuddy.store.content_models import BlobScope
 #: A library piece's key prefix; the number moves when the reader changes what a file's
 #: objects are, so an older reading is never taken for the new one. It prefixes a kept
 #: object list's name too, for the same reason.
-LIBRARY_PIECE_PREFIX = "lib2"
+LIBRARY_PIECE_PREFIX = "lib3"
 #: Where the object lists are kept, under the data volume's cache.
 CACHE_DIRNAME = "library-objects"
 #: How many files' object lists are kept, newest first: each is a few hundred bytes.
 MAX_CACHED = 512
+#: The chunk a spooled file is hashed in.
+_CHUNK = 1024 * 1024
 #: Library pieces belong to no template.
 LIBRARY_SCOPE = BlobScope(slug=None, title=SHARED_TITLE)
 
@@ -83,6 +99,18 @@ class _Kept(BaseModel):
 
     objects: list[ManifestObject] = []
     refused: str | None = None
+    #: The budget a refusal was read within: one kept before #2087 had the defaults.
+    budget: ReadBudget = ReadBudget()
+
+
+def _digest(payload: BinaryIO) -> str:
+    """``payload``'s SHA-256, read from its start, left open at its start again."""
+    payload.seek(0)
+    digest = hashlib.sha256()
+    while chunk := payload.read(_CHUNK):
+        digest.update(chunk)
+    payload.seek(0)
+    return digest.hexdigest()
 
 
 def piece_key(digest: str, index: int) -> str:
@@ -115,11 +143,18 @@ async def _stored(blobs: BlobStore, key: str) -> bool:
 
 
 async def read_library_objects(
-    client: BambuddyClient, file_id: int, *, blobs: BlobStore, cache: Path
+    client: BambuddyClient,
+    file_id: int,
+    *,
+    blobs: BlobStore,
+    cache: Path,
+    budget: ReadBudget | None = None,
 ) -> LibraryObjects:
     """``file_id``'s objects, their pieces in ``blobs``: kept in ``cache`` by the file's
-    hash, else downloaded and read. A file deleted in Bambuddy is the client's 404; one
-    that cannot be arranged is :class:`NotArrangeableError`."""
+    hash, else downloaded and read within ``budget`` (the defaults when None). A file
+    deleted in Bambuddy is the client's 404; one that cannot be arranged is
+    :class:`NotArrangeableError`."""
+    spend = budget or ReadBudget()
     file = await client.library_file(file_id)
     kind = (file.file_type or "").lower()
     if kind == SLICED_TYPE:
@@ -134,29 +169,41 @@ async def read_library_objects(
         )
     path = _kept_at(cache, file)
     kept = None if path is None else await asyncio.to_thread(_load, path)
-    if kept is not None and kept.refused is not None:
+    if kept is not None and kept.refused is not None and kept.budget.covers(spend):
         raise NotArrangeableError(file_id, file.filename, kept.refused)
-    if kept is not None and all([await _stored(blobs, obj.part) for obj in kept.objects]):
+    if (
+        kept is not None
+        and kept.refused is None
+        and all([await _stored(blobs, obj.part) for obj in kept.objects])
+    ):
         # Another library file with the same bytes kept them: these are this file's.
         objects = [obj.model_copy(update={"library_file_id": file_id}) for obj in kept.objects]
         return LibraryObjects(file_id, file.filename, objects)
     source = LibrarySource(
         file_id=file_id, colours=[], plates=[], filename=file.filename, file_type=kind
     )
-    payload = await source.fetch_3mf(client)
-    if payload is None:
-        reason = "it is too large to read, or holds no mesh ScadBuddy can read"
-        await _keep(path, _Kept(refused=reason))
-        raise NotArrangeableError(file_id, file.filename, reason)
-    digest = hashlib.sha256(payload).hexdigest()
     try:
-        read = await asyncio.to_thread(read_objects, payload)
+        async with spooled_3mf(client, source, cache, spend) as payload:
+            if payload is None:
+                reason = "it holds no mesh ScadBuddy can read"
+                # No budget decides this one, so no larger budget would read it: kept as
+                # the ceilings', which cover every budget.
+                await _keep(path, _Kept(refused=reason, budget=ReadBudget.widest()))
+                raise NotArrangeableError(file_id, file.filename, reason)
+            digest = await asyncio.to_thread(_digest, payload)
+            read = await asyncio.to_thread(read_objects, payload, spend)
     except UnreadableObjectsError as error:
-        await _keep(path, _Kept(refused=str(error)))
+        # A budget refusal of an STL, or a 3MF that cannot be read.
+        await _keep(path, _Kept(refused=str(error), budget=spend))
+        raise NotArrangeableError(file_id, file.filename, str(error)) from None
+    except SpoolFullError as error:
+        # The volume's, not the file's: never kept, so the next try reads it again.
         raise NotArrangeableError(file_id, file.filename, str(error)) from None
     objects = []
     for index, obj in enumerate(read):
-        box = bounding_box(obj.parts)
+        # Packed by its negative parts' reach too: the slicer cuts them out of the whole
+        # plate, so no neighbour may sit inside one (`footprint_box`).
+        box = footprint_box(obj.parts)
         objects.append(
             ManifestObject(
                 part=piece_key(digest, index),
@@ -169,6 +216,7 @@ async def read_library_objects(
                     dict.fromkeys(
                         colour
                         for part in obj.parts
+                        if not part.negative
                         for colour in [
                             part.colour,
                             *(part.paint.used() if part.paint is not None else []),

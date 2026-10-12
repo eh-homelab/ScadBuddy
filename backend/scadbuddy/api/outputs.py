@@ -24,6 +24,7 @@ from scadbuddy.api.deps import (
     OutputIdPath,
     OutputsDep,
     PathsDep,
+    ReadBudgetDep,
     RenderDep,
     SettingsStoreDep,
     SlugPath,
@@ -70,6 +71,7 @@ from scadbuddy.bambuddy.library_objects import (
     NotArrangeableError,
     read_library_objects,
 )
+from scadbuddy.bambuddy.library_view import plate_glb
 from scadbuddy.bambuddy.project_file import (
     ProjectFile,
     ProjectFileRequest,
@@ -99,6 +101,8 @@ from scadbuddy.render.inputs import (
     legacy_inputs,
 )
 from scadbuddy.render.job_models import BomEntry, JobNotFoundError, ManifestObject, OutputRecord
+from scadbuddy.render.objects3mf import UnreadableObjectsError
+from scadbuddy.render.read_budget import ReadBudget, ReadBudgetOverride, budget_of
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.thumbnail import PLATE_PNG_SIZE, ViewName
 from scadbuddy.workflows.arrange import GOALS, part_of
@@ -339,6 +343,9 @@ class ArrangeRequest(BaseModel):
     #: The template the result is filed under (#1864): one of the outputs', omitted the
     #: first one's. With library files only, any template, and required.
     slug: str | None = Field(default=None, max_length=200)
+    #: What reading each plain library file may spend (#2087), each omitted budget the
+    #: setting's; none past its ceiling.
+    read_budget: ReadBudgetOverride | None = None
 
     @model_validator(mode="after")
     def _copies_within_the_cap(self) -> ArrangeRequest:
@@ -383,7 +390,7 @@ async def resolve_library_files(
 
 
 async def read_plain_files(
-    client: BambuddyClient, file_ids: list[int], state: AppState
+    client: BambuddyClient, file_ids: list[int], state: AppState, budget: ReadBudget
 ) -> dict[int, LibraryObjects]:
     """Each plain library file's objects, read from its 3MF (#1863) once per file hash
     (#1973), their pieces stored. Every file that cannot be arranged is refused at
@@ -393,7 +400,7 @@ async def read_plain_files(
     for file_id in file_ids:
         try:
             read[file_id] = await read_library_objects(
-                client, file_id, blobs=state.store.blobs, cache=state.paths.cache
+                client, file_id, blobs=state.store.blobs, cache=state.paths.cache, budget=budget
             )
         except NotArrangeableError as error:
             refused.append(error)
@@ -577,7 +584,8 @@ async def arrange_outputs(
         async with client_for(stored) as client:
             if printer_id is not None:
                 plate_model = (await client.printer(printer_id)).model
-            library = await read_plain_files(client, plain, state)
+            budget = budget_of(state.settings, body.read_budget)
+            library = await read_plain_files(client, plain, state, budget)
     slug, inputs = await asyncio.to_thread(
         arrange_inputs, outputs, body, plate_model=plate_model, library=library
     )
@@ -835,12 +843,30 @@ async def download_output(
 
 @router.get(
     "/outputs/{output_id}/preview.glb",
-    response_class=FileResponse,
+    response_class=Response,
     responses={200: {"content": {GLB_MEDIA_TYPE: {}}}},
     summary="The output's preview mesh",
 )
-def get_output_preview(output_id: OutputIdPath, outputs: OutputsDep) -> FileResponse:
+async def get_output_preview(
+    output_id: OutputIdPath,
+    outputs: OutputsDep,
+    budget: ReadBudgetDep,
+    plate: Annotated[int | None, Query(ge=1)] = None,
+) -> Response:
+    """The output's preview mesh, or with ``plate`` that one plate of its 3MF, where the
+    file places it: what the print dialog's pane shows for a plate clicked (#2169)."""
     require_output(outputs, output_id)
+    if plate is not None:
+        payload = await outputs.model_3mf(output_id)
+        if payload is None:
+            raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF")
+        try:
+            data = await asyncio.to_thread(plate_glb, payload, plate, budget)
+        except NoSuchPlateError as error:
+            raise ApiError(status.HTTP_404_NOT_FOUND, str(error)) from None
+        except UnreadableObjectsError as error:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+        return Response(data, media_type=GLB_MEDIA_TYPE)
     path = outputs.directory(output_id) / PREVIEW_NAME
     if not path.is_file():
         raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no preview mesh")

@@ -8,6 +8,7 @@ import { connectDatabase, type Database } from '../src/db.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import type { RiskTier } from '../src/harness/permissions.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
+import { STALE_TAB_IMAGES } from '../src/sessions/clientProtocol.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
 import { expectPanelAccepts, frontendChatReducer, frontendClientMessages } from './support/frontendProtocol.js'
@@ -265,8 +266,8 @@ describe.skipIf(skip !== undefined)(`the chat socket against the real SDK${skip 
     panel.close()
   }, 30_000)
 
-  it('a tab from before #1941: small inline images still go, a frame past 256 KiB closes the socket (1009)', async () => {
-    script = () => ({ text: 'A pixel.' })
+  it('a tab from before #1941: inline images are refused with a reload, a frame past 256 KiB closes the socket (1009) (#1959)', async () => {
+    script = () => ({ text: 'should not run' })
     const m = await sessions()
     agent = await startLiveAgent(m, { attachments: new AttachmentStore(pools.at(-1)!.sql) })
     const preview = { mediaType: 'image/jpeg', data: JPEG_HEAD }
@@ -281,8 +282,9 @@ describe.skipIf(skip !== undefined)(`the chat socket against the real SDK${skip 
     const panel = await openPanelSocket(agent)
     await panel.until(is('sessions.snapshot'))
     panel.send(inline(PNG_1X1.toString('base64')))
-    const frames = await panel.until(is('session.result'))
-    expect(frames.find(is('user.turn'))).toMatchObject({ images: [preview] })
+    const [refused] = (await panel.until(is('error'))).filter(is('error'))
+    expect(refused).toMatchObject({ code: 'invalid', message: STALE_TAB_IMAGES })
+    await expectPanelAccepts(panel.frames)
     panel.close()
 
     const big = new WebSocket(`${agent.url.replace(/^http/, 'ws')}/api/v1/ai/chat`, { headers: { origin: agent.origin } })
@@ -293,7 +295,7 @@ describe.skipIf(skip !== undefined)(`the chat socket against the real SDK${skip 
     const closed = new Promise<number>((resolve) => big.once('close', (code) => resolve(code)))
     big.send(JSON.stringify(inline(Buffer.concat([PNG_1X1, Buffer.alloc(300 * 1024, 7)]).toString('base64'))))
     expect(await closed).toBe(1009)
-    expect(fake.messageCalls()).toHaveLength(1)
+    expect(fake.messageCalls()).toHaveLength(0)
   }, 60_000)
 
   it('keeps the session picker current: a session started elsewhere appears without a reconnect', async () => {

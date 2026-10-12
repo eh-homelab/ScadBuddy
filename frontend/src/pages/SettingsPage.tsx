@@ -225,7 +225,7 @@ export function SettingsPage() {
   const loaded = Boolean(settings)
   useEffect(() => {
     if (!loaded || hash.length < 2) return
-    document.getElementById(decodeURIComponent(hash.slice(1)))?.scrollIntoView?.({ block: 'start' })
+    document.getElementById(sectionId(hash))?.scrollIntoView?.({ block: 'start' })
   }, [loaded, hash])
 
   const value = (name: FieldName): string => draft[name] ?? (settings ? baseline(settings, name) : '')
@@ -710,7 +710,7 @@ export function SettingsPage() {
                 label="API key"
                 badge={badge('bambuddy_api_key')}
                 error={errors.bambuddy_api_key}
-                help="Needs Read Status, Manage Library and Manage Queue; Manage Projects for projects and Manage Archives for print photos."
+                help="Needs Read Status, Manage Library and Manage Queue; Manage Projects for projects, Manage Archives for print photos and Manage Inventory to record a tray's spool."
               >
                 <div className="flex gap-2">
                   <input
@@ -1090,6 +1090,7 @@ export function SettingsPage() {
                   </p>
                 </div>
               )}
+              {runtimeRows('projects')}
             </>,
           )}
 
@@ -1174,7 +1175,7 @@ export function SettingsPage() {
           <Section
             id="remembered"
             title={sectionTitle('remembered')}
-            description="What the print dialog remembers per model and per printer. Forgetting one leaves the rest; the dialog then opens on its own defaults. A printer with a nozzle rack also lists what each hotend has printed, which Least used ranks by."
+            description="What the print dialog remembers per model and per printer. Forgetting one leaves the rest; the dialog then opens on its own defaults. A printer with a nozzle rack also lists each hotend: its serial, what it has loaded, what it has printed (which Least used ranks by) and every spool that ran through it."
           >
             <RememberedChoicesPanel targets={targetsState.data} projects={projectsState.data} />
             <HotendUsagePanel targets={targetsState.data} />
@@ -1361,4 +1362,17 @@ function UpstreamAnswerDetails({ answer }: { answer: NonNullable<ConnectionTest[
       </dl>
     </details>
   )
+}
+
+/**
+ * The section a URL hash names. A malformed escape (a truncated or hand-edited link,
+ * `#%E0%A4%A`) makes `decodeURIComponent` throw, which inside the effect took the whole
+ * page down (#2113); the raw text is used instead, which simply matches no section.
+ */
+function sectionId(hash: string): string {
+  try {
+    return decodeURIComponent(hash.slice(1))
+  } catch {
+    return hash.slice(1)
+  }
 }

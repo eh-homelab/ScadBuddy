@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import base64
 import dataclasses
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -44,6 +46,8 @@ from scadbuddy.core.secrets import KEK_BYTES, Kek, SealError, open_bytes, seal_b
 
 SUBJECT_ENCODING = b"binary/scadbuddy-subject"
 SUBJECT_METADATA = "scadbuddy-subject"
+# Original bytes from which a payload is sealed with a synthetic IV (dedup_iv).
+DEDUP_BYTES = 16 * 1024
 _SUBJECT = re.compile(
     r"^(session|flow)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
@@ -88,6 +92,13 @@ def _payload_from(data: bytes) -> Payload:
         metadata={k: base64.b64decode(v) for k, v in parsed["m"].items()},
         data=base64.b64decode(parsed["d"]),
     )
+
+
+def dedup_iv(dek: bytes, subject: str, plain: bytes) -> bytes:
+    """The IV a large payload is sealed with: HMAC-SHA256 of its bytes under a key derived
+    from the subject's, cut to 12 bytes. One IV is only ever used for one plaintext."""
+    iv_key = hmac.new(dek, f"payload-iv:{subject}".encode(), hashlib.sha256).digest()
+    return hmac.new(iv_key, plain, hashlib.sha256).digest()[:12]
 
 
 def seal_payload(dek: bytes, subject: str, payload: Payload, iv: bytes | None = None) -> Payload:
@@ -209,10 +220,15 @@ class SubjectPayloadCodec(PayloadCodec, WithSerializationContext):
         if self._subject is None:
             return list(payloads)
         key = await self._keys.key_for(self._subject, True)
-        return [
-            p if sealed_subject(p) is not None else seal_payload(key, self._subject, p)
-            for p in payloads
-        ]
+        out: list[Payload] = []
+        for p in payloads:
+            if sealed_subject(p) is not None:
+                out.append(p)
+                continue
+            plain = payload_bytes(p)
+            iv = dedup_iv(key, self._subject, plain) if len(plain) >= DEDUP_BYTES else None
+            out.append(seal_payload(key, self._subject, p, iv))
+        return out
 
     async def decode(self, payloads: Sequence[Payload]) -> list[Payload]:
         out: list[Payload] = []

@@ -32,6 +32,8 @@ import {
   httpRequestEnabled,
   httpRequestServer,
   httpTierOf,
+  type SavedMeta,
+  savedBody,
   SETTING_HTTP_REQUEST,
 } from '../harness/httpRequest.js'
 import type { Resolver } from '../http/egress.js'
@@ -80,6 +82,7 @@ import {
   type SessionStatus,
 } from './protocol.js'
 import { SessionBlobs, sessionImage, type StoredBlob } from './blobs.js'
+import { SessionFiles } from '../workspace/store.js'
 import { SessionEdits } from './edits.js'
 import { forkHistory, transcriptCut } from './forkPoint.js'
 import { scrubForLog, SdkEventMapper, ShownCalls, type TitleResolver } from './sdkEvents.js'
@@ -88,7 +91,7 @@ import { UnpricedSpend } from './unpricedSpend.js'
 import { type ImagePreview, previewsOf, userPrompt, type UserImage } from './images.js'
 import { type ResourceRef, SessionResources, type TouchedRecord } from './touched.js'
 import { TurnTrace } from '../telemetry/turn.js'
-import type { DurableGate } from '../gate/durable.js'
+import { type DurableGate, DurableUnavailable } from '../gate/durable.js'
 import type { DurableTurns } from './durable.js'
 import { PendingProjection } from '../gate/projection.js'
 import { ownPluginEnabled } from '../plugins/packages/builtins.js'
@@ -573,7 +576,7 @@ export type SessionManagerDeps = {
     session: SessionRecord,
     turn: TurnPrincipal,
     /** #815 §2: how a browser_* call that finds no tab waits for it; only in a session the browser user owns. */
-    extras?: { waitForTab?: WaitForTab; turnContext?: () => Context; builtIn?: BuiltInPolicy },
+    extras?: { waitForTab?: WaitForTab; turnContext?: () => Context; builtIn?: BuiltInPolicy; secrets?: () => readonly string[] },
   ) => Record<string, McpSdkServerConfigWithInstance>
   /**
    * Settings → Plugins' overrides of the built-in tools (#1953,
@@ -646,6 +649,12 @@ export type SessionManagerDeps = {
     /** Tests only: smaller caps. */
     limits?: Partial<HttpLimits>
   }
+  /**
+   * The assistant's workspace (#2329, workspace/store.ts): where http_request's
+   * `save_to_workspace` writes, and what a fork copies. One over `sql` (caps from
+   * `settings`) when omitted.
+   */
+  workspace?: SessionFiles
   run?: QueryRunner
   /** Per-token approval grants (spec §6); nobody but the browser user may approve without one. */
   approvalGrants?: GrantCheck
@@ -885,12 +894,14 @@ export class SessionManager {
   private readonly touched: SessionResources
   /** The images tool results carried (#782), read by `blob`. */
   private readonly blobs: SessionBlobs
+  private readonly files: SessionFiles
 
   constructor(deps: SessionManagerDeps) {
     this.deps = deps
     this.store = new PostgresSessionStore(deps.sql)
     this.touched = new SessionResources(deps.sql)
     this.blobs = new SessionBlobs(deps.sql)
+    this.files = deps.workspace ?? new SessionFiles(deps.sql, { settings: deps.settings })
     this.events = new EventLog(deps.sql, {
       ...(deps.pollMs === undefined ? {} : { pollMs: deps.pollMs }),
       ...(deps.onAppend ? { onAppend: deps.onAppend } : {}),
@@ -918,6 +929,7 @@ export class SessionManager {
       events: this.events,
       get: (id, principal) => this.get(id, principal),
       ...(deps.audit ? { audit: deps.audit } : {}),
+      endDurable: (id) => this.endDurable(id),
     })
     this.run = deps.run ?? runHarness
     this.leaseMs = deps.leaseMs ?? DEFAULT_LEASE_MS
@@ -959,6 +971,19 @@ export class SessionManager {
     return blob
   }
 
+  /**
+   * A response body the session's http_request saved (#1292), by the id its
+   * audit row names; not_found for a session the principal may not see, or a
+   * body that is not (or no longer) in the session's directory on this replica.
+   */
+  /** `id` is the saved response's id as `savedBody` checked it: a UUID, safe in a header or a path. */
+  async httpBody(id: string, saved: string, principal: Owner): Promise<{ id: string; meta: SavedMeta; bytes: Buffer }> {
+    await this.get(id, principal)
+    const body = await savedBody(path.join(sessionWorkDir(this.deps.paths, id), 'http'), saved)
+    if (!body) throw new SessionError('not_found', `no saved response ${saved} in session ${id}`)
+    return { id: saved, ...body }
+  }
+
   /** Newest first. */
   async list(principal: Owner, filter: ListFilter = {}): Promise<SessionRecord[]> {
     const { text, params } = listQuery(principal, filter)
@@ -983,6 +1008,9 @@ export class SessionManager {
         costUsd: s.costUsd,
         budgetUsd: s.budgetUsd,
         mode: s.mode,
+        // #1284 — the switcher's "Offered to" badge and Cancel offer; an expired offer reads as
+        // none. Its target is named only as `principal` may see it, as the session routes do.
+        offer: s.offer ? { to: ownerSeenBy(principal, s.offer.to), until: s.offer.until } : null,
       })),
     })
   }
@@ -1175,6 +1203,7 @@ export class SessionManager {
         author: principal,
         images: options.images ?? [],
         systemAppend: systemAppend(false),
+        ...(options.tiers ? { tiers: options.tiers } : {}),
       })
       if (!turn) throw await this.whyNotClaimed(id, principal, before)
       return turn
@@ -1262,6 +1291,19 @@ export class SessionManager {
       'unavailable',
       'this session is durable, and this agent service has no Temporal or secret key to run it; try again once it has',
     )
+  }
+
+  /** Tells a durable session's workflow it was marked done (#1056), or refuses `unavailable`. */
+  private async endDurable(id: string): Promise<void> {
+    if (!this.durable) {
+      throw new SessionError('unavailable', 'this session is durable, and this agent service has no Temporal to end it; try again once it has')
+    }
+    try {
+      await this.durable.end(id)
+    } catch (err) {
+      if (err instanceof DurableUnavailable) throw new SessionError('unavailable', err.message)
+      throw err
+    }
   }
 
   /** Gives back a claim no turn ran on (a resume that could not start). */
@@ -1500,7 +1542,14 @@ export class SessionManager {
           this.deps.ownPlugin !== undefined && (await ownPluginEnabled(this.deps.settings))
             ? this.deps.ownPlugin
             : undefined
-        const pluginTiers = harnessTierOf({ remotePlugins, tierOf, ...(ownPlugin !== undefined ? { ownPlugin } : {}) })
+        packages = this.deps.packagePlugins ? await this.deps.packagePlugins() : undefined
+        const pluginTiers = harnessTierOf({
+          remotePlugins,
+          tierOf,
+          ...(ownPlugin !== undefined ? { ownPlugin } : {}),
+          pluginPaths: [...(this.deps.pluginPaths ?? []), ...(packages?.paths ?? [])],
+          allowedPluginPaths: packages?.allowedPaths ?? [],
+        })
         eventTierOf = (name, input) => raised(name, browserTierOf(name) ?? pluginTiers(name, input))
         // A plugin left out of this turn is said so in the session, not only in the log.
         const unavailable = (message: string) =>
@@ -1511,7 +1560,6 @@ export class SessionManager {
           this.deps.stderr?.(`${problem}\n`)
           await unavailable(problem)
         }
-        packages = this.deps.packagePlugins ? await this.deps.packagePlugins() : undefined
         for (const problem of packages?.problems ?? []) {
           this.deps.stderr?.(`${problem}\n`)
           await unavailable(problem)
@@ -1573,6 +1621,8 @@ export class SessionManager {
           this.deps.httpRequest && httpRequestEnabled(httpSetting)
             ? httpRequestServer({
                 saveDir: path.join(cwd, 'http'),
+                // save_to_workspace (#2329): the body becomes one of the session's files.
+                workspace: { files: this.files, ref: { kind: 'session', sessionId: id } },
                 secrets: () => secrets,
                 audit: this.deps.audit,
                 actor: session.owner,
@@ -1627,6 +1677,8 @@ export class SessionManager {
                   : {}),
                 dir: sessionBrowserDir(this.deps.paths, id),
                 tmpDir: sessionBrowserTmpDir(id),
+                // Its downloads land in the session's workspace (#2329, harness/browserDownloads.ts).
+                downloads: { files: this.files, ref: { kind: 'session' as const, sessionId: id } },
                 ...(hb.executablePath ? { executablePath: hb.executablePath } : {}),
               }
             : undefined
@@ -1677,6 +1729,8 @@ export class SessionManager {
                             : {}),
                           turnContext: () => traced.context(),
                           ...(builtIn ? { builtIn } : {}),
+                          // The turn's credentials and plugin tokens, which workspace_read redacts (#2329).
+                          secrets: () => secrets,
                         },
                       )
                     : {}),
@@ -2139,7 +2193,9 @@ export class SessionManager {
 
   /**
    * Ends the live offer of a session: its owner withdraws it, its target
-   * declines it. Resolves false when there was none.
+   * declines it. Resolves false when there was none. The browser user is only
+   * ever an owner here, since a handoff to it transfers at once and is never
+   * offered: declining by the target serves MCP principals (`sessions_cancel_handoff`).
    */
   async cancelHandoff(id: string, actor: Owner): Promise<boolean> {
     const session = await this.get(id, actor)
@@ -2214,8 +2270,8 @@ export class SessionManager {
   /**
    * Announces a change to a session's offer as `session.owner` on the bus
    * (busEvents.ts), so a watcher of the session or of the list re-reads it. An
-   * offer is state on the session row, not a transcript event (the panel's
-   * protocol has none for it), so nothing is appended.
+   * offer is state on the session row, not a transcript event (the panel reads it
+   * from `sessions.snapshot`, #1284), so nothing is appended.
    */
   private async announceOwner(id: string): Promise<void> {
     const session = await this.row(id)
@@ -2318,6 +2374,8 @@ export class SessionManager {
     }
     // The images those results name (#782), before the events that name them.
     await this.blobs.copy(id, childId)
+    // Its workspace files (#2329), so the fork carries on with what the parent had.
+    await this.files.copy(id, childId)
     await this.events.append(childId, [
       event({
         type: 'session.started',

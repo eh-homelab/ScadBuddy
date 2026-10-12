@@ -59,6 +59,28 @@ describe("Generate's menu", () => {
     expect(screen.getByRole('dialog', { name: 'Rendered image' })).toBeInTheDocument()
   })
 
+  it('offers the colour breakdown only for a render with more than one colour (#1289)', async () => {
+    const { user } = setup()
+    await user.click(screen.getByRole('button', { name: 'More to generate' }))
+    expect(screen.queryByRole('menuitem', { name: /Colours/ })).not.toBeInTheDocument()
+  })
+
+  it('opens the colour breakdown of the render on screen (#1289)', async () => {
+    const getJobColours = vi
+      .spyOn(api, 'getJobColours')
+      .mockResolvedValue({ image: new Blob(['png']), colours: ['#FF0000', '#00FF00'], columns: 2 })
+    URL.createObjectURL = vi.fn(() => 'blob:colours')
+    URL.revokeObjectURL = vi.fn()
+    const { user } = setup(false, { ...job, colors: ['#FF0000', '#00FF00'] })
+    await user.click(screen.getByRole('button', { name: 'More to generate' }))
+    await user.click(screen.getByRole('menuitem', { name: /Colours/ }))
+
+    expect(screen.getByRole('dialog', { name: 'Colours' })).toBeInTheDocument()
+    expect(await screen.findByText('Tile 2: Extruder 2, #00FF00')).toBeInTheDocument()
+    expect(getJobColours).toHaveBeenCalledWith(job.id, 'iso', expect.any(AbortSignal))
+    getJobColours.mockRestore()
+  })
+
   it('closes on a click outside it, and not on one inside it', async () => {
     const { user } = setup()
     await user.click(screen.getByRole('button', { name: 'More to generate' }))

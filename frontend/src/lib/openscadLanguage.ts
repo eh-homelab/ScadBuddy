@@ -137,6 +137,15 @@ const RULES = [
 export const SCADBUDDY_DARK = 'scadbuddy-dark'
 export const SCADBUDDY_LIGHT = 'scadbuddy-light'
 
+/** The theme every Monaco editor here uses: one probe, so two editors never disagree. */
+export function editorTheme(): string {
+  const dark =
+    typeof window.matchMedia === 'function'
+      ? window.matchMedia('(prefers-color-scheme: dark)').matches
+      : true
+  return dark ? SCADBUDDY_DARK : SCADBUDDY_LIGHT
+}
+
 export function registerOpenscad(monaco: typeof Monaco): void {
   monaco.languages.register({ id: 'openscad', extensions: ['.scad'], aliases: ['OpenSCAD'] })
   monaco.languages.setLanguageConfiguration('openscad', openscadConfiguration)

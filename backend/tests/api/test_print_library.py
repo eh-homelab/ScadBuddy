@@ -21,7 +21,12 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.bambuddy.uploads import LibraryCopy, ProjectTarget
-from scadbuddy.render.bambu3mf import MAX_SETTINGS_BYTES, layout_of, write_bambu_3mf
+from scadbuddy.render.bambu3mf import (
+    MAX_SETTINGS_BYTES,
+    laid_out_plates,
+    layout_of,
+    write_bambu_3mf,
+)
 from scadbuddy.render.split import ColourPart
 from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_progress import watched as watched  # the fixture, shared
@@ -52,13 +57,13 @@ STUB_SETTINGS = {
 }
 
 
-def library_3mf(*, sliced: bool = False) -> bytes:
+def library_3mf(*, sliced: bool = False, settings: dict[str, Any] | None = None) -> bytes:
     """A 3MF as Bambuddy's library holds it: unsliced, or with a plate's gcode in it."""
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr("[Content_Types].xml", "<Types/>")
         archive.writestr("3D/3dmodel.model", "<model/>")
-        archive.writestr("Metadata/project_settings.config", json.dumps(STUB_SETTINGS))
+        archive.writestr("Metadata/project_settings.config", json.dumps(settings or STUB_SETTINGS))
         if sliced:
             archive.writestr("Metadata/plate_1.gcode", "; sliced\n")
     return buffer.getvalue()
@@ -211,10 +216,15 @@ def test_an_stl_slices_as_one_plate(client: TestClient) -> None:
     )
 
     assert response.status_code == 200, response.text
-    assert json.loads(sliced.calls.last.request.content)["plate"] == 1
+    # One plate is sliced as the whole file (#2180).
+    assert json.loads(sliced.calls.last.request.content)["plate"] == 0
     assert "/library/files/141/slice" in str(sliced.calls.last.request.url)
     assert uploaded_name(upload) == "file-46 (ScadBuddy).3mf"
     assert layout_of(_uploaded_3mf(upload)) == "scadbuddy"
+    # Laying out never adds a plate, so slicing the copy whole slices exactly the one
+    # plate the library file has (#2227).
+    with zipfile.ZipFile(io.BytesIO(_uploaded_3mf(upload))) as archive:
+        assert len(laid_out_plates(archive)) == 1
 
 
 @respx.mock
@@ -370,8 +380,57 @@ def test_a_file_with_no_plate_metadata_prints_plate_one(client: TestClient) -> N
     assert response.status_code == 200, response.text
     assert sliced.call_count == 1
     sent = json.loads(sliced.calls.last.request.content)
-    assert sent["plate"] == 1 and len(sent["filament_presets"]) == 1
+    # Its one plate, sliced as the whole file (#2180).
+    assert sent["plate"] == 0 and len(sent["filament_presets"]) == 1
     assert client.get("/api/v1/print/library/70/plates").json() == []
+
+
+@respx.mock
+def test_a_one_plate_library_file_is_sliced_as_the_whole_file(client: TestClient) -> None:
+    """#2180: Bambuddy repaints a slot it thinks the plate leaves unused whenever the
+    slice names a plate, and it cannot see colour painted inline on a mesh, so queue 268's
+    two-colour file sliced all green. ``plate: 0`` skips that substitution."""
+    configure(client)
+    one_color(89)
+    flow_copy_routes()
+    library_file(89, plates="library-plates-single.json")
+    run_routes()
+    sliced = slice_routes()
+    queue_route()
+
+    response = run_library(
+        client,
+        89,
+        json={**body(), "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]}},
+    )
+
+    assert response.status_code == 200, response.text
+    assert json.loads(sliced.calls.last.request.content)["plate"] == 0
+
+
+@respx.mock
+def test_a_plate_of_a_file_with_several_is_sliced_by_its_number(client: TestClient) -> None:
+    """Plate 0 slices every plate, so a file with more than one keeps naming its plate."""
+    configure(client)
+    one_color(67)
+    flow_copy_routes()
+    library_file(67, plates="library-plates-multi.json")
+    run_routes()
+    sliced = slice_routes()
+    queue_route()
+
+    response = run_library(
+        client,
+        67,
+        json={
+            **body(),
+            "plate_id": 2,
+            "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]},
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert json.loads(sliced.calls.last.request.content)["plate"] == 2
 
 
 @respx.mock
@@ -711,6 +770,41 @@ def high_flow_run() -> dict[str, Any]:
     }
 
 
+@respx.mock
+def test_queue_268_a_one_extruder_library_file_gets_both_nozzles_and_one_slice(
+    client: TestClient,
+) -> None:
+    """#2181, #2227: a library file saved for one extruder (an A1's stats) printed on a
+    printer with the chosen 0.4 High Flow on both sides. The file's own one-side stats
+    are no longer kept (before, both colours went onto the left): the nozzle plan
+    (#2166) names the side for its one filament, and the copy offers that side alone,
+    in a Manual map. Its one plate is sliced whole (#2180)."""
+    configure(client)
+    one_color(89)
+    upload = flow_copy_routes()
+    one_side = {
+        **STUB_SETTINGS,
+        "extruder_nozzle_stats": ["Standard#1"],
+        "extruder_nozzle_stats_new": ["Standard#1"],
+    }
+    library_file(89, content=library_3mf(settings=one_side))
+    run_routes()
+    both_sides_high_flow()
+    sliced = slice_routes()
+    queue_route()
+
+    response = run_library(client, 89, json=high_flow_run())
+
+    assert response.status_code == 200, response.text
+    with zipfile.ZipFile(io.BytesIO(_uploaded_3mf(upload))) as archive:
+        settings = json.loads(archive.read("Metadata/project_settings.config"))
+    assert settings["filament_map_mode"] == "Manual"
+    assert settings["filament_map"] == ["2"]
+    assert settings["extruder_nozzle_stats"] == ["High Flow#0", "High Flow#1"]
+    assert settings["extruder_nozzle_stats_new"] == ["High Flow#0", "High Flow#1"]
+    assert json.loads(sliced.calls.last.request.content)["plate"] == 0
+
+
 def flow_copy_routes(listed: list[dict[str, Any]] | None = None) -> respx.Route:
     """The inbox (folder 2, from Settings) as listed before the copy is uploaded, and
     the upload, which Bambuddy answers as file 141 of one filament. Registered before
@@ -806,6 +900,68 @@ def test_a_library_files_flow_copy_in_the_inbox_is_reused(client: TestClient) ->
     assert sliced.call_count == 2
     assert "/library/files/141/slice" in str(sliced.calls.last.request.url)
     assert first.call_count == 1
+
+
+def one_extruder_3mf() -> bytes:
+    """A two-colour library file saved for a one-extruder printer (an A1), as queue item
+    268's MakerWorld file was: its stats offer the slicer one extruder."""
+    settings = {
+        **STUB_SETTINGS,
+        "filament_colour": ["#3F8E43", "#27272C"],
+        "extruder_nozzle_stats": ["Standard#1"],
+        "extruder_nozzle_stats_new": ["Standard#1"],
+    }
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        archive.writestr("3D/3dmodel.model", "<model/>")
+        archive.writestr("Metadata/project_settings.config", json.dumps(settings))
+    return buffer.getvalue()
+
+
+@respx.mock
+def test_a_two_colour_library_file_offers_both_sides_and_slices_every_plate(
+    client: TestClient,
+) -> None:
+    """Queue item 268, on a printer with a 0.4 High Flow on each side.
+
+    #2181: the file's one-extruder stats offered the slicer only the left, so both
+    colours went there; the copy offers both sides. #2180: a one-plate file is sliced as
+    ``plate: 0``, so Bambuddy does not repaint the second slot (which it reads as unused
+    in an inline-painted mesh) with the first's colour."""
+    configure(client)
+    respx.get(f"{API}/library/files", params={"folder_id": 2}).mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    upload = respx.post(f"{API}/library/files").mock(
+        return_value=httpx.Response(
+            200, json={"id": 141, "filename": "file-89.3mf", "file_type": "3mf"}
+        )
+    )
+    library_file(89, content=one_extruder_3mf())
+    run_routes()
+    both_sides_high_flow()
+    sliced = slice_routes()
+    queue_route()
+
+    response = run_library(
+        client,
+        89,
+        json={
+            **body(nozzles=[{"size": "0.4", "flow": "high_flow"}], tier="standard"),
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    with zipfile.ZipFile(io.BytesIO(_uploaded_3mf(upload))) as archive:
+        settings = json.loads(archive.read("Metadata/project_settings.config"))
+    assert settings["filament_map_mode"] == "Manual"
+    assert settings["filament_map"] == ["2", "1"]
+    assert settings["extruder_nozzle_stats"] == ["High Flow#1", "High Flow#1"]
+    assert settings["extruder_nozzle_stats_new"] == ["High Flow#1", "High Flow#1"]
+    request = json.loads(sliced.calls.last.request.content)
+    assert request["plate"] == 0
+    assert len(request["filament_colours"]) == 2
 
 
 def _settings_bomb() -> bytes:
@@ -934,9 +1090,20 @@ def test_a_library_print_into_a_project_is_filed_there_and_remembered(
     assert settings["filament_colour"] == ["#688197"]
     uploads = _state(client).uploads
     assert [copy.id for copy in asyncio.run(uploads.for_output("library:89"))] == [141]
-    assert asyncio.run(uploads.project_target(7)) == ProjectTarget(
+    # Recorded by the real print, not seeded: the listing must not read that copy as an
+    # output's, whatever key `send.upload_copy` filed it under.
+    root = recording("library-files-root.json")
+    listing_routes([{**root[0], "id": 141}, {**root[0], "id": 89}])
+    listed = client.get("/api/v1/print/library").json()["files"]
+    assert {row["id"]: row["output_id"] for row in listed} == {141: None, 89: None}
+    remembered = asyncio.run(uploads.project_target(7))
+    assert remembered is not None
+    assert remembered.model_copy(update={"nozzle_plan": None}) == ProjectTarget(
         printer_id=1, nozzle_diameter="0.2"
     )
+    # The run's nozzle plan too, which the next Generate lays the file out with (#2166).
+    assert remembered.nozzle_plan is not None
+    assert [slot["side"] for slot in remembered.nozzle_plan["slots"]] == ["R"]
 
 
 # --- #1753: viewing a library file as an output is viewed ---------------------------------

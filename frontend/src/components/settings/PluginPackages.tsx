@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState, type FormEvent, type ReactNode } from 'react'
+import { useCallback, useLayoutEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { USER_ONLY } from '../../agent/dom'
 import {
   aiPlugins,
@@ -713,11 +713,19 @@ export function PluginPackagesPanel() {
   const replace = (pkg: ListedPackage) =>
     state.setData(packages.some((p) => same(p, pkg)) ? packages.map((p) => (same(p, pkg) ? pkg : p)) : [...packages, pkg])
   const { setData } = state
+  // The listener reads the list through a ref set before paint. Closing over `packages`
+  // left a gap: the list rendered, but the listener re-subscribed only in the next
+  // passive effect, so a change announced in between mapped the previous list (the
+  // empty one on first load) and dropped every row (#2238).
+  const latest = useRef(packages)
+  useLayoutEffect(() => {
+    latest.current = packages
+  }, [packages])
   useHeadlessBrowserChanges(
     useCallback(
       (enabled: boolean) =>
-        setData(packages.map((p) => (isBuiltIn(p) && p.name === BROWSER_PLUGIN ? { ...p, enabled } : p))),
-      [setData, packages],
+        setData(latest.current.map((p) => (isBuiltIn(p) && p.name === BROWSER_PLUGIN ? { ...p, enabled } : p))),
+      [setData],
     ),
   )
 

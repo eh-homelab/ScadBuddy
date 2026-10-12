@@ -28,7 +28,7 @@ from scadbuddy.library import settings_store
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.rack.rank import Usage
-from scadbuddy.rack.usage import PickedHotend, RackUsageStore
+from scadbuddy.rack.usage import PickedHotend, PickedSpool, RackUsageStore
 from tests.api.test_print_filaments import prepared, queue_route, slice_routes
 from tests.api.test_print_library import (
     flow_copy_routes,
@@ -324,6 +324,14 @@ def test_the_picks_are_recorded_against_the_queue_item(client: TestClient, model
     # Spec §5/§7: the result reports the picks sent, by position, never by serial.
     assert response.json()["rack_picks"] == [{"plate_id": 1, "group_id": 0, "position": 4}]
     assert serial(19) not in response.text
+    # #2170: and the group's spool, with the slicer's grams, for the hotend's history.
+    with rack_usage(client)._ready().connection() as conn:
+        spools = conn.execute(
+            "SELECT group_id, slot_id, grams FROM rack_nozzle_pick_spools WHERE queue_item_id = 51"
+        ).fetchall()
+    assert [(row["group_id"], row["slot_id"], float(row["grams"])) for row in spools] == [
+        (0, 1, 3.2)
+    ]
 
 
 @respx.mock
@@ -906,14 +914,27 @@ SETTLED = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
 
 
 @respx.mock
-def test_the_rack_usage_lists_each_position_and_never_a_serial(client: TestClient) -> None:
-    """#1298: Settings' Hotend usage table, by position; a serial stays backend-only (§7)."""
+def test_the_rack_usage_lists_each_hotend_with_its_serial_filament_and_spools(
+    client: TestClient,
+) -> None:
+    """#1298, #2170: Settings' Hotend usage table, by position, with each hotend's serial,
+    wear, current filament and the spools that ran through it."""
     configure(client)
     invented_rack_route()
     store = rack_usage(client)
     asyncio.run(store.seen(1, [serial(17)]))
+    blue = PickedSpool(
+        slot_id=1,
+        spool_id=7,
+        label="Bambu PLA Silk Blue",
+        material="PLA",
+        colour="#00629B",
+        grams=12.5,
+    )
     asyncio.run(
-        store.record_picks(51, 1, [PickedHotend(group_id=0, position=2, serial=serial(17))])
+        store.record_picks(
+            51, 1, [PickedHotend(group_id=0, position=2, serial=serial(17), spools=[blue])]
+        )
     )
     asyncio.run(
         store.record_prints(
@@ -933,12 +954,45 @@ def test_the_rack_usage_lists_each_position_and_never_a_serial(client: TestClien
     assert hotends[2]["pending"] == 0
     assert hotends[2]["last_used_at"] == "2026-10-02T12:00:00Z"
     assert hotends[2]["first_seen_at"] is not None
+    assert hotends[2]["serial"] == serial(17)
+    assert hotends[2]["wear"] == 128
+    assert (
+        hotends[2]["filament_id"],
+        hotends[2]["filament_name"],
+        hotends[2]["filament_material"],
+        hotends[2]["filament_colour"],
+    ) == ("GFA05", "Bambu PLA Silk", "PLA", "#00629B")
+    assert hotends[2]["spools"] == [
+        {
+            "spool_id": 7,
+            "label": "Bambu PLA Silk Blue",
+            "material": "PLA",
+            "colour": "#00629B",
+            "prints": 1,
+            "grams": 12.5,
+            "last_used_at": "2026-10-02T12:00:00Z",
+        }
+    ]
+    # Position 3's hotend has no filament loaded: 00000000 is no colour, not black.
+    assert hotends[3]["filament_id"] is None
+    assert hotends[3]["filament_colour"] is None
     assert {hotends[position]["prints"] for position in hotends if position != 2} == {0}
-    assert all(hotend["last_used_at"] is None for p, hotend in hotends.items() if p != 2)
+    assert all(hotend["spools"] == [] for p, hotend in hotends.items() if p != 2)
     assert list(hotends) == sorted(hotends)
-    for invented in INVENTED_SERIALS:
-        assert invented not in response.text
-    assert "serial" not in response.text
+
+
+@respx.mock
+def test_a_printer_with_no_rack_lists_no_hotends(client: TestClient) -> None:
+    """#2102: a printer whose status has an empty rack answers 200 and no hotends."""
+    configure(client)
+    rackless = invented_status()
+    rackless["nozzle_rack"] = []
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(200, json=rackless))
+
+    response = client.get("/api/v1/print/printers/1/rack-usage")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"printer_id": 1, "hotends": []}
 
 
 class UnreadableUsage(BrokenUsage):

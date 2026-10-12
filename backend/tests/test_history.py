@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 import pytest
@@ -19,6 +20,7 @@ from scadbuddy.library.history import (
     DEFAULT_TIMEOUT,
     GITIGNORE_NAME,
     LOCK_NAME,
+    MAINTAIN_LOOSE_OBJECTS,
     MAX_SUBJECT,
     RECOVERED_MESSAGE,
     BlobTooLargeError,
@@ -29,7 +31,7 @@ from scadbuddy.library.history import (
     subject_line,
 )
 from scadbuddy.library.slugs import MAX_SLUG_LENGTH
-from scadbuddy.render.jobs import prune_revision_exports
+from scadbuddy.render.jobs import export_revision, prune_revision_exports
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.support.media import MemoryMediaStore
 
@@ -240,6 +242,33 @@ def test_last_commits_is_empty_before_the_first_commit(models: Path) -> None:
     history = ModelHistory(models, wrapper_prefix=WRAPPER_PREFIX)
 
     assert history.last_commits() == {}
+
+
+def test_maintain_leaves_a_small_repository_alone(models: Path, history: ModelHistory) -> None:
+    write_model(models, "box", "cube(1);")
+    history.ensure_repo()
+    assert history.maintain() is False
+    assert history.object_counts()["count"] > 0
+
+
+def test_maintain_packs_once_loose_objects_pile_up(models: Path, history: ModelHistory) -> None:
+    """#2289: thousands of loose objects on NFS made every listing's history walk 11 s."""
+    write_model(models, "box", "cube(1);")
+    head = history.ensure_repo()
+    for n in range(MAINTAIN_LOOSE_OBJECTS):
+        write_model(models, "box", f"cube({n + 2});")
+        history.commit(f"edit {n}", "box")
+    assert history.object_counts()["count"] >= MAINTAIN_LOOSE_OBJECTS
+    assert history.maintain() is True
+    counts = history.object_counts()
+    assert counts["count"] == 0
+    assert counts["packs"] == 1
+    assert history.last_commit("box") is not None
+    assert head in {r.commit for r in history.log(limit=MAINTAIN_LOOSE_OBJECTS + 1)}
+
+
+def test_maintain_is_a_no_op_without_a_repository(models: Path, history: ModelHistory) -> None:
+    assert history.maintain() is False
 
 
 def test_merge_file_merges_clean_edits_and_counts_conflicts(history: ModelHistory) -> None:
@@ -1058,6 +1087,36 @@ def test_revision_exports_are_evicted_by_last_use(tmp_path: Path) -> None:
 
 def test_pruning_leaves_an_absent_cache_alone(tmp_path: Path) -> None:
     assert prune_revision_exports(DataPaths(tmp_path / "nothing"), ttl=1.0) == []
+
+
+def test_two_pods_exporting_one_revision_never_share_a_staging_directory(
+    tmp_path: Path,
+) -> None:
+    """Every container runs the API as pid 1 on the shared `/data` volume, so a
+    staging name built from the pid and thread ident alone is the same in two pods.
+    The second export to start then deleted the first one's half-written tree.
+    Here the second export starts from inside the first, on the same pid and
+    thread: the name those two would build is identical."""
+    directory = tmp_path / "revisions" / "keychain" / ("a" * 40)
+    stagings: list[Path] = []
+
+    class History:
+        def export(self, slug: str, commit: str, dest: Path) -> None:
+            stagings.append(dest)
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / "model.scad").write_text("cube(1);\n", encoding="utf-8")
+            if len(stagings) == 1:
+                # The other pod, starting while this export is half written.
+                export_revision(cast(ModelHistory, History()), slug, commit, directory)
+                assert (dest / "model.scad").is_file(), "the other export deleted this one"
+            (dest / "model.json").write_text("{}", encoding="utf-8")
+
+    export_revision(cast(ModelHistory, History()), "keychain", "a" * 40, directory)
+
+    assert len(stagings) == 2
+    assert stagings[0] != stagings[1]
+    assert (directory / "model.scad").is_file()
+    assert not [p for p in directory.parent.iterdir() if p != directory]
 
 
 def test_a_built_in_that_cannot_be_replaced_keeps_its_mirror_and_the_rest_sync(

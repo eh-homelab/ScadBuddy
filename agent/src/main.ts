@@ -34,6 +34,8 @@ import { AuditLog } from './audit/log.js'
 import { auditedTokenStore } from './audit/writes.js'
 import { TabHub } from './bridge/hub.js'
 import { PgTabRelay } from './bridge/relay.js'
+import { PostgresSessionTabStore } from './bridge/sessionTabs.js'
+import { PgMcpSessionRelay } from './mcp/sessionRelay.js'
 import { PostgresPairingStore } from './bridge/pairings.js'
 import { CHAT_FRAME_MAX, startHeartbeat } from './routes/chat.js'
 import { storedModel } from './routes/model.js'
@@ -45,11 +47,13 @@ import { shutdownTelemetry, traceListener } from './telemetry/runtime.js'
 import { harnessTools } from './tools/harness.js'
 import { SessionResources } from './sessions/touched.js'
 import { ALL_TOOLS } from './tools/index.js'
+import { PgFlowRuns } from './temporal/flowRuns.js'
+import { flowSessionActivities } from './temporal/flowSessions.js'
 import { gateActivities, PgApprovalRecords, PgSessionOwners, toolActivities } from './temporal/toolActivities.js'
 import { DURABLE_TOOLS } from './tools/manifest.js'
 import { PgAnswers } from './gate/answers.js'
 import { AgentWorker } from './temporal/worker.js'
-import { PgPayloadKeys, rewrapPayloadKeys, SubjectPayloadCodec } from './temporal/payloadCodec.js'
+import { FilePayloadStore, PgPayloadKeys, rewrapPayloadKeys, SubjectPayloadCodec } from './temporal/payloadCodec.js'
 import { DurableGate } from './gate/durable.js'
 import { DurableTurns } from './sessions/durable.js'
 import { DurableRunningSweep, durableDescriber } from './sessions/durableSweep.js'
@@ -63,6 +67,7 @@ import { packageKinds } from './plugins/packages/operations.js'
 import { operationActivities } from './temporal/operationActivities.js'
 import { PendingActionStore } from './tools/pending.js'
 import type { ToolServices } from './tools/registry.js'
+import { SessionFiles, WORKSPACE_SWEEP_MS } from './workspace/store.js'
 import { toolSwitches } from './tools/switches.js'
 
 // Fixed rather than configurable: the listening port is part of the pod
@@ -186,6 +191,9 @@ const events = config.databaseUrl ? new PgEventListener(config.databaseUrl) : un
 // browser_* calls for a tab connected to another replica (#1916, bridge/relay.ts),
 // on the listener's connection: made before start(), so its first LISTEN covers it.
 const tabRelay = database && events ? new PgTabRelay(database.sql, { listen: (c, f) => events.listenAlso(c, f) }) : undefined
+// /mcp requests for a session another replica holds (#2086, mcp/sessionRelay.ts),
+// on the same connection, for the same reason.
+const mcpRelay = database && events ? new PgMcpSessionRelay(database.sql, { listen: (c, f) => events.listenAlso(c, f) }) : undefined
 events?.start()
 const resources = new ResourceHub(events)
 const paths = { stateDir: DEFAULT_STATE_DIR }
@@ -212,7 +220,13 @@ const toolServices: ToolServices = {
 // The browser bridge (#254, bridge/hub.ts): the tabs connected over
 // /api/v1/ai/bridge, which the browser_* tools drive; MCP clients pair with
 // one through `ai_browser_pairings` (spec §8.5).
-const tabs = new TabHub({ pairings: database ? new PostgresPairingStore(database.sql) : undefined, relay: tabRelay })
+const tabs = new TabHub({
+  pairings: database ? new PostgresPairingStore(database.sql) : undefined,
+  relay: tabRelay,
+  // A durable session's browser_* calls run on whichever replica took the
+  // activity, so the tab its chat socket paired is read from Postgres (#2086).
+  sessionTabs: database ? new PostgresSessionTabStore(database.sql) : undefined,
+})
 toolServices.browser = tabs
 // What each session touched (#931, sessions/touched.ts), from its tool calls.
 if (database) {
@@ -220,6 +234,24 @@ if (database) {
     console.error('session resources: could not record a call:', (err as Error).message),
   )
 }
+// The assistant's workspace (#2329, workspace/store.ts): a session's files, or an
+// /mcp caller's own outside a session, in ai_session_files. The workspace_* tools
+// and http_request's save_to_workspace write it; a principal's files are swept
+// 24 h after their last write.
+const workspace = database ? new SessionFiles(database.sql, { settings }) : undefined
+if (workspace) toolServices.workspace = workspace
+// What workspace_read redacts from text in every mode (classic, durable, /mcp):
+// each saved Claude credential's secret, read at the call (a classic turn adds its
+// plugin tokens, tools/harness.ts). None without the KEK, which opens them.
+if (credentials && kek.ok) {
+  const key = kek.kek
+  toolServices.secrets = async () =>
+    (await credentials.revealAll(key)).flatMap((row) => (row.credential ? [row.credential.secret] : []))
+}
+const stopWorkspaceSweep = workspace?.startSweeper(WORKSPACE_SWEEP_MS, {
+  ...(database ? { ready: database.ready } : {}),
+  onError: (err) => console.error('workspace sweep failed:', (err as Error).message),
+})
 // Plugin packages (#297): the pin is in Postgres (`ai_plugin_packages`); the
 // files under <state dir>/plugins are a cache, rebuilt from the pin and
 // verified against its content hash before each load (plugins/packages/).
@@ -324,6 +356,8 @@ const sessions =
         // The http_request tool (#827): on for a turn unless the
         // `http_request_enabled` setting is false (routes/httpRequest.ts).
         httpRequest: {},
+        // The workspace http_request's save_to_workspace writes, and a fork copies (#2329).
+        ...(workspace ? { workspace } : {}),
         // Every usable credential in priority order, with fallback; disables,
         // cooldowns, recoveries and fallbacks are audited (#1093).
         credentials: new CredentialPool({ repo: credentials, kek, audit }),
@@ -385,7 +419,9 @@ const payloadKeys =
   temporal && kek.ok
     ? new PgPayloadKeys(temporal.sql, kek.kek, { previous: previousKek?.ok ? previousKek.kek : undefined })
     : undefined
-const dataConverter = payloadKeys ? { payloadCodecs: [new SubjectPayloadCodec(payloadKeys)] } : undefined
+// A session's large payloads are files on the data share, by reference (#2243).
+const payloadStore = config.payloadDir ? new FilePayloadStore(config.payloadDir) : undefined
+const dataConverter = payloadKeys ? { payloadCodecs: [new SubjectPayloadCodec(payloadKeys, payloadStore)] } : undefined
 if (temporal && !payloadKeys) {
   console.warn('agent-tools worker: no secret key, so durable payloads cannot be sealed; no durable session is started')
 }
@@ -403,10 +439,14 @@ const temporalWorker =
             services: toolServices,
             sessions: new PgSessionOwners(temporal.sql),
             approvals: new PgApprovalRecords(temporal.sql),
+            flows: new PgFlowRuns(temporal.sql),
             audit,
             answers: new PgAnswers(temporal.sql),
+            currentTiers: liveTokenTiers(tokens),
           }),
           ...gateActivities({ audit, sessions: new PgSessionOwners(temporal.sql) }),
+          // A flow's agent(...) and ask_session(...) (#1057, 6g): beside the tools, never one.
+          ...flowSessionActivities({ sql: temporal.sql, flows: new PgFlowRuns(temporal.sql) }),
           ...operationActivities(commandKinds, operationStore),
         },
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
@@ -510,6 +550,7 @@ const app = createApp({
     authSettings,
     oidc: oidcProvider,
     publicUrl: config.publicUrl,
+    relay: mcpRelay,
   },
   mcpOidc: { repo: oidcRepo, provider: oidcProvider, publicUrl: config.publicUrl },
 })
@@ -543,6 +584,7 @@ async function stop(): Promise<void> {
   stopReaper?.()
   stopRetention?.()
   stopAttachmentSweep?.()
+  stopWorkspaceSweep?.()
   // Running turns first, while the panel's socket, the paired tab and the pool
   // are all still up: no new turn starts, running ones may finish, the rest are
   // aborted and record that they were (SessionManager.stopTurns). Aborted

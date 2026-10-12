@@ -58,6 +58,7 @@ import type {
   UpstreamStatus,
 } from '../api/types'
 import { editPath } from '../lib/deeplink'
+import { foldFamily } from '../lib/fonts'
 import { emitRealtime, realtimeHandler } from './realtime'
 import { features } from './features'
 import { mockRackCheck, mockRackPicks } from './features/rack'
@@ -78,6 +79,10 @@ import { UI_MODULES } from './templateUi'
 import { SLICED_REASON, mockLibraryObjects } from './libraryObjects'
 
 const base = '/api/v1'
+
+/** A 1×1 PNG, for the image routes whose pixels no test looks at. */
+const PLACEHOLDER_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='
+const bytesOf = (base64: string) => Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
 
 /** `ModelPrintChoices()` on the backend: every field at its default. */
 export const NO_MODEL_CHOICES: Required<ModelPrintChoices> = {
@@ -424,6 +429,11 @@ export function setMockInvalidLibraries(slug: string, entries: InvalidLibraryEnt
 /** #169 — every model as the mock has it now, for a feature module (`features/`). */
 export function mockModels(): readonly ModelSummary[] {
   return state.models
+}
+
+/** #1290 — a model's `model.scad` as the mock has it now, for a feature module (`features/`). */
+export function mockSource(slug: string): string | undefined {
+  return state.sources[slug]
 }
 
 /** #169 — puts `model` in place of the one with its slug; answers it as the routes do. */
@@ -2514,6 +2524,31 @@ export const handlers = [
       }
     }
 
+    // #1286 — `require_installed_fonts` (api/params.py): a `// font` value the caller
+    // chose that names a family not installed is refused, naming both.
+    const installedFamilies = new Set(state.fonts.map((font) => foldFamily(font.family)))
+    const unfontedParams: string[] = []
+    const unfontedFamilies: string[] = []
+    for (const param of schema.parameters ?? []) {
+      const value = renderParams[param.name]
+      if (param.type !== 'font' || typeof value !== 'string' || value === param.initial) continue
+      // The template's own options are its business, as on the server.
+      if ((param.options ?? []).some((option) => option.value === value)) continue
+      const families = (value.split(':style=')[0] ?? '').split(',').map((family) => family.trim()).filter(Boolean)
+      const missing = families.filter((family) => !installedFamilies.has(foldFamily(family)))
+      if (missing.length === 0) continue
+      unfontedParams.push(param.name)
+      for (const family of missing) if (!unfontedFamilies.includes(family)) unfontedFamilies.push(family)
+    }
+    if (unfontedParams.length > 0) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        `parameter '${unfontedParams[0]}' names font family '${unfontedFamilies[0]}', which is not installed`,
+        { parameters: unfontedParams, families: unfontedFamilies },
+      )
+    }
+
     const jobId = nextHexId()
     const inputs = withVersion({ ...(body.inputs ?? {}), params: renderParams })
     state.jobs.set(jobId, {
@@ -2757,6 +2792,23 @@ export const handlers = [
     const glb = keychainGlb(job.colors ?? ['#9AA4B2'], { x, y, z })
     return HttpResponse.arrayBuffer(glb.buffer.slice(0) as ArrayBuffer, {
       headers: { 'Content-Type': 'model/gltf-binary' },
+    })
+  }),
+
+  // #1289 — the per-colour breakdown: a placeholder image, with the legend in the
+  // route's headers as the backend sends it (a near-square grid, render/thumbnail.py).
+  http.get(`${base}/jobs/:id/colours.png`, ({ params }) => {
+    const job = state.jobs.get(String(params['id']))
+    if (!job || !job.bbox_mm) return problem(404, 'Preview not ready')
+    const colours = (job.colors ?? []).map((colour) => colour.toUpperCase())
+    if (colours.length === 0) return problem(404, 'The preview has no geometry')
+    if (colours.length > 16) return problem(422, `${colours.length} colours is more than a breakdown draws (16)`)
+    return HttpResponse.arrayBuffer(bytesOf(PLACEHOLDER_PNG).buffer as ArrayBuffer, {
+      headers: {
+        'Content-Type': 'image/png',
+        'X-ScadBuddy-Colours': colours.join(','),
+        'X-ScadBuddy-Colour-Columns': String(Math.ceil(Math.sqrt(colours.length))),
+      },
     })
   }),
 
@@ -3532,9 +3584,6 @@ export const handlers = [
   }),
 
   // #349 — served by the agent service, not the backend (agent/src/routes/headlessBrowser.ts).
-  http.get(`${base}/ai/templates/blank`, () =>
-    HttpResponse.json({ source: '// A blank starter\n/* [Hidden] */\n$fn = 64;\n\ncube(10);\n' }),
-  ),
   http.get(`${base}/ai/settings/headless-browser`, () =>
     HttpResponse.json({ enabled: state.headlessBrowser }),
   ),

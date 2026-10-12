@@ -9,7 +9,7 @@
  * `schema.d.ts` is not committed (#492): typecheck, test and build regenerate it
  * first, so after a backend change `tsc` points at whatever broke.
  */
-import type { Origin, SessionStatus } from '../agent/chat/protocol'
+import type { Origin, Owner, SessionStatus } from '../agent/chat/protocol'
 import type { components } from './schema'
 
 type Schemas = components['schemas']
@@ -33,6 +33,8 @@ export type ModelSummary = Schemas['ModelRecord']
 /** #274 — one image or video of a template, in its order; the first is the cover. */
 export type MediaView = Schemas['MediaView']
 export type SourceCheck = Schemas['SourceCheck']
+/** #1290 — one `.scad` file of a model's directory, `model.scad` (`main`) first. */
+export type SourceFile = Schemas['SourceFile']
 export type Diagnostic = Schemas['Diagnostic']
 
 export type PastedSource = Schemas['PastedSource']
@@ -127,6 +129,14 @@ export type PrintCheck = Schemas['PrintCheck']
 export type PrintRun = Schemas['PrintRun']
 /** #1053 — a Bambuddy write as an operation: `GET /operations/{id}` reads it. */
 export type Operation = Schemas['Operation']
+
+// Flows (#1057, backend `api/flows.py`): a flow's runs and what they wait on.
+export type FlowRun = Schemas['Run']
+export type FlowRunView = Schemas['RunView']
+export type FlowRunStatus = FlowRunView['status']
+export type FlowPending = Schemas['PendingEntry']
+export type FlowStep = Schemas['FlowStep']
+export type FlowDecided = Schemas['Decided']
 /** A route's 202: the operation to follow, `repeated` when an earlier press started it. */
 export type OperationAccepted = Schemas['OperationAccepted']
 
@@ -159,12 +169,19 @@ export type PrinterBedType = Schemas['PrinterBedType']
 /** #836 — the rack nozzle ScadBuddy would pick, its candidates, and what a run sent. */
 export type RackPickView = Schemas['RackPickView']
 export type RackOption = Schemas['RackOption']
+export type NozzlePlan = Schemas['NozzlePlan']
+export type PlannedSlot = Schemas['PlannedSlot']
+export type UnknownTray = Schemas['UnknownTray']
+export type PreviewStarted = Schemas['PreviewStarted']
+export type SlicePreview = Schemas['SlicePreview']
+export type TrayAssigned = Schemas['TrayAssigned']
 export type RackSentPick = Schemas['RackSentPick']
 export type RackAlgorithm = NonNullable<Schemas['ChoicesView']['rack_algorithm']>
 export type PrinterRackAlgorithm = Schemas['PrinterRackAlgorithm']
-/** #1298 — what each hotend on a printer's rack has printed; never a serial. */
+/** #1298, #2170 — each hotend on a printer's rack: its use, what it has loaded, and its serial (the one route that carries one, spec 2026-10-01 §7 amendment). */
 export type PrinterRackUsage = Schemas['PrinterRackUsage']
 export type RackHotendUsage = Schemas['RackHotendUsage']
+export type RackSpoolUse = Schemas['RackSpoolUse']
 /** #907, #1862 — Bambu's print sequence, a per-print process override. */
 export type PrintSequence = NonNullable<Schemas['PrintRunRequest']['print_sequence']>
 export type OutputPlate = Schemas['OutputPlate']
@@ -173,6 +190,8 @@ export type OutputPlate = Schemas['OutputPlate']
 export type LibraryListing = Schemas['LibraryListing']
 export type LibraryEntry = Schemas['LibraryEntry']
 export type LibraryFolderView = Schemas['LibraryFolderView']
+export type LibraryDeleteResult = Schemas['LibraryDeleteResult']
+export type LibraryRestoreResult = Schemas['LibraryRestoreResult']
 /** #1863 — the objects Arrange reads from a library file ScadBuddy did not make. */
 export type LibraryFileObjects = Schemas['LibraryFileObjects']
 export type LibraryFileObject = Schemas['LibraryFileObject']
@@ -367,6 +386,8 @@ export interface AiSessionView {
   /** #1885 — archived by its owner: out of the panel's list, and read-only. Absent from an older agent. */
   archived?: boolean
   archived_at?: string | null
+  /** #1284 — a live handoff offer: to whom, until when. */
+  offer?: { to: Pick<Owner, 'kind' | 'label'> & { id?: string }; until: string } | null
 }
 
 /**

@@ -48,6 +48,11 @@ export function useFilamentPlan(
   const [filaments, setFilaments] = useState<FilamentOptions | null>(null)
   const [plan, setPlan] = useState<SlotChoice[]>([])
   const [filamentError, setFilamentError] = useState<string | null>(null)
+  /**
+   * #2186 — the choices `plan` was seeded from. The plan follows the choices one render
+   * late (it is set by the effect below), so for that render it is the last read's.
+   */
+  const [planFor, setPlanFor] = useState<ChoicesView | null>(null)
 
   // One plan applies to every plate, a slot being the same color-numbered project
   // filament on each (#180). "All plates" reads every plate's slots, so a slot only a
@@ -82,10 +87,12 @@ export function useFilamentPlan(
     if (!choices || !current) {
       setFilaments(null)
       setPlan([])
+      setPlanFor(null)
       return
     }
     const seed = (next: FilamentOptions) => {
       setFilaments(next)
+      setPlanFor(choices)
       const carried = carry?.get()
       if (carried) {
         // A re-arrange: the plan it was made for, less any slot the new file lacks.
@@ -130,6 +137,7 @@ export function useFilamentPlan(
         if (token !== filamentAttempt.current) return
         setFilaments(null)
         setPlan([])
+        setPlanFor(null)
         setFilamentError(
           cause instanceof ApiError ? cause.detail : 'Could not read the filament inventory.',
         )
@@ -144,5 +152,8 @@ export function useFilamentPlan(
         plan.find((entry) => entry.slot_id === choice.slot_id)?.spool_id !== choice.spool_id,
     )
 
-  return { filaments, plan, setPlan, planChanged, filamentError }
+  /** Whether `plan` was seeded from these choices, so it may be sent with them. */
+  const planReady = choices !== null && planFor === choices
+
+  return { filaments, plan, setPlan, planChanged, filamentError, planReady }
 }

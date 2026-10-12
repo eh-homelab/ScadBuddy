@@ -7,7 +7,7 @@
 #  - the backend's tests run in an image holding only backend/, so they read copies
 #    of the agent's vectors and key migration, which must equal the originals;
 #  - the two Python codecs must be the same code apart from their imports,
-#    docstrings and converter function (the key lock and tombstone logic that no
+#    docstrings (module, class and function ones) and converter function (the key lock and tombstone logic that no
 #    vector covers).
 set -euo pipefail
 root="${1:-$(cd "$(dirname "$0")/../.." && pwd)}"
@@ -28,9 +28,26 @@ import sys
 root = sys.argv[1]
 
 
+def is_doc(node: ast.stmt) -> bool:
+    return (
+        isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+    )
+
+
+def strip_docs(tree: ast.AST) -> None:
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if len(node.body) > 1 and is_doc(node.body[0]):
+                node.body = node.body[1:]
+
+
 def body(path: str, converter: str) -> dict[str, str]:
     out = {}
-    for node in ast.parse(open(f"{root}/{path}").read()).body:
+    tree = ast.parse(open(f"{root}/{path}").read())
+    strip_docs(tree)
+    for node in tree.body:
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             continue
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):

@@ -6,7 +6,7 @@ import { connectLanguageServer } from '../lib/languageClient'
 import { definitionFile, definitionLabel, directoryOf, type DefinitionFile } from '../lib/lsp'
 import { MARKER_OWNER, toMarkers } from '../lib/markers'
 import { OPENSCAD_LANGUAGE_ID, monaco, setupMonaco } from '../lib/monaco'
-import { SCADBUDDY_DARK, SCADBUDDY_LIGHT } from '../lib/openscadLanguage'
+import { editorTheme } from '../lib/openscadLanguage'
 import { useLatest } from '../lib/useLatest'
 import { Button } from './ui/Button'
 
@@ -213,11 +213,6 @@ export function SourceEditor({
     setViewing(null)
   }
 
-  const dark =
-    typeof window.matchMedia === 'function'
-      ? window.matchMedia('(prefers-color-scheme: dark)').matches
-      : true
-
   const fileName = uri.slice(uri.lastIndexOf('/') + 1)
 
   return (
@@ -239,7 +234,7 @@ export function SourceEditor({
         <Editor
           path={shown?.uri ?? uri}
           language={OPENSCAD_LANGUAGE_ID}
-          theme={dark ? SCADBUDDY_DARK : SCADBUDDY_LIGHT}
+          theme={editorTheme()}
           // Held back while a definition is shown: the wrapper writes `value` into
           // whichever model the editor has, and that is not the model's source then.
           value={shown ? undefined : value}

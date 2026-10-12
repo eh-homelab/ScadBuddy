@@ -20,6 +20,7 @@ from scadbuddy.workflows.commands import (
     TemporalRefusedError,
     TemporalUnavailableError,
     TemporalUnreachableError,
+    _retrieve_start_error,
     namespace_retention,
     start_command,
     temporal_failure,
@@ -146,6 +147,21 @@ async def test_start_command_reads_an_execution_not_found_as_closing(
         await call(Failing())
 
 
+def _start_handle(operation: Any) -> asyncio.Future[Any]:
+    """The start operation's private handle future, which `_retrieve_start_error` reads.
+
+    A temporalio release that renames it fails here, by name, rather than with an
+    AttributeError, so the bump is seen: the command would then skip the read and
+    asyncio's "Future exception was never retrieved" log (#2065) would come back."""
+    handle = getattr(operation, "_workflow_handle", None)
+    if not isinstance(handle, asyncio.Future):
+        pytest.fail(
+            "temporalio's WithStartWorkflowOperation no longer has the `_workflow_handle` future: "
+            "update `_retrieve_start_error` in scadbuddy/workflows/commands.py for the new name"
+        )
+    return handle
+
+
 async def test_a_failed_start_leaves_no_unretrieved_future_behind() -> None:
     """#2065: temporalio sets a failed start's error on the operation's handle future
     as well as raising it (``client/_client.py`` ``on_start_error``). The raised one is
@@ -161,7 +177,7 @@ async def test_a_failed_start_leaves_no_unretrieved_future_behind() -> None:
             self, *args: Any, start_workflow_operation: Any, **kwargs: Any
         ) -> Any:
             error = RPCError("Timeout expired", RPCStatusCode.UNAVAILABLE, b"")
-            start_workflow_operation._workflow_handle.set_exception(error)
+            _start_handle(start_workflow_operation).set_exception(error)
             raise error
 
     try:
@@ -171,6 +187,41 @@ async def test_a_failed_start_leaves_no_unretrieved_future_behind() -> None:
     finally:
         loop.set_exception_handler(previous)
     assert [c["message"] for c in logged] == []
+
+
+async def test_a_start_error_set_after_the_command_stopped_waiting_is_read_too() -> None:
+    """#2190: when the command's own timeout fires before temporalio sets the start's
+    error, the future is not done yet in the ``finally``; its error is still read when it
+    arrives, so asyncio logs nothing."""
+    logged: list[dict[str, Any]] = []
+    loop = asyncio.get_running_loop()
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: logged.append(context))
+    started: list[Any] = []
+
+    class TimingOutFirst:
+        async def execute_update_with_start_workflow(
+            self, *args: Any, start_workflow_operation: Any, **kwargs: Any
+        ) -> Any:
+            started.append(start_workflow_operation)
+            raise RPCError("Timeout expired", RPCStatusCode.UNAVAILABLE, b"")
+
+    try:
+        with pytest.raises(TemporalUnavailableError):
+            await call(TimingOutFirst())
+        _start_handle(started[0]).set_exception(RPCError("late", RPCStatusCode.UNAVAILABLE, b""))
+        started.clear()
+        await asyncio.sleep(0)
+        gc.collect()
+    finally:
+        loop.set_exception_handler(previous)
+    assert [c["message"] for c in logged] == []
+
+
+def test_an_sdk_without_the_private_handle_is_skipped() -> None:
+    """#2190: the handle is private; a temporalio that renames it must not break every
+    command with an AttributeError from the ``finally``."""
+    _retrieve_start_error(cast(Any, object()))
 
 
 @pytest.mark.parametrize(

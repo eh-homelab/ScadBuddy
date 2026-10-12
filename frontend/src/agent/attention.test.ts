@@ -177,6 +177,56 @@ describe('useAttention', () => {
     expect(result.current.running).toBeNull()
   })
 
+  it('shows the waiting count without waiting for a slow sessions list (#2192)', async () => {
+    let answer: (() => void) | undefined
+    setPendingApprovals(2)
+    server.use(
+      http.get('/api/v1/ai/sessions', async () => {
+        await new Promise<void>((resolve) => {
+          answer = resolve
+        })
+        return HttpResponse.json({ sessions: [{}] })
+      }),
+    )
+    const { result } = renderHook(() => useAttention(true))
+    await waitFor(() => expect(result.current.waiting).toBe(2))
+    expect(result.current.running).toBeNull()
+    act(() => answer?.())
+    await waitFor(() => expect(result.current.running).toBe(true))
+  })
+
+  it('does not bring "working" back from a read that answers after the assistant is off (#2192)', async () => {
+    let answer: (() => void) | undefined
+    server.use(
+      http.get('/api/v1/ai/sessions', async () => {
+        await new Promise<void>((resolve) => {
+          answer = resolve
+        })
+        return HttpResponse.json({ sessions: [{}] })
+      }),
+    )
+    // The late read's body, read: from there to its end is microtasks only, so one
+    // macrotask after it has settled the read, and the guard has run (#2214).
+    const reads: Promise<unknown>[] = []
+    const json = Response.prototype.json
+    const spy = vi.spyOn(Response.prototype, 'json').mockImplementation(function (this: Response) {
+      const read = json.call(this)
+      if (this.url.includes('/api/v1/ai/sessions')) reads.push(read)
+      return read
+    })
+    const { result, rerender } = renderHook(({ on }) => useAttention(on), { initialProps: { on: true } })
+    await waitFor(() => expect(answer).toBeDefined())
+    rerender({ on: false })
+    act(() => answer?.())
+    await waitFor(() => expect(reads).toHaveLength(1))
+    await act(async () => {
+      await reads[0]
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    spy.mockRestore()
+    expect(result.current.running).toBeNull()
+  })
+
   it('reads nothing while the assistant is off', async () => {
     const seen = vi.fn()
     server.use(

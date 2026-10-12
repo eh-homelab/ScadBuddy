@@ -12,6 +12,24 @@ const ANALYZERS_LATER =
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
+    operation: 'POST /api/v1/workflow-runs/{run_id}/answer',
+    reason:
+      "A flow's entries are answered by the browser user on the Workflows page only (spec §6.6, plan 6 " +
+      'Ruling 6); the route refuses an agent-authored request.',
+  },
+  {
+    operation: 'POST /api/v1/workflow-runs/{run_id}/decide',
+    reason:
+      "A flow's outward calls are approved by the browser user on the Workflows page only (spec §6.6, plan 6 " +
+      'Ruling 6); the route refuses an agent-authored request.',
+  },
+  {
+    operation: 'DELETE /api/v1/workflow-runs/{run_id}',
+    reason:
+      "Forgets a flow run: its payload key, workflow and row (#1057). A person's decision on the Workflows " +
+      'page; the route refuses an agent-authored request.',
+  },
+  {
     operation: 'GET /api/v1/print/library/{file_id}/objects',
     reason:
       "The Arrange dialog's list of a library file's objects, with a count each (#1863). The arrange " +
@@ -55,12 +73,6 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: "One-time setup that edits Bambuddy's own sidebar; an operator action in Settings, not an agent task.",
   },
   {
-    operation: 'PUT /api/v1/outputs/{output_id}/thumbnail',
-    reason:
-      "Uploads the 3D viewer's canvas capture. An agent has no canvas; a browser_* tool driving the open tab " +
-      'can (#254, #266).',
-  },
-  {
     operation: 'GET /api/v1/outputs/{output_id}/files/{name}',
     reason: 'binary download; the agent reads `bom` and `files` from GET /outputs/{id}',
   },
@@ -75,10 +87,10 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason:
       'the host migrates inputs as it opens a preset or output; the agent reads inputs already migrated',
   },
-  // #274: template media. An agent reads `media` (ids, captions, order) from the model record.
+  // #274: template media. An agent reads `media` (ids, captions, order) from the model record;
+  // workspace_save (#2329) saves an item's file into the workspace, and add_model_media adds one.
   ...(
     [
-      'GET /api/v1/models/{slug}/media/{item_id}',
       'GET /api/v1/models/{slug}/media/{item_id}/poster',
       'GET /api/v1/models/{slug}/media/{item_id}/thumbnail',
     ] as const
@@ -88,10 +100,6 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'Serves an image or video file to the browser; an agent gets the item list from the model record ' +
       'and has no use for the bytes.',
   })),
-  {
-    operation: 'POST /api/v1/models/{slug}/media',
-    reason: 'A multipart upload of an image or video from the user; an agent has no file to send.',
-  },
   ...(
     [
       'PATCH /api/v1/models/{slug}/media/{item_id}',
@@ -114,13 +122,6 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "Serves the image files beside a model to the browser, so a README's relative `![](thumbnail.png)` " +
       'shows (#951). The bytes are only useful to an <img>; an agent reads the README itself through ' +
       'get_source_file and sees the image path in it.',
-  },
-  {
-    operation: 'GET /api/v1/models/{slug}/libraries/{name}/files/{path}',
-    reason:
-      "Serves the file a go-to-definition lands in to the source editor's read-only view (#185). The " +
-      'editor asks for the path openscad-lsp named; an agent has no definition to follow and reads a ' +
-      "model's own files through get_source and get_source_file.",
   },
   {
     operation: 'GET /api/v1/analyzers',
@@ -183,11 +184,32 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'like the rest of the rack picker; an agent prints through print_output, which takes the ' +
       'remembered algorithm, and a tool for changing it is a follow-up.',
   },
+  ...(
+    [
+      'POST /api/v1/print/outputs/{output_id}/preview-slice',
+      'POST /api/v1/print/library/{file_id}/preview-slice',
+      'GET /api/v1/print/outputs/{output_id}/preview-slices/{job_id}',
+      'GET /api/v1/print/library/{file_id}/preview-slices/{job_id}',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      "The print dialog's background reslice (#2169), which shows grams, time and the nozzle plan beside " +
+      'the choices while a person changes them. An agent prints through print_output, whose run slices ' +
+      'anyway, and reads the plan from the print check.',
+  })),
+  {
+    operation: 'POST /api/v1/print/printers/{printer_id}/trays/{ams_id}/{tray_id}/spool',
+    reason:
+      "Records in Bambuddy which spool is in an untagged tray (#2164), sent only on a person's own answer " +
+      "to the print dialog's question; an agent cannot see which spool is physically in the tray.",
+  },
   {
     operation: 'GET /api/v1/print/printers/{printer_id}/rack-usage',
     reason:
       "Settings' Hotend usage table (#1298). An agent already sees each rack position's prints, " +
-      "print time and open picks in the print check's rack options, for the hotends that job could use.",
+      "print time and open picks in the print check's rack options, for the hotends that job could use. " +
+      "It also answers each hotend's serial (#2170), which is for the Settings page and stays out of a model's context.",
   },
 ]
 

@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import type { Param, ParamValue } from '../../api/types'
+import { UNINSTALLABLE_FONT } from '../../mocks/fixtures'
 import { ParamWidget } from './ParamWidget'
 
 const fonts = [
@@ -507,6 +508,102 @@ describe('font', () => {
 
     await waitFor(() => expect(onChange).toHaveBeenLastCalledWith('Pacifico:style=Regular'))
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('flags families the render was refused for and installs one from the field (#1286)', async () => {
+    const user = userEvent.setup()
+    const onFontInstalled = vi.fn()
+    render(
+      <ParamWidget
+        slug="name-keychain"
+        param={param}
+        value="Roboto:style=Bold"
+        fonts={fonts}
+        missingFonts={['Roboto']}
+        onFontInstalled={onFontInstalled}
+        onChange={vi.fn()}
+      />,
+    )
+    const field = screen.getByRole('combobox', { name: 'Typeface' })
+    expect(field).toHaveAttribute('aria-invalid', 'true')
+    expect(field).toHaveAccessibleDescription(
+      'Roboto is not installed, so this would render in the default font.',
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Install Roboto' }))
+
+    await waitFor(() => expect(onFontInstalled).toHaveBeenCalledWith(expect.objectContaining({ family: 'Roboto' })))
+  })
+
+  it('says why a family could not be installed from the field', async () => {
+    const user = userEvent.setup()
+    const onFontInstalled = vi.fn()
+    render(
+      <ParamWidget
+        slug="name-keychain"
+        param={param}
+        value={UNINSTALLABLE_FONT}
+        fonts={fonts}
+        missingFonts={[UNINSTALLABLE_FONT]}
+        onFontInstalled={onFontInstalled}
+        onChange={vi.fn()}
+      />,
+    )
+
+    await user.click(screen.getByRole('button', { name: `Install ${UNINSTALLABLE_FONT}` }))
+
+    expect(await screen.findByText(/could not be downloaded/)).toBeInTheDocument()
+    expect(onFontInstalled).not.toHaveBeenCalled()
+  })
+
+  it('drops a failed install\u2019s message once a different family is refused', async () => {
+    const user = userEvent.setup()
+    const props = { slug: 'name-keychain', param, fonts, onChange: vi.fn() }
+    const { rerender } = render(
+      <ParamWidget {...props} value={UNINSTALLABLE_FONT} missingFonts={[UNINSTALLABLE_FONT]} />,
+    )
+    await user.click(screen.getByRole('button', { name: `Install ${UNINSTALLABLE_FONT}` }))
+    expect(await screen.findByText(/could not be downloaded/)).toBeInTheDocument()
+
+    rerender(<ParamWidget {...props} value="Roboto:style=Bold" missingFonts={['Roboto']} />)
+    expect(screen.getByRole('button', { name: 'Install Roboto' })).toBeInTheDocument()
+    expect(screen.queryByText(/could not be downloaded/)).not.toBeInTheDocument()
+  })
+
+  it('drops a failed install\u2019s message when the same family is refused again (#2215)', async () => {
+    const user = userEvent.setup()
+    const props = { slug: 'name-keychain', param, fonts, onChange: vi.fn(), value: UNINSTALLABLE_FONT }
+    const first = { parameters: [param.name], families: [UNINSTALLABLE_FONT] }
+    const { rerender } = render(
+      <ParamWidget {...props} missingFonts={[UNINSTALLABLE_FONT]} fontRefusal={first} />,
+    )
+    await user.click(screen.getByRole('button', { name: `Install ${UNINSTALLABLE_FONT}` }))
+    expect(await screen.findByText(/could not be downloaded/)).toBeInTheDocument()
+
+    // A later render refused for the same family: equal contents, a new refusal.
+    const again = { parameters: [param.name], families: [UNINSTALLABLE_FONT] }
+    rerender(<ParamWidget {...props} missingFonts={[UNINSTALLABLE_FONT]} fontRefusal={again} />)
+    expect(screen.getByRole('button', { name: `Install ${UNINSTALLABLE_FONT}` })).toBeInTheDocument()
+    expect(screen.queryByText(/could not be downloaded/)).not.toBeInTheDocument()
+  })
+
+  it('keeps a failed install\u2019s message while its own refusal stands', async () => {
+    const user = userEvent.setup()
+    const props = { slug: 'name-keychain', param, fonts, onChange: vi.fn(), value: UNINSTALLABLE_FONT }
+    const refusal = { parameters: [param.name], families: [UNINSTALLABLE_FONT] }
+    const { rerender } = render(<ParamWidget {...props} missingFonts={[UNINSTALLABLE_FONT]} fontRefusal={refusal} />)
+    await user.click(screen.getByRole('button', { name: `Install ${UNINSTALLABLE_FONT}` }))
+    expect(await screen.findByText(/could not be downloaded/)).toBeInTheDocument()
+
+    // The page renders again for another reason; the refusal is the same object.
+    rerender(<ParamWidget {...props} missingFonts={[UNINSTALLABLE_FONT]} fontRefusal={refusal} />)
+    expect(screen.getByText(/could not be downloaded/)).toBeInTheDocument()
+  })
+
+  it('is not flagged when nothing is missing', () => {
+    setup(param, 'Liberation Sans:style=Bold')
+    expect(screen.getByRole('combobox', { name: 'Typeface' })).not.toHaveAttribute('aria-invalid')
+    expect(screen.queryByRole('button', { name: /^Install/ })).not.toBeInTheDocument()
   })
 
   it('seeds the picker preview with the model\u2019s own text', async () => {

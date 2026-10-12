@@ -2,9 +2,12 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-# ScadBuddy's Grafana dashboard (spec 2026-10-01 §7, #988), as a ConfigMap the
-# rancher-monitoring Grafana's dashboard sidecar loads: it watches
-# `cattle-dashboards` for the `grafana_dashboard: "1"` label.
+# ScadBuddy's Grafana dashboards (spec 2026-10-01 §7, #988), one ConfigMap each, which
+# the rancher-monitoring Grafana's dashboard sidecar loads: it watches
+# `cattle-dashboards` for the `grafana_dashboard: "1"` label. Each `<name>.json` has
+# uid `<name>` and is the only file of ConfigMap `<name>-dashboard`
+# (.github/scripts/lint-dashboard.sh checks all three). One ConfigMap per dashboard keeps
+# each well under the 256 KiB last-applied annotation a client-side apply writes.
 #
 # eh-homelab/clusters' clusters/prod/scadbuddy overlay pulls this directory in
 # as a remote resource pinned to a full commit SHA, and deploy.reusable.yml
@@ -19,7 +22,8 @@ kind: Kustomization
 #
 # No folder annotation: clusters/prod/rk2-rancher-monitoring-values.yaml sets
 # the sidecar's `folderAnnotation: null`, so a per-ConfigMap folder is ignored
-# and the dashboard lands in General.
+# and the dashboards land in General; they share the tag `scadbuddy`, which
+# each one's links menu lists.
 #
 # No hash suffix: the sidecar keys on the dashboard's uid, not the ConfigMap's
 # name, and a stable name lets ArgoCD update it in place.
@@ -32,3 +36,43 @@ configMapGenerator:
         grafana_dashboard: "1"
     files:
       - scadbuddy.json
+  - name: scadbuddy-api-dashboard
+    namespace: cattle-dashboards
+    options:
+      disableNameSuffixHash: true
+      labels:
+        grafana_dashboard: "1"
+    files:
+      - scadbuddy-api.json
+  - name: scadbuddy-web-dashboard
+    namespace: cattle-dashboards
+    options:
+      disableNameSuffixHash: true
+      labels:
+        grafana_dashboard: "1"
+    files:
+      - scadbuddy-web.json
+  - name: scadbuddy-renders-dashboard
+    namespace: cattle-dashboards
+    options:
+      disableNameSuffixHash: true
+      labels:
+        grafana_dashboard: "1"
+    files:
+      - scadbuddy-renders.json
+  - name: scadbuddy-printing-dashboard
+    namespace: cattle-dashboards
+    options:
+      disableNameSuffixHash: true
+      labels:
+        grafana_dashboard: "1"
+    files:
+      - scadbuddy-printing.json
+  - name: scadbuddy-agent-dashboard
+    namespace: cattle-dashboards
+    options:
+      disableNameSuffixHash: true
+      labels:
+        grafana_dashboard: "1"
+    files:
+      - scadbuddy-agent.json

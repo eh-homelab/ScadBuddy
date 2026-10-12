@@ -65,6 +65,7 @@ describe('route groups', () => {
     const served = new Set(app.routes.filter((r) => r.method !== 'ALL').map((r) => `${r.method} ${r.path}`))
     for (const endpoint of [
       'GET /api/v1/ai/status',
+      'GET /api/v1/ai/templates/blank',
       'GET /api/v1/ai/chat',
       'GET /api/v1/ai/sessions',
       'POST /api/v1/ai/sessions',
@@ -73,6 +74,7 @@ describe('route groups', () => {
       'GET /api/v1/ai/sessions/:id/events',
       'POST /api/v1/ai/sessions/:id/interrupt',
       'POST /api/v1/ai/sessions/:id/handoff',
+      'DELETE /api/v1/ai/sessions/:id/handoff',
       'POST /api/v1/ai/approvals/:id/:verb{approve|deny}',
       'GET /api/v1/ai/audit',
       'PUT /api/v1/ai/audit/settings',

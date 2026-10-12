@@ -10,6 +10,8 @@ import { PrintDetailPage } from './pages/PrintDetailPage'
 import { PrintsPage, TemplatePrintsPage } from './pages/PrintsPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { VersionsPage } from './pages/VersionsPage'
+import { WorkflowRunPage } from './pages/WorkflowRunPage'
+import { WorkflowsPage } from './pages/WorkflowsPage'
 
 // Monaco is the biggest thing in the bundle and only these two routes want it, so
 // they are split out: opening the customizer never downloads an editor.
@@ -18,6 +20,9 @@ const NewModelPage = lazy(async () => ({
 }))
 const EditSourcePage = lazy(async () => ({
   default: (await import('./pages/EditSourcePage')).EditSourcePage,
+}))
+const EditSourceFilePage = lazy(async () => ({
+  default: (await import('./pages/EditSourceFilePage')).EditSourceFilePage,
 }))
 
 function Editing({ children }: { children: ReactNode }) {
@@ -56,13 +61,23 @@ export function App() {
             </Editing>
           }
         />
+        <Route
+          path="m/:slug/source/:file"
+          element={
+            <Editing>
+              <EditSourceFilePage />
+            </Editing>
+          }
+        />
         <Route path="m/:slug/history" element={<HistoryPage />} />
         <Route path="m/:slug/versions" element={<VersionsPage />} />
         <Route path="m/:slug/prints" element={<TemplatePrintsPage />} />
         <Route path="prints" element={<PrintsPage />} />
         <Route path="edit/:outputId" element={<EditPage />} />
         <Route path="prints/:archiveId" element={<PrintDetailPage />} />
-        <Route path="library" element={<LibraryPage />} />
+        <Route path="library/*" element={<LibraryPage />} />
+        <Route path="workflows" element={<WorkflowsPage />} />
+        <Route path="workflows/runs/:id" element={<WorkflowRunPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>

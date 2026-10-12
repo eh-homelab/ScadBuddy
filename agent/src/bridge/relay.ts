@@ -5,8 +5,10 @@ import { CallOutcomeSchema, type CallOutcome } from './protocol.js'
 
 // browser_* calls between agent replicas (#1916). A tab's bridge socket is held
 // by the replica it reached (bridge/hub.ts), while the call can come from any
-// replica: a turn runs where its chat socket started it, and an MCP client's
-// session lives on the replica that opened it. When the tab is not connected
+// replica: a classic turn runs where its chat socket started it, a durable
+// session's tool call wherever its activity was taken (bridge/sessionTabs.ts),
+// and an MCP call on the replica holding its session (mcp/sessionRelay.ts).
+// When the tab is not connected
 // here, the hub forwards the call through Postgres, as the event bus carries
 // `session.*` between replicas (sessions/busEvents.ts):
 //

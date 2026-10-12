@@ -77,7 +77,8 @@ request), and the manager's rules apply unchanged (spec §6):
   approvals. An offer is made whether or not `to` names a live token, so the answer
   never tells a caller which token ids are live; one nobody can accept lapses at its
   `until` (an hour), and the owner can withdraw it with `sessions_cancel_handoff`
-  (PR #715 review).
+  (PR #715 review), or the browser user with `DELETE /api/v1/ai/sessions/:id/handoff`
+  (the panel's "Cancel offer", #1284).
 - A turn a token sends runs its in-process tools with **that token's tiers**
   (`SendOptions.tiers` in `manager.ts`, `turnPrincipal()` in
   [`agent/src/tools/harness.ts`](../../agent/src/tools/harness.ts)). Without them a
@@ -116,8 +117,10 @@ spec §6 "Handoff": ownership moves "explicitly"). Now (`handoff()` in `manager.
   may read it with `sessions_get` before deciding. Reading is all an offer lets anyone
   push at another agent, and the transcript arrives in the untrusted-data envelope like
   any other.
+- **Shown** in the panel's session switcher as "Offered to …" (#1284): `sessions.snapshot`
+  carries each session's live offer, its target named as the viewer may see it.
 - **It ends** when the owner withdraws it or the target declines it
-  (`sessions_cancel_handoff`), after `HANDOFF_OFFER_TTL_MS` (one hour; an expired offer
+  (`sessions_cancel_handoff`, or `DELETE /api/v1/ai/sessions/:id/handoff` from the panel), after `HANDOFF_OFFER_TTL_MS` (one hour; an expired offer
   reads as none), or when the owner changes by any route, the browser's take-over
   included. One offer at a time: a new one replaces it.
 - **Announced** as `session.owner` on the bus (§4) when it is made, withdrawn or

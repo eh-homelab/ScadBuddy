@@ -176,6 +176,7 @@ stored on ScadBuddy's server and is never sent to the browser.
    | **Read Status** | listing printers, spools and AMS slots for the print picker and **Test connection** |
    | **Manage Projects** | only if you use the project picker |
    | **Manage Archives** | uploading and deleting print photos, and pulling a timelapse off the printer |
+   | **Manage Inventory** | only to record which spool is in a tray, when the print dialog asks and you answer yes |
 
 2. Open **Settings** in ScadBuddy. Under **Connection**, enter the **Bambuddy URL**
    and the **API key**, then press **Test connection**.
@@ -357,8 +358,14 @@ project, the same as an output's.
   volume. You can diff two revisions, **Customize this version** (render an old
   revision without restoring it), or **Restore this version** (restoring adds a new
   commit and never rewrites history).
-- **Edit source** opens the model's source in the editor. Saving it creates a new
-  revision.
+- **Edit source** opens the model's source in the editor. Saving it creates a
+  new revision. The row above the editor lists the model's `.scad` files:
+  `model.scad`, which every render opens, and any files beside it that it can
+  `include` or `use`. Open one to edit it on its own page, where **Save file**
+  and **Delete file** are each a revision too. **New file** adds one (`.scad` is
+  added to the name if you leave it off). If the model changed elsewhere since
+  you opened a file, saving it is refused and you can reload the file or keep
+  editing and save over it.
 
 ![Versions](images/versions.png)
 
@@ -541,6 +548,20 @@ into **Pairing code** in the tab it should use, and press **Allow** (or **Deny**
 code works once, for 5 minutes. The pairing lasts until you press **Disconnect**, 8
 hours pass, or the tab reloads
 ([browser-bridge.md](ai/browser-bridge.md#pairing-spec-85)).
+
+### The assistant's workspace
+
+The assistant has a workspace of its own for files: a session's files stay with it
+(and are deleted with it), and a fork starts with a copy. It can save a ScadBuddy file
+there (an output's 3MF, a model's file or picture, a print's photo or timelapse, a
+Bambuddy library file), download one from the web into it, and read, write, edit and
+delete its files, so a file it fetched does not have to pass through the conversation.
+What the headless browser downloads lands there too. It sends a workspace file on by
+name to any upload (an asset, a picture or video for the gallery, a thumbnail, a
+model's source, a README), and an approval it asks for names the file and its sha256.
+A file holds at most 25 MB and a session's workspace 200 MB. An MCP client working
+outside any session gets a workspace of its own whose files are deleted a day after
+they were last written ([operating.md §13](ai/operating.md#13-the-workspace-2329)).
 
 ### The headless browser
 

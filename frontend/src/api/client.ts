@@ -36,7 +36,9 @@ import type {
   CatalogueLibrary,
   DependencyReport,
   LibraryFileObjects,
+  LibraryDeleteResult,
   LibraryListing,
+  LibraryRestoreResult,
   LibraryPinRequest,
   InstalledLibrary,
   LibraryCheck,
@@ -71,7 +73,13 @@ import type {
   PrintPage,
   PrintProgress,
   PrintCheck,
+  PreviewStarted,
+  SlicePreview,
+  TrayAssigned,
   PrintRun,
+  FlowDecided,
+  FlowRun,
+  FlowRunView,
   Operation,
   OperationAccepted,
   PrintRunRequest,
@@ -93,6 +101,7 @@ import type {
   SettingsUpdate,
   SidebarLink,
   SourceCheck,
+  SourceFile,
   StoreUsage,
   UpstreamMerge,
   UpstreamStatus,
@@ -133,6 +142,13 @@ export type ThumbnailKeyed = Pick<
   ModelSummary,
   'slug' | 'version' | 'thumbnail_source' | 'thumbnail_output_id' | 'thumbnail_preview_id'
 >
+
+/** #1289 — `GET /jobs/{id}/colours.png`: tile `i` shows where `colours[i]` goes. */
+export interface ColourBreakdown {
+  image: Blob
+  colours: string[]
+  columns: number
+}
 
 /** The optional parts of a model upload besides its source (#179). */
 export interface UploadExtras {
@@ -528,9 +544,15 @@ export async function command<T>(
   init: RequestInit = {},
   /** Where the operation is followed: the backend's, or the agent's own (`/ai/operations`, #1055). */
   operations = '/operations',
+  /**
+   * The press's key. A caller offering "Try again" after a failure passes the failed
+   * attempt's, so the retry follows a start that may have happened rather than doing it
+   * a second time; a new press gets a new one.
+   */
+  key: string = newRequestId(),
 ): Promise<T> {
   const signal = init.signal ?? undefined
-  const headers = { ...(init.headers as Record<string, string> | undefined), 'Idempotency-Key': newRequestId() }
+  const headers = { ...(init.headers as Record<string, string> | undefined), 'Idempotency-Key': key }
   const first = await reattach(() => requestWithStatus<T | OperationAccepted>(path, { ...init, headers }), signal)
   return followOperation<T>(first, signal, operations)
 }
@@ -630,6 +652,31 @@ async function followPrintRun(
 }
 
 export const api = {
+  // Flows (#1057): runs, and a person's answers and approvals for them. An answer or
+  // a decision is an operation, keyed per call (`command`); a stale one is a 409
+  // `stale-entry`.
+  listFlowRuns: (query: { session?: string; definition_id?: string } = {}) => {
+    const params = new URLSearchParams()
+    if (query.session) params.set('session', query.session)
+    if (query.definition_id) params.set('definition_id', query.definition_id)
+    const search = params.toString()
+    return request<FlowRun[]>(`/workflow-runs${search ? `?${search}` : ''}`)
+  },
+
+  getFlowRun: (id: string) => request<FlowRunView>(`/workflow-runs/${seg(id)}`),
+
+  answerFlowRun: (id: string, callId: string, answer: string) =>
+    command<FlowDecided>(`/workflow-runs/${seg(id)}/answer`, {
+      method: 'POST',
+      body: JSON.stringify({ call_id: callId, answer }),
+    }),
+
+  decideFlowRun: (id: string, callId: string, approved: boolean, reason?: string) =>
+    command<FlowDecided>(`/workflow-runs/${seg(id)}/decide`, {
+      method: 'POST',
+      body: JSON.stringify({ call_id: callId, approved, ...(reason ? { reason } : {}) }),
+    }),
+
   listModels: () => request<ModelSummary[]>('/models'),
 
   getModel: (slug: string) => request<ModelSummary>(`/models/${seg(slug)}`),
@@ -782,6 +829,24 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ source, force, message: null }),
     }),
+
+  /** #1290 — the model's `.scad` files, `model.scad` first (`GET /models/{slug}/files`). */
+  listSourceFiles: (slug: string) => request<SourceFile[]>(`/models/${seg(slug)}/files`),
+
+  /**
+   * #1290 — writes a `.scad` file beside `model.scad` as one revision. With `base`, a
+   * 409 naming the `current` revision when the model has moved on since, writing
+   * nothing. `model.scad` itself is written with `replaceSource`.
+   */
+  writeSourceFile: (slug: string, name: string, content: string, base?: string) =>
+    command<ModelSummary>(`/models/${seg(slug)}/files/${seg(name)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ content, message: null, base: base ?? null }),
+    }),
+
+  /** #1290 — removes a `.scad` file beside `model.scad` as one revision. */
+  deleteSourceFile: (slug: string, name: string) =>
+    command<ModelSummary>(`/models/${seg(slug)}/files/${seg(name)}`, { method: 'DELETE' }),
 
 
   /**
@@ -1009,6 +1074,24 @@ export const api = {
 
   previewUrl: (jobId: string) => `${API_BASE}/jobs/${seg(jobId)}/preview.glb`,
 
+  /**
+   * #1289 — the job drawn once per colour (`GET /jobs/{id}/colours.png`): the grid, and
+   * its tiles' colours row by row with the grid's width, from the route's own headers.
+   */
+  getJobColours: async (jobId: string, view: string, signal?: AbortSignal): Promise<ColourBreakdown> => {
+    const response = await send(`${API_BASE}/jobs/${seg(jobId)}/colours.png?view=${encodeURIComponent(view)}`, {
+      headers: { Accept: 'image/png' },
+      ...(signal ? { signal } : {}),
+    })
+    if (!response.ok) throw new ApiError(await readProblem(response))
+    const colours = (response.headers.get('X-ScadBuddy-Colours') ?? '').split(',').filter(Boolean)
+    const columns = Number(response.headers.get('X-ScadBuddy-Colour-Columns'))
+    if (colours.length === 0 || !Number.isInteger(columns) || columns < 1) {
+      throw new ApiError({ title: 'The colour breakdown came without its legend', status: response.status })
+    }
+    return { image: await response.blob(), colours, columns }
+  },
+
   /** A file under a template's `ui/` (spec 2026-09-27 §4.1): pinned by revision when there is one. */
   uiFileUrl: (slug: string, version: string | undefined, path: string) =>
     `${API_BASE}/models/${seg(slug)}${version ? `/versions/${seg(version)}` : ''}/ui/${path
@@ -1024,17 +1107,25 @@ export const api = {
   backfillOutput: (outputId: string) =>
     request<Job>(`/outputs/${seg(outputId)}/backfill`, { method: 'POST' }),
 
-  /** `index` picks one of a pipeline job's outputs (spec 2026-09-27 §5.2); the first by default. */
-  createOutput: (slug: string, jobId: string, name?: string, inputs?: JsonObject, index?: number) =>
-    command<Output>(`/models/${seg(slug)}/outputs`, {
-      method: 'POST',
-      body: JSON.stringify({
-        job_id: jobId,
-        name: name ?? null,
-        ...(inputs ? { inputs } : {}),
-        ...(index !== undefined ? { index } : {}),
-      }),
-    }),
+  /**
+   * `index` picks one of a pipeline job's outputs (spec 2026-09-27 §5.2); the first by
+   * default. `key` is a retried press's (`command`), so the retry saves one output.
+   */
+  createOutput: (slug: string, jobId: string, name?: string, inputs?: JsonObject, index?: number, key?: string) =>
+    command<Output>(
+      `/models/${seg(slug)}/outputs`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          job_id: jobId,
+          name: name ?? null,
+          ...(inputs ? { inputs } : {}),
+          ...(index !== undefined ? { index } : {}),
+        }),
+      },
+      undefined,
+      key,
+    ),
 
   /** Saved inputs brought up to the template's `INPUTS_VERSION` (spec 2026-09-27 §8.2). */
   migrateInputs: (slug: string, inputs: JsonObject, version?: string) =>
@@ -1088,7 +1179,9 @@ export const api = {
     `${API_BASE}/outputs/${seg(id)}/plates/${index}/thumbnail`,
 
   /** #1723 — the output's preview mesh, every part in its colour. */
-  outputPreviewGlbUrl: (id: string) => `${API_BASE}/outputs/${seg(id)}/preview.glb`,
+  /** The output's preview mesh, or with `plate` that one plate of its 3MF (#2169). */
+  outputPreviewGlbUrl: (id: string, plate?: number) =>
+    `${API_BASE}/outputs/${seg(id)}/preview.glb${plate === undefined ? '' : `?plate=${plate}`}`,
 
   sendOutput: (id: string, body: SendRequest) =>
     command<SendResult>(`/outputs/${seg(id)}/send`, { method: 'POST', body: JSON.stringify(body) }),
@@ -1193,6 +1286,34 @@ export const api = {
     }),
 
   /**
+   * #2169 — slice the dialog's choices in the background, through the run's own path,
+   * without queueing; follow it with `getPreviewSlice`.
+   */
+  previewSlice: (outputId: string, body: PrintRunRequest) =>
+    command<PreviewStarted>(`/print/outputs/${seg(outputId)}/preview-slice`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  /** #2169 — how an output's background slice stands, and what it came to once finished. */
+  getPreviewSlice: (outputId: string, jobId: number) =>
+    request<SlicePreview>(`/print/outputs/${seg(outputId)}/preview-slices/${jobId}`),
+
+  /** #2169 — as `getPreviewSlice`, for a library file's. */
+  getLibraryPreviewSlice: (fileId: number, jobId: number) =>
+    request<SlicePreview>(`/print/library/${fileId}/preview-slices/${jobId}`),
+
+  /**
+   * #2164 — record in Bambuddy which spool is in a tray it had no spool for. Sent only
+   * on the person's own "yes".
+   */
+  assignTraySpool: (printerId: number, amsId: number, trayId: number, spoolId: number) =>
+    command<TrayAssigned>(`/print/printers/${printerId}/trays/${amsId}/${trayId}/spool`, {
+      method: 'POST',
+      body: JSON.stringify({ spool_id: spoolId }),
+    }),
+
+  /**
    * #284 — judge an output against the request the print dialog would send. Reads only:
    * nothing is uploaded, sliced or queued (`post_run`, backend/scadbuddy/api/analyzers.py).
    */
@@ -1288,13 +1409,29 @@ export const api = {
   },
 
   /** #313 — Bambuddy's folder tree and one folder's files; `all` adds sliced files and STLs. */
-  listLibrary: (query: { folderId: number | null; all: boolean }) => {
+  /** `fileId` in place of `folderId` lists the folder that file is in (#2165). */
+  listLibrary: (query: { folderId: number | null; all: boolean; fileId?: number }) => {
     const search = new URLSearchParams()
     if (query.folderId !== null) search.set('folder_id', String(query.folderId))
+    else if (query.fileId !== undefined) search.set('file_id', String(query.fileId))
     if (query.all) search.set('all', 'true')
     const suffix = search.size > 0 ? `?${search}` : ''
     return request<LibraryListing>(`/print/library${suffix}`)
   },
+
+  /** #2167 — files to Bambuddy's trash; the ones it skipped come back in `skipped`. */
+  deleteLibraryFiles: (fileIds: number[]) =>
+    command<LibraryDeleteResult>('/print/library/delete', {
+      method: 'POST',
+      body: JSON.stringify({ file_ids: fileIds }),
+    }),
+
+  /** #2167 — a delete's Undo: the files back from Bambuddy's trash. */
+  restoreLibraryFiles: (fileIds: number[]) =>
+    command<LibraryRestoreResult>('/print/library/restore', {
+      method: 'POST',
+      body: JSON.stringify({ file_ids: fileIds }),
+    }),
 
   libraryThumbnailUrl: (fileId: number) => `${API_BASE}/print/library/${fileId}/thumbnail`,
 
@@ -1349,6 +1486,13 @@ export const api = {
 
   checkLibraryPrint: (fileId: number, body: PrintRunRequest) =>
     request<PrintCheck>(`/print/library/${fileId}/check`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  /** #2169 — slice the dialog's choices for a library file in the background. */
+  previewLibrarySlice: (fileId: number, body: PrintRunRequest) =>
+    command<PreviewStarted>(`/print/library/${fileId}/preview-slice`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
@@ -1621,6 +1765,15 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ add_usd: addUsd }),
     }),
+
+  /** #1284 — withdraws the session's live handoff offer; `cancelled` is false when there was none. */
+  cancelAiSessionOffer: (id: string) =>
+    request<{ cancelled: boolean; session: AiSessionView }>(`/ai/sessions/${encodeURIComponent(id)}/handoff`, {
+      method: 'DELETE',
+    }),
+
+  /** #1288 — one session, as the browser user sees it; 404 when it is gone or not theirs to show. */
+  getAiSession: (id: string) => request<AiSessionView>(`/ai/sessions/${encodeURIComponent(id)}`),
 
   /** #931 — what a session's tool calls created, changed or deleted, oldest first. */
   listAiSessionResources: (id: string) =>

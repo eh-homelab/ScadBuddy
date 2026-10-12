@@ -11,6 +11,7 @@ import json
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -29,6 +30,7 @@ from session_support import (
     until,
 )
 from temporalio import activity
+from temporalio.claude_agent_sdk import ClaudeAgentPlugin
 from temporalio.claude_agent_sdk.testing import Final, HistoryItem, ScriptedClaude, ToolCall
 from temporalio.client import (
     Client,
@@ -38,21 +40,31 @@ from temporalio.client import (
 )
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
-from temporalio.worker import Worker
+from temporalio.worker import Replayer, Worker
+from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
 
 from scadbuddy_durable.codec import PgPayloadKeys, data_converter
 from scadbuddy_durable.gate.activities import GateActivities
 from scadbuddy_durable.gate.names import (
     CANCEL_INPUT_UPDATE,
+    END_SIGNAL,
     INTERRUPT_SIGNAL,
     PENDING_INPUT_QUERY,
     RESPOND_UPDATE,
 )
 from scadbuddy_durable.gate.store import ResolveInput
+from scadbuddy_durable.payload_store import OFFLOAD_BYTES, external_storage
 from scadbuddy_durable.secrets import kek_from_base64
 from scadbuddy_durable.session import tools
 from scadbuddy_durable.session.activities import SessionActivities
-from scadbuddy_durable.session.models import TURN_QUERY, FinishTurn, GateSettings
+from scadbuddy_durable.session.models import (
+    SEGMENT_CONTEXT_QUERY,
+    TURN_QUERY,
+    FinishTurn,
+    GateSettings,
+    SegmentContext,
+)
+from scadbuddy_durable.session.workflow import DurableSession
 from scadbuddy_durable.worker import build_worker
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
@@ -99,6 +111,7 @@ class Harness:
     queue: str
     agent: Worker
     handles: list[WorkflowHandle[Any, Any]]
+    payload_dir: Path = Path()
     session_activities: SessionActivities | None = None
     gate_activities: GateActivities | None = None
 
@@ -121,17 +134,19 @@ class Harness:
 
 
 @pytest.fixture
-async def harness(temporal_env: WorkflowEnvironment, connect: Connect) -> AsyncIterator[Harness]:
+async def harness(
+    temporal_env: WorkflowEnvironment, connect: Connect, tmp_path: Path
+) -> AsyncIterator[Harness]:
     tools.use_manifest(MANIFEST)
     keys = PgPayloadKeys(connect, KEK)
     client = await Client.connect(
         temporal_env.client.service_client.config.target_host,
         namespace=temporal_env.client.namespace,
-        data_converter=data_converter(keys),
+        data_converter=data_converter(keys, external_storage(tmp_path)),
     )
     stand_in = StandInTools(connect)
     queue = f"agent-{uuid.uuid4().hex[:8]}"
-    h = Harness(client, connect, stand_in, queue, None, [])  # type: ignore[arg-type]
+    h = Harness(client, connect, stand_in, queue, None, [], payload_dir=tmp_path)  # type: ignore[arg-type]
     agent = h.restart_agent()
     async with tools_worker(client, stand_in):
         task = asyncio.create_task(agent.run())
@@ -212,6 +227,27 @@ async def test_history_holds_no_plaintext(
     raw = b"".join(e.SerializeToString() for e in history.events)
     assert b"red bracket" not in raw
     assert b"binary/scadbuddy-subject" in raw
+
+
+async def test_a_large_turn_crosses_history_as_references(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#2243: the message, the segment's input and its answer, the stream and the turn's
+    events all carry the text, and none of history's events does."""
+    sid, handle = await harness.session(agent_db)
+    text = "a long brief " + "z" * (OFFLOAD_BYTES * 4)
+    await send(handle, text)
+    assert await settled(connect, sid) == "idle"
+    deltas = [
+        e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"
+    ]
+    [delta] = deltas  # the panel's delta is cut to 32 KiB; the answer was whole
+    assert delta.startswith("you said: a long brief zzzz")
+    history = await handle.fetch_history()
+    # Nothing at the threshold or over it is inline: the message alone is four times it.
+    assert max(e.ByteSize() for e in history.events) < OFFLOAD_BYTES + 4096
+    assert b"zzzz" not in b"".join(e.SerializeToString() for e in history.events)
+    assert any((harness.payload_dir / f"session-{sid}").iterdir())
 
 
 async def test_an_approved_call_runs_once_and_is_reported(
@@ -406,6 +442,29 @@ async def test_interrupt_ends_the_turn_even_while_the_worker_is_down(
     assert harness.stand_in.ran == []
 
 
+async def test_end_completes_an_idle_session(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#1056: a session marked done ends its workflow."""
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "hi")
+    await settled(connect, sid)
+    await handle.signal(END_SIGNAL, {})
+    await asyncio.wait_for(handle.result(), 30)
+
+
+async def test_end_during_a_turn_completes_the_session_after_it(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "print it")
+    await _parked(handle)
+    await handle.signal(END_SIGNAL, {})
+    await handle.execute_update(CANCEL_INPUT_UPDATE, {"reason": "done"})
+    assert await settled(connect, sid) == "idle"
+    await asyncio.wait_for(handle.result(), 30)
+
+
 async def test_the_handler_set_is_the_gates_and_the_plugins(
     harness: Harness, agent_db: Conn, connect: Connect
 ) -> None:
@@ -418,13 +477,14 @@ async def test_the_handler_set_is_the_gates_and_the_plugins(
     signals = {s.name for s in definition.signal_definitions}
     queries = {q.name for q in definition.query_definitions}
     assert {"send_message", "respond", "cancel_input"} <= updates
-    assert "interrupt" in signals
+    assert {"interrupt", "end"} <= signals
     assert {"pending_input", "segment_context", "turn"} <= queries
     ours = {
         "send_message",
         "respond",
         "cancel_input",
         "interrupt",
+        "end",
         "pending_input",
         "segment_context",
         "turn",
@@ -645,3 +705,121 @@ async def test_a_stop_survives_a_database_outage_while_it_cancels_a_parked_call(
         assert await settled(connect, sid) == "idle"
     log = await events(agent_db, sid)
     assert [e["code"] for e in log if e["type"] == "error"] == ["interrupted"]
+
+
+# ---- Settings → Plugins overrides (#2088) ----
+
+
+async def _overrides(conn: Conn, tool_tiers: dict[str, str], disabled: list[str]) -> None:
+    await conn.execute(
+        "INSERT INTO ai_settings (key, value) VALUES (%s, %s)"
+        " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        (
+            tools.OVERRIDES_SETTING,
+            json.dumps({"tool_tiers": tool_tiers, "disabled_tools": disabled}),
+        ),
+    )
+
+
+async def _replays(harness: Harness, handle: WorkflowHandle[Any, Any]) -> None:
+    """The history replays on this code: the gates came from recorded results only."""
+    history = await handle.fetch_history()
+    await Replayer(
+        workflows=[DurableSession],
+        plugins=[ClaudeAgentPlugin(ScriptedClaude(policy))],
+        data_converter=harness.client.data_converter,
+        workflow_runner=SandboxedWorkflowRunner(
+            restrictions=SandboxRestrictions.default.with_passthrough_modules(
+                "scadbuddy_durable.session.tools"
+            )
+        ),
+    ).replay_workflow(history)
+
+
+async def test_a_tool_raised_to_outward_parks_and_runs_once_approved(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    await _overrides(agent_db, {"render_preview": "outward"}, [])
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "render it")
+    [entry] = await _parked(handle)
+    assert entry["kind"] == "approval"
+    assert entry["summary"] == "render_preview call"
+    assert harness.stand_in.ran == []
+    result = await handle.execute_update(
+        RESPOND_UPDATE, _respond(entry, {"kind": "approval", "decision": "approve"})
+    )
+    assert result == {"kind": "approval", "outcome": "approved"}
+    assert await settled(connect, sid) == "idle"
+    assert [r[0] for r in harness.stand_in.ran] == ["render_preview"]
+    texts = [e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"]
+    assert texts == ["render_preview: ok: rendered"]
+    log = await events(agent_db, sid)
+    assert _types(log).count("approval.required") == 1
+    await _replays(harness, handle)
+
+
+async def test_an_override_never_lowers_a_tool_below_its_own_tier(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """TIGHTEN ONLY (builtInTools.ts): an outward tool set to read still parks."""
+    await _overrides(agent_db, {"print_output": "read"}, [])
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "print it")
+    [entry] = await _parked(handle)
+    assert entry["kind"] == "approval"
+    await handle.execute_update(
+        RESPOND_UPDATE, _respond(entry, {"kind": "approval", "decision": "deny"})
+    )
+    assert await settled(connect, sid) == "idle"
+    assert harness.stand_in.ran == []
+
+
+async def test_a_disabled_tool_is_refused_naming_settings_and_never_parks(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    # Raised as well: a disabled tool is refused as disabled, never parked for approval.
+    await _overrides(agent_db, {"render_preview": "outward"}, ["render_preview"])
+    sid, handle = await harness.session(agent_db)
+    before = await handle.query(SEGMENT_CONTEXT_QUERY, result_type=SegmentContext)
+    assert before.disabled_tools == []  # no turn has read the settings yet
+    await send(handle, "render it")
+    assert await settled(connect, sid) == "idle"
+    assert harness.stand_in.ran == []
+    log = await events(agent_db, sid)
+    assert "approval.required" not in _types(log)
+    texts = [e["delta"] for e in log if e["type"] == "assistant.text.delta"]
+    assert len(texts) == 1
+    assert texts[0].startswith("render_preview: error")
+    assert "disabled in Settings → Plugins" in texts[0]
+    # What the segment runner reads, to leave the tool undeclared.
+    context = await handle.query(SEGMENT_CONTEXT_QUERY, result_type=SegmentContext)
+    assert context.disabled_tools == ["render_preview"]
+    await _replays(harness, handle)
+
+
+class OlderSettings(SessionActivities):
+    """gate_settings as a worker before #2088 answered it: the timers alone."""
+
+    @activity.defn(name="gate_settings")
+    async def gate_settings(self) -> dict[str, int]:  # type: ignore[override]
+        return {"approval_expiry_s": 600, "question_expiry_s": 3600}
+
+
+async def test_a_turn_an_older_worker_started_parks_by_the_manifest_and_replays(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """A history whose gate_settings result has no overrides keeps its old commands: the
+    raised call runs unparked (and is refused, as before #2088), and replays here."""
+    await harness.agent.shutdown()
+    harness.session_activities = OlderSettings(connect)
+    await _overrides(agent_db, {"render_preview": "outward"}, [])
+    async with harness.restart_agent():
+        sid, handle = await harness.session(agent_db)
+        await send(handle, "render it")
+        assert await settled(connect, sid) == "idle"
+    log = await events(agent_db, sid)
+    assert "approval.required" not in _types(log)
+    texts = [e["delta"] for e in log if e["type"] == "assistant.text.delta"]
+    assert texts and texts[0].startswith("render_preview: error")
+    await _replays(harness, handle)

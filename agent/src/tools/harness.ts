@@ -37,7 +37,7 @@ export type HarnessTools = {
   mcpServers: (
     session: { id?: string; owner: Owner },
     turn?: TurnPrincipal,
-    extras?: { waitForTab?: WaitForTab; turnContext?: () => Context; builtIn?: BuiltInPolicy },
+    extras?: { waitForTab?: WaitForTab; turnContext?: () => Context; builtIn?: BuiltInPolicy; secrets?: () => readonly string[] },
   ) => Record<string, McpSdkServerConfigWithInstance>
 }
 
@@ -51,24 +51,29 @@ export function harnessTools(services: ToolServices, tools: readonly Tool[] = AL
       // Settings → Plugins (#1953): a disabled tool is not offered, and one raised
       // past the principal's tiers is not either.
       const builtIn = extras?.builtIn
+      const seamTierOf = (t: Tool) => (builtIn ? builtIn.tierOf(`mcp__${SERVER_NAME}__${t.name}`, t.risk) : t.risk)
       const allowed = tools.filter((t) =>
-        builtIn
-          ? !builtIn.isDisabled(OWN_PLUGIN_NAME, t.name) && hasTier(principal, builtIn.tierOf(`mcp__${SERVER_NAME}__${t.name}`, t.risk))
-          : hasTier(principal, t.risk),
+        builtIn ? !builtIn.isDisabled(OWN_PLUGIN_NAME, t.name) && hasTier(principal, seamTierOf(t)) : hasTier(principal, t.risk),
       )
+      // The turn's own secrets (its credentials and plugin tokens) beside every
+      // saved credential's, for workspace_read to redact (#2329).
+      const turnSecrets = extras?.secrets
+      const withSecrets: ToolServices = turnSecrets
+        ? { ...services, secrets: async () => [...((await services.secrets?.()) ?? []), ...turnSecrets()] }
+        : services
       // The browser_* tools reach the tab this session is paired with (#254, bridge/hub.ts).
       const bound =
-        services.browser && session.id !== undefined
+        withSecrets.browser && session.id !== undefined
           ? {
-              ...services,
-              browser: services.browser.forSession(session.id),
+              ...withSecrets,
+              browser: withSecrets.browser.forSession(session.id),
               // #815 §2: a call that finds no tab may wait for it (browser.ts).
               ...(extras?.waitForTab ? { waitForTab: extras.waitForTab } : {}),
             }
-          : services
+          : withSecrets
       // The session id too, so its commits name it (authorship.ts, #252).
       // The turn's context, for a call whose span is not found (telemetry/trace.ts toolContextFor).
-      return { [SERVER_NAME]: createHarnessServer(allowed, bound, principal, session.id, extras?.turnContext) }
+      return { [SERVER_NAME]: createHarnessServer(allowed, bound, principal, session.id, extras?.turnContext, seamTierOf) }
     },
   }
 }
