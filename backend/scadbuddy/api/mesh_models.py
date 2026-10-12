@@ -38,11 +38,12 @@ ACCEPTED_SUFFIXES = (".3mf", ".stl")
 MAX_NAME_CHARS = 200
 #: The upload's ``name`` part: at most `MAX_NAME_CHARS` characters, 4 bytes each.
 MAX_NAME_BYTES = MAX_NAME_CHARS * 4
+MAX_DESCRIPTION_CHARS = 10_000
 
 
 class MeshModelCreate(BaseModel):
     name: str = Field(min_length=1, max_length=MAX_NAME_CHARS)
-    description: str = Field(default="", max_length=10_000)
+    description: str = Field(default="", max_length=MAX_DESCRIPTION_CHARS)
     library_file_id: int | None = Field(default=None, ge=1)
     output_id: str | None = Field(default=None, pattern=OUTPUT_ID_PATTERN)
 
@@ -62,6 +63,7 @@ class MeshUpload(BaseModel):
         max_length=MAX_NAME_CHARS,
         description="The model's name; the file's name without its extension when omitted",
     )
+    description: str | None = Field(default=None, max_length=MAX_DESCRIPTION_CHARS)
 
 
 class SceneEdits(BaseModel):
@@ -178,7 +180,11 @@ async def create_from_upload(
     catalogue: CatalogueDep,
     idempotency_key: IdempotencyKey = None,
 ) -> ModelRecord | JSONResponse:
-    received = await _receive(request, catalogue.paths.cache, fields={"name": MAX_NAME_BYTES})
+    received = await _receive(
+        request,
+        catalogue.paths.cache,
+        fields={"name": MAX_NAME_BYTES, "description": MAX_DESCRIPTION_CHARS * 4},
+    )
     try:
         path = received.files.get("file")
         if path is None or received.sizes["file"] == 0:
@@ -192,13 +198,21 @@ async def create_from_upload(
             )
         try:
             name = received.fields.get("name", bytearray()).decode("utf-8").strip()
+            description = received.fields.get("description", bytearray()).decode("utf-8")
         except UnicodeDecodeError:
-            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "the name is not UTF-8") from None
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, "the name or description is not UTF-8"
+            ) from None
         name = name or filename.rsplit(".", 1)[0]
         if len(name) > MAX_NAME_CHARS:
             raise ApiError(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
                 f"a name is at most {MAX_NAME_CHARS} characters",
+            )
+        if len(description) > MAX_DESCRIPTION_CHARS:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"a description is at most {MAX_DESCRIPTION_CHARS:,} characters",
             )
         digest = received.hashes["file"].hexdigest()
 
@@ -211,7 +225,7 @@ async def create_from_upload(
             catalogue,
             idempotency_key,
             name=name,
-            description="",
+            description=description,
             source={"kind": "upload", "claim": digest, "name": filename},
             claim=claim,
         )

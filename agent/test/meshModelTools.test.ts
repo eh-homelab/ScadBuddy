@@ -7,7 +7,7 @@ import { BACKEND, firstText, services } from './helpers/mcp.js'
 
 // #2146: mesh models. Every write is a command (an Idempotency-Key, 202 followed).
 
-type Seen = { method: string; path: string; body: unknown; key: string | null }
+type Seen = { method: string; path: string; body: unknown; key: string | null; fields?: Record<string, string> }
 
 function backend() {
   const seen: Seen[] = []
@@ -16,7 +16,9 @@ function backend() {
     const url = new URL(r.url)
     const type = r.headers.get('content-type') ?? ''
     const body = type.includes('json') ? await r.json() : type.includes('multipart') ? 'multipart' : undefined
-    seen.push({ method: r.method, path: url.pathname, body, key: r.headers.get('Idempotency-Key') })
+    // A multipart body's text parts (the file part is left out).
+    const fields = body === 'multipart' ? Object.fromEntries([...(await r.formData()).entries()].filter((e): e is [string, string] => typeof e[1] === 'string')) : undefined
+    seen.push({ method: r.method, path: url.pathname, body, key: r.headers.get('Idempotency-Key'), ...(fields === undefined ? {} : { fields }) })
     if (r.method === 'GET' && url.pathname === '/api/v1/models/carrot/scene')
       return Response.json({ scene: { version: 1, objects: [{ id: 'o1' }] }, notes: [], hand_edited: false })
     return Response.json(
@@ -62,7 +64,13 @@ describe('mesh model tools', () => {
   it('uploads base64 as multipart', async () => {
     const { seen, client } = backend()
     await call('create_model_from_mesh', { name: 'Carrot', filename: 'carrot.stl', content_base64: Buffer.from('solid x').toString('base64') }, client)
-    expect(seen[0]).toEqual(expect.objectContaining({ path: '/api/v1/models/from-mesh/upload', body: 'multipart' }))
+    expect(seen[0]).toEqual(expect.objectContaining({ path: '/api/v1/models/from-mesh/upload', body: 'multipart', fields: { name: 'Carrot' } }))
+  })
+
+  it('sends an upload\'s description as a multipart field', async () => {
+    const { seen, client } = backend()
+    await call('create_model_from_mesh', { name: 'Carrot', description: 'Two carrots', filename: 'carrot.stl', content_base64: Buffer.from('solid x').toString('base64') }, client)
+    expect(seen[0]).toEqual(expect.objectContaining({ path: '/api/v1/models/from-mesh/upload', fields: { name: 'Carrot', description: 'Two carrots' } }))
   })
 
   it('refuses no source, two sources, a missing filename and a wrong extension, sending nothing', async () => {

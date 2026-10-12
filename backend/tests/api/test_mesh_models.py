@@ -3,7 +3,9 @@ file, an upload or an output; read the scene; edit and eject, each one revision.
 
 from __future__ import annotations
 
+import io
 import json
+import zipfile
 from typing import Any
 
 import httpx
@@ -17,9 +19,8 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.presets import ParamPresetCreate
 from scadbuddy.meshmodel import ingest
 from scadbuddy.meshmodel import operations as mesh_operations
-from scadbuddy.meshmodel.scene import load_scene, text_sha256
+from scadbuddy.meshmodel.scene import MAX_OBJECTS, load_scene, text_sha256
 from scadbuddy.render.bambu3mf import stl_3mf
-from scadbuddy.render.read_budget import ReadBudget
 from tests.api.conftest import wait_for_job
 from tests.api.test_print_library import library_file
 from tests.api.test_send import configure, make_output
@@ -47,6 +48,7 @@ def upload(
     data: bytes | None = None,
     filename: str = "carrot.stl",
     key: dict[str, str] | None = None,
+    description: str | None = None,
 ) -> httpx.Response:
     response: httpx.Response = client.post(
         "/api/v1/models/from-mesh/upload",
@@ -57,7 +59,7 @@ def upload(
                 "application/octet-stream",
             )
         },
-        data={"name": name},
+        data={"name": name} if description is None else {"name": name, "description": description},
         headers=key or press(),
     )
     return response
@@ -228,15 +230,15 @@ def test_a_repeated_upload_is_one_model(client: TestClient, paths: DataPaths) ->
     assert not (paths.model_dir("carrot-2")).exists()
 
 
-def tight_budget(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A triangle budget the carrot's STL is past."""
-    monkeypatch.setattr(mesh_operations, "ReadBudget", lambda: ReadBudget(max_triangles=10))
+def tight_budget(client: TestClient) -> None:
+    """A triangle budget the carrot's STL is past, set as the operator sets it: a mesh
+    model's read takes the budget in effect, as Arrange's does."""
+    saved = client.put("/api/v1/settings", json={"read_max_triangles": 10})
+    assert saved.status_code == 200, saved.text
 
 
-def test_an_stl_upload_past_the_triangle_budget_is_refused(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    tight_budget(monkeypatch)
+def test_an_stl_upload_past_the_triangle_budget_is_refused(client: TestClient) -> None:
+    tight_budget(client)
     refused = upload(client)
     assert refused.status_code == 422, refused.text
     assert "triangles" in refused.json()["detail"]
@@ -246,7 +248,7 @@ def test_a_library_stl_past_the_triangle_budget_is_refused_before_it_loads(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     configure(client)
-    tight_budget(monkeypatch)
+    tight_budget(client)
 
     def never(*args: object, **kwargs: object) -> bytes:
         raise AssertionError("an STL past the budget is never loaded")
@@ -401,7 +403,12 @@ def test_arranging_a_mesh_models_output_writes_a_3mf_and_no_revision(client: Tes
     """The user's rule (#2146): arranging makes a 3MF output; it never adds to a model's history."""
     data = makerworld_path("411-broccoli.3mf").read_bytes()
     slug = upload(client, name="Broccoli", data=data, filename="broccoli.3mf").json()["slug"]
-    versions = client.get(f"/api/v1/models/{slug}/versions").json()
+    before = client.get(f"/api/v1/models/{slug}/versions")
+    assert before.status_code == 200, before.text
+    versions = before.json()
+    assert versions
+    # Under tests/api openscad is the fake (`tests/conftest.py` FAKE_OPENSCAD), so the
+    # output, and so what Arrange packs, is the fake's geometry, not the broccoli's.
     output_id = make_output(client, slug)
     arranged = client.post(
         "/api/v1/outputs/arrange",
@@ -411,4 +418,39 @@ def test_arranging_a_mesh_models_output_writes_a_3mf_and_no_revision(client: Tes
     assert arranged.status_code == 202, arranged.text
     job = wait_for_job(client, arranged.json()["id"])
     assert job["status"] == "done" and job["outputs"]
-    assert client.get(f"/api/v1/models/{slug}/versions").json() == versions
+    after = client.get(f"/api/v1/models/{slug}/versions")
+    assert after.status_code == 200, after.text
+    assert after.json() == versions
+
+
+def test_an_uploads_description_is_the_models(client: TestClient) -> None:
+    created = upload(client, description="Two carrots, one cut")
+    assert created.status_code == 201, created.text
+    model = client.get(f"/api/v1/models/{created.json()['slug']}").json()
+    assert model["description"] == "Two carrots, one cut"
+
+
+def copies_3mf(count: int) -> bytes:
+    """One small box placed ``count`` times: one read object of ``count`` copies."""
+    with zipfile.ZipFile(io.BytesIO(ingest.part_mesh_3mf(trimesh.creation.box((2, 2, 2))))) as z:
+        files = {name: z.read(name) for name in z.namelist()}
+    items = "".join(
+        f'<item objectid="1" transform="1 0 0 0 1 0 0 0 1 {3 * i} 0 0"/>' for i in range(count)
+    )
+    model = files["3D/3dmodel.model"].decode()
+    files["3D/3dmodel.model"] = model.replace(
+        '<build><item objectid="1"/></build>', f"<build>{items}</build>"
+    ).encode()
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as out:
+        for name, data in files.items():
+            out.writestr(name, data)
+    return buffer.getvalue()
+
+
+def test_a_file_of_more_objects_than_a_scene_holds_is_a_422_naming_the_cap(
+    client: TestClient,
+) -> None:
+    refused = upload(client, data=copies_3mf(MAX_OBJECTS + 1), filename="pegs.3mf")
+    assert refused.status_code == 422, refused.text
+    assert f"at most {MAX_OBJECTS}" in refused.json()["detail"]

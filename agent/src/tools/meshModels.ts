@@ -91,8 +91,8 @@ export const meshModelTools: Tool[] = [
       if (file === undefined || !/\.(3mf|stl)$/i.test(file)) throw new ToolError('give a `filename` ending .3mf or .stl')
       const answer = await command(ctx, `open ${file}`, (headers) =>
         ctx.backend.POST('/api/v1/models/from-mesh/upload', {
-          body: { file: file, name },
-          ...uploadInit(ctx, source, { name: 'file', filename: file, type: 'application/octet-stream' }, headers, { name }),
+          body: { file: file, name, description: description ?? null },
+          ...uploadInit(ctx, source, { name: 'file', filename: file, type: 'application/octet-stream' }, headers, { name, ...(description === undefined ? {} : { description }) }),
         }),
       )
       return json(withSent(answer, 'info' in source ? source.info : undefined))
@@ -120,7 +120,9 @@ export const meshModelTools: Tool[] = [
       'object an earlier one made (split_at_plane makes the top half the next id). Planes and `at` are world mm. ' +
       'split_at_plane with joint adds a keyed peg to one half and a socket with clearance to the other, sized from ' +
       'the section and refused when it would not fit. lay_flat turns a world direction (or the largest flat face, often ' +
-      'the cut face) onto the bed. expose turns a number into a customizer parameter; removing one a saved preset sets ' +
+      'the cut face) onto the bed. add with a colour fills its space in that colour, carved out of every other colour (an ' +
+      'add without one is in the object\'s first colour); to print a part in place into another (a carrot\'s leaves into ' +
+      'its body), add a cylinder in the leaves\' colour through the neck. expose turns a number into a customizer parameter; removing one a saved preset sets ' +
       'needs drop_from_presets. Render after editing to check.',
     input: z.object({ slug, edits: z.array(edit).min(1).max(50), drop_from_presets: z.boolean().default(false), message: z.string().max(200).optional().describe('The revision\'s message') }),
     risk: 'write',
