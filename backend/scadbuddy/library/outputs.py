@@ -33,6 +33,7 @@ from scadbuddy.render.job_models import (
     ManifestObject,
     OutputRecord,
     PipelineOutput,
+    PlateInfo,
 )
 from scadbuddy.render.jobs import Job, PartInfo
 from scadbuddy.render.provenance import Provenance, source_version, stamp
@@ -105,6 +106,14 @@ def _replace(path: Path, text: str) -> None:
     temporary.replace(path)
 
 
+def _cover_from_3mf(model: Path, thumbnail: Path) -> None:
+    """Plate 1's cover out of ``model`` as ``thumbnail``; nothing when the 3MF has none
+    (its cover render timed out or failed, `render.jobs.plate_thumbnails`)."""
+    with zipfile.ZipFile(model) as archive:
+        if PLATE_THUMBNAIL in archive.namelist():
+            thumbnail.write_bytes(archive.read(PLATE_THUMBNAIL))
+
+
 class OutputMeta(BaseModel):
     # #80 asks for the "model version"; pydantic reserves the "model_" prefix for
     # its own methods, so its guard is turned off rather than the field renamed.
@@ -126,6 +135,11 @@ class OutputMeta(BaseModel):
     colors: list[str] = Field(default_factory=list)
     parts: list[PartInfo] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    #: Every plate of the output's 3MF (spec §6.4), as the job's result lists them: an
+    #: arranged output's plates (#2281), a multi-plate template's. Empty for a one-plate
+    #: output, whose plate is ``bbox_mm`` and ``colors``, and on records written before
+    #: the field existed. Not ``plates`` below, which is what a print queued.
+    layout_plates: list[PlateInfo] = Field(default_factory=list)
     # The output's uploads to Bambuddy's file library are in Postgres
     # (`bambuddy.uploads`, #455), not here. The keys an older record carries for them
     # (``library_file_id``, ``library_file_plate``, ``library_files``) are ignored, as
@@ -380,6 +394,8 @@ class OutputStore:
                 (directory / ARRANGED_NAME).write_text(
                     json.dumps(list(arranged_from)), encoding="utf-8"
                 )
+                # No viewer captured an arrange (#2281): its cover is plate 1's own.
+                _cover_from_3mf(directory / MODEL_NAME, directory / THUMBNAIL_NAME)
         except OSError:
             shutil.rmtree(directory, ignore_errors=True)
             raise
@@ -395,6 +411,7 @@ class OutputStore:
             colors=list(result.colors),
             parts=list(result.parts),
             warnings=list(result.warnings),
+            layout_plates=list(result.plates),
             libraries=list(result.libraries),
         )
         self._write_meta(directory, meta)

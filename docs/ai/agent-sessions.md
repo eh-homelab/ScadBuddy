@@ -44,7 +44,8 @@ answer once the turn has started; otherwise they wait for it, reporting progress
 `{ kind: 'asset', slug, asset_id }` and `{ kind: 'print_thumbnail', archive_id, plate? }`.
 It never takes inline image data. The agent fetches each one from the backend before it
 starts the turn and checks it as it checks the panel's images (`sessions/images.ts`: PNG,
-JPEG, GIF or WebP by signature, 5 MiB of base64 each, 8 MiB together). The model gets the
+JPEG, GIF or WebP by signature, 3.75 MiB each, 6 MiB together, the bytes the Messages API's
+5 MiB and 8 MiB of base64 hold). The model gets the
 images before the text. A refusal names the reference and the reason, and no turn starts.
 Because the call's input holds only the references, the event log's `tool.call`, the
 `/mcp` audit row and an approval summary record no image bytes, and the request stays far
@@ -52,7 +53,8 @@ under `/mcp`'s 4 MiB body cap. A URL is not a kind: fetching one the caller chos
 outward (spec §8.2). Bring a web image in with `fetch_asset` (approved, held to the
 Settings allowlist), then send it as an `asset`. The `user.turn` preview is the backend's
 own small copy (a view drawn at 128 px, a media item's thumbnail), or the image itself
-when it is a still of at most 64 KiB, or else a one-pixel grey placeholder.
+when it is a still of at most 48 KiB, or else a one-pixel grey placeholder. The turn names
+the image and its preview, each stored with the session, never their bytes (#2479).
 
 Tier choices (spec §8.1): starting, sending, forking, interrupting and handing off
 (offering, accepting, withdrawing or declining) change only ScadBuddy's own session state, so they are `write`. Deciding an approval is

@@ -229,7 +229,11 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const { agent, runs } = await setup(undefined, { attachments: store })
       const a = await agent('write')
       const b = await agent('write')
-      const image = { mediaType: 'image/png' as const, data: PNG, preview: { mediaType: 'image/jpeg' as const, data: JPEG } }
+      const image = {
+        mediaType: 'image/png' as const,
+        bytes: Buffer.from(PNG, 'base64'),
+        preview: { mediaType: 'image/jpeg' as const, bytes: Buffer.from(JPEG, 'base64') },
+      }
       const mine = await store.put(a.owner, image)
       const theirs = await store.put(b.owner, image)
       const browsers = await store.put(BROWSER_USER, image)
@@ -258,7 +262,8 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(content[0]!.source).toMatchObject({ data: PNG })
       const left = (await db.sql`SELECT id FROM ai_attachments`).map((r) => r.id as string).sort()
       expect(left).toEqual([theirs.id, browsers.id].sort())
-      expect(await db.sql`SELECT 1 FROM ai_session_blobs WHERE session_id = ${session.id}`).toHaveLength(1)
+      // The image and its preview (#2479).
+      expect(await db.sql`SELECT 1 FROM ai_session_blobs WHERE session_id = ${session.id}`).toHaveLength(2)
     })
 
     it("takes a new session's mode, and says when the default ran classic (plan 5d)", async () => {

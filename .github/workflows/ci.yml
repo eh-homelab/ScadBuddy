@@ -307,6 +307,15 @@ jobs:
       - name: Test the plugin lint
         run: .github/scripts/lint-plugin.test.sh
 
+      # No image travels as base64 inside JSON or text (#2479): an image is a blob
+      # and moves as a pointer. This fails on new code in any package that builds
+      # base64 or a data: URL outside the allowlisted Messages API boundaries.
+      - name: Check that no image is built as base64
+        run: .github/scripts/lint-base64-images.sh
+
+      - name: Test the base64 image check
+        run: .github/scripts/lint-base64-images.test.sh
+
       # The payload codec is kept in agent/, agent-durable/ and backend/; the
       # backend's tests run in an image without agent/, so they read copies of the
       # agent's vectors and key migration (plan 2026-10-09-durable-phase-6-flows.md

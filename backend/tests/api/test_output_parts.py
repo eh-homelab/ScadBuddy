@@ -245,6 +245,33 @@ def test_saving_an_arrange_job_records_its_sources_and_holds_its_parts(
     assert held(pool) == {(m.part, output_id) for m in written.manifest}
 
 
+@pytest.mark.parametrize("plates", [1, 3])
+def test_an_arranged_output_records_its_plates_and_a_cover(
+    client: TestClient, app: FastAPI, pool: Pool, tmp_path: Path, plates: int
+) -> None:
+    """#2281: the saved record says what the arrange job produced, its plates and a
+    cover, though no viewer captured one."""
+    _, job, written = asyncio.run(finished_job(tmp_path, job_id="arr-3", plates=plates))
+    assert job.result is not None and len(job.result.plates) == (plates if plates > 1 else 0)
+    inputs = ArrangeInputs(
+        items=[PackItem(part=part_of(written.manifest[0]), count=2 * plates)],
+        plate=PlateSize(key="default", width=256.0, depth=256.0),
+        sources=["a" * 32],
+    )
+    arranged = job.model_copy(update={"kind": "arrange", "inputs": inputs.model_dump(mode="json")})
+    answer_for(app, arranged)
+    output_id = save(client, "arr-3")
+    detail = client.get(f"/api/v1/outputs/{output_id}").json()
+    assert detail["has_thumbnail"] is True
+    cover = client.get(f"/api/v1/outputs/{output_id}/thumbnail")
+    assert cover.status_code == 200 and cover.content.startswith(b"\x89PNG")
+    recorded = [(p["index"], p["bbox_mm"], p["colors"]) for p in detail["layout_plates"]]
+    expected = [(p.index, p.bbox_mm.model_dump(mode="json"), p.colors) for p in job.result.plates]
+    assert recorded == expected
+    listed = client.get(f"/api/v1/outputs/{output_id}/plates").json()
+    assert len(listed) == plates and all(p["has_thumbnail"] for p in listed)
+
+
 def test_the_edit_link_of_an_arranged_output_says_it_was_arranged(
     client: TestClient, app: FastAPI, pool: Pool, tmp_path: Path
 ) -> None:

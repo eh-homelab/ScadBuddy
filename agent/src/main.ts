@@ -55,6 +55,8 @@ import { TASK_QUEUE } from './temporal/names.js'
 import { memoryActivities } from './temporal/memoryActivities.js'
 import { SHARED_PACKAGES } from './temporal/turnPackages.js'
 import { forwardPackageServers } from './plugins/packages/mcp.js'
+import { subagentKey } from './temporal/subagentToken.js'
+import { pgRunning } from './routes/subagentMcp.js'
 import { turnServers } from './temporal/turnServers.js'
 import { turnToolActivities, turnToolActivity } from './temporal/turnTools.js'
 import { DURABLE_TOOLS } from './tools/manifest.js'
@@ -586,6 +588,20 @@ const app = createApp({
       return undefined
     }
   },
+  // A durable segment's subagents' ScadBuddy tools (#2320, routes/subagentMcp.ts): loopback only.
+  ...(database && kek.ok
+    ? {
+        subagentMcp: {
+          sessions: new PgSessionOwners(database.sql),
+          running: pgRunning(database.sql),
+          currentTiers: liveTokenTiers(tokens),
+          keys: () => [subagentKey(kek.kek), ...(previousKek?.ok ? [subagentKey(previousKek.kek)] : [])],
+          tools: ALL_TOOLS,
+          services: toolServices,
+          ...(audit ? { audit } : {}),
+        },
+      }
+    : {}),
   mcp: {
     tools: ALL_TOOLS,
     resources,

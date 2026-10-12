@@ -192,7 +192,8 @@ class DurableSession:
         self._agent = DurableClaudeAgent(
             tools=list(self._tools.values()),
             max_turns=start.max_turns,
-            builtin_tools=["Skill"],
+            # The own plugin's skills and subagents (#2320: subagents in durable too).
+            builtin_tools=["Skill", "Agent"],
             tool_activities=(),
             max_segments=MAX_SEGMENTS,
             state=start.agent,
@@ -273,10 +274,12 @@ class DurableSession:
             # The built-ins the allowed packages name, as a classic turn offers them; each
             # call is outward there, so here it runs as its own activity after a human
             # approved it (the agent offers only Bash and PowerShell, which can).
-            named = sorted({t for p in offered.packages for t in p.builtin_tools} - {"Skill"})
+            named = sorted(
+                {t for p in offered.packages for t in p.builtin_tools} - {"Skill", "Agent"}
+            )
             parked = [t for t in named if t in ENGINE_PARKED]
             # Only those: one the agent should have left out never runs unasked here.
-            self._agent._builtin_tools = ["Skill", *parked]
+            self._agent._builtin_tools = ["Skill", "Agent", *parked]
             self._agent._tool_activities = parked
             self._agent._tool_approvals = parked
         if prompt is not None and workflow.patched(MEMORY_PATCH):
