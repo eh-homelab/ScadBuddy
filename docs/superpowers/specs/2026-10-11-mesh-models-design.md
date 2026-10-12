@@ -29,8 +29,9 @@ today), mesh repair beyond what reading already refuses, sculpting or vertex edi
   translate([0,0,5]) cube(100); }` exported to 3MF with `Status: NoError`, 264 facets;
   the same with `import("src.stl")`. The imported file's `basematerials` colours reach
   the output (`#FF0000`, `#0000FF` bases present). That image is an older nightly than
-  the pinned `dev.2026-10-05` (2026.10.05); the `requires_openscad` test in §10 re-measures it on the
-  pinned image, and spec 2026-09-22 §3 gains the fact when it passes.
+  the pinned `dev.2026-10-05` (2026.10.05); `backend/tests/test_mesh_models_openscad.py`
+  re-measured it on the pinned image on 2026-10-12 (a colourless core 3MF in `color()`, see
+  spec 2026-09-22 §3).
 - **Library 3MFs are already read faithfully.** `render/objects3mf.py` `read_objects`
   returns each object as closed meshes per colour (`ReadObject.parts`, `ColourPart`),
   with Bambu Studio per-part extruders, `basematerials` colours, and Bambu `paint_color`
