@@ -20,6 +20,8 @@ import { PgFlowRuns } from '../src/temporal/flowRuns.js'
 import { flowSessionActivities } from '../src/temporal/flowSessions.js'
 import { PgPayloadKeys, SubjectPayloadCodec } from '../src/temporal/payloadCodec.js'
 import { gateActivities, PgApprovalRecords, PgSessionOwners, toolActivities } from '../src/temporal/toolActivities.js'
+import { turnServers } from '../src/temporal/turnServers.js'
+import { turnToolActivities } from '../src/temporal/turnTools.js'
 import { AgentWorker } from '../src/temporal/worker.js'
 import { DURABLE_TOOLS, writeManifest } from '../src/tools/manifest.js'
 import { PendingActionStore } from '../src/tools/pending.js'
@@ -260,6 +262,8 @@ describe.skipIf(skip !== undefined)(`a flow's agent() and ask_session() end to e
           audit,
         }),
         ...gateActivities({ audit, sessions: new PgSessionOwners(db.sql) }),
+        // A durable turn lists its other tools first (#2320): none here.
+        ...turnToolActivities({ sessions: new PgSessionOwners(db.sql), servers: turnServers({}) }),
         ...flowSessionActivities({ sql: db.sql, flows, pollMs: 200 }),
       },
       dataConverter: { ...codec, failureConverterPath: FAILURE_CONVERTER },
