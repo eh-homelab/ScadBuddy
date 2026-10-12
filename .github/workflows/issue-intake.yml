@@ -276,7 +276,7 @@ jobs:
 
       - name: Issue Intake with Claude
         id: intake
-        uses: anthropics/claude-code-action@cab360f6565aa35a51d6ce9e43f1f4287c0a32ea # v1
+        uses: anthropics/claude-code-action@1d6de8cb0c237e7c15e9e1bdf973826ebae490cc # v1
         with:
           # Only matters on the `labeled` path: a pr-feedback issue authored
           # by claude[bot] that a human deliberately re-triages by applying
