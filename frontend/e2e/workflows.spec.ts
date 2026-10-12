@@ -205,9 +205,8 @@ for (const { name, viewport } of [
       await noSideScroll(page)
 
       // In-app, so the mocked delete stands: the run of v2 still shows the script it ran.
-      await page.getByRole('link', { name: 'Workflows', exact: true }).click()
+      await page.getByRole('main').getByRole('link', { name: 'Workflows', exact: true }).click()
       await page.locator('[data-run="run-print"]').getByRole('link', { name: 'plates v2' }).click()
-      await page.getByText('Script', { exact: true }).click()
       await expect(page.getByLabel('Script', { exact: true })).toContainText('queue_print')
 
       await page.getByRole('link', { name: 'plates v2' }).click()
