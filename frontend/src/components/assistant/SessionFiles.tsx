@@ -53,10 +53,19 @@ export function SessionFiles({ sessionId, refreshKey, canWrite, onInsert }: Prop
     const added: string[] = []
     setUploading((n) => n + files.length)
     for (const file of files) {
-      const path = uploadPath(file.name, taken)
+      let path = uploadPath(file.name, taken)
       taken.add(path)
       try {
-        await api.uploadAiSessionFile(sessionId, file, path)
+        try {
+          await api.uploadAiSessionFile(sessionId, file, path)
+        } catch (caught) {
+          // The list was stale: something else took the path meanwhile (#2469). Read it again and take the next free one, once.
+          if (!(caught instanceof ApiError && caught.status === 409)) throw caught
+          for (const f of (await api.listAiSessionFiles(sessionId)).files) taken.add(f.path)
+          path = uploadPath(file.name, taken)
+          taken.add(path)
+          await api.uploadAiSessionFile(sessionId, file, path)
+        }
         added.push(path)
       } catch (caught) {
         failures.push(`${file.name} was not uploaded: ${why(caught)}`)

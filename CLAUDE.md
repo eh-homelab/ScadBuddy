@@ -172,7 +172,9 @@ Workflow/Dockerfile lint (the `lint` job): actionlint, hadolint with `.hadolint.
 `shellcheck .github/scripts/*.sh models/*/verify.sh`, `lint-verify-labels.sh`,
 `lint-dashboard.sh` (the Grafana dashboard, #988; it needs `KUSTOMIZE` pointing at
 kustomize v5.6.0, which the job downloads and checks by sha256 because ArgoCD's
-repo-server runs that version), and the `.github/scripts/*.test.sh` suites. Every
+repo-server runs that version), `lint-base64-images.sh` (#2479: no image is built as
+base64 in JSON or text outside its allowlisted Messages API boundaries; images move as
+blobs and `{name, mediaType}` pointers), and the `.github/scripts/*.test.sh` suites. Every
 `docker run` in a `verify.sh` must carry
 `--label "scadbuddy-verify=${SCADBUDDY_VERIFY_LABEL:-local}"` (Python:
 `"--label", "scadbuddy-verify=" + os.environ.get("SCADBUDDY_VERIFY_LABEL", "local")`) on
@@ -588,6 +590,10 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `activities.py` (`gate_settings`, `finish_turn`). Its tests start a dev server from
   `SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` and skip without one; `tests/fake_anthropic.py`
   is the Python fake endpoint the bundled Claude Code is pointed at.
+  A segment's subagents (#2320) get ScadBuddy's tools from the agent's loopback
+  `routes/subagentMcp.ts` as `mcp__scadbuddy__*` (`session/subagents.py` mints the
+  per-turn token from the KEK, `temporal/subagentToken.ts` the same format); every call
+  is resolved from the session as it is then, and an outward one is refused to the main agent.
   `scadbuddy_durable/gate/` is the gate's Python half (5b): ids, the `respond`
   validator (the same vectors), `build_entry`, and the `open_input` / `resolve_input`
   activities that write `ai_pending_input`, `ai_input_responses`, the session's events

@@ -616,6 +616,49 @@ async def test_background_stores_leave_the_interactive_slots_free(
     assert all(content.index.get(snapshot_key("demo", rev)) is not None for rev in revs)
 
 
+async def test_an_interactive_pin_lifts_a_background_store_still_queued(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#2140: a render right after an edit joins the preview pass's store of that
+    revision. Still queued behind a stalled background upload, it moves to an
+    interactive slot instead of waiting there."""
+    api_paths = DataPaths(tmp_path / "api")
+    stalled, wanted = "d1" * 20, "d2" * 20
+    for rev in (stalled, wanted):
+        _export(api_paths, rev)
+    put = content.put
+    gate = asyncio.Event()
+    uploading = {rev: asyncio.Event() for rev in (stalled, wanted)}
+
+    async def slow(*args: object, **kwargs: object) -> object:
+        rev = stalled if str(kwargs["name"]) == f"src-{stalled[:12]}.zip" else wanted
+        uploading[rev].set()
+        if rev == stalled:
+            await gate.wait()
+        return await put(*args, **kwargs)  # type: ignore[arg-type]
+
+    content.put = slow  # type: ignore[method-assign,assignment]
+    api = SnapshotStore(content, api_paths, history=None, wait=_gives_up)
+    with pytest.raises(SnapshotPendingError):
+        await api.pin("demo", stalled, background=True)
+    await asyncio.wait_for(uploading[stalled].wait(), 5)
+    with pytest.raises(SnapshotPendingError):
+        await api.pin("demo", wanted, background=True)
+    await asyncio.sleep(0.05)
+    assert not uploading[wanted].is_set()  # queued for the one background slot
+
+    with pytest.raises(SnapshotPendingError):
+        await api.pin("demo", wanted)
+
+    await asyncio.wait_for(uploading[wanted].wait(), 5)
+    assert not gate.is_set()
+    gate.set()
+    await asyncio.wait_for(asyncio.gather(*api._storing), 5)
+    assert content.index.get(snapshot_key("demo", wanted)) is not None
+    # Every slot is back.
+    assert not api._stores.locked() and not api._background_stores.locked()
+
+
 async def test_a_caller_gone_mid_pin_leaves_the_store_running(
     tmp_path: Path, content: ContentStore
 ) -> None:

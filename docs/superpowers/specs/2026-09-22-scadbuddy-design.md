@@ -343,7 +343,11 @@ on the volume sees the same thing.
   `safe.directory` is passed as command-line — *protected-scope* — config,
   because a PVC's ownership need not match the runtime uid.
 - **Writes are serialised** by a thread lock plus an `flock`, so nothing can
-  interleave an `add`/`commit` pair.
+  interleave an `add`/`commit` pair. Across the API's replicas, which share the
+  volume over NFS, a Postgres advisory lock serialises too, and it carries the
+  HEAD the last writer left (`models_repo_head`, #2385): a writer waits until git
+  shows that HEAD before it checks or writes anything, because NFS can go on
+  serving another replica's `.git` as it was before that replica's commit.
 - **Generated files never enter the tree.** `render_solids` drops its wrapper
   next to the model source (it has to, for `include <>` to resolve); the prefix
   is the named `WRAPPER_PREFIX` constant and `ensure_repo` writes it into

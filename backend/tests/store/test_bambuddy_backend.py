@@ -763,6 +763,16 @@ def listed(*files: tuple[int, str]) -> httpx.Response:
     return httpx.Response(200, json=[{**row, "id": i, "created_at": at} for i, at in files])
 
 
+def file_in(file_id: int, folder_id: int = 11) -> respx.Route:
+    """``GET /library/files/{id}``: the file, in ``folder_id``, as the sweep re-reads it
+    right before its DELETE (#2115)."""
+    return respx.get(f"{API}/library/files/{file_id}").mock(
+        return_value=httpx.Response(
+            200, json=shaped("FileResponse", id=file_id, filename="p", folder_id=folder_id)
+        )
+    )
+
+
 OLD = "2026-10-01T00:00:00"
 FRESH = "2026-10-09T23:59:00"
 #: Between `OLD` and `FRESH`: what `sweep_unrecorded` treats as older than the grace.
@@ -776,6 +786,7 @@ async def test_an_old_work_file_no_row_names_is_deleted(pool: Pool) -> None:
     respx.get(f"{API}/library/files/", params={"folder_id": "11"}).mock(
         return_value=listed((600, OLD))
     )
+    file_in(600)
     delete = respx.delete(f"{API}/library/files/600").mock(
         return_value=httpx.Response(200, json={})
     )
@@ -820,7 +831,27 @@ async def test_a_work_folder_gone_from_bambuddy_is_skipped(pool: Pool) -> None:
     respx.get(f"{API}/library/files/", params={"folder_id": "12"}).mock(
         return_value=listed((610, OLD))
     )
+    file_in(610, 12)
     respx.delete(f"{API}/library/files/610").mock(return_value=httpx.Response(404, json={}))
     backend = BambuddyContentBackend(target(), pool)
     assert await backend.sweep_unrecorded(cutoff=CUTOFF) == ["610"]
+    await backend.aclose()
+
+
+@respx.mock
+async def test_a_file_moved_out_of_work_after_the_listing_is_kept(pool: Pool) -> None:
+    """#2115: the listing can be many round trips old by the DELETE, so each file's
+    folder is read again first, as `remove` does (#1272)."""
+    work_folder(pool)
+    respx.get(f"{API}/library/files/", params={"folder_id": "11"}).mock(
+        return_value=listed((620, OLD), (621, OLD))
+    )
+    file_in(620, 99)  # moved out of Work/ in Bambuddy's UI since the listing
+    respx.get(f"{API}/library/files/621").mock(
+        return_value=httpx.Response(404, json={"detail": "gone"})
+    )
+    delete = respx.delete(url__regex=rf"{API}/library/files/\d+")
+    backend = BambuddyContentBackend(target(), pool)
+    assert await backend.sweep_unrecorded(cutoff=CUTOFF) == []
+    assert not delete.called
     await backend.aclose()

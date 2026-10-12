@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { Sql } from 'postgres'
+import type { Sql, TransactionSql } from 'postgres'
 import type { SettingsReader } from '../approvals/service.js'
 
 // The assistant's workspace (#2329): files of its own, in `ai_session_files`,
@@ -254,6 +254,8 @@ export type WriteOptions = {
    * otherwise a `conflict`. Omitted, the write replaces whatever is there.
    */
   expectedSha256?: string | null | undefined
+  /** Runs in the write's transaction once the row is written, so what it writes commits with the file or not at all. */
+  alongside?: ((tx: TransactionSql, file: WorkspaceFileInfo) => Promise<void>) | undefined
 }
 
 export class SessionFiles {
@@ -390,28 +392,40 @@ export class SessionFiles {
           media_type = EXCLUDED.media_type, data = EXCLUDED.data, sha256 = EXCLUDED.sha256,
           size = EXCLUDED.size, source = EXCLUDED.source, updated_at = now()
         RETURNING path, media_type, size, sha256, source, created_at, updated_at`
-      return infoOf(row!)
+      const file = infoOf(row!)
+      await options.alongside?.(tx, file)
+      return file
     })
   }
 
-  /** Deletes a file; false when there was none. `conflict` when `expectedSha256` is given and does not hold. */
-  async delete(ws: WorkspaceRef, path: string, options: { expectedSha256?: string | undefined } = {}): Promise<boolean> {
+  /**
+   * Deletes a file; false when there was none. `conflict` when `expectedSha256` is given and does not hold.
+   * `alongside` runs in the delete's transaction once the row is gone.
+   */
+  async delete(
+    ws: WorkspaceRef,
+    path: string,
+    options: { expectedSha256?: string | undefined; alongside?: ((tx: TransactionSql) => Promise<void>) | undefined } = {},
+  ): Promise<boolean> {
     const name = workspacePath(path)
     const { key } = keyOf(ws)
-    if (options.expectedSha256 === undefined) {
-      const rows = await this.sql`DELETE FROM ai_session_files WHERE workspace = ${key} AND path = ${name} RETURNING path`
-      return rows.length > 0
-    }
-    const rows = await this.sql<{ sha256: string; deleted: boolean }[]>`
-      WITH target AS (SELECT sha256 FROM ai_session_files WHERE workspace = ${key} AND path = ${name}),
-           gone AS (DELETE FROM ai_session_files WHERE workspace = ${key} AND path = ${name} AND sha256 = ${options.expectedSha256} RETURNING path)
-      SELECT target.sha256, EXISTS (SELECT 1 FROM gone) AS deleted FROM target`
-    const [row] = rows
-    if (!row) return false
-    if (!row.deleted) {
-      throw new WorkspaceError('conflict', `${name} changed since it was read: its sha256 is ${row.sha256}; nothing was deleted`)
-    }
-    return true
+    return this.sql.begin(async (tx) => {
+      if (options.expectedSha256 === undefined) {
+        const rows = await tx`DELETE FROM ai_session_files WHERE workspace = ${key} AND path = ${name} RETURNING path`
+        if (rows.length === 0) return false
+      } else {
+        const [row] = await tx<{ sha256: string; deleted: boolean }[]>`
+          WITH target AS (SELECT sha256 FROM ai_session_files WHERE workspace = ${key} AND path = ${name}),
+               gone AS (DELETE FROM ai_session_files WHERE workspace = ${key} AND path = ${name} AND sha256 = ${options.expectedSha256} RETURNING path)
+          SELECT target.sha256, EXISTS (SELECT 1 FROM gone) AS deleted FROM target`
+        if (!row) return false
+        if (!row.deleted) {
+          throw new WorkspaceError('conflict', `${name} changed since it was read: its sha256 is ${row.sha256}; nothing was deleted`)
+        }
+      }
+      await options.alongside?.(tx)
+      return true
+    })
   }
 
   /** A fork's copy of its parent's files. */
