@@ -34,7 +34,9 @@ import type { RouteModule } from './module.js'
 // it needs an approval) is refused: nothing in a subagent can wait for a human, so the
 // main agent makes it, where it parks for approval.
 
-export const SUBAGENT_MCP_PATH = '/api/v1/ai/durable/subagent-mcp'
+// Outside /api/v1/ai/, the prefix the ingress routes to the agent (docs/ai/operating.md §1.1): no
+// ingress or dev proxy reaches it, on top of the loopback-peer check below.
+export const SUBAGENT_MCP_PATH = '/internal/durable/subagent-mcp'
 export const SUBAGENT_SERVER = 'scadbuddy'
 
 /** What a subagent sees for an outward call. */

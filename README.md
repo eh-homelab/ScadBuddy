@@ -1043,8 +1043,15 @@ ScadBuddy pod, `ghcr.io/eh-homelab/scadbuddy-agent-durable` (the Dockerfile's
   `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` during a rotation),
   `SCADBUDDY_TEMPORAL_ADDRESS` and `SCADBUDDY_TEMPORAL_NAMESPACE`. The image
   sets its own paths: `SCADBUDDY_DURABLE_TOOLS_JSON` (the agent's tool manifest
-  from the same build), `SCADBUDDY_DURABLE_SKILLS_DIR` and
+  from the same build), `SCADBUDDY_DURABLE_SKILLS_DIR`,
+  `SCADBUDDY_DURABLE_AGENTS_DIR` (ScadBuddy's subagents) and
   `SCADBUDDY_DURABLE_CWD=/srv/agent`.
+- A segment's subagents call ScadBuddy's tools on the agent container's loopback
+  MCP server, `SCADBUDDY_DURABLE_SUBAGENT_MCP_URL`, by default
+  `http://127.0.0.1:8081/internal/durable/subagent-mcp`: the `agent` container in
+  the same pod (it answers only a loopback peer). Set it if the agent listens
+  elsewhere, or to `off` to give the subagents no ScadBuddy tools. The path is
+  not under `/api/v1/ai/`, so the ingress never routes to it.
 - It runs as uid 10001 and writes only under `/srv/agent` (`HOME`, Claude
   Code's config and its working directory) and `/tmp`, so mount an `emptyDir`
   at each and keep the root filesystem read-only.
