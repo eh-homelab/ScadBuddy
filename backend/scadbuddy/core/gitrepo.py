@@ -184,14 +184,26 @@ class Revision:
         return self.commit[:7]
 
 
+@dataclass(frozen=True)
+class HeadChange:
+    """A HEAD recorded for the other replicas (#2507), and what moved with it."""
+
+    commit: str
+    #: The top-level entries the commit touched (a models repository's templates);
+    #: None for "any of them" (a HEAD adopted at boot, too many to name, or a
+    #: repository that does not say).
+    models: list[str] | None = None
+
+
 class RepoHold(Protocol):
     """The cross-replica write lock on a repository, while it is held."""
 
     #: The HEAD the last writer recorded, or None before any did.
     expected: str | None
 
-    def record(self, commit: str) -> None:
-        """Record ``commit`` as HEAD, before the lock is released."""
+    def record(self, change: HeadChange) -> None:
+        """Record ``change.commit`` as HEAD, and announce it, before the lock is
+        released."""
 
 
 class RepoCoordinator(Protocol):
@@ -304,7 +316,7 @@ class GitRepo:
             *args,
         ]
         # Another replica's commit is visible to this call, not 60 s later (#2385).
-        revalidate_dirs(*self._git_dirs)
+        self.revalidate()
         try:
             # A fixed argv with no shell: nothing here is interpolated from a request.
             completed = subprocess.run(
@@ -324,6 +336,10 @@ class GitRepo:
             stderr = completed.stderr if text else completed.stderr.decode("utf-8", "replace")
             raise GitError(f"git {args[0]} failed: {stderr.strip()}", stderr)
         return completed
+
+    def revalidate(self) -> None:
+        """Have this NFS client look again at where HEAD, the index and the refs live."""
+        revalidate_dirs(*self._git_dirs)
 
     def _out(self, *args: str, check: bool = True) -> str:
         completed = self._run(*args, check=check)
@@ -424,7 +440,7 @@ class GitRepo:
                     extra={"recorded": expected, "head": head, "repository": str(self.root)},
                 )
                 if hold is not None and head is not None:
-                    hold.record(head)
+                    hold.record(HeadChange(head))
                 break
             time.sleep(pause)
             pause = min(pause * 2, FRESH_POLL_MAX_SECONDS)
@@ -696,13 +712,24 @@ class GitRepo:
             )
         if self._hold is not None:
             try:
-                self._hold.record(created)
+                change = self._change_of(created)
+            except GitError:
+                # The commit has landed: the other replicas refresh everything instead.
+                logger.exception("could not list what a commit touched", extra={"commit": created})
+                change = HeadChange(created)
+            try:
+                self._hold.record(change)
             except GitError:
                 logger.exception(
                     "a commit landed, but its HEAD could not be recorded for the other replicas",
                     extra={"commit": created},
                 )
         return created
+
+    def _change_of(self, commit: str) -> HeadChange:
+        """What the other replicas are told of ``commit`` (#2507). Here, only that it
+        is HEAD; a repository whose readers cache per entry names what it touched."""
+        return HeadChange(commit)
 
     def _stage(self, targets: list[str]) -> None:
         """``git add -A`` over the paths an action touched.

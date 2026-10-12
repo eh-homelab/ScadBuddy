@@ -47,6 +47,7 @@ from scadbuddy.core.gitrepo import FileChange as FileChange
 from scadbuddy.core.gitrepo import GitError as GitError
 from scadbuddy.core.gitrepo import GitTimeoutError as GitTimeoutError
 from scadbuddy.core.gitrepo import GitUnavailableError as GitUnavailableError
+from scadbuddy.core.gitrepo import HeadChange as HeadChange
 from scadbuddy.core.gitrepo import HeadMovedError as HeadMovedError
 from scadbuddy.core.gitrepo import RepoCoordinator as RepoCoordinator
 from scadbuddy.core.gitrepo import RepoHold as RepoHold
@@ -172,18 +173,24 @@ class ModelHistory(GitRepo):
         if commit is None or self.on_commit is None:
             return []
         try:
-            names = self._out(
-                "diff-tree", "--no-commit-id", "--name-only", "-r", "--root", commit
-            ).splitlines()
+            return self._changed_models(commit)
         except GitError:
             logger.exception("could not list what a commit touched", extra={"commit": commit})
             return []
-        touched: list[str] = []
-        for name in names:
+
+    def _change_of(self, commit: str) -> HeadChange:
+        """The templates ``commit`` touched, for the other replicas to refresh (#2507)."""
+        return HeadChange(commit, self._changed_models(commit))
+
+    def _changed_models(self, commit: str) -> list[str]:
+        """The templates ``commit`` touched."""
+        names = self._out("diff-tree", "--no-commit-id", "--name-only", "-r", "--root", commit)
+        models: list[str] = []
+        for name in names.splitlines():
             model_id = _model_id(name.strip())
-            if model_id is not None and model_id not in touched:
-                touched.append(model_id)
-        return touched
+            if model_id is not None and model_id not in models:
+                models.append(model_id)
+        return models
 
     def _announce(self, commit: str | None, touched: list[str]) -> None:
         if commit is None or self.on_commit is None:
