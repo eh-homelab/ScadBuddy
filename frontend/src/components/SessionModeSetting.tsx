@@ -61,10 +61,10 @@ export function SessionModeSetting() {
           </select>
         </label>
         <p id="session-mode-help" className="text-[12px] text-muted">
-          Durable sessions run as Temporal workflows: a turn survives a restart of the assistant, and an approval or
-          question waits for you as long as it needs. Classic sessions run inside the assistant service, and can be
-          forked. A new chat uses this default unless you pick a mode under Session mode in the composer. Applies to
-          sessions started from now on.
+          Both modes have the same tools, plugins, skills, browser and settings. Durable sessions run as Temporal
+          workflows: a turn survives a restart of the assistant, and an approval or question waits for you as long as
+          it needs. Classic sessions run inside the assistant service, and can be forked. A new chat uses this default
+          unless you pick a mode under Session mode in the composer. Applies to sessions started from now on.
         </p>
         {!current.durable_available && (
           <p data-testid="session-mode-unavailable" className="text-[12px] text-warn">

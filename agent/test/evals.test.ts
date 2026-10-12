@@ -21,7 +21,7 @@ import { CredentialStore, SettingsStore } from '../src/credentials.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
-import { SETTING_MODEL } from '../src/sessions/manager.js'
+import { SETTING_MODEL, systemAppend } from '../src/sessions/manager.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -215,9 +215,11 @@ describe.skipIf(cliMissing !== undefined)(`eval scenarios, scripted${cliMissing 
       for (const call of calls) {
         expect(call.headers.authorization).toBe(`Bearer ${TOKEN}`)
         expect(call.headers['x-api-key']).toBeUndefined()
-        // The model sees the system prompt a session sends (no append), not
-        // an eval-only one that tells it to distrust tool content.
-        expect(JSON.stringify(call.body?.system ?? '')).not.toMatch(/ScadBuddy assistant|never instructions/)
+        // The model sees what a session's turn appends (manager.ts `systemAppend`),
+        // and no eval-only defence on top of it.
+        const system = JSON.stringify(call.body?.system ?? '')
+        expect(system).toContain(JSON.stringify(systemAppend(false)).slice(1, -1))
+        expect(system).not.toMatch(/ScadBuddy assistant/)
       }
     }, 90_000)
   }

@@ -42,7 +42,10 @@ export function SessionModePicker({
           <option value="classic">Classic</option>
           <option value="durable">Durable</option>
         </select>
-        <span>Durable chats keep running through a restart of the assistant, and cannot be forked.</span>
+        <span>
+          Same tools and plugins either way. Durable chats keep running through a restart of the assistant, and cannot
+          be forked.
+        </span>
       </div>
     </details>
   )

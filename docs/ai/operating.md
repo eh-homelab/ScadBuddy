@@ -634,7 +634,9 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   `agent` queue; without them a session whose mode came from this default runs classic
   and says why (`session.started` `modeFallback`, `mode_fallback` on `POST /sessions`
   and `sessions_start`), while one that asked for `durable` is refused 503
-  (plan `2026-10-09-durable-phase-5d-mode.md`). The worker check counts only a
+  (plan `2026-10-09-durable-phase-5d-mode.md`). Both modes get the same tools, plugins,
+  packages, browser, `http_request`, Hindsight and settings (#2320, spec 2026-10-01
+  §6.3b); only forking is classic-only. The worker check counts only a
   poller Temporal saw in the last 70 s (it lists one for minutes after its worker has
   gone), so an `agent-durable` that died counts for at most about that long;
   and `mcp_oidc`, the
@@ -789,6 +791,44 @@ turn goes ahead without it. `main.ts` passes `loadPackagesForRun(…)` to the
 socket, `POST /api/v1/ai/sessions` or the `sessions_*` tools (the comment on `sessions`
 in `main.ts`).
 
+A vetted package's http MCP servers are reached the way a remote plugin is, through the
+loopback forwarder
+([`agent/src/plugins/packages/mcp.ts`](../../agent/src/plugins/packages/mcp.ts)
+`forwardPackageServers`, #2320). Each is registered as a plugin named
+`plugin_<package>_<server>`, the name Claude Code gives a plugin's server. The forwarder
+connects to the address the egress check passed, follows no redirect, starts no OAuth
+discovery, adds the declared header itself (one at most) and marks results untrusted.
+Before #2320, Claude Code started none of them, because `strictMcpConfig` was on. Their
+URL and their one header (at most one) are checked as a remote plugin's registration is
+(`normalisePluginUrl`, `validateHeaderName`, `validateSecret`), and `X-Forwarded-*` and
+`Proxy-*` are refused. Claude Code loads every package without its own http entries: a
+copy under `<state dir>/plugins-local/<hash>/` whose `.mcp.json` and manifest keep only
+local servers (`withoutRemoteServers`). A query that reads plugins' MCP configs (with
+`strictMcpConfig` off, for the headless browser or an allowed package) refuses any
+loaded plugin that still declares an http server (`harness/run.ts`). An allowed
+package's local servers still start as declared.
+
+**Durable sessions (#2320).** A durable turn's Claude Code runs in the `agent-durable`
+container, so the agent copies each loaded package to the payload volume both sidecars
+mount, `<SCADBUDDY_PAYLOAD_DIR>/plugins/<content hash>/`, once per hash, when the turn
+lists its tools (`turn_tools`,
+[`agent/src/temporal/turnPackages.ts`](../../agent/src/temporal/turnPackages.ts)). The
+segment runner hashes that copy again (`agent-durable/.../session/package_hash.py`, the
+same hash as `hash.ts`) and loads only a copy that matches the pin. Without
+`SCADBUDDY_PAYLOAD_DIR` a durable turn loads no package and says so in the session. A
+package's MCP servers run in the agent as turn tools, as a remote plugin's do. They are
+named `plugin_<package>_<server>` and are outward. http ones go through the same
+forwarder (above), and their forwarder URLs and headers are redacted like a plugin's. A
+local one runs only for a package approved with `allow_refused`, started in the
+package's folder with `PATH`, `HOME` and its declared `env`. Of the built-ins an allowed package names, only `Bash` and `PowerShell` can run as
+their own activities, and so wait for a human. A durable turn offers those two and parks
+each call for approval. It does not offer the others, and says so in the session. The
+Temporal plugin owns the engine's settings, so a durable turn cannot set
+`disableSkillShellExecution`, and skill shell injection follows Claude Code's default
+there. Only an allowed package can carry one (`vet.ts` refuses it everywhere else), and
+it runs only with `Bash` offered, as in a classic turn (run.ts `builtinTools`). This was
+not measured in a durable engine. Copies on the volume are not pruned.
+
 Settings has an "Assistant plugins" area with two sections: "Plugin packages"
 ([`frontend/src/components/settings/PluginPackages.tsx`](../../frontend/src/components/settings/PluginPackages.tsx))
 and "Plugins", the list of `/api/v1/ai/plugins`
@@ -888,6 +928,27 @@ Upstream's knobs are kept as `MemoryHookConfig` (`DEFAULT_MEMORY_HOOK_CONFIG`). 
 ScadBuddy's own: `retainMode` is `'transcript'` (the default, above) or `'result'`,
 upstream's behaviour of retaining only the last result with no document id.
 
+**In a durable session** (#2320, superseding #825) the turn's Claude Code runs in
+`agent-durable`, which has none of ScadBuddy's hooks. So the agent builds the same hooks
+and calls them from two activities on `agent-tools`
+([`agent/src/temporal/memoryActivities.ts`](../../agent/src/temporal/memoryActivities.ts)),
+which the `DurableSession` workflow calls around each turn, behind the patch
+`memory-2320`:
+
+- `memory_recall` runs before the prompt is sent. It recalls against the user's words
+  in that turn's `user.turn` event, and returns the same `<hindsight_memories>` block.
+  The workflow appends that block to the prompt.
+- `memory_retain` runs after the turn's events are written and before `finish_turn`.
+  It runs the Stop hook over the session's transcript, rebuilt from its event log
+  (`transcriptOf`: user turns, the assistant's text, and the main agent's tool calls).
+  It upserts `conversation:<ScadBuddy session id>`.
+
+Each recall and retain gets the same audit row and `memory` event as in a classic
+turn. Neither is retried, and neither ever fails the turn: a failure is recorded and
+the turn goes on with no memories. Only the recalled block enters the workflow's history,
+sealed by the session's payload codec. Unlike a classic turn, the turn waits for its
+retain before it is marked done (up to the 15 s retain limit).
+
 ## 12. The HTTP request tool (#827)
 
 Session turns get an `http_request` tool ("curl"; `agent/src/harness/httpRequest.ts`)
@@ -923,8 +984,12 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   a fork copies them. A call outside any session (an `/mcp` client, a flow run) uses its
   principal's own workspace, whose files are swept 24 h after their last write (every
   10 minutes, `WORKSPACE_SWEEP_MS`).
-- Caps: 25 MB a file and 200 MB a workspace by default, the `ai_settings` keys
-  `workspace_file_max_bytes` and `workspace_max_bytes` (bytes; no route writes them yet).
+- Caps: 25 MiB a file and 200 MiB a workspace by default, the `ai_settings` keys
+  `workspace_file_max_bytes` and `workspace_max_bytes` (bytes), which Settings →
+  Assistant workspace writes through `PUT /api/v1/ai/settings/workspace`
+  `{file_max_bytes, workspace_max_bytes}` (1 MiB to 100 MiB a file, 1 MiB to 2 GiB a
+  workspace, the file cap no larger; each a `settings` audit row;
+  [`agent/src/routes/workspaceSettings.ts`](../../agent/src/routes/workspaceSettings.ts)).
   Each is read at every write. Size the database for them.
 - Tools, with their tiers: `workspace_list` and `workspace_read` (read),
   `workspace_write`, `workspace_edit` and `workspace_delete` (write), and
@@ -963,3 +1028,30 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   (`ToolServices.secrets`, `main.ts`).
 - Paths are at most four `/`-separated segments of `[A-Za-z0-9_][A-Za-z0-9_.-]*`, checked
   by the store and by the table. No Claude Code built-in reaches the workspace.
+- The panel's **Files** (part 3,
+  [`agent/src/routes/sessionFiles.ts`](../../agent/src/routes/sessionFiles.ts)) is a
+  session's workspace over HTTP, for the browser user, guarded as the session routes
+  are: reads need a session it may see (`uiReadProblem`), writes the UI's origin
+  (`uiRequestProblem`) and a session it owns that is not archived (403, 409).
+  - `GET /api/v1/ai/sessions/:id/files`: `{files, usage: {files, bytes}, limits:
+    {file_max_bytes, workspace_max_bytes}}`, each file with its `path`, `media_type`,
+    `size`, `sha256`, `source` and times.
+  - `GET /api/v1/ai/sessions/:id/files/<path>`: the bytes, always
+    `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`, a sandboxing
+    CSP and `Cache-Control: private, no-store`. The stored media type is sent, except
+    HTML, SVG, XML and scripts, which go as `application/octet-stream`. The panel fetches
+    it and saves it through `downloadBlob`, or previews an image through a blob URL.
+  - `POST /api/v1/ai/sessions/:id/files`: multipart `file`, `path` and, to replace a
+    file, `expected_sha256` (the sha256 it has now) → `201 {file}` (`200` when it
+    replaced one). A path that exists without it, or with a stale one, is `409`; past
+    either cap, `413` (the body is capped at the file cap plus 64 KiB before it is read).
+    The file's `source` is `{kind: "upload", by: "browser", filename}`.
+  - `DELETE /api/v1/ai/sessions/:id/files/<path>[?expected_sha256=]`: `204`, `404` when
+    there is none, `409` on a stale sha256.
+
+  An upload or a delete is a `resource` audit row (`workspace_upload`, refusals
+  included, or `workspace_delete`) and appends a `workspace.file` event (`path`,
+  `change`, `by`, and an upload's `size`, `mediaType` and `sha256`) to the session's
+  log: the panel's Files list reads again on it. A running turn is not interrupted;
+  the panel adds `[workspace file <path>]` to the next message, and the model finds the
+  file with `workspace_list` / `workspace_read`.

@@ -589,6 +589,24 @@ A file holds at most 25 MB and a session's workspace 200 MB. An MCP client worki
 outside any session gets a workspace of its own whose files are deleted a day after
 they were last written ([operating.md §13](ai/operating.md#13-the-workspace-2329)).
 
+**Files** in a session's bar shows that session's workspace: each file's path, size,
+type, where it came from (uploaded by you, a web address, or the tool that saved it)
+and when it last changed.
+
+- **Download** saves a file; it works inside Bambuddy's frame too, through the same
+  popup as the 3MF download. A PNG, JPEG, GIF or WebP also has **Preview**, shown in the
+  panel. HTML and SVG files only ever download.
+- **Upload**, or a file dropped on the list, puts a file in the workspace under
+  `uploads/` (a name already there gets `-2`, `-3`, …) and adds
+  `[workspace file uploads/<name>]` to your message, so the assistant knows to look.
+  The assistant reads it with its workspace tools; no file passes through the chat.
+- **Delete** asks once more, then removes the file for the assistant too.
+
+Uploads and deletes are for your own chats that are not archived; anyone's chat can be
+listed and downloaded. Settings → **Assistant workspace** sets the caps (25 MiB a file
+and 200 MiB a chat by default), and they apply to uploads as to the assistant's own
+files ([operating.md §13](ai/operating.md#13-the-workspace-2329)).
+
 ### The headless browser
 
 A session with no tab of yours (one started over MCP, say) can still look at
@@ -617,8 +635,8 @@ browser are built in, each with **Enable**/**Disable**.
   assistant's ScadBuddy tools) and `playwright` (the headless browser's). **Review tools**
   lists each one with its tier and **Disable**. A tier can only be raised above the one
   ScadBuddy gives the tool (raise it to outward and it asks first), never lowered, and a
-  built-in is never removed. A durable session does not yet ask about a tool raised to
-  outward: it refuses the call instead. Then the plugin endpoints (remote MCP servers): give a **Name**, the **MCP endpoint URL**
+  built-in is never removed. Every setting here applies to classic and durable chats
+  alike. Then the plugin endpoints (remote MCP servers): give a **Name**, the **MCP endpoint URL**
   and, if it needs one, an auth header, and press **Add endpoint**. It starts disabled:
   **Test connection** lists its tools, each with a tier (outward, which asks first, by
   default) and **Hide**. Press **Save tool settings**, then **Enable**. Claude never

@@ -46,6 +46,56 @@ export function workspaceOf(ctx: { session?: string | undefined; principal: { ki
     : { kind: 'principal', principalKind: ctx.principal.kind, principalId: ctx.principal.id }
 }
 
+/** A size as a person reads it, with the exact count: "12.1 KB (12,345 bytes)". */
+export function humanSize(bytes: number): string {
+  const exact = `${bytes.toLocaleString('en-US')} byte${bytes === 1 ? '' : 's'}`
+  if (bytes < 1024) return exact
+  const units = ['KB', 'MB', 'GB'] as const
+  let n = bytes / 1024
+  let unit = 0
+  while (n >= 1024 && unit < units.length - 1) {
+    n /= 1024
+    unit += 1
+  }
+  return `${n.toFixed(1)} ${units[unit]} (${exact})`
+}
+
+/**
+ * The input an approval shows for a call that uploads a workspace file (#2396):
+ * the input with `workspace_size` added, the size of the row `workspace_sha256`
+ * pins in the workspace the call runs in, or saying there is no such file (the
+ * upload is then refused when it runs). Keyed by the input's shape, not the
+ * tool: any input with a string `workspace_path` and `workspace_sha256` (every
+ * workspaceUploads.ts tool) gets it. Every gate that describes a call goes
+ * through this: the classic gate and /mcp's prepare (approvals/service.ts
+ * `create`, `createPrepared`) and a durable call (temporal/toolActivities.ts
+ * `gate.describe_call`). Only what is SHOWN: the hash an approval binds to is
+ * always of the call's own input, so the size is never something the model gave.
+ * A lookup that fails says so on the card rather than failing the gate.
+ */
+export async function withWorkspaceSize(
+  files: SessionFiles | undefined,
+  ws: WorkspaceRef | undefined,
+  input: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const { workspace_path: path, workspace_sha256: digest } = input
+  // The classic gate gets the SDK's unparsed input: a `workspace_size` the model
+  // put there is never shown, so the only size on a card is one read here.
+  const own = { ...input }
+  delete own.workspace_size
+  // The shape check keeps every call that uploads nothing off Postgres.
+  if (files === undefined || ws === undefined || typeof path !== 'string' || typeof digest !== 'string') return own
+  let info: WorkspaceFileInfo | undefined
+  try {
+    info = await files.stat(ws, path)
+  } catch (err) {
+    if (!(err instanceof WorkspaceError)) return { ...own, workspace_size: 'unknown: the workspace could not be read' }
+  }
+  const size =
+    info?.sha256 === digest ? humanSize(info.size) : 'no such file at this sha256 in the workspace: the upload will be refused'
+  return { ...own, workspace_size: size }
+}
+
 function keyOf(ws: WorkspaceRef): { key: string; sessionId: string | null } {
   return ws.kind === 'session'
     ? { key: `session:${ws.sessionId}`, sessionId: ws.sessionId }

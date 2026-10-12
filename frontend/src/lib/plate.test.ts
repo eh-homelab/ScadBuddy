@@ -153,6 +153,13 @@ describe('boundByPlate', () => {
     expect(boundByPlate(schema(fine), H2C).parameters.map((p) => p.max)).toEqual([300])
   })
 
+  it("rounds a bound to the finer of its min's and step's decimals, never past the plate (#2148)", () => {
+    const narrower = { ...H2C, usable: { ...H2C.usable, max_x: H2C.usable.min_x + 299.97 } }
+    const stepped = param({ name: 'width', type: 'slider', min: 1.65, max: 400, step: 0.1, plate_max: 'x' })
+    // 1.65 + 2983 * 0.1 = 299.95; rounding to the step's one decimal made it 300.0.
+    expect(boundByPlate(schema(stepped), narrower).parameters.map((p) => p.max)).toEqual([299.95])
+  })
+
   it('never puts the max under the min', () => {
     const big = param({ name: 'width', min: 350, max: 400, plate_max: 'x' })
     expect(boundByPlate(schema(big), H2C).parameters.map((p) => p.max)).toEqual([350])

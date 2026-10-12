@@ -11,10 +11,12 @@ import type { Database } from '../src/db.js'
 import { drainDownloads } from '../src/harness/browserDownloads.js'
 import { runHttpRequest, withDefaults } from '../src/harness/httpRequest.js'
 import { unwrapUntrusted } from '../src/safety/untrusted.js'
-import { toolActivities } from '../src/temporal/toolActivities.js'
+import { ApprovalActions, ownerOf } from '../src/approvals/mcp.js'
+import { canonicalJson } from '../src/approvals/service.js'
+import { DESCRIBE_CALL_ACTIVITY, gateActivities, toolActivities } from '../src/temporal/toolActivities.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { runTool, type ToolContext } from '../src/tools/registry.js'
-import { SessionFiles, sha256, type WorkspaceRef, WorkspaceError } from '../src/workspace/store.js'
+import { humanSize, SessionFiles, sha256, type WorkspaceRef, WorkspaceError, withWorkspaceSize } from '../src/workspace/store.js'
 import { BACKEND, connect, firstText, services, testApp } from './helpers/mcp.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
@@ -36,13 +38,14 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
   let files: SessionFiles
   let sessionId: string
   let ws: WorkspaceRef
+  let m: ReturnType<typeof manager>
   const servers: Server[] = []
 
   beforeEach(async () => {
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     files = new SessionFiles(db.sql, { limits: { fileMaxBytes: 1000, workspaceMaxBytes: 2500 } })
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: scriptedRunner(() => ({ reply: 'ok' })).runner })
+    m = manager({ sql: db.sql, paths: await tempPaths(), run: scriptedRunner(() => ({ reply: 'ok' })).runner })
     ;({
       session: { id: sessionId },
     } = await m.start(browser, { origin: 'chat' }))
@@ -395,6 +398,76 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       const summary = tool('import_model').summarize({ workspace_path: 'downloads/box.scad', workspace_sha256: sha })
       expect(summary).toBe(`Import a model from the workspace file downloads/box.scad (sha256 ${sha})`)
       expect(tool('upload_asset').summarize({ slug: 'box', workspace_path: 'logo.svg', workspace_sha256: sha })).toContain(sha)
+    })
+
+    it('shows the size of the file the sha256 pins on the approval card, in every gate, and never hashes it (#2396)', async () => {
+      // Over the suite's 1000-byte cap, so written through a store with the default caps.
+      const info = await new SessionFiles(db.sql).write(ws, 'downloads/box.scad', Buffer.alloc(1234, 'a'))
+      const call = { workspace_path: 'downloads/box.scad', workspace_sha256: info.sha256 }
+      const size = '1.2 KB (1,234 bytes)'
+      expect(humanSize(1)).toBe('1 byte')
+      expect(humanSize(5 * 1024 * 1024)).toBe('5.0 MB (5,242,880 bytes)')
+      expect(humanSize(3 * 1024 ** 3)).toBe('3.0 GB (3,221,225,472 bytes)')
+      expect(await withWorkspaceSize(files, ws, call)).toEqual({ ...call, workspace_size: size })
+      // A file that is gone or no longer at that sha256, or a bad path, is said to be; an input with no upload is left alone.
+      const stale = await withWorkspaceSize(files, ws, { ...call, workspace_sha256: 'f'.repeat(64) })
+      expect(stale.workspace_size).toMatch(/^no such file at this sha256/)
+      expect((await withWorkspaceSize(files, ws, { ...call, workspace_path: '../x' })).workspace_size).toMatch(/^no such file/)
+      expect(await withWorkspaceSize(files, ws, { slug: 'box' })).toEqual({ slug: 'box' })
+      expect(await withWorkspaceSize(undefined, ws, call)).toEqual(call)
+      // A size the model put in the input is never shown.
+      expect(await withWorkspaceSize(files, ws, { slug: 'box', workspace_size: '1 byte' })).toEqual({ slug: 'box' })
+      expect(await withWorkspaceSize(files, ws, { ...call, workspace_size: '1 byte' })).toEqual({ ...call, workspace_size: size })
+      // A store that cannot be read says so; the gate still parks the call.
+      const down = { stat: async () => Promise.reject(new Error('connection refused')) } as unknown as SessionFiles
+      expect((await withWorkspaceSize(down, ws, call)).workspace_size).toBe('unknown: the workspace could not be read')
+
+      // Classic: the session's approval row (the card's summary), hashed over the call's own input.
+      const classic = await m.approvals.create({
+        sessionId,
+        turnId: null,
+        toolUseId: 'toolu_up',
+        tool: 'import_model',
+        input: call,
+        tier: 'outward',
+        requestedBy: browser,
+      })
+      expect(JSON.parse(classic.inputSummary)).toEqual({ ...call, workspace_size: size })
+      expect(classic.inputHash).toBe(m.approvals.hash('import_model', call))
+
+      // /mcp: a prepare outside any session reads the caller's own workspace.
+      const principal = { id: 'token:up', kind: 'bearer' as const, tiers: tiersUpTo('outward') }
+      const own: WorkspaceRef = { kind: 'principal', principalKind: 'bearer', principalId: 'token:up' }
+      const mine = await files.write(own, 'parts.scad', Buffer.from('cube(1);'))
+      const mcpCall = { workspace_path: 'parts.scad', workspace_sha256: mine.sha256 }
+      const parsed = { ...mcpCall, force: false } // import_model's default, as the prepare parsed it
+      const prepared = await runTool(tool('import_model'), mcpCall, {
+        ...services({ workspace: files, pending: new ApprovalActions(m.approvals) }),
+        principal,
+        progress: async () => {},
+        signal: new AbortController().signal,
+      })
+      expect(JSON.stringify(firstText(prepared))).toContain('pending_approval')
+      const [listed] = await m.approvals.listPrepared(ownerOf(principal))
+      expect(JSON.parse(listed!.inputSummary)).toEqual({ ...parsed, workspace_size: '8 bytes' })
+      expect(listed!.inputHash).toBe(m.approvals.hash('import_model', parsed))
+
+      // Durable: describe_call reads the durable session's own workspace.
+      const audit = {
+        record: async () => {},
+        hash: (_: string, input: Record<string, unknown>) => canonicalJson(input),
+        summarise: (_: string, input: Record<string, unknown>) => JSON.stringify(input),
+      }
+      const describeCall = gateActivities({ audit, sessions: { ownerOf: async () => browser }, workspace: files })[DESCRIBE_CALL_ACTIVITY]!
+      const result: unknown = await new MockActivityEnvironment({
+        activityId: 'describe-1',
+        workflowExecution: { workflowId: `session-${sessionId}`, runId: 'run-1' },
+        activityType: DESCRIBE_CALL_ACTIVITY,
+        taskQueue: 'agent-tools',
+      }).run(describeCall, { tool: 'import_model', input: call })
+      const described = result as { summary: string; input_hash: string }
+      expect(JSON.parse(described.summary)).toEqual({ ...call, workspace_size: size })
+      expect(described.input_hash).toBe(canonicalJson(call))
     })
 
     it('redacts the credentials from a text read', async () => {

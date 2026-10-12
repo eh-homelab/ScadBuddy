@@ -12,6 +12,7 @@ import { DURABLE_ONLY_NAMES } from '../tools/answerTools.js'
 import { turnPrincipal } from '../tools/harness.js'
 import { type FlowBlobStore, type FlowImage, flowImageOf } from './flowBlobs.js'
 import { flowOf, type FlowRuns } from './flowRuns.js'
+import { type SessionFiles, withWorkspaceSize } from '../workspace/store.js'
 
 // Every tool as an activity on `agent-tools` (spec 2026-10-01 §6.3, #1055), registered
 // under the tool's name, which is how the durable worker's `activity_as_tool` stubs
@@ -464,23 +465,28 @@ export const DESCRIBE_CALL_ACTIVITY = 'gate.describe_call'
 
 /**
  * What DurableSession needs to open an `approval` entry (spec §6.6): the call's
- * scrubbed summary and its input hash, computed as a classic approval's are (the
+ * scrubbed summary (with a workspace upload's size, workspace/store.ts
+ * `withWorkspaceSize`) and its input hash, computed as a classic approval's are (the
  * approvals' HMAC key, audit/log.ts), so the agent alone holds the key and the
  * scrubbing rules. Served on `agent-tools` beside the tools.
  */
-export function gateActivities(deps: Pick<ToolActivityDeps, 'audit' | 'sessions'>): Record<string, ToolActivity> {
+export function gateActivities(
+  deps: Pick<ToolActivityDeps, 'audit' | 'sessions'> & { workspace?: SessionFiles | undefined },
+): Record<string, ToolActivity> {
   return {
     [DESCRIBE_CALL_ACTIVITY]: async (args: unknown) => {
       // The hash is keyed by the approvals' HMAC key: only a durable session's workflow
       // gets one (security review of 5b).
-      await durableSession(DESCRIBE_CALL_ACTIVITY, deps.sessions)
+      const { session } = await durableSession(DESCRIBE_CALL_ACTIVITY, deps.sessions)
       const { tool, input } = (args ?? {}) as { tool?: unknown; input?: unknown }
       if (!deps.audit) throw ApplicationFailure.nonRetryable('describing a call needs the audit log and its key', TOOL_ERROR)
       if (typeof tool !== 'string' || typeof input !== 'object' || input === null || Array.isArray(input)) {
         throw ApplicationFailure.nonRetryable('describe_call takes {tool: string, input: object}', TOOL_ERROR)
       }
       const fields = input as Record<string, unknown>
-      return { summary: deps.audit.summarise(tool, fields), input_hash: deps.audit.hash(tool, fields) }
+      // A workspace upload's size is shown (#2396), from the session's own workspace; the hash is of the call's input.
+      const shown = await withWorkspaceSize(deps.workspace, { kind: 'session', sessionId: session }, fields)
+      return { summary: deps.audit.summarise(tool, shown), input_hash: deps.audit.hash(tool, fields) }
     },
   }
 }

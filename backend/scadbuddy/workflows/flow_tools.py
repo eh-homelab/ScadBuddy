@@ -147,6 +147,13 @@ _RUN_SETTLED = ["succeeded", "failed"]
 OUTWARD_PREFIX = "outward-"
 #: An agent tool's activity id prefix, which the agent strips to find the call id.
 TOOL_PREFIX = "tool-"
+#: A turn tool (agent/src/temporal/turnTools.ts): its tier activity, its call's activity
+#: type prefix, and the separator in its `<server>__<tool>` name.
+TURN_TOOL_TIER = "turn_tool_tier"
+TURN_TOOL_PREFIX = "turn:"
+TURN_TOOL_SEPARATOR = "__"
+#: tool(...) reaches the turn tools (#2320); runs recorded before refuse such a name.
+FLOW_TURN_TOOLS_PATCH = "flow-turn-tools-2320"
 
 
 def _refusal(err: ActivityError) -> BaseException:
@@ -376,17 +383,26 @@ def _tool_result(answer: Any) -> ToolResult:
     return ToolResult.model_validate(answer)
 
 
-async def _call_tool(call_id: str, name: str, args: dict[str, Any], *, attempts: int) -> ToolResult:
+async def _call_tool(
+    call_id: str,
+    name: str,
+    args: dict[str, Any],
+    *,
+    attempts: int,
+    activity: str | None = None,
+    queue: str | None = None,
+) -> ToolResult:
     """The agent tool `name` as an activity on the agent's `agent-tools` queue, under the
-    activity id `tool-<call id>` the agent reads the call (and its approval) from."""
+    activity id `tool-<call id>` the agent reads the call (and its approval) from. A turn
+    tool's call is the activity `turn:<name>`, on the queue `turn_tool_tier` named."""
     owner: StepOwner = workflow.instance()
     try:
         # Untyped: a string, or `{text, images}` (#2477); a history from before either replays.
         answer: Any = await workflow.execute_activity(
-            name,
+            activity or name,
             args,
             activity_id=f"{TOOL_PREFIX}{call_id}",
-            task_queue=owner.tools_queue,
+            task_queue=queue or owner.tools_queue,
             start_to_close_timeout=_TOOL_TIMEOUT,
             retry_policy=RetryPolicy(
                 maximum_attempts=attempts, non_retryable_error_types=_TOOL_REFUSALS
@@ -406,10 +422,75 @@ async def approved_tool(call: str, name: str, args: dict[str, Any]) -> ToolResul
     return await _call_tool(call, name, args, attempts=1)
 
 
+@agent.tool_defn()
+async def approved_turn_tool(
+    call: str, name: str, args: dict[str, Any], queue: str
+) -> ToolResult:
+    """An outward plugin or http_request call, run once a person approved it, at most once."""
+    await _approved(call)
+    return await _call_tool(
+        call, name, args, attempts=1, activity=f"{TURN_TOOL_PREFIX}{name}", queue=queue
+    )
+
+
+async def _turn_tool(
+    name: str, args: dict[str, Any], runner: AgentWorkflowRunner
+) -> ToolResult:
+    """A tool a durable turn has beside ScadBuddy's own (a remote plugin's,
+    `scadbuddy_http__http_request`), named `<server>__<tool>` (agent/src/temporal/turnTools.ts).
+    The agent tiers it from its input as the run's starter, and refuses one no enabled
+    plugin or setting offers before anything is called."""
+    owner: StepOwner = workflow.instance()
+    try:
+        tiered: dict[str, Any] = await workflow.execute_activity(
+            TURN_TOOL_TIER,
+            {"tool": name, "input": args},
+            task_queue=owner.tools_queue,
+            result_type=dict,
+            start_to_close_timeout=_TOOL_TIMEOUT,
+            retry_policy=RetryPolicy(maximum_attempts=3, non_retryable_error_types=_TOOL_REFUSALS),
+        )
+    except ActivityError as err:
+        if isinstance(err.cause, ApplicationError) and err.cause.type == "ToolError":
+            raise ValueError(f"there is no tool {name!r}: {err.cause.message}") from None
+        if isinstance(err.cause, ApplicationError):
+            raise ToolFailedError(err.cause.message) from None
+        raise
+    tier = str(tiered.get("tier"))
+    # A server whose state lives on one agent replica (http_request's saved bodies) names it.
+    queue = str(tiered.get("task_queue") or owner.tools_queue)
+    call_id = str(workflow.uuid4())
+    if tier == "outward":
+        result: ToolResult = await _gated(
+            f"tool:{name}",
+            runner,
+            approved_turn_tool,
+            call_id,
+            call=call_id,
+            name=name,
+            args=args,
+            queue=queue,
+        )
+        return result
+    async with step(f"tool:{name}", call_id, outward=False):
+        return await _call_tool(
+            call_id,
+            name,
+            args,
+            attempts=3 if tier == "read" else 1,
+            activity=f"{TURN_TOOL_PREFIX}{name}",
+            queue=queue,
+        )
+
+
 async def _run_tool(name: str, args: dict[str, Any], runner: AgentWorkflowRunner) -> ToolResult:
     owner: StepOwner = workflow.instance()
     tier = owner.tool_tier(name)
     if tier is None:
+        # Before #2320 an unknown name was refused here with no command: a run recorded
+        # then replays without the patch marker and is refused again.
+        if TURN_TOOL_SEPARATOR in name and workflow.patched(FLOW_TURN_TOOLS_PATCH):
+            return await _turn_tool(name, args, runner)
         raise ValueError(f"there is no tool {name!r}")
     call_id = str(workflow.uuid4())
     if tier == "outward":
@@ -427,8 +508,10 @@ async def _run_tool(name: str, args: dict[str, Any], runner: AgentWorkflowRunner
 async def tool(name: str, args: dict[str, Any], runner: agent.Injected[AgentWorkflowRunner]) -> str:
     """Call ScadBuddy's agent tool `name` with `args`, as the person or session that
     started this run; returns its text, each image it returned named as `[image <name>]`
-    (`tool_result` gives the images themselves). An outward tool (one that changes
-    something outside ScadBuddy) waits for a person to approve it first."""
+    (`tool_result` gives the images themselves). `name` may also be a plugin's tool or
+    `scadbuddy_http__http_request`, named `<server>__<tool>` as the assistant sees them.
+    An outward tool (one that changes something outside ScadBuddy) waits for a person
+    to approve it first."""
     return (await _run_tool(name, args, runner)).text
 
 
@@ -570,7 +653,9 @@ async def _start_session(
         # not one a session start takes).
         body: dict[str, Any] = {"prompt": _prompt(prompt, skills, result_schema), "mode": "durable"}
         started = _untrusted(
-            (await _call_tool(call_id, "sessions_start", body | _refs(images), attempts=1)).text
+            (
+                await _call_tool(call_id, "sessions_start", body | _refs(images), attempts=1)
+            ).text
         )
         try:
             session_id, turn_id = str(started["session"]["id"]), str(started["turn_id"])
@@ -647,12 +732,13 @@ FLOW_TOOLS: list[Any] = [
     tool,
     tool_result,
     approved_tool,
+    approved_turn_tool,
     agent_session,
     agent_with_images,
     ask_session,
     ask_session_with_images,
 ]
-_INNER = (human_answer, approved_print, approved_arrange, approved_tool)
+_INNER = (human_answer, approved_print, approved_arrange, approved_tool, approved_turn_tool)
 SCRIPT_TOOLS: list[Any] = [t for t in FLOW_TOOLS if t not in _INNER]
 
 

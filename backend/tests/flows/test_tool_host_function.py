@@ -4,12 +4,13 @@ the agent's names on a test queue. An outward tool waits for a person's approval
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Sequence
 from typing import Any
 
 import pytest
 from temporal_agent_harness.harness.agent_client import AgentClient
 from temporalio import activity
+from temporalio.common import RawValue
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 from temporalio.worker import Worker
@@ -216,6 +217,118 @@ async def test_a_write_tool_runs_once_even_when_its_attempt_fails(
     run = await outward.finished(run_id)
     assert "lost its answer" in (run.result or "")
     assert [c[0] for c in served.calls] == ["make_thing"]
+
+
+class TurnTools:
+    """The agent's turn tools (#2320): `turn_tool_tier` on the tools queue, and each call
+    the activity `turn:<server>__<tool>`, here on a replica's own queue, as a pinned
+    server's (http_request's) calls are."""
+
+    def __init__(self, host: str) -> None:
+        self.host = host
+        self.tiered: list[str] = []
+        self.calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    def tier(self) -> Any:
+        @activity.defn(name="turn_tool_tier")
+        async def turn_tool_tier(args: dict[str, Any]) -> dict[str, Any]:
+            name = str(args["tool"])
+            self.tiered.append(name)
+            if not name.startswith("scadbuddy_http__"):
+                raise ApplicationError(
+                    f"{name} is not offered any more: its plugin or setting was turned off",
+                    type="ToolError",
+                    non_retryable=True,
+                )
+            method = args["input"].get("method")
+            return {"tier": "read" if method == "GET" else "outward", "task_queue": self.host}
+
+        return turn_tool_tier
+
+    def call(self) -> Any:
+        @activity.defn(dynamic=True)
+        async def turn_call(args: Sequence[RawValue]) -> str:
+            info = activity.info()
+            fields = activity.payload_converter().from_payload(args[0].payload, dict)
+            self.calls.append((info.activity_type, info.activity_id, fields))
+            return f"{fields['method']} done"
+
+        return turn_call
+
+
+@pytest.fixture
+async def turn_tools(outward: Outward) -> AsyncIterator[tuple[TurnTools, str]]:
+    queue = f"agent-tools-{uuid.uuid4().hex[:8]}"
+    served = TurnTools(f"{queue}.host-1")
+    async with (
+        Worker(outward.client, task_queue=queue, activities=[served.tier()]),
+        Worker(outward.client, task_queue=served.host, activities=[served.call()]),
+    ):
+        yield served, queue
+
+
+async def test_a_turn_tool_runs_on_the_queue_its_tier_names(
+    outward: Outward, turn_tools: tuple[TurnTools, str]
+) -> None:
+    served, queue = turn_tools
+    run_id = await outward.run(
+        script("return await tool('scadbuddy_http__http_request', {'method': 'GET'})"),
+        tools_queue=queue,
+    )
+    run = await outward.finished(run_id)
+    assert run.result == "result: 'GET done'"
+    [step] = run.steps
+    assert (step.fn, step.outward) == ("tool:scadbuddy_http__http_request", False)
+    assert served.calls == [
+        ("turn:scadbuddy_http__http_request", f"tool-{step.call_id}", {"method": "GET"})
+    ]
+
+
+async def test_an_outward_turn_tool_waits_for_approval(
+    outward: Outward, turn_tools: tuple[TurnTools, str]
+) -> None:
+    served, queue = turn_tools
+    run_id = await outward.run(
+        script("return await tool('scadbuddy_http__http_request', {'method': 'POST'})"),
+        tools_queue=queue,
+    )
+    call_id = await outward.approval(run_id)
+    parked = await outward.store.get_run(run_id)
+    assert parked is not None
+    assert [(w.fn, w.kind) for w in parked.waiting_on] == [
+        ("tool:scadbuddy_http__http_request", "approval")
+    ]
+    assert served.calls == []
+    decide = next(k for k in flow_kinds(outward.store, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
+    request = {"run_id": run_id, "call_id": call_id, "approved": True}
+    env = ActivityEnvironment(client=outward.client)
+    await env.run(decide.run, request, await env.run(decide.check, request))
+    run = await outward.finished(run_id)
+    assert run.result == "result: 'POST done'"
+    assert served.calls == [
+        ("turn:scadbuddy_http__http_request", f"tool-{call_id}", {"method": "POST"})
+    ]
+
+
+async def test_a_turn_tool_nothing_offers_is_refused_before_any_call(
+    outward: Outward, turn_tools: tuple[TurnTools, str]
+) -> None:
+    served, queue = turn_tools
+    run_id = await outward.run(
+        script(
+            "try:",
+            "    await tool('gone__thing', {})",
+            "except Exception as e:",
+            "    return str(e)",
+        ),
+        tools_queue=queue,
+    )
+    run = await outward.finished(run_id)
+    assert "there is no tool 'gone__thing': gone__thing is not offered any more" in (
+        run.result or ""
+    )
+    assert served.tiered == ["gone__thing"]
+    assert served.calls == []
 
 
 async def test_tool_answers_text_and_tool_result_answers_the_images_as_pointers(

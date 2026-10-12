@@ -451,6 +451,16 @@ export class PackageInstaller {
   }
 }
 
+export type LoadedPackage = {
+  name: string
+  contentHash: string
+  dir: string
+  /** Approved with `allow_refused`: loaded as it is. */
+  allowed: boolean
+  /** The Claude Code built-ins an allowed package names (vet.ts `builtin_tools`). */
+  builtinTools: string[]
+}
+
 export type PackagesForRun = {
   /** Packages that pass the rules, which the harness checks again (harness/plugins.ts). */
   paths: string[]
@@ -458,6 +468,8 @@ export type PackagesForRun = {
   allowedPaths: string[]
   /** The Claude Code built-ins the allowed packages name, for the turn's `tools` (run.ts `builtinTools`). */
   builtinTools: string[]
+  /** Each loaded package with its pin's hash, for a durable turn (temporal/turnPackages.ts). */
+  loaded: LoadedPackage[]
   problems: string[]
   /** Call when the turn has ended: its package directories may then be pruned. */
   release: () => void
@@ -477,6 +489,7 @@ export async function loadPackagesForRun(
   const builtinTools = new Set<string>()
   const problems: string[] = []
   const releases: (() => void)[] = []
+  const loaded: LoadedPackage[] = []
   for (const pin of await store.enabledPins()) {
     // A package stored under a built-in's name before builtins.ts (a reserved name
     // was allowable) would shadow the built-in: never loaded, only removable.
@@ -492,6 +505,7 @@ export async function loadPackagesForRun(
       } else {
         paths.push(dir)
       }
+      loaded.push({ name: pin.name, contentHash: pin.contentHash, dir, allowed: pin.allowRefused === true, builtinTools: pin.allowRefused ? [...wanted] : [] })
       releases.push(release)
     } catch (err) {
       if (err instanceof PackageRefusedError) {
@@ -507,6 +521,7 @@ export async function loadPackagesForRun(
     paths,
     allowedPaths,
     builtinTools: [...builtinTools].sort(),
+    loaded,
     problems,
     release: () => releases.forEach((r) => r()),
   }

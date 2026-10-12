@@ -143,8 +143,9 @@ function summarise(content: unknown): { summary: string; images: SessionImage[] 
         if (!isText(b)) return true
         // A preamble only announces the image after it.
         if (isPreamble(b.text)) return false
-        // Claude Code's lines around an image the panel shows.
-        if (IMAGE_SOURCE_LINE.test(b.text) && shown.some(Boolean)) return false
+        // Claude Code's lines around an image the panel shows: each image's own, so a
+        // refused image keeps its source line beside its `[image]` (#2149).
+        if (IMAGE_SOURCE_LINE.test(b.text) && shown[i - 1] === true) return false
         if (RESOURCE_LINE.test(b.text) && shown[i + 1] === true) return false
         return true
       })

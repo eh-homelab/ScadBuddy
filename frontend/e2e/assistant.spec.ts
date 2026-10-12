@@ -124,7 +124,9 @@ test.describe('assistant panel (#256)', () => {
     await expect(card).toContainText('Denied by You.')
     await expect(card.getByRole('button', { name: 'Approve' })).toHaveCount(0)
     await expect(card.getByRole('button', { name: 'Deny' })).toHaveCount(0)
-    await expect(panel.getByText('Denied: nothing was sent.')).toBeVisible()
+    // The call reads as not run; its refusal result is the model's, not shown (#2149).
+    await expect(send.getByTestId('agent-tool-status')).toHaveText('Not run')
+    await expect(panel.getByText('Denied: nothing was sent.')).toHaveCount(0)
     const log = panel.getByRole('log', { name: 'Conversation' })
     await expect(log.getByText("OK, I didn't send it.")).toBeVisible()
     await expect(panel.getByTestId('agent-status')).toHaveText('Idle')
