@@ -304,9 +304,12 @@ describe('HistoryPage', () => {
     expect(await screen.findByRole('heading', { name: 'Nothing generated yet' })).toBeInTheDocument()
   })
 
-  it('offers to send an output again', async () => {
+  it('offers to send an output, "again" only once it was sent (#2287)', async () => {
     const { user } = render()
-    await user.click(within(await row('Workshop')).getByRole('button', { name: /^Send again / }))
+    expect(within(await row('Reagan')).getByRole('button', { name: 'Send again Reagan' })).toBeInTheDocument()
+    const workshop = await row('Workshop')
+    expect(within(workshop).queryByRole('button', { name: /^Send again / })).not.toBeInTheDocument()
+    await user.click(within(workshop).getByRole('button', { name: 'Send Workshop' }))
 
     // #312: the send bar only uploads. There is no mode to choose any more.
     const dialog = await screen.findByRole('dialog', { name: 'Send to Bambuddy' })
@@ -328,6 +331,21 @@ describe('HistoryPage', () => {
     // The list reloads with the arranged output, and the selection is cleared.
     expect(await screen.findByText('Arranged from 1 output')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Arrange selected (0)' })).toBeDisabled()
+    // #2287 — the next step, right there: it has not been sent, and Print is the way on.
+    const next = screen.getByRole('group', { name: 'Next step' })
+    expect(next).toHaveTextContent('Not sent to Bambuddy yet')
+    expect(within(next).getByRole('link', { name: 'Download' })).toHaveAttribute(
+      'href',
+      expect.stringMatching(/\/outputs\/[0-9a-f]+\/model\.3mf$/),
+    )
+    await user.click(within(next).getByRole('button', { name: 'Print' }))
+    expect(await screen.findByRole('dialog', { name: 'Print' })).toBeInTheDocument()
+  })
+
+  it('offers Print on every output (#2287)', async () => {
+    const { user } = render()
+    await user.click(within(await row('Workshop')).getByRole('button', { name: 'Print Workshop' }))
+    expect(await screen.findByRole('dialog', { name: 'Print' })).toBeInTheDocument()
   })
 
   it('says which outputs could not be re-rendered after the dialog closes (#902)', async () => {
@@ -382,7 +400,7 @@ describe('HistoryPage', () => {
     const batch = await row('Batch')
     expect(within(batch).queryByRole('button', { name: 'Edit Batch' })).not.toBeInTheDocument()
     expect(within(batch).getByText('Arranged from 2 outputs')).toBeInTheDocument()
-    expect(within(batch).getByRole('button', { name: 'Send again Batch' })).toBeInTheDocument()
+    expect(within(batch).getByRole('button', { name: 'Print Batch' })).toBeInTheDocument()
   })
 })
 

@@ -48,6 +48,15 @@ describe('LibraryPage', () => {
     expect(await screen.findByRole('status', { name: 'Arranged' })).toHaveTextContent('Arranged onto 2 plates.')
     expect(screen.getByRole('link', { name: 'Open in History' })).toHaveAttribute('href', '/m/name-keychain/history')
     expect(screen.getByRole('button', { name: 'Arrange selected (0)' })).toBeDisabled()
+    // #2287 — it is not sent anywhere yet; Print opens the print dialog with the result.
+    const next = screen.getByRole('group', { name: 'Next step' })
+    expect(next).toHaveTextContent('Not sent to Bambuddy yet')
+    expect(within(next).getByRole('link', { name: 'Download' })).toHaveAttribute(
+      'href',
+      expect.stringMatching(/\/outputs\/[0-9a-f]+\/model\.3mf$/),
+    )
+    await user.click(within(next).getByRole('button', { name: 'Print' }))
+    expect(await screen.findByRole('dialog', { name: 'Print' })).toBeInTheDocument()
   })
 
   it('Advanced lists the sliced file without Print and is remembered', async () => {
