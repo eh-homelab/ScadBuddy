@@ -3,8 +3,8 @@
  * a session's tool results carried (agent `src/routes/sessions.ts`). The scripted agent
  * (`../agent.ts`) returns one, a render view of the name keychain, in its first turn;
  * any other name is a 404, as the real route answers a name the session never stored.
- * It also serves the images the user sent (#1891's full-size view), which the attachment
- * mock stores here as a turn takes them (`storeSentImage`).
+ * It also serves the images the user sent and their previews (#1891, #2479), which the
+ * attachment mock stores here as they are uploaded (`storeSentImage`).
  */
 import { HttpResponse, http } from 'msw'
 import type { ToolImage } from '../../agent/chat/protocol'
@@ -23,31 +23,31 @@ const bytes = (base64: string) => Uint8Array.from(atob(base64), (c) => c.charCod
 
 const EXTENSION: Record<string, string> = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp' }
 
-/** The images users sent, by the name a `user.turn` gives them. */
-const sent = new Map<string, { mediaType: string; data: string }>()
+/** The images users sent and their previews, by the name a `user.turn` gives them. */
+const sent = new Map<string, Blob>()
 
 export function reset(): void {
   sent.clear()
 }
 
 /**
- * Keeps a sent image and returns the name it is served under. The real agent names it by
- * its bytes' sha256; any name of that shape does here.
+ * Keeps a sent image (or its preview) and returns the pointer it is served under. The
+ * real agent names it by its bytes' sha256; any name of that shape does here.
  */
-export function storeSentImage(image: { mediaType: string; data: string }): string {
-  const name = `${(sent.size + 1).toString(16).padStart(64, '0')}.${EXTENSION[image.mediaType] ?? 'png'}`
+export function storeSentImage(image: Blob): { name: string; mediaType: string } {
+  const name = `${(sent.size + 1).toString(16).padStart(64, '0')}.${EXTENSION[image.type] ?? 'png'}`
   sent.set(name, image)
-  return name
+  return { name, mediaType: image.type }
 }
 
 export const handlers = [
   http.get('/api/v1/ai/sessions/:id/blobs/:name', ({ params }) => {
     const image =
-      params.name === PREVIEW_IMAGE.name ? { mediaType: 'image/png', data: PREVIEW_PNG } : sent.get(String(params.name))
+      params.name === PREVIEW_IMAGE.name ? new Blob([bytes(PREVIEW_PNG)], { type: 'image/png' }) : sent.get(String(params.name))
     return image
-      ? new HttpResponse(bytes(image.data), {
+      ? new HttpResponse(image, {
           headers: {
-            'Content-Type': image.mediaType,
+            'Content-Type': image.type,
             'X-Content-Type-Options': 'nosniff',
             'Content-Disposition': 'inline',
             'Cache-Control': 'private, max-age=31536000, immutable',

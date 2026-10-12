@@ -84,18 +84,19 @@ import {
   ownerSeenBy,
   publicLabel,
   sameOwner,
+  type SentImage,
   type ServerEvent,
   type SessionMode,
   type SessionStatus,
 } from './protocol.js'
-import { SessionBlobs, sessionImage, type StoredBlob } from './blobs.js'
+import { SessionBlobs, sentImageBlobs, type StoredBlob } from './blobs.js'
 import { SessionFiles } from '../workspace/store.js'
 import { SessionEdits } from './edits.js'
 import { blobNames, forkHistory, transcriptCut } from './forkPoint.js'
 import { scrubForLog, SdkEventMapper, ShownCalls, type TitleResolver } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
 import { UnpricedSpend } from './unpricedSpend.js'
-import { type ImagePreview, previewsOf, userPrompt, type UserImage } from './images.js'
+import { userPrompt, type UserImage } from './images.js'
 import { type ResourceRef, SessionResources, type TouchedRecord } from './touched.js'
 import { TurnTrace } from '../telemetry/turn.js'
 import { type DurableGate, DurableUnavailable } from '../gate/durable.js'
@@ -528,8 +529,8 @@ export type SendOptions = {
   context?: string
   /**
    * Images the user sent with the message (#1866, images.ts): the model gets
-   * them as image blocks before the text; the `user.turn` event shows their
-   * previews.
+   * them as image blocks before the text; the `user.turn` event names them and
+   * their previews, stored with the session first (#2479).
    */
   images?: readonly UserImage[]
   /**
@@ -1219,6 +1220,10 @@ export class SessionManager {
       if (!turn) throw await this.whyNotClaimed(id, principal, before)
       return turn
     }
+    // The images and their previews are stored before the claim, so the turn's event can
+    // name them (#2479); a store that fails refuses the message. (A durable send stores
+    // them under its own claim, durable.ts.)
+    const sent = options.images?.length ? await this.storeSentImages(id, options.images) : undefined
     const [claim] = await this.deps.sql.unsafe<(Row & { unpriced_cost_usd: number })[]>(
       `UPDATE ai_sessions
        SET status = 'running', turn_id = $2, lease_until = now() + ($5 * interval '1 millisecond'),
@@ -1231,7 +1236,7 @@ export class SessionManager {
     if (!claim) throw await this.whyNotClaimed(id, principal, before)
     return this.startTurn(claimed(claim), turnId, prompt, principal, {
       ...(options.context ? { context: options.context } : {}),
-      ...(options.images?.length ? { images: options.images } : {}),
+      ...(options.images?.length && sent ? { images: options.images, sent } : {}),
       ...(options.tiers ? { tiers: options.tiers } : {}),
     })
   }
@@ -1326,20 +1331,19 @@ export class SessionManager {
   }
 
   /**
-   * The `user.turn` event's images: each preview with the name of the full
-   * image, stored before the event is logged (blobs.ts), as a tool result's
-   * are, so the panel's full-size view can load it. If they cannot be stored,
-   * the previews go without names.
+   * Stores a turn's images and their previews with the session (blobs.ts), as a
+   * tool result's are, and answers what the `user.turn` event names them by
+   * (#2479): the panel loads both by name, from any tab.
    */
-  private async sentImages(id: string, images: readonly UserImage[]): Promise<(ImagePreview & { name?: string })[]> {
-    const named = images.map((image) => ({ image, blob: sessionImage(image.mediaType, Buffer.from(image.data, 'base64')) }))
+  private async storeSentImages(id: string, images: readonly UserImage[]): Promise<SentImage[]> {
+    const { blobs, sent } = sentImageBlobs(images)
     try {
-      await this.blobs.put(id, named.map((n) => n.blob))
+      await this.blobs.put(id, blobs)
     } catch (err) {
       this.deps.stderr?.(`session ${id}: could not store a turn's images: ${err instanceof Error ? err.message : String(err)}\n`)
-      return previewsOf(images)
+      throw new SessionError('unavailable', `the images for session ${id} could not be stored; send it again in a moment`)
     }
-    return named.map(({ image: { preview }, blob }) => ({ mediaType: preview.mediaType, data: preview.data, name: blob.name }))
+    return sent
   }
 
   private async startTurn(
@@ -1347,7 +1351,14 @@ export class SessionManager {
     turnId: string,
     prompt: string,
     author: Owner,
-    options: { keepResumeTurn?: string; context?: string; images?: readonly UserImage[]; tiers?: readonly Tier[] } = {},
+    options: {
+      keepResumeTurn?: string
+      context?: string
+      images?: readonly UserImage[]
+      /** What the `user.turn` event names `images` by, stored already (`storeSentImages`). */
+      sent?: readonly SentImage[]
+      tiers?: readonly Tier[]
+    } = {},
   ): Promise<Turn> {
     const id = session.id
     // A new turn supersedes approvals left pending, or approved and unused,
@@ -1366,7 +1377,7 @@ export class SessionManager {
         turnId,
         text: prompt,
         author,
-        ...(options.images?.length ? { images: await this.sentImages(id, options.images) } : {}),
+        ...(options.sent?.length ? { images: [...options.sent] } : {}),
       }),
       event({ type: 'session.status', sessionId: id, status: 'running' }),
     ])
