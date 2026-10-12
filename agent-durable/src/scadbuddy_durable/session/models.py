@@ -55,6 +55,8 @@ class TurnStart:
     turn_id: str
     author: Owner
     images: list[ImageRef] = field(default_factory=list)
+    # The append this turn was sent with (#2525); None for one sent before it was.
+    system_append: str | None = None
     # workflow.now() as the turn started (ISO 8601), the plugin's events' `at` clock:
     # a subscriber of a turn carried over by continue-as-new ignores an end before it.
     started_at: str | None = None
@@ -69,7 +71,8 @@ class SessionStart:
     owner: Owner
     max_turns: int = 50
     # What the agent service appends to Claude Code's own system prompt for the
-    # session, as a classic turn's (manager.ts systemPromptAppend).
+    # session, as a classic turn's (manager.ts systemPromptAppend): the first turn's.
+    # Each turn sends its own (Message.system_append, #2525), which wins.
     system_append: str | None = None
     agent: AgentState | None = None
     turn: TurnStart | None = None
@@ -85,6 +88,9 @@ class Message:
     text: str
     author: Owner
     images: list[ImageRef] = field(default_factory=list)
+    # The append as Settings stand when this turn is sent (#2525): a session started
+    # while the headless browser was off is told about it once it is on, and back.
+    system_append: str | None = None
 
 
 @dataclass
