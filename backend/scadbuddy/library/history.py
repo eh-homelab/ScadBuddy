@@ -46,10 +46,11 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Protocol
 
 from scadbuddy.core.authorship import (
     AGENT_AUTHOR_EMAIL,
@@ -59,7 +60,7 @@ from scadbuddy.core.authorship import (
     AgentAuthor,
     current_author,
 )
-from scadbuddy.core.paths import BUILTIN_DIR, BUILTIN_PREFIX, RENDERS_DIR_NAME
+from scadbuddy.core.paths import BUILTIN_DIR, BUILTIN_PREFIX, RENDERS_DIR_NAME, revalidate_dirs
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,15 @@ DEFAULT_LOG_LIMIT = 50
 # executor slot for minutes. Overridable with ``SCADBUDDY_GIT_TIMEOUT``.
 DEFAULT_TIMEOUT = 30.0
 LOCK_POLL_SECONDS = 0.05
+#: The longest pause between two looks for the HEAD the last writer recorded.
+FRESH_POLL_MAX_SECONDS = 1.0
+#: What git says when HEAD moved between its read of it and its lock on it: on the
+#: NFS share, a read of `.git` older than another replica's commit (#2385).
+REF_LOCK_ERROR = "cannot lock ref"
+#: How many times a `git commit` that hit `REF_LOCK_ERROR` is tried in all, and the
+#: first pause between tries (doubled after each).
+COMMIT_ATTEMPTS = 4
+COMMIT_RETRY_SECONDS = 0.1
 # git itself imposes no subject limit; this one keeps a listed revision readable
 # and bounds what a caller can write into the history.
 MAX_SUBJECT = 200
@@ -129,6 +139,12 @@ class GitError(RuntimeError):
 
 class GitUnavailableError(GitError):
     """No usable git repository — either no binary, or ``init`` never succeeded."""
+
+
+class HeadMovedError(GitError):
+    """HEAD is not where this writer found it on taking the write lock: something
+    committed without the lock. What was checked against the old HEAD -- an edit's
+    ``base`` (#813) -- has to be checked again."""
 
 
 class GitTimeoutError(GitError):
@@ -193,6 +209,23 @@ class Revision:
         return self.commit[:7]
 
 
+class RepoHold(Protocol):
+    """The cross-replica write lock on the models repository, while it is held."""
+
+    #: The HEAD the last writer recorded, or None before any did.
+    expected: str | None
+
+    def record(self, commit: str) -> None:
+        """Record ``commit`` as HEAD, before the lock is released."""
+
+
+class RepoCoordinator(Protocol):
+    """Takes :class:`RepoHold`: one writer across every replica sharing the volume
+    (`library/repo_lock.py`'s Postgres one in the app)."""
+
+    def hold(self, timeout: float) -> AbstractContextManager[RepoHold]: ...
+
+
 def git_env() -> dict[str, str]:
     """The hermetic environment every git call runs in -- see the module docstring.
 
@@ -251,12 +284,23 @@ class ModelHistory:
         git: str = GIT,
         wrapper_prefix: str = "",
         timeout: float = DEFAULT_TIMEOUT,
+        coordinator: RepoCoordinator | None = None,
     ) -> None:
         self.root = root
         self.git = git
         self.wrapper_prefix = wrapper_prefix
         self.timeout = timeout
         self._lock = threading.Lock()
+        #: The write lock across replicas, and the HEAD each writer leaves behind
+        #: (#2385). None (tests, a single process): the ``flock`` alone serialises,
+        #: and nothing checks this process's view of HEAD against another's commit.
+        self.coordinator = coordinator
+        #: The cross-replica hold while this instance has the write lock.
+        self._hold: RepoHold | None = None
+        git_dir = root / ".git"
+        #: What `revalidate_dirs` opens before every git call: where HEAD, the
+        #: index, ``packed-refs`` and the branch refs are replaced by rename.
+        self._git_dirs = (root, git_dir, git_dir / "refs", git_dir / "refs" / "heads")
         #: Called with each new commit and the templates it touched, after the write
         #: lock is released -- how the app publishes ``version.committed``. It must
         #: not raise; a failure is logged, never reported as a failed commit.
@@ -290,6 +334,8 @@ class ModelHistory:
             "core.autocrlf=false",
             *args,
         ]
+        # Another replica's commit is visible to this call, not 60 s later (#2385).
+        revalidate_dirs(*self._git_dirs)
         try:
             # A fixed argv with no shell: nothing here is interpolated from a request.
             completed = subprocess.run(
@@ -324,42 +370,105 @@ class ModelHistory:
         return completed.stdout.decode("utf-8", "replace")
 
     @contextmanager
-    def _exclusive(self) -> Iterator[None]:
-        """One writer at a time, across threads *and* processes.
+    def _exclusive(self, *, adopt: bool = False) -> Iterator[None]:
+        """One writer at a time, across threads, processes *and* replicas, on a
+        current view of the repository.
 
         The thread lock alone would be enough for a single uvicorn worker; the
-        ``flock`` is what keeps a second process (a shell on the volume, a future
-        worker) from interleaving an ``add``/``commit`` pair with ours.
+        ``flock`` is what keeps a second process (a shell on the volume) from
+        interleaving an ``add``/``commit`` pair with ours. Across the API's replicas,
+        which share the volume over NFS, the :attr:`coordinator`'s lock serialises
+        too, and it carries the HEAD the last writer left: a lock alone is not
+        enough there, because this replica's NFS client can go on serving ``.git``
+        as it was before another's commit (#2385). So the HEAD git reports is
+        waited for until it is that one (:meth:`_settle`) before anything is read
+        for a check or written -- an edit's ``base`` (#813) is checked against the
+        repository as it is, not as this replica last cached it.
 
-        Both waits are bounded by :attr:`timeout`, for the reason
+        Every wait is bounded by :attr:`timeout`, for the reason
         :class:`GitTimeoutError` gives: a blocking ``flock`` behind a wedged
         holder would pin an executor slot for as long as that holder lasts.
         ``fcntl.flock`` takes no deadline of its own, so the non-blocking form is
-        retried against one.
+        retried against one. ``adopt`` (boot only) takes the HEAD found as current
+        when the recorded one never shows -- a volume restored to an older history.
         """
         deadline = time.monotonic() + self.timeout
         if not self._lock.acquire(timeout=self.timeout):
             raise GitTimeoutError(f"waited {self.timeout:g}s for the in-process write lock")
         try:
-            lock_path = self.root / LOCK_NAME
-            lock_path.parent.mkdir(parents=True, exist_ok=True)
-            with lock_path.open("w") as handle:
-                while True:
+            held: AbstractContextManager[RepoHold | None] = (
+                nullcontext() if self.coordinator is None else self.coordinator.hold(self.timeout)
+            )
+            with held as hold:
+                lock_path = self.root / LOCK_NAME
+                lock_path.parent.mkdir(parents=True, exist_ok=True)
+                with lock_path.open("w") as handle:
+                    while True:
+                        try:
+                            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            break
+                        except BlockingIOError:
+                            if time.monotonic() >= deadline:
+                                raise GitTimeoutError(
+                                    f"waited {self.timeout:g}s for {lock_path}"
+                                ) from None
+                            time.sleep(LOCK_POLL_SECONDS)
+                    self._hold = hold
                     try:
-                        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        break
-                    except BlockingIOError:
-                        if time.monotonic() >= deadline:
-                            raise GitTimeoutError(
-                                f"waited {self.timeout:g}s for {lock_path}"
-                            ) from None
-                        time.sleep(LOCK_POLL_SECONDS)
-                try:
-                    yield
-                finally:
-                    fcntl.flock(handle, fcntl.LOCK_UN)
+                        self._settle(deadline, adopt=adopt)
+                        yield
+                    finally:
+                        self._hold = None
+                        fcntl.flock(handle, fcntl.LOCK_UN)
         finally:
             self._lock.release()
+
+    def _settle(self, deadline: float, *, adopt: bool = False) -> None:
+        """Under the write lock: wait until HEAD is the one the last writer recorded,
+        then make the index HEAD's tree.
+
+        A HEAD that descends from the recorded one is current too: a commit made on
+        the volume by hand, outside the lock. The index is reset because it is a file
+        of its own, as stale or as current as HEAD: a commit built from an old one
+        would silently undo every change made since. ``read-tree --reset`` keeps the stat
+        data of the entries that match, so nothing is hashed again; what a failed
+        commit left staged is unstaged, and the next boot's recovery commits it.
+        """
+        if not (self.root / ".git").is_dir():
+            return
+        hold = self._hold
+        expected = None if hold is None else hold.expected
+        pause = LOCK_POLL_SECONDS
+        while True:
+            head = self.head()
+            if expected is None or head == expected or self._descends(head, expected):
+                break
+            if time.monotonic() >= deadline:
+                if not adopt:
+                    raise GitTimeoutError(
+                        f"the models repository here is at {head[:7] if head else 'no revision'},"
+                        f" but another replica committed {expected[:7]}: still not visible"
+                        f" after {self.timeout:g}s"
+                    )
+                logger.warning(
+                    "the recorded HEAD of the models repository never showed; taking this one",
+                    extra={"recorded": expected, "head": head},
+                )
+                if hold is not None and head is not None:
+                    hold.record(head)
+                break
+            time.sleep(pause)
+            pause = min(pause * 2, FRESH_POLL_MAX_SECONDS)
+        if head is not None:
+            self._run("read-tree", "--reset", "HEAD")
+
+    def _descends(self, head: str | None, ancestor: str) -> bool:
+        """Whether ``head`` is a later commit than ``ancestor``; False when either is
+        not an object this view of the repository has."""
+        if head is None:
+            return False
+        completed = self._run("merge-base", "--is-ancestor", ancestor, head, check=False)
+        return completed.returncode == 0
 
     def write_lock(self) -> AbstractContextManager[None]:
         """The write lock every commit takes, held for a change that commits nothing:
@@ -387,7 +496,7 @@ class ModelHistory:
             return None
         try:
             self.root.mkdir(parents=True, exist_ok=True)
-            with self._exclusive():
+            with self._exclusive(adopt=True):
                 if not (self.root / ".git").is_dir():
                     self._run("init", f"--initial-branch={DEFAULT_BRANCH}", ".")
                 # No commit yet, not "no .git": a crash between `init` and the first
@@ -460,16 +569,32 @@ class ModelHistory:
         -- of a ``model.json``, say -- atomic with its commit. ``rollback`` runs under
         the same lock if the commit then fails, before the error is raised, so what
         ``prepare`` wrote can be undone before another write sees it.
+
+        When HEAD turns out to have moved since the lock was taken
+        (:class:`HeadMovedError`), a change that can be rolled back is: and then,
+        once the repository has settled, ``prepare`` runs again, so whatever it
+        checks -- an edit's ``base`` -- is checked against the new HEAD and refuses
+        as it would have. A change that cannot be rolled back raises.
         """
         with self._exclusive():
-            if prepare is not None:
-                prepare()
-            try:
-                created = self._commit_locked(message, *paths)
-            except (GitError, OSError):
-                if rollback is not None:
+            for attempt in range(1, COMMIT_ATTEMPTS + 1):
+                if prepare is not None:
+                    prepare()
+                try:
+                    created = self._commit_locked(message, *paths)
+                    break
+                except HeadMovedError:
+                    if rollback is None or attempt == COMMIT_ATTEMPTS:
+                        if rollback is not None:
+                            rollback()
+                        raise
                     rollback()
-                raise
+                    logger.warning("HEAD moved under the write lock; checking again")
+                    self._settle(time.monotonic() + self.timeout)
+                except (GitError, OSError):
+                    if rollback is not None:
+                        rollback()
+                    raise
             touched = self._touched_by(created)
         self._announce(created, touched)
         return created
@@ -482,30 +607,71 @@ class ModelHistory:
         # `_stage`) on the one action that most needs to work -- delete.
         if not self._has_staged():
             return None
+        parent = self.head()
+        args = ["commit", "--no-verify", "-m", subject_line(message)]
+        env: dict[str, str] | None = None
         author = current_author()
-        if author is None:
-            self._run("commit", "--no-verify", "-m", subject_line(message))
-            return self.head()
-        # Authored as the agent, committed as ScadBuddy, with who and where as trailers
-        # (#252, core/authorship.py). Each value was checked to be one printable token,
-        # so each trailer is exactly one line.
-        trailers = [
-            f"{name}: {value}"
-            for name, value in (
-                (PRINCIPAL_TRAILER, author.principal),
-                (SESSION_TRAILER, author.session),
+        if author is not None:
+            # Authored as the agent, committed as ScadBuddy, with who and where as
+            # trailers (#252, core/authorship.py). Each value was checked to be one
+            # printable token, so each trailer is exactly one line.
+            trailers = [
+                f"{name}: {value}"
+                for name, value in (
+                    (PRINCIPAL_TRAILER, author.principal),
+                    (SESSION_TRAILER, author.session),
+                )
+                if value
+            ]
+            args += ["-m", "\n".join(trailers)]
+            env = {
+                **git_env(),
+                "GIT_AUTHOR_NAME": AGENT_AUTHOR_NAME,
+                "GIT_AUTHOR_EMAIL": AGENT_AUTHOR_EMAIL,
+            }
+        self._commit_with_retry(args, env, parent)
+        return self._landed(parent)
+
+    def _commit_with_retry(
+        self, args: list[str], env: dict[str, str] | None, parent: str | None
+    ) -> None:
+        """``git commit``, again after a pause when git could not lock HEAD because it
+        read an older HEAD than the one it found under its lock (#2385). That is a
+        stale read, not a race: the write lock is held. If HEAD really has moved
+        from ``parent`` meanwhile, :class:`HeadMovedError`."""
+        pause = COMMIT_RETRY_SECONDS
+        for attempt in range(1, COMMIT_ATTEMPTS + 1):
+            try:
+                self._run(*args, env=env)
+                return
+            except GitError as error:
+                if REF_LOCK_ERROR not in error.stderr or attempt == COMMIT_ATTEMPTS:
+                    raise
+                logger.warning(
+                    "git could not lock HEAD; trying the commit again", extra={"attempt": attempt}
+                )
+            time.sleep(pause)
+            pause *= 2
+            head = self.head()
+            if head != parent:
+                raise HeadMovedError(
+                    f"HEAD moved from {parent[:7] if parent else 'no revision'}"
+                    f" to {head[:7] if head else 'no revision'} under the write lock"
+                )
+
+    def _landed(self, parent: str | None) -> str:
+        """The commit just made, once HEAD is shown to be a new commit on ``parent``,
+        and recorded as HEAD for the other replicas. A commit git reported but HEAD
+        does not show is an error, never a revision answered as made."""
+        created = self.head()
+        if created is None or created == parent or self._parent_of(created) != parent:
+            raise GitError(
+                f"git commit succeeded, but HEAD is {created[:7] if created else 'no revision'},"
+                f" not a new commit on {parent[:7] if parent else 'no revision'}"
             )
-            if value
-        ]
-        env = {
-            **git_env(),
-            "GIT_AUTHOR_NAME": AGENT_AUTHOR_NAME,
-            "GIT_AUTHOR_EMAIL": AGENT_AUTHOR_EMAIL,
-        }
-        self._run(
-            "commit", "--no-verify", "-m", subject_line(message), "-m", "\n".join(trailers), env=env
-        )
-        return self.head()
+        if self._hold is not None:
+            self._hold.record(created)
+        return created
 
     def _touched_by(self, commit: str | None) -> list[str]:
         """The templates ``commit`` changed, when anyone is listening for it."""
