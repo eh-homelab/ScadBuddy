@@ -7,7 +7,8 @@ import type { AnalysisRequest, Output, PrintRunResult } from '../api/types'
 import { analysisReport, openEdgesDiagnostic } from '../mocks/analyzers'
 import { choicesView, queuedResult } from '../mocks/choices'
 import * as fixtures from '../mocks/fixtures'
-import { lastArrangeRequest, resetMockState } from '../mocks/handlers'
+import { MULTI_PLATE_FILE } from '../mocks/features/library'
+import { lastArrangeRequest, problem, resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { normalizeHex } from '../lib/format'
 import { renderPage } from '../test/utils'
@@ -68,6 +69,43 @@ async function loaded() {
   await screen.findByRole('switch', { name: 'Advanced' })
   await screen.findByTestId('filament-slot-1')
 }
+
+describe('PrintPicker · a choices read that fails (#2550)', () => {
+  it('still shows the preview, the plates and Preview in 3D, with the error and Retry', async () => {
+    server.use(
+      http.get('/api/v1/print/library/:id/choices', () =>
+        problem(
+          504,
+          'Gateway Timeout',
+          'could not reach Bambuddy to read the filament requirements of library file 67: ReadTimeout',
+        ),
+      ),
+    )
+    renderPage(
+      <PrintPicker
+        open
+        source={{ kind: 'library', file: { id: MULTI_PLATE_FILE, filename: 'two-plates.3mf' } }}
+        onClose={vi.fn()}
+        onRan={vi.fn()}
+      />,
+    )
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/ReadTimeout/)
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+    const pane = await screen.findByTestId('preview-pane')
+    // jsdom draws no WebGL, so the pane shows the plate's image in place of its mesh.
+    expect(within(pane).getByRole('img', { name: 'The plate' })).toHaveAttribute(
+      'src',
+      expect.stringContaining(`/print/library/${MULTI_PLATE_FILE}/plates/1/thumbnail`),
+    )
+    expect(await screen.findByTestId('plate-choice')).toBeInTheDocument()
+    expect(screen.getByTestId('plate-preview-open')).toBeInTheDocument()
+    // The spool, printer and print controls still wait for the choices.
+    expect(screen.queryByRole('switch', { name: 'Advanced' })).toBeNull()
+    expect(screen.queryByTestId('filament-slot-1')).toBeNull()
+    expect(screen.getByTestId('run-print')).toBeDisabled()
+  })
+})
 
 describe('PrintPicker · 3D preview (#1723)', () => {
   it('shows the plate in the chosen spools over the dialog, and keeps every choice on close', async () => {

@@ -658,7 +658,7 @@ export function PrintPicker({
             : 'Choose the spools. ScadBuddy picks the Bambu presets, then Bambuddy slices and queues it.'
       }
       onClose={close}
-      size={choices && !result && unanswered === null ? 'split' : 'md'}
+      size={(choices || source) && !result && unanswered === null ? 'split' : 'md'}
       footer={
         result ? (
           <>
@@ -751,135 +751,142 @@ export function PrintPicker({
             </div>
           )}
 
-          {choices && (
+          {/* #2550 — the plates and the preview need only the source, so a choices read
+              that is slow or failed (its error and Retry above) never hides them. Only
+              the spool, printer and print controls wait for the choices. */}
+          {(choices || source) && (
             <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(300px,380px)]">
             <div className="min-w-0 space-y-3">
-              <AdvancedSwitch
-                value={picker.advanced}
-                onToggle={picker.toggleAdvanced}
-                disabled={projectCreating}
-              />
-              {printers.length > 1 && (
-                <div>
-                  <label htmlFor="print-printer" className="block text-[13px]">
-                    Printer
-                  </label>
-                  <select
-                    id="print-printer"
-                    value={printerId === null ? '' : String(printerId)}
-                    onChange={(event) =>
-                      picker.askPrinter(
-                        event.target.value === '' ? null : Number(event.target.value),
-                      )
-                    }
-                    className="sb-field mt-1.5 cursor-pointer"
-                  >
-                    {printerId === null && <option value="">Choose a printer</option>}
-                    {printers.map((entry) => (
-                      <option key={entry.id} value={entry.id}>
-                        {entry.name}
-                        {entry.model ? ` (${entry.model})` : ''}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
-
-              {filamentError && (
-                <div className="flex items-center gap-3" data-testid="filaments-unavailable">
-                  <p className="text-[12px] text-warn">
-                    ScadBuddy could not read the filament inventory: {filamentError} Print is unavailable
-                    until it loads.
-                  </p>
-                  <Button size="sm" onClick={retryFilaments}>
-                    Retry
-                  </Button>
-                </div>
-              )}
-              {!picker.advanced && (
-                <FlowChoice value={nozzles[0]?.flow ?? 'standard'} onChange={picker.changeFlow} />
-              )}
-              {printerId !== null &&
-                trays.open.map((tray) => (
-                  <TrayQuestion
-                    key={`${tray.ams_id}:${tray.tray_id}`}
-                    printerId={printerId}
-                    tray={tray}
-                    spools={filaments?.spools ?? []}
-                    onAssigned={picker.reload}
-                    onDecline={() => trays.decline(tray)}
+              {choices && (
+                <>
+                  <AdvancedSwitch
+                    value={picker.advanced}
+                    onToggle={picker.toggleAdvanced}
+                    disabled={projectCreating}
                   />
-                ))}
-              {filaments && (
-                <FilamentPicker
-                  options={filaments}
-                  plan={plan}
-                  onChange={setPlan}
-                  copies={effectiveCopies}
-                  offeredTrays={trays.offered}
-                />
-              )}
-              <NozzlePlanLine plan={check.verdict?.nozzle_plan} stale={!check.current} />
-              {target && known && (
-                <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2">
-                  <legend className="px-1 text-[13px] text-ink">Arrange</legend>
-                  {stale && <p className="mb-1.5 text-[12px] text-muted">{backfillNote([target])}</p>}
-                  <label htmlFor="arrange-for" className="text-[12px] text-muted">
-                    Arrange for
-                  </label>
-                  <select
-                    id="arrange-for"
-                    value={arrangeGoal}
-                    onChange={(event) => setArrangeGoal(event.target.value as ArrangeGoal)}
-                    className="sb-field mt-1.5"
-                  >
-                    {Object.entries(GOAL_LABELS)
-                      .filter(([value]) => value !== 'keep_together')
-                      .map(([value, text]) => (
-                        <option key={value} value={value}>
-                          {text}
-                        </option>
-                      ))}
-                  </select>
-                  <Button
-                    size="sm"
-                    className="mt-1.5"
-                    disabled={arranging || askBackfill}
-                    onClick={() => (stale ? setAskFor(target.id) : void rearrange(false))}
-                  >
-                    Re-arrange for these spools
-                  </Button>
-                  {askBackfill && (
-                    <div className="mt-1.5">
-                      <BackfillPrompt
-                        outputs={[target]}
-                        onConfirm={() => void rearrange(true)}
-                        onCancel={() => setAskFor(null)}
-                      />
+                  {printers.length > 1 && (
+                    <div>
+                      <label htmlFor="print-printer" className="block text-[13px]">
+                        Printer
+                      </label>
+                      <select
+                        id="print-printer"
+                        value={printerId === null ? '' : String(printerId)}
+                        onChange={(event) =>
+                          picker.askPrinter(
+                            event.target.value === '' ? null : Number(event.target.value),
+                          )
+                        }
+                        className="sb-field mt-1.5 cursor-pointer"
+                      >
+                        {printerId === null && <option value="">Choose a printer</option>}
+                        {printers.map((entry) => (
+                          <option key={entry.id} value={entry.id}>
+                            {entry.name}
+                            {entry.model ? ` (${entry.model})` : ''}
+                          </option>
+                        ))}
+                      </select>
                     </div>
                   )}
-                  <BackfillProgress outputs={[target]} progress={backfillProgress} />
-                  {arrangeNote && (
-                    <p aria-live="polite" className="mt-1.5 text-[12px] text-muted">
-                      {arrangeNote}
-                    </p>
-                  )}
-                  {arrangeError && (
-                    <p role="alert" className="mt-1.5 text-[13px] text-warn">
-                      {arrangeError}
-                    </p>
-                  )}
-                </fieldset>
-              )}
 
-              {picker.advanced && filaments && (filaments.slots ?? []).length > 0 && (
-                <PresetOverrides
-                  size={size}
-                  slots={filaments.slots ?? []}
-                  presets={choices.filament_presets?.[size] ?? []}
-                  overrides={overrides}
-                  onChange={picker.setOverride}
-                />
+                  {filamentError && (
+                    <div className="flex items-center gap-3" data-testid="filaments-unavailable">
+                      <p className="text-[12px] text-warn">
+                        ScadBuddy could not read the filament inventory: {filamentError} Print is unavailable
+                        until it loads.
+                      </p>
+                      <Button size="sm" onClick={retryFilaments}>
+                        Retry
+                      </Button>
+                    </div>
+                  )}
+                  {!picker.advanced && (
+                    <FlowChoice value={nozzles[0]?.flow ?? 'standard'} onChange={picker.changeFlow} />
+                  )}
+                  {printerId !== null &&
+                    trays.open.map((tray) => (
+                      <TrayQuestion
+                        key={`${tray.ams_id}:${tray.tray_id}`}
+                        printerId={printerId}
+                        tray={tray}
+                        spools={filaments?.spools ?? []}
+                        onAssigned={picker.reload}
+                        onDecline={() => trays.decline(tray)}
+                      />
+                    ))}
+                  {filaments && (
+                    <FilamentPicker
+                      options={filaments}
+                      plan={plan}
+                      onChange={setPlan}
+                      copies={effectiveCopies}
+                      offeredTrays={trays.offered}
+                    />
+                  )}
+                  <NozzlePlanLine plan={check.verdict?.nozzle_plan} stale={!check.current} />
+                  {target && known && (
+                    <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2">
+                      <legend className="px-1 text-[13px] text-ink">Arrange</legend>
+                      {stale && <p className="mb-1.5 text-[12px] text-muted">{backfillNote([target])}</p>}
+                      <label htmlFor="arrange-for" className="text-[12px] text-muted">
+                        Arrange for
+                      </label>
+                      <select
+                        id="arrange-for"
+                        value={arrangeGoal}
+                        onChange={(event) => setArrangeGoal(event.target.value as ArrangeGoal)}
+                        className="sb-field mt-1.5"
+                      >
+                        {Object.entries(GOAL_LABELS)
+                          .filter(([value]) => value !== 'keep_together')
+                          .map(([value, text]) => (
+                            <option key={value} value={value}>
+                              {text}
+                            </option>
+                          ))}
+                      </select>
+                      <Button
+                        size="sm"
+                        className="mt-1.5"
+                        disabled={arranging || askBackfill}
+                        onClick={() => (stale ? setAskFor(target.id) : void rearrange(false))}
+                      >
+                        Re-arrange for these spools
+                      </Button>
+                      {askBackfill && (
+                        <div className="mt-1.5">
+                          <BackfillPrompt
+                            outputs={[target]}
+                            onConfirm={() => void rearrange(true)}
+                            onCancel={() => setAskFor(null)}
+                          />
+                        </div>
+                      )}
+                      <BackfillProgress outputs={[target]} progress={backfillProgress} />
+                      {arrangeNote && (
+                        <p aria-live="polite" className="mt-1.5 text-[12px] text-muted">
+                          {arrangeNote}
+                        </p>
+                      )}
+                      {arrangeError && (
+                        <p role="alert" className="mt-1.5 text-[13px] text-warn">
+                          {arrangeError}
+                        </p>
+                      )}
+                    </fieldset>
+                  )}
+
+                  {picker.advanced && filaments && (filaments.slots ?? []).length > 0 && (
+                    <PresetOverrides
+                      size={size}
+                      slots={filaments.slots ?? []}
+                      presets={choices.filament_presets?.[size] ?? []}
+                      overrides={overrides}
+                      onChange={picker.setOverride}
+                    />
+                  )}
+                </>
               )}
 
               {/* #986 — one plate has no choice to make, but its name still says what prints. */}
@@ -936,114 +943,118 @@ export function PrintPicker({
                 </div>
               )}
 
-              {/* #1660 — Simple hides the project step, but not where the print is filed. */}
-              {!picker.advanced && filedUnderLabel !== null && (
-                <p className="text-[13px] text-muted" data-testid="print-filed-under">
-                  Filed under: <span className="text-ink">{filedUnderLabel}</span>{' '}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      focusProject.current = true
-                      picker.toggleAdvanced()
-                    }}
-                    disabled={projectCreating}
-                    className="underline decoration-dotted underline-offset-2 hover:text-ink"
-                    data-testid="print-filed-under-change"
-                  >
-                    (change)
-                  </button>
-                </p>
-              )}
-
-              {/* #768 — Simple mode sends these steps' defaults without showing them. */}
-              {picker.advanced && (
+              {choices && (
                 <>
-                  <NozzleStep
-                    sizes={choices.nozzle_sizes ?? []}
-                    installed={choices.installed ?? []}
-                    value={nozzles}
-                    onChange={picker.changeNozzles}
-                  />
-                  <NozzlePlanStep plan={check.verdict?.nozzle_plan} sides={selection.sides} onSide={picker.setSide} />
-                  {check.verdict?.rack && (
-                    <RackNozzleStep
-                      rack={check.verdict.rack}
-                      algorithm={rackAlgorithm}
-                      position={rackPosition}
-                      algorithmUnsaved={algorithmUnsaved}
-                      onAlgorithm={changeRackAlgorithm}
-                      onPosition={setRackPosition}
-                    />
-                  )}
-                  <QualityStep
-                    size={size}
-                    tiers={choices.tiers?.[size] ?? []}
-                    processes={choices.processes?.[size] ?? []}
-                    tier={tier}
-                    processName={processName}
-                    onChange={picker.changeQuality}
-                  />
-                  {bedType !== null && (
-                    <PlateStep
-                      bedTypes={
-                        (choices.bed_types ?? []).includes(bedType)
-                          ? (choices.bed_types ?? [])
-                          : [bedType, ...(choices.bed_types ?? [])]
-                      }
-                      value={bedType}
-                      lastBedType={choices.last_bed_type ?? null}
-                      printerName={printer?.name ?? null}
-                      onChange={picker.setBedType}
-                    />
+                  {/* #1660 — Simple hides the project step, but not where the print is filed. */}
+                  {!picker.advanced && filedUnderLabel !== null && (
+                    <p className="text-[13px] text-muted" data-testid="print-filed-under">
+                      Filed under: <span className="text-ink">{filedUnderLabel}</span>{' '}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          focusProject.current = true
+                          picker.toggleAdvanced()
+                        }}
+                        disabled={projectCreating}
+                        className="underline decoration-dotted underline-offset-2 hover:text-ink"
+                        data-testid="print-filed-under-change"
+                      >
+                        (change)
+                      </button>
+                    </p>
                   )}
 
-                  <PrintSequenceStep value={printSequence} onChange={setPrintSequence} />
+                  {/* #768 — Simple mode sends these steps' defaults without showing them. */}
+                  {picker.advanced && (
+                    <>
+                      <NozzleStep
+                        sizes={choices.nozzle_sizes ?? []}
+                        installed={choices.installed ?? []}
+                        value={nozzles}
+                        onChange={picker.changeNozzles}
+                      />
+                      <NozzlePlanStep plan={check.verdict?.nozzle_plan} sides={selection.sides} onSide={picker.setSide} />
+                      {check.verdict?.rack && (
+                        <RackNozzleStep
+                          rack={check.verdict.rack}
+                          algorithm={rackAlgorithm}
+                          position={rackPosition}
+                          algorithmUnsaved={algorithmUnsaved}
+                          onAlgorithm={changeRackAlgorithm}
+                          onPosition={setRackPosition}
+                        />
+                      )}
+                      <QualityStep
+                        size={size}
+                        tiers={choices.tiers?.[size] ?? []}
+                        processes={choices.processes?.[size] ?? []}
+                        tier={tier}
+                        processName={processName}
+                        onChange={picker.changeQuality}
+                      />
+                      {bedType !== null && (
+                        <PlateStep
+                          bedTypes={
+                            (choices.bed_types ?? []).includes(bedType)
+                              ? (choices.bed_types ?? [])
+                              : [bedType, ...(choices.bed_types ?? [])]
+                          }
+                          value={bedType}
+                          lastBedType={choices.last_bed_type ?? null}
+                          printerName={printer?.name ?? null}
+                          onChange={picker.setBedType}
+                        />
+                      )}
 
-                  {given?.kind === 'output' && (
-                    <SlicerDefaults
-                      settings={printSettings}
-                      overridden={printSequence !== null ? ['print_sequence'] : []}
-                    />
+                      <PrintSequenceStep value={printSequence} onChange={setPrintSequence} />
+
+                      {given?.kind === 'output' && (
+                        <SlicerDefaults
+                          settings={printSettings}
+                          overridden={printSequence !== null ? ['print_sequence'] : []}
+                        />
+                      )}
+
+                      <PrintOptionsDisclosure
+                        subject={subject}
+                        printerId={printerId}
+                        value={copies === null ? options : { ...options, quantity: copies }}
+                        onChange={({ quantity, ...rest }) => {
+                          setCopies(quantity ?? null)
+                          setOptions(rest)
+                        }}
+                      />
+
+                      {/* #79 — a send to a project uploads into that project's folder. */}
+                      {project ? (
+                        <ProjectPicker
+                          value={project.value}
+                          onChange={project.onChange}
+                          list={project.list}
+                          disabled={project.disabled || projectCreating}
+                          onCreating={reportProjectCreating}
+                        />
+                      ) : (
+                        <ProjectPicker
+                          value={ownProjectId}
+                          onChange={setOwnProjectId}
+                          list={ownProjects}
+                          disabled={projectCreating}
+                          onCreating={reportProjectCreating}
+                        />
+                      )}
+
+                      <CopiesField value={copies} remembered={rememberedCopies} onChange={setCopies} />
+                    </>
                   )}
 
-                  <PrintOptionsDisclosure
-                    subject={subject}
-                    printerId={printerId}
-                    value={copies === null ? options : { ...options, quantity: copies }}
-                    onChange={({ quantity, ...rest }) => {
-                      setCopies(quantity ?? null)
-                      setOptions(rest)
-                    }}
-                  />
-
-                  {/* #79 — a send to a project uploads into that project's folder. */}
-                  {project ? (
-                    <ProjectPicker
-                      value={project.value}
-                      onChange={project.onChange}
-                      list={project.list}
-                      disabled={project.disabled || projectCreating}
-                      onCreating={reportProjectCreating}
-                    />
-                  ) : (
-                    <ProjectPicker
-                      value={ownProjectId}
-                      onChange={setOwnProjectId}
-                      list={ownProjects}
-                      disabled={projectCreating}
-                      onCreating={reportProjectCreating}
-                    />
-                  )}
-
-                  <CopiesField value={copies} remembered={rememberedCopies} onChange={setCopies} />
+                  {/* The analyzers judge what the print slices: an output's 3MF, or a library
+                      file's, read as a print of it reads it (#1753). */}
+                  <AnalyzerPanel target={analysisTarget} request={analysisRequest} allPlates={allPlates}>
+                    {verdict}
+                  </AnalyzerPanel>
                 </>
               )}
-
-              {/* The analyzers judge what the print slices: an output's 3MF, or a library
-                  file's, read as a print of it reads it (#1753). */}
-              <AnalyzerPanel target={analysisTarget} request={analysisRequest} allPlates={allPlates}>
-                {verdict}
-              </AnalyzerPanel>
             </div>
             <div className="min-w-0 lg:sticky lg:top-0 lg:self-start">
               <PreviewPane
