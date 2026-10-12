@@ -160,7 +160,11 @@ export function ActionBar({
   /** One no longer in Bambuddy's list is nothing remembered. */
   const stillListed = (id: number | null) =>
     id !== null && (!listed || listed.some((entry) => entry.id === id)) ? id : null
-  const modelProjects = useAsync(() => api.getModelProjects(slug), [slug])
+  // Tagged with the model they were read for: a write that lands after the page moved
+  // to another model (a filing's PUT) must not pass for the new model's (#2142 review).
+  const modelProjects = useAsync(async () => ({ slug, ...(await api.getModelProjects(slug)) }), [slug])
+  /** This model's remembered projects, once read; never another model's. */
+  const loadedProjects = modelProjects.data?.slug === slug ? modelProjects.data : undefined
   // Another tab (or the agent) filing this model, or a Forget in Settings, changes what
   // is remembered: read it again, or this tab confirms against a stale project.
   useSubscription('settings', (signal) => {
@@ -169,7 +173,7 @@ export function ActionBar({
   })
   const rememberedFor = (presetId: string | null) =>
     stillListed(
-      modelProjects.data?.projects?.find((entry) => (entry.preset_id ?? null) === presetId)?.project_id ?? null,
+      loadedProjects?.projects?.find((entry) => (entry.preset_id ?? null) === presetId)?.project_id ?? null,
     )
   /**
    * #1660 — the project this model was last filed into with the preset in use, which
@@ -187,13 +191,14 @@ export function ActionBar({
   // since stays.
   const preselectKeyFor = (presetId: string | null, target: number | null) =>
     `${slug}\n${presetId ?? ''}\n${target ?? ''}`
-  const preselectKey = modelProjects.data ? preselectKeyFor(preset?.id ?? null, opensOn) : null
+  const preselectKey = loadedProjects ? preselectKeyFor(preset?.id ?? null, opensOn) : null
   const [preselected, setPreselected] = useState<string | null>(null)
   if (preselectKey !== null && preselectKey !== preselected) {
     setPreselected(preselectKey)
     setProjectId(opensOn)
   }
   const latestPresetId = useLatest(preset?.id ?? null)
+  const latestSlug = useLatest(slug)
   /** #1660 — Generate about to file somewhere other than the remembered project, asking. */
   const [confirming, setConfirming] = useState<{ remembered: number; chosen: number } | null>(null)
   const [filed, setFiled] = useState<{ outputId: string; name: string; file: ProjectFile } | null>(
@@ -234,10 +239,12 @@ export function ActionBar({
       void api
         .putModelProject(slug, { preset_id: presetId, preset_name: preset?.name ?? null, project_id: target })
         .then((next) => {
+          // The page has moved to another model since: this is not its projects.
+          if (latestSlug.current !== slug) return
           // What this page just filed is not a fresh preselect: a pick made on the
           // unlocked picker since Generate ended stays where it was put.
           if (latestPresetId.current === presetId) setPreselected(preselectKeyFor(presetId, target))
-          modelProjects.setData(next, { supersede: true })
+          modelProjects.setData({ slug, ...next }, { supersede: true })
         })
         .catch(() => undefined)
       return file

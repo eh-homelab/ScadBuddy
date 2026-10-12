@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from scadbuddy.api.deps import (
+    OutputsDep,
     PathsDep,
     PrintLinksDep,
     PrintProgressDep,
@@ -31,7 +32,7 @@ from scadbuddy.api.operations import (
     operation_answer,
     run_operation,
 )
-from scadbuddy.api.outputs import OutputPlate, read_plain_files
+from scadbuddy.api.outputs import OutputPlate, live_outputs_for_files, read_plain_files
 from scadbuddy.api.printing import PRINT_RUN_PROBLEMS, accept_run, failed_before_queueing
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for
@@ -76,20 +77,23 @@ FileIdPath = Annotated[int, Path(ge=1)]
 async def get_library(
     store: SettingsStoreDep,
     uploads: UploadsDep,
+    outputs: OutputsDep,
     folder_id: Annotated[int | None, Query()] = None,
     show_all: Annotated[bool, Query(alias="all")] = False,
     file_id: Annotated[int | None, Query(ge=1)] = None,
 ) -> LibraryListing:
     """The folder tree and one folder's files (the root's without ``folder_id``).
     Without ``all`` only unsliced 3MFs; with it every file, each flagged ``printable``.
-    A file ScadBuddy uploaded names its ``output_id`` (#1864). ``file_id`` in place of
-    ``folder_id`` lists the folder that file is in, which a deep link to a file opens
-    (#2165); a file Bambuddy no longer has is its 404."""
+    A file ScadBuddy uploaded names its ``output_id`` (#1864), while that output still
+    exists: the upload row outlives a deleted output, and a file whose output is gone is
+    any other library file (#2138). ``file_id`` in place of ``folder_id`` lists the
+    folder that file is in, which a deep link to a file opens (#2165); a file Bambuddy
+    no longer has is its 404."""
     async with client_for(store.load()) as client:
         if file_id is not None and folder_id is None:
             folder_id = (await client.library_file(file_id)).folder_id
         listing = await list_library(client, folder_id=folder_id, show_all=show_all)
-    made = await uploads.outputs_for_files(entry.id for entry in listing.files)
+    made = await live_outputs_for_files(uploads, outputs, (entry.id for entry in listing.files))
     for entry in listing.files:
         entry.output_id = made.get(entry.id)
     return listing
@@ -321,7 +325,8 @@ async def get_library_choices(
     settings = store.load()
     remembered = store.library_choices(file_id)
     async with client_for(settings) as client:
-        source = await LibrarySource.load(client, file_id, uploads=uploads, settings=settings)
+        # Loaded alongside the printers and presets (#2504).
+        source = LibrarySource.load(client, file_id, uploads=uploads, settings=settings)
         return await choices_for(
             client, source, settings, remembered=remembered, printer_id=printer_id, rack=rack
         )

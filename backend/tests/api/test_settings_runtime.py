@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections.abc import Iterator
 from typing import Any
 
 import httpx
+import psycopg
 import pytest
 import respx
 from fastapi.testclient import TestClient
@@ -16,6 +18,7 @@ from fastapi.testclient import TestClient
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.bambuddy.uploads import ProjectTarget
 from scadbuddy.core.settings import APPLIES, ENV_SEEDED, Settings
+from scadbuddy.library.settings_store import ModelProject
 from scadbuddy.main import create_app
 from tests.api.conftest import read_stored
 from tests.support.operations import press
@@ -220,6 +223,13 @@ def _catalogue(client: TestClient, *slugs: str) -> None:
         paths.model_source(slug).write_text("cube(1);\n", encoding="utf-8")
 
 
+def _template_presets(client: TestClient, slug: str, *names: str) -> None:
+    """The presets ``slug``'s ``model.json`` lists: ``template-<name lowercased>``."""
+    path = _state(client).paths.model_dir(slug) / "model.json"
+    presets = [{"name": name, "params": {}} for name in names]
+    path.write_text(json.dumps({"presets": presets}), encoding="utf-8")
+
+
 def _remember_everything(client: TestClient) -> None:
     _catalogue(client, "gear")
     client.put("/api/v1/print/models/gear/choices", json={"tier": "fine"})
@@ -268,6 +278,7 @@ def test_forget_all_forgets_every_remembered_choice(client: TestClient) -> None:
 def test_each_model_and_preset_remembers_its_own_project(client: TestClient) -> None:
     """#1660: one model, three presets, each filed in its own project."""
     _catalogue(client, "critter", "critter-2")
+    _template_presets(client, "critter", "Fish", "Snake")
     assert client.get("/api/v1/print/models/critter/projects").json() == {"projects": []}
     client.put("/api/v1/print/models/critter/project", json={"project_id": 1})
     client.put(
@@ -337,6 +348,7 @@ def test_a_project_is_not_remembered_for_a_model_not_in_the_catalogue(
 
 def test_deleting_a_preset_or_a_model_forgets_its_projects(client: TestClient) -> None:
     _catalogue(client, "critter", "critter-2")
+    _template_presets(client, "critter", "Snake")
     preset = client.post(
         "/api/v1/models/critter/presets",
         json={"name": "Fish", "params": {}},
@@ -364,6 +376,95 @@ def test_deleting_a_preset_or_a_model_forgets_its_projects(client: TestClient) -
     assert client.get("/api/v1/settings/remembered").json()["model_projects"] == {
         "critter-2": {"project_id": 9}
     }
+
+
+def test_a_failed_forget_still_deletes_the_preset(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2142's review: the preset is gone, so the cleanup after it cannot answer 500 (and a
+    retry 404). What it left behind goes the next time Settings reads it."""
+    _catalogue(client, "critter")
+    preset = client.post(
+        "/api/v1/models/critter/presets", json={"name": "Fish", "params": {}}, headers=press()
+    ).json()["id"]
+    client.put("/api/v1/print/models/critter/project", json={"preset_id": preset, "project_id": 2})
+    store = _state(client).settings_store
+    forget = store.forget_model_projects
+
+    def fail(*_: object) -> None:
+        raise psycopg.OperationalError("database is away")
+
+    monkeypatch.setattr(store, "forget_model_projects", fail)
+    deleted = client.delete(f"/api/v1/models/critter/presets/{preset}", headers=press())
+    assert deleted.status_code == 204, deleted.text
+    assert client.get("/api/v1/models/critter/presets").json() == []
+
+    monkeypatch.setattr(store, "forget_model_projects", forget)
+    assert client.get("/api/v1/settings/remembered").json()["model_projects"] == {}
+    assert client.get("/api/v1/print/models/critter/projects").json() == {"projects": []}
+
+
+def test_settings_names_presets_now_and_prunes_the_gone(client: TestClient) -> None:
+    """#2142's review: a template preset dropped from ``model.json`` deletes nothing of
+    ours, so Settings forgets its entry as it reads it; one still listed shows its name
+    now, in the same read (no request per model)."""
+    _catalogue(client, "critter", "gear")
+    _template_presets(client, "critter", "Fish", "Snake")
+    for preset_id, name in (("template-fish", "Fish"), ("template-snake", "Snake")):
+        client.put(
+            "/api/v1/print/models/critter/project",
+            json={"preset_id": preset_id, "preset_name": name, "project_id": 2},
+        )
+    client.put("/api/v1/print/models/critter/project", json={"project_id": 1})
+    client.put("/api/v1/print/models/gear/project", json={"project_id": 3})
+    # Kept as it is: a model not in the catalogue says nothing about its presets.
+    _state(client).settings_store.set_model_project(
+        "gone", "template-x", ModelProject(project_id=4, preset_name="X")
+    )
+
+    # The template is edited: Snake is gone, Fish is renamed but keeps its id.
+    path = _state(client).paths.model_dir("critter") / "model.json"
+    path.write_text(
+        json.dumps({"presets": [{"id": "fish", "name": "Big fish", "params": {}}]}),
+        encoding="utf-8",
+    )
+    expected = {
+        "critter": {"project_id": 1},
+        "critter/template-fish": {"project_id": 2, "preset_name": "Big fish"},
+        "gear": {"project_id": 3},
+        "gone/template-x": {"project_id": 4, "preset_name": "X"},
+    }
+    assert client.get("/api/v1/settings/remembered").json()["model_projects"] == expected
+    # Forgotten, not only hidden: the model's own read no longer has it either.
+    listed = client.get("/api/v1/print/models/critter/projects").json()["projects"]
+    assert {entry["preset_id"] for entry in listed} == {None, "template-fish"}
+
+
+@pytest.mark.parametrize(
+    "written",
+    [
+        '{"presets": [{"name": "Fi',  # half-written
+        '{"presets": "not a list"}',
+        "[]",
+    ],
+)
+def test_an_unreadable_model_json_prunes_nothing(client: TestClient, written: str) -> None:
+    """#2505: a model.json that cannot be read says nothing about which presets the
+    template has, so a read during a half-written save forgets none of its entries."""
+    _catalogue(client, "critter")
+    _template_presets(client, "critter", "Fish")
+    client.put(
+        "/api/v1/print/models/critter/project",
+        json={"preset_id": "template-fish", "preset_name": "Fish", "project_id": 2},
+    )
+    path = _state(client).paths.model_dir("critter") / "model.json"
+    path.write_text(written, encoding="utf-8")
+    remembered = {"critter/template-fish": {"project_id": 2, "preset_name": "Fish"}}
+    assert client.get("/api/v1/settings/remembered").json()["model_projects"] == remembered
+
+    # Readable again, it still has its entry: nothing was forgotten in between.
+    _template_presets(client, "critter", "Fish")
+    assert client.get("/api/v1/settings/remembered").json()["model_projects"] == remembered
 
 
 def _remember_project_targets(client: TestClient) -> None:

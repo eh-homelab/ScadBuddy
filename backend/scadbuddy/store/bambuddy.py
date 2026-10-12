@@ -283,7 +283,10 @@ class BambuddyContentBackend:
         """Delete the files in this Bambuddy's recorded `Work/` folders that no
         `store_blobs` row names and that were added before ``cutoff`` (#701): an upload
         whose process died before `ContentStore.put` wrote its row. A newer one may be
-        an upload whose row is about to be written, so it stays. Returns the deleted ids."""
+        an upload whose row is about to be written, so it stays. Each file's folder is
+        read again right before its DELETE, as `remove` does (#1272): the listing can be
+        many round trips old by then, and a file moved out of `Work/` meanwhile is left
+        alone (#2115). Returns the deleted ids."""
         removed: list[str] = []
         async with self._client() as (client, inbox):
             for folder_id in sorted(await asyncio.to_thread(self._work_folders, inbox)):
@@ -298,6 +301,14 @@ class BambuddyContentBackend:
                     if added is None or added.replace(tzinfo=UTC) > cutoff:
                         continue
                     if await asyncio.to_thread(self._recorded_id, str(file.id)):
+                        continue
+                    try:
+                        still = await client.library_file(file.id)
+                    except ApiError as error:
+                        if error.status == 404:
+                            continue
+                        raise
+                    if still.folder_id != folder_id:
                         continue
                     try:
                         await client.delete_library_file(file.id)

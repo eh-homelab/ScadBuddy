@@ -172,7 +172,9 @@ Workflow/Dockerfile lint (the `lint` job): actionlint, hadolint with `.hadolint.
 `shellcheck .github/scripts/*.sh models/*/verify.sh`, `lint-verify-labels.sh`,
 `lint-dashboard.sh` (the Grafana dashboard, #988; it needs `KUSTOMIZE` pointing at
 kustomize v5.6.0, which the job downloads and checks by sha256 because ArgoCD's
-repo-server runs that version), and the `.github/scripts/*.test.sh` suites. Every
+repo-server runs that version), `lint-base64-images.sh` (#2479: no image is built as
+base64 in JSON or text outside its allowlisted Messages API boundaries; images move as
+blobs and `{name, mediaType}` pointers), and the `.github/scripts/*.test.sh` suites. Every
 `docker run` in a `verify.sh` must carry
 `--label "scadbuddy-verify=${SCADBUDDY_VERIFY_LABEL:-local}"` (Python:
 `"--label", "scadbuddy-verify=" + os.environ.get("SCADBUDDY_VERIFY_LABEL", "local")`) on
