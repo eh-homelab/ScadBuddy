@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { Sql } from 'postgres'
-import { IMAGE_DATA_MAX, type ImageMediaType, IMAGE_MEDIA_TYPES, sniff } from './images.js'
-import type { ImageRef } from './protocol.js'
+import { IMAGE_DATA_MAX, type ImageMediaType, IMAGE_MEDIA_TYPES, sniff, type UserImage } from './images.js'
+import type { ImageRef, SentImage } from './protocol.js'
 
 // The images a session's tool results carried (#782, design
 // docs/superpowers/specs/2026-10-08-friendly-tool-calls-design.md §3.1), in
@@ -11,9 +11,9 @@ import type { ImageRef } from './protocol.js'
 // read that). sdkEvents.ts takes the block; the manager stores the bytes here
 // before it logs the `tool.result` that names them; the session route serves
 // them. The event carries only `{name, mediaType}`, so the event log every
-// watcher replays stays small. The images a user sends with a turn are stored
-// here too, before the `user.turn` event that names them beside their
-// previews, so the panel's full-size view can load them from any tab.
+// watcher replays stays small. The images a user sends with a turn, and their
+// previews, are stored here too (`sentImageBlobs`), before the `user.turn`
+// event that names them, so any tab loads them by name (#2479).
 //
 // A blob is found by (session, name) and nothing else: no path is ever built
 // from a request. The name is the bytes' sha256 and the type's extension, so
@@ -58,13 +58,33 @@ export function imageOfBlock(block: unknown): SessionImage | undefined {
   if (type !== 'base64' || typeof data !== 'string' || typeof mediaType !== 'string') return undefined
   if (!(IMAGE_MEDIA_TYPES as readonly string[]).includes(mediaType)) return undefined
   if (data.length === 0 || data.length > IMAGE_DATA_MAX || data.length % 4 !== 0 || !BASE64.test(data)) return undefined
-  if (sniff(data) !== mediaType) return undefined
-  return sessionImage(mediaType as ImageMediaType, Buffer.from(data, 'base64'))
+  const bytes = Buffer.from(data, 'base64')
+  if (sniff(bytes) !== mediaType) return undefined
+  return sessionImage(mediaType as ImageMediaType, bytes)
 }
 
 /** `bytes` as a session image, named by their sha256 and the type's extension. */
 export function sessionImage(mediaType: ImageMediaType, bytes: Buffer): SessionImage {
   return { name: `${createHash('sha256').update(bytes).digest('hex')}.${EXTENSION[mediaType]}`, mediaType, bytes }
+}
+
+/**
+ * A turn's images as the blobs to store (each full image, then its preview) and
+ * what `user.turn` names them by (#2479).
+ */
+export function sentImageBlobs(images: readonly UserImage[]): { blobs: SessionImage[]; sent: SentImage[] } {
+  const blobs: SessionImage[] = []
+  const sent = images.map((image) => {
+    const full = sessionImage(image.mediaType, image.bytes)
+    const small = sessionImage(image.preview.mediaType, image.preview.bytes)
+    blobs.push(full, small)
+    return {
+      name: full.name,
+      mediaType: image.mediaType,
+      preview: { name: small.name, mediaType: image.preview.mediaType },
+    }
+  })
+  return { blobs, sent }
 }
 
 export type StoredBlob = { mediaType: ImageMediaType; bytes: Buffer }

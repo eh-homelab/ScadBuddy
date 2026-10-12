@@ -1685,9 +1685,17 @@ export const api = {
       body: JSON.stringify({ enabled }),
     }),
 
-  /** #1941 — uploads an image the user attached in the assistant panel; its message then sends the id. */
-  uploadAttachment: (image: { mediaType: string; data: string; preview: { mediaType: string; data: string } }) =>
-    request<AttachmentView>('/ai/attachments', { method: 'POST', body: JSON.stringify(image) }),
+  /**
+   * #1941 — uploads an image the user attached in the assistant panel; its message then
+   * sends the id. #2479 — as bytes: the image and its preview are two file parts, each
+   * typed, never base64 in JSON.
+   */
+  uploadAttachment: (image: { mediaType: string; blob: Blob; preview: { mediaType: string; blob: Blob } }) => {
+    const body = new FormData()
+    body.append('image', new Blob([image.blob], { type: image.mediaType }), 'image')
+    body.append('preview', new Blob([image.preview.blob], { type: image.preview.mediaType }), 'preview')
+    return request<AttachmentView>('/ai/attachments', { method: 'POST', body })
+  },
 
   /** #1941 — deletes an upload the user removed from the composer before sending it. */
   deleteAttachment: (id: string) =>

@@ -389,11 +389,14 @@ export interface WorkspaceFileList {
 /**
  * #1941 — an image the composer uploaded when it was attached (agent `POST
  * /api/v1/ai/attachments`, `src/routes/attachments.ts`): the id a message sends, and the
- * preview the transcript will show. Unsent, it expires after an hour.
+ * names the image and its preview take in the session (#2479: pointers, never bytes).
+ * Unsent, it expires after an hour.
  */
 export interface AttachmentView {
   id: string
-  preview: { mediaType: 'image/png' | 'image/jpeg' | 'image/webp'; data: string }
+  name: string
+  mediaType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'
+  preview: { name: string; mediaType: 'image/png' | 'image/jpeg' | 'image/webp' }
 }
 
 /** One assistant session as the agent's HTTP routes answer it (agent `routes/sessions.ts` `SessionView`). */

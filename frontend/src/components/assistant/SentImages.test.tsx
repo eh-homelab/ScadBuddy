@@ -7,11 +7,15 @@ import { ModalCompanionContext } from '../../lib/modal'
 import { SentImages } from './SentImages'
 
 // #1891 — a sent image, opened large from the transcript.
+// #2479 — the turn names the image and its preview; both load from the session's blobs.
 
-const preview = (name: string): SentImage => ({ mediaType: 'image/jpeg', data: btoa(`preview of ${name}`) })
-/** A preview whose full image the agent stored under a name. */
-const stored = (name: string, hex: string): SentImage => ({ ...preview(name), name: `${hex.repeat(64)}.png` })
-const previewUrl = (name: string) => `data:image/jpeg;base64,${btoa(`preview of ${name}`)}`
+const SESSION = 'sess-1'
+const previewName = (name: string) => `${name.repeat(64).slice(0, 63)}f.jpg`
+/** A turn logged before #2479 whose full image could not be stored: its preview only. */
+const preview = (name: string): SentImage => ({ preview: { name: previewName(name), mediaType: 'image/jpeg' } })
+/** An image the agent stored, and its preview. */
+const stored = (name: string, hex: string): SentImage => ({ ...preview(name), name: `${hex.repeat(64)}.png`, mediaType: 'image/png' })
+const previewUrl = (name: string, session = SESSION) => blobUrl(session, previewName(name))
 
 /**
  * The thumbnails inside a stand-in for the assistant panel: a companion region whose own
@@ -35,7 +39,7 @@ function Panel({ children }: { children: ReactNode }) {
 
 describe('sent images (#1891)', () => {
   it('shows each preview as a button that names the image, at least 24 px', () => {
-    render(<SentImages images={[preview('a'), preview('b')]} />)
+    render(<SentImages images={[preview('a'), preview('b')]} sessionId={SESSION} />)
     const list = screen.getByRole('list', { name: 'Images sent' })
     const buttons = within(list).getAllByRole('button')
     expect(buttons.map((b) => b.getAttribute('aria-label'))).toEqual([
@@ -55,7 +59,7 @@ describe('sent images (#1891)', () => {
     const image = stored('a', 'a')
     render(
       <Panel>
-        <SentImages images={[image]} sessionId="sess-1" />
+        <SentImages images={[image]} sessionId={SESSION} />
       </Panel>,
     )
     const thumb = screen.getByRole('button', { name: 'View image 1 of 1 larger' })
@@ -67,7 +71,7 @@ describe('sent images (#1891)', () => {
     // While the full image loads, its preview stands in for it.
     expect(within(dialog).getByRole('img', { name: 'Image 1 of 1, preview' })).toHaveAttribute('src', previewUrl('a'))
     const full = within(dialog).getByAltText('Image 1 of 1, as sent')
-    expect(full).toHaveAttribute('src', blobUrl('sess-1', `${'a'.repeat(64)}.png`))
+    expect(full).toHaveAttribute('src', blobUrl(SESSION, `${'a'.repeat(64)}.png`))
     expect(full).not.toBeVisible()
     fireEvent.load(full)
     expect(within(dialog).getByRole('img', { name: 'Image 1 of 1, as sent' })).toBeVisible()
@@ -98,7 +102,7 @@ describe('sent images (#1891)', () => {
     const dialog = screen.getByRole('dialog', { name: 'Image 2 of 2' })
     fireEvent.error(within(dialog).getByAltText('Image 2 of 2, as sent'))
     expect(within(dialog).queryByAltText('Image 2 of 2, as sent')).not.toBeInTheDocument()
-    expect(within(dialog).getByRole('img', { name: 'Image 2 of 2, preview' })).toHaveAttribute('src', previewUrl('b'))
+    expect(within(dialog).getByRole('img', { name: 'Image 2 of 2, preview' })).toHaveAttribute('src', previewUrl('b', 'sess-gone'))
     expect(dialog).toHaveTextContent(/the full image could not be loaded/i)
     expect(within(dialog).getByRole('button', { name: 'Close' })).toHaveFocus()
 
@@ -110,9 +114,16 @@ describe('sent images (#1891)', () => {
     expect(again).not.toHaveTextContent(/could not be loaded/i)
   })
 
+  it('draws every image from the session blob route, never a data: URL (#2479)', () => {
+    const { container } = render(<SentImages images={[stored('a', 'a'), preview('b')]} sessionId={SESSION} />)
+    const sources = Array.from(container.querySelectorAll('img')).map((img) => img.getAttribute('src'))
+    expect(sources).toEqual([previewUrl('a'), previewUrl('b')])
+    for (const src of sources) expect(src).not.toMatch(/^data:/)
+  })
+
   it('opens from the keyboard and shows the preview enlarged for a turn that names no stored image', async () => {
     const user = userEvent.setup()
-    render(<SentImages images={[preview('a'), preview('b')]} />)
+    render(<SentImages images={[preview('a'), preview('b')]} sessionId={SESSION} />)
     screen.getByRole('button', { name: 'View image 2 of 2 larger' }).focus()
     await user.keyboard('{Enter}')
 
