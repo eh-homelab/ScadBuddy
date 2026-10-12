@@ -5,11 +5,12 @@ import type { AuditLog } from '../audit/log.js'
 import { type Tier, TIERS } from '../auth/principal.js'
 import { imageOfBlock, RESULT_IMAGES_MAX, type SessionImage } from '../sessions/blobs.js'
 import type { Owner } from '../sessions/protocol.js'
-import { effectiveTool, parsedOrRaw, runToolWithOutcome, type Tool, type ToolRun, type ToolServices } from '../tools/registry.js'
+import { effectiveTool, type FlowImages, parsedOrRaw, runToolWithOutcome, type Tool, type ToolRun, type ToolServices } from '../tools/registry.js'
 import type { AnswerReader } from '../gate/answers.js'
 import { durableRequestId, flowRequestId } from '../gate/ids.js'
 import { DURABLE_ONLY_NAMES } from '../tools/answerTools.js'
 import { turnPrincipal } from '../tools/harness.js'
+import { type FlowBlobStore, type FlowImage, flowImageOf } from './flowBlobs.js'
 import { flowOf, type FlowRuns } from './flowRuns.js'
 
 // Every tool as an activity on `agent-tools` (spec 2026-10-01 §6.3, #1055), registered
@@ -116,6 +117,8 @@ export type ToolActivityDeps = {
   currentTiers?: ((owner: Owner) => Promise<readonly Tier[] | undefined>) | undefined
   /** Where a durable call's result images are kept for `view_tool_images`; placeholders without it. */
   blobs?: ResultBlobs | undefined
+  /** Where a flow call's result images are kept, by the run's subject (#2477); placeholders without it. */
+  flowBlobs?: FlowBlobStore | undefined
   /** How often a running call heartbeats, so a cancel reaches it (default 10 s). */
   heartbeatMs?: number
 }
@@ -140,11 +143,31 @@ export const NOT_FOR_FLOWS = 'NotForFlows'
 export const TOOL_IMAGES_TOOL = 'view_tool_images'
 /** What stands where a tool returned an image the model could not take (not one of the four types, or not what it claims). */
 export const UNUSABLE_IMAGE = '[an image the model cannot take]'
-/** Where a flow's call returned an image: a flow has no session to keep it in, and no model to show it to. */
+/** Where a flow's call returned an image and this worker has no store to keep it in (#2477: `flowBlobs`). */
 export const FLOW_IMAGE = '[an image]'
 
 /** Where a durable activity keeps a result's images: the session's blobs (sessions/blobs.ts). */
 export type ResultBlobs = { put(sessionId: string, images: readonly SessionImage[]): Promise<void> }
+
+type Block = { type: string; text?: string; data?: unknown; mimeType?: unknown }
+
+/**
+ * A result's text with each image named by its bytes (`[image <name>]`), and the images
+ * to keep: at most RESULT_IMAGES_MAX, each once. A block that is not one of the four
+ * types, or not what it claims, or one past the cap, is UNUSABLE_IMAGE.
+ */
+function namedImages(content: readonly Block[]): { parts: string[]; images: SessionImage[] } {
+  const images: SessionImage[] = []
+  const parts = content.map((block) => {
+    if (block.type === 'text') return block.text ?? ''
+    if (block.type !== 'image') return `[${block.type}]`
+    const image = imageOfBlock({ type: 'image', source: { type: 'base64', media_type: block.mimeType, data: block.data } })
+    if (!image || images.length >= RESULT_IMAGES_MAX) return UNUSABLE_IMAGE
+    if (!images.some((i) => i.name === image.name)) images.push(image)
+    return `[image ${image.name}]`
+  })
+  return { parts, images }
+}
 
 /**
  * A result as the durable plugin hands it to the model: text. The plugin delivers an
@@ -153,23 +176,15 @@ export type ResultBlobs = { put(sessionId: string, images: readonly SessionImage
  * So each image is kept in the session's blobs, named by its bytes (sessions/blobs.ts),
  * and named in the text, which tells the model to call `view_tool_images` with the
  * names: that tool returns them as image blocks, as a classic turn's tool result is.
- * At most RESULT_IMAGES_MAX are kept; one past it, or with no session, is a placeholder.
+ * At most RESULT_IMAGES_MAX are kept; one past it is a placeholder, and with nowhere to
+ * keep them every image is FLOW_IMAGE.
  */
-export async function resultText(
-  content: readonly { type: string; text?: string; data?: unknown; mimeType?: unknown }[],
-  keep?: { session: string; blobs: ResultBlobs },
-): Promise<string> {
-  const images: SessionImage[] = []
-  const parts = content.map((block) => {
-    if (block.type === 'text') return block.text ?? ''
-    if (block.type !== 'image') return `[${block.type}]`
-    if (!keep) return FLOW_IMAGE
-    const image = imageOfBlock({ type: 'image', source: { type: 'base64', media_type: block.mimeType, data: block.data } })
-    if (!image || images.length >= RESULT_IMAGES_MAX) return UNUSABLE_IMAGE
-    if (!images.some((i) => i.name === image.name)) images.push(image)
-    return `[image ${image.name}]`
-  })
-  if (images.length && keep) {
+export async function resultText(content: readonly Block[], keep?: { session: string; blobs: ResultBlobs }): Promise<string> {
+  if (!keep) {
+    return content.map((block) => (block.type === 'text' ? (block.text ?? '') : block.type === 'image' ? FLOW_IMAGE : `[${block.type}]`)).join('\n')
+  }
+  const { parts, images } = namedImages(content)
+  if (images.length) {
     await keep.blobs.put(keep.session, images)
     const n = images.length
     parts.push(
@@ -181,6 +196,28 @@ export async function resultText(
   return parts.join('\n')
 }
 
+/** A flow call's result when it returned images: its text, and a pointer to each image. */
+export type FlowToolResult = { text: string; images: FlowImage[] }
+
+/**
+ * A flow call's result (#2477): its text alone, as before, when it returned no image.
+ * With images, each is kept under the run's subject (flowBlobs.ts) and the flow gets
+ * `{text, images}`, the images as pointers `{name, mediaType, bytes}`: the bytes never
+ * enter the activity's result, the run's history or its stored result. Without a store,
+ * each image stays FLOW_IMAGE.
+ */
+export async function flowResult(
+  content: readonly Block[],
+  keep: { subject: string; blobs: FlowBlobStore } | undefined,
+): Promise<string | FlowToolResult> {
+  if (!keep) return resultText(content)
+  const { parts, images } = namedImages(content)
+  const text = parts.join('\n')
+  if (!images.length) return text
+  await keep.blobs.put(keep.subject, images)
+  return { text, images: images.map(flowImageOf) }
+}
+
 // Lowercase only, as the codec's subjects are (payloadCodec.ts): a session's payloads are sealed.
 const SESSION_WORKFLOW = /^session-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/
 const DEFAULT_HEARTBEAT_MS = 10_000
@@ -188,6 +225,11 @@ const DEFAULT_HEARTBEAT_MS = 10_000
 /** The session a workflow ID names, or undefined for any other workflow. */
 export function sessionOf(workflowId: string | undefined): string | undefined {
   return workflowId === undefined ? undefined : SESSION_WORKFLOW.exec(workflowId)?.[1]
+}
+
+/** The images of one flow run, and of no other. */
+function flowImagesOf(blobs: FlowBlobStore, subject: string): FlowImages {
+  return { get: (name) => blobs.get(subject, name) }
 }
 
 /** The text a non-ok run shows the model: the error result's text blocks. */
@@ -345,6 +387,8 @@ async function runAsActivity(
       ...services,
       // The tab paired with this session (#254), as for a classic turn; a flow has none.
       ...(services.browser && session !== undefined ? { browser: services.browser.forSession(session) } : {}),
+      // A flow's own images, which its calls may name as `flow_image` references (#2477).
+      ...(flow !== undefined && deps.flowBlobs ? { flowImages: flowImagesOf(deps.flowBlobs, `flow-${flow}`) } : {}),
       principal,
       ...(session === undefined ? {} : { session }),
       progress: async (progress, total, message) => context.heartbeat({ progress, total, message }),
@@ -377,6 +421,7 @@ async function runAsActivity(
   })
   if (context.cancellationSignal.aborted) throw new CancelledFailure('the call was cancelled')
   if (run.outcome !== 'ok') throw ApplicationFailure.nonRetryable(failureText(run), TOOL_ERROR)
+  if (flow !== undefined) return flowResult(run.result.content, deps.flowBlobs ? { subject: `flow-${flow}`, blobs: deps.flowBlobs } : undefined)
   return resultText(run.result.content, session !== undefined && deps.blobs ? { session, blobs: deps.blobs } : undefined)
 }
 

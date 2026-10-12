@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { createBackendClient } from '../src/api/backend.js'
 import { IMAGE_DATA_MAX, IMAGES_MAX, PREVIEW_DATA_MAX } from '../src/sessions/images.js'
-import { ImageRefsSchema, NO_PREVIEW, resolveImageRefs } from '../src/tools/imageRefs.js'
+import { ImageRefsSchema, NO_PREVIEW, resolveImageRefs, resolveSendImages } from '../src/tools/imageRefs.js'
 import { ToolError } from '../src/tools/registry.js'
 import { BACKEND } from './helpers/mcp.js'
 
@@ -124,6 +124,21 @@ describe('image references (#1894)', () => {
     await expect(
       resolveImageRefs(ImageRefsSchema.parse([{ kind: 'model_thumbnail', slug: 'nope' }]), client),
     ).rejects.toThrow(/images\[0\].*HTTP 404/)
+  })
+
+  // #2477: a flow hands on an image one of its calls returned, by its name.
+  it("resolves a flow_image from the run's own images, and refuses one outside a flow run", async () => {
+    const { client, seen } = backend({})
+    const name = `${'d'.repeat(64)}.png`
+    const flowImages = { get: async (n: string) => (n === name ? { mediaType: 'image/png' as const, bytes: PNG } : undefined) }
+    const refs = ImageRefsSchema.parse([{ kind: 'flow_image', name }])
+    const { images } = await resolveSendImages(refs, client, undefined, flowImages)
+    expect(images.map((i) => [i.mediaType, i.data])).toEqual([['image/png', PNG.toString('base64')]])
+    expect(seen).toEqual([])
+    await expect(resolveSendImages(refs, client)).rejects.toThrow(/images\[0\].*only inside a flow run/)
+    const other = ImageRefsSchema.parse([{ kind: 'flow_image', name: `${'e'.repeat(64)}.png` }])
+    await expect(resolveSendImages(other, client, undefined, flowImages)).rejects.toThrow(/images\[0\].*this run has no image/)
+    expect(() => ImageRefsSchema.parse([{ kind: 'flow_image', name: '../etc/passwd' }])).toThrow()
   })
 
   it('takes at most IMAGES_MAX references, and no inline bytes', () => {

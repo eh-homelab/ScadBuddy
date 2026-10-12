@@ -22,7 +22,8 @@ import {
 import type { Owner } from '../sessions/protocol.js'
 import { readCapped } from './binary.js'
 import { outputId, slug, VIEW } from './common.js'
-import { ToolError } from './registry.js'
+import { BLOB_NAME } from '../sessions/blobs.js'
+import { type FlowImages, ToolError } from './registry.js'
 
 // Images by reference for sessions_send (#1894). A caller names images
 // ScadBuddy already holds; the agent fetches each from the backend when it
@@ -52,6 +53,12 @@ import { ToolError } from './registry.js'
 // only for the principal that uploaded it; the panel's uploads are the browser
 // user's. Its preview is the one uploaded with it, and once the turn has
 // started its bytes move into the session (`AttachmentStore.claim`).
+//
+// One kind is a flow run's (#2477): `flow_image`, an image one of the run's own
+// calls returned, kept under the run (temporal/flowBlobs.ts) and named by its bytes.
+// It resolves only inside a call of that same run (ToolContext.flowImages), so a
+// flow can hand its images to `agent(...)`/`ask_session(...)` without their bytes
+// ever entering its history, and nobody else can name them.
 //
 // Previews (the `user.turn` event's, which the panel shows) come from the
 // backend: a view's own 128 px drawing, a media item's thumbnail, or the image
@@ -92,6 +99,10 @@ export const ImageRefSchema = z.discriminatedUnion('kind', [
     plate: z.number().int().min(1).optional(),
   }),
   AttachmentRefSchema,
+  z.strictObject({
+    kind: z.literal('flow_image'),
+    name: z.string().regex(BLOB_NAME, "must be an image's name from a flow: 64 lowercase hex digits and its extension"),
+  }),
 ])
 export type ImageRef = z.infer<typeof ImageRefSchema>
 
@@ -103,7 +114,8 @@ export const IMAGE_REFS_DESCRIPTION =
   "`output_thumbnail` (an output's thumbnail, or a plate's cover with `plate`), `output_view` (a drawn view " +
   "of an output), `model_thumbnail`, `model_media` (a template's media item), `asset` (an uploaded file; " +
   'bring a web image in with fetch_asset first), `print_thumbnail`, and `attachment` (an image this caller ' +
-  'uploaded to the assistant\'s attachment store; only its uploader may send it). Each must be a PNG, JPEG, GIF or WebP ' +
+  'uploaded to the assistant\'s attachment store; only its uploader may send it), and `flow_image` (inside a flow run only: ' +
+  'an image one of its own calls returned, by name). Each must be a PNG, JPEG, GIF or WebP ' +
   `of at most ${(IMAGE_DATA_MAX / 4) * 3} bytes, and together at most ${(IMAGES_DATA_TOTAL_MAX / 4) * 3} bytes. ` +
   'No inline image data is accepted.'
 
@@ -144,7 +156,7 @@ function label(ref: BackendRef): string {
   }
 }
 
-type BackendRef = Exclude<ImageRef, { kind: 'attachment' }>
+type BackendRef = Exclude<ImageRef, { kind: 'attachment' } | { kind: 'flow_image' }>
 
 function image(backend: BackendClient, ref: BackendRef): Pending {
   const stream = { parseAs: 'stream' as const }
@@ -229,6 +241,16 @@ async function resolveOne(backend: BackendClient, ref: BackendRef, index: number
   return { mediaType, data: fetched.data, preview: await preview(backend, ref, fetched.data) }
 }
 
+/** A flow run's own image, checked as a fetched one is. */
+async function flowImageAt(flowImages: FlowImages | undefined, name: string, index: number): Promise<UserImage> {
+  if (!flowImages) throw new ToolError(`images[${index}]: a flow_image is sent only inside a flow run`, 400)
+  const found = await flowImages.get(name)
+  if (!found) throw new ToolError(`images[${index}]: this run has no image ${name}`, 404)
+  const data = found.bytes.toString('base64')
+  if (sniff(data) !== found.mediaType) throw new ToolError(`images[${index}] is not a PNG, JPEG, GIF or WebP image`, 415)
+  return { mediaType: found.mediaType, data, preview: asPreview(data) ?? NO_PREVIEW }
+}
+
 /** Where `attachment` references are read, and for whom: the principal sending the turn. */
 export type AttachmentSource = { store: AttachmentStore; owner: Owner }
 
@@ -255,6 +277,7 @@ export async function resolveSendImages(
   refs: readonly ImageRef[],
   backend: BackendClient,
   attachments?: AttachmentSource,
+  flowImages?: FlowImages,
 ): Promise<ResolvedImages> {
   const images: UserImage[] = []
   const attached: ResolvedAttachment[] = []
@@ -264,6 +287,8 @@ export async function resolveSendImages(
       const one = await attachmentAt(attachments, ref, index)
       attached.push(one)
       images.push(one.image)
+    } else if (ref.kind === 'flow_image') {
+      images.push(await flowImageAt(flowImages, ref.name, index))
     } else {
       images.push(await resolveOne(backend, ref, index))
     }
