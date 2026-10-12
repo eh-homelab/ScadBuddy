@@ -95,6 +95,15 @@ TURN_TOOLS_PATCH = "turn-tools-2320"
 # The built-ins a package may name that run as their own activities, so a call can park.
 ENGINE_PARKED = frozenset({"Bash", "PowerShell"})
 TURN_TOOLS_TIMEOUT = timedelta(minutes=2)
+# #2581: a session's plugin calls are pinned to the replica that listed them, which keeps
+# its MCP client on each plugin (agent temporal/sessionClients.ts), so a stateful plugin
+# (Playwright MCP) keeps its page. The next turn is listed on that replica's own queue
+# first, so the pin and the page outlive the turn; a replica that does not pick it up
+# within HOST_WAIT is gone, and the turn is listed on agent-tools (a new client there).
+# turn_tools_close ends the clients there when the session ends.
+TURN_TOOLS_CLOSE = "turn_tools_close"
+HOST_PIN_PATCH = "turn-tools-host-2581"
+HOST_WAIT = timedelta(seconds=5)
 # agent/src/temporal/memoryActivities.ts (#2320, superseding #825): automatic Hindsight
 # memory around a turn, as a classic turn's hooks do it.
 MEMORY_RECALL = "memory_recall"
@@ -181,6 +190,8 @@ class DurableSession:
         self._turn_tools: set[str] = set()
         # This turn's plugin packages (#2320), from turn_tools: the segment runner loads them.
         self._packages: list[TurnPackage] = []
+        # The replica this session's pinned turn tools run on (#2581), from the last listing.
+        self._host_queue: str | None = start.host_queue
         self._turn: TurnStart | None = start.turn
         self._message: Message | None = None
         self._parked: dict[str, Parked] = {}
@@ -213,7 +224,11 @@ class DurableSession:
     def _next_run(self, state: AgentState) -> list[Any]:
         return [
             dataclasses.replace(
-                self._start, agent=state, turn=self._turn, interrupted=self._interrupted
+                self._start,
+                agent=state,
+                turn=self._turn,
+                interrupted=self._interrupted,
+                host_queue=self._host_queue,
             )
         ]
 
@@ -226,6 +241,7 @@ class DurableSession:
             else:
                 await workflow.wait_condition(lambda: self._message is not None or self._ended)
                 if self._message is None:
+                    await self._close_turn_tools()
                     return
                 message, self._message = self._message, None
                 assert message is not None
@@ -262,20 +278,7 @@ class DurableSession:
         if workflow.patched(TURN_TOOLS_PATCH):
             # What a classic turn would hand Claude Code beside ScadBuddy's own tools,
             # listed by the agent as it is now; from the result, so a replay offers the same.
-            try:
-                offered = await workflow.execute_activity(
-                    TURN_TOOLS,
-                    task_queue=TOOLS_QUEUE,
-                    start_to_close_timeout=TURN_TOOLS_TIMEOUT,
-                    retry_policy=RetryPolicy(
-                        maximum_attempts=3, non_retryable_error_types=["UnknownSession"]
-                    ),
-                    result_type=TurnTools,
-                )
-            except FailureError:
-                # As a classic turn whose plugins cannot be reached: it goes on with
-                # ScadBuddy's own tools, and offers none of last turn's others.
-                offered = TurnTools()
+            offered = await self._list_turn_tools()
             # The plugin's own table, which each segment declares its tools from.
             self._turn_tools = manifest.offer_turn_tools(
                 self._agent._tools, self._tools, self._turn_tools, offered.tools
@@ -361,6 +364,57 @@ class DurableSession:
             FinishTurn(session_id=sid, turn_id=turn_id, outcome=outcome, message=message),
             start_to_close_timeout=SHORT,
         )
+
+    async def _list_turn_tools(self) -> TurnTools:
+        """This turn's other tools: on the replica last turn's were pinned to, if it is
+        still there (#2581), else on agent-tools."""
+        if self._host_queue is not None and workflow.patched(HOST_PIN_PATCH):
+            with contextlib.suppress(FailureError):
+                pinned: TurnTools = await workflow.execute_activity(
+                    TURN_TOOLS,
+                    task_queue=self._host_queue,
+                    schedule_to_start_timeout=HOST_WAIT,
+                    start_to_close_timeout=TURN_TOOLS_TIMEOUT,
+                    retry_policy=RetryPolicy(maximum_attempts=1),
+                    result_type=TurnTools,
+                )
+                self._pin(pinned)
+                return pinned
+        offered: TurnTools
+        try:
+            offered = await workflow.execute_activity(
+                TURN_TOOLS,
+                task_queue=TOOLS_QUEUE,
+                start_to_close_timeout=TURN_TOOLS_TIMEOUT,
+                retry_policy=RetryPolicy(
+                    maximum_attempts=3, non_retryable_error_types=["UnknownSession"]
+                ),
+                result_type=TurnTools,
+            )
+        except FailureError:
+            # As a classic turn whose plugins cannot be reached: it goes on with
+            # ScadBuddy's own tools, and offers none of last turn's others.
+            offered = TurnTools()
+        self._pin(offered)
+        return offered
+
+    def _pin(self, offered: TurnTools) -> None:
+        """The replica this turn's pinned tools run on, kept for the next turn (#2581)."""
+        if workflow.patched(HOST_PIN_PATCH):
+            self._host_queue = next((t.task_queue for t in offered.tools if t.task_queue), None)
+
+    async def _close_turn_tools(self) -> None:
+        """Ends the session's kept MCP clients on its replica (#2581); a replica that is
+        gone took them with it, and one that does not answer ends them when they go idle."""
+        if self._host_queue is None or not workflow.patched(HOST_PIN_PATCH):
+            return
+        with contextlib.suppress(ActivityError):
+            await workflow.execute_activity(
+                TURN_TOOLS_CLOSE,
+                task_queue=self._host_queue,
+                schedule_to_close_timeout=HOST_WAIT,
+                retry_policy=RetryPolicy(maximum_attempts=1),
+            )
 
     async def _recall(self, turn_id: str) -> str:
         """The memories a classic turn's recall hook would add, to follow the prompt;

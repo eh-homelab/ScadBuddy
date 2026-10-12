@@ -118,6 +118,7 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
     ]
     for (const plugin of forwarded?.plugins ?? []) {
       const tiers = pluginTierResolver([plugin])
+      const keep = forwarded?.keep?.(plugin.name)
       servers.push({
         name: plugin.name,
         connect: () => connectHttp(plugin.url),
@@ -126,6 +127,23 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
         // An unlisted plugin tool is outward (registry.ts), as in a classic turn.
         tierOf: (name) => tiers(name) ?? 'outward',
         mayPark: (name) => (tiers(name) ?? 'outward') === 'outward',
+        // Its MCP session is kept for the durable session, on its own route (#2581).
+        ...(keep
+          ? {
+              keep: {
+                fingerprint: keep.fingerprint,
+                connect: async () => {
+                  const route = keep.register()
+                  try {
+                    return { client: await connectHttp(route.url), release: route.release }
+                  } catch (err) {
+                    route.release()
+                    throw err
+                  }
+                },
+              },
+            }
+          : {}),
       })
     }
     const http = deps.httpRequest
