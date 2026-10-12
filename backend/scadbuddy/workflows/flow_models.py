@@ -14,6 +14,7 @@ from scadbuddy.flows.grants import Narrowing
 #: A run grant at the gate (#2481): `workflows/flow_grants.py`'s activities.
 FLOW_GRANT_CHECK = "flow_grant_check"
 FLOW_GRANT_APPROVE = "flow_grant_approve"
+FLOW_GRANT_WITHDRAW = "flow_grant_withdraw"
 #: The harness refused the grant's Update for good (not "not parked yet").
 GRANT_REFUSED = "GrantApprovalRefused"
 

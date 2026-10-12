@@ -298,6 +298,11 @@ class FlowStore:
         """Undo a decision the harness refused: no `approved` row for a call it never ran."""
         await asyncio.to_thread(self._delete_decision, request_id)
 
+    async def withdraw_grant_decision(self, request_id: str) -> None:
+        """Remove a run grant's own decision for the call (responder `grant:<id>`), never a
+        person's: its approval never reached the harness, and a person decides it."""
+        await asyncio.to_thread(self._withdraw_grant_decision, request_id)
+
     # -- grants (#2481) -----------------------------------------------------------
 
     async def insert_grant(
@@ -614,6 +619,14 @@ class FlowStore:
     def _delete_decision(self, request_id: str) -> None:
         with self._pool.connection() as conn:
             conn.execute("DELETE FROM workflow_run_decisions WHERE request_id = %s", (request_id,))
+
+    def _withdraw_grant_decision(self, request_id: str) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "DELETE FROM workflow_run_decisions"
+                " WHERE request_id = %s AND starts_with(responder, 'grant:')",
+                (request_id,),
+            )
 
     def _announce(self, conn: Connection[DictRow], run: Run) -> None:
         if self.events is not None:

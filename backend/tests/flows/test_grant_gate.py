@@ -14,6 +14,7 @@ import pytest
 from pydantic import ValidationError
 from temporal_agent_harness.harness.agent_client import AgentClient
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 from temporalio.worker import Worker
 
@@ -21,6 +22,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.flows.approval_hash import input_hash
 from scadbuddy.flows.grants import GrantSpec
 from scadbuddy.flows.manifest import use_manifest
+from scadbuddy.flows.models import Decision
 from scadbuddy.flows.operations import FLOW_DECIDE, STALE_ENTRY, flow_kinds, request_id
 from scadbuddy.workflows.flow_grants import FlowGrants
 from scadbuddy.workflows.flow_models import GrantApprove, GrantCheck, GrantVerdict
@@ -425,3 +427,112 @@ async def test_approving_a_requested_grant_releases_the_calls_waiting_inside_it(
     # The print waits for its own approval, and releasing again releases nothing.
     assert await grants.release(outward.client, run) == []
     assert api.sent == []
+
+
+def harness_down(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The harness Update fails as a transport error would (not ToolApprovalError), for
+    the grant's approvals only: a person's still reach it."""
+    real = AgentClient.approve_tool
+
+    async def approve_tool(self: AgentClient, call_id: str, *args: Any, **kwargs: Any) -> Any:
+        if str(kwargs.get("update_id", "")).startswith("grant-"):
+            raise RuntimeError("the Update never arrived")
+        return await real(self, call_id, *args, **kwargs)
+
+    monkeypatch.setattr(AgentClient, "approve_tool", approve_tool)
+
+
+async def person_can_decide(outward: Outward, p: Parked) -> None:
+    decide = next(k for k in flow_kinds(outward.store, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
+    env = ActivityEnvironment(client=outward.client)
+    await env.run(decide.check, {"run_id": p.run_id, "call_id": p.call_id, "approved": True})
+
+
+async def test_an_approval_the_harness_never_took_leaves_the_call_to_a_person(
+    outward: Outward, api: FakeApi, tools: tuple[Tools, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #2645: a `grant:` row left behind by an Update that failed made the call,
+    listed for a person once the retries were spent, answer stale to every decision."""
+    _, queue = tools
+    [p] = await parked_send(outward, api, queue)
+    assert (await check(p)).verdict == "inside"
+    harness_down(monkeypatch)
+    with pytest.raises(RuntimeError):
+        await approve(p)
+    assert await outward.store.get_decision(p.request_id) is None
+    await person_can_decide(outward, p)
+
+
+async def test_a_release_the_harness_never_took_leaves_the_call_to_a_person(
+    outward: Outward, api: FakeApi, tools: tuple[Tools, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, queue = tools
+    [p] = await parked_send(outward, api, queue)
+    harness_down(monkeypatch)
+    run = await outward.store.get_run(p.run_id)
+    assert run is not None
+    assert await p.grants.release(outward.client, run) == []
+    assert await outward.store.get_decision(p.request_id) is None
+    await person_can_decide(outward, p)
+
+
+async def test_withdraw_removes_only_the_grants_own_decision(
+    outward: Outward, api: FakeApi, tools: tuple[Tools, str]
+) -> None:
+    """What the workflow runs before it lists a call whose approval never completed (the
+    worker died after the row was written, or the retries ran out)."""
+    _, queue = tools
+    [p, q] = await parked_send(outward, api, queue, calls=2)
+    verdict = await check(p)
+    assert verdict.verdict == "inside" and verdict.grant_id is not None
+    run = await outward.store.get_run(p.run_id)
+    assert run is not None
+    base = Decision(
+        request_id=p.request_id,
+        run_id=p.run_id,
+        workflow_run_id=run.workflow_run_id,
+        call_id=p.call_id,
+        kind="approval",
+        outcome="approved",
+        responder=f"grant:{verdict.grant_id}",
+        input_hash=verdict.input_hash,
+    )
+    assert await outward.store.record_grant_decision(base)
+    await p.env.run(p.grants.withdraw, GrantApprove(call_id=p.call_id))
+    assert await outward.store.get_decision(p.request_id) is None
+    await person_can_decide(outward, p)
+    # A person's decision is never the grant's to withdraw.
+    person = base.model_copy(
+        update={"request_id": q.request_id, "call_id": q.call_id, "responder": "browser"}
+    )
+    await outward.store.record_decision(person)
+    await q.env.run(q.grants.withdraw, GrantApprove(call_id=q.call_id))
+    assert await outward.store.get_decision(q.request_id) is not None
+
+
+async def test_a_call_whose_approval_failed_after_its_row_is_decided_by_a_person(
+    outward: Outward, api: FakeApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #2645: the approval wrote its row and then failed for good (here at
+    once; in production when its retries run out). The workflow withdraws the row
+    before it lists the call, so the person it is listed for can decide it."""
+    record = outward.store.record_grant_decision
+
+    async def recorded_then_lost(decision: Any) -> bool:
+        assert await record(decision)
+        raise ApplicationError("the worker was lost", non_retryable=True)
+
+    monkeypatch.setattr(outward.store, "record_grant_decision", recorded_then_lost)
+    run_id = await outward.run(
+        script("a = await arrange({'objects': [{'output_id': 'o1'}]})", "return a['status']"),
+        grant=grant({"fn": "arrange"}),
+    )
+    run = await outward.row(run_id, lambda r: [w.fn for w in r.waiting_on] == ["arrange"])
+    call_id = run.steps[0].call_id
+    assert await outward.store.get_decision(request_id(run, call_id)) is None
+    decide = next(k for k in flow_kinds(outward.store, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
+    env = ActivityEnvironment(client=outward.client)
+    await env.run(decide.check, {"run_id": run_id, "call_id": call_id, "approved": True})
+    await outward.decide(run_id, approved=True)
+    run = await outward.finished(run_id)
+    assert run.result == "result: 'done'"
