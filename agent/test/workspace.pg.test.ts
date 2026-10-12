@@ -9,7 +9,9 @@ import { createBackendClient } from '../src/api/backend.js'
 import { tiersUpTo } from '../src/auth/principal.js'
 import type { Database } from '../src/db.js'
 import { drainDownloads } from '../src/harness/browserDownloads.js'
-import { runHttpRequest, withDefaults } from '../src/harness/httpRequest.js'
+import { HTTP_SERVER, HTTP_TOOL, runHttpRequest, withDefaults } from '../src/harness/httpRequest.js'
+import { turnToolActivity } from '../src/temporal/turnTools.js'
+import { turnServers } from '../src/temporal/turnServers.js'
 import { unwrapUntrusted } from '../src/safety/untrusted.js'
 import { ApprovalActions, ownerOf } from '../src/approvals/mcp.js'
 import { canonicalJson } from '../src/approvals/service.js'
@@ -524,6 +526,50 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       expect((await files.read(ws, 'd.txt'))?.bytes.toString()).toBe('durable')
       const read = await env('tool-toolu_r').run(activities.workspace_read!, { path: 'd.txt' })
       expect(unwrapUntrusted(read as string)).toContain('     1\tdurable')
+    })
+
+    it('reads an image back for view_tool_images, kept as the session\'s blob (#2402)', async () => {
+      await files.write(ws, 'p.png', PNG, { mediaType: 'image/png' })
+      const kept: string[] = []
+      const activities = toolActivities(ALL_TOOLS, {
+        services: services({ workspace: files }),
+        sessions: { ownerOf: async (id) => (id === sessionId ? browser : undefined) },
+        blobs: { put: async (session, images) => void kept.push(...images.map((i) => `${session}/${i.mediaType}`)) },
+      })
+      const read = await new MockActivityEnvironment({
+        activityId: 'tool-toolu_img',
+        workflowExecution: { workflowId: `session-${sessionId}`, runId: 'run-1' },
+        activityType: 'workspace_read',
+        taskQueue: 'agent-tools',
+      }).run(activities.workspace_read!, { path: 'p.png' })
+      expect(read as string).toMatch(/\[image [0-9a-f]+\.png\]/)
+      expect(read as string).toContain('view_tool_images')
+      expect(kept).toEqual([`${sessionId}/image/png`])
+    })
+
+    it("saves a durable http_request's body into the session's workspace (#2496)", async () => {
+      const server = createServer((_req, res) => {
+        res.writeHead(200, { 'content-type': 'image/png' })
+        res.end(PNG)
+      })
+      servers.push(server)
+      await new Promise<void>((r) => server.listen(0, '127.0.0.1', r))
+      const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/p.png`
+      const deps = {
+        sessions: { ownerOf: async (id: string) => (id === sessionId ? browser : undefined) },
+        servers: turnServers({
+          httpRequest: { saveRoot: (await tempPaths()).stateDir, files },
+          settings: { get: async <T,>() => true as T },
+        }),
+      }
+      const out = await new MockActivityEnvironment({
+        activityId: 'tool-toolu_http',
+        workflowExecution: { workflowId: `session-${sessionId}`, runId: 'run-1' },
+        activityType: `turn:${HTTP_SERVER}__${HTTP_TOOL}`,
+        taskQueue: 'agent-tools',
+      }).run(turnToolActivity(deps), { url, save_to_workspace: 'dl/p.png' })
+      expect(String(out)).toContain('dl/p.png')
+      expect((await files.read(ws, 'dl/p.png'))?.bytes.equals(PNG)).toBe(true)
     })
   })
 

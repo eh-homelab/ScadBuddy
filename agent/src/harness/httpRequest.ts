@@ -722,7 +722,8 @@ export function httpRequestServer(context: HttpRequestContext): McpSdkServerConf
   const read = tool(
     HTTP_READ_TOOL,
     `Read one page of a response body that ${HTTP_TOOL} saved (its \`saved.id\`), from a byte offset. ` +
-      'Text comes back as text, anything else as base64.',
+      'Text comes back as text, anything else as base64. A body saved in an earlier turn may be gone; ' +
+      `pass save_to_workspace to ${HTTP_TOOL} to keep one.`,
     HttpReadInput,
     async (args) => markUntrusted(await readSavedResponse(args, context), HTTP_READ_TOOL, 'a saved HTTP response body'),
     { annotations: { readOnlyHint: true } },

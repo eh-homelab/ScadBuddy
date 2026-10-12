@@ -35,8 +35,11 @@ import { type SessionFiles, withWorkspaceSize } from '../workspace/store.js'
 
 /** Where a durable session's owner is read; undefined for any other session. */
 export interface SessionOwners {
-  /** The owner, and the tiers its current turn was sent with (`ai_sessions.turn_tiers`, #2320). */
-  ownerOf(sessionId: string): Promise<(Owner & { turnTiers?: readonly Tier[] | null }) | undefined>
+  /**
+   * The owner, the tiers its current turn was sent with (`ai_sessions.turn_tiers`, #2320),
+   * and that turn (`durable_turn_id`), which its calls' audit rows carry as a classic turn's do.
+   */
+  ownerOf(sessionId: string): Promise<(Owner & { turnTiers?: readonly Tier[] | null; turnId?: string | null }) | undefined>
 }
 
 export class PgSessionOwners implements SessionOwners {
@@ -46,23 +49,24 @@ export class PgSessionOwners implements SessionOwners {
     this.sql = sql
   }
 
-  async ownerOf(sessionId: string): Promise<(Owner & { turnTiers: readonly Tier[] | null }) | undefined> {
+  async ownerOf(sessionId: string): Promise<(Owner & { turnTiers: readonly Tier[] | null; turnId: string | null }) | undefined> {
     const [row] = await this.sql<
       {
         owner_kind: Owner['kind']
         owner_id: string
         owner_label: string
         turn_tiers: { by?: { kind?: string; id?: string }; tiers?: unknown } | null
+        durable_turn_id: string | null
       }[]
     >`
-      SELECT owner_kind, owner_id, owner_label, turn_tiers FROM ai_sessions WHERE id = ${sessionId} AND mode = 'durable'`
+      SELECT owner_kind, owner_id, owner_label, turn_tiers, durable_turn_id FROM ai_sessions WHERE id = ${sessionId} AND mode = 'durable'`
     if (!row) return undefined
     // Only the sender's own tiers, while it still owns the session (a handoff since
     // leaves the new owner its default), and only tiers there are.
     const sent = row.turn_tiers
     const mine = sent?.by?.kind === row.owner_kind && sent.by.id === row.owner_id && Array.isArray(sent.tiers)
     const turnTiers = mine ? TIERS.filter((t) => (sent.tiers as unknown[]).includes(t)) : null
-    return { kind: row.owner_kind, id: row.owner_id, label: row.owner_label, turnTiers }
+    return { kind: row.owner_kind, id: row.owner_id, label: row.owner_label, turnTiers, turnId: row.durable_turn_id }
   }
 }
 
@@ -204,7 +208,10 @@ export function toolActivities(tools: readonly Tool[], deps: ToolActivityDeps): 
 }
 
 /** The durable session the current activity's workflow is, and its owner; refused otherwise. */
-export async function durableSession(what: string, sessions: SessionOwners): Promise<{ session: string; owner: Owner; turnTiers?: readonly Tier[] }> {
+export async function durableSession(
+  what: string,
+  sessions: SessionOwners,
+): Promise<{ session: string; owner: Owner; turnTiers?: readonly Tier[]; turnId?: string }> {
   const { workflowExecution } = Context.current().info
   const session = sessionOf(workflowExecution?.workflowId)
   // A lookup that throws (the database is away) is left to the activity's retries.
@@ -215,8 +222,8 @@ export async function durableSession(what: string, sessions: SessionOwners): Pro
       UNKNOWN_SESSION,
     )
   }
-  const { turnTiers, ...who } = owner
-  return { session, owner: who, ...(turnTiers ? { turnTiers } : {}) }
+  const { turnTiers, turnId, ...who } = owner
+  return { session, owner: who, ...(turnTiers ? { turnTiers } : {}), ...(turnId ? { turnId } : {}) }
 }
 
 /** Who a call runs as, in which session if any, and the id its gate entry is recorded under. */
@@ -227,6 +234,8 @@ type Caller = {
   approvals: ApprovalRecords | undefined
   /** The tiers the call runs with; undefined: the owner's default (`harnessPrincipal`). */
   tiers: readonly Tier[] | undefined
+  /** The durable turn the call is part of, for its audit row; none for a flow. */
+  turnId?: string | undefined
 }
 
 /**
@@ -281,11 +290,11 @@ async function runAsActivity(
   if (flow !== undefined) {
     caller = await flowCaller(tool, flow, deps, toolUseId)
   } else {
-    const { session, owner, turnTiers: sent } = await durableSession(tool.name, deps.sessions)
+    const { session, owner, turnTiers: sent, turnId } = await durableSession(tool.name, deps.sessions)
     // The call's gate entry, if it parked (spec §6.6): its approver, or its answer, is recorded under this id.
     const requestId = durableRequestId(session, workflowExecution?.runId ?? '', toolUseId)
     if (DURABLE_ONLY_NAMES.has(tool.name)) return answerAsActivity(tool, input, deps, { session, owner, toolUseId, requestId })
-    caller = { owner, session, requestId, approvals: deps.approvals, tiers: await turnTiers(owner, sent, deps) }
+    caller = { owner, session, requestId, approvals: deps.approvals, tiers: await turnTiers(owner, sent, deps), turnId }
   }
   const { owner, session, requestId } = caller
   // `gate: 'workflow'` below skips preparing an approval because the workflow parked
@@ -366,6 +375,7 @@ async function runAsActivity(
     surface: 'harness',
     actor: owner,
     sessionId: session ?? null,
+    turnId: caller.turnId ?? null,
     toolUseId,
     requestId,
     tier: run.ran ? (lookup(run.ran.tool)?.risk ?? effective.risk) : effective.risk,

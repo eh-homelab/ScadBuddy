@@ -63,6 +63,8 @@ const SEPARATOR = '__'
 export const MAX_TURN_TOOL_NAME = 50
 /** How long one server's tool listing may take before it is left out of the turn. */
 const LIST_TIMEOUT_MS = 20_000
+/** How long a keyed server's listing is reused (TurnServer.listingKey). */
+export const LISTING_KEPT_MS = 30_000
 
 /** One MCP server a turn offers beside ScadBuddy's own tools. */
 export type TurnServer = {
@@ -97,6 +99,12 @@ export type TurnServer = {
   ready?(): Promise<void>
   /** Why a call must not run at all, by its input (the browser's filename and origin rules); undefined: it may. */
   refusal?(harnessName: string, input: unknown): string | undefined
+  /**
+   * What its tool list depends on (a remote plugin's name and the tools Settings disabled):
+   * with one, a listing is kept for LISTING_KEPT_MS, so a tier check and the call after it
+   * do not list the plugin again (#2497). The forwarder still refuses a disabled tool's call.
+   */
+  listingKey?: string
   /** Whether a tool the server lists is offered (the browser's fixed deny list, Settings → Plugins). */
   offers?(tool: string): boolean
   /** Once an outward call's approval is verified, before it runs (an approved origin is remembered). */
@@ -123,6 +131,8 @@ export type TurnContext = {
   session: string
   /** The flow run a call comes from: it has no session, so no session-bound server (the browser). */
   flow?: string
+  /** The durable turn running now (`ai_sessions.durable_turn_id`), for audit rows; none for a flow. */
+  turnId?: string
   owner: Owner
   signal: AbortSignal
   /** The call being made, for a server built for it (the browser's grant names its approval). */
@@ -220,15 +230,27 @@ async function withClient<T>(server: TurnServer, use: (client: Client) => Promis
  * Tools whose harness names collide are left out, as a classic turn hides them
  * (plugins/forwarder.ts), so a name never stands for two tools.
  */
-async function listed(server: TurnServer, signal: AbortSignal) {
+type Listed = { tool: Awaited<ReturnType<Client['listTools']>>['tools'][number]; name: string }[]
+
+const kept = new Map<string, { at: number; tools: Listed }>()
+
+async function listed(server: TurnServer, signal: AbortSignal, reuse = false): Promise<Listed> {
   await server.ready?.()
-  return withClient(server, async (client) => {
+  const key = server.listingKey === undefined ? undefined : `${server.name}\0${server.listingKey}`
+  const hit = key === undefined ? undefined : kept.get(key)
+  if (reuse && hit && Date.now() - hit.at < LISTING_KEPT_MS) return hit.tools
+  const tools = await withClient(server, async (client) => {
     const { tools } = await client.listTools(undefined, { signal })
     const named = tools.filter((tool) => server.offers?.(tool.name) ?? true).map((tool) => ({ tool, name: harnessToolName(tool.name) }))
     const seen = new Map<string, number>()
     for (const { name } of named) seen.set(name, (seen.get(name) ?? 0) + 1)
     return named.filter(({ name }) => seen.get(name) === 1)
   })
+  if (key !== undefined) {
+    for (const [k, v] of kept) if (Date.now() - v.at >= LISTING_KEPT_MS) kept.delete(k)
+    kept.set(key, { at: Date.now(), tools })
+  }
+  return tools
 }
 
 /** `promise`, or the signal's reason once it aborts (a connect that stalls takes no signal). */
@@ -263,7 +285,7 @@ function serverOf(set: TurnServers, name: string) {
 /** The tool a turn tool's name names now, or a non-retryable refusal saying why not. */
 async function resolve(set: TurnServers, name: string, signal: AbortSignal) {
   const { parts, server } = serverOf(set, name)
-  const found = (await listed(server, signal)).find((t) => t.name === parts.tool)
+  const found = (await listed(server, signal, true)).find((t) => t.name === parts.tool)
   if (!found) throw ApplicationFailure.nonRetryable(`${name} is not offered any more by ${server.name}`, TOOL_ERROR)
   return { server, tool: found.tool, harnessName: `mcp__${server.name}__${parts.tool}` }
 }
@@ -300,9 +322,9 @@ async function turnCaller(deps: TurnToolsDeps, name: string, toolUseId: string):
       approved: (requestId) => flows.approved(requestId),
     }
   }
-  const { session, owner, turnTiers: sent } = await durableSession(name, deps.sessions)
+  const { session, owner, turnTiers: sent, turnId } = await durableSession(name, deps.sessions)
   return {
-    context: { session, owner },
+    context: { session, owner, ...(turnId ? { turnId } : {}) },
     owner,
     sessionId: session,
     requestId: durableRequestId(session, runId, toolUseId),
@@ -319,9 +341,9 @@ function inputObject(input: unknown): Record<string, unknown> {
 export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: unknown) => Promise<unknown>> {
   return {
     [TURN_TOOLS_ACTIVITY]: async (): Promise<TurnToolsResult> => {
-      const { session, owner } = await durableSession(TURN_TOOLS_ACTIVITY, deps.sessions)
+      const { session, owner, turnId } = await durableSession(TURN_TOOLS_ACTIVITY, deps.sessions)
       const signal = Context.current().cancellationSignal
-      return withServers(deps, { session, owner, signal, listing: true }, async (set) => {
+      return withServers(deps, { session, owner, signal, listing: true, ...(turnId ? { turnId } : {}) }, async (set) => {
         const scrub = (text: string) => redact(text, set.secrets)
         // Listed side by side, each within LIST_TIMEOUT_MS: a plugin that stalls is
         // reported and left out, never the whole listing's deadline.
@@ -422,6 +444,7 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
           surface: 'harness',
           actor: owner,
           sessionId: session,
+          turnId: caller.context.turnId ?? null,
           toolUseId,
           requestId,
           tier,
