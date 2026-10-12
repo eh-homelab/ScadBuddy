@@ -30,6 +30,12 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'page; the route refuses an agent-authored request.',
   },
   {
+    operation: 'GET /api/v1/workflow-script/host-functions',
+    reason:
+      "The flow editor's completion and hover (#2487). An agent has the same host functions in " +
+      "register_flow's description, and check_flow_script's problems name a wrong call.",
+  },
+  {
     operation: 'GET /api/v1/workflow-runs/{run_id}/images/{name}',
     reason:
       "A flow run's images as the run page's thumbnails (#2477). A flow hands them to a session by " +
