@@ -1054,7 +1054,8 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   session the browser user does not own or that is archived) and appends a
   `workspace.file` event (`path`, `change`, `by`, and an upload's `size`, `mediaType`
   and `sha256`) to the session's log in the same transaction as the file, so the two
-  commit together: the panel's Files list reads again on it. An upload whose numbered
+  commit together: the panel's Files list reads again on it, and the feed shows it as a
+  line where it happened (#2399). An upload whose numbered
   `uploads/<name>` was taken meanwhile reads the list again and takes the next number,
   once. A running turn is not interrupted;
   the panel adds `[workspace file <path>]` to the next message, and the model finds the
