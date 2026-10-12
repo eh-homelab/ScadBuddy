@@ -94,11 +94,18 @@ def _clip(
             start.append(at[None, :])
             end.append(b[i : i + 1])
             events.append((float(at @ along), 1, at))
-    events.sort(key=lambda e: (e[0], e[1]))
+    # Close the line over each stretch between neighbouring crossings, as many times as
+    # exits outnumber entries so far (parts that touch or overlap cross at the same
+    # places, and a tie in either order then adds nothing). Along `along`, the kept
+    # region is on the left.
+    events.sort(key=lambda e: e[0])
+    open_chains = 0
     for first, second in pairwise(events):
-        if first[1] == 0 and second[1] == 1:
-            start.append(first[2][None, :])
-            end.append(second[2][None, :])
+        open_chains += 1 if first[1] == 0 else -1
+        for _ in range(abs(open_chains)):
+            from_, to = (first[2], second[2]) if open_chains > 0 else (second[2], first[2])
+            start.append(from_[None, :])
+            end.append(to[None, :])
     return np.concatenate(start), np.concatenate(end)
 
 

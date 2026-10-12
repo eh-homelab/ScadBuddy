@@ -105,26 +105,26 @@ def test_three_cuts_add_the_corner_they_share() -> None:
 
 def test_a_cut_clips_the_section_to_what_it_keeps() -> None:
     box = trimesh.creation.box((10, 10, 10))
-    cut: CutSpec = ((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), "above")
+    cut: CutSpec = ((2.0, 0.0, 0.0), (1.0, 0.0, 0.0), "above")
     section = measure(box, (0, 0, 0), (0, 0, 1), cuts=[cut])
     assert section is not None
-    assert section.area == pytest.approx(50.0)
-    assert np.allclose(section.centroid, (2.5, 0, 0), atol=1e-9)
-    # The cut line is a wall: 2.5 mm away, nearer than the box's 5 mm edges.
-    assert section.room == pytest.approx(2.5)
+    assert section.area == pytest.approx(30.0)
+    assert np.allclose(section.centroid, (3.5, 0, 0), atol=1e-9)
+    # The cut line is a wall, 1.5 mm from the centroid: nearer than the box's 5 mm edges.
+    assert section.room == pytest.approx(1.5)
     assert section.inside
 
 
 def test_two_cuts_clip_one_after_another() -> None:
     box = trimesh.creation.box((10, 10, 10))
     cuts: list[CutSpec] = [
-        ((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), "above"),
-        ((0.0, 0.0, 0.0), (0.0, 1.0, 0.0), "below"),
+        ((1.0, 0.0, 0.0), (1.0, 0.0, 0.0), "above"),
+        ((0.0, -1.0, 0.0), (0.0, 1.0, 0.0), "below"),
     ]
     section = measure(box, (0, 0, 0), (0, 0, 1), cuts=cuts)
     assert section is not None
-    assert section.area == pytest.approx(25.0)
-    assert np.allclose(section.centroid, (2.5, -2.5, 0), atol=1e-9)
+    assert section.area == pytest.approx(16.0)
+    assert np.allclose(section.centroid, (3, -3, 0), atol=1e-9)
 
 
 def test_a_cut_that_removes_the_whole_section_leaves_nothing() -> None:
@@ -133,11 +133,46 @@ def test_a_cut_that_removes_the_whole_section_leaves_nothing() -> None:
     assert measure(box, (0, 0, 0), (0, 0, 1), cuts=[cut]) is None
 
 
-def test_a_cut_through_a_ring_closes_each_island() -> None:
-    ring = trimesh.creation.annulus(r_min=4, r_max=10, height=10, sections=64)
-    cut: CutSpec = ((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), "above")
+def test_a_cut_through_a_ring_closes_each_stretch() -> None:
+    ring = trimesh.creation.annulus(r_min=4, r_max=10, height=10, sections=256)
+
+    def cap(r: float, a: float) -> tuple[float, float]:
+        """Area and first moment about x of the disc of radius r beyond x = a."""
+        return (
+            r * r * math.acos(a / r) - a * math.sqrt(r * r - a * a),
+            (2 / 3) * (r * r - a * a) ** 1.5,
+        )
+
+    (area_out, moment_out), (area_in, moment_in) = cap(10, 2), cap(4, 2)
+    cut: CutSpec = ((2.0, 0.0, 0.0), (1.0, 0.0, 0.0), "above")
     section = measure(ring, (0, 0, 0), (0, 0, 1), cuts=[cut])
     assert section is not None
-    full = measure(ring, (0, 0, 0), (0, 0, 1))
-    assert full is not None
-    assert section.area == pytest.approx(full.area / 2, rel=1e-6)
+    assert section.area == pytest.approx(area_out - area_in, rel=1e-3)
+    assert section.centroid[0] == pytest.approx(
+        (moment_out - moment_in) / (area_out - area_in), rel=1e-3
+    )
+    assert section.centroid[1] == pytest.approx(0, abs=1e-9)
+
+
+def two_boxes_sharing_a_wall() -> trimesh.Trimesh:
+    left = trimesh.creation.box((6, 10, 10))
+    left.apply_translation((-2, 0, 0))  # x from -5 to 1
+    right = trimesh.creation.box((4, 10, 10))
+    right.apply_translation((3, 0, 0))  # x from 1 to 5
+    merged = trimesh.util.concatenate([left, right])
+    assert isinstance(merged, trimesh.Trimesh)
+    return merged
+
+
+@pytest.mark.parametrize(
+    ("keep", "area", "centroid_y"), [("above", 40.0, 3.0), ("below", 60.0, -2.0)]
+)
+def test_parts_that_touch_are_clipped_with_every_crossing_closed(
+    keep: Literal["above", "below"], area: float, centroid_y: float
+) -> None:
+    cut: CutSpec = ((0.0, 1.0, 0.0), (0.0, 1.0, 0.0), keep)
+    section = measure(two_boxes_sharing_a_wall(), (0, 0, 0), (0, 0, 1), cuts=[cut])
+    assert section is not None
+    assert section.area == pytest.approx(area)
+    assert section.centroid[0] == pytest.approx(0, abs=1e-9)
+    assert section.centroid[1] == pytest.approx(centroid_y)
