@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 if TYPE_CHECKING:
     from scadbuddy.flows.models import Run
@@ -72,7 +72,7 @@ class GrantSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    expires_at: datetime
+    expires_at: AwareDatetime
     #: Whether it extends to the flow turns of the sessions the run starts (§3.4).
     sessions: bool = False
     #: Whether a call outside it goes to the starter session before the person (§4.4).

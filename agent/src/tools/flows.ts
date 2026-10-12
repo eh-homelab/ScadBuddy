@@ -30,14 +30,14 @@ const grantRule = z
     max_filament_g: z.number().min(0).optional(),
     max_calls: z.number().int().min(0).optional(),
     args: z
-      .array(z.object({ path: z.string(), in: z.array(z.union([z.string(), z.number(), z.boolean(), z.null()])) }))
+      .array(z.object({ path: z.string(), in: z.array(z.union([z.string(), z.number(), z.boolean(), z.null()])).min(1).max(256) }))
       .optional()
       .describe("tool: JSON pointers into the call's arguments and the values each may hold"),
   })
   .strict()
 const grantSpec = z
   .object({
-    expires_at: z.string().describe('ISO 8601; at most 7 days ahead (24 h is the usual)'),
+    expires_at: z.string().datetime({ offset: true }).describe('ISO 8601 with its offset; at most 7 days ahead (24 h is the usual)'),
     sessions: z.boolean().default(false).describe('Whether it covers the outward calls of sessions the run starts'),
     ask_starter_session: z.boolean().default(true).describe('Whether calls outside it go to this session first'),
     rules: z.array(grantRule).max(32),
