@@ -9,6 +9,7 @@ from contextlib import ExitStack
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 from unittest import mock
 
 import psycopg
@@ -1338,4 +1339,6 @@ async def test_a_colour_fallback_leaves_no_span_in_error(
     # The exit code is the export's, recorded once (review 5 of #1064).
     assert "scadbuddy.openscad.exit_code" not in (fallbacks[0].attributes or {})
     exports = [s for s in finished if s.name == "openscad.export"]
-    assert sorted((s.attributes or {})["scadbuddy.openscad.exit_code"] for s in exports) == [0, 3]
+    assert sorted(
+        cast(int, (s.attributes or {})["scadbuddy.openscad.exit_code"]) for s in exports
+    ) == [0, 3]
