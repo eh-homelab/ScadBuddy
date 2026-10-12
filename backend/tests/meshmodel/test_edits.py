@@ -19,6 +19,7 @@ from scadbuddy.meshmodel.edits import (
 )
 from scadbuddy.meshmodel.frames import rotation
 from scadbuddy.meshmodel.scene import (
+    MAX_NAME,
     Add,
     Cut,
     Exposed,
@@ -503,3 +504,35 @@ def test_a_mesh_that_does_not_close_is_refused_as_an_edit_error(
     monkeypatch.setattr("scadbuddy.meshmodel.edits.measure", open_section)
     with pytest.raises(SceneEditError, match="o1's mesh is not closed"):
         apply_edits(garden(1), edits(split()), mesh_of)
+
+
+def test_a_long_name_survives_repeated_splits_and_a_duplicate() -> None:
+    scene = garden(1)
+    long = scene.model_copy(
+        update={"objects": [scene.objects[0].model_copy(update={"name": "n" * MAX_NAME})]}
+    )
+    result = apply_edits(
+        long,
+        edits(split(), split(z=31.0), {"edit": "duplicate", "object": "o1"}),
+        mesh_of,
+    )
+    names = [o.name for o in result.objects]
+    assert all(len(name) <= MAX_NAME for name in names)
+    assert names[0].endswith(" (bottom)") and any(n.endswith(" (copy)") for n in names)
+    # Still a valid scene: every name within `SceneObject`'s cap.
+    Scene.model_validate(result.model_dump())
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        {"edit": "expose", "object": "o1", "op": None, "field": "translate.0", "name": "x\n"},
+        {"edit": "expose", "object": "o1", "op": None, "field": "translate.0\n", "name": "x"},
+        {"edit": "set_colour", "object": "o1", "part": "p1", "colour": "#3a7d2c\n"},
+        {"edit": "set_colour", "object": "o1", "part": "p1\n", "colour": "#3a7d2c"},
+        {"edit": "delete", "object": "o1\n"},
+    ],
+)
+def test_an_edit_with_a_trailing_newline_is_refused(raw: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        edits(raw)

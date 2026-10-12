@@ -1,8 +1,9 @@
 """A file's objects as a scene (spec 2026-10-11 §4): one mesh file per (object, colour
-part), with no colour of its own (§3.3), recentred so the object sits on z = 0 about
-its own x/y centre; an object read with ``count`` copies becomes that many scene objects
-sharing its meshes; the objects start in a row along X, ``gap`` apart, centred on the
-origin. A painted part's codes are kept beside its mesh for paint transfer (§7)."""
+part), with no colour of its own (§3.3), recentred so the object's printed parts sit on
+z = 0 about their own x/y centre (a negative part does not set the bed); an object read
+with ``count`` copies becomes that many scene objects sharing its meshes; the objects
+start in a row along X, ``gap`` apart, centred on the origin. A painted part's codes are
+kept beside its mesh for paint transfer (§7)."""
 
 from __future__ import annotations
 
@@ -14,7 +15,16 @@ import zipfile
 import numpy as np
 import trimesh
 
-from scadbuddy.meshmodel.scene import Part, Scene, SceneObject, SceneSource, Transform
+from scadbuddy.meshmodel.scene import (
+    MAX_OBJECTS,
+    MAX_PARTS,
+    Part,
+    Scene,
+    SceneObject,
+    SceneSource,
+    Transform,
+    named,
+)
 from scadbuddy.render.bambu3mf import (
     CORE_NS,
     MODEL_CONTENT_TYPE,
@@ -23,7 +33,7 @@ from scadbuddy.render.bambu3mf import (
     ROOT_MODEL_NAME,
     ZIP_TIMESTAMP,
 )
-from scadbuddy.render.objects3mf import ReadObject
+from scadbuddy.render.objects3mf import ReadObject, UnreadableObjectsError
 
 _TYPES = (
     '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -70,10 +80,24 @@ def scene_from_objects(
     objects: list[SceneObject] = []
     widths: list[float] = []
     notes: list[str] = []
+    copies = sum(obj.count for obj in read)
+    if copies > MAX_OBJECTS:
+        raise UnreadableObjectsError(
+            f"the file places {copies} objects, copies counted; a mesh model holds at most "
+            f"{MAX_OBJECTS}"
+        )
+    for obj in read:
+        if len(obj.parts) > MAX_PARTS:
+            raise UnreadableObjectsError(
+                f"{obj.name} has {len(obj.parts)} parts; a mesh model's object holds at most "
+                f"{MAX_PARTS}"
+            )
     for obj in read:
         # A read object's files are named by the id of its first scene object.
         stem = f"meshes/o{len(objects) + 1}"
-        vertices = np.concatenate([np.asarray(p.mesh.vertices) for p in obj.parts])
+        # The bed is set by what prints: a negative part may reach below it (#2146).
+        printed = [p for p in obj.parts if not p.negative] or obj.parts
+        vertices = np.concatenate([np.asarray(p.mesh.vertices) for p in printed])
         low, high = vertices.min(axis=0), vertices.max(axis=0)
         offset = -np.array([(low[0] + high[0]) / 2, (low[1] + high[1]) / 2, low[2]])
         parts: list[Part] = []
@@ -97,13 +121,17 @@ def scene_from_objects(
                 )
             )
         if any(p.painted for p in parts):
+            # Nothing reads the .paint.json files until paint transfer (spec §7, phase 3):
+            # OpenSCAD's import drops paint, so renders and prints carry none.
             notes.append(
-                f"{obj.name}: painted in Bambu Studio; the paint is kept for printing, "
-                "not yet shown in renders"
+                f"{obj.name}: painted in Bambu Studio; the paint is not carried into renders "
+                "or prints until phase 3, so each part prints in its own colour"
             )
         notes += [f"{obj.name}: {note}" for note in obj.notes]
         for _ in range(obj.count):
-            objects.append(SceneObject(id=f"o{len(objects) + 1}", name=obj.name, parts=parts))
+            objects.append(
+                SceneObject(id=f"o{len(objects) + 1}", name=named(obj.name), parts=parts)
+            )
             widths.append(float(high[0] - low[0]))
     total = sum(widths) + gap * (len(widths) - 1)
     x = -total / 2

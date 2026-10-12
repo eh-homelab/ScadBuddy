@@ -27,6 +27,9 @@ from scadbuddy.meshmodel.frames import (
 from scadbuddy.meshmodel.scene import (
     IDENT,
     MAX_CUTS,
+    MAX_NAME,
+    OBJECT_ID,
+    PART_ID,
     Add,
     Custom,
     Cut,
@@ -41,6 +44,7 @@ from scadbuddy.meshmodel.scene import (
     Transform,
     Vec3,
     exposed_values,
+    named,
     next_object_id,
     value,
 )
@@ -55,9 +59,16 @@ class SceneEditError(ValueError):
     """An edit the scene refuses; the route's 422."""
 
 
+#: A colour as callers may send it: either case (`Part.colour` stores it upper case).
+COLOUR_IN = r"^#[0-9A-Fa-f]{6}\Z"
+#: An op's field, a tuple's element by ``.index``.
+FIELD = r"^[a-z_]+(\.[0-2])?\Z"
+
+
 class _Edit(BaseModel):
-    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
-    object: str = Field(pattern=r"^o[0-9]+$")
+    # python-re, as `scene._Strict`: `IDENT`'s lookaheads, and ``\Z`` (scene.py).
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False, regex_engine="python-re")
+    object: str = Field(pattern=OBJECT_ID)
 
 
 class JointSpec(BaseModel):
@@ -100,7 +111,7 @@ class _PrimitiveEdit(_Edit):
 class AddEdit(_PrimitiveEdit):
     edit: Literal["add"] = "add"
     #: See `Add.colour`.
-    colour: str | None = Field(default=None, pattern=r"^#[0-9A-Fa-f]{6}$")
+    colour: str | None = Field(default=None, pattern=COLOUR_IN)
 
 
 class SubtractEdit(_PrimitiveEdit):
@@ -114,8 +125,8 @@ class CustomEdit(_Edit):
 
 class SetColourEdit(_Edit):
     edit: Literal["set_colour"] = "set_colour"
-    part: str = Field(pattern=r"^p[0-9]+$")
-    colour: str = Field(pattern=r"^#[0-9A-Fa-f]{6}$")
+    part: str = Field(pattern=PART_ID)
+    colour: str = Field(pattern=COLOUR_IN)
 
 
 class DeleteEdit(_Edit):
@@ -129,7 +140,7 @@ class DuplicateEdit(_Edit):
 
 class RenameEdit(_Edit):
     edit: Literal["rename"] = "rename"
-    name: str = Field(min_length=1, max_length=200)
+    name: str = Field(min_length=1, max_length=MAX_NAME)
 
 
 class RemoveOpEdit(_Edit):
@@ -138,20 +149,18 @@ class RemoveOpEdit(_Edit):
 
 
 class ExposeEdit(_Edit):
-    # python-re: `IDENT`'s lookaheads, which the default Rust engine does not support.
-    model_config = ConfigDict(extra="forbid", allow_inf_nan=False, regex_engine="python-re")
     edit: Literal["expose"] = "expose"
     #: The op's index, or None for the object's transform.
     op: int | None = Field(ge=0)
     #: A field of it, a tuple's element by ``.index``: ``point.2``, ``diameter``.
-    field: str = Field(pattern=r"^[a-z_]+(\.[0-2])?$")
+    field: str = Field(pattern=FIELD)
     name: str = Field(pattern=IDENT, max_length=64)
 
 
 class UnexposeEdit(_Edit):
     edit: Literal["unexpose"] = "unexpose"
     op: int | None = Field(ge=0)
-    field: str = Field(pattern=r"^[a-z_]+(\.[0-2])?$")
+    field: str = Field(pattern=FIELD)
 
 
 Edit = Annotated[
@@ -255,14 +264,14 @@ def _split(scene: Scene, edit: SplitEdit, mesh_of: MeshOf) -> Scene:
     upper_id = next_object_id(scene)
     lower = obj.model_copy(
         update={
-            "name": f"{obj.name} (bottom)",
+            "name": named(obj.name, " (bottom)"),
             "ops": [*obj.ops, Cut(point=p, normal=n, keep="below")],
         }
     )
     upper = obj.model_copy(
         update={
             "id": upper_id,
-            "name": f"{obj.name} (top)",
+            "name": named(obj.name, " (top)"),
             "ops": [*obj.ops, Cut(point=p, normal=n, keep="above")],
         }
     )
@@ -562,7 +571,7 @@ def _one(scene: Scene, edit: BaseModel, mesh_of: MeshOf) -> Scene:
         copy = obj.model_copy(
             update={
                 "id": next_object_id(scene),
-                "name": f"{obj.name} (copy)",
+                "name": named(obj.name, " (copy)"),
                 "transform": t.model_copy(update={"translate": tuple(moved)}),
             }
         )

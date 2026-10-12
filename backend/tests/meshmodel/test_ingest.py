@@ -7,11 +7,12 @@ import json
 import zipfile
 
 import numpy as np
+import pytest
 import trimesh
 
 from scadbuddy.meshmodel.ingest import part_mesh_3mf, scene_from_objects
-from scadbuddy.meshmodel.scene import SceneSource, value
-from scadbuddy.render.objects3mf import ReadObject
+from scadbuddy.meshmodel.scene import MAX_NAME, MAX_OBJECTS, MAX_PARTS, SceneSource, value
+from scadbuddy.render.objects3mf import ReadObject, UnreadableObjectsError
 from scadbuddy.render.split import ColourPart, Paint
 
 SOURCE = SceneSource(kind="upload", name="garden.3mf", sha256="cd" * 32)
@@ -87,7 +88,11 @@ def test_a_painted_part_keeps_its_codes_beside_its_mesh() -> None:
     )
     assert scene.objects[0].parts[0].painted
     assert json.loads(files["meshes/o1-p1.paint.json"])["codes"][-1] == "4"
-    assert any("paint" in note for note in scene.notes)
+    # Phases 1-2 carry no paint into renders or prints: the note says so (spec §7).
+    assert scene.notes == [
+        "Carrot: painted in Bambu Studio; the paint is not carried into renders or prints "
+        "until phase 3, so each part prints in its own colour"
+    ]
 
 
 def test_a_negative_part_is_kept_as_one() -> None:
@@ -112,3 +117,35 @@ def test_reading_notes_are_kept() -> None:
         SOURCE,
     )
     assert "Carrot: dropped a modifier" in scene.notes
+
+
+def test_a_negative_part_does_not_set_the_bed() -> None:
+    # As the 1943 keychain: the negative part reaches below the printed part (#2146).
+    printed = box(0)
+    hole: trimesh.Trimesh = trimesh.creation.box((4.0, 4.0, 14.0))
+    hole.apply_translation((0.0, 7.0, 20.0))  # z 13..27, the printed box's 15..25
+    negative = ColourPart(1, "Negative part", "#F08A24", hole, negative=True)
+    _, files = scene_from_objects(
+        [ReadObject(name="Keychain", count=1, parts=[part(0, "#F08A24", printed), negative])],
+        SOURCE,
+    )
+    assert load(files["meshes/o1-p1.3mf"]).bounds[0][2] == pytest.approx(0.0)
+    assert load(files["meshes/o1-p2.3mf"]).bounds[0][2] == pytest.approx(-2.0)
+
+
+def test_too_many_objects_copies_counted_is_refused() -> None:
+    read = [ReadObject(name="Peg", count=MAX_OBJECTS // 2 + 1, parts=[part(0, "#FFFFFF", box(0))])]
+    with pytest.raises(UnreadableObjectsError, match=f"at most {MAX_OBJECTS}"):
+        scene_from_objects(read * 2, SOURCE)
+
+
+def test_an_object_of_too_many_parts_is_refused() -> None:
+    parts = [part(i, "#FFFFFF", box(0)) for i in range(MAX_PARTS + 1)]
+    with pytest.raises(UnreadableObjectsError, match=f"at most {MAX_PARTS}"):
+        scene_from_objects([ReadObject(name="Lots", count=1, parts=parts)], SOURCE)
+
+
+def test_a_long_object_name_is_cut_to_the_cap() -> None:
+    read = [ReadObject(name="n" * 500, count=1, parts=[part(0, "#FFFFFF", box(0))])]
+    scene, _ = scene_from_objects(read, SOURCE)
+    assert scene.objects[0].name == "n" * MAX_NAME

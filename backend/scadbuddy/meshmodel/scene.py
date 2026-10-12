@@ -32,11 +32,17 @@ KEYWORDS = (
     "undef",
     "PI",
 )
-RESERVED = r"(?!o[0-9]+(?:_|$))(?!sb_)" + rf"(?!(?:{'|'.join(KEYWORDS)})$)"
-IDENT = rf"^{RESERVED}[A-Za-z_][A-Za-z0-9_]*$"
-COLOUR = r"^#[0-9A-F]{6}$"
-MESH_PATH = r"^meshes/o[0-9]+-p[0-9]+\.3mf$"
+#: Every pattern ends ``\Z``, not ``$``: under python-re ``$`` also matches before a
+#: trailing newline, so ``"x\n"`` would pass as ``x``.
+RESERVED = r"(?!o[0-9]+(?:_|\Z))(?!sb_)" + rf"(?!(?:{'|'.join(KEYWORDS)})\Z)"
+IDENT = rf"^{RESERVED}[A-Za-z_][A-Za-z0-9_]*\Z"
+COLOUR = r"^#[0-9A-F]{6}\Z"
+MESH_PATH = r"^meshes/o[0-9]+-p[0-9]+\.3mf\Z"
+OBJECT_ID = r"^o[0-9]+\Z"
+PART_ID = r"^p[0-9]+\Z"
 MAX_OBJECTS = 200
+MAX_PARTS = 64
+MAX_NAME = 200
 MAX_OPS = 100
 #: `section.cut_points` is cubic in an object's cuts.
 MAX_CUTS = 16
@@ -74,7 +80,7 @@ class Transform(_Strict):
 
 
 class Part(_Strict):
-    id: str = Field(pattern=r"^p[0-9]+$")
+    id: str = Field(pattern=PART_ID)
     mesh: str = Field(pattern=MESH_PATH)
     colour: str = Field(pattern=COLOUR)
     #: Painted in Bambu Studio; its codes are ``<mesh stem>.paint.json`` (spec §7).
@@ -120,9 +126,9 @@ class Primitive(_Strict):
 
 class Add(Primitive):
     op: Literal["add"] = "add"
-    #: Its own colour: the shape takes over the space it fills from every other colour
-    #: (the carrot's green anchored into the orange body, #2146). None: the object's
-    #: first part's, unioned.
+    #: Its colour: None is the object's first printed part's. Either way the shape takes
+    #: over the space it fills from every other piece (the carrot's green anchored into
+    #: the orange body, #2146), so no volume has two colours.
     colour: str | None = Field(default=None, pattern=COLOUR)
 
 
@@ -141,9 +147,9 @@ Op = Annotated[Cut | Joint | Add | Subtract | Custom, Field(discriminator="op")]
 
 
 class SceneObject(_Strict):
-    id: str = Field(pattern=r"^o[0-9]+$")
-    name: str = Field(min_length=1, max_length=200)
-    parts: list[Part] = Field(min_length=1, max_length=64)
+    id: str = Field(pattern=OBJECT_ID)
+    name: str = Field(min_length=1, max_length=MAX_NAME)
+    parts: list[Part] = Field(min_length=1, max_length=MAX_PARTS)
     ops: list[Op] = Field(default_factory=list, max_length=MAX_OPS)
     transform: Transform = Transform()
 
@@ -158,7 +164,7 @@ class SceneObject(_Strict):
 class SceneSource(_Strict):
     kind: Literal["bambuddy_library", "upload", "output"]
     name: str
-    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}\Z")
     file_id: int | None = None
     output_id: str | None = None
     licence: str | None = None
@@ -201,6 +207,12 @@ def exposed_values(model: BaseModel) -> dict[str, float]:
         if found.setdefault(item.expose, item.value) != item.value:
             raise ValueError(f"the parameter {item.expose!r} has two values")
     return found
+
+
+def named(name: str, suffix: str = "") -> str:
+    """``name`` then ``suffix``, the name cut short to keep the whole within
+    :data:`MAX_NAME`: a split appends " (bottom)" or " (top)" each time."""
+    return name[: MAX_NAME - len(suffix)] + suffix
 
 
 def next_object_id(scene: Scene) -> str:

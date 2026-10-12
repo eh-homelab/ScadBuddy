@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from scadbuddy.meshmodel.scene import (
+    MAX_NAME,
     Cut,
     Exposed,
     Joint,
@@ -17,6 +18,7 @@ from scadbuddy.meshmodel.scene import (
     dump_scene,
     exposed_values,
     load_scene,
+    named,
     next_object_id,
 )
 
@@ -124,3 +126,26 @@ def test_non_finite_numbers_are_refused() -> None:
 def test_next_object_id_is_one_past_the_largest() -> None:
     scene = Scene(source=SOURCE, objects=[obj("o1"), obj("o7")])
     assert next_object_id(scene) == "o8"
+
+
+def test_a_trailing_newline_is_refused_everywhere() -> None:
+    # python-re's `$` matches before a trailing "\n"; every pattern ends `\Z` instead.
+    with pytest.raises(ValidationError):
+        Exposed(expose="x\n", value=1)
+    with pytest.raises(ValidationError):
+        Part(id="p1", mesh="meshes/o1-p1.3mf", colour="#FFFFFF\n")
+    with pytest.raises(ValidationError):
+        Part(id="p1\n", mesh="meshes/o1-p1.3mf", colour="#FFFFFF")
+    with pytest.raises(ValidationError):
+        Part(id="p1", mesh="meshes/o1-p1.3mf\n", colour="#FFFFFF")
+    with pytest.raises(ValidationError):
+        obj("o1\n")
+    with pytest.raises(ValidationError):
+        SceneSource(kind="upload", name="x.3mf", sha256="ab" * 32 + "\n")
+
+
+def test_named_keeps_a_suffixed_name_within_the_cap() -> None:
+    assert named("Carrot", " (top)") == "Carrot (top)"
+    long = named("x" * 300, " (bottom)")
+    assert len(long) == MAX_NAME and long.endswith(" (bottom)")
+    assert named("y" * 300) == "y" * MAX_NAME
