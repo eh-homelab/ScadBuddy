@@ -26,7 +26,7 @@ from scadbuddy.bambuddy.print_source import SLICED_TYPE, LibrarySource, printabl
 from scadbuddy.core.events import ModelEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import ModelExistsError, ModelMeta, UnsafeModelPathError
-from scadbuddy.library.operations import answered_as_routes
+from scadbuddy.library.operations import PIN_TIMEOUT, answered_as_routes
 from scadbuddy.library.presets import ParamPresetUpdate
 from scadbuddy.meshmodel.compile import compile_scene
 from scadbuddy.meshmodel.edits import Edit, MeshOf, SceneEditError, apply_edits, removed_parameters
@@ -41,10 +41,15 @@ from scadbuddy.meshmodel.scene import (
     text_sha256,
 )
 from scadbuddy.operations.claims import ClaimStore
-from scadbuddy.operations.kinds import KindsBuild, OperationKind, waiting_on_bambuddy
+from scadbuddy.operations.kinds import (
+    KindsBuild,
+    OperationKind,
+    to_thread_to_end,
+    waiting_on_bambuddy,
+)
 from scadbuddy.render.bambu3mf import stl_3mf
 from scadbuddy.render.objects3mf import UnreadableObjectsError, check_stl, read_objects
-from scadbuddy.render.read_budget import ReadBudget
+from scadbuddy.render.read_budget import ReadBudget, budget_of
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
@@ -55,6 +60,14 @@ SOURCE_NAME = "model.scad"
 #: What a mesh model's writes may name: the scene, its compiled source, and the meshes
 #: (each part's, and a painted part's codes beside it, `ingest.py`).
 SCENE_FILE = re.compile(r"(?:scene\.json|model\.scad|meshes/[A-Za-z0-9_-]+\.(?:3mf|paint\.json))")
+#: The compiled ``model.scad``'s cap. A scene at every other cap compiles to hundreds of
+#: MB (200 objects of 64 parts and 100 ops); a real file's scene is far under it (the
+#: MakerWorld fixtures', `tests/test_mesh_models_fixtures.py`).
+MAX_SOURCE_BYTES = 8 * 1024 * 1024
+#: A run: the source's download (at most ``MAX_DOWNLOAD_BYTES``) and read under the read
+#: budget, a split's measuring, and the commit. A pin's, since the browser and the agent
+#: follow a 202 for 15 minutes (`library/operations.py` ``PIN_TIMEOUT``).
+RUN_TIMEOUT = PIN_TIMEOUT
 HAND_EDITED = (
     "model.scad was edited by hand since the scene last wrote it; eject the scene "
     "(scene_eject) to keep editing it as source"
@@ -71,7 +84,15 @@ def scene_files[V](files: Mapping[str, V]) -> Mapping[str, V]:
 
 
 def compiled(scene: Scene) -> tuple[Scene, str]:
+    """The scene with the hash of its compiled ``model.scad``, and that text; refused past
+    :data:`MAX_SOURCE_BYTES`."""
     text = compile_scene(scene)
+    size = len(text.encode())
+    if size > MAX_SOURCE_BYTES:
+        raise SceneEditError(
+            f"the scene compiles to {size:,} bytes of model.scad; at most "
+            f"{MAX_SOURCE_BYTES:,} are allowed (fewer objects, ops or parts)"
+        )
     return scene.model_copy(update={"generated_sha256": text_sha256(text)}), text
 
 
@@ -105,10 +126,10 @@ def mesh_loader(directory: Path) -> MeshOf:
     return mesh_of
 
 
-def stl_as_3mf(data: bytes, name: str) -> bytes:
+def stl_as_3mf(data: bytes, name: str, budget: ReadBudget) -> bytes:
     """An untrusted STL as a 3MF: refused past the triangle budget before trimesh loads
     it whole (`check_stl`), and as unreadable when it holds no mesh."""
-    check_stl(io.BytesIO(data), ReadBudget())
+    check_stl(io.BytesIO(data), budget)
     try:
         return stl_3mf(data, model_name=Path(name).stem or "model")
     except ValueError:
@@ -158,7 +179,7 @@ def mesh_kinds(state: AppState) -> list[OperationKind]:
         return data
 
     async def source_bytes(
-        request: dict[str, Any], checked: dict[str, Any]
+        request: dict[str, Any], checked: dict[str, Any], budget: ReadBudget
     ) -> tuple[bytes, SceneSource]:
         """The file as a 3MF, and where it came from (its own bytes' digest)."""
         source = request["source"]
@@ -194,7 +215,7 @@ def mesh_kinds(state: AppState) -> list[OperationKind]:
             output_id=source.get("output_id"),
         )
         if name.lower().endswith(".stl") or checked.get("file_type") == "stl":
-            data = await asyncio.to_thread(stl_as_3mf, data, name)
+            data = await asyncio.to_thread(stl_as_3mf, data, name, budget)
         return data, found_at
 
     async def create_check(request: dict[str, Any]) -> dict[str, Any]:
@@ -215,8 +236,10 @@ def mesh_kinds(state: AppState) -> list[OperationKind]:
         return {"filename": file.filename, "file_type": kind}
 
     async def create_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
-        data, source = await source_bytes(request, checked)
-        read = await asyncio.to_thread(read_objects, data, ReadBudget())
+        # The operator's read budgets, as Arrange reads a library file (`api/outputs.py`).
+        budget = budget_of(state.settings)
+        data, source = await source_bytes(request, checked, budget)
+        read = await asyncio.to_thread(read_objects, data, budget)
         if not read:
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, f"{source.name} holds no objects")
         scene, files = scene_from_objects(read, source)
@@ -228,13 +251,17 @@ def mesh_kinds(state: AppState) -> list[OperationKind]:
         create = partial(
             state.catalogue.create, request["slug"], text, meta, files=scene_files(files)
         )
+
+        def created(_: object) -> None:
+            emit(state.events, ModelEvent(kind="model.created", slug=request["slug"]))
+
         try:
-            record = await asyncio.to_thread(create)
+            # To its end: a commit that lands after the run's timeout is still announced.
+            record = await to_thread_to_end(create, created)
         except ModelExistsError:
             raise ApiError(
                 status.HTTP_409_CONFLICT, f"a model named {request['slug']!r} already exists"
             ) from None
-        emit(state.events, ModelEvent(kind="model.created", slug=request["slug"]))
         return _record(record)
 
     async def edit_check(request: dict[str, Any]) -> dict[str, Any]:
@@ -289,13 +316,14 @@ def mesh_kinds(state: AppState) -> list[OperationKind]:
             return scene_files({SCENE_NAME: dump_scene(after).encode(), SOURCE_NAME: text.encode()})
 
         update = partial(state.catalogue.update_files, slug, compute, message=request["message"])
-        record = await asyncio.to_thread(update)
+        record = await to_thread_to_end(
+            update, lambda _: models_api.announce_source_change(state.events, slug)
+        )
         # After the revision, and on every run whatever it removed: a saved preset naming a
         # parameter the scene no longer exposes cannot render, so trimming it is always the
         # repair. That makes a run that died between the commit and this loop (the revision
         # kept, the presets not trimmed) mended by the next edit (review of #2388).
         await asyncio.to_thread(trim_saved_presets, slug)
-        models_api.announce_source_change(state.events, slug)
         return _record(record)
 
     async def eject_check(request: dict[str, Any]) -> dict[str, Any]:
@@ -311,12 +339,15 @@ def mesh_kinds(state: AppState) -> list[OperationKind]:
             return scene_files({SCENE_NAME: None})
 
         update = partial(state.catalogue.update_files, slug, drop, message="Eject the scene")
-        record = await asyncio.to_thread(update)
-        models_api.announce_source_change(state.events, slug)
+        record = await to_thread_to_end(
+            update, lambda _: models_api.announce_source_change(state.events, slug)
+        )
         return _record(record)
 
     def kind(name: str, check: Step, run: Step) -> OperationKind:
-        return OperationKind(name, _answered(check), _answered(run), queue="library")
+        return OperationKind(
+            name, _answered(check), _answered(run), queue="library", run_timeout=RUN_TIMEOUT
+        )
 
     return [
         kind("mesh_model_create", create_check, create_run),

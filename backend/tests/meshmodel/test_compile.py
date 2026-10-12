@@ -5,7 +5,11 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+import pytest
+
 from scadbuddy.meshmodel.compile import compile_scene
+from scadbuddy.meshmodel.edits import SceneEditError
+from scadbuddy.meshmodel.operations import MAX_SOURCE_BYTES, compiled
 from scadbuddy.meshmodel.scene import (
     Add,
     Custom,
@@ -120,6 +124,16 @@ def test_add_and_subtract_place_centred_primitives() -> None:
     add = Add(primitive="cylinder", size=(3, 3, 8), transform=Transform(translate=(0, 0, 30)))
     sub = Subtract(primitive="cube", size=(2, 2, 2))
     text = compile_scene(scene(carrot(ops=[add, sub])))
+    cylinder = "translate([0, 0, 30]) rotate([0, 0, 0]) scale([1, 1, 1]) cylinder(h = 8, d = 3, center = true, $fn = 64);"
+    # An uncoloured add carves its space out of every other piece too, as a coloured one
+    # does, so the second colour (p2) never shares a volume with it.
+    assert (
+        '  color("#3A7D2C") difference() {\n'
+        "    difference() {\n"
+        '      import("meshes/o1-p2.3mf");\n'
+        f"      {cylinder}\n"
+        "    }\n"
+    ) in text
     # The added cylinder is a piece of its own, which the later subtract cuts too.
     assert (
         '  color("#F08A24") difference() {\n'
@@ -241,3 +255,13 @@ def test_every_cutter_is_inside_its_pieces_colour() -> None:
         assert piece.count("cube(4000);") == 1
         assert piece.count('"flat", 0.2);') == 1
         assert piece.count("sphere(d = 3, $fn = 64);") == 1
+
+
+def test_a_compiled_source_past_the_cap_is_refused() -> None:
+    # Five objects of 100 custom ops of 20,000 characters: 10 MB of model.scad.
+    ops = [Custom(scad="//" + "x" * 19_998) for _ in range(100)]
+    big = scene(*(carrot(f"o{i}", ops=ops) for i in range(1, 6)))
+    with pytest.raises(SceneEditError, match=r"model\.scad"):
+        compiled(big)
+    small, text = compiled(scene(carrot()))
+    assert len(text.encode()) < MAX_SOURCE_BYTES and small.generated_sha256

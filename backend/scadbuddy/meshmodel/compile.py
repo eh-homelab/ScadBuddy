@@ -8,7 +8,8 @@ An object compiles per piece: one ``color(c) <statement>;`` per colour piece, st
 with one per printed part. Every op that removes geometry (a cut's half-space, a socket,
 a ``subtract``, the negative parts) wraps every piece, and a ``custom`` op is given each
 piece on its own as its ``children()``; an op that adds geometry (a peg, an ``add``)
-appends a piece in its colour, or the object's first printed part's. So every cutter
+appends a piece in its colour, or the object's first printed part's, and an ``add`` is
+first cut out of every other piece, so no volume has two colours. So every cutter
 sits inside its piece's ``color()``: in OpenSCAD 2026.10.05's Manifold 3MF a face takes
 the colour of the solid that made it, and a cutter outside every ``color()`` made the
 cut faces the Default material and a socket's wall a colour of its own (#2146; measured
@@ -121,10 +122,9 @@ def _apply(obj: SceneObject, index: int, op: Op, pieces: list[Piece]) -> list[Pi
         return _cut_all(pieces, "difference()", socket)
     if isinstance(op, Add):
         shape = f"{_placed(op.transform)} {_primitive(op)}"
-        if op.colour is None:
-            return [*pieces, (colour, [shape])]
-        # Carved out of the rest first, so no two colours ever claim the same volume.
-        return [*_cut_all(pieces, "difference()", shape), (op.colour, [shape])]
+        # Carved out of the rest first, coloured or not, so no two colours ever claim the
+        # same volume: an uncoloured add over a second colour takes its space too.
+        return [*_cut_all(pieces, "difference()", shape), (op.colour or colour, [shape])]
     if isinstance(op, Subtract):
         return _cut_all(pieces, "difference()", f"{_placed(op.transform)} {_primitive(op)}")
     assert isinstance(op, Custom)
