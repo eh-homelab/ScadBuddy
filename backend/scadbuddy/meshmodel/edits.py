@@ -26,6 +26,7 @@ from scadbuddy.meshmodel.frames import (
 )
 from scadbuddy.meshmodel.scene import (
     IDENT,
+    MAX_CUTS,
     Add,
     Custom,
     Cut,
@@ -43,7 +44,7 @@ from scadbuddy.meshmodel.scene import (
     next_object_id,
     value,
 )
-from scadbuddy.meshmodel.section import cut_points, kept, measure
+from scadbuddy.meshmodel.section import OpenSectionError, cut_points, kept, measure
 
 #: Two 0.4 mm walls around a socket (spec §5).
 WALL = 0.8
@@ -243,6 +244,8 @@ def _split(scene: Scene, edit: SplitEdit, mesh_of: MeshOf) -> Scene:
         )
     except ValueError as error:
         raise SceneEditError(str(error)) from None
+    if sum(isinstance(op, Cut) for op in obj.ops) >= MAX_CUTS:
+        raise SceneEditError(f"{obj.id} already has {MAX_CUTS} cuts")
     holes = _holes(obj, mesh_of)
     section = measure(object_mesh(obj, mesh_of), point.tolist(), normal.tolist(), holes, _cuts(obj))
     if section is None:
@@ -576,7 +579,13 @@ def _one(scene: Scene, edit: BaseModel, mesh_of: MeshOf) -> Scene:
 
 def apply_edits(scene: Scene, edits: Sequence[BaseModel], mesh_of: MeshOf) -> Scene:
     for edit in edits:
-        scene = _one(scene, edit, mesh_of)
+        try:
+            scene = _one(scene, edit, mesh_of)
+        except OpenSectionError:
+            raise SceneEditError(
+                f"{getattr(edit, 'object', 'the object')}'s mesh is not closed where the plane "
+                "cuts it"
+            ) from None
     try:
         return Scene.model_validate(scene.model_dump())
     except ValueError as error:

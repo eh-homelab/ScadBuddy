@@ -31,6 +31,7 @@ from scadbuddy.meshmodel.scene import (
     text_sha256,
     value,
 )
+from scadbuddy.meshmodel.section import OpenSectionError
 from tests.meshmodel.test_section import neck
 
 SOURCE = SceneSource(kind="upload", name="garden.3mf", sha256="ab" * 32)
@@ -474,3 +475,31 @@ def test_a_joint_is_refused_on_a_scaled_object() -> None:
     with pytest.raises(SceneEditError, match="o1 is scaled"):
         apply_edits(scene, edits(split(z=64.0, depth=5)), mesh_of)
     apply_edits(scene, edits(split(z=64.0)), mesh_of)  # no joint: fine
+
+
+def with_cuts(count: int) -> Scene:
+    cuts = [Cut(point=(0, 0, 100 + i), normal=(0, 0, 1), keep="below") for i in range(count)]
+    obj = garden(1).objects[0].model_copy(update={"ops": cuts})
+    return garden(1).model_copy(update={"objects": [obj]})
+
+
+def test_an_object_may_carry_sixteen_cuts_and_no_more() -> None:
+    Scene.model_validate(with_cuts(16).model_dump())
+    with pytest.raises(ValidationError, match="17 cuts"):
+        Scene.model_validate(with_cuts(17).model_dump())
+
+
+def test_a_split_is_refused_past_the_cut_limit() -> None:
+    with pytest.raises(SceneEditError, match="o1 already has 16 cuts"):
+        apply_edits(with_cuts(16), edits(split()), mesh_of)
+
+
+def test_a_mesh_that_does_not_close_is_refused_as_an_edit_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def open_section(*args: Any, **kwargs: Any) -> None:
+        raise OpenSectionError("the section is not closed")
+
+    monkeypatch.setattr("scadbuddy.meshmodel.edits.measure", open_section)
+    with pytest.raises(SceneEditError, match="o1's mesh is not closed"):
+        apply_edits(garden(1), edits(split()), mesh_of)

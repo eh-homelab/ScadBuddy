@@ -23,6 +23,14 @@ from scadbuddy.meshmodel.frames import unit
 CutSpec = tuple[Sequence[float], Sequence[float], Literal["above", "below"]]
 
 
+#: Twice an object's 64-part cap: more open chains than this is no closed mesh.
+MAX_OPEN_CHAINS = 128
+
+
+class OpenSectionError(ValueError):
+    """A section whose boundary does not close: the mesh has a hole in it."""
+
+
 @dataclass(frozen=True)
 class Section:
     area: float
@@ -102,6 +110,8 @@ def _clip(
     open_chains = 0
     for first, second in pairwise(events):
         open_chains += 1 if first[1] == 0 else -1
+        if abs(open_chains) > MAX_OPEN_CHAINS:
+            raise OpenSectionError("the section is not closed")
         for _ in range(abs(open_chains)):
             from_, to = (first[2], second[2]) if open_chains > 0 else (second[2], first[2])
             start.append(from_[None, :])
@@ -181,6 +191,8 @@ def cut_points(mesh: trimesh.Trimesh, cuts: Sequence[CutSpec]) -> np.ndarray:
             continue
         start, end = found
         points.append(kept(np.concatenate(found), others(i)))
+        plane = np.stack(_basis(n), axis=1)
+        flat_start, flat_end = (start - origin) @ plane, (end - origin) @ plane
         for j, (other, m) in enumerate(spots):
             if j == i or np.linalg.norm(np.cross(n, m)) < 1e-9:
                 continue
@@ -197,10 +209,6 @@ def cut_points(mesh: trimesh.Trimesh, cuts: Sequence[CutSpec]) -> np.ndarray:
                     continue
                 d = [n @ origin, m @ other, spots[k][1] @ spots[k][0]]
                 common = np.linalg.solve(normals, d)
-                u, v = _basis(n)
-                plane = np.stack([u, v], axis=1)
-                if _encloses(
-                    (start - origin) @ plane, (end - origin) @ plane, (common - origin) @ plane
-                ):
+                if _encloses(flat_start, flat_end, (common - origin) @ plane):
                     points.append(kept(common[None, :], others(i, j, k)))
     return np.concatenate(points)

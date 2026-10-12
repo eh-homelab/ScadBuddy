@@ -38,6 +38,8 @@ COLOUR = r"^#[0-9A-F]{6}$"
 MESH_PATH = r"^meshes/o[0-9]+-p[0-9]+\.3mf$"
 MAX_OBJECTS = 200
 MAX_OPS = 100
+#: `section.cut_points` is cubic in an object's cuts.
+MAX_CUTS = 16
 
 
 class _Strict(BaseModel):
@@ -144,6 +146,13 @@ class SceneObject(_Strict):
     parts: list[Part] = Field(min_length=1, max_length=64)
     ops: list[Op] = Field(default_factory=list, max_length=MAX_OPS)
     transform: Transform = Transform()
+
+    @model_validator(mode="after")
+    def _few_cuts(self) -> SceneObject:
+        cuts = sum(isinstance(op, Cut) for op in self.ops)
+        if cuts > MAX_CUTS:
+            raise ValueError(f"{self.id} has {cuts} cuts; at most {MAX_CUTS} are allowed")
+        return self
 
 
 class SceneSource(_Strict):

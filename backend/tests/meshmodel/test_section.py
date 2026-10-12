@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 import trimesh
 
-from scadbuddy.meshmodel.section import CutSpec, cut_points, measure
+from scadbuddy.meshmodel.section import CutSpec, OpenSectionError, _clip, cut_points, measure
 
 
 def neck() -> trimesh.Trimesh:
@@ -176,3 +176,35 @@ def test_parts_that_touch_are_clipped_with_every_crossing_closed(
     assert section.area == pytest.approx(area)
     assert section.centroid[0] == pytest.approx(0, abs=1e-9)
     assert section.centroid[1] == pytest.approx(centroid_y)
+
+
+def two_overlapping_boxes() -> trimesh.Trimesh:
+    left = trimesh.creation.box((7, 10, 10))
+    left.apply_translation((-1.5, 0, 0))  # x from -5 to 2
+    right = trimesh.creation.box((5, 10, 10))
+    right.apply_translation((2.5, 0, 0))  # x from 0 to 5
+    merged = trimesh.util.concatenate([left, right])
+    assert isinstance(merged, trimesh.Trimesh)
+    return merged
+
+
+@pytest.mark.parametrize(
+    ("keep", "area", "centroid_y"), [("above", 48.0, 3.0), ("below", 72.0, -2.0)]
+)
+def test_parts_that_overlap_count_twice_where_they_overlap(
+    keep: Literal["above", "below"], area: float, centroid_y: float
+) -> None:
+    cut: CutSpec = ((0.0, 1.0, 0.0), (0.0, 1.0, 0.0), keep)
+    section = measure(two_overlapping_boxes(), (0, 0, 0), (0, 0, 1), cuts=[cut])
+    assert section is not None
+    assert section.area == pytest.approx(area)
+    assert section.centroid[0] == pytest.approx(1 / 6)
+    assert section.centroid[1] == pytest.approx(centroid_y)
+
+
+def test_a_section_that_does_not_close_is_refused() -> None:
+    x = np.arange(200, dtype=float)
+    a, b = np.stack([x, np.full(200, -1.0)], axis=1), np.stack([x, np.ones(200)], axis=1)
+    cut: CutSpec = ((0.0, 0.0, 0.0), (0.0, 1.0, 0.0), "above")
+    with pytest.raises(OpenSectionError):
+        _clip(a, b, np.zeros(3), np.array([1.0, 0, 0]), np.array([0, 1.0, 0]), cut)
