@@ -73,7 +73,7 @@ export async function forwardPackageServers(
   for (const pkg of loaded) {
     for (const { map } of declaredConfigs(pkg.dir).mcp) {
       for (const [server, config] of entries(map)) {
-        if (typeof config.url !== 'string' || config.command !== undefined) continue
+        if (typeof config.url !== 'string' || !noCommand(config)) continue
         const name = packageServerName(pkg.name, server)
         const what = `plugin package ${pkg.name}: MCP server "${server}"`
         if (name.includes('__')) {
@@ -128,9 +128,14 @@ export async function forwardPackageServers(
   return { plugins, problems, secrets, release: () => releases.forEach((r) => r()) }
 }
 
+/** No command: absent or null, as agent-durable's runner.py `_remote_entry` reads it (#2563). */
+function noCommand(config: Record<string, unknown>): boolean {
+  return config.command === undefined || config.command === null
+}
+
 /** Whether a server entry is reached by URL (http, sse): the forwarder's, never Claude Code's. */
 export function isRemoteEntry(config: Record<string, unknown>): boolean {
-  return config.command === undefined && (typeof config.url === 'string' || config.type === 'http' || config.type === 'sse')
+  return noCommand(config) && (typeof config.url === 'string' || config.type === 'http' || config.type === 'sse')
 }
 
 /** Whether a plugin directory declares any server reached by URL. */
