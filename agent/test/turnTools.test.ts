@@ -18,6 +18,7 @@ import {
   TURN_TOOLS_ACTIVITY,
   turnToolActivities,
   turnToolActivity,
+  MAX_TURN_TOOL_NAME,
   type TurnContext,
   type TurnServer,
   type TurnToolsDeps,
@@ -173,6 +174,21 @@ describe('turn tools in a durable session', () => {
     const { tools } = (await env(TURN_TOOLS_ACTIVITY).run(h.activities[TURN_TOOLS_ACTIVITY] as () => Promise<TurnToolsResult>)) as TurnToolsResult
     expect(tools.map((t) => t.name)).not.toContain('notes__read_note')
     expect((await failure(env('turn:notes__read_note').run(h.call, { id: 'a' }))).message).toContain('not offered any more')
+  })
+
+  it('leaves out a tool whose turn name is over 50 characters and says so, listing the rest', async () => {
+    const long = 'browser_console_messages_and_then_some_more_words'
+    const withLong = (calls: string[]) => () => {
+      const server = notes(calls)()
+      server.registerTool(long, { description: 'too long', inputSchema: {} }, async () => ({ content: [] }))
+      return server
+    }
+    const h = harness({ server: withLong })
+    const { tools } = (await env(TURN_TOOLS_ACTIVITY).run(h.activities[TURN_TOOLS_ACTIVITY] as () => Promise<TurnToolsResult>)) as TurnToolsResult
+    expect(`notes__${long}`.length).toBeGreaterThan(MAX_TURN_TOOL_NAME)
+    expect(tools.map((t) => t.name)).not.toContain(`notes__${long}`)
+    expect(tools.map((t) => t.name)).toContain('notes__post')
+    expect(h.reported).toEqual([`tool ${long} of plugin notes is not available in this turn: its name notes__${long} is over 50 characters`])
   })
 
   it('leaves out a server whose listing stalls, says so once, and lists the others (review of #2324)', async () => {

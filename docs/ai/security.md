@@ -927,13 +927,18 @@ socket.
 **The upload.** `POST /api/v1/ai/attachments`
 ([`agent/src/routes/attachments.ts`](../../agent/src/routes/attachments.ts)) passes the
 same UI check as the other browser writes (`guard.ts` `uiRequestProblem`: the HTTPS
-ingress and the one origin allowlist in `http/origins.ts`), takes JSON only, and caps
-the body at one image and its preview before reading it. The image is checked by
+ingress and the one origin allowlist in `http/origins.ts`), takes `multipart/form-data`
+only (two file parts, `image` and `preview`, each typed by its Content-Type; base64 in
+JSON is refused with 415, #2479), and caps the body at one image and its preview before
+reading it. The image is checked by
 [`agent/src/sessions/images.ts`](../../agent/src/sessions/images.ts): PNG, JPEG, GIF
-or WebP, at most 5 MiB of base64, its bytes starting with its type's signature, and a
-preview of at most 64 KiB (PNG, JPEG or WebP). A refusal names fields and caps, never
-the bytes. The answer is `{ id, preview }`. `DELETE /api/v1/ai/attachments/:id` (same
-check) removes one the user took out of the composer.
+or WebP, at most 3.75 MiB (what the Messages API's 5 MiB of base64 holds), its bytes
+starting with its type's signature, and a preview of at most 48 KiB (PNG, JPEG or WebP).
+A refusal names fields and caps, never the bytes. The answer is pointers only,
+`{ id, name, mediaType, preview: { name, mediaType } }`, the `<sha256>.<ext>` names the
+image and its preview take in the session; the composer shows its own copy from a blob
+URL. `DELETE /api/v1/ai/attachments/:id` (same check) removes one the user took out of
+the composer.
 
 **The store.** `ai_attachments`
 ([`agent/src/attachments/store.ts`](../../agent/src/attachments/store.ts)) is a staging
@@ -961,10 +966,13 @@ them from then on (deleting the session cascades). A durable session (#1056) rea
 images from that table by name in an activity, so no image enters a Temporal payload.
 Every image a turn starts with, whatever brought it (an attachment, or a backend
 reference over `sessions_send`), is also stored in
-`ai_session_blobs` before the `user.turn` event is logged (`sessions/manager.ts`
-`sentImages`; an attachment's later move then finds its row there). The event keeps
-the previews, each with its image's name, and an MCP transcript (`sessions_get`) only
-their count. The panel's full-size view loads an image by that name from
+`ai_session_blobs` with its preview before the `user.turn` event is logged
+(`sessions/blobs.ts` `sentImageBlobs`; an attachment's later move then finds its row
+there), and a store that fails refuses the message. The event names each image and its
+preview, `{ name, mediaType, preview: { name, mediaType } }`, never their bytes (#2479;
+the migration `20261012T0226Z_images_by_pointer.sql` moved older turns' inline previews
+into the blobs), and an MCP transcript (`sessions_get`) keeps only their count. The
+panel loads the previews and the full-size view by name from
 `GET /api/v1/ai/sessions/:id/blobs/:name` (`routes/sessions.ts`): the same UI-read
 check as the session's other reads, `Content-Type` from the stored type, `nosniff`,
 `Content-Disposition: inline`, a sandboxing CSP, `Cross-Origin-Resource-Policy:

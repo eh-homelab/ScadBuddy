@@ -61,6 +61,13 @@ export type AttentionView =
 /** An image a tool returned, as the event names it (#782): `<sha256>.<ext>`, one of the session's blobs. */
 export type ImageRef = { name: string; mediaType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp' }
 
+/**
+ * An image the user sent with a turn, as `user.turn` names it (#2479): the full image
+ * and its preview, each one of the session's blobs. A turn logged before #2479 whose
+ * full image could not be stored names its preview only (that migration).
+ */
+export type SentImage = Partial<ImageRef> & { preview: { name: string; mediaType: 'image/png' | 'image/jpeg' | 'image/webp' } }
+
 export type SessionSummary = {
   sessionId: string
   title: string
@@ -131,9 +138,9 @@ export type ServerEvent = V &
       }
     | { type: 'session.owner'; sessionId: string; owner: Owner }
     /**
-     * `images`: previews of the images the user sent with the turn (#1866, images.ts); the model got the full ones.
-     * `name`: the full image, stored with the session (blobs.ts) and served by the session route, as a
-     * tool result's are; absent on turns logged before it, and when the image could not be stored.
+     * `images`: the images the user sent with the turn (#1866, images.ts), by name (#2479): the
+     * full image and its preview, stored with the session (blobs.ts) and served by the session
+     * route, as a tool result's are. Never their bytes.
      */
     | {
         type: 'user.turn'
@@ -141,7 +148,7 @@ export type ServerEvent = V &
         turnId: string
         text: string
         author: Owner
-        images?: { mediaType: 'image/png' | 'image/jpeg' | 'image/webp'; data: string; name?: string }[]
+        images?: SentImage[]
       }
     | { type: 'assistant.text.delta'; sessionId: string; messageId: string; delta: string }
     | { type: 'assistant.text.done'; sessionId: string; messageId: string }

@@ -1,15 +1,24 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import timedelta
 from typing import Any, Literal, Self
 
+import psycopg
 from fastapi import APIRouter, Response, status
 from fastapi.responses import JSONResponse
 from psycopg.conninfo import conninfo_to_dict
 from pydantic import BaseModel, Field, model_validator
 
-from scadbuddy.api.deps import AppState, SettingsStoreDep, StateDep, UploadsDep
+from scadbuddy.api.deps import (
+    AppState,
+    CatalogueDep,
+    PresetsDep,
+    SettingsStoreDep,
+    StateDep,
+    UploadsDep,
+)
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
     IdempotencyKey,
@@ -39,6 +48,8 @@ from scadbuddy.core.settings import (
     Settings,
     env_var,
 )
+from scadbuddy.library.catalogue import Catalogue
+from scadbuddy.library.presets import PresetStore, TemplatePresetsUnreadableError
 from scadbuddy.library.settings_store import (
     DisplayUnit,
     ModelPrintChoices,
@@ -56,6 +67,8 @@ from scadbuddy.workflows.commands import (
     TemporalUnavailableError,
     namespace_retention,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["settings"])
 
@@ -252,7 +265,8 @@ class RememberedChoices(BaseModel):
     #: Stringified Bambuddy project id -> the printer and nozzle it last printed on (#599).
     project_print_targets: dict[str, ProjectTarget] = Field(default_factory=dict)
     #: A model id, or ``<model id>/<preset id>``, -> the project Generate last filed it
-    #: into (#1660).
+    #: into (#1660). A preset's entry carries the preset's name now, so Settings needs
+    #: no read per model; one for a preset its model no longer lists is not here.
     model_projects: dict[str, ModelProject] = Field(default_factory=dict)
 
 
@@ -414,8 +428,51 @@ async def put_settings(
     return _view(snapshot, state)
 
 
+def _current_model_projects(
+    settings: StoredSettings, catalogue: Catalogue, presets: PresetStore, store: SettingsStore
+) -> dict[str, ModelProject]:
+    """``model_projects`` as Settings lists it (#1660): each preset's entry named by the
+    preset's name now, and none for a preset its model no longer lists. A template's
+    preset dropped from ``model.json`` deletes nothing of ours, so its entry is
+    forgotten here instead. A model not in the catalogue, or whose presets cannot be
+    read (the database, or a ``model.json`` that is not valid), keeps its entries as
+    they are."""
+    names: dict[str, dict[str, str] | None] = {}
+    current: dict[str, ModelProject] = {}
+    for scope, project in settings.model_projects.items():
+        model_id, separator, preset_id = scope.partition("/")
+        if separator and model_id not in names:
+            try:
+                names[model_id] = (
+                    {preset.id: preset.name for preset in presets.presets(model_id, strict=True)}
+                    if catalogue.exists(model_id)
+                    else None
+                )
+            except (psycopg.Error, TemplatePresetsUnreadableError):
+                # Unreadable is not "lists none": a half-written model.json must not
+                # forget every template preset's entry for good.
+                logger.exception("could not read a model's presets", extra={"slug": model_id})
+                names[model_id] = None
+        listed = names.get(model_id) if separator else None
+        if listed is None:
+            current[scope] = project
+        elif preset_id in listed:
+            current[scope] = project.model_copy(update={"preset_name": listed[preset_id]})
+        else:
+            try:
+                store.forget_model_projects(model_id, preset_id)
+            except psycopg.Error:
+                logger.exception(
+                    "could not forget a gone preset's project",
+                    extra={"slug": model_id, "id": preset_id},
+                )
+    return current
+
+
 def _remembered(
-    settings: StoredSettings, project_targets: dict[int, ProjectTarget]
+    settings: StoredSettings,
+    project_targets: dict[int, ProjectTarget],
+    model_projects: dict[str, ModelProject] | None = None,
 ) -> RememberedChoices:
     return RememberedChoices(
         project_print_targets={str(pid): target for pid, target in project_targets.items()},
@@ -425,7 +482,7 @@ def _remembered(
         printer_print_options=settings.printer_print_options,
         model_print_options=settings.model_print_options,
         printer_rack_algorithms=settings.printer_rack_algorithms,
-        model_projects=settings.model_projects,
+        model_projects=settings.model_projects if model_projects is None else model_projects,
     )
 
 
@@ -435,7 +492,9 @@ def _remembered(
     response_model_exclude_none=True,
     summary="What the print dialog remembers",
 )
-async def get_remembered(store: SettingsStoreDep, uploads: UploadsDep) -> RememberedChoices:
+async def get_remembered(
+    store: SettingsStoreDep, uploads: UploadsDep, catalogue: CatalogueDep, presets: PresetsDep
+) -> RememberedChoices:
     """Each entry is forgotten through its own route: ``PUT /print/models/{slug}/choices``
     with an empty body (a ``library:<file id>`` entry, #1754, through
     ``PUT /print/library/{file_id}/choices``), ``PUT /print/printers/{id}/bed-type``
@@ -444,8 +503,15 @@ async def get_remembered(store: SettingsStoreDep, uploads: UploadsDep) -> Rememb
     ``PUT /print/models/{slug}/project`` with a ``null`` project,
     and ``PUT /settings/print-options`` with no options, so the browser never posts a
     whole map back; a project's printer and nozzle go through
-    ``DELETE /settings/remembered/projects/{project_id}``."""
-    return _remembered(store.load(), await uploads.project_targets())
+    ``DELETE /settings/remembered/projects/{project_id}``.
+
+    A ``model_projects`` entry for a preset its model no longer lists is forgotten as
+    this reads it (#1660)."""
+    settings = store.load()
+    model_projects = await asyncio.to_thread(
+        _current_model_projects, settings, catalogue, presets, store
+    )
+    return _remembered(settings, await uploads.project_targets(), model_projects)
 
 
 @router.delete(

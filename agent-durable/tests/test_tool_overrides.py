@@ -105,3 +105,15 @@ def test_a_pinned_turn_tool_runs_on_its_replicas_queue_with_a_deadline() -> None
     assert pinned.schedule_to_close_timeout == tools.PINNED_DEADLINE
     assert anywhere.task_queue == "agent-tools"
     assert anywhere.schedule_to_close_timeout is None
+
+
+def test_a_tool_the_sdk_refuses_is_left_out_not_raised() -> None:
+    """A 54-character plugin tool name failed every workflow task of its session; it is
+    now left out and the rest of the turn's tools are offered."""
+    too_long = "plugin_playwright_playwright__browser_console_messages"
+    offered = _gates()
+    names = tools.offer_turn_tools(
+        offered, dict(offered), set(), [_turn_tool(too_long), _turn_tool("notes__post")]
+    )
+    assert names == {"notes__post"}
+    assert too_long not in offered

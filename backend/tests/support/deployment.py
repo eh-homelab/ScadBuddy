@@ -16,7 +16,7 @@ from temporalio.service import RPCError
 from scadbuddy.workflows.client import DEPLOYMENT_NAME
 
 #: How long a test's app may take to have its render build serve its queue: the
-#: worker's own `MAKE_CURRENT_DEADLINE`, with room for the describe.
+#: worker's own `MAKE_CURRENT_ERROR_AFTER`, with room for the describe.
 BUILD_SERVES_TIMEOUT = 75.0
 #: The first wait between two checks of whether it does, doubled after each up to
 #: `BUILD_SERVES_MAX_POLL`: under load the dev server answered slowly, and rate-limits
