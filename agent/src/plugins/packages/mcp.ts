@@ -195,11 +195,10 @@ export async function withoutRemoteServers(dir: string, contentHash: string, roo
     }
     if (declaresRemoteServers(tmp)) throw new Error(`could not strip the http MCP servers of ${dir}`)
     const want = (await hashTree(tmp)).hash
-    if (await hashesTo(target, want)) {
-      // Its last use, which turnPackages.ts `sweepPackageCopies` keeps it by (#2395).
-      await touch(target)
-      return target
-    }
+    // Its last use, which turnPackages.ts `sweepPackageCopies` keeps it by (#2395),
+    // touched before it is checked, as sharePackage does.
+    await touch(target)
+    if (await hashesTo(target, want)) return target
     await rm(target, { recursive: true, force: true })
     await rename(tmp, target).catch(async (err: NodeJS.ErrnoException) => {
       // Another turn placed it first: fine when it is the same copy.

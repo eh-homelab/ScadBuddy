@@ -830,7 +830,7 @@ it runs only with `Bash` offered, as in a classic turn (run.ts `builtinTools`). 
 not measured in a durable engine. Each listing touches the copies it shares, and each
 query the `plugins-local/` copy it loads; every replica removes, once an hour, the copies
 on the volume and its own `plugins-local/` copies that nothing has touched for 7 days,
-and copies left half-made for an hour (`sweepPackageCopies`, #2395). An enabled package
+and copies left half-made for an hour (`sweepPackageCopies`, #2395; a copy is moved aside and checked again before it goes, so a turn sharing it at that moment keeps it). An enabled package
 is shared again at its next turn.
 
 Settings has an "Assistant plugins" area with two sections: "Plugin packages"

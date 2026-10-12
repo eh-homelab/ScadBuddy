@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, readFile, utimes, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, symlink, utimes, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -78,6 +78,12 @@ describe('plugin packages in a durable turn', () => {
     expect(await sweepPackageCopies(local)).toEqual([])
     expect(await sweepPackageCopies(local, week)).toEqual([localCopy])
     expect(await sweepPackageCopies(path.join(root, 'missing'))).toEqual([])
+    // A link on the shared volume is never followed or removed, nor what it points at.
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'turn-outside-'))
+    await writeFile(path.join(outside, 'keep'), 'x')
+    await symlink(outside, path.join(root, 'e'.repeat(64)))
+    expect(await sweepPackageCopies(root, week)).toEqual([shared.dir])
+    expect(await readdir(outside)).toEqual(['keep'])
   })
 
   it('shares a package that declares an http MCP server without it, named by that copy (review of #2334)', async () => {

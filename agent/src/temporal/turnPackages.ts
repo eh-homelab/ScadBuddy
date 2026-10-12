@@ -1,4 +1,4 @@
-import { cp, mkdir, readdir, rename, rm, stat } from 'node:fs/promises'
+import { cp, lstat, mkdir, readdir, rename, rm } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
@@ -56,6 +56,9 @@ export async function sharePackage(pkg: LoadedPackage, root: string, localRoot: 
   const contentHash = source === pkg.dir ? pkg.contentHash : (await hashTree(source)).hash
   const name = sharedName(contentHash)
   const target = path.join(root, name)
+  // Its last share, which the sweep keeps it by (sweepPackageCopies): touched before
+  // it is checked, so a sweep that takes it after the touch sees the share and puts it back.
+  await touch(target)
   if (!(await matches(target, contentHash))) {
     await mkdir(root, { recursive: true })
     const tmp = path.join(root, `.tmp-${randomUUID()}`)
@@ -74,8 +77,6 @@ export async function sharePackage(pkg: LoadedPackage, root: string, localRoot: 
       await rm(tmp, { recursive: true, force: true })
     }
   }
-  // Its last share, which the sweep keeps it by (sweepPackageCopies).
-  await touch(target)
   return { name: pkg.name, dir: name, content_hash: contentHash, allowed: pkg.allowed, builtin_tools: [...pkg.builtinTools] }
 }
 
@@ -98,14 +99,30 @@ export async function sweepPackageCopies(root: string, now = Date.now()): Promis
   })
   const removed: string[] = []
   for (const name of names) {
-    const keep = /^[0-9a-f]{64}$/.test(name) ? PACKAGE_COPY_KEPT_MS : name.startsWith('.tmp-') ? TMP_KEPT_MS : undefined
+    const keep = /^[0-9a-f]{64}$/.test(name) ? PACKAGE_COPY_KEPT_MS : /^\.(tmp|sweep)-/.test(name) ? TMP_KEPT_MS : undefined
     if (keep === undefined) continue
-    const at = await stat(path.join(root, name)).then(
-      (s) => s.mtimeMs,
-      () => undefined,
-    )
-    if (at === undefined || now - at < keep) continue
-    await rm(path.join(root, name), { recursive: true, force: true })
+    const dir = path.join(root, name)
+    const old = async (at: string) =>
+      lstat(at).then(
+        (s) => s.isDirectory() && now - s.mtimeMs >= keep,
+        () => false,
+      )
+    if (!(await old(dir))) continue
+    // Taken out of the way first, then checked again: a turn that shared it in between
+    // touched it before checking it (sharePackage), so it goes back; one that shares it
+    // after finds nothing there and copies it again.
+    const trash = path.join(root, `.sweep-${randomUUID()}`)
+    try {
+      await rename(dir, trash)
+    } catch {
+      continue
+    }
+    if (!(await old(trash))) {
+      // Put back unless a share already copied it again; either way the folder is a good copy.
+      await rename(trash, dir).catch(() => rm(trash, { recursive: true, force: true }))
+      continue
+    }
+    await rm(trash, { recursive: true, force: true })
     removed.push(name)
   }
   return removed
