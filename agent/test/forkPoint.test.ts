@@ -51,21 +51,23 @@ describe('transcriptCut', () => {
 
 describe('blobNames (#2150)', () => {
   const owner = { kind: 'browser', id: 'browser', label: 'You' }
-  it("names a tool result's images and a user's sent images once each, and nothing else", () => {
+  it("names a tool result's images and a user's sent images and their previews once each, and nothing else", () => {
     const a = `${'a'.repeat(64)}.png`
     const b = `${'b'.repeat(64)}.jpg`
+    const c = `${'c'.repeat(64)}.jpg`
+    const d = `${'d'.repeat(64)}.png`
     const events = [
       { type: 'user.turn', sessionId: 's', turnId: 't', text: 'x', author: owner, images: [
-        { mediaType: 'image/png', data: 'p', name: b },
-        // A preview whose full image could not be stored.
-        { mediaType: 'image/png', data: 'p' },
+        { name: b, mediaType: 'image/jpeg', preview: { name: c, mediaType: 'image/jpeg' } },
+        // A turn logged before #2479 whose full image could not be stored: its preview only.
+        { preview: { name: d, mediaType: 'image/png' } },
       ] },
       { type: 'tool.result', sessionId: 's', id: '1', ok: true, summary: '', images: [{ name: a, mediaType: 'image/png' }] },
       { type: 'tool.result', sessionId: 's', id: '2', ok: true, summary: '', images: [{ name: a, mediaType: 'image/png' }] },
       { type: 'tool.result', sessionId: 's', id: '3', ok: true, summary: '' },
       { type: 'assistant.text.done', sessionId: 's', messageId: 'm:0' },
     ] as ServerEvent[]
-    expect(blobNames(events).sort()).toEqual([a, b])
+    expect(blobNames(events).sort()).toEqual([a, b, c, d])
     expect(blobNames([])).toEqual([])
   })
 })

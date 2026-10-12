@@ -127,6 +127,10 @@ const offline = new Set<string>()
 /** Runs that exist only as an accepted start (`starting`, no row yet). */
 const starting = new Set<string>()
 let requests: { path: string; key: string | null; body: Record<string, unknown> }[] = []
+/** #2477: each run's images, as the view lists them. */
+const images = new Map<string, FlowRunView['images']>()
+/** One grey pixel, what every image route answers. */
+const PIXEL = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGO4AAAA0gDR29kOtwAAAABJRU5ErkJggg=='), (c) => c.charCodeAt(0))
 
 export function reset(): void {
   runs = defaults()
@@ -135,7 +139,13 @@ export function reset(): void {
   moved.clear()
   offline.clear()
   starting.clear()
+  images.clear()
   requests = []
+}
+
+/** Tests: the images a run's tool calls returned. */
+export function setFlowRunImages(id: string, next: FlowRunView['images']): void {
+  images.set(id, next)
 }
 
 /** Tests: the runs listed (newest first) and viewed. */
@@ -174,7 +184,7 @@ export function flowRequests(): readonly { path: string; key: string | null; bod
 
 function view(id: string): FlowRunView | undefined {
   if (starting.has(id)) {
-    return { id, status: 'starting', definition_id: 'def-swap', version: 1, name: 'swap', run: null, pending: [], live: false }
+    return { id, status: 'starting', definition_id: 'def-swap', version: 1, name: 'swap', run: null, pending: [], live: false, images: [] }
   }
   const found = runs.find((r) => r.id === id)
   if (!found) return undefined
@@ -188,6 +198,7 @@ function view(id: string): FlowRunView | undefined {
     run: found,
     pending,
     live: !offline.has(id),
+    images: images.get(id) ?? [],
   }
 }
 
@@ -349,6 +360,11 @@ export const handlers = [
       ? HttpResponse.json(found)
       : HttpResponse.json({ title: 'Not Found', status: 404, detail: 'No such flow run.' }, { status: 404 })
   }),
+  http.get('/api/v1/workflow-runs/:id/images/:name', ({ params }) =>
+    (images.get(String(params['id'])) ?? []).some((i) => i.name === params['name'])
+      ? new HttpResponse(PIXEL, { headers: { 'Content-Type': 'image/png' } })
+      : HttpResponse.json({ title: 'Not Found', status: 404, detail: 'No such image.' }, { status: 404 }),
+  ),
   http.post('/api/v1/workflow-runs/:id/answer', respond(() => 'answered')),
   http.post('/api/v1/workflow-runs/:id/decide', respond((body) => (body['approved'] ? 'approved' : 'denied'))),
 ]

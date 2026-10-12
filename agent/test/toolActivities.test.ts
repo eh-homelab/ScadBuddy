@@ -414,6 +414,79 @@ describe('flow runs in tool activities', () => {
     }
     expect(h.audits).toEqual([])
   })
+
+  // #2477: a flow call's images are kept under the run's subject; the flow gets pointers.
+  const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='
+  const PNG_NAME = `${createHash('sha256').update(Buffer.from(PNG, 'base64')).digest('hex')}.png`
+  const pic = defineTool({
+    name: 'pic',
+    description: 'an image and words',
+    input: z.object({}),
+    risk: 'read',
+    routes: [],
+    handler: async () => ({
+      content: [
+        { type: 'text', text: 'first' },
+        { type: 'image', data: PNG, mimeType: 'image/png' },
+        { type: 'image', data: PNG, mimeType: 'image/png' },
+        { type: 'image', data: PNG, mimeType: 'image/jpeg' },
+      ],
+    }),
+  })
+
+  function memoryFlowBlobs() {
+    const rows = new Map<string, { mediaType: 'image/png'; bytes: Buffer }>()
+    return {
+      rows,
+      put: async (subject: string, images: readonly { name: string; mediaType: string; bytes: Buffer }[]) => {
+        for (const i of images) rows.set(`${subject}/${i.name}`, { mediaType: 'image/png', bytes: i.bytes })
+      },
+      get: async (subject: string, name: string) => rows.get(`${subject}/${name}`),
+    }
+  }
+
+  it("keeps a flow call's images under the run's subject and answers with pointers, never the bytes", async () => {
+    const flowBlobs = memoryFlowBlobs()
+    const out = await env(FLOW, 'tool-call_1').run(harness({ flows: flowRuns(), flowBlobs }, [pic]).activities.pic!, {})
+    const { text: said, images } = out as { text: string; images: unknown }
+    expect(images).toEqual([{ name: PNG_NAME, mediaType: 'image/png', bytes: Buffer.from(PNG, 'base64').length }])
+    expect(said).toContain('first')
+    expect(said.split(`[image ${PNG_NAME}]`)).toHaveLength(3)
+    expect(said).toContain('[an image the model cannot take]')
+    expect([...flowBlobs.rows.keys()]).toEqual([`${FLOW}/${PNG_NAME}`])
+    expect(JSON.stringify(out)).not.toContain(PNG)
+    expect(JSON.stringify(out)).not.toContain(PNG.slice(0, 16))
+  })
+
+  it('answers text alone when a flow call returned no image, and a placeholder with no store', async () => {
+    const plain = await env(FLOW, 'tool-call_1').run(harness({ flows: flowRuns(), flowBlobs: memoryFlowBlobs() }).activities.whoami!, {})
+    expect(typeof plain).toBe('string')
+    const none = await env(FLOW, 'tool-call_1').run(harness({ flows: flowRuns() }, [pic]).activities.pic!, {})
+    expect(String(none).split('\n[an image]')).toHaveLength(4)
+    expect(none).not.toContain('[image ')
+  })
+
+  it("gives a flow's tools the run's own images, and a session's none", async () => {
+    const flowBlobs = memoryFlowBlobs()
+    await flowBlobs.put(FLOW, [{ name: PNG_NAME, mediaType: 'image/png', bytes: Buffer.from(PNG, 'base64') }])
+    const peek = defineTool({
+      name: 'peek',
+      description: 'reads a flow image',
+      input: z.object({ name: z.string() }),
+      risk: 'read',
+      routes: [],
+      handler: async ({ name }, ctx) => {
+        const found = await ctx.flowImages?.get(name)
+        return json({ has: ctx.flowImages !== undefined, found: found ? found.bytes.length : null })
+      },
+    })
+    const h = harness({ flows: flowRuns(), flowBlobs }, [peek])
+    expect(text(await env(FLOW, 'tool-call_1').run(h.activities.peek!, { name: PNG_NAME }))).toContain('"found": 68')
+    const other = `flow-${'1'.repeat(8)}-0000-4000-8000-000000000000`
+    const elsewhere = harness({ flows: { ...flowRuns(), startedBy: async () => BROWSER }, flowBlobs }, [peek])
+    expect(text(await env(other, 'tool-call_1').run(elsewhere.activities.peek!, { name: PNG_NAME }))).toContain('"found": null')
+    expect(text(await env().run(h.activities.peek!, { name: PNG_NAME }))).toContain('"has": false')
+  })
 })
 
 // spec §6.6: a durable call's gate entry. Every call's audit row names its request id,

@@ -4,7 +4,6 @@ import { api, ApiError } from '../../api/client'
 import type {
   BambuddyTargets,
   ModelPrintChoices,
-  ParamPreset,
   PrintOptions,
   ProjectChoices,
   RememberedChoices,
@@ -76,28 +75,6 @@ export function RememberedChoicesPanel({
     projects?.projects?.find((project) => String(project.id) === id)?.name ?? `Project ${id}`
 
   const remembered: RememberedChoices | undefined = state.data
-  // #1660 — a preset's name now, read from its model's presets, so a rename shows. The
-  // name stored with the entry is only for a preset (or model) no longer there.
-  const presetModels = [
-    ...new Set(
-      Object.keys(remembered?.model_projects ?? {})
-        .filter((scope) => scope.includes('/'))
-        .map((scope) => scope.slice(0, scope.indexOf('/'))),
-    ),
-  ].sort()
-  const presetNames = useAsync(
-    async () => {
-      const names = new Map<string, string>()
-      await Promise.all(
-        presetModels.map(async (modelId) => {
-          const presets = await api.listPresets(modelId).catch(() => [] as ParamPreset[])
-          for (const preset of presets) names.set(`${modelId}/${preset.id}`, preset.name)
-        }),
-      )
-      return names
-    },
-    [presetModels.join('\n')],
-  )
   const rows: Row[] = []
   if (remembered) {
     for (const [scope, choices] of Object.entries(remembered.model_print_choices ?? {})) {
@@ -141,7 +118,9 @@ export function RememberedChoicesPanel({
       })
     }
     for (const [scope, entry] of Object.entries(remembered.model_projects ?? {})) {
-      // #1660: `<model id>` with no preset, `<model id>/<preset id>` with one.
+      // #1660: `<model id>` with no preset, `<model id>/<preset id>` with one. The
+      // server names a preset by its name now (one read for every model, not one
+      // `listPresets` each), and drops an entry for a preset its model no longer lists.
       const slash = scope.indexOf('/')
       const modelId = slash < 0 ? scope : scope.slice(0, slash)
       const presetId = slash < 0 ? null : scope.slice(slash + 1)
@@ -151,7 +130,7 @@ export function RememberedChoicesPanel({
         subject:
           presetId === null
             ? modelId
-            : `${modelId} · ${presetNames.data?.get(scope) ?? entry.preset_name ?? presetId}`,
+            : `${modelId} · ${entry.preset_name ?? presetId}`,
         value: projectName(String(entry.project_id)),
         forget: () => api.putModelProject(modelId, { preset_id: presetId, project_id: null }),
       })

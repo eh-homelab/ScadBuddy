@@ -265,7 +265,7 @@ class ArrangeInputs(BaseModel):
     colours: list[str] = Field(default_factory=list)
     name: str | None = None
     provenance: dict[str, ManifestObject] = Field(default_factory=dict)
-    #: The outputs the objects came from.
+    #: The outputs the objects came from, then each plain library file as `library:<id>`.
     sources: list[str] = Field(default_factory=list)
 
 

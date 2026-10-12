@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Link, useParams } from 'react-router'
 import { api, ApiError } from '../api/client'
-import type { FlowPending, FlowStep } from '../api/types'
+import type { FlowPending, FlowRunView, FlowStep } from '../api/types'
 import { FlowScript } from '../components/flows/FlowScript'
 import { ForgetRun } from '../components/flows/ForgetRun'
 import { ResetPanel } from '../components/flows/ResetPanel'
@@ -16,7 +16,7 @@ import {
   STALE_ENTRY_MESSAGE,
   waitingText,
 } from '../lib/flows'
-import { formatDuration } from '../lib/format'
+import { formatBytes, formatDuration } from '../lib/format'
 import { temporalWorkflowUrl } from '../lib/temporal'
 import { useAsync } from '../lib/useAsync'
 import { usePollWhileUnavailable } from '../lib/usePollWhileUnavailable'
@@ -109,6 +109,7 @@ export function WorkflowRunPage() {
               <PendingCard key={entry.call_id} entry={entry} runId={id} respond={respond} />
             ))}
             {run && run.steps.length > 0 && <Steps steps={run.steps} />}
+            {view.data.images && view.data.images.length > 0 && <Images runId={id} images={view.data.images} />}
             {run?.result && (
               <section aria-label="Result" className="mt-4">
                 <h2 className="mb-1 text-[13px] font-medium">Result</h2>
@@ -124,6 +125,36 @@ export function WorkflowRunPage() {
         )}
       </div>
     </div>
+  )
+}
+
+/**
+ * #2477: the images the run's tool calls returned, each a thumbnail of its blob route
+ * (`GET /workflow-runs/{id}/images/{name}`), never inline data. A click opens it whole.
+ */
+function Images({ runId, images }: { runId: string; images: NonNullable<FlowRunView['images']> }) {
+  return (
+    <section aria-label="Images" className="mt-4">
+      <h2 className="mb-1 text-[13px] font-medium">Images</h2>
+      <ul className="flex flex-wrap gap-2">
+        {images.map((image, i) => {
+          const url = api.flowRunImageUrl(runId, image.name)
+          const label = `Image ${i + 1} (${formatBytes(image.bytes)})`
+          return (
+            <li key={image.name}>
+              <a href={url} target="_blank" rel="noreferrer" aria-label={label} title={image.name}>
+                <img
+                  src={url}
+                  alt={label}
+                  loading="lazy"
+                  className="h-24 w-24 rounded-[6px] border border-line bg-surface-2 object-contain"
+                />
+              </a>
+            </li>
+          )
+        })}
+      </ul>
+    </section>
   )
 }
 

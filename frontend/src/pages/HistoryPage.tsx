@@ -14,7 +14,8 @@ import { Button } from '../components/ui/Button'
 import { Dialog } from '../components/ui/Dialog'
 import { Spinner } from '../components/ui/Spinner'
 import { editPath, editTargetFor, modelPath, type EditNavigationState } from '../lib/deeplink'
-import { fromOutputs } from '../lib/arrange'
+import { arrangedSources, fromOutputs, savedNote, type Arranged } from '../lib/arrange'
+import { wasSent } from '../lib/sent'
 import { formatBbox, formatValue, timeAgo } from '../lib/format'
 import { plateLabel } from '../lib/plate'
 import { useDisplayUnit } from '../lib/units'
@@ -55,6 +56,8 @@ export function HistoryPage() {
   const [printFor, setPrintFor] = useState<Output | undefined>(undefined)
   /** #902 — the outputs the last Arrange could not re-render, said once it has closed. */
   const [skipped, setSkipped] = useState<string | null>(null)
+  /** #2284 — the last Arrange's result, said by where it was filed: maybe another model. */
+  const [saved, setSaved] = useState<Arranged | null>(null)
   const togglePicked = (id: string) =>
     setPicked((current) => (current.includes(id) ? current.filter((p) => p !== id) : [...current, id]))
 
@@ -77,6 +80,8 @@ export function HistoryPage() {
 
   const loading = schemaState.loading || outputsState.loading
   const schema = schemaState.data
+  /** #2287 — the arranged result's row as the list has it now: gone once deleted. */
+  const arrangedRow = arrangedOutput ? outputsState.data?.find((o) => o.id === arrangedOutput.id) : undefined
 
   return (
     <div className="h-full overflow-y-auto">
@@ -114,11 +119,11 @@ export function HistoryPage() {
         {!loading && schema && outputsState.data && outputsState.data.length > 0 && (
           <>
             {/* Gone from the list (deleted): nothing to offer a next step for. */}
-            {arrangedOutput && outputsState.data.some((o) => o.id === arrangedOutput.id) && (
+            {arrangedOutput && arrangedRow && (
               <div className="mb-2">
                 <ArrangedNext
                   output={arrangedOutput}
-                  sent={(outputsState.data ?? []).some((o) => o.id === arrangedOutput.id && wasSent(o))}
+                  sent={wasSent(arrangedRow)}
                   onPrint={() => setPrintFor(arrangedOutput)}
                 />
               </div>
@@ -129,6 +134,7 @@ export function HistoryPage() {
                 disabled={picked.length === 0}
                 onClick={() => {
                   setSkipped(null)
+                  setSaved(null)
                   setArranging(true)
                 }}
               >
@@ -138,6 +144,19 @@ export function HistoryPage() {
             {skipped && (
               <p role="alert" className="mb-2 text-[13px] text-warn">
                 {skipped}
+              </p>
+            )}
+            {saved && (
+              <p role="status" aria-label="Arranged" className="mb-2 text-[13px] text-ink">
+                {savedNote(saved, slug)}
+                {saved.output.slug !== slug && (
+                  <>
+                    {' '}
+                    <Link to={modelPath(saved.output.slug, 'history')} className="text-accent underline">
+                      Open in History
+                    </Link>
+                  </>
+                )}
               </p>
             )}
             <ul data-testid="outputs" aria-label="Generated outputs" className="space-y-2">
@@ -194,6 +213,7 @@ export function HistoryPage() {
         onClose={() => setArranging(false)}
         onArranged={(arranged) => {
           setSkipped(arranged.skipped ?? null)
+          setSaved(arranged)
           setArranging(false)
           setPicked([])
           setArrangedOutput(arranged.output)
@@ -201,16 +221,6 @@ export function HistoryPage() {
         }}
       />
     </div>
-  )
-}
-
-/** #2287 — whether any of the output reached Bambuddy: a library copy, a queue item, a print. */
-function wasSent(output: Output): boolean {
-  return (
-    (output.library_files ?? []).length > 0 ||
-    output.queue_item_id != null ||
-    (output.plates ?? []).length > 0 ||
-    output.print_route != null
   )
 }
 
@@ -476,17 +486,17 @@ function OutputRow({
         <div className="flex shrink-0 items-center gap-2">
           {arrangedFrom > 0 ? (
             <span className="text-[12px] text-muted">
-              {`Arranged from ${arrangedFrom} ${arrangedFrom === 1 ? 'output' : 'outputs'}`}
+              {`Arranged from ${arrangedSources(output.arranged_from ?? [])}`}
             </span>
           ) : (
             <Button size="sm" onClick={onEdit} aria-label={`Edit ${label}`}>
               Edit
             </Button>
           )}
-          {/* #2287 — "again" only for an output that went to Bambuddy before. */}
           <Button size="sm" onClick={onPrint} aria-label={`Print ${label}`}>
             Print
           </Button>
+          {/* #2287 — "again" only for an output that went to Bambuddy before. */}
           <Button size="sm" onClick={onSend} aria-label={`${sent ? 'Send again' : 'Send'} ${label}`}>
             {sent ? 'Send again' : 'Send'}
           </Button>

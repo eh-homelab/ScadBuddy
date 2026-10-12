@@ -20,7 +20,7 @@ import json
 import re
 from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 import psycopg
@@ -137,6 +137,14 @@ async def append_from(
         return True
 
 
+def _before(event: Mapping[str, Any], since: str | None) -> bool:
+    """The event was published before ``since`` (both workflow.now(), ISO 8601)."""
+    at = event.get("at")
+    if since is None or not isinstance(at, str):
+        return False
+    return datetime.fromisoformat(at) < datetime.fromisoformat(since)
+
+
 class SessionEvents:
     """``follow_session``, over the connection ``connect`` gives."""
 
@@ -185,7 +193,9 @@ class SessionEvents:
                 await asyncio.sleep(FOLLOW_HEARTBEAT.total_seconds() / 3)
 
         # A turn with a prompt ends only after it: an earlier turn's end, left unread when
-        # its subscriber was cancelled, is written but does not end this one.
+        # its subscriber was cancelled, is written but does not end this one. A turn
+        # carried over by continue-as-new sent its prompt in an earlier run, so it tells
+        # an earlier turn's end by its time instead (#2123).
         own = not args.prompted
         beater = asyncio.create_task(beat())
         try:
@@ -196,7 +206,7 @@ class SessionEvents:
                 async with self._connect() as conn:
                     if await append_from(conn, args.session_id, at[0], translated):
                         written += len(translated)
-                if own and event.get("type") in LAST:
+                if own and event.get("type") in LAST and not _before(event, args.since):
                     return FollowResult(ended=str(event["type"]), events=written)
             return FollowResult(ended="closed", events=written)
         finally:

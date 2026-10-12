@@ -18,7 +18,6 @@ import type {
   FilamentOptions,
   FontCatalogue,
   FontFamily,
-  HeadlessBrowserSetting,
   HttpRequestSetting,
   ModelSetting,
   PrinterCameraSetting,
@@ -678,6 +677,8 @@ export const api = {
   },
 
   getFlowRun: (id: string) => request<FlowRunView>(`/workflow-runs/${seg(id)}`),
+  /** #2477: one of a run's images, from its blob route. */
+  flowRunImageUrl: (id: string, name: string) => `${API_BASE}/workflow-runs/${seg(id)}/images/${seg(name)}`,
 
   answerFlowRun: (id: string, callId: string, answer: string) =>
     command<FlowDecided>(`/workflow-runs/${seg(id)}/answer`, {
@@ -1709,19 +1710,6 @@ export const api = {
     command<SidebarLink>('/settings/register-sidebar', { method: 'POST' }),
 
   /**
-   * The AI agent's headless browser (#349), served by the agent service under
-   * `/api/v1/ai/*`. Fails (404 or 503) when there is no agent or no AI database.
-   */
-  getHeadlessBrowserSetting: () =>
-    request<HeadlessBrowserSetting>('/ai/settings/headless-browser'),
-
-  putHeadlessBrowserSetting: (enabled: boolean) =>
-    request<HeadlessBrowserSetting>('/ai/settings/headless-browser', {
-      method: 'PUT',
-      body: JSON.stringify({ enabled }),
-    }),
-
-  /**
    * The assistant's `http_request` tool (#827), served by the agent service. On by
    * default. Fails (404 or 503) when there is no agent or no AI database.
    */
@@ -1733,9 +1721,17 @@ export const api = {
       body: JSON.stringify({ enabled }),
     }),
 
-  /** #1941 — uploads an image the user attached in the assistant panel; its message then sends the id. */
-  uploadAttachment: (image: { mediaType: string; data: string; preview: { mediaType: string; data: string } }) =>
-    request<AttachmentView>('/ai/attachments', { method: 'POST', body: JSON.stringify(image) }),
+  /**
+   * #1941 — uploads an image the user attached in the assistant panel; its message then
+   * sends the id. #2479 — as bytes: the image and its preview are two file parts, each
+   * typed, never base64 in JSON.
+   */
+  uploadAttachment: (image: { mediaType: string; blob: Blob; preview: { mediaType: string; blob: Blob } }) => {
+    const body = new FormData()
+    body.append('image', new Blob([image.blob], { type: image.mediaType }), 'image')
+    body.append('preview', new Blob([image.preview.blob], { type: image.preview.mediaType }), 'preview')
+    return request<AttachmentView>('/ai/attachments', { method: 'POST', body })
+  },
 
   /** #1941 — deletes an upload the user removed from the composer before sending it. */
   deleteAttachment: (id: string) =>

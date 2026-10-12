@@ -66,6 +66,7 @@ from temporalio.exceptions import ApplicationError
 
 from scadbuddy_durable.credentials import Credential, credential_env, usable_credentials
 from scadbuddy_durable.secrets import Kek
+from scadbuddy_durable.session import subagents
 from scadbuddy_durable.session.fallback import credentials_fault
 from scadbuddy_durable.session.models import (
     BUDGET_EXHAUSTED,
@@ -431,6 +432,7 @@ class ScadBuddyRunner:
         cwd: str,
         plugin_dir: str | None = None,
         package_root: str | None = None,
+        subagent_url: str | None = None,
         make_runner: MakeRunner = ClaudeAgentSdkRunner,
     ) -> None:
         self._connect = connect
@@ -438,6 +440,7 @@ class ScadBuddyRunner:
         self._cwd = cwd
         self._plugin_dir = plugin_dir
         self._package_root = package_root
+        self._subagent_url = subagent_url
         self._make = make_runner
 
     def __repr__(self) -> str:
@@ -461,6 +464,28 @@ class ScadBuddyRunner:
             model=model if isinstance(model, str) and model else None,
             own_plugin=values.get(OWN_PLUGIN_KEY) is not False,
         )
+
+    async def _subagent_tools(self, session: str, extra: dict[str, Any]) -> None:
+        """ScadBuddy's tools for the segment's subagents (#2320, subagents.py): the agent's
+        loopback server, with a token for this session's running turn and owner."""
+        if self._subagent_url is None:
+            return
+        async with self._connect() as conn:
+            cur = await conn.execute(
+                "SELECT owner_kind, owner_id, durable_turn_id FROM ai_sessions"
+                " WHERE id = %s AND mode = 'durable'",
+                (session,),
+            )
+            row = await cur.fetchone()
+        if row is None or row[2] is None:
+            return
+        token = subagents.token_for(self._kek, session, str(row[2]), row[0], row[1])
+        extra["mcp_servers"] = {
+            **extra.get("mcp_servers", {}),
+            subagents.SERVER: subagents.server_config(self._subagent_url, token),
+        }
+        extra["allowed_tools"] = [*extra.get("allowed_tools", []), f"mcp__{subagents.SERVER}"]
+        extra["hooks"] = subagents.hooks()
 
     def _packages(self, workflow_id: str, context: SegmentContext) -> list[str]:
         """The turn's plugin packages (#2320) that hash to their pins on the shared volume,
@@ -615,6 +640,7 @@ class ScadBuddyRunner:
             IMAGES_SERVER: images_server(images, tool_images_loader(self._connect, session))
         }
         extra["allowed_tools"] = [VIEW_TOOL_IMAGES_TOOL, *([VIEW_IMAGES_TOOL] if images else [])]
+        await self._subagent_tools(session, extra)
         plugins = (
             [{"type": "local", "path": self._plugin_dir}]
             if (self._plugin_dir and settings.own_plugin)

@@ -9,27 +9,29 @@ import {
   unknownAttachment,
 } from '../attachments/store.js'
 import {
-  IMAGE_DATA_MAX,
-  IMAGES_DATA_TOTAL_MAX,
+  checkedImages,
+  IMAGE_BYTES_MAX,
+  IMAGES_BYTES_TOTAL_MAX,
   IMAGES_MAX,
   type ImagePreview,
-  PREVIEW_DATA_MAX,
+  PREVIEW_BYTES_MAX,
   PREVIEW_MEDIA_TYPES,
+  type PreviewMediaType,
   sniff,
   type UserImage,
-  UserImagesSchema,
 } from '../sessions/images.js'
 import type { Owner } from '../sessions/protocol.js'
 import { readCapped } from './binary.js'
 import { outputId, slug, VIEW } from './common.js'
-import { ToolError } from './registry.js'
+import { BLOB_NAME } from '../sessions/blobs.js'
+import { type FlowImages, ToolError } from './registry.js'
 
 // Images by reference for sessions_send (#1894). A caller names images
 // ScadBuddy already holds; the agent fetches each from the backend when it
 // starts the turn and checks it exactly as it checks the panel's
-// (sessions/images.ts: one of the four types by its signature, IMAGE_DATA_MAX
-// each, IMAGES_DATA_TOTAL_MAX together, at most IMAGES_MAX). The bytes never
-// travel in the tool call, so:
+// sessions/images.ts: one of the four types by its signature, IMAGE_BYTES_MAX
+// each, IMAGES_BYTES_TOTAL_MAX together, at most IMAGES_MAX). The bytes never
+// travel in the tool call, and are held as bytes, never base64 (#2479), so:
 //
 // - the tool input that the event log's `tool.call`, the `/mcp` audit row and
 //   an approval summary record (sessions/sdkEvents.ts `scrubForLog`) holds the
@@ -53,9 +55,15 @@ import { ToolError } from './registry.js'
 // user's. Its preview is the one uploaded with it, and once the turn has
 // started its bytes move into the session (`AttachmentStore.claim`).
 //
+// One kind is a flow run's (#2477): `flow_image`, an image one of the run's own
+// calls returned, kept under the run (temporal/flowBlobs.ts) and named by its bytes.
+// It resolves only inside a call of that same run (ToolContext.flowImages), so a
+// flow can hand its images to `agent(...)`/`ask_session(...)` without their bytes
+// ever entering its history, and nobody else can name them.
+//
 // Previews (the `user.turn` event's, which the panel shows) come from the
 // backend: a view's own 128 px drawing, a media item's thumbnail, or the image
-// itself when it is a still within PREVIEW_DATA_MAX. Anything else gets
+// itself when it is a still within PREVIEW_BYTES_MAX. Anything else gets
 // NO_PREVIEW, a 1 px grey PNG: the agent has no image library to draw one.
 
 /** The edge of the view the backend draws as a view's preview (VIEW_SIZE allows 64 to 1024). */
@@ -64,7 +72,10 @@ export const VIEW_PREVIEW_SIZE = 128
 /** The preview of an image the backend has no small copy of: one grey pixel. */
 export const NO_PREVIEW: ImagePreview = {
   mediaType: 'image/png',
-  data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGO4AAAA0gDR29kOtwAAAABJRU5ErkJggg==',
+  bytes: Buffer.from(
+    '89504e470d0a1a0a0000000d49484452000000010000000108000000003a7e9b550000000a49444154789c63b8000000d200d1dbd90eb70000000049454e44ae426082',
+    'hex',
+  ),
 }
 
 const mediaId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/, 'must be a media item id from get_model')
@@ -92,6 +103,10 @@ export const ImageRefSchema = z.discriminatedUnion('kind', [
     plate: z.number().int().min(1).optional(),
   }),
   AttachmentRefSchema,
+  z.strictObject({
+    kind: z.literal('flow_image'),
+    name: z.string().regex(BLOB_NAME, "must be an image's name from a flow: 64 lowercase hex digits and its extension"),
+  }),
 ])
 export type ImageRef = z.infer<typeof ImageRefSchema>
 
@@ -103,14 +118,12 @@ export const IMAGE_REFS_DESCRIPTION =
   "`output_thumbnail` (an output's thumbnail, or a plate's cover with `plate`), `output_view` (a drawn view " +
   "of an output), `model_thumbnail`, `model_media` (a template's media item), `asset` (an uploaded file; " +
   'bring a web image in with fetch_asset first), `print_thumbnail`, and `attachment` (an image this caller ' +
-  'uploaded to the assistant\'s attachment store; only its uploader may send it). Each must be a PNG, JPEG, GIF or WebP ' +
-  `of at most ${(IMAGE_DATA_MAX / 4) * 3} bytes, and together at most ${(IMAGES_DATA_TOTAL_MAX / 4) * 3} bytes. ` +
+  'uploaded to the assistant\'s attachment store; only its uploader may send it), and `flow_image` (inside a flow run only: ' +
+  'an image one of its own calls returned, by name). Each must be a PNG, JPEG, GIF or WebP ' +
+  `of at most ${IMAGE_BYTES_MAX} bytes, and together at most ${IMAGES_BYTES_TOTAL_MAX} bytes. ` +
   'No inline image data is accepted.'
 
-/** The raw bytes whose base64 is IMAGE_DATA_MAX characters. */
-const IMAGE_BYTES_MAX = (IMAGE_DATA_MAX / 4) * 3
-
-type Fetched = { ok: true; data: string } | { ok: false; status: number; detail?: string } | { ok: false; tooLarge: true }
+type Fetched = { ok: true; bytes: Buffer } | { ok: false; status: number; detail?: string } | { ok: false; tooLarge: true }
 
 type Pending = Promise<{ error?: unknown; response: Response; data?: unknown }>
 
@@ -124,7 +137,7 @@ async function fetchCapped(pending: Pending, cap: number): Promise<Fetched> {
   const declared = length !== null && /^\d+$/.test(length) ? Number(length) : undefined
   const read = await readCapped(result.data as ReadableStream<Uint8Array> | null, declared, cap)
   if (!read.inline) return { ok: false, tooLarge: true }
-  return { ok: true, data: Buffer.from(read.bytes).toString('base64') }
+  return { ok: true, bytes: Buffer.from(read.bytes) }
 }
 
 function label(ref: BackendRef): string {
@@ -144,7 +157,7 @@ function label(ref: BackendRef): string {
   }
 }
 
-type BackendRef = Exclude<ImageRef, { kind: 'attachment' }>
+type BackendRef = Exclude<ImageRef, { kind: 'attachment' } | { kind: 'flow_image' }>
 
 function image(backend: BackendClient, ref: BackendRef): Pending {
   const stream = { parseAs: 'stream' as const }
@@ -199,21 +212,21 @@ function smallCopy(backend: BackendClient, ref: BackendRef): Pending | undefined
   return undefined
 }
 
-function asPreview(data: string): ImagePreview | undefined {
-  const type = sniff(data)
-  if (data.length > PREVIEW_DATA_MAX || !type || !(PREVIEW_MEDIA_TYPES as readonly string[]).includes(type)) return undefined
-  return { mediaType: type as ImagePreview['mediaType'], data }
+function asPreview(bytes: Buffer): ImagePreview | undefined {
+  const type = sniff(bytes)
+  if (bytes.length > PREVIEW_BYTES_MAX || !type || !(PREVIEW_MEDIA_TYPES as readonly string[]).includes(type)) return undefined
+  return { mediaType: type as PreviewMediaType, bytes }
 }
 
-async function preview(backend: BackendClient, ref: BackendRef, data: string): Promise<ImagePreview> {
+async function preview(backend: BackendClient, ref: BackendRef, bytes: Buffer): Promise<ImagePreview> {
   const small = smallCopy(backend, ref)
   if (small) {
     // A preview is best effort: a missing or odd small copy falls back, never fails the send.
-    const fetched = await fetchCapped(small, (PREVIEW_DATA_MAX / 4) * 3).catch(() => undefined)
-    const own = fetched?.ok ? asPreview(fetched.data) : undefined
+    const fetched = await fetchCapped(small, PREVIEW_BYTES_MAX).catch(() => undefined)
+    const own = fetched?.ok ? asPreview(fetched.bytes) : undefined
     if (own) return own
   }
-  return asPreview(data) ?? NO_PREVIEW
+  return asPreview(bytes) ?? NO_PREVIEW
 }
 
 async function resolveOne(backend: BackendClient, ref: BackendRef, index: number): Promise<UserImage> {
@@ -224,9 +237,18 @@ async function resolveOne(backend: BackendClient, ref: BackendRef, index: number
     // The backend's reason is untrusted text (#258), and never holds the bytes.
     throw new ToolError(`${where}: fetching it failed (HTTP ${fetched.status})`, fetched.status, fetched.detail)
   }
-  const mediaType = sniff(fetched.data)
+  const mediaType = sniff(fetched.bytes)
   if (!mediaType) throw new ToolError(`${where} is not a PNG, JPEG, GIF or WebP image`, 415)
-  return { mediaType, data: fetched.data, preview: await preview(backend, ref, fetched.data) }
+  return { mediaType, bytes: fetched.bytes, preview: await preview(backend, ref, fetched.bytes) }
+}
+
+/** A flow run's own image, checked as a fetched one is. */
+async function flowImageAt(flowImages: FlowImages | undefined, name: string, index: number): Promise<UserImage> {
+  if (!flowImages) throw new ToolError(`images[${index}]: a flow_image is sent only inside a flow run`, 400)
+  const found = await flowImages.get(name)
+  if (!found) throw new ToolError(`images[${index}]: this run has no image ${name}`, 404)
+  if (sniff(found.bytes) !== found.mediaType) throw new ToolError(`images[${index}] is not a PNG, JPEG, GIF or WebP image`, 415)
+  return { mediaType: found.mediaType, bytes: found.bytes, preview: asPreview(found.bytes) ?? NO_PREVIEW }
 }
 
 /** Where `attachment` references are read, and for whom: the principal sending the turn. */
@@ -255,6 +277,7 @@ export async function resolveSendImages(
   refs: readonly ImageRef[],
   backend: BackendClient,
   attachments?: AttachmentSource,
+  flowImages?: FlowImages,
 ): Promise<ResolvedImages> {
   const images: UserImage[] = []
   const attached: ResolvedAttachment[] = []
@@ -264,16 +287,16 @@ export async function resolveSendImages(
       const one = await attachmentAt(attachments, ref, index)
       attached.push(one)
       images.push(one.image)
+    } else if (ref.kind === 'flow_image') {
+      images.push(await flowImageAt(flowImages, ref.name, index))
     } else {
       images.push(await resolveOne(backend, ref, index))
     }
   }
-  const checked = UserImagesSchema.safeParse(images)
-  if (!checked.success) {
-    // Messages from images.ts name fields and caps only: they never quote the bytes.
-    throw new ToolError(`images: ${checked.error.issues.map((i) => `${i.path.join('.') || 'images'}: ${i.message}`).join('; ')}`, 400)
-  }
-  return { images: checked.data, attached }
+  const checked = checkedImages(images)
+  // Messages from images.ts name fields and caps only: they never quote the bytes.
+  if (!checked.ok) throw new ToolError(`images: ${checked.error}`, 400)
+  return { images: checked.images, attached }
 }
 
 /** resolveSendImages's images, for a caller with no attachment store: an `attachment` reference is refused. */

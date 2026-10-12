@@ -8,7 +8,8 @@ import { payloadKeyLock, subjectOf } from '../temporal/payloadCodec.js'
 //   1. delete the subject's `ai_payload_keys` row and record it in
 //      `ai_forgotten_subjects`, so no key is ever made for it again: from then on every
 //      copy of its payloads (history, Visibility, Archival) is undecryptable, whatever
-//      fails next. A process that read the key keeps it in memory 30 s at most
+//      fails next. A flow run's images (`ai_flow_blobs`, #2477) are deleted with it.
+//      A process that read the key keeps it in memory 30 s at most
 //      (payloadCodec.ts, codec.py);
 //      Its large payloads, files on the data share (#2243), are ciphertext under that
 //      key, so they are unreadable from here on too; step 3 removes them;
@@ -54,6 +55,8 @@ export async function forgetSubject(deps: ForgetDeps, subject: string): Promise<
     // reads from before this commits.
     await tx`SELECT pg_advisory_xact_lock(hashtext(${payloadKeyLock(subject)}))`
     await tx`INSERT INTO ai_forgotten_subjects (subject) VALUES (${subject}) ON CONFLICT (subject) DO NOTHING`
+    // A flow run's images go with its key (#2477, temporal/flowBlobs.ts).
+    if (subject.startsWith('flow-')) await tx`DELETE FROM ai_flow_blobs WHERE subject = ${subject}`
     return tx`DELETE FROM ai_payload_keys WHERE subject = ${subject}`
   })
   let workflow: Forgotten['workflow'] = 'not_reached'

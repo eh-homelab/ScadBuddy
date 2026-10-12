@@ -9,7 +9,7 @@ import type { TabHub } from '../bridge/hub.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { type AttachmentRef, AttachmentError, type AttachmentStore, type ResolvedAttachment } from '../attachments/store.js'
 import { type ClientMessage, isAnswerId, isSessionId, parseClientFrame, renderPageContext } from '../sessions/clientProtocol.js'
-import { UserImagesSchema } from '../sessions/images.js'
+import { checkedImages } from '../sessions/images.js'
 import { type SessionManager, SessionError } from '../sessions/manager.js'
 import { event, type Owner, type ServerEvent } from '../sessions/protocol.js'
 import { BROWSER_USER } from './approvals.js'
@@ -378,11 +378,9 @@ export class ChatConnection {
       throw err
     }
     // Each upload was checked alone; together they must fit images.ts's caps too (the total).
-    const checked = UserImagesSchema.safeParse(resolved.map((a) => a.image))
-    if (!checked.success) {
-      // images.ts messages name fields and caps only: they never quote the bytes.
-      throw new SessionError('invalid', `images: ${checked.error.issues.map((i) => i.message).join('; ')}`)
-    }
+    const checked = checkedImages(resolved.map((a) => a.image))
+    // images.ts messages name fields and caps only: they never quote the bytes.
+    if (!checked.ok) throw new SessionError('invalid', `images: ${checked.error}`)
     return resolved
   }
 
