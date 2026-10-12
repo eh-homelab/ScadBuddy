@@ -97,6 +97,8 @@ export type FeedItem =
       input?: string
       memories?: string[]
     }
+  /** #2399 — a file uploaded to, or deleted from, the session's workspace through the panel's Files: a quiet line. */
+  | { kind: 'file'; id: string; path: string; change: 'uploaded' | 'deleted'; by: Owner; size?: number }
 
 export interface SessionState {
   id: string
@@ -512,7 +514,20 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
       )
 
     case 'workspace.file':
-      return patchSession(state, event.sessionId, (s) => ({ ...s, workspaceChanges: (s.workspaceChanges ?? 0) + 1 }))
+      // The Files list reads again on the count; the feed notes the change where it happened (#2399).
+      return patchSession(state, event.sessionId, (s) =>
+        push(
+          { ...s, workspaceChanges: (s.workspaceChanges ?? 0) + 1 },
+          {
+            kind: 'file',
+            id: `file-${s.items.length}`,
+            path: event.path,
+            change: event.change,
+            by: event.by,
+            ...(event.size === undefined ? {} : { size: event.size }),
+          },
+        ),
+      )
 
     case 'error': {
       if (event.sessionId && BUDGET_CODES.has(event.code ?? '') && state.sessions[event.sessionId]) {

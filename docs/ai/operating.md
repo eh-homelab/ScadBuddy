@@ -1050,6 +1050,7 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   An upload or a delete is a `resource` audit row (`workspace_upload`, refusals
   included, or `workspace_delete`) and appends a `workspace.file` event (`path`,
   `change`, `by`, and an upload's `size`, `mediaType` and `sha256`) to the session's
-  log: the panel's Files list reads again on it. A running turn is not interrupted;
+  log: the panel's Files list reads again on it, and the feed shows it as a line where
+  it happened (#2399). A running turn is not interrupted;
   the panel adds `[workspace file <path>]` to the next message, and the model finds the
   file with `workspace_list` / `workspace_read`.

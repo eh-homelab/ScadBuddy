@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Markdown } from '../../agent/chat/Markdown'
 import { ANSWER_MAX, type Question as AskedQuestion, type DoneAttention, isDone } from '../../agent/chat/protocol'
 import type { FeedItem } from '../../agent/chat/state'
+import { formatBytes } from '../../lib/format'
 import { Button } from '../ui/Button'
 import { RiskBadge } from './badges'
 import { SentImages } from './SentImages'
@@ -472,6 +473,15 @@ export function FeedItemView({
       )
     case 'memory':
       return <MemoryLine item={item} advanced={advanced} />
+    case 'file':
+      return (
+        <p className="text-[11.5px] text-faint" data-testid="agent-file">
+          {item.by.label} {item.change} <span className="font-mono">{item.path}</span>
+          {item.size !== undefined && <> ({formatBytes(item.size)})</>}
+          {item.change === 'uploaded' && ' to the workspace'}
+          {item.change === 'deleted' && ' from the workspace'}
+        </p>
+      )
     case 'error':
       return (
         <p role="alert" className="text-[12.5px] text-warn">
