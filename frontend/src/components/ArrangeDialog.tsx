@@ -129,7 +129,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
   const templates = anyTemplate
     ? [...new Set([...ownTemplates, ...(models ?? []).map((model) => model.slug)])]
     : ownTemplates
-  /** A template by its name, as "File under" and the saved line say it (#2284). */
+  /** A template by its name, as "File under" says it (#2284); its slug until the list is read. */
   const modelName = (slug: string) => models?.find((model) => model.slug === slug)?.name ?? slug
   const [counts, setCounts] = useState<Record<string, number>>({})
   const [goal, setGoal] = useState<ArrangeGoal>('fewest_plates')
@@ -189,6 +189,8 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
     api
       .listModels()
       .then((found) => live && setModels(found))
+      // #2541 — deliberate: a failed list costs only names. "File under" then offers the
+      // outputs' own templates by slug, and the saved line says no name (`savedNote`).
       .catch(() => live && setModels([]))
     return () => {
       live = false
@@ -310,7 +312,9 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
       // Closed while the output was being saved: it is saved, a normal output in
       // History, but this dialog no longer acts on it.
       if (controller.signal.aborted) return
-      const filed = { ...arranged, filedUnder: modelName(arranged.output.slug) }
+      // Only a name the model list gave: a slug is not a name (#2541).
+      const filedUnder = models?.find((model) => model.slug === arranged.output.slug)?.name
+      const filed = filedUnder ? { ...arranged, filedUnder } : arranged
       onArranged(skipped ? { ...filed, skipped } : filed)
     } catch (cause) {
       if (controller.signal.aborted) return

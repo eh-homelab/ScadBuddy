@@ -2,7 +2,9 @@ import { act, screen, waitFor, within } from '@testing-library/react'
 import { delay, HttpResponse, http } from 'msw'
 import { Route, Routes, useLocation, useParams } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
+import type { Output } from '../api/types'
 import { bbox, keychainSchema, models, outputs } from '../mocks/fixtures'
+import { addMockOutput, problem } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { setDisplayUnit } from '../lib/units'
 import { renderPage } from '../test/utils'
@@ -78,6 +80,41 @@ describe('HistoryPage', () => {
       expect(open).toHaveBeenCalledWith('', '_blank')
       expect(await screen.findByRole('alert')).toHaveTextContent('Allow pop-ups')
     } finally {
+      open.mockRestore()
+      Object.defineProperty(window, 'top', { value: top, configurable: true })
+    }
+  })
+
+  it("downloads a pipeline output's file into the escape popup, by its name, when embedded (#2546)", async () => {
+    const first = outputs[0]!
+    server.use(
+      http.get('/api/v1/models/name-keychain/outputs', () =>
+        HttpResponse.json([{ ...first, bom: [], files: ['guide.svg'] }]),
+      ),
+      http.get(`/api/v1/outputs/${first.id}/files/guide.svg`, () => HttpResponse.text('<svg/>')),
+    )
+    const top = window.top
+    Object.defineProperty(window, 'top', { value: {}, configurable: true })
+    const popup = document.implementation.createHTMLDocument('popup')
+    const open = vi.spyOn(window, 'open').mockReturnValue({ document: popup, close: vi.fn() } as unknown as Window)
+    const objectUrl = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:guide')
+    let clicked: HTMLAnchorElement | undefined
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      // eslint-disable-next-line @typescript-eslint/no-this-alias -- the spy's receiver is the anchor under test
+      clicked = this
+    })
+    try {
+      const { user } = render()
+      await user.click(within(await row('Reagan')).getByRole('button', { name: 'guide.svg' }))
+      expect(open).toHaveBeenCalledWith('', '_blank')
+      await waitFor(() => expect(clicked).toBeDefined())
+      expect(clicked?.ownerDocument).toBe(popup)
+      expect(clicked?.getAttribute('download')).toBe('guide.svg')
+      expect(clicked?.href).toBe('blob:guide')
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    } finally {
+      click.mockRestore()
+      objectUrl.mockRestore()
       open.mockRestore()
       Object.defineProperty(window, 'top', { value: top, configurable: true })
     }
@@ -378,6 +415,63 @@ describe('HistoryPage', () => {
     expect(within(next).getByRole('button', { name: 'Download' })).toBeInTheDocument()
     await user.click(within(next).getByRole('button', { name: 'Print' }))
     expect(await screen.findByRole('dialog', { name: 'Print' })).toBeInTheDocument()
+  })
+
+  it('says the result was saved here, with no link to where it already is (#2542)', async () => {
+    const { user } = render()
+    await user.click(within(await row('Reagan')).getByRole('checkbox', { name: 'Select Reagan' }))
+    await user.click(screen.getByRole('button', { name: 'Arrange selected (1)' }))
+    await user.click(await screen.findByRole('button', { name: 'Arrange' }))
+    const note = await screen.findByRole('status', { name: 'Arranged' })
+    expect(note).toHaveTextContent(/in Name Keychain's history\.$/)
+    expect(within(note).queryByRole('link', { name: 'Open in History' })).not.toBeInTheDocument()
+  })
+
+  it("says \"this model's\" history, not its slug, when the model list cannot be read (#2541)", async () => {
+    let failed = false
+    server.use(
+      http.get('/api/v1/models', () => {
+        failed = true
+        return problem(503, 'Service Unavailable', 'down')
+      }),
+    )
+    const { user } = render()
+    await user.click(within(await row('Reagan')).getByRole('checkbox', { name: 'Select Reagan' }))
+    await user.click(screen.getByRole('button', { name: 'Arrange selected (1)' }))
+    await waitFor(() => expect(failed).toBe(true))
+    await user.click(await screen.findByRole('button', { name: 'Arrange' }))
+    const note = await screen.findByRole('status', { name: 'Arranged' })
+    expect(note).toHaveTextContent(/in this model's history\.$/)
+    expect(note).not.toHaveTextContent('name-keychain')
+  })
+
+  it('says which model the result was filed under, and links to its History (#2542)', async () => {
+    const first = outputs[0]!
+    const bin: Output = {
+      ...first,
+      id: '9'.repeat(32),
+      slug: 'gridfinity-bin',
+      name: 'Bin',
+      manifest: [{ ...first.manifest![0]!, part: 'piece-bin', slug: 'gridfinity-bin', bom_piece: 'bin', count: 1 }],
+    }
+    addMockOutput(bin)
+    const { user } = render()
+    await user.click(within(await row('Reagan')).getByRole('checkbox', { name: 'Select Reagan' }))
+    await user.click(screen.getByRole('button', { name: 'Arrange selected (1)' }))
+    await user.click(await screen.findByRole('button', { name: 'Add from a model' }))
+    await user.selectOptions(await screen.findByLabelText('Model'), 'gridfinity-bin')
+    await user.click(await screen.findByRole('checkbox', { name: 'Bin' }))
+    await user.click(screen.getByRole('button', { name: 'Add (1)' }))
+    expect(await screen.findByLabelText('Copies of bin — Bin')).toBeVisible()
+    await user.selectOptions(screen.getByLabelText('File under'), 'gridfinity-bin')
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    const note = await screen.findByRole('status', { name: 'Arranged' })
+    const binName = models.find((m) => m.slug === 'gridfinity-bin')!.name
+    expect(note).toHaveTextContent(`in ${binName}'s history.`)
+    expect(within(note).getByRole('link', { name: 'Open in History' })).toHaveAttribute(
+      'href',
+      '/m/gridfinity-bin/history',
+    )
   })
 
   it('offers Print on every output (#2287)', async () => {
