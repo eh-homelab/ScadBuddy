@@ -160,7 +160,7 @@ export const TOOLS = {
       'Save the settled render as an output (the Generate button). Needed before the print or send dialog can open. ' +
       "It files the 3MF in the Project picker's project. When that is not the project this model (with the preset " +
       'in use) was last filed in, it saves nothing and names both: call again with project_id set to the one meant ' +
-      '(null for no project), which also moves the picker there.',
+      '(null for no project; an id Bambuddy does not list is refused), which also moves the picker there.',
     risk: 'write',
     scope: 'customize',
     input: z

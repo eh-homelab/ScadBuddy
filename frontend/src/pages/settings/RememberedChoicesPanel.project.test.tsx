@@ -37,4 +37,24 @@ describe('RememberedChoicesPanel · model projects (#1660)', () => {
       expect(forgot).toEqual([{ slug: 'critter', body: { preset_id: 'template-fish', project_id: null } }]),
     )
   })
+
+  it("names a preset by its name now, the remembered one only when it is gone", async () => {
+    server.use(
+      http.get('/api/v1/settings/remembered', () =>
+        HttpResponse.json({
+          model_projects: {
+            'critter/saved-1': { project_id: 1, preset_name: 'Fish' },
+            'critter/saved-2': { project_id: 1, preset_name: 'Snake' },
+          },
+        }),
+      ),
+      http.get('/api/v1/models/critter/presets', () =>
+        HttpResponse.json([{ id: 'saved-1', name: 'Big fish', params: {}, source: 'saved' }]),
+      ),
+    )
+    renderPage(<RememberedChoicesPanel targets={undefined} projects={null} />)
+    expect(await screen.findByText('critter · Big fish')).toBeInTheDocument()
+    // Deleted since: the name it was remembered with.
+    expect(screen.getByText('critter · Snake')).toBeInTheDocument()
+  })
 })

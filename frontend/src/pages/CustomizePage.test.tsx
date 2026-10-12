@@ -1598,13 +1598,17 @@ describe('full screen', () => {
 })
 
 describe('CustomizePage, project file (#317)', () => {
-  /** The last send went to `Reagan Keychain` (1), so both pickers open on it. */
+  /**
+   * The last send went to `projectId`, and this model was last filed there (#1660), so
+   * both pickers open on it.
+   */
   function withLastProject(projectId: number | null) {
     server.use(
       http.get('/api/v1/print/projects', () =>
         HttpResponse.json({ projects: projectViews, last_project_id: projectId }),
       ),
     )
+    if (projectId !== null) setMockRemembered({ modelProjects: { 'name-keychain': { project_id: projectId } } })
   }
 
   /** The bodies of every request to a path ending in `suffix`, by method. */
@@ -1813,6 +1817,20 @@ describe('CustomizePage, project file (#317)', () => {
     expect(await remembered[0]).toEqual({ preset_id: null, preset_name: null, project_id: 1 })
   })
 
+  it("opens on no project rather than another model's last one", async () => {
+    // The 2026-10-11 QA report: a project chosen on another model filed an apple into it.
+    server.use(
+      http.get('/api/v1/print/projects', () => HttpResponse.json({ projects: projectViews, last_project_id: 1 })),
+    )
+    const filed = watchBodies('POST', '/project-file')
+    const { user } = render()
+    await firstRender()
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(pagePicker()).toHaveValue('')
+    await generate(user)
+    expect(filed).toHaveLength(0)
+  })
+
   it("opens on the model's remembered project over the last one", async () => {
     withLastProject(1)
     setMockRemembered({ modelProjects: { 'name-keychain': { project_id: 2 } } })
@@ -1822,7 +1840,12 @@ describe('CustomizePage, project file (#317)', () => {
 
   it("moves to a preset's remembered project when it is loaded, and back without one", async () => {
     withLastProject(1)
-    setMockRemembered({ modelProjects: { 'name-keychain/template-tiny': { project_id: 2, preset_name: 'Tiny' } } })
+    setMockRemembered({
+      modelProjects: {
+        'name-keychain': { project_id: 1 },
+        'name-keychain/template-tiny': { project_id: 2, preset_name: 'Tiny' },
+      },
+    })
     const { user } = render()
     await firstRender()
     await waitFor(() => expect(pagePicker()).toHaveValue('1'))
@@ -1831,6 +1854,22 @@ describe('CustomizePage, project file (#317)', () => {
     await waitFor(() => expect(pagePicker()).toHaveValue('2'))
     await user.selectOptions(presets, '')
     await waitFor(() => expect(pagePicker()).toHaveValue('1'))
+  })
+
+  it("opens a preset never filed on the model's project, without asking", async () => {
+    withLastProject(null)
+    setMockRemembered({ modelProjects: { 'name-keychain': { project_id: 2 } } })
+    const filed = watchBodies('POST', '/project-file')
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(pagePicker()).toHaveValue('2'))
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Preset' }), 'template-tiny')
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    expect(pagePicker()).toHaveValue('2')
+    await generate(user)
+    // The preset was never filed anywhere, so there is nothing to ask about.
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(await filed[0]).toEqual({ project_id: 2 })
   })
 
   it('asks before filing somewhere other than the remembered project', async () => {
@@ -1861,6 +1900,48 @@ describe('CustomizePage, project file (#317)', () => {
     await screen.findByTestId('project-filed')
     expect(await filed[0]).toEqual({ project_id: 2 })
     expect(pagePicker()).toHaveValue('2')
+  })
+
+  it('reads the remembered project again when another tab files the model', async () => {
+    withLastProject(2)
+    const { user } = render()
+    await waitFor(() => expect(pagePicker()).toHaveValue('2'))
+    setMockRemembered({ modelProjects: { 'name-keychain': { project_id: 1 } } })
+    await waitFor(() => {
+      emitRealtime('settings.changed', ['settings'], { section: 'model_project' })
+      expect(pagePicker()).toHaveValue('1')
+    })
+    // The question is asked against the project now remembered, not the one read first.
+    await user.selectOptions(pagePicker(), '2')
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    expect(
+      within(await screen.findByRole('dialog')).getByTestId('generate-project-confirm'),
+    ).toHaveTextContent('Name Keychain was last filed in Reagan Keychain. File this in Gridfinity Bins?')
+  })
+
+  it("names the print's project in Simple mode, and (change) opens its picker", async () => {
+    withLastProject(1)
+    const { user } = render()
+    await waitFor(() => expect(pagePicker()).toHaveValue('1'))
+    await generate(user)
+    await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
+    await user.click(screen.getByTestId('print'))
+    const dialog = await screen.findByRole('dialog')
+    expect(await within(dialog).findByTestId('print-filed-under')).toHaveTextContent(
+      'Filed under: Reagan Keychain (change)',
+    )
+    await user.click(within(dialog).getByTestId('print-filed-under-change'))
+    const dialogPicker = await within(dialog).findByTestId('project-select')
+    await waitFor(() => expect(dialogPicker).toHaveFocus())
+    expect(within(dialog).getByRole('switch', { name: 'Advanced' })).toBeChecked()
+    expect(within(dialog).queryByTestId('print-filed-under')).not.toBeInTheDocument()
+
+    // "No project" is named too, so a print filed nowhere is not a surprise either.
+    await user.selectOptions(dialogPicker, '')
+    await user.click(within(dialog).getByRole('switch', { name: 'Advanced' }))
+    expect(within(dialog).getByTestId('print-filed-under')).toHaveTextContent('Filed under: No project')
   })
 
   it('files in the chosen project when asked, which becomes the remembered one', async () => {

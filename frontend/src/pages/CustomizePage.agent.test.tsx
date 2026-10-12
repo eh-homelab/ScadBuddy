@@ -205,6 +205,7 @@ describe('customizer tools', () => {
         HttpResponse.json({ projects: projectViews, last_project_id: 1 }),
       ),
     )
+    setMockRemembered({ modelProjects: { 'name-keychain': { project_id: 1 } } })
     await open()
     // Filed in the remembered project too, which the answer says (#931: the agent records it).
     expect(await call('generate', { timeout_ms: 5000 })).toMatchObject({
@@ -254,6 +255,33 @@ describe('customizer tools', () => {
       result: { filed: { project_id: 2 } },
     })
     expect(picker).toHaveValue('2')
+  })
+
+  it('files nothing with project_id null, past the remembered-project check (#1660)', async () => {
+    setMockRemembered({ modelProjects: { 'name-keychain': { project_id: 2 } } })
+    await open()
+    const picker = screen.getByTestId<HTMLSelectElement>('customize-project-select')
+    await waitFor(() => expect(picker).toHaveValue('2'))
+
+    const generated = await call('generate', { timeout_ms: 5000, project_id: null })
+    expect(generated).toMatchObject({ ok: true, result: { filed: null } })
+    expect(picker).toHaveValue('')
+  })
+
+  it('refuses a project_id Bambuddy does not list, saving nothing (#1660)', async () => {
+    const saved = vi.fn()
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'POST' && new URL(request.url).pathname.endsWith('/outputs')) saved()
+    })
+    await open()
+    const picker = screen.getByTestId<HTMLSelectElement>('customize-project-select')
+    await waitFor(() => expect(within(picker).getAllByRole('option').length).toBeGreaterThan(2))
+
+    const refused = await call('generate', { timeout_ms: 5000, project_id: 999 })
+    expect(refused).toMatchObject({ ok: false, error: { code: 'invalid_args' } })
+    expect(!refused.ok && refused.error.message).toMatch(/no project 999/)
+    expect(saved).not.toHaveBeenCalled()
+    expect(picker).toHaveValue('')
   })
 
   it('holds Generate while a project is being created (#665)', async () => {

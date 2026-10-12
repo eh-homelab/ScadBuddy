@@ -1,7 +1,14 @@
 import { useState } from 'react'
 import { USER_ONLY } from '../../agent/dom'
 import { api, ApiError } from '../../api/client'
-import type { BambuddyTargets, ModelPrintChoices, PrintOptions, ProjectChoices, RememberedChoices } from '../../api/types'
+import type {
+  BambuddyTargets,
+  ModelPrintChoices,
+  ParamPreset,
+  PrintOptions,
+  ProjectChoices,
+  RememberedChoices,
+} from '../../api/types'
 import { ALGORITHM_LABELS } from '../../components/print/rackLabels'
 import { Button } from '../../components/ui/Button'
 import { Spinner } from '../../components/ui/Spinner'
@@ -69,6 +76,28 @@ export function RememberedChoicesPanel({
     projects?.projects?.find((project) => String(project.id) === id)?.name ?? `Project ${id}`
 
   const remembered: RememberedChoices | undefined = state.data
+  // #1660 — a preset's name now, read from its model's presets, so a rename shows. The
+  // name stored with the entry is only for a preset (or model) no longer there.
+  const presetModels = [
+    ...new Set(
+      Object.keys(remembered?.model_projects ?? {})
+        .filter((scope) => scope.includes('/'))
+        .map((scope) => scope.slice(0, scope.indexOf('/'))),
+    ),
+  ].sort()
+  const presetNames = useAsync(
+    async () => {
+      const names = new Map<string, string>()
+      await Promise.all(
+        presetModels.map(async (modelId) => {
+          const presets = await api.listPresets(modelId).catch(() => [] as ParamPreset[])
+          for (const preset of presets) names.set(`${modelId}/${preset.id}`, preset.name)
+        }),
+      )
+      return names
+    },
+    [presetModels.join('\n')],
+  )
   const rows: Row[] = []
   if (remembered) {
     for (const [scope, choices] of Object.entries(remembered.model_print_choices ?? {})) {
@@ -119,7 +148,10 @@ export function RememberedChoicesPanel({
       rows.push({
         key: `model-project:${scope}`,
         kind: 'Project',
-        subject: presetId === null ? modelId : `${modelId} · ${entry.preset_name ?? presetId}`,
+        subject:
+          presetId === null
+            ? modelId
+            : `${modelId} · ${presetNames.data?.get(scope) ?? entry.preset_name ?? presetId}`,
         value: projectName(String(entry.project_id)),
         forget: () => api.putModelProject(modelId, { preset_id: presetId, project_id: null }),
       })
