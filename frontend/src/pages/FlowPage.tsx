@@ -1,9 +1,11 @@
 import { lazy, Suspense, useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { api, ApiError } from '../api/client'
-import type { FlowDefinition, FlowRegister, FlowScriptProblem, FlowVersion } from '../api/types'
+import type { FlowDefinition, FlowGrantSpec, FlowRegister, FlowScriptProblem, FlowVersion } from '../api/types'
 import { FlowScript } from '../components/flows/FlowScript'
+import { GrantEditor } from '../components/flows/GrantEditor'
 import { Button } from '../components/ui/Button'
+import { Dialog } from '../components/ui/Dialog'
 import { Spinner } from '../components/ui/Spinner'
 import { timeAgo } from '../lib/format'
 import { actorText, flowPath, flowRunPath, FLOWS_PATH } from '../lib/flows'
@@ -55,13 +57,15 @@ export function FlowPage() {
   const [starting, setStarting] = useState(false)
   const [error, setError] = useState<string>()
   const [restoring, setRestoring] = useState(false)
+  // #2481: Start run with a grant, approved as sent; without one, every outward call asks.
+  const [granting, setGranting] = useState(false)
   const viewed = versions.data?.find((v) => v.id === id)
 
-  async function start() {
+  async function start(grant?: FlowGrantSpec) {
     setStarting(true)
     setError(undefined)
     try {
-      const run = await api.startFlowRun(id)
+      const run = await api.startFlowRun(id, undefined, grant)
       void navigate(flowRunPath(run.id))
     } catch (caught) {
       setError(errorText(caught))
@@ -109,17 +113,38 @@ export function FlowPage() {
                 <Button variant="primary" onClick={() => void start()} disabled={starting}>
                   {starting ? <Spinner /> : 'Start run'}
                 </Button>
+                <Button onClick={() => setGranting(true)} disabled={starting}>
+                  Start with a grant…
+                </Button>
                 {!phone && viewed && !viewed.current && (
                   <Button onClick={() => void restore(flow.data!.name, viewed)} disabled={restoring}>
                     {restoring ? <Spinner /> : `Restore v${viewed.version}`}
                   </Button>
                 )}
               </div>
-              {error && (
+              {error && !granting && (
                 <p role="alert" className="text-[13px] text-warn">
                   {error}
                 </p>
               )}
+              <Dialog
+                open={granting}
+                title="Start with a grant"
+                description="What the run's outward calls may do without asking you."
+                onClose={() => !starting && setGranting(false)}
+              >
+                <GrantEditor
+                  submitLabel="Start run"
+                  busy={starting}
+                  onSubmit={(grant) => void start(grant)}
+                  onCancel={() => setGranting(false)}
+                />
+                {error && (
+                  <p role="alert" className="mt-2 text-[13px] text-warn">
+                    {error}
+                  </p>
+                )}
+              </Dialog>
               <p className="text-[12.5px] text-muted">
                 Registered by {actorText(flow.data.created_by)}, {timeAgo(flow.data.created_at)}.
               </p>

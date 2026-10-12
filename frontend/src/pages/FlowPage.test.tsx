@@ -182,6 +182,25 @@ describe('FlowPage', () => {
     ])
   })
 
+  it('starts a run with a grant (#2481), approved as sent', async () => {
+    const { user } = render('def-swap')
+    await user.click(await screen.findByRole('button', { name: 'Start with a grant…' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Start with a grant' })
+    const arrange = await within(dialog).findByRole('group', { name: 'Rule arrange' })
+    await user.click(within(arrange).getByRole('checkbox', { name: 'Allow without asking' }))
+    await user.type(within(arrange).getByLabelText('Max calls'), '2')
+    await user.click(within(dialog).getByRole('button', { name: 'Start run' }))
+    expect(await screen.findByText('Run page')).toBeInTheDocument()
+    const sent = flowRequests()
+    expect(sent).toHaveLength(1)
+    expect(sent[0]).toMatchObject({ path: '/api/v1/workflows/def-swap/runs', key: expect.stringMatching(/^[0-9a-f]{32}$/) })
+    expect(sent[0]!.body['grant']).toMatchObject({
+      sessions: false,
+      ask_starter_session: true,
+      rules: [{ fn: 'arrange', max_calls: 2 }],
+    })
+  })
+
   it('on a phone, shows the script and a diff read only: no editor, Save or Restore', async () => {
     asPhone()
     const { user } = render('def-plates-1')

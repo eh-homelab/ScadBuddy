@@ -231,6 +231,20 @@ describe('WorkflowRunPage, #2350', () => {
     expect(within(again).getAllByRole('listitem').map((i) => i.textContent)).toEqual(['#3 sleep'])
   })
 
+  it("shows the run's grant and decides a requested one (#2481)", async () => {
+    const { user } = render('run-ask')
+    const grant = await screen.findByRole('region', { name: 'Grant' })
+    expect(within(grant).getByTestId('grant-status')).toHaveTextContent('Requested')
+    await user.click(within(grant).getByRole('button', { name: 'Decline grant' }))
+    await waitFor(() => expect(within(grant).getByTestId('grant-status')).toHaveTextContent('Declined'))
+  })
+
+  it('shows no grant panel for a run without one', async () => {
+    render('run-print')
+    expect(await screen.findByTestId('flow-run-status')).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'Grant' })).not.toBeInTheDocument()
+  })
+
   it('a point past every step runs nothing again', async () => {
     const { user } = render('run-done')
     await user.click(await screen.findByRole('button', { name: 'Preview a reset' }))

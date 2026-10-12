@@ -1,6 +1,8 @@
 import { HttpResponse, http } from 'msw'
 import type {
   FlowDefinition,
+  FlowGrantSpec,
+  FlowGrantView,
   FlowHostInterface,
   FlowScriptProblem,
   FlowPending,
@@ -22,6 +24,11 @@ import type {
  * from one, a run forgotten, and its reset points, preview and Reset. A step's reset
  * point is its `history_length + 1`, which runs it and every later step again; one more
  * after the last ended step runs none again.
+ *
+ * #2481 — a run's grant: in the run's view, started with one from the browser (approved
+ * as sent), and a person's approve (as requested, or the edited spec), decline and
+ * revoke; a second decision is the backend's 409 `flow-grant-state`. `run-ask` (an
+ * agent's start) carries a requested grant and `run-done` an approved one with uses.
  *
  * #2487 — the editor: Save (`POST /workflows`, a new version), the check that stores
  * nothing, the host functions it completes, a version's source by commit, and Restore.
@@ -124,7 +131,80 @@ function defaults(): FlowRun[] {
   ]
 }
 
+const HOUR = 3_600_000
+const GRANT_STATE = 'https://scadbuddy.dev/problems/flow-grant-state'
+
+function grant(id: string, fields: Partial<FlowGrantView>): FlowGrantView {
+  return {
+    id,
+    status: 'approved',
+    spec: { expires_at: new Date(Date.now() + 24 * HOUR).toISOString(), sessions: false, ask_starter_session: true, rules: [] },
+    used: {},
+    requested_by: { kind: 'browser' },
+    approved_by: 'browser',
+    approved_at: at(0),
+    revoked_by: null,
+    revoked_at: null,
+    expires_at: null,
+    created_at: at(0),
+    in_force: true,
+    uses: [],
+    ...fields,
+  }
+}
+
+function defaultGrants(): Map<string, FlowGrantView> {
+  const expires = new Date(Date.now() + 24 * HOUR).toISOString()
+  return new Map([
+    [
+      'run-ask',
+      grant('grant-ask', {
+        status: 'requested',
+        spec: {
+          expires_at: expires,
+          sessions: false,
+          ask_starter_session: true,
+          rules: [{ fn: 'queue_print', printers: [1], models: ['name-keychain'], max_prints: 12, max_calls: 12 }],
+        },
+        requested_by: { kind: 'agent', principal: 'p', session: 'sess-1' },
+        approved_by: null,
+        approved_at: null,
+        in_force: false,
+      }),
+    ],
+    [
+      'run-done',
+      grant('grant-done', {
+        spec: {
+          expires_at: expires,
+          sessions: true,
+          ask_starter_session: true,
+          rules: [
+            { fn: 'queue_print', printers: [1, 2], max_prints: 4, max_filament_g: 200 },
+            { fn: 'tool', tool: 'send_to_bambuddy', max_calls: 2 },
+          ],
+        },
+        expires_at: expires,
+        used: { '0': { prints: 1, filament_g: 12.5, calls: 1 } },
+        uses: [
+          {
+            request_id: 'req-1',
+            fn: 'queue_print',
+            tool: null,
+            rule_index: 0,
+            prints: 1,
+            filament_g: 12.5,
+            session_id: null,
+            created_at: at(2),
+          },
+        ],
+      }),
+    ],
+  ])
+}
+
 let runs = defaults()
+let grants = defaultGrants()
 let definitions = defaultDefinitions()
 let started = 0
 /** Runs whose next Reset is refused: outward calls landed since the preview. */
@@ -141,6 +221,7 @@ const PIXEL = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptV
 
 export function reset(): void {
   runs = defaults()
+  grants = defaultGrants()
   definitions = defaultDefinitions()
   started = 0
   moved.clear()
@@ -166,6 +247,12 @@ export function setFlowRunOffline(id: string): void {
 }
 export function setFlowRunStarting(id: string): void {
   starting.add(id)
+}
+
+/** Tests: a run's grant, as its view shows it; null for none. */
+export function setFlowRunGrant(id: string, next: FlowGrantView | null): void {
+  if (next) grants.set(id, next)
+  else grants.delete(id)
 }
 
 /** Tests: the registered flow versions. */
@@ -206,6 +293,30 @@ function view(id: string): FlowRunView | undefined {
     pending,
     live: !offline.has(id),
     images: images.get(id) ?? [],
+    grant: grants.get(id) ?? null,
+  }
+}
+
+/** A grant route: 404 without a grant, 409 once it is decided (or revoked), else `change`. */
+function decideGrant(allowed: (found: FlowGrantView) => boolean, change: (found: FlowGrantView, body: Record<string, unknown>) => void) {
+  return async ({ request, params }: { request: Request; params: Record<string, string | readonly string[] | undefined> }) => {
+    const body = await keep(request)
+    const found = grants.get(String(params['id']))
+    if (!found) return notFound('This run has no grant.')
+    if (!allowed(found) || found.revoked_at) {
+      const state = found.revoked_at ? 'revoked' : found.status
+      return HttpResponse.json(
+        {
+          type: GRANT_STATE,
+          title: 'Conflict',
+          status: 409,
+          detail: `The run's grant is ${state}: a grant is decided once, and revoking it is final.`,
+        },
+        { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+      )
+    }
+    change(found, body)
+    return HttpResponse.json(found)
   }
 }
 
@@ -416,11 +527,13 @@ export const handlers = [
     return found ? HttpResponse.json(found) : notFound('No such flow.')
   }),
   http.post('/api/v1/workflows/:id/runs', async ({ request, params }) => {
-    await keep(request)
+    const body = await keep(request)
     const found = definitions.find((d) => d.id === params['id'])
     if (!found) return notFound('No such flow.')
     started += 1
     const id = `run-new-${started}`
+    const sent = (body['grant'] as FlowGrantSpec | undefined) ?? null
+    if (sent) grants.set(id, grant(`grant-new-${started}`, { spec: sent, expires_at: sent.expires_at, approved_at: at(30), created_at: at(30) }))
     runs = [
       run(id, { definition_id: found.id, name: found.name, version: found.version, status: 'running', created_at: at(30) }),
       ...runs,
@@ -482,6 +595,37 @@ export const handlers = [
     (images.get(String(params['id'])) ?? []).some((i) => i.name === params['name'])
       ? new HttpResponse(PIXEL, { headers: { 'Content-Type': 'image/png' } })
       : HttpResponse.json({ title: 'Not Found', status: 404, detail: 'No such image.' }, { status: 404 }),
+  ),
+  http.post(
+    '/api/v1/workflow-runs/:id/grant/approve',
+    decideGrant(
+      (found) => found.status === 'requested',
+      (found, body) => {
+        const spec = (body['spec'] as FlowGrantSpec | undefined) ?? found.spec
+        Object.assign(found, {
+          status: 'approved',
+          spec,
+          approved_by: 'browser',
+          approved_at: new Date().toISOString(),
+          expires_at: spec.expires_at,
+          in_force: true,
+        })
+      },
+    ),
+  ),
+  http.post(
+    '/api/v1/workflow-runs/:id/grant/decline',
+    decideGrant(
+      (found) => found.status === 'requested',
+      (found) => Object.assign(found, { status: 'declined' }),
+    ),
+  ),
+  http.post(
+    '/api/v1/workflow-runs/:id/grant/revoke',
+    decideGrant(
+      (found) => found.status !== 'declined',
+      (found) => Object.assign(found, { revoked_by: 'browser', revoked_at: new Date().toISOString(), in_force: false }),
+    ),
   ),
   http.post('/api/v1/workflow-runs/:id/answer', respond(() => 'answered')),
   http.post('/api/v1/workflow-runs/:id/decide', respond((body) => (body['approved'] ? 'approved' : 'denied'))),
