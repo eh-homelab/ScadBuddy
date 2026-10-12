@@ -415,6 +415,9 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       expect((await withWorkspaceSize(files, ws, { ...call, workspace_path: '../x' })).workspace_size).toMatch(/^no such file/)
       expect(await withWorkspaceSize(files, ws, { slug: 'box' })).toEqual({ slug: 'box' })
       expect(await withWorkspaceSize(undefined, ws, call)).toEqual(call)
+      // A size the model put in the input is never shown.
+      expect(await withWorkspaceSize(files, ws, { slug: 'box', workspace_size: '1 byte' })).toEqual({ slug: 'box' })
+      expect(await withWorkspaceSize(files, ws, { ...call, workspace_size: '1 byte' })).toEqual({ ...call, workspace_size: size })
       // A store that cannot be read says so; the gate still parks the call.
       const down = { stat: async () => Promise.reject(new Error('connection refused')) } as unknown as SessionFiles
       expect((await withWorkspaceSize(down, ws, call)).workspace_size).toBe('unknown: the workspace could not be read')

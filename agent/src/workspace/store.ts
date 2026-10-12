@@ -79,16 +79,21 @@ export async function withWorkspaceSize(
   input: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
   const { workspace_path: path, workspace_sha256: digest } = input
-  if (files === undefined || ws === undefined || typeof path !== 'string' || typeof digest !== 'string') return input
+  // The classic gate gets the SDK's unparsed input: a `workspace_size` the model
+  // put there is never shown, so the only size on a card is one read here.
+  const own = { ...input }
+  delete own.workspace_size
+  // The shape check keeps every call that uploads nothing off Postgres.
+  if (files === undefined || ws === undefined || typeof path !== 'string' || typeof digest !== 'string') return own
   let info: WorkspaceFileInfo | undefined
   try {
     info = await files.stat(ws, path)
   } catch (err) {
-    if (!(err instanceof WorkspaceError)) return { ...input, workspace_size: 'unknown: the workspace could not be read' }
+    if (!(err instanceof WorkspaceError)) return { ...own, workspace_size: 'unknown: the workspace could not be read' }
   }
   const size =
     info?.sha256 === digest ? humanSize(info.size) : 'no such file at this sha256 in the workspace: the upload will be refused'
-  return { ...input, workspace_size: size }
+  return { ...own, workspace_size: size }
 }
 
 function keyOf(ws: WorkspaceRef): { key: string; sessionId: string | null } {
