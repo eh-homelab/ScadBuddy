@@ -23,6 +23,7 @@ from temporalio.common import WorkflowIDReusePolicy
 
 from scadbuddy.api.deps import (
     AppState,
+    CatalogueDep,
     OutputIdPath,
     OutputsDep,
     PrintCommands,
@@ -35,6 +36,7 @@ from scadbuddy.api.deps import (
     StateDep,
     UploadsDep,
 )
+from scadbuddy.api.models import require_model_exists
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
     RETRY_FOLLOWS,
@@ -304,15 +306,17 @@ def get_model_projects(slug: SlugPath, store: SettingsStoreDep) -> ModelProjects
     summary="Remember the project this model was filed into",
 )
 def put_model_project(
-    slug: SlugPath, body: ModelProjectPut, store: SettingsStoreDep
+    slug: SlugPath, body: ModelProjectPut, store: SettingsStoreDep, catalogue: CatalogueDep
 ) -> ModelProjects:
     """What Generate filed this model into with the preset in use (#1660); a ``null``
-    project forgets it. Answers with every project remembered for the model."""
-    project = (
-        None
-        if body.project_id is None
-        else ModelProject(project_id=body.project_id, preset_name=body.preset_name)
-    )
+    project forgets it. Answers with every project remembered for the model.
+
+    404 for a model not in the catalogue, so a stray id leaves no entry nobody can
+    trace; forgetting still works for one, so an entry left from before can go."""
+    project = None
+    if body.project_id is not None:
+        require_model_exists(catalogue, slug)
+        project = ModelProject(project_id=body.project_id, preset_name=body.preset_name)
     return _model_projects(store.set_model_project(slug, body.preset_id, project), slug)
 
 

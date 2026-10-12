@@ -252,8 +252,8 @@ class StoredSettings(BambuddyIds):
 
     #: The Bambuddy project the last send went to (#79), and nothing more. A project
     #: is Bambuddy's grouping, not a second one kept here, so ScadBuddy remembers only
-    #: enough to open the picker where it was left rather than modelling which models
-    #: belong to which project — that question is Bambuddy's to answer.
+    #: defaults for the next filing (this, and ``model_projects`` below) rather than
+    #: modelling which prints belong to which project: that question is Bambuddy's.
     last_project_id: int | None = None
     #: :func:`model_project_scope` -> the project Generate last filed it into (#1660), so
     #: the picker moves there when the model or the preset is opened, and Generate asks
@@ -838,6 +838,23 @@ class SettingsStore:
                 None if project is None else project.model_dump(mode="json"),
             )
         return self._written("model_project")
+
+    def forget_model_projects(self, model_id: str, preset_id: str | None = None) -> None:
+        """Drop what a deleted preset was filed into or, with no ``preset_id``, every
+        entry for a deleted model (#1660), so Settings lists no id that is gone."""
+        with self._pool.connection() as conn:
+            if preset_id is not None:
+                _put_entry(conn, "model_projects", model_project_scope(model_id, preset_id), None)
+            else:
+                prefix = model_project_scope(model_id, "")
+                conn.execute(
+                    "UPDATE settings SET value = COALESCE("
+                    " (SELECT jsonb_object_agg(e.key, e.value) FROM jsonb_each(settings.value) AS e"
+                    "  WHERE e.key <> %s AND left(e.key, length(%s)) <> %s), '{}'::jsonb),"
+                    " updated_at = now() WHERE name = 'model_projects'",
+                    (model_id, prefix, prefix),
+                )
+        emit(self.events, SettingsChanged(section="model_project"))
 
     def save_print_options(
         self, scope: OptionScope, key: str | None, options: PrintOptions
