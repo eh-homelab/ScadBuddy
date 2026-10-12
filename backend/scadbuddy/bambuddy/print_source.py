@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import aclosing
 from dataclasses import dataclass, field
 from typing import BinaryIO, Protocol
@@ -29,7 +29,8 @@ from fastapi import status
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import QueueOutcome
 from scadbuddy.bambuddy.filaments import FilamentPlan, normalise_colour, settled
-from scadbuddy.bambuddy.models import LibraryFile
+from scadbuddy.bambuddy.filaments3mf import LocalFilaments
+from scadbuddy.bambuddy.models import FilamentRequirements, LibraryFile
 from scadbuddy.bambuddy.nozzle_plan import NozzlePlan
 from scadbuddy.bambuddy.options import options_scope
 from scadbuddy.bambuddy.print_links import PrintLinkStore, PrintSend
@@ -529,6 +530,24 @@ def _refusal(file: LibraryFile) -> str:
     )
 
 
+#: Reads a library file's filament slots from the file itself (#2550):
+#: :func:`~scadbuddy.bambuddy.library_view.library_filaments`, bound to its cache.
+#: ``None`` for a file it cannot read them from.
+FilamentReader = Callable[[LibraryFile], Awaitable[LocalFilaments | None]]
+
+
+async def _requirements(
+    client: BambuddyClient, file: LibraryFile, read: FilamentReader | None
+) -> tuple[FilamentRequirements, LocalFilaments | None]:
+    """The whole file's slots: read from the file itself where ``read`` can, else
+    Bambuddy's ``filament-requirements``, which for a large unsliced 3MF can outlast the
+    request (#2550)."""
+    local = await read(file) if read is not None else None
+    if local is not None:
+        return local.for_plate(None), local
+    return await client.filament_requirements(file.id), None
+
+
 def _file_stem(filename: str) -> str:
     for suffix in (".3mf", ".stl"):
         if filename.lower().endswith(suffix):
@@ -549,6 +568,10 @@ class LibrarySource(PrintPipeline):
     #: The file's name and type, which name its copies and say whether it is an STL.
     filename: str = ""
     file_type: str = ""
+    #: The file's filament slots as read from the file itself, which the filament step
+    #: then reads too, rather than asking Bambuddy per plate (#2550). ``None`` when
+    #: they came from Bambuddy.
+    local: LocalFilaments | None = None
 
     @classmethod
     async def load(
@@ -559,21 +582,25 @@ class LibrarySource(PrintPipeline):
         uploads: BambuddyUploadStore | None = None,
         settings: StoredSettings | None = None,
         sends: PrintLinkStore | None = None,
+        filaments: FilamentReader | None = None,
     ) -> LibrarySource:
         """Read the file, its plates and its filaments. A file deleted in Bambuddy is
         its 404; one the dialog cannot print is a 422 before anything else is read. The
-        plates and filaments are read together (#2504)."""
+        plates and filaments are read together (#2504). With ``filaments``, the slots
+        are read from the file itself, and Bambuddy is asked only for one it cannot
+        read (#2550)."""
         file = await client.library_file(file_id)
         if not printable(file.file_type):
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, _refusal(file))
-        layout, requirements = await asyncio.gather(
+        layout, read = await asyncio.gather(
             client.library_plates(file_id),
-            client.filament_requirements(file_id),
+            _requirements(client, file, filaments),
             return_exceptions=True,
         )
         plates = sorted(plate.index for plate in settled(layout).plates)
+        requirements, local = settled(read)
         # Slots are 1-based; a slot Bambuddy numbers below 1 is not one the dialog can fill.
-        needs = [need for need in settled(requirements).filaments if need.slot_id >= 1]
+        needs = [need for need in requirements.filaments if need.slot_id >= 1]
         colours = [UNKNOWN_COLOUR] * max((need.slot_id for need in needs), default=0)
         for need in needs:
             colours[need.slot_id - 1] = normalise_colour(need.color) or UNKNOWN_COLOUR
@@ -585,6 +612,7 @@ class LibrarySource(PrintPipeline):
             plates=plates or [1],
             filename=file.filename,
             file_type=(file.file_type or "").lower(),
+            local=local,
             uploads=uploads,
             settings=settings,
             sends=sends,

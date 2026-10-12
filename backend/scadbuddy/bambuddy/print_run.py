@@ -62,7 +62,12 @@ from scadbuddy.bambuddy.models import (
 )
 from scadbuddy.bambuddy.nozzle_plan import NozzlePlan, plan_for
 from scadbuddy.bambuddy.options import PrintOptions
-from scadbuddy.bambuddy.print_source import LibrarySource, OutputSource, PrintSource
+from scadbuddy.bambuddy.print_source import (
+    FilamentReader,
+    LibrarySource,
+    OutputSource,
+    PrintSource,
+)
 from scadbuddy.bambuddy.resolver import (
     PRINTER_MODEL,
     PrintChoices,
@@ -296,6 +301,13 @@ async def filament_options(
             fallback_colours=list(source.colours),
             own_colours=file.own_colours,
             inventory=settled(inventory),
+            # A library file's slots read from the file itself (#2550): every copy has
+            # the same slots, so they answer for the copy read here too.
+            known=(
+                source.local.for_plate
+                if isinstance(source, LibrarySource) and source.local is not None
+                else None
+            ),
         )
     finally:
         # Awaited even when a read failed, so the status read never outlives the call.
@@ -1325,11 +1337,15 @@ async def filament_options_for_library(
     printer_id: int | None = None,
     plate_id: int = 1,
     all_plates: bool = False,
+    filaments: FilamentReader | None = None,
 ) -> FilamentOptions:
-    """:func:`filament_options` for a file already in Bambuddy's library (#313)."""
+    """:func:`filament_options` for a file already in Bambuddy's library (#313); with
+    ``filaments``, its slots read from the file itself (#2550)."""
     return await filament_options(
         client,
-        await LibrarySource.load(client, file_id, uploads=uploads, settings=settings),
+        await LibrarySource.load(
+            client, file_id, uploads=uploads, settings=settings, filaments=filaments
+        ),
         printer_id=printer_id,
         plate_id=plate_id,
         all_plates=all_plates,

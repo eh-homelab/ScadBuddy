@@ -8,6 +8,7 @@ images are proxied so the API key never reaches the browser.
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Annotated
 
 from fastapi import APIRouter, Path, Query, Request, Response, status
@@ -39,7 +40,11 @@ from scadbuddy.bambuddy.choices import ChoicesView, choices_for
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.library_listing import LibraryListing, list_library
-from scadbuddy.bambuddy.library_view import NotViewableError, library_preview
+from scadbuddy.bambuddy.library_view import (
+    NotViewableError,
+    library_filaments,
+    library_preview,
+)
 from scadbuddy.bambuddy.preview import PreviewStarted, SlicePreview, read_preview
 from scadbuddy.bambuddy.print_run import (
     PrintCheck,
@@ -318,15 +323,25 @@ async def get_library_choices(
     store: SettingsStoreDep,
     uploads: UploadsDep,
     rack: RackUsageDep,
+    paths: PathsDep,
+    budget: ReadBudgetDep,
     printer_id: Annotated[int | None, Query()] = None,
 ) -> ChoicesView:
     """As ``/print/outputs/{id}/choices``; ``model_choices`` is what this file last
-    printed with, so the dialog reopens on it."""
+    printed with, so the dialog reopens on it. The file's filament slots are read from
+    the file itself, the fetch its preview shares, and from Bambuddy only for a file
+    ScadBuddy cannot read them from (#2550)."""
     settings = store.load()
     remembered = store.library_choices(file_id)
     async with client_for(settings) as client:
         # Loaded alongside the printers and presets (#2504).
-        source = LibrarySource.load(client, file_id, uploads=uploads, settings=settings)
+        source = LibrarySource.load(
+            client,
+            file_id,
+            uploads=uploads,
+            settings=settings,
+            filaments=partial(library_filaments, client, paths.cache, budget=budget),
+        )
         return await choices_for(
             client, source, settings, remembered=remembered, printer_id=printer_id, rack=rack
         )
@@ -353,6 +368,8 @@ async def get_library_filaments(
     file_id: FileIdPath,
     store: SettingsStoreDep,
     uploads: UploadsDep,
+    paths: PathsDep,
+    budget: ReadBudgetDep,
     printer_id: Annotated[int | None, Query()] = None,
     plate_id: Annotated[int, Query(ge=1)] = 1,
     all_plates: Annotated[bool, Query()] = False,
@@ -367,6 +384,7 @@ async def get_library_filaments(
             printer_id=printer_id,
             plate_id=plate_id,
             all_plates=all_plates,
+            filaments=partial(library_filaments, client, paths.cache, budget=budget),
         )
 
 
