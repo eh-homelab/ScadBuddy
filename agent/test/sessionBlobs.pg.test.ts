@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
@@ -253,6 +253,26 @@ describe.skipIf(skip !== undefined)(`session images${skip ? ` (skipped: ${skip})
       // The owner reads it as the session; any other principal finds no session.
       await expect(m.blob(id, SENT, browser)).resolves.toMatchObject({ mediaType: 'image/jpeg' })
       await expect(m.blob(id, SENT, agentA)).rejects.toMatchObject({ code: 'not_found' })
+    })
+
+    const blobsOf = async (id: string) => db.sql`SELECT name FROM ai_session_blobs WHERE session_id = ${id}`
+
+    it('stores nothing for a principal who may not send to the session (#2479)', async () => {
+      next = { reply: 'nothing to see' }
+      // The browser user sees every session, but only an owner may send.
+      const { session } = await m.start(agentA, { origin: 'mcp' })
+      await expect(m.send(session.id, browser, 'look', { images: [image] })).rejects.toMatchObject({ code: 'forbidden' })
+      expect(await blobsOf(session.id)).toHaveLength(0)
+    })
+
+    it('stores nothing when the claim is refused: a busy session (#2479)', async () => {
+      next = { reply: 'nothing to see' }
+      const { session } = await m.start(browser, { origin: 'chat' })
+      await db.sql`
+        UPDATE ai_sessions SET status = 'running', turn_id = ${randomUUID()}, lease_until = now() + interval '1 hour'
+        WHERE id = ${session.id}`
+      await expect(m.send(session.id, browser, 'look', { images: [image] })).rejects.toMatchObject({ code: 'busy' })
+      expect(await blobsOf(session.id)).toHaveLength(0)
     })
 
     it('refuses the message, starting nothing, when the images cannot be stored (#2479)', async () => {

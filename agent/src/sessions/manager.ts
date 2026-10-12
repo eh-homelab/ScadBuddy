@@ -1220,10 +1220,6 @@ export class SessionManager {
       if (!turn) throw await this.whyNotClaimed(id, principal, before)
       return turn
     }
-    // The images and their previews are stored before the claim, so the turn's event can
-    // name them (#2479); a store that fails refuses the message. (A durable send stores
-    // them under its own claim, durable.ts.)
-    const sent = options.images?.length ? await this.storeSentImages(id, options.images) : undefined
     const [claim] = await this.deps.sql.unsafe<(Row & { unpriced_cost_usd: number })[]>(
       `UPDATE ai_sessions
        SET status = 'running', turn_id = $2, lease_until = now() + ($5 * interval '1 millisecond'),
@@ -1234,6 +1230,19 @@ export class SessionManager {
       [id, turnId, principal.kind, principal.id, this.leaseMs],
     )
     if (!claim) throw await this.whyNotClaimed(id, principal, before)
+    // The images and their previews are stored once the claim proves the sender owns the
+    // session and may start a turn, so the turn's event can name them (#2479). A store
+    // that fails gives the claim back and refuses the message. (A durable send does the
+    // same under its own claim, durable.ts.)
+    let sent: SentImage[] | undefined
+    if (options.images?.length) {
+      try {
+        sent = await this.storeSentImages(id, options.images)
+      } catch (err) {
+        await this.releaseClaim(id, turnId)
+        throw err
+      }
+    }
     return this.startTurn(claimed(claim), turnId, prompt, principal, {
       ...(options.context ? { context: options.context } : {}),
       ...(options.images?.length && sent ? { images: options.images, sent } : {}),
