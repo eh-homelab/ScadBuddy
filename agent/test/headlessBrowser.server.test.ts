@@ -80,7 +80,7 @@ async function connect(
 }
 
 const refOf = (snapshot: string, role: string, name: string): string => {
-  const match = new RegExp(`${role} "${name}"[^\\n]*\\[ref=(e\\d+)\\]`).exec(snapshot)
+  const match = new RegExp(`${role} "${name}"[^\\n]*\\[ref=((?:f\\d+)?e\\d+)\\]`).exec(snapshot)
   if (!match?.[1]) throw new Error(`no ${role} "${name}" in:\n${snapshot}`)
   return match[1]
 }
@@ -349,6 +349,20 @@ describe.skipIf(!chromium)(`@playwright/mcp as configured for a session${chromiu
       expect(written).toEqual([{ path: 'downloads/part.stl', bytes: DOWNLOAD_BODY, source: { tool: 'browser', url: `${ui.origin}/files/part.stl` } }])
       expect(await readdir(plugin.downloadsDir)).toEqual([])
     }, 60_000)
+
+    it("starts a turn's totals again when the budget names a new turn, as a durable session's browser outlives one (#2402)", async () => {
+      const { call, plugin } = await connect(ui.origin)
+      const { written, target } = store()
+      const click = async (over: Partial<DownloadBudget>) => {
+        writeDownloadBudget(plugin.budgetFile, budget({ turnMaxCount: 1, ...over }))
+        await clickOn(call, 'link', 'Download part')
+        return drainDownloads(plugin.downloadsDir, target, { waitMs: 15_000 })
+      }
+      expect((await click({ call: 1, turn: 'turn-a' })).saved).toHaveLength(1)
+      expect((await click({ call: 2, turn: 'turn-a' })).refused).toEqual([{ name: 'part.stl', reason: expect.stringMatching(/more than 1 downloads in one turn/) }])
+      expect((await click({ call: 1, turn: 'turn-b' })).saved).toHaveLength(1)
+      expect(written).toHaveLength(2)
+    }, 90_000)
 
     it('downloads nothing before the harness writes a budget', async () => {
       const { call, plugin } = await connect(ui.origin)

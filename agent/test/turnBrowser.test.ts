@@ -1,8 +1,20 @@
+import { randomUUID } from 'node:crypto'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { MockActivityEnvironment } from '@temporalio/testing'
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
-import type { HeadlessBrowserOptions, HeadlessBrowserPlugin } from '../src/harness/headlessBrowser.js'
+import { type DownloadTarget, MAX_DOWNLOADS_PER_CALL, MAX_DOWNLOADS_PER_TURN } from '../src/harness/browserDownloads.js'
+import {
+  browserDownloadsDir,
+  type DownloadBudget,
+  type HeadlessBrowserOptions,
+  type HeadlessBrowserPlugin,
+  NO_DOWNLOADS,
+} from '../src/harness/headlessBrowser.js'
+import { sessionBrowserDir } from '../src/harness/stateDirs.js'
 import type { UiReach, UiReachMap } from '../src/harness/browserReach.js'
 import type { BuiltInPolicy } from '../src/plugins/builtInTools.js'
 import type { Owner } from '../src/sessions/protocol.js'
@@ -23,12 +35,14 @@ const SESSION = '0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f60'
 const BROWSER: Owner = { kind: 'browser', id: 'browser', label: 'You' }
 const BACKEND = 'http://scadbuddy.test:8080'
 
-function fakeBrowser(calls: string[]): () => McpServer {
+function fakeBrowser(calls: string[], download?: () => Promise<void>): () => McpServer {
   return () => {
     const server = new McpServer({ name: 'playwright', version: '1' })
     for (const name of ['browser_navigate', 'browser_snapshot', 'browser_click', 'browser_evaluate', 'browser_file_upload']) {
       server.registerTool(name, { description: name, inputSchema: { url: z.string().optional(), filename: z.string().optional() } }, async (args) => {
         calls.push(`${name} ${JSON.stringify(args)}`)
+        // A click that downloads, as the request guard leaves one (harness/headlessBrowser.ts).
+        if (name === 'browser_click') await download?.()
         return { content: [{ type: 'text', text: `${name} ok` }] }
       })
     }
@@ -36,8 +50,19 @@ function fakeBrowser(calls: string[]): () => McpServer {
   }
 }
 
-function harness(options: { enabled?: boolean; disabled?: string[]; probe?: () => Promise<UiReachMap> } = {}) {
+function harness(
+  options: { enabled?: boolean; disabled?: string[]; probe?: () => Promise<UiReachMap>; files?: DownloadTarget['files']; stateDir?: string } = {},
+) {
   const calls: string[] = []
+  const stateDir = options.stateDir ?? '/tmp/turn-browser-test'
+  const turn = { id: 'turn-1' }
+  const downloads = browserDownloadsDir(sessionBrowserDir({ stateDir }, SESSION))
+  const download = async () => {
+    const id = randomUUID()
+    await mkdir(downloads, { recursive: true })
+    await writeFile(path.join(downloads, `${id}.bin`), 'solid part')
+    await writeFile(path.join(downloads, `${id}.json`), JSON.stringify({ url: 'https://makerworld.com/f/part.stl?t=1', name: 'part.stl' }))
+  }
   const approvedOrigins: string[] = []
   const remembered: unknown[][] = []
   // Only rememberDurableOrigin and loadApprovedOrigins reach it here.
@@ -55,8 +80,11 @@ function harness(options: { enabled?: boolean; disabled?: string[]; probe?: () =
     browser: async (_session: string, opts: HeadlessBrowserOptions): Promise<Hosted> => {
       started++
       held.push(JSON.stringify(opts.uiReach ?? null))
-      const plugin = { approve: (o: string) => void approvedOrigins.push(o) } as unknown as HeadlessBrowserPlugin
-      return { client: await connectInProcess(fakeBrowser(calls)), plugin, key: '', lastUsed: 0, inFlight: 1 }
+      const plugin = {
+        approve: (o: string) => void approvedOrigins.push(o),
+        budgetFile: path.join(stateDir, 'download-budget.json'),
+      } as unknown as HeadlessBrowserPlugin
+      return { client: await connectInProcess(fakeBrowser(calls, download)), plugin, key: '', lastUsed: 0, inFlight: 1 }
     },
     release: (h: Hosted) => {
       h.inFlight--
@@ -70,18 +98,19 @@ function harness(options: { enabled?: boolean; disabled?: string[]; probe?: () =
   }
   const servers = turnBrowserServers({
     sql,
-    paths: { stateDir: '/tmp/turn-browser-test' },
+    paths: { stateDir },
     host,
+    ...(options.files ? { files: options.files } : {}),
     headless: { backendUrl: BACKEND, browserAllowedOrigins: 'https://makerworld.com', ...(options.probe ? { probe: options.probe } : {}) },
     settings: { get: async <T,>(key: string) => (key === 'headless_browser_enabled' ? (options.enabled ?? true) : undefined) as T },
     builtIn: async () => policy,
   })
   const deps = {
-    sessions: { ownerOf: async (id: string) => (id === SESSION ? BROWSER : undefined) },
+    sessions: { ownerOf: async (id: string) => (id === SESSION ? { ...BROWSER, turnId: turn.id } : undefined) },
     servers: async (context: Parameters<typeof servers>[0]) => ({ servers: await servers(context), problems: [], secrets: [], release: () => {} }),
     approvals: { approved: async (requestId: string) => requestId.endsWith(':toolu_approved') },
   }
-  return { calls, remembered, approvedOrigins, held, started: () => started, released: () => released, activities: turnToolActivities(deps), call: turnToolActivity(deps) }
+  return { calls, turn, remembered, approvedOrigins, held, started: () => started, released: () => released, activities: turnToolActivities(deps), call: turnToolActivity(deps) }
 }
 
 function env(activityType: string, activityId = 'tool-toolu_01') {
@@ -94,6 +123,61 @@ function env(activityType: string, activityId = 'tool-toolu_01') {
 }
 
 const NAV = `${BROWSER_SERVER}__browser_navigate`
+
+describe("the headless browser's downloads in a durable turn (#2402)", () => {
+  function workspace() {
+    const written: string[] = []
+    let used = 0
+    const files: DownloadTarget['files'] = {
+      limits: async () => ({ fileMaxBytes: 1000, workspaceMaxBytes: 5000 }),
+      usage: async () => ({ bytes: used, files: written.length }),
+      write: async (_ref: unknown, p: string, bytes: Buffer) => {
+        written.push(p)
+        used += bytes.length
+        return { path: p, size: bytes.length, sha256: 'ab'.repeat(32), mediaType: 'model/stl' }
+      },
+    } as unknown as DownloadTarget['files']
+    return { files, written, use: (n: number) => (used += n) }
+  }
+  const CLICK = `${BROWSER_SERVER}__browser_click`
+  const budget = async (stateDir: string) => JSON.parse(await readFile(path.join(stateDir, 'download-budget.json'), 'utf8')) as DownloadBudget
+
+  it("budgets each call by the workspace and the turn, and returns what it downloaded, now in the workspace", async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), 'turn-browser-dl-'))
+    const w = workspace()
+    const h = harness({ files: w.files, stateDir })
+    const out = await env(`turn:${CLICK}`).run(h.call, {})
+    expect(await budget(stateDir)).toEqual({
+      call: 1,
+      turn: 'turn-1',
+      fileMaxBytes: 1000,
+      callMaxBytes: 5000,
+      callMaxCount: MAX_DOWNLOADS_PER_CALL,
+      turnMaxBytes: 5000,
+      turnMaxCount: MAX_DOWNLOADS_PER_TURN,
+    })
+    expect(w.written).toEqual(['downloads/part.stl'])
+    expect(String(out)).toContain('browser_click ok')
+    expect(String(out)).toContain('- downloads/part.stl (model/stl, 10 bytes')
+    // The turn's room is what it was at its first call; a call's is what is left now.
+    w.use(2000)
+    await env(`turn:${CLICK}`, 'tool-toolu_02').run(h.call, {})
+    expect(await budget(stateDir)).toMatchObject({ call: 2, turn: 'turn-1', callMaxBytes: 2990, turnMaxBytes: 5000 })
+    // The next turn starts its own count and room; the browser outlives the turn, so the
+    // guard starts its turn totals again by the turn named in the budget.
+    h.turn.id = 'turn-2'
+    await env(`turn:${CLICK}`, 'tool-toolu_03').run(h.call, {})
+    expect(await budget(stateDir)).toMatchObject({ call: 1, turn: 'turn-2', turnMaxBytes: 2980 })
+  })
+
+  it('downloads nothing without a workspace', async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), 'turn-browser-dl-'))
+    const h = harness({ stateDir })
+    const out = await env(`turn:${CLICK}`).run(h.call, {})
+    expect(await budget(stateDir)).toEqual({ ...NO_DOWNLOADS, call: null })
+    expect(String(out)).not.toContain('downloads/')
+  })
+})
 
 describe('the headless browser in a durable turn', () => {
   it('offers its tools under their classic names, minus the deny list and what Settings disabled, with the grant tool', async () => {
@@ -189,7 +273,7 @@ describe('the headless browser in a durable turn', () => {
 describe('BrowserHost (#2522)', () => {
   const OPTIONS: HeadlessBrowserOptions = { sessionId: SESSION, backendUrl: BACKEND, dir: '/tmp/turn-browser-host', tmpDir: '/tmp/turn-browser-host-tmp' }
 
-  function host(options: { active?: (session: string) => Promise<boolean> } = {}) {
+  function host(options: { active?: (session: string) => Promise<boolean>; closed?: (session: string) => Promise<void> } = {}) {
     const closed: string[] = []
     let n = 0
     const b = new BrowserHost({
@@ -237,6 +321,15 @@ describe('BrowserHost (#2522)', () => {
     expect(closed).toEqual([idOf(a)])
     expect(idOf(restarted!)).not.toBe(idOf(a))
     b.release(restarted!)
+    await b.stop()
+  })
+
+  it("keeps a session's downloads once its browser has ended, before its folders go (#2402)", async () => {
+    const order: string[] = []
+    const { b, closed } = host({ closed: async (session) => void order.push(`drained ${session} after ${closed.join(',')}`) })
+    b.release(await b.browser(SESSION, OPTIONS))
+    await b.close(SESSION)
+    expect(order).toEqual([`drained ${SESSION} after browser-1`])
     await b.stop()
   })
 

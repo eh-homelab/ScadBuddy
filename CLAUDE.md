@@ -522,7 +522,8 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     inline content (`src/tools/workspaceUploads.ts`: binary streamed by
     `SessionFiles.chunks` into the multipart route, text decoded as UTF-8); the headless
     browser's downloads are drained into `downloads/` after each browser call by a
-    `PostToolUse` hook (`src/harness/browserDownloads.ts`).
+    `PostToolUse` hook (`src/harness/browserDownloads.ts`), and in a durable session by
+    the browser turn server's `after` (`src/temporal/turnBrowser.ts`).
     The panel's Files (part 3) are `routes/sessionFiles.ts`
     (list, download as an attachment, multipart upload, delete; the session routes'
     guards, writes owner-only, each write a `workspace.file` event) and the caps' route

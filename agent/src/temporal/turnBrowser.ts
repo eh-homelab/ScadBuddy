@@ -3,10 +3,20 @@ import path from 'node:path'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import type { Sql } from 'postgres'
+import {
+  describeDrained,
+  DOWNLOAD_WAIT_MS,
+  type DownloadTarget,
+  drainDownloads,
+  MAX_DOWNLOADS_PER_CALL,
+  MAX_DOWNLOADS_PER_TURN,
+  writeDownloadBudget,
+} from '../harness/browserDownloads.js'
 import { browserOrigins, loadApprovedOrigins, rememberDurableOrigin } from '../harness/browserOrigins.js'
 import type { UiReachMap } from '../harness/browserReach.js'
 import {
   assertHeadlessPlugin,
+  browserDownloadsDir,
   browserInputGuard,
   browserTierDependsOnInput,
   browserTierOf,
@@ -15,6 +25,7 @@ import {
   type HeadlessBrowserOptions,
   type HeadlessBrowserPlugin,
   materializeHeadlessBrowser,
+  NO_DOWNLOADS,
   originToApprove,
   PLUGIN_NAME,
   SERVER_NAME,
@@ -80,6 +91,7 @@ export class BrowserHost {
   readonly #idleMs: number
   readonly #active: ((session: string) => Promise<boolean>) | undefined
   readonly #start: (options: HeadlessBrowserOptions, key: string) => Promise<Hosted>
+  readonly #closed: ((session: string) => Promise<void>) | undefined
   readonly #hosted = new Map<string, Hosted>()
   // Each session's starts and closes run one after another, so two calls never start two
   // browsers for one session, nor close one the other is using (#2522).
@@ -93,11 +105,14 @@ export class BrowserHost {
     /** Whether the session's turn is running now: its browser is kept while it is, even parked on an approval. */
     active?: (session: string) => Promise<boolean>
     start?: (options: HeadlessBrowserOptions, key: string) => Promise<Hosted>
+    /** Once a session's browser has ended, before its folders go: keeps what it downloaded since its last call (#2402). */
+    closed?: (session: string) => Promise<void>
   }) {
     this.#paths = options.paths
     this.#idleMs = options.idleMs ?? BROWSER_IDLE_MS
     this.#active = options.active
     this.#start = options.start ?? startBrowser
+    this.#closed = options.closed
     this.#timer = setInterval(() => void this.reap(), Math.min(this.#idleMs, 60_000))
     this.#timer.unref()
   }
@@ -144,6 +159,7 @@ export class BrowserHost {
     this.#drained.delete(hosted)
     if (this.#hosted.get(session) === hosted) this.#hosted.delete(session)
     await hosted.client.close().catch(() => {})
+    await this.#closed?.(session).catch(() => {})
     await removeSessionBrowserDirs(this.#paths, session).catch(() => {})
   }
 
@@ -194,6 +210,8 @@ export type TurnBrowserDeps = {
   headless: HeadlessBrowserDeps
   settings?: { get<T>(key: string): Promise<T | undefined> } | undefined
   builtIn?: (() => Promise<BuiltInPolicy>) | undefined
+  /** The workspace the browser's downloads go to (#2402); without it nothing downloads. */
+  files?: DownloadTarget['files'] | undefined
 }
 
 /** The options a classic turn would start this session's browser with (sessions/manager.ts `runTurn`), but its approved origins. */
@@ -252,6 +270,35 @@ export function turnBrowserServers(deps: TurnBrowserDeps): (context: TurnContext
     if (kept.size > OPTIONS_KEPT) kept.delete(kept.keys().next().value!)
     return options
   }
+  // Each session's download budget for its current turn, as run.ts's hooks keep one for a
+  // classic turn: the call count, and the room the workspace had at the turn's first call.
+  const budgets = new Map<string, { turn: string; call: number; turnMaxBytes?: number }>()
+  const writeBudget = async (session: string, turn: string, budgetFile: string, files: DownloadTarget['files']) => {
+    const was = budgets.get(session)
+    const now = was && was.turn === turn ? was : { turn, call: 0 }
+    now.call++
+    budgets.delete(session)
+    budgets.set(session, now)
+    if (budgets.size > OPTIONS_KEPT) budgets.delete(budgets.keys().next().value!)
+    try {
+      const ref = { kind: 'session' as const, sessionId: session }
+      const [limits, usage] = await Promise.all([files.limits(), files.usage(ref)])
+      const room = Math.max(0, limits.workspaceMaxBytes - usage.bytes)
+      now.turnMaxBytes ??= room
+      writeDownloadBudget(budgetFile, {
+        call: now.call,
+        turn,
+        fileMaxBytes: Math.min(limits.fileMaxBytes, room),
+        callMaxBytes: room,
+        callMaxCount: MAX_DOWNLOADS_PER_CALL,
+        turnMaxBytes: now.turnMaxBytes,
+        turnMaxCount: MAX_DOWNLOADS_PER_TURN,
+      })
+    } catch {
+      // The workspace could not be read: nothing downloads in this call.
+      writeDownloadBudget(budgetFile, { ...NO_DOWNLOADS, call: now.call, turn })
+    }
+  }
   return async (context) => {
     if ((await deps.settings?.get<unknown>(SETTING_HEADLESS_BROWSER)) !== true) return []
     const policy = deps.builtIn ? await deps.builtIn() : undefined
@@ -299,6 +346,29 @@ export function turnBrowserServers(deps: TurnBrowserDeps): (context: TurnContext
       release: () => {
         if (held) deps.host.release(held)
         held = undefined
+      },
+      // The download budget for this call, and what it downloaded drained into the workspace
+      // after it, as run.ts's PreToolUse and PostToolUse hooks do in a classic turn (#2402).
+      // Never fails the call: a budget that cannot be written leaves the one there, at
+      // most the last call's, and a new browser's none (as run.ts's hook).
+      before: async () => {
+        if (!held) return
+        const files = deps.files
+        try {
+          if (!files) writeDownloadBudget(held.plugin.budgetFile, { ...NO_DOWNLOADS, call: null })
+          else await writeBudget(context.session, context.turnId ?? 'unknown', held.plugin.budgetFile, files)
+        } catch {
+          // As above.
+        }
+      },
+      after: async () => {
+        if (!deps.files) return undefined
+        const drained = await drainDownloads(
+          browserDownloadsDir(sessionBrowserDir(deps.paths, context.session)),
+          { files: deps.files, ref: { kind: 'session', sessionId: context.session } },
+          { waitMs: DOWNLOAD_WAIT_MS },
+        ).catch(() => undefined)
+        return drained && describeDrained(drained)
       },
       tierOf: tier,
       // browser_navigate and browser_tabs are outward by the origin they open.

@@ -20,7 +20,9 @@ import { DEFAULT_STATE_DIR, pluginCacheDir } from './harness/options.js'
 import { probeChromiumSandbox } from './harness/headlessSandbox.js'
 import { UiOriginProbe } from './harness/browserReach.js'
 import { OWN_PLUGIN_DIR } from './harness/ownPlugin.js'
-import { ensureStateDirs, StateDirError, sweepBrowserDirs } from './harness/stateDirs.js'
+import { ensureStateDirs, sessionBrowserDir, StateDirError, sweepBrowserDirs } from './harness/stateDirs.js'
+import { drainDownloads } from './harness/browserDownloads.js'
+import { browserDownloadsDir } from './harness/headlessBrowser.js'
 import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
 import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
@@ -468,6 +470,17 @@ const browserHost = new BrowserHost({
           (await database.sql`SELECT 1 FROM ai_sessions WHERE id = ${session} AND durable_turn_id IS NOT NULL`).length > 0,
       }
     : {}),
+  // A download that ended after the browser's last call is kept, as a classic turn's
+  // last drain keeps it (#2402, sessions/manager.ts).
+  ...(workspace
+    ? {
+        closed: async (session: string) =>
+          void (await drainDownloads(browserDownloadsDir(sessionBrowserDir(paths, session)), {
+            files: workspace,
+            ref: { kind: 'session', sessionId: session },
+          })),
+      }
+    : {}),
 })
 // The enabled remote plugins and every usable credential's secret, as a classic turn
 // reads them, for a durable turn's tools and its automatic memory.
@@ -508,6 +521,7 @@ const turnToolDeps = temporal
                 paths,
                 host: browserHost,
                 headless: headlessBrowserDeps,
+                ...(workspace ? { files: workspace } : {}),
                 ...(settings ? { settings } : {}),
                 builtIn: () => builtInTools.policy(),
               }),

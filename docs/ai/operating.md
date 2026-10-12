@@ -1029,6 +1029,10 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   `{tool: 'browser', url}` with the query dropped. The caps hold while a download
   runs: the per-file cap and the room left in the workspace, at most 5 downloads a
   browser call and 20 a turn ([headless-browser.md](headless-browser.md#downloads)).
+  In a durable session too (#2402): the browser server writes the budget before each
+  call and drains after it (`temporal/turnBrowser.ts`, `before`/`after`), the budget
+  names the turn so the turn's totals start again though the browser outlives it, and
+  `BrowserHost` drains once more when it closes a session's browser.
 - `workspace_read` redacts every saved Claude credential's secret from text (and, in a
   classic turn, the turn's plugin tokens) before the model sees it
   (`ToolServices.secrets`, `main.ts`).

@@ -21,8 +21,9 @@ import { DurableTurns } from '../src/sessions/durable.js'
 import { SessionManager, SETTING_MODEL, SETTING_SESSION_BUDGET_USD } from '../src/sessions/manager.js'
 import type { Owner } from '../src/sessions/protocol.js'
 import { PgPayloadKeys, SubjectPayloadCodec } from '../src/temporal/payloadCodec.js'
-import { gateActivities, PgSessionOwners, toolActivities, type ToolActivity } from '../src/temporal/toolActivities.js'
-import { turnToolActivities, turnToolActivity } from '../src/temporal/turnTools.js'
+import { SessionBlobs } from '../src/sessions/blobs.js'
+import { gateActivities, PgApprovalRecords, PgSessionOwners, toolActivities, type ToolActivity } from '../src/temporal/toolActivities.js'
+import { turnToolActivities, turnToolActivity, type TurnToolsDeps } from '../src/temporal/turnTools.js'
 import { AgentWorker } from '../src/temporal/worker.js'
 import { DURABLE_TOOLS, writeManifest } from '../src/tools/manifest.js'
 import { PendingActionStore } from '../src/tools/pending.js'
@@ -107,6 +108,14 @@ export type DurableStackOptions = {
   renderWaitMs?: number
   /** The durable worker's output, line by line. */
   stderr?: (line: string) => void
+  /** Settings saved before any session (the headless browser's switch, say). */
+  settings?: Record<string, unknown>
+  /** A turn's own servers (none by default), built over the stack's database and state dir. */
+  turnServers?: (stack: { sql: Database['sql']; stateDir: string }) => TurnToolsDeps['servers']
+  /** This "replica's" own queue, served by a second worker, for pinned turn servers (main.ts HOST_QUEUE). */
+  hostQueue?: string
+  /** How each parked approval is answered; every one is denied by default. */
+  decide?: (entry: { id: string; tool: string }) => 'approve' | 'deny'
 }
 
 export type DurableRunOptions = {
@@ -119,8 +128,15 @@ export type DurableRunOptions = {
 type Ran = { ok: boolean; result: string }
 
 export type DurableEvalStack = {
-  run(scenario: Scenario, options?: DurableRunOptions, backend?: ScenarioBackend): Promise<Outcome & { script: ScriptedTurn[] }>
+  run(
+    scenario: Scenario,
+    options?: DurableRunOptions,
+    backend?: ScenarioBackend,
+  ): Promise<Outcome & { script: ScriptedTurn[]; sessionId?: string | undefined }>
   close(): Promise<void>
+  /** The stack's database and state dir, for a test's own checks. */
+  sql: Database['sql']
+  stateDir: string
 }
 
 /** Starts the durable stack once; each `run` is a new durable session on it. */
@@ -151,6 +167,7 @@ export async function startDurableStack(options: DurableStackOptions): Promise<D
     const settings = new SettingsStore(db.sql)
     if (options.model) await settings.set(SETTING_MODEL, options.model)
     await settings.set(SETTING_SESSION_BUDGET_USD, options.maxBudgetUsd ?? 0.5)
+    for (const [key, value] of Object.entries(options.settings ?? {})) await settings.set(key, value)
 
     const worker = await startDurableWorker({ url: withSearchPath(url, schema), address: env.address, dir, stderr: options.stderr })
     cleanups.push(() => stopProcess(worker))
@@ -169,7 +186,25 @@ export async function startDurableStack(options: DurableStackOptions): Promise<D
     } satisfies ToolServices
     const sessions = new PgSessionOwners(db.sql)
     const audit = new AuditLog({ sql: db.sql, settings: () => settings, hashKey: randomBytes(32) })
-    const turnDeps = { sessions, servers: async () => ({ servers: [], problems: [], secrets: [], release: () => {} }) }
+    const turnDeps: TurnToolsDeps = {
+      sessions,
+      servers: options.turnServers?.({ sql: db.sql, stateDir: dir }) ?? (async () => ({ servers: [], problems: [], secrets: [], release: () => {} })),
+      approvals: new PgApprovalRecords(db.sql),
+      audit,
+      blobs: new SessionBlobs(db.sql),
+      ...(options.hostQueue ? { hostQueue: options.hostQueue } : {}),
+    }
+    if (options.hostQueue) {
+      const host = AgentWorker.start({
+        address: env.address,
+        namespace: 'default',
+        taskQueue: options.hostQueue,
+        activities: { ...turnToolActivities(turnDeps), default: turnToolActivity(turnDeps) },
+        dataConverter: codec,
+      })
+      cleanups.push(() => host.stop())
+      await host.running(60_000)
+    }
     const tools = AgentWorker.start({
       address: env.address,
       namespace: 'default',
@@ -200,6 +235,8 @@ export async function startDurableStack(options: DurableStackOptions): Promise<D
 
     return {
       close,
+      sql: db.sql,
+      stateDir: dir,
       async run(scenario, runOptions = {}, backend = new EvalBackend()) {
         current = backend
         ran.clear()
@@ -231,7 +268,8 @@ export async function startDurableStack(options: DurableStackOptions): Promise<D
                 toolUseId,
                 tier: (call?.risk as RiskTier | undefined) ?? 'outward',
               })
-              await gate.respond(session.id, { request_id: entry.id, response: { kind: 'approval', decision: 'deny' }, responder: EVAL_OWNER, role: 'browser' })
+              const decision = options.decide?.({ id: entry.id, tool: entry.tool }) ?? 'deny'
+              await gate.respond(session.id, { request_id: entry.id, response: { kind: 'approval', decision }, responder: EVAL_OWNER, role: 'browser' })
             }
             await new Promise((r) => setTimeout(r, 200))
           }
@@ -260,6 +298,7 @@ export async function startDurableStack(options: DurableStackOptions): Promise<D
           ...(error !== undefined ? { error: sessionId ? `${error} (session ${sessionId})` : error } : {}),
           durationMs: Date.now() - startedAt,
           script,
+          sessionId,
         }
       },
     }

@@ -212,6 +212,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  */
 export type DownloadBudget = {
   call: number | null
+  /**
+   * The turn the budget is for, when the server outlives one (a durable session's
+   * browser, temporal/turnBrowser.ts): the turn's totals start again when it changes.
+   */
+  turn?: string
   /** One download's most: the workspace file cap, or the room left, whichever is less. */
   fileMaxBytes: number
   /** All of one call's downloads: the room left in the workspace. */
@@ -737,6 +742,7 @@ const budget = () => {
     const n = (v) => (typeof v === 'number' && v >= 0 ? v : 0)
     return {
       call: b.call ?? null,
+      turn: typeof b.turn === 'string' ? b.turn : null,
       fileMaxBytes: n(b.fileMaxBytes),
       callMaxBytes: n(b.callMaxBytes),
       callMaxCount: n(b.callMaxCount),
@@ -843,8 +849,9 @@ const dropServerCopy = (suggested) => {
   drop()
   setTimeout(drop, 1000).unref()
 }
-// This server lives for one query, so these totals are the turn's.
-const tally = { call: undefined, callCount: 0, callBytes: 0, turnCount: 0, turnBytes: 0, live: new Map() }
+// A classic turn's server lives for one query, so these totals are the turn's; a durable
+// session's names its turn in the budget, and they start again at the next one.
+const tally = { turn: null, call: undefined, callCount: 0, callBytes: 0, turnCount: 0, turnBytes: 0, live: new Map() }
 const sizeOf = (file) => Math.max(plainSize(file), plainSize(file + '.crdownload'))
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 // Why a download of \`size\` bytes may not go on, or null, counting the others still running.
@@ -912,6 +919,11 @@ const watchDownloads = (page) => {
       }
       writeFileSync(pending, '', { flag: 'wx' })
       const b = budget()
+      if (b.turn !== null && tally.turn !== b.turn) {
+        tally.turn = b.turn
+        tally.turnCount = 0
+        tally.turnBytes = 0
+      }
       if (tally.call !== b.call) {
         tally.call = b.call
         tally.callCount = 0

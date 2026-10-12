@@ -107,6 +107,10 @@ export type TurnServer = {
   listingKey?: string
   /** Whether a tool the server lists is offered (the browser's fixed deny list, Settings → Plugins). */
   offers?(tool: string): boolean
+  /** Just before a call is sent, on the client it is sent on (the browser's download budget). */
+  before?(harnessName: string): Promise<void>
+  /** After a call, whether it failed or not: a note added to its result (the browser's downloads, now in the workspace). */
+  after?(harnessName: string): Promise<string | undefined>
   /** Once an outward call's approval is verified, before it runs (an approved origin is remembered). */
   approved?(harnessName: string, input: unknown, requestId: string): Promise<void>
 }
@@ -475,23 +479,29 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
       }
       const heartbeat = setInterval(() => context.heartbeat(), 10_000)
       let result: Awaited<ReturnType<Client['callTool']>>
+      let note: string | undefined
       try {
-        result = await withClient(server, (client) => client.callTool({ name: tool.name, arguments: fields }, undefined, { signal }))
+        result = await withClient(server, async (client) => {
+          await server.before?.(harnessName)
+          return client.callTool({ name: tool.name, arguments: fields }, undefined, { signal })
+        })
       } catch (err) {
         if (signal.aborted) throw new CancelledFailure('the call was cancelled')
+        note = await server.after?.(harnessName)
         await record('error', (err as Error).message)
-        throw ApplicationFailure.nonRetryable(scrub(`${name} failed: ${(err as Error).message}`), TOOL_ERROR)
+        const message = `${name} failed: ${(err as Error).message}`
+        throw ApplicationFailure.nonRetryable(scrub(note ? `${message}\n\n${note}` : message), TOOL_ERROR)
       } finally {
         clearInterval(heartbeat)
       }
+      note = await server.after?.(harnessName)
       // The images go to the session's blobs, never into the payload; their names and
       // the text go through the same scrub.
-      const text = scrub(
-        await resultText(
-          (result.content ?? []) as { type: string; text?: string; data?: unknown; mimeType?: unknown }[],
-          deps.blobs && session ? { session, blobs: deps.blobs } : undefined,
-        ),
+      const content = await resultText(
+        (result.content ?? []) as { type: string; text?: string; data?: unknown; mimeType?: unknown }[],
+        deps.blobs && session ? { session, blobs: deps.blobs } : undefined,
       )
+      const text = scrub(note ? `${content}\n\n${note}` : content)
       await record(result.isError ? 'error' : 'ok')
       if (result.isError) throw ApplicationFailure.nonRetryable(text, TOOL_ERROR)
       return text
