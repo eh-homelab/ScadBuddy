@@ -251,6 +251,14 @@ if (database) {
 // 24 h after their last write.
 const workspace = database ? new SessionFiles(database.sql, { settings }) : undefined
 if (workspace) toolServices.workspace = workspace
+// What workspace_read redacts from text in every mode (classic, durable, /mcp):
+// each saved Claude credential's secret, read at the call (a classic turn adds its
+// plugin tokens, tools/harness.ts). None without the KEK, which opens them.
+if (credentials && kek.ok) {
+  const key = kek.kek
+  toolServices.secrets = async () =>
+    (await credentials.revealAll(key)).flatMap((row) => (row.credential ? [row.credential.secret] : []))
+}
 const stopWorkspaceSweep = workspace?.startSweeper(WORKSPACE_SWEEP_MS, {
   ...(database ? { ready: database.ready } : {}),
   onError: (err) => console.error('workspace sweep failed:', (err as Error).message),

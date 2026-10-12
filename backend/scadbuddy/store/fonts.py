@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import threading
 from collections.abc import Collection, Mapping
 from pathlib import Path
 
@@ -76,8 +77,9 @@ class FontMirror:
         if directory.is_dir():
             await self._publish_dir(directory)
 
-    async def backfill(self) -> int:
-        """Mirror every family installed before the store was (the API's boot)."""
+    async def backfill(self, *, stop: threading.Event | None = None) -> int:
+        """Mirror every family installed before the store was (the API's boot). Once
+        ``stop`` is set it publishes no further family (#2128), as `RemoteAssets.backfill`."""
         root = self.fonts.root
         if not root.is_dir():
             return 0
@@ -85,6 +87,8 @@ class FontMirror:
         for directory in sorted(
             p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")
         ):
+            if stop is not None and stop.is_set():
+                break
             if await asyncio.to_thread(self.content.index.get, font_key(directory.name)) is None:
                 await self._publish_dir(directory)
                 done += 1

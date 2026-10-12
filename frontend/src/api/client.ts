@@ -542,9 +542,15 @@ export async function command<T>(
   init: RequestInit = {},
   /** Where the operation is followed: the backend's, or the agent's own (`/ai/operations`, #1055). */
   operations = '/operations',
+  /**
+   * The press's key. A caller offering "Try again" after a failure passes the failed
+   * attempt's, so the retry follows a start that may have happened rather than doing it
+   * a second time; a new press gets a new one.
+   */
+  key: string = newRequestId(),
 ): Promise<T> {
   const signal = init.signal ?? undefined
-  const headers = { ...(init.headers as Record<string, string> | undefined), 'Idempotency-Key': newRequestId() }
+  const headers = { ...(init.headers as Record<string, string> | undefined), 'Idempotency-Key': key }
   const first = await reattach(() => requestWithStatus<T | OperationAccepted>(path, { ...init, headers }), signal)
   return followOperation<T>(first, signal, operations)
 }
@@ -1099,17 +1105,25 @@ export const api = {
   backfillOutput: (outputId: string) =>
     request<Job>(`/outputs/${seg(outputId)}/backfill`, { method: 'POST' }),
 
-  /** `index` picks one of a pipeline job's outputs (spec 2026-09-27 §5.2); the first by default. */
-  createOutput: (slug: string, jobId: string, name?: string, inputs?: JsonObject, index?: number) =>
-    command<Output>(`/models/${seg(slug)}/outputs`, {
-      method: 'POST',
-      body: JSON.stringify({
-        job_id: jobId,
-        name: name ?? null,
-        ...(inputs ? { inputs } : {}),
-        ...(index !== undefined ? { index } : {}),
-      }),
-    }),
+  /**
+   * `index` picks one of a pipeline job's outputs (spec 2026-09-27 §5.2); the first by
+   * default. `key` is a retried press's (`command`), so the retry saves one output.
+   */
+  createOutput: (slug: string, jobId: string, name?: string, inputs?: JsonObject, index?: number, key?: string) =>
+    command<Output>(
+      `/models/${seg(slug)}/outputs`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          job_id: jobId,
+          name: name ?? null,
+          ...(inputs ? { inputs } : {}),
+          ...(index !== undefined ? { index } : {}),
+        }),
+      },
+      undefined,
+      key,
+    ),
 
   /** Saved inputs brought up to the template's `INPUTS_VERSION` (spec 2026-09-27 §8.2). */
   migrateInputs: (slug: string, inputs: JsonObject, version?: string) =>

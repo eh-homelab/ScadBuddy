@@ -4,6 +4,7 @@ import asyncio
 import importlib
 import logging
 import pkgutil
+import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
@@ -311,18 +312,22 @@ async def _sweep_blobs_logged(state: AppState) -> None:
         logger.info("removed unreferenced blobs", extra={"count": len(removed)})
 
 
-async def _backfill_store_logged(state: AppState, *, uploads: bool, fonts: bool = True) -> None:
+async def _backfill_store_logged(
+    state: AppState, *, uploads: bool, fonts: bool = True, stop: threading.Event | None = None
+) -> None:
     """The boot's mirror of what predates the store, in the background and best effort:
     an unreachable Bambuddy never holds up or fails the start. Uploads only when the
     housekeeping Schedule's sweep does not backfill them: `SCADBUDDY_ASSET_SWEEP_INTERVAL`
     0, or the Schedule paused (`_run_library_worker`, review #1095 2). Fonts on every
-    boot: nothing else mirrors a family installed before."""
+    boot: nothing else mirrors a family installed before. ``stop`` ends it after the item
+    in hand (`_join_background`)."""
     try:
         if uploads and state.store.remote_assets is not None:
-            mirrored = await state.store.remote_assets.backfill(state.assets)
+            mirrored = await state.store.remote_assets.backfill(state.assets, stop=stop)
             logger.info("mirrored uploads", extra={"count": mirrored})
         if fonts and state.store.fonts is not None:
-            logger.info("mirrored fonts", extra={"count": await state.store.fonts.backfill()})
+            count = await state.store.fonts.backfill(stop=stop)
+            logger.info("mirrored fonts", extra={"count": count})
     except Exception:
         logger.exception("could not mirror what predates the blob store; the next boot retries")
 
@@ -334,6 +339,33 @@ HEARTBEAT_EVERY = HEARTBEAT_TIMEOUT.total_seconds() / 4
 #: How long a sweep the worker's stop cancels may still run (#1708): cancelling its task
 #: would leave its thread running on the stores the lifespan closes next.
 SWEEP_SHUTDOWN_JOIN = 10.0
+
+
+#: How long the shutdown waits for the boot's backfills to stop (#2128): each runs its
+#: work in threads, which a cancel would leave running on the pool and the stores the
+#: lifespan closes next.
+BACKGROUND_SHUTDOWN_JOIN = 10.0
+
+
+async def _join_background(stop: threading.Event, *tasks: asyncio.Task[Any] | None) -> None:
+    """Stop the boot's backfills (#2128): set ``stop``, which each checks between items,
+    and wait up to `BACKGROUND_SHUTDOWN_JOIN` for them to end by themselves, as
+    `follow_backfills`' remover waits for its attaches (#1759). One still running past
+    that is cancelled and logged; its thread may then outlive the pool."""
+    stop.set()
+    running = {task for task in tasks if task is not None}
+    if not running:
+        return
+    _, late = await asyncio.wait(running, timeout=BACKGROUND_SHUTDOWN_JOIN)
+    for task in late:
+        logger.warning(
+            "a boot backfill was still running at shutdown; cancelled it",
+            extra={"task": task.get_name()},
+        )
+        task.cancel()
+    for task in running:
+        with suppress(asyncio.CancelledError):
+            await task
 
 
 async def _heartbeating[T](work: Coroutine[Any, Any, T]) -> T:
@@ -497,12 +529,19 @@ async def _reap_output_holds_logged(state: AppState) -> None:
         raise
 
 
-async def _attach_backfills_logged(state: AppState, *, reraise: bool = True) -> None:
+async def _attach_backfills_logged(
+    state: AppState, *, reraise: bool = True, stop: threading.Event | None = None
+) -> None:
     """#902's backstop pass. The Schedule's sweep (``reraise``) fails its activity on an
-    error; the boot's pass only logs it."""
+    error; the boot's pass only logs it, and is ended by ``stop`` (`_join_background`)."""
     try:
         await asyncio.to_thread(
-            attach_backfills, state.outputs, state.refs, state.render.store.read, state.events
+            attach_backfills,
+            state.outputs,
+            state.refs,
+            state.render.store.read,
+            state.events,
+            stop,
         )
     except Exception:
         logger.exception("could not attach the finished output re-renders")
@@ -995,6 +1034,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     unfollow = follow_changes(state)
     unfollow_backfills: Callable[[], Coroutine[Any, Any, None]] | None = None
     attach_now: asyncio.Task[None] | None = None
+    stop_background = threading.Event()
     components = AsyncExitStack()
     worker: tuple[asyncio.Task[None], WorkerDeps] | None = None
     stop = asyncio.Event()
@@ -1027,7 +1067,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         # And once now, whatever the Schedule: a re-render that settled while no replica
         # was listening (the sweeps' interval 0, or the Schedule paused).
-        attach_now = asyncio.create_task(_attach_backfills_logged(state, reraise=False))
+        attach_now = asyncio.create_task(
+            _attach_backfills_logged(state, reraise=False, stop=stop_background),
+            name="attach backfills",
+        )
         # Print runs (#1052): the `scadbuddy-print` worker serves the `bambuddy` queue,
         # or this process does when told to (#1060); the upkeep is this process's.
         if serves_print_queue(state.settings):
@@ -1039,7 +1082,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         library = asyncio.create_task(_run_library_worker(state, stop_library))
         if state.store.content is not None:
             backfill = asyncio.create_task(
-                _backfill_store_logged(state, uploads=state.config.asset_sweep_interval == 0)
+                _backfill_store_logged(
+                    state,
+                    uploads=state.config.asset_sweep_interval == 0,
+                    stop=stop_background,
+                ),
+                name="store backfill",
             )
         # The per-change requests. The pass over every model is the preview
         # backfill's Schedule (#1054), triggered once the library worker connects.
@@ -1065,11 +1113,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await _stop_queue_worker(library, "library", LIBRARY_WORKER_STOP_TIMEOUT)
         if unfollow_backfills is not None:
             await unfollow_backfills()
-        for background in (backfill, attach_now):
-            if background is not None:
-                background.cancel()
-                with suppress(asyncio.CancelledError):
-                    await background
+        await _join_background(stop_background, backfill, attach_now)
         stop_printing.set()
         await _stop_queue_worker(printing, "print")
         await _stop_queue_worker(upkeep, "print upkeep")

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { transcriptCut } from '../src/sessions/forkPoint.js'
+import { blobNames, transcriptCut } from '../src/sessions/forkPoint.js'
+import type { ServerEvent } from '../src/sessions/protocol.js'
 
 // Fork from a message (#793): the panel's assistant message id (`<API message id>:<block>`,
 // sessions/sdkEvents.ts) to the SDK transcript entry `forkSession({upToMessageId})` slices at.
@@ -45,5 +46,26 @@ describe('transcriptCut', () => {
     expect(transcriptCut(transcript, 'msg_1')).toBeUndefined()
     expect(transcriptCut(transcript, ':0')).toBeUndefined()
     expect(transcriptCut([], 'msg_1:0')).toBeUndefined()
+  })
+})
+
+describe('blobNames (#2150)', () => {
+  const owner = { kind: 'browser', id: 'browser', label: 'You' }
+  it("names a tool result's images and a user's sent images once each, and nothing else", () => {
+    const a = `${'a'.repeat(64)}.png`
+    const b = `${'b'.repeat(64)}.jpg`
+    const events = [
+      { type: 'user.turn', sessionId: 's', turnId: 't', text: 'x', author: owner, images: [
+        { mediaType: 'image/png', data: 'p', name: b },
+        // A preview whose full image could not be stored.
+        { mediaType: 'image/png', data: 'p' },
+      ] },
+      { type: 'tool.result', sessionId: 's', id: '1', ok: true, summary: '', images: [{ name: a, mediaType: 'image/png' }] },
+      { type: 'tool.result', sessionId: 's', id: '2', ok: true, summary: '', images: [{ name: a, mediaType: 'image/png' }] },
+      { type: 'tool.result', sessionId: 's', id: '3', ok: true, summary: '' },
+      { type: 'assistant.text.done', sessionId: 's', messageId: 'm:0' },
+    ] as ServerEvent[]
+    expect(blobNames(events).sort()).toEqual([a, b])
+    expect(blobNames([])).toEqual([])
   })
 })

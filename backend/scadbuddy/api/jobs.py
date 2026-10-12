@@ -31,6 +31,7 @@ from scadbuddy.api.deps import (
 )
 from scadbuddy.api.models import require_model, require_model_exists
 from scadbuddy.api.operations import (
+    RETRY_FOLLOWS,
     TEMPORAL_UNAVAILABLE_PROBLEM,
     IdempotencyKey,
     still_accepting,
@@ -509,8 +510,7 @@ def _temporal_problem(
         logger.error("Temporal refused to start a render", exc_info=error)
         return ApiError(
             status.HTTP_500_INTERNAL_SERVER_ERROR,
-            "Temporal refused to start this render; see ScadBuddy's logs. Send the same"
-            " request again to follow it if it started.",
+            "ScadBuddy could not start this render; its server log says why." + RETRY_FOLLOWS,
             type_=RENDER_UNSTARTABLE_PROBLEM,
             may_have_started=True,
         )
@@ -519,20 +519,14 @@ def _temporal_problem(
     if not started:
         # The lazy client's first connect failed (`start_command`): nothing was sent.
         detail = (
-            "ScadBuddy cannot reach Temporal, where renders run. Nothing was queued; try"
+            "ScadBuddy's background service is not answering. Nothing was queued; try"
             " again shortly."
         )
     elif isinstance(error, TemporalBusyError):
         # Temporal answered, but could not take the start now (`temporal_failure`).
-        detail = (
-            "Temporal could not start this render right now. Send the same request again"
-            " shortly to follow it if it started."
-        )
+        detail = "ScadBuddy's background service is busy right now." + RETRY_FOLLOWS
     else:
-        detail = (
-            "ScadBuddy cannot reach Temporal, where renders run. Send the same request"
-            " again shortly to follow it if it started."
-        )
+        detail = "ScadBuddy's background service did not answer." + RETRY_FOLLOWS
     return ApiError(
         status.HTTP_503_SERVICE_UNAVAILABLE,
         detail,

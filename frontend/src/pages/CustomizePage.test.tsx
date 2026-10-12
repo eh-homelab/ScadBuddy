@@ -2,7 +2,7 @@ import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, delay, http } from 'msw'
 import type { ReactNode } from 'react'
 import { Route, Routes, useLocation } from 'react-router'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import type { BoundingBox, ChoicesView, Job, Plate } from '../api/types'
 import { choicesView } from '../mocks/choices'
@@ -113,6 +113,46 @@ async function firstRender() {
   await waitFor(() => expect(screen.getByTestId('bbox')).toBeInTheDocument(), { timeout: 10_000 })
 }
 
+/**
+ * Holds the next render running (#2116, #2121): POST /render answers a job that
+ * `GET /jobs/:id` keeps reporting `running`, so the page sits on a submitted render.
+ * `posted` counts the renders submitted since, `read` the page's reads of them.
+ */
+function holdRenders() {
+  const held = { posted: 0, read: 0, workflowId: '' }
+  server.use(
+    http.post('/api/v1/models/:slug/render', async ({ request, params }) => {
+      const body = (await request.json()) as { inputs?: Record<string, unknown> }
+      held.posted += 1
+      const id = String(held.posted).padStart(32, 'a')
+      held.workflowId = `render-${id}`
+      heldJobs.set(id, {
+        id,
+        slug: String(params['slug']),
+        status: 'running',
+        created_at: new Date().toISOString(),
+        params: (body.inputs?.['params'] as Record<string, unknown>) ?? {},
+        inputs: body.inputs ?? {},
+        log_tail: ['Compiling design (CSG Tree generation)...'],
+        workflow_id: held.workflowId,
+      })
+      return HttpResponse.json(
+        { job_id: id, status_url: `/api/v1/jobs/${id}`, inputs: body.inputs ?? {} },
+        { status: 202 },
+      )
+    }),
+    http.get('/api/v1/jobs/:id', ({ params }) => {
+      const job = heldJobs.get(String(params['id']))
+      if (!job) return undefined
+      held.read += 1
+      return HttpResponse.json(job)
+    }),
+  )
+  return held
+}
+const heldJobs = new Map<string, Record<string, unknown>>()
+afterEach(() => heldJobs.clear())
+
 describe('CustomizePage', () => {
   it("never heads the page with OpenSCAD's customizer title while the record loads (#939)", async () => {
     // The schema's title is the .scad file's name, "model" for every model.
@@ -208,9 +248,15 @@ describe('CustomizePage', () => {
     // One whole valid colour: clear-then-type left '#000000#00FF00', which is not one,
     // so the field never took a new value and the test passed whatever the label did
     // (#2033).
+    const held = holdRenders()
     await user.tripleClick(hex)
     await user.paste('#00FF00')
     expect(hex).toHaveValue('#00FF00')
+    // Before the debounce has submitted anything…
+    expect(field).not.toHaveTextContent('not in this render')
+    // …and once the render is submitted and still running (#2121).
+    await waitFor(() => expect(held.posted).toBe(1), { timeout: 4000 })
+    await waitFor(() => expect(held.read).toBeGreaterThan(0))
     expect(field).not.toHaveTextContent('not in this render')
   })
 
@@ -431,6 +477,27 @@ describe('CustomizePage', () => {
       const href = (await screen.findByRole('link', { name: 'Open workflow ↗' })).getAttribute('href')
       expect(href).toMatch(/^https:\/\/temporal\.example\/namespaces\/default\/workflows\/render-[0-9a-f]+$/)
       expect(link()).toHaveAttribute('target', '_blank')
+    })
+
+    // #2116: the case the link is mainly for, a render that is stuck running.
+    it('on a render still running, naming its workflow', async () => {
+      setMockSettings({ ...mockSettings(), temporal_ui_url: 'https://temporal.example' })
+      const { user } = render()
+      await firstRender()
+      expect(link()).not.toBeInTheDocument()
+
+      const held = holdRenders()
+      const name = screen.getByRole('textbox', { name: 'Name on the tag' })
+      await user.clear(name)
+      await user.type(name, 'stuck')
+      await waitFor(() => expect(held.posted).toBeGreaterThan(0), { timeout: 4000 })
+
+      await waitFor(() =>
+        expect(link()).toHaveAttribute(
+          'href',
+          `https://temporal.example/namespaces/default/workflows/${held.workflowId}`,
+        ),
+      )
     })
 
     it('not once the render is done', async () => {

@@ -19,13 +19,14 @@ import pytest
 from opentelemetry import trace
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from temporalio import activity
-from temporalio.api.enums.v1 import IndexedValueType
+from temporalio.api.enums.v1 import EventType, IndexedValueType
 from temporalio.api.operatorservice.v1 import AddSearchAttributesRequest
 from temporalio.client import (
     Client,
     WorkflowExecutionStatus,
     WorkflowFailureError,
     WorkflowHandle,
+    WorkflowHistory,
     WorkflowUpdateFailedError,
 )
 from temporalio.exceptions import ApplicationError, TimeoutType
@@ -1707,6 +1708,26 @@ class _HeldLoad(ProjectingActivities):
         return await super().load_pipeline(req)
 
 
+def _release_and_child_start(history: WorkflowHistory) -> tuple[bool, list[str]]:
+    """Whether one workflow task both accepted the release and started a child, and
+    the ids of the children the run started."""
+    completed = 0  # the WorkflowTaskCompleted the events that follow it came from
+    accepted: set[int] = set()
+    started: set[int] = set()
+    children: list[str] = []
+    for event in history.events:
+        if event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED:
+            completed = event.event_id
+        elif event.event_type == EventType.EVENT_TYPE_WORKFLOW_EXECUTION_UPDATE_ACCEPTED:
+            accepted.add(completed)
+        elif event.event_type == EventType.EVENT_TYPE_START_CHILD_WORKFLOW_EXECUTION_INITIATED:
+            started.add(completed)
+            children.append(
+                event.start_child_workflow_execution_initiated_event_attributes.workflow_id
+            )
+    return bool(accepted & started), children
+
+
 async def test_a_release_that_lands_with_the_piece_start_still_cancels(
     make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
 ) -> None:
@@ -1767,9 +1788,20 @@ async def test_a_release_that_lands_with_the_piece_start_still_cancels(
                 # on the server, which hands it that task, so the task is only given to
                 # this worker once its 10 s timeout passes.
                 answer = await asyncio.wait_for(release, timeout=30)
+            raced, children = _release_and_child_start(await handle.fetch_history())
+            # The ABANDONed piece and its held `render_main` would stay open on the dev
+            # server after this test (#2126).
+            for child in children:
+                with suppress(RPCError):  # it may have closed on its own
+                    await client.get_workflow_handle(child).terminate()
             gate.set()
         await service.aclose()
 
+    # Only the race leaves this behind: the release accepted, and the piece's child
+    # start sent, by one workflow task. Taken apart (a slow server), the release lands
+    # on its own and the ordinary path passes the test, which then proves nothing (#2126).
+    assert children, "the piece's child was never started"
+    assert raced, "the release and the piece's child start were not in one workflow task"
     assert answer.cancelled is not None and answer.cancelled.id == job.id
     stored = await asyncio.to_thread(projection.read, job.id)
     assert (stored.state, stored.error) == ("cancelled", SUPERSEDED_ERROR)

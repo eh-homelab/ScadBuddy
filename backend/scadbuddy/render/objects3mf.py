@@ -16,15 +16,21 @@ where each colour falls on it is the slicer's to work out again, as it was for t
 
 What cannot be read faithfully is refused (:class:`UnreadableObjectsError`) rather than
 guessed: a sliced file, PrusaSlicer's painting, painting in a file with no Bambu Studio
-filaments for it to name, a painted part the file mirrors, a negative part. Modifiers
-and support blockers or enforcers print nothing and are dropped, with a note.
+filaments for it to name, a painted part the file mirrors. Modifiers and support
+blockers or enforcers print nothing and are dropped, with a note. A negative part is
+carried with its object (``ColourPart.negative``) for the slicer to cut out, as it was
+for the file; a plate read for a preview or the mesh checks leaves it out.
 
-The file is untrusted: the archive is bounded as the print path bounds it
-(:data:`~scadbuddy.render.bambu3mf.MAX_UNCOMPRESSED_BYTES`), every entry is read
-capped, and every read spends against a :class:`~scadbuddy.render.read_budget.ReadBudget`
-(#2087): distinct objects, and, since components may name one object many times, what the
-file expands to (objects visited, triangles produced, paint digits carried), however few
-bytes asked for them. Past one, the refusal names it and how to raise it.
+The file is untrusted, but its size alone is no reason to refuse it: every read spends
+against a :class:`~scadbuddy.render.read_budget.ReadBudget` (#2087), and that is what
+bounds it. Only the entries a read needs are inflated, each capped: the settings at
+their own small caps, the model files together at what the budget's triangles can take
+(:meth:`~scadbuddy.render.read_budget.ReadBudget.model_bytes`), their meshes stopped at
+its triangle count as they are parsed. Thumbnails and attachments are never read, so
+however large they are costs nothing. Past those, distinct objects and, since components
+may name one object many times, what the file expands to (objects visited, triangles
+produced, paint digits carried), however few bytes asked for them. Past any budget, the
+refusal names it and how to raise it.
 """
 
 from __future__ import annotations
@@ -36,6 +42,7 @@ import zipfile
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from typing import BinaryIO
 from xml.sax.saxutils import quoteattr
 
 import numpy as np
@@ -45,20 +52,21 @@ from scadbuddy.render.bambu3mf import (
     _GCODE,
     CORE_NS,
     MAX_SETTINGS_BYTES,
-    MAX_UNCOMPRESSED_BYTES,
     MODEL_RELATIONSHIP,
     MODEL_SETTINGS_NAME,
     PRODUCTION_NS,
     PROJECT_SETTINGS_NAME,
     ROOT_MODEL_NAME,
     STL_COLOUR,
+    ArchiveTooLargeError,
     MeshArrays,
     PlateParts,
+    TooManyTrianglesError,
     _read_capped,
     parse_model,
 )
 from scadbuddy.render.geometry import NoSuchPlateError
-from scadbuddy.render.glb import BoundingBox, bounding_box
+from scadbuddy.render.glb import BoundingBox, bounding_box, footprint_box
 from scadbuddy.render.jobs import LAYOUT_NAME, PartSource, PlateLayout
 from scadbuddy.render.paint import PaintCodeError, states
 from scadbuddy.render.read_budget import ReadBudget
@@ -87,6 +95,60 @@ _MAX_DEPTH = 8
 
 class UnreadableObjectsError(ValueError):
     """The file's objects cannot be read faithfully; the message says why."""
+
+
+class OverBudgetError(UnreadableObjectsError):
+    """A read refused past one of its budgets: the message names the budget, and
+    :func:`_opened` adds how large the file is, so what limits it can be told apart
+    from how big it is."""
+
+
+def _megabytes(size: int) -> str:
+    """``size`` as a person reads a file's size: bytes under a megabyte, else MB."""
+    return f"{size:,} bytes" if size < 1_000_000 else f"{size / 1_000_000:,.1f} MB"
+
+
+#: A binary STL: an 80-byte header, a triangle count, then 50 bytes per triangle.
+_STL_HEADER = 84
+_STL_TRIANGLE = 50
+#: What one triangle of an ASCII STL may take, generously: a facet's seven lines are
+#: some 250 bytes with six-digit exponents.
+_STL_ASCII_TRIANGLE = 512
+
+
+def check_stl(stl: BinaryIO, budget: ReadBudget) -> None:
+    """Refuse an STL past ``budget``'s triangles before anything loads it whole
+    (:class:`OverBudgetError`): a binary one by the count its header states (which its
+    size must match), an ASCII one by its size against what that many facets could
+    take. With no triangle limit, any STL is wrapped. Leaves ``stl`` at its start."""
+    limit = budget.limit("max_triangles")
+    if limit is None:
+        return
+    size = stl.seek(0, io.SEEK_END)
+    stl.seek(0)
+    head = stl.read(_STL_HEADER)
+    stl.seek(0)
+    count = int.from_bytes(head[80:84], "little") if len(head) == _STL_HEADER else -1
+    if count >= 0 and size == _STL_HEADER + _STL_TRIANGLE * count:
+        if count > limit:
+            raise OverBudgetError(
+                f"{budget.refusal('max_triangles', f'is an STL of {count:,} triangles')}"
+                f" (the file is {_megabytes(size)})"
+            )
+        return
+    allowed = _STL_ASCII_TRIANGLE * limit
+    if size > allowed:
+        raise OverBudgetError(
+            budget.refusal(
+                "max_triangles",
+                f"is a text STL of {_megabytes(size)}, past the {_megabytes(allowed)}"
+                " that many triangles could take",
+            )
+        )
+
+
+def _model_names(names: set[str]) -> list[str]:
+    return sorted(name for name in names if name.lower().endswith(".model"))
 
 
 #: One mesh as read: its colour, vertices, faces, and its painting when painted.
@@ -123,11 +185,19 @@ class _ObjectSettings:
 
 
 class _Archive:
-    """The archive's model files, each parsed once and read within the archive's cap."""
+    """The archive's model files, each parsed once, all of them together within what
+    ``budget`` allows them: its :meth:`~ReadBudget.model_bytes` inflated and its
+    triangles stored."""
 
-    def __init__(self, archive: zipfile.ZipFile) -> None:
+    def __init__(self, archive: zipfile.ZipFile, budget: ReadBudget) -> None:
         self.archive = archive
+        self.budget = budget
         self.names = set(archive.namelist())
+        #: What the model files parsed so far inflated to, and the triangles and vertices
+        #: they store.
+        self.inflated = 0
+        self.stored = 0
+        self.vertices = 0
         self.models: dict[str, tuple[ET.Element, dict[str, ET.Element], float]] = {}
         #: Every parsed model's meshes, by ``<mesh>`` element.
         self.meshes: dict[ET.Element, MeshArrays] = {}
@@ -136,10 +206,41 @@ class _Archive:
         if name not in self.models:
             if name not in self.names:
                 raise UnreadableObjectsError(f"the 3MF names a model file it lacks ({name})")
+            allowed = self.budget.model_bytes()
+            limit = self.budget.limit("max_triangles")
             try:
-                parsed = parse_model(self.archive, name)
+                parsed = parse_model(
+                    self.archive,
+                    name,
+                    cap=None if allowed is None else allowed - self.inflated,
+                    max_triangles=None if limit is None else limit - self.stored,
+                    # Against the whole budget: a file may keep its vertices in one model
+                    # and its triangles in another.
+                    max_vertices=None if limit is None else 3 * limit - self.vertices,
+                )
             except ET.ParseError:
                 raise UnreadableObjectsError(f"{name} is not readable XML") from None
+            except TooManyTrianglesError as error:
+                # Said over the whole file, not the remainder this model was allowed.
+                past = (
+                    f"stores more than {3 * (limit or 0):,} vertices, three for every"
+                    " triangle allowed"
+                    if error.kind == "vertices"
+                    else f"stores more than {limit or 0:,} triangles"
+                )
+                raise OverBudgetError(self.budget.refusal("max_triangles", past)) from None
+            except ArchiveTooLargeError:
+                raise OverBudgetError(
+                    self.budget.refusal(
+                        "max_triangles",
+                        f"has model files that inflate past {_megabytes(allowed or 0)}, more"
+                        " than that many triangles could take",
+                    )
+                ) from None
+            # zipfile stops an entry at its declared size (a longer one fails its CRC).
+            self.inflated += self.archive.getinfo(name).file_size
+            self.stored += sum(len(arrays.faces) for arrays in parsed.meshes.values())
+            self.vertices += sum(len(arrays.vertices) for arrays in parsed.meshes.values())
             root = parsed.root
             self.meshes.update(parsed.meshes)
             resources = root.find(f"{_CORE}resources")
@@ -284,11 +385,12 @@ class _Reader:
         self.triangles += triangles
         self.paint_digits += paint_digits
         if self.visits > self.budget.max_visits:
-            raise UnreadableObjectsError(self.budget.refusal("max_visits"))
-        if self.triangles > self.budget.max_triangles:
-            raise UnreadableObjectsError(self.budget.refusal("max_triangles"))
+            raise OverBudgetError(self.budget.refusal("max_visits"))
+        triangles_allowed = self.budget.limit("max_triangles")
+        if triangles_allowed is not None and self.triangles > triangles_allowed:
+            raise OverBudgetError(self.budget.refusal("max_triangles"))
         if self.paint_digits > self.budget.max_paint_digits:
-            raise UnreadableObjectsError(self.budget.refusal("max_paint_digits"))
+            raise OverBudgetError(self.budget.refusal("max_paint_digits"))
 
     def colour_of(self, extruder: int) -> str:
         return self.filaments[extruder - 1] if extruder <= len(self.filaments) else STL_COLOUR
@@ -344,7 +446,7 @@ class _Reader:
         ):
             return
         # The budget counts what the arrays already hold: it bounds the work below, not
-        # the parse. The archive's size cap (`MAX_UNCOMPRESSED_BYTES`) bounds that.
+        # the parse. The archive's model allowance (`_Archive`) bounds that.
         self._spend(triangles=len(arrays.faces))
         points = arrays.vertices
         if not np.isfinite(points).all():
@@ -460,6 +562,8 @@ class _Reader:
         by_colour: dict[str, list[trimesh.Trimesh]] = {}
         # A painted mesh stays a part of its own: its faces are its painting's (#1965).
         painted: list[tuple[str, trimesh.Trimesh, Paint]] = []
+        # Negative parts, joined: what the slicer cuts out of this object.
+        negatives: list[trimesh.Trimesh] = []
         notes: list[str] = []
 
         def add(pieces: Iterator[_Piece]) -> None:
@@ -480,10 +584,18 @@ class _Reader:
                 cid = component.get("objectid", "")
                 part = settings.parts.get(cid, _PartSettings(None, "normal_part"))
                 if part.subtype == "negative_part":
-                    raise UnreadableObjectsError(
-                        f"object {settings.name or object_id} has a negative part, which"
-                        " Arrange cannot cut out"
-                    )
+                    path = (component.get(_PATH) or "").lstrip("/") or model
+                    for _, points, faces, _ in self.meshes(
+                        path,
+                        cid,
+                        _combine(matrix, _matrix(component.get("transform"))),
+                        part.extruder or settings.extruder or 1,
+                    ):
+                        # Its painting, if any, is never printed: only its volume is.
+                        cut = trimesh.Trimesh(vertices=points, faces=faces, process=False)
+                        cut.remove_unreferenced_vertices()
+                        negatives.append(cut)
+                    continue
                 if part.subtype in _DROPPED:
                     note = f"a {part.subtype.replace('_', ' ')} was left out"
                     if note not in notes:
@@ -507,15 +619,24 @@ class _Reader:
         for colour, mesh, paint in painted:
             index = len(parts) + 1
             parts.append(ColourPart(index, f"Color {index}", colour, mesh, paint))
+        cuts = [mesh for mesh in negatives if not mesh.is_empty]
+        if parts and cuts:
+            joined = cuts[0] if len(cuts) == 1 else trimesh.util.concatenate(cuts)
+            if isinstance(joined, trimesh.Trimesh):
+                index = len(parts) + 1
+                parts.append(
+                    ColourPart(index, "Negative part", parts[0].colour, joined, negative=True)
+                )
         return parts, notes
 
 
-def read_objects(payload: bytes, budget: ReadBudget | None = None) -> list[ReadObject]:
+def read_objects(payload: bytes | BinaryIO, budget: ReadBudget | None = None) -> list[ReadObject]:
     """Every object ``payload``'s build places, each with its count, in build order,
-    read within ``budget`` (the defaults when None). Raises
+    read within ``budget`` (the defaults when None). ``payload`` is the file's bytes, or
+    the file open for reading, for one too large to hold whole. Raises
     :class:`UnreadableObjectsError` for a file whose objects cannot be read."""
     spend = budget or ReadBudget()
-    return _opened(payload, lambda archive: _read(archive, spend))
+    return _opened(payload, spend, lambda archive: _read(archive, spend))
 
 
 @dataclass(frozen=True)
@@ -526,7 +647,9 @@ class PlateRead:
     plates: int
 
 
-def read_plate_parts(payload: bytes, plate: int = 1, budget: ReadBudget | None = None) -> PlateRead:
+def read_plate_parts(
+    payload: bytes | BinaryIO, plate: int = 1, budget: ReadBudget | None = None
+) -> PlateRead:
     """The parts of ``payload``'s plate ``plate``, one per colour in the order colours
     appear, placed where the file places them: what a library file's preview and mesh
     checks read, as an output's read its own 3MF (#1753). Plates are Bambu Studio's
@@ -534,7 +657,7 @@ def read_plate_parts(payload: bytes, plate: int = 1, budget: ReadBudget | None =
     :func:`read_objects` refuses; a plate the file lacks is
     :class:`~scadbuddy.render.geometry.NoSuchPlateError`."""
     spend = budget or ReadBudget()
-    return _opened(payload, lambda archive: _read_plate(archive, plate, spend))
+    return _opened(payload, spend, lambda archive: _read_plate(archive, plate, spend))
 
 
 def _plates(config: ET.Element | None) -> dict[int, set[tuple[str, int]]]:
@@ -573,6 +696,8 @@ def _read_plate(archive: _Archive, plate: int, budget: ReadBudget) -> PlateRead:
         path = (item.get(_PATH) or "").lstrip("/") or model
         parts, _ = reader.item(path, object_id, _matrix(item.get("transform")))
         for part in parts:
+            if part.negative:
+                continue  # cut out by the slicer: neither shown nor checked
             by_colour.setdefault(part.colour, []).append(part.mesh)
     found: list[ColourPart] = []
     for index, (colour, meshes) in enumerate(by_colour.items(), start=1):
@@ -584,18 +709,41 @@ def _read_plate(archive: _Archive, plate: int, budget: ReadBudget) -> PlateRead:
     return PlateRead(found, count)
 
 
-def _opened[T](payload: bytes, read: Callable[[_Archive], T]) -> T:
-    """``read`` over ``payload``'s archive, every way it can fail an
-    :class:`UnreadableObjectsError`."""
+def _opened[T](payload: bytes | BinaryIO, budget: ReadBudget, read: Callable[[_Archive], T]) -> T:
+    """``read`` over ``payload``'s archive, within ``budget``, every way it can fail an
+    :class:`UnreadableObjectsError`. The archive's size is not one: what it may cost is
+    what ``budget`` allows the entries a read inflates (:class:`_Archive`)."""
     try:
-        with zipfile.ZipFile(io.BytesIO(payload)) as zipped:
-            archive = _Archive(zipped)
-            infos = zipped.infolist()
-            if any(_GCODE.fullmatch(info.filename) for info in infos):
+        with zipfile.ZipFile(
+            io.BytesIO(payload) if isinstance(payload, bytes) else payload
+        ) as zipped:
+            archive = _Archive(zipped, budget)
+            if any(_GCODE.fullmatch(name) for name in archive.names):
                 raise UnreadableObjectsError("the file is sliced already; print it from Bambuddy")
-            if sum(info.file_size for info in infos) > MAX_UNCOMPRESSED_BYTES:
-                raise UnreadableObjectsError("the 3MF is too large to read")
-            return read(archive)
+            models = sum(zipped.getinfo(name).file_size for name in _model_names(archive.names))
+            allowed = budget.model_bytes()
+            try:
+                if allowed is not None and models > allowed:
+                    # Said before anything is inflated: the headers declare it.
+                    raise OverBudgetError(
+                        budget.refusal(
+                            "max_triangles",
+                            f"has model files that inflate to {_megabytes(models)}, past the"
+                            f" {_megabytes(allowed)} that many triangles could take",
+                        )
+                    )
+                return read(archive)
+            except OverBudgetError as error:
+                if isinstance(payload, bytes):
+                    size = len(payload)
+                else:
+                    at = payload.tell()
+                    size = payload.seek(0, io.SEEK_END)
+                    payload.seek(at)
+                raise OverBudgetError(
+                    f"{error} (the file is {_megabytes(size)}; its model files"
+                    f" {_megabytes(models)} once inflated)"
+                ) from None
     except zipfile.BadZipFile:
         raise UnreadableObjectsError("the file is not a 3MF archive") from None
     except (KeyError, ValueError) as error:
@@ -635,7 +783,7 @@ def _read(archive: _Archive, budget: ReadBudget) -> list[ReadObject]:
             groups[key] = (groups[key][0], groups[key][1] + 1)
             continue
         if len(groups) == budget.max_objects:
-            raise UnreadableObjectsError(budget.refusal("max_objects"))
+            raise OverBudgetError(budget.refusal("max_objects"))
         groups[key] = (matrix, 1)
     objects: list[ReadObject] = []
     for (path, object_id, _), (matrix, count) in groups.items():
@@ -707,9 +855,10 @@ def piece_mesh(parts: list[ColourPart]) -> bytes:
 
 def write_piece(directory: Path, obj: ReadObject) -> BoundingBox:
     """Write ``obj`` into ``directory`` as a piece `write_output` places: the mesh file,
-    then its ``layout.json`` (last, so a piece with a layout is whole). Returns its box."""
+    then its ``layout.json`` (last, so a piece with a layout is whole). Returns the box
+    it is packed by (:func:`~scadbuddy.render.glb.footprint_box`)."""
     parts = [
-        ColourPart(index, part.name, part.colour, part.mesh, part.paint)
+        ColourPart(index, part.name, part.colour, part.mesh, part.paint, negative=part.negative)
         for index, part in enumerate(obj.parts)
     ]
     (directory / PIECE_MESH_NAME).write_bytes(piece_mesh(parts))
@@ -722,4 +871,4 @@ def write_piece(directory: Path, obj: ReadObject) -> BoundingBox:
         sources=[tuple(PartSource(str(PurePosixPath(PIECE_MESH_NAME))) for _ in parts)],
     )
     layout.save(directory / LAYOUT_NAME)
-    return box
+    return footprint_box(parts)

@@ -17,7 +17,7 @@ from temporalio.service import RPCError, RPCStatusCode
 from temporalio.testing import ActivityEnvironment
 
 from scadbuddy import main
-from scadbuddy.workflows.housekeeping import PRUNE_SWEEPS, SWEEPS
+from scadbuddy.workflows.housekeeping import GIT_SWEEP, PRUNE_SWEEPS, SWEEPS
 from tests.test_print_worker_task import StubWorker
 
 
@@ -133,7 +133,7 @@ async def test_a_paused_schedule_leaves_the_uploads_backfill_to_the_boot(
         set_up.set()
         return paused
 
-    async def backfill(assets: object) -> int:
+    async def backfill(assets: object, *, stop: object = None) -> int:
         backfilled.append(assets)
         return 0
 
@@ -225,6 +225,27 @@ async def test_a_failing_sweep_fails_its_activity(
     ):
         await ActivityEnvironment().run(activities[sweep])
     assert caplog.records, "the failure is logged too"
+
+
+@pytest.mark.parametrize("packed", [True, False])
+async def test_the_models_git_sweep_runs_maintain_and_logs_a_pack(
+    packed: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#2344: the success path of `GIT_SWEEP`: the activity calls `history.maintain`,
+    completes, and logs only when it packed."""
+    calls: list[str] = []
+
+    def maintain() -> bool:
+        calls.append("maintain")
+        return packed
+
+    state = SimpleNamespace(history=SimpleNamespace(maintain=maintain))
+    activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
+    with caplog.at_level(logging.INFO, logger="scadbuddy.main"):
+        await ActivityEnvironment().run(activities[GIT_SWEEP])
+    assert calls == ["maintain"]
+    logged = [r.getMessage() for r in caplog.records if r.name == "scadbuddy.main"]
+    assert logged == (["packed the models repository"] if packed else [])
 
 
 async def test_a_long_sweep_heartbeats_while_it_runs(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -379,3 +400,40 @@ def test_the_library_worker_has_time_to_join_its_sweeps() -> None:
     assert (
         main.LIBRARY_GRACEFUL_SHUTDOWN.total_seconds() + main.SWEEP_SHUTDOWN_JOIN + 5
     ) <= main.LIBRARY_WORKER_STOP_TIMEOUT
+
+
+async def test_the_boots_backfills_stop_and_their_threads_finish_before_shutdown_goes_on() -> None:
+    """#2128: the boot's backfills run in threads, which a cancel would leave running on
+    the pool the lifespan closes next. The shutdown sets their stop and waits for them."""
+    stop = threading.Event()
+    entered = threading.Event()
+    finished = threading.Event()
+
+    def work() -> None:
+        entered.set()
+        while not stop.is_set():  # the item in hand, then the check between items
+            time.sleep(0.01)
+        time.sleep(0.05)
+        finished.set()
+
+    task = asyncio.create_task(asyncio.to_thread(work))
+    assert await asyncio.to_thread(entered.wait, 5)
+    await main._join_background(stop, task, None)
+    assert finished.is_set()
+    assert task.done() and not task.cancelled()
+
+
+async def test_the_shutdown_waits_for_a_stuck_backfill_only_so_long(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#2128: the wait is bounded; a backfill past it is cancelled and logged."""
+    monkeypatch.setattr(main, "BACKGROUND_SHUTDOWN_JOIN", 0.1)
+    release = threading.Event()
+    task = asyncio.create_task(asyncio.to_thread(release.wait, 5), name="store backfill")
+    try:
+        with caplog.at_level(logging.WARNING, logger="scadbuddy.main"):
+            await asyncio.wait_for(main._join_background(threading.Event(), task), 5)
+        assert task.cancelled()
+        assert "still running at shutdown" in caplog.text
+    finally:
+        release.set()

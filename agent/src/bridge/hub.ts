@@ -199,6 +199,12 @@ export class TabHub implements BrowserTabs {
   readonly #relay: TabRelay | undefined
   readonly #sessionTabStore: SessionTabStore | undefined
   #sessionTabWrites: Promise<void> = Promise.resolve()
+  /**
+   * Sessions whose latest pairing here failed to reach the store: the row still
+   * names an older tab, so this replica's map answers for them until a later
+   * write succeeds (#2211).
+   */
+  readonly #sessionTabsUnstored = new Set<string>()
   readonly #callTimeoutMs: number
   readonly #pollMs: number
   readonly #log: (message: string) => void
@@ -268,7 +274,13 @@ export class TabHub implements BrowserTabs {
       // One write at a time, in pairing order: two in flight could commit out of
       // order and leave the earlier tab stored.
       this.#sessionTabWrites = this.#sessionTabWrites.then(() =>
-        store.set(sessionId, tabId).catch((err: unknown) => this.logError(err)),
+        store.set(sessionId, tabId).then(
+          () => void this.#sessionTabsUnstored.delete(sessionId),
+          (err: unknown) => {
+            this.#sessionTabsUnstored.add(sessionId)
+            this.logError(err)
+          },
+        ),
       )
     }
     this.#sessionTabs.delete(sessionId)
@@ -276,6 +288,7 @@ export class TabHub implements BrowserTabs {
     while (this.#sessionTabs.size > MAX_SESSION_TABS) {
       const oldest = this.#sessionTabs.keys().next().value as string
       this.#sessionTabs.delete(oldest)
+      this.#sessionTabsUnstored.delete(oldest)
     }
     if (this.#tabs.has(tabId)) this.#sessionTabBack(sessionId)
   }
@@ -336,12 +349,17 @@ export class TabHub implements BrowserTabs {
     return this.#reach(paired.tabId, { via: 'pairing', pairing: paired })
   }
 
-  /** The tab `sessionId` was last paired with on any replica; undefined when there is no row or it cannot be read. */
+  /**
+   * The tab `sessionId` was last paired with on any replica; undefined when there
+   * is no row, it cannot be read, or this replica's own latest pairing of it
+   * failed to reach the store (the row would name the older tab).
+   */
   async #storedSessionTab(sessionId: string, signal?: AbortSignal): Promise<string | undefined> {
     if (!this.#sessionTabStore) return undefined
     try {
       // This replica's own latest pairing first, so the row read is not older than it.
       await this.#sessionTabWrites
+      if (this.#sessionTabsUnstored.has(sessionId)) return undefined
       return await this.#sessionTabStore.get(sessionId, signal)
     } catch (err) {
       if (signal?.aborted) throw err

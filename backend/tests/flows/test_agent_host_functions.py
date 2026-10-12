@@ -241,3 +241,24 @@ async def test_a_reset_preview_counts_a_turn_that_made_an_outward_call(
     preview = await outward_since(outward.client, run, point)
     expected = [("agent", step.call_id)] if outward_calls else []
     assert [(c.fn, c.call_id) for c in preview.calls] == expected
+
+
+@pytest.mark.parametrize("ref", ["#/$defs/missing", "https://example.invalid/door.json"])
+async def test_a_schema_ref_that_cannot_be_resolved_is_a_script_error(
+    outward: Outward, sessions: tuple[Sessions, str], ref: str
+) -> None:
+    served, queue = sessions
+    served.answer = '{"width": 40}'
+    schema = {"$ref": ref}
+    run_id = await outward.run(
+        script(
+            "try:",
+            f"    await agent('Size the door', [], {schema!r})",
+            "except Exception as e:",
+            "    return str(e)",
+        ),
+        tools_queue=queue,
+    )
+    run = await outward.finished(run_id)
+    assert "result_schema has a $ref that cannot be resolved" in (run.result or "")
+    assert [(s.fn, s.status) for s in run.steps] == [("agent", "failed")]

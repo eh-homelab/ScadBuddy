@@ -110,6 +110,12 @@ def openscad_binary() -> str | None:
     return shutil.which(load_config().openscad)
 
 
+def fixtures_missing() -> str | None:
+    from tests.support.fixtures import fixtures_missing as missing
+
+    return missing()
+
+
 def openscad_lsp_binary() -> str | None:
     return shutil.which(load_config().openscad_lsp)
 
@@ -161,6 +167,18 @@ def installed_font_families() -> str:
 def _skip_without_openscad(request: pytest.FixtureRequest) -> None:
     if request.node.get_closest_marker("requires_openscad") and openscad_binary() is None:
         pytest.skip("openscad is not on PATH")
+
+
+@pytest.fixture(autouse=True)
+def _skip_without_fixtures(request: pytest.FixtureRequest) -> None:
+    if not request.node.get_closest_marker("requires_fixtures"):
+        return
+    missing = fixtures_missing()
+    if missing is None:
+        return
+    if os.environ.get("SCADBUDDY_TEST_FIXTURES"):
+        pytest.fail(f"SCADBUDDY_TEST_FIXTURES is set, but {missing}")
+    pytest.skip(missing)
 
 
 @pytest.fixture(autouse=True)

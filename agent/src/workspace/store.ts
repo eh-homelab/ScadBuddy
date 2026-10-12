@@ -28,6 +28,8 @@ export const DEFAULT_WORKSPACE_MAX_BYTES = 200 * 1024 * 1024
 export const WORKSPACE_TTL_MS = 24 * 60 * 60 * 1000
 /** How often principals' expired files are swept. */
 export const WORKSPACE_SWEEP_MS = 10 * 60 * 1000
+/** The slice `chunks` reads at a time. */
+export const STREAM_CHUNK_BYTES = 1024 * 1024
 
 const SEGMENT = '[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}'
 /** A workspace path: one to four segments, each starting with a letter, digit or `_` (the table's CHECK). */
@@ -259,6 +261,33 @@ export class SessionFiles {
       SELECT path, media_type, size, sha256, source, created_at, updated_at, data FROM ai_session_files
       WHERE workspace = ${keyOf(ws).key} AND path = ${workspacePath(path)}`
     return row ? { ...infoOf(row), bytes: row.data } : undefined
+  }
+
+  /**
+   * The bytes of `path` as it is at `expectedSha256`, a slice at a time
+   * (`substring` on the column, stored uncompressed for it), so an upload
+   * streams a file to the backend without holding it whole. `not_found` when
+   * there is no such file, `conflict` when it is not at that sha256, then or
+   * between two slices.
+   */
+  async *chunks(ws: WorkspaceRef, path: string, expectedSha256: string, chunkBytes = STREAM_CHUNK_BYTES): AsyncGenerator<Buffer> {
+    const name = workspacePath(path)
+    const { key } = keyOf(ws)
+    for (let offset = 0; ; ) {
+      const [row] = await this.sql<{ part: Buffer; size: number; sha256: string }[]>`
+        SELECT substring(data FROM ${offset + 1}::int FOR ${chunkBytes}::int) AS part, size, sha256
+        FROM ai_session_files WHERE workspace = ${key} AND path = ${name}`
+      if (!row) throw new WorkspaceError('not_found', `no file ${name} in the workspace; workspace_list lists them`)
+      if (row.sha256 !== expectedSha256) {
+        throw new WorkspaceError(
+          'conflict',
+          `${name} changed${offset > 0 ? ' while it was being sent' : ''}: its sha256 is ${row.sha256}, not ${expectedSha256}`,
+        )
+      }
+      if (row.part.length > 0) yield row.part
+      offset += row.part.length
+      if (row.part.length === 0 || offset >= row.size) return
+    }
   }
 
   /**

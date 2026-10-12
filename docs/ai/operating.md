@@ -705,7 +705,9 @@ its $1.00 budget.") and offers:
   into a new session with the current Settings budget, owned by the browser user, and
   the panel switches to it. It counts against the new-session limit (`429`). With
   `up_to` (a reply's panel message id, #793) it copies the conversation only through
-  that reply. Each fork is a `resource` audit row (action `session_fork`).
+  that reply. Each fork, from this route or the `sessions_fork` tool, is a `resource`
+  audit row (action `session_fork`), written once the fork is complete; a rename or
+  mark-done (`PATCH /api/v1/ai/sessions/:id`) is one with action `session_update`.
 - **Raise this chat's budget**: `POST /api/v1/ai/sessions/:id/budget` `{add_usd}`
   (`SessionManager.raiseBudget`). Only the browser user, only on a session it owns
   (take one over first), and never past $100. A request with the headless browser's
@@ -995,5 +997,28 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   becomes a workspace file instead of a saved body on the state volume (§12). A body cut
   at the 20 MiB read cap, or one over the workspace caps, is not stored, and the result
   says why.
+- Uploads send workspace files (#2329 part 2,
+  [`agent/src/tools/workspaceUploads.ts`](../../agent/src/tools/workspaceUploads.ts)):
+  `upload_asset`, `add_model_media`, `set_model_thumbnail`, `set_output_thumbnail`,
+  `create_model`, `import_model`, `write_source_file`, `write_file` and `set_readme` take
+  `workspace_path` with its `workspace_sha256` instead of their inline content (exactly
+  one of the two). The sha256 is the one the model read the file at; a file no longer at
+  it is refused, so an approval card and an audit row (the call's input) name the path
+  and the exact content, and never carry the bytes. Each tool keeps its tier
+  (`import_model` from a file is still `outward`). A binary file is streamed from
+  Postgres to the backend's multipart route a 1 MiB slice at a time
+  (`SessionFiles.chunks`; the column is stored uncompressed, `20261011T1521Z_session_files_streaming.sql`);
+  a text file is decoded as UTF-8 and refused when it is not text. Every upload, from
+  the workspace or inline, text or binary (a byte search), is refused when it contains
+  one of the agent's credentials (`ToolServices.secrets`, below): `workspace_read`
+  redacts them, and an upload would otherwise carry them into a README, a source file,
+  an asset or Bambuddy. The refusal names the upload, never the credential.
+- Headless-browser downloads land in the workspace as `downloads/<name>`, source
+  `{tool: 'browser', url}` with the query dropped. The caps hold while a download
+  runs: the per-file cap and the room left in the workspace, at most 5 downloads a
+  browser call and 20 a turn ([headless-browser.md](headless-browser.md#downloads)).
+- `workspace_read` redacts every saved Claude credential's secret from text (and, in a
+  classic turn, the turn's plugin tokens) before the model sees it
+  (`ToolServices.secrets`, `main.ts`).
 - Paths are at most four `/`-separated segments of `[A-Za-z0-9_][A-Za-z0-9_.-]*`, checked
   by the store and by the table. No Claude Code built-in reaches the workspace.

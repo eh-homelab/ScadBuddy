@@ -277,6 +277,8 @@ class ModelHistory:
         env: dict[str, str] | None = None,
         timeout: float | None = None,
     ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
+        # `None` is the sentinel, so an explicit 0 is honoured (#2343).
+        limit = self.timeout if timeout is None else timeout
         command = [
             self.git,
             "--no-pager",
@@ -297,12 +299,10 @@ class ModelHistory:
                 capture_output=True,
                 text=text,
                 check=False,
-                timeout=timeout or self.timeout,
+                timeout=limit,
             )
         except subprocess.TimeoutExpired as error:
-            raise GitTimeoutError(
-                f"git {args[0]} timed out after {timeout or self.timeout:g}s"
-            ) from error
+            raise GitTimeoutError(f"git {args[0]} timed out after {limit:g}s") from error
         except OSError as error:
             raise GitUnavailableError(f"could not run {self.git!r}: {error}") from error
         if check and completed.returncode != 0:

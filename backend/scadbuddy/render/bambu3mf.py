@@ -19,7 +19,7 @@ from xml.sax.saxutils import escape, quoteattr
 import numpy as np
 import trimesh
 
-from scadbuddy.render.paint import MAX_CODE_DIGITS
+from scadbuddy.render.paint import MAX_CODE_DIGITS, states
 from scadbuddy.render.plate import (
     DEFAULT_PLATE,
     Placement,
@@ -159,8 +159,10 @@ def object_model(part: ColourPart, object_id: int) -> str:
 
 
 def model_bounds(parts: Sequence[ColourPart]) -> np.ndarray:
-    """The ``(2, 3)`` min/max box every part shares, in the meshes' coordinates."""
-    bounds = np.array([part.mesh.bounds for part in parts])
+    """The ``(2, 3)`` min/max box every part shares, in the meshes' coordinates: those
+    that print, since a negative part is cut out."""
+    printed = [part for part in parts if not part.negative] or list(parts)
+    bounds = np.array([part.mesh.bounds for part in printed])
     return np.array([bounds[:, 0, :].min(axis=0), bounds[:, 1, :].max(axis=0)])
 
 
@@ -184,10 +186,14 @@ class PlateParts:
         """Whether this plate needs a prime tower: only when it uses more than one
         filament. One colour prints without one, so reserving room would refuse
         plates that are perfectly printable. A painted part prints with its painting's
-        filaments too (#1965)."""
-        return len(set(self.extruders)) > 1 or any(
-            part.paint is not None and part.paint.used() for part in self.parts
-        )
+        filaments too (#1965), but a painting only in filaments the plate already uses
+        adds none (#2108). The painting must be numbered against the file's filament
+        list, as `write_plates_3mf` renumbers it before asking."""
+        used = set(self.extruders)
+        for part in self.parts:
+            if part.paint is not None:
+                used.update(state for code in part.paint.codes if code for state in states(code))
+        return len(used) > 1
 
 
 def single_plate(parts: Sequence[ColourPart]) -> PlateParts:
@@ -274,6 +280,11 @@ def root_model(
     )
 
 
+def _subtype(part: ColourPart) -> str:
+    """Bambu Studio's part subtype: a negative part is cut out of its object (#1863)."""
+    return "negative_part" if part.negative else "normal_part"
+
+
 def model_settings(plates: Sequence[PlateParts], model_name: str, *, covers: bool) -> str:
     total = sum(len(plate.parts) for plate in plates)
     objects: list[str] = []
@@ -283,7 +294,7 @@ def model_settings(plates: Sequence[PlateParts], model_name: str, *, covers: boo
     ):
         assembly_id = total + plate_index
         entries = "".join(
-            f'  <part id="{index}" subtype="normal_part">\n'
+            f'  <part id="{index}" subtype="{_subtype(part)}">\n'
             f'   <metadata key="name" value={quoteattr(part.name)}/>\n'
             f'   <metadata key="extruder" value="{extruder}"/>\n'
             "  </part>\n"
@@ -921,6 +932,16 @@ class ArchiveTooLargeError(ValueError):
     """An entry, or the whole 3MF, inflated past its cap."""
 
 
+class TooManyTrianglesError(ValueError):
+    """A model file holds more triangles, or more vertices than they could name, than
+    the parse was allowed (:func:`parse_model`'s ``max_triangles``); ``kind`` says
+    which."""
+
+    def __init__(self, message: str, kind: Literal["triangles", "vertices"]) -> None:
+        super().__init__(message)
+        self.kind = kind
+
+
 #: The chunk every untrusted entry is inflated in.
 _CHUNK = 1024 * 1024
 
@@ -986,11 +1007,19 @@ class _MeshTarget:
     mesh's ``<vertex>`` and ``<triangle>`` elements, which go straight into arrays: an
     element costs some 500 bytes against the 30-odd of XML it is read from, so a model
     entry at the archive's cap would otherwise take gigabytes (#1949). Arrays cost
-    about what the XML does."""
+    about what the XML does.
 
-    def __init__(self) -> None:
+    With ``max_triangles`` and ``max_vertices``, the parse stops at the triangle or the
+    vertex past them, every mesh counted together: what bounds the arrays' memory,
+    whatever the entry's size."""
+
+    def __init__(self, max_triangles: int | None = None, max_vertices: int | None = None) -> None:
         self.builder = ET.TreeBuilder()
         self.meshes: dict[ET.Element, MeshArrays] = {}
+        self._max_triangles = max_triangles
+        self._max_vertices = max_vertices
+        self._triangles = 0
+        self._vertices = 0
         self._open: list[ET.Element] = []
         #: Depth inside an element read into the arrays, whose content is dropped.
         self._skipping = 0
@@ -1015,11 +1044,23 @@ class _MeshTarget:
             self._skipping += 1
         elif tag == _VERTEX and self._within(_VERTICES):
             self._skipping = 1
+            self._vertices += 1
+            if self._max_vertices is not None and self._vertices > self._max_vertices:
+                raise TooManyTrianglesError(
+                    f"stores more than {self._max_vertices:,} vertices, three for every"
+                    " triangle allowed",
+                    "vertices",
+                )
             self._points.extend(
                 (float(attrs.get("x", 0)), float(attrs.get("y", 0)), float(attrs.get("z", 0)))
             )
         elif tag == _TRIANGLE and self._within(_TRIANGLES):
             self._skipping = 1
+            self._triangles += 1
+            if self._max_triangles is not None and self._triangles > self._max_triangles:
+                raise TooManyTrianglesError(
+                    f"stores more than {self._max_triangles:,} triangles", "triangles"
+                )
             self._faces.extend(
                 (int(attrs.get("v1", 0)), int(attrs.get("v2", 0)), int(attrs.get("v3", 0)))
             )
@@ -1080,18 +1121,25 @@ class _MeshTarget:
 
 
 def parse_model(
-    archive: zipfile.ZipFile, name: str, cap: int = MAX_UNCOMPRESSED_BYTES
+    archive: zipfile.ZipFile,
+    name: str,
+    cap: int | None = MAX_UNCOMPRESSED_BYTES,
+    *,
+    max_triangles: int | None = None,
+    max_vertices: int | None = None,
 ) -> ParsedModel:
-    """Model file ``name``, inflated in chunks and refused past ``cap``, parsed as it
-    inflates, its meshes read into arrays (`_MeshTarget`). ``ET.ParseError`` when it is
-    not XML, ``ValueError`` when a vertex or triangle is not numbers."""
-    target = _MeshTarget()
+    """Model file ``name``, inflated in chunks and refused past ``cap`` (``None``: no
+    cap), parsed as it inflates, its meshes read into arrays (`_MeshTarget`), refused
+    past ``max_triangles`` or ``max_vertices`` (:class:`TooManyTrianglesError`) when
+    given. ``ET.ParseError`` when it is not XML, ``ValueError`` when a vertex or triangle
+    is not numbers."""
+    target = _MeshTarget(max_triangles, max_vertices)
     parser = ET.XMLParser(target=target)
     read = 0
     with archive.open(name) as entry:
         while chunk := entry.read(_CHUNK):
             read += len(chunk)
-            if read > cap:
+            if cap is not None and read > cap:
                 raise ArchiveTooLargeError(f"{name} inflates past {cap} bytes")
             try:
                 parser.feed(chunk)

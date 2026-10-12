@@ -30,7 +30,7 @@ def _hashed(file_id: int, tmp_path: Path) -> None:
 
 
 @respx.mock
-def test_a_request_can_lower_and_raise_the_setting(client: TestClient, tmp_path: Path) -> None:
+def test_a_request_can_lower_the_setting(client: TestClient, tmp_path: Path) -> None:
     configure(client)
     _hashed(88, tmp_path)
     lowered = client.get(f"/api/v1/print/library/88/objects?max_triangles={TRIANGLES - 1}")
@@ -53,17 +53,30 @@ def test_the_setting_is_the_default_and_a_request_overrides_it(
     assert saved.json()["applies"]["read_max_triangles"] == "live"
     refused = client.get("/api/v1/print/library/88/objects")
     assert refused.status_code == 422 and "SCADBUDDY_READ_MAX_TRIANGLES" in refused.text
-    raised = client.get(f"/api/v1/print/library/88/objects?max_triangles={TRIANGLES}")
-    assert raised.status_code == 200, raised.text
+    # The operator's limit binds every request: one may not raise it, nor lift it with 0.
+    for override in (TRIANGLES, 0):
+        raised = client.get(f"/api/v1/print/library/88/objects?max_triangles={override}")
+        assert raised.status_code == 422, (override, raised.text)
+    # With no limit set, a request may read with none or with any limit of its own.
+    assert client.put("/api/v1/settings", json={"read_max_triangles": 0}).status_code == 200
+    assert client.get("/api/v1/print/library/88/objects").status_code == 200
 
 
 def test_no_setting_goes_past_its_ceiling(client: TestClient) -> None:
-    ceiling = CEILINGS["max_triangles"]
-    past = client.put("/api/v1/settings", json={"read_max_triangles": ceiling + 1})
+    ceiling = CEILINGS["max_objects"]
+    assert ceiling is not None
+    past = client.put("/api/v1/settings", json={"read_max_objects": ceiling + 1})
     assert past.status_code == 422, past.text
-    assert "SCADBUDDY_READ_MAX_TRIANGLES" in past.text
-    at = client.put("/api/v1/settings", json={"read_max_triangles": ceiling})
+    assert "SCADBUDDY_READ_MAX_OBJECTS" in past.text
+    at = client.put("/api/v1/settings", json={"read_max_objects": ceiling})
     assert at.status_code == 200, at.text
+
+
+def test_triangles_have_no_ceiling_and_0_is_no_limit(client: TestClient) -> None:
+    for value in (0, 10**12):
+        saved = client.put("/api/v1/settings", json={"read_max_triangles": value})
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["read_max_triangles"] == value
 
 
 @respx.mock
@@ -73,6 +86,8 @@ def test_no_override_goes_past_its_ceiling(
     configure(client)
     _hashed(88, tmp_path)
     for budget, ceiling in CEILINGS.items():
+        if ceiling is None:
+            continue
         past = client.get(f"/api/v1/print/library/88/objects?{budget}={ceiling + 1}")
         assert past.status_code == 422, (budget, past.text)
         assert budget in past.text
@@ -81,7 +96,7 @@ def test_no_override_goes_past_its_ceiling(
     body = {
         "objects": [{"library_file_id": 88}],
         "slug": "demo",
-        "read_budget": {"max_paint_digits": CEILINGS["max_paint_digits"] + 1},
+        "read_budget": {"max_paint_digits": (CEILINGS["max_paint_digits"] or 0) + 1},
     }
     past = client.post("/api/v1/outputs/arrange", json=body)
     assert past.status_code == 422, past.text

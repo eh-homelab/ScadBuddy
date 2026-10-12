@@ -5,6 +5,7 @@ import math
 import os
 import shutil
 import subprocess
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -141,6 +142,22 @@ async def test_downloaded_fonts_reach_a_worker_that_never_installed_them(
     assert (worker_fonts.root / family.name / "LobsterTwo-Regular.ttf").read_bytes() == b"ttf"
     assert await mirror.sync() == []
     assert content.index.get(font_key(family.name)) is not None
+
+
+async def test_a_stopped_font_backfill_publishes_nothing_more(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """#2128: the boot's font backfill ends once the shutdown sets ``stop``."""
+    api_fonts = FontService(tmp_path / "api")
+    family = api_fonts.family_dir("Lobster Two")
+    family.mkdir(parents=True)
+    (family / "LobsterTwo-Regular.ttf").write_bytes(b"ttf")
+    mirror = FontMirror(content, api_fonts)
+    stop = threading.Event()
+    stop.set()
+    assert await mirror.backfill(stop=stop) == 0
+    assert content.index.get(font_key(family.name)) is None
+    assert await mirror.backfill() == 1
 
 
 async def test_a_republished_family_reaches_a_worker_that_has_the_old_one(
@@ -709,6 +726,76 @@ async def test_every_piece_activity_brings_the_source_back_when_the_export_is_go
     shutil.rmtree(export)
     await activities.finish_piece(req, prepared, main)
     assert (export / "model.scad").read_text() == "cube(4);"
+
+
+@pytest.mark.parametrize("stored", [True, pytest.param(False, marks=pytest.mark.requires_git)])
+async def test_every_piece_activity_on_another_worker_brings_the_source_in(
+    tmp_path: Path, content: ContentStore, pool: Pool, stored: bool
+) -> None:
+    """#2130: each piece activity may run on a worker that never had the export (its own
+    emptyDir). With a stored snapshot it is unpacked; with none but git history, it is
+    exported from git, as `prepare` does, rather than left missing for OpenSCAD."""
+    history: ModelHistory | None = None
+    if stored:
+        rev = "f" * 40
+        await _stored(tmp_path, content, rev)
+    else:
+        repo = DataPaths(tmp_path / "repo")
+        repo.ensure()
+        history = ModelHistory(repo.models, wrapper_prefix=WRAPPER_PREFIX)
+        history.ensure_repo()
+        source = repo.model_source("demo")
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("cube(4);")
+        history.commit("add demo", model_path("demo"))
+        rev = subprocess.run(
+            ["git", "-C", str(repo.models), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        # A later commit, so `rev` is an old revision: it renders from an export.
+        source.write_text("cube(5);")
+        history.commit("edit demo", model_path("demo"))
+    # Shared by every worker, on the last one's volume: `finish_piece` names its outputs
+    # relative to that.
+    blobs = LocalBlobStore(DataPaths(tmp_path / "worker-d").blobs)
+    openscad = install_fake_openscad(tmp_path, DataPaths(tmp_path / "repo")).openscad
+
+    def worker(name: str) -> tuple[RenderActivities, Path]:
+        paths = DataPaths(tmp_path / name)
+        deps = replace(
+            _worker_deps(tmp_path, pool, SnapshotStore(content, paths, history=None)),
+            paths=paths,
+            config=Config(openscad=openscad, data_dir=paths.root),
+            blobs=blobs,
+            history=history,
+        )
+        return RenderActivities(deps), paths.model_revision_dir("demo", rev) / "model.scad"
+
+    def on(scad: Path, prepared: PrepareResult) -> PrepareResult:
+        """`prepared` as another worker reads it: the same path on its own volume."""
+        return prepared.model_copy(update={"scad": str(scad)})
+
+    req = PieceRequest(
+        slug="demo", revision=rev, params={}, piece_key=piece_key("demo", rev, "model.scad", {})
+    )
+    first, scad = worker("worker-a")
+    env = ActivityEnvironment()  # a slow step heartbeats
+    prepared = await env.run(first.prepare, req)
+    assert Path(prepared.scad) == scad and scad.read_text() == "cube(4);"
+
+    second, scad = worker("worker-b")
+    main = await env.run(second.render_main, req, on(scad, prepared))
+    assert scad.read_text() == "cube(4);"
+
+    third, scad = worker("worker-c")
+    await env.run(third.render_solids, req, on(scad, prepared), main)
+    assert scad.read_text() == "cube(4);"
+
+    fourth, scad = worker("worker-d")
+    await env.run(fourth.finish_piece, req, on(scad, prepared), main)
+    assert scad.read_text() == "cube(4);"
 
 
 async def test_every_openscad_activity_brings_the_templates_fonts_to_its_worker(

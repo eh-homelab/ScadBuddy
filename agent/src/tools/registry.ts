@@ -88,6 +88,13 @@ export type ToolServices = {
    * the principal's own outside a session. The workspace_* tools refuse without it.
    */
   workspace?: SessionFiles | undefined
+  /**
+   * The secrets a tool must never hand the model (#2329): every saved Claude
+   * credential's (main.ts), and in a classic turn the turn's plugin tokens too
+   * (tools/harness.ts). workspace_read redacts them from text, as the event log
+   * is redacted of them (sessions/sdkEvents.ts `scrubForLog`).
+   */
+  secrets?: (() => Promise<readonly string[]>) | undefined
   /** The tabs the browser_* tools drive (bridge/hub.ts, #254); without it they answer "no browser attached". */
   browser?: BrowserTabs | undefined
   /**

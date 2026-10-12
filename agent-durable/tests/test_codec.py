@@ -3,10 +3,12 @@ written by the agent's payloadCodec.test.ts, opened and sealed again byte for by
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+import uuid
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +24,7 @@ from scadbuddy_durable.codec import (
     SubjectPayloadCodec,
     open_payload,
     payload_key_context,
+    payload_key_lock,
     seal_payload,
 )
 from scadbuddy_durable.secrets import SealError, kek_from_base64, open_bytes
@@ -149,3 +152,38 @@ async def test_keys_are_made_once_kept_sealed_and_opened_with_the_previous_key(
     assert await cur.fetchone() == (0,)
     assert PgPayloadKeys(lambda: _same(agent_db), kek)._cache_s == 30.0
     assert "\\x" not in repr(one) and str(made) not in repr(one)
+
+
+@pytest.mark.requires_postgres
+async def test_no_key_is_made_for_a_subject_whose_forget_commits_while_the_encoder_waits(
+    agent_db: psycopg.AsyncConnection[Any],
+    connect: Callable[[], AbstractAsyncContextManager[psycopg.AsyncConnection[Any]]],
+) -> None:
+    """forgetSubject and key creation serialise on the subject's advisory lock (#2157):
+    without it on either side, the encoder's tombstone check reads from before the
+    forget commits and a forgotten subject gets a fresh key."""
+    kek = kek_from_base64(base64.b64encode(b"\x11" * 32).decode())
+    subject = f"flow-{uuid.uuid4()}"
+    async with connect() as watcher:
+        # agent/src/sessions/forget.ts, its transaction held open before it commits.
+        async with agent_db.transaction():
+            await agent_db.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s))", (payload_key_lock(subject),)
+            )
+            await agent_db.execute(
+                "INSERT INTO ai_forgotten_subjects (subject) VALUES (%s)", (subject,)
+            )
+            await agent_db.execute("DELETE FROM ai_payload_keys WHERE subject = %s", (subject,))
+            making = asyncio.ensure_future(PgPayloadKeys(connect, kek).key_for(subject, True))
+            # The encoder is blocked on the forget's lock (or, without the lock, done).
+            for _ in range(100):
+                cur = await watcher.execute(
+                    "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
+                )
+                if await cur.fetchone() != (0,) or making.done():
+                    break
+                await asyncio.sleep(0.02)
+        with pytest.raises(SubjectForgottenError):
+            await making
+    cur = await agent_db.execute("SELECT 1 FROM ai_payload_keys WHERE subject = %s", (subject,))
+    assert await cur.fetchone() is None
