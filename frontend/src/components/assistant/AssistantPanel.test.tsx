@@ -10,6 +10,7 @@ import { EXTERNAL_SESSION_ID, createMockAgentTransport, type MockAgentTransport 
 import { respondRequests, setPendingAnswers, setPendingApprovals } from '../../mocks/features/pendingInput'
 import { setRunningSessions, setSessionResources } from '../../mocks/features/assistantSessions'
 import { setMcpAuthMode } from '../../mocks/features/mcpTokens'
+import { seedSessionFile } from '../../mocks/features/sessionFiles'
 import { emitRealtime } from '../../mocks/realtime'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
@@ -776,6 +777,52 @@ describe('assistant panel', () => {
     expect(await within(panel).findByRole('link', { name: /out-mid/ })).toHaveAttribute('href', '/edit/out-mid')
     // Read on the tool result alone: the session's status never moved.
     expect(screen.getByTestId('agent-status').textContent).toBe(status)
+  })
+
+  it("shows a session's Files, and reads them again when a file is uploaded (#2329)", async () => {
+    let inject: (frame: unknown) => void = () => {}
+    const spying = () => {
+      const inner = factory()
+      return {
+        ...inner,
+        connect: (h: Parameters<typeof inner.connect>[0]) => {
+          inject = (frame) => act(() => h.onFrame(frame as never))
+          inner.connect(h)
+        },
+      }
+    }
+    seedSessionFile(EXTERNAL_SESSION_ID, 'downloads/bin.3mf', new Uint8Array(10), 'model/3mf', { tool: 'workspace_save' })
+    const view = renderPage(
+      <Routes>
+        <Route element={<AppShell embedded={false} assistantTransport={spying} />}>
+          <Route path="*" element={<p>page</p>} />
+        </Route>
+      </Routes>,
+      { route: '/' },
+    )
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    await view.user.click(await screen.findByRole('button', { name: 'Sessions (1)' }))
+    await view.user.click(screen.getByRole('button', { name: /Tune the gridfinity bin/ }))
+    await screen.findByText('Done: the bin is now 3 units (21 mm) tall.')
+
+    const files = screen.getByRole('button', { name: 'Files' })
+    expect(files).toHaveAttribute('aria-expanded', 'false')
+    await view.user.click(files)
+    const panel = screen.getByRole('region', { name: "This session's files" })
+    expect(await within(panel).findByText('downloads/bin.3mf')).toBeInTheDocument()
+    expect(within(panel).getByText(/by workspace_save/)).toBeInTheDocument()
+
+    seedSessionFile(EXTERNAL_SESSION_ID, 'uploads/new.stl', new Uint8Array(3), 'model/stl', { kind: 'upload' })
+    inject({
+      v: 1,
+      type: 'workspace.file',
+      sessionId: EXTERNAL_SESSION_ID,
+      path: 'uploads/new.stl',
+      change: 'uploaded',
+      by: { kind: 'browser', id: 'browser', label: 'You' },
+      size: 3,
+    })
+    expect(await within(panel).findByText('uploads/new.stl')).toBeInTheDocument()
   })
 
   it('reports a malformed frame instead of rendering it', async () => {

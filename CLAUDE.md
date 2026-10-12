@@ -507,6 +507,12 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     `SessionFiles.chunks` into the multipart route, text decoded as UTF-8); the headless
     browser's downloads are drained into `downloads/` after each browser call by a
     `PostToolUse` hook (`src/harness/browserDownloads.ts`).
+    The panel's Files (part 3) are `routes/sessionFiles.ts`
+    (list, download as an attachment, multipart upload, delete; the session routes'
+    guards, writes owner-only, each write a `workspace.file` event) and the caps' route
+    `routes/workspaceSettings.ts`; the frontend is `components/assistant/SessionFiles.tsx`
+    with msw `src/mocks/features/sessionFiles.ts` (component tests stub the upload:
+    jsdom's `File` cannot pass undici's multipart parser).
   - Plugins given to the harness are vetted by `src/harness/plugins.ts`: anything that
     starts a process (command hooks, stdio MCP servers, LSP servers, monitors) or runs
     plugin code in Claude Code (a hooks file's `modules`, on by default since Claude

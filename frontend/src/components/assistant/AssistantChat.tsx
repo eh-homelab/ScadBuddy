@@ -40,6 +40,7 @@ import { BudgetMeter, BudgetSpent, usd } from './SessionBudget'
 import { ArchivedSessions } from './ArchivedSessions'
 import { SessionSwitcher } from './SessionSwitcher'
 import { useSkillMenu } from './SkillMenu'
+import { SessionFiles } from './SessionFiles'
 import { SessionFlowRuns } from './SessionFlowRuns'
 import { SessionTouched } from './SessionTouched'
 import { useDictation, useSpokenReplies } from './useVoice'
@@ -181,6 +182,8 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   }, [toolResults])
   // #931 — the active session's "Touched" panel.
   const [touchedOpen, setTouchedOpen] = useState(false)
+  // #2329 — the active session's Files (its workspace).
+  const [filesOpen, setFilesOpen] = useState(false)
   const [advanced, setAdvanced] = useState(readAdvanced)
   function toggleAdvanced() {
     setAdvanced((was) => {
@@ -210,6 +213,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   const feedEnd = useRef<HTMLDivElement>(null)
   const pickerId = useId()
   const touchedId = useId()
+  const filesId = useId()
   const voiceNoteId = useId()
   const archivedNoteId = useId()
   /** #1885 — a refused Unarchive, shown for that chat only. */
@@ -680,6 +684,16 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
           >
             Touched
           </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-expanded={filesOpen}
+            aria-controls={filesOpen ? filesId : undefined}
+            title="The files in this session's workspace: download them, or upload one for the assistant"
+            onClick={() => setFilesOpen((o) => !o)}
+          >
+            Files
+          </Button>
           <BudgetMeter session={active} />
           {active.parentId && (
             <div className="flex w-full items-center gap-1 text-[11.5px] text-muted">
@@ -737,6 +751,22 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
             key={active.id}
             sessionId={active.id}
             refreshKey={`${active.status}:${finishedTools}`}
+          />
+        </section>
+      )}
+
+      {active && filesOpen && (
+        <section id={filesId} aria-label="This session's files" className="shrink-0 border-b border-line bg-surface-2">
+          {/* Read again when a tool call finishes or a file is uploaded or deleted. */}
+          <SessionFiles
+            key={active.id}
+            sessionId={active.id}
+            refreshKey={`${active.status}:${finishedTools}:${active.workspaceChanges ?? 0}`}
+            canWrite={canSend}
+            onInsert={(text) => {
+              const now = draftNow.current
+              writeDraft(now && !/\s$/.test(now) ? `${now} ${text}` : `${now}${text}`)
+            }}
           />
         </section>
       )}
