@@ -123,13 +123,7 @@ export const arrangeTools: Tool[] = [
             'to re-render them first, or leave them out.',
         )
       }
-      if (problem.code === 'library_file_output_deleted') {
-      throw new ToolError(
-        `not arranged: library file(s) ${(problem.library_file_ids ?? []).join(', ')} were made from a ` +
-          'ScadBuddy output that has since been deleted, so Arrange cannot read them. Leave them out.',
-      )
-    }
-    if (problem.code === 'library_file_not_arrangeable') {
+      if (problem.code === 'library_file_not_arrangeable') {
         throw new ToolError(
           `not arranged: library file(s) ${(problem.library_file_ids ?? []).join(', ')} cannot be arranged ` +
             `(${(sent.error as { detail?: string }).detail ?? 'their objects could not be read'}). Leave them out.`,

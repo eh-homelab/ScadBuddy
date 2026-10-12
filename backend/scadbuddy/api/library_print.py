@@ -8,7 +8,6 @@ images are proxied so the API key never reaches the browser.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Annotated
 
 from fastapi import APIRouter, Path, Query, Request, Response, status
@@ -33,7 +32,7 @@ from scadbuddy.api.operations import (
     operation_answer,
     run_operation,
 )
-from scadbuddy.api.outputs import OutputPlate, read_plain_files
+from scadbuddy.api.outputs import OutputPlate, live_outputs_for_files, read_plain_files
 from scadbuddy.api.printing import PRINT_RUN_PROBLEMS, accept_run, failed_before_queueing
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for
@@ -59,7 +58,6 @@ from scadbuddy.library.library_file_operations import (
     LibraryFilesRequest,
     LibraryRestoreResult,
 )
-from scadbuddy.library.outputs import OutputNotFoundError, OutputStore
 from scadbuddy.library.settings_store import ModelPrintChoices
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.rack.component import RackUsageDep
@@ -95,24 +93,10 @@ async def get_library(
         if file_id is not None and folder_id is None:
             folder_id = (await client.library_file(file_id)).folder_id
         listing = await list_library(client, folder_id=folder_id, show_all=show_all)
-    made = await uploads.outputs_for_files(entry.id for entry in listing.files)
-    live = await asyncio.to_thread(_existing, outputs, set(made.values()))
+    made = await live_outputs_for_files(uploads, outputs, (entry.id for entry in listing.files))
     for entry in listing.files:
-        output_id = made.get(entry.id)
-        entry.output_id = output_id if output_id in live else None
+        entry.output_id = made.get(entry.id)
     return listing
-
-
-def _existing(outputs: OutputStore, output_ids: set[str]) -> set[str]:
-    """Those of ``output_ids`` the output store still has."""
-    found: set[str] = set()
-    for output_id in output_ids:
-        try:
-            outputs.directory(output_id)
-        except OutputNotFoundError:
-            continue
-        found.add(output_id)
-    return found
 
 
 @router.post(

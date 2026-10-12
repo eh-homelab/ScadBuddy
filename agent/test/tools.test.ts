@@ -1011,26 +1011,6 @@ describe('arrange (#1864)', () => {
     expect(JSON.stringify(plain.content)).toMatch(/88 cannot be arranged.*sliced already.*Leave them out/)
   })
 
-  it('tells the model to leave out a library file whose output was deleted (#2138)', async () => {
-    server.use(
-      http.post(`${BACKEND}/api/v1/outputs/arrange`, () =>
-        HttpResponse.json(
-          {
-            title: 'Not Found',
-            status: 404,
-            detail: `library file 78 is a copy of output ${A}, which has been deleted`,
-            code: 'library_file_output_deleted',
-            library_file_ids: [78],
-          },
-          { status: 404 },
-        ),
-      ),
-    )
-    const gone = await runTool(tool('arrange'), { objects: [{ library_file_id: 78 }] }, ctx())
-    expect(gone.isError).toBe(true)
-    expect(JSON.stringify(gone.content)).toMatch(/78 were made from a ScadBuddy output.*deleted.*Leave them out/)
-  })
-
   it('refuses an object naming no source, or both, before any request', async () => {
     for (const object of [{}, { output_id: A, library_file_id: 7 }]) {
       const result = await runTool(tool('arrange'), { objects: [object] }, ctx())
