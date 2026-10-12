@@ -163,12 +163,26 @@ class FlowGrants:
                 return GrantVerdict(verdict="outside", reason="not this session's call")
             if not req.request_id.startswith(prefix[1]) or req.flow_call_id is None:
                 return GrantVerdict(verdict="outside", reason="not this session's call")
-            run = await self._store.get_run(req.run_id)
+            # The run is the one whose step talks to this very session, from its own
+            # record; the payload's run id must agree with it. The step must be an
+            # `agent`/`ask_session` call still running (its turn is the flow turn), and
+            # its policy recorded: anything missing is no flow turn (fail closed).
+            run = await self._store.run_talking_to(req.session_id, req.flow_call_id)
             sent = next(
                 (s for s in (run.steps if run else []) if s.call_id == req.flow_call_id), None
             )
+            if (
+                run is None
+                or run.id != req.run_id
+                or sent is None
+                or sent.session_id != req.session_id
+                or sent.fn not in ("agent", "ask_session")
+                or sent.status != "running"
+                or sent.policy is None
+            ):
+                return GrantVerdict(verdict="outside", reason="not a flow turn of this run")
             # The script's narrowing, as the run recorded the step (spec §3.4).
-            narrowing = sent.policy.grant if sent is not None and sent.policy else None
+            narrowing = sent.policy.grant
         verdict = await match_grant(
             self._store,
             self.facts_of,

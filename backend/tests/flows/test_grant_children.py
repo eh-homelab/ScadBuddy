@@ -3,6 +3,7 @@ plan Task A5): `agent`/`ask_session` take a narrowing (`grant`) and `on_outside`
 recorded with the step; `flow_grant_check` checks a child's call against the run's own
 record of that step, from the session's own workflow, never from what it is told."""
 
+import asyncio
 import dataclasses
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -116,23 +117,31 @@ class Child:
 
 
 async def child(
-    outward: Outward, api: FakeApi, queue: str, spec: GrantSpec, narrowing: Any = None
+    outward: Outward,
+    api: FakeApi,
+    sessions: tuple[Sessions, str],
+    spec: GrantSpec,
+    narrowing: Any = None,
 ) -> Child:
+    """A run whose `agent(...)` turn in session DURABLE is still running: a flow turn."""
+    served, queue = sessions
+    if served.hold is None:
+        served.hold = asyncio.Event()
     run_id = await outward.run(
         script(f"return await agent('go', [], None, grant={narrowing!r})"),
         tools_queue=queue,
         grant=spec,
     )
-    run = await outward.finished(run_id)
-    [step] = run.steps
-    return Child(outward, api, run_id, step.call_id)
+    run = await outward.row(
+        run_id, lambda r: [(s.session_id, s.status) for s in r.steps] == [(DURABLE, "running")]
+    )
+    return Child(outward, api, run_id, run.steps[0].call_id)
 
 
 async def test_a_child_call_in_a_flow_turn_inside_the_grant_is_inside(
     outward: Outward, api: FakeApi, sessions: tuple[Sessions, str]
 ) -> None:
-    _, queue = sessions
-    c = await child(outward, api, queue, grant(SEND_RULE))
+    c = await child(outward, api, sessions, grant(SEND_RULE))
     verdict = await c.check("toolu_1")
     assert verdict.verdict == "inside", verdict
     [use] = await outward.store.grant_uses(c.run_id)
@@ -142,20 +151,18 @@ async def test_a_child_call_in_a_flow_turn_inside_the_grant_is_inside(
 async def test_a_grant_not_extended_to_sessions_admits_no_child_call(
     outward: Outward, api: FakeApi, sessions: tuple[Sessions, str]
 ) -> None:
-    _, queue = sessions
-    c = await child(outward, api, queue, grant(SEND_RULE, extends=False))
+    c = await child(outward, api, sessions, grant(SEND_RULE, extends=False))
     assert (await c.check("toolu_1")).verdict == "outside"
 
 
 async def test_the_scripts_narrowing_is_read_from_the_step_and_only_narrows(
     outward: Outward, api: FakeApi, sessions: tuple[Sessions, str]
 ) -> None:
-    _, queue = sessions
     narrowing = {"rules": [{**SEND_RULE, "args": [{"path": "/printer_id", "in": [3, 4]}]}]}
     c = await child(
         outward,
         api,
-        queue,
+        sessions,
         grant({**SEND_RULE, "args": [{"path": "/printer_id", "in": [3]}]}),
         narrowing,
     )
@@ -165,13 +172,13 @@ async def test_the_scripts_narrowing_is_read_from_the_step_and_only_narrows(
     narrower = await child(
         outward,
         api,
-        queue,
+        sessions,
         grant(SEND_RULE),
         {"rules": [{**SEND_RULE, "args": [{"path": "/printer_id", "in": [5]}]}]},
     )
     assert (await narrower.check("toolu_9")).verdict == "outside"
     # A request id another run's grant let through is that run's, never this one's.
-    wide_open = await child(outward, api, queue, grant(SEND_RULE))
+    wide_open = await child(outward, api, sessions, grant(SEND_RULE))
     assert (await wide_open.check("toolu_1")).verdict == "outside"
     assert await outward.store.grant_uses(wide_open.run_id) == []
 
@@ -179,8 +186,7 @@ async def test_the_scripts_narrowing_is_read_from_the_step_and_only_narrows(
 async def test_a_check_names_only_its_own_session_and_a_step_of_the_run(
     outward: Outward, api: FakeApi, sessions: tuple[Sessions, str]
 ) -> None:
-    _, queue = sessions
-    c = await child(outward, api, queue, grant(SEND_RULE))
+    c = await child(outward, api, sessions, grant(SEND_RULE))
     other = "33333333-3333-4333-8333-333333333333"
     # Another step of the run, or a step that is not this session's.
     assert (await c.check("toolu_1", flow_call_id="nope")).verdict == "outside"
@@ -191,4 +197,56 @@ async def test_a_check_names_only_its_own_session_and_a_step_of_the_run(
     ).verdict == "outside"
     # A check with no session from a session's workflow is no flow-own call.
     assert (await c.check("toolu_4", session_id=None, flow_call_id=None)).verdict == "outside"
+    assert await outward.store.grant_uses(c.run_id) == []
+
+
+async def test_a_session_cannot_borrow_another_runs_grant(
+    outward: Outward, api: FakeApi, sessions: tuple[Sessions, str]
+) -> None:
+    """The run is the one whose step talks to this session, never the payload's."""
+    closed = await child(outward, api, sessions, grant(SEND_RULE, extends=False))
+    wide = await child(outward, api, sessions, grant(SEND_RULE))
+    # This session's turn of `closed`, claiming `wide`'s run id.
+    assert (await closed.check("toolu_1", run_id=wide.run_id)).verdict == "outside"
+    # `wide`'s own step, claiming `closed`'s run id.
+    assert (await wide.check("toolu_2", run_id=closed.run_id)).verdict == "outside"
+    assert await outward.store.grant_uses(wide.run_id) == []
+
+
+async def test_another_session_cannot_use_a_step_that_talks_to_this_one(
+    outward: Outward, api: FakeApi, sessions: tuple[Sessions, str]
+) -> None:
+    c = await child(outward, api, sessions, grant(SEND_RULE))
+    other = "33333333-3333-4333-8333-333333333333"
+    c.env.info = dataclasses.replace(c.env.info, workflow_id=f"session-{other}")
+    verdict = await c.check("toolu_1", session_id=other, request_id=f"durable:{other}:swr:toolu_1")
+    assert verdict.verdict == "outside"
+    assert await outward.store.grant_uses(c.run_id) == []
+
+
+async def test_a_step_with_no_policy_admits_nothing(
+    outward: Outward, api: FakeApi, sessions: tuple[Sessions, str]
+) -> None:
+    """Fail closed: a step whose narrowing cannot be read is no flow turn."""
+    c = await child(outward, api, sessions, grant(SEND_RULE))
+    with outward.store._pool.connection() as conn:
+        conn.execute(
+            "UPDATE workflow_runs SET steps ="
+            " (SELECT jsonb_agg(s - 'policy') FROM jsonb_array_elements(steps) s)"
+            " WHERE id = %s",
+            (c.run_id,),
+        )
+    assert (await c.check("toolu_1")).verdict == "outside"
+
+
+async def test_a_finished_turn_is_no_flow_turn(
+    outward: Outward, api: FakeApi, sessions: tuple[Sessions, str]
+) -> None:
+    """A later turn of the same session (the person's, after the step ended) is not covered."""
+    served, _ = sessions
+    c = await child(outward, api, sessions, grant(SEND_RULE))
+    assert served.hold is not None
+    served.hold.set()
+    await outward.finished(c.run_id)
+    assert (await c.check("toolu_1")).verdict == "outside"
     assert await outward.store.grant_uses(c.run_id) == []
