@@ -108,22 +108,6 @@ function builtIns(): BuiltInPluginPackage[] {
       approved: true,
       enabled: true,
     },
-    {
-      name: 'playwright',
-      built_in: true,
-      source: { kind: 'built_in', path: 'agent/plugins/playwright' },
-      review: {
-        ...emptyReview,
-        name: 'playwright',
-        description: 'Browser automation and end-to-end testing MCP server by Microsoft.',
-        version: '0.0.83',
-        skills: [],
-        agents: [],
-        files: ['.claude-plugin/plugin.json', 'README.md'],
-      },
-      approved: true,
-      enabled: false,
-    },
   ]
 }
 
@@ -233,7 +217,7 @@ export function remotePluginList(): RemotePlugin[] {
 }
 
 /** ScadBuddy's own tool sets (#1953); their routes are `features/builtInToolSets.ts`. */
-const BUILT_IN_SETS = new Set(['scadbuddy', 'playwright'])
+const BUILT_IN_SETS = new Set(['scadbuddy'])
 
 export const aiPluginHandlers = [
   // ---- remote MCP endpoints. A name that is no remote plugin falls through to
@@ -244,7 +228,7 @@ export const aiPluginHandlers = [
     if (!/^[a-z][a-z0-9-]{0,30}[a-z0-9]$/.test(body.name)) {
       return detail(400, 'name must be 2–32 characters: lower-case letters, digits and single hyphens')
     }
-    if (!/^https:\/\//.test(body.url)) return detail(400, 'url must be https: plain http is allowed only to loopback')
+    if (!/^https:\/\//.test(body.url)) return detail(400, 'url must be https: plain http is allowed only to loopback or private addresses')
     if (BUILT_IN_SETS.has(body.name)) {
       return detail(409, `"${body.name}" is built in: it cannot be added: it ships with the agent`, { built_in: true })
     }

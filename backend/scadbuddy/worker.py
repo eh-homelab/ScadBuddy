@@ -112,10 +112,13 @@ DRAIN_POLL = 5.0
 DRAIN_CURRENT_GRACE = 30.0
 #: Making the build current, retried once the worker polls: Temporal 1.28 ignores
 #: `allow_no_pollers` and answers NOT_FOUND until the build's first poll reaches it.
-#: The waits between attempts, then every `MAKE_CURRENT_EVERY`, for `_DEADLINE` seconds.
+#: The waits between attempts, then every `MAKE_CURRENT_EVERY` until it takes or the
+#: worker stops: a worker that gave up left a deployment whose current build had no
+#: poller once the old pods went, and every render hung (#2341). After
+#: `MAKE_CURRENT_ERROR_AFTER` seconds each failure logs an error instead of a warning.
 MAKE_CURRENT_BACKOFF = (1.0, 2.0, 4.0)
 MAKE_CURRENT_EVERY = 5.0
-MAKE_CURRENT_DEADLINE = 60.0
+MAKE_CURRENT_ERROR_AFTER = 60.0
 
 
 def build_worker_deps(
@@ -278,12 +281,13 @@ async def make_current_until_polled(
     build_id: str,
     backoff: Sequence[float],
     every: float,
-    deadline: float,
-) -> bool:
-    """Make the build current, retrying an `RPCError` until ``deadline`` seconds have
-    passed; False when it never took. Any other error propagates."""
+    error_after: float,
+) -> None:
+    """Make the build current, retrying an `RPCError` until it takes; cancel it to
+    stop. Failures past ``error_after`` seconds log at error level. Any other error
+    propagates."""
     loop = asyncio.get_running_loop()
-    give_up = loop.time() + deadline
+    escalate = loop.time() + error_after
     attempt = 0
     while True:
         attempt += 1
@@ -291,20 +295,15 @@ async def make_current_until_polled(
             await set_current()
         except RPCError as error:
             delay = backoff[attempt - 1] if attempt <= len(backoff) else every
-            logger.warning(
+            logger.log(
+                logging.ERROR if loop.time() >= escalate else logging.WARNING,
                 "could not make this build current yet",
                 extra={"build_id": build_id, "attempt": attempt, "error": str(error)},
             )
-            if loop.time() + delay > give_up:
-                logger.error(
-                    "could not make this build current; polling anyway",
-                    extra={"build_id": build_id, "attempts": attempt, "error": str(error)},
-                )
-                return False
             await asyncio.sleep(delay)
         else:
             logger.info("made this build current", extra={"build_id": build_id})
-            return True
+            return
 
 
 async def _poll(
@@ -403,7 +402,7 @@ async def _serve_versioned(
                 build_id=build_id,
                 backoff=MAKE_CURRENT_BACKOFF,
                 every=MAKE_CURRENT_EVERY,
-                deadline=MAKE_CURRENT_DEADLINE,
+                error_after=MAKE_CURRENT_ERROR_AFTER,
             )
         )
         stopped = asyncio.create_task(stop.wait())

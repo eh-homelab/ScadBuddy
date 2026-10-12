@@ -9,7 +9,6 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { afterEach, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import type { AuditEntry, AuditSink } from '../src/audit/log.js'
-import { AGENT_ACTOR_HEADER } from '../src/harness/headlessBrowser.js'
 import {
   HTTP_READ_TOOL,
   HTTP_READ_TOOL_NAME,
@@ -155,14 +154,11 @@ describe('what is sent', () => {
     const { headers } = seen[0]!
     // Node adds only the connection-level headers.
     expect(Object.keys(headers).sort()).toEqual(['connection', 'content-length', 'content-type', 'host', 'x-custom'])
-    expect(headers[AGENT_ACTOR_HEADER.toLowerCase()]).toBeUndefined()
     expect(JSON.stringify(headers)).not.toContain(SECRET)
     expect(seen[0]!.body).toBe('hello')
   })
 
   it.each([
-    ['the agent-actor header', { headers: { [AGENT_ACTOR_HEADER]: 'x' } }, /ScadBuddy's own/],
-    ['the actor header in another case', { headers: { 'x-scadbuddy-agent-session': 'x' } }, /ScadBuddy's own/],
     ['the credential in Authorization', { headers: { Authorization: `Bearer ${SECRET}` } }, /own credential/],
     ['a plugin token in a Cookie', { headers: { Cookie: `s=${PLUGIN_TOKEN}` } }, /own credential/],
     ['the credential in the URL', { url: `QUERY?key=${SECRET}` }, /URL contains/],

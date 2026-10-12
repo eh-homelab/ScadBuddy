@@ -1,5 +1,5 @@
 import {
-  IMAGE_DATA_MAX,
+  IMAGE_BYTES_MAX,
   DEFAULT_IMAGE_EDGE,
   PREVIEW_EDGE,
   composerImages,
@@ -39,12 +39,15 @@ function fakeCodec(width: number, height: number, size = (w: number, h: number, 
 const file = (head: number[], size: number, type: string, name = 'shot.png') => new File([bytes(head, size)], name, { type })
 
 describe('prepareImage (#1866)', () => {
-  it('sends a small image as it is, with a JPEG preview at most PREVIEW_EDGE on a side', async () => {
+  it('sends a small image as it is, with a JPEG preview at most PREVIEW_EDGE on a side, both as blobs (#2479)', async () => {
     const { codec, drawn } = fakeCodec(800, 400)
-    const image = await prepareImage(file(PNG_HEAD, 1000, 'image/png'), codec)
+    const png = file(PNG_HEAD, 1000, 'image/png')
+    const image = await prepareImage(png, codec)
     expect(image.mediaType).toBe('image/png')
-    expect(atob(image.data).length).toBe(1000)
+    expect(image.blob).toBe(png)
     expect(image.preview.mediaType).toBe('image/jpeg')
+    expect(image.preview.blob).toBeInstanceOf(Blob)
+    expect(image).not.toHaveProperty('data')
     expect(drawn).toEqual([{ width: PREVIEW_EDGE, height: PREVIEW_EDGE / 2, type: 'image/jpeg' }])
   })
 
@@ -54,7 +57,7 @@ describe('prepareImage (#1866)', () => {
     expect(DEFAULT_IMAGE_EDGE).toBe(1568)
     expect(drawn[0]).toEqual({ width: DEFAULT_IMAGE_EDGE, height: DEFAULT_IMAGE_EDGE / 2, type: 'image/png' })
     expect(image.mediaType).toBe('image/png')
-    expect(atob(image.data).length).toBe(5000)
+    expect(image.blob.size).toBe(5000)
   })
 
   it('scales to the edge it is given (the stored setting)', async () => {
@@ -66,12 +69,12 @@ describe('prepareImage (#1866)', () => {
   it('sends an image within the given edge as it is, though it is past the default', async () => {
     const { codec, drawn } = fakeCodec(2000, 1000)
     const image = await prepareImage(file(PNG_HEAD, 1000, 'image/png'), codec, 2576)
-    expect(atob(image.data).length).toBe(1000)
+    expect(image.blob.size).toBe(1000)
     expect(drawn.map((d) => d.type)).toEqual(['image/jpeg'])
   })
 
   it('falls back to a JPEG when the scaled image is still too large', async () => {
-    const tooBig = (IMAGE_DATA_MAX / 4) * 3 + 10
+    const tooBig = IMAGE_BYTES_MAX + 10
     const { codec, drawn } = fakeCodec(4000, 2000, (_w, _h, type) => (type === 'image/png' ? tooBig : 3000))
     const image = await prepareImage(file(PNG_HEAD, tooBig, 'image/png'), codec)
     expect(drawn.map((d) => d.type)).toEqual(['image/png', 'image/jpeg', 'image/jpeg'])

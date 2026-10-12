@@ -18,7 +18,6 @@ import type {
   FilamentOptions,
   FontCatalogue,
   FontFamily,
-  HeadlessBrowserSetting,
   HttpRequestSetting,
   ModelSetting,
   PrinterCameraSetting,
@@ -81,8 +80,15 @@ import type {
   TrayAssigned,
   PrintRun,
   FlowDecided,
+  FlowDefinition,
+  FlowReset,
+  FlowResetPoints,
+  FlowResetPreview,
   FlowRun,
+  FlowRunStarted,
   FlowRunView,
+  FlowSummary,
+  FlowVersion,
   Operation,
   OperationAccepted,
   PrintRunRequest,
@@ -671,6 +677,8 @@ export const api = {
   },
 
   getFlowRun: (id: string) => request<FlowRunView>(`/workflow-runs/${seg(id)}`),
+  /** #2477: one of a run's images, from its blob route. */
+  flowRunImageUrl: (id: string, name: string) => `${API_BASE}/workflow-runs/${seg(id)}/images/${seg(name)}`,
 
   answerFlowRun: (id: string, callId: string, answer: string) =>
     command<FlowDecided>(`/workflow-runs/${seg(id)}/answer`, {
@@ -682,6 +690,47 @@ export const api = {
     command<FlowDecided>(`/workflow-runs/${seg(id)}/decide`, {
       method: 'POST',
       body: JSON.stringify({ call_id: callId, approved, ...(reason ? { reason } : {}) }),
+    }),
+
+  // #2350 — the Flows tab: every registered flow version, one with its script, and a
+  // run started from it. Version history, diffs and the editor come with #2503/#2487.
+  listFlows: () => request<FlowSummary[]>('/workflows'),
+
+  /**
+   * One flow's versions, newest first: the one place the page reads them from, its git
+   * history (#2503). `GET /workflows` lists only each name's newest version.
+   */
+  listFlowVersions: (name: string) => request<FlowVersion[]>(`/workflows/names/${seg(name)}/versions`),
+
+  getFlow: (id: string) => request<FlowDefinition>(`/workflows/${seg(id)}`),
+
+  /** A start is keyed per press: a re-send after an answer that never arrived reaches the same run. */
+  startFlowRun: (id: string, key: string = newRequestId()) =>
+    reattach(() =>
+      request<FlowRunStarted>(`/workflows/${seg(id)}/runs`, {
+        method: 'POST',
+        headers: { 'Idempotency-Key': key },
+        body: JSON.stringify({}),
+      }),
+    ),
+
+  /** Forgets a run: its payload key, its workflow (stopped if open) and its row. */
+  deleteFlowRun: (id: string) => request<void>(`/workflow-runs/${seg(id)}`, { method: 'DELETE' }),
+
+  getFlowResetPoints: (id: string) => request<FlowResetPoints>(`/workflow-runs/${seg(id)}/reset-points`),
+
+  previewFlowReset: (id: string, eventId: number) =>
+    request<FlowResetPreview>(`/workflow-runs/${seg(id)}/reset-preview?event_id=${eventId}`),
+
+  /** Pinned to the preview the person saw: a 409 `flow-reset-changed` carries the new one. */
+  resetFlowRun: (id: string, preview: Pick<FlowResetPreview, 'event_id' | 'as_of_event_id' | 'workflow_run_id'>) =>
+    command<FlowReset>(`/workflow-runs/${seg(id)}/reset`, {
+      method: 'POST',
+      body: JSON.stringify({
+        event_id: preview.event_id,
+        as_of_event_id: preview.as_of_event_id,
+        workflow_run_id: preview.workflow_run_id,
+      }),
     }),
 
   listModels: () => request<ModelSummary[]>('/models'),
@@ -1661,19 +1710,6 @@ export const api = {
     command<SidebarLink>('/settings/register-sidebar', { method: 'POST' }),
 
   /**
-   * The AI agent's headless browser (#349), served by the agent service under
-   * `/api/v1/ai/*`. Fails (404 or 503) when there is no agent or no AI database.
-   */
-  getHeadlessBrowserSetting: () =>
-    request<HeadlessBrowserSetting>('/ai/settings/headless-browser'),
-
-  putHeadlessBrowserSetting: (enabled: boolean) =>
-    request<HeadlessBrowserSetting>('/ai/settings/headless-browser', {
-      method: 'PUT',
-      body: JSON.stringify({ enabled }),
-    }),
-
-  /**
    * The assistant's `http_request` tool (#827), served by the agent service. On by
    * default. Fails (404 or 503) when there is no agent or no AI database.
    */
@@ -1685,9 +1721,17 @@ export const api = {
       body: JSON.stringify({ enabled }),
     }),
 
-  /** #1941 — uploads an image the user attached in the assistant panel; its message then sends the id. */
-  uploadAttachment: (image: { mediaType: string; data: string; preview: { mediaType: string; data: string } }) =>
-    request<AttachmentView>('/ai/attachments', { method: 'POST', body: JSON.stringify(image) }),
+  /**
+   * #1941 — uploads an image the user attached in the assistant panel; its message then
+   * sends the id. #2479 — as bytes: the image and its preview are two file parts, each
+   * typed, never base64 in JSON.
+   */
+  uploadAttachment: (image: { mediaType: string; blob: Blob; preview: { mediaType: string; blob: Blob } }) => {
+    const body = new FormData()
+    body.append('image', new Blob([image.blob], { type: image.mediaType }), 'image')
+    body.append('preview', new Blob([image.preview.blob], { type: image.preview.mediaType }), 'preview')
+    return request<AttachmentView>('/ai/attachments', { method: 'POST', body })
+  },
 
   /** #1941 — deletes an upload the user removed from the composer before sending it. */
   deleteAttachment: (id: string) =>

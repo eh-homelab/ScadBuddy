@@ -31,20 +31,6 @@ function initial(): BuiltInToolSet[] {
       tool_tiers: {},
       disabled_tools: [],
     },
-    {
-      name: 'playwright',
-      kind: 'built_in',
-      built_in: true,
-      enabled: false,
-      switchable: true,
-      tool_prefix: 'mcp__plugin_playwright_playwright__',
-      tools: [
-        { name: 'browser_navigate', harness_name: 'mcp__plugin_playwright_playwright__browser_navigate', risk: 'read' },
-        { name: 'browser_click', harness_name: 'mcp__plugin_playwright_playwright__browser_click', risk: 'write' },
-      ],
-      tool_tiers: {},
-      disabled_tools: [],
-    },
   ]
 }
 

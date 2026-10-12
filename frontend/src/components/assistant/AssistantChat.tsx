@@ -14,15 +14,15 @@ import { useLocation } from 'react-router'
 import { bridge } from '../../agent/bridge'
 import {
   IMAGE_ACCEPT,
-  IMAGES_DATA_TOTAL_MAX,
+  IMAGES_BYTES_TOTAL_MAX,
   IMAGES_MAX,
   composerImages,
-  dataUrl,
   prepareImage,
+  type PreparedImage,
 } from '../../agent/chat/images'
 import { statusLabel } from '../../agent/chat/labels'
 import { pageContext, suggestedPrompts } from '../../agent/chat/pageContext'
-import { isDone, type SessionMode, type UserImage } from '../../agent/chat/protocol'
+import { isDone, type SessionMode } from '../../agent/chat/protocol'
 import { askedBy, isBusy, isOwnedByBrowser, type SessionPatch, type SessionState } from '../../agent/chat/state'
 import { feedBlocks, toolStatus } from '../../agent/chat/toolGroups'
 import type { ChatTransportFactory } from '../../agent/chat/transport'
@@ -100,8 +100,22 @@ export interface OpenRequest {
 interface Attached {
   key: number
   name: string
-  image: UserImage
+  image: PreparedImage
   id: string
+}
+
+/**
+ * #2479 — an attached image's thumbnail, drawn from its preview blob by a blob URL (the
+ * page's CSP allows `blob:` images, inside Bambuddy's frame too), revoked when it goes.
+ */
+function AttachedThumb({ blob, alt }: { blob: Blob; alt: string }) {
+  const [url, setUrl] = useState<string>()
+  useEffect(() => {
+    const made = URL.createObjectURL(blob)
+    setUrl(made)
+    return () => URL.revokeObjectURL(made)
+  }, [blob])
+  return url ? <img src={url} alt={alt} className="h-14 w-14 rounded-[4px] border border-line object-cover" /> : null
 }
 
 /** The assistant panel's body: sessions, the stream and action feed, and the composer. */
@@ -272,21 +286,21 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
     preparingNow.current += taken.length
     setPreparing(preparingNow.current)
     const results = await Promise.allSettled(taken.map((file) => prepareImage(file, undefined, imageEdge)))
-    const ready: { name: string; image: UserImage }[] = []
-    let total = attachedNow.current.reduce((sum, a) => sum + a.image.data.length, uploadingBytes.current)
+    const ready: { name: string; image: PreparedImage }[] = []
+    let total = attachedNow.current.reduce((sum, a) => sum + a.image.blob.size, uploadingBytes.current)
     results.forEach((result, index) => {
       const name = taken[index]?.name ?? 'image'
       if (result.status === 'rejected') {
         errors.push(result.reason instanceof Error ? result.reason.message : `${name} could not be added.`)
-      } else if (total + result.value.data.length > IMAGES_DATA_TOTAL_MAX) {
+      } else if (total + result.value.blob.size > IMAGES_BYTES_TOTAL_MAX) {
         errors.push(`${name} was not added: this message's images would be too large together.`)
       } else {
-        total += result.value.data.length
+        total += result.value.blob.size
         ready.push({ name, image: result.value })
       }
     })
     // #2119 — held until the uploads settle, so an attach started meanwhile counts them.
-    const reserved = ready.reduce((sum, { image }) => sum + image.data.length, 0)
+    const reserved = ready.reduce((sum, { image }) => sum + image.blob.size, 0)
     uploadingBytes.current += reserved
     // #1941 — each image goes to the agent now, and the message sends its id.
     const uploads = await Promise.allSettled(ready.map(({ image }) => api.uploadAttachment(image)))
@@ -880,11 +894,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
           <ul aria-label="Images to send" className="mb-1.5 flex flex-wrap gap-1.5">
             {attached.map((a) => (
               <li key={a.key} className="relative">
-                <img
-                  src={dataUrl(a.image.preview)}
-                  alt={a.name}
-                  className="h-14 w-14 rounded-[4px] border border-line object-cover"
-                />
+                <AttachedThumb blob={a.image.preview.blob} alt={a.name} />
                 <button
                   type="button"
                   aria-label={`Remove ${a.name}`}

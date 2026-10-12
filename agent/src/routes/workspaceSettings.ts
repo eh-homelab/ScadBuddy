@@ -9,7 +9,7 @@ import {
   WORKSPACE_MAX_SETTING,
 } from '../workspace/store.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
-import type { SettingsRepo } from './headlessBrowser.js'
+import type { SettingsRepo } from './httpRequest.js'
 import type { SettingsWriter } from './mcpAuthMode.js'
 import { ready, type RouteModule } from './module.js'
 
@@ -122,14 +122,14 @@ export function registerWorkspaceSettingsRoutes(app: Hono, deps: WorkspaceSettin
     const context = { actor: UI_ACTOR, surface: 'http' as const, clientIp: deps.remoteAddress(c) }
     await settings.setMany(
       { [WORKSPACE_FILE_MAX_SETTING]: body.file_max_bytes, [WORKSPACE_MAX_SETTING]: body.workspace_max_bytes },
-      () => Promise.resolve(true),
+      undefined,
       context,
     )
     return c.json(workspaceSettings(body.file_max_bytes, body.workspace_max_bytes))
   })
 }
 
-/** The workspace caps. `deps.settings` is declared in routes/headlessBrowser.ts, `deps.aiSettings` in routes/mcpAuthMode.ts. */
+/** The workspace caps. `deps.settings` is declared in routes/httpRequest.ts, `deps.aiSettings` in routes/mcpAuthMode.ts. */
 export const route: RouteModule = {
   register(app, deps) {
     registerWorkspaceSettingsRoutes(app, {

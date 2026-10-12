@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,6 +34,27 @@ BUILTIN_DIR = "_builtin"
 BUILTIN_PREFIX = "builtin:"
 
 
+def revalidate_dirs(*directories: Path) -> None:
+    """Make this process's next lookups under ``directories`` see what other NFS
+    clients wrote there (#2384, #2385).
+
+    ``/data`` is one NFS share mounted by every API replica, and the kernel's NFS
+    client trusts its cached directory entries -- negative ones included -- until the
+    directory's attributes expire (``acdirmax``, 60 s by default). So a model another
+    replica just created reads as missing here, and a ``.git/HEAD`` it just moved
+    reads as where it was. Opening a directory is a close-to-open point: the client
+    revalidates its attributes with the server, and on a change drops the entries it
+    cached under it. Pass parents before children. A directory that cannot be opened
+    (absent, say) is skipped: the lookup after this answers for it.
+    """
+    for directory in directories:
+        try:
+            descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+        except OSError:
+            continue
+        os.close(descriptor)
+
+
 def is_builtin(model_id: str) -> bool:
     return model_id.startswith(BUILTIN_PREFIX)
 
@@ -51,6 +73,11 @@ class DataPaths:
     @property
     def models(self) -> Path:
         return self.root / "models"
+
+    @property
+    def flows(self) -> Path:
+        """Flow scripts' git repository (#2503), beside the models' own."""
+        return self.root / "flows"
 
     @property
     def outputs(self) -> Path:

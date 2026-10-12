@@ -17,6 +17,7 @@ from scadbuddy.flows.models import RESULT_MAX
 from scadbuddy.flows.store import FlowStore, ResetBeforeFloorError, ResetSupersededError
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.workflows.flow_models import FlowRecord, FlowStep, FlowWaiting, ProjectionWrite
+from tests.flows.flows_support import define
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -58,7 +59,7 @@ SCRIPT = "import asyncio\nasync def main():\n    return 1\nasyncio.run(main())"
 
 
 async def started(store: FlowStore, run_id: str = "r1", *, session: str | None = None) -> str:
-    definition = await store.create_definition("swap", SCRIPT, {"kind": "browser"})
+    definition = await define(store, "swap")
     author: dict[str, Any] = {"kind": "browser"}
     if session is not None:
         author = {"kind": "agent", "principal": "p", "session": session}
@@ -90,21 +91,53 @@ def step(call_id: str, seq: int, status: str = "running") -> FlowStep:
     )
 
 
-async def test_versions_count_up_per_name(store: FlowStore) -> None:
-    one = await store.create_definition("swap", SCRIPT, {"kind": "browser"})
-    two = await store.create_definition("swap", SCRIPT + "\n", {"kind": "browser"})
-    other = await store.create_definition("other", SCRIPT, {"kind": "browser"})
-    assert (one.version, two.version, other.version) == (1, 2, 1)
+A = "a" * 40
+B = "b" * 40
+
+
+async def test_a_version_row_names_its_commit_and_the_list_has_the_newest(
+    store: FlowStore,
+) -> None:
+    """#2503: one row per version, each naming its commit (spec §6.2)."""
+    store.insert_version("v1", "swap", 1, A, {"kind": "browser"}, approval_timeout_s=0)
+    store.insert_version("v2", "swap", 2, B, {"kind": "browser"}, approval_timeout_s=None)
+    store.insert_version("o1", "other", 1, A, {"kind": "browser"}, approval_timeout_s=None)
     listed = await store.list_definitions()
-    assert [(d.name, d.version) for d in listed] == [("other", 1), ("swap", 2)]
-    got = await store.get_definition(one.id)
-    assert got is not None and got.script == SCRIPT
+    assert [(d.name, d.version, d.commit) for d in listed] == [("other", 1, A), ("swap", 2, B)]
+    one = store.stored_definition("v1")
+    assert one is not None and (one.commit, one.approval_timeout_s, one.script) == (A, 0, None)
+    assert store.version_commits() == {"v1": A, "v2": B, "o1": A}
 
 
-async def test_a_definition_keeps_its_approval_timeout(store: FlowStore) -> None:
-    never = await store.create_definition("a", SCRIPT, {}, approval_timeout_s=0)
-    inherit = await store.create_definition("b", SCRIPT, {})
-    assert (never.approval_timeout_s, inherit.approval_timeout_s) == (0, None)
+async def test_a_run_records_its_commit(store: FlowStore, jobs: JobProjection) -> None:
+    store.insert_version("v1", "swap", 1, A, {"kind": "browser"}, approval_timeout_s=None)
+    with jobs.pool.connection() as conn:
+        # A row written before #2503: no commit until the backfill sets one.
+        conn.execute(
+            "INSERT INTO workflow_definitions (id, name, version, script, created_by)"
+            " VALUES ('old', 'swap', 2, 'x', '{}')"
+        )
+
+    def record(run_id: str, definition_id: str, commit: str = "") -> FlowRecord:
+        return FlowRecord(
+            run_id=run_id,
+            definition_id=definition_id,
+            version=1,
+            name="swap",
+            workflow_id=f"flow-{run_id}",
+            workflow_run_id="wr",
+            started_by={},
+            commit=commit,
+        )
+
+    run = await store.insert_run(record("r1", "v1", B))
+    # A run started before #2503 names none: it runs its version's, once there is one.
+    legacy = await store.insert_run(record("r2", "v1"))
+    pending = await store.insert_run(record("r3", "old"))
+    assert (run.commit, legacy.commit, pending.commit) == (B, A, None)
+    store.set_commit("old", B)
+    after = await store.get_run("r3")
+    assert after is not None and after.commit == B
 
 
 async def test_insert_run_twice_returns_the_first_row_and_publishes_once(

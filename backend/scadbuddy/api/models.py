@@ -942,6 +942,15 @@ async def _create(
         )
     except ModelExistsError:
         raise ApiError(status.HTTP_409_CONFLICT, f"a model named {slug!r} already exists") from None
+    except GitError:
+        # The create was undone (`Catalogue.create`): nothing holds the slug, so the
+        # same request can simply be sent again (#2385).
+        logger.exception("could not record a new model", extra={"slug": slug})
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"{slug!r} was not created: its first revision could not be recorded."
+            " Nothing was kept; try again.",
+        ) from None
     if checked is not None and checked.schema is not None:
         # The check already derived it; storing it here is what stops the first
         # customizer open paying for the same subprocess again.

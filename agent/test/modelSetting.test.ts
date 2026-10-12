@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { describe, expect, it } from 'vitest'
 import { originPolicy } from '../src/http/origins.js'
-import type { SettingsRepo } from '../src/routes/headlessBrowser.js'
+import type { SettingsRepo } from '../src/routes/httpRequest.js'
 import { MODEL_SETTING_PATH, registerModelRoutes, storedModel } from '../src/routes/model.js'
 import { SETTING_MODEL } from '../src/sessions/manager.js'
 

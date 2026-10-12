@@ -33,7 +33,7 @@ from tests.api.test_print_progress import watched as watched  # the fixture, sha
 from tests.api.test_print_run_choices import body, follow_run, run_routes
 from tests.api.test_print_runs import Gate, gated_slice_routes
 from tests.api.test_print_runs import gate as gate  # the fixture, shared
-from tests.api.test_send import BASE, _uploaded_3mf, configure
+from tests.api.test_send import BASE, _uploaded_3mf, configure, make_output
 from tests.api.test_settings_runtime import _state
 from tests.bambuddy.conftest import recording
 from tests.support.operations import press
@@ -151,8 +151,29 @@ def test_the_root_lists_unsliced_3mfs_and_advanced_lists_every_file(client: Test
 
 
 @respx.mock
-def test_a_file_scadbuddy_uploaded_names_its_output(client: TestClient, app: FastAPI) -> None:
+def test_a_file_scadbuddy_uploaded_names_its_output(
+    client: TestClient, app: FastAPI, model: str
+) -> None:
     """#1864: what Arrange reads a generated library file's objects through."""
+    configure(client)
+    output_id = make_output(client, model)
+    listing_routes(recording("library-files-root.json"))
+    first = client.get("/api/v1/print/library").json()["files"][0]["id"]
+    state: AppState = getattr(app.state, STATE_ATTR)
+    asyncio.run(
+        state.uploads.record(output_id, LibraryCopy(id=first, folder_id=None, target_key="k"))
+    )
+
+    files = client.get("/api/v1/print/library").json()["files"]
+
+    assert {row["id"]: row["output_id"] for row in files if row["output_id"]} == {first: output_id}
+    assert len(files) > 1
+
+
+@respx.mock
+def test_a_file_whose_output_was_deleted_names_no_output(client: TestClient, app: FastAPI) -> None:
+    """#2138: the upload row outlives its output. Named, the file would be read as an
+    output's copy, and Arrange would 404 it rather than read it as a plain file."""
     configure(client)
     listing_routes(recording("library-files-root.json"))
     first = client.get("/api/v1/print/library").json()["files"][0]["id"]
@@ -163,8 +184,7 @@ def test_a_file_scadbuddy_uploaded_names_its_output(client: TestClient, app: Fas
 
     files = client.get("/api/v1/print/library").json()["files"]
 
-    assert {row["id"]: row["output_id"] for row in files if row["output_id"]} == {first: "a" * 32}
-    assert len(files) > 1
+    assert [row["output_id"] for row in files if row["id"] == first] == [None]
 
 
 @respx.mock
@@ -1183,3 +1203,170 @@ def test_the_library_file_is_always_a_download_never_a_page(client: TestClient) 
     assert served.headers["content-type"] == "application/octet-stream"
     assert served.headers["content-disposition"].startswith("attachment")
     assert served.headers["x-content-type-options"] == "nosniff"
+
+
+def two_plate_3mf() -> bytes:
+    """A Bambu Studio project of three filaments over two plates, never sliced: plate 1
+    places an object in slot 1 with a part in slot 3, plate 2 one in slot 2 (#2550)."""
+    settings = {
+        "filament_colour": ["#FF0000", "#0000FF", "#FFFFFF"],
+        "filament_type": ["PLA", "PETG", "PLA"],
+    }
+    model_settings = """<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <object id="1">
+    <metadata key="name" value="body"/>
+    <metadata key="extruder" value="1"/>
+    <part id="1" subtype="normal_part"><metadata key="extruder" value="1"/></part>
+    <part id="2" subtype="normal_part"><metadata key="extruder" value="3"/></part>
+  </object>
+  <object id="2">
+    <metadata key="name" value="lid"/>
+    <metadata key="extruder" value="2"/>
+    <part id="3" subtype="normal_part"/>
+  </object>
+  <plate>
+    <metadata key="plater_id" value="1"/>
+    <model_instance><metadata key="object_id" value="1"/></model_instance>
+  </plate>
+  <plate>
+    <metadata key="plater_id" value="2"/>
+    <model_instance><metadata key="object_id" value="2"/></model_instance>
+  </plate>
+</config>
+"""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        archive.writestr("3D/3dmodel.model", "<model/>")
+        archive.writestr("Metadata/project_settings.config", json.dumps(settings))
+        archive.writestr("Metadata/model_settings.config", model_settings)
+    return buffer.getvalue()
+
+
+def _slots(options: dict[str, Any]) -> list[tuple[int, str | None, str | None]]:
+    return [(slot["slot_id"], slot["material"], slot["colour"]) for slot in options["slots"]]
+
+
+@respx.mock
+def test_a_library_3mfs_slots_are_read_from_the_file_never_from_bambuddy(
+    client: TestClient,
+) -> None:
+    """#2550: Bambuddy's filament-requirements read of a large unsliced 3MF outlasts the
+    request, and failed the whole dialog. The slots are read from the 3MF itself, the
+    plate's own slots from its parts' extruders, so Bambuddy is never asked."""
+    configure(client)
+    download = library_file(
+        67, plates="library-plates-multi.json", content=two_plate_3mf(), file_hash="a" * 64
+    )
+    asked = respx.get(path__regex=r"/api/v1/library/files/67/filament-requirements").mock(
+        side_effect=httpx.ReadTimeout("Bambuddy is slicing a preview")
+    )
+    run_routes()
+
+    choices = client.get("/api/v1/print/library/67/choices")
+    plate_2 = client.get("/api/v1/print/library/67/filaments", params={"plate_id": 2})
+    every = client.get("/api/v1/print/library/67/filaments", params={"all_plates": "true"})
+
+    assert choices.status_code == 200, choices.text
+    assert _slots(choices.json()["filaments"]) == [(1, "PLA", "#FF0000"), (3, "PLA", "#FFFFFF")]
+    assert plate_2.status_code == 200, plate_2.text
+    assert _slots(plate_2.json()) == [(2, "PETG", "#0000FF")]
+    assert [slot["slot_id"] for slot in every.json()["slots"]] == [1, 2, 3]
+    assert not asked.called
+    # Read once, then from the cache under the file's hash.
+    assert download.call_count == 1
+
+
+@respx.mock
+def test_the_preview_s_download_serves_the_choices_slots(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """#2550: the dialog's preview and its choices read the same 3MF, fetched once."""
+    configure(client)
+    download = library_file(89, content=scadbuddy_3mf(tmp_path), file_hash="b" * 64)
+    asked = respx.get(path__regex=r"/api/v1/library/files/89/filament-requirements").mock(
+        side_effect=httpx.ReadTimeout("Bambuddy is slicing a preview")
+    )
+    run_routes()
+
+    preview = client.get("/api/v1/print/library/89/preview.glb", params={"plate": 1})
+    choices = client.get("/api/v1/print/library/89/choices")
+
+    assert preview.status_code == 200, preview.text
+    assert choices.status_code == 200, choices.text
+    assert [slot["slot_id"] for slot in choices.json()["filaments"]["slots"]] == [1]
+    assert choices.json()["filaments"]["slots"][0]["colour"] == "#43A047"
+    assert not asked.called
+    assert download.call_count == 1
+
+
+@respx.mock
+def test_a_file_scadbuddy_cannot_read_its_slots_from_asks_bambuddy(client: TestClient) -> None:
+    """#2550: a 3MF that is not a readable archive, and an STL, which holds no filament
+    settings, keep Bambuddy's filament-requirements as their slots."""
+    configure(client)
+    library_file(89, content=b"not a zip archive")
+    library_file(46, file_type="stl", plates="library-plates-stl.json")
+    answer = recording("filament-requirements.json")
+    asked = respx.get(path__regex=r"/api/v1/library/files/(89|46)/filament-requirements").mock(
+        return_value=httpx.Response(200, json=answer)
+    )
+    run_routes()
+
+    unreadable = client.get("/api/v1/print/library/89/choices")
+    stl = client.get("/api/v1/print/library/46/choices")
+
+    assert unreadable.status_code == 200, unreadable.text
+    assert [slot["colour"] for slot in unreadable.json()["filaments"]["slots"]] == [
+        "#0047BB",
+        "#FF1493",
+    ]
+    assert stl.status_code == 200, stl.text
+    asked_for = {call.request.url.path for call in asked.calls}
+    assert asked_for == {
+        "/api/v1/library/files/89/filament-requirements",
+        "/api/v1/library/files/46/filament-requirements",
+    }
+
+
+@respx.mock
+def test_a_library_print_runs_when_bambuddy_cannot_read_its_filaments(
+    client: TestClient,
+) -> None:
+    """#2550: a print of library file 1922 got past the dialog and still had to read its
+    slots, from the file and from the copy it uploads, through Bambuddy's
+    filament-requirements, which a large 3MF outlasts. The route that starts the run
+    reads them from the file, as the dialog does, and hands them to every activity, so
+    it slices and queues with Bambuddy never asked."""
+    configure(client)
+    # Not run_routes' own pattern, which would replace this route rather than follow it.
+    unreadable = respx.get(path__regex=r"/library/files/\d+/filament-requirements$").mock(
+        side_effect=httpx.ReadTimeout("Bambuddy is slicing a preview")
+    )
+    flow_copy_routes()
+    download = library_file(67, plates="library-plates-multi.json", file_hash="c" * 64)
+    run_routes()
+    sliced = slice_routes()
+    queued = queue_route()
+
+    response = run_library(
+        client,
+        67,
+        json={
+            **body(),
+            "plate_id": 2,
+            "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]},
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert json.loads(sliced.calls.last.request.content)["plate"] == 2
+    assert queued.called
+    # Read once by the route, which caches the slots, and once to upload the copy.
+    assert download.call_count == 2
+    asked = {call.request.url.path for call in unreadable.calls}
+    assert not asked & {
+        "/api/v1/library/files/67/filament-requirements",
+        "/api/v1/library/files/141/filament-requirements",
+    }, asked
