@@ -68,6 +68,7 @@ def bambu_project(
     component_transform: str = "1 0 0 0 1 0 0 0 1 0 0 0",
     triangle_extra: str = "",
     colours: tuple[str, ...] = ("#FF0000", "#00FF00"),
+    types: tuple[str, ...] | None = None,
     sliced: bool = False,
 ) -> bytes:
     """A Bambu Studio project: object 10 of components in one object file, one build
@@ -104,7 +105,10 @@ def bambu_project(
             "<build/></model>"
         ),
         "Metadata/model_settings.config": model_settings,
-        "Metadata/project_settings.config": json.dumps({"filament_colour": list(colours)}),
+        "Metadata/project_settings.config": json.dumps(
+            {"filament_colour": list(colours)}
+            | ({} if types is None else {"filament_type": list(types)})
+        ),
     }
     if sliced:
         entries["Metadata/plate_1.gcode"] = "; sliced"
@@ -131,6 +135,26 @@ def test_a_bambu_project_is_its_objects_with_their_counts_and_colours() -> None:
         np.max([p.mesh.bounds[1] for p in obj.parts], axis=0),
     )
     assert tuple(np.round(high - low, 3)) == (20, 10, 7)
+
+
+def test_an_object_keeps_the_material_the_project_states_for_each_of_its_colours() -> None:
+    """A PLA keychain arranged must not reach the slicer as a slot of no material,
+    which Bambuddy's slice dialog filled with Bambu ABS. A colour the object does not
+    print in is not its."""
+    payload = bambu_project(
+        items=[at(50, 50)],
+        parts={1: (_box(20, 10, 5), "normal_part", None)},
+        colours=("#ff0000", "#00FF00", "#0000FF"),
+        types=("PLA", "PETG", " "),
+    )
+    [obj] = read_objects(payload)
+    assert obj.materials == {"#FF0000": "PLA"}
+
+
+def test_a_project_stating_no_material_leaves_its_colours_without_one() -> None:
+    payload = bambu_project(items=[at(50, 50)], parts={1: (_box(20, 10, 5), "normal_part", 2)})
+    [obj] = read_objects(payload)
+    assert obj.materials == {}
 
 
 def test_an_item_turned_another_way_is_an_object_of_its_own() -> None:

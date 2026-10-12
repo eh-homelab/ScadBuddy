@@ -196,6 +196,17 @@ def placement_matrix(box: BoundingBox, x: float, y: float, rot: float) -> np.nda
     return matrix
 
 
+def _materials(req: OutputRequest) -> dict[str, str]:
+    """Each colour's material as the arranged objects' sources state it, the first
+    source to state one winning. Only a library file states any; an output's objects
+    leave theirs unknown, and then the writer states none (`project_settings`)."""
+    materials: dict[str, str] = {}
+    for obj in req.provenance.values():
+        for colour, material in obj.materials.items():
+            materials.setdefault(colour.upper(), material)
+    return materials
+
+
 async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobResult:
     blobs = deps.blobs
     parts = {p.piece_key: p for p in req.parts}
@@ -277,6 +288,7 @@ async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobRe
         thumbnails=thumbnails,
         model_name=req.slug.removeprefix(BUILTIN_PREFIX),
         plate=plate_for(req.plate_model),
+        materials=_materials(req),
     )
     await asyncio.to_thread(write_glb, list(plates[0].parts), work / PREVIEW_NAME)
     root = deps.paths.root

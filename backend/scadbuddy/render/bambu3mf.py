@@ -9,7 +9,7 @@ import tempfile
 import uuid
 import zipfile
 from array import array
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import IO, Any, Literal
@@ -376,7 +376,10 @@ def one_extruder_map(filaments: int) -> dict[str, str | list[str]]:
 
 
 def project_settings(
-    colours: Sequence[str], placements: Sequence[Placement], plate: PlateGeometry
+    colours: Sequence[str],
+    placements: Sequence[Placement],
+    plate: PlateGeometry,
+    materials: Mapping[str, str] | None = None,
 ) -> str:
     """``Metadata/project_settings.config``, in Bambu Studio's own JSON shape.
 
@@ -393,6 +396,13 @@ def project_settings(
 
     ``colours`` is the one filament list every plate shares; ``placements`` has one
     entry per plate, in plate order (spec §6.4).
+
+    ``materials`` maps a colour to the material its source stated (an arranged library
+    file's ``filament_type``). ``filament_type`` is written only when every slot has
+    one: Bambuddy's slice dialog picks each slot's filament preset by it, and with none
+    it takes the first preset it lists, Bambu ABS, for a file whose sources were PLA. A
+    partial list is not written: a slot with ``""`` would get that same guess, and
+    what Bambu Studio makes of one was never measured.
     """
     settings: dict[str, str | list[str]] = {
         "filament_colour": list(colours),
@@ -403,6 +413,9 @@ def project_settings(
         "nozzle_diameter": PLACEHOLDER_NOZZLE_DIAMETER,
         "printable_height": _number(plate.height),
     }
+    stated = [(materials or {}).get(colour.upper(), "") for colour in colours]
+    if stated and all(stated):
+        settings["filament_type"] = stated
     _set_towers(settings, [placement.tower for placement in placements])
     return json.dumps(settings, indent=4) + "\n"
 
@@ -591,6 +604,7 @@ def write_plates_3mf(
     thumbnails: Sequence[PlateThumbnails] | None,
     model_name: str = "model",
     plate: PlateGeometry = DEFAULT_PLATE,
+    materials: Mapping[str, str] | None = None,
 ) -> None:
     """Write a 3MF with one Bambu plate per entry of ``plates`` (spec §6.4).
 
@@ -640,7 +654,7 @@ def write_plates_3mf(
                 for index, part in zip(numbers, each.parts, strict=True)
             ),
             (MODEL_SETTINGS_NAME, model_settings(plates, model_name, covers=covers)),
-            (PROJECT_SETTINGS_NAME, project_settings(colours, placements, plate)),
+            (PROJECT_SETTINGS_NAME, project_settings(colours, placements, plate, materials)),
         )
     ]
     if thumbnails is not None:

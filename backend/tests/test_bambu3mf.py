@@ -39,6 +39,7 @@ from scadbuddy.render.bambu3mf import (
     plate_settings,
     plates_of,
     replate_3mf,
+    single_plate,
     state_nozzles,
     stl_3mf,
     write_bambu_3mf,
@@ -157,6 +158,46 @@ def test_project_settings_carry_the_prime_tower_corner(written: Path) -> None:
         settings = json.loads(archive.read("Metadata/project_settings.config"))
     assert settings["wipe_tower_x"] == ["98"]
     assert settings["wipe_tower_y"] == ["5"]
+
+
+def _settings_of(out: Path) -> dict[str, object]:
+    with zipfile.ZipFile(out) as archive:
+        settings: dict[str, object] = json.loads(archive.read("Metadata/project_settings.config"))
+    return settings
+
+
+def test_a_render_states_no_material(written: Path) -> None:
+    """ScadBuddy does not know what a render prints in: it names no material rather
+    than invent one."""
+    assert "filament_type" not in _settings_of(written)
+
+
+def test_materials_known_for_every_slot_are_stated_in_slot_order(tmp_path: Path) -> None:
+    """Bambuddy's slice dialog picks each slot's filament preset by ``filament_type``;
+    without one it picks Bambu ABS for an arranged PLA keychain."""
+    parts = _parts()
+    out = tmp_path / "arranged.3mf"
+    write_plates_3mf(
+        [single_plate(parts)],
+        [p.colour for p in parts],
+        out,
+        thumbnails=None,
+        materials={"#1F6FEB": "PETG", "#FF6AC1": "PLA", "#000000": "ABS"},
+    )
+    assert _settings_of(out)["filament_type"] == ["PLA", "PETG"]
+
+
+def test_a_slot_of_unknown_material_states_none_for_any_slot(tmp_path: Path) -> None:
+    parts = _parts()
+    out = tmp_path / "arranged.3mf"
+    write_plates_3mf(
+        [single_plate(parts)],
+        [p.colour for p in parts],
+        out,
+        thumbnails=None,
+        materials={"#FF6AC1": "PLA"},
+    )
+    assert "filament_type" not in _settings_of(out)
 
 
 def test_a_single_colour_model_gets_no_prime_tower(tmp_path: Path) -> None:
