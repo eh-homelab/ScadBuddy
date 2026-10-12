@@ -21,7 +21,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Literal
 
-from temporalio import activity
+from temporalio import activity, workflow
 from temporalio.claude_agent_sdk import DurableTool, activity_as_tool
 from temporalio.common import RetryPolicy
 
@@ -175,24 +175,36 @@ def turn_tools(entries: Sequence[TurnTool]) -> list[DurableTool]:
     """A turn's other tools as durable tools on agent-tools (#2320): each call is the
     activity ``turn:<name>``, which the agent serves with its ``default`` activity. One
     that may be outward parks (the workflow asks ``turn_tool_tier`` first, so a call whose
-    input is read or write goes straight through) and runs at most once."""
-    return [
-        activity_as_tool(
-            _stub(f"{TURN_TOOL_PREFIX}{e.name}"),
-            name=e.name,
-            description=e.description,
-            input_schema=e.input_schema,
-            needs_approval=e.may_park,
-            task_queue=e.task_queue or TOOLS_QUEUE,
-            start_to_close_timeout=timedelta(minutes=10),
-            # Pinned to a replica: if it is gone nothing polls its queue, and the call
-            # fails here rather than waiting for ever.
-            schedule_to_close_timeout=PINNED_DEADLINE if e.task_queue else None,
-            heartbeat_timeout=timedelta(seconds=60),
-            retry_policy=_ONCE if e.may_park else _RETRY,
-        )
-        for e in entries
-    ]
+    input is read or write goes straight through) and runs at most once.
+
+    A tool the SDK refuses (a name over 50 characters, such as
+    ``plugin_playwright_playwright__browser_console_messages``) is left out and logged:
+    raised, it failed every workflow task of the session, which then retried for ever."""
+    built: list[DurableTool] = []
+    for e in entries:
+        try:
+            built.append(
+                activity_as_tool(
+                    _stub(f"{TURN_TOOL_PREFIX}{e.name}"),
+                    name=e.name,
+                    description=e.description,
+                    input_schema=e.input_schema,
+                    needs_approval=e.may_park,
+                    task_queue=e.task_queue or TOOLS_QUEUE,
+                    start_to_close_timeout=timedelta(minutes=10),
+                    # Pinned to a replica: if it is gone nothing polls its queue, and the
+                    # call fails here rather than waiting for ever.
+                    schedule_to_close_timeout=PINNED_DEADLINE if e.task_queue else None,
+                    heartbeat_timeout=timedelta(seconds=60),
+                    retry_policy=_ONCE if e.may_park else _RETRY,
+                )
+            )
+        except ValueError as error:
+            # The listing (turnTools.ts) already leaves these out and tells the user;
+            # this only keeps a name it missed from failing the session.
+            if workflow.in_workflow():
+                workflow.logger.warning("turn tool left out: %s", error)
+    return built
 
 
 def offer_turn_tools(

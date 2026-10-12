@@ -32,7 +32,11 @@ const QUEUE = 'durable-standin'
 const WORKFLOWS = fileURLToPath(new URL('./support/durableSessionWorkflows.ts', import.meta.url))
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='
-const IMAGE: UserImage = { mediaType: 'image/png', data: PNG, preview: { mediaType: 'image/png', data: PNG } }
+const IMAGE: UserImage = {
+  mediaType: 'image/png',
+  bytes: Buffer.from(PNG, 'base64'),
+  preview: { mediaType: 'image/png', bytes: Buffer.from(PNG, 'base64') },
+}
 const PNG_NAME = `${createHash('sha256').update(Buffer.from(PNG, 'base64')).digest('hex')}.png`
 
 type Recorded = { start: Record<string, unknown>; messages: Record<string, unknown>[]; calls: string[] }
@@ -183,8 +187,14 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     expect(blob?.name).toBe(PNG_NAME)
     const log = await m.events.read(session.id)
     const userTurn = log.find((e) => e.event.type === 'user.turn')?.event
-    // The page context goes to the model, not the transcript.
-    expect(userTurn).toMatchObject({ text: 'make me a bracket', turnId: turn!.turnId, author: browser })
+    // The page context goes to the model, not the transcript; the images go by name (#2479).
+    expect(userTurn).toMatchObject({
+      text: 'make me a bracket',
+      turnId: turn!.turnId,
+      author: browser,
+      images: [{ name: PNG_NAME, mediaType: 'image/png', preview: { name: PNG_NAME, mediaType: 'image/png' } }],
+    })
+    expect(JSON.stringify(log)).not.toContain(PNG.slice(0, 40))
     expect(log.at(-1)?.event).toMatchObject({ type: 'session.status', status: 'running' })
     const [row] = await db.sql<{ status: string; turn_id: string | null }[]>`SELECT status, turn_id FROM ai_sessions WHERE id = ${session.id}`
     // Durable turns take no turn_id/lease claim (Ruling 7).

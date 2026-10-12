@@ -93,10 +93,10 @@ What the ingress must do:
   therefore stay open under that default. The rule: both intervals must stay under
   the ingress's read and send timeouts. Lowering a timeout below 25 s, or raising
   either constant above it, closes idle assistant sockets and streams.
-- **Request bodies.** An image upload (`POST /api/v1/ai/attachments`, #1941) is JSON of
-  up to about 5.1 MiB (`ATTACHMENT_BODY_MAX`,
+- **Request bodies.** An image upload (`POST /api/v1/ai/attachments`, #1941) is a
+  multipart body of up to about 3.8 MiB (`ATTACHMENT_BODY_MAX`,
   [`agent/src/routes/attachments.ts`](../../agent/src/routes/attachments.ts)): one
-  image's base64 and its preview. ingress-nginx refuses bodies over its default
+  image's bytes and its preview's (#2479). ingress-nginx refuses bodies over its default
   `proxy-body-size` of 1m with 413, so the agent's paths need at least
   `nginx.ingress.kubernetes.io/proxy-body-size: 8m`
   ([ingress-nginx, custom max body size](https://kubernetes.github.io/ingress-nginx/user-guide/nginx-configuration/annotations/#custom-max-body-size)).
@@ -988,7 +988,7 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   `workspace_file_max_bytes` and `workspace_max_bytes` (bytes), which Settings →
   Assistant workspace writes through `PUT /api/v1/ai/settings/workspace`
   `{file_max_bytes, workspace_max_bytes}` (1 MiB to 100 MiB a file, 1 MiB to 2 GiB a
-  workspace, the file cap no larger; each a `settings` audit row;
+  workspace, the file cap no larger; both in one transaction, each a `settings` audit row;
   [`agent/src/routes/workspaceSettings.ts`](../../agent/src/routes/workspaceSettings.ts)).
   Each is read at every write. Size the database for them.
 - Tools, with their tiers: `workspace_list` and `workspace_read` (read),
@@ -1049,9 +1049,13 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   - `DELETE /api/v1/ai/sessions/:id/files/<path>[?expected_sha256=]`: `204`, `404` when
     there is none, `409` on a stale sha256.
 
-  An upload or a delete is a `resource` audit row (`workspace_upload`, refusals
-  included, or `workspace_delete`) and appends a `workspace.file` event (`path`,
-  `change`, `by`, and an upload's `size`, `mediaType` and `sha256`) to the session's
-  log: the panel's Files list reads again on it. A running turn is not interrupted;
+  An upload or a delete is a `resource` audit row (`workspace_upload` or
+  `workspace_delete`, refusals included: a bad path, a cap, a stale sha256, and a
+  session the browser user does not own or that is archived) and appends a
+  `workspace.file` event (`path`, `change`, `by`, and an upload's `size`, `mediaType`
+  and `sha256`) to the session's log in the same transaction as the file, so the two
+  commit together: the panel's Files list reads again on it. An upload whose numbered
+  `uploads/<name>` was taken meanwhile reads the list again and takes the next number,
+  once. A running turn is not interrupted;
   the panel adds `[workspace file <path>]` to the next message, and the model finds the
   file with `workspace_list` / `workspace_read`.

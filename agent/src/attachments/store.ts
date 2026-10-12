@@ -1,13 +1,14 @@
-import { createHash, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import type { Sql } from 'postgres'
 import { z } from 'zod'
-import { type SessionImage, SessionBlobs } from '../sessions/blobs.js'
-import { type ImageMediaType, type ImagePreview, IMAGES_MAX, type UserImage } from '../sessions/images.js'
+import { type SessionImage, SessionBlobs, sessionImage } from '../sessions/blobs.js'
+import { type ImageMediaType, IMAGES_MAX, type PreviewMediaType, type UserImage } from '../sessions/images.js'
 import type { Owner } from '../sessions/protocol.js'
 
 // Images the assistant panel uploads when the user attaches them (#1941), so a
 // `user.message` names them, `{ kind: 'attachment', id }`, instead of carrying
-// their base64 in the chat socket's frame.
+// them in the chat socket's frame. The image and its preview are bytes, never
+// base64 (#2479).
 //
 // `ai_attachments` is a staging area, per owner: the panel uploads before any
 // session may exist (a new chat's first message makes it). When a turn that
@@ -41,15 +42,16 @@ export type AttachmentRef = z.infer<typeof AttachmentRefSchema>
 
 export const AttachmentRefsSchema = z.array(AttachmentRefSchema).min(1).max(IMAGES_MAX)
 
-const EXTENSION: Record<ImageMediaType, string> = {
-  'image/png': 'png',
-  'image/jpeg': 'jpg',
-  'image/gif': 'gif',
-  'image/webp': 'webp',
+/**
+ * What the upload route answers: the id to send, and the names the image and its
+ * preview will have in the session (`<sha256>.<ext>`). Pointers only, never bytes.
+ */
+export type AttachmentView = {
+  id: string
+  name: string
+  mediaType: ImageMediaType
+  preview: { name: string; mediaType: PreviewMediaType }
 }
-
-/** What the upload route answers: the id to send, and the preview the turn will show. */
-export type AttachmentView = { id: string; preview: ImagePreview }
 
 /** An attachment read for a turn: the image for the model, and the blob it becomes. */
 export type ResolvedAttachment = { id: string; image: UserImage; blob: SessionImage }
@@ -75,8 +77,8 @@ type Row = {
   name: string
   media_type: ImageMediaType
   data: Buffer
-  preview_media_type: ImagePreview['mediaType']
-  preview_data: string
+  preview_media_type: PreviewMediaType
+  preview: Buffer
 }
 
 const lockKey = (owner: Pick<Owner, 'kind' | 'id'>) => `scadbuddy:ai_attachments:${owner.kind}:${owner.id}`
@@ -94,8 +96,8 @@ export class AttachmentStore {
 
   /** Stores a checked image for `owner`; refused `quota` past the owner's caps. */
   async put(owner: Owner, image: UserImage): Promise<AttachmentView> {
-    const bytes = Buffer.from(image.data, 'base64')
-    const name = `${createHash('sha256').update(bytes).digest('hex')}.${EXTENSION[image.mediaType]}`
+    const { bytes } = image
+    const { name } = sessionImage(image.mediaType, bytes)
     const id = randomUUID()
     const { rowsMax, bytesMax, ttlMs } = this.limits
     await this.sql.begin(async (tx) => {
@@ -113,11 +115,12 @@ export class AttachmentStore {
         )
       }
       await tx`
-        INSERT INTO ai_attachments (id, owner_kind, owner_id, name, media_type, data, preview_media_type, preview_data, expires_at)
+        INSERT INTO ai_attachments (id, owner_kind, owner_id, name, media_type, data, preview_media_type, preview, expires_at)
         VALUES (${id}, ${owner.kind}, ${owner.id}, ${name}, ${image.mediaType}, ${bytes},
-                ${image.preview.mediaType}, ${image.preview.data}, now() + (${ttlMs} * interval '1 millisecond'))`
+                ${image.preview.mediaType}, ${image.preview.bytes}, now() + (${ttlMs} * interval '1 millisecond'))`
     })
-    return { id, preview: { mediaType: image.preview.mediaType, data: image.preview.data } }
+    const preview = sessionImage(image.preview.mediaType, image.preview.bytes)
+    return { id, name, mediaType: image.mediaType, preview: { name: preview.name, mediaType: preview.mediaType as PreviewMediaType } }
   }
 
   /**
@@ -129,7 +132,7 @@ export class AttachmentStore {
     if (refs.length === 0) return []
     const ids = refs.map((r) => r.id)
     const rows = await this.sql<Row[]>`
-      SELECT id, name, media_type, data, preview_media_type, preview_data FROM ai_attachments
+      SELECT id, name, media_type, data, preview_media_type, preview FROM ai_attachments
       WHERE id = ANY(${ids}::uuid[]) AND owner_kind = ${owner.kind} AND owner_id = ${owner.id} AND expires_at > now()`
     const byId = new Map(rows.map((r) => [r.id, r]))
     return refs.map((ref, index) => {
@@ -141,8 +144,8 @@ export class AttachmentStore {
         id: row.id,
         image: {
           mediaType: row.media_type,
-          data: row.data.toString('base64'),
-          preview: { mediaType: row.preview_media_type, data: row.preview_data },
+          bytes: row.data,
+          preview: { mediaType: row.preview_media_type, bytes: row.preview },
         },
         blob: { name: row.name, mediaType: row.media_type, bytes: row.data },
       }

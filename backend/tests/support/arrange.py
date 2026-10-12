@@ -17,12 +17,18 @@ from tests.test_packing_and_outputs import _deps, _record, _render
 
 
 async def finished_job(
-    tmp_path: Path, *, width: int = 12, count: int = 2, name: str = "two", job_id: str = "j1"
+    tmp_path: Path,
+    *,
+    width: int = 12,
+    count: int = 2,
+    name: str = "two",
+    job_id: str = "j1",
+    plates: int = 1,
 ) -> tuple[DataPaths, Job, PipelineOutput]:
     """A done job for template `demo` whose one output lays out ``count`` copies of one
-    Part. Its data directory is ``tmp_path / "data"``, which is also the API tests'
-    `paths`, so an app built on those fixtures can save it. Once per ``tmp_path``:
-    `_deps` creates the template."""
+    Part on each of ``plates`` plates. Its data directory is ``tmp_path / "data"``,
+    which is also the API tests' `paths`, so an app built on those fixtures can save it.
+    Once per ``tmp_path``: `_deps` creates the template."""
     deps, paths = _deps(tmp_path)
     part = await _render(deps, "model.scad", {"width": width})
     layout = Layout(
@@ -33,6 +39,7 @@ async def finished_job(
                     for i in range(count)
                 ]
             )
+            for _ in range(plates)
         ]
     )
     req = OutputRequest(
@@ -42,7 +49,7 @@ async def finished_job(
         layout=layout,
         parts=[part],
         name=name,
-        bom=[BomEntry(piece="wall", label="Wall", count=count, part=part.piece_key)],
+        bom=[BomEntry(piece="wall", label="Wall", count=count * plates, part=part.piece_key)],
         files={},
         record=_record([part.piece_key]),
     )

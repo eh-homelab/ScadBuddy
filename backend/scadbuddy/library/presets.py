@@ -88,6 +88,11 @@ class PresetExistsError(ValueError):
         self.existing = name if existing is None else existing
 
 
+class TemplatePresetsUnreadableError(ValueError):
+    """A template's preset list could not be read, which says nothing about which presets
+    it has: raised instead of reading as none when the caller asks (``strict``)."""
+
+
 class TooManyPresetsError(ValueError):
     pass
 
@@ -427,46 +432,61 @@ class PresetStore:
     def close(self) -> None:
         self._pool.close()
 
-    def _defined(self, model_id: str, name: str, raw: Any) -> list[TemplatePreset]:
-        """``raw`` as a checked preset list, or none when it is not one (logged)."""
+    def _defined(
+        self, model_id: str, name: str, raw: Any, strict: bool = False
+    ) -> list[TemplatePreset]:
+        """``raw`` as a checked preset list, or none when it is not one (logged; raised
+        with ``strict``)."""
         try:
             return _checked(
                 _PRESET_LIST.validate_python(_details_as_written(raw), context={STORED: True})
             )
         except (ValidationError, ValueError, RecursionError) as error:
+            if strict:
+                raise TemplatePresetsUnreadableError(f"{model_id}/{name}") from error
             logger.warning(
                 "ignored a template's presets in %s: %s", name, error, extra={"slug": model_id}
             )
             return []
 
-    def _read_json(self, model_id: str, name: str) -> Any:
-        """A JSON file of the template's, or None when it is missing or unreadable."""
+    def _read_json(self, model_id: str, name: str, strict: bool = False) -> Any:
+        """A JSON file of the template's, or None when it is missing or unreadable (with
+        ``strict``, unreadable raises)."""
         path = self.paths.model_dir(model_id) / name
         try:
             return json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return None
-        except (OSError, UnicodeDecodeError, ValueError, RecursionError):
+        except (OSError, UnicodeDecodeError, ValueError, RecursionError) as error:
+            if strict:
+                raise TemplatePresetsUnreadableError(f"{model_id}/{name}") from error
             logger.warning("could not read %s", name, extra={"slug": model_id})
             return None
 
-    def template_presets(self, model_id: str) -> list[ParamPreset]:
+    def template_presets(self, model_id: str, strict: bool = False) -> list[ParamPreset]:
         """The template's own: its ``model.json`` list, then any from a legacy
         ``presets.json`` whose key or name ``model.json`` does not already have.
 
         A list that is not a valid one is logged and treated as no presets: it costs
-        the picker that template's presets, never the page or the model.
+        the picker that template's presets, never the page or the model. With ``strict``
+        it raises :class:`TemplatePresetsUnreadableError` instead, for a caller that
+        would act on a preset being absent (#2142's review: Settings forgets entries for
+        presets a model no longer lists, and a half-written file lists none).
         """
-        meta = self._read_json(model_id, MODEL_META_NAME)
+        meta = self._read_json(model_id, MODEL_META_NAME, strict)
+        if strict and meta is not None and not isinstance(meta, dict):
+            raise TemplatePresetsUnreadableError(f"{model_id}/{MODEL_META_NAME}")
         defined: list[TemplatePreset] = []
         if isinstance(meta, dict) and meta.get(PRESETS_KEY) is not None:
-            defined = self._defined(model_id, MODEL_META_NAME, meta[PRESETS_KEY])
-        legacy = self._read_json(model_id, LEGACY_PRESETS_NAME)
+            defined = self._defined(model_id, MODEL_META_NAME, meta[PRESETS_KEY], strict)
+        legacy = self._read_json(model_id, LEGACY_PRESETS_NAME, strict)
+        if strict and legacy is not None and not isinstance(legacy, dict):
+            raise TemplatePresetsUnreadableError(f"{model_id}/{LEGACY_PRESETS_NAME}")
         if isinstance(legacy, dict) and legacy.get(PRESETS_KEY) is not None:
             keys = set(template_preset_keys(defined))
             names = {preset.name.casefold() for preset in defined}
             for preset in with_keys(
-                self._defined(model_id, LEGACY_PRESETS_NAME, legacy[PRESETS_KEY])
+                self._defined(model_id, LEGACY_PRESETS_NAME, legacy[PRESETS_KEY], strict)
             ):
                 if preset.id not in keys and preset.name.casefold() not in names:
                     defined.append(preset)
@@ -536,9 +556,10 @@ class PresetStore:
         with self._pool.connection() as conn:
             return [row["params"] for row in conn.execute("SELECT params FROM saved_presets")]
 
-    def presets(self, model_id: str) -> list[ParamPreset]:
-        """The template's presets, then the saved ones, each in their own order."""
-        return self.template_presets(model_id) + self.saved_presets(model_id)
+    def presets(self, model_id: str, strict: bool = False) -> list[ParamPreset]:
+        """The template's presets, then the saved ones, each in their own order
+        (``strict``: see :meth:`template_presets`)."""
+        return self.template_presets(model_id, strict) + self.saved_presets(model_id)
 
     def find(self, model_id: str, preset_id: str) -> ParamPreset:
         """One preset of the template, shipped or saved."""

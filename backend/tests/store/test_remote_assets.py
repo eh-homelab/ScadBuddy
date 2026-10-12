@@ -224,6 +224,23 @@ async def test_reconcile_spares_a_marked_copy_touched_after_the_cutoff(
     assert remote.content.index.get(asset_key(meta.id)) is not None
 
 
+async def test_a_copy_a_stopped_sweep_only_marked_goes_at_the_next_reconcile(
+    tmp_path: Path, pool: Pool, pg_pool: PgPool
+) -> None:
+    """#2140: a sweep the shutdown stopped marks what it removed and drops nothing; the
+    next sweep's reconcile, which only retries marked copies, removes it."""
+    remote = RemoteAssets(local_content(tmp_path / "remote", pool))
+    api = AssetStore(tmp_path / "api" / "assets", pg_pool)
+    meta = api.put(SVG, "logo.svg")
+    await remote.mirror(api, meta, slug="demo", title="Demo")
+    _age(pool, asset_key(meta.id))
+    gone = AssetStore(tmp_path / "gone" / "assets", pg_pool)  # the volume, swept of it
+    await remote.mark_swept([meta.id], cutoff=await remote.clock())
+    assert remote.content.index.get(asset_key(meta.id)) is not None
+    assert await remote.reconcile(gone, cutoff=await remote.clock()) == [meta.id]
+    assert remote.content.index.get(asset_key(meta.id)) is None
+
+
 async def test_a_re_upload_clears_the_swept_mark(
     tmp_path: Path, pool: Pool, pg_pool: PgPool
 ) -> None:
