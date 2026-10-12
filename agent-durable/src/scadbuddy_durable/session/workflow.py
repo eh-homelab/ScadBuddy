@@ -139,6 +139,10 @@ class Parked:
     created_at: datetime
     expires_at: datetime
     attention: dict[str, Any] | None
+    # Whether open_input has written its row: answerable from the moment it is parked,
+    # resolved only once its row is there (or refused stale if the open failed).
+    opened: bool = False
+    open_failed: bool = False
 
     @property
     def kind(self) -> Literal["approval", "answer"]:
@@ -475,29 +479,36 @@ class DurableSession:
             expires_at=now + timedelta(seconds=timeout),
             attention=built.attention,
         )
-        await workflow.execute_activity(
-            "open_input",
-            OpenInput(
-                request_id=rid,
-                session_id=sid,
-                workflow_id=workflow.info().workflow_id,
-                workflow_run_id=workflow.info().run_id,
-                kind=kind,
-                tool=name,
-                tool_use_id=parked.call_id,
-                summary=summary,
-                input_hash=input_hash,
-                prompt=built.prompt,
-                requested_by=parked.requested_by,
-                responders=["browser", "grant"] if kind == "approval" else ["browser"],
-                expires_at=_iso(parked.expires_at),
-                questions=built.questions,
-                attention=built.attention,
-            ),
-            start_to_close_timeout=SHORT,
-        )
-        # Answerable only once its row is there, so no response races the open.
+        # Parked before its row is opened, so a respond that reads the row as soon as it is
+        # written finds the call here; every resolution waits for the open (_resolve).
         self._parked[rid] = parked
+        try:
+            await workflow.execute_activity(
+                "open_input",
+                OpenInput(
+                    request_id=rid,
+                    session_id=sid,
+                    workflow_id=workflow.info().workflow_id,
+                    workflow_run_id=workflow.info().run_id,
+                    kind=kind,
+                    tool=name,
+                    tool_use_id=parked.call_id,
+                    summary=summary,
+                    input_hash=input_hash,
+                    prompt=built.prompt,
+                    requested_by=parked.requested_by,
+                    responders=["browser", "grant"] if kind == "approval" else ["browser"],
+                    expires_at=_iso(parked.expires_at),
+                    questions=built.questions,
+                    attention=built.attention,
+                ),
+                start_to_close_timeout=SHORT,
+            )
+        except BaseException:
+            parked.open_failed = True
+            self._parked.pop(rid, None)
+            raise
+        parked.opened = True
         try:
             await workflow.wait_condition(
                 lambda: parked.entry.state != "pending", timeout=timedelta(seconds=timeout)
@@ -542,6 +553,14 @@ class DurableSession:
         *,
         timer: bool = False,
     ) -> bool:
+        # A response is written only after its entry's row: a call is parked (and so
+        # answerable) before open_input has written it. One whose open failed was never
+        # asked; its call is refused by _park_or_refuse.
+        if not (parked.opened or parked.open_failed):
+            await workflow.wait_condition(lambda: parked.opened or parked.open_failed)
+            # Another resolution may have run while this one waited.
+            if parked.open_failed or parked.entry.state != "pending":
+                return False
         parked.set_state("resolving")
         try:
             written: bool = await workflow.execute_activity(
@@ -615,6 +634,11 @@ class DurableSession:
         parked = self._parked.get(request.request_id)
         if parked is None:
             raise _refused("stale", f"no pending input {request.request_id}")
+        if not (parked.opened or parked.open_failed):
+            # Read from its row before open_input's result reached here: wait for it (_park).
+            await workflow.wait_condition(lambda: parked.opened or parked.open_failed)
+        if parked.open_failed:
+            raise _refused("stale", f"no pending input {request.request_id}")
         try:
             # The validator passed, but another handler may have moved the entry since.
             valid = validate_respond(parked.entry, request)
@@ -678,7 +702,9 @@ class DurableSession:
     def pending_input(self) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         for p in self._parked.values():
-            if p.entry.state == "resolved":
+            # Listed once its row is written, as the projection lists it; a respond is
+            # taken a moment sooner (_park).
+            if p.entry.state == "resolved" or not p.opened:
                 continue
             entry: dict[str, Any] = {
                 "id": p.entry.id,
