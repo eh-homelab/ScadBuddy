@@ -139,8 +139,15 @@ In order, from the model outwards:
    (answered `413`, [Downloads](#downloads)), and any other page or subresource to
    `PAGE_MAX_BYTES`, 50 MiB (answered `502`, a navigation with a page that says the
    response is larger than the most the headless browser reads, which the model sees in
-   its snapshot). So an endless or enormous response costs the agent pod at most about
-   that much memory, never all of it. A 3xx to a place the session may not go is refused, an allowed
+   its snapshot). Past 1 MiB (`SPOOL_OVER_BYTES`, #2401) a body is no longer held in
+   memory while it is read: what came so far and the rest go to a fresh file in the
+   browser directory's `spool/`, which the guard reads back only to hand the body to
+   Chromium and then deletes. The handoff itself still takes the body whole: Playwright's
+   `route.fulfill` reads even its `path` option into one buffer (playwright-core 1.64
+   `Route._innerFulfill`) and CDP's `Fetch.fulfillRequest` takes the body as one base64
+   string. So a slow response holds at most 1 MiB while it trickles in, and an endless or
+   enormous one costs the agent pod at most about its limit, for the moment of the
+   handoff, never all of it. A 3xx to a place the session may not go is refused, an allowed
    3xx on a GET navigation becomes a new navigation (which the guard sees again), and
    any other 3xx is refused. So neither a ScadBuddy page redirecting off-origin nor an
    approved origin redirecting to an unapproved one gets through, whatever sits in
@@ -485,6 +492,14 @@ became `chrome-headless-shell` (revision 1247) and `testChromium()` looked only 
   (`headlessBrowser.test.ts`, `workspace.test.ts`). Measured on 0.0.83 with
   chromium-headless-shell 1246 on 2026-10-11 (server tests "stops reading an endless …",
   "keeps a site's cookies …").
+- **Spooled bodies** (#2401): a body past `SPOOL_OVER_BYTES` is on the disk, not in
+  memory, by the time the stream has given out twice the threshold; an endless download
+  spooled past the threshold is still cut off one chunk past its cap, its spool file
+  removed; a spool file is removed after the handoff, and when the handoff fails; and a
+  spool name that is a link or leaves the directory is neither read nor followed
+  (`headlessBrowser.test.ts` "reading a body (#2401)"). A 3 MiB page reaches Chromium
+  whole and leaves `spool/` empty, measured on 0.0.83 with chromium-headless-shell 1247
+  on 2026-10-11 (server test "hands on a page past the spool threshold …").
 - **`TMPDIR` must be short.** Chromium's profile goes under it and its `SingletonSocket`
   is a Unix socket (path limit about 107 bytes); under the session directory the launch
   fails with "Target page, context or browser has been closed". It is a folder per

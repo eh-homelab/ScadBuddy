@@ -84,6 +84,9 @@ export const BIG_DOWNLOAD = 5000
 export const endlessSent = new Map<string, number>()
 export const ENDLESS_CEILING = 512 * 1024 * 1024
 
+/** The size of `/big.html`, a page past the request guard's spool threshold (headlessBrowser.ts SPOOL_OVER_BYTES). */
+export const BIG_PAGE = 3 * 1024 * 1024
+
 async function sendEndless(url: string, res: ServerResponse, headers: Record<string, string>): Promise<void> {
   res.writeHead(200, headers)
   const chunk = Buffer.alloc(64 * 1024, 0x61)
@@ -167,6 +170,13 @@ export async function startUi(otherOrigin: string, gate: OutwardGate = () => Pro
     }
     if (url === '/files/endless.bin') {
       await sendEndless(url, res, { 'content-type': 'application/octet-stream', 'content-disposition': 'attachment; filename="endless.bin"' })
+      return
+    }
+    if (url === '/big.html') {
+      const head = '<!doctype html><title>Big page</title><h1>big page reached</h1><!--'
+      const tail = '-->'
+      res.writeHead(200, { 'content-type': 'text/html' })
+      res.end(head + 'a'.repeat(BIG_PAGE - head.length - tail.length) + tail)
       return
     }
     if (url === '/endless.html') {
