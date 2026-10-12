@@ -71,5 +71,6 @@ def test_the_fixtures_cover_every_kind_of_file() -> None:
         "support blocker": any("support_blocker" in e["part_subtypes"] for e in FIXTURES),
         "several plates": any(e["plates"] > 1 for e in FIXTURES),
         "over 50 MB": any(e["bytes"] > 50_000_000 for e in FIXTURES),
+        "200 objects (Arrange's max_objects)": any(e["objects"] >= 200 for e in FIXTURES),
     }
     assert all(kinds.values()), [k for k, v in kinds.items() if not v]

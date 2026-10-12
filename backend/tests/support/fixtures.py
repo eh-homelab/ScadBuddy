@@ -67,9 +67,16 @@ def fixtures_root() -> Path | None:
 
 def makerworld() -> list[dict[str, Any]]:
     """The MakerWorld fixtures' manifest entries. The manifest is plain JSON, not in
-    LFS, so tests parametrized by it collect the same with or without the files."""
+    LFS, so tests parametrized by it collect the same with or without the files. With
+    `SCADBUDDY_TEST_FIXTURES` set and no manifest there, collection fails rather than
+    parametrizing nothing, which would skip quietly."""
     root = _manifest_root()
     if root is None:
+        named = os.environ.get("SCADBUDDY_TEST_FIXTURES")
+        if named:
+            raise RuntimeError(
+                f"SCADBUDDY_TEST_FIXTURES is {named}, which has no makerworld/manifest.json"
+            )
         return []
     entries: list[dict[str, Any]] = json.loads(
         (root / "makerworld" / "manifest.json").read_text(encoding="utf-8")

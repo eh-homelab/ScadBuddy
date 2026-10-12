@@ -36,7 +36,9 @@ Tests marked `requires_fixtures` (#2146) use the real MakerWorld 3MFs in
 `manifest.json` says what each covers) and skip, naming every missing file, without
 them; with `SCADBUDDY_TEST_FIXTURES` set (a directory holding `makerworld/`, as CI sets
 it) they fail instead. CI's `lfs-fixtures` job pulls them once into the Actions cache
-and each shard mounts them at `/app/test-fixtures`.
+and each shard mounts them at `/app/test-fixtures`. Add or change a fixture only on a
+branch of this repo: a fork's LFS objects live in the fork's store, which that job's
+`git lfs pull` cannot reach.
 Tests marked `requires_temporal` skip unless `SCADBUDDY_TEST_TEMPORAL_ADDRESS` names a
 running Temporal (e.g. `temporal server start-dev`) or a `temporal` CLI is on `PATH`
 (`SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` can point at one; the test image ships
