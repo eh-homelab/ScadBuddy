@@ -792,8 +792,9 @@ async def test_a_cancelled_filament_step_leaves_the_callers_status_read_running(
         filament_options(bambuddy, cast(PrintSource, _ReadSource()), printer_id=1, status=reading)
     )
     # Every other read done: the step now waits on the status alone.
-    while not remain.called:
-        await asyncio.sleep(0.01)
+    async with asyncio.timeout(5):
+        while not remain.called:
+            await asyncio.sleep(0.01)
     await asyncio.sleep(0.01)
     step.cancel()
     with pytest.raises(asyncio.CancelledError):
