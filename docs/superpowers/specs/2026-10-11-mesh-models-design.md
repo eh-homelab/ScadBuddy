@@ -143,7 +143,7 @@ every `color()` made the cut faces the default material (measured in the image,
 union, since (A ∪ B) − C = (A − C) ∪ (B − C). The compiled `model.scad` is capped at
 8 MiB (`meshmodel/operations.py` `MAX_SOURCE_BYTES`; a 422).
 
-## 4. Opening a mesh (`model_from_mesh`)
+## 4. Opening a mesh (`mesh_model_create`)
 
 An `OperationKind` on the `library` queue (§6), exported with `model_kinds`.
 
@@ -152,7 +152,7 @@ Sources:
 - **Bambuddy library file** (`library_file_id`): `bambuddy/library_objects.py`'s read
   (once per sha256; the same refusals Arrange gives: sliced, past the cap, unreadable),
   so a file Arrange has listed is neither downloaded nor parsed again.
-- **Upload**: `POST /api/v1/models/from-mesh`, multipart, streamed into the claim store
+- **Upload**: `POST /api/v1/models/from-mesh/upload`, multipart, streamed into the claim store
   with `ClaimStore.hold_file` as media uploads are; `.3mf` and `.stl` only (the formats
   `read_objects` and `bambu3mf.stl_3mf` read); at most `MAX_DOWNLOAD_BYTES`. An STL
   becomes one object of one part in the default colour. OBJ is out of phase 1: nothing
@@ -228,14 +228,14 @@ Measuring (sections, inscribed circles, faces) runs in `asyncio.to_thread` under
 runs to its end (`operations.kinds.to_thread_to_end`), so a run past its timeout whose
 commit lands still announces it.
 
-`scene_eject`: deletes `scene.json` and clears `scene` in `model.json`, one commit. The
+`scene_eject`: deletes `scene.json`, one commit (`model.json` keeps `mesh_source`). The
 model is then an ordinary template whose source imports `meshes/`.
 
 ## 6. Temporal, operations, flows and pipelines
 
 No new workflow type and no new queue.
 
-- `model_from_mesh`, `scene_edit` and `scene_eject` are `OperationKind`s with
+- `mesh_model_create`, `scene_edit` and `scene_eject` are `OperationKind`s with
   `queue="library"`, run by `OperationWorkflow` (check, insert, run, finish), exported
   from `library/operations.py` through `model_kinds`. The library worker runs in the API
   process, which holds the data volume and the Bambuddy client. Routes run them through
@@ -312,7 +312,7 @@ split → `lay_flat` the tuft → render → `analyze_geometry` again.
 - Paint transfer: on a synthetic painted mesh, an op-free object keeps 100 % of its
   codes verbatim; a cut object keeps every uncut face's code verbatim and gives cut faces
   the part's own colour.
-- API (`requires_postgres`, `requires_temporal`): `model_from_mesh` from an upload and
+- API (`requires_postgres`, `requires_temporal`): `mesh_model_create` from an upload and
   from a mocked library file (the recorded Bambuddy client); `scene_edit` and
   `scene_eject` through `run_operation`; claim release.
 - `requires_openscad` (the image): a 3MF made with OpenSCAD is opened, split with a
@@ -331,7 +331,7 @@ split → `lay_flat` the tuft → render → `analyze_geometry` again.
 ## 11. Phases
 
 1. Open as editable model: `meshes/` write path, `scene.json`, compiler (cut, joint,
-   add, subtract, custom), `model_from_mesh`, `create_model_from_mesh`, `get_scene`.
+   add, subtract, custom), `mesh_model_create`, `create_model_from_mesh`, `get_scene`.
    Acceptance: a library 3MF opens and renders the same geometry and colours (paint by
    phase 3).
 2. Editing: `scene_edit` with every edit of §5, `scene_eject`, `edit_scene`,

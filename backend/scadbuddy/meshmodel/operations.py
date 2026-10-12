@@ -70,7 +70,7 @@ MAX_SOURCE_BYTES = 8 * 1024 * 1024
 RUN_TIMEOUT = PIN_TIMEOUT
 HAND_EDITED = (
     "model.scad was edited by hand since the scene last wrote it; eject the scene "
-    "(scene_eject) to keep editing it as source"
+    "(POST /models/{slug}/scene/eject, the agent's eject_scene) to keep editing it as source"
 )
 
 
