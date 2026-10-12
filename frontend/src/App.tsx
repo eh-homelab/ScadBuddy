@@ -15,7 +15,8 @@ import { WorkflowRunPage } from './pages/WorkflowRunPage'
 import { WorkflowsPage } from './pages/WorkflowsPage'
 
 // Monaco is the biggest thing in the bundle and only these two routes want it, so
-// they are split out: opening the customizer never downloads an editor.
+// they are split out: opening the customizer never downloads an editor. A flow's page
+// (#2487) loads the same chunk for its editor and diff only (`FlowPage`'s own lazy imports).
 const NewModelPage = lazy(async () => ({
   default: (await import('./pages/NewModelPage')).NewModelPage,
 }))

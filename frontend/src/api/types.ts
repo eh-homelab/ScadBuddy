@@ -142,6 +142,11 @@ export type FlowDefinition = Schemas['Definition']
 export type FlowSummary = Schemas['DefinitionSummary']
 /** #2503 — one version of a flow's git history. */
 export type FlowVersion = Schemas['FlowVersion']
+/** #2487 — the editor's Save body, its check, and what it completes. */
+export type FlowRegister = Schemas['DefinitionCreate']
+export type FlowScriptCheck = Schemas['ScriptCheckResult']
+export type FlowScriptProblem = Schemas['ScriptProblem']
+export type FlowHostInterface = Schemas['HostInterface']
 export type FlowRunStarted = Schemas['RunAnswer']
 export type FlowResetPoints = Schemas['ResetPoints']
 export type FlowResetPreview = Schemas['ResetPreview']

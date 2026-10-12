@@ -1,6 +1,8 @@
 import { HttpResponse, http } from 'msw'
 import type {
   FlowDefinition,
+  FlowHostInterface,
+  FlowScriptProblem,
   FlowPending,
   FlowResetPoints,
   FlowResetPreview,
@@ -20,6 +22,11 @@ import type {
  * from one, a run forgotten, and its reset points, preview and Reset. A step's reset
  * point is its `history_length + 1`, which runs it and every later step again; one more
  * after the last ended step runs none again.
+ *
+ * #2487 — the editor: Save (`POST /workflows`, a new version), the check that stores
+ * nothing, the host functions it completes, a version's source by commit, and Restore.
+ * The check here is a stand-in for the server's: a call to a name that is not a host
+ * function, or `sleep` given a string, is a problem on its line.
  */
 
 const at = (minutes: number) => new Date(Date.UTC(2026, 9, 10, 9, minutes)).toISOString()
@@ -226,6 +233,91 @@ function respond(outcome: (body: Record<string, unknown>) => string) {
   }
 }
 
+/** A version's commit, as the history route lists it. */
+const commitOf = (d: FlowDefinition) => `c0ffee${d.version}`.padEnd(40, '0')
+
+export const FLOW_HOST_FUNCTIONS: FlowHostInterface = {
+  functions: [
+    {
+      name: 'sleep',
+      signature: 'async def sleep(seconds: float) -> None',
+      parameters: ['seconds'],
+      doc: 'Wait `seconds` seconds, durably (a Temporal timer).',
+    },
+    {
+      name: 'wait_for_human',
+      signature: 'async def wait_for_human(question: str, timeout_s: int) -> HumanAnswer',
+      parameters: ['question', 'timeout_s'],
+      doc: 'Ask a person `question` and wait up to `timeout_s` seconds (10 to 86400) for the answer.',
+    },
+    {
+      name: 'render',
+      signature: 'async def render(slug: str, params: dict[str, Any]) -> RenderResult',
+      parameters: ['slug', 'params'],
+      doc: 'Render template `slug` with `params` and wait until it settles.',
+    },
+    {
+      name: 'queue_print',
+      signature: 'async def queue_print(source: dict[str, Any], request: dict[str, Any]) -> PrintOutcome',
+      parameters: ['source', 'request'],
+      doc: 'Once a person approves it, slice and queue `source` with `request`.',
+    },
+    {
+      name: 'tool',
+      signature: 'async def tool(name: str, args: dict[str, Any]) -> str',
+      parameters: ['name', 'args'],
+      doc: "Call ScadBuddy's agent tool `name` with `args`; returns its text.",
+    },
+  ],
+  types: [
+    { name: 'HumanAnswer', source: 'class HumanAnswer(TypedDict):\n    answer: str' },
+    { name: 'RenderResult', source: 'class RenderResult(TypedDict):\n    job_id: str\n    status: str' },
+  ],
+  tools: [
+    { name: 'list_models', tier: 'read' },
+    { name: 'send_to_bambuddy', tier: 'outward' },
+  ],
+}
+
+const CALLABLE = new Set([...FLOW_HOST_FUNCTIONS.functions.map((f) => f.name), 'main', 'print', 'len', 'range'])
+
+/** The stand-in check: each line's calls to names nothing defines, and `sleep('…')`. */
+export function checkFlowScript(script: string): FlowScriptProblem[] {
+  if (new TextEncoder().encode(script).length > 65_536) return [{ line: null, message: 'script is over 64 KiB' }]
+  const problems: FlowScriptProblem[] = []
+  script.split('\n').forEach((text, i) => {
+    if (/^\s*(async\s+)?def\s/.test(text)) return
+    for (const [, called] of text.matchAll(/(?<![\w.])([a-z_]\w*)\(/g)) {
+      if (called && !CALLABLE.has(called)) {
+        problems.push({ line: i + 1, message: `error[unresolved-reference]: Name \`${called}\` used when not defined` })
+      }
+    }
+    if (/\bsleep\(\s*["']/.test(text)) {
+      problems.push({ line: i + 1, message: 'error[invalid-argument-type]: Argument to function `sleep` is incorrect' })
+    }
+  })
+  return problems
+}
+
+function scriptProblems(problems: FlowScriptProblem[], detail: string) {
+  return HttpResponse.json(
+    { type: 'https://scadbuddy.dev/problems/flow-script', title: 'Unprocessable Content', status: 422, detail, problems },
+    { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+  )
+}
+
+/** A new version of `name`, numbered after its last, as the git history numbers it. */
+function addVersion(name: string, script: string, approval: number | null): FlowDefinition {
+  const version = (newestFirst(name)[0]?.version ?? 0) + 1
+  const created: FlowDefinition = {
+    ...definition(`def-${name}-${version}`, name, version, script, 40 + version),
+    approval_timeout_s: approval,
+    created_by: { kind: 'browser' },
+  }
+  definitions = [...definitions, created]
+  return created
+}
+
 const newestFirst = (name: string) =>
   definitions.filter((d) => d.name === name).sort((a, b) => b.version - a.version)
 
@@ -283,7 +375,7 @@ export const handlers = [
     return HttpResponse.json(
       versions.map((d, i) => ({
         id: d.id,
-        commit: `c0ffee${d.version}`.padEnd(40, '0'),
+        commit: commitOf(d),
         short: `c0ffee${d.version}`,
         version: d.version,
         message: `flow ${d.name} v${d.version}`,
@@ -292,6 +384,32 @@ export const handlers = [
         current: i === 0,
       })),
     )
+  }),
+  http.post('/api/v1/workflows', async ({ request }) => {
+    const body = (await keep(request)) as { name: string; script: string; approval_timeout?: number | 'never' | null }
+    const problems = checkFlowScript(body.script)
+    if (problems.length > 0) return scriptProblems(problems, 'The script does not type-check.')
+    const timeout = body.approval_timeout === 'never' ? 0 : (body.approval_timeout ?? null)
+    return HttpResponse.json(addVersion(body.name, body.script, timeout), { status: 201 })
+  }),
+  http.post('/api/v1/workflow-script/check', async ({ request }) => {
+    const { script } = (await request.json()) as { script: string }
+    return HttpResponse.json({ problems: checkFlowScript(script) })
+  }),
+  http.get('/api/v1/workflow-script/host-functions', () => HttpResponse.json(FLOW_HOST_FUNCTIONS)),
+  http.get('/api/v1/workflows/names/:name/versions/:commit/source', ({ params }) => {
+    const found = newestFirst(String(params['name'])).find((d) => commitOf(d) === params['commit'])
+    return found
+      ? new HttpResponse(found.script, { headers: { 'Content-Type': 'text/plain; charset=utf-8' } })
+      : notFound('No such version of this flow.')
+  }),
+  http.post('/api/v1/workflows/names/:name/versions/:commit/restore', async ({ request, params }) => {
+    await keep(request)
+    const found = newestFirst(String(params['name'])).find((d) => commitOf(d) === params['commit'])
+    if (!found) return notFound('No such version of this flow.')
+    const problems = checkFlowScript(found.script)
+    if (problems.length > 0) return scriptProblems(problems, 'That version no longer type-checks.')
+    return HttpResponse.json(addVersion(found.name, found.script, found.approval_timeout_s ?? null), { status: 201 })
   }),
   http.get('/api/v1/workflows/:id', ({ params }) => {
     const found = definitions.find((d) => d.id === params['id'])
