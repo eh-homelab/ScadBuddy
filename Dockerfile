@@ -310,8 +310,10 @@ RUN uv sync --frozen --no-dev
 # (checked 2026-10-10 on 2.1.292 with --debug-to-stderr: "Loaded 3 skills from
 # plugin scadbuddy"). SCADBUDDY_DURABLE_SKILLS_DIR below points at it.
 COPY plugins/scadbuddy/skills /app/plugins/scadbuddy/skills
-# Its subagents too (#2320), with ScadBuddy's tools through the agent's loopback server.
-COPY plugins/scadbuddy/agents /app/plugins/scadbuddy/agents
+# Its subagents (#2320, #2562), outside the plugin directory: the runner gives each the
+# agent's loopback MCP server inline, which a plugin's own subagents cannot carry
+# (https://code.claude.com/docs/en/sub-agents). SCADBUDDY_DURABLE_AGENTS_DIR below.
+COPY plugins/scadbuddy/agents /app/subagents
 # The agent's tool manifest (agent `pnpm build` writes dist/tools.json): each entry
 # becomes an `activity_as_tool` on `agent-tools`, which the agent container of the
 # same build serves, so the two never disagree on a tool's name or schema (#1056, 5e).
@@ -330,6 +332,7 @@ ENV PATH=/app/agent-durable/.venv/bin:$PATH \
     CLAUDE_CONFIG_DIR=/srv/agent/claude \
     SCADBUDDY_DURABLE_TOOLS_JSON=/app/agent-durable/tools.json \
     SCADBUDDY_DURABLE_SKILLS_DIR=/app/plugins/scadbuddy \
+    SCADBUDDY_DURABLE_AGENTS_DIR=/app/subagents \
     SCADBUDDY_DURABLE_CWD=/srv/agent \
     SCADBUDDY_REVISION=${SCADBUDDY_REVISION} \
     SCADBUDDY_VERSION=${SCADBUDDY_VERSION}

@@ -10,6 +10,12 @@ container's (spec 2026-10-01 §6.3a):
 - ``SCADBUDDY_DURABLE_CWD``: the engine's working directory (default ``/srv/agent``);
 - ``SCADBUDDY_DURABLE_SKILLS_DIR``: a plugin directory the engine loads skills from
   (optional);
+- ``SCADBUDDY_DURABLE_AGENTS_DIR``: ScadBuddy's subagent definitions
+  (``plugins/scadbuddy/agents``), given to each segment with the agent's loopback MCP
+  server inline (``session/subagents.py``; optional: unset, a segment has no subagents);
+- ``SCADBUDDY_DURABLE_SUBAGENT_MCP_URL``: that server, by default
+  ``http://127.0.0.1:8081/internal/durable/subagent-mcp`` (the agent container in the
+  same pod); ``off`` gives the subagents no server;
 - ``SCADBUDDY_PAYLOAD_DIR``: where a session's large payloads are kept, on the data
   share the agent mounts at the same path (``payload_store``). Unset, they stay in
   history, and the plugin fails a turn whose conversation outgrows 2 MB;
@@ -65,6 +71,8 @@ class Config:
     payload_dir: str | None = None
     # The agent's loopback MCP server for subagents (session/subagents.py); "off" disables it.
     subagent_url: str | None = None
+    # ScadBuddy's subagent definitions (session/subagents.py `load_agents`).
+    agents_dir: str | None = None
 
     def __repr__(self) -> str:  # the database URL can carry a password
         return f"Config(temporal={self.temporal_address}, namespace={self.namespace})"
@@ -96,6 +104,7 @@ def config_from_env(env: dict[str, str] | None = None) -> Config:
         scripted=e.get("SCADBUDDY_DURABLE_SCRIPTED") == "1",
         payload_dir=e.get("SCADBUDDY_PAYLOAD_DIR") or None,
         subagent_url=_subagent_url(e.get("SCADBUDDY_DURABLE_SUBAGENT_MCP_URL")),
+        agents_dir=e.get("SCADBUDDY_DURABLE_AGENTS_DIR") or None,
     )
 
 
@@ -165,6 +174,7 @@ def segment_runner(cfg: Config, connect: Connect, kek: Kek) -> SegmentRunner:
         # agent/src/temporal/turnPackages.ts SHARED_PACKAGES, on the shared payload volume.
         package_root=os.path.join(cfg.payload_dir, "plugins") if cfg.payload_dir else None,
         subagent_url=cfg.subagent_url,
+        agents_dir=cfg.agents_dir,
     )
 
 
