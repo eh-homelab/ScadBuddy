@@ -54,12 +54,13 @@ import { flowSessionActivities } from './temporal/flowSessions.js'
 import { gateActivities, PgApprovalRecords, PgSessionOwners, toolActivities } from './temporal/toolActivities.js'
 import { TASK_QUEUE } from './temporal/names.js'
 import { memoryActivities } from './temporal/memoryActivities.js'
-import { SHARED_PACKAGES } from './temporal/turnPackages.js'
+import { SHARED_PACKAGES, sweepPackageCopies } from './temporal/turnPackages.js'
 import { forwardPackageServers } from './plugins/packages/mcp.js'
 import { subagentKey } from './temporal/subagentToken.js'
 import { pgRunning } from './routes/subagentMcp.js'
 import { DURABLE_TURNS_DIR, sweepTurnDirs, turnServers } from './temporal/turnServers.js'
-import { turnToolActivities, turnToolActivity } from './temporal/turnTools.js'
+import { SessionClients } from './temporal/sessionClients.js'
+import { type ListedTools, turnToolActivities, turnToolActivity } from './temporal/turnTools.js'
 import { DURABLE_TOOLS } from './tools/manifest.js'
 import { PgAnswers } from './gate/answers.js'
 import { AgentWorker } from './temporal/worker.js'
@@ -394,10 +395,17 @@ if (temporal && !payloadKeys) {
 const workerDataConverter = dataConverter
   ? { ...dataConverter, failureConverterPath: fileURLToPath(new URL('./temporal/failureConverter.js', import.meta.url)) }
   : undefined
-// What a durable turn offers beside ScadBuddy's own tools (#2320): the servers a
-// classic turn would hand Claude Code, built again for every listing and call. One whose
-// state lives on this pod (http_request's saved bodies) runs its calls on this replica's
-// own queue, HOST_QUEUE, served by `hostWorker` below.
+// Package copies no turn has used for a week (#2395): the shared ones on the payload
+// volume, and this pod's own copies without their http servers. Every hour.
+{
+  const roots = [path.join(paths.stateDir, 'plugins-local'), ...(config.payloadDir ? [path.join(config.payloadDir, SHARED_PACKAGES)] : [])]
+  const sweep = () =>
+    void Promise.all(roots.map((root) => sweepPackageCopies(root))).catch((err: unknown) =>
+      console.error('package copy sweep failed:', (err as Error).message),
+    )
+  sweep()
+  setInterval(sweep, 3600_000).unref()
+}
 // Each replica's saved http bodies of durable sessions gone since (#2496), every hour.
 if (database) {
   const sweepRoot = path.join(paths.stateDir, DURABLE_TURNS_DIR)
@@ -408,6 +416,10 @@ if (database) {
   sweep()
   setInterval(sweep, 3600_000).unref()
 }
+// What a durable turn offers beside ScadBuddy's own tools (#2320): the servers a
+// classic turn would hand Claude Code, built again for every listing and call. One whose
+// state lives on this pod (http_request's saved bodies) runs its calls on this replica's
+// own queue, HOST_QUEUE, served by `hostWorker` below.
 const HOST_QUEUE = `${TASK_QUEUE}.${os.hostname()}`
 // The enabled remote plugins and every usable credential's secret, as a classic turn
 // reads them, for a durable turn's tools and its automatic memory.
@@ -419,6 +431,9 @@ const durableCredentialSecrets = async () => {
   const pool = new CredentialPool({ repo: credentials, kek, audit })
   return (await pool.candidates().catch(() => [])).map((c) => c.credential.secret)
 }
+// A durable session's MCP client on each remote plugin, kept on the replica its calls
+// are pinned to (#2581): a stateful plugin (Playwright MCP) keeps its page between calls.
+const turnClients = new SessionClients<ListedTools>()
 const turnToolDeps = temporal
   ? {
       sessions: new PgSessionOwners(temporal.sql),
@@ -443,6 +458,7 @@ const turnToolDeps = temporal
           : {}),
       }),
       hostQueue: HOST_QUEUE,
+      clients: turnClients,
       approvals: new PgApprovalRecords(temporal.sql),
       audit,
       currentTiers: liveTokenTiers(tokens),
@@ -674,6 +690,8 @@ async function stop(): Promise<void> {
     hostWorker?.stop(),
     sessions?.stopTurns({ graceMs: TURN_DRAIN_MS, abortWaitMs: TURN_ABORT_WAIT_MS }),
   ])
+  // Kept plugin MCP sessions end with their DELETE while the forwarder still routes it.
+  await turnClients.closeAll()
   stopSessionWake?.()
   stopHeartbeat()
   tabs.close()

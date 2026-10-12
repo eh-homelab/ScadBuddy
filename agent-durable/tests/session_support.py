@@ -120,6 +120,13 @@ class StandInTools:
         self.memory_fails = False
         self.tier_refuses = False
         self.turn_tools_fails = False
+        # #2581: the replica queue turn_tools pins every offered tool to (the agent's
+        # hostQueue, set when its plugin clients are kept), and the queues turn_tools and
+        # turn_tools_close, and each turn tool's call, ran on.
+        self.host_queue: str | None = None
+        self.listed_on: list[str] = []
+        self.closed_on: list[str] = []
+        self.called_on: list[str] = []
 
     async def _response(self, tool: str) -> tuple[str, Any] | None:
         info = activity.info()
@@ -193,7 +200,16 @@ class StandInTools:
         async def turn_tools() -> dict[str, Any]:
             if self.turn_tools_fails:
                 raise ApplicationError("the agent is away", non_retryable=True)
-            return {"tools": self.turn_offered, "packages": self.turn_packages}
+            self.listed_on.append(activity.info().task_queue)
+            pin = {"task_queue": self.host_queue} if self.host_queue else {}
+            return {
+                "tools": [{**t, **pin} for t in self.turn_offered],
+                "packages": self.turn_packages,
+            }
+
+        @activity.defn(name="turn_tools_close")
+        async def turn_tools_close() -> None:
+            self.closed_on.append(activity.info().task_queue)
 
         # As httpRequest.ts httpTierOf tiers http_request: no method, a GET or a HEAD is
         # read, anything else outward.
@@ -231,6 +247,7 @@ class StandInTools:
                 if recorded is None or recorded[0] != "approved":
                     raise ApplicationError("no approval", type="NotApproved", non_retryable=True)
             self.ran.append((name, args))
+            self.called_on.append(activity.info().task_queue)
             return f"{name} did {args.get('method')}"
 
         return [
@@ -240,6 +257,7 @@ class StandInTools:
             wait_for_user,
             describe_call,
             turn_tools,
+            turn_tools_close,
             turn_tool_tier,
             turn_tool,
             memory_recall,

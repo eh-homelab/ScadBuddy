@@ -60,6 +60,7 @@ from scadbuddy_durable.session import tools
 from scadbuddy_durable.session.activities import SessionActivities
 from scadbuddy_durable.session.models import (
     SEGMENT_CONTEXT_QUERY,
+    TOOLS_QUEUE,
     TURN_QUERY,
     FinishTurn,
     GateSettings,
@@ -1077,6 +1078,53 @@ async def test_a_failed_recall_or_retain_never_fails_the_turn(
     texts = [e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"]
     assert texts == ["you said: hello there"]
     assert [name for name, _ in harness.stand_in.memory] == ["memory_recall", "memory_retain"]
+    await _replays(harness, handle)
+
+
+async def test_a_session_stays_on_the_replica_its_plugin_calls_are_pinned_to(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#2581: the replica that holds the session's plugin MCP clients lists its next turn
+    too, so the pin (and a browser's page) outlives the turn; the session's end closes
+    them there."""
+    host = f"agent-tools.pod-{uuid.uuid4().hex[:6]}"
+    harness.stand_in.turn_offered = [NOTES_POST]
+    harness.stand_in.host_queue = host
+    async with Worker(harness.client, task_queue=host, activities=harness.stand_in.activities()):
+        sid, handle = await harness.session(agent_db)
+        await send(handle, "get it")
+        assert await settled(connect, sid) == "idle"
+        await agent_db.execute("UPDATE ai_sessions SET status = 'running' WHERE id = %s", (sid,))
+        await send_next(handle, "hello there")
+        assert await settled(connect, sid) == "idle"
+        await handle.signal(END_SIGNAL, {})
+        await asyncio.wait_for(handle.result(), 30)
+    assert harness.stand_in.called_on == [host]
+    assert harness.stand_in.listed_on == [TOOLS_QUEUE, host]
+    assert harness.stand_in.closed_on == [host]
+    await _replays(harness, handle)
+
+
+async def test_a_session_whose_replica_is_gone_lists_its_next_turn_anywhere(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#2581: a pinned replica that does not pick the listing up is gone: the turn is
+    listed on agent-tools (its plugins start new sessions there), and goes on."""
+    harness.stand_in.turn_offered = [NOTES_POST]
+    harness.stand_in.host_queue = f"agent-tools.gone-{uuid.uuid4().hex[:6]}"
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "hello there")
+    assert await settled(connect, sid) == "idle"
+    harness.stand_in.host_queue = None
+    await agent_db.execute("UPDATE ai_sessions SET status = 'running' WHERE id = %s", (sid,))
+    await send_next(handle, "get it")
+    assert await settled(connect, sid, timeout=60) == "idle"
+    assert harness.stand_in.listed_on == [TOOLS_QUEUE, TOOLS_QUEUE]
+    assert harness.stand_in.ran == [("turn:notes__post", {"method": "GET", "body": "y"})]
+    await handle.signal(END_SIGNAL, {})
+    await asyncio.wait_for(handle.result(), 30)
+    # Nothing was pinned last: nothing to close.
+    assert harness.stand_in.closed_on == []
     await _replays(harness, handle)
 
 
