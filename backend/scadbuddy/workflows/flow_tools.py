@@ -423,9 +423,7 @@ async def approved_tool(call: str, name: str, args: dict[str, Any]) -> ToolResul
 
 
 @agent.tool_defn()
-async def approved_turn_tool(
-    call: str, name: str, args: dict[str, Any], queue: str
-) -> ToolResult:
+async def approved_turn_tool(call: str, name: str, args: dict[str, Any], queue: str) -> ToolResult:
     """An outward plugin or http_request call, run once a person approved it, at most once."""
     await _approved(call)
     return await _call_tool(
@@ -433,9 +431,7 @@ async def approved_turn_tool(
     )
 
 
-async def _turn_tool(
-    name: str, args: dict[str, Any], runner: AgentWorkflowRunner
-) -> ToolResult:
+async def _turn_tool(name: str, args: dict[str, Any], runner: AgentWorkflowRunner) -> ToolResult:
     """A tool a durable turn has beside ScadBuddy's own (a remote plugin's,
     `scadbuddy_http__http_request`), named `<server>__<tool>` (agent/src/temporal/turnTools.ts).
     The agent tiers it from its input as the run's starter, and refuses one no enabled
@@ -653,9 +649,7 @@ async def _start_session(
         # not one a session start takes).
         body: dict[str, Any] = {"prompt": _prompt(prompt, skills, result_schema), "mode": "durable"}
         started = _untrusted(
-            (
-                await _call_tool(call_id, "sessions_start", body | _refs(images), attempts=1)
-            ).text
+            (await _call_tool(call_id, "sessions_start", body | _refs(images), attempts=1)).text
         )
         try:
             session_id, turn_id = str(started["session"]["id"]), str(started["turn_id"])
