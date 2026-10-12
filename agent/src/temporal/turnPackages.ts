@@ -161,8 +161,5 @@ export function unparkableBuiltins(pkg: TurnPackage): string[] {
   return pkg.builtin_tools.filter((t) => !PARKABLE_BUILTINS.has(t) && !OFFERED.has(t))
 }
 
-/**
- * What every durable turn's Claude Code has already (the Skill tool). Not Agent: the
- * durable agent starts without it, and one a package names would run unasked.
- */
-const OFFERED = new Set(['Skill'])
+/** What every durable turn's Claude Code has already (the Skill and Agent tools, read). */
+const OFFERED = new Set(['Skill', 'Agent'])
