@@ -789,6 +789,44 @@ turn goes ahead without it. `main.ts` passes `loadPackagesForRun(…)` to the
 socket, `POST /api/v1/ai/sessions` or the `sessions_*` tools (the comment on `sessions`
 in `main.ts`).
 
+A vetted package's http MCP servers are reached the way a remote plugin is, through the
+loopback forwarder
+([`agent/src/plugins/packages/mcp.ts`](../../agent/src/plugins/packages/mcp.ts)
+`forwardPackageServers`, #2320). Each is registered as a plugin named
+`plugin_<package>_<server>`, the name Claude Code gives a plugin's server. The forwarder
+connects to the address the egress check passed, follows no redirect, starts no OAuth
+discovery, adds the declared header itself (one at most) and marks results untrusted.
+Before #2320, Claude Code started none of them, because `strictMcpConfig` was on. Their
+URL and their one header (at most one) are checked as a remote plugin's registration is
+(`normalisePluginUrl`, `validateHeaderName`, `validateSecret`), and `X-Forwarded-*` and
+`Proxy-*` are refused. Claude Code loads every package without its own http entries: a
+copy under `<state dir>/plugins-local/<hash>/` whose `.mcp.json` and manifest keep only
+local servers (`withoutRemoteServers`). A query that reads plugins' MCP configs (with
+`strictMcpConfig` off, for the headless browser or an allowed package) refuses any
+loaded plugin that still declares an http server (`harness/run.ts`). An allowed
+package's local servers still start as declared.
+
+**Durable sessions (#2320).** A durable turn's Claude Code runs in the `agent-durable`
+container, so the agent copies each loaded package to the payload volume both sidecars
+mount, `<SCADBUDDY_PAYLOAD_DIR>/plugins/<content hash>/`, once per hash, when the turn
+lists its tools (`turn_tools`,
+[`agent/src/temporal/turnPackages.ts`](../../agent/src/temporal/turnPackages.ts)). The
+segment runner hashes that copy again (`agent-durable/.../session/package_hash.py`, the
+same hash as `hash.ts`) and loads only a copy that matches the pin. Without
+`SCADBUDDY_PAYLOAD_DIR` a durable turn loads no package and says so in the session. A
+package's MCP servers run in the agent as turn tools, as a remote plugin's do. They are
+named `plugin_<package>_<server>` and are outward. http ones go through the same
+forwarder (above), and their forwarder URLs and headers are redacted like a plugin's. A
+local one runs only for a package approved with `allow_refused`, started in the
+package's folder with `PATH`, `HOME` and its declared `env`. Of the built-ins an allowed package names, only `Bash` and `PowerShell` can run as
+their own activities, and so wait for a human. A durable turn offers those two and parks
+each call for approval. It does not offer the others, and says so in the session. The
+Temporal plugin owns the engine's settings, so a durable turn cannot set
+`disableSkillShellExecution`, and skill shell injection follows Claude Code's default
+there. Only an allowed package can carry one (`vet.ts` refuses it everywhere else), and
+it runs only with `Bash` offered, as in a classic turn (run.ts `builtinTools`). This was
+not measured in a durable engine. Copies on the volume are not pruned.
+
 Settings has an "Assistant plugins" area with two sections: "Plugin packages"
 ([`frontend/src/components/settings/PluginPackages.tsx`](../../frontend/src/components/settings/PluginPackages.tsx))
 and "Plugins", the list of `/api/v1/ai/plugins`
@@ -887,6 +925,27 @@ with the forwarder).
 Upstream's knobs are kept as `MemoryHookConfig` (`DEFAULT_MEMORY_HOOK_CONFIG`). One is
 ScadBuddy's own: `retainMode` is `'transcript'` (the default, above) or `'result'`,
 upstream's behaviour of retaining only the last result with no document id.
+
+**In a durable session** (#2320, superseding #825) the turn's Claude Code runs in
+`agent-durable`, which has none of ScadBuddy's hooks. So the agent builds the same hooks
+and calls them from two activities on `agent-tools`
+([`agent/src/temporal/memoryActivities.ts`](../../agent/src/temporal/memoryActivities.ts)),
+which the `DurableSession` workflow calls around each turn, behind the patch
+`memory-2320`:
+
+- `memory_recall` runs before the prompt is sent. It recalls against the user's words
+  in that turn's `user.turn` event, and returns the same `<hindsight_memories>` block.
+  The workflow appends that block to the prompt.
+- `memory_retain` runs after the turn's events are written and before `finish_turn`.
+  It runs the Stop hook over the session's transcript, rebuilt from its event log
+  (`transcriptOf`: user turns, the assistant's text, and the main agent's tool calls).
+  It upserts `conversation:<ScadBuddy session id>`.
+
+Each recall and retain gets the same audit row and `memory` event as in a classic
+turn. Neither is retried, and neither ever fails the turn: a failure is recorded and
+the turn goes on with no memories. Only the recalled block enters the workflow's history,
+sealed by the session's payload codec. Unlike a classic turn, the turn waits for its
+retain before it is marked done (up to the 15 s retain limit).
 
 ## 12. The HTTP request tool (#827)
 

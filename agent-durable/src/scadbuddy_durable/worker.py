@@ -148,7 +148,14 @@ def segment_runner(cfg: Config, connect: Connect, kek: Kek) -> SegmentRunner:
     """The model's runner: Claude through ScadBuddyRunner, or the tests' scripted one."""
     if cfg.scripted:
         return scripted_runner()
-    return ScadBuddyRunner(connect, kek, cwd=cfg.cwd, plugin_dir=cfg.skills_dir)
+    return ScadBuddyRunner(
+        connect,
+        kek,
+        cwd=cfg.cwd,
+        plugin_dir=cfg.skills_dir,
+        # agent/src/temporal/turnPackages.ts SHARED_PACKAGES, on the shared payload volume.
+        package_root=os.path.join(cfg.payload_dir, "plugins") if cfg.payload_dir else None,
+    )
 
 
 async def connect_client(cfg: Config, connect: Connect, kek: Kek, previous: Kek | None) -> Client:
