@@ -209,3 +209,60 @@ describe('flow tools (#1057)', () => {
     expect(seen).toEqual([{ key: expect.stringMatching(/^[0-9a-f]{32}$/), body: { event_id: 12, as_of_event_id: 40, workflow_run_id: 'w1' } }])
   })
 })
+
+describe('run grants (#2481)', () => {
+  const RUN = '1b9d6bcd-bbfd-4b2d-9b5d-ab8dfbbd4bed'
+  const GRANT = {
+    expires_at: '2026-10-13T12:00:00Z',
+    sessions: true,
+    rules: [{ fn: 'queue_print', printers: [3], max_prints: 4 }],
+  }
+
+  it('proposes a grant with a start: only a person approves it', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/workflows/${DEFINITION}/runs`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ id: RUN, status: 'starting', repeated: false }, { status: 202 })
+      }),
+    )
+    const result = await runTool(tool('start_flow_run'), { definition_id: DEFINITION, grant: GRANT }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(bodies).toEqual([{ grant: { ...GRANT, ask_starter_session: true } }])
+    expect(tool('start_flow_run').description).toMatch(/requested/)
+  })
+
+  it('refuses an expiry with no offset and an empty value list before the round trip', async () => {
+    let sent = 0
+    server.use(
+      http.post(`${BACKEND}/api/v1/workflows/${DEFINITION}/runs`, () => {
+        sent += 1
+        return HttpResponse.json({ id: RUN, status: 'starting', repeated: false }, { status: 202 })
+      }),
+    )
+    const naive = { ...GRANT, expires_at: '2026-10-13T12:00:00' }
+    expect((await runTool(tool('start_flow_run'), { definition_id: DEFINITION, grant: naive }, ctx())).isError).toBe(true)
+    const empty = { ...GRANT, rules: [{ fn: 'tool', tool: 'send_to_bambuddy', args: [{ path: '/x', in: [] }] }] }
+    expect((await runTool(tool('start_flow_run'), { definition_id: DEFINITION, grant: empty }, ctx())).isError).toBe(true)
+    expect(sent).toBe(0)
+  })
+
+  it('revokes as a write; approving and declining have no tool', async () => {
+    expect(tool('revoke_flow_grant').risk).toBe('write')
+    const routes = ALL_TOOLS.flatMap((t) => t.routes)
+    expect(routes).toContain('POST /api/v1/workflow-runs/{run_id}/grant/revoke')
+    expect(routes).not.toContain('POST /api/v1/workflow-runs/{run_id}/grant/approve')
+    expect(routes).not.toContain('POST /api/v1/workflow-runs/{run_id}/grant/decline')
+    const revoked: string[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/workflow-runs/${RUN}/grant/revoke`, ({ request }) => {
+        revoked.push(request.url)
+        return HttpResponse.json({ id: 'g1', status: 'approved', revoked_by: 'agent test', in_force: false })
+      }),
+    )
+    const result = await runTool(tool('revoke_flow_grant'), { run_id: RUN }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(firstText(result)).toMatchObject({ id: 'g1', in_force: false })
+    expect(revoked).toHaveLength(1)
+  })
+})

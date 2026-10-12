@@ -1,14 +1,15 @@
 """The flow-run sweep (#1057, plan 2026-10-09-durable-phase-6-flows.md Task B6): a row
 whose execution closed without finishing it is ended, within one sweep."""
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 from psycopg import Connection
 
 from scadbuddy.core.events import Event, FlowRunEvent
-from scadbuddy.flows.sweep import sweep_flow_runs
+from scadbuddy.flows.grants import GrantSpec
+from scadbuddy.flows.sweep import sweep_flow_runs, sweep_orphan_grants
 from scadbuddy.workflows.flow_models import FlowRecord
 from tests.flows.flows_support import Flows, define, script
 
@@ -62,3 +63,19 @@ async def test_a_quiet_row_is_the_only_one_described(flows: Flows) -> None:
     await flows.row(run_id, lambda r: len(r.steps) == 1)
     await flows.client.get_workflow_handle(f"flow-{run_id}").terminate(reason="operator")
     assert await sweep_flow_runs(flows.store, flows.client) == []
+
+
+async def test_a_grant_whose_run_never_started_is_deleted(flows: Flows) -> None:
+    """#2481: a start that failed after inserting its grant leaves it with no run; one
+    whose run is starting (an open execution, no row yet) is kept."""
+    spec = GrantSpec(expires_at=datetime.now(UTC) + timedelta(hours=1))
+    orphan = "00000000-0000-4000-8000-0000000000aa"
+    await flows.store.insert_grant(orphan, spec, status="approved", requested_by={})
+    starting = await flows.start(script("await sleep(60)"))
+    await flows.row(starting, lambda r: len(r.steps) == 1)
+    await flows.store.delete_run(starting)
+    await flows.store.insert_grant(starting, spec, status="approved", requested_by={})
+    swept = await sweep_orphan_grants(flows.store, flows.client, older_than=timedelta(0))
+    assert swept == [orphan]
+    assert await flows.store.get_grant(orphan) is None
+    assert await flows.store.get_grant(starting) is not None

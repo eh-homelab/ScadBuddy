@@ -236,6 +236,8 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   archive_flow: () => [],
   unarchive_flow: () => [],
   delete_flow: () => [],
+  // A run's grant (#2481) is the run's: its page shows who revoked it, and when.
+  revoke_flow_grant: () => [],
   // Models.
   create_model: (_input, result) => modelCreated(result),
   import_model: (_input, result) => modelCreated(result),

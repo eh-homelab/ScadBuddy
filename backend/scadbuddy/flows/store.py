@@ -12,6 +12,7 @@ workflow (plan 2026-10-09-durable-phase-6-flows.md Ruling 7), each write with it
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import Callable, Coroutine
 from datetime import datetime, timedelta
 from typing import Any
@@ -24,6 +25,7 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.bambuddy.runs import TransactionalEvents
 from scadbuddy.core.events import FlowRunEvent
+from scadbuddy.flows.grants import Consumption, Grant, GrantSpec, GrantStatus, GrantUse
 from scadbuddy.flows.manifest import OVERRIDES_SETTING
 from scadbuddy.flows.models import (
     RESULT_MAX,
@@ -40,6 +42,14 @@ _DECISION = (
     " input_hash, created_at"
 )
 _DEFINITION = "id, name, version, commit, script, approval_timeout_s, created_by, created_at"
+_GRANT = (
+    "id, run_id, status, spec, used, requested_by, approved_by, approved_at, revoked_by,"
+    " revoked_at, expires_at, created_at"
+)
+_GRANT_USE = (
+    "request_id, grant_id, run_id, fn, tool, input_hash, rule_index, prints, filament_g,"
+    " session_id, narrowed_by, pins, created_at"
+)
 _RUN = (
     "id, definition_id, version, name, status, waiting_on, steps, result,"
     " result_truncated, approval_timeout_s, commit, workflow_id, workflow_run_id,"
@@ -63,6 +73,15 @@ class ResetSupersededError(Exception):
     def __init__(self, run: Run) -> None:
         super().__init__(f"run {run.id} was reset by another Reset first")
         self.run = run
+
+
+class GrantStateError(Exception):
+    """The grant is not in a state that allows this (one grant per run, fixed once
+    approved, revocation final: amendment Ruling 6)."""
+
+    def __init__(self, grant: Grant, wanted: str) -> None:
+        super().__init__(f"grant {grant.id} is {grant.status}; it cannot be {wanted}")
+        self.grant = grant
 
 
 class ResetBeforeFloorError(Exception):
@@ -265,11 +284,232 @@ class FlowStore:
         """Undo a decision the harness refused: no `approved` row for a call it never ran."""
         await asyncio.to_thread(self._delete_decision, request_id)
 
+    # -- grants (#2481) -----------------------------------------------------------
+
+    async def insert_grant(
+        self, run_id: str, spec: GrantSpec, *, status: GrantStatus, requested_by: dict[str, Any]
+    ) -> Grant:
+        """The run's grant, `approved` (by the browser) or `requested`; the existing one
+        when the run has one already (a repeated start)."""
+        return await asyncio.to_thread(self._insert_grant, run_id, spec, status, requested_by)
+
+    async def get_grant(self, run_id: str) -> Grant | None:
+        return await asyncio.to_thread(self._get_grant, run_id)
+
+    async def approve_grant(
+        self, run_id: str, spec: GrantSpec | None, *, approved_by: str
+    ) -> Grant | None:
+        """Approve the run's requested grant, as `spec` when given (the person's edit).
+        None without a grant; `GrantStateError` unless it is requested."""
+        return await asyncio.to_thread(self._approve_grant, run_id, spec, approved_by)
+
+    async def decline_grant(self, run_id: str) -> Grant | None:
+        """Decline the run's requested grant: final."""
+        return await asyncio.to_thread(self._decline_grant, run_id)
+
+    async def revoke_grant(self, run_id: str, *, revoked_by: str) -> Grant | None:
+        """Revoke the run's grant, requested or approved: final."""
+        return await asyncio.to_thread(self._revoke_grant, run_id, revoked_by)
+
+    async def grant_use(self, request_id: str) -> GrantUse | None:
+        return await asyncio.to_thread(self._grant_use, request_id)
+
+    async def grant_uses(self, run_id: str) -> list[GrantUse]:
+        """What the run's grant let through, oldest first."""
+        return await asyncio.to_thread(self._grant_uses, run_id)
+
+    async def consume_grant(
+        self, run_id: str, request_id: str, pick: Callable[[Grant], Consumption | str]
+    ) -> GrantUse | str:
+        """Under the grant's row lock: the use already recorded for `request_id`, or the
+        one `pick` chooses against the counters as they are, recorded with them; else
+        `pick`'s reason."""
+        return await asyncio.to_thread(self._consume_grant, run_id, request_id, pick)
+
+    async def orphan_grants(self, older_than: timedelta) -> list[str]:
+        """The run ids of grants older than `older_than` whose run has no row: a start
+        that failed after inserting its grant (the sweep checks the execution too)."""
+        return await asyncio.to_thread(self._orphan_grants, older_than)
+
+    async def delete_grant(self, run_id: str) -> None:
+        await asyncio.to_thread(self._delete_grant, run_id)
+
     async def tool_overrides(self) -> Any:
         """Settings' raised tool tiers (the agent's `ai_settings` row), or None."""
         return await asyncio.to_thread(self._tool_overrides)
 
     # -- implementation -----------------------------------------------------------
+
+    def _insert_grant(
+        self, run_id: str, spec: GrantSpec, status: GrantStatus, requested_by: dict[str, Any]
+    ) -> Grant:
+        approved = status == "approved"
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "INSERT INTO flow_grants (id, run_id, status, spec, requested_by, approved_by,"
+                " approved_at, expires_at)"
+                " VALUES (%s, %s, %s, %s, %s, %s, CASE WHEN %s THEN now() END, %s)"
+                f" ON CONFLICT (run_id) DO NOTHING RETURNING {_GRANT}",
+                (
+                    str(uuid.uuid4()),
+                    run_id,
+                    status,
+                    Jsonb(spec.model_dump(mode="json", by_alias=True)),
+                    Jsonb(requested_by),
+                    "browser" if approved else None,
+                    approved,
+                    spec.expires_at if approved else None,
+                ),
+            ).fetchone()
+            if row is None:
+                row = conn.execute(
+                    f"SELECT {_GRANT} FROM flow_grants WHERE run_id = %s", (run_id,)
+                ).fetchone()
+        assert row is not None
+        return Grant.model_validate(row)
+
+    def _get_grant(self, run_id: str) -> Grant | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                f"SELECT {_GRANT} FROM flow_grants WHERE run_id = %s", (run_id,)
+            ).fetchone()
+        return Grant.model_validate(row) if row else None
+
+    def _locked_grant(self, conn: Connection[DictRow], run_id: str) -> Grant | None:
+        row = conn.execute(
+            f"SELECT {_GRANT} FROM flow_grants WHERE run_id = %s FOR UPDATE", (run_id,)
+        ).fetchone()
+        return Grant.model_validate(row) if row else None
+
+    def _approve_grant(self, run_id: str, spec: GrantSpec | None, approved_by: str) -> Grant | None:
+        with self._pool.connection() as conn, conn.transaction():
+            grant = self._locked_grant(conn, run_id)
+            if grant is None:
+                return None
+            if grant.status != "requested" or grant.revoked_at is not None:
+                raise GrantStateError(grant, "approved")
+            final = spec or grant.spec
+            row = conn.execute(
+                "UPDATE flow_grants SET status = 'approved', spec = %s, approved_by = %s,"
+                f" approved_at = now(), expires_at = %s WHERE id = %s RETURNING {_GRANT}",
+                (
+                    Jsonb(final.model_dump(mode="json", by_alias=True)),
+                    approved_by,
+                    final.expires_at,
+                    grant.id,
+                ),
+            ).fetchone()
+        assert row is not None
+        return Grant.model_validate(row)
+
+    def _decline_grant(self, run_id: str) -> Grant | None:
+        with self._pool.connection() as conn, conn.transaction():
+            grant = self._locked_grant(conn, run_id)
+            if grant is None:
+                return None
+            if grant.status != "requested" or grant.revoked_at is not None:
+                raise GrantStateError(grant, "declined")
+            row = conn.execute(
+                f"UPDATE flow_grants SET status = 'declined' WHERE id = %s RETURNING {_GRANT}",
+                (grant.id,),
+            ).fetchone()
+        assert row is not None
+        return Grant.model_validate(row)
+
+    def _revoke_grant(self, run_id: str, revoked_by: str) -> Grant | None:
+        with self._pool.connection() as conn, conn.transaction():
+            grant = self._locked_grant(conn, run_id)
+            if grant is None:
+                return None
+            if grant.status == "declined" or grant.revoked_at is not None:
+                raise GrantStateError(grant, "revoked")
+            row = conn.execute(
+                "UPDATE flow_grants SET revoked_by = %s, revoked_at = now() WHERE id = %s"
+                f" RETURNING {_GRANT}",
+                (revoked_by, grant.id),
+            ).fetchone()
+        assert row is not None
+        return Grant.model_validate(row)
+
+    def _grant_use(self, request_id: str) -> GrantUse | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                f"SELECT {_GRANT_USE} FROM flow_grant_uses WHERE request_id = %s", (request_id,)
+            ).fetchone()
+        return GrantUse.model_validate(row) if row else None
+
+    def _grant_uses(self, run_id: str) -> list[GrantUse]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT {_GRANT_USE} FROM flow_grant_uses WHERE run_id = %s"
+                " ORDER BY created_at, request_id",
+                (run_id,),
+            ).fetchall()
+        return [GrantUse.model_validate(row) for row in rows]
+
+    def _consume_grant(
+        self, run_id: str, request_id: str, pick: Callable[[Grant], Consumption | str]
+    ) -> GrantUse | str:
+        with self._pool.connection() as conn, conn.transaction():
+            grant = self._locked_grant(conn, run_id)
+            if grant is None:
+                return "no grant in force"
+            # After the lock: a concurrent check of the same request id has committed.
+            prior = conn.execute(
+                f"SELECT {_GRANT_USE} FROM flow_grant_uses WHERE request_id = %s", (request_id,)
+            ).fetchone()
+            if prior is not None:
+                return GrantUse.model_validate(prior)
+            taken = pick(grant)
+            if isinstance(taken, str):
+                return taken
+            use = taken.use
+            used = {k: v.model_dump() for k, v in grant.used.items()}
+            for key in filter(None, (str(taken.rule_index), taken.narrowed_key)):
+                was = used.get(key, {"prints": 0, "filament_g": 0.0, "calls": 0})
+                used[key] = {
+                    "prints": was["prints"] + use.prints,
+                    "filament_g": was["filament_g"] + use.filament_g,
+                    "calls": was["calls"] + 1,
+                }
+            conn.execute("UPDATE flow_grants SET used = %s WHERE id = %s", (Jsonb(used), grant.id))
+            row = conn.execute(
+                "INSERT INTO flow_grant_uses (request_id, grant_id, run_id, fn, tool,"
+                " input_hash, rule_index, prints, filament_g, session_id, narrowed_by, pins)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                f" RETURNING {_GRANT_USE}",
+                (
+                    use.request_id,
+                    use.grant_id,
+                    use.run_id,
+                    use.fn,
+                    use.tool,
+                    use.input_hash,
+                    use.rule_index,
+                    use.prints,
+                    use.filament_g,
+                    use.session_id,
+                    use.narrowed_by,
+                    Jsonb(use.pins),
+                ),
+            ).fetchone()
+        assert row is not None
+        return GrantUse.model_validate(row)
+
+    def _orphan_grants(self, older_than: timedelta) -> list[str]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT g.run_id FROM flow_grants g"
+                " WHERE g.created_at <= now() - %s"
+                " AND NOT EXISTS (SELECT 1 FROM workflow_runs r WHERE r.id = g.run_id)"
+                " ORDER BY g.created_at",
+                (older_than,),
+            ).fetchall()
+        return [row["run_id"] for row in rows]
+
+    def _delete_grant(self, run_id: str) -> None:
+        with self._pool.connection() as conn:
+            conn.execute("DELETE FROM flow_grants WHERE run_id = %s", (run_id,))
 
     def _tool_overrides(self) -> Any:
         with self._pool.connection() as conn:
@@ -572,6 +812,8 @@ class FlowStore:
             # Its decisions go by cascade; the operations that made them carry the
             # answers in their requests, so they go too.
             conn.execute("DELETE FROM operations WHERE subject = %s", (f"flow:{run_id}",))
+            # Its grant's uses go by cascade.
+            conn.execute("DELETE FROM flow_grants WHERE run_id = %s", (run_id,))
             cur = conn.execute("DELETE FROM workflow_runs WHERE id = %s", (run_id,))
         return cur.rowcount > 0
 

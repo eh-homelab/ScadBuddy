@@ -19,6 +19,34 @@ const flowCommit = z
   .regex(/^[0-9a-f]{7,40}$/)
   .describe("One of the flow's versions' commits, as list_flow_versions returns it")
 const runId = z.string().uuid().describe('A flow run id, as start_flow_run returns it')
+const grantRule = z
+  .object({
+    fn: z.enum(['queue_print', 'arrange', 'tool']),
+    tool: z.string().optional().describe("For fn `tool`: the outward tool's name"),
+    printers: z.array(z.number().int()).optional().describe('queue_print: printer ids it may use'),
+    models: z.array(z.string()).optional().describe('queue_print, arrange: template slugs'),
+    library_files: z.array(z.number().int()).optional().describe("queue_print: Bambuddy library file ids"),
+    max_prints: z.number().int().min(0).optional(),
+    max_filament_g: z.number().min(0).optional(),
+    max_calls: z.number().int().min(0).optional(),
+    args: z
+      .array(z.object({ path: z.string(), in: z.array(z.union([z.string(), z.number(), z.boolean(), z.null()])).min(1).max(256) }))
+      .optional()
+      .describe("tool: JSON pointers into the call's arguments and the values each may hold"),
+  })
+  .strict()
+const grantSpec = z
+  .object({
+    expires_at: z.string().datetime({ offset: true }).describe('ISO 8601 with its offset; at most 7 days ahead (24 h is the usual)'),
+    sessions: z.boolean().default(false).describe('Whether it covers the outward calls of sessions the run starts'),
+    ask_starter_session: z.boolean().default(true).describe('Whether calls outside it go to this session first'),
+    rules: z.array(grantRule).max(32),
+  })
+  .strict()
+  .describe(
+    "A proposed run grant: outward calls inside a rule's bounds would run without asking. An agent's grant is " +
+      'only requested: it does nothing until the user approves it (maybe edited) on the run page.',
+  )
 const approvalTimeout = z
   .union([z.number().int().min(10).max(2_592_000), z.literal('never')])
   .describe('Seconds an outward host call waits for a person to approve it before it is denied, or "never"')
@@ -244,11 +272,13 @@ export const flowTools: Tool[] = [
     description:
       'Start a run of a flow version. Answered at once with the run id (status `starting`): follow it with ' +
       'get_flow_run. The script is checked again first (422 with `problems` if the host functions changed). ' +
-      '`approval_timeout` overrides the flow\'s for this run. The run is recorded as started by this session.',
-    input: z.object({ definition_id: definitionId, approval_timeout: approvalTimeout.optional() }),
+      '`approval_timeout` overrides the flow\'s for this run. The run is recorded as started by this session. ' +
+      '`grant` proposes what its outward calls may do without asking; it is requested, never approved, until ' +
+      'the user approves it on the run page. The run starts at once, and its outward calls wait meanwhile.',
+    input: z.object({ definition_id: definitionId, approval_timeout: approvalTimeout.optional(), grant: grantSpec.optional() }),
     risk: 'write',
     routes: ['POST /api/v1/workflows/{definition_id}/runs'],
-    handler: async ({ definition_id, approval_timeout }, ctx) => {
+    handler: async ({ definition_id, approval_timeout, grant }, ctx) => {
       // One key for this call, re-sent after an answer that never came, so a re-send reaches the same run.
       const headers = { 'Idempotency-Key': randomUUID().replaceAll('-', '') }
       const what = `start flow ${definition_id}`
@@ -257,7 +287,13 @@ export const flowTools: Tool[] = [
         () =>
           ctx.backend.POST('/api/v1/workflows/{definition_id}/runs', {
             params: { path: { definition_id } },
-            body: approval_timeout === undefined ? null : { approval_timeout },
+            body:
+              approval_timeout === undefined && grant === undefined
+                ? null
+                : {
+                    ...(approval_timeout === undefined ? {} : { approval_timeout }),
+                    ...(grant === undefined ? {} : { grant }),
+                  },
             headers,
           }),
         what,
@@ -265,6 +301,24 @@ export const flowTools: Tool[] = [
       )
       return json(await ok(Promise.resolve(sent), what))
     },
+  }),
+
+  defineTool({
+    name: 'revoke_flow_grant',
+    description:
+      "Revoke a flow run's grant, for a run this principal started: final, and the run goes on, its next " +
+      'outward call waiting for a decision. Revoking only takes authority away; approving a grant is the ' +
+      "user's alone.",
+    input: z.object({ run_id: runId }),
+    risk: 'write',
+    routes: ['POST /api/v1/workflow-runs/{run_id}/grant/revoke'],
+    handler: async ({ run_id }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/workflow-runs/{run_id}/grant/revoke', { params: { path: { run_id } } }),
+          `revoke the grant of flow run ${run_id}`,
+        ),
+      ),
   }),
 
   defineTool({
