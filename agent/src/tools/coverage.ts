@@ -24,6 +24,14 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'Ruling 6); the route refuses an agent-authored request.',
   },
   {
+    operation: 'POST /api/v1/workflow-runs/{run_id}/grant/approve',
+    reason: 'A run grant is approved by the browser user only (amendment §3.2); the route refuses an agent-authored request.',
+  },
+  {
+    operation: 'POST /api/v1/workflow-runs/{run_id}/grant/decline',
+    reason: 'A run grant is approved by the browser user only (amendment §3.2); the route refuses an agent-authored request.',
+  },
+  {
     operation: 'DELETE /api/v1/workflow-runs/{run_id}',
     reason:
       "Forgets a flow run: its payload key, workflow and row (#1057). A person's decision on the Workflows " +
