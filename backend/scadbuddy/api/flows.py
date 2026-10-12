@@ -91,6 +91,7 @@ ENTRY_BROWSER_ONLY = "https://scadbuddy.dev/problems/flow-entry-browser-only"
 GRANT_INVALID = "https://scadbuddy.dev/problems/flow-grant-invalid"
 GRANT_STATE = "https://scadbuddy.dev/problems/flow-grant-state"
 GRANT_STARTER_ONLY = "https://scadbuddy.dev/problems/flow-grant-starter-only"
+GRANT_BROWSER_ONLY = "https://scadbuddy.dev/problems/flow-grant-browser-only"
 _STATUS_SECONDS = 2.0
 
 ApprovalTimeout = int | Literal["never"]
@@ -434,8 +435,6 @@ async def start_flow_run(
     )
     # As the agent will enforce them: Settings may have raised a tool to outward.
     tool_tiers = raise_tiers(tiers(), await flows.store.tool_overrides())
-    if options.grant is not None:
-        _check_grant(options.grant, tool_tiers)
     try:
         async with asyncio.timeout(COMMAND_ANSWER_DEADLINE.total_seconds()):
             # Started already, its row not yet written: the same run, nothing new.
@@ -445,6 +444,13 @@ async def start_flow_run(
                 return RunAnswer(
                     id=run_id, status="terminated" if closed else "starting", repeated=True
                 )
+            # Checked only once no repeat answered: a repeat answers its run, whatever
+            # has become of the grant it was sent with since.
+            if options.grant is not None:
+                _check_grant(options.grant, tool_tiers)
+            # No execution, so a grant held for this run is a start's that never started
+            # it (it raised after the insert): never this request's, so it goes.
+            await flows.store.delete_grant(run_id)
             if options.grant is not None:
                 # Before the run starts, so its first outward call finds it. A person's
                 # (the browser's) is approved; an agent's only proposes one (§3.2).
@@ -675,15 +681,19 @@ class Decided(BaseModel):
     outcome: Literal["approved", "denied", "answered"]
 
 
-def _browser_only() -> None:
+def _browser_only(
+    detail: str = "Only a person answers a flow's questions and approvals.",
+    type_: str = ENTRY_BROWSER_ONLY,
+) -> None:
     # Spec §6.6, plan 6 Ruling 6: a flow's entries are answered on the Workflows page,
     # never by an agent, whatever grant it holds.
     if current_author() is not None:
-        raise ApiError(
-            status.HTTP_403_FORBIDDEN,
-            "Only a person answers a flow's questions and approvals.",
-            type_=ENTRY_BROWSER_ONLY,
-        )
+        raise ApiError(status.HTTP_403_FORBIDDEN, detail, type_=type_)
+
+
+def _grant_browser_only() -> None:
+    # Spec 2026-10-11 §3.2: an agent proposes a grant; only a person approves or declines it.
+    _browser_only("Only a person approves or declines a run's grant.", GRANT_BROWSER_ONLY)
 
 
 @router.post(
@@ -799,7 +809,7 @@ async def approve_flow_grant(
     """Browser only (spec 2026-10-11 §3.2): no agent approves a grant, its own or
     another's. From now until it expires or is revoked, the run's outward calls inside it
     run without asking."""
-    _browser_only()
+    _grant_browser_only()
     grant = await flows.store.get_grant(run_id)
     if grant is None:
         raise _no_grant()
@@ -807,6 +817,8 @@ async def approve_flow_grant(
     spec = options.spec or grant.spec
     if options.ask_starter_session is not None:
         spec = spec.model_copy(update={"ask_starter_session": options.ask_starter_session})
+    # Only a grant still requested is checked: any other answers 409 from the store, which
+    # says what is wrong with it better than its spec's problems would.
     if grant.status == "requested" and grant.revoked_at is None:
         _check_grant(spec, raise_tiers(tiers(), await flows.store.tool_overrides()))
     try:
@@ -823,7 +835,7 @@ async def approve_flow_grant(
 )
 async def decline_flow_grant(run_id: str, flows: FlowsDep) -> GrantView:
     """Browser only. Final: the run's outward calls ask for the rest of its life."""
-    _browser_only()
+    _grant_browser_only()
     try:
         declined = await flows.store.decline_grant(run_id)
     except GrantStateError as err:
@@ -848,7 +860,15 @@ async def revoke_flow_grant(run_id: str, flows: FlowsDep) -> GrantView:
         revoked_by = "browser"
     else:
         starter = grant.requested_by
-        if starter.get("kind") != "agent" or starter.get("principal") != author.principal:
+        principal = starter.get("principal")
+        # Named on both sides: no principal never matches another missing one.
+        if (
+            starter.get("kind") != "agent"
+            or not isinstance(principal, str)
+            or not principal
+            or not author.principal
+            or principal != author.principal
+        ):
             raise ApiError(
                 status.HTTP_403_FORBIDDEN,
                 "Only a person or the run's starter revokes its grant.",

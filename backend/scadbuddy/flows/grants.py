@@ -15,7 +15,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 if TYPE_CHECKING:
     from scadbuddy.flows.models import Run
@@ -72,7 +72,7 @@ class GrantSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    expires_at: datetime
+    expires_at: AwareDatetime
     #: Whether it extends to the flow turns of the sessions the run starts (§3.4).
     sessions: bool = False
     #: Whether a call outside it goes to the starter session before the person (§4.4).
@@ -407,6 +407,9 @@ async def match_grant(
     """Amendment §3.3: whether the call `request_id` is inside the run's grant, consuming
     its share when it is. A request id already recorded answers its first verdict."""
     if (prior := await store.grant_use(request_id)) is not None:
+        if prior.run_id != run_id or prior.session_id != session_id:
+            # Another run's (or another caller's) call: never this one's to repeat.
+            return Outside(reason="the request id is another call's")
         return Inside(
             grant_id=prior.grant_id,
             rule_index=prior.rule_index,

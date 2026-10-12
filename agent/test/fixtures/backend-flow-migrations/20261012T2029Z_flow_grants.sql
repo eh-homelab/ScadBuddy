@@ -38,3 +38,5 @@ CREATE TABLE flow_grant_uses (
 );
 
 CREATE INDEX flow_grant_uses_run ON flow_grant_uses (run_id, created_at);
+-- The cascade from flow_grants finds a grant's uses by it.
+CREATE INDEX flow_grant_uses_grant ON flow_grant_uses (grant_id);

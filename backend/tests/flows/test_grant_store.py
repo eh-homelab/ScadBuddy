@@ -172,6 +172,12 @@ async def test_a_repeated_request_id_answers_its_first_verdict_and_consumes_once
     assert first == again
     grant = await store.get_grant(run_id)
     assert grant is not None and grant.used["0"].calls == 1
+    # Review of #2643: another run naming the same request id never repeats its verdict.
+    other = await run_row(store)
+    await store.insert_grant(
+        other, spec({"fn": "queue_print"}), status="approved", requested_by={"kind": "browser"}
+    )
+    assert isinstance(await match(store, other, "flow:r:w:same"), Outside)
 
 
 async def test_concurrent_calls_for_the_last_print_admit_one(store: FlowStore) -> None:

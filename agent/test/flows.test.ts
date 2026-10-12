@@ -191,6 +191,21 @@ describe('run grants (#2481)', () => {
     expect(tool('start_flow_run').description).toMatch(/requested/)
   })
 
+  it('refuses an expiry with no offset and an empty value list before the round trip', async () => {
+    let sent = 0
+    server.use(
+      http.post(`${BACKEND}/api/v1/workflows/${DEFINITION}/runs`, () => {
+        sent += 1
+        return HttpResponse.json({ id: RUN, status: 'starting', repeated: false }, { status: 202 })
+      }),
+    )
+    const naive = { ...GRANT, expires_at: '2026-10-13T12:00:00' }
+    expect((await runTool(tool('start_flow_run'), { definition_id: DEFINITION, grant: naive }, ctx())).isError).toBe(true)
+    const empty = { ...GRANT, rules: [{ fn: 'tool', tool: 'send_to_bambuddy', args: [{ path: '/x', in: [] }] }] }
+    expect((await runTool(tool('start_flow_run'), { definition_id: DEFINITION, grant: empty }, ctx())).isError).toBe(true)
+    expect(sent).toBe(0)
+  })
+
   it('revokes as a write; approving and declining have no tool', async () => {
     expect(tool('revoke_flow_grant').risk).toBe('write')
     const routes = ALL_TOOLS.flatMap((t) => t.routes)

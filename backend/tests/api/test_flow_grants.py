@@ -4,6 +4,8 @@ approves or declines one; the browser or the starter revokes it, once."""
 
 from __future__ import annotations
 
+import json
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -11,6 +13,7 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.flows import FLOW_NAMESPACE
 from tests.api.test_flows import AGENT, register, script, settings, start, until
 
 __all__ = ["settings"]
@@ -96,7 +99,7 @@ def test_an_agents_grant_is_requested_and_only_the_browser_decides_it(
     for action in ("approve", "decline"):
         refused = client.post(f"/api/v1/workflow-runs/{run_id}/grant/{action}", headers=AGENT)
         assert refused.status_code == 403
-        assert refused.json()["type"] == "https://scadbuddy.dev/problems/flow-entry-browser-only"
+        assert refused.json()["type"] == "https://scadbuddy.dev/problems/flow-grant-browser-only"
     # The person edits it as they approve it: the request was only a proposal.
     edited = grant({"fn": "queue_print", "max_prints": 2}, ask_starter_session=True)
     approved = client.post(
@@ -184,3 +187,88 @@ def test_a_repeated_start_keeps_the_first_grant(client: TestClient) -> None:
     again = start(client, definition["id"], "same", grant=grant({"fn": "arrange"}))
     assert again.status_code == 200
     assert view_grant(client, run_id)["spec"]["rules"][0]["fn"] == "queue_print"
+
+
+def test_a_naive_expiry_is_refused_not_a_server_error(client: TestClient) -> None:
+    """Review of #2643: an expiry with no offset is a 422, never a 500."""
+    definition = register(client, WAITS)
+    naive = (datetime.now(UTC) + timedelta(hours=1)).replace(tzinfo=None).isoformat()
+    body = {"grant": {"expires_at": naive, "rules": [{"fn": "queue_print"}]}}
+    response = client.post(
+        f"/api/v1/workflows/{definition['id']}/runs", headers={"Idempotency-Key": "nv"}, json=body
+    )
+    assert response.status_code == 422, response.text
+    run_id = started(client, "nv2", {"grant": grant({"fn": "queue_print"})}, **AGENT)
+    approve = client.post(
+        f"/api/v1/workflow-runs/{run_id}/grant/approve",
+        json={"spec": {"expires_at": naive, "rules": [{"fn": "queue_print"}]}},
+    )
+    assert approve.status_code == 422, approve.text
+
+
+def test_an_agent_with_no_principal_never_revokes(client: TestClient, pg_conninfo: str) -> None:
+    """Review of #2643: no principal on either side is no match."""
+    run_id = started(client, "np", {"grant": grant({"fn": "queue_print"})}, **AGENT)
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute(
+            """UPDATE flow_grants SET requested_by = '{"kind": "agent", "principal": null}'"""
+            " WHERE run_id = %s",
+            (run_id,),
+        )
+    # An empty author is refused before the route (400); a named one never matches none.
+    unnamed = {"X-ScadBuddy-Agent-Author": ""}
+    response = client.post(f"/api/v1/workflow-runs/{run_id}/grant/revoke", headers=unnamed)
+    assert response.status_code == 400, response.text
+    response = client.post(f"/api/v1/workflow-runs/{run_id}/grant/revoke", headers=AGENT)
+    assert response.status_code == 403, response.text
+
+
+def test_a_repeated_key_answers_its_run_after_the_grant_expired(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    """Review of #2643: the repeat answers before the grant is validated again."""
+    definition = register(client, WAITS)
+    first = start(client, definition["id"], "late", grant=grant({"fn": "queue_print"}))
+    run_id = first.json()["id"]
+    until(client, run_id, lambda v: v["status"] == "waiting")
+    # As if its row were not yet written: only its execution answers the repeat.
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute("DELETE FROM workflow_runs WHERE id = %s", (run_id,))
+    again = start(client, definition["id"], "late", grant=grant({"fn": "queue_print"}, hours=-1))
+    assert again.status_code == 200, again.text
+    assert again.json()["repeated"] is True
+
+
+def stale_grant(pg_conninfo: str, run_id: str) -> None:
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute(
+            "INSERT INTO flow_grants (id, run_id, status, spec, requested_by, approved_by,"
+            " approved_at, expires_at) VALUES (%s, %s, 'approved', %s, '{}', 'browser',"
+            " now(), now() + interval '1 hour')",
+            (f"stale-{run_id}", run_id, json.dumps(grant({"fn": "queue_print"}))),
+        )
+
+
+def run_of(definition: dict[str, Any], key: str) -> str:
+    return str(uuid.uuid5(FLOW_NAMESPACE, f"{definition['id']}:{definition['version']}:{key}"))
+
+
+def test_a_start_that_failed_leaves_no_grant_for_its_retry(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    """Review of #2643: a grant inserted by a start that never started its run is replaced
+    by the retry's (or removed, when the retry sends none), never silently kept."""
+    definition = register(client, WAITS)
+    run_id = run_of(definition, "k")
+    stale_grant(pg_conninfo, run_id)
+    response = start(client, definition["id"], "k", grant=grant({"fn": "arrange"}))
+    assert response.status_code == 202, response.text
+    until(client, run_id, lambda v: v["status"] == "waiting")
+    shown = view_grant(client, run_id)
+    assert shown["id"] != f"stale-{run_id}" and shown["spec"]["rules"][0]["fn"] == "arrange"
+    other = register(client, WAITS)
+    bare = run_of(other, "k2")
+    stale_grant(pg_conninfo, bare)
+    assert start(client, other["id"], "k2").status_code == 202
+    until(client, bare, lambda v: v["status"] == "waiting")
+    assert view_grant(client, bare) is None
