@@ -530,7 +530,7 @@ const temporalWorker =
             // A result's images, for the durable segment's view_tool_images (#2320).
             blobs: new SessionBlobs(temporal.sql),
           }),
-          ...gateActivities({ audit, sessions: new PgSessionOwners(temporal.sql) }),
+          ...gateActivities({ audit, sessions: new PgSessionOwners(temporal.sql), workspace }),
           // A durable turn's plugin and http_request tools (#2320): listed per turn, and
           // each call the `default` activity `turn:<server>__<tool>`.
           ...turnToolActivities(turnToolDeps),
