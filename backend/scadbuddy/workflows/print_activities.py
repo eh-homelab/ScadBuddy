@@ -41,7 +41,12 @@ from scadbuddy.bambuddy.print_run import (
     prepare_run,
     queue_plate,
 )
-from scadbuddy.bambuddy.print_source import LibrarySource, OutputSource, PrintSource
+from scadbuddy.bambuddy.print_source import (
+    LibrarySource,
+    OutputSource,
+    PrintSource,
+    given_filaments,
+)
 from scadbuddy.bambuddy.progress import ProgressObserver
 from scadbuddy.bambuddy.runs import PrintRun, PrintRunError, PrintRunStore
 from scadbuddy.bambuddy.subject import PrintSubject, library_slug
@@ -133,15 +138,15 @@ class PrintActivities:
     ) -> PrintSource:
         if spec.kind == "library":
             assert spec.file_id is not None
-            # The slots from the download the print uploads, never Bambuddy's
-            # filament-requirements, which a large 3MF outlasts (#2550).
+            # The slots the route read from the file (#2550), never Bambuddy's
+            # filament-requirements, which a large 3MF outlasts, unless it read none.
             return await LibrarySource.load(
                 client,
                 spec.file_id,
                 uploads=self.d.uploads,
                 settings=settings,
                 sends=self.d.links,
-                read_own=True,
+                filaments=given_filaments(spec.filaments) if spec.filaments else None,
             )
         return await self._output_source(spec, settings)
 

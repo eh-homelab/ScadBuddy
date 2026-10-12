@@ -39,6 +39,7 @@ from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.filaments import FilamentOptions
+from scadbuddy.bambuddy.filaments3mf import LocalFilaments
 from scadbuddy.bambuddy.library_listing import LibraryListing, list_library
 from scadbuddy.bambuddy.library_view import (
     NotViewableError,
@@ -57,16 +58,18 @@ from scadbuddy.bambuddy.progress import QUEUE_PATH, PrintProgress, from_failed_r
 from scadbuddy.bambuddy.projects import AttachResult, ProjectAttach
 from scadbuddy.bambuddy.runs import PrintRun
 from scadbuddy.bambuddy.subject import PrintSubject, library_slug
+from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.library_file_operations import (
     LibraryDeleteResult,
     LibraryFilesRequest,
     LibraryRestoreResult,
 )
-from scadbuddy.library.settings_store import ModelPrintChoices
+from scadbuddy.library.settings_store import ModelPrintChoices, SettingsStore
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.render.geometry import NoSuchPlateError
+from scadbuddy.render.read_budget import ReadBudget
 from scadbuddy.workflows.component import FollowsDep
 from scadbuddy.workflows.print_models import SourceSpec
 
@@ -407,12 +410,21 @@ async def post_library_run(
     body: PrintRunRequest,
     response: Response,
     runs: PrintRunsDep,
+    store: SettingsStoreDep,
+    paths: PathsDep,
+    budget: ReadBudgetDep,
 ) -> PrintRun:
     """As ``/print/outputs/{id}/run`` (202, then follow ``GET /print/runs/{id}``; a
     repeat of the same request is its run, #742), on the file as it stands in Bambuddy.
     A sliced file is a 422, and a file deleted in Bambuddy is its 404, both before the
     202 and any slice. The run's ``subject`` is ``library:<file id>``, and so is its
-    ``output_id``, which older clients read."""
+    ``output_id``, which older clients read. The file's filament slots go with the run,
+    read from the file as ``/choices`` read them (#2550)."""
+
+    async def prepare(source: SourceSpec) -> SourceSpec:
+        filaments = await _run_filaments(store, paths, budget, file_id)
+        return source.model_copy(update={"filaments": filaments})
+
     return await accept_run(
         runs,
         response,
@@ -420,7 +432,27 @@ async def post_library_run(
         slug=library_slug(PrintSubject.library(file_id)),
         request=body,
         source=SourceSpec(kind="library", file_id=file_id),
+        prepare=prepare,
     )
+
+
+async def _run_filaments(
+    store: SettingsStore, paths: DataPaths, budget: ReadBudget, file_id: int
+) -> LocalFilaments | None:
+    """The slots a run of library file ``file_id`` reads (#2550): from the cache the
+    dialog filled, or a download of the file that fills it. Only for a file Bambuddy
+    states a hash for: one with none is never cached, so reading it here would download
+    it a second time beside the run's own, and the run asks Bambuddy instead, as it
+    does for a file this cannot read. Never refuses the run: the run's own reads say
+    why a file cannot print."""
+    try:
+        async with client_for(store.load()) as client:
+            file = await client.library_file(file_id)
+            if not file.file_hash:
+                return None
+            return await library_filaments(client, paths.cache, file, budget)
+    except ApiError:
+        return None
 
 
 @router.get(

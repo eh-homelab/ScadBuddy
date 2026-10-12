@@ -541,6 +541,15 @@ def _refusal(file: LibraryFile) -> str:
 FilamentReader = Callable[[LibraryFile], Awaitable[LocalFilaments | None]]
 
 
+def given_filaments(local: LocalFilaments) -> FilamentReader:
+    """A :data:`FilamentReader` answering ``local``, read already (#2550)."""
+
+    async def read(file: LibraryFile) -> LocalFilaments | None:
+        return local
+
+    return read
+
+
 async def _requirements(
     client: BambuddyClient, file: LibraryFile, read: FilamentReader | None
 ) -> tuple[FilamentRequirements, LocalFilaments | None]:
