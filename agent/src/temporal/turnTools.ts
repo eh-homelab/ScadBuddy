@@ -87,6 +87,14 @@ export type TurnServer = {
   pinned?: boolean
   /** A long-lived client the server owns (the headless browser's process): never closed after a use. */
   keepOpen?: boolean
+  /** A `keepOpen` client given back after each use, so the server knows which calls are in flight. */
+  release?(): void
+  /**
+   * Reads what its tiers, refusals and listing depend on, before any of them is asked
+   * (the browser's options): awaited first by every listing, tier check and call, so a
+   * call of another server's tool never pays for it.
+   */
+  ready?(): Promise<void>
   /** Why a call must not run at all, by its input (the browser's filename and origin rules); undefined: it may. */
   refusal?(harnessName: string, input: unknown): string | undefined
   /** Whether a tool the server lists is offered (the browser's fixed deny list, Settings → Plugins). */
@@ -202,7 +210,8 @@ async function withClient<T>(server: TurnServer, use: (client: Client) => Promis
   try {
     return await use(client)
   } finally {
-    if (!server.keepOpen) await client.close().catch(() => {})
+    if (server.keepOpen) server.release?.()
+    else await client.close().catch(() => {})
   }
 }
 
@@ -212,6 +221,7 @@ async function withClient<T>(server: TurnServer, use: (client: Client) => Promis
  * (plugins/forwarder.ts), so a name never stands for two tools.
  */
 async function listed(server: TurnServer, signal: AbortSignal) {
+  await server.ready?.()
   return withClient(server, async (client) => {
     const { tools } = await client.listTools(undefined, { signal })
     const named = tools.filter((tool) => server.offers?.(tool.name) ?? true).map((tool) => ({ tool, name: harnessToolName(tool.name) }))
@@ -240,13 +250,19 @@ async function withServers<T>(deps: TurnToolsDeps, context: TurnContext, use: (s
   }
 }
 
-/** The tool a turn tool's name names now, or a non-retryable refusal saying why not. */
-async function resolve(set: TurnServers, name: string, signal: AbortSignal) {
+/** The server a turn tool's name names now, or a non-retryable refusal saying why not. */
+function serverOf(set: TurnServers, name: string) {
   const parts = split(name)
   const server = parts && set.servers.find((s) => s.name === parts.server)
   if (!parts || !server) {
     throw ApplicationFailure.nonRetryable(`${name} is not offered any more: its plugin or setting was turned off`, TOOL_ERROR)
   }
+  return { parts, server }
+}
+
+/** The tool a turn tool's name names now, or a non-retryable refusal saying why not. */
+async function resolve(set: TurnServers, name: string, signal: AbortSignal) {
+  const { parts, server } = serverOf(set, name)
   const found = (await listed(server, signal)).find((t) => t.name === parts.tool)
   if (!found) throw ApplicationFailure.nonRetryable(`${name} is not offered any more by ${server.name}`, TOOL_ERROR)
   return { server, tool: found.tool, harnessName: `mcp__${server.name}__${parts.tool}` }
@@ -353,7 +369,18 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
       const caller = await turnCaller(deps, TURN_TOOL_TIER_ACTIVITY, '')
       const signal = Context.current().cancellationSignal
       return withServers(deps, { ...caller.context, signal }, async (set) => {
-        const { server, harnessName } = await resolve(set, tool, signal)
+        // A pinned server is not listed here: this check runs on whichever replica took it,
+        // and listing the headless browser would start one there for nothing (#2523). Its
+        // tier is by name and input; its call, on its own replica, still lists it.
+        const { server, harnessName } = await (async () => {
+          const { parts, server } = serverOf(set, tool)
+          if (!server.pinned) return resolve(set, tool, signal)
+          await server.ready?.()
+          if (!(server.offers?.(parts.tool) ?? true)) {
+            throw ApplicationFailure.nonRetryable(`${tool} is not offered any more by ${server.name}`, TOOL_ERROR)
+          }
+          return { server, harnessName: `mcp__${server.name}__${parts.tool}` }
+        })()
         // A flow takes its call's queue from here, since it lists nothing (turn_tools).
         const queue = server.pinned && deps.hostQueue ? { task_queue: deps.hostQueue } : {}
         // A call that will be refused is not parked: its activity says why.

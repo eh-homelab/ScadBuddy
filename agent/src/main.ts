@@ -449,7 +449,16 @@ const workerDataConverter = dataConverter
 // own queue, HOST_QUEUE, served by `hostWorker` below.
 const HOST_QUEUE = `${TASK_QUEUE}.${os.hostname()}`
 // The headless browsers this replica runs for durable sessions' pinned calls.
-const browserHost = new BrowserHost({ paths })
+const browserHost = new BrowserHost({
+  paths,
+  // A session whose turn is running (parked on an approval, say) keeps its browser.
+  ...(database
+    ? {
+        active: async (session: string) =>
+          (await database.sql`SELECT 1 FROM ai_sessions WHERE id = ${session} AND durable_turn_id IS NOT NULL`).length > 0,
+      }
+    : {}),
+})
 // The enabled remote plugins and every usable credential's secret, as a classic turn
 // reads them, for a durable turn's tools and its automatic memory.
 const durableRemotePlugins = plugins
