@@ -244,6 +244,11 @@ export type PrinterNow = Schemas['PrinterNow']
 /** #308 — ScadBuddy's print history: one linked Bambuddy archive per print. */
 export type PrintSummary = Schemas['PrintSummary']
 export type PrintPage = Schemas['PrintPage']
+/** The API's `ActivityItem`: the backend's `ActivityRow` as answered (advanced fields only with `?advanced=1`). */
+export type Activity = Schemas['ActivityItem']
+export type ActivityPage = Schemas['ActivityPage']
+export type ActivityFacets = Schemas['ActivityFacets']
+export type ActivityDetail = Schemas['ActivityDetail']
 export type PrintDetail = Schemas['PrintDetail']
 export type TimelapseFrames = Schemas['TimelapseFrames']
 /** #311 — the print detail page's two writes. */

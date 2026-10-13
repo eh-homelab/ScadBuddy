@@ -12,6 +12,10 @@ const ANALYZERS_LATER =
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
+    operation: 'GET /api/v1/activity/facets',
+    reason: "The UI's filter bar; activity_list's own filters say the same.",
+  },
+  {
     operation: 'GET /api/v1/prints/{archive_id}/timelapse/frames',
     reason:
       "The print page's timelapse stills and probe, read after the detail so it need not wait on Bambuddy's " +
