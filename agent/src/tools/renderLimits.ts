@@ -11,13 +11,14 @@ import { ToolError } from './registry.js'
 //   - at most `concurrent` of a principal's renders in flight at once (its
 //     override in `overrides`, by principal id, else the default), and at most
 //     `global` of every principal's together (0: no global bound). A render
-//     past either WAITS for a slot, first come first served, for as long as it
-//     takes: nothing is refused for being one too many, so sub-agents rendering
-//     a batch queue up instead of retrying in a storm. A waiting call ends only
-//     when its caller aborts. A slot is held until the backend job settles; a
-//     render handed back still running keeps it while render_model polls in the
-//     background, for at most `holdMs` (PR #752 review), and past that it is
-//     freed whether or not the job settled;
+//     past either WAITS for a slot, first come first served, so sub-agents
+//     rendering a batch queue up instead of retrying in a storm. A wait ends when
+//     its caller aborts or after `maxWaitMs` (the tool's own wait, so it ends
+//     before the tool's deadline, with nothing submitted), and at most
+//     MAX_QUEUED_PER_PRINCIPAL of a principal's renders may wait. A slot is held
+//     until the backend job settles; a render handed back still running keeps it
+//     while the tool polls in the background, for at most `holdMs` (PR #752
+//     review), and past that it is freed whether or not the job settled;
 //   - at most `perWindow` started in any `windowMs` (0: no bound), so an
 //     edit/render loop that never converges stops and says so. 30 by default; 0 turns it off.
 //
@@ -132,6 +133,8 @@ export type AcquireOptions = {
   signal?: AbortSignal | undefined
   /** Called once when the render has to wait, with how many are ahead of it. */
   onWait?: (ahead: number) => void
+  /** How long it may wait for a slot before it is refused; no bound when unset. */
+  maxWaitMs?: number
 }
 
 export class RenderLimiter {
@@ -188,27 +191,49 @@ export class RenderLimiter {
     }
     options.signal?.throwIfAborted()
     // First come, first served: nothing overtakes a render of its own principal
-    // already waiting, nor, under a global bound, anyone's.
-    const ahead = limits.global > 0 ? this.waiting : this.waiting.filter((w) => w.principal === principal)
-    if (ahead.length === 0 && this.free(principal, limits)) return this.start(principal)
+    // already waiting, nor, under a global bound, a waiting render that could
+    // start now (one held only by its own principal's bound is not ahead).
+    const ahead =
+      own > 0 || (limits.global > 0 && this.waiting.some((w) => this.free(w.principal, limits)))
+    if (!ahead && this.free(principal, limits)) return this.start(principal)
     return new Promise<() => void>((resolve, reject) => {
-      const onAbort = () => {
+      let timeout: ReturnType<typeof setTimeout> | undefined
+      const leave = (err: unknown) => {
         const at = this.waiting.indexOf(waiter)
         if (at >= 0) this.waiting.splice(at, 1)
-        reject(options.signal?.reason ?? new Error('aborted'))
+        settle()
+        reject(err)
         // Those behind it may fit now.
         void this.pump()
+      }
+      const onAbort = () => leave(options.signal?.reason ?? new Error('aborted'))
+      const settle = () => {
+        options.signal?.removeEventListener('abort', onAbort)
+        if (timeout !== undefined) clearTimeout(timeout)
       }
       const waiter: Waiter = {
         principal,
         grant: (release) => {
-          options.signal?.removeEventListener('abort', onAbort)
+          settle()
           resolve(release)
         },
         refuse: (err) => {
-          options.signal?.removeEventListener('abort', onAbort)
+          settle()
           reject(err)
         },
+      }
+      if (options.maxWaitMs !== undefined) {
+        const waitMs = options.maxWaitMs
+        timeout = setTimeout(() => {
+          const queued = this.waiting.indexOf(waiter)
+          leave(
+            new ToolError(
+              `not rendered: still waiting for a render slot after ${Math.round(waitMs / 1000)}s ` +
+                `(${queued} ahead of it); nothing was submitted. Try again later, or tell the user ` +
+                'renders are queued behind others.',
+            ),
+          )
+        }, waitMs)
       }
       options.signal?.addEventListener('abort', onAbort, { once: true })
       this.waiting.push(waiter)
@@ -238,11 +263,15 @@ export class RenderLimiter {
   }
 
   private windowRefusal(recent: number[], waiting: number, limits: RenderLimits, now: number): ToolError {
-    const seconds = Math.max(1, Math.ceil(((recent[0] ?? now) + limits.windowMs - now) / 1000))
     const queued = waiting > 0 ? ` (${waiting} of them still waiting for a slot)` : ''
+    // Only renders still waiting fill the window: nothing leaves it until they start.
+    const retry =
+      recent.length === 0
+        ? `Wait for your ${waiting} queued render${waiting === 1 ? '' : 's'} to start (get_render_job), then try again`
+        : `Try again in ${Math.max(1, Math.ceil((recent[0]! + limits.windowMs - now) / 1000))}s`
     return new ToolError(
       `not rendered: ${recent.length + waiting} renders in the last ${limits.windowMs / 60_000} min${queued} is ` +
-        `the most allowed. Try again in ${seconds}s, or stop and tell the user what is not converging.`,
+        `the most allowed. ${retry}, or stop and tell the user what is not converging.`,
     )
   }
 

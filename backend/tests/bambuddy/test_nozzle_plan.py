@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from scadbuddy.bambuddy.extruders import LEFT, RIGHT
-from scadbuddy.bambuddy.filaments import FilamentPlan
+from scadbuddy.bambuddy.filaments import FilamentPlan, family
 from scadbuddy.bambuddy.models import NozzleChoice, PrinterStatus, Spool, SpoolAssignment
 from scadbuddy.bambuddy.nozzle_plan import (
     PlanInput,
@@ -20,7 +20,6 @@ from scadbuddy.bambuddy.nozzle_plan import (
     spool_name,
 )
 from scadbuddy.bambuddy.resolver import PrintChoices
-from scadbuddy.bambuddy.trays import family
 from scadbuddy.render.bambu3mf import FilamentMap, state_nozzles
 from tests.bambuddy.test_extruders import fts_status, mapped_status
 

@@ -275,6 +275,12 @@ export type ScopeRef = Schemas['ScopeRef']
 /** A decision about a finding at a scope; `DecisionCreate` records an ignore or a suppression. */
 export type AnalyzerDecision = Schemas['Decision']
 export type DecisionCreate = Schemas['DecisionCreate']
+/** A fix a finding offers: a diff against the print's base, line by line. */
+export type AnalyzerFix = Schemas['Fix']
+export type SettingChange = Schemas['SettingChange']
+export type FixRequest = Schemas['FixRequest']
+export type FixPreview = Schemas['FixPreview']
+export type FixApply = Schemas['FixApply']
 
 export type SendRequest = Schemas['SendRequest']
 export type SendResult = Schemas['SendResult']
@@ -351,8 +357,10 @@ export interface SessionLimits {
 
 /**
  * How many of the assistant's renders run at once (`GET/PUT /api/v1/ai/settings/render-limits`,
- * agent `src/routes/renderLimits.ts`). Past a limit a render waits for a slot; nothing
- * is refused for it. Read live by the agent, so a change applies to waiting renders too.
+ * agent `src/routes/renderLimits.ts`). Past a concurrency limit a render waits for a slot,
+ * up to the tool's own wait; a call is refused past 100 waiting per caller, or past
+ * `per_window`, which counts waiting renders. Read live by the agent, so a change
+ * applies to waiting renders too.
  */
 export interface RenderLimits {
   /** Each caller's renders at once, unless an override names it. */
@@ -379,6 +387,17 @@ export interface SessionModeSetting {
 }
 
 /**
+ * Where a durable segment's subagents reach ScadBuddy's tools
+ * (`GET/PUT /api/v1/ai/settings/durable-subagents`, agent `src/routes/durableSubagents.ts`).
+ * `url` replaces agent-durable's own (null: the pod's loopback); `peers` are the addresses or
+ * CIDR ranges besides loopback the agent answers on that route (empty: loopback only).
+ */
+export interface DurableSubagentsSetting {
+  url: string | null
+  peers: string[]
+}
+
+/**
  * The long edge, in pixels, the assistant panel scales an attached image to before
  * sending it (`GET/PUT /api/v1/ai/settings/images`, agent `src/routes/imageSettings.ts`).
  * `min` and `max` are the bounds the agent accepts; the PUT sends `long_edge` only.
@@ -386,6 +405,18 @@ export interface SessionModeSetting {
 export interface ImageSettings {
   long_edge: number
   min: number
+  max: number
+}
+
+/**
+ * The longest automatic Hindsight recall query, in characters (`GET/PUT
+ * /api/v1/ai/settings/memory`, agent `src/routes/memorySettings.ts`): the Claude Code
+ * Hindsight plugin's `recallMaxQueryChars`. `0` sends the whole query; `default` and `max`
+ * come from the agent, and the PUT sends `recall_max_query_chars` only.
+ */
+export interface MemorySettings {
+  recall_max_query_chars: number
+  default: number
   max: number
 }
 

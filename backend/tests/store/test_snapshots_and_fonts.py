@@ -312,7 +312,7 @@ async def test_a_worker_without_the_volume_renders_a_preview_from_the_stored_sna
     async def one_box(*args: object, **kwargs: object) -> object:
         rendered.append(cast(Path, args[0]))
         write_openscad_3mf(cast(Path, args[3]), [("Color 1", "#0047BB00", box())])
-        return mock.Mock(log_tail=[], missing_files=())
+        return mock.Mock(log_tail=[], missing_files=(), plates=None)
 
     async def no_parameters(*args: object, **kwargs: object) -> CustomizerSchema:
         return CustomizerSchema()

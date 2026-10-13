@@ -10,8 +10,10 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import time
 import zipfile
 from datetime import timedelta
+from typing import Any
 
 import httpx
 import pytest
@@ -35,6 +37,25 @@ SLICED = 77
 #: The copy the run uploads (``upload_route``), which the slice job slices.
 COPY = 41
 CREATED = "2026-10-10T23:40:00.123456"
+
+
+def start_slice(client: TestClient, output_id: str, json: dict[str, Any]) -> dict[str, Any]:
+    """Start the background slice and follow it: the route answers 202 with the running
+    operation as soon as it is recorded, never after the slice (#2462), which used to
+    hold every start for the whole 10 s command deadline."""
+    started = client.post(
+        f"/api/v1/print/outputs/{output_id}/preview-slice", json=json, headers=press()
+    )
+    assert started.status_code == 202, started.text
+    op: dict[str, Any] = started.json()
+    assert op["status"] == "running"
+    deadline = time.monotonic() + 30
+    while op["status"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.1)
+        op = client.get(f"/api/v1/operations/{op['id']}").json()
+    assert op["status"] == "succeeded", op
+    result: dict[str, Any] = op["result"]
+    return result
 
 
 class Job:
@@ -95,12 +116,9 @@ def test_a_background_slice_is_read_back_and_a_run_of_the_same_choices_queues_it
     sliced_routes()
     queued = queue_route()
 
-    started = client.post(
-        f"/api/v1/print/outputs/{output_id}/preview-slice", json=body(), headers=press()
-    )
+    started = start_slice(client, output_id, body())
 
-    assert started.status_code == 200, started.text
-    assert started.json()["job_id"] == 9
+    assert started["job_id"] == 9
     assert sliced.call_count == 1
     assert not queued.called
 
@@ -135,13 +153,8 @@ def test_a_background_slice_with_a_project_chosen_files_nothing_in_the_project(
     Job().routes()
     sliced_routes()
 
-    started = client.post(
-        f"/api/v1/print/outputs/{output_id}/preview-slice",
-        json={**body(), "project_id": 7},
-        headers=press(),
-    )
+    start_slice(client, output_id, {**body(), "project_id": 7})
 
-    assert started.status_code == 200, started.text
     assert upload.call_count == 1
     assert upload.calls.last.request.url.params.get("folder_id") != "9"
     assert not folder.called
@@ -164,10 +177,7 @@ def _preview_then_change(client: TestClient, model: str, change: str) -> tuple[s
     sliced = job.routes()
     sliced_routes()
     queue_route()
-    started = client.post(
-        f"/api/v1/print/outputs/{output_id}/preview-slice", json=body(), headers=press()
-    )
-    assert started.status_code == 200, started.text
+    start_slice(client, output_id, body())
     if change == "another-file":
         job.body = {**job.body, "source_id": 999}
     elif change == "restart":
@@ -281,10 +291,7 @@ def _previewed(client: TestClient, model: str) -> tuple[str, Job, respx.Route]:
     deleted = respx.delete(f"{API}/library/files/{SLICED}").mock(
         return_value=httpx.Response(200, json={"trashed": True})
     )
-    started = client.post(
-        f"/api/v1/print/outputs/{output_id}/preview-slice", json=body(), headers=press()
-    )
-    assert started.status_code == 200, started.text
+    start_slice(client, output_id, body())
     return output_id, job, deleted
 
 

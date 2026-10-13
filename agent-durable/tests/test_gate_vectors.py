@@ -68,6 +68,7 @@ def _entry(e: dict[str, Any] | None) -> GateEntry | None:
             else None
         ),
         options=tuple(e["options"]) if "options" in e else None,
+        in_run=bool(e.get("in_run", False)),
     )
 
 

@@ -8,6 +8,8 @@ import {
   hindsightTarget,
   type MemoryHooks,
   type MemoryHooksOptions,
+  type SettingsReader,
+  turnRecallMaxQueryChars,
 } from '../memory/hindsight.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
 import type { EventLog, LoggedEvent } from '../sessions/eventLog.js'
@@ -48,6 +50,8 @@ export type MemoryActivityDeps = {
   /** Every usable credential's secret, redacted as a classic turn redacts them. */
   credentialSecrets?: (() => Promise<readonly string[]>) | undefined
   audit?: AuditSink | undefined
+  /** ai_settings, for the recall query's cap, read at each turn as a classic turn reads it. */
+  settings?: SettingsReader | undefined
   /** The hook knobs a classic turn takes (SessionManagerDeps.memory); false: memory off. */
   memory?: Omit<MemoryHooksOptions, 'client' | 'secrets' | 'log' | 'sessionStore' | 'onActivity'> | false
   log?: (line: string) => void
@@ -116,9 +120,10 @@ export function memoryActivities(deps: MemoryActivityDeps) {
     }
     const config = deps.memory
     const fixed = config?.hookConfig?.recallQuery
+    const recallMaxQueryChars = await turnRecallMaxQueryChars(deps.settings, config?.hookConfig)
     const hooks = createMemoryHooks({
       ...config,
-      hookConfig: { ...config?.hookConfig, recallQuery: fixed && fixed !== '$prompt' ? fixed : recallQuery },
+      hookConfig: { ...config?.hookConfig, recallQuery: fixed && fixed !== '$prompt' ? fixed : recallQuery, recallMaxQueryChars },
       client,
       secrets,
       log,

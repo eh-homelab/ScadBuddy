@@ -116,6 +116,31 @@ describe('PrintsPage (#310): the global print history', () => {
     expect(within(screen.getByLabelText('Printer')).getByRole('option', { name: 'Printer 3' })).toHaveValue('3')
   })
 
+  it('names a printing print’s printer once, even unnamed (#2363)', async () => {
+    server.use(
+      http.get('/api/v1/prints', () =>
+        HttpResponse.json({
+          items: [{ ...summaryOf(37), status: 'printing', printer_id: 3, printer_name: null }],
+          next_cursor: null,
+        } satisfies PrintPage),
+      ),
+      http.get('/api/v1/print/outputs/:id/progress', () =>
+        HttpResponse.json({
+          ...queuedSliceProgress,
+          stage: 'running',
+          copies_detail: [
+            { ...queuedSliceProgress.copies_detail![0]!, stage: 'running', message: 'Layer 42 of 180', waiting_reason: null },
+          ],
+        } satisfies PrintProgress),
+      ),
+    )
+    render()
+    const printing = await item(37)
+    expect(await within(printing).findByText('Layer 42 of 180')).toBeInTheDocument()
+    expect(printing).toHaveTextContent('Printer 3')
+    expect(printing).not.toHaveTextContent('3DP-31B-598')
+  })
+
   it('names the attachments a print has', async () => {
     server.use(
       http.get('/api/v1/prints', () =>
@@ -348,6 +373,15 @@ describe('PrintsPage (#310): the global print history', () => {
     const done = await item(35)
     await user.click(within(done).getByRole('link'))
     expect(await screen.findByTestId('print-route')).toHaveTextContent('35')
+  })
+
+  it('covers a card with the photo shrunk for it (#2355)', async () => {
+    render()
+    const done = await item(35)
+    expect(within(done).getByRole('button', { name: /^Open media of/ }).querySelector('img')).toHaveAttribute(
+      'src',
+      '/api/v1/prints/35/photos/finish_20260927_015703_93372185.jpg?size=card&v=1',
+    )
   })
 
   it('opens the lightbox on the image, with the photos and the timelapse', async () => {
@@ -747,6 +781,29 @@ describe('TemplatePrintsPage (#310): a template’s Prints tab', () => {
     // Every other sent output already has its print.
     expect(waiting).not.toHaveTextContent('Reagan')
     expect(waiting).not.toHaveTextContent('Draft')
+  })
+})
+
+describe('changed parameters markup (#2457)', () => {
+  it('keeps "+N more" out of the definition list, which holds only term groups', async () => {
+    const params = { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6 }
+    server.use(
+      http.get('/api/v1/prints', () =>
+        HttpResponse.json({
+          items: [{ ...summaryOf(prints[0]!.archive_id), params_diff: params }],
+          next_cursor: null,
+        } satisfies PrintPage),
+      ),
+    )
+    render()
+    const dl = await within(await list()).findByLabelText('Changed parameters')
+    expect(dl.tagName).toBe('DL')
+    for (const child of Array.from(dl.children)) {
+      expect(child.tagName).toBe('DIV')
+      expect(Array.from(child.children).map((node) => node.tagName)).toEqual(['DT', 'DD'])
+    }
+    expect(dl).not.toHaveTextContent('more')
+    expect(screen.getByTestId('params-more')).toHaveTextContent('+2 more')
   })
 })
 

@@ -4,20 +4,53 @@ import asyncio
 import hashlib
 import itertools
 import uuid
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from google.protobuf.message import Message
 from temporal_agent_harness.harness.agent_client import AgentClient
 from temporal_agent_harness.harness.agent_protocol import AgentConfig
+from temporalio import activity
 from temporalio.api.common.v1 import Payload
 from temporalio.client import Client, WorkflowExecutionStatus
+from temporalio.exceptions import ApplicationError
 
 from scadbuddy.flows.models import TERMINAL, Run, StoredDefinition
 from scadbuddy.flows.store import FlowStore
+from scadbuddy.workflows.flow_tools import FLOW_TOOL_TIER
 from scadbuddy.workflows.project import PROJECT_WORKFLOW, FlowStart, RunFlow
 
 #: The key a flow approval's input hash is made with in these tests (#2318).
 HASH_KEY = b"\x05" * 32
+
+
+class AgentTiers:
+    """The agent's side of a flow's tool tiers (#2704): `flow_tool_tier` answered as the
+    agent answers it (agent/src/temporal/flowTools.ts) from `tiers` and `disabled`, which
+    a test may change while a run is in flight, and the API's view of them."""
+
+    def __init__(self, tiers: Mapping[str, str], disabled: Iterable[str] = ()) -> None:
+        self.tiers = dict(tiers)
+        self.disabled = set(disabled)
+        #: Every tool the workflow asked about, in order.
+        self.asked: list[str] = []
+
+    def activity(self) -> Any:
+        @activity.defn(name=FLOW_TOOL_TIER)
+        async def flow_tool_tier(args: dict[str, Any]) -> dict[str, Any]:
+            name = str(args["tool"])
+            self.asked.append(name)
+            if name not in self.tiers:
+                raise ApplicationError(
+                    f"the agent has no tool {name}", type="ToolError", non_retryable=True
+                )
+            return {"tier": self.tiers[name], "disabled": name in self.disabled}
+
+        return flow_tool_tier
+
+    async def tool_tiers(self) -> dict[str, str]:
+        """As `flows.agent_tools.AgentTools.tool_tiers`: the enabled tools."""
+        return {n: t for n, t in self.tiers.items() if n not in self.disabled}
 
 
 class Keys:
@@ -138,7 +171,8 @@ async def history_payloads(client: Client, workflow_id: str) -> bytes:
 #: reads them; the agent's own migrations make them in a deployment.
 _AGENT_OWNERS = """
 CREATE TABLE IF NOT EXISTS ai_sessions (
-    id uuid PRIMARY KEY, owner_kind text NOT NULL, owner_id text NOT NULL
+    id uuid PRIMARY KEY, owner_kind text NOT NULL, owner_id text NOT NULL,
+    archived_at timestamptz
 );
 CREATE TABLE IF NOT EXISTS ai_mcp_tokens (
     id uuid PRIMARY KEY, tier text NOT NULL, expires_at timestamptz, revoked_at timestamptz
@@ -146,11 +180,13 @@ CREATE TABLE IF NOT EXISTS ai_mcp_tokens (
 """
 
 
-def parent_session(conn: Any, session: str, owner: str, tier: str = "outward") -> None:
+def parent_session(
+    conn: Any, session: str, owner: str, tier: str = "outward", kind: str | None = None
+) -> None:
     """Session `session`, owned by `owner` (`browser`, or a `token:<id>` holding `tier`),
     as the agent records it: whose tiers a parent acts with."""
     conn.execute(_AGENT_OWNERS)
-    kind = "browser" if owner == "browser" else "bearer"
+    kind = kind or ("browser" if owner == "browser" else "bearer")
     conn.execute(
         "INSERT INTO ai_sessions (id, owner_kind, owner_id) VALUES (%s, %s, %s)"
         " ON CONFLICT (id) DO UPDATE SET owner_kind = EXCLUDED.owner_kind,"

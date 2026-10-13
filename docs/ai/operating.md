@@ -618,10 +618,21 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   standard-tier edge; 200 to 2576, the high-resolution tier's edge for Claude 4.7 and
   later), which Settings → Assistant images writes through
   `PUT /api/v1/ai/settings/images` ([`agent/src/routes/imageSettings.ts`](../../agent/src/routes/imageSettings.ts));
+  `memory_recall_max_query_chars`, the longest automatic Hindsight recall query in
+  characters (default 800, 0 for no cut, at most 100000), which Settings → Hindsight
+  memory writes through `PUT /api/v1/ai/settings/memory`
+  ([§11](#11-automatic-hindsight-memory));
   `session_mode`, the mode a new session gets when whoever starts it names none
   (`durable` unless it says `classic`), which Settings → Assistant session mode writes
   through `PUT /api/v1/ai/settings/session-mode`
-  ([`agent/src/routes/sessionMode.ts`](../../agent/src/routes/sessionMode.ts)). A
+  ([`agent/src/routes/sessionMode.ts`](../../agent/src/routes/sessionMode.ts));
+  `durable_subagents`, `{url, peers}`: the URL an `agent-durable` worker gives its
+  subagents for ScadBuddy's tools (null: its `SCADBUDDY_DURABLE_SUBAGENT_MCP_URL`), and
+  the addresses or CIDR ranges besides loopback the agent answers on
+  `/internal/durable/subagent-mcp` (empty: loopback only, a worker in the agent's pod),
+  which Settings → Durable subagents writes through
+  `PUT /api/v1/ai/settings/durable-subagents`
+  ([`agent/src/routes/durableSubagents.ts`](../../agent/src/routes/durableSubagents.ts)). A
   durable session needs Temporal, the KEK and an `agent-durable` worker polling the
   `agent` queue; without them a session whose mode came from this default runs classic
   and says why (`session.started` `modeFallback`, `mode_fallback` on `POST /sessions`
@@ -629,7 +640,7 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   (plan `2026-10-09-durable-phase-5d-mode.md`). Both modes get the same tools, plugins
   (a browser among them, as the `playwright` remote plugin, #2568), packages,
   `http_request`, Hindsight, subagents and settings (#2320, spec 2026-10-01 §6.3b), with
-  three differences: forking is classic-only; a durable subagent has ScadBuddy's own tools
+  two differences: a durable subagent has ScadBuddy's own tools
   only, through the agent's loopback server (`routes/subagentMcp.ts`), since the Temporal
   plugin refuses a subagent the turn's durable tools; and of the built-ins an
   `allow_refused` package names, a durable turn offers only `Bash` and `PowerShell`, each
@@ -704,7 +715,11 @@ its $1.00 budget.") and offers:
   into a new session with the current Settings budget, owned by the browser user, and
   the panel switches to it. It counts against the new-session limit (`429`). With
   `up_to` (a reply's panel message id, #793) it copies the conversation only through
-  that reply. Each fork, from this route or the `sessions_fork` tool, is a `resource`
+  that reply. A fork runs in its parent's mode: a durable parent's conversation is read
+  from its workflow (the `fork_point` Query) and the child's workflow starts with a copy,
+  sealed under the child's own key (#2688); its replies are matched to the transcript by
+  their text, and a parent whose turn is running forks at its last finished reply.
+  Each fork, from this route or the `sessions_fork` tool, is a `resource`
   audit row (action `session_fork`), written once the fork is complete; a rename or
   mark-done (`PATCH /api/v1/ai/sessions/:id`) is one with action `session_update`.
 - **Raise this chat's budget**: `POST /api/v1/ai/sessions/:id/budget` `{add_usd}`
@@ -905,7 +920,7 @@ model. In production the model called `recall` once and `retain` never across fo
 sessions. The code is [`agent/src/memory/hindsight.ts`](../../agent/src/memory/hindsight.ts),
 a port of `create_memory_hooks` in Hindsight's Claude Agent SDK integration
 ([`hooks.py` @ eb021da3](https://github.com/vectorize-io/hindsight/blob/eb021da3b2501911e4b57c82b3de1123572a200e/hindsight-integrations/claude-agent-sdk/hindsight_claude_agent_sdk/hooks.py)),
-registered as in-process SDK hooks by `harness/run.ts`. There is no setting: the API
+registered as in-process SDK hooks by `harness/run.ts`. The API
 base and bank come from the plugin's URL (`…/mcp/<bank>/` gives
 `/v1/default/banks/<bank>/…`), and requests carry the plugin's stored header to the
 address the plugin check pinned, with no redirects (`agent/src/http/pinned.ts`, shared
@@ -915,6 +930,20 @@ with the forwarder).
   are added as `additionalContext`, wrapped as untrusted data (#258). It gives up after
   3 s (`RECALL_TIMEOUT_MS`); on a timeout or error nothing is added and the failure is
   logged.
+- **The recall query's length** (#2655). Only the start of the redacted query is sent:
+  `recallMaxQueryChars` characters (code points, so a non-BMP character is never split),
+  800 by default and `0` for all of it. This is the Claude Code Hindsight plugin's
+  setting of the same name (env `HINDSIGHT_RECALL_MAX_QUERY_CHARS`, `query[:max]`).
+  Settings → Assistant plugins → Hindsight memory writes it to `ai_settings`
+  `memory_recall_max_query_chars` through `PUT /api/v1/ai/settings/memory`
+  ([`agent/src/routes/memorySettings.ts`](../../agent/src/routes/memorySettings.ts)), and
+  both session modes read it at each turn. The bank's own limit is in tokens,
+  `HINDSIGHT_API_RECALL_MAX_QUERY_TOKENS` on the Hindsight server (default 500, counted
+  with tiktoken), which refuses a longer query with HTTP 400 `Query too long: N tokens
+  exceeds maximum of M`. Since the two are set apart (and punctuation-dense text such as
+  pasted OpenSCAD runs about one token per two characters), such a refusal is retried
+  once with the query cut to its length × M/N, less a fifth, or to half when the reply
+  does not give both numbers, and logged. A second refusal is an ordinary recall failure.
 - **Retain** (`Stop`): the session's user and assistant text (tool results left out,
   secrets redacted) is upserted as one document, `conversation:<session_id>`, so every
   turn replaces the same document. It runs in the background and never fails or delays
@@ -943,7 +972,7 @@ which the `DurableSession` workflow calls around each turn, behind the patch
   It upserts `conversation:<ScadBuddy session id>`.
 
 Each recall and retain gets the same audit row and `memory` event as in a classic
-turn. Neither is retried, and neither ever fails the turn: a failure is recorded and
+turn. Neither is retried (beyond the one shorter recall above), and neither ever fails the turn: a failure is recorded and
 the turn goes on with no memories. Only the recalled block enters the workflow's history,
 sealed by the session's payload codec. Unlike a classic turn, the turn waits for its
 retain before it is marked done (up to the 15 s retain limit).

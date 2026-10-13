@@ -76,6 +76,20 @@ describe('PrintDetailPage (#311)', () => {
     expect(runs).toHaveTextContent('Cancelled')
   })
 
+  it('numbers a printer Bambuddy gave no name for as the list does (#2363)', async () => {
+    const done = prints.find((print) => print.archive_id === 35)!
+    server.use(
+      http.get('/api/v1/prints/:id', () =>
+        HttpResponse.json({ ...done, printer_id: 3, printer_name: null, outcome: { ...done.outcome, printer_id: 3, printer_name: null } }),
+      ),
+    )
+    render(35)
+    const outcome = await section('Outcome')
+    const facts = within(outcome.querySelector('dl') as HTMLElement)
+    expect(facts.getByText('Printer 3')).toBeInTheDocument()
+    expect(facts.queryByText('#3')).not.toBeInTheDocument()
+  })
+
   it('marks a run whose filament reading is not believed (#950)', async () => {
     const done = prints.find((print) => print.archive_id === 35)!
     const [, last] = done.outcome.runs
@@ -313,6 +327,19 @@ describe('PrintDetailPage (#311)', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Open in queue' }))
     expect(openExternal).toHaveBeenCalledWith('https://bambuddy.example/queue')
     server.events.removeAllListeners()
+  })
+
+  it('offers no Print again while the print is still going (#2736)', async () => {
+    const done = prints.find((print) => print.archive_id === 35)!
+    server.use(
+      http.get('/api/v1/prints/35', () =>
+        HttpResponse.json({ ...done, status: 'printing', outcome: { ...done.outcome, status: 'printing' } }),
+      ),
+    )
+    render(35)
+    await section('Outcome')
+    expect(screen.queryByRole('button', { name: 'Print again' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Open in Bambuddy' })).toBeInTheDocument()
   })
 
   it('says why Bambuddy would not queue it', async () => {

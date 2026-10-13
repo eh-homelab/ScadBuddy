@@ -14,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.flows import FLOW_NAMESPACE
+from tests.api.conftest import FakeAgentTools
 from tests.api.test_flows import AGENT, register, script, settings, start, until
 
 __all__ = ["settings"]
@@ -87,6 +88,47 @@ def test_an_invalid_grant_is_refused_and_starts_nothing(client: TestClient) -> N
         assert body["type"] == "https://scadbuddy.dev/problems/flow-grant-invalid"
         assert body["problems"]
     assert client.get("/api/v1/workflow-runs").json() == []
+
+
+def test_a_grant_names_a_tool_the_agent_raised_to_outward_in_settings(
+    client: TestClient, agent_tools: FakeAgentTools
+) -> None:
+    """#2704: a grant's tools are checked as the agent resolves them now, with no file
+    anywhere: a read tool Settings raised to outward may be granted, at the start and at
+    an approval; one the agent does not have, or holds at read, may not."""
+    send = {"fn": "tool", "tool": "get_model"}
+    definition = register(client, WAITS)
+    start = f"/api/v1/workflows/{definition['id']}/runs"
+    agent_tools.tiers = {"get_model": "read"}
+    refused = client.post(start, headers={"Idempotency-Key": "g0"}, json={"grant": grant(send)})
+    assert refused.status_code == 422, refused.text
+    agent_tools.tiers = {"get_model": "outward"}
+    started(client, "g1", {"grant": grant(send)})
+    run_id = started(client, "g2", {"grant": grant({"fn": "queue_print"})}, **AGENT)
+    agent_tools.tiers = {}
+    gone = client.post(f"/api/v1/workflow-runs/{run_id}/grant/approve", json={"spec": grant(send)})
+    assert gone.status_code == 422, gone.text
+    agent_tools.tiers = {"get_model": "outward"}
+    approved = client.post(
+        f"/api/v1/workflow-runs/{run_id}/grant/approve", json={"spec": grant(send)}
+    )
+    assert approved.status_code == 200, approved.text
+
+
+def test_an_agent_that_does_not_answer_refuses_a_start_and_an_approval(
+    client: TestClient, agent_tools: FakeAgentTools
+) -> None:
+    """No fallback: without the agent's answer nothing says what its tools are."""
+    run_id = started(client, "u1", {"grant": grant({"fn": "queue_print"})}, **AGENT)
+    definition = register(client, WAITS)
+    agent_tools.down = True
+    response = client.post(
+        f"/api/v1/workflows/{definition['id']}/runs", headers={"Idempotency-Key": "u2"}, json={}
+    )
+    assert response.status_code == 503, response.text
+    approve = client.post(f"/api/v1/workflow-runs/{run_id}/grant/approve")
+    assert approve.status_code == 503, approve.text
+    assert view_grant(client, run_id)["status"] == "requested"
 
 
 def test_an_agents_grant_is_requested_and_only_the_browser_decides_it(

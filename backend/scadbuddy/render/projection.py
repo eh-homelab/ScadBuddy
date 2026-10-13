@@ -489,6 +489,21 @@ class JobProjection:
             raise JobNotFoundError(job_id)
         return _job(row)
 
+    def queue_position(self, job: Job) -> int | None:
+        """Where a pending ``job`` waits (#1638): 1 when no pending job was submitted
+        before it, None once it has started or settled. Render and arrange jobs share
+        the render workers, so every pending job counts."""
+        if job.state != "pending":
+            return None
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT count(*) AS ahead FROM render_jobs WHERE state = 'pending'"
+                " AND (created_at, id) < (%s, %s)",
+                (job.created_at, job.id),
+            ).fetchone()
+        assert row is not None
+        return int(row["ahead"]) + 1
+
     def list_jobs(self) -> list[Job]:
         with self._pool.connection() as conn:
             rows = conn.execute("SELECT * FROM render_jobs ORDER BY created_at, id").fetchall()

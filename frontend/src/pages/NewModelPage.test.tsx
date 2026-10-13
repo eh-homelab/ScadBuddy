@@ -2,7 +2,7 @@ import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
 import { MemoryRouter, Route, Routes } from 'react-router'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import { BROKEN_SOURCE, keychainSchema, keychainSource } from '../mocks/fixtures'
 import { server } from '../mocks/server'
 import { NewModelPage } from './NewModelPage'
@@ -76,19 +76,25 @@ describe('NewModelPage', () => {
   it('abandons a superseded check on the wire, not just on arrival', async () => {
     // The server checks under a small concurrency budget, so a check nobody is
     // waiting for any more must release its permit.
-    const seen: AbortSignal[] = []
+    let arrived = 0
     server.use(
-      http.post('*/api/v1/models/check', async ({ request }) => {
-        seen.push(request.signal)
+      http.post('*/api/v1/models/check', async () => {
+        arrived += 1
         await new Promise((resolve) => setTimeout(resolve, 10_000))
         return HttpResponse.json({ ok: true, checked: true, diagnostics: [], parameters: 0 })
       }),
     )
+    // The signal given to fetch: msw 3 rebuilds the handler's request from the wire, and
+    // does not abort it when the client drops a reused keep-alive connection.
+    const sent = vi.spyOn(globalThis, 'fetch')
+    onTestFinished(() => sent.mockRestore())
 
     const { user, unmount } = renderNew()
     await paste(user, keychainSource)
-    await waitFor(() => expect(seen).toHaveLength(1), { timeout: 3_000 })
-    const inflight = seen[0]
+    await waitFor(() => expect(arrived).toBe(1), { timeout: 3_000 })
+    const checks = sent.mock.calls.filter(([url]) => String(url).endsWith('/api/v1/models/check'))
+    expect(checks).toHaveLength(1)
+    const inflight = checks[0]?.[1]?.signal
 
     unmount()
     await waitFor(() => expect(inflight?.aborted).toBe(true), { timeout: 3_000 })

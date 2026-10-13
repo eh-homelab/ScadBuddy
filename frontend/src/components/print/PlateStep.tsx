@@ -1,5 +1,7 @@
 type Props = {
   bedTypes: string[]
+  /** Bambu Studio's label for each plate it names (#2366); others show as they are. */
+  labels?: Record<string, string>
   value: string
   lastBedType: string | null
   printerName: string | null
@@ -12,7 +14,7 @@ type Props = {
  * Falls back the way `backend/scadbuddy/bambuddy/hardware.py`'s `plate_warning` does
  * (`printer_name or "printer"`), so the two stay worded the same.
  */
-export function PlateStep({ bedTypes, value, lastBedType, printerName, onChange }: Props) {
+export function PlateStep({ bedTypes, labels = {}, value, lastBedType, printerName, onChange }: Props) {
   return (
     <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2">
       <legend className="px-1 text-[13px] text-ink">Plate</legend>
@@ -29,7 +31,7 @@ export function PlateStep({ bedTypes, value, lastBedType, printerName, onChange 
         >
           {bedTypes.map((type) => (
             <option key={type} value={type}>
-              {type}
+              {labels[type] ?? type}
             </option>
           ))}
         </select>

@@ -89,6 +89,11 @@ export type TurnServer = {
    */
   mayPark?(harnessName: string): boolean
   /**
+   * The tool's tier when it does not depend on the call's input, for the session's
+   * transcript to show (`TurnToolEntry.tier`); undefined: it depends on the input.
+   */
+  fixedTier?(harnessName: string): RiskTier | undefined
+  /**
    * Whether its calls must run on the replica that listed it (`TurnToolsDeps.hostQueue`):
    * a server whose state lives in this process or on this pod's disk (http_request's
    * saved bodies).
@@ -168,6 +173,8 @@ export type TurnToolEntry = {
   input_schema: Record<string, unknown>
   /** Whether a call may be outward: it then parks unless `turn_tool_tier` says otherwise, and runs at most once. */
   may_park: boolean
+  /** Its tier when that does not depend on the input, as the transcript labels its calls; absent: it does. */
+  tier?: RiskTier
   /** The queue its calls run on when the server is pinned to the replica that listed it. */
   task_queue?: string
 }
@@ -419,7 +426,7 @@ async function turnCaller(deps: TurnToolsDeps, name: string, toolUseId: string):
       requestId: flowRequestId(flow, runId, toolUseId),
       // A token starter's run acts with what its token holds now, as toolActivities' flowCaller.
       tiers: owner.kind === 'browser' ? undefined : await deps.currentTiers?.(owner),
-      approved: (requestId) => flows.approved(requestId),
+      approved: (requestId, binding) => flows.approved(requestId, binding?.inputHash),
     }
   }
   const { session, owner, turnTiers: sent, turnId } = await durableSession(name, deps.sessions)
@@ -465,6 +472,7 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
         for (const { server, offered } of listings) {
           for (const { tool, name } of offered ?? []) {
             const turnName = turnToolName(server.name, tool.name)
+            const tier = server.fixedTier?.(`mcp__${server.name}__${name}`)
             if (turnName.length > MAX_TURN_TOOL_NAME) {
               tooLong.push(
                 `tool ${tool.name} of plugin ${server.name} is not available in this turn: its name ` +
@@ -477,6 +485,7 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
               description: tool.description ?? '',
               input_schema: tool.inputSchema as Record<string, unknown>,
               may_park: server.mayPark?.(`mcp__${server.name}__${name}`) ?? true,
+              ...(tier ? { tier } : {}),
               ...(pinned(deps, server) ? { task_queue: deps.hostQueue! } : {}),
             })
           }

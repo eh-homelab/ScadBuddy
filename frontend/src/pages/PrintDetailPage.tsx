@@ -6,8 +6,8 @@ import { MediaCarousel } from '../components/media/MediaCarousel'
 import { MediaLightbox } from '../components/media/MediaLightbox'
 import type { Slide } from '../components/media/slides'
 import { PrintAgainDialog } from '../components/PrintAgainDialog'
-import { libraryPrintsPath } from '../components/prints/prints'
-import { DELETED_STATUS, statusLabel } from '../components/prints/status'
+import { libraryPrintsPath, printerLabel } from '../components/prints/prints'
+import { DELETED_STATUS, isUnfinished, statusLabel } from '../components/prints/status'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
 import { modelPath } from '../lib/deeplink'
@@ -177,7 +177,8 @@ function PrintView({ print, reload }: { print: PrintDetail; reload: () => void }
                 Customize from this
               </Link>
             )}
-            {!deleted && (
+            {/* #2736 — not while it is still going: its outcome is not known yet. */}
+            {!deleted && !isUnfinished(print.status) && (
               <Button onClick={() => setReprinting(true)}>Print again</Button>
             )}
             {print.links.bambuddy_url && (
@@ -449,7 +450,7 @@ function OutcomeSection({ print }: { print: PrintDetail }) {
         <Fact label="Failure" value={outcome.failure_reason} />
         <Fact
           label="Printer"
-          value={outcome.printer_name ?? print.printer_name ?? (outcome.printer_id !== null ? `#${outcome.printer_id}` : null)}
+          value={outcome.printer_name ?? print.printer_name ?? (outcome.printer_id !== null ? printerLabel(outcome.printer_id) : null)}
         />
         <Fact label="Started" value={formatWhen(print.started_at)} />
         <Fact label="Finished" value={formatWhen(print.completed_at)} />

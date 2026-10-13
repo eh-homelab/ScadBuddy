@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, BinaryIO
 
 from fastapi import status
 
@@ -66,7 +66,7 @@ async def visible(read: Callable[[], Awaitable[Any]], detail: str) -> bool:
 async def upload_into(
     client: BambuddyClient,
     filename: str,
-    content: bytes,
+    content: bytes | BinaryIO,
     *,
     folder_id: int | None,
     media_type: str | None = None,
@@ -92,7 +92,7 @@ async def upload_into(
 async def _upload(
     client: BambuddyClient,
     filename: str,
-    content: bytes,
+    content: bytes | BinaryIO,
     folder_id: int | None,
     media_type: str | None,
 ) -> LibraryFile:

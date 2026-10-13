@@ -247,6 +247,39 @@ describe('render limits', () => {
     await expect(limiter.acquire('p')).rejects.toThrow(/most allowed/)
   })
 
+  it('when only queued renders fill the window, the refusal says to wait for them, not the whole window', async () => {
+    let now = 0
+    const limiter = new RenderLimiter(limits({ concurrent: 1, perWindow: 2, windowMs: 1000 }), () => now)
+    await limiter.acquire('p')
+    now = 5000
+    const queued = [limiter.acquire('p'), limiter.acquire('p')]
+    const refused = limiter.acquire('p')
+    await expect(refused).rejects.toThrow(/Wait for your 2 queued renders to start/)
+    await expect(refused).rejects.not.toThrow(/Try again in/)
+    void Promise.allSettled(queued)
+  })
+
+  it('a wait past maxWaitMs is refused with nothing submitted, and leaves the queue', async () => {
+    const limiter = new RenderLimiter(limits({ concurrent: 1 }))
+    const first = await limiter.acquire('p')
+    await expect(limiter.acquire('p', { maxWaitMs: 20 })).rejects.toThrow(
+      /still waiting for a render slot after 0s \(0 ahead of it\); nothing was submitted/,
+    )
+    expect(limiter.queued).toBe(0)
+    first()
+    ;(await limiter.acquire('p'))()
+  })
+
+  it('under a global bound, a render is not held behind one blocked only by its own principal\'s bound', async () => {
+    const limiter = new RenderLimiter(limits({ concurrent: 1, global: 3 }))
+    await limiter.acquire('p')
+    const blocked = limiter.acquire('p')
+    expect(await pending(blocked)).toBe(true)
+    // A global slot is free and p's waiter cannot take it: q starts at once.
+    expect(await pending(limiter.acquire('q'))).toBe(false)
+    void blocked
+  })
+
   it('a render waiting when the window cap is lowered is refused at its start, not started past it', async () => {
     let current = limits({ concurrent: 1, windowMs: 60_000 })
     const limiter = new RenderLimiter(async () => current)
