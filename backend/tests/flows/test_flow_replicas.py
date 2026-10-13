@@ -15,6 +15,7 @@ import pytest
 
 from scadbuddy.flows.definitions import FlowDefinitions
 from scadbuddy.flows.repository import FlowHistory
+from scadbuddy.flows.states import FlowStates
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.library.repo_lock import flows_coordinator
 from scadbuddy.render.projection import JobProjection
@@ -24,9 +25,11 @@ pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_git]
 SCRIPT = "import asyncio\nasync def main():\n    return {n}\nasyncio.run(main())\n"
 
 
-def replica(root: Path, store: FlowStore, conninfo: str) -> FlowDefinitions:
+def replica(root: Path, store: FlowStore, states: FlowStates, conninfo: str) -> FlowDefinitions:
     return FlowDefinitions(
-        FlowHistory(root, timeout=10.0, coordinator=flows_coordinator(conninfo)), store
+        FlowHistory(root, timeout=10.0, coordinator=flows_coordinator(conninfo)),
+        store,
+        states,
     )
 
 
@@ -35,8 +38,9 @@ def test_two_replicas_register_in_turn_when_their_flock_does_not_hold(
 ) -> None:
     monkeypatch.setattr(fcntl, "flock", lambda *_args: None)
     root = tmp_path / "data" / "flows"
-    store = FlowStore(jobs.pool)
-    first, second = replica(root, store, pg_conninfo), replica(root, store, pg_conninfo)
+    store, states = FlowStore(jobs.pool), FlowStates(jobs.pool)
+    first = replica(root, store, states, pg_conninfo)
+    second = replica(root, store, states, pg_conninfo)
     first._start()
     second._start()
     errors: list[BaseException] = []

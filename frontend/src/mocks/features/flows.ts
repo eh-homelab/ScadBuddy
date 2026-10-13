@@ -8,6 +8,7 @@ import type {
   FlowResetPreview,
   FlowRun,
   FlowRunView,
+  FlowState,
   FlowStep,
 } from '../../api/types'
 
@@ -27,6 +28,11 @@ import type {
  * nothing, the host functions it completes, a version's source by commit, and Restore.
  * The check here is a stand-in for the server's: a call to a name that is not a host
  * function, or `sleep` given a string, is a problem on its line.
+ *
+ * #2485 — a flow archived (`POST /workflows/names/{name}/archive`, `unarchive`) or deleted
+ * (`DELETE /workflows/names/{name}`): hidden from `GET /workflows` unless `?archived=true`,
+ * and its starts refused (409 `flow-archived`, `flow-deleted`). A new version brings a
+ * deleted flow back; its versions and their scripts stay readable throughout.
  */
 
 const at = (minutes: number) => new Date(Date.UTC(2026, 9, 10, 9, minutes)).toISOString()
@@ -58,6 +64,7 @@ function definition(id: string, name: string, version: number, script: string, m
     id,
     name,
     version,
+    commit: `c0ffee${version}`.padEnd(40, '0'),
     approval_timeout_s: null,
     created_by: { kind: 'agent', principal: 'p', session: 'sess-1' },
     created_at: at(minutes),
@@ -127,6 +134,8 @@ function defaults(): FlowRun[] {
 let runs = defaults()
 let definitions = defaultDefinitions()
 let started = 0
+/** #2485: each archived or deleted flow's state, by name. */
+const states = new Map<string, FlowState>()
 /** Runs whose next Reset is refused: outward calls landed since the preview. */
 const moved = new Set<string>()
 /** Runs whose view says the workflow did not answer (`live: false`). */
@@ -147,7 +156,37 @@ export function reset(): void {
   offline.clear()
   starting.clear()
   images.clear()
+  states.clear()
   requests = []
+}
+
+/** Tests: a flow archived or deleted, as `GET /workflows?archived=true` lists it. */
+export function setFlowState(state: Pick<FlowState, 'name'> & Partial<FlowState>): void {
+  states.set(state.name, { ...stateOf(state.name), ...state })
+}
+
+/** A version's archive and delete fields, from its flow's state. */
+function flags(name: string): Pick<FlowState, 'archived_at' | 'archived_by' | 'deleted_at' | 'deleted_by'> {
+  const state = states.get(name)
+  return {
+    archived_at: state?.archived_at ?? null,
+    archived_by: state?.archived_by ?? null,
+    deleted_at: state?.deleted_at ?? null,
+    deleted_by: state?.deleted_by ?? null,
+  }
+}
+
+const hidden = (name: string) => Boolean(states.get(name)?.archived_at || states.get(name)?.deleted_at)
+
+function stateOf(name: string): FlowState {
+  return states.get(name) ?? { name, archived_at: null, archived_by: null, deleted_at: null, deleted_by: null, deleted_commit: null }
+}
+
+function conflict(type: string, detail: string) {
+  return HttpResponse.json(
+    { type: `https://scadbuddy.dev/problems/${type}`, title: 'Conflict', status: 409, detail },
+    { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+  )
 }
 
 /** Tests: the images a run's tool calls returned. */
@@ -315,7 +354,10 @@ function addVersion(name: string, script: string, approval: number | null): Flow
     created_by: { kind: 'browser' },
   }
   definitions = [...definitions, created]
-  return created
+  // A new version brings a deleted flow back.
+  const state = states.get(name)
+  if (state) states.set(name, { ...state, deleted_at: null, deleted_by: null, deleted_commit: null })
+  return { ...created, ...flags(name) }
 }
 
 const newestFirst = (name: string) =>
@@ -360,15 +402,45 @@ async function keep(request: Request): Promise<Record<string, unknown>> {
 }
 
 export const handlers = [
-  // As `FlowStore.list_definitions`: each name's newest version only, by name.
-  http.get('/api/v1/workflows', () =>
-    HttpResponse.json(
-      [...new Set(definitions.map((d) => d.name))].sort().map((name) => {
-        const { script: _script, ...summary } = newestFirst(name)[0]!
-        return summary
-      }),
-    ),
-  ),
+  // As `FlowStates.newest`: each name's newest version only, by name; archived and
+  // deleted flows only with `?archived=true`.
+  http.get('/api/v1/workflows', ({ request }) => {
+    const all = new URL(request.url).searchParams.get('archived') === 'true'
+    return HttpResponse.json(
+      [...new Set(definitions.map((d) => d.name))]
+        .filter((name) => all || !hidden(name))
+        .sort()
+        .map((name) => {
+          const { script: _script, ...summary } = newestFirst(name)[0]!
+          return { ...summary, ...flags(name) }
+        }),
+    )
+  }),
+  http.post('/api/v1/workflows/names/:name/archive', async ({ request, params }) => {
+    await keep(request)
+    const name = String(params['name'])
+    if (newestFirst(name).length === 0) return notFound('No such flow.')
+    const state = stateOf(name)
+    if (!state.archived_at) states.set(name, { ...state, archived_at: at(50), archived_by: { kind: 'browser' } })
+    return HttpResponse.json(stateOf(name))
+  }),
+  http.post('/api/v1/workflows/names/:name/unarchive', async ({ request, params }) => {
+    await keep(request)
+    const name = String(params['name'])
+    if (newestFirst(name).length === 0) return notFound('No such flow.')
+    states.set(name, { ...stateOf(name), archived_at: null, archived_by: null })
+    return HttpResponse.json(stateOf(name))
+  }),
+  http.delete('/api/v1/workflows/names/:name', async ({ request, params }) => {
+    await keep(request)
+    const name = String(params['name'])
+    if (newestFirst(name).length === 0) return notFound('No such flow.')
+    const state = stateOf(name)
+    if (!state.deleted_at) {
+      states.set(name, { ...state, deleted_at: at(51), deleted_by: { kind: 'browser' }, deleted_commit: 'de1e7e'.padEnd(40, '0') })
+    }
+    return HttpResponse.json(stateOf(name))
+  }),
   http.get('/api/v1/workflows/names/:name/versions', ({ params }) => {
     const versions = newestFirst(String(params['name']))
     if (versions.length === 0) return notFound('No such flow.')
@@ -413,12 +485,16 @@ export const handlers = [
   }),
   http.get('/api/v1/workflows/:id', ({ params }) => {
     const found = definitions.find((d) => d.id === params['id'])
-    return found ? HttpResponse.json(found) : notFound('No such flow.')
+    return found ? HttpResponse.json({ ...found, ...flags(found.name) }) : notFound('No such flow.')
   }),
   http.post('/api/v1/workflows/:id/runs', async ({ request, params }) => {
     await keep(request)
     const found = definitions.find((d) => d.id === params['id'])
     if (!found) return notFound('No such flow.')
+    if (states.get(found.name)?.deleted_at) {
+      return conflict('flow-deleted', 'This flow was deleted. Restore one of its versions to run it.')
+    }
+    if (states.get(found.name)?.archived_at) return conflict('flow-archived', 'This flow is archived. Unarchive it to run it.')
     started += 1
     const id = `run-new-${started}`
     runs = [

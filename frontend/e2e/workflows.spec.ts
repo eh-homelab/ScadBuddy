@@ -170,5 +170,51 @@ for (const { name, viewport } of [
       await expect(page.locator('[data-run]')).toHaveCount(2)
       await expect(page.locator('[data-run="run-done"]')).toHaveCount(0)
     })
+
+    test('archives a flow from the Flows tab, and Show archived lists it to unarchive (#2485)', async ({ page }) => {
+      await page.goto('/workflows/flows')
+      const swap = page.locator('[data-flow="swap"]')
+      await swap.getByRole('button', { name: 'Archive' }).click()
+      const dialog = page.getByRole('dialog', { name: 'Archive swap?' })
+      await expect(dialog).toContainText('Runs in progress keep running')
+      await expect(dialog.getByRole('button', { name: 'Archive' })).toBeInViewport()
+      await dialog.getByRole('button', { name: 'Archive' }).click()
+      await expect(swap).toHaveCount(0)
+      await expect(page.locator('[data-flow]')).toHaveCount(1)
+
+      await page.getByRole('checkbox', { name: 'Show archived' }).check()
+      await expect(swap).toContainText('Archived by you, in the browser')
+      await expect(swap.getByRole('button', { name: 'Unarchive' })).toBeInViewport()
+      await noSideScroll(page)
+      await swap.getByRole('button', { name: 'Unarchive' }).click()
+      await expect(swap).not.toContainText('Archived')
+    })
+
+    test('deletes a flow from its page; its finished run still shows its script, and Restore brings it back (#2485)', async ({
+      page,
+    }) => {
+      await page.goto('/workflows/flows/def-plates-2')
+      await page.getByRole('button', { name: 'Delete', exact: true }).click()
+      const dialog = page.getByRole('dialog', { name: 'Delete plates?' })
+      await expect(dialog).toContainText('Runs in progress keep running on the version they started with')
+      await expect(dialog).toContainText('Finished runs still show the script they ran')
+      await expect(dialog.getByRole('button', { name: 'Delete flow' })).toBeInViewport()
+      await dialog.getByRole('button', { name: 'Delete flow' }).click()
+      await expect(page.getByText(/Deleted by you, in the browser/)).toBeVisible()
+      await expect(page.getByRole('button', { name: 'Start run' })).toBeDisabled()
+      await noSideScroll(page)
+
+      // In-app, so the mocked delete stands: the run of v2 still shows the script it ran.
+      await page.getByRole('main').getByRole('link', { name: 'Workflows', exact: true }).click()
+      await page.locator('[data-run="run-print"]').getByRole('link', { name: 'plates v2' }).click()
+      await expect(page.getByLabel('Script', { exact: true })).toContainText('queue_print')
+
+      await page.getByRole('link', { name: 'plates v2' }).click()
+      await expect(page).toHaveURL(/\/workflows\/flows\/def-plates-2$/)
+      await page.getByRole('button', { name: 'Restore v2' }).click()
+      await expect(page).toHaveURL(/\/workflows\/flows\/def-plates-3$/)
+      await expect(page.getByText(/Deleted by/)).toHaveCount(0)
+      await expect(page.getByRole('button', { name: 'Start run' })).toBeEnabled()
+    })
   })
 }

@@ -228,6 +228,110 @@ def test_a_flows_history_source_diff_and_restore(client: TestClient) -> None:
     assert client.get(f"{base}/{other}/source").status_code == 404
 
 
+AGENT_ACTOR = {"kind": "agent", "principal": "token:p1", "session": "s1"}
+
+
+def listed(client: TestClient, **query: str) -> list[tuple[str, int]]:
+    return [(d["name"], d["version"]) for d in client.get("/api/v1/workflows", params=query).json()]
+
+
+def test_an_archived_flow_is_hidden_and_never_starts_until_unarchived(
+    client: TestClient,
+) -> None:
+    """#2485: archiving a flow archives every version, by name; it is reversible."""
+    one = register(client, script("return 1"))
+    two = register(client, script("return 2"))
+    register(client, script("return 3"), name="other")
+    archived = client.post("/api/v1/workflows/names/swap/archive", headers=AGENT)
+    assert archived.status_code == 200, archived.text
+    state = archived.json()
+    assert (state["name"], state["archived_by"], state["deleted_at"]) == ("swap", AGENT_ACTOR, None)
+    assert state["archived_at"] is not None
+
+    assert listed(client) == [("other", 1)]
+    shown = client.get("/api/v1/workflows", params={"archived": "true"}).json()
+    assert [(d["name"], d["version"], d["archived_by"]) for d in shown] == [
+        ("other", 1, None),
+        ("swap", 2, AGENT_ACTOR),
+    ]
+    # Every version is archived, and its page says so.
+    assert client.get(f"/api/v1/workflows/{one['id']}").json()["archived_by"] == AGENT_ACTOR
+    for definition in (one, two):
+        refused = start(client, definition["id"], f"k-{definition['version']}")
+        assert refused.status_code == 409, refused.text
+        assert refused.json()["type"].endswith("/flow-archived")
+    assert client.get("/api/v1/workflow-runs").json() == []
+    # Archiving again changes nothing; a flow that does not exist is 404.
+    again = client.post("/api/v1/workflows/names/swap/archive").json()
+    assert (again["archived_at"], again["archived_by"]) == (state["archived_at"], AGENT_ACTOR)
+    assert client.post("/api/v1/workflows/names/nothing/archive").status_code == 404
+
+    unarchived = client.post("/api/v1/workflows/names/swap/unarchive")
+    assert unarchived.status_code == 200, unarchived.text
+    assert (unarchived.json()["archived_at"], unarchived.json()["archived_by"]) == (None, None)
+    assert listed(client) == [("other", 1), ("swap", 2)]
+    run_id = start(client, two["id"], "after").json()["id"]
+    until(client, run_id, lambda v: v["status"] == "succeeded")
+
+
+def test_a_deleted_flow_keeps_its_runs_scripts_and_restores_as_a_new_version(
+    client: TestClient,
+) -> None:
+    """#2485: a delete is a commit removing `<name>/`; its versions stay in the history,
+    a finished run still shows the script it ran, and a restore brings the flow back."""
+    one = register(client, script("return 1"))
+    finished = start(client, one["id"], "done").json()["id"]
+    until(client, finished, lambda v: v["status"] == "succeeded")
+    two = register(client, script("await sleep(3)", "return 2"))
+    running = start(client, two["id"], "running").json()["id"]
+    until(client, running, lambda v: v["status"] == "running")
+
+    deleted = client.delete("/api/v1/workflows/names/swap", headers=AGENT)
+    assert deleted.status_code == 200, deleted.text
+    state = deleted.json()
+    assert state["deleted_by"] == AGENT_ACTOR and state["deleted_commit"]
+    assert listed(client) == []
+    assert listed(client, archived="true") == [("swap", 2)]
+
+    # The run in progress finishes on the version it started with.
+    view = until(client, running, lambda v: v["status"] == "succeeded")
+    assert (view["run"]["commit"], view["run"]["result"]) == (two["commit"], "result: 2")
+    # A finished run's script is still read from git at its commit.
+    ran = client.get(f"/api/v1/workflows/{one['id']}")
+    assert ran.status_code == 200
+    assert (ran.json()["script"], ran.json()["deleted_by"]) == (script("return 1"), AGENT_ACTOR)
+    versions = client.get("/api/v1/workflows/names/swap/versions").json()
+    assert [v["version"] for v in versions] == [2, 1]
+    # Nothing new starts; deleting again is the same delete.
+    refused = start(client, two["id"], "after-delete")
+    assert (refused.status_code, refused.json()["type"].rsplit("/", 1)[1]) == (409, "flow-deleted")
+    again = client.delete("/api/v1/workflows/names/swap").json()
+    assert (again["deleted_commit"], again["deleted_by"]) == (state["deleted_commit"], AGENT_ACTOR)
+    assert client.delete("/api/v1/workflows/names/nothing").status_code == 404
+
+    base = "/api/v1/workflows/names/swap/versions"
+    restored = client.post(f"{base}/{one['commit']}/restore")
+    assert restored.status_code == 201, restored.text
+    back = restored.json()
+    assert (back["version"], back["script"], back["deleted_at"]) == (3, script("return 1"), None)
+    assert listed(client) == [("swap", 3)]
+    run_id = start(client, back["id"], "restored").json()["id"]
+    until(client, run_id, lambda v: v["status"] == "succeeded")
+
+
+def test_registering_a_deleted_name_brings_it_back(client: TestClient) -> None:
+    register(client, script("return 1"))
+    # Archived, then deleted: it comes back unarchived, ready to run.
+    assert client.post("/api/v1/workflows/names/swap/archive").status_code == 200
+    assert client.delete("/api/v1/workflows/names/swap").status_code == 200
+    again = register(client, script("return 2"))
+    assert (again["version"], again["deleted_at"], again["archived_at"]) == (2, None, None)
+    assert listed(client) == [("swap", 2)]
+    # One only archived stays archived when a version is added.
+    assert client.post("/api/v1/workflows/names/swap/archive").status_code == 200
+    assert register(client, script("return 3"))["archived_at"] is not None
+
+
 def test_the_approval_timeout_resolves_run_then_flow_then_setting(client: TestClient) -> None:
     inherits = register(client, script("return 1"), name="a")
     never = register(client, script("return 1"), name="b", approval_timeout="never")

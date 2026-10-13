@@ -25,6 +25,7 @@ from scadbuddy.flows.definitions import FlowDefinitions
 from scadbuddy.flows.keys import approval_key, payload_keys
 from scadbuddy.flows.manifest import load_manifest
 from scadbuddy.flows.repository import FlowHistory
+from scadbuddy.flows.states import FlowStates
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.library.repo_lock import flows_coordinator
 from scadbuddy.workflows.flow_activities import FlowActivities
@@ -91,7 +92,7 @@ def _build(core: Core, components: Components) -> Flows:
     return Flows(
         store=store,
         settings=core.settings,
-        definitions=FlowDefinitions(history, store),
+        definitions=FlowDefinitions(history, store, FlowStates(core.projection.pool)),
         keys=keys[0] if keys is not None else None,
         connect=keys[1] if keys is not None else None,
         operation_activities=projects_operations,

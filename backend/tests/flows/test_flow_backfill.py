@@ -18,6 +18,7 @@ from scadbuddy.core.gitrepo import AUTHOR_NAME, GitError, git_env
 from scadbuddy.flows.backfill import backfill
 from scadbuddy.flows.definitions import FlowDefinitions, ScriptMissingError, UnknownFlowError
 from scadbuddy.flows.repository import FlowHistory
+from scadbuddy.flows.states import FlowStates
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.workflows.flow_models import FlowRecord
@@ -41,8 +42,8 @@ def root(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def definitions(root: Path, store: FlowStore) -> FlowDefinitions:
-    return FlowDefinitions(FlowHistory(root), store)
+def definitions(root: Path, store: FlowStore, jobs: JobProjection) -> FlowDefinitions:
+    return FlowDefinitions(FlowHistory(root), store, FlowStates(jobs.pool))
 
 
 def git(root: Path, *args: str) -> str:

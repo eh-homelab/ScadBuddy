@@ -113,6 +113,47 @@ describe('flow tools (#1057)', () => {
     expect(restored).toHaveLength(1)
   })
 
+  it('archives as a write and deletes as an outward call (#2485)', async () => {
+    expect([tool('archive_flow').risk, tool('unarchive_flow').risk, tool('delete_flow').risk]).toEqual([
+      'write',
+      'write',
+      'outward',
+    ])
+    expect(tool('delete_flow').summarize?.({ name: 'swap' })).toContain('swap')
+    const calls: string[] = []
+    const state = (name: string, extra: Record<string, unknown>) => ({ name, archived_at: null, deleted_at: null, ...extra })
+    server.use(
+      http.get(`${BACKEND}/api/v1/workflows`, ({ request }) => {
+        calls.push(`list ${new URL(request.url).searchParams.get('archived')}`)
+        return HttpResponse.json([])
+      }),
+      http.post(`${BACKEND}/api/v1/workflows/names/swap/archive`, () => {
+        calls.push('archive')
+        return HttpResponse.json(state('swap', { archived_at: '2026-10-12T00:00:00Z' }))
+      }),
+      http.post(`${BACKEND}/api/v1/workflows/names/swap/unarchive`, () => {
+        calls.push('unarchive')
+        return HttpResponse.json(state('swap', {}))
+      }),
+      http.delete(`${BACKEND}/api/v1/workflows/names/swap`, () => {
+        calls.push('delete')
+        return HttpResponse.json(state('swap', { deleted_at: '2026-10-12T00:00:00Z', deleted_commit: 'd'.repeat(40) }))
+      }),
+    )
+    await runTool(tool('list_flows'), {}, ctx())
+    await runTool(tool('list_flows'), { include_archived: true }, ctx())
+    const archived = firstText(await runTool(tool('archive_flow'), { name: 'swap' }, ctx())) as { archived_at: string }
+    expect(archived.archived_at).toBe('2026-10-12T00:00:00Z')
+    await runTool(tool('unarchive_flow'), { name: 'swap' }, ctx())
+    // Gated: nothing is sent until a person approves, then confirm_action runs it once.
+    expect(tool('delete_flow').gated).toBe(true)
+    expect((await runTool(tool('delete_flow'), { name: 'swap' }, ctx())).isError).toBe(true)
+    expect(calls).not.toContain('delete')
+    const deleted = firstText(await tool('delete_flow').execute({ name: 'swap' }, ctx())) as { deleted_commit: string }
+    expect(deleted.deleted_commit).toBe('d'.repeat(40))
+    expect(calls).toEqual(['list null', 'list true', 'archive', 'unarchive', 'delete'])
+  })
+
   it('registers a script and reports its problems', async () => {
     server.use(
       http.post(`${BACKEND}/api/v1/workflows`, () =>

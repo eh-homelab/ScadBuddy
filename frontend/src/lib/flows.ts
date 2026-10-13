@@ -1,5 +1,5 @@
 import { ApiError } from '../api/client'
-import type { FlowPending, FlowRunStatus } from '../api/types'
+import type { FlowPending, FlowRunStatus, FlowSummary } from '../api/types'
 
 /** #1057 — how a flow run's status reads on the Workflows pages. */
 export const FLOW_STATUS_LABEL: Record<FlowRunStatus, string> = {
@@ -47,4 +47,13 @@ export function actorText(actor: Record<string, unknown>): string {
   if (actor['kind'] !== 'agent') return 'someone else'
   const session = actor['session']
   return typeof session === 'string' && session ? `an assistant (session ${session})` : 'an assistant'
+}
+
+/** #2485 — a flow archived or deleted, and who did it, as a phrase; null for neither. */
+export function flowStateText(
+  flow: Pick<FlowSummary, 'archived_at' | 'archived_by' | 'deleted_at' | 'deleted_by'>,
+): string | null {
+  if (flow.deleted_at) return `Deleted by ${actorText(flow.deleted_by ?? {})}`
+  if (flow.archived_at) return `Archived by ${actorText(flow.archived_by ?? {})}`
+  return null
 }
