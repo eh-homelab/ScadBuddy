@@ -120,6 +120,8 @@ FOLLOW_TIMEOUT = timedelta(days=30)
 FOLLOW_HEARTBEAT = timedelta(seconds=30)
 FOLLOW_DRAIN = timedelta(seconds=30)
 SHORT = timedelta(seconds=30)
+#: How long a flow turn's call waits for the run grant's verdict before it parks.
+GRANT_CHECK_WAIT = timedelta(minutes=1)
 IMAGES_NOTE = (
     "\n\n[The user attached {n} image{s} to this message. Call the view_user_images tool"
     " to see {them} before you answer.]"
@@ -660,6 +662,9 @@ class DurableSession:
                     "flow_call_id": flow.call_id,
                 },
                 task_queue=PROJECTS_QUEUE,
+                # No projects worker to answer (down, or a deployment without flows):
+                # the call parks after this, rather than waiting on it for ever.
+                schedule_to_close_timeout=GRANT_CHECK_WAIT,
                 start_to_close_timeout=SHORT,
                 retry_policy=RetryPolicy(maximum_attempts=3),
                 result_type=dict,

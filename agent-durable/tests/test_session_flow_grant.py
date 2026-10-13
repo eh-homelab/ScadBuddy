@@ -14,11 +14,12 @@ from typing import Any
 
 import pytest
 import test_session_workflow as base
-from session_support import ME, Conn, Connect, events, send, settled
+from session_support import ME, Conn, Connect, events, send, settled, until
 from temporalio import activity
 from temporalio.client import WorkflowHandle
 from temporalio.worker import Worker
 
+from scadbuddy_durable.gate.names import PENDING_INPUT_QUERY
 from scadbuddy_durable.session.models import (
     PROJECTS_QUEUE,
     SEND_MESSAGE_UPDATE,
@@ -180,4 +181,23 @@ async def test_a_revoked_grant_parks_the_call(
     await send_flow(handle, "print it")
     [entry] = await base._parked(handle)
     assert entry["kind"] == "approval"
+    assert harness.stand_in.ran == []
+
+
+async def test_a_flow_turns_call_parks_when_no_projects_worker_answers(
+    harness: base.Harness, agent_db: Conn
+) -> None:
+    """Nothing serves the `projects` queue (its worker down, or a deployment without
+    flows): the call parks once the check's wait runs out, never waits for ever."""
+    _, handle = await harness.session(agent_db)
+    await send_flow(handle, "print it")
+    entries: list[dict[str, Any]] = []
+
+    async def parked() -> bool:
+        nonlocal entries
+        entries = await handle.query(PENDING_INPUT_QUERY)
+        return bool(entries)
+
+    await until(parked, timeout=150)
+    assert [e["kind"] for e in entries] == ["approval"]
     assert harness.stand_in.ran == []
