@@ -23,6 +23,7 @@ from scadbuddy.activity.models import ActivityRow, ActivityStatus
 from scadbuddy.api import printing as printing_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.settings import Settings
+from scadbuddy.flows.agent_tools import AgentTools, AgentToolsUnavailableError
 from scadbuddy.main import create_app
 from scadbuddy.render import submit as submit_module
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
@@ -153,6 +154,32 @@ def settings(
     workflow_reaper.terminate(f"{queue}-bambuddy")
     workflow_reaper.terminate(f"{queue}-library")
     workflow_reaper.terminate(f"{queue}-projects")
+
+
+class FakeAgentTools:
+    """The agent sidecar's flow tools (#2704, `flows/agent_tools.py`) as every api test's
+    app reads them: no agent answers on a test's loopback. `tiers` are the enabled tools
+    at their tiers now; `down` makes the agent unreachable."""
+
+    def __init__(self) -> None:
+        self.tiers: dict[str, str] = {}
+        self.down = False
+
+    async def tool_tiers(self) -> dict[str, str]:
+        if self.down:
+            raise AgentToolsUnavailableError("connection refused")
+        return dict(self.tiers)
+
+
+@pytest.fixture(autouse=True)
+def agent_tools(monkeypatch: pytest.MonkeyPatch) -> FakeAgentTools:
+    fake = FakeAgentTools()
+
+    async def tool_tiers(_self: AgentTools) -> dict[str, str]:
+        return await fake.tool_tiers()
+
+    monkeypatch.setattr(AgentTools, "tool_tiers", tool_tiers)
+    return fake
 
 
 @pytest.fixture

@@ -1464,7 +1464,7 @@ function printOf(
     completed_at: '2026-09-27T05:56:53.660315',
     actual_time_seconds: 6437,
     filament_used_grams: 16.36,
-    cover: { kind: 'thumbnail', url: `${prints}/thumbnail` },
+    cover: { kind: 'thumbnail', url: `${prints}/thumbnail`, full_url: `${prints}/thumbnail` },
     has_timelapse: false,
     attachment_count: 0,
     params_diff: { name: output.params?.['name'] ?? '' },
@@ -1547,7 +1547,11 @@ export const prints: PrintDetail[] = [
   ),
   printOf(35, reagan, {
     status: 'completed',
-    cover: { kind: 'photo', url: `/api/v1/prints/35/photos/${FINISH_PHOTO}` },
+    cover: {
+      kind: 'photo',
+      url: `/api/v1/prints/35/photos/${FINISH_PHOTO}?size=card&v=1`,
+      full_url: `/api/v1/prints/35/photos/${FINISH_PHOTO}`,
+    },
     has_timelapse: true,
   }, {
     media: {

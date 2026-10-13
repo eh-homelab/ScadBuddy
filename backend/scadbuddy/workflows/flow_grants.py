@@ -221,15 +221,24 @@ class FlowGrants:
         # that never times out, so a starter session that never answers cannot hold the
         # person's queue back (spec §4.6, Ruling 11).
         hop_s = 0
+        parent_session = parent_principal = None
         if verdict.parent_hop:
             hop_s = verdict.timeout_s or await self._store.approval_expiry_s()
+            starter = await self._store.get_run(req.run_id)
+            by = starter.started_by if starter is not None else {}
+            parent_session, parent_principal = by.get("session"), by.get("principal")
+            if not isinstance(parent_session, str) or not isinstance(parent_principal, str):
+                # No starter session after all: the person's at once.
+                hop_s, parent_session, parent_principal = 0, None, None
         return GrantVerdict(
             verdict="outside",
             reason=verdict.reason,
             timeout_s=verdict.timeout_s,
-            parent_hop=verdict.parent_hop,
+            parent_hop=hop_s > 0,
             hop_s=hop_s,
             on_outside=on_outside,
+            parent_session=parent_session,
+            parent_principal=parent_principal,
         )
 
     @activity.defn(name=FLOW_HOP_DUE)

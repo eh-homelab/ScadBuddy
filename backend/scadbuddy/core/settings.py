@@ -247,10 +247,10 @@ class Settings(BaseSettings):
     # SCADBUDDY_TEMPORAL_TASK_QUEUE_AGENT_TOOLS: where the agent service serves its tools
     # as activities (#1055); a flow's `tool(...)` calls them there (#1057).
     temporal_task_queue_agent_tools: str = "agent-tools"
-    # SCADBUDDY_FLOW_TOOLS_JSON: the agent's tool manifest (its `pnpm build` writes
-    # dist/tools.json; the image carries the same build's), which a flow's `tool(...)`
-    # reads names and tiers from. Unset, `tool(...)` refuses every name.
-    flow_tools_json: Path | None = None
+    # SCADBUDDY_AGENT_INTERNAL_URL: the agent sidecar beside this API, on the pod's
+    # loopback (#2704). The flow routes read the agent's tools and their tiers from it
+    # (agent/src/routes/flowTools.ts), and refuse when it does not answer.
+    agent_internal_url: str = "http://127.0.0.1:8081"
     # SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES: upsert the Scadbuddy* Search Attributes
     # (spec 2026-10-01 §4.2). Off until the namespace has them registered: an upsert of
     # an unregistered attribute fails the workflow task.
@@ -282,6 +282,14 @@ class Settings(BaseSettings):
         parts = urlsplit(value)
         if parts.scheme not in {"http", "https"} or not parts.netloc:
             raise ValueError(f"SCADBUDDY_API_INTERNAL_URL must be an http(s) URL, not {value!r}")
+        return value
+
+    @field_validator("agent_internal_url")
+    @classmethod
+    def _agent_internal_url_is_http(cls, value: str) -> str:
+        parts = urlsplit(value)
+        if parts.scheme not in {"http", "https"} or not parts.netloc:
+            raise ValueError(f"SCADBUDDY_AGENT_INTERNAL_URL must be an http(s) URL, not {value!r}")
         return value
 
     @field_validator("temporal_ui_url")
@@ -513,7 +521,9 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
         "temporal_task_queue_agent_tools": (
             "Paired with the agent service's worker, which serves its tools on that queue."
         ),
-        "flow_tools_json": ("A file the image carries, from the same build as the agent's tools."),
+        "agent_internal_url": (
+            "Where the API reaches the agent sidecar in its own pod, which the deployment lays out."
+        ),
         "temporal_projects_worker_inprocess": (
             "A deployment choice: a one-process dev run serves flows itself."
         ),

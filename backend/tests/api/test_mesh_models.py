@@ -454,3 +454,41 @@ def test_a_file_of_more_objects_than_a_scene_holds_is_a_422_naming_the_cap(
     refused = upload(client, data=copies_3mf(MAX_OBJECTS + 1), filename="pegs.3mf")
     assert refused.status_code == 422, refused.text
     assert f"at most {MAX_OBJECTS}" in refused.json()["detail"]
+
+
+def two_objects_3mf() -> bytes:
+    """A box and a cylinder: two read objects, so two objects with meshes of their own."""
+    scene = trimesh.Scene(
+        {
+            "box": trimesh.creation.box((10, 10, 10)),
+            "cylinder": trimesh.creation.cylinder(radius=4, height=10, sections=32),
+        }
+    )
+    data = scene.export(file_type="3mf")
+    assert isinstance(data, bytes)
+    return data
+
+
+def test_deleting_an_object_removes_the_meshes_only_it_used(
+    client: TestClient, paths: DataPaths
+) -> None:
+    """#2632: a deleted object's part files leave the volume (and every later revision);
+    the other object's stay."""
+    created = upload(client, data=two_objects_3mf(), filename="two.3mf")
+    assert created.status_code == 201, created.text
+    slug = created.json()["slug"]
+    meshes = paths.model_dir(slug) / "meshes"
+    assert sorted(p.name for p in meshes.iterdir()) == ["o1-p1.3mf", "o2-p1.3mf"]
+    done = edit(client, slug, {"edit": "delete", "object": "o2"})
+    assert done.status_code == 200, done.text
+    assert sorted(p.name for p in meshes.iterdir()) == ["o1-p1.3mf"]
+
+
+def test_a_long_upload_name_is_cut_to_fit_the_source(client: TestClient) -> None:
+    """#2632: the uploaded file's name goes into ``mesh_source`` at most 255 characters
+    long, its extension kept."""
+    created = upload(client, name="Carrot", filename="c" * 300 + ".stl")
+    assert created.status_code == 201, created.text
+    source = created.json()["mesh_source"]
+    assert len(source["name"]) == 255
+    assert source["name"].endswith(".stl")

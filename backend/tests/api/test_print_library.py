@@ -690,7 +690,11 @@ def test_a_library_file_s_print_is_in_the_history_once_bambuddy_archives_it(
     assert summary["output_name"] == "Bambu Spool Lock or shim UPDATED"
     assert summary["status"] == "printing"
     assert summary["params_diff"] is None
-    assert summary["cover"] == {"kind": "thumbnail", "url": "/api/v1/prints/90/thumbnail"}
+    assert summary["cover"] == {
+        "kind": "thumbnail",
+        "url": "/api/v1/prints/90/thumbnail",
+        "full_url": "/api/v1/prints/90/thumbnail",
+    }
 
     # It opens, and its media is served, like an output's print.
     detail = client.get("/api/v1/prints/90")

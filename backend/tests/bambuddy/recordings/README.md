@@ -133,6 +133,14 @@ Added for #1912 on 2026-10-09, from the live Bambuddy **1.2.6b1** over the ingre
   `/printers`.
 - **`DELETE /api/v1/library/files/{file_id}` exists** (`openapi/routes.txt`), which is
   what makes a replace-on-re-send possible.
+- **A move and a rename keep the file's id; there is no copy** (#2670, read off
+  Bambuddy's `routes/library.py` on 2026-10-13). `POST /api/v1/library/files/move`
+  (`FileMoveRequest {file_ids, folder_id}`, `null` for the root) updates each row's
+  `folder_id`, and answers `{moved, skipped, skipped_reasons: [{file_id, code, reason}]}`;
+  an id it does not have is in neither count. `PUT /api/v1/library/files/{file_id}`
+  takes `filename` (rejected with a 400 by `validate_print_filename`). A project's files
+  are those directly in a folder whose `project_id` is the project's, so a move out of
+  such a folder takes the file out of the project.
 
 - **Bambuddy computes `ams_mapping` itself, and ScadBuddy therefore sends none.**
   `print_scheduler.py`'s `_compute_ams_mapping_for_printer` is "called when a queue

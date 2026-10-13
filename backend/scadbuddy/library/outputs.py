@@ -340,11 +340,13 @@ class OutputStore:
         files_dir: Path | None = None,
         arranged_from: Sequence[str] = (),
         output_id: str | None = None,
+        print_settings: Mapping[str, str] | None = None,
     ) -> OutputMeta:
         """Save the job's output ``index`` (a pipeline job's `ctx.output`, §5.2), or its
         one result for a job without outputs. ``files_dir`` holds that output's extra
         files (the caller's ``dir_for(files_key) / "files"``). ``output_id`` lets a caller
-        that holds the output's Parts first name the output before it exists."""
+        that holds the output's Parts first name the output before it exists.
+        ``print_settings`` are the template's (#770), written into the saved 3MF."""
         if job.outputs and not 0 <= index < len(job.outputs):
             raise IndexError(index)
         chosen = job.outputs[index] if job.outputs else None
@@ -385,6 +387,7 @@ class OutputStore:
                     params=dict(job.params),
                     edit_url=edit_url(public_url, output_id),
                 ),
+                print_settings,
             )
 
             if chosen is not None:

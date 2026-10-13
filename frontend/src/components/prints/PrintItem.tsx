@@ -207,14 +207,21 @@ function ParamsDiff({ diff }: { diff: PrintSummary['params_diff'] }) {
   }
   const rest = entries.length - PARAMS_SHOWN
   return (
-    <dl className="mt-2 flex flex-wrap gap-1 text-[11px]" aria-label="Changed parameters">
-      {entries.slice(0, PARAMS_SHOWN).map(([name, value]) => (
-        <div key={name} className="flex max-w-full min-w-0 gap-1 rounded-[3px] bg-surface-2 px-1.5 py-0.5">
-          <dt className="text-muted">{name}</dt>
-          <dd className="sb-num truncate text-ink">{formatValue(value)}</dd>
-        </div>
-      ))}
-      {rest > 0 && <div className="px-1 py-0.5 text-faint">+{rest} more</div>}
-    </dl>
+    // #2457 — "+N more" sits beside the list, not in it: a <dl> holds only term groups.
+    <div className="mt-2 flex flex-wrap items-start gap-1 text-[11px]">
+      <dl className="flex min-w-0 flex-wrap gap-1" aria-label="Changed parameters">
+        {entries.slice(0, PARAMS_SHOWN).map(([name, value]) => (
+          <div key={name} className="flex max-w-full min-w-0 gap-1 rounded-[3px] bg-surface-2 px-1.5 py-0.5">
+            <dt className="text-muted">{name}</dt>
+            <dd className="sb-num truncate text-ink">{formatValue(value)}</dd>
+          </div>
+        ))}
+      </dl>
+      {rest > 0 && (
+        <p className="px-1 py-0.5 text-faint" data-testid="params-more">
+          +{rest} more
+        </p>
+      )}
+    </div>
   )
 }

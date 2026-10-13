@@ -57,10 +57,15 @@ describe('session mode', () => {
     expect(sentMessages()[0]).not.toHaveProperty('mode')
     const header = await screen.findByTestId('active-session-header')
     expect(within(header).getByText('Durable')).toBeInTheDocument()
-    // Its conversation is in the workflow: no fork.
-    expect(within(header).getByRole('button', { name: 'Fork' })).toHaveAttribute('title', expect.stringMatching(/cannot be forked/))
+    // Forked like a classic one (#2688), from the header and from a reply.
     await waitFor(() => expect(screen.getByTestId('agent-status')).toHaveTextContent(/idle|approval/i))
-    expect(screen.queryByRole('button', { name: /Fork from here/ })).not.toBeInTheDocument()
+    await waitFor(() => expect(within(header).getByRole('button', { name: 'Fork' })).toBeEnabled())
+    expect(within(header).getByRole('button', { name: 'Fork' })).toHaveAttribute('title', expect.stringMatching(/^Copy this chat/))
+    expect(screen.getAllByRole('button', { name: /Fork from here/ }).length).toBeGreaterThan(0)
+    // The fork is durable too.
+    await user.click(within(header).getByRole('button', { name: 'Fork' }))
+    await waitFor(() => expect(within(screen.getByTestId('active-session-header')).getByText(/Forked from/)).toBeInTheDocument())
+    expect(within(screen.getByTestId('active-session-header')).getByText('Durable')).toBeInTheDocument()
     // Set at the start: the picker is gone once a session is open.
     expect(screen.queryByRole('combobox', { name: 'Session mode' })).not.toBeInTheDocument()
   })

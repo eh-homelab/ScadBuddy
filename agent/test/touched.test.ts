@@ -375,6 +375,21 @@ describe('extractors', () => {
     ])
   })
 
+  it('records the library files moved, copied and renamed, never a skipped one (#2670)', () => {
+    const moved = { folder_id: 4, moved: [{ id: 1, filename: 'a.3mf' }], skipped: [{ id: 2, reason: 'not owned' }] }
+    expect(touches('move_library_file', { file_ids: [1, 2] }, moved, 'outward')).toEqual([
+      { type: 'bambuddy_file', id: '1', action: 'modified' },
+    ])
+    const copied = { folder_id: 4, copied: [{ source_id: 1, id: 9, filename: 'a.3mf' }], skipped: [] }
+    expect(touches('copy_library_file', { file_ids: [1] }, copied, 'outward')).toEqual([
+      { type: 'bambuddy_file', id: '9', action: 'created' },
+    ])
+    const renamed = { id: 1, filename: 'b.3mf', previous: 'a.3mf' }
+    expect(touches('rename_library_file', { file_id: 1, filename: 'b.3mf' }, renamed, 'outward')).toEqual([
+      { type: 'bambuddy_file', id: '1', action: 'modified' },
+    ])
+  })
+
   it('leaves only the browser click and fill unclassified', () => {
     const open = ALL_TOOLS.filter((t) => t.risk !== 'read' && !EXTRACTORS[t.name] && !TOUCHES_NOTHING.has(t.name))
     expect(open.map((t) => t.name).sort()).toEqual(['browser_click', 'browser_fill'])

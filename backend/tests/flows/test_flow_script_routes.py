@@ -4,7 +4,7 @@ and manifest tools the editor completes, from what the type check itself uses.""
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import Any
+from dataclasses import dataclass
 
 import pytest
 from fastapi import FastAPI
@@ -12,42 +12,31 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api import flow_script
 from scadbuddy.api.components import getter_for
+from scadbuddy.flows.agent_tools import AgentToolsUnavailableError
 from scadbuddy.flows.component import FLOWS
-from scadbuddy.flows.manifest import tiers, use_manifest
 from scadbuddy.workflows.flow_tools import SCRIPT_TOOLS
+from tests.flows.flows_support import AgentTiers
 
 
-class Overrides:
-    """The flows component as the route reads it: Settings' stored tool overrides."""
+@dataclass
+class FakeFlows:
+    """The flows component as the route reads it: the agent's tools (#2704)."""
 
-    def __init__(self) -> None:
-        self.stored: Any = None
-        self.store = self
-
-    async def tool_overrides(self) -> Any:
-        return self.stored
+    agent_tools: AgentTiers
 
 
 @pytest.fixture
-def overrides() -> Overrides:
-    return Overrides()
+def agent() -> AgentTiers:
+    return AgentTiers({"list_models": "read", "send_to_bambuddy": "outward"})
 
 
 @pytest.fixture
-def client(overrides: Overrides) -> Iterator[TestClient]:
+def client(agent: AgentTiers) -> Iterator[TestClient]:
     app = FastAPI()
     app.include_router(flow_script.router, prefix="/api/v1")
-    app.dependency_overrides[getter_for(FLOWS)] = lambda: overrides
+    app.dependency_overrides[getter_for(FLOWS)] = lambda: FakeFlows(agent)
     with TestClient(app) as test_client:
         yield test_client
-
-
-@pytest.fixture
-def manifest() -> Iterator[None]:
-    before = tiers()
-    use_manifest({"list_models": "read", "send_to_bambuddy": "outward"})
-    yield
-    use_manifest(before)
 
 
 def script(*body: str) -> str:
@@ -82,7 +71,7 @@ def test_an_oversized_script_is_one_problem_for_the_whole_script(client: TestCli
 
 
 def test_the_host_functions_are_the_ones_a_script_is_checked_against(
-    client: TestClient, manifest: None
+    client: TestClient,
 ) -> None:
     response = client.get("/api/v1/workflow-script/host-functions")
     assert response.status_code == 200, response.text
@@ -105,15 +94,28 @@ def test_the_host_functions_are_the_ones_a_script_is_checked_against(
     ]
 
 
-def test_the_tools_carry_the_tiers_settings_raised(
-    client: TestClient, manifest: None, overrides: Overrides
-) -> None:
-    """Review of #2648: a grant names the tools as the run enforces them (`raise_tiers`,
-    which the grant routes check against), so the editor reads them so too."""
-    overrides.stored = {"tool_tiers": {"list_models": "outward", "send_to_bambuddy": "read"}}
+def test_the_tools_are_the_agents_at_their_tiers_now(client: TestClient, agent: AgentTiers) -> None:
+    """#2704: a grant names the tools as the agent resolves them (Settings' raised tiers,
+    disabled tools left out), so the editor lists them so too, from no file."""
+    agent.tiers["list_models"] = "outward"
+    agent.disabled.add("send_to_bambuddy")
     response = client.get("/api/v1/workflow-script/host-functions")
     assert response.status_code == 200, response.text
-    assert response.json()["tools"] == [
-        {"name": "list_models", "tier": "outward"},
-        {"name": "send_to_bambuddy", "tier": "outward"},
-    ]
+    body = response.json()
+    assert body["tools"] == [{"name": "list_models", "tier": "outward"}]
+    assert body["tools_unavailable"] is None
+
+
+def test_an_agent_that_does_not_answer_lists_no_tools(
+    client: TestClient, agent: AgentTiers
+) -> None:
+    async def down() -> dict[str, str]:
+        raise AgentToolsUnavailableError("connection refused")
+
+    agent.tool_tiers = down  # type: ignore[method-assign]
+    response = client.get("/api/v1/workflow-script/host-functions")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["tools"] == []
+    assert body["tools_unavailable"] == flow_script.TOOLS_UNAVAILABLE
+    assert [f["name"] for f in body["functions"]] == [t.__name__ for t in SCRIPT_TOOLS]

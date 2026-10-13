@@ -36,13 +36,6 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: 'A run grant is approved by the browser user only (amendment §3.2); the route refuses an agent-authored request.',
   },
   {
-    operation: 'POST /api/v1/workflow-runs/{run_id}/escalations/{call_id}',
-    reason:
-      "The starting session's deny, narrow or pass up of its run's call outside the run's grant (#2482, " +
-      "amendment §4.4). Reached only through the agent's own escalation route, which names the session " +
-      'from the one the call runs in, never from a tool argument; no tool calls the backend route itself.',
-  },
-  {
     operation: 'GET /api/v1/workflow-runs/{run_id}/proposals/{call_id}',
     reason:
       "A parent's narrowing beside the call it narrows, for the person to compare before approving it by " +
@@ -285,5 +278,13 @@ export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: str
   {
     route: 'PUT /api/v1/ai/settings/session-mode',
     reason: 'Changes how every new session runs: an operator decision made in Settings, never by an agent.',
+  },
+  {
+    route: 'GET /api/v1/ai/settings/durable-subagents',
+    reason: "Settings → Durable subagents: deployment wiring for the agent-durable worker, for the operator.",
+  },
+  {
+    route: 'PUT /api/v1/ai/settings/durable-subagents',
+    reason: 'Widens which network peers may call the agent: an operator decision made in Settings, never by an agent.',
   },
 ]

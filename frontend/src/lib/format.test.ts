@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import { bbox } from '../mocks/fixtures'
-import { formatBbox, formatBytes, formatDuration, formatValue, inkOn, normalizeHex, timeAgo } from './format'
+import {
+  formatBbox,
+  formatBytes,
+  formatDuration,
+  formatElapsed,
+  formatValue,
+  inkOn,
+  normalizeHex,
+  queuePlace,
+  timeAgo,
+} from './format'
 
 describe('formatBbox', () => {
   it('prints the size, one decimal, in millimetres', () => {
@@ -71,5 +81,18 @@ describe('formatBytes', () => {
     expect(formatBytes(2091667)).toBe('2.1 MB')
     expect(formatBytes(1846000000)).toBe('1.8 GB')
     expect(formatBytes(3e12)).toBe('3.0 TB')
+  })
+})
+
+describe('a waiting render (#1638)', () => {
+  it('says where it stands in the queue', () => {
+    expect(queuePlace(1)).toBe('next in line')
+    expect(queuePlace(4)).toBe('3 ahead')
+  })
+
+  it('counts its time to the second, never below zero', () => {
+    expect(formatElapsed(7.9)).toBe('0:07')
+    expect(formatElapsed(252)).toBe('4:12')
+    expect(formatElapsed(-3)).toBe('0:00')
   })
 })

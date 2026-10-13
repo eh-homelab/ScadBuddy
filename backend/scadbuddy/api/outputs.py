@@ -861,16 +861,14 @@ def _no_content(result: dict[str, Any] | Operation) -> Response:
     responses={200: {"content": {THREE_MF_MEDIA_TYPE: {}}}},
     summary="Download the 3MF",
 )
-async def download_output(
-    output_id: OutputIdPath, outputs: OutputsDep, store: SettingsStoreDep, catalogue: CatalogueDep
-) -> Response:
+async def download_output(output_id: OutputIdPath, outputs: OutputsDep) -> Response:
     meta = require_output(outputs, output_id)
     path = outputs.directory(output_id) / MODEL_NAME
     if not path.is_file():
         raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF")
-    # For the default printer, on its real presets (#769), with the template's own
-    # print settings (#770).
-    return await download_3mf(path, meta, store.load(), catalogue.print_settings(meta.slug))
+    # The saved file as it is (#2652): its presets and print settings were written when
+    # it was saved.
+    return download_3mf(path, meta)
 
 
 @router.get(
