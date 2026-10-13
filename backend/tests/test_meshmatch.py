@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import math
+import time
 
 import numpy as np
+import pytest
 import trimesh
 
 from scadbuddy.render.meshmatch import match_points, nearest_triangles, point_triangle_distance
@@ -48,10 +50,12 @@ def test_point_triangle_distance_by_region() -> None:
             [0.0, -1.0, 0.0],  # off a's corner along -y
             [0.3, 0.3, 0.0],  # in the face
             [1.0, 1.0, 0.0],  # off edge bc
+            [0.5, -1.0, 0.0],  # off edge ab
+            [-1.0, 0.5, 0.0],  # off edge ac
         ]
     )
     measured = point_triangle_distance(points, np.repeat(triangle, len(points), axis=0))
-    expected = [1.0, math.sqrt(2), 1.0, 0.0, 1.0, 0.0, math.sqrt(2) / 2]
+    expected = [1.0, math.sqrt(2), 1.0, 0.0, 1.0, 0.0, math.sqrt(2) / 2, 1.0, 1.0]
     assert np.allclose(measured, expected)
 
 
@@ -68,3 +72,49 @@ def test_nearest_triangles_within_the_tolerance() -> None:
     assert math.isclose(distance[0], 0.005, abs_tol=1e-9)
     assert index[1:].tolist() == [-1, -1]
     assert np.isinf(distance[1:]).all()
+
+
+def test_many_identical_points_are_matched_quickly() -> None:
+    source = np.tile([1.0, 2.0, 3.0], (20_000, 1))
+    began = time.perf_counter()
+    found = match_points(source, source.copy(), 1e-4)
+    assert time.perf_counter() - began < 5
+    assert (found == 0).all()
+
+
+def test_a_cell_of_too_many_distinct_points_is_refused() -> None:
+    source = np.zeros((200, 3))
+    source[:, 0] = np.arange(200) * 1e-7
+    with pytest.raises(ValueError, match="distinct points"):
+        match_points(source, source, 1e-4)
+
+
+def test_nearest_triangles_on_a_large_sphere_agrees_with_brute_force() -> None:
+    sphere = trimesh.creation.icosphere(subdivisions=5)
+    assert len(sphere.faces) == 20480
+    triangles = np.asarray(sphere.triangles, dtype=np.float64)
+    rng = np.random.default_rng(2)
+    on = triangles[rng.integers(0, len(triangles), 10_000)].mean(axis=1)
+    direction = rng.normal(size=(10_000, 3))
+    direction /= np.linalg.norm(direction, axis=1)[:, None]
+    points = on + direction * rng.uniform(0, 0.009, (10_000, 1))
+    began = time.perf_counter()
+    index, distance = nearest_triangles(points, triangles, 0.01)
+    assert time.perf_counter() - began < 5
+    for i in range(0, 10_000, 20):
+        every = point_triangle_distance(
+            np.repeat(points[i : i + 1], len(triangles), axis=0), triangles
+        )
+        assert math.isclose(distance[i], every.min(), abs_tol=1e-9)
+        assert math.isclose(every[index[i]], every.min(), abs_tol=1e-9)
+
+
+def test_a_triangle_covering_many_cells_is_still_found() -> None:
+    triangles = np.array(
+        [
+            [[0.0, 0.0, 0.0], [100.0, 0.0, 0.0], [0.0, 100.0, 0.0]],
+            [[0.0, 0.0, 50.0], [0.1, 0.0, 50.0], [0.0, 0.1, 50.0]],
+        ]
+    )
+    index, _ = nearest_triangles(np.array([[10.0, 10.0, 0.005], [0.0, 0.0, 50.0]]), triangles, 0.01)
+    assert index.tolist() == [0, 1]

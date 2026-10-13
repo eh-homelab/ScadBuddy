@@ -20,17 +20,23 @@ _BITS = 21
 _CELLS = 1 << _BITS
 #: The smallest cell, mm.
 MIN_CELL = 1e-3
-#: Point and triangle pairs `nearest_triangles` compares at once (memory, not time).
+#: Point and triangle pairs `nearest_triangles` measures at once (memory, not time).
 _CHUNK_PAIRS = 1 << 22
+#: Most distinct source points one cell may hold, and most cells one triangle may be
+#: registered in (a larger one is checked against every point instead).
+CELL_CAP = 64
 
 
 def match_points(source: FloatArray, query: FloatArray, tol: float) -> IntArray:
     """For each ``query`` point, the index of the nearest ``source`` point at most
     ``tol`` away, or -1. Points are binned into cells no smaller than ``tol``, so a
-    match is in the point's own cell or one of its 26 neighbours."""
+    match is in the point's own cell or one of its 26 neighbours. Identical source
+    points are one point; a cell that still holds more than ``CELL_CAP`` distinct
+    points raises ValueError (the work per query point is bounded by it)."""
     found = np.full(len(query), -1, dtype=np.int64)
     if len(source) == 0 or len(query) == 0:
         return found
+    source, first = np.unique(source, axis=0, return_index=True)
     low = np.minimum(source.min(axis=0), query.min(axis=0)) - 2 * tol
     span = float((np.maximum(source.max(axis=0), query.max(axis=0)) - low).max()) + 2 * tol
     cell = max(MIN_CELL, tol, span / (_CELLS - 2))
@@ -45,6 +51,8 @@ def match_points(source: FloatArray, query: FloatArray, tol: float) -> IntArray:
     order = np.argsort(keys, kind="stable")
     ordered = keys[order]
     most = int(np.unique(ordered, return_counts=True)[1].max())
+    if most > CELL_CAP:
+        raise ValueError(f"{most} distinct points in one cell; the limit is {CELL_CAP}")
     best = np.full(len(query), np.inf)
     home = cells(query)
     for offset in itertools.product((-1, 0, 1), repeat=3):
@@ -63,7 +71,7 @@ def match_points(source: FloatArray, query: FloatArray, tol: float) -> IntArray:
             distance = np.linalg.norm(source[candidates] - query[rows], axis=1)
             better = (distance <= tol) & (distance < best[rows])
             best[rows[better]] = distance[better]
-            found[rows[better]] = candidates[better]
+            found[rows[better]] = first[candidates[better]]
     return found
 
 
@@ -109,33 +117,100 @@ def point_triangle_distance(points: FloatArray, triangles: FloatArray) -> FloatA
     return np.asarray(distance, dtype=np.float64)
 
 
+def _commit(
+    index: IntArray,
+    distance: FloatArray,
+    points: FloatArray,
+    triangles: FloatArray,
+    rows: IntArray,
+    cols: IntArray,
+    tol: float,
+) -> None:
+    """Measure the pairs (``points[rows[i]]``, ``triangles[cols[i]]``), at most
+    ``_CHUNK_PAIRS`` at a time, and keep each point's nearest within ``tol``."""
+    for start in range(0, len(rows), _CHUNK_PAIRS):
+        r = rows[start : start + _CHUNK_PAIRS]
+        c = cols[start : start + _CHUNK_PAIRS]
+        measured = point_triangle_distance(points[r], triangles[c])
+        keep = measured <= tol
+        r, c, measured = r[keep], c[keep], measured[keep]
+        if len(r) == 0:
+            continue
+        order = np.lexsort((measured, r))
+        r, c, measured = r[order], c[order], measured[order]
+        first = np.r_[True, r[1:] != r[:-1]]
+        r, c, measured = r[first], c[first], measured[first]
+        better = measured < distance[r]
+        index[r[better]] = c[better]
+        distance[r[better]] = measured[better]
+
+
+def _expand(counts: IntArray) -> tuple[IntArray, IntArray]:
+    """For ``counts`` [2, 0, 3]: owners [0, 0, 2, 2, 2] and offsets [0, 1, 0, 1, 2]."""
+    owners = np.repeat(np.arange(len(counts)), counts)
+    starts = np.cumsum(counts) - counts
+    return owners, np.arange(int(counts.sum())) - starts[owners]
+
+
 def nearest_triangles(
     points: FloatArray, triangles: FloatArray, tol: float
 ) -> tuple[IntArray, FloatArray]:
     """For each point, the index of the nearest of ``triangles`` (shape (m, 3, 3)) at
-    most ``tol`` away, or -1, and that distance (inf for -1). Only triangles whose box,
-    grown by ``tol``, holds the point are measured."""
+    most ``tol`` away, or -1, and that distance (inf for -1). Triangles are binned in a
+    uniform grid (cells of the median box extent, at least ``tol``), each in every cell
+    its box grown by ``tol`` covers, so a point's candidates are its own cell's. A
+    triangle covering more than ``CELL_CAP`` cells is "large": it is a candidate of
+    every point whose grown box holds it."""
     index = np.full(len(points), -1, dtype=np.int64)
     distance = np.full(len(points), np.inf)
     if len(points) == 0 or len(triangles) == 0:
         return index, distance
     low = triangles.min(axis=1) - tol
     high = triangles.max(axis=1) + tol
-    chunk = max(1, _CHUNK_PAIRS // len(triangles))
-    for start in range(0, len(points), chunk):
-        block = points[start : start + chunk]
-        near = ((block[:, None, :] >= low[None]) & (block[:, None, :] <= high[None])).all(axis=2)
-        rows, cols = np.nonzero(near)
-        if len(rows) == 0:
-            continue
-        measured = point_triangle_distance(block[rows], triangles[cols])
-        keep = measured <= tol
-        rows, cols, measured = rows[keep], cols[keep], measured[keep]
-        if len(rows) == 0:
-            continue
-        order = np.lexsort((measured, rows))
-        rows, cols, measured = rows[order], cols[order], measured[order]
-        first = np.r_[True, rows[1:] != rows[:-1]]
-        index[start + rows[first]] = cols[first]
-        distance[start + rows[first]] = measured[first]
+    origin = low.min(axis=0)
+    span = float((high.max(axis=0) - origin).max())
+    cell = max(float(np.median((high - low).max(axis=1))), tol, span / (_CELLS - 2))
+    first = np.floor((low - origin) / cell).astype(np.int64)
+    dims = np.floor((high - origin) / cell).astype(np.int64) - first + 1
+    counts = dims.prod(axis=1)
+    large = np.flatnonzero(counts > CELL_CAP)
+    small = np.flatnonzero(counts <= CELL_CAP)
+
+    def key(c: IntArray) -> IntArray:
+        return (c[:, 0] << (2 * _BITS)) | (c[:, 1] << _BITS) | c[:, 2]
+
+    owners, k = _expand(counts[small])
+    tri = small[owners]
+    d = dims[tri]
+    step = np.stack([k // (d[:, 1] * d[:, 2]), (k // d[:, 2]) % d[:, 1], k % d[:, 2]], axis=1)
+    keys = key(first[tri] + step)
+    order = np.argsort(keys, kind="stable")
+    keys, tri = keys[order], tri[order]
+
+    home = np.floor((points - origin) / cell).astype(np.int64)
+    inside = ((home >= 0) & (home < _CELLS)).all(axis=1)
+    wanted = key(np.clip(home, 0, _CELLS - 1))
+    begin = np.searchsorted(keys, wanted, side="left")
+    end = np.where(inside, np.searchsorted(keys, wanted, side="right"), begin)
+    # Points in groups whose candidate pairs fit one chunk (a lone point may exceed it).
+    ends = np.cumsum(end - begin)
+    row = 0
+    while row < len(points):
+        base = ends[row - 1] if row else 0
+        stop = max(row + 1, int(np.searchsorted(ends, base + _CHUNK_PAIRS, side="right")))
+        stop = min(stop, len(points))
+        who, within = _expand((end - begin)[row:stop])
+        _commit(
+            index, distance, points, triangles, row + who, tri[begin[row:stop][who] + within], tol
+        )
+        row = stop
+    if len(large):
+        block = max(1, _CHUNK_PAIRS // len(large))
+        for start in range(0, len(points), block):
+            chunk = points[start : start + block]
+            near = (
+                (chunk[:, None, :] >= low[large][None]) & (chunk[:, None, :] <= high[large][None])
+            ).all(axis=2)
+            rows, cols = np.nonzero(near)
+            _commit(index, distance, points, triangles, start + rows, large[cols], tol)
     return index, distance
