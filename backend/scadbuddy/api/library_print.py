@@ -46,7 +46,13 @@ from scadbuddy.bambuddy.library_view import (
     library_filaments,
     library_preview,
 )
-from scadbuddy.bambuddy.preview import PreviewStarted, SlicePreview, read_preview
+from scadbuddy.bambuddy.preview import (
+    TOOLPATH_HEADERS,
+    PreviewStarted,
+    SlicePreview,
+    read_preview,
+    read_toolpath,
+)
 from scadbuddy.bambuddy.print_run import (
     PrintCheck,
     PrintRunRequest,
@@ -649,6 +655,28 @@ async def get_library_preview_slice(
         return await read_preview(
             client, uploads, job_id, PrintSubject.library(file_id).run_subject
         )
+
+
+@router.get(
+    "/{file_id}/preview-slices/{job_id}/toolpath",
+    response_class=Response,
+    responses={
+        200: {
+            "content": {"application/octet-stream": {}},
+            "description": "The toolpath, as `scadbuddy.bambuddy.toolpath` encodes it",
+        }
+    },
+    summary="The toolpath of a finished background slice",
+)
+async def get_library_preview_toolpath(
+    file_id: FileIdPath, job_id: int, store: SettingsStoreDep, uploads: UploadsDep
+) -> Response:
+    """As ``/print/outputs/{id}/preview-slices/{job}/toolpath``, for a library file's."""
+    async with client_for(store.load()) as client:
+        body = await read_toolpath(
+            client, uploads, job_id, PrintSubject.library(file_id).run_subject
+        )
+    return Response(body, media_type="application/octet-stream", headers=TOOLPATH_HEADERS)
 
 
 @router.post(

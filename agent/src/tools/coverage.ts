@@ -212,6 +212,18 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   },
   ...(
     [
+      'GET /api/v1/print/outputs/{output_id}/preview-slices/{job_id}/toolpath',
+      'GET /api/v1/print/library/{file_id}/preview-slices/{job_id}/toolpath',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      "The background slice's toolpath (#2072): binary float32 segments the plate preview draws as its " +
+      'Speed, Movement and Layers views. It is for drawing, not reading; get the slice\'s grams, time and ' +
+      'filament changes from the print check.',
+  })),
+  ...(
+    [
       'POST /api/v1/print/outputs/{output_id}/preview-slice',
       'POST /api/v1/print/library/{file_id}/preview-slice',
       'GET /api/v1/print/outputs/{output_id}/preview-slices/{job_id}',
