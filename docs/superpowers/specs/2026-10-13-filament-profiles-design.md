@@ -72,3 +72,31 @@ What this shows:
   slicer's own slowdowns and are the same in both.
 - **Nothing else changes.** Inner walls, move counts and filament are identical.
 - **The cost is time.** On this small part the estimate rose by 2m 40s, about 12%.
+
+## 4. Nozzle temperature: no channel yet (#2799, 2026-10-13)
+
+Silk's 235 °C stays a note, because no tested route sets one slot's nozzle temperature
+for a slice.
+
+- **The slice dialog has none.** Bambuddy's settings panel lists process options only.
+  Searching "temperature" with Expert on finds only the ooze-prevention variation and
+  the prime-tower cooldown.
+- **The slice API has no filament field.** Its `SliceRequest`
+  (`backend/app/schemas/slicer.py`) carries filament presets and colours, and two kinds
+  of override. `design_overrides` carries only the source 3MF's process keys (index 0
+  of `different_settings_to_system`). `process_overrides` goes into the process JSON.
+- **One route is untested.** `apply_process_overrides` merges any lowercase key into
+  the process JSON, so a `nozzle_temperature` override would reach the slicer's
+  `--load-settings` process file. Whether the slicer honours a filament key there, or
+  the filament preset wins, has not been measured. The dialog cannot send the key, and
+  a direct slice request was not permitted in this session.
+- **Plain baseline,** measured on file 188 with H2C 0.4, `0.20mm Standard @BBL H2C`
+  and 2× `Bambu PLA Basic @BBL H2C`:
+  - `nozzle_temperature` and `nozzle_temperature_initial_layer` are both `["220"]`
+    ×6, which is six entries for two filaments, per variant like the speeds.
+  - The G-code sets `M104 S220` four times.
+
+  A test of the untested route must therefore send six entries, not one per slot.
+
+Until that is measured, or Bambuddy gains a filament override, the temperature is set
+in the spool's filament preset, as the note says.
