@@ -164,6 +164,9 @@ class TurnTool:
     # The replica's own queue when its server's state lives there (http_request's saved
     # bodies); None: agent-tools.
     task_queue: str | None = None
+    # Its tier when that does not depend on the input, for the transcript's label;
+    # None: it does (or an older agent listed it), and the label says outward.
+    tier: str | None = None
 
 
 @dataclass
@@ -208,6 +211,9 @@ class FollowArgs:
     prompted: bool = False
     # TurnStart.started_at: an end published before it is an earlier turn's (#2123).
     since: str | None = None
+    # This turn's turn tools' tiers, as turn_tools listed them, for the calls' labels:
+    # the manifest knows only ScadBuddy's own tools.
+    tiers: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
