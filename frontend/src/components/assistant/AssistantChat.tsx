@@ -40,6 +40,7 @@ import { BudgetMeter, BudgetSpent, usd } from './SessionBudget'
 import { ArchivedSessions } from './ArchivedSessions'
 import { SessionSwitcher } from './SessionSwitcher'
 import { useSkillMenu } from './SkillMenu'
+import { SessionBackgroundTasks } from './SessionBackgroundTasks'
 import { SessionFiles } from './SessionFiles'
 import { SessionFlowRuns } from './SessionFlowRuns'
 import { SessionTouched } from './SessionTouched'
@@ -786,6 +787,10 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
       )}
 
       {active && <SessionFlowRuns key={active.id} sessionId={active.id} />}
+
+      {active && (
+        <SessionBackgroundTasks key={active.id} sessionId={active.id} refreshKey={`${active.status}:${finishedTools}`} canWrite={canSend} />
+      )}
 
       <div
         role="log"

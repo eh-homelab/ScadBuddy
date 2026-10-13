@@ -1,3 +1,5 @@
+import { BACKGROUND_BUILTINS, BUILTIN_SERVER, backgroundNote, backgroundSdkServer } from '../builtins/server.js'
+import type { BackgroundTasks } from '../background/service.js'
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import {
@@ -685,6 +687,12 @@ export type SessionManagerDeps = {
    * `settings`) when omitted.
    */
   workspace?: SessionFiles
+  /**
+   * A session's background tasks (src/background/): a classic turn whose allowed packages
+   * name CronCreate and the rest gets the session's in place of Claude Code's own, which
+   * end with the turn. Without it those are Claude Code's.
+   */
+  background?: { tasks: BackgroundTasks; tz: string }
   run?: QueryRunner
   /** Per-token approval grants (spec §6); nobody but the browser user may approve without one. */
   approvalGrants?: GrantCheck
@@ -1713,6 +1721,11 @@ export class SessionManager {
                 ...(this.deps.httpRequest.limits ? { limits: this.deps.httpRequest.limits } : {}),
               })
             : undefined
+        // The background built-ins the packages name, kept by the session instead of Claude Code.
+        const background =
+          this.deps.background && allowedPluginPaths.length
+            ? (packages?.builtinTools ?? []).filter((n) => BACKGROUND_BUILTINS.includes(n))
+            : []
         const gate = this.approvals.gate({
           sessionId: id,
           turnId,
@@ -1755,11 +1768,11 @@ export class SessionManager {
           ...(builtIn ? { builtInPolicy: builtIn } : {}),
           approvalGate: auditor ? auditor.gate(gate, (toolUseId) => this.approvals.idForToolUse(id, toolUseId)) : gate,
           ...(questionGate ? { questionGate } : {}),
-          systemPromptAppend: systemAppend(),
+          systemPromptAppend: background.length ? `${systemAppend()}\n\n${backgroundNote(background)}` : systemAppend(),
           // First turn: the SDK session gets OUR id; later turns resume it.
           ...(resume ? { resume: id } : { sessionId: id }),
           ...(typeof model === 'string' && model ? { model } : {}),
-          ...(this.deps.mcpServers || http
+          ...(this.deps.mcpServers || http || background.length
             ? {
                 mcpServers: {
                   ...(this.deps.mcpServers
@@ -1778,11 +1791,24 @@ export class SessionManager {
                       )
                     : {}),
                   ...(http ? { [HTTP_SERVER]: http } : {}),
+                  ...(background.length && this.deps.background
+                    ? {
+                        [BUILTIN_SERVER]: backgroundSdkServer(background, {
+                          tasks: this.deps.background.tasks,
+                          sessionId: id,
+                          owner: session.owner,
+                          tz: this.deps.background.tz,
+                          now: () => new Date(),
+                        }),
+                      }
+                    : {}),
                 },
               }
             : {}),
           ...(pluginPaths.length ? { pluginPaths } : {}),
-          ...(allowedPluginPaths.length ? { allowedPluginPaths, builtinTools: packages?.builtinTools ?? [] } : {}),
+          ...(allowedPluginPaths.length
+            ? { allowedPluginPaths, builtinTools: (packages?.builtinTools ?? []).filter((n) => !background.includes(n)) }
+            : {}),
           ...(ownPlugin !== undefined ? { ownPlugin } : {}),
           ...(remotePlugins.length ? { remotePlugins } : {}),
           ...(memory ? { memoryHooks: memory.hooks } : {}),

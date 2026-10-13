@@ -2,7 +2,8 @@ import { mkdir, readdir, rm, stat } from 'node:fs/promises'
 import path from 'node:path'
 import type { Sql } from 'postgres'
 import type { AuditSink } from '../audit/log.js'
-import { BUILTIN_SERVER, builtinServer, PROVIDED } from '../builtins/server.js'
+import { BACKGROUND_BUILTINS, BUILTIN_SERVER, builtinServer, PROVIDED } from '../builtins/server.js'
+import type { BackgroundTasks } from '../background/service.js'
 import type { NestedQueries } from '../builtins/web.js'
 import { HTTP_READ_TOOL_NAME, HTTP_SERVER, httpRequestEnabled, httpRequestServer, httpTierOf, SETTING_HTTP_REQUEST } from '../harness/httpRequest.js'
 import type { HttpLimits } from '../harness/httpRequest.js'
@@ -119,6 +120,8 @@ export type TurnServerDeps = {
         nested: (context: TurnContext) => NestedQueries
         audit?: AuditSink | undefined
         resolve?: Resolver
+        /** The session's background tasks (CronCreate, ScheduleWakeup, TaskStop); without them those are not offered. */
+        background?: { tasks: BackgroundTasks; tz: string; now?: () => Date } | undefined
       }
     | undefined
 }
@@ -130,7 +133,11 @@ export function builtinNote(names: readonly string[]): string {
     `Claude Code's built-in tools ${tools} are provided in this session as tools of the "${BUILTIN_SERVER}" server, because a ` +
     'plugin package you have names them. Use them where its skills or agents say to use the built-in of that name: they take ' +
     'the same input and answer the same way. Every call of one asks the user first. Their files are the session workspace, ' +
-    'shown under /workspace (the workspace_* tools see the same files), not a local disk.'
+    'shown under /workspace (the workspace_* tools see the same files), not a local disk.' +
+    (names.some((n) => BACKGROUND_BUILTINS.includes(n))
+      ? ' The session keeps the jobs and wakeups they schedule past this turn: each sends its prompt to the session as a new ' +
+        'message when it is due and the session is idle.'
+      : '')
   )
 }
 
@@ -209,7 +216,10 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
     const problems = [...(forwarded?.problems ?? [])]
     const notes: string[] = []
     // A flow has no session workspace for the file tools to act on, nor a turn to tell.
-    const provided: ReadonlySet<string> = deps.builtins && !context.flow ? PROVIDED : new Set()
+    const provided: ReadonlySet<string> =
+      deps.builtins && !context.flow
+        ? new Set([...PROVIDED].filter((n) => deps.builtins!.background || !BACKGROUND_BUILTINS.includes(n)))
+        : new Set()
     const loaded = deps.packages ? await deps.packages.load() : undefined
     let forwardedPackages: PackageServers | undefined
     let shared: TurnPackage[] | undefined
@@ -263,9 +273,13 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
           signal: context.signal,
           ...(builtins.resolve ? { resolve: builtins.resolve } : {}),
         }
+        const tasks = builtins.background
+        const background = tasks
+          ? { tasks: tasks.tasks, sessionId: context.session, owner: context.owner, tz: tasks.tz, now: tasks.now ?? (() => new Date()) }
+          : undefined
         servers.push({
           name: BUILTIN_SERVER,
-          connect: () => connectInProcess(() => builtinServer(named, () => ({ files, web }))),
+          connect: () => connectInProcess(() => builtinServer(named, () => ({ files, web, background }))),
           // Every package built-in is outward, as in a classic turn (run.ts `builtinTools`).
           tierOf: () => 'outward',
           mayPark: () => true,
