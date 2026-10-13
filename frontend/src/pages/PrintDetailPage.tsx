@@ -64,7 +64,7 @@ function gallerySlides(print: PrintDetail): Slide[] {
       key: 'timelapse',
       kind: 'video',
       src: media.timelapse.url,
-      poster: media.timelapse.poster_frames[0]?.data_url,
+      poster: media.timelapse.poster_url,
       alt: 'Timelapse',
       contentType: 'video/mp4',
     })
@@ -303,6 +303,11 @@ function TimelapseSection({ print, onPulled }: { print: PrintDetail; onPulled: (
   const [onPrinter, setOnPrinter] = useState<PrinterMedia | null>(null)
   const [pulling, setPulling] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // #2360 — read after the page shows: Bambuddy can take tens of seconds over them.
+  const stills = useAsync(
+    async () => (timelapse ? await api.getTimelapseFrames(print.archive_id).catch(() => null) : null),
+    [print.archive_id, timelapse?.frames_url],
+  )
 
   async function look() {
     setLooking(true)
@@ -332,7 +337,8 @@ function TimelapseSection({ print, onPulled }: { print: PrintDetail; onPulled: (
   }
 
   if (timelapse) {
-    const info = timelapse.info
+    const info = stills.data?.info ?? null
+    const frames = stills.data?.frames ?? []
     return (
       <Section title="Timelapse">
         {/* Native controls against the Range proxy: a seek fetches only those bytes.
@@ -340,7 +346,7 @@ function TimelapseSection({ print, onPulled }: { print: PrintDetail; onPulled: (
         <video
           ref={video}
           src={timelapse.url}
-          poster={timelapse.poster_frames[0]?.data_url}
+          poster={timelapse.poster_url}
           controls
           controlsList={isEmbedded() ? 'nofullscreen' : undefined}
           playsInline
@@ -352,9 +358,9 @@ function TimelapseSection({ print, onPulled }: { print: PrintDetail; onPulled: (
             {clock(info.duration)} · {info.width}×{info.height} · {formatBytes(info.file_size)}
           </p>
         )}
-        {timelapse.poster_frames.length > 1 || (timelapse.poster_frames.length === 1 && info) ? (
+        {frames.length > 1 || (frames.length === 1 && info) ? (
           <ul aria-label="Timelapse frames" className="mt-2 flex gap-1.5 overflow-x-auto">
-            {timelapse.poster_frames.map((frame) => (
+            {frames.map((frame) => (
               <li key={frame.timestamp} className="shrink-0">
                 <button
                   type="button"
@@ -364,7 +370,7 @@ function TimelapseSection({ print, onPulled }: { print: PrintDetail; onPulled: (
                   }}
                   className="block overflow-hidden rounded-[4px] focus-visible:ring-2 focus-visible:ring-accent focus-visible:outline-none"
                 >
-                  <img src={frame.data_url} alt="" className="h-12 w-auto" />
+                  <img src={frame.url} alt="" loading="lazy" className="h-12 w-auto" />
                 </button>
               </li>
             ))}

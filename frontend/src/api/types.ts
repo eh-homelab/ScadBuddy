@@ -233,6 +233,7 @@ export type PrintProgress = Schemas['PrintProgress']
 export type PrintSummary = Schemas['PrintSummary']
 export type PrintPage = Schemas['PrintPage']
 export type PrintDetail = Schemas['PrintDetail']
+export type TimelapseFrames = Schemas['TimelapseFrames']
 /** #311 — the print detail page's two writes. */
 export type PrintAgain = Schemas['PrintAgain']
 export type PrinterMedia = Schemas['PrinterMedia']

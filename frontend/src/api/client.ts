@@ -77,6 +77,7 @@ import type {
   RackAlgorithm,
   PrintAgain,
   PrintDetail,
+  TimelapseFrames,
   PrintPage,
   PrintProgress,
   PrintCheck,
@@ -1273,6 +1274,12 @@ export const api = {
    */
   getPrint: (archiveId: number, { printerMedia = false } = {}) =>
     request<PrintDetail>(`/prints/${archiveId}${printerMedia ? '?printer_media=1' : ''}`),
+
+  /**
+   * #2360 — a print's timelapse stills and Bambuddy's probe of it, read after the detail:
+   * Bambuddy makes them with ffmpeg, which can take tens of seconds.
+   */
+  getTimelapseFrames: (archiveId: number) => request<TimelapseFrames>(`/prints/${archiveId}/timelapse/frames`),
 
   /** #311 — "Print again": queues the archive on its printer (Bambuddy's reprint is gone). */
   reprint: (archiveId: number) => command<PrintAgain>(`/prints/${archiveId}/reprint`, { method: 'POST' }),
