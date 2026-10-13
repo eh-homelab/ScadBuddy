@@ -87,6 +87,9 @@ THREE_MF_MEDIA_TYPE = "model/3mf"
 
 DEFAULT_TIMEOUT = 30.0
 DEFAULT_UPLOAD_TIMEOUT = 180.0
+#: The largest camera frame read into memory: a JPEG of a printer's camera is well
+#: under a megabyte, so past this Bambuddy is answering something else (#1006).
+MAX_CAMERA_FRAME_BYTES = 16 * 1024 * 1024
 DEFAULT_SLICE_TIMEOUT = 600.0
 DEFAULT_SLICE_POLL = 2.0
 #: The largest page ``GET /library/trash`` serves (``limit`` is ``le=500``).
@@ -370,15 +373,22 @@ class BambuddyClient:
         """
         what = f"capture the camera of printer {printer_id}"
         token = await self._camera_token(what=what)
-        response = await self._send(
-            "GET",
+        frame = bytearray()
+        async with self.stream(
             f"/printers/{printer_id}/camera/snapshot",
-            scope=Scope.READ_STATUS,
             operation="printers.camera.snapshot",
             what=what,
             params={"token": token},
-        )
-        return response.content
+        ) as response:
+            async for chunk in response.aiter_bytes():
+                frame += chunk
+                if len(frame) > MAX_CAMERA_FRAME_BYTES:
+                    raise ApiError(
+                        status.HTTP_502_BAD_GATEWAY,
+                        f"Bambuddy's frame was over {MAX_CAMERA_FRAME_BYTES} bytes when asked"
+                        f" to {what}",
+                    )
+        return bytes(frame)
 
     @asynccontextmanager
     async def camera_stream(
@@ -817,6 +827,7 @@ class BambuddyClient:
         what: str,
         range_header: str | None = None,
         if_range: str | None = None,
+        params: Mapping[str, str] | None = None,
     ) -> AsyncIterator[httpx.Response]:
         """``GET path`` without reading the body, for the media proxy (#307).
 
@@ -832,7 +843,9 @@ class BambuddyClient:
             headers["Range"] = range_header
         if if_range is not None:
             headers["If-Range"] = if_range
-        request = self._http.build_request("GET", self.config.url(path), headers=headers)
+        request = self._http.build_request(
+            "GET", self.config.url(path), headers=headers, params=params
+        )
         # The span fails only on what Bambuddy did: an error the consumer raises inside
         # the ``async with`` (a browser that went away) leaves it, and is raised after.
         # A transport error there is the body's read failing, which is Bambuddy's.

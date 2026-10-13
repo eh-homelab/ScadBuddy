@@ -24,6 +24,7 @@ from starlette.requests import ClientDisconnect
 from scadbuddy.api import printing
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.bambuddy.client import mjpeg_type
+from scadbuddy.bambuddy import client as bambuddy_client
 from tests.api.test_send import API, configure
 
 JPEG = b"\xff\xd8\xff\xe0camera-frame\xff\xd9"
@@ -392,3 +393,52 @@ def test_only_a_multipart_mjpeg_type_with_a_plain_boundary_is_kept(
     upstream: str | None, served: str
 ) -> None:
     assert mjpeg_type(upstream) == served
+
+
+@respx.mock
+def test_a_snapshot_refused_after_the_mint_maps_as_any_refusal(client: TestClient) -> None:
+    """#1006: the token minted, then the snapshot refused it (expired in a slow capture)."""
+    configure(client)
+    token_route()
+    respx.get(f"{API}/printers/7/camera/snapshot").mock(
+        return_value=httpx.Response(403, json={"detail": "Invalid stream token"})
+    )
+
+    response = client.get("/api/v1/print/printers/7/camera")
+
+    assert response.status_code == 409
+    assert response.json()["required_scope"] == "Read Status"
+
+
+@respx.mock
+def test_a_mint_with_no_token_is_a_bad_gateway(client: TestClient) -> None:
+    """#1006: a 200 whose body is not ``{"token": str}`` is Bambuddy's fault, named."""
+    configure(client)
+    snapshot = respx.get(f"{API}/printers/7/camera/snapshot")
+    bodies: list[object] = [{}, None, [], {"token": 5}]
+    for body in bodies:
+        respx.post(f"{API}/printers/camera/stream-token").mock(
+            return_value=httpx.Response(200, json=body)
+        )
+        response = client.get("/api/v1/print/printers/7/camera")
+        assert response.status_code == 502, body
+        assert "no camera token" in response.json()["detail"]
+    assert not snapshot.called
+
+
+@respx.mock
+def test_a_frame_past_the_cap_is_refused_before_it_is_all_read(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#1006: the frame is read with a cap, not buffered whole."""
+    monkeypatch.setattr(bambuddy_client, "MAX_CAMERA_FRAME_BYTES", 64)
+    configure(client)
+    token_route()
+    respx.get(f"{API}/printers/7/camera/snapshot").mock(
+        return_value=httpx.Response(200, content=b"x" * 65, headers={"Content-Type": "image/jpeg"})
+    )
+
+    response = client.get("/api/v1/print/printers/7/camera")
+
+    assert response.status_code == 502
+    assert "over 64 bytes" in response.json()["detail"]
