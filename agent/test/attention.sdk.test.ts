@@ -92,6 +92,11 @@ describe('parseAttention', () => {
       ok: false,
       error: expect.stringMatching(/^on_timeout 'wait' takes no timeout_s: it waits up to 24 hours/),
     })
+    // A done request with both gets done's own refusal, the more specific one.
+    expect(parseAttention({ reason: 'done', message: MESSAGE, timeout_s: 60, on_timeout: 'wait' })).toEqual({
+      ok: false,
+      error: expect.stringMatching(/^reason 'done' takes no timeout_s, on_timeout:/),
+    })
   })
 
   // #815 §4: a done summary is posted, never waited on.

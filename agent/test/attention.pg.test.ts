@@ -13,7 +13,7 @@ import { originPolicy } from '../src/http/origins.js'
 import { loadDoneSummary } from '../src/questions/doneSummary.js'
 import { ATTENTION_RATE_LIMIT, ATTENTION_RATE_WINDOW_S, DONE_POSTS_PER_TURN, PENDING_CAP, TAB_WAIT_RATE_LIMIT } from '../src/questions/service.js'
 import { pendingInput } from '../src/routes/pendingInput.js'
-import { resolveTabWaits, type SessionManager, TAB_WAIT_S, TAB_WAITS_PER_TURN, waitForTab } from '../src/sessions/manager.js'
+import { CLAIMED_AT, resolveTabWaits, type SessionManager, TAB_WAIT_S, TAB_WAITS_PER_TURN, waitForTab } from '../src/sessions/manager.js'
 import { browserTools } from '../src/tools/browser.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { SERVER_NAME } from '../src/tools/projections.js'
@@ -783,6 +783,19 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     expect(await listed()).toEqual(['done'])
   })
 
+  // #1383: the turn's start reaches the done summary as text, so its form must not
+  // depend on the connection's settings.
+  it("gives a claim's time as UTC ISO 8601 at microseconds, whatever DateStyle and TimeZone say", async () => {
+    await db.sql.begin(async (tx) => {
+      await tx`SET LOCAL DateStyle = 'SQL, DMY'`
+      await tx`SET LOCAL TimeZone = 'Asia/Kolkata'`
+      const [row] = await tx.unsafe<{ claimed_at: string }[]>(
+        `SELECT ${CLAIMED_AT} FROM (SELECT timestamptz '2026-10-13 21:00:00.123456+00' AS updated_at) AS t`,
+      )
+      expect(row?.claimed_at).toBe('2026-10-13T21:00:00.123456Z')
+    })
+  })
+
   // #1383: done is outside the rate limit, so a model looping on it is capped per turn,
   // before it scans the turn's touches or writes anything.
   it(`refuses a turn's done posts past ${DONE_POSTS_PER_TURN}, and keeps the last one it took`, async () => {
@@ -792,9 +805,14 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
         for (let i = 0; i <= DONE_POSTS_PER_TURN; i++) verdicts.push(await postDone(run, `toolu_done${i}`))
         yield result(run)
       })()
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: looping, approvalPollMs: 20 })
+    const audit = new AuditLog({ sql: db.sql })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: looping, approvalPollMs: 20, audit })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
     await turn!.done
+    // #1205: the refused post is audited as the rate limit's refusal is.
+    expect(await db.sql`SELECT action, outcome, session_id FROM ai_audit WHERE kind = 'question' AND action = 'rate_limited'`).toEqual([
+      { action: 'rate_limited', outcome: 'refused', session_id: session.id },
+    ])
     expect(verdicts.slice(0, DONE_POSTS_PER_TURN)).toEqual(Array(DONE_POSTS_PER_TURN).fill({ answered: false, posted: true, message: 'posted' }))
     expect(verdicts[DONE_POSTS_PER_TURN]).toEqual({
       answered: false,
@@ -1371,11 +1389,13 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
         results.push(await wait!({ tool: 'browser_snapshot', toolUseId: 'toolu_lim', signal: new AbortController().signal, isBack: () => Promise.resolve(false) }))
         yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: r.sessionId ?? r.resume } as unknown as SDKMessage
       })()
+    const audit = new AuditLog({ sql: db.sql })
     const m = manager({
       sql: db.sql,
       paths: await tempPaths(),
       run,
       approvalPollMs: 20,
+      audit,
       mcpServers: (_session, _turn, extras) => {
         wait = extras?.waitForTab
         return {}
@@ -1398,6 +1418,10 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
       },
     ])
     expect(await db.sql`SELECT 1 FROM ai_questions WHERE session_id = ${session.id}`).toEqual([])
+    // #1205: audited as the model's own rate limit is.
+    expect(await db.sql`SELECT action, outcome, session_id FROM ai_audit WHERE kind = 'question'`).toEqual([
+      { action: 'rate_limited', outcome: 'refused', session_id: session.id },
+    ])
   })
 
   /** A turn that runs `body` with its waitForTab, its manager and its session id, then ends. */
