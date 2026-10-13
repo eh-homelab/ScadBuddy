@@ -1530,6 +1530,16 @@ describe('render (#1053)', () => {
     expect(follows).toBe(2)
   })
 
+  it('follows a 202 accepting at once, keeping its floor only between follows (review #2805)', async () => {
+    printRunPoll.intervalMs = 60_000
+    server.use(
+      http.post('/api/v1/models/box/render', () => stillAccepting()),
+      http.post(followUrl, () => HttpResponse.json({ job_id: 'j1', status_url: '/api/v1/jobs/j1', inputs: {} })),
+    )
+
+    await expect(api.render('box', { params: {} })).resolves.toMatchObject({ job_id: 'j1' })
+  })
+
   it('sends the render again with its key when the follow says command-resend', async () => {
     printRunPoll.intervalMs = 1
     const keys: (string | null)[] = []

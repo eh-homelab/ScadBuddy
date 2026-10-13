@@ -602,6 +602,7 @@ async function untilAccepted<T>(send: () => Promise<T | CommandAccepting>, signa
   const began = performance.now()
   let answer = await send()
   let last = false
+  let followed = false
   while (isAccepting(answer)) {
     // The last follow after an abort named no claim yet: the abort it is, so a caller
     // that keeps a superseded action quiet still can (review #2805).
@@ -615,12 +616,18 @@ async function untilAccepted<T>(send: () => Promise<T | CommandAccepting>, signa
       })
     }
     // Not `retry_after`: the follow is itself a long-poll that waits for the answer, so
-    // waiting first only delays it (review #2849). `intervalMs` keeps a floor.
-    try {
-      await wait(printRunPoll.intervalMs, signal)
-    } catch {
+    // waiting first only delays it (review #2849). The first follow goes at once; after
+    // a follow that came back 202, `intervalMs` keeps a floor (review #2805).
+    if (followed) {
+      try {
+        await wait(printRunPoll.intervalMs, signal)
+      } catch {
+        last = true
+      }
+    } else if (signal?.aborted) {
       last = true
     }
+    followed = true
     const url = answer.follow_url.startsWith(API_BASE) ? answer.follow_url.slice(API_BASE.length) : answer.follow_url
     try {
       // A POST (#2782 review): a render's follow makes its supersede, a change the

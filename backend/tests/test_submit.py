@@ -69,6 +69,7 @@ from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.workflows import commands as commands_module
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.commands import (
+    CONNECT_MARGIN_SECONDS,
     CommandClosedError,
     CommandClosingError,
     CommandResendError,
@@ -2493,3 +2494,34 @@ async def test_a_follow_supersedes_only_what_the_post_would(
 
     assert job.id == answered.id
     assert supersede.await_count == (1 if released else 0)
+
+
+@pytest.mark.parametrize("supersedes", [None, "o" * 32])
+async def test_a_follow_and_its_release_stay_below_envoys_route_timeout(
+    make_service: ServiceFactory, monkeypatch: pytest.MonkeyPatch, supersedes: str | None
+) -> None:
+    """#3041: a follow that releases the job it supersedes waits that much less on the
+    Update, so its wait, the connect margin and the release's bound stay below Envoy's
+    15 s route timeout. One with nothing to release waits the whole `FOLLOW_WAIT`."""
+    waits: list[timedelta | None] = []
+    answered = Job(id="n" * 32, slug=SLUG, created_at=datetime.now(UTC), inputs={})
+
+    async def answer(*args: Any, wait: timedelta | None = None, **kwargs: Any) -> RenderAnswer:
+        waits.append(wait)
+        return RenderAnswer(job=answered)
+
+    monkeypatch.setattr(submit_module, "follow_update", answer)
+    async with temporal_client() as client:
+        service = make_service(client, "unused")
+        done = Job(id="o" * 32, slug=SLUG, created_at=datetime.now(UTC), inputs={}, state="done")
+        monkeypatch.setattr(service.store, "read", lambda job_id: done)
+        await service.follow("render-new", "k", supersedes=supersedes)
+        await service.aclose()
+
+    [wait] = waits
+    if supersedes is None:
+        assert wait is None
+    else:
+        assert wait is not None
+        total = wait.total_seconds() + CONNECT_MARGIN_SECONDS + submit_module.RELEASE_BOUND
+        assert total < 15

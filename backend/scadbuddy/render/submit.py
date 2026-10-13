@@ -71,6 +71,7 @@ from scadbuddy.render.projection import (
 )
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.store.snapshots import SnapshotStore
+from scadbuddy.workflows import commands
 from scadbuddy.workflows.commands import (
     COMMAND_ANSWER_DEADLINE,
     CONNECT_MARGIN_SECONDS,
@@ -127,6 +128,9 @@ CLOSING_WAIT = 5.0
 #: How long a release waits on its Update: `rpc_timeout` bounds each poll, not the
 #: Update, and the SDK polls again (review #1066 (8) 1).
 RELEASE_BOUND = RPC_TIMEOUT.total_seconds() + CONNECT_MARGIN_SECONDS
+#: The least a follow that releases a superseded job waits on its Update: `FOLLOW_WAIT`
+#: less `RELEASE_BOUND`, never below this (a test's shortened `FOLLOW_WAIT`).
+SUPERSEDING_FOLLOW_MIN = timedelta(seconds=1)
 #: Every Temporal call a submit makes (both starts, the wait between them, the release)
 #: answers within this; past it one describe (`DESCRIBE_SECONDS`) says whether the
 #: request is still accepting or Temporal unavailable, and the two stay below Envoy's
@@ -346,9 +350,16 @@ class RenderService:
         submit could not make before it answered. Still not answered, it is
         `CommandStillAcceptingError`; an Update a closing run rejected, or one Temporal
         does not know, `CommandResendError`; a refusal, as `submit` raises it."""
+        # The release after the answer can take RELEASE_BOUND; a follow that makes one
+        # waits that much less on the Update, so the two stay below Envoy's 15 s (#3041).
+        wait = (
+            max(commands.FOLLOW_WAIT - timedelta(seconds=RELEASE_BOUND), SUPERSEDING_FOLLOW_MIN)
+            if supersedes
+            else None
+        )
         try:
             answer = await follow_update(
-                self.client, workflow_id, update_id, result_type=RenderAnswer
+                self.client, workflow_id, update_id, result_type=RenderAnswer, wait=wait
             )
         except CommandStillAcceptingError:
             # Counted once, by the submit that answered 202; not once per follow.

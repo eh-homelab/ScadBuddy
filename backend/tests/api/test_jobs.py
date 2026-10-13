@@ -746,6 +746,31 @@ def test_a_followed_render_without_a_key_gets_one_to_follow(client: TestClient, 
     assert len(response.json()["update_id"]) == 32
 
 
+def test_a_render_answered_at_once_is_its_job_under_respond_async(
+    client: TestClient, model: str
+) -> None:
+    """#3042, spec 2026-10-13 §4: the healthy path does not change. A submit that
+    answers within `FAST_ACCEPT` is the 202 `RenderAccepted` it always was, not an
+    `accepting` to follow, and the preference is not echoed, as nothing applied it."""
+    quick = mock.AsyncMock(return_value=_job())
+    with mock.patch.object(RenderService, "submit", quick):
+        response = client.post(
+            f"/api/v1/models/{model}/render",
+            json={"params": {"width": 12}},
+            headers={"Idempotency-Key": "k" * 32, "Prefer": "respond-async"},
+        )
+
+    assert response.status_code == 202, response.text
+    assert response.json() == {
+        "job_id": "j" * 32,
+        "status_url": f"/api/v1/jobs/{'j' * 32}",
+        "inputs": {"params": {"width": 12}, "v": 0},
+    }
+    assert "preference-applied" not in response.headers
+    assert quick.await_args is not None
+    assert quick.await_args.kwargs["accept_within"] == FAST_ACCEPT
+
+
 def _job(job_id: str = "j" * 32) -> Job:
     return Job(id=job_id, slug="demo", created_at=datetime.now(UTC), inputs={"v": 0})
 

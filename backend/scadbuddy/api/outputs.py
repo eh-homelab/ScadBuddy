@@ -64,7 +64,6 @@ from scadbuddy.api.operations import (
     IdempotencyKey,
     operation_answer,
     run_operation,
-    still_accepting,
 )
 from scadbuddy.api.template_ui import UI_FILE_HEADERS
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
@@ -717,6 +716,9 @@ async def backfill_output(
             fetcher,
             fonts,
             activity,
+            # It cannot answer its caller a 202 to follow: a slow start keeps the
+            # default deadline, and its 503 re-send, whatever the caller preferred.
+            respond_async=False,
         )
     except ApiError as error:
         # Matched by its code, not its status: any other 409 passes through (#1849).
@@ -737,10 +739,8 @@ async def backfill_output(
             f"output {output_id} cannot be rendered again from {meta.slug}@{version[:12]}:"
             f" {error.detail}",
         ) from None
-    if isinstance(accepted, JSONResponse):
-        # Only a client that follows a render's 202 itself asks for one (#2340); this
-        # route answers a job, so it is still accepting as it was.
-        raise still_accepting()
+    # Asked with respond_async=False, the render never answers a 202 to follow.
+    assert not isinstance(accepted, JSONResponse)
     await asyncio.to_thread(outputs.start_backfill, output_id, accepted.job_id)
     job = await asyncio.to_thread(require_job, render, accepted.job_id)
     return _job_status(job, None)

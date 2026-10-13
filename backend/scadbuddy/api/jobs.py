@@ -402,9 +402,11 @@ async def render_model(
     fetcher: FetcherDep,
     fonts: FontsDep,
     activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
+    # A dependency, not read here off `request`: the backfill calls this with its own
+    # request, and cannot hand its caller a 202 to follow (#3042).
+    respond_async: Annotated[bool, Depends(prefers_async)],
     idempotency_key: IdempotencyKey = None,
 ) -> RenderAccepted | JSONResponse:
-    respond_async = prefers_async(request)
     if respond_async and idempotency_key is None:
         # What the 202 follows is this request's Update, so it needs an id (#2340).
         idempotency_key = uuid.uuid4().hex
