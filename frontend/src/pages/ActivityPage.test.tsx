@@ -1,10 +1,12 @@
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import { useLocation } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fakeRealtime } from '../lib/realtime.fake'
 import { seedActivity } from '../mocks/features/activity'
 import { resetMockState } from '../mocks/handlers'
 import { renderPage } from '../test/utils'
+import type { Activity } from '../api/types'
+import { principalLabel, sinceTime } from '../components/activity/labels'
 import { ActivityPage } from './ActivityPage'
 
 function Location() {
@@ -12,15 +14,60 @@ function Location() {
   return <output data-testid="location">{`${location.pathname}${location.search}`}</output>
 }
 
-function render() {
+function render(route = '/activity') {
   return renderPage(
     <>
       <ActivityPage />
       <Location />
     </>,
-    { route: '/activity' },
+    { route },
   )
 }
+
+function activity(id: string, at: string, extra: Partial<Activity> = {}): Activity {
+  return {
+    id,
+    kind: 'render',
+    status: 'running',
+    title: `Row ${id}`,
+    principal: 'browser',
+    session: null,
+    via_tool: null,
+    subject: '',
+    parent_id: null,
+    detail: {},
+    created_at: at,
+    updated_at: at,
+    finished_at: null,
+    ...extra,
+  }
+}
+
+/** `count` rows, newest first, one minute apart. */
+function many(count: number): Activity[] {
+  return Array.from({ length: count }, (_, i) =>
+    activity(`r${String(i).padStart(3, '0')}`, new Date(Date.UTC(2026, 9, 9, 12) - i * 60_000).toISOString()),
+  )
+}
+
+describe('labels', () => {
+  it('names the principals', () => {
+    expect(principalLabel('browser')).toBe('You')
+    expect(principalLabel('system')).toBe('System')
+    expect(principalLabel(null)).toBe('Unknown')
+    expect(principalLabel('token:t1')).toBe('token:t1')
+    expect(principalLabel('Zo%C3%AB')).toBe('Zoë')
+    expect(principalLabel('100%')).toBe('100%')
+  })
+
+  it('turns a since token into a time, and an unknown one into none', () => {
+    const now = Date.parse('2026-10-09T12:00:00Z')
+    expect(sinceTime('24h', now)).toBe('2026-10-08T12:00:00.000Z')
+    expect(sinceTime('7d', now)).toBe('2026-10-02T12:00:00.000Z')
+    expect(sinceTime('bogus', now)).toBe('')
+    expect(sinceTime('', now)).toBe('')
+  })
+})
 
 describe('ActivityPage', () => {
   beforeEach(() => {
@@ -73,5 +120,46 @@ describe('ActivityPage', () => {
     ])
     await realtime.signal('activity', 'activity.changed', { activity_id: 'render:new' })
     expect(await screen.findByText('Render lid')).toBeInTheDocument()
+  })
+
+  it('loads more, and a live insert loses no row', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const realtime = fakeRealtime()
+    seedActivity(many(60))
+    const { user } = render()
+    await waitFor(() => expect(screen.getAllByTestId(/^activity-row-/)).toHaveLength(50))
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    await waitFor(() => expect(screen.getAllByTestId(/^activity-row-/)).toHaveLength(60))
+    expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull()
+    seedActivity([activity('new', '2026-10-09T13:00:00Z'), ...many(60)])
+    await realtime.signal('activity', 'activity.changed', { activity_id: 'new' })
+    await waitFor(() => expect(screen.getAllByTestId(/^activity-row-/)).toHaveLength(61))
+    expect(screen.getByTestId('activity-row-r059')).toBeInTheDocument()
+  })
+
+  it('restores chips and a facet input from a deep link', async () => {
+    render('/activity?kind=render&facet.slug=box')
+    expect(await screen.findByRole('button', { name: 'Render', pressed: true })).toBeInTheDocument()
+    expect(await screen.findByLabelText('Template')).toHaveValue('box')
+  })
+
+  it('shows an applied value the facets do not list, and clears it', async () => {
+    const { user } = render('/activity?principal=ghost')
+    expect(await screen.findByRole('button', { name: 'ghost', pressed: true })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Clear filters' }))
+    await waitFor(() => expect(screen.getByTestId('location').textContent).toBe('/activity'))
+  })
+
+  it('nests a child under its parent when both are loaded', async () => {
+    seedActivity([
+      activity('child', '2026-10-09T12:05:00Z', { parent_id: 'parent' }),
+      activity('other', '2026-10-09T12:03:00Z'),
+      activity('parent', '2026-10-09T12:00:00Z'),
+    ])
+    render()
+    await waitFor(() => expect(screen.getAllByTestId(/^activity-row-/)).toHaveLength(3))
+    const order = screen.getAllByTestId(/^activity-row-/).map((r) => r.getAttribute('data-testid'))
+    expect(order).toEqual(['activity-row-other', 'activity-row-parent', 'activity-row-child'])
+    expect(within(screen.getByTestId('activity-row-child')).getByText('Row child').closest('td')).toHaveClass('pl-5')
   })
 })

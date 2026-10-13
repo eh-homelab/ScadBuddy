@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { ActivityQuery } from '../../lib/activityQuery'
+import { isActivityFiltered, splitList, type ActivityQuery } from '../../lib/activityQuery'
 import type { ActivityFacets } from '../../api/types'
 import { statusLabel } from '../prints/status'
 import { chipClass, principalLabel, SINCE_OPTIONS, toggleValue } from './labels'
@@ -7,7 +7,8 @@ import { chipClass, principalLabel, SINCE_OPTIONS, toggleValue } from './labels'
 interface Props {
   query: ActivityQuery
   facets: ActivityFacets | undefined
-  onChange: (next: ActivityQuery) => void
+  /** `typing` is a change made keystroke by keystroke: it replaces the history entry. */
+  onChange: (next: ActivityQuery, options?: { typing?: boolean }) => void
 }
 
 function Group({ label, children }: { label: string; children: React.ReactNode }) {
@@ -19,55 +20,105 @@ function Group({ label, children }: { label: string; children: React.ReactNode }
   )
 }
 
-/** The filters above the table; every choice comes from the facets endpoint. */
-export function ActivityFilters({ query, facets, onChange }: Props) {
-  const [text, setText] = useState(query.q)
-  const sent = useRef(query.q)
-  const latest = useRef(query)
+const CHIP_WRAP = 'max-w-full break-all text-left'
+
+/** A text input that reports after a pause, and follows the URL when it changes elsewhere. */
+function DebouncedInput({
+  value,
+  onCommit,
+  ...rest
+}: { value: string; onCommit: (value: string) => void } & Omit<
+  React.InputHTMLAttributes<HTMLInputElement>,
+  'value' | 'onChange'
+>) {
+  const [text, setText] = useState(value)
+  const sent = useRef(value)
+  const commit = useRef(onCommit)
   useEffect(() => {
-    latest.current = query
+    commit.current = onCommit
   })
-  // The URL changed from outside (Back/Forward): follow it.
   useEffect(() => {
-    if (query.q !== sent.current) {
-      sent.current = query.q
-      setText(query.q)
+    if (value !== sent.current) {
+      sent.current = value
+      setText(value)
     }
-  }, [query.q])
+  }, [value])
   useEffect(() => {
     if (text === sent.current) return
     const timer = setTimeout(() => {
       sent.current = text
-      onChange({ ...latest.current, q: text })
+      commit.current(text)
     }, 250)
     return () => clearTimeout(timer)
-  }, [text, onChange])
+  }, [text])
+  return <input {...rest} value={text} onChange={(e) => setText(e.target.value)} />
+}
 
-  const selectedKinds = query.kind ? query.kind.split(',') : []
+/** The values of one facet as chips, plus any selected value the facets do not list. */
+function valueChips(
+  listed: Array<{ value: string; count: number }>,
+  selected: string,
+): Array<{ value: string; count: number | null }> {
+  const extra = selected && !listed.some((l) => l.value === selected) ? [{ value: selected, count: null }] : []
+  return [...listed, ...extra]
+}
+
+/** The filters above the table; every choice comes from the facets endpoint. */
+export function ActivityFilters({ query, facets, onChange }: Props) {
+  const latest = useRef(query)
+  useEffect(() => {
+    latest.current = query
+  })
+
+  const selectedKinds = splitList(query.kind)
+  const selectedStatuses = splitList(query.status)
   const single = selectedKinds.length === 1 ? facets?.kinds.find((k) => k.key === selectedKinds[0]) : undefined
   const filterable = single?.facets.filter((f) => f.filterable) ?? []
+  const filterableNames = new Set(filterable.map((f) => f.name))
+  // An applied facet whose input is not shown still has to be visible and removable.
+  const strayFacets = Object.entries(query.facets).filter(([name]) => !filterableNames.has(name))
+  const kinds = [
+    ...(facets?.kinds ?? []).map((k) => ({ key: k.key, label: k.label })),
+    ...selectedKinds.filter((k) => !facets?.kinds.some((f) => f.key === k)).map((k) => ({ key: k, label: k })),
+  ]
+  const statuses = [
+    ...(facets?.statuses ?? []),
+    ...selectedStatuses.filter((s) => !(facets?.statuses as string[] | undefined)?.includes(s)),
+  ]
 
   function setKind(next: string) {
     // A kind's own facets mean nothing once the kind is not alone.
-    const alone = next.split(',').filter(Boolean).length === 1
+    const alone = splitList(next).length === 1
     onChange({ ...query, kind: next, facets: alone ? query.facets : {} })
   }
+
+  function setFacet(name: string, value: string, typing: boolean) {
+    const rest = { ...latest.current.facets }
+    if (value) rest[name] = value
+    else delete rest[name]
+    onChange({ ...latest.current, facets: rest }, { typing })
+  }
+
+  const principals = valueChips(facets?.principals ?? [], query.principal)
+  const tools = valueChips(facets?.tools ?? [], query.tool)
+  const subjects = valueChips(facets?.subjects ?? [], query.subject)
+  const sinceKnown = SINCE_OPTIONS.some((o) => o.value === query.since)
 
   return (
     <div className="flex flex-col gap-2" aria-label="Activity filters" role="search">
       <div className="flex flex-wrap items-center gap-2">
-        <input
+        <DebouncedInput
           type="search"
           className="sb-field max-w-xs"
           placeholder="Search activity"
           aria-label="Search activity"
-          value={text}
-          onChange={(e) => setText(e.target.value)}
+          value={query.q}
+          onCommit={(q) => onChange({ ...latest.current, q }, { typing: true })}
         />
         <select
           className="sb-field w-auto"
           aria-label="Since"
-          value={query.since}
+          value={sinceKnown ? query.since : ''}
           onChange={(e) => onChange({ ...query, since: e.target.value })}
         >
           <option value="">Any time</option>
@@ -77,14 +128,19 @@ export function ActivityFilters({ query, facets, onChange }: Props) {
             </option>
           ))}
         </select>
+        {isActivityFiltered(query) && (
+          <button type="button" className="text-[12px] text-muted hover:text-ink" onClick={() => onChange({ ...query, kind: '', status: '', principal: '', tool: '', subject: '', since: '', q: '', facets: {} })}>
+            Clear filters
+          </button>
+        )}
       </div>
-      {facets && facets.kinds.length > 0 && (
+      {kinds.length > 0 && (
         <Group label="Kind">
-          {facets.kinds.map((k) => (
+          {kinds.map((k) => (
             <button
               key={k.key}
               type="button"
-              className={chipClass(selectedKinds.includes(k.key))}
+              className={`${chipClass(selectedKinds.includes(k.key))} ${CHIP_WRAP}`}
               aria-pressed={selectedKinds.includes(k.key)}
               onClick={() => setKind(toggleValue(query.kind, k.key))}
             >
@@ -93,10 +149,10 @@ export function ActivityFilters({ query, facets, onChange }: Props) {
           ))}
         </Group>
       )}
-      {facets && facets.statuses.length > 0 && (
+      {statuses.length > 0 && (
         <Group label="Status">
-          {facets.statuses.map((s) => {
-            const on = query.status.split(',').includes(s)
+          {statuses.map((s) => {
+            const on = selectedStatuses.includes(s)
             return (
               <button
                 key={s}
@@ -111,47 +167,50 @@ export function ActivityFilters({ query, facets, onChange }: Props) {
           })}
         </Group>
       )}
-      {facets && facets.principals.length > 0 && (
+      {principals.length > 0 && (
         <Group label="Started by">
-          {facets.principals.map((p) => (
+          {principals.map((p) => (
             <button
               key={p.value}
               type="button"
-              className={chipClass(query.principal === p.value)}
+              className={`${chipClass(query.principal === p.value)} ${CHIP_WRAP}`}
               aria-pressed={query.principal === p.value}
               onClick={() => onChange({ ...query, principal: query.principal === p.value ? '' : p.value })}
             >
-              {principalLabel(p.value, facets)} <span className="sb-num text-muted">{p.count}</span>
+              {principalLabel(p.value, facets)}
+              {p.count !== null && <> <span className="sb-num text-muted">{p.count}</span></>}
             </button>
           ))}
         </Group>
       )}
-      {facets && facets.tools.length > 0 && (
+      {tools.length > 0 && (
         <Group label="Tool">
-          {facets.tools.map((t) => (
+          {tools.map((t) => (
             <button
               key={t.value}
               type="button"
-              className={chipClass(query.tool === t.value)}
+              className={`${chipClass(query.tool === t.value)} ${CHIP_WRAP}`}
               aria-pressed={query.tool === t.value}
               onClick={() => onChange({ ...query, tool: query.tool === t.value ? '' : t.value })}
             >
-              {t.value} <span className="sb-num text-muted">{t.count}</span>
+              {t.value}
+              {t.count !== null && <> <span className="sb-num text-muted">{t.count}</span></>}
             </button>
           ))}
         </Group>
       )}
-      {facets && facets.subjects.length > 0 && (
+      {subjects.length > 0 && (
         <Group label="Subject">
-          {facets.subjects.map((s) => (
+          {subjects.map((s) => (
             <button
               key={s.value}
               type="button"
-              className={chipClass(query.subject === s.value)}
+              className={`${chipClass(query.subject === s.value)} ${CHIP_WRAP}`}
               aria-pressed={query.subject === s.value}
               onClick={() => onChange({ ...query, subject: query.subject === s.value ? '' : s.value })}
             >
-              {s.value} <span className="sb-num text-muted">{s.count}</span>
+              {s.value}
+              {s.count !== null && <> <span className="sb-num text-muted">{s.count}</span></>}
             </button>
           ))}
         </Group>
@@ -161,14 +220,30 @@ export function ActivityFilters({ query, facets, onChange }: Props) {
           {filterable.map((f) => (
             <label key={f.name} className="flex flex-col gap-0.5 text-[12px] text-muted">
               {f.label}
-              <input
-                className="sb-field w-40"
+              <DebouncedInput
+                className="sb-field w-40 max-w-full"
                 value={query.facets[f.name] ?? ''}
-                onChange={(e) => onChange({ ...query, facets: { ...query.facets, [f.name]: e.target.value } })}
+                onCommit={(v) => setFacet(f.name, v, true)}
               />
             </label>
           ))}
         </div>
+      )}
+      {strayFacets.length > 0 && (
+        <Group label="Applied facets">
+          {strayFacets.map(([name, value]) => (
+            <button
+              key={name}
+              type="button"
+              className={`${chipClass(true)} ${CHIP_WRAP}`}
+              aria-pressed
+              aria-label={`Remove ${name} ${value}`}
+              onClick={() => setFacet(name, '', false)}
+            >
+              {name}: {value}
+            </button>
+          ))}
+        </Group>
       )}
     </div>
   )

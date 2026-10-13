@@ -1,11 +1,16 @@
 import type { ActivityFacets } from '../../api/types'
+import { joinList, splitList } from '../../lib/activityQuery'
 
 /** How a principal is shown: the browser is "You", schedules are "System". */
 export function principalLabel(principal: string | null, _facets?: ActivityFacets): string {
   if (principal === null) return 'Unknown'
   if (principal === 'browser') return 'You'
   if (principal === 'system') return 'System'
-  return principal
+  try {
+    return decodeURIComponent(principal)
+  } catch {
+    return principal
+  }
 }
 
 export function chipClass(selected: boolean): string {
@@ -28,6 +33,6 @@ export function sinceTime(token: string, now = Date.now()): string {
 
 /** Adds `value` to, or removes it from, a comma-joined list. */
 export function toggleValue(list: string, value: string): string {
-  const values = list ? list.split(',') : []
-  return (values.includes(value) ? values.filter((v) => v !== value) : [...values, value]).join(',')
+  const values = splitList(list)
+  return joinList(values.includes(value) ? values.filter((v) => v !== value) : [...values, value])
 }
