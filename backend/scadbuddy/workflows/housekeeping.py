@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Sequence
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from temporalio import workflow
@@ -33,6 +33,7 @@ from temporalio.client import (
     Schedule,
     ScheduleActionStartWorkflow,
     ScheduleAlreadyRunningError,
+    ScheduleHandle,
     ScheduleIntervalSpec,
     ScheduleOverlapPolicy,
     SchedulePolicy,
@@ -56,6 +57,10 @@ HOUSEKEEPING_SCHEDULE = "scadbuddy-housekeeping"
 PRUNE_SCHEDULE = "scadbuddy-prune"
 #: The render service's prune loop's interval: a settled job outlives `job_ttl` by this.
 PRUNE_INTERVAL = 300.0
+#: A boot does not trigger a Schedule that already started a run this recently (or
+#: within its interval, if shorter): each replica of each rollout booting used to run
+#: the daily sweeps again, ~37 times a day (#2352). One run per window converges them.
+BOOT_TRIGGER_WINDOW = 30 * 60.0
 
 
 def schedule_id_for(task_queue: str) -> str:
@@ -217,12 +222,20 @@ def _schedule(interval: float, action: ScheduleActionStartWorkflow) -> Schedule:
 
 
 async def ensure_workflow_schedule(
-    client: Client, schedule_id: str, interval: float, action: ScheduleActionStartWorkflow
+    client: Client,
+    schedule_id: str,
+    interval: float,
+    action: ScheduleActionStartWorkflow,
+    *,
+    boot_window: float | None = None,
 ) -> bool:
     """The Schedule starting ``action`` every ``interval`` seconds (0: none), then one
-    run now: the boot's. A Schedule an operator paused stays paused, and is not run:
-    True says so (review #1095 2), since then nothing converges until it resumes.
-    Every Schedule the API keeps (housekeeping, the preview backfill) is made here."""
+    run now: the boot's, unless a run is open or one started within ``boot_window``
+    seconds (default `BOOT_TRIGGER_WINDOW`; or the interval, if shorter), which
+    converges this boot too (#2352). A
+    Schedule an operator paused stays paused, and is not run: True says so (review
+    #1095 2), since then nothing converges until it resumes. Every Schedule the API
+    keeps (housekeeping, the preview backfill) is made here."""
     handle = client.get_schedule_handle(schedule_id)
     if interval <= 0:
         try:
@@ -242,11 +255,23 @@ async def ensure_workflow_schedule(
             return ScheduleUpdate(schedule=schedule)
 
         await handle.update(replace)
-    if not schedule.state.paused:
-        # A run still open (a rollout stopped the old pod mid-run) would SKIP this
-        # one; it queues behind that run instead.
+    window = BOOT_TRIGGER_WINDOW if boot_window is None else boot_window
+    if not schedule.state.paused and not await _ran_lately(handle, min(window, interval)):
+        # A run that opens between the look and this would SKIP this one; it queues
+        # behind that run instead.
         await handle.trigger(overlap=ScheduleOverlapPolicy.BUFFER_ONE)
     return schedule.state.paused
+
+
+async def _ran_lately(handle: ScheduleHandle, window: float) -> bool:
+    """Whether the Schedule has a run open, or started one within ``window`` seconds.
+    An open run's activities move to a live worker when a rollout stops theirs, so it
+    still finishes; another boot's trigger would only run the sweeps twice."""
+    info = (await handle.describe()).info
+    if info.running_actions:
+        return True
+    since = datetime.now(UTC) - timedelta(seconds=window)
+    return any(action.started_at >= since for action in info.recent_actions)
 
 
 async def ensure_schedule(
@@ -256,6 +281,7 @@ async def ensure_schedule(
     *,
     schedule_id: str | None = None,
     sweeps: tuple[str, ...] = SWEEPS,
+    boot_window: float | None = None,
 ) -> bool:
     """The sweeps' Schedule at ``interval`` seconds (0: none), then one run now: the
     boot's converging sweep (`ensure_workflow_schedule`). True when it is paused."""
@@ -267,7 +293,9 @@ async def ensure_schedule(
         task_queue=task_queue,
         execution_timeout=housekeeping_timeout(sweeps),
     )
-    return await ensure_workflow_schedule(client, schedule_id, interval, action)
+    return await ensure_workflow_schedule(
+        client, schedule_id, interval, action, boot_window=boot_window
+    )
 
 
 async def ensure_schedules(client: Client, task_queue: str, interval: float) -> bool:

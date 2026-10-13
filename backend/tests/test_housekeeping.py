@@ -254,9 +254,12 @@ async def _actions(client: Client, schedule_id: str, count: int) -> int:
     return described.info.num_actions
 
 
-async def test_the_boots_trigger_queues_behind_an_open_run(client: Client) -> None:
-    """Review #1095 1a: a start while a run is still open (a rollout stopped the old
-    pod mid-sweep) still gets its converging sweep, after that run."""
+async def test_a_boot_while_a_run_is_open_does_not_run_the_sweeps_again(
+    client: Client,
+) -> None:
+    """#2352: every replica of every rollout used to queue a run behind the open one,
+    ~37 runs a day of a daily Schedule. The open run converges this boot too: its
+    activities move to a live worker when a rollout stops theirs."""
     schedule_id = f"housekeeping-test-{uuid.uuid4().hex[:8]}"
     queue = f"library-{uuid.uuid4().hex[:8]}"
     started = asyncio.Event()
@@ -275,19 +278,44 @@ async def test_the_boots_trigger_queues_behind_an_open_run(client: Client) -> No
                 client, queue, NO_TICK, schedule_id=schedule_id, sweeps=PRUNE_SWEEPS
             )
             await asyncio.wait_for(started.wait(), 10)
-            await ensure_schedule(
-                client, queue, NO_TICK, schedule_id=schedule_id, sweeps=PRUNE_SWEEPS
-            )
+            for _ in range(3):
+                await ensure_schedule(
+                    client, queue, NO_TICK, schedule_id=schedule_id, sweeps=PRUNE_SWEEPS
+                )
             release.set()
-            assert await _actions(client, schedule_id, 2) == 2
-            for _ in range(50):
-                if len(ran) == 2:
-                    break
-                await asyncio.sleep(0.1)
+            await asyncio.sleep(1)
+            described = await client.get_schedule_handle(schedule_id).describe()
     finally:
         await client.get_schedule_handle(schedule_id).delete()
         await terminate_open_workflows(client, queue)
-    assert ran == [PRUNE_SWEEPS[0]] * 2
+    assert described.info.num_actions == 1
+    assert ran == [PRUNE_SWEEPS[0]]
+
+
+async def test_a_boot_runs_the_sweeps_only_once_the_last_run_is_old_enough(
+    client: Client,
+) -> None:
+    """#2352: a run started within the window converges a boot; after it, a boot runs
+    them again."""
+    schedule_id = f"housekeeping-test-{uuid.uuid4().hex[:8]}"
+    queue = f"library-{uuid.uuid4().hex[:8]}"
+    handle = client.get_schedule_handle(schedule_id)
+    try:
+        await ensure_schedule(client, queue, NO_TICK, schedule_id=schedule_id)
+        assert await _actions(client, schedule_id, 1) == 1
+        started = (await handle.describe()).info.recent_actions[-1].action
+        assert isinstance(started, ScheduleActionExecutionStartWorkflow)
+        await client.get_workflow_handle(
+            started.workflow_id, run_id=started.first_execution_run_id
+        ).terminate("ended by the test")
+        await ensure_schedule(client, queue, NO_TICK, schedule_id=schedule_id)
+        within = await _actions(client, schedule_id, 2)
+        await ensure_schedule(client, queue, NO_TICK, schedule_id=schedule_id, boot_window=0.0)
+        after = await _actions(client, schedule_id, 2)
+    finally:
+        await handle.delete()
+        await terminate_open_workflows(client, queue)
+    assert (within, after) == (1, 2)
 
 
 async def test_a_run_is_bounded_by_its_sweeps_timeouts(client: Client) -> None:
