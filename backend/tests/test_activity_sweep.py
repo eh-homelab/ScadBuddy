@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
+from scadbuddy import main
 from scadbuddy.activity.index import ActivityIndex
 from scadbuddy.activity.models import ActivityRow
 from scadbuddy.library.settings_store import SettingsPatch, StoredSettings
@@ -209,3 +212,125 @@ async def test_repair_ingests_agent_operations(
 
 async def test_repair_without_agent_tables_is_fine(index: ActivityIndex) -> None:
     assert await index.repair(DAY) == 0
+
+
+async def test_repair_keeps_the_sources_timestamps(
+    pg_pool: PgPool, index: ActivityIndex, projection: JobProjection
+) -> None:
+    job = make_job(state="pending")
+    projection.accept(job, "k3", workflow_id="render-k3", run_id="run-3")
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE render_jobs SET created_at = now() - interval '20 hours',"
+            " finished_at = now() - interval '19 hours', state = 'done'"
+        )
+        source = conn.execute("SELECT created_at, finished_at FROM render_jobs").fetchone()
+    assert source is not None
+    assert await index.repair(DAY) >= 1
+    got = await index.get(f"render:{job.id}")
+    assert got is not None
+    assert (got.created_at, got.finished_at) == (source["created_at"], source["finished_at"])
+
+
+async def test_a_pruned_row_is_not_restored_when_the_window_fits_the_ttl(
+    pg_pool: PgPool, index: ActivityIndex, projection: JobProjection
+) -> None:
+    job = make_job(state="pending")
+    projection.accept(job, "k4", workflow_id="render-k4", run_id="run-4")
+    with pg_pool.connection() as conn:
+        conn.execute(
+            "UPDATE render_jobs SET created_at = now() - interval '30 hours',"
+            " finished_at = now() - interval '29 hours', state = 'done'"
+        )
+    ttl = DAY
+    window = min(7 * DAY, ttl)  # what the sweep passes
+    assert await index.repair(window) == 0  # older than the window
+    assert await index.prune(ttl, window) == 0
+    assert await index.get(f"render:{job.id}") is None
+
+
+async def test_repair_leaves_a_row_that_is_no_longer_a_placeholder(
+    pg_pool: PgPool, index: ActivityIndex, projection: JobProjection
+) -> None:
+    job = make_job(state="pending")
+    projection.accept(job, "k5", workflow_id="render-k5", run_id="run-5")
+    seed_row = ActivityRow(
+        id=f"render:{job.id}",
+        kind="render",
+        status="succeeded",
+        title="landed",
+        source="render_jobs",
+        source_id=job.id,
+    )
+    with pg_pool.connection() as conn:
+        index.upsert_in(conn, seed_row)
+    assert await index.repair(DAY) == 0
+    got = await index.get(f"render:{job.id}")
+    assert got is not None and (got.status, got.title) == ("succeeded", "landed")
+
+
+async def test_one_bad_source_row_does_not_stop_the_rest(
+    pg_pool: PgPool, index: ActivityIndex, projection: JobProjection
+) -> None:
+    good = make_job(state="pending")
+    projection.accept(good, "k6", workflow_id="render-k6", run_id="run-6")
+    with pg_pool.connection() as conn:
+        conn.execute("ALTER TABLE print_runs DROP COLUMN slug")
+    try:
+        assert await index.repair(DAY) == 1  # the print_runs query fails; renders restored
+    finally:
+        with pg_pool.connection() as conn:
+            conn.execute("ALTER TABLE print_runs ADD COLUMN slug text")
+    assert await index.get(f"render:{good.id}") is not None
+
+
+class RecordingIndex:
+    def __init__(self, fail_repair: bool = False) -> None:
+        self.calls: list[tuple[str, float, float | None]] = []
+        self.fail_repair = fail_repair
+
+    async def repair(self, window: float) -> int:
+        self.calls.append(("repair", window, None))
+        if self.fail_repair:
+            raise RuntimeError("boom")
+        return 0
+
+    async def prune(self, ttl: float, placeholder_ttl: float) -> int:
+        self.calls.append(("prune", ttl, placeholder_ttl))
+        return 0
+
+
+def sweep_state(stored: StoredSettings, index: RecordingIndex) -> Any:
+    components = SimpleNamespace(get=lambda key: SimpleNamespace(index=index))
+    return SimpleNamespace(
+        settings_store=SimpleNamespace(load=lambda: stored), components=components
+    )
+
+
+async def test_the_sweep_repairs_then_prunes_with_the_defaults() -> None:
+    index = RecordingIndex()
+    await main._sweep_activity_logged(sweep_state(StoredSettings(), index))
+    assert index.calls == [("repair", DAY, None), ("prune", 30 * DAY, DAY)]
+
+
+async def test_the_sweep_reads_the_settings_each_run() -> None:
+    stored = StoredSettings(activity_ttl_seconds=7 * DAY, activity_repair_window_seconds=3600)
+    index = RecordingIndex()
+    state = sweep_state(stored, index)
+    await main._sweep_activity_logged(state)
+    stored.activity_ttl_seconds = 2 * DAY
+    stored.activity_repair_window_seconds = 5 * DAY  # longer than the TTL: clamped
+    await main._sweep_activity_logged(state)
+    assert index.calls == [
+        ("repair", 3600, None),
+        ("prune", 7 * DAY, 3600),
+        ("repair", 2 * DAY, None),
+        ("prune", 2 * DAY, 2 * DAY),
+    ]
+
+
+async def test_the_sweep_prunes_even_when_repair_fails() -> None:
+    index = RecordingIndex(fail_repair=True)
+    with pytest.raises(RuntimeError):
+        await main._sweep_activity_logged(sweep_state(StoredSettings(), index))
+    assert [call[0] for call in index.calls] == ["repair", "prune"]

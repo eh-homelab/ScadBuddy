@@ -11,6 +11,7 @@ import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import Any
 
 from psycopg import Connection, errors, sql
@@ -187,11 +188,15 @@ class ActivityIndex:
         row: ActivityRow | Callable[[], ActivityRow],
         *,
         attribution: Attribution | None = None,
-    ) -> None:
+        restore: bool = False,
+    ) -> bool:
         """Write ``row`` in the caller's transaction, under a savepoint: a failure is
         logged and counted, and the caller's own write still commits (Review Focus 4).
         A callable is built inside the guard, so a read or a mapping that raises cannot
-        abort the source's write either."""
+        abort the source's write either. ``restore`` is the repair's write: it takes the
+        row's ``created_at``/``finished_at`` (the source's, never now()) and touches only
+        a placeholder, so a row another writer landed meanwhile is left alone. True when
+        a row was written."""
         activity_id = row.id if isinstance(row, ActivityRow) else None
         try:
             with conn.transaction():
@@ -202,14 +207,30 @@ class ActivityIndex:
                 values["facets"] = json.dumps(values["facets"])
                 values["detail"] = json.dumps(values["detail"])
                 finished = row.status in FINISHED
+                times = ", created_at, finished_at" if restore else ", finished_at"
+                finish_value = (
+                    "%(row_finished_at)s" if restore else "CASE WHEN %(finished)s THEN now() END"
+                )
+                created_value = ", %(row_created_at)s" if restore else ""
+                update_times = (
+                    ", created_at = EXCLUDED.created_at, finished_at = EXCLUDED.finished_at"
+                    if restore
+                    else ", finished_at = CASE WHEN %(finished)s"
+                    " THEN coalesce(activity.finished_at, now()) END"
+                )
+                guard = " WHERE activity.source = ''" if restore else ""
                 found = conn.execute(
                     sql.SQL(
-                        "INSERT INTO activity (id, {cols}, finished_at) VALUES (%(id)s, {vals}, "
-                        "CASE WHEN %(finished)s THEN now() END) "
-                        "ON CONFLICT (id) DO UPDATE SET {sets}, updated_at = now(), "
-                        "finished_at = CASE WHEN %(finished)s "
-                        "THEN coalesce(activity.finished_at, now()) END "
-                        "RETURNING principal"
+                        "INSERT INTO activity (id, {cols}"
+                        + times
+                        + ") VALUES (%(id)s, {vals}"
+                        + created_value
+                        + ", "
+                        + finish_value
+                        + ") ON CONFLICT (id) DO UPDATE SET {sets}, updated_at = now()"
+                        + update_times
+                        + guard
+                        + " RETURNING principal"
                     ).format(
                         cols=sql.SQL(", ").join(map(sql.Identifier, _WRITTEN)),
                         vals=sql.SQL(", ").join(sql.Placeholder(c) for c in _WRITTEN),
@@ -218,8 +239,16 @@ class ActivityIndex:
                             for c in _WRITTEN
                         ),
                     ),
-                    {**values, "id": row.id, "finished": finished},
+                    {
+                        **values,
+                        "id": row.id,
+                        "finished": finished,
+                        "row_created_at": row.created_at,
+                        "row_finished_at": row.finished_at,
+                    },
                 ).fetchone()
+                if found is None:
+                    return False  # a restore found a row that is no longer a placeholder
                 if attribution is not None:
                     found = conn.execute(
                         "UPDATE activity SET principal = coalesce(principal, %s),"
@@ -232,10 +261,12 @@ class ActivityIndex:
                     self.events.publish_in(
                         conn, ActivityEvent(activity_id=row.id, principal=principal)
                     )
+            return True
         except Exception:
             logger.exception("an activity write failed", extra={"activity_id": activity_id})
             if self.metrics is not None:
                 self.metrics.activity_write_failures.inc()
+            return False
 
     async def attribute(
         self, activity_id: str, *, principal: str, session: str | None, via_tool: str | None
@@ -266,21 +297,21 @@ class ActivityIndex:
         tables, or the attribution columns its migration adds, are not there."""
         await asyncio.to_thread(self._ingest_agent_operation, operation_id)
 
-    def _ingest_agent_operation(self, operation_id: str) -> None:
+    def _ingest_agent_operation(self, operation_id: str, *, restore: bool = False) -> bool:
         with self.pool.connection() as conn, conn.transaction():
             try:
                 with conn.transaction():
                     op = conn.execute(
                         "SELECT id, kind, subject, status, request, result, error, principal,"
-                        " session, via_tool, workflow_id, workflow_run_id"
+                        " session, via_tool, workflow_id, workflow_run_id, created_at, finished_at"
                         " FROM ai_operations WHERE id = %s",
                         (operation_id,),
                     ).fetchone()
             except (errors.UndefinedTable, errors.UndefinedColumn):
-                return
+                return False
             if op is None:
-                return
-            self.upsert_in(
+                return False
+            return self.upsert_in(
                 conn,
                 lambda: ActivityRow(
                     id=f"agent_operation:{op['id']}",
@@ -294,6 +325,8 @@ class ActivityIndex:
                     source_id=op["id"],
                     workflow_id=op["workflow_id"],
                     run_id=op["workflow_run_id"],
+                    created_at=op["created_at"],
+                    finished_at=op["finished_at"],
                     detail={
                         "request": op["request"],
                         "result": op["result"],
@@ -303,6 +336,7 @@ class ActivityIndex:
                 attribution=Attribution(
                     op["principal"] or "browser", op["session"], op["via_tool"]
                 ),
+                restore=restore,
             )
 
     async def prune(self, ttl: float, placeholder_ttl: float) -> int:
@@ -332,83 +366,107 @@ class ActivityIndex:
         from scadbuddy.render.job_models import Job
         from scadbuddy.render.projection import PROJECTION_COLUMNS
 
-        restored = 0
-        params = {"window": window}
+        def timed(row: ActivityRow, found: Mapping[str, Any]) -> ActivityRow:
+            row.created_at = found["created_at"]
+            row.finished_at = found["finished_at"]
+            return row
 
-        def missing(prefix: str, table: str, columns: str) -> sql.Composed:
-            return sql.SQL(
-                "SELECT {columns} FROM {table} r LEFT JOIN activity a ON a.id = {prefix} || r.id"
-                " WHERE (a.id IS NULL OR a.source = '')"
-                " AND (r.created_at >= now() - make_interval(secs => %(window)s)"
-                " OR r.finished_at >= now() - make_interval(secs => %(window)s))"
-            ).format(
-                columns=sql.SQL(columns),
-                table=sql.Identifier(table),
-                prefix=sql.Literal(prefix),
-            )
-
-        with self.pool.connection() as conn:
-            jobs = conn.execute(
-                missing("render:", "render_jobs", ", ".join(f"r.{c}" for c in PROJECTION_COLUMNS)),
-                params,
-            ).fetchall()
-            for found in jobs:
-                job = Job.model_validate({c: found[c] for c in PROJECTION_COLUMNS})
-                self.upsert_in(conn, render_row_of(job))
-                restored += 1
-            ops = conn.execute(
-                missing(
-                    "operation:",
-                    "operations",
-                    "r.id, r.kind, r.subject, r.status, r.result, r.error, r.created_at,"
-                    " r.finished_at, r.workflow_id, r.workflow_run_id",
+        sources: list[tuple[str, str, str, Callable[[Any], ActivityRow]]] = [
+            (
+                "render:",
+                "render_jobs",
+                ", ".join(f"r.{c}" for c in PROJECTION_COLUMNS),
+                lambda f: timed(
+                    render_row_of(Job.model_validate({c: f[c] for c in PROJECTION_COLUMNS})), f
                 ),
-                params,
-            ).fetchall()
-            for found in ops:
-                self.upsert_in(
-                    conn,
+            ),
+            (
+                "operation:",
+                "operations",
+                "r.id, r.kind, r.subject, r.status, r.result, r.error, r.created_at,"
+                " r.finished_at, r.workflow_id, r.workflow_run_id",
+                lambda f: timed(
                     operation_row_of(
-                        Operation.model_validate(found),
-                        found["workflow_id"],
-                        found["workflow_run_id"],
+                        Operation.model_validate(f), f["workflow_id"], f["workflow_run_id"]
                     ),
-                )
-                restored += 1
-            runs = conn.execute(
-                missing(
-                    "print_run:",
-                    "print_runs",
-                    "r.id, r.output_id, r.status, r.created_at, r.finished_at, r.result, r.error,"
-                    " (r.status = 'failed' AND r.enqueue_attempted) AS may_have_queued,"
-                    " r.workflow_id, r.workflow_run_id, r.slug",
+                    f,
                 ),
-                params,
-            ).fetchall()
-            for found in runs:
-                self.upsert_in(
-                    conn,
+            ),
+            (
+                "print_run:",
+                "print_runs",
+                "r.id, r.output_id, r.status, r.created_at, r.finished_at, r.result, r.error,"
+                " (r.status = 'failed' AND r.enqueue_attempted) AS may_have_queued,"
+                " r.workflow_id, r.workflow_run_id, r.slug",
+                lambda f: timed(
                     print_row_of(
-                        PrintRun.model_validate(found),
-                        found["slug"] or "",
-                        found["workflow_id"],
-                        found["workflow_run_id"],
+                        PrintRun.model_validate(f),
+                        f["slug"] or "",
+                        f["workflow_id"],
+                        f["workflow_run_id"],
                     ),
-                )
-                restored += 1
+                    f,
+                ),
+            ),
+        ]
+        restored = 0
+        for prefix, table, columns, build in sources:
             try:
-                with conn.transaction():
-                    agent_ids = [
-                        r["id"]
-                        for r in conn.execute(
-                            missing("agent_operation:", "ai_operations", "r.id"), params
-                        ).fetchall()
-                    ]
-            except errors.UndefinedTable:
-                agent_ids = []
+                restored += self._repair_source(window, prefix, table, columns, build)
+            except Exception:
+                logger.exception("an activity repair failed", extra={"table": table})
+                self._count_failure()
+        try:
+            with self.pool.connection() as conn:
+                agent_ids = [
+                    r["id"]
+                    for r in conn.execute(
+                        self._missing("agent_operation:", "ai_operations", "r.id"),
+                        {"window": window},
+                    ).fetchall()
+                ]
+        except errors.UndefinedTable:
+            agent_ids = []
+        except Exception:
+            logger.exception("an activity repair failed", extra={"table": "ai_operations"})
+            self._count_failure()
+            agent_ids = []
         for agent_id in agent_ids:
-            self._ingest_agent_operation(agent_id)
-            restored += 1
+            try:
+                restored += self._ingest_agent_operation(agent_id, restore=True)
+            except Exception:
+                logger.exception("an activity repair failed", extra={"activity_id": agent_id})
+                self._count_failure()
+        return restored
+
+    def _count_failure(self) -> None:
+        if self.metrics is not None:
+            self.metrics.activity_write_failures.inc()
+
+    @staticmethod
+    def _missing(prefix: str, table: str, columns: str) -> sql.Composed:
+        return sql.SQL(
+            "SELECT {columns} FROM {table} r LEFT JOIN activity a ON a.id = {prefix} || r.id"
+            " WHERE (a.id IS NULL OR a.source = '')"
+            " AND (r.created_at >= now() - make_interval(secs => %(window)s)"
+            " OR r.finished_at >= now() - make_interval(secs => %(window)s))"
+        ).format(columns=sql.SQL(columns), table=sql.Identifier(table), prefix=sql.Literal(prefix))
+
+    def _repair_source(
+        self,
+        window: float,
+        prefix: str,
+        table: str,
+        columns: str,
+        build: Callable[[Any], ActivityRow],
+    ) -> int:
+        restored = 0
+        with self.pool.connection() as conn:
+            found = conn.execute(
+                self._missing(prefix, table, columns), {"window": window}
+            ).fetchall()
+            for row in found:
+                restored += self.upsert_in(conn, partial(build, row), restore=True)
         return restored
 
     async def get(self, activity_id: str) -> ActivityRow | None:

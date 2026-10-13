@@ -21,6 +21,8 @@ from temporalio.worker import Worker
 
 from scadbuddy.render.submit import DESCRIBE_BOUND, SETTLE_DESCRIBES
 from scadbuddy.workflows.housekeeping import (
+    ACTIVITY_SWEEP,
+    ACTIVITY_TIMEOUT,
     CLAIMS_TIMEOUT,
     HEARTBEAT_TIMEOUT,
     PRUNE_INTERVAL,
@@ -98,7 +100,11 @@ async def test_the_prune_is_short_and_every_sweep_heartbeats(client: Client) -> 
         await client.execute_workflow(
             Housekeeping.run, id=f"housekeeping-{uuid.uuid4().hex}", task_queue=queue
         )
-    expected = {PRUNE_SWEEPS[0]: PRUNE_TIMEOUT, PRUNE_SWEEPS[1]: CLAIMS_TIMEOUT}
+    expected = {
+        PRUNE_SWEEPS[0]: PRUNE_TIMEOUT,
+        PRUNE_SWEEPS[1]: CLAIMS_TIMEOUT,
+        ACTIVITY_SWEEP: ACTIVITY_TIMEOUT,
+    }
     for sweep in SWEEPS:
         assert fake.timeouts[sweep] == (expected.get(sweep, SWEEP_TIMEOUT), HEARTBEAT_TIMEOUT)
 
@@ -217,11 +223,16 @@ async def test_the_prune_keeps_its_own_cadence_when_the_sweeps_are_off(client: C
         await prune.delete()
         await terminate_open_workflows(client, queue)
     assert described.schedule.spec.intervals[0].every == timedelta(seconds=300)
-    # Review 3c M1: claims are swept even with the sweeps off, or they pile up for good.
+    # Review 3c M1: claims are swept even with the sweeps off, or they pile up for good;
+    # so is the activity record (spec 2026-10-09 §6).
     action = described.schedule.action
     assert isinstance(action, ScheduleActionStartWorkflow)
     (sweeps,) = await client.data_converter.decode(action.args)
-    assert list(sweeps) == ["housekeeping_prune_jobs", "housekeeping_sweep_claims"]
+    assert list(sweeps) == [
+        "housekeeping_prune_jobs",
+        "housekeeping_sweep_claims",
+        "housekeeping_activity",
+    ]
 
 
 async def _actions(client: Client, schedule_id: str, count: int) -> int:

@@ -16,6 +16,7 @@ from temporalio.service import RPCError, RPCStatusCode
 from temporalio.testing import ActivityEnvironment
 
 from scadbuddy import main
+from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.workflows.housekeeping import PRUNE_SWEEPS, SWEEPS
 from tests.test_print_worker_task import StubWorker
 
@@ -204,6 +205,7 @@ async def test_a_failing_sweep_fails_its_activity(
         catalogue=SimpleNamespace(sweep_duplicate_staging=_broken(staging_error)),
         paths=SimpleNamespace(claims=None),
         events=None,
+        settings_store=SimpleNamespace(load=_broken(RuntimeError("the settings are gone"))),
     )
     activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
     with (
@@ -246,6 +248,17 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
     monkeypatch.setattr(main, "ClaimStore", lambda root: SimpleNamespace(sweep=slow_claims))
     state = SimpleNamespace(render=SimpleNamespace(prune=slow_prune), paths=SimpleNamespace())
     state.paths.claims = None
+
+    class SlowIndex:
+        async def repair(self, window: float) -> int:
+            await asyncio.sleep(0.1)
+            return 0
+
+        async def prune(self, ttl: float, placeholder_ttl: float) -> int:
+            return 0
+
+    state.settings_store = SimpleNamespace(load=StoredSettings)
+    state.components = SimpleNamespace(get=lambda key: SimpleNamespace(index=SlowIndex()))
     activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
     beats: list[object] = []
     env = ActivityEnvironment()

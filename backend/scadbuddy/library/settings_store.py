@@ -35,7 +35,7 @@ import time
 import types
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, LiteralString, Self, Union, get_args, get_origin
+from typing import Annotated, Any, Literal, LiteralString, Self, Union, get_args, get_origin
 
 from psycopg import Connection
 from psycopg.rows import DictRow, dict_row
@@ -45,6 +45,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StringConstraints,
     ValidationError,
     ValidationInfo,
     field_validator,
@@ -355,7 +356,9 @@ class SettingsPatch(BaseModel):
     operation_retention_seconds: float | None = Field(default=None, ge=86400)
     activity_ttl_seconds: float | None = Field(default=None, ge=86400)
     activity_repair_window_seconds: float | None = Field(default=None, ge=600, le=7 * 86400)
-    activity_follow: list[str] | None = Field(default=None, max_length=50)
+    activity_follow: list[Annotated[str, StringConstraints(max_length=256)]] | None = Field(
+        default=None, max_length=50
+    )
     #: The project a send without one goes to, and where the project picker opens.
     last_project_id: int | None = None
     #: The asset allowlist (#844); ``null`` puts the defaults back. Only the user sets

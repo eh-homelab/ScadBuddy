@@ -411,18 +411,32 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
 
 
 async def _sweep_activity_logged(state: AppState) -> None:
-    """Spec 2026-10-09 §6: repair what the sources' own writes missed, then prune.
-    Repair first, so a placeholder it can fill is filled before its time is up."""
+    """Spec 2026-10-09 §6: repair what the sources' own writes missed, then prune. Repair
+    first, so a placeholder it can fill is filled before its time is up; prune runs
+    whatever repair did. The window is never longer than the TTL, or a pruned row would
+    be restored from its source on the next run."""
+    failed = False
     try:
         settings = await asyncio.to_thread(state.settings_store.load)
         ttl = settings.activity_ttl_seconds or ACTIVITY_TTL_DEFAULT
         window = settings.activity_repair_window_seconds or ACTIVITY_REPAIR_WINDOW_DEFAULT
+        window = min(window, ttl)
         index = state.components.get(ACTIVITY).index
-        await index.repair(window)
-        await index.prune(ttl, window)
     except Exception:
         logger.exception("could not sweep activity")
         raise
+    try:
+        await index.repair(window)
+    except Exception:
+        logger.exception("could not repair activity")
+        failed = True
+    try:
+        await index.prune(ttl, window)
+    except Exception:
+        logger.exception("could not prune activity")
+        failed = True
+    if failed:
+        raise RuntimeError("the activity sweep failed")
 
 
 async def _prune_jobs_logged(state: AppState) -> None:

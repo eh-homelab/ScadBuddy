@@ -4,7 +4,8 @@ The API process's periodic loops are two Schedules that start ``Housekeeping`` o
 ``library`` queue: ``scadbuddy-housekeeping-<queue>`` runs every sweep every
 ``SCADBUDDY_ASSET_SWEEP_INTERVAL`` seconds (0: no Schedule), and
 ``scadbuddy-prune-<queue>`` prunes settled render jobs (as the render service's loop
-did) and sweeps old request claims every `PRUNE_INTERVAL`, whatever that interval. The
+did), sweeps old request claims and repairs and prunes the activity record every
+`PRUNE_INTERVAL`, whatever that interval. The
 queue is served in the API process, which holds the data volume the sweeps read. Each
 sweep is best effort, as the loop's were: one that fails is logged, fails its activity
 (the run returns it, and Temporal's UI shows it), the rest still run, and the next tick
@@ -94,8 +95,9 @@ SWEEPS = (
     ACTIVITY_SWEEP,
 )
 #: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs, and request claims,
-#: which would otherwise pile up for good with the sweeps off (review 3c M1).
-PRUNE_SWEEPS = (SWEEPS[0], SWEEPS[4])
+#: which would otherwise pile up for good with the sweeps off (review 3c M1); and the
+#: activity rows, which every start adds to (retention and repair, spec 2026-10-09 §6).
+PRUNE_SWEEPS = (SWEEPS[0], SWEEPS[4], ACTIVITY_SWEEP)
 #: An asset sweep converges with the store over Bambuddy, at length.
 SWEEP_TIMEOUT = timedelta(minutes=30)
 #: Every sweep heartbeats: a worker lost mid-sweep is noticed within this, not after
@@ -110,6 +112,8 @@ PRUNE_TIMEOUT = timedelta(seconds=2 * (1 + SETTLE_DESCRIBES) * DESCRIBE_BOUND) +
 )
 #: The claims sweep is one delete.
 CLAIMS_TIMEOUT = timedelta(minutes=2)
+#: The activity sweep is a repair pass over four tables and one delete.
+ACTIVITY_TIMEOUT = timedelta(minutes=5)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)
 
@@ -120,6 +124,8 @@ def sweep_timeout(sweep: str) -> timedelta:
         return PRUNE_TIMEOUT
     if sweep == PRUNE_SWEEPS[1]:
         return CLAIMS_TIMEOUT
+    if sweep == ACTIVITY_SWEEP:
+        return ACTIVITY_TIMEOUT
     return SWEEP_TIMEOUT
 
 
