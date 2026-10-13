@@ -94,6 +94,15 @@ export const SNAPSHOT_PENDING_MAX_SECONDS = 300
  */
 export const READ_RETRIES = 5
 
+/**
+ * #2464 — a render that failed to submit for a reason a retry can fix is sent again on
+ * its own: after 5 s, doubling to at most a minute, up to 8 times (about 5 minutes,
+ * longer than a deploy's restart). "Try again" stays for the impatient.
+ */
+export const RENDER_AUTO_RETRY_MS = 5_000
+export const RENDER_AUTO_RETRY_MAX_MS = 60_000
+export const RENDER_AUTO_RETRIES = 8
+
 /** The wait before a failed read's `n`th retry (0-based): 400 ms doubling, capped. */
 export function readBackoffMs(n: number): number {
   return Math.min(POLL_MS * 2 ** n, 8_000)
