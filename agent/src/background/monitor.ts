@@ -100,9 +100,12 @@ export function runCommand(options: { command: string; cwd: string; timeoutMs: n
       batch = []
       batchChars = 0
       dropped = 0
-      writing = writing.then(async () => {
-        if (!(await options.onEvent(text))) kill({ outcome: 'too_many' })
-      })
+      writing = writing
+        .then(async () => {
+          if (!(await options.onEvent(text))) kill({ outcome: 'too_many' })
+        })
+        // An event that could not be written ends the watch: the chain never stays rejected.
+        .catch((err: unknown) => kill({ outcome: 'failed', reason: `an event could not be recorded: ${(err as Error).message}` }))
     }
     const lines = lineSplitter((line) => {
       // One batch is one event: past EVENT_CHARS its lines are counted, not kept.
@@ -196,9 +199,11 @@ export function runSocket(options: {
     options.signal.addEventListener('abort', onAbort, { once: true })
     socket.on('message', (data: Buffer, isBinary: boolean) => {
       const text = isBinary ? `[binary frame, ${data.byteLength} bytes]` : data.toString('utf8').slice(0, EVENT_CHARS)
-      writing = writing.then(async () => {
-        if (!(await options.onEvent(text))) stop({ outcome: 'too_many' })
-      })
+      writing = writing
+        .then(async () => {
+          if (!(await options.onEvent(text))) stop({ outcome: 'too_many' })
+        })
+        .catch((err: unknown) => stop({ outcome: 'failed', reason: `an event could not be recorded: ${(err as Error).message}` }))
     })
     socket.on('error', (err: Error) => {
       ended ??= { outcome: 'failed', reason: `the WebSocket failed: ${err.message}` }
