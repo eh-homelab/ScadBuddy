@@ -154,13 +154,27 @@ cannot do it in one step:
 - A file not sent yet (still being written, or queued) takes the name at once and
   shadows the stored file there, which it replaces when it is sent (see the conflict
   rule below). A slicer's save, write `x.3mf.tmp`, close, rename over `x.3mf`, works
-  whether ScadBuddy is up or not.
+  whether ScadBuddy is up or not, in any folder the mount has listed since it started
+  (see "While ScadBuddy is down").
 - A queued file renamed over another queued file supersedes it; a file still being
   written supersedes it once its own bytes are durable (sent or queued).
 
 `RENAME_NOREPLACE` over anything, a folder over a folder, and anything over a file
 still being written are `EEXIST`; a file over a folder is `EISDIR`, a folder over a file
 `ENOTDIR`.
+
+## While ScadBuddy is down
+
+When ScadBuddy does not answer (unreachable, a timeout, or a 5xx such as a deploy's
+503), each folder's last listing is served, however old, so `ls`, lookups, reads of
+cached contents and queued writes, creates and renames go on, and a save is queued
+(below) and sent once ScadBuddy is back. The log says so once when it starts, and once
+when a listing succeeds again. What changed in the library meanwhile shows only then.
+
+Only folders listed since the mount started have a listing to serve. Mounted while
+ScadBuddy is down, the top level, and any folder not yet opened, answer `EIO` until
+it is back. Reading a file whose contents are not cached, `mkdir`, `rmdir`, `unlink`
+of a stored file and renaming a stored file need ScadBuddy, and answer `EIO`.
 
 ## Unsent writes
 

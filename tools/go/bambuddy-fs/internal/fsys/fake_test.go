@@ -34,6 +34,8 @@ type fakeLibrary struct {
 	failUploads int
 	failStatus  int
 	down        bool
+	// listDown makes every List fail with a 503, as ScadBuddy does during a deploy.
+	listDown bool
 	// failUpdates is how many UpdateFile calls fail, with a 502; updating, if set, is
 	// called at the start of each with its count.
 	failUpdates int
@@ -80,6 +82,14 @@ func (l *fakeLibrary) setDown(down bool) {
 	l.down = down
 }
 
+// setAllDown makes every upload and listing fail with a 503, or none.
+func (l *fakeLibrary) setAllDown(down bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.down, l.listDown = down, down
+	l.failStatus = http.StatusServiceUnavailable
+}
+
 func (l *fakeLibrary) remove(id int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -104,6 +114,9 @@ func (l *fakeLibrary) List(_ context.Context, folderID int, all bool) (api.Listi
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.lists++
+	if l.listDown {
+		return api.Listing{}, &api.Error{Op: "list", Status: http.StatusServiceUnavailable}
+	}
 	out := api.Listing{Folders: append([]api.Folder(nil), l.folders...)}
 	for _, f := range l.files {
 		if f.FolderID == folderID && (all || strings.HasSuffix(f.Name, ".3mf")) {

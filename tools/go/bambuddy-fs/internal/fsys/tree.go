@@ -85,6 +85,8 @@ type tree struct {
 	uploaded map[int]api.File
 	// pendings are the writes open now.
 	pendings map[*pending]bool
+	// down is set while listings are served stale because ScadBuddy is not answering.
+	down bool
 
 	// released, if set, is called when a write handle's release has finished (tests).
 	released func()
@@ -98,29 +100,65 @@ type listing struct {
 }
 
 // list returns a folder's entries, from the cache while they are younger than the TTL.
+//
+// While ScadBuddy cannot answer (unreachable, a timeout, a 5xx: a deploy takes
+// minutes), the folder's last listing is served whatever its age, so lookups,
+// listings, creates and renames go on and a save reaches the unsent queue; the first
+// such answer is logged, and the first listing after it. A folder never listed has
+// none to serve and answers the error.
 func (t *tree) list(ctx context.Context, folderID int) (listing, syscall.Errno) {
-	if l, ok := t.cached(folderID); ok {
+	l, fresh, ok := t.lookupListing(folderID)
+	if fresh {
 		return l, 0
 	}
 	got, err := t.lib.List(ctx, folderID, t.opts.All)
 	if err != nil {
+		if ok && ctx.Err() == nil && unreachable(err) {
+			t.mu.Lock()
+			first := !t.down
+			t.down = true
+			t.mu.Unlock()
+			if first {
+				slog.Warn("ScadBuddy is not answering; serving the last listings, and queueing writes, until it does", "folder", folderID, "err", err)
+			}
+			return l, 0
+		}
 		slog.Warn("list failed", "folder", folderID, "err", err)
 		return listing{}, api.Errno(err)
 	}
 	folders, files := shownNames(got.Folders, got.Files, folderID)
-	l := listing{at: time.Now(), folders: folders, files: files}
+	l = listing{at: time.Now(), folders: folders, files: files}
 	t.mu.Lock()
 	t.listings[folderID] = l
+	back := t.down
+	t.down = false
 	t.mu.Unlock()
+	if back {
+		slog.Info("ScadBuddy answers again; listings are fresh")
+	}
 	return l, 0
+}
+
+// unreachable is whether a library error is ScadBuddy not answering, not an answer:
+// no response, or a 5xx.
+func unreachable(err error) bool {
+	s := status(err)
+	return s == 0 || s >= 500
 }
 
 // cached returns a folder's listing if it is younger than the TTL.
 func (t *tree) cached(folderID int) (listing, bool) {
+	l, fresh, _ := t.lookupListing(folderID)
+	return l, fresh
+}
+
+// lookupListing returns a folder's last listing, whether it is younger than the TTL,
+// and whether there is one.
+func (t *tree) lookupListing(folderID int) (l listing, fresh, ok bool) {
 	t.mu.Lock()
-	l, ok := t.listings[folderID]
+	l, ok = t.listings[folderID]
 	t.mu.Unlock()
-	return l, ok && time.Since(l.at) < t.opts.TTL
+	return l, ok && !l.at.IsZero() && time.Since(l.at) < t.opts.TTL, ok
 }
 
 // listing starts the span of a lookup or readdir that lists its folder; one answered
@@ -264,17 +302,24 @@ func (t *tree) listedCreated(f api.File) time.Time {
 	return time.Time{}
 }
 
-// forget drops a folder's cached listing.
+// forget has a folder's listing fetched again at its next use. It is kept, expired,
+// for list to serve while ScadBuddy is not answering.
 func (t *tree) forget(folderID int) {
 	t.mu.Lock()
-	delete(t.listings, folderID)
+	if l, ok := t.listings[folderID]; ok {
+		l.at = time.Time{}
+		t.listings[folderID] = l
+	}
 	t.mu.Unlock()
 }
 
-// forgetAll drops every cached listing.
+// forgetAll expires every listing, as forget does.
 func (t *tree) forgetAll() {
 	t.mu.Lock()
-	clear(t.listings)
+	for id, l := range t.listings {
+		l.at = time.Time{}
+		t.listings[id] = l
+	}
 	t.mu.Unlock()
 }
 

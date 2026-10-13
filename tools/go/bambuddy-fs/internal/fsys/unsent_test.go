@@ -911,3 +911,71 @@ func TestASentWriteGoneBeforeItsRenameIsSentAgain(t *testing.T) {
 		}
 	})
 }
+
+// A deploy's minutes of 503s: listings and uploads both fail. The last listings are
+// served, so a slicer's save (write X.3mf.tmp, close, rename over the stored X.3mf)
+// succeeds and queues over the stored file, and replaces it once ScadBuddy is back.
+func TestASaveByRenameWhileScadBuddyIsDownIsQueuedAndSentLater(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.folder(4, "Top", 0)
+	lib.file(10, "X.3mf", 4, []byte("old"))
+	lib.file(11, "Y.3mf", 4, []byte("other"))
+	state := t.TempDir()
+	dir, released := retrying(t, lib, Options{StateDir: state})
+	log := logs(t)
+	top := filepath.Join(dir, "Top")
+	if got := names(t, top); !slices.Equal(got, []string{"X.3mf", "Y.3mf"}) {
+		t.Fatalf("listed: %v", got)
+	}
+	lib.setAllDown(true)
+	// The TTL is 0: every lookup and listing below asks ScadBuddy, and is refused.
+	if got := names(t, top); !slices.Equal(got, []string{"X.3mf", "Y.3mf"}) {
+		t.Fatalf("listed while down: %v", got)
+	}
+	if data, err := os.ReadFile(filepath.Join(top, "Y.3mf")); err != nil || string(data) != "other" {
+		t.Fatalf("read while down: %q %v", data, err)
+	}
+	saveByRename(t, top, "new")
+	waitRelease(t, released)
+	if data, err := os.ReadFile(filepath.Join(top, "X.3mf")); err != nil || string(data) != "new" {
+		t.Fatalf("read back: %q %v", data, err)
+	}
+	if got := names(t, top); !slices.Equal(got, []string{"X.3mf", "Y.3mf"}) {
+		t.Fatalf("listed after the save: %v", got)
+	}
+	q := queued(t, state)
+	if len(q) != 1 || q[0].Name != "X.3mf" || q[0].FolderID != 4 {
+		t.Fatalf("queue: %+v", q)
+	}
+	if rec, err := readRecord(q[0].Path); err != nil || len(rec.Bases) != 1 || rec.Bases[0].ID != 10 {
+		t.Fatalf("bases: %+v %v", rec.Bases, err)
+	}
+	if n := strings.Count(log.String(), "ScadBuddy is not answering"); n != 1 {
+		t.Fatalf("outage logged %d times: %s", n, log.String())
+	}
+	lib.setAllDown(false)
+	eventually(t, "the replace", func() bool { return libraryHas(lib, map[string]string{"4/X.3mf": "new", "4/Y.3mf": "other"}) })
+	eventually(t, "the queue to empty", func() bool { return len(queued(t, state)) == 0 })
+	lib.locked(func() {
+		if !lib.deleted[10] {
+			t.Fatal("old file kept")
+		}
+	})
+	if got := names(t, top); !slices.Equal(got, []string{"X.3mf", "Y.3mf"}) {
+		t.Fatalf("listed after: %v", got)
+	}
+	if !strings.Contains(log.String(), "ScadBuddy answers again") {
+		t.Fatalf("recovery not logged: %s", log.String())
+	}
+}
+
+// At a start with ScadBuddy down there is no listing to serve: the top level is EIO.
+func TestAFolderNeverListedIsEIOWhileScadBuddyIsDown(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.setAllDown(true)
+	dir, _ := retrying(t, lib, Options{StateDir: t.TempDir()})
+	logs(t)
+	if _, err := os.ReadDir(dir); !errors.Is(err, syscall.EIO) {
+		t.Fatalf("%v", err)
+	}
+}
