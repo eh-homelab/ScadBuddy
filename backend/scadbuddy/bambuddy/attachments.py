@@ -63,6 +63,8 @@ class Attachment(BaseModel):
     filename: str
     size_bytes: int
     caption: str | None = None
+    #: The templates whose gallery has a copy (promote).
+    promoted_to: list[str] = []
     created_at: datetime | None = None
 
 
@@ -93,6 +95,10 @@ class AttachmentStore:
         self, archive_id: int, attachment_id: int, caption: str | None
     ) -> Attachment | None:
         return await asyncio.to_thread(self._set_caption, archive_id, attachment_id, caption)
+
+    async def promoted(self, archive_id: int, attachment_id: int, slug: str) -> None:
+        """Note that ``slug``'s gallery has a copy."""
+        await asyncio.to_thread(self._promoted, archive_id, attachment_id, slug)
 
     async def remove(self, attachment_id: int) -> None:
         await asyncio.to_thread(self._remove, attachment_id)
@@ -151,6 +157,14 @@ class AttachmentStore:
                 (caption, archive_id, attachment_id),
             ).fetchone()
         return Attachment.model_validate(dict(row)) if row is not None else None
+
+    def _promoted(self, archive_id: int, attachment_id: int, slug: str) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE print_attachments SET promoted_to = array_append(promoted_to, %s)"
+                " WHERE archive_id = %s AND id = %s AND NOT (%s = ANY(promoted_to))",
+                (slug, archive_id, attachment_id, slug),
+            )
 
     def _remove(self, attachment_id: int) -> None:
         with self._pool.connection() as conn:

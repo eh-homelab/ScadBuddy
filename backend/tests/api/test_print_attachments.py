@@ -290,8 +290,17 @@ def test_promote_copies_an_attachment_into_the_template_gallery(
     assert [item["caption"] for item in media] == ["Real print"]
     gallery = client.get(f"/api/v1/models/{model}/media/{media[0]['id']}")
     assert gallery.content == PNG
-    # The print keeps its attachment.
-    assert client.get("/api/v1/prints/35").json()["attachment_count"] == 1
+    # The print keeps its attachment, and says where it went.
+    detail = client.get("/api/v1/prints/35").json()
+    assert detail["attachment_count"] == 1
+    assert detail["media"]["attachments"][0]["promoted_to"] == [model]
+    # A second copy is refused (review on #2832): a reload offered it again.
+    again = client.post(
+        f"{URL}/{attachment['id']}/promote", json={"slug": model}, headers=press()
+    )
+    assert again.status_code == 409, again.text
+    assert "gallery already" in again.json()["detail"]
+    assert len(client.get(f"/api/v1/models/{model}").json()["media"]) == 1
 
 
 @respx.mock

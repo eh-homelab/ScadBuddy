@@ -229,7 +229,10 @@ async def delete_attachment(
     "/{attachment_id}/promote",
     response_model=ModelRecord,
     responses={
-        409: {"description": "The template already holds its most media items"},
+        409: {
+            "description": "The template already holds its most media items, or this "
+            "attachment already"
+        },
         413: {"description": "A photo over 10 MB, which a template's history does not take"},
         **OPERATION_RESPONSES,
     },
@@ -257,6 +260,11 @@ async def promote_attachment(
     found = await attachments.get(archive_id, attachment_id)
     if found is None:
         raise _no_attachment(archive_id, attachment_id)
+    if body.slug in found.promoted_to:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"this attachment is in {body.slug}'s gallery already",
+        )
     staged = catalogue.paths.cache / f"{MEDIA_UPLOAD_PREFIX}{uuid.uuid4().hex}"
     claims = ClaimStore(catalogue.paths.claims)
     held: list[Held] = []
@@ -302,7 +310,10 @@ async def promote_attachment(
         idempotency_key=idempotency_key,
         claimed=Claimed(claims, held),
     )
-    return operation_answer(result, ModelRecord)
+    answer = operation_answer(result, ModelRecord)
+    if isinstance(answer, ModelRecord):
+        await attachments.promoted(archive_id, attachment_id, body.slug)
+    return answer
 
 
 async def _download(

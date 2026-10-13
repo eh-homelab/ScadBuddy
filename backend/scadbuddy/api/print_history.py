@@ -258,6 +258,8 @@ class PrintAttachment(_Response):
     #: The file's name as it was added (its extension the type its bytes are).
     filename: str
     size_bytes: int
+    #: The templates whose gallery already has a copy (``promote``).
+    promoted_to: list[str] = []
     created_at: datetime | None = None
 
 
@@ -269,6 +271,7 @@ def attachment_view(attachment: Attachment) -> PrintAttachment:
         url=_prints_url(attachment.archive_id, f"attachments/{attachment.id}/file"),
         filename=attachment.filename,
         size_bytes=attachment.size_bytes,
+        promoted_to=attachment.promoted_to,
         created_at=attachment.created_at,
     )
 

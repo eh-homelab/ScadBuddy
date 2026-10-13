@@ -12,6 +12,8 @@ CREATE TABLE IF NOT EXISTS print_attachments (
     filename text NOT NULL,
     size_bytes bigint NOT NULL,
     caption text,
+    -- The templates whose gallery has a copy, so one is not offered or made twice.
+    promoted_to text[] NOT NULL DEFAULT '{}',
     created_at timestamptz NOT NULL DEFAULT now(),
     CHECK (archive_photo IS NOT NULL OR library_file_id IS NOT NULL)
 );
