@@ -4,20 +4,40 @@ and manifest tools the editor completes, from what the type check itself uses.""
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from scadbuddy.api import flow_script
+from scadbuddy.api.components import getter_for
+from scadbuddy.flows.component import FLOWS
 from scadbuddy.flows.manifest import tiers, use_manifest
 from scadbuddy.workflows.flow_tools import SCRIPT_TOOLS
 
 
+class Overrides:
+    """The flows component as the route reads it: Settings' stored tool overrides."""
+
+    def __init__(self) -> None:
+        self.stored: Any = None
+        self.store = self
+
+    async def tool_overrides(self) -> Any:
+        return self.stored
+
+
 @pytest.fixture
-def client() -> Iterator[TestClient]:
+def overrides() -> Overrides:
+    return Overrides()
+
+
+@pytest.fixture
+def client(overrides: Overrides) -> Iterator[TestClient]:
     app = FastAPI()
     app.include_router(flow_script.router, prefix="/api/v1")
+    app.dependency_overrides[getter_for(FLOWS)] = lambda: overrides
     with TestClient(app) as test_client:
         yield test_client
 
@@ -79,5 +99,19 @@ def test_the_host_functions_are_the_ones_a_script_is_checked_against(
     assert "job_id: str" in types["RenderResult"]["source"]
     assert body["tools"] == [
         {"name": "list_models", "tier": "read"},
+        {"name": "send_to_bambuddy", "tier": "outward"},
+    ]
+
+
+def test_the_tools_carry_the_tiers_settings_raised(
+    client: TestClient, manifest: None, overrides: Overrides
+) -> None:
+    """Review of #2648: a grant names the tools as the run enforces them (`raise_tiers`,
+    which the grant routes check against), so the editor reads them so too."""
+    overrides.stored = {"tool_tiers": {"list_models": "outward", "send_to_bambuddy": "read"}}
+    response = client.get("/api/v1/workflow-script/host-functions")
+    assert response.status_code == 200, response.text
+    assert response.json()["tools"] == [
+        {"name": "list_models", "tier": "outward"},
         {"name": "send_to_bambuddy", "tier": "outward"},
     ]

@@ -153,6 +153,12 @@ export type FlowRunStarted = Schemas['RunAnswer']
 export type FlowResetPoints = Schemas['ResetPoints']
 export type FlowResetPreview = Schemas['ResetPreview']
 export type FlowReset = Schemas['Reset']
+/** #2481 — a run's grant: what its outward calls may do without asking, and what it let through. */
+export type FlowGrantSpec = Schemas['GrantSpec']
+export type FlowGrantRule = Schemas['GrantRule']
+export type FlowGrantArg = Schemas['ArgBound']
+export type FlowGrantView = Schemas['GrantView']
+export type FlowGrantUse = Schemas['GrantUseView']
 /** A route's 202: the operation to follow, `repeated` when an earlier press started it. */
 export type OperationAccepted = Schemas['OperationAccepted']
 

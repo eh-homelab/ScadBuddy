@@ -1,6 +1,8 @@
-import { fireEvent, screen, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { bridge } from '../agent/bridge'
+import { useGlobalAgentTools } from '../agent/global'
 import { api } from '../api/client'
 import type { FlowHostInterface, FlowScriptProblem } from '../api/types'
 import { flowRequests, setFlowState } from '../mocks/features/flows'
@@ -180,6 +182,46 @@ describe('FlowPage', () => {
     expect(flowRequests()).toEqual([
       { path: '/api/v1/workflows/def-swap/runs', key: expect.stringMatching(/^[0-9a-f]{32}$/), body: {} },
     ])
+  })
+
+  it('starts a run with a grant (#2481), approved as sent', async () => {
+    const { user } = render('def-swap')
+    await user.click(await screen.findByRole('button', { name: 'Start with a grant…' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Start with a grant' })
+    const arrange = await within(dialog).findByRole('group', { name: 'Rule arrange' })
+    await user.click(within(arrange).getByRole('checkbox', { name: 'Allow without asking' }))
+    await user.type(within(arrange).getByLabelText('Max calls'), '2')
+    await user.click(within(dialog).getByRole('button', { name: 'Start run' }))
+    expect(await screen.findByText('Run page')).toBeInTheDocument()
+    const sent = flowRequests()
+    expect(sent).toHaveLength(1)
+    expect(sent[0]).toMatchObject({ path: '/api/v1/workflows/def-swap/runs', key: expect.stringMatching(/^[0-9a-f]{32}$/) })
+    expect(sent[0]!.body['grant']).toMatchObject({
+      sessions: false,
+      ask_starter_session: true,
+      rules: [{ fn: 'arrange', max_calls: 2 }],
+    })
+  })
+
+  it('keeps "Start with a grant…" from the browser bridge (#2481)', async () => {
+    function Agent() {
+      useGlobalAgentTools()
+      return null
+    }
+    renderPage(
+      <>
+        <Agent />
+        <Routes>
+          <Route path="/workflows/flows/:id" element={<FlowPage />} />
+        </Routes>
+      </>,
+      { route: '/workflows/flows/def-swap' },
+    )
+    await screen.findByRole('button', { name: 'Start with a grant…' })
+    await waitFor(() => expect(bridge.liveNames()).toContain('click'))
+    const outcome = await bridge.call('click', { role: 'button', name: 'Start with a grant…' })
+    expect(!outcome.ok && outcome.error.code).toBe('refused')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
   it('on a phone, shows the script and a diff read only: no editor, Save or Restore', async () => {

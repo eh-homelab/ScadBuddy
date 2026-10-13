@@ -69,6 +69,49 @@ for (const { name, viewport } of [
       await expect(page.getByLabel('Script', { exact: true })).toContainText('wait_for_human')
     })
 
+    // #2481 — a run grant: attached at Start run, shown on the run, revoked once
+    // confirmed; and an agent's requested grant approved narrowed.
+    test('starts a run with a grant and revokes it', async ({ page }) => {
+      await page.goto('/workflows/flows/def-swap')
+      await page.getByRole('button', { name: 'Start with a grant…' }).click()
+      const dialog = page.getByRole('dialog', { name: 'Start with a grant' })
+      const print = dialog.getByRole('group', { name: 'Rule queue_print' })
+      await print.getByRole('checkbox', { name: 'Allow without asking' }).check()
+      await expect(print.getByText('No bounds: any printer, any model, any number of prints.')).toBeVisible()
+      await print.getByRole('checkbox', { name: 'Any printer' }).uncheck()
+      await print.getByRole('checkbox', { name: '3DP-31B-598' }).check()
+      await print.getByRole('textbox', { name: 'Max prints' }).fill('4')
+      await expect(print.getByText(/^No bounds/)).toHaveCount(0)
+      await noSideScroll(page)
+      await dialog.getByRole('button', { name: 'Start run', exact: true }).click()
+
+      await expect(page).toHaveURL(/\/workflows\/runs\/run-new-1$/)
+      const grant = page.getByRole('region', { name: 'Grant' })
+      await expect(grant.getByTestId('grant-status')).toHaveText('In force')
+      await expect(grant.getByRole('table', { name: 'Grant rules' })).toContainText('0 / 4 prints')
+      await expect(grant.getByRole('table', { name: 'Grant rules' })).toContainText('printers 1')
+      await noSideScroll(page)
+      await grant.getByRole('button', { name: 'Revoke grant' }).click()
+      await page.getByRole('dialog', { name: 'Revoke this grant?' }).getByRole('button', { name: 'Revoke grant' }).click()
+      await expect(grant.getByTestId('grant-status')).toHaveText('Revoked')
+      await expect(grant.getByRole('button', { name: 'Revoke grant' })).toHaveCount(0)
+    })
+
+    test("approves an agent's requested grant, narrowed", async ({ page }) => {
+      await page.goto('/workflows/runs/run-ask')
+      const grant = page.getByRole('region', { name: 'Grant' })
+      await expect(grant.getByTestId('grant-status')).toHaveText('Requested')
+      await grant.getByRole('button', { name: 'Approve grant…' }).click()
+      const dialog = page.getByRole('dialog', { name: 'Approve this grant' })
+      const maxPrints = dialog.getByRole('group', { name: 'Rule queue_print' }).getByRole('textbox', { name: 'Max prints' })
+      await expect(maxPrints).toHaveValue('12')
+      await maxPrints.fill('3')
+      await noSideScroll(page)
+      await dialog.getByRole('button', { name: 'Approve grant' }).click()
+      await expect(grant.getByTestId('grant-status')).toHaveText('In force')
+      await expect(grant.getByRole('table', { name: 'Grant rules' })).toContainText('0 / 3 prints')
+    })
+
     test('previews a reset with the outward call flagged, and resets once confirmed', async ({ page }) => {
       await page.goto('/workflows/runs/run-done')
       await page.getByRole('button', { name: 'Preview a reset' }).click()
