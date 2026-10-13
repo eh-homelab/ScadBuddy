@@ -493,7 +493,7 @@ def test_drawing_memory_follows_the_chunk_not_the_plate(monkeypatch: pytest.Monk
     can be the sum of every piece on the plate. Its triangles are projected, and their
     fragments resolved, a chunk at a time, and no normals are left cached on the
     mesh: sixteen copies cost what one does, give or take."""
-    monkeypatch.setattr(thumbnail, "CHUNK_TRIANGLES", 4096, raising=False)
+    monkeypatch.setattr(thumbnail, "CHUNK_TRIANGLES", 4096)
     monkeypatch.setattr(thumbnail, "BATCH_PIXELS", 1 << 14)
     piece = trimesh.creation.icosphere(subdivisions=5, radius=10)
     copies = []
@@ -514,5 +514,5 @@ def test_drawing_memory_follows_the_chunk_not_the_plate(monkeypatch: pytest.Monk
 
 def test_a_plate_drawn_in_small_chunks_is_the_same_image(monkeypatch: pytest.MonkeyPatch) -> None:
     whole = render_plate_thumbnails(_two_colour_parts())
-    monkeypatch.setattr(thumbnail, "CHUNK_TRIANGLES", 5, raising=False)
+    monkeypatch.setattr(thumbnail, "CHUNK_TRIANGLES", 5)
     assert render_plate_thumbnails(_two_colour_parts()) == whole

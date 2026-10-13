@@ -15,7 +15,9 @@ import respx
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
+from tests.api.conftest import wait_for_job
 from tests.api.test_send import BASE, configure, make_output
+from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -102,3 +104,25 @@ def test_print_settings_declared_after_the_save_leave_its_file_alone(
 
     assert client.get(f"/api/v1/outputs/{output_id}/model.3mf").content == stored
     assert "different_settings_to_system" not in _project_settings(stored)
+
+
+def test_a_template_s_invalid_model_json_fails_the_save_naming_the_key(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#2868: the print settings are read when the output is saved, so a model.json made
+    invalid since the render fails the save, as a 409 naming it, never a 500."""
+    configure(client)
+    job_id = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}}).json()[
+        "job_id"
+    ]
+    wait_for_job(client, job_id)
+    _declare(paths, model, {"enable_support": 1})  # type: ignore[dict-item]
+
+    saved = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": job_id, "name": "Elan"}, headers=press()
+    )
+
+    assert saved.status_code == 409, saved.text
+    assert saved.json()["title"] == "Invalid Model Metadata"
+    assert "model.json" in saved.json()["detail"]
+    assert "print_settings" in saved.json()["detail"]
