@@ -217,7 +217,7 @@ describe('startTracing', () => {
     await traceAction('arrange', {}, async (within) => {
       actionTrace = trace.getActiveSpan()?.spanContext().traceId
       await backfillOutputs([{ id: 'o1' }], { within, pollMs: 1 })
-      await runArrange('box', { objects: [], slug: 'box' }, { within, pollMs: 1 })
+      await runArrange('box', { objects: [], slug: 'box', goal: 'fewest_plates' }, { within, pollMs: 1 })
     })
     for (const key of ['backfill', 'arrange', 'save']) {
       expect(seen[key]?.[0], key).toMatch(TRACEPARENT)
