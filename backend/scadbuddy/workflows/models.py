@@ -83,6 +83,11 @@ class PrepareResult(BaseModel):
     schema_cache: str
     #: The pins `library_path` holds (#169), for the result to record.
     libraries: list[ModelLibrary] = Field(default_factory=list)
+    #: The piece's geometry key (`render/geometry_cache.py`): None when its geometry is
+    #: never shared (no revision, no colour parameter, a literal colour in the source).
+    geometry_key: str | None = None
+    #: The colour of each of its colour classes, in class order.
+    colours: list[str] = Field(default_factory=list)
 
 
 class RenderMainResult(BaseModel):

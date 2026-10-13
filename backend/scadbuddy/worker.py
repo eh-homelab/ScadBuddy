@@ -78,6 +78,7 @@ from scadbuddy.store import BlobRefs
 from scadbuddy.store.bambuddy import RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.factory import StoreBundle, build_store, store_health
+from scadbuddy.store.geometry import GeometryIndex
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.client import (
     DEPLOYMENT_NAME,
@@ -193,6 +194,7 @@ def build_worker_deps(
         blobs=store.blobs,
         refs=BlobRefs(projection.pool),
         projection=projection,
+        geometry=GeometryIndex(projection.pool),
         history=history if backend == "local" else None,
         checkouts=checkouts,
         fetcher=fetcher,
@@ -218,6 +220,7 @@ def worker_deps_from_state(state: AppState) -> WorkerDeps:
         blobs=state.store.blobs,
         refs=state.refs,
         projection=state.projection,
+        geometry=GeometryIndex(state.refs.pool),
         history=state.history,
         checkouts=state.checkouts,
         fetcher=CheckoutFetcher(state.libraries, state.installs, state.checkouts),

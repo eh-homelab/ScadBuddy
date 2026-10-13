@@ -95,8 +95,14 @@ class FakeActivities:
         fail_running: asyncio.Event | None = None,
         fail_solids: bool = False,
         settled_rows: frozenset[str] = frozenset(),
+        geometry_key: str | None = None,
+        reuse: str = "miss",
     ) -> None:
         self.calls: list[str] = []
+        #: What `prepare` answers as the piece's geometry key, and what `reuse_geometry`
+        #: then does: "hit", "miss" or "fail".
+        self.geometry_key = geometry_key
+        self.reuse = reuse
         #: Rows the API settled before the run's first step (#603).
         self.settled_rows = settled_rows
         self.projections: list[Projection] = []
@@ -124,7 +130,18 @@ class FakeActivities:
             scad=f"models/{req.slug}/model.scad",
             library_path=[],
             schema_cache="cache/x",
+            geometry_key=self.geometry_key,
+            colours=["#FF0000"] if self.geometry_key else [],
         )
+
+    @activity.defn(name="reuse_geometry")
+    async def reuse_geometry(
+        self, req: PieceRequest, prepared: PrepareResult
+    ) -> RenderMainResult | None:
+        self.calls.append("reuse_geometry")
+        if self.reuse == "fail":
+            raise ApplicationError("the index went away", non_retryable=True)
+        return RenderMainResult(log_tail=["reused"]) if self.reuse == "hit" else None
 
     @activity.defn(name="render_main")
     async def render_main(self, req: PieceRequest, prepared: PrepareResult) -> RenderMainResult:
@@ -238,6 +255,7 @@ def _activities(acts: FakeActivities) -> list[Any]:
     return [
         acts.cached_piece,
         acts.prepare,
+        acts.reuse_geometry,
         acts.render_main,
         acts.render_solids,
         acts.finish_piece,
@@ -388,6 +406,41 @@ async def test_a_default_render_runs_the_four_stages_and_projects_done() -> None
         assert acts.projections[-1].blob_keys == [
             piece_key("demo", REVISION, "model.scad", {"width": 1})
         ]
+
+
+async def test_a_piece_whose_geometry_is_reused_is_only_recoloured_and_finished() -> None:
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        acts = FakeActivities(geometry_key="g" * 64, reuse="hit")
+        async with _worker(client, queue, acts):
+            job = _job(width=1)
+            await client.execute_workflow(
+                TemplatePipeline.run, start_of(job), id=f"render-{job.id}", task_queue=queue
+            )
+        assert acts.calls == ["prepare", "reuse_geometry", "finish_piece"]
+        last = acts.projections[-1]
+        assert last.state == "done" and last.log_tail == ["reused"]
+
+
+async def test_a_geometry_miss_or_a_failed_reuse_renders_the_piece() -> None:
+    """The reuse is a shortcut: when it fails, the piece is rendered, never failed."""
+    for reuse in ("miss", "fail"):
+        async with temporal_client() as client:
+            queue = f"t-{uuid.uuid4().hex[:8]}"
+            acts = FakeActivities(geometry_key="g" * 64, reuse=reuse)
+            async with _worker(client, queue, acts):
+                job = _job(width=1)
+                await client.execute_workflow(
+                    TemplatePipeline.run, start_of(job), id=f"render-{job.id}", task_queue=queue
+                )
+            assert acts.calls == [
+                "prepare",
+                "reuse_geometry",
+                "render_main",
+                "render_solids",
+                "finish_piece",
+            ], reuse
+            assert acts.projections[-1].state == "done"
 
 
 async def test_an_openscad_failure_projects_failed_with_the_log_tail() -> None:

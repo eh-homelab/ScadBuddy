@@ -38,6 +38,9 @@ RENDER_GRANTS: Mapping[str, tuple[str, ...]] = {
     # The job.* events, written in the row's transaction (`core/pg_events.py`
     # `write_event`; RETURNING seq reads).
     "events": ("SELECT", "INSERT"),
+    # A finished piece's geometry (`store/geometry.py`): read before rendering, written
+    # by `finish_piece`, and forgotten when the piece it names is gone.
+    "piece_geometry": ("SELECT", "INSERT", "UPDATE", "DELETE"),
     # The blob index (`store/index.py`): get, put, touch, and `forget` of a row whose
     # object is gone.
     "store_blobs": ("SELECT", "INSERT", "UPDATE", "DELETE"),

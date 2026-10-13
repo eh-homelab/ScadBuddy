@@ -46,6 +46,7 @@ from scadbuddy.library.libraries import (
 )
 from scadbuddy.render.bambu3mf import PlateParts, single_plate, write_plates_3mf
 from scadbuddy.render.colours import colour_hex
+from scadbuddy.render.geometry_cache import UNCOLOURED_MATERIAL_INDEX, class_order, colour_classes
 from scadbuddy.render.glb import BoundingBox, bounding_box, write_glb
 from scadbuddy.render.job_models import Job as Job
 from scadbuddy.render.job_models import JobResult as JobResult
@@ -69,8 +70,6 @@ MODEL_NAME = "model.3mf"
 PREVIEW_NAME = "preview.glb"
 LAYOUT_NAME = "layout.json"
 
-# Material 0 is OpenSCAD's "Default": geometry no color() call reached.
-UNCOLOURED_MATERIAL_INDEX = 0
 UNCOLOURED_WARNING = "uncoloured geometry present; parts are not closed"
 THUMBNAIL_TIMEOUT_WARNING = "plate thumbnail timed out; the 3MF carries no cover image"
 THUMBNAIL_FAILED_WARNING = "plate thumbnail failed; the 3MF carries no cover image"
@@ -125,20 +124,7 @@ def extruder_order(
     share a value therefore share one extruder, and one no geometry uses gets none.
     Every part no parameter names -- a hard-coded colour, one computed from a
     parameter, the uncoloured Default -- follows, in OpenSCAD's material order."""
-    ranks: dict[str, int] = {}
-    for parameter in schema.parameters:
-        if parameter.type != "color":
-            continue
-        colour = colour_hex(params.get(parameter.name, parameter.initial))
-        if colour is not None:
-            ranks.setdefault(colour, len(ranks))
-
-    def rank(part: ColourPart) -> int:
-        if part.material_index == UNCOLOURED_MATERIAL_INDEX:
-            return len(ranks)
-        return ranks.get(part.colour, len(ranks))
-
-    return sorted(parts, key=rank)
+    return class_order(parts, colour_classes(schema, params))
 
 
 async def solid_parts(
