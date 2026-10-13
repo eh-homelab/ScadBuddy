@@ -88,6 +88,9 @@ DEFAULT_SLICE_TIMEOUT = 600.0
 DEFAULT_SLICE_POLL = 2.0
 #: The largest page ``GET /library/trash`` serves (``limit`` is ``le=500``).
 TRASH_PAGE = 500
+#: The Bambuddy permission that shows a caller every user's trash (``Permission``,
+#: ``backend/app/core/permissions.py`` line 62 at v1.2.5.5).
+LIBRARY_DELETE_ALL = "library:delete_all"
 
 
 #: What a Bambuddy call does, which names its span (``bambuddy.<operation>``, spec
@@ -103,6 +106,8 @@ Operation = Literal[
     "archives.timelapse.info",
     "archives.timelapse.select",
     "archives.timelapse.thumbnails",
+    "auth.me",
+    "auth.status",
     "external_links.create",
     "external_links.list",
     "external_links.update",
@@ -1018,8 +1023,9 @@ class BambuddyClient:
         """``GET /library/trash``: every file in Bambuddy's trash that its API key's user
         may see, page by page (``limit`` at most 500). Bambuddy v1.2.5.5
         ``backend/app/api/routes/library_trash.py`` ``list_trash`` (lines 88-150):
-        ``{items, total, retention_days}``, each item with its ``folder_id``; a key with
-        only ``library:delete_own`` sees only its user's files."""
+        ``{items, total, retention_days}``, each item with its ``folder_id``; a caller
+        without ``library:delete_all`` sees only its user's files
+        (:meth:`sees_every_users_trash` says which)."""
         found: list[TrashedLibraryFile] = []
         while True:
             response = await self._send(
@@ -1035,6 +1041,41 @@ class BambuddyClient:
             found.extend(items)
             if not items or len(found) >= body["total"]:
                 return found
+
+    async def sees_every_users_trash(self) -> bool:
+        """Whether :meth:`trashed_library_files` lists every user's trashed files rather
+        than only the key's user's. Bambuddy v1.2.5.5 narrows ``list_trash`` to the
+        caller's own files unless ``require_ownership_permission`` grants
+        ``library:delete_all`` (``backend/app/core/auth.py`` lines 2106-2220), which it
+        grants to every caller while auth is off. So: ``GET /auth/status``
+        (``routes/auth.py`` line 395, public) for ``auth_enabled``, then ``GET /auth/me``
+        (line 662), whose ``permissions`` for an API key are those the key can exercise
+        (``apikey_effective_permissions``, ``core/auth.py`` line 340). Any other shape
+        is a 502, never read as seeing everything."""
+        what = "read whether Bambuddy's API key sees every user's trash"
+        response = await self._send(
+            "GET", "/auth/status", scope=Scope.MANAGE_LIBRARY, operation="auth.status", what=what
+        )
+        body = response.json()
+        enabled = body.get("auth_enabled") if isinstance(body, dict) else None
+        if not isinstance(enabled, bool):
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Bambuddy did not say whether auth is on, asked to {what}",
+            )
+        if not enabled:
+            return True
+        response = await self._send(
+            "GET", "/auth/me", scope=Scope.MANAGE_LIBRARY, operation="auth.me", what=what
+        )
+        body = response.json()
+        permissions = body.get("permissions") if isinstance(body, dict) else None
+        if not isinstance(permissions, list) or not all(isinstance(p, str) for p in permissions):
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Bambuddy did not list the API key's permissions, asked to {what}",
+            )
+        return LIBRARY_DELETE_ALL in permissions
 
     async def restore_library_file(self, file_id: int) -> None:
         """``POST /library/trash/{id}/restore``: a trashed file back where it was. A file

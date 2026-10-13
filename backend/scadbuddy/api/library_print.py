@@ -306,7 +306,9 @@ async def post_library_folder_delete(
 ) -> LibraryFolderDeleteResult | JSONResponse:
     """Deletes the folder's files as ``/delete`` does, then its folders, deepest first
     (#2686). A file a print waiting in Bambuddy's queue names is a 409 before anything
-    is deleted. A folder holding a file Bambuddy skipped, and its ancestors, are kept."""
+    is deleted, as are files of the folder in Bambuddy's trash; a key without
+    ``library:delete_all`` (which sees only its own user's trash) is a 403. A folder
+    holding a file Bambuddy skipped, and its ancestors, are kept."""
     result = await run_operation(
         ops,
         response,

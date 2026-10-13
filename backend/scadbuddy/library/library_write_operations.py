@@ -6,10 +6,13 @@ A folder delete takes everything in it, and never lets Bambuddy's own folder del
 which cascades to every file row in the folder, trashed ones included, reach a file
 (spec §5). It walks the folder and its subfolders and refuses with 409 before anything
 is deleted when a print waiting in Bambuddy's queue names any file, or when Bambuddy's
-trash holds files from the folder. It moves each managed file to the top level, then
+trash holds files from the folder; and with 403 when the API key cannot see every
+user's trash (it lacks ``library:delete_all``), since another user's trashed file would
+then be missing from that check. It moves each managed file to the top level, then
 deletes the files as ``library_file_delete`` does (managed files to the trash, external
 ones for good), then the folders, deepest first, each only once a fresh read finds
-nothing in it: no file, trashed file or subfolder. A folder with a file Bambuddy
+nothing in it: no file, trashed file or subfolder, read by a key that still sees every
+user's trash. A folder with a file Bambuddy
 skipped, with anything that arrived after the check, or with a subfolder kept for
 either reason, is not deleted.
 """
@@ -23,7 +26,8 @@ from typing import TYPE_CHECKING, Annotated, Any
 from fastapi import status
 from pydantic import BaseModel, Field, StringConstraints
 
-from scadbuddy.bambuddy.client import BambuddyClient, client_for
+from scadbuddy.bambuddy.client import LIBRARY_DELETE_ALL, BambuddyClient, client_for
+from scadbuddy.bambuddy.errors import SCOPE_PROBLEM, Scope
 from scadbuddy.bambuddy.models import FileUpdate, Folder, FolderCreate, FolderUpdate, LibraryFile
 from scadbuddy.bambuddy.send import is_inbox
 from scadbuddy.core.problems import ApiError
@@ -54,6 +58,11 @@ FOLDER_ADDED_AFTER_CHECK = (
 TRASHED_AFTER_CHECK = (
     "trashed from the folder after the delete was checked; the folder was kept, "
     "since deleting it would empty this file from Bambuddy's trash"
+)
+TRASH_NOT_WHOLE = (
+    "Bambuddy's API key no longer sees every user's trash (it lacks "
+    f"'{LIBRARY_DELETE_ALL}'); the folder was kept, since deleting it could empty "
+    "another user's trashed file from it for good"
 )
 NOT_MOVED_OUT = "Bambuddy moves only files its API key's user added; the folder was kept"
 MOVED_TO_TOP = "It was moved to the top level of the library first."
@@ -101,6 +110,23 @@ class LibraryFolderDeleteResult(BaseModel):
     skipped: list[SkippedLibraryFile]
     #: The folders deleted, deepest first.
     folders: list[int]
+
+
+async def _refuse_partial_trash(client: BambuddyClient) -> None:
+    """A folder delete trusts the trash listing to hold every file Bambuddy's cascade
+    would reach, which it does only for a key that sees every user's trash."""
+    if not await client.sees_every_users_trash():
+        raise ApiError(
+            status.HTTP_403_FORBIDDEN,
+            f"Bambuddy's API key lacks the '{LIBRARY_DELETE_ALL}' permission, so it sees "
+            "only its own user's trash. Deleting a folder empties every file trashed from "
+            "it, other users' included, so ScadBuddy deletes folders only with a key whose "
+            f"user holds '{LIBRARY_DELETE_ALL}'.",
+            title="Bambuddy API key scope",
+            type_=SCOPE_PROBLEM,
+            required_scope=Scope.MANAGE_LIBRARY.value,
+            required_permission=LIBRARY_DELETE_ALL,
+        )
 
 
 def _find(tree: list[Folder], folder_id: int) -> Folder:
@@ -245,6 +271,7 @@ def library_write_kinds(state: Core) -> list[OperationKind]:
             found = await read_files(client, ids)
             await refuse_queued(client, found)
             subtree = {f.id for f in order}
+            await _refuse_partial_trash(client)
             trashed = [t.id for t in await client.trashed_library_files() if t.folder_id in subtree]
             if trashed:
                 # Bambuddy's folder delete would empty them from its trash for good, and
@@ -291,6 +318,12 @@ def library_write_kinds(state: Core) -> list[OperationKind]:
                 if now is None:
                     continue
                 left = await client.library_files(node["id"])
+                if not await client.sees_every_users_trash():
+                    kept.add(node["id"])
+                    result.skipped.append(
+                        SkippedLibraryFile(id=now.id, filename=now.name, reason=TRASH_NOT_WHOLE)
+                    )
+                    continue
                 in_trash = [
                     t for t in await client.trashed_library_files() if t.folder_id == node["id"]
                 ]

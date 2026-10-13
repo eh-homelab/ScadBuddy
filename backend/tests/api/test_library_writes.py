@@ -124,12 +124,18 @@ class FakeLibrary:
     trashed or not, whose folder is in the subtree (``routes/library.py``
     ``delete_folder``); each such row is recorded in ``destroyed``. A trashed file
     cannot be moved (``update_file`` reads only active rows), and a file in
-    ``not_owned`` is refused a move or a delete, as for a key with only ``*_own``."""
+    ``not_owned`` is refused a move or a delete, as for a key with only ``*_own``. A
+    trashed file in ``others`` is another user's: the trash lists it only while
+    ``permissions`` holds ``library:delete_all`` (``list_trash``)."""
 
     def __init__(self) -> None:
         self.folders: dict[int, dict[str, Any]] = {}
         self.files: dict[int, dict[str, Any]] = {}
         self.not_owned: set[int] = set()
+        self.others: set[int] = set()
+        self.permissions = ["library:delete_all", "library:delete_own"]
+        #: What ``GET /auth/me`` answers instead, when set.
+        self.me: httpx.Response | None = None
         self.log: list[tuple[str, int]] = []
         self.destroyed: list[int] = []
         #: Runs once, at the first move: what someone else does after the check.
@@ -234,6 +240,7 @@ class FakeLibrary:
                 {**self._row(i), "file_size": 1, "deleted_at": "2026-10-13T00:00:00Z"}
                 for i, f in self.files.items()
                 if f["trashed"]
+                and (i not in self.others or "library:delete_all" in self.permissions)
             ]
             return httpx.Response(
                 200, json={"items": items, "total": len(items), "retention_days": 30}
@@ -262,6 +269,14 @@ class FakeLibrary:
         respx.get(path=f"{library}/files").mock(side_effect=listing)
         respx.get(path=f"{library}/trash").mock(side_effect=trash)
         respx.delete(path__regex=rf"^{library}/folders/(?P<folder_id>\d+)$").mock(side_effect=rmdir)
+        respx.get(f"{API}/auth/status").mock(
+            return_value=httpx.Response(200, json={"auth_enabled": True, "requires_setup": False})
+        )
+        respx.get(f"{API}/auth/me").mock(
+            side_effect=lambda request: (
+                self.me or httpx.Response(200, json={"id": 3, "permissions": self.permissions})
+            )
+        )
         queue()
 
     def moved_before_deleted(self, file_id: int) -> bool:
@@ -344,6 +359,75 @@ def test_folder_delete_refuses_when_the_trash_holds_its_files(client: TestClient
     assert "1 file in Bambuddy's trash" in response.json()["detail"]
     assert bambuddy.log == []
     assert bambuddy.files[10]["folder_id"] == 4
+
+
+@respx.mock
+def test_folder_delete_refuses_a_key_that_sees_only_its_own_trash(client: TestClient) -> None:
+    """The listing leaves out another user's file trashed from the folder, so the trash
+    check alone would pass and Bambuddy's cascade would empty that file for good."""
+    configure(client)
+    bambuddy = FakeLibrary()
+    bambuddy.permissions = ["library:delete_own"]
+    bambuddy.folder(4)
+    bambuddy.file(10, 4)
+    bambuddy.file(20, 4, trashed=True)
+    bambuddy.others.add(20)
+
+    response = delete_folder(client, 4)
+
+    assert response.status_code == 403, response.text
+    problem = response.json()
+    assert problem["type"] == "https://scadbuddy.dev/problems/bambuddy-scope"
+    assert problem["required_permission"] == "library:delete_all"
+    assert "library:delete_all" in problem["detail"]
+    assert bambuddy.log == []
+    assert bambuddy.destroyed == []
+    assert 20 in bambuddy.files and bambuddy.files[10]["folder_id"] == 4
+
+
+@respx.mock
+def test_folder_delete_is_refused_when_the_key_s_permissions_cannot_be_read(
+    client: TestClient,
+) -> None:
+    configure(client)
+    bambuddy = FakeLibrary()
+    bambuddy.me = httpx.Response(500, json={"detail": "boom"})
+    bambuddy.folder(4)
+    bambuddy.file(10, 4)
+
+    response = delete_folder(client, 4)
+
+    assert response.status_code >= 500, response.text
+    assert bambuddy.log == []
+    assert bambuddy.files[10]["folder_id"] == 4
+
+
+@respx.mock
+def test_a_key_that_loses_delete_all_after_the_check_keeps_the_folder(
+    client: TestClient,
+) -> None:
+    configure(client)
+    bambuddy = FakeLibrary()
+    bambuddy.folder(4)
+    bambuddy.file(10, 4)
+
+    def demote() -> None:
+        bambuddy.permissions = ["library:delete_own"]
+        bambuddy.file(20, 4, trashed=True)
+        bambuddy.others.add(20)
+
+    bambuddy.on_move = demote
+
+    response = delete_folder(client, 4)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert [f["id"] for f in body["deleted"]] == [10]
+    assert [(f["id"], f["filename"]) for f in body["skipped"]] == [(4, "folder-4")]
+    assert "library:delete_all" in body["skipped"][0]["reason"]
+    assert body["folders"] == []
+    assert not any(entry[0] == "rmdir" for entry in bambuddy.log)
+    assert bambuddy.destroyed == [] and 20 in bambuddy.files
 
 
 @respx.mock

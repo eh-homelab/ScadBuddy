@@ -84,3 +84,52 @@ async def test_trashed_library_files_reads_every_page(bambuddy: BambuddyClient) 
         {"limit": "500", "offset": "0"},
         {"limit": "500", "offset": "500"},
     ]
+
+
+def _auth(enabled: object, me: httpx.Response | None = None) -> respx.Route:
+    respx.get(f"{API}/auth/status").mock(
+        return_value=httpx.Response(200, json={"auth_enabled": enabled, "requires_setup": False})
+    )
+    return respx.get(f"{API}/auth/me").mock(
+        return_value=me or httpx.Response(500, json={"detail": "not asked"})
+    )
+
+
+@respx.mock
+async def test_with_auth_off_every_caller_sees_every_trash(bambuddy: BambuddyClient) -> None:
+    me = _auth(False)
+    assert await bambuddy.sees_every_users_trash() is True
+    assert not me.called
+
+
+@pytest.mark.parametrize(
+    ("permissions", "sees_all"),
+    [
+        (["library:delete_all", "library:delete_own", "library:read"], True),
+        (["library:delete_own", "library:read"], False),
+    ],
+)
+@respx.mock
+async def test_a_key_sees_every_trash_only_with_delete_all(
+    bambuddy: BambuddyClient, permissions: list[str], sees_all: bool
+) -> None:
+    _auth(True, httpx.Response(200, json={"id": 3, "permissions": permissions}))
+    assert await bambuddy.sees_every_users_trash() is sees_all
+
+
+@pytest.mark.parametrize(
+    ("enabled", "me"),
+    [
+        ("yes", None),
+        (True, httpx.Response(200, json={"id": 3})),
+        (True, httpx.Response(200, json={"permissions": "library:delete_all"})),
+    ],
+)
+@respx.mock
+async def test_an_unreadable_answer_is_never_seeing_everything(
+    bambuddy: BambuddyClient, enabled: object, me: httpx.Response | None
+) -> None:
+    _auth(enabled, me)
+    with pytest.raises(ApiError) as raised:
+        await bambuddy.sees_every_users_trash()
+    assert raised.value.status == 502
