@@ -813,3 +813,22 @@ function summaryOf(archiveId: number): PrintPage['items'][number] {
   const { provenance: _p, files: _f, media: _m, outcome: _o, printer_media: _pm, links: _l, ...summary } = print
   return summary
 }
+
+describe('now printing (#977)', () => {
+  it('shows every printer above the history, a job ScadBuddy did not start included', async () => {
+    render()
+    const strip = await screen.findByRole('region', { name: 'Now printing' })
+    expect(within(strip).getByTestId('printer-now-1')).toHaveTextContent('Bracket')
+    expect(await list()).toBeInTheDocument()
+  })
+})
+
+describe('up next (#2351)', () => {
+  it("shows Bambuddy's queue between what is printing and the history", async () => {
+    render()
+    const queue = await screen.findByRole('region', { name: 'Up next' })
+    expect(within(queue).getByTestId('queue-item-259')).toHaveTextContent('Luna keychain')
+    const now = await screen.findByRole('region', { name: 'Now printing' })
+    expect(now.compareDocumentPosition(queue) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+})

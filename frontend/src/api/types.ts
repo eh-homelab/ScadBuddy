@@ -217,6 +217,9 @@ export type LibraryEntry = Schemas['LibraryEntry']
 export type LibraryFolderView = Schemas['LibraryFolderView']
 export type LibraryDeleteResult = Schemas['LibraryDeleteResult']
 export type LibraryRestoreResult = Schemas['LibraryRestoreResult']
+export type LibraryMoveResult = Schemas['LibraryMoveResult']
+export type LibraryCopyResult = Schemas['LibraryCopyResult']
+export type LibraryRenameResult = Schemas['LibraryRenameResult']
 /** #1863 — the objects Arrange reads from a library file ScadBuddy did not make. */
 export type LibraryFileObjects = Schemas['LibraryFileObjects']
 export type LibraryFileObject = Schemas['LibraryFileObject']
@@ -228,7 +231,16 @@ export type LibraryFileObject = Schemas['LibraryFileObject']
  * than string literals of their own: the backend's vocabulary is the contract, and a
  * hand-kept copy would drift the moment it gains a state.
  */
+/** #2351 — Bambuddy's spool inventory and loaded slots, read through `/farm/inventory`. */
+export type InventoryView = Schemas['InventoryView']
+export type InventorySpool = Schemas['InventorySpool']
 export type PrintProgress = Schemas['PrintProgress']
+/** #977 — what each printer is doing now, whoever started it. */
+export type PrintersNow = Schemas['PrintersNow']
+/** #2351 — Bambuddy's print queue and the farm's totals, read through `/farm`. */
+export type QueueItem = Schemas['QueueItem']
+export type ArchiveStats = Schemas['ArchiveStats']
+export type PrinterNow = Schemas['PrinterNow']
 /** #308 — ScadBuddy's print history: one linked Bambuddy archive per print. */
 export type PrintSummary = Schemas['PrintSummary']
 export type PrintPage = Schemas['PrintPage']
@@ -238,6 +250,7 @@ export type ActivityPage = Schemas['ActivityPage']
 export type ActivityFacets = Schemas['ActivityFacets']
 export type ActivityDetail = Schemas['ActivityDetail']
 export type PrintDetail = Schemas['PrintDetail']
+export type TimelapseFrames = Schemas['TimelapseFrames']
 /** #311 — the print detail page's two writes. */
 export type PrintAgain = Schemas['PrintAgain']
 export type PrinterMedia = Schemas['PrinterMedia']

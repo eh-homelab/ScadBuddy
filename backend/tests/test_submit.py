@@ -147,6 +147,10 @@ class ProjectingActivities(FakeActivities):
 RENDER = {"kind": "render"}
 
 
+#: The labels of a render submit's series (#2294).
+RENDER = {"kind": "render"}
+
+
 def _sample(metrics: Metrics, name: str, labels: dict[str, str] | None = None) -> float:
     return metrics.registry.get_sample_value(name, labels) or 0.0
 
@@ -163,7 +167,7 @@ def _settle_errors(metrics: Metrics, settle_pass: str) -> float:
 
 def _failed_jobs(metrics: Metrics) -> float:
     sample = "scadbuddy_render_jobs_finished_total"
-    return metrics.registry.get_sample_value(sample, {"outcome": "failed"}) or 0.0
+    return metrics.registry.get_sample_value(sample, {"kind": "render", "outcome": "failed"}) or 0.0
 
 
 def _w() -> int:
@@ -497,7 +501,7 @@ async def test_a_submit_is_answered_within_one_bound(
 
     assert (
         service.metrics.registry.get_sample_value(
-            counted, {"operation": "start_workflow"} if not exists else None
+            counted, {"operation": "start_workflow"} if not exists else {"kind": "render"}
         )
         == 1
     )
@@ -770,7 +774,7 @@ async def test_an_update_aborted_twice_by_closing_executions_is_still_accepting(
         await service.aclose()
 
     assert len(calls) == 2
-    assert _sample(service.metrics, "scadbuddy_render_accept_pending_total") == 1
+    assert _sample(service.metrics, "scadbuddy_render_accept_pending_total", RENDER) == 1
 
 
 class FakePreview:
@@ -1536,7 +1540,7 @@ async def test_a_legacy_row_whose_workflow_runs_answers_still_accepting_past_the
         await legacy.terminate()
         await service.aclose()
 
-    assert _sample(service.metrics, "scadbuddy_render_accept_pending_total") == 1
+    assert _sample(service.metrics, "scadbuddy_render_accept_pending_total", RENDER) == 1
     assert (await asyncio.to_thread(projection.read, old.id)).state == "pending"
 
 
@@ -2153,7 +2157,7 @@ async def test_a_start_still_accepting_counts_as_pending_not_as_an_error(
 
     sample = service.metrics.registry.get_sample_value
     assert sample("scadbuddy_render_store_errors_total", {"operation": "start_workflow"}) == 0
-    assert sample("scadbuddy_render_accept_pending_total") == 1
+    assert sample("scadbuddy_render_accept_pending_total", RENDER) == 1
 
 
 class _ProjectingWorld(FakeWorld):

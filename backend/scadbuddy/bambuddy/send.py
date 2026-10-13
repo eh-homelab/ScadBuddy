@@ -436,7 +436,9 @@ async def upload_copy(
     no duplicate in the folder.
     """
     target = target if target is not None else await target_for(client, settings)
-    payload = _laid_out_for(await printable.fetch(), target)
+    # Re-plating is mesh work that took ~23 s on a big output, on the event loop every
+    # other request shares (#2354).
+    payload = await asyncio.to_thread(_laid_out_for, await printable.fetch(), target)
     folder = folder_id if folder_id is not None else settings.library_folder_id
     project_stem = (
         stem if stem is not None and folder is not None and not is_inbox(folder, settings) else None

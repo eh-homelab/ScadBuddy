@@ -291,6 +291,8 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
     monkeypatch.setattr(main, "ClaimStore", lambda root: SimpleNamespace(sweep=slow_claims))
     monkeypatch.setattr(main, "client_for", _a_client)
     monkeypatch.setattr(main, "sweep_preview_slices", slow_previews)
+    # #2715: the same tick sweeps lost slice starts.
+    monkeypatch.setattr(main, "sweep_lost_slices", slow_previews)
     state = SimpleNamespace(
         render=SimpleNamespace(prune=slow_prune),
         paths=SimpleNamespace(),
@@ -522,3 +524,28 @@ async def test_the_shutdown_waits_for_a_stuck_backfill_only_so_long(
         assert "still running at shutdown" in caplog.text
     finally:
         release.set()
+
+
+async def test_the_background_slice_sweep_also_sweeps_lost_slice_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2715: what a print run's lost slice start left goes on the same tick, every
+    `PRUNE_INTERVAL`, inside Bambuddy's 30 minutes of keeping a finished job."""
+    swept: list[str] = []
+
+    async def previews(*args: object) -> int:
+        swept.append("previews")
+        return 0
+
+    async def lost(*args: object) -> int:
+        swept.append("lost")
+        return 1
+
+    monkeypatch.setattr(main, "client_for", _a_client)
+    monkeypatch.setattr(main, "sweep_preview_slices", previews)
+    monkeypatch.setattr(main, "sweep_lost_slices", lost)
+    state = SimpleNamespace(settings_store=SimpleNamespace(load=lambda: None), uploads=None)
+
+    await main._sweep_preview_slices_logged(state)  # type: ignore[arg-type]
+
+    assert swept == ["previews", "lost"]

@@ -57,13 +57,20 @@ from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.filament_ids import filament_material, filament_name
 from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.models import RackAlgorithm
-from scadbuddy.bambuddy.preview import PreviewStarted, SlicePreview, read_preview
+from scadbuddy.bambuddy.preview import (
+    TOOLPATH_HEADERS,
+    PreviewStarted,
+    SlicePreview,
+    read_preview,
+    read_toolpath,
+)
 from scadbuddy.bambuddy.print_run import (
     PrintCheck,
     PrintRunRequest,
     check_for_output,
     filament_options_for_output,
 )
+from scadbuddy.bambuddy.printers_now import PrintersNow, printers_now
 from scadbuddy.bambuddy.progress import QUEUE_PATH, PrintProgress, from_failed_run, progress_for
 from scadbuddy.bambuddy.projects import (
     AttachResult,
@@ -515,6 +522,23 @@ async def post_tray_spool(
 
 
 @router.get(
+    "/printers/now",
+    response_model=PrintersNow,
+    summary="What each printer is doing now",
+    description=(
+        "Every active Bambuddy printer's live state (#977): what it prints, how far, "
+        "time left and its HMS errors, whoever started the job. A job whose archive "
+        "ScadBuddy linked is `linked` (its print is `/prints/{archive_id}`); any other "
+        "names Bambuddy's archives page. A printer whose status cannot be read is a "
+        "card with `error`, never a failed page."
+    ),
+)
+async def get_printers_now(store: SettingsStoreDep, links: PrintLinksDep) -> PrintersNow:
+    async with client_for(store.load()) as client:
+        return await printers_now(client, links)
+
+
+@router.get(
     "/printers/{printer_id}/camera",
     response_class=Response,
     responses={200: {"content": {"image/jpeg": {}}, "description": "The current frame"}},
@@ -843,6 +867,35 @@ async def get_preview_slice(
     meta = require_output(outputs, output_id)
     async with client_for(store.load()) as client:
         return await read_preview(client, uploads, job_id, PrintSubject.output(meta.id).run_subject)
+
+
+@router.get(
+    "/outputs/{output_id}/preview-slices/{job_id}/toolpath",
+    response_class=Response,
+    responses={
+        200: {
+            "content": {"application/octet-stream": {}},
+            "description": "The toolpath, as `scadbuddy.bambuddy.toolpath` encodes it",
+        }
+    },
+    summary="The toolpath of a finished background slice",
+)
+async def get_preview_toolpath(
+    output_id: OutputIdPath,
+    job_id: int,
+    outputs: OutputsDep,
+    store: SettingsStoreDep,
+    uploads: UploadsDep,
+) -> Response:
+    """#2072: every move of the sliced plate, from its G-code, for the plate preview's
+    Speed, Movement and Layers views: a binary header and float32 segments. 409 while
+    the slice is under way; 422 when its G-code cannot be read."""
+    meta = require_output(outputs, output_id)
+    async with client_for(store.load()) as client:
+        body = await read_toolpath(
+            client, uploads, job_id, PrintSubject.output(meta.id).run_subject
+        )
+    return Response(body, media_type="application/octet-stream", headers=TOOLPATH_HEADERS)
 
 
 @router.get(

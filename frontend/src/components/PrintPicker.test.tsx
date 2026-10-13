@@ -11,6 +11,7 @@ import { MULTI_PLATE_FILE } from '../mocks/features/library'
 import { lastArrangeRequest, problem, resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { normalizeHex } from '../lib/format'
+import { startTracing } from '../lib/tracing'
 import { renderPage } from '../test/utils'
 import { PrintPicker } from './PrintPicker'
 
@@ -490,6 +491,33 @@ describe('PrintPicker', () => {
     expect(sent?.filament_plan?.slots?.length).toBeGreaterThan(0)
     // The dialog now reads the new output: its plates are asked for by the new id.
     await screen.findByTestId('filament-slot-1')
+  })
+
+  it('re-arranges as one traced action, the save in the arrange’s trace (#2292)', async () => {
+    const seen: { method: string; path: string; traceparent: string | null }[] = []
+    const listen = ({ request }: { request: Request }) => {
+      seen.push({
+        method: request.method,
+        path: new URL(request.url).pathname,
+        traceparent: request.headers.get('traceparent'),
+      })
+    }
+    server.events.on('request:start', listen)
+    const stop = startTracing()
+    try {
+      const { user } = renderPicker()
+      await loaded()
+      await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+      expect(await screen.findByText('Arranged onto 1 plate.')).toBeInTheDocument()
+    } finally {
+      server.events.removeListener('request:start', listen)
+      await stop()
+    }
+    const arrange = seen.find((call) => call.method === 'POST' && call.path === '/api/v1/outputs/arrange')
+    const save = seen.find((call) => call.method === 'POST' && /^\/api\/v1\/models\/[^/]+\/outputs$/.test(call.path))
+    expect(arrange?.traceparent).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/)
+    // The save follows an await: it joins the arrange's trace only through the action.
+    expect(save?.traceparent?.split('-')[1]).toBe(arrange?.traceparent?.split('-')[1])
   })
 
   it('keeps the spools and settings a re-arrange was made for', async () => {

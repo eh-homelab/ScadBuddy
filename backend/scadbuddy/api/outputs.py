@@ -83,6 +83,7 @@ from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.bambuddy.send import SendRequest, SendResult
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
 from scadbuddy.core.problems import DATABASE_ERRORS, PROBLEM_MEDIA_TYPE, ApiError
+from scadbuddy.core.tracing import span
 from scadbuddy.library.history import COMMIT_ID_PATTERN
 from scadbuddy.library.outputs import (
     MODEL_NAME,
@@ -232,13 +233,15 @@ async def _details(
 ) -> list[OutputDetail]:
     copies = await uploads.for_outputs(meta.id for meta in metas)
     failed = await _failed_before_queueing(runs, metas)
-    # The thumbnail check and params read are file IO: off the event loop.
-    return await asyncio.to_thread(
-        lambda: [
-            detail(store, meta, copies[meta.id], failed_before_queueing=meta.id in failed)
-            for meta in metas
-        ]
-    )
+    # The thumbnail check and params read are file IO: off the event loop. A span of
+    # their own (#2755): on the NAS share they were most of a listing's time.
+    with span("output.details", attributes={"scadbuddy.outputs": len(metas)}):
+        return await asyncio.to_thread(
+            lambda: [
+                detail(store, meta, copies[meta.id], failed_before_queueing=meta.id in failed)
+                for meta in metas
+            ]
+        )
 
 
 @router.post(

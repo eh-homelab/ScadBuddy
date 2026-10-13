@@ -1,4 +1,5 @@
 import type {
+  InventoryView,
   AnalysisReport,
   AnalysisRun,
   AnalyzerDecision,
@@ -44,8 +45,11 @@ import type {
   CatalogueLibrary,
   DependencyReport,
   LibraryFileObjects,
+  LibraryCopyResult,
   LibraryDeleteResult,
   LibraryListing,
+  LibraryMoveResult,
+  LibraryRenameResult,
   LibraryRestoreResult,
   LibraryPinRequest,
   InstalledLibrary,
@@ -78,11 +82,15 @@ import type {
   RackAlgorithm,
   PrintAgain,
   PrintDetail,
+  TimelapseFrames,
   PrintPage,
   ActivityDetail,
   ActivityFacets,
   ActivityPage,
   PrintProgress,
+  PrintersNow,
+  QueueItem,
+  ArchiveStats,
   PrintCheck,
   PreviewStarted,
   SlicePreview,
@@ -1279,6 +1287,12 @@ export const api = {
   getPrint: (archiveId: number, { printerMedia = false } = {}) =>
     request<PrintDetail>(`/prints/${archiveId}${printerMedia ? '?printer_media=1' : ''}`),
 
+  /**
+   * #2360 — a print's timelapse stills and Bambuddy's probe of it, read after the detail:
+   * Bambuddy makes them with ffmpeg, which can take tens of seconds.
+   */
+  getTimelapseFrames: (archiveId: number) => request<TimelapseFrames>(`/prints/${archiveId}/timelapse/frames`),
+
   /** #311 — "Print again": queues the archive on its printer (Bambuddy's reprint is gone). */
   reprint: (archiveId: number) => command<PrintAgain>(`/prints/${archiveId}/reprint`, { method: 'POST' }),
 
@@ -1372,6 +1386,10 @@ export const api = {
     const suffix = search.size > 0 ? `?${search}` : ''
     return request<FilamentOptions>(`/print/outputs/${seg(outputId)}/filaments${suffix}`)
   },
+
+  /** #2351 — Bambuddy's spool inventory, each spool with where it is loaded. */
+  getSpoolInventory: (includeArchived = false) =>
+    request<InventoryView>(`/farm/inventory${includeArchived ? '?include_archived=true' : ''}`),
 
   /**
    * spec 2026-09-27 §3 — one read for the whole spool-first print dialog: printers,
@@ -1534,6 +1552,16 @@ export const api = {
   getPrintProgress: (outputId: string) =>
     request<PrintProgress | null>(`/print/outputs/${seg(outputId)}/progress`),
 
+  /** #977 — every active printer's live state, whoever started its job. */
+  getPrintersNow: () => request<PrintersNow>('/print/printers/now'),
+
+  /** #2351 — Bambuddy's queue in its order; `status` narrows it (finished items stay in it). */
+  getPrintQueue: (status?: 'pending' | 'printing' | 'completed' | 'failed' | 'cancelled') =>
+    request<QueueItem[]>(`/farm/queue${status ? `?status=${status}` : ''}`),
+
+  /** #2351 — the farm's totals over every Bambuddy archive. */
+  getFarmStats: () => request<ArchiveStats>('/farm/stats'),
+
   /** #308 — the print history, newest first, a page at a time; `cursor` is the last
    * page's `next_cursor`. */
   listPrints: (filters: PrintFilters, page: { cursor?: string | null; limit?: number } = {}) => {
@@ -1588,6 +1616,27 @@ export const api = {
     command<LibraryRestoreResult>('/print/library/restore', {
       method: 'POST',
       body: JSON.stringify({ file_ids: fileIds }),
+    }),
+
+  /** #2670 — files into another folder (`null`, the top level), each under its own id. */
+  moveLibraryFiles: (fileIds: number[], folderId: number | null) =>
+    command<LibraryMoveResult>('/print/library/move', {
+      method: 'POST',
+      body: JSON.stringify({ file_ids: fileIds, folder_id: folderId }),
+    }),
+
+  /** #2670 — a copy of each file in a folder (`null`, the top level), each a new file. */
+  copyLibraryFiles: (fileIds: number[], folderId: number | null) =>
+    command<LibraryCopyResult>('/print/library/copy', {
+      method: 'POST',
+      body: JSON.stringify({ file_ids: fileIds, folder_id: folderId }),
+    }),
+
+  /** #2670 — a new name for a file, its extension kept. */
+  renameLibraryFile: (fileId: number, filename: string) =>
+    command<LibraryRenameResult>('/print/library/rename', {
+      method: 'POST',
+      body: JSON.stringify({ file_id: fileId, filename }),
     }),
 
   libraryThumbnailUrl: (fileId: number) => `${API_BASE}/print/library/${fileId}/thumbnail`,

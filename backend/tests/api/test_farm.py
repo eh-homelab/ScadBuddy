@@ -159,3 +159,98 @@ def test_a_queue_status_bambuddy_does_not_have_is_refused_before_bambuddy(
 
     assert response.status_code == 422
     assert not route.called
+
+
+# --- #785: one spool's summary, for the filament hover card ------------------------
+
+
+def mock_inventory() -> tuple[respx.Route, respx.Route]:
+    return (
+        respx.get(f"{API}/inventory/spools").mock(
+            return_value=httpx.Response(200, json=recording("inventory-spools.json"))
+        ),
+        respx.get(f"{API}/inventory/assignments").mock(
+            return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
+        ),
+    )
+
+
+@respx.mock
+def test_a_spool_summary_counts_its_filament_and_prices_it(client: TestClient) -> None:
+    configure(client)
+    spools, _ = mock_inventory()
+
+    response = client.get("/api/v1/farm/spools/15/summary", params={"grams": 10})
+
+    assert response.status_code == 200, response.text
+    # The archived ones too, so an archived spool's own card still resolves.
+    assert spools.calls.last.request.url.params["include_archived"] == "true"
+    body = response.json()
+    # Insignia Clear PETG: spool 15 has 400 g left, spool 14 is full; both loaded.
+    assert body["spool"]["remaining_g"] == 400.0
+    assert body["spool"]["cost_per_kg"] == 15.96
+    assert body["spool"]["loaded"] == {
+        "printer_id": 1,
+        "printer_name": "3DP-31B-598",
+        "ams_id": 0,
+        "tray_id": 3,
+    }
+    assert body["price_per_g"] == pytest.approx(0.01596)
+    assert body["remaining_value"] == pytest.approx(6.384)
+    assert (body["grams"], body["grams_cost"]) == (10.0, pytest.approx(0.1596))
+    filament = body["filament"]
+    assert (filament["material"], filament["brand"], filament["color_name"]) == (
+        "PETG",
+        "Insignia",
+        "Clear",
+    )
+    assert filament["spool_count"] == 2
+    assert sorted(filament["spool_ids"]) == [14, 15]
+    assert filament["remaining_g"] == 1400.0
+    assert sorted((row["spool_id"], row["tray_id"]) for row in filament["loaded"]) == [
+        (14, 2),
+        (15, 3),
+    ]
+
+
+@respx.mock
+def test_without_a_price_every_cost_is_null_not_a_guess(client: TestClient) -> None:
+    configure(client)
+    mock_inventory()
+
+    body = client.get("/api/v1/farm/spools/1/summary", params={"grams": 10}).json()
+
+    assert body["spool"]["cost_per_kg"] is None
+    assert (body["price_per_g"], body["remaining_value"], body["grams_cost"]) == (None, None, None)
+    assert body["filament"]["spool_count"] == 1
+    assert body["filament"]["loaded"] == []
+    assert body["spool"]["loaded"] is None
+
+
+@respx.mock
+def test_an_archived_spool_is_summarised_but_not_counted_as_stock(client: TestClient) -> None:
+    configure(client)
+    rows = recording("inventory-spools.json")
+    for row in rows:
+        if row["id"] == 14:
+            row["archived_at"] = "2026-10-01T00:00:00"
+    respx.get(f"{API}/inventory/spools").mock(return_value=httpx.Response(200, json=rows))
+    respx.get(f"{API}/inventory/assignments").mock(return_value=httpx.Response(200, json=[]))
+
+    archived = client.get("/api/v1/farm/spools/14/summary").json()
+
+    assert archived["spool"]["archived"] is True
+    assert archived["filament"]["spool_ids"] == [15]
+    assert archived["filament"]["remaining_g"] == 400.0
+
+
+@respx.mock
+def test_an_unknown_spool_is_a_404(client: TestClient) -> None:
+    configure(client)
+    mock_inventory()
+
+    assert client.get("/api/v1/farm/spools/999/summary").status_code == 404
+
+
+def test_grams_cannot_be_negative(client: TestClient) -> None:
+    assert client.get("/api/v1/farm/spools/1/summary", params={"grams": -1}).status_code == 422

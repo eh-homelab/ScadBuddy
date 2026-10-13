@@ -94,6 +94,15 @@ class PreviewSlice(BaseModel):
     retired: bool = False
 
 
+class LostStart(BaseModel):
+    """A print run's slice start that got no answer (#2715), table
+    ``print_slice_starts``: Bambuddy may still have started its job."""
+
+    id: int
+    library_file_id: int
+    created_at: datetime
+
+
 class ProjectTarget(BaseModel):
     """The printer and nozzle a Bambuddy project last printed on (#317)."""
 
@@ -338,6 +347,70 @@ class BambuddyUploadStore:
     def _forget_preview(self, row_id: int) -> None:
         with self._pool.connection() as conn:
             conn.execute("DELETE FROM print_preview_slices WHERE id = %s", (row_id,))
+
+    async def record_slice_start(self, library_file_id: int, job_id: int | None) -> None:
+        """A print run started slice job ``job_id`` of the copy ``library_file_id``, or,
+        with ``None``, tried to and got no answer (#2715)."""
+        await asyncio.to_thread(self._record_slice_start, library_file_id, job_id)
+
+    async def lost_starts(self) -> list[LostStart]:
+        """The lost slice starts the sweep has not finished with, oldest first."""
+        return await asyncio.to_thread(self._lost_starts)
+
+    async def finish_lost_start(self, row_id: int) -> None:
+        await asyncio.to_thread(self._finish_lost_start, row_id)
+
+    async def slice_jobs_after(self, after: datetime, within: timedelta) -> list[int]:
+        """The slice jobs recorded in ``(after, after + within]``, by a run or by the
+        print dialog's background slices: Bambuddy's job ids next to a lost start's."""
+        return await asyncio.to_thread(self._slice_jobs_after, after, within)
+
+    async def slice_jobs_recorded(self, job_ids: Iterable[int], since: datetime) -> set[int]:
+        """Of ``job_ids``, the ones a run or a background slice recorded since ``since``:
+        their files are someone's. Ids restart with Bambuddy, hence ``since``."""
+        return await asyncio.to_thread(self._slice_jobs_recorded, list(job_ids), since)
+
+    def _record_slice_start(self, library_file_id: int, job_id: int | None) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO print_slice_starts (library_file_id, job_id) VALUES (%s, %s)",
+                (library_file_id, job_id),
+            )
+
+    def _lost_starts(self) -> list[LostStart]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT id, library_file_id, created_at FROM print_slice_starts"
+                " WHERE job_id IS NULL AND NOT swept ORDER BY created_at, id"
+            ).fetchall()
+        return [LostStart.model_validate(row) for row in rows]
+
+    def _finish_lost_start(self, row_id: int) -> None:
+        with self._pool.connection() as conn:
+            conn.execute("UPDATE print_slice_starts SET swept = true WHERE id = %s", (row_id,))
+
+    def _slice_jobs_after(self, after: datetime, within: timedelta) -> list[int]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT job_id FROM print_slice_starts WHERE job_id IS NOT NULL"
+                " AND created_at > %s AND created_at <= %s"
+                " UNION SELECT job_id FROM print_preview_slices"
+                " WHERE created_at > %s AND created_at <= %s ORDER BY job_id",
+                (after, after + within, after, after + within),
+            ).fetchall()
+        return [int(row["job_id"]) for row in rows]
+
+    def _slice_jobs_recorded(self, job_ids: list[int], since: datetime) -> set[int]:
+        if not job_ids:
+            return set()
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT job_id FROM print_slice_starts WHERE job_id = ANY(%s) AND created_at >= %s"
+                " UNION SELECT job_id FROM print_preview_slices"
+                " WHERE job_id = ANY(%s) AND created_at >= %s",
+                (job_ids, since, job_ids, since),
+            ).fetchall()
+        return {int(row["job_id"]) for row in rows}
 
     async def record_slice_hash(self, output_id: str, sliced_id: int, file_hash: str) -> None:
         """Keep the hash Bambuddy reports for one of the output's sliced files (#306)."""
