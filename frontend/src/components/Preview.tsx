@@ -190,10 +190,16 @@ export function Preview({
   const onMeasured = useCallback((url: string, box: BoundingBox) => setMeasuredBox({ url, bbox: box }), [])
 
   // #2731 — the one plate of a multi-plate render the viewer chose to see alone, for
-  // that render only; null shows them all.
+  // that render only; null shows them all. Keyed by the job: a re-render coalesced onto
+  // the same job is the same render, so it keeps the plate shown (#2914).
   const [chosen, setChosen] = useState<{ jobId: string; plate: number }>()
-  const platesOfJob = job?.status === 'done' ? (job.plates?.length ?? 0) : 0
-  const alone = chosen && job && chosen.jobId === job.id && chosen.plate <= platesOfJob ? chosen.plate : null
+  // #2914 — the plates by their own index, which the 3MF names them by.
+  const plateIndices = job?.status === 'done' ? (job.plates ?? []).map((p) => p.index) : []
+  const platesOfJob = plateIndices.length
+  const alone =
+    chosen && job && chosen.jobId === job.id && plateIndices.includes(chosen.plate) ? chosen.plate : null
+  // #2914 — a plate whose own mesh failed to load: shown all together again, and said so.
+  const [plateFailed, setPlateFailed] = useState<{ jobId: string; plate: number }>()
 
   useEffect(() => {
     if (job?.status === 'done' && job.preview_url && alone !== null) {
@@ -282,6 +288,12 @@ export function Preview({
         onError={() => {
           if (!shown) return
           useLoader.clear(GLTFLoader, shown.url)
+          if (alone !== null && job) {
+            // One plate's mesh: every plate together still loads, so go back to it.
+            setPlateFailed({ jobId: job.id, plate: alone })
+            setChosen(undefined)
+            return
+          }
           setBrokenUrl(shown.url)
         }}
         fallback={(_, retry) => <PreviewFailed captureRef={captureRef} onRetry={retry} />}
@@ -417,11 +429,19 @@ export function Preview({
             {shown?.bbox && <Dimensions bbox={shown.bbox} plates={shown.plates} compact={compact} />}
             {job && platesOfJob > 1 && (
               <PlatePicker
-                plates={platesOfJob}
+                plates={plateIndices}
                 chosen={alone}
                 compact={compact}
-                onChoose={(plate) => setChosen(plate === null ? undefined : { jobId: job.id, plate })}
+                onChoose={(plate) => {
+                  setPlateFailed(undefined)
+                  setChosen(plate === null ? undefined : { jobId: job.id, plate })
+                }}
               />
+            )}
+            {job && plateFailed?.jobId === job.id && (
+              <p role="status" className="rounded-[6px] bg-surface/90 px-2 py-0.5 text-[12px] text-warn">
+                Plate {plateFailed.plate} could not be shown alone; showing all plates.
+              </p>
             )}
           </div>
         )}
@@ -461,12 +481,13 @@ function PlatePicker({
   compact,
   onChoose,
 }: {
-  plates: number
+  /** Each plate's own index. */
+  plates: number[]
   chosen: number | null
   compact: boolean
   onChoose: (plate: number | null) => void
 }) {
-  const options: (number | null)[] = [null, ...Array.from({ length: plates }, (_, i) => i + 1)]
+  const options: (number | null)[] = [null, ...plates]
   return (
     <div
       role="group"
