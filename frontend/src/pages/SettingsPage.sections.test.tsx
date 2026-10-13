@@ -33,7 +33,7 @@ async function enter(user: UserEvent, field: HTMLElement, text: string) {
  * ran into their 5 s under load (#1485); so buttons are looked for in their section.
  */
 function region(name: string): HTMLElement {
-  const section = screen.getByText(name, { selector: 'h2' }).closest('section')
+  const section = screen.getByText(name, { selector: 'h2 button' }).closest('section')
   if (!section) throw new Error(`no section headed ${name}`)
   return section
 }
@@ -946,5 +946,58 @@ describe('SettingsPage Administration (#668)', () => {
     const link = await within(region('Administration')).findByRole('link', { name: /Temporal UI/ })
     expect(link).toHaveAttribute('href', 'https://temporal.env')
     expect(screen.getByTestId('source-temporal_ui_url')).toHaveTextContent('From SCADBUDDY_TEMPORAL_UI_URL')
+  })
+})
+
+// #2173 — every section folds from its heading, remembered per browser.
+describe('SettingsPage folded sections (#2173)', () => {
+  function fold(name: string): HTMLElement {
+    return within(region(name)).getByRole('button', { name })
+  }
+
+  it('folds a section from its heading, and the next visit keeps it folded', async () => {
+    localStorage.clear()
+    const { user, unmount } = renderPage(<SettingsPage />)
+    await seeded()
+    expect(fold('Rendering')).toHaveAttribute('aria-expanded', 'true')
+    await user.click(fold('Rendering'))
+    expect(fold('Rendering')).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByLabelText('Render timeout')).not.toBeVisible()
+    unmount()
+
+    renderPage(<SettingsPage />)
+    await seeded()
+    expect(fold('Rendering')).toHaveAttribute('aria-expanded', 'false')
+    expect(fold('Connection')).toHaveAttribute('aria-expanded', 'true')
+    localStorage.clear()
+  })
+
+  it('keeps a folded section’s edits, its Unsaved badge and its Save bar', async () => {
+    localStorage.clear()
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    const timeout = screen.getByLabelText('Render timeout')
+    await user.clear(timeout)
+    await user.type(timeout, '45')
+    await user.click(fold('Rendering'))
+
+    expect(within(region('Rendering')).getByText('Unsaved')).toBeVisible()
+    expect(within(region('Rendering')).getByRole('button', { name: 'Save Rendering' })).toBeEnabled()
+    await user.click(fold('Rendering'))
+    expect(screen.getByLabelText('Render timeout')).toHaveValue(45)
+    localStorage.clear()
+  })
+
+  it('unfolds the section a link or the nav goes to', async () => {
+    localStorage.setItem('scadbuddy.settings.collapsed', JSON.stringify(['libraries', 'rendering']))
+    const { user } = renderPage(<SettingsPage />, { route: '/settings#libraries' })
+    await seeded()
+    await waitFor(() => expect(fold('Libraries')).toHaveAttribute('aria-expanded', 'true'))
+    expect(fold('Rendering')).toHaveAttribute('aria-expanded', 'false')
+
+    const nav = screen.getByRole('navigation', { name: 'Settings sections' })
+    await user.click(within(nav).getByRole('link', { name: 'Rendering' }))
+    await waitFor(() => expect(fold('Rendering')).toHaveAttribute('aria-expanded', 'true'))
+    localStorage.clear()
   })
 })

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useLocation } from 'react-router'
 import { useAiAvailability } from '../agent/chat/availability'
 import { USER_ONLY } from '../agent/dom'
 import { committed, touchAfterRender } from '../agent/highlight'
@@ -40,6 +41,8 @@ import { useAsync } from '../lib/useAsync'
 import { setBambuddyLinks } from '../lib/bambuddyLinks'
 import { plateSize, setDisplayUnit, type DisplayUnit } from '../lib/units'
 import { FieldRow, RuntimeInput, Section, SourceBadge } from './settings/controls'
+import { SectionContents, SettingsCollapseProvider, SubSection } from './settings/collapse'
+import { useReveal } from './settings/collapseState'
 import {
   RUNTIME_FIELDS,
   SECTIONS,
@@ -54,7 +57,7 @@ import { HotendUsagePanel } from './settings/HotendUsagePanel'
 import { RememberedChoicesPanel } from './settings/RememberedChoicesPanel'
 import { SpoolInventoryPanel } from './settings/SpoolInventoryPanel'
 import { editedSince, pendingFields, seedDraft, type Draft, type Edits, type Seed } from './settings/seed'
-import { useSectionNav } from './settings/sectionNav'
+import { sectionId, useSectionNav } from './settings/sectionNav'
 import { useLeaveGuard } from '../lib/useLeaveGuard'
 
 /** #296 — `used` of `limit`, where a limit of 0 means none. */
@@ -199,6 +202,29 @@ function isProblem(value: unknown): value is Problem {
 }
 
 export function SettingsPage() {
+  return (
+    <SettingsCollapseProvider>
+      <SettingsSections />
+    </SettingsCollapseProvider>
+  )
+}
+
+/** #2769 — the Assistant section's groups, each its own anchor and fold. */
+const ASSISTANT_GROUPS = [
+  { id: 'assistant-credentials', title: 'Status & credentials' },
+  { id: 'assistant-browser', title: 'This browser' },
+  { id: 'assistant-tools', title: 'HTTP & camera tools' },
+  { id: 'assistant-model', title: 'Model & limits' },
+  { id: 'assistant-sessions', title: 'Session mode' },
+  { id: 'assistant-mcp', title: 'MCP access' },
+  { id: 'assistant-plugins', title: 'Plugins & memory' },
+  { id: 'assistant-audit', title: 'Audit log' },
+] as const
+
+const groupTitle = (id: (typeof ASSISTANT_GROUPS)[number]['id']): string =>
+  ASSISTANT_GROUPS.find((group) => group.id === id)?.title ?? id
+
+function SettingsSections() {
   const settingsState = useAsync(() => api.getSettings(), [])
   const settings = settingsState.data
 
@@ -270,6 +296,14 @@ export function SettingsPage() {
   const pane = useRef<HTMLDivElement>(null)
   const sectionNav = useRef<HTMLElement>(null)
   const loaded = Boolean(settings)
+  // #2173 — a section, or an Assistant group, a link or the address names is unfolded
+  // first, with any section around it; useSectionNav then scrolls the pane to it.
+  const { hash } = useLocation()
+  const reveal = useReveal()
+  useEffect(() => {
+    if (!loaded || hash.length < 2) return
+    reveal(sectionId(hash))
+  }, [loaded, hash, reveal])
   const { current: currentSection, go: goToSection } = useSectionNav(pane, sectionNav, SECTION_IDS, loaded)
 
   const value = (name: FieldName): string => draft[name] ?? (settings ? baseline(settings, name) : '')
@@ -678,6 +712,7 @@ export function SettingsPage() {
                 aria-current={currentSection === section.id ? 'location' : undefined}
                 onClick={(event) => {
                   event.preventDefault()
+                  reveal(section.id)
                   goToSection(section.id)
                 }}
                 className="inline-flex items-center gap-1 rounded-[6px] px-2 py-1 text-muted hover:bg-surface-2 hover:text-ink aria-[current=location]:bg-surface-2 aria-[current=location]:text-ink"
@@ -1241,79 +1276,96 @@ export function SettingsPage() {
           </Section>
 
           <Section id="assistant" title={sectionTitle('assistant')} description="Applied at once; not part of any saved section.">
-            <AiStatusSection />
-            {/* Not behind ai.available: a missing credential is why the assistant is off (#1000). */}
-            <AiCredentialSection />
-            {/* Per browser and applied at once. Only the user may flip it: an agent must
-                not grant itself access (#254). */}
-            <div>
-              <label className="flex items-start gap-2 text-[13px]" {...USER_ONLY}>
-                <input
-                  type="checkbox"
-                  checked={webMcp}
-                  onChange={(event) => setWebMcpEnabled(event.target.checked)}
-                  className="mt-0.5"
-                  aria-describedby="webmcp-help"
-                />
-                Let this browser&rsquo;s built-in agent use ScadBuddy tools (WebMCP)
-              </label>
-              <p id="webmcp-help" className="mt-1.5 text-[12px] text-muted">
-                Off by default, as AI design spec §8.5 has an outside agent pair before it drives a tab. Even
-                when on, the print and send tool can only open the dialog; you confirm it.
-              </p>
-            </div>
-            <HttpRequestSetting />
-            {/* #1911 — the camera tool's switch; hidden without the agent's database, like the switch above. */}
-            <PrinterCameraSetting />
-            {/* Saves on its own (#1917), beside the chat limits; hidden without the agent's database. */}
-            <ModelSetting />
-            {/* Saves on its own (#790); hidden without the agent's database, like the switch above. */}
-            <SessionLimitsSetting />
-            {/* Saves on its own; read live by the agent, hidden without its database. */}
-            <RenderLimitsSetting />
-            {/* Saves on its own; hidden without the agent's database, like the limits above. */}
-            <ImageSettingsSetting />
-            {/* #2329 — the workspace caps; saves on its own, hidden without the agent's database. */}
-            <WorkspaceSettingsSetting />
-            {/* Plan 5d — saves on its own; hidden without the agent's database, like the limits above. */}
-            <SessionModeSetting />
-            <DurableSubagentsSetting />
-            {/* The agent service serves these routes, so they show only where the assistant
-                would (#251): when the agent answers /api/v1/ai/status as available
-                (useAiAvailability). */}
-            {ai.available && (
-              <>
-                <McpAuthSection
-                  onSaved={(setting) => {
-                    setMcpAuthMode(setting.mode)
-                    mcpAuthChanged()
-                  }}
-                />
-                <McpTokensSection authMode={mcpAuthMode} publicUrl={settings?.public_url} />
-              </>
-            )}
-            {ai.available && (
+            <SectionContents label="Assistant settings" items={ASSISTANT_GROUPS} />
+            <SubSection id="assistant-credentials" title={groupTitle('assistant-credentials')}>
+              <AiStatusSection />
+              {/* Not behind ai.available: a missing credential is why the assistant is off (#1000). */}
+              <AiCredentialSection />
+            </SubSection>
+            <SubSection id="assistant-browser" title={groupTitle('assistant-browser')}>
+              {/* Per browser and applied at once. Only the user may flip it: an agent must
+                  not grant itself access (#254). */}
               <div>
-                <p className="text-[13px]">MCP sign-in (OIDC)</p>
-                {/* Saved on its own: the agent service owns it, not the backend's settings. */}
-                <McpOidcSettings />
-              </div>
-            )}
-            {/* Each action is its own request, applied at once. */}
-            {ai.available && (
-              <div>
-                <p className="text-[13px]">Assistant plugins</p>
-                <p className="mt-0.5 text-[12px] text-muted">
-                  What the assistant can load besides ScadBuddy&rsquo;s own tools. Each change applies at once.
+                <label className="flex items-start gap-2 text-[13px]" {...USER_ONLY}>
+                  <input
+                    type="checkbox"
+                    checked={webMcp}
+                    onChange={(event) => setWebMcpEnabled(event.target.checked)}
+                    className="mt-0.5"
+                    aria-describedby="webmcp-help"
+                  />
+                  Let this browser&rsquo;s built-in agent use ScadBuddy tools (WebMCP)
+                </label>
+                <p id="webmcp-help" className="mt-1.5 text-[12px] text-muted">
+                  Off by default, as AI design spec §8.5 has an outside agent pair before it drives a tab. Even
+                  when on, the print and send tool can only open the dialog; you confirm it.
                 </p>
-                <PluginPackagesPanel />
-                <RemotePluginsPanel />
-                {/* Beside the plugins, where a hindsight plugin is added; saves on its own, read at each turn. */}
-                <MemorySettingsSetting />
               </div>
-            )}
-            {/* Saves on its own (#258); shown only when the assistant is available. */}
-            <AiAuditSection />
+            </SubSection>
+            <SubSection id="assistant-tools" title={groupTitle('assistant-tools')}>
+              <HttpRequestSetting />
+              {/* #1911 — the camera tool's switch; hidden without the agent's database, like the switch above. */}
+              <PrinterCameraSetting />
+            </SubSection>
+            <SubSection id="assistant-model" title={groupTitle('assistant-model')}>
+              {/* Saves on its own (#1917), beside the chat limits; hidden without the agent's database. */}
+              <ModelSetting />
+              {/* Saves on its own (#790); hidden without the agent's database, like the switch above. */}
+              <SessionLimitsSetting />
+              {/* Saves on its own; read live by the agent, hidden without its database. */}
+              <RenderLimitsSetting />
+              {/* Saves on its own; hidden without the agent's database, like the limits above. */}
+              <ImageSettingsSetting />
+              {/* #2329 — the workspace caps; saves on its own, hidden without the agent's database. */}
+              <WorkspaceSettingsSetting />
+            </SubSection>
+            <SubSection id="assistant-sessions" title={groupTitle('assistant-sessions')}>
+              {/* Plan 5d — saves on its own; hidden without the agent's database, like the limits above. */}
+              <SessionModeSetting />
+              <DurableSubagentsSetting />
+            </SubSection>
+            <SubSection id="assistant-mcp" title={groupTitle('assistant-mcp')}>
+              {/* The agent service serves these routes, so they show only where the assistant
+                  would (#251): when the agent answers /api/v1/ai/status as available
+                  (useAiAvailability). */}
+              {ai.available && (
+                <>
+                  <McpAuthSection
+                    onSaved={(setting) => {
+                      setMcpAuthMode(setting.mode)
+                      mcpAuthChanged()
+                    }}
+                  />
+                  <McpTokensSection authMode={mcpAuthMode} publicUrl={settings?.public_url} />
+                </>
+              )}
+              {ai.available && (
+                <div>
+                  <p className="text-[13px]">MCP sign-in (OIDC)</p>
+                  {/* Saved on its own: the agent service owns it, not the backend's settings. */}
+                  <McpOidcSettings />
+                </div>
+              )}
+            </SubSection>
+            <SubSection id="assistant-plugins" title={groupTitle('assistant-plugins')}>
+              {/* Each action is its own request, applied at once. */}
+              {ai.available && (
+                <div>
+                  <p className="text-[13px]">Assistant plugins</p>
+                  <p className="mt-0.5 text-[12px] text-muted">
+                    What the assistant can load besides ScadBuddy&rsquo;s own tools. Each change applies at once.
+                  </p>
+                  <PluginPackagesPanel />
+                  <RemotePluginsPanel />
+                  {/* Beside the plugins, where a hindsight plugin is added; saves on its own, read at each turn. */}
+                  <MemorySettingsSetting />
+                </div>
+              )}
+            </SubSection>
+            <SubSection id="assistant-audit" title={groupTitle('assistant-audit')}>
+              {/* Saves on its own (#258); shown only when the assistant is available. */}
+              <AiAuditSection />
+            </SubSection>
           </Section>
 
           {saved('diagnostics', runtimeRows('diagnostics'))}
