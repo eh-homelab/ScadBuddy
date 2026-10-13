@@ -6,10 +6,13 @@ A folder delete takes everything in it, and never lets Bambuddy's own folder del
 which cascades to every file row in the folder, trashed ones included, reach a file
 (spec §5). It walks the folder and its subfolders and refuses with 409 before anything
 is deleted when a print waiting in Bambuddy's queue names any file, or when Bambuddy's
-trash holds files from the folder. It moves each managed file to the top level, then
+trash holds files from the folder; and with 403 when the API key cannot see every
+user's trash (it lacks ``library:delete_all``), since another user's trashed file would
+then be missing from that check. It moves each managed file to the top level, then
 deletes the files as ``library_file_delete`` does (managed files to the trash, external
 ones for good), then the folders, deepest first, each only once a fresh read finds
-nothing in it: no file, trashed file or subfolder. A folder with a file Bambuddy
+nothing in it: no file, trashed file or subfolder, read by a key that still sees every
+user's trash. A folder with a file Bambuddy
 skipped, with anything that arrived after the check, or with a subfolder kept for
 either reason, is not deleted.
 """
@@ -23,7 +26,8 @@ from typing import TYPE_CHECKING, Annotated, Any
 from fastapi import status
 from pydantic import BaseModel, Field, StringConstraints
 
-from scadbuddy.bambuddy.client import BambuddyClient, client_for
+from scadbuddy.bambuddy.client import LIBRARY_DELETE_ALL, BambuddyClient, client_for
+from scadbuddy.bambuddy.errors import SCOPE_PROBLEM, Scope
 from scadbuddy.bambuddy.models import FileUpdate, Folder, FolderCreate, FolderUpdate, LibraryFile
 from scadbuddy.bambuddy.send import is_inbox
 from scadbuddy.core.problems import ApiError
@@ -54,6 +58,11 @@ FOLDER_ADDED_AFTER_CHECK = (
 TRASHED_AFTER_CHECK = (
     "trashed from the folder after the delete was checked; the folder was kept, "
     "since deleting it would empty this file from Bambuddy's trash"
+)
+TRASH_NOT_WHOLE = (
+    "Bambuddy's API key no longer sees every user's trash (it lacks "
+    f"'{LIBRARY_DELETE_ALL}'); the folder was kept, since deleting it could empty "
+    "another user's trashed file from it for good"
 )
 NOT_MOVED_OUT = "Bambuddy moves only files its API key's user added; the folder was kept"
 MOVED_TO_TOP = "It was moved to the top level of the library first."
@@ -103,6 +112,23 @@ class LibraryFolderDeleteResult(BaseModel):
     folders: list[int]
 
 
+async def _refuse_partial_trash(client: BambuddyClient) -> None:
+    """A folder delete trusts the trash listing to hold every file Bambuddy's cascade
+    would reach, which it does only for a key that sees every user's trash."""
+    if not await client.sees_every_users_trash():
+        raise ApiError(
+            status.HTTP_403_FORBIDDEN,
+            f"Bambuddy's API key lacks the '{LIBRARY_DELETE_ALL}' permission, so it sees "
+            "only its own user's trash. Deleting a folder empties every file trashed from "
+            "it, other users' included, so ScadBuddy deletes folders only with a key whose "
+            f"user holds '{LIBRARY_DELETE_ALL}'.",
+            title="Bambuddy API key scope",
+            type_=SCOPE_PROBLEM,
+            required_scope=Scope.MANAGE_LIBRARY.value,
+            required_permission=LIBRARY_DELETE_ALL,
+        )
+
+
 def _find(tree: list[Folder], folder_id: int) -> Folder:
     for top in tree:
         for folder in top.walk():
@@ -133,8 +159,9 @@ async def _to_top_level(
     (``backend/app/models/library.py`` line 104). A file trashed while still in the
     folder would be gone for good. Moved to the top level first, Undo restores it there.
 
-    A file Bambuddy will not move (its key's user did not add it: ``update_file``'s 403)
-    or no longer has (404) is skipped, and keeps its folder."""
+    A file Bambuddy will not move (its key's user did not add it: ``update_file``'s 403;
+    or any other refusal, such as a 422) or no longer has (404) is skipped, and keeps its
+    folder; the files moved before or after it are still moved and deleted."""
     gate = asyncio.Semaphore(READ_CONCURRENCY)
 
     async def one(entry: dict[str, Any]) -> SkippedLibraryFile | None:
@@ -142,12 +169,19 @@ async def _to_top_level(
             try:
                 await client.update_library_file(entry["id"], FileUpdate(folder_id=0))
             except ApiError as error:
-                if error.extensions.get("bambuddy_status") == status.HTTP_403_FORBIDDEN:
+                upstream = error.extensions.get("bambuddy_status")
+                if upstream == status.HTTP_403_FORBIDDEN:
                     reason = NOT_MOVED_OUT
                 elif error.status == status.HTTP_404_NOT_FOUND:
                     reason = "it is no longer in Bambuddy's library"
                 else:
-                    raise
+                    # Some files may have moved already: report this one rather than
+                    # abort with no account of where they went.
+                    reason = (
+                        f"Bambuddy refused to move it to the top level "
+                        f"(HTTP {upstream or error.status}: {error.detail}); it stayed in "
+                        "its folder, and the folder was kept"
+                    )
                 return SkippedLibraryFile(id=entry["id"], filename=entry["filename"], reason=reason)
         return None
 
@@ -245,6 +279,7 @@ def library_write_kinds(state: Core) -> list[OperationKind]:
             found = await read_files(client, ids)
             await refuse_queued(client, found)
             subtree = {f.id for f in order}
+            await _refuse_partial_trash(client)
             trashed = [t.id for t in await client.trashed_library_files() if t.folder_id in subtree]
             if trashed:
                 # Bambuddy's folder delete would empty them from its trash for good, and
@@ -286,11 +321,22 @@ def library_write_kinds(state: Core) -> list[OperationKind]:
                     continue
                 # Bambuddy's folder delete takes whatever the folder holds, its trash and
                 # its subfolders included, so anything that arrived after the check keeps
-                # the folder (and its ancestors).
+                # the folder (and its ancestors). These re-reads per node, just before
+                # its delete, ARE the guard against that (a folder made or a file trashed
+                # in the subtree mid-run): never hoist or cache them. The trash cannot be
+                # read for one folder: Bambuddy v1.2.5.5's ``GET /library/trash``
+                # (``routes/library_trash.py`` ``list_trash``, lines 88-150) takes only
+                # ``limit`` and ``offset``.
                 now = _by_id(await client.folders()).get(node["id"])
                 if now is None:
                     continue
                 left = await client.library_files(node["id"])
+                if not await client.sees_every_users_trash():
+                    kept.add(node["id"])
+                    result.skipped.append(
+                        SkippedLibraryFile(id=now.id, filename=now.name, reason=TRASH_NOT_WHOLE)
+                    )
+                    continue
                 in_trash = [
                     t for t in await client.trashed_library_files() if t.folder_id == node["id"]
                 ]
@@ -326,22 +372,25 @@ def library_write_kinds(state: Core) -> list[OperationKind]:
     async def upload_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         body = LibraryFileUpload.model_validate(request)
         try:
-            data = await asyncio.to_thread(ClaimStore(state.paths.claims).get, body.claim)
+            # Streamed from the claim, never read whole: an upload may be 256 MB, and
+            # this worker runs inside the API process.
+            held = await asyncio.to_thread(ClaimStore(state.paths.claims).open, body.claim)
         except LookupError:
             raise ApiError(
                 status.HTTP_409_CONFLICT,
                 # Not "send it again": a re-send with the same key replays this answer.
                 "this request's upload is no longer held; upload the file again",
             ) from None
-        async with client_for(await settings()) as client:
-            made = await client.upload_library_file(
-                body.filename,
-                data,
-                folder_id=body.folder_id,
-                media_type="application/octet-stream",
-            )
+        with held:
+            async with client_for(await settings()) as client:
+                made = await client.upload_library_file(
+                    body.filename,
+                    held,
+                    folder_id=body.folder_id,
+                    media_type="application/octet-stream",
+                )
         return LibraryEntryUpdated(
-            id=made.id, filename=made.filename, folder_id=body.folder_id
+            id=made.id, filename=made.filename, folder_id=made.folder_id
         ).model_dump(mode="json")
 
     def kind(

@@ -2,6 +2,7 @@
 (#2686), through ScadBuddy's operations."""
 
 import asyncio
+import io
 import json
 from collections.abc import Callable
 from typing import Any
@@ -13,6 +14,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.uploads import LibraryCopy
 from tests.api.test_library_delete import API, files, queue
 from tests.api.test_send import configure
@@ -124,12 +126,20 @@ class FakeLibrary:
     trashed or not, whose folder is in the subtree (``routes/library.py``
     ``delete_folder``); each such row is recorded in ``destroyed``. A trashed file
     cannot be moved (``update_file`` reads only active rows), and a file in
-    ``not_owned`` is refused a move or a delete, as for a key with only ``*_own``."""
+    ``not_owned`` is refused a move or a delete, as for a key with only ``*_own``. A
+    trashed file in ``others`` is another user's: the trash lists it only while
+    ``permissions`` holds ``library:delete_all`` (``list_trash``)."""
 
     def __init__(self) -> None:
         self.folders: dict[int, dict[str, Any]] = {}
         self.files: dict[int, dict[str, Any]] = {}
         self.not_owned: set[int] = set()
+        self.others: set[int] = set()
+        #: Files whose move Bambuddy refuses, with the status it answers.
+        self.refuse_move: dict[int, int] = {}
+        self.permissions = ["library:delete_all", "library:delete_own"]
+        #: What ``GET /auth/me`` answers instead, when set.
+        self.me: httpx.Response | None = None
         self.log: list[tuple[str, int]] = []
         self.destroyed: list[int] = []
         #: Runs once, at the first move: what someone else does after the check.
@@ -197,6 +207,8 @@ class FakeLibrary:
                 return missing()
             if i in self.not_owned:
                 return httpx.Response(403, json={"detail": "You can only update your own files"})
+            if i in self.refuse_move:
+                return httpx.Response(self.refuse_move[i], json={"detail": "refused"})
             folder_id = json.loads(request.content)["folder_id"]
             self.files[i]["folder_id"] = None if folder_id == 0 else folder_id
             self.log.append(("move", i))
@@ -234,6 +246,7 @@ class FakeLibrary:
                 {**self._row(i), "file_size": 1, "deleted_at": "2026-10-13T00:00:00Z"}
                 for i, f in self.files.items()
                 if f["trashed"]
+                and (i not in self.others or "library:delete_all" in self.permissions)
             ]
             return httpx.Response(
                 200, json={"items": items, "total": len(items), "retention_days": 30}
@@ -262,6 +275,14 @@ class FakeLibrary:
         respx.get(path=f"{library}/files").mock(side_effect=listing)
         respx.get(path=f"{library}/trash").mock(side_effect=trash)
         respx.delete(path__regex=rf"^{library}/folders/(?P<folder_id>\d+)$").mock(side_effect=rmdir)
+        respx.get(f"{API}/auth/status").mock(
+            return_value=httpx.Response(200, json={"auth_enabled": True, "requires_setup": False})
+        )
+        respx.get(f"{API}/auth/me").mock(
+            side_effect=lambda request: (
+                self.me or httpx.Response(200, json={"id": 3, "permissions": self.permissions})
+            )
+        )
         queue()
 
     def moved_before_deleted(self, file_id: int) -> bool:
@@ -330,6 +351,34 @@ def test_folder_delete_keeps_a_folder_whose_file_was_skipped(client: TestClient)
 
 
 @respx.mock
+def test_a_move_refused_with_another_status_keeps_the_folder(client: TestClient) -> None:
+    configure(client)
+    bambuddy = FakeLibrary()
+    bambuddy.folder(4)
+    bambuddy.file(10, 4)
+    bambuddy.file(11, 4)
+    bambuddy.file(12, 4)
+    bambuddy.refuse_move[11] = 422
+
+    response = delete_folder(client, 4)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    # The others were moved to the top level and trashed there; the refused one stayed.
+    assert sorted(f["id"] for f in body["deleted"]) == [10, 12]
+    assert [f["id"] for f in body["skipped"]] == [11]
+    assert "422" in body["skipped"][0]["reason"]
+    assert "stayed in its folder" in body["skipped"][0]["reason"]
+    assert body["folders"] == []
+    assert bambuddy.moved_before_deleted(10) and bambuddy.moved_before_deleted(12)
+    for file_id in (10, 12):
+        assert bambuddy.files[file_id] == {"folder_id": None, "external": False, "trashed": True}
+    assert bambuddy.files[11] == {"folder_id": 4, "external": False, "trashed": False}
+    assert bambuddy.destroyed == []
+    assert 4 in bambuddy.folders
+
+
+@respx.mock
 def test_folder_delete_refuses_when_the_trash_holds_its_files(client: TestClient) -> None:
     configure(client)
     bambuddy = FakeLibrary()
@@ -344,6 +393,75 @@ def test_folder_delete_refuses_when_the_trash_holds_its_files(client: TestClient
     assert "1 file in Bambuddy's trash" in response.json()["detail"]
     assert bambuddy.log == []
     assert bambuddy.files[10]["folder_id"] == 4
+
+
+@respx.mock
+def test_folder_delete_refuses_a_key_that_sees_only_its_own_trash(client: TestClient) -> None:
+    """The listing leaves out another user's file trashed from the folder, so the trash
+    check alone would pass and Bambuddy's cascade would empty that file for good."""
+    configure(client)
+    bambuddy = FakeLibrary()
+    bambuddy.permissions = ["library:delete_own"]
+    bambuddy.folder(4)
+    bambuddy.file(10, 4)
+    bambuddy.file(20, 4, trashed=True)
+    bambuddy.others.add(20)
+
+    response = delete_folder(client, 4)
+
+    assert response.status_code == 403, response.text
+    problem = response.json()
+    assert problem["type"] == "https://scadbuddy.dev/problems/bambuddy-scope"
+    assert problem["required_permission"] == "library:delete_all"
+    assert "library:delete_all" in problem["detail"]
+    assert bambuddy.log == []
+    assert bambuddy.destroyed == []
+    assert 20 in bambuddy.files and bambuddy.files[10]["folder_id"] == 4
+
+
+@respx.mock
+def test_folder_delete_is_refused_when_the_key_s_permissions_cannot_be_read(
+    client: TestClient,
+) -> None:
+    configure(client)
+    bambuddy = FakeLibrary()
+    bambuddy.me = httpx.Response(500, json={"detail": "boom"})
+    bambuddy.folder(4)
+    bambuddy.file(10, 4)
+
+    response = delete_folder(client, 4)
+
+    assert response.status_code >= 500, response.text
+    assert bambuddy.log == []
+    assert bambuddy.files[10]["folder_id"] == 4
+
+
+@respx.mock
+def test_a_key_that_loses_delete_all_after_the_check_keeps_the_folder(
+    client: TestClient,
+) -> None:
+    configure(client)
+    bambuddy = FakeLibrary()
+    bambuddy.folder(4)
+    bambuddy.file(10, 4)
+
+    def demote() -> None:
+        bambuddy.permissions = ["library:delete_own"]
+        bambuddy.file(20, 4, trashed=True)
+        bambuddy.others.add(20)
+
+    bambuddy.on_move = demote
+
+    response = delete_folder(client, 4)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert [f["id"] for f in body["deleted"]] == [10]
+    assert [(f["id"], f["filename"]) for f in body["skipped"]] == [(4, "folder-4")]
+    assert "library:delete_all" in body["skipped"][0]["reason"]
+    assert body["folders"] == []
+    assert not any(entry[0] == "rmdir" for entry in bambuddy.log)
+    assert bambuddy.destroyed == [] and 20 in bambuddy.files
 
 
 @respx.mock
@@ -451,11 +569,21 @@ def test_a_subfolder_made_after_the_check_keeps_its_ancestors(client: TestClient
 
 
 @respx.mock
-def test_upload_into_a_folder_goes_by_claim(client: TestClient) -> None:
+def test_upload_into_a_folder_goes_by_claim(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
     configure(client)
     up = respx.post(f"{API}/library/files").mock(
-        return_value=httpx.Response(200, json={"id": 50, "filename": "box.3mf"})
+        return_value=httpx.Response(200, json={"id": 50, "filename": "box.3mf", "folder_id": 3})
     )
+    sent_as: list[object] = []
+    upload = BambuddyClient.upload_library_file
+
+    async def recording(self: BambuddyClient, filename: str, content: Any, **kw: Any) -> Any:
+        sent_as.append(content)
+        return await upload(self, filename, content, **kw)
+
+    monkeypatch.setattr(BambuddyClient, "upload_library_file", recording)
     payload = b"PK\x03\x04" + b"\x00" * 3_000_000
     response = client.post(
         "/api/v1/print/library/files",
@@ -468,6 +596,25 @@ def test_upload_into_a_folder_goes_by_claim(client: TestClient) -> None:
     sent = up.calls.last.request
     assert sent.url.params["folder_id"] == "3"
     assert payload in sent.content
+    # Streamed from the claim's file, never read into memory whole.
+    assert len(sent_as) == 1 and not isinstance(sent_as[0], bytes)
+    assert isinstance(sent_as[0], io.BufferedReader) and sent_as[0].closed
+
+
+@respx.mock
+def test_an_upload_answers_the_folder_bambuddy_put_it_in(client: TestClient) -> None:
+    configure(client)
+    respx.post(f"{API}/library/files").mock(
+        return_value=httpx.Response(200, json={"id": 51, "filename": "box.3mf", "folder_id": 8})
+    )
+    response = client.post(
+        "/api/v1/print/library/files",
+        files={"file": ("box.3mf", b"PK\x03\x04data", "application/octet-stream")},
+        data={"folder_id": "3"},
+        headers=press(),
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {"id": 51, "filename": "box.3mf", "folder_id": 8}
 
 
 @respx.mock

@@ -28,7 +28,7 @@ from scadbuddy.api.deps import (
     UploadsDep,
 )
 from scadbuddy.api.jobs import GLB_MEDIA_TYPE
-from scadbuddy.api.media import _receive
+from scadbuddy.api.media import receive_upload
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
     Claimed,
@@ -306,7 +306,9 @@ async def post_library_folder_delete(
 ) -> LibraryFolderDeleteResult | JSONResponse:
     """Deletes the folder's files as ``/delete`` does, then its folders, deepest first
     (#2686). A file a print waiting in Bambuddy's queue names is a 409 before anything
-    is deleted. A folder holding a file Bambuddy skipped, and its ancestors, are kept."""
+    is deleted, as are files of the folder in Bambuddy's trash; a key without
+    ``library:delete_all`` (which sees only its own user's trash) is a 403. A folder
+    holding a file Bambuddy skipped, and its ancestors, are kept."""
     result = await run_operation(
         ops,
         response,
@@ -375,7 +377,7 @@ async def post_library_file(
     """Streams the ``file`` part to disk and uploads it through Bambuddy, to the folder
     in ``folder_id`` or the top level; its filename is the library name. The body may be
     as large as the library download cap (#2686)."""
-    received = await _receive(request, paths.cache, fields={"folder_id": 32})
+    received = await receive_upload(request, paths.cache, fields={"folder_id": 32})
     try:
         path = received.files.get("file")
         if path is None or received.sizes["file"] == 0:

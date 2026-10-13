@@ -571,7 +571,9 @@ export const printTools: Tool[] = [
       "Delete a folder from Bambuddy's library along with its files and subfolders. Managed files go to " +
       "Bambuddy's trash (restore_library_files undoes that); a file linked from an external folder " +
       '(`is_external`) is deleted for good. Answers 409, before anything is deleted, if a print waiting in ' +
-      "Bambuddy's queue names a file. A file that could not be deleted is listed in `skipped`, and its " +
+      "Bambuddy's queue names a file or Bambuddy's trash holds one of the folder's files, and 403 unless " +
+      "the API key's user holds `library:delete_all` (without it the key cannot see other users' trash). " +
+      'A file that could not be deleted is listed in `skipped`, and its ' +
       'folder and that folder\'s parents stay.',
     input: z.object({ folder_id: z.number().int().positive() }),
     risk: 'outward',
