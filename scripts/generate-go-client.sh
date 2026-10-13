@@ -55,8 +55,13 @@ jq 'del(.descriptionHash)' "$OUT/kiota-lock.json" > "$OUT/kiota-lock.json.tmp"
 mv "$OUT/kiota-lock.json.tmp" "$OUT/kiota-lock.json"
 
 gofmt -w "$OUT"
+# The client's own vendor/ first, in module mode, then the workspace's. No `go work
+# sync`: it raises each module's requires to the workspace's build list, which would
+# move the client's go.mod after its vendor/modules.txt was written (inconsistent
+# vendoring in the module-mode build) and edit bambuddy-fs's go.mod on a client-only
+# change. Each module keeps its own requires; the workspace takes the highest.
 (cd "$MODULE" && GOWORK=off go mod tidy && GOWORK=off go mod vendor)
-(cd "$ROOT" && go work sync && go work vendor)
+(cd "$ROOT" && go work vendor)
 
 if [[ "$check" == "true" ]]; then
   # Against the index, not HEAD: staged files are not drift, anything the run changed or added since is.

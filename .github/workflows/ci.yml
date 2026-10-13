@@ -1642,7 +1642,7 @@ jobs:
             echo "::error::Two generations of the Go client differ; Kiota output is not a function of the spec."
             exit 1
           fi
-          # All of tools/go: `go work sync` can move bambuddy-fs's go.mod too.
+          # All of tools/go: tidy can move the client's go.mod and go.sum.
           if [ -z "$(git status --porcelain -- tools/go vendor go.work go.work.sum)" ]; then
             echo "state=fresh" | tee -a "$GITHUB_OUTPUT"
           else
