@@ -463,11 +463,13 @@ def test_generate_with_the_printer_status_unreadable_states_no_sides(
 
 
 @respx.mock
-def test_a_print_on_a_different_printer_adds_a_second_copy_named_for_it(
+def test_a_print_on_a_different_printer_replaces_the_copy_nothing_printed_from(
     client: TestClient, model: str
 ) -> None:
-    """The project keeps the Generate copy; the second printer model gets its own,
-    named after that model so the two are told apart in the folder."""
+    """#2476: the project kept Generate's copy and the print added one named for its
+    printer, so the folder had two files and the print's slice, with no telling which
+    printed. Generate's copy was only a guess nothing printed from: it is deleted, and
+    the print's copy takes its name and its "Edit in ScadBuddy" note."""
     configure(client)
     output_id = named_output(client, model)
     project_folder_routes().side_effect = [
@@ -475,15 +477,52 @@ def test_a_print_on_a_different_printer_adds_a_second_copy_named_for_it(
         httpx.Response(200, json=[{"id": 41, "folder_id": FOLDER, "filename": "Demo — 12.3mf"}]),
     ]
     uploaded = uploads(41, 42)
+    deleted = respx.delete(f"{API}/library/files/41").mock(
+        return_value=httpx.Response(200, json={"success": True})
+    )
+    renamed = respx.put(f"{API}/library/files/42").mock(
+        side_effect=lambda request: httpx.Response(
+            200, json={"id": 42, **json.loads(request.content)}
+        )
+    )
     run_routes()
     slice_routes()
     queue_route()
 
     file_into_project(client, output_id)  # no printer known: the fallback plate
+    respx.get(f"{API}/library/files/41").mock(
+        return_value=httpx.Response(
+            200,
+            json={"id": 41, "filename": "Demo — 12.3mf", "notes": "Edit in ScadBuddy: x"},
+        )
+    )
     ran = run_print(client, output_id, json=run_request(project_id=PROJECT))
+
     assert ran.json()["library_file_id"] == 42
     assert uploaded_name(uploaded) == "Demo — 12 (H2C).3mf"
     assert uploaded.calls.last.request.url.params["folder_id"] == str(FOLDER)
+    assert deleted.call_count == 1
+    assert [json.loads(call.request.content) for call in renamed.calls] == [
+        {"filename": "Demo — 12.3mf"},
+        {"notes": "Edit in ScadBuddy: x"},
+    ]
+
+
+@respx.mock
+def test_an_identical_generate_takes_the_file_already_filed(client: TestClient, model: str) -> None:
+    """#2476: the same parameters generated twice save two outputs; the second filing
+    takes the first one's file rather than adding "Demo — 12 (2).3mf"."""
+    configure(client)
+    first_id = named_output(client, model)
+    second_id = named_output(client, model)
+    project_folder_routes()
+    uploaded = uploads(41)
+
+    first = file_into_project(client, first_id).json()
+    second = file_into_project(client, second_id).json()
+
+    assert uploaded.call_count == 1
+    assert (second["library_file_id"], second["created"]) == (first["library_file_id"], False)
 
 
 @respx.mock
