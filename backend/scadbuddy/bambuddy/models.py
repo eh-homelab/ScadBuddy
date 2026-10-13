@@ -654,6 +654,9 @@ class Spool(BambuddyModel):
     storage_location: str | None = None
     location_id: int | None = None
     archived_at: datetime | None = None
+    #: What the spool cost per kilogram, in Bambuddy's currency setting; ``None`` when
+    #: nobody entered a price (#785).
+    cost_per_kg: float | None = None
 
     @property
     def remaining_g(self) -> float:
