@@ -115,13 +115,15 @@ def mine(client: TestClient, events: list[Event]) -> str:
 
 def published(events: list[Event], kind: str | None = None) -> list[dict[str, Any]]:
     """What was published, as kind plus ids, in order; the event's own id and time
-    are left out so the assertions read as the payloads they are about."""
+    are left out so the assertions read as the payloads they are about.
+    `activity.changed` mirrors every job and operation write into the activity log and
+    is asserted by its own tests, so it is left out unless asked for by kind."""
     if isinstance(events, Recorded):
         events.settle()
     return [
         event.model_dump(exclude={"id", "at"})
         for event in events
-        if kind is None or event.kind == kind
+        if (event.kind != "activity.changed" if kind is None else event.kind == kind)
     ]
 
 

@@ -6,9 +6,11 @@ export function Toasts() {
   const shown = useSyncExternalStore(subscribeToasts, getToasts)
   return (
     // The one live region, always mounted so a toast added to it is announced; the toasts
-    // inside are plain, or each would be announced twice.
+    // inside are plain, or each would be announced twice. A bare `aria-live`, not
+    // role="status": an always-present empty status would be one more on every page.
     <div
-      role="status"
+      aria-live="polite"
+      data-testid="toasts"
       className="pointer-events-none fixed bottom-4 right-4 z-50 flex w-72 max-w-[calc(100vw-2rem)] flex-col gap-2"
     >
       {shown.map((one) => (

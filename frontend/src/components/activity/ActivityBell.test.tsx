@@ -74,7 +74,7 @@ describe('ActivityBell', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(800)
     })
-    expect(screen.getByRole('status')).toBeEmptyDOMElement()
+    expect(screen.getByTestId('toasts')).toBeEmptyDOMElement()
     expect(screen.getByTestId('activity-bell-count')).not.toBeVisible()
   })
 
@@ -142,7 +142,7 @@ describe('ActivityBell', () => {
     seedActivity([{ ...finished('browser'), finished_at: new Date(Date.now() - 30_000).toISOString() }])
     mount()
     await waitFor(() => expect(screen.getByTestId('activity-bell-count')).toHaveTextContent('1'))
-    expect(screen.getByRole('status')).toBeEmptyDOMElement()
+    expect(screen.getByTestId('toasts')).toBeEmptyDOMElement()
   })
 
   it('works with localStorage blocked', async () => {
@@ -173,7 +173,7 @@ describe('ActivityBell', () => {
     expect(screen.getByText(/Render box: succeeded/)).toBeInTheDocument()
     await user.unhover(shown)
     await advance(6100)
-    expect(screen.getByRole('status')).toBeEmptyDOMElement()
+    expect(screen.getByTestId('toasts')).toBeEmptyDOMElement()
   })
 
   it('keeps a toast while it is focused even after the pointer leaves', async () => {
@@ -190,7 +190,7 @@ describe('ActivityBell', () => {
     expect(screen.getByText(/Render box: succeeded/)).toBeInTheDocument()
     await act(async () => link.blur())
     await advance(6100)
-    expect(screen.getByRole('status')).toBeEmptyDOMElement()
+    expect(screen.getByTestId('toasts')).toBeEmptyDOMElement()
   })
 
   it('follows a list saved in Settings without a reload', async () => {

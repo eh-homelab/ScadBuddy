@@ -38,6 +38,9 @@ RENDER_GRANTS: Mapping[str, tuple[str, ...]] = {
     # The job.* events, written in the row's transaction (`core/pg_events.py`
     # `write_event`; RETURNING seq reads).
     "events": ("SELECT", "INSERT"),
+    # The job's activity row (`render/projection.py` `_announce` through
+    # `activity/index.py` `upsert_in`; ON CONFLICT and RETURNING principal read it).
+    "activity": ("SELECT", "INSERT", "UPDATE"),
     # The blob index (`store/index.py`): get, put, touch, and `forget` of a row whose
     # object is gone.
     "store_blobs": ("SELECT", "INSERT", "UPDATE", "DELETE"),

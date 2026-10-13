@@ -430,5 +430,10 @@ async def test_the_worker_renders_as_its_own_role(
         refs = conn.execute(
             "SELECT count(*) AS n FROM blob_refs WHERE holder_id = %s", (job.id,)
         ).fetchone()
+        # Written by the worker as the role, not left to the repair pass.
+        activity = conn.execute(
+            "SELECT status FROM activity WHERE id = %s", (f"render:{job.id}",)
+        ).fetchone()
     assert {"job.running", "job.done"} <= kinds
     assert refs is not None and refs["n"] >= 1
+    assert activity is not None and activity["status"] == "succeeded"

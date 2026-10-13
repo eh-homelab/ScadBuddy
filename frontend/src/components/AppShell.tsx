@@ -51,7 +51,8 @@ const NAV = [
   { to: '/prints', label: 'Prints', end: false },
   { to: '/library', label: 'Library', end: false },
   { to: '/workflows', label: 'Workflows', end: false },
-  { to: '/activity', label: 'Activity', end: false },
+  // Not on a phone, where the row would overflow: the bell's popover links to it there.
+  { to: '/activity', label: 'Activity', end: false, wide: true },
   { to: '/settings', label: 'Settings', end: false },
 ]
 
@@ -231,7 +232,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
                   to={item.to}
                   end={item.end}
                   className={({ isActive }) =>
-                    `rounded-[6px] px-2.5 py-1 text-[13px] transition-colors ${
+                    `${'wide' in item ? 'hidden sm:block ' : ''}rounded-[6px] px-2.5 py-1 text-[13px] transition-colors ${
                       isActive
                         ? 'bg-surface-3 text-ink'
                         : 'text-muted hover:bg-surface-2 hover:text-ink'
