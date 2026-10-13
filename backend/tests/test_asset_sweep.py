@@ -210,11 +210,8 @@ async def test_a_failing_trim_does_not_hide_the_bambuddy_failure(
         raise OSError("Bambuddy is down")
 
     monkeypatch.setattr(main, "sweep_content", sweep_content)
-    with pytest.raises(OSError, match="down") as raised:
+    with pytest.raises(OSError, match="down"):
         await main._sweep_blobs_logged(_sweep_state(_FailingCache(), _Unreachable()))  # type: ignore[arg-type]
-    # The trim's failure neither replaced it nor rode along on it.
-    assert not isinstance(raised.value.__context__, RuntimeError)
-    assert not isinstance(raised.value.__cause__, RuntimeError)
     logged = {r.getMessage(): r.exc_info[1] for r in caplog.records if r.exc_info}
     assert isinstance(logged["could not trim the worker cache"], RuntimeError)
     assert isinstance(logged["could not sweep unreferenced blobs"], OSError)

@@ -340,6 +340,8 @@ async def _sweep_blobs_logged(state: AppState) -> None:
                     cutoff = datetime.now(UTC) - timedelta(seconds=state.config.job_ttl)
                     removed += await backend.sweep_unrecorded(cutoff=cutoff)
             except BaseException:
+                # BaseException on purpose: a cancelled sweep must stay cancelled, not be
+                # replaced by the trim's own failure below.
                 failed = True
                 raise
             finally:
