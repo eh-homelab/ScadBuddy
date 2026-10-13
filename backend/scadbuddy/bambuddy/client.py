@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from contextlib import AbstractContextManager, asynccontextmanager
 from dataclasses import dataclass
@@ -96,6 +97,20 @@ LIBRARY_DELETE_ALL = "library:delete_all"
 CAMERA_STREAM_TIMEOUT = httpx.Timeout(10.0, read=30.0)
 #: What Bambuddy's ``/camera/stream`` answers with.
 MJPEG_TYPE = "multipart/x-mixed-replace; boundary=frame"
+#: A multipart MJPEG type with a plain boundary token: the only type a stream is
+#: served as, since ScadBuddy's origin would otherwise serve whatever Bambuddy (or an
+#: external camera behind it) labels the bytes, ``text/html`` included.
+_MJPEG = re.compile(
+    r"multipart/x-mixed-replace;\s*boundary=\"?([A-Za-z0-9'()+_,.\-]{1,70})\"?", re.I
+)
+
+
+def mjpeg_type(upstream: str | None) -> str:
+    """The content type to serve a camera stream as: ``multipart/x-mixed-replace`` with
+    the upstream's boundary, since the parts are split on it; :data:`MJPEG_TYPE` when the
+    upstream names no usable boundary. Never the upstream's type itself."""
+    match = _MJPEG.fullmatch((upstream or "").strip())
+    return f"multipart/x-mixed-replace; boundary={match.group(1)}" if match else MJPEG_TYPE
 
 
 #: What a Bambuddy call does, which names its span (``bambuddy.<operation>``, spec
@@ -384,10 +399,7 @@ class BambuddyClient:
                     if not response.is_success:
                         await response.aread()
                         raise map_response(response, scope=Scope.READ_STATUS, what=what)
-                    yield (
-                        response.headers.get("content-type", MJPEG_TYPE),
-                        response.aiter_bytes(),
-                    )
+                    yield mjpeg_type(response.headers.get("content-type")), response.aiter_bytes()
             except httpx.HTTPError as error:
                 logger.warning("bambuddy request failed", extra={"method": "GET", "path": path})
                 raise map_transport(error, what=what) from error

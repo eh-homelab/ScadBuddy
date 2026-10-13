@@ -10,9 +10,11 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 import httpx
+import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.bambuddy.client import mjpeg_type
 from tests.api.test_send import API, configure
 
 JPEG = b"\xff\xd8\xff\xe0camera-frame\xff\xd9"
@@ -160,3 +162,41 @@ def test_a_refused_stream_is_an_error_not_an_empty_stream(client: TestClient) ->
 
 def test_fps_is_capped(client: TestClient) -> None:
     assert client.get("/api/v1/print/printers/7/camera/stream?fps=60").status_code == 422
+
+
+@respx.mock
+def test_a_stream_is_never_served_as_the_type_bambuddy_labels_it(client: TestClient) -> None:
+    """ScadBuddy's origin serves the bytes, so an upstream ``text/html`` (Bambuddy, or an
+    external camera behind it) must not become HTML here."""
+    configure(client)
+    token_route()
+    respx.get(f"{API}/printers/7/camera/stream").mock(
+        return_value=httpx.Response(
+            200, stream=Frames(1), headers={"Content-Type": "text/html; charset=utf-8"}
+        )
+    )
+
+    response = client.get("/api/v1/print/printers/7/camera/stream")
+
+    assert response.headers["content-type"] == MJPEG
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
+@pytest.mark.parametrize(
+    ("upstream", "served"),
+    [
+        (MJPEG, MJPEG),
+        (
+            'multipart/x-mixed-replace; boundary="cam42"',
+            "multipart/x-mixed-replace; boundary=cam42",
+        ),
+        ("text/html", MJPEG),
+        ("multipart/x-mixed-replace; boundary=frame\r\nX-Evil: 1", MJPEG),
+        ("multipart/x-mixed-replace; boundary=<script>", MJPEG),
+        (None, MJPEG),
+    ],
+)
+def test_only_a_multipart_mjpeg_type_with_a_plain_boundary_is_kept(
+    upstream: str | None, served: str
+) -> None:
+    assert mjpeg_type(upstream) == served
