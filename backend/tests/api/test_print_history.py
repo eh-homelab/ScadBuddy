@@ -724,6 +724,7 @@ def test_a_deleted_archive_has_no_slicing_or_record(client: TestClient, model: s
     configure(client)
     output_id = make_output(client, model)
     link(client, output_id, 35)
+    mock_bambuddy_lists()
     respx.get(f"{API}/archives/35").mock(return_value=httpx.Response(404))
     respx.get(f"{API}/archives/35/runs").mock(return_value=httpx.Response(404))
 
