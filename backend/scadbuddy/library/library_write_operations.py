@@ -12,6 +12,7 @@ file Bambuddy skipped, or with a subfolder kept for that reason, is not deleted.
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import status
@@ -29,6 +30,7 @@ from scadbuddy.library.library_file_operations import (
     read_files,
     refuse_queued,
 )
+from scadbuddy.library.operations import PIN_TIMEOUT
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import OperationKind, waiting_on_bambuddy
 
@@ -224,13 +226,18 @@ def library_write_kinds(state: Core) -> list[OperationKind]:
             id=made.id, filename=made.filename, folder_id=body.folder_id
         ).model_dump(mode="json")
 
-    def kind(name: str, check: Any, run: Any) -> OperationKind:
-        return OperationKind(name, check, run, queue="library", where=WHERE)
+    def kind(
+        name: str, check: Any, run: Any, run_timeout: timedelta | None = None
+    ) -> OperationKind:
+        return OperationKind(
+            name, check, run, queue="library", where=WHERE, run_timeout=run_timeout
+        )
 
     return [
         kind("library_file_update", update_check, update_run),
         kind("library_folder_create", no_check, create_run),
         kind("library_folder_update", no_check, folder_update_run),
         kind("library_folder_delete", folder_delete_check, folder_delete_run),
-        kind("library_file_upload", upload_check, upload_run),
+        # An upload of up to the download cap must not time out into a second upload.
+        kind("library_file_upload", upload_check, upload_run, run_timeout=PIN_TIMEOUT),
     ]

@@ -24,6 +24,7 @@ from scadbuddy import __version__
 from scadbuddy.api import (
     health,
     libraries,
+    library_print,
     media,
     mesh_models,
     metrics,
@@ -1259,6 +1260,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         models.PastedSource,
         media.MediaUpload,
         mesh_models.MeshUpload,
+        library_print.LibraryFileUploadForm,
         outputs.NeedsBackfillProblem,
     )
 
