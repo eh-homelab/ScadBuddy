@@ -974,8 +974,12 @@ export function PrintPicker({
                       colors={previewColors}
                       toolpathUrl={
                         // #2072 — the background slice's toolpaths, while they are of the
-                        // choices on screen and of the plate this dialog shows.
-                        previewSlice.result && !previewSlice.stale && previewPlate === (plate === 'all' ? 1 : plate)
+                        // choices on screen and of the plate this dialog shows. A multi-plate
+                        // output's dialog shows every plate, which no one plate's slice is.
+                        previewSlice.result &&
+                        !previewSlice.stale &&
+                        !(source.kind === 'output' && picker.plates.length > 1) &&
+                        previewPlate === (plate === 'all' ? 1 : plate)
                           ? sourceApi(source).toolpathUrl(previewSlice.result.job_id)
                           : null
                       }

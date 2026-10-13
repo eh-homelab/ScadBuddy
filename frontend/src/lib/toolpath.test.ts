@@ -46,4 +46,11 @@ describe('toolpath (#2072)', () => {
     expect(first.count).toBe(3)
     expect(Array.from(first.colours.subarray(12, 15))).toEqual(featureColour('Sparse infill', 1).map(Math.fround))
   })
+
+  it('draws a feature past the header’s list in a fallback colour rather than failing', () => {
+    const buffer = encodeToolpath({ features: ['x'], layers: [], max_speed: 1, truncated: false }, [[0, 0, 0, 1, 1, 0, 1, 7]])
+    const lines = toolpathLines(decodeToolpath(buffer), 'layers', null)
+    expect(lines.count).toBe(1)
+    expect(Array.from(lines.colours.subarray(0, 3)).every(Number.isFinite)).toBe(true)
+  })
 })

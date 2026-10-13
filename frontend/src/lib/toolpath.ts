@@ -138,7 +138,7 @@ export function toolpathLines(
           : PRINT_MOVE
         : view === 'speed'
           ? speedColour(segments[at + 6]!, header.max_speed)
-          : featureRgb[kind - 1]!
+          : (featureRgb[kind - 1] ?? FALLBACK[0]!)
     const out = count * 6
     positions[out] = segments[at]!
     positions[out + 1] = segments[at + 2]!
