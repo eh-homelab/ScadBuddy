@@ -326,8 +326,8 @@ async def update_flow_trigger(
     trigger_id: str, body: TriggerUpdate, triggers: TriggersDep
 ) -> TriggerView:
     """Any change returns the trigger's standing grant to `requested` (Ruling 20): a person
-    approved it for what the trigger was. Runs already started keep their grants; its pause
-    is kept."""
+    approved it for what the trigger was. Runs already started spend nothing more from it;
+    its pause is kept."""
     trigger = await _load(triggers, trigger_id)
     _creator_only(trigger)
     sent = body.model_fields_set

@@ -3,8 +3,8 @@
 The routes write who made, changed or paused a trigger from the request's author, never
 from its body; a fire reads everything it acts on from here. Revoking a standing grant
 revokes the run grants it seeded in the same transaction, so their next outward calls wait
-(§3.5); an edit returns it to `requested` (Ruling 20) and leaves runs already started
-alone. Approving one is bound to the trigger as the person saw it (`state_hash`), checked
+(§3.5); an edit returns it to `requested` (Ruling 20), after which the runs it seeded
+spend nothing. Approving one is bound to the trigger as the person saw it (`state_hash`), checked
 under the trigger's row lock, which every edit takes too. A fire is admitted under the
 same lock, so concurrent fires keep to the trigger's overlap and rate cap.
 """
@@ -114,7 +114,9 @@ class TriggerStore:
         self, trigger_id: str, fields: dict[str, Any], by: dict[str, Any], revoked_by: str
     ) -> Trigger | None:
         """Change `fields` and return the trigger's standing grant to `requested` (Ruling
-        20); the run grants it seeded already are left as they are."""
+        20). The run grants it seeded keep their rows, but spend nothing until a person
+        approves it again, and then only under the approval that seeded them, which is gone:
+        those runs' outward calls wait (`FlowStore.consume_grant`)."""
         return await self._call(self._update, trigger_id, fields, by, revoked_by)
 
     async def set_paused(
@@ -275,7 +277,7 @@ class TriggerStore:
             if row is None:
                 return None
             # Ruling 20: a person approves it again for what the trigger is now. Runs
-            # already started keep the grant they were given.
+            # already started keep their grant rows, which spend nothing from here on.
             conn.execute(
                 "UPDATE flow_trigger_grants SET status = 'requested', approved_by = NULL,"
                 " approved_at = NULL, expires_at = NULL, approval_id = NULL WHERE trigger_id = %s"
