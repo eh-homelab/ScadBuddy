@@ -73,9 +73,9 @@ describe('parseAttention', () => {
     }
   })
 
-  it("'wait' parks to the day-long ceiling, whatever timeout_s said; the others use timeout_s", () => {
+  it("'wait' parks to the day-long ceiling; the others use timeout_s", () => {
     const at = (on_timeout: string) => {
-      const parsed = parseAttention({ reason: 'blocked', message: MESSAGE, timeout_s: 60, on_timeout })
+      const parsed = parseAttention({ reason: 'blocked', message: MESSAGE, ...(on_timeout === 'wait' ? {} : { timeout_s: 60 }), on_timeout })
       if (!parsed.ok) throw new Error(parsed.error)
       const spec = attentionSpec(parsed.input)
       if (spec.reason === 'done') throw new Error('a blocked request has a timer')
@@ -84,6 +84,14 @@ describe('parseAttention', () => {
     expect(at('wait')).toBe(WAIT_CEILING_S)
     expect(at('proceed')).toBe(60)
     expect(at('stop')).toBe(60)
+  })
+
+  // #1204: the ceiling would silently override it, so the model is told instead.
+  it("refuses timeout_s beside 'wait', saying the wait ignores it", () => {
+    expect(parseAttention({ reason: 'blocked', message: MESSAGE, timeout_s: 60, on_timeout: 'wait' })).toEqual({
+      ok: false,
+      error: expect.stringMatching(/^on_timeout 'wait' takes no timeout_s: it waits up to 24 hours/),
+    })
   })
 
   // #815 §4: a done summary is posted, never waited on.
