@@ -268,10 +268,14 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
           }
         }
         offered = loaded.loaded.filter((pkg) => !failed.has(pkg.name))
+      } else if (deps.packages!.root === undefined) {
+        // With no payload volume a listing shares nothing, so a call builds nothing
+        // either, whatever it names (#3072).
+        offered = []
       }
-      // A call (not a listing) builds every loaded package's servers, a failed share's
-      // included: the listing is the guard, since a call can only name a tool the listing
-      // offered, and it offered none of a package that failed to share (#2620).
+      // Otherwise a call (not a listing) builds every loaded package's servers: a share
+      // that threw is known only by sharing again, so for that one the listing is the
+      // guard, since a call can only name a tool the listing offered (#2620).
       servers.push(...localPackageServers(offered, problems))
       const named = [...new Set(offered.filter((p) => p.allowed).flatMap((p) => p.builtinTools))].filter((n) => provided.has(n)).sort()
       const builtins = deps.builtins
