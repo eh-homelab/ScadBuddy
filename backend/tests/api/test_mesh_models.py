@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import io
 import json
+import tempfile
 import zipfile
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -20,7 +22,8 @@ from scadbuddy.library.presets import ParamPresetCreate
 from scadbuddy.meshmodel import ingest
 from scadbuddy.meshmodel import operations as mesh_operations
 from scadbuddy.meshmodel.scene import MAX_OBJECTS, load_scene, text_sha256
-from scadbuddy.render.bambu3mf import stl_3mf
+from scadbuddy.render.bambu3mf import PlateParts, stl_3mf, write_plates_3mf
+from scadbuddy.render.split import ColourPart, Paint
 from tests.api.conftest import wait_for_job
 from tests.api.test_print_library import library_file
 from tests.api.test_send import configure, make_output
@@ -65,6 +68,17 @@ def upload(
     return response
 
 
+def painted_3mf() -> bytes:
+    """The carrot as Bambu Studio would save it painted: every other face green."""
+    mesh = carrot()
+    codes = tuple("8" if i % 2 else "" for i in range(len(mesh.faces)))
+    part = ColourPart(0, "Carrot", "#F08A24", mesh, Paint(codes, ("#F08A24", "#3A7D2C")))
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "carrot.3mf"
+        write_plates_3mf([PlateParts((part,), (1,))], ["#F08A24", "#3A7D2C"], path, thumbnails=None)
+        return path.read_bytes()
+
+
 def edit(
     client: TestClient,
     slug: str,
@@ -78,6 +92,21 @@ def edit(
         headers=key or press(),
     )
     return response
+
+
+def test_a_painted_scene_notes_only_where_its_painting_is_not_carried_whole(
+    client: TestClient,
+) -> None:
+    slug = upload(client, data=painted_3mf(), filename="carrot.3mf").json()["slug"]
+    scene = client.get(f"/api/v1/models/{slug}/scene").json()
+    assert scene["scene"]["objects"][0]["parts"][0]["painted"] is True
+    assert scene["notes"] == []
+    assert (
+        edit(client, slug, {"edit": "transform", "object": "o1", "scale": [-1, 1, 1]}).status_code
+        == 200
+    )
+    [note] = client.get(f"/api/v1/models/{slug}/scene").json()["notes"]
+    assert note.startswith("o1 (") and "is mirrored" in note
 
 
 def save_tall(client: TestClient, slug: str) -> None:
