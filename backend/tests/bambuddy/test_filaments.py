@@ -14,7 +14,7 @@ answers. What is tested here is that ScadBuddy sends it what it needs to answer 
 from __future__ import annotations
 
 import asyncio
-from typing import ClassVar, cast
+from typing import Any, ClassVar, cast
 
 import httpx
 import pytest
@@ -204,7 +204,8 @@ def test_the_keychain_pre_selects_the_closest_blue_and_pink() -> None:
 
 
 def test_one_spool_is_never_pre_selected_for_two_slots() -> None:
-    """A two-colour plate opening with the same spool in both slots reads as a bug."""
+    """A two-colour plate opening with the same spool in both slots reads as a bug,
+    unless it is a loaded spool shared in place of another material (#2461)."""
     built = options(
         requirements=[SlotNeed(slot_id=1, colour="#0047BB"), SlotNeed(slot_id=2, colour="#0047BB")]
     )
@@ -703,6 +704,70 @@ def test_a_loaded_cobalt_beats_a_closer_cyan_on_the_shelf() -> None:
     assert [choice.spool_id for choice in built.suggested] == [40]
 
 
+def _loaded(spool_id: int, tray_id: int) -> SpoolAssignment:
+    return SpoolAssignment.model_validate(
+        {
+            **recording("inventory-assignments.json")[0],
+            "id": 100 + spool_id,
+            "spool_id": spool_id,
+            "tray_id": tray_id,
+            "spool": None,
+        }
+    )
+
+
+def _mosaic(shelf: list[Spool], loaded: list[SpoolAssignment]) -> list[SlotChoice]:
+    """#2461: pixel-art-mosaic's opening plan, two near-blacks and a green, with no
+    declared material (a generated template's slots declare none)."""
+    built = build_options(
+        library_file_id=1,
+        spools=shelf,
+        assignments=loaded,
+        requirements=[
+            SlotNeed(slot_id=1, colour="#263238"),
+            SlotNeed(slot_id=2, colour="#1A1A1A"),
+            SlotNeed(slot_id=3, colour="#3F8E43"),
+        ],
+        printer=printer(),
+    )
+    return built.suggested
+
+
+def test_a_second_black_shares_the_loaded_pla_rather_than_an_unloaded_tpu() -> None:
+    """#2461: slot 2 fell through to an unloaded TPU 95A in an all-PLA print, because the
+    loaded PLA Black was taken by slot 1 and an undeclared slot took any material."""
+    shelf = [
+        _spool(1, "1A1A1AFF"),  # Inland PLA Basic Black, loaded
+        _spool(2, "101010FF", "TPU 95A"),  # Insignia TPU 95A Black, on the shelf
+        _spool(3, "3F8E43FF"),  # PLA Basic Mistletoe Green, loaded
+    ]
+    chosen = {
+        choice.slot_id: choice.spool_id for choice in _mosaic(shelf, [_loaded(1, 0), _loaded(3, 1)])
+    }
+    assert chosen == {1: 1, 2: 1, 3: 3}
+
+
+def test_a_free_spool_of_the_plates_material_is_still_preferred_to_sharing() -> None:
+    shelf = [
+        _spool(1, "1A1A1AFF"),
+        _spool(2, "101010FF", "TPU 95A"),
+        _spool(3, "3F8E43FF"),
+        _spool(4, "111111FF"),  # a second PLA black, on the shelf
+    ]
+    chosen = {
+        choice.slot_id: choice.spool_id for choice in _mosaic(shelf, [_loaded(1, 0), _loaded(3, 1)])
+    }
+    assert chosen == {1: 1, 2: 4, 3: 3}
+
+
+def test_an_undeclared_slot_with_only_another_material_is_left_for_the_user() -> None:
+    """Nothing loaded to share, and only a TPU of the colour: the slot opens empty
+    rather than mixing a material in."""
+    shelf = [_spool(1, "1A1A1AFF"), _spool(2, "101010FF", "TPU 95A"), _spool(3, "3F8E43FF")]
+    chosen = {choice.slot_id: choice.spool_id for choice in _mosaic(shelf, [])}
+    assert chosen == {1: 1, 3: 3}
+
+
 def _seed(slot: SlotNeed, shelf: list[Spool], remembered: int) -> list[SlotChoice]:
     built = build_options(library_file_id=1, spools=shelf, assignments=[], requirements=[slot])
     return seed_plan(built, [SlotChoice(slot_id=slot.slot_id, spool_id=remembered)]).slots
@@ -760,6 +825,18 @@ class _ReadSource:
         return [1]
 
 
+class _WatchedRead(asyncio.Future[PrinterStatus | None]):
+    """A status read that says when someone starts waiting on it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.waited_on = asyncio.Event()
+
+    def add_done_callback(self, fn: Any, *, context: Any = None) -> None:
+        self.waited_on.set()
+        super().add_done_callback(fn, context=context)
+
+
 @respx.mock
 async def test_a_cancelled_filament_step_leaves_the_callers_status_read_running(
     bambuddy: BambuddyClient,
@@ -778,28 +855,21 @@ async def test_a_cancelled_filament_step_leaves_the_callers_status_read_running(
     respx.get(f"{API}/printers/1").mock(
         return_value=httpx.Response(200, json=recording("printer.json"))
     )
-    remain = respx.get(f"{API}/printers/1/inventory-remain").mock(
+    respx.get(f"{API}/printers/1/inventory-remain").mock(
         return_value=httpx.Response(200, json=recording("inventory-remain.json"))
     )
-    release = asyncio.Event()
-
-    async def slow_status() -> PrinterStatus | None:
-        await release.wait()
-        return None
-
-    reading = asyncio.ensure_future(slow_status())
+    reading = _WatchedRead()
     step = asyncio.ensure_future(
         filament_options(bambuddy, cast(PrintSource, _ReadSource()), printer_id=1, status=reading)
     )
-    # Every other read done: the step now waits on the status alone.
+    # The step waits on the read only once every other read is done (#2630): no sleep
+    # can say when that is under load, so the read itself says.
     async with asyncio.timeout(5):
-        while not remain.called:
-            await asyncio.sleep(0.01)
-    await asyncio.sleep(0.01)
+        await reading.waited_on.wait()
     step.cancel()
     with pytest.raises(asyncio.CancelledError):
         await step
 
     assert not reading.done()
-    release.set()
+    reading.set_result(None)
     assert await reading is None

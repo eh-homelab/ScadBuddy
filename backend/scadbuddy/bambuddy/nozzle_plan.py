@@ -66,7 +66,13 @@ from scadbuddy.bambuddy.extruders import (
     side_of,
     track_switch,
 )
-from scadbuddy.bambuddy.filaments import FilamentPlan, Inventory, normalise_colour, read_inventory
+from scadbuddy.bambuddy.filaments import (
+    FilamentPlan,
+    Inventory,
+    family,
+    normalise_colour,
+    read_inventory,
+)
 from scadbuddy.bambuddy.models import (
     FlowType,
     NozzleChoice,
@@ -74,7 +80,7 @@ from scadbuddy.bambuddy.models import (
     Spool,
     SpoolAssignment,
 )
-from scadbuddy.bambuddy.trays import family, tray_label, tray_material_colour, tray_of_spool_id
+from scadbuddy.bambuddy.trays import tray_label, tray_material_colour, tray_of_spool_id
 from scadbuddy.render.bambu3mf import FilamentMap
 
 #: ``NozzleVolumeType`` as Bambu Studio numbers it (``PrintConfig.cpp``).

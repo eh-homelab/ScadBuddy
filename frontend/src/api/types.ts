@@ -357,8 +357,10 @@ export interface SessionLimits {
 
 /**
  * How many of the assistant's renders run at once (`GET/PUT /api/v1/ai/settings/render-limits`,
- * agent `src/routes/renderLimits.ts`). Past a limit a render waits for a slot; nothing
- * is refused for it. Read live by the agent, so a change applies to waiting renders too.
+ * agent `src/routes/renderLimits.ts`). Past a concurrency limit a render waits for a slot,
+ * up to the tool's own wait; a call is refused past 100 waiting per caller, or past
+ * `per_window`, which counts waiting renders. Read live by the agent, so a change
+ * applies to waiting renders too.
  */
 export interface RenderLimits {
   /** Each caller's renders at once, unless an override names it. */
@@ -382,6 +384,17 @@ export interface SessionModeSetting {
   mode: 'classic' | 'durable'
   durable_available: boolean
   durable_unavailable_reason?: string
+}
+
+/**
+ * Where a durable segment's subagents reach ScadBuddy's tools
+ * (`GET/PUT /api/v1/ai/settings/durable-subagents`, agent `src/routes/durableSubagents.ts`).
+ * `url` replaces agent-durable's own (null: the pod's loopback); `peers` are the addresses or
+ * CIDR ranges besides loopback the agent answers on that route (empty: loopback only).
+ */
+export interface DurableSubagentsSetting {
+  url: string | null
+  peers: string[]
 }
 
 /**

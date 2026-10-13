@@ -24,6 +24,7 @@ from fastapi import status
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.filaments import QueueFilaments
 from scadbuddy.bambuddy.models import PresetRef, QueueItemCreate, SliceRequest
 from scadbuddy.bambuddy.options import PrintOptions
@@ -140,6 +141,40 @@ async def slice_and_queue(
     )
 
 
+#: How Bambuddy words a slice job its slicer sidecar never answered: its
+#: ``SlicerApiUnavailableError``, raised on a transport error to the sidecar (a sidecar
+#: OOM-killed, evicted or mid-rollout), reported on the job as ``error_status`` 502.
+SIDECAR_UNREACHABLE = "Slicer sidecar"
+
+
+class SliceLostError(ApiError):
+    """A slice that left nothing behind, so it may be started again (#2081): the
+    sidecar died under it, Bambuddy forgot it (a restart: its jobs live in memory), or
+    Bambuddy could not be reached to start it. A second slice of the same plate costs
+    only slicer time; what must happen once is the enqueue, which a run does once
+    whatever its slices did."""
+
+    @classmethod
+    def of(cls, error: ApiError) -> SliceLostError:
+        lost = cls(
+            error.status, error.detail, title=error.title, type_=error.type, **error.extensions
+        )
+        lost.upstream = error.upstream
+        return lost
+
+
+def _start_lost(error: ApiError) -> bool:
+    """A start Bambuddy never answered, or answered with a server error: a later
+    attempt may meet a Bambuddy (and a sidecar) that is up. Any other 4xx is the
+    request's, and would be refused again."""
+    answered = error.extensions.get("bambuddy_status")
+    return error.type == UNAVAILABLE_PROBLEM and (
+        answered is None
+        or answered >= status.HTTP_500_INTERNAL_SERVER_ERROR
+        or answered == status.HTTP_429_TOO_MANY_REQUESTS
+    )
+
+
 class SliceStarted(BaseModel):
     """A slice Bambuddy accepted: its job, and the key the sliced file is recorded by."""
 
@@ -171,7 +206,12 @@ async def start_slice(
         job_id = await reuse(library_file_id, request.preset_key)
         if job_id is not None:
             return SliceStarted(job_id=job_id, preset_key=request.preset_key)
-    accepted = await client.slice(library_file_id, request)
+    try:
+        accepted = await client.slice(library_file_id, request)
+    except ApiError as error:
+        if _start_lost(error):
+            raise SliceLostError.of(error) from None
+        raise
     return SliceStarted(job_id=accepted.job_id, preset_key=request.preset_key)
 
 
@@ -190,9 +230,32 @@ def slice_request(plan: SlicePlan, plate_id: int) -> SliceRequest:
 
 async def wait_slice(client: BambuddyClient, job_id: int) -> int:
     """Wait for slice job ``job_id``; the sliced file's id. Reading a job again is
-    safe, so this may be retried."""
-    job = await client.await_slice(job_id)
+    safe, so this may be retried. A job the sidecar died under, or one Bambuddy no
+    longer has, is :class:`SliceLostError` (#2081). A job still running at the deadline
+    is not: it may yet finish, and a second slice would wait behind it."""
+    try:
+        job = await client.await_slice(job_id)
+    except ApiError as error:
+        if error.status == status.HTTP_404_NOT_FOUND:
+            raise SliceLostError(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Bambuddy no longer has slice job {job_id}; it restarted while slicing",
+                type_=UNAVAILABLE_PROBLEM,
+                slice_job_id=job_id,
+            ) from None
+        raise
     failure = job.failure
+    if (
+        failure is not None
+        and job.error_status == status.HTTP_502_BAD_GATEWAY
+        and (failure.startswith(SIDECAR_UNREACHABLE))
+    ):
+        raise SliceLostError(
+            status.HTTP_502_BAD_GATEWAY,
+            f"Bambuddy failed to slice the plate: {failure}",
+            type_=UNAVAILABLE_PROBLEM,
+            slice_job_id=job_id,
+        )
     if failure is not None:
         # Bambuddy's own words, not a paraphrase: the slicer's message is what tells the
         # user whether to change the mapping, the plate or the model.

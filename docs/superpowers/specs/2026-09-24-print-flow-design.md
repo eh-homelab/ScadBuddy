@@ -150,13 +150,13 @@ two places:
   writes over the chosen process preset for that slice. They are part of
   `SliceRequest.preset_key`, so a sliced copy made before the template changed them is
   not reused for one after; a template without any keeps the key it always had.
-- **Every downloaded 3MF** (`bambuddy/download.py`). They are written into
-  `project_settings.config` over the process, and their keys are listed, `;`-joined, in
-  the process entry (the first) of `different_settings_to_system`, so Bambu Studio shows
-  them as edits to the system process instead of a new preset. This happens on each path
-  a download takes: re-plated for the default printer, no default printer, Bambuddy
-  unreachable, and a file too big for the default printer's plate (kept on its own plate,
-  still with the settings). Only a template with none is served as the stored file.
+- **Every saved 3MF** (`OutputStore.create`, `render/provenance.py` `stamp`). They are
+  written into `project_settings.config` over the process when the output is saved, and
+  their keys are listed, `;`-joined, in the process entry (the first) of
+  `different_settings_to_system`, so Bambu Studio shows them as edits to the system
+  process instead of a new preset. A download serves the saved file byte for byte
+  (#2652), so it carries the settings the template had when the output was saved; it
+  no longer re-plates for the default printer or asks Bambuddy for preset names.
 
 ### The two warnings
 

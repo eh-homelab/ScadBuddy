@@ -7,7 +7,7 @@ import asyncio
 import contextlib
 import json
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
@@ -16,7 +16,6 @@ from temporalio.exceptions import ApplicationError
 from temporalio.worker import Worker
 
 from scadbuddy.flows.history import outward_since
-from scadbuddy.flows.manifest import use_manifest
 from tests.flows.fake_api import Outward
 from tests.flows.flows_support import script
 
@@ -91,13 +90,6 @@ class Sessions:
             }
 
         return [sessions_start, sessions_send, flow_session_check, flow_session_turn]
-
-
-@pytest.fixture(autouse=True)
-def manifest() -> Iterator[None]:
-    use_manifest({"sessions_start": "write", "sessions_send": "write"})
-    yield
-    use_manifest({})
 
 
 @pytest.fixture

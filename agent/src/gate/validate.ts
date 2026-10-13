@@ -15,8 +15,10 @@ import { type Owner, sameOwner } from '../sessions/protocol.js'
 //   resolved   it has ended (decided, answered, timed out, cancelled)
 //   resolving  a response or its timer is being recorded (durable only)
 //   too_large  the response is over RESPONSE_MAX bytes of JSON
-//   forbidden  the kind does not accept the role: `approval` takes browser and grant,
-//              `answer` the browser user only
+//   forbidden  the kind does not accept the role: `approval` takes browser, grant and
+//              parent, `answer` the browser user only; a flow run's entry (`inRun`)
+//              takes no grant, and only it takes a parent, which may only deny
+//              (spec 2026-10-11 §4.2); `run_grant` is never a response's
 //   self       a grant holder deciding a call of its own: one it asked for, or in a
 //              session it owns or started (approval only)
 //   malformed  the response is not the entry's shape
@@ -32,7 +34,12 @@ import { type Owner, sameOwner } from '../sessions/protocol.js'
  */
 export const RESPONSE_MAX = QUESTIONS_MAX * (QUESTION_TEXT_MAX + ANSWER_MAX) * 6 + 1024
 
-export type Role = 'browser' | 'grant' | 'owner'
+/**
+ * `parent`: the run's starter session at hop `parent` (#2482), decided by the
+ * escalation tool from the entry's record; `run_grant`: the gate's own inside verdict,
+ * which no response carries.
+ */
+export type Role = 'browser' | 'grant' | 'owner' | 'parent' | 'run_grant'
 
 /** What the gate knows of a parked call. */
 export type GateEntry = {
@@ -50,6 +57,8 @@ export type GateEntry = {
   questions?: readonly { question: string; multiSelect: boolean }[]
   /** An attention request's options. */
   options?: readonly string[]
+  /** A child session's call in a flow run's turn (#2482): the run's queue, the person's. */
+  inRun?: boolean
 }
 
 export type RespondRequest = { requestId: string; response: unknown; responder: Pick<Owner, 'kind' | 'id'>; role: Role }
@@ -80,7 +89,7 @@ export class RespondRefusal extends Error {
 /** What a valid response says: an approval's decision, or an answer's answers (one per question, or the one reply). */
 export type ValidResponse = { decision: 'approve' | 'deny' } | { answers: string[] }
 
-const ALLOWED: Record<GateEntry['kind'], readonly Role[]> = { approval: ['browser', 'grant'], answer: ['browser'] }
+const ALLOWED: Record<GateEntry['kind'], readonly Role[]> = { approval: ['browser', 'grant', 'parent'], answer: ['browser'] }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
 const isAnswer = (v: unknown): v is string => typeof v === 'string' && v.length >= 1 && v.length <= ANSWER_MAX
@@ -114,6 +123,12 @@ export function validateRespond(entry: GateEntry | undefined, request: RespondRe
         : 'outward actions need a human approval in the ScadBuddy UI, or another agent with a per-token approval grant',
     )
   }
+  if (entry.kind === 'approval' && request.role === 'grant' && entry.inRun) {
+    throw new RespondRefusal('forbidden', "a flow run's calls are decided by the person, never by an approval grant")
+  }
+  if (entry.kind === 'approval' && request.role === 'parent' && !entry.inRun) {
+    throw new RespondRefusal('forbidden', "only a flow run's call goes to the session that started the run")
+  }
   if (entry.kind === 'approval' && request.role !== 'browser') {
     const own = [entry.requestedBy, entry.sessionOwner, entry.sessionCreator].some((o) => o !== null && sameOwner(o, request.responder))
     if (own) {
@@ -140,6 +155,9 @@ export function validateRespond(entry: GateEntry | undefined, request: RespondRe
         'input_mismatch',
         `${id} is for a different input than the one you were shown; the call needs a new approval`,
       )
+    }
+    if (request.role === 'parent' && body.decision !== 'deny') {
+      throw new RespondRefusal('forbidden', 'the session that started the run may deny the call or pass it up, never approve it')
     }
     return { decision: body.decision }
   }

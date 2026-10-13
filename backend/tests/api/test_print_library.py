@@ -375,6 +375,24 @@ def test_a_deleted_files_choices_are_its_404_whatever_else_fails(client: TestCli
 
 
 @respx.mock
+def test_an_unprintable_files_choices_are_its_422_whatever_else_fails(client: TestClient) -> None:
+    """#2532: as the 404 above, an unprintable file's 422 beats the printers' and the
+    presets' failures, though they are read beside it."""
+    configure(client)
+    library_file(105, file_type="step")
+    respx.get(f"{API}/printers/").mock(return_value=httpx.Response(500))
+    respx.get(f"{API}/slicer/presets").mock(return_value=httpx.Response(500))
+    respx.get(f"{API}/local-presets/").mock(return_value=httpx.Response(500))
+
+    response = client.get("/api/v1/print/library/105/choices")
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == (
+        "ScadBuddy prints only 3MF and STL files from the library, and file-105.step is a step."
+    )
+
+
+@respx.mock
 def test_a_sliced_file_is_a_422_before_anything_is_sliced(client: TestClient) -> None:
     configure(client)
     library_file(104, file_type="gcode.3mf")
@@ -646,7 +664,11 @@ def test_a_library_file_s_print_is_in_the_history_once_bambuddy_archives_it(
     assert summary["output_name"] == "Bambu Spool Lock or shim UPDATED"
     assert summary["status"] == "printing"
     assert summary["params_diff"] is None
-    assert summary["cover"] == {"kind": "thumbnail", "url": "/api/v1/prints/90/thumbnail"}
+    assert summary["cover"] == {
+        "kind": "thumbnail",
+        "url": "/api/v1/prints/90/thumbnail",
+        "full_url": "/api/v1/prints/90/thumbnail",
+    }
 
     # It opens, and its media is served, like an output's print.
     detail = client.get("/api/v1/prints/90")

@@ -61,6 +61,31 @@ class OpenInput:
     questions: list[dict[str, Any]] | None = None
     # An attention request's {reason, on_timeout}; None otherwise.
     attention: dict[str, Any] | None = None
+    # A flow turn's call (#2482): its run's queue, and where it waits. `hop` is `parent`
+    # (the starter session, until `hop_until`, ISO 8601) or `person`; who the parent is
+    # comes from flow_grant_check's verdict, the backend's record of the run.
+    flow_run_id: str | None = None
+    hop: Literal["parent", "person"] | None = None
+    hop_until: str | None = None
+    parent_session: str | None = None
+    parent_principal: str | None = None
+    outside_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class DenyInput:
+    """A flow turn's call outside the run's grant whose step said `on_outside="deny"`
+    (#2482, spec 2026-10-11 §4.3): refused at once, recorded as denied by the flow, no
+    entry ever opened."""
+
+    request_id: str
+    session_id: str
+    run_id: str
+    tool: str
+    summary: str
+    input_hash: str
+    reason: str | None
+    requested_by: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -89,6 +114,38 @@ class GrantInput:
 
 def run_grant_responder(grant_id: str) -> dict[str, str]:
     return {"kind": "run_grant", "id": grant_id, "label": "Run grant"}
+
+
+def flow_responder(run_id: str) -> dict[str, str]:
+    return {"kind": "flow", "id": run_id, "label": "Flow"}
+
+
+#: How a resolution reads in an entry's `hops` (spec 2026-10-11 §4.6).
+_HOP_ACTIONS: dict[str, str] = {
+    "approved": "approve",
+    "denied": "deny",
+    "expired": "timeout",
+    "cancelled": "cancelled",
+}
+
+
+def _actor(responder: dict[str, str]) -> str:
+    kind = responder.get("kind", "")
+    if kind == "session":
+        return f"session:{responder.get('id', '')}"
+    return kind if kind in ("browser", "system", "flow") else f"{kind}:{responder.get('id', '')}"
+
+
+def _hop(hop: str, action: str, actor: str, reason: str | None = None) -> dict[str, Any]:
+    step: dict[str, Any] = {
+        "hop": hop,
+        "action": action,
+        "actor": actor,
+        "at": _iso(datetime.now(UTC)),
+    }
+    if reason:
+        step["reason"] = reason
+    return step
 
 
 def _event(body: dict[str, Any]) -> dict[str, Any]:
@@ -187,11 +244,16 @@ async def _resolved(
     """Records the end of the entry ``row`` (already deleted, in this transaction)."""
     sid = str(row["session_id"])
     rid = row["request_id"]
+    hops: list[dict[str, Any]] = list(row.get("hops") or [])
+    if row.get("flow_run_id") is not None and row.get("hop") is not None:
+        # A run's entry keeps its way up, the resolution as its last step (§4.6).
+        action = _HOP_ACTIONS.get(outcome, outcome)
+        hops.append(_hop(row["hop"], action, _actor(responder), reason))
     await conn.execute(
         """
         INSERT INTO ai_input_responses
-          (request_id, session_id, kind, outcome, response, responder, reason)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+          (request_id, session_id, kind, outcome, response, responder, reason, hops)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """,
         (
             rid,
@@ -201,6 +263,7 @@ async def _resolved(
             None if response is None else json.dumps(response),
             json.dumps(responder),
             reason,
+            json.dumps(hops),
         ),
     )
     person = responder.get("kind") != "system"
@@ -326,8 +389,11 @@ async def open_input(conn: psycopg.AsyncConnection[Any], args: OpenInput) -> boo
             """
             INSERT INTO ai_pending_input
               (request_id, session_id, workflow_id, workflow_run_id, kind, tool, summary,
-               input_hash, prompt, requested_by, responders, attention, expires_at)
-            SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamptz
+               input_hash, prompt, requested_by, responders, attention, expires_at,
+               flow_run_id, hop, hop_until, parent_session, parent_principal,
+               outside_reason, hops)
+            SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::timestamptz,
+                   %s, %s, %s::timestamptz, %s::uuid, %s, %s, %s
             -- A retried open that lands after its entry was resolved opens nothing.
             WHERE NOT EXISTS (SELECT 1 FROM ai_input_responses WHERE request_id = %s)
             ON CONFLICT (request_id) DO NOTHING
@@ -347,6 +413,17 @@ async def open_input(conn: psycopg.AsyncConnection[Any], args: OpenInput) -> boo
                 list(args.responders),
                 None if args.attention is None else json.dumps(args.attention),
                 args.expires_at,
+                args.flow_run_id,
+                args.hop,
+                args.hop_until,
+                args.parent_session,
+                args.parent_principal,
+                args.outside_reason,
+                json.dumps(
+                    []
+                    if args.hop is None
+                    else [_hop(args.hop, "parked", "flow", args.outside_reason)]
+                ),
                 args.request_id,
             ),
         )
@@ -452,6 +529,47 @@ async def grant_input(conn: psycopg.AsyncConnection[Any], args: GrantInput) -> b
             "approved",
             responder,
             None,
+        )
+    return True
+
+
+async def deny_input(conn: psycopg.AsyncConnection[Any], args: DenyInput) -> bool:
+    """Records the flow's refusal of a call (`on_outside="deny"`): denied, by the flow,
+    with the grant's reason; audited as a decision is. False when the request id was
+    resolved already (a retried activity writes nothing twice)."""
+    responder = flow_responder(args.run_id)
+    async with conn.transaction():
+        cur = await conn.execute(
+            """
+            INSERT INTO ai_input_responses
+              (request_id, session_id, kind, outcome, responder, reason, hops)
+            VALUES (%s, %s, 'approval', 'denied', %s, %s, %s)
+            ON CONFLICT (request_id) DO NOTHING RETURNING request_id
+            """,
+            (
+                args.request_id,
+                args.session_id,
+                json.dumps(responder),
+                args.reason,
+                json.dumps([_hop("person", "deny", "flow", args.reason)]),
+            ),
+        )
+        if await cur.fetchone() is None:
+            return False
+        await _audit(
+            conn,
+            {
+                "request_id": args.request_id,
+                "session_id": args.session_id,
+                "requested_by": args.requested_by,
+                "tool": args.tool,
+                "input_hash": args.input_hash,
+                "summary": args.summary,
+                "created_at": datetime.now(UTC),
+            },
+            "denied",
+            responder,
+            args.reason,
         )
     return True
 

@@ -14,9 +14,10 @@ interface Props {
 }
 
 function fileCountLabel(folder: LibraryFolderView): string | undefined {
-  // #975 — "MakerWorld, 49 files", not "MakerWorld49" run together.
+  // #975 — "MakerWorld 49 files", not "MakerWorld49" run together. #2457: no comma, so
+  // the name holds the visible "MakerWorld" and "49" as said ("click MakerWorld 49").
   if (!folder.file_count) return undefined
-  return `${folder.name}, ${folder.file_count} ${folder.file_count === 1 ? 'file' : 'files'}`
+  return `${folder.name} ${folder.file_count} ${folder.file_count === 1 ? 'file' : 'files'}`
 }
 
 /**

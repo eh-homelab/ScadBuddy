@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
+import zipfile
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -21,13 +23,14 @@ from scadbuddy.bambuddy import send
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import LibraryFile
 from scadbuddy.bambuddy.send import Target, ensure_copy
-from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy, SlicedCopy
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.plate import DEFAULT_PLATE
 from scadbuddy.render.projection import JobProjection
+from scadbuddy.render.provenance import PROVENANCE_KEY
 
 FOLDER = 9
 
@@ -68,6 +71,30 @@ class MemoryUploads:
     async def recorded(self, library_file_ids: Iterable[int]) -> set[int]:
         ids = {copy.id for copies in self.copies.values() for copy in copies}
         return ids & set(library_file_ids)
+
+    async def forget(self, output_id: str, library_file_id: int) -> None:
+        self.copies[output_id] = [
+            copy for copy in self.copies.get(output_id, []) if copy.id != library_file_id
+        ]
+
+    async def same_content(
+        self, folder_id: int | None, target_key: str, content_key: str
+    ) -> list[tuple[str, LibraryCopy]]:
+        return [
+            (owner, copy)
+            for owner, copies in self.copies.items()
+            for copy in copies
+            if (copy.folder_id, copy.target_key, copy.content_key)
+            == (folder_id, target_key, content_key)
+        ]
+
+    async def shared(self, library_file_ids: Iterable[int], output_id: str) -> set[int]:
+        return {
+            copy.id
+            for owner, copies in self.copies.items()
+            if owner != output_id
+            for copy in copies
+        } & set(library_file_ids)
 
     @asynccontextmanager
     async def copy_lock(self, key: str) -> AsyncIterator[None]:
@@ -127,8 +154,13 @@ async def test_two_outputs_filed_into_one_folder_at_once_get_different_names(
 ) -> None:
     """Two customizations with the same changed params name the same stem. The folder's
     listing and the upload that takes a name from it are one step per folder, or both
-    see ``Demo.3mf`` free and both upload under it (#540 review)."""
-    monkeypatch.setattr(send, "read_3mf", _stored_3mf)
+    see ``Demo.3mf`` free and both upload under it (#540 review). Their 3MFs differ:
+    identical ones would share one copy (#2476)."""
+
+    async def own_3mf(store: object, meta: OutputMeta) -> bytes:
+        return meta.id.encode()
+
+    monkeypatch.setattr(send, "read_3mf", own_3mf)
     monkeypatch.setattr(send, "_laid_out_for", lambda payload, target: payload)
     bambuddy = SlowBambuddy()
     uploads = MemoryUploads()
@@ -203,6 +235,8 @@ async def test_filing_after_a_print_in_the_models_own_colours_reuses_its_copy(
         )
 
     printed = await ensure(Target(DEFAULT_PLATE, "0.2", colours=("#ff0000",)))
+    # It was printed from, so a later copy for other spools leaves it be (#2476).
+    uploads.copies[meta.id][0].sliced.append(SlicedCopy(id=99))
     filed = await ensure(Target(DEFAULT_PLATE, "0.2"))
     other = await ensure(Target(DEFAULT_PLATE, "0.2", colours=("#00ff00",)))
 
@@ -354,3 +388,151 @@ async def test_a_file_of_the_same_name_and_size_with_other_bytes_is_not_taken(
 
     assert bambuddy.uploaded == ["Demo.3mf", "Demo (2).3mf"]
     assert (copy.library_file_id, copy.created) == (2, True)
+
+
+class Library(SlowBambuddy):
+    """A folder's files by id, which deletes and renames change; each file's note."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.deleted: list[int] = []
+        self.notes: dict[int, str] = {}
+        self.renamed: dict[int, str] = {}
+
+    def _name(self, file_id: int) -> str:
+        return self.renamed.get(file_id, self.uploaded[file_id - 1])
+
+    async def library_files(self, folder_id: int) -> list[LibraryFile]:
+        return [
+            LibraryFile(id=number, filename=self._name(number))
+            for number in range(1, len(self.uploaded) + 1)
+            if number not in self.deleted
+        ]
+
+    async def library_file(self, file_id: int) -> LibraryFile:
+        if file_id in self.deleted:
+            raise ApiError(404, "gone")
+        return LibraryFile(id=file_id, filename=self._name(file_id), notes=self.notes.get(file_id))
+
+    async def delete_library_file(self, file_id: int) -> bool:
+        self.deleted.append(file_id)
+        return True
+
+    async def rename_library_file(self, file_id: int, filename: str) -> LibraryFile:
+        self.renamed[file_id] = filename
+        return await self.library_file(file_id)
+
+    async def annotate_library_file(self, file_id: int, notes: str) -> LibraryFile:
+        self.notes[file_id] = notes
+        return await self.library_file(file_id)
+
+
+async def _file(
+    bambuddy: Library, uploads: MemoryUploads, meta: OutputMeta, target: Target
+) -> send.EnsuredCopy:
+    return await ensure_copy(
+        cast(BambuddyClient, bambuddy),
+        cast(OutputStore, None),
+        cast(BambuddyUploadStore, uploads),
+        meta,
+        StoredSettings(library_folder_id=2),
+        target=target,
+        folder_id=FOLDER,
+        stem="Demo",
+    )
+
+
+def _stamped(output_id: str) -> bytes:
+    """A 3MF stamped as ``output_id``'s, the rest the same for every output."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(
+            "3D/3dmodel.model",
+            '<?xml version="1.0"?>\n<model unit="millimeter">\n'
+            f' <metadata name="{PROVENANCE_KEY}">{{"output": "{output_id}"}}</metadata>\n'
+            "<resources/></model>",
+        )
+        archive.writestr("Metadata/plate_1.png", b"cover")
+    return buffer.getvalue()
+
+
+async def test_an_identical_output_filed_again_takes_the_copy_already_there(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2476: Generate twice with the same parameters saves two outputs whose 3MFs
+    differ only in the stamp naming each. The second filing takes the first one's copy
+    rather than adding ``Demo (2).3mf``, and records it as its own."""
+
+    async def stamped(store: object, meta: OutputMeta) -> bytes:
+        return _stamped(meta.id)
+
+    monkeypatch.setattr(send, "read_3mf", stamped)
+    monkeypatch.setattr(send, "_laid_out_for", lambda payload, target: payload)
+    bambuddy, uploads = Library(), MemoryUploads()
+
+    first = await _file(bambuddy, uploads, output("h"), Target(DEFAULT_PLATE))
+    second = await _file(bambuddy, uploads, output("i"), Target(DEFAULT_PLATE))
+
+    assert bambuddy.uploaded == ["Demo.3mf"]
+    assert (second.created, second.library_file_id, second.filename) == (
+        False,
+        first.library_file_id,
+        "Demo.3mf",
+    )
+    assert [copy.id for copy in uploads.copies["i" * 32]] == [first.library_file_id]
+    # On another plate it is another file.
+    other = await _file(bambuddy, uploads, output("i"), Target(DEFAULT_PLATE, "0.2"))
+    assert other.created
+
+
+async def test_a_print_for_another_printer_replaces_the_copy_nothing_printed_from(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2476: Generate files a copy laid out for its guess at the printer. A print on
+    another one puts its own copy beside it; rather than leave two files (and the
+    print's slice) with no way to tell which printed, the guess goes, and the print's
+    copy takes its name and its "Edit in ScadBuddy" note."""
+    monkeypatch.setattr(send, "read_3mf", _stored_3mf)
+    monkeypatch.setattr(
+        send, "_laid_out_for", lambda payload, target: payload + target.key.encode()
+    )
+    bambuddy, uploads = Library(), MemoryUploads()
+    meta = output("j")
+
+    filed = await _file(bambuddy, uploads, meta, Target(DEFAULT_PLATE))
+    bambuddy.notes[filed.library_file_id] = "Edit in ScadBuddy: https://sb/edit/j"
+    printed = await _file(bambuddy, uploads, meta, Target(DEFAULT_PLATE, "0.2"))
+
+    assert bambuddy.uploaded == ["Demo.3mf", "Demo (2).3mf"]
+    assert bambuddy.deleted == [filed.library_file_id]
+    assert (printed.created, printed.filename) == (True, "Demo.3mf")
+    assert bambuddy.notes[printed.library_file_id] == "Edit in ScadBuddy: https://sb/edit/j"
+    assert [copy.id for copy in uploads.copies[meta.id]] == [printed.library_file_id]
+
+
+async def test_a_copy_printed_from_or_shared_is_never_replaced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A copy sliced from is the project's record of what it printed (#316), and one an
+    identical output shares is that output's file too: both stay."""
+
+    async def stamped(store: object, meta: OutputMeta) -> bytes:
+        return _stamped(meta.id)
+
+    monkeypatch.setattr(send, "read_3mf", stamped)
+    monkeypatch.setattr(
+        send, "_laid_out_for", lambda payload, target: payload + target.key.encode()
+    )
+    bambuddy, uploads = Library(), MemoryUploads()
+    printed, shared = output("k"), output("l")
+
+    sliced = await _file(bambuddy, uploads, printed, Target(DEFAULT_PLATE))
+    uploads.copies[printed.id][0].sliced.append(SlicedCopy(id=99))
+    await _file(bambuddy, uploads, printed, Target(DEFAULT_PLATE, "0.2"))
+    assert bambuddy.deleted == []
+
+    # `shared` files the same 3MF, so takes the copy `printed` has for the 0.2 plate.
+    await _file(bambuddy, uploads, shared, Target(DEFAULT_PLATE, "0.2"))
+    await _file(bambuddy, uploads, shared, Target(DEFAULT_PLATE, "0.6"))
+    assert bambuddy.deleted == []
+    assert sliced.library_file_id in {copy.id for copy in uploads.copies[printed.id]}
