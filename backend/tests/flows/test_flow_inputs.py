@@ -91,6 +91,30 @@ def test_values_that_do_not_fit_are_refused(values: dict[str, Any], fragment: st
     assert any(fragment in p for p in caught.value.problems), caught.value.problems
 
 
+def test_an_integer_enum_sent_as_a_float_is_its_integer() -> None:
+    schema = {"type": "object", "properties": {"n": {"type": "integer", "enum": [3, 4]}}}
+    assert resolve_inputs(schema, {"n": 4}) == {"n": 4}
+    with pytest.raises(InputsError):
+        resolve_inputs(schema, {"n": 3.5})
+    assert resolve_inputs(schema, {"n": 3.0}) == {"n": 3}
+
+
+def test_a_boolean_left_out_is_false_and_typed_bool() -> None:
+    schema = {"type": "object", "properties": {"dry": {"type": "boolean"}}}
+    assert resolve_inputs(schema, {}) == {"dry": False}
+
+
+async def test_a_boolean_left_out_reads_as_bool_in_the_script() -> None:
+    schema = {"type": "object", "properties": {"dry": {"type": "boolean"}}}
+    script = _script("i = await inputs()", "x: bool = i['dry']", "return x")
+    assert await check_script(script, schema) == []
+
+
+def test_a_long_pattern_is_refused() -> None:
+    schema = {"type": "object", "properties": {"s": {"type": "string", "pattern": "a" * 300}}}
+    assert any("pattern" in p for p in schema_problems(schema))
+
+
 def test_a_flow_without_a_schema_takes_no_inputs() -> None:
     assert resolve_inputs(None, None) == {}
     assert resolve_inputs(None, {}) == {}

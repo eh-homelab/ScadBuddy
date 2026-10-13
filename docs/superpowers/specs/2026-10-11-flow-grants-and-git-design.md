@@ -720,7 +720,9 @@ Amends §6.1 and Ruling 16, and 10-01 §7.3–7.4 ("the script is the run's inpu
   the subset, each default against its input, then the script's Code Mode type check
   with `inputs()` added to the host functions. `inputs()` returns `FlowInputs`, a
   TypedDict rendered from the schema: an input that is required or has a default is
-  always present; any other is `T | None`. A flow without a schema has no `inputs()`.
+  always present (a boolean without a default is false, as an unticked box sends it);
+  any other is `T | None`. A pattern is at most 256 characters, since every start runs
+  it. A flow without a schema has no `inputs()`.
   `ScriptProblem.file` says whether a problem is in `flow.py` or `inputs.json`.
 - **Checked when a run starts**: `POST /workflows/{id}/runs` takes `inputs`, fills in
   the defaults, validates them (422 `flow-inputs` with `problems`) and coerces them to

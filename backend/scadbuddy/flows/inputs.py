@@ -26,11 +26,12 @@ import re
 from typing import Any, Final, Literal
 
 import jsonschema
-from pydantic import BaseModel, create_model
+from pydantic import BaseModel, ValidationError, create_model
 
 INPUTS_FILE: Final = "inputs.json"
 MAX_SCHEMA_BYTES = 16_384
 MAX_INPUTS = 50
+MAX_PATTERN = 256
 #: The type the script's `inputs()` returns, in the stubs and the editor's help.
 INPUTS_TYPE = "FlowInputs"
 
@@ -107,6 +108,11 @@ def _property_problems(name: str, prop: Any) -> list[str]:
             problems += [f"items: {key!r} is not supported" for key in items if key not in own]
     if "enum" in prop and (not isinstance(prop["enum"], list) or not prop["enum"]):
         problems.append("enum must list at least one value")
+    items = prop.get("items")
+    for where in (prop, items if isinstance(items, dict) else {}):
+        if len(str(where.get("pattern", ""))) > MAX_PATTERN:
+            # Every start runs it: a pasted one is bounded.
+            problems.append(f"a pattern is at most {MAX_PATTERN} characters")
     if "default" in prop and not problems:
         try:
             jsonschema.Draft202012Validator(prop).validate(prop["default"])
@@ -123,15 +129,26 @@ def _python_type(prop: dict[str, Any]) -> Any:
     return _SCALARS[prop["type"]]
 
 
+def _default(prop: dict[str, Any]) -> tuple[bool, Any]:
+    """Whether the input has a default, and it: a boolean without one is false, as the
+    Start run form's unticked checkbox sends it."""
+    if "default" in prop:
+        return True, prop["default"]
+    if prop.get("type") == "boolean":
+        return True, False
+    return False, None
+
+
 def inputs_model(schema: dict[str, Any]) -> type[BaseModel]:
     """The schema as the model the stubs render to ``FlowInputs``: an input that is
-    required or has a default is always there; any other is ``T | None``, None when the
-    run was not given it."""
+    required or has a default (a boolean always has one, false) is always there; any
+    other is ``T | None``, None when the run was not given it."""
     required = set(schema.get("required", []))
     fields: dict[str, Any] = {}
     for name, prop in schema.get("properties", {}).items():
         kind = _python_type(prop)
-        fields[name] = (kind, ...) if name in required or "default" in prop else (kind | None, None)
+        present = name in required or _default(prop)[0]
+        fields[name] = (kind, ...) if present else (kind | None, None)
     model: type[BaseModel] = create_model(INPUTS_TYPE, **fields)
     model.__doc__ = schema.get("description") or "This run's inputs."
     return model
@@ -148,8 +165,9 @@ def resolve_inputs(schema: dict[str, Any] | None, values: dict[str, Any] | None)
         return {}
     properties: dict[str, Any] = schema.get("properties", {})
     for name, prop in properties.items():
-        if name not in given and "default" in prop:
-            given[name] = copy.deepcopy(prop["default"])
+        has, default = _default(prop)
+        if name not in given and has:
+            given[name] = copy.deepcopy(default)
     checked = {**schema, "additionalProperties": False}
     validator = jsonschema.Draft202012Validator(checked)
     problems = [
@@ -159,4 +177,9 @@ def resolve_inputs(schema: dict[str, Any] | None, values: dict[str, Any] | None)
     if problems:
         raise InputsError(problems)
     # As the script's type says: an `integer` sent as 3.0 is 3, a `number` sent as 2 is 2.0.
-    return inputs_model(schema).model_validate(given).model_dump()
+    try:
+        return inputs_model(schema).model_validate(given).model_dump()
+    except ValidationError as err:
+        raise InputsError(
+            [f"{'.'.join(str(p) for p in e['loc']) or 'inputs'}: {e['msg']}" for e in err.errors()]
+        ) from None

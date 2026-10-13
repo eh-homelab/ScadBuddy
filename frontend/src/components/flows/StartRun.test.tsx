@@ -48,6 +48,30 @@ describe('StartRun (#2483)', () => {
     ])
   })
 
+  it('makes a required choice with no default be chosen, never shown chosen when it is not', async () => {
+    const schema = {
+      type: 'object',
+      properties: { colour: { type: 'string', title: 'Colour', enum: ['red', 'blue'] } },
+      required: ['colour'],
+    }
+    const { user } = renderPage(
+      <Routes>
+        <Route path="/" element={<StartRun flowId="def-swap" name="swap" schema={schema} />} />
+        <Route path="/workflows/runs/:id" element={<p>Run page</p>} />
+      </Routes>,
+    )
+    await user.click(screen.getByRole('button', { name: 'Start run' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Start swap' })
+    const colour = within(dialog).getByRole('combobox', { name: /Colour/ })
+    expect(colour).toHaveValue('')
+    expect(within(dialog).getByRole('option', { name: 'Choose…' })).toBeDisabled()
+    await user.click(within(dialog).getByRole('button', { name: 'Start run' }))
+    expect(within(dialog).getByText('Required')).toBeInTheDocument()
+    await user.selectOptions(colour, 'red')
+    await user.click(within(dialog).getByRole('button', { name: 'Start run' }))
+    await waitFor(() => expect(starts().map((r) => r.body)).toEqual([{ inputs: { colour: 'red' } }]))
+  })
+
   it("shows the server's refusal beside the form", async () => {
     const { user } = render('def-coasters')
     await user.click(screen.getByRole('button', { name: 'Start run' }))

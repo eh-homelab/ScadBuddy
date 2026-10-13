@@ -229,7 +229,15 @@ function Field({
   if (field.enum) {
     control = (
       <select {...common} className={CONTROL} value={String(value)} onChange={(event) => onChange(event.target.value)}>
-        {!field.required && field.default === undefined && <option value="">(none)</option>}
+        {/* With no default, nothing is chosen until the person chooses: never the first option shown chosen. */}
+        {field.default === undefined &&
+          (field.required ? (
+            <option value="" disabled>
+              Choose…
+            </option>
+          ) : (
+            <option value="">(none)</option>
+          ))}
         {field.enum.map((option) => (
           <option key={String(option)} value={String(option)}>
             {String(option)}
