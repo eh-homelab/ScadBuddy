@@ -13,8 +13,10 @@ import (
 	"time"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/bambuddy-fs/internal/api"
+	"github.com/eh-homelab/ScadBuddy/tools/go/bambuddy-fs/internal/telemetry"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // Writes (spec §8). Bambuddy has no in-place write, so a file is written to a temp
@@ -143,11 +145,36 @@ func (n *file) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.SetAttrIn
 	if p == nil || !hasSize || in.Valid&^(timesOnly|fuse.FATTR_SIZE|fuse.FATTR_KILL_SUIDGID) != 0 {
 		return syscall.ENOTSUP
 	}
-	if errno := p.truncate(ctx, int64(size)); errno != 0 {
+	ctx, op := telemetry.StartOp(ctx, "setattr", p.attrs()...)
+	errno := p.truncate(ctx, int64(size))
+	op.End(errno)
+	if errno != 0 {
 		return errno
 	}
 	n.attr(&out.Attr)
 	return 0
+}
+
+// downloads is whether ensure may download the stored file the contents start from.
+// The caller holds p.mu.
+func (p *pending) downloads() bool {
+	return p.tmp == nil && p.seed && p.seedFile == nil && p.base.ID != 0
+}
+
+// traced starts the span of a read or write that may download what it starts from;
+// any other has none. The caller holds p.mu.
+func (p *pending) traced(ctx context.Context, op string) (context.Context, *telemetry.Op) {
+	if !p.downloads() {
+		return ctx, nil
+	}
+	return telemetry.StartOp(ctx, op, telemetry.FileID(p.base.ID), telemetry.Bytes(p.base.Size))
+}
+
+// attrs are a write's span attributes: the file (0 if never uploaded), its folder and
+// its size.
+func (p *pending) attrs() []attribute.KeyValue {
+	cur := p.node.current()
+	return []attribute.KeyValue{telemetry.FileID(cur.ID), telemetry.FolderID(cur.FolderID), telemetry.Bytes(p.size.Load())}
 }
 
 // ensure makes the temp file. The caller holds p.mu.
@@ -202,7 +229,10 @@ func (h *pendingHandle) Read(ctx context.Context, dest []byte, off int64) (fuse.
 	p := h.p
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if errno := p.ensure(ctx); errno != 0 {
+	ctx, op := p.traced(ctx, "read")
+	errno := p.ensure(ctx)
+	op.End(errno)
+	if errno != 0 {
 		return nil, errno
 	}
 	n, err := p.tmp.ReadAt(dest, off)
@@ -216,7 +246,10 @@ func (h *pendingHandle) Write(ctx context.Context, data []byte, off int64) (uint
 	p := h.p
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if errno := p.ensure(ctx); errno != 0 {
+	ctx, op := p.traced(ctx, "write")
+	errno := p.ensure(ctx)
+	op.End(errno)
+	if errno != 0 {
 		return 0, errno
 	}
 	n, err := p.tmp.WriteAt(data, off)
@@ -275,7 +308,19 @@ func (h *pendingHandle) Flush(ctx context.Context) syscall.Errno {
 	p := h.p
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.upload(ctx)
+	return p.tracedUpload(ctx, "flush")
+}
+
+// tracedUpload uploads, in the span of the flush or release that does; one with
+// nothing to send has none.
+func (p *pending) tracedUpload(ctx context.Context, name string) syscall.Errno {
+	if !p.dirty {
+		return 0
+	}
+	ctx, op := telemetry.StartOp(ctx, name, p.attrs()...)
+	errno := p.upload(ctx)
+	op.End(errno)
+	return errno
 }
 
 // Release ends the handle. The last one uploads anything still unsent: what a failed
@@ -297,7 +342,7 @@ func (h *pendingHandle) Release(ctx context.Context) syscall.Errno {
 	if !last {
 		return 0
 	}
-	errno := p.upload(ctx)
+	errno := p.tracedUpload(ctx, "release")
 	n.mu.Lock()
 	// A handle opened during the upload keeps the pending write, unsent contents and
 	// all: its own flush tries again.

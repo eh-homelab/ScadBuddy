@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/bambuddy-fs/internal/api"
+	"github.com/eh-homelab/ScadBuddy/tools/go/bambuddy-fs/internal/telemetry"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
@@ -53,6 +54,11 @@ func NewRoot(lib Library, opts Options) fs.InodeEmbedder {
 	}
 	t.unsent.discard = t.discardSent
 	t.unsent.load()
+	telemetry.Observe(telemetry.Gauges{
+		CacheBytes:    t.cache.size,
+		UnsentEntries: func() int64 { n, _ := t.unsent.totals(); return n },
+		UnsentBytes:   func() int64 { _, b := t.unsent.totals(); return b },
+	})
 	return &dir{tree: t}
 }
 
@@ -87,10 +93,7 @@ type listing struct {
 
 // list returns a folder's entries, from the cache while they are younger than the TTL.
 func (t *tree) list(ctx context.Context, folderID int) (listing, syscall.Errno) {
-	t.mu.Lock()
-	l, ok := t.listings[folderID]
-	t.mu.Unlock()
-	if ok && time.Since(l.at) < t.opts.TTL {
+	if l, ok := t.cached(folderID); ok {
 		return l, 0
 	}
 	got, err := t.lib.List(ctx, folderID, t.opts.All)
@@ -99,11 +102,28 @@ func (t *tree) list(ctx context.Context, folderID int) (listing, syscall.Errno) 
 		return listing{}, api.Errno(err)
 	}
 	folders, files := shownNames(got.Folders, got.Files, folderID)
-	l = listing{at: time.Now(), folders: folders, files: files}
+	l := listing{at: time.Now(), folders: folders, files: files}
 	t.mu.Lock()
 	t.listings[folderID] = l
 	t.mu.Unlock()
 	return l, 0
+}
+
+// cached returns a folder's listing if it is younger than the TTL.
+func (t *tree) cached(folderID int) (listing, bool) {
+	t.mu.Lock()
+	l, ok := t.listings[folderID]
+	t.mu.Unlock()
+	return l, ok && time.Since(l.at) < t.opts.TTL
+}
+
+// listing starts the span of a lookup or readdir that lists its folder; one answered
+// from the cached listing has none, as they are too many to trace.
+func (d *dir) listing(ctx context.Context, op string) (context.Context, *telemetry.Op) {
+	if _, ok := d.tree.cached(d.id); ok {
+		return ctx, nil
+	}
+	return telemetry.StartOp(ctx, op, telemetry.FolderID(d.id))
 }
 
 // view is a folder as the mount shows it: its listing without the stored files that
@@ -277,7 +297,9 @@ var (
 	_ fs.NodeGetattrer = (*dir)(nil)
 )
 
-func (d *dir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+func (d *dir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (_ *fs.Inode, errno syscall.Errno) {
+	ctx, op := d.listing(ctx, "lookup")
+	defer func() { op.End(errno) }()
 	l, errno := d.tree.view(ctx, d.id)
 	if errno != 0 {
 		return nil, errno
@@ -323,7 +345,9 @@ func (d *dir) unsent(name string) (*fs.Inode, *file) {
 	return nil, nil
 }
 
-func (d *dir) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+func (d *dir) Readdir(ctx context.Context) (_ fs.DirStream, errno syscall.Errno) {
+	ctx, op := d.listing(ctx, "readdir")
+	defer func() { op.End(errno) }()
 	l, errno := d.tree.view(ctx, d.id)
 	if errno != 0 {
 		return nil, errno

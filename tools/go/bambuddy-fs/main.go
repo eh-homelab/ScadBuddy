@@ -21,6 +21,7 @@ import (
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/bambuddy-fs/internal/api"
 	"github.com/eh-homelab/ScadBuddy/tools/go/bambuddy-fs/internal/fsys"
+	"github.com/eh-homelab/ScadBuddy/tools/go/bambuddy-fs/internal/telemetry"
 )
 
 type config struct {
@@ -34,6 +35,7 @@ type config struct {
 	CacheDir   string
 	StateDir   string
 	Mountpoint string
+	Telemetry  telemetry.Config
 }
 
 const usageText = `Usage: bambuddy-fs mount --api <url> [flags] <mountpoint>
@@ -55,6 +57,9 @@ func newFlagSet(cfg *config) *flag.FlagSet {
 	set.DurationVar(&cfg.TTL, "attr-ttl", 5*time.Second, "how long listings and kernel entries and attributes are kept")
 	set.StringVar(&cfg.CacheDir, "cache-dir", defaultCacheDir(), "where downloaded contents and files being written are kept")
 	stateDirFlag(set, cfg)
+	set.StringVar(&cfg.Telemetry.Endpoint, "otel-endpoint", "", "OTLP/HTTP collector base URL for traces and metrics (default $OTEL_EXPORTER_OTLP_ENDPOINT, else "+telemetry.DefaultEndpoint+")")
+	set.BoolVar(&cfg.Telemetry.Disabled, "no-telemetry", false, "send no traces or metrics")
+	set.BoolVar(&cfg.Telemetry.Disabled, "no-tracing", false, "the same as --no-telemetry")
 	return set
 }
 
@@ -195,6 +200,13 @@ func run(cfg config) int {
 		return 1
 	}
 	defer lock.Close()
+	stopTelemetry, err := telemetry.Start(cfg.Telemetry)
+	if err != nil {
+		log.Printf("bambuddy-fs: telemetry: %v", err)
+		return 1
+	}
+	// Flushes, within 5 s, once the mount is gone and before the lock is released.
+	defer stopTelemetry()
 	root := fsys.NewRoot(lib, fsys.Options{All: cfg.All, ReadOnly: cfg.ReadOnly, TTL: cfg.TTL, CacheDir: cfg.CacheDir, StateDir: cfg.StateDir})
 	ttl := cfg.TTL
 	server, err := fs.Mount(cfg.Mountpoint, root, &fs.Options{

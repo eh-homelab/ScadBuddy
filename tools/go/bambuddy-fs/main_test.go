@@ -38,6 +38,20 @@ func TestParseDefaultsAndAllowOther(t *testing.T) {
 	}
 }
 
+func TestParseTelemetryFlags(t *testing.T) {
+	cfg, err := parse([]string{"mount", "--api", "http://h/api/v1", "/m"})
+	if err != nil || cfg.Telemetry.Endpoint != "" || cfg.Telemetry.Disabled {
+		t.Fatalf("defaults: %+v %v", cfg.Telemetry, err)
+	}
+	cfg, err = parse([]string{"mount", "--api", "http://h/api/v1", "--otel-endpoint", "https://c.example", "--no-telemetry", "/m"})
+	if err != nil || cfg.Telemetry.Endpoint != "https://c.example" || !cfg.Telemetry.Disabled {
+		t.Fatalf("%+v %v", cfg.Telemetry, err)
+	}
+	if cfg, err := parse([]string{"mount", "--api", "http://h/api/v1", "--no-tracing", "/m"}); err != nil || !cfg.Telemetry.Disabled {
+		t.Fatalf("--no-tracing: %+v %v", cfg.Telemetry, err)
+	}
+}
+
 func TestParseHelpAndErrors(t *testing.T) {
 	for _, args := range [][]string{nil, {"--help"}, {"mount", "--help"}, {"mount", "-h"}} {
 		if _, err := parse(args); !errors.Is(err, flag.ErrHelp) {

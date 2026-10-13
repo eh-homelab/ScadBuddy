@@ -13,6 +13,7 @@ import (
 	"syscall"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/bambuddy-fs/internal/api"
+	"github.com/eh-homelab/ScadBuddy/tools/go/bambuddy-fs/internal/telemetry"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
@@ -109,6 +110,28 @@ func (c *cache) release(id int) {
 	c.mu.Unlock()
 }
 
+// has is whether a file's contents are cached.
+func (c *cache) has(f api.File) bool {
+	st, err := os.Stat(c.path(f.ID))
+	return err == nil && st.Size() == f.Size
+}
+
+// size is the bytes in the cache directory, for the cache gauge. The directory is
+// flat, so this is a listing and a stat per file at each collection (every minute).
+func (c *cache) size() int64 {
+	entries, err := os.ReadDir(c.dir)
+	if err != nil {
+		return 0
+	}
+	var total int64
+	for _, e := range entries {
+		if info, err := e.Info(); err == nil && info.Mode().IsRegular() {
+			total += info.Size()
+		}
+	}
+	return total
+}
+
 // drop removes a file's cached contents.
 func (c *cache) drop(id int) {
 	for _, p := range []string{c.path(id), c.path(id) + ".part"} {
@@ -144,6 +167,11 @@ func (n *file) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 		// Created here, never uploaded, and no longer being written.
 		return nil, 0, syscall.EIO
 	}
+	// Only an open that downloads is traced.
+	var op *telemetry.Op
+	if !n.tree.cache.has(f) {
+		ctx, op = telemetry.StartOp(ctx, "open", telemetry.FileID(f.ID), telemetry.Bytes(f.Size))
+	}
 	fh, err := n.tree.cache.open(ctx, n.tree.lib, f)
 	if err != nil {
 		slog.Warn("open failed", "file", f.ID, "err", err)
@@ -151,8 +179,10 @@ func (n *file) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 		if errno == syscall.ENOENT {
 			n.gone()
 		}
+		op.End(errno)
 		return nil, 0, errno
 	}
+	op.End(0)
 	// The bytes never change for this inode, so the kernel may keep its pages.
 	return &handle{f: fh}, fuse.FOPEN_KEEP_CACHE, 0
 }

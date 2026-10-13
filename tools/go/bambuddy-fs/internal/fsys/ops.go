@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/bambuddy-fs/internal/api"
+	"github.com/eh-homelab/ScadBuddy/tools/go/bambuddy-fs/internal/telemetry"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
@@ -33,10 +34,12 @@ var (
 	_ fs.NodeSetattrer = (*dir)(nil)
 )
 
-func (d *dir) Create(ctx context.Context, name string, _, _ uint32, out *fuse.EntryOut) (*fs.Inode, fs.FileHandle, uint32, syscall.Errno) {
+func (d *dir) Create(ctx context.Context, name string, _, _ uint32, out *fuse.EntryOut) (_ *fs.Inode, _ fs.FileHandle, _ uint32, errno syscall.Errno) {
 	if d.tree.opts.ReadOnly {
 		return nil, nil, 0, syscall.EROFS
 	}
+	ctx, op := telemetry.StartOp(ctx, "create", telemetry.FolderID(d.id))
+	defer func() { op.End(errno) }()
 	if errno := d.free(ctx, d, name); errno != 0 {
 		return nil, nil, 0, errno
 	}
@@ -47,10 +50,12 @@ func (d *dir) Create(ctx context.Context, name string, _, _ uint32, out *fuse.En
 	return d.NewInode(ctx, n, fs.StableAttr{Mode: syscall.S_IFREG}), w, 0, 0
 }
 
-func (d *dir) Mkdir(ctx context.Context, name string, _ uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+func (d *dir) Mkdir(ctx context.Context, name string, _ uint32, out *fuse.EntryOut) (_ *fs.Inode, errno syscall.Errno) {
 	if d.tree.opts.ReadOnly {
 		return nil, syscall.EROFS
 	}
+	ctx, op := telemetry.StartOp(ctx, "mkdir", telemetry.FolderID(d.id))
+	defer func() { op.End(errno) }()
 	if errno := d.free(ctx, d, name); errno != 0 {
 		return nil, errno
 	}
@@ -64,15 +69,20 @@ func (d *dir) Mkdir(ctx context.Context, name string, _ uint32, out *fuse.EntryO
 	return d.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFDIR, Ino: dirIno(f.ID)}), 0
 }
 
-func (d *dir) Unlink(ctx context.Context, name string) syscall.Errno {
+func (d *dir) Unlink(ctx context.Context, name string) (errno syscall.Errno) {
 	if d.tree.opts.ReadOnly {
 		return syscall.EROFS
 	}
+	ctx, op := telemetry.StartOp(ctx, "unlink", telemetry.FolderID(d.id))
+	defer func() { op.End(errno) }()
 	l, errno := d.tree.view(ctx, d.id)
 	if errno != 0 {
 		return errno
 	}
 	f, ok := l.files[name]
+	if ok {
+		op.Set(telemetry.FileID(f.ID))
+	}
 	if !ok {
 		if _, isDir := l.folders[name]; isDir {
 			return syscall.EISDIR
@@ -131,15 +141,20 @@ func (t *tree) unqueue(ctx context.Context, e *entry) syscall.Errno {
 
 // Rmdir deletes the folder with everything in it (spec §5); the route refuses with
 // 409, EBUSY, before deleting anything if a file in it is queued to print.
-func (d *dir) Rmdir(ctx context.Context, name string) syscall.Errno {
+func (d *dir) Rmdir(ctx context.Context, name string) (errno syscall.Errno) {
 	if d.tree.opts.ReadOnly {
 		return syscall.EROFS
 	}
+	ctx, op := telemetry.StartOp(ctx, "rmdir")
+	defer func() { op.End(errno) }()
 	l, errno := d.tree.list(ctx, d.id)
 	if errno != 0 {
 		return errno
 	}
 	f, ok := l.folders[name]
+	if ok {
+		op.Set(telemetry.FolderID(f.ID))
+	}
 	if !ok {
 		if _, isFile := l.files[name]; isFile {
 			return syscall.ENOTDIR
@@ -164,7 +179,7 @@ func (d *dir) Rmdir(ctx context.Context, name string) syscall.Errno {
 // durable. RENAME_NOREPLACE over anything, a folder over a folder, and anything over
 // a file still being written are EEXIST; a file over a folder is EISDIR, a folder
 // over a file ENOTDIR.
-func (d *dir) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
+func (d *dir) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) (errno syscall.Errno) {
 	if d.tree.opts.ReadOnly {
 		return syscall.EROFS
 	}
@@ -172,6 +187,8 @@ func (d *dir) Rename(ctx context.Context, name string, newParent fs.InodeEmbedde
 	if !ok || flags&fs.RENAME_EXCHANGE != 0 {
 		return syscall.ENOTSUP
 	}
+	ctx, op := telemetry.StartOp(ctx, "rename", telemetry.FolderID(d.id), telemetry.ToFolderID(to.id))
+	defer func() { op.End(errno) }()
 	src, errno := d.tree.view(ctx, d.id)
 	if errno != 0 {
 		return errno

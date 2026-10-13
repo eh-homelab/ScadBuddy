@@ -25,6 +25,9 @@ import (
 	"github.com/microsoft/kiota-abstractions-go/serialization"
 	kiotahttp "github.com/microsoft/kiota-http-go"
 	jsonserialization "github.com/microsoft/kiota-serialization-json-go"
+	"go.opentelemetry.io/otel/attribute"
+
+	"github.com/eh-homelab/ScadBuddy/tools/go/bambuddy-fs/internal/telemetry"
 )
 
 // Folder is one entry of the library's folder list, which is flat: ParentID 0 is
@@ -67,11 +70,14 @@ const (
 )
 
 // New takes ScadBuddy's API root, like http://host/api/v1. A nil httpClient is
-// http.DefaultClient.
+// http.DefaultClient. Requests go through telemetry.Transport, on a copy of the client.
 func New(baseURL string, httpClient *http.Client) (*Client, error) {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
+	traced := *httpClient
+	traced.Transport = telemetry.Transport(httpClient.Transport)
+	httpClient = &traced
 	base := strings.TrimRight(baseURL, "/")
 	// The generated URL templates already start with /api/v1.
 	origin, ok := strings.CutSuffix(base, "/api/v1")
@@ -102,6 +108,7 @@ func (c *Client) List(ctx context.Context, folderID int, all bool) (Listing, err
 	if all {
 		query.All = &all
 	}
+	ctx = telemetry.WithCall(ctx, telemetry.Call{Op: "list_library", Route: "/api/v1/print/library", Attrs: folderAttr(folderID)})
 	info, err := c.library().ToGetRequestInformation(ctx, &api.V1PrintLibraryRequestBuilderGetRequestConfiguration{QueryParameters: &query})
 	if err != nil {
 		return Listing{}, err
@@ -132,6 +139,7 @@ func (c *Client) List(ctx context.Context, folderID int, all bool) (Listing, err
 
 // Download streams a file's bytes into w.
 func (c *Client) Download(ctx context.Context, fileID int, w io.Writer) error {
+	ctx = telemetry.WithCall(ctx, telemetry.Call{Op: "download", Route: "/api/v1/print/library/{file_id}/file", Transfer: telemetry.Download, Attrs: fileAttr(fileID)})
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/print/library/%d/file", c.base, fileID), nil)
 	if err != nil {
 		return err
@@ -159,6 +167,7 @@ func (c *Client) Upload(ctx context.Context, folderID int, name string, r io.Rea
 	// Closing the reader on return fails the writer's next write, so it stops.
 	defer pr.Close()
 	form := multipart.NewWriter(pw)
+	ctx = telemetry.WithCall(ctx, telemetry.Call{Op: "upload", Route: "/api/v1/print/library/files", Transfer: telemetry.Upload, Attrs: folderAttr(folderID)})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/print/library/files", pr)
 	if err != nil {
 		return File{}, err
@@ -225,6 +234,7 @@ func (c *Client) UpdateFile(ctx context.Context, fileID int, name *string, folde
 		v.SetInteger(int32Ptr(*folderID))
 		body.SetFolderId(v)
 	}
+	ctx = telemetry.WithCall(ctx, telemetry.Call{Op: "update_file", Route: "/api/v1/print/library/{file_id}", Attrs: fileAttr(fileID)})
 	info, err := c.library().ByFile_idInteger(int32(fileID)).ToPatchRequestInformation(ctx, body, nil)
 	if err != nil {
 		return File{}, err
@@ -245,6 +255,11 @@ func (c *Client) DeleteFiles(ctx context.Context, ids ...int) error {
 		fileIDs[i] = int32(id)
 	}
 	body.SetFileIds(fileIDs)
+	var attrs []attribute.KeyValue
+	if len(ids) == 1 {
+		attrs = fileAttr(ids[0])
+	}
+	ctx = telemetry.WithCall(ctx, telemetry.Call{Op: "delete_files", Route: "/api/v1/print/library/delete", Attrs: attrs})
 	info, err := c.library().DeletePath().ToPostRequestInformation(ctx, body, nil)
 	if err != nil {
 		return err
@@ -265,6 +280,7 @@ func (c *Client) Mkdir(ctx context.Context, parentID int, name string) (Folder, 
 		v.SetInteger(int32Ptr(parentID))
 		body.SetParentId(v)
 	}
+	ctx = telemetry.WithCall(ctx, telemetry.Call{Op: "create_folder", Route: "/api/v1/print/library/folders", Attrs: folderAttr(parentID)})
 	info, err := c.library().Folders().ToPostRequestInformation(ctx, body, nil)
 	if err != nil {
 		return Folder{}, err
@@ -290,6 +306,7 @@ func (c *Client) UpdateFolder(ctx context.Context, folderID int, name *string, p
 		v.SetInteger(int32Ptr(*parentID))
 		body.SetParentId(v)
 	}
+	ctx = telemetry.WithCall(ctx, telemetry.Call{Op: "update_folder", Route: "/api/v1/print/library/folders/{folder_id}", Attrs: folderAttr(folderID)})
 	info, err := c.library().Folders().ByFolder_idInteger(int32(folderID)).ToPatchRequestInformation(ctx, body, nil)
 	if err != nil {
 		return Folder{}, err
@@ -304,6 +321,7 @@ func (c *Client) UpdateFolder(ctx context.Context, folderID int, name *string, p
 // DeleteFolder deletes a folder with everything in it (spec §5). Anything the route
 // kept is a 409.
 func (c *Client) DeleteFolder(ctx context.Context, folderID int) error {
+	ctx = telemetry.WithCall(ctx, telemetry.Call{Op: "delete_folder", Route: "/api/v1/print/library/folders/{folder_id}/delete", Attrs: folderAttr(folderID)})
 	info, err := c.library().Folders().ByFolder_idInteger(int32(folderID)).DeletePath().ToPostRequestInformation(ctx, nil)
 	if err != nil {
 		return err
@@ -389,12 +407,14 @@ func answer[T any](ctx context.Context, c *Client, op string, status int, body [
 // an EIO, since it is the operation that is gone, not the file.
 func (c *Client) follow(ctx context.Context, op, id string) ([]byte, error) {
 	delay := firstPoll
+	poll := telemetry.WithCall(ctx, telemetry.Call{Op: "poll_operation", Route: "/api/v1/operations/{operation_id}",
+		Attrs: []attribute.KeyValue{telemetry.OperationID(id)}})
 	for {
 		info, err := c.kiota.Api().V1().Operations().ByOperation_id(id).ToGetRequestInformation(ctx, nil)
 		if err != nil {
 			return nil, err
 		}
-		status, body, err := c.send(ctx, op, info)
+		status, body, err := c.send(poll, op, info)
 		switch {
 		case err != nil && ctx.Err() != nil:
 			return nil, fmt.Errorf("%s: operation %s: %w", op, id, err)
@@ -491,6 +511,10 @@ func newKey() string {
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
+
+func fileAttr(id int) []attribute.KeyValue { return []attribute.KeyValue{telemetry.FileID(id)} }
+
+func folderAttr(id int) []attribute.KeyValue { return []attribute.KeyValue{telemetry.FolderID(id)} }
 
 func updatedFile(e models.LibraryEntryUpdatedable) File {
 	return File{ID: deref(e.GetId()), Name: derefString(e.GetFilename()), FolderID: deref(unionInt(e.GetFolderId()))}

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/bambuddy-fs/internal/api"
+	"github.com/eh-homelab/ScadBuddy/tools/go/bambuddy-fs/internal/telemetry"
 	"github.com/hanwen/go-fuse/v2/fs"
 )
 
@@ -668,6 +669,17 @@ func (q *queue) in(folderID int) (map[string]*entry, map[int]bool) {
 	return byName, replaced
 }
 
+// totals is how many writes are queued and their bytes, for the gauges.
+func (q *queue) totals() (entries, bytes int64) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, e := range q.entries {
+		entries++
+		bytes += e.rec.Size
+	}
+	return entries, bytes
+}
+
 // due returns the entries the retrier should send now, in sequence order.
 func (q *queue) due() []*entry {
 	now := q.now()
@@ -750,6 +762,10 @@ func (t *tree) send(ctx context.Context, e *entry) {
 		e.sending.Unlock()
 		return
 	}
+	// An attempt is the write's (Attempts+1)th: the first was its own upload.
+	ctx, retry := telemetry.StartRetry(ctx, rec.Attempts+1)
+	result, sentID := telemetry.RetryFailed, 0
+	defer func() { retry.End(result, sentID) }()
 	sentAs, conflict := rec, false
 	var got api.File
 	var err error
@@ -766,6 +782,9 @@ func (t *tree) send(ctx context.Context, e *entry) {
 	}
 	if err != nil {
 		e.sending.Unlock()
+		if !queueable(err) {
+			result = telemetry.RetryRefused
+		}
 		if ctx.Err() == nil {
 			t.sendFailed(ctx, e, rec, err)
 		}
@@ -777,6 +796,10 @@ func (t *tree) send(ctx context.Context, e *entry) {
 	post, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
 	n := t.sent(post, e, sentAs, got, conflict)
 	cancel()
+	// A rename that failed after the upload leaves the entry queued.
+	if _, queued := q.record(e); !queued {
+		result, sentID = telemetry.RetrySent, got.ID
+	}
 	e.sending.Unlock()
 	if n != nil {
 		n.notify()

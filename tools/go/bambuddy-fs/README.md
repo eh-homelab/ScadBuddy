@@ -77,7 +77,7 @@ inside the container. With no arguments the image prints `mount --help`.
 ## Flags
 
 ```
-bambuddy-fs mount --api <url> [--ro] [--all] [--allow-other] [--attr-ttl 5s] [--cache-dir <dir>] [--state-dir <dir>] <mountpoint>
+bambuddy-fs mount --api <url> [--ro] [--all] [--allow-other] [--attr-ttl 5s] [--cache-dir <dir>] [--state-dir <dir>] [--otel-endpoint <url>] [--no-telemetry] <mountpoint>
 bambuddy-fs unsent [--state-dir <dir>]
 ```
 
@@ -90,6 +90,8 @@ bambuddy-fs unsent [--state-dir <dir>]
 | `--attr-ttl` | How long listings are cached, and the kernel's entry and attribute timeout. Default `5s`. |
 | `--cache-dir` | Downloaded contents and files being written. Default `$XDG_CACHE_HOME/bambuddy-fs`, or `~/.cache/bambuddy-fs`. |
 | `--state-dir` | Writes whose upload failed, under `unsent/` (see "Unsent writes"). Default `$XDG_STATE_HOME/bambuddy-fs`, or `~/.local/state/bambuddy-fs`. |
+| `--otel-endpoint` | OTLP/HTTP collector base URL for traces and metrics (see "Telemetry"). |
+| `--no-telemetry` | Send no traces or metrics. `--no-tracing` is the same. |
 
 `bambuddy-fs --help` and `bambuddy-fs mount --help` print the usage and exit 0; an
 unknown command exits 2.
@@ -230,3 +232,63 @@ a change of times only is accepted and ignored. Each error is logged with the op
 and the problem `detail`. A write that answers 202 is followed through
 `GET /operations/{id}`; if it is still running when the request's timeout passes, the
 result is `EIO` and the log names the operation id.
+
+## Telemetry
+
+The mount sends OpenTelemetry traces and metrics over OTLP/HTTP to
+`https://otlp.internal.nullreference.io` (`/v1/traces`, `/v1/metrics`), the homelab's
+collector, reachable from the LAN only, with TLS checked against the system roots
+(eh-homelab/clusters#2221). The standard `OTEL_*` variables apply as the OpenTelemetry
+SDK reads them (`OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_EXPORTER_OTLP_CERTIFICATE`,
+`OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_TRACES_SAMPLER` and `_ARG`,
+`OTEL_METRIC_EXPORT_INTERVAL`, default 60 s). Where each signal goes, first match wins:
+
+1. `--otel-endpoint <base>`: `<base>/v1/traces` and `<base>/v1/metrics`;
+2. `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`, as is;
+3. `OTEL_EXPORTER_OTLP_ENDPOINT` plus the signal's path;
+4. the default above.
+
+`--no-telemetry` (or `--no-tracing`) or `OTEL_SDK_DISABLED=true` turns both off;
+`OTEL_TRACES_EXPORTER=none` or `OTEL_METRICS_EXPORTER=none` turns off one. Off, no
+exporter is built and nothing touches the network. Metrics are always cumulative,
+whatever `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE` says, since Prometheus
+refuses delta.
+
+Telemetry never holds up the mount: setup makes no network call, export runs in the
+background, an unreachable collector (off the LAN, or a name that does not resolve) is
+logged once with the first export error and never again, and the final flush on unmount
+is bounded at 5 s.
+
+The resource is `service.name=bambuddy-fs`, `service.version` when the binary carries
+one, and `service.instance.id` set to the host's name (a random UUID if it has none):
+the collector replaces `host.name` with its own, so the instance id is what keeps two
+workstations' series apart. `service.namespace` is not set. In Prometheus the series
+carry `job="bambuddy-fs"`, so `{job="bambuddy-fs"}` selects them (eh-homelab/clusters#2224).
+
+Spans:
+
+- `fuse.<op>` (INTERNAL) for each FUSE operation that reaches ScadBuddy or does work:
+  a lookup or readdir that lists its folder, an open, read or write that downloads,
+  a flush or release that uploads, create, mkdir, rmdir, unlink, rename and a truncate.
+  A lookup or getattr answered from the cache has none.
+- `scadbuddy.<operation>` (CLIENT) for each ScadBuddy API request (`list_library`,
+  `download`, `upload`, `update_file`, `delete_files`, `create_folder`, `update_folder`,
+  `delete_folder`, `poll_operation`), with the method, status code and route template
+  (`url.template`, never the URL); each request carries `traceparent`, so the backend's
+  spans join the trace. A download's span lasts until its bytes are read.
+- `unsent.retry` (INTERNAL) for each attempt to send a queued write, with the attempt
+  number and the result (`ok`, `failed`, `refused`).
+
+Metrics: `bambuddy_fs.fuse.operations` and `bambuddy_fs.fuse.operation.duration` (by
+`op` and `result`, `ok` or the errno's name), `http.client.request.duration` (by
+`scadbuddy.operation`, method and status code), `bambuddy_fs.transfer.bytes` (by
+`direction`, `upload` or `download`), the gauges `bambuddy_fs.cache.bytes`,
+`bambuddy_fs.unsent.entries` and `bambuddy_fs.unsent.bytes`, and
+`bambuddy_fs.unsent.uploads` (by `result`).
+
+What is recorded is ids (file, folder, operation), byte counts, operation names, errno
+names, status codes and durations. Never a file or folder name, a path, file contents,
+an xattr, a response body or any text ScadBuddy or Bambuddy returns; an error's status
+is its errno name or status class, never its message. Metric attributes never carry
+ids. The OpenTelemetry global providers stay the no-op, so the Kiota client's own spans,
+which carry URLs, are not sent.
