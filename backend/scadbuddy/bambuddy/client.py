@@ -42,8 +42,10 @@ from scadbuddy.bambuddy.models import (
     AvailableFilament,
     ExternalLink,
     FilamentRequirements,
+    FileUpdate,
     Folder,
     FolderCreate,
+    FolderUpdate,
     InventoryRemain,
     LibraryFile,
     LibraryListRow,
@@ -107,10 +109,13 @@ Operation = Literal[
     "library.filament_requirements",
     "library.files.list",
     "library.files.read",
+    "library.files.update",
     "library.folders.by_project",
     "library.folders.create",
+    "library.folders.delete",
     "library.folders.list",
     "library.folders.read",
+    "library.folders.update",
     "library.listing",
     "library.plate_thumbnail",
     "library.plates",
@@ -889,6 +894,43 @@ class BambuddyClient:
             json={"notes": notes},
         )
         return LibraryFile.model_validate(response.json())
+
+    async def update_library_file(self, file_id: int, update: FileUpdate) -> LibraryFile:
+        """``PUT /library/files/{id}``: rename and/or move. Partial, as
+        :meth:`annotate_library_file` explains."""
+        response = await self._send(
+            "PUT",
+            f"/library/files/{file_id}",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="library.files.update",
+            what=f"update library file {file_id}",
+            json=update.model_dump(mode="json", exclude_none=True),
+        )
+        return LibraryFile.model_validate(response.json())
+
+    async def update_folder(self, folder_id: int, update: FolderUpdate) -> Folder:
+        """``PUT /library/folders/{id}``: rename and/or move; partial, ``parent_id=0``
+        is the top level."""
+        response = await self._send(
+            "PUT",
+            f"/library/folders/{folder_id}",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="library.folders.update",
+            what=f"update library folder {folder_id}",
+            json=update.model_dump(mode="json", exclude_none=True),
+        )
+        return Folder.model_validate(response.json())
+
+    async def delete_folder(self, folder_id: int) -> None:
+        """``DELETE /library/folders/{id}``. The caller empties it first (the folder
+        delete kind), so what this drops is the folder's own record."""
+        await self._send(
+            "DELETE",
+            f"/library/folders/{folder_id}",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="library.folders.delete",
+            what=f"delete library folder {folder_id}",
+        )
 
     async def delete_library_file(self, file_id: int) -> bool:
         """``DELETE /library/files/{id}``: moves the file to Bambuddy's trash, and says

@@ -446,6 +446,23 @@ class FolderCreate(BambuddyModel):
     project_id: int | None = None
 
 
+class FileUpdate(BambuddyModel):
+    """``PUT /api/v1/library/files/{id}``: a partial update. Only the fields given are
+    sent, and ``folder_id=0`` moves the file to the top level (Bambuddy's sentinel;
+    see `BambuddyClient.annotate_library_file`)."""
+
+    filename: str | None = None
+    folder_id: int | None = None
+
+
+class FolderUpdate(BambuddyModel):
+    """``PUT /api/v1/library/folders/{id}``: a partial update; ``parent_id=0`` moves the
+    folder to the top level."""
+
+    name: str | None = None
+    parent_id: int | None = None
+
+
 class LibraryFile(BambuddyModel):
     """``POST /api/v1/library/files`` (``FileUploadResponse``) — the uploaded file —
     and ``GET /api/v1/library/files/{id}`` (``FileResponse``). ``folder_id`` and
