@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import zipfile
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -16,7 +17,9 @@ from scadbuddy.bambuddy.clearance import (
     clearance_for,
     clearance_warnings,
     placed_objects,
+    placed_objects_by_plate,
 )
+from scadbuddy.render import bambu3mf
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
 from scadbuddy.render.read_budget import ReadBudget
 from scadbuddy.render.split import ColourPart
@@ -148,3 +151,51 @@ def test_a_model_file_is_held_to_the_one_file_cap_whatever_the_budget(
     monkeypatch.setattr(clearance, "MAX_UNCOMPRESSED_BYTES", 100)
     with pytest.raises(ValueError, match="read budget"):
         placed_objects(_fan_out_3mf(levels=1, fan=1), 1, ReadBudget.widest())
+
+
+def test_every_plate_is_read_in_one_pass_of_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2875 review: each plate re-opened and re-parsed every model file under a fresh
+    budget, so an N-plate check did N times the work the budget meant to cap."""
+    parts = [
+        ColourPart(1, f"Box {n}", "#FF6AC1", trimesh.creation.box(extents=(20, 20, 10)))
+        for n in (1, 2)
+    ]
+    out = tmp_path / "two-plates.3mf"
+    write_plates_3mf(
+        [PlateParts((parts[0],), (1,)), PlateParts((parts[1],), (1,))],
+        ["#FF6AC1"],
+        out,
+        thumbnails=None,
+    )
+    parsed: list[str] = []
+    real = bambu3mf.parse_model
+
+    def counting(archive: zipfile.ZipFile, name: str, *args: Any, **kwargs: Any) -> Any:
+        parsed.append(name)
+        return real(archive, name, *args, **kwargs)
+
+    monkeypatch.setattr(clearance, "parse_model", counting)
+
+    by_plate = placed_objects_by_plate(out.read_bytes(), [1, 2])
+
+    assert [len(by_plate[1]), len(by_plate[2])] == [1, 1]
+    assert len(parsed) == len(set(parsed))
+
+
+def test_a_component_naming_a_file_the_archive_lacks_is_a_value_error() -> None:
+    core = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+    production = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
+    model = (
+        f'<model xmlns="{core}" xmlns:p="{production}" unit="millimeter"><resources>'
+        '<object id="1" type="model"><components>'
+        '<component p:path="/3D/Objects/missing.model" objectid="1"/>'
+        '</components></object></resources><build><item objectid="1"/></build></model>'
+    )
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("3D/3dmodel.model", model)
+
+    with pytest.raises(ValueError, match="does not hold"):
+        placed_objects(buffer.getvalue(), 1)

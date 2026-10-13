@@ -20,7 +20,11 @@ from fastapi import status
 from pydantic import BaseModel, Field, field_validator
 
 from scadbuddy.bambuddy.catalogue import _Catalogue, _catalogue
-from scadbuddy.bambuddy.clearance import clearance_for, clearance_warnings, placed_objects
+from scadbuddy.bambuddy.clearance import (
+    clearance_for,
+    clearance_warnings,
+    placed_objects_by_plate,
+)
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.concurrent import settled
 from scadbuddy.bambuddy.dispatch import QueueOutcome, RackChoice, SlicePlan, enqueue_plate
@@ -720,11 +724,10 @@ async def _sequence_clearance(
         payload = await source.fetch_3mf(client)
         if payload is None:
             return None, []
-        per_plate = [
-            (plate_id, await asyncio.to_thread(placed_objects, payload, plate_id))
-            for plate_id in prepared.plate_ids
-        ]
-    except (ValueError, KeyError, zipfile.BadZipFile, ET.ParseError):
+        # One read of the file for every plate (#2875 review), against one budget.
+        by_plate = await asyncio.to_thread(placed_objects_by_plate, payload, prepared.plate_ids)
+        per_plate = [(plate_id, by_plate[plate_id]) for plate_id in prepared.plate_ids]
+    except (ValueError, zipfile.BadZipFile, ET.ParseError):
         return None, []
     several = len(per_plate) > 1
     warnings = (

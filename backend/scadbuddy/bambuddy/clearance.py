@@ -100,7 +100,8 @@ class _Bounds:
         self.triangles = budget.limit("max_triangles")
         self.bytes = budget.model_bytes()
 
-    def _model(self, path: str) -> ParsedModel:
+    def model(self, path: str) -> ParsedModel:
+        """Model file ``path``, parsed once, against the budget."""
         if path not in self.models:
             # Never past the one-file cap parse_model holds every read to, whatever
             # the budget leaves (no limit included).
@@ -135,7 +136,7 @@ class _Bounds:
         self.visits -= 1
         if depth > _MAX_DEPTH or self.visits < 0:
             raise _OverBudgetError
-        model = self._model(path)
+        model = self.model(path)
         found = next(
             (o for o in model.root.iter(f"{{{CORE_NS}}}object") if o.get("id") == object_id),
             None,
@@ -186,17 +187,38 @@ def _moved(points: np.ndarray, matrix: np.ndarray) -> np.ndarray:
 def placed_objects(
     payload: bytes, plate: int, budget: ReadBudget | None = None
 ) -> list[PlacedObject]:
-    """Every build item on ``plate`` of a 3MF, each where it sits: the objects a
-    by-object print finishes one at a time. A file with no plate list is one plate.
+    """:func:`placed_objects_by_plate` for one plate."""
+    return placed_objects_by_plate(payload, [plate], budget)[plate]
+
+
+def placed_objects_by_plate(
+    payload: bytes, plates: Sequence[int], budget: ReadBudget | None = None
+) -> dict[int, list[PlacedObject]]:
+    """Every build item on each of ``plates`` of a 3MF, each where it sits: the objects
+    a by-object print finishes one at a time. A file with no plate list is one plate,
+    whose items every plate asked for gets. The file is read once, against one
+    ``budget`` (default: the default :class:`ReadBudget`), however many plates.
 
     Each box is the box of its components' boxes, so a rotated component can make it
     larger than the object, never smaller (the module's one-way rule). Raises
-    `ValueError` for a file past ``budget`` (default: the default :class:`ReadBudget`).
+    `ValueError` for a file past the budget, or one naming a part it lacks.
     """
+    try:
+        return _placed_by_plate(payload, plates, budget or ReadBudget())
+    except (_OverBudgetError, TooManyTrianglesError, ArchiveTooLargeError) as error:
+        raise ValueError(f"the 3MF is past the read budget: {error}") from error
+    except KeyError as error:
+        raise ValueError(f"the 3MF names a file it does not hold: {error}") from error
+
+
+def _placed_by_plate(
+    payload: bytes, plates: Sequence[int], budget: ReadBudget
+) -> dict[int, list[PlacedObject]]:
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         names = set(archive.namelist())
         object_names: dict[str, str] = {}
-        on_plate: set[str] | None = None
+        #: Each plate's object ids; ``None`` for a file with no plate list.
+        on_plate: dict[int, set[str]] | None = None
         if MODEL_SETTINGS_NAME in names:
             # Capped as every settings read of an untrusted file is.
             config = ET.fromstring(_read_capped(archive, MODEL_SETTINGS_NAME, MAX_SETTINGS_BYTES))
@@ -206,34 +228,33 @@ def placed_objects(
                         object_names[obj.get("id", "")] = entry.get("value") or ""
             listed = plate_settings(config)
             if listed:
-                on_plate = {
-                    object_id
-                    for each in listed
-                    if each.index == plate
-                    for object_id in each.object_ids
-                }
-        bounds = _Bounds(archive, budget or ReadBudget())
-        placed: list[PlacedObject] = []
-        try:
-            root = bounds._model(ROOT_MODEL_NAME)
-            for number, item in enumerate(root.root.iter(f"{{{CORE_NS}}}item"), start=1):
-                object_id = item.get("objectid", "")
-                if on_plate is not None and object_id not in on_plate:
-                    continue
-                corners = bounds.box(ROOT_MODEL_NAME, object_id)
-                if corners is None:
-                    continue
-                where = _moved(corners, _transform(item.get("transform")))
-                low, high = where.min(axis=0), where.max(axis=0)
-                placed.append(
-                    PlacedObject(
-                        object_names.get(object_id) or f"object {number}",
-                        (float(low[0]), float(low[1]), float(low[2])),
-                        (float(high[0]), float(high[1]), float(high[2])),
-                    )
-                )
-        except (_OverBudgetError, TooManyTrianglesError, ArchiveTooLargeError) as error:
-            raise ValueError(f"the 3MF is past the read budget: {error}") from error
+                on_plate = {}
+                for each in listed:
+                    on_plate.setdefault(each.index, set()).update(each.object_ids)
+        bounds = _Bounds(archive, budget)
+        placed: dict[int, list[PlacedObject]] = {plate: [] for plate in plates}
+        root = bounds.model(ROOT_MODEL_NAME)
+        for number, item in enumerate(root.root.iter(f"{{{CORE_NS}}}item"), start=1):
+            object_id = item.get("objectid", "")
+            wanted = [
+                plate
+                for plate in plates
+                if on_plate is None or object_id in on_plate.get(plate, set())
+            ]
+            if not wanted:
+                continue
+            corners = bounds.box(ROOT_MODEL_NAME, object_id)
+            if corners is None:
+                continue
+            where = _moved(corners, _transform(item.get("transform")))
+            low, high = where.min(axis=0), where.max(axis=0)
+            found = PlacedObject(
+                object_names.get(object_id) or f"object {number}",
+                (float(low[0]), float(low[1]), float(low[2])),
+                (float(high[0]), float(high[1]), float(high[2])),
+            )
+            for plate in wanted:
+                placed[plate].append(found)
     return placed
 
 
