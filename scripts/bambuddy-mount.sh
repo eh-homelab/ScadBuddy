@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Mount Bambuddy's library (through ScadBuddy's API) as a FUSE filesystem (#2686).
 #
-#   bambuddy-mount [mount] [--ro] [--api URL] [--dir DIR] [-- extra bambuddy-fs flags]
+#   bambuddy-mount [mount] [--ro] [--allow-other] [--api URL] [--dir DIR] [-- extra bambuddy-fs flags]
 #   bambuddy-mount umount [--dir DIR]
 #   bambuddy-mount status [--dir DIR]
 #   bambuddy-mount build
@@ -9,8 +9,15 @@
 # Lives in the repo as scripts/bambuddy-mount.sh; copy or symlink it onto PATH, e.g.
 #   ln -s "$PWD/scripts/bambuddy-mount.sh" ~/bin/bambuddy-mount
 #
+# --allow-other (or BAMBUDDY_FS_ALLOW_OTHER=1) lets other users and processes in, which
+# Windows Explorer (\\wsl$) needs; it also lets every local user rename, overwrite and
+# delete library files, so it is off unless asked for.
+#
+# The log, $XDG_STATE_HOME/bambuddy-fs/mount.log, is appended to, each mount after a
+# banner, so the lines naming unsent writes survive the next mount.
+#
 # Env: BAMBUDDY_FS_API (default the deployed ScadBuddy), BAMBUDDY_FS_DIR (default
-# ~/bambuddy), SCADBUDDY_REPO (a checkout holding tools/go/bambuddy-fs; default: the
+# ~/bambuddy), BAMBUDDY_FS_ALLOW_OTHER, SCADBUDDY_REPO (a checkout holding tools/go/bambuddy-fs; default: the
 # checkout this script lives in, else the first worktree of ~/repos/eh-homelab/ScadBuddy
 # that has it).
 set -euo pipefail
@@ -72,12 +79,16 @@ stop() {
 cmd=mount
 case "${1:-}" in mount|umount|unmount|status|build) cmd=$1; shift ;; esac
 
-ro=() extra=()
+# A flag's value, or a clear error instead of set -u's.
+value() { [[ $# -ge 2 && -n "$2" ]] || die "$1 needs a value"; }
+
+ro=() extra=() allow_other="${BAMBUDDY_FS_ALLOW_OTHER:-}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --ro) ro=(--ro); shift ;;
-    --api) API="$2"; shift 2 ;;
-    --dir) DIR="$2"; shift 2 ;;
+    --allow-other) allow_other=1; shift ;;
+    --api) value "$@"; API="$2"; shift 2 ;;
+    --dir) value "$@"; DIR="$2"; shift 2 ;;
     --) shift; extra=("$@"); break ;;
     *) die "unknown argument: $1" ;;
   esac
@@ -86,7 +97,16 @@ done
 case "$cmd" in
   build) build ;;
   status)
-    if mounted; then echo "mounted at $DIR"; else echo "not mounted ($DIR)"; exit 1; fi ;;
+    pid=$(running) || pid=""
+    if mounted && [[ -n "$pid" ]]; then
+      echo "mounted at $DIR (pid $pid)"
+    elif mounted; then
+      echo "mounted at $DIR, but its process is gone (bambuddy-mount umount clears it)"; exit 1
+    elif [[ -n "$pid" ]]; then
+      echo "not mounted ($DIR), but pid $pid is still running (bambuddy-mount umount stops it)"; exit 1
+    else
+      echo "not mounted ($DIR)"; exit 1
+    fi ;;
   umount|unmount)
     if mounted; then fusermount3 -u "$DIR"; fi
     stop
@@ -101,12 +121,17 @@ case "$cmd" in
     allow=()
     # Windows Explorer (\\wsl$) and other users only see the mount with allow_other,
     # which FUSE permits a non-root user only when /etc/fuse.conf says so.
-    if grep -qx 'user_allow_other' /etc/fuse.conf 2>/dev/null; then
+    if [[ -n "$allow_other" ]]; then
+      grep -qx 'user_allow_other' /etc/fuse.conf 2>/dev/null \
+        || die "--allow-other needs user_allow_other uncommented in /etc/fuse.conf"
       allow=(--allow-other)
     else
-      echo "note: uncomment user_allow_other in /etc/fuse.conf to see the mount from Windows" >&2
+      printf '%s\n' 'note: only you see the mount; pass --allow-other to see it from Windows (\\wsl$), which also lets every local user change it' >&2
     fi
-    nohup "$BIN" mount --api "$API" --all "${ro[@]}" "${allow[@]}" "${extra[@]}" "$DIR" >"$LOG" 2>&1 &
+    start=1
+    if [[ -f "$LOG" ]]; then start=$(($(wc -l <"$LOG") + 1)); fi
+    echo "=== $(date -Is) mount $API at $DIR" >>"$LOG"
+    nohup "$BIN" mount --api "$API" --all "${ro[@]}" "${allow[@]}" "${extra[@]}" "$DIR" >>"$LOG" 2>&1 &
     pid=$!
     echo "$pid" >"$PIDFILE"
     for _ in $(seq 50); do
@@ -114,7 +139,7 @@ case "$cmd" in
       kill -0 "$pid" 2>/dev/null || break
       sleep 0.1
     done
-    cat "$LOG" >&2
+    tail -n "+$start" "$LOG" >&2
     die "mount did not come up"
     ;;
 esac

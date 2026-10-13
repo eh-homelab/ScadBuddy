@@ -33,14 +33,22 @@ scripts/bambuddy-mount.sh umount
 scripts/bambuddy-mount.sh status
 ```
 
-`SCADBUDDY_REPO`, `BAMBUDDY_FS_API` and `BAMBUDDY_FS_DIR` override its defaults. It adds
-`--allow-other` when `/etc/fuse.conf` allows it.
+`SCADBUDDY_REPO`, `BAMBUDDY_FS_API` and `BAMBUDDY_FS_DIR` override its defaults. It
+passes `--allow-other` only when given `--allow-other` (or `BAMBUDDY_FS_ALLOW_OTHER=1`),
+for the reason below. It appends to `$XDG_STATE_HOME/bambuddy-fs/mount.log`, each mount
+after a `===` banner, so the lines naming unsent writes outlive the next mount; `status`
+checks both the mount and its process.
 
 ### WSL and Windows
 
 Windows Explorer reaches a WSL mount only when other users may see it. Uncomment
 `user_allow_other` in `/etc/fuse.conf`, mount with `--allow-other`, then open
 `\\wsl$\<distro>\home\<you>\bambuddy`.
+
+`--allow-other` has a cost: the mount does not check permissions (no
+`default_permissions`), so with it every local user, and every container that shares
+the mount, can rename, overwrite and delete library files through it, with the
+mounting user's access to ScadBuddy. Use it only on a machine whose users you trust.
 
 ## Container image
 
@@ -83,7 +91,7 @@ docker run --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor:unconf
 ```
 
 `--allow-other` lets processes other than the mounting one, such as the host and other
-containers, see the files; the image's `/etc/fuse.conf` sets `user_allow_other` so the
+containers, see and change the files (see "WSL and Windows" for what that allows); the image's `/etc/fuse.conf` sets `user_allow_other` so the
 unprivileged user may pass it. `--cache-dir` and `--state-dir` default to the two volume
 paths above. With no arguments the image prints `mount --help`.
 
@@ -101,7 +109,7 @@ bambuddy-fs unsent [--state-dir <dir>]
 | `--all` | List every file. Without it the mount lists what the library dialog lists by default (unsliced 3MFs). |
 | `--allow-other` | FUSE `allow_other`: other users and processes see the mount. |
 | `--attr-ttl` | How long listings are cached, and the kernel's entry and attribute timeout. Default `5s`. |
-| `--cache-dir` | Downloaded contents and files being written. Default `$XDG_CACHE_HOME/bambuddy-fs`, or `~/.cache/bambuddy-fs`. |
+| `--cache-dir` | Downloaded contents and files being written, under `<cache-dir>/<API host>[_<port>]/`, so two ScadBuddy instances never share contents (file IDs are each one's own). Default `$XDG_CACHE_HOME/bambuddy-fs`, or `~/.cache/bambuddy-fs`. One mount at a time uses an API's cache (it holds a `lock` there). |
 | `--cache-max` | At most this much downloaded contents is kept in `--cache-dir`, the least recently read removed first: a number of bytes, or with `K`, `M`, `G` or `T` (binary; `2G`, `2GiB` and `2GB` are the same). `0` is no bound. Default `2G`. |
 | `--state-dir` | Writes whose upload failed, under `unsent/` (see "Unsent writes"). Default `$XDG_STATE_HOME/bambuddy-fs`, or `~/.local/state/bambuddy-fs`. |
 | `--otel-endpoint` | OTLP/HTTP collector base URL for traces and metrics (see "Telemetry"). |
@@ -191,15 +199,20 @@ of a stored file and renaming a stored file need ScadBuddy, and answer `EIO`.
 
 ## Unsent writes
 
-A write whose upload fails (ScadBuddy down or unreachable, a 5xx, a 404 from an older
-ScadBuddy without the upload route, a timeout) is not dropped. Its bytes move to
+A write whose upload fails for any reason but a refusal of the request itself (see
+"Refused writes") is not dropped: ScadBuddy down or unreachable, a 5xx, a timeout, a 404
+from an older ScadBuddy without the upload route, and also a 401 or 403 (the API key
+lacks a Bambuddy scope) or a 409, which a later attempt may get past once the cause is
+fixed. Its bytes move to
 `<state-dir>/unsent/<n>/contents`, beside a `record.json` (folder ID, name, size, when
 it was saved, attempts, last error, and the stored files it replaces), both fsync'd, and
 the log names that directory once.
 
 The queue is in the state directory, not the cache directory, because it is the only
 copy of what was written: cache cleaners may empty `~/.cache`. One mount at a time uses
-a state directory (it holds `<state-dir>/lock`); a second fails to start.
+a state directory (it holds `<state-dir>/lock`); a second fails to start. Records do not
+say which ScadBuddy they are for: a mount of another `--api` over the same state
+directory would send them there, so give each API its own `--state-dir`.
 
 `close()`, `fsync()` and `release` then succeed: the bytes are as safe on local disk as
 they would be in the library, and an app told its save failed would report it, or
@@ -269,15 +282,27 @@ as an unreadable record.
 | 409 | `EBUSY` |
 | 413, or a size cap | `EFBIG` |
 | 401/403 (a Bambuddy scope the key lacks) | `EACCES` |
-| 5xx, timeout, unreachable | `EIO` (an upload that fails so is queued instead, see "Unsent writes") |
+| 5xx, timeout, unreachable | `EIO` |
+
+Those are the answers of every operation but an upload. An upload is queued instead,
+and its `close()` succeeds, on everything but 400, 413, 415 and 422, which are refusals
+(`close()` answers `EFBIG` for 413, else `EIO`; see "Refused writes"). So a 401, 403,
+404 or 409 on an upload is queued, not `EACCES`, `ENOENT` or `EBUSY`. While ScadBuddy
+does not answer, listings are served stale instead (see "While ScadBuddy is down").
+
+| Local cause | errno |
+|---|---|
 | any write on `--ro` | `EROFS` |
 | chmod, chown, symlink, link, setting or removing an xattr, truncate of a stored file | `ENOTSUP` |
 
 Reading xattrs answers `ENODATA` and an empty list, so `ls -l` and `cp` stay quiet, and
 a change of times only is accepted and ignored. Each error is logged with the operation
 and the problem `detail`. A write that answers 202 is followed through
-`GET /operations/{id}`; if it is still running when the request's timeout passes, the
-result is `EIO` and the log names the operation id.
+`GET /operations/{id}`, polled from 250 ms backing off to 2 s, through network errors
+and 5xx answers, until the operation ends. FUSE requests have no timeout, so that wait
+lasts as long as the operation, and ends early only when the caller is interrupted
+(`EIO`, and the log names the operation id). An upload, including its operation, is
+cut off after 30 minutes and queued.
 
 ## Telemetry
 
