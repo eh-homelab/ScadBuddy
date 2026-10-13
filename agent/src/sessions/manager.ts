@@ -1495,6 +1495,8 @@ export class SessionManager {
       parent: otelContext.active(),
       // Each tool's tier for its span (TierResolver takes an optional input).
       tierOf: (name) => eventTierOf(name) ?? 'outward',
+      // What finish() subtracts for the audit row, so the span's cost is this turn's (#2376).
+      before: { costUsd: session.ownCostUsd, turns: session.turns },
     })
     // The turn's span ends whatever happens below, even if a cleanup step or
     // finish() throws: segment 0 and its tool bindings never outlive the turn.
