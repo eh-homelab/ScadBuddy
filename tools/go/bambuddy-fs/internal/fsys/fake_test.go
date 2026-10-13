@@ -34,8 +34,11 @@ type fakeLibrary struct {
 	failUploads int
 	failStatus  int
 	down        bool
-	// failUpdates is how many UpdateFile calls fail, with a 502.
+	// failUpdates is how many UpdateFile calls fail, with a 502; updating, if set, is
+	// called at the start of each with its count.
 	failUpdates int
+	updating    func(n int)
+	updateCalls int
 	// uploading, if set, is called at the start of each upload with its attempt number.
 	uploading func(attempt int)
 	attempts  int
@@ -159,6 +162,13 @@ func (l *fakeLibrary) Upload(_ context.Context, folderID int, name string, r io.
 
 func (l *fakeLibrary) UpdateFile(_ context.Context, fileID int, name *string, folderID *int) (api.File, error) {
 	l.mu.Lock()
+	l.updateCalls++
+	hook, calls := l.updating, l.updateCalls
+	l.mu.Unlock()
+	if hook != nil {
+		hook(calls)
+	}
+	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.updates = append(l.updates, update{id: fileID, name: name, parent: folderID})
 	if l.failUpdates > 0 {
@@ -168,6 +178,9 @@ func (l *fakeLibrary) UpdateFile(_ context.Context, fileID int, name *string, fo
 	f, ok := l.files[fileID]
 	if !ok {
 		return api.File{}, &api.Error{Op: "update file", Status: http.StatusNotFound}
+	}
+	if folderID != nil && *folderID != 0 && !slices.ContainsFunc(l.folders, func(f api.Folder) bool { return f.ID == *folderID }) {
+		return api.File{}, &api.Error{Op: "update file", Status: http.StatusNotFound, Detail: "Folder not found"}
 	}
 	if name != nil {
 		f.Name = *name

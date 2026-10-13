@@ -156,8 +156,11 @@ func (t *tree) discardSent(ids ...int) {
 
 // rebase follows a stored file renamed through the mount in every write that replaces
 // it, open or queued: a base is the file wherever it now lives.
+//
+// Open writes go first: one that queues meanwhile then records the moved base, or is
+// queued before the records are rebased.
 func (t *tree) rebase(id int, name string, folderID int) {
-	t.unsent.rebase(id, name, folderID)
+	defer t.unsent.rebase(id, name, folderID)
 	t.mu.Lock()
 	open := slices.Collect(maps.Keys(t.pendings))
 	t.mu.Unlock()

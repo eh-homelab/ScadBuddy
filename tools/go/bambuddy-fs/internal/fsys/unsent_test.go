@@ -819,3 +819,95 @@ func TestRemovingAnUploadedFileGoneFromTheLibraryClearsIt(t *testing.T) {
 		t.Fatalf("listed after: %v", got)
 	}
 }
+
+// renameDuringUpload queues x.3mf with the library down, then brings the library back
+// and, during the upload, renames x.3mf to the path to (relative to the mount) and runs
+// then.
+func renameDuringUpload(t *testing.T, lib *fakeLibrary, opts Options, to string, then func()) string {
+	t.Helper()
+	lib.down = true
+	dir, released := retrying(t, lib, opts)
+	if err := os.WriteFile(filepath.Join(dir, "x.3mf"), []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitRelease(t, released)
+	var once sync.Once
+	lib.locked(func() {
+		lib.down = false
+		lib.uploading = func(int) {
+			once.Do(func() {
+				if err := os.Rename(filepath.Join(dir, "x.3mf"), filepath.Join(dir, to)); err != nil {
+					t.Errorf("rename: %v", err)
+				}
+				then()
+			})
+		}
+	})
+	return dir
+}
+
+func TestAWriteRenamedToAnUnlistedNameAfterAFailedRenameReadsBack(t *testing.T) {
+	lib := newFakeLibrary()
+	state := t.TempDir()
+	logs(t)
+	dir := renameDuringUpload(t, lib, Options{StateDir: state}, "y.txt", func() {
+		lib.locked(func() { lib.failUpdates = 1 })
+	})
+	eventually(t, "the rename", func() bool { return libraryHas(lib, map[string]string{"0/y.txt": "new"}) })
+	eventually(t, "the queue to empty", func() bool { return len(queued(t, state)) == 0 })
+	path := filepath.Join(dir, "y.txt")
+	if info, err := os.Stat(path); err != nil || info.Size() != 3 || info.ModTime().Year() < 2000 {
+		t.Fatalf("stat: %v %v", info, err)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "new" {
+		t.Fatalf("read: %q %v", data, err)
+	}
+}
+
+func TestARenameIntoAFolderGoneMeanwhileGoesToTheTop(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.folder(4, "Top", 0)
+	state := t.TempDir()
+	log := logs(t)
+	renameDuringUpload(t, lib, Options{StateDir: state}, filepath.Join("Top", "x.3mf"), func() {
+		if err := lib.DeleteFolder(context.Background(), 4); err != nil {
+			t.Error(err)
+		}
+	})
+	eventually(t, "the queue to empty", func() bool { return len(queued(t, state)) == 0 })
+	if !libraryHas(lib, map[string]string{"0/x.3mf": "new"}) {
+		lib.locked(func() { t.Fatalf("%+v", lib.files) })
+	}
+	lib.locked(func() {
+		if lib.uploads != 1 {
+			t.Fatalf("uploads %d", lib.uploads)
+		}
+	})
+	if !strings.Contains(log.String(), "moved to the top level") {
+		t.Fatalf("log: %q", log.String())
+	}
+}
+
+func TestASentWriteGoneBeforeItsRenameIsSentAgain(t *testing.T) {
+	lib := newFakeLibrary()
+	state := t.TempDir()
+	logs(t)
+	renameDuringUpload(t, lib, Options{StateDir: state}, "y.3mf", func() {
+		lib.locked(func() {
+			lib.failUpdates = 1
+			lib.updating = func(n int) {
+				if n == 2 {
+					// Between the failed rename and its retry, the sent file is deleted.
+					lib.remove(101)
+				}
+			}
+		})
+	})
+	eventually(t, "the second upload", func() bool { return libraryHas(lib, map[string]string{"0/y.3mf": "new"}) })
+	eventually(t, "the queue to empty", func() bool { return len(queued(t, state)) == 0 })
+	lib.locked(func() {
+		if lib.uploads != 2 {
+			t.Fatalf("uploads %d", lib.uploads)
+		}
+	})
+}

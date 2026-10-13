@@ -755,7 +755,7 @@ func (t *tree) send(ctx context.Context, e *entry) {
 	var err error
 	if u := rec.Uploaded; u != nil {
 		// Sent on an earlier pass; only its rename is left.
-		got = api.File{ID: u.ID, Name: u.Name, FolderID: u.FolderID}
+		got = api.File{ID: u.ID, Name: u.Name, FolderID: u.FolderID, Size: rec.Size, Created: rec.Created}
 		sentAs.Name, sentAs.FolderID = u.Name, u.FolderID
 	} else {
 		var name string
@@ -895,6 +895,19 @@ func (t *tree) sendFailed(ctx context.Context, e *entry, rec record, cause error
 	slog.Warn("sending an unsent write failed", "path", e.dir, "folder", rec.FolderID, "name", rec.Name, "attempts", rec.Attempts+1, "err", cause)
 }
 
+// listedIn is whether a fresh listing of folderID has file id. A folder that is gone
+// has none of its files.
+func (t *tree) listedIn(ctx context.Context, id, folderID int) (bool, error) {
+	l, err := t.lib.List(ctx, folderID, true)
+	if err != nil {
+		if status(err) == 404 && folderID != 0 && t.folderGone(ctx, folderID) {
+			return false, nil
+		}
+		return false, err
+	}
+	return slices.ContainsFunc(l.Files, func(f api.File) bool { return f.ID == id }), nil
+}
+
 // folderGone is whether a listing succeeds without the folder.
 func (t *tree) folderGone(ctx context.Context, folderID int) bool {
 	l, err := t.lib.List(ctx, 0, false)
@@ -922,12 +935,26 @@ func (t *tree) sent(ctx context.Context, e *entry, sentAs record, got api.File, 
 		name, folder := changes(at.Name, rec.Name, at.FolderID, rec.FolderID)
 		moved, err := t.lib.UpdateFile(ctx, got.ID, name, folder)
 		if err != nil {
-			gone := status(err) == 404
+			// A 404 is the sent file gone (send the write again) or the folder it is to
+			// move to (move it to the top level instead).
+			resend, toTop := false, false
+			if status(err) == 404 {
+				switch present, lerr := t.listedIn(ctx, got.ID, at.FolderID); {
+				case lerr != nil:
+				case !present:
+					resend = true
+				case rec.FolderID != 0 && t.folderGone(ctx, rec.FolderID):
+					toTop = true
+					slog.Warn("the unsent write's folder is gone; it will be moved to the top level", "path", e.dir, "folder", rec.FolderID, "name", rec.Name, "file", got.ID)
+				}
+			}
 			uerr := q.update(e, func(r *record) {
 				r.Uploaded = &uploadedAs{ID: got.ID, FolderID: at.FolderID, Name: at.Name}
-				if gone {
-					// The sent file is gone: send the write again.
+				if resend {
 					r.Uploaded = nil
+				}
+				if toTop && r.FolderID == rec.FolderID {
+					r.FolderID = 0
 				}
 				r.Attempts++
 				r.LastError, r.LastAttempt = err.Error(), q.now().UTC()

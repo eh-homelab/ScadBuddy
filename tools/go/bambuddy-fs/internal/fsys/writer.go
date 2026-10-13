@@ -420,6 +420,10 @@ func (p *pending) upload(ctx context.Context) syscall.Errno {
 			p.refusal = err
 			return errno
 		}
+		// The bases as they are now: a rename during the upload may have moved one.
+		n.mu.Lock()
+		bases = slices.Clone(p.bases)
+		n.mu.Unlock()
 		return p.queue(cur, bases, over, err)
 	}
 	p.dirty, p.refusal = false, nil
@@ -441,6 +445,8 @@ func (p *pending) upload(ctx context.Context) syscall.Errno {
 	n.mu.Lock()
 	p.over = slices.DeleteFunc(p.over, func(e *entry) bool { return slices.Contains(over, e) })
 	if !conflict {
+		// The bases as they are now: a rename during the upload may have moved one.
+		bases = slices.Clone(p.bases)
 		p.bases = []base{baseOf(got, time.Time{})}
 	}
 	n.mu.Unlock()
