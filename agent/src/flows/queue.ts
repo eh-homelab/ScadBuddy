@@ -260,14 +260,16 @@ export class FlowQueue {
   /**
    * Every open run's own parked calls, for the person's aggregate read (spec §4.5: the
    * badge counts them, grouped by run). A child's are in `ai_pending_input` already.
+   * The 200 most recently moved runs: past that, the longest-waiting ones are left out.
+   * `updated_at` dates an entry that records no `since`.
    */
-  async ownEntries(): Promise<{ run: { id: string; name: string }; starter_session: string | null; entry: OwnEntry }[]> {
-    let runs: RunRow[]
+  async ownEntries(): Promise<{ run: { id: string; name: string; updated_at: string }; starter_session: string | null; entry: OwnEntry }[]> {
+    let runs: (RunRow & { updated_at: Date })[]
     try {
-      runs = await this.#sql<RunRow[]>`
-        SELECT id, name, status, workflow_run_id, started_by, waiting_on, steps FROM workflow_runs
+      runs = await this.#sql<(RunRow & { updated_at: Date })[]>`
+        SELECT id, name, status, workflow_run_id, started_by, waiting_on, steps, updated_at FROM workflow_runs
          WHERE status IN ('running', 'waiting') AND jsonb_array_length(waiting_on) > 0
-         ORDER BY updated_at LIMIT 200`
+         ORDER BY updated_at DESC LIMIT 200`
     } catch (err) {
       if ((err as { code?: string }).code === '42P01') return []
       throw err
@@ -276,7 +278,7 @@ export class FlowQueue {
       const session = run.started_by.session
       const steps = Array.isArray(run.steps) ? run.steps : []
       return run.waiting_on.map((w) => ({
-        run: { id: run.id, name: run.name },
+        run: { id: run.id, name: run.name, updated_at: run.updated_at.toISOString() },
         starter_session: typeof session === 'string' ? session : null,
         entry: ownEntry(run, steps, w),
       }))

@@ -25,7 +25,8 @@ import {
 import { formatBytes, formatDuration } from '../lib/format'
 import { temporalWorkflowUrl } from '../lib/temporal'
 import { useAsync } from '../lib/useAsync'
-import { usePollWhileUnavailable } from '../lib/usePollWhileUnavailable'
+import { usePollWhile, usePollWhileUnavailable } from '../lib/usePollWhileUnavailable'
+import { ATTENTION_POLL_MS } from '../agent/attention'
 
 const FIELD = 'w-full rounded-[6px] border border-line bg-bg px-2 py-1.5 text-[13px]'
 
@@ -44,6 +45,12 @@ export function WorkflowRunPage() {
   const queue = useAsync(() => api.getFlowRunQueue(id), [id], [flowRunTopic(id)])
   const settings = useAsync(() => api.getSettings(), []).data
   usePollWhileUnavailable(() => view.refresh(), FLOW_POLL_MS)
+  // A child's call is decided or ends in its own session, which no run topic announces.
+  usePollWhile(
+    (queue.data?.entries ?? []).some((e) => e.source === 'child'),
+    () => queue.refresh(),
+    ATTENTION_POLL_MS,
+  )
   const [notice, setNotice] = useState<string>()
 
   const run = view.data?.run ?? null

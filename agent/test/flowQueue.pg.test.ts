@@ -199,6 +199,26 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow run queue${TEST_DATABASE_URL ? '' : ` 
     expect((await pendingInput(m, other, { runs: true })).entries.map((e) => e.id)).not.toContain(flowRequestId(RUN, 'wr1', 'c1'))
   })
 
+  it("lists the most recently moved runs' calls first, and dates one with no since by its run", async () => {
+    await run()
+    // 200 runs that moved before RUN did, each waiting on a call with no `since`.
+    await db.sql`
+      INSERT INTO workflow_runs (id, definition_id, version, name, status, workflow_id, workflow_run_id, started_by, waiting_on, updated_at)
+      SELECT 'old-' || n, 'd1', 1, 'swap', 'waiting', 'flow-old-' || n, 'wr1', '{"kind": "browser"}'::jsonb,
+             '[{"call_id": "c1", "kind": "approval", "fn": "queue_print"}]'::jsonb, now() - n * interval '1 minute'
+      FROM generate_series(1, 200) n`
+    const moved = new Date(Date.now() - 30_000).toISOString()
+    await db.sql`UPDATE workflow_runs SET updated_at = ${moved}, waiting_on = jsonb_set(waiting_on, '{0}', (waiting_on -> 0) - 'since') WHERE id = ${RUN}`
+    const m = manager({ sql: db.sql, paths: await tempPaths() })
+    const own = (await pendingInput(m, undefined, { runs: true })).entries.filter((e) => e.run && e.session_id === null)
+    expect(own).toHaveLength(200)
+    const newest = own.find((e) => e.id === flowRequestId(RUN, 'wr1', 'c1'))
+    expect(newest?.created_at).toBe(moved)
+    // The run that moved longest ago is the one a full page leaves out.
+    expect(own.map((e) => e.id)).not.toContain(flowRequestId('old-200', 'wr1', 'c1'))
+    expect(own.every((e) => e.created_at > new Date(0).toISOString())).toBe(true)
+  })
+
   it('looks for the call and its turn only in the last events of the log, never the whole session', async () => {
     const toolu = `toolu_${randomUUID()}`
     const id = durableRequestId(child, 'run-1', toolu)

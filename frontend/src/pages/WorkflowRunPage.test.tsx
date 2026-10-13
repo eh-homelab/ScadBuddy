@@ -17,6 +17,8 @@ import { mockSettings, setMockSettings } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { WorkflowRunPage } from './WorkflowRunPage'
+import { ATTENTION_POLL_MS } from '../agent/attention'
+import { STALE_ENTRY_MESSAGE } from '../lib/flows'
 
 // #1057 — one flow run (plan 2026-10-09 Task F1): its steps, and its answers and
 // approvals, sent through `command()` with an Idempotency-Key.
@@ -163,6 +165,31 @@ describe('WorkflowRunPage', () => {
     await user.click(deny)
     await waitFor(() => expect(sent).toHaveLength(1))
     expect(sent[0]).toEqual({ id: 'durable:sess-child:wr-child:toolu_1', body: { kind: 'approval', decision: 'deny' } })
+  })
+
+  it("says a child's call already decided is out of date, not the agent's raw refusal", async () => {
+    server.use(
+      http.post('/api/v1/ai/pending-input/:id', () =>
+        HttpResponse.json({ detail: 'durable:sess-child is no longer waiting', reason: 'it was already approved' }, { status: 409 }),
+      ),
+    )
+    const { user } = render('run-escalated')
+    const card = await screen.findByRole('region', { name: 'Waiting for approval: print_output' })
+    await user.click(within(card).getByRole('button', { name: 'Deny' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(STALE_ENTRY_MESSAGE)
+  })
+
+  it("re-reads the queue while a child's call shows, which no run topic announces", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      render('run-escalated')
+      await screen.findByRole('region', { name: 'Waiting for approval: print_output' })
+      setFlowRunChildren('run-escalated', [])
+      await act(() => vi.advanceTimersByTimeAsync(ATTENTION_POLL_MS))
+      await waitFor(() => expect(screen.queryByRole('region', { name: 'Waiting for approval: print_output' })).toBeNull())
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it("offers no decision on a child's call past its timer", async () => {

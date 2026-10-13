@@ -1,4 +1,5 @@
 import { ApiError } from '../api/client'
+import { RespondError } from '../agent/respond'
 import type { FlowPending, FlowRunStatus, FlowSummary } from '../api/types'
 
 /** #1057 — how a flow run's status reads on the Workflows pages. */
@@ -71,6 +72,8 @@ export function hopActor(actor: string): string {
 
 /** The backend's 409 for an answer or decision the run has moved past (`flows/operations.py`). */
 export function isStaleEntry(error: unknown): boolean {
+  // A child session's call is answered through the agent, whose refusal is a RespondError.
+  if (error instanceof RespondError) return error.settled
   return error instanceof ApiError && error.status === 409 && (error.problem.type ?? '').endsWith('/stale-entry')
 }
 

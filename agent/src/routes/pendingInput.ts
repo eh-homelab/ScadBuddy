@@ -114,7 +114,8 @@ export async function pendingInput(
     prompt: entry.kind === 'answer' ? (entry.prompt ?? '') : '',
     requested_by: null,
     responders: ['browser'],
-    created_at: entry.since ?? new Date(0).toISOString(),
+    // An entry with no `since` of its own sorts by when its run last moved, not first.
+    created_at: entry.since ?? run.updated_at,
     expires_at: null,
     run: { id: run.id, name: run.name, hop: entry.hop, reason: entry.reason, starter_session },
   }))

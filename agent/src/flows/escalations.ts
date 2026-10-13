@@ -237,7 +237,6 @@ export class Escalations {
         waits_until: r.hop_until.toISOString(),
         step: childStep(steps, r.session_id),
         child_session: r.session_id,
-        reasoning: await childReasoning(this.#deps.sql, r.request_id),
       })
     }
     for (const own of await this.#flowOwn()) add(own.session, own.principal, own.call)
@@ -270,6 +269,12 @@ export class Escalations {
         await this.#deps.sql.begin(async (tx) => {
           claimed = await this.#claim(tx, session, calls)
           if (claimed.length === 0) return
+          // A child's reasoning, read only for the calls this turn carries.
+          await Promise.all(
+            claimed.map(async (c) => {
+              if (c.child_session !== undefined) c.reasoning = await childReasoning(this.#deps.sql, c.request_id)
+            }),
+          )
           const text = `${DELIVERY_PREAMBLE}\n\n${wrapUntrustedText('escalation', 'flow runs this session started', JSON.stringify(claimed))}`
           await withinHold(send(session, owner.owner, text, owner.tiers), this.#deps.claimHoldMs ?? CLAIM_HOLD_MS)
         })

@@ -1,5 +1,7 @@
-import { screen, within } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { act, screen, waitFor, within } from '@testing-library/react'
+import { describe, expect, it, vi } from 'vitest'
+import { ATTENTION_POLL_MS } from '../../agent/attention'
+import { setFlowRunChildren } from '../../mocks/features/flows'
 import { renderPage } from '../../test/utils'
 import { SessionFlowRuns } from './SessionFlowRuns'
 
@@ -34,5 +36,19 @@ describe('SessionFlowRuns', () => {
     expect(lines[0]).toMatch(/^queue_print: with this session until .+; outside the grant: print limit reached$/)
     expect(lines[1]).toBe('arrange: with you; outside the grant: no rule admits it')
     expect(lines[2]).toBe('print_output (in a session it talks to): with you; outside the grant: printer 5 is not in the grant')
+  })
+
+  it("re-reads the queues while a child's call is listed, which no run topic announces", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      renderPage(<SessionFlowRuns sessionId="sess-escalated" />)
+      const waiting = await screen.findByRole('list', { name: 'Waiting in runs started here' })
+      expect(waiting).toHaveTextContent('print_output (in a session it talks to)')
+      setFlowRunChildren('run-escalated', [])
+      await act(() => vi.advanceTimersByTimeAsync(ATTENTION_POLL_MS))
+      await waitFor(() => expect(screen.getByRole('list', { name: 'Waiting in runs started here' })).not.toHaveTextContent('print_output'))
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
