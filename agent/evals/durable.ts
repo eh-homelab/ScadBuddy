@@ -382,10 +382,9 @@ export function foldEvents(log: Logged[], ran: ReadonlyMap<string, Ran>): Pick<O
       if (text.trim()) finalText = text
     } else if (e.type === 'session.result') {
       result = {
-        subtype: 'success',
+        subtype: turnError ?? 'success',
         ...(typeof e.costUsd === 'number' ? { total_cost_usd: e.costUsd } : {}),
         ...(typeof e.turns === 'number' ? { num_turns: e.turns } : {}),
-        ...(turnError !== undefined ? { subtype: turnError } : {}),
       }
       turnResult = true
     } else if (e.type === 'error') {
