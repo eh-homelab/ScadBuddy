@@ -883,7 +883,15 @@ async def run_projects_worker(
         decisions = operation_activities(
             OperationStore(settings_store.pool, events=events),
             settings_store,
-            {kind.name: kind for kind in flow_kinds(store, keys[0], approval_key(settings))},
+            {
+                kind.name: kind
+                for kind in flow_kinds(
+                    store,
+                    keys[0],
+                    approval_key(settings),
+                    api=lambda: api_client(settings.api_internal_url),
+                )
+            },
         )
         api = api_client(settings.api_internal_url)
         routes = FlowRoutes(api)
