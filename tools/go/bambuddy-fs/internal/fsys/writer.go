@@ -218,7 +218,8 @@ func (h *pendingHandle) Flush(ctx context.Context) syscall.Errno {
 
 // Release ends the handle. The last one uploads anything still unsent: what a failed
 // flush could not send (one more try), or what a mapping wrote after the last close.
-// If that fails too, the contents are lost and a file never uploaded is dropped.
+// If that fails too and no handle has opened meanwhile, the contents are lost and a
+// file never uploaded is dropped.
 func (h *pendingHandle) Release(ctx context.Context) syscall.Errno {
 	p, n, t := h.p, h.p.node, h.p.node.tree
 	if t.released != nil {
@@ -234,6 +235,17 @@ func (h *pendingHandle) Release(ctx context.Context) syscall.Errno {
 		return 0
 	}
 	errno := p.upload(ctx)
+	n.mu.Lock()
+	// A handle opened during the upload keeps the pending write, unsent contents and
+	// all: its own flush tries again.
+	ended := p.handles == 0
+	if ended {
+		n.pending = nil
+	}
+	n.mu.Unlock()
+	if !ended {
+		return errno
+	}
 	if p.dirty {
 		cur := n.current()
 		slog.Error("upload failed again; the written contents are lost", "folder", cur.FolderID, "name", cur.Name)
@@ -241,14 +253,7 @@ func (h *pendingHandle) Release(ctx context.Context) syscall.Errno {
 			n.drop()
 		}
 	}
-	n.mu.Lock()
-	// A handle opened during the upload keeps the pending write.
-	if p.handles == 0 {
-		n.pending = nil
-	}
-	ended := p.handles == 0
-	n.mu.Unlock()
-	if ended && p.tmp != nil {
+	if p.tmp != nil {
 		_ = p.tmp.Close()
 		_ = os.Remove(p.tmp.Name())
 		p.tmp = nil

@@ -31,6 +31,9 @@ type fakeLibrary struct {
 	busy map[int]bool
 	// failUploads is how many uploads fail, with a 502, before they succeed.
 	failUploads int
+	// uploading, if set, is called at the start of each upload with its attempt number.
+	uploading func(attempt int)
+	attempts  int
 }
 
 // update is one UpdateFile or UpdateFolder call, as sent.
@@ -108,6 +111,13 @@ func (l *fakeLibrary) Download(_ context.Context, fileID int, w io.Writer) error
 }
 
 func (l *fakeLibrary) Upload(_ context.Context, folderID int, name string, r io.Reader) (api.File, error) {
+	l.mu.Lock()
+	l.attempts++
+	hook, attempt := l.uploading, l.attempts
+	l.mu.Unlock()
+	if hook != nil {
+		hook(attempt)
+	}
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return api.File{}, err

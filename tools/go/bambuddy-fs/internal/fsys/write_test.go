@@ -736,3 +736,48 @@ func TestRenameOntoAFolderIsEEXIST(t *testing.T) {
 		}
 	})
 }
+
+func TestAHandleOpenedDuringTheLastRetryKeepsTheWrite(t *testing.T) {
+	// The flush and the release's retry fail; a handle opens during the retry. With
+	// the library back, its close uploads everything; without, its close fails.
+	for _, fails := range []int{2, 4} {
+		lib := newFakeLibrary()
+		dir, released := releases(t, lib, Options{})
+		logs(t)
+		path := filepath.Join(dir, "a.3mf")
+		second := make(chan *os.File, 1)
+		lib.locked(func() {
+			lib.failUploads = fails
+			lib.uploading = func(attempt int) {
+				if attempt == 2 {
+					f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+					if err != nil {
+						t.Errorf("open during the retry: %v", err)
+					}
+					second <- f
+				}
+			}
+		})
+		if err := os.WriteFile(path, []byte("abc"), 0o644); !errors.Is(err, syscall.EIO) {
+			t.Fatalf("fails %d: %v", fails, err)
+		}
+		waitRelease(t, released)
+		f := <-second
+		if f == nil {
+			t.FailNow()
+		}
+		defer f.Close()
+		if _, err := f.Write([]byte("XYZ")); err != nil {
+			t.Fatal(err)
+		}
+		err := f.Close()
+		lib.locked(func() {
+			if fails == 2 && (err != nil || lib.uploads != 1 || string(lib.data[101]) != "abcXYZ") {
+				t.Fatalf("recovered: close %v uploads %d data %q", err, lib.uploads, lib.data)
+			}
+			if fails == 4 && (!errors.Is(err, syscall.EIO) || lib.uploads != 0) {
+				t.Fatalf("still failing: close %v uploads %d", err, lib.uploads)
+			}
+		})
+	}
+}
