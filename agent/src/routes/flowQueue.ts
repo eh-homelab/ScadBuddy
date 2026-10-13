@@ -36,8 +36,10 @@ export function registerFlowQueueRoutes(app: Hono, deps: FlowQueueRouteDeps): vo
 
 export const route: RouteModule = {
   register(app, deps) {
+    const sessions = deps.sessions
     registerFlowQueueRoutes(app, {
-      queue: deps.sessions?.queue,
+      // Read per request, never at registration: an app is built before its manager is used.
+      queue: sessions ? { forRun: (id) => sessions.queue.forRun(id) } : undefined,
       ready: ready(deps),
       remoteAddress: deps.remoteAddress,
       origins: deps.origins,
