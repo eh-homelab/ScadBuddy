@@ -1011,7 +1011,11 @@ export function PrintPicker({
                         />
                       )}
 
-                      <PrintSequenceStep value={printSequence} onChange={setPrintSequence} />
+                      <PrintSequenceStep
+                        value={printSequence}
+                        onChange={setPrintSequence}
+                        objects={check.current ? (check.verdict?.objects ?? null) : null}
+                      />
 
                       {given?.kind === 'output' && (
                         <SlicerDefaults
