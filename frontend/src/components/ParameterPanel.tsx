@@ -189,7 +189,10 @@ export function ParameterPanel({
         )}
 
         {current && (
-          <ul id={panelId} role="tabpanel" aria-labelledby={tabId(currentIndex)} className="divide-y divide-line/60">
+          // #2455 — the panel wraps the list: a role on the <ul> itself replaced its list
+          // role, and a screen reader lost "list, N items" for the tab.
+          <div id={panelId} role="tabpanel" aria-labelledby={tabId(currentIndex)}>
+          <ul className="divide-y divide-line/60">
             {current.params.map((param) => (
               <li key={param.name} data-param={param.name}>
                 <ParamWidget
@@ -208,6 +211,7 @@ export function ParameterPanel({
               </li>
             ))}
           </ul>
+          </div>
         )}
       </div>
 

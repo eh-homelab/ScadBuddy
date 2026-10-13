@@ -224,27 +224,13 @@ export function attentionDetail(c: PendingCounts | null): string {
 }
 
 /**
- * Puts the waiting count in front of the tab title (`(2) ScadBuddy`), so a background
- * tab shows it in the tab strip, and restores the title it found at zero. The title is
- * remembered rather than parsed back, so a page title that happens to start with
- * `(n) ` is never mistaken for this prefix. Off when embedded: inside Bambuddy's frame
- * the tab shows Bambuddy's title, and the frame's own is seen by nobody.
+ * The tab title: `base` (the page's own, #2454), with the waiting count in front of it
+ * (`(2) Prints · ScadBuddy`) so a background tab shows it in the tab strip. The count is
+ * left off when embedded: inside Bambuddy's frame the tab shows Bambuddy's title, and the
+ * frame's own is seen by nobody.
  */
-export function useAttentionTitle(waiting: number | null, enabled: boolean): void {
-  const bare = useRef<string | null>(null)
+export function useAttentionTitle(waiting: number | null, enabled: boolean, base: string): void {
   useEffect(() => {
-    if (enabled && waiting !== null && waiting > 0) {
-      bare.current ??= document.title
-      document.title = `(${attentionCount(waiting)}) ${bare.current}`
-    } else if (bare.current !== null) {
-      document.title = bare.current
-      bare.current = null
-    }
-  }, [waiting, enabled])
-  useEffect(
-    () => () => {
-      if (bare.current !== null) document.title = bare.current
-    },
-    [],
-  )
+    document.title = enabled && waiting !== null && waiting > 0 ? `(${attentionCount(waiting)}) ${base}` : base
+  }, [waiting, enabled, base])
 }

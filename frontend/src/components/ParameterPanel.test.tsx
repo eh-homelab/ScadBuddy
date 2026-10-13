@@ -94,6 +94,9 @@ describe('ParameterPanel', () => {
       await user.click(plate)
 
       const panel = screen.getByRole('tabpanel', { name: 'Plate' })
+      // #2455 — the panel holds a real list, so its parameters are "list, N items".
+      const list = within(panel).getByRole('list')
+      expect(within(list).getAllByRole('listitem').length).toBeGreaterThan(0)
       expect(panel).toHaveAttribute('aria-labelledby', plate.id)
       expect(plate).toHaveAttribute('aria-controls', panel.id)
       for (const tab of screen.getAllByRole('tab')) {

@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
+  type RefObject,
 } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router'
 import {
@@ -117,7 +118,11 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   // state: idle shows neither.
   const working = attention.running === true ? WORKING_LABEL : ''
   const toggleLabel = [working, waitingLabel, summaries].filter(Boolean).join(', ')
-  useAttentionTitle(attention.waiting, !embedded)
+  // #2454 — each page's tab title is its own heading, so history, tabs and a screen
+  // reader's announcement on navigation tell the pages apart.
+  const mainRef = useRef<HTMLElement>(null)
+  const pageTitle = usePageHeading(mainRef)
+  useAttentionTitle(attention.waiting, !embedded, pageTitle ? `${pageTitle} · ${APP_TITLE}` : APP_TITLE)
   const [focusKey, setFocusKey] = useState(0)
   const toggleButton = useRef<HTMLButtonElement>(null)
   // #2013 — below `md` the panel lies over the page (the aside's classes), so a dialog
@@ -212,12 +217,29 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
             }`}
             data-embedded={embedded ? 'true' : 'false'}
           >
-            <NavLink to="/" className="flex items-baseline gap-1.5 shrink-0" aria-label="ScadBuddy">
+            {/* #2454 — past the logo, the nav and a page's own actions, to its content. */}
+            <a
+              href="#main"
+              onClick={(event) => {
+                event.preventDefault()
+                mainRef.current?.focus()
+              }}
+              className="sr-only rounded-[6px] bg-surface-3 px-2.5 py-1 text-[13px] text-ink focus:not-sr-only"
+            >
+              Skip to main content
+            </a>
+            {/* Named by its visible text (#2454): an aria-label of "ScadBuddy" did not
+                contain the tagline beside it. */}
+            <NavLink to="/" className="flex items-baseline gap-1.5 shrink-0">
               <span className={`font-semibold tracking-tight ${embedded ? 'text-[13px]' : 'text-base'}`}>
                 Scad<span className="text-accent">Buddy</span>
               </span>
+              {/* A space between the two, as the name reads them: they sit apart by a gap. */}
               {!embedded && (
-                <span className="hidden text-[11px] text-faint sm:inline">OpenSCAD customizer</span>
+                <>
+                  {' '}
+                  <span className="hidden text-[11px] text-faint sm:inline">OpenSCAD customizer</span>
+                </>
               )}
             </NavLink>
 
@@ -312,7 +334,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
             </ErrorBoundary>
           )}
           <div className="relative flex min-h-0 flex-1">
-            <main className="min-h-0 min-w-0 flex-1 overflow-hidden">
+            <main id="main" ref={mainRef} tabIndex={-1} className="min-h-0 min-w-0 flex-1 overflow-hidden outline-none">
               {/* #361 — the last resort: one page that throws never blanks the app, and
                   leaving it clears the error. Reload, not an in-place retry: what lands
                   here is mostly a lazy chunk that failed, which React caches as failed. */}
@@ -374,4 +396,21 @@ function PanelFailed() {
       </Button>
     </div>
   )
+}
+
+const APP_TITLE = 'ScadBuddy'
+
+/** The text of the page's first `<h1>` inside `main`, following it as pages change it. */
+function usePageHeading(main: RefObject<HTMLElement | null>): string {
+  const [heading, setHeading] = useState('')
+  useEffect(() => {
+    const element = main.current
+    if (!element) return
+    const read = () => setHeading(element.querySelector('h1')?.textContent?.trim() ?? '')
+    read()
+    const observer = new MutationObserver(read)
+    observer.observe(element, { childList: true, subtree: true, characterData: true })
+    return () => observer.disconnect()
+  }, [main])
+  return heading
 }
