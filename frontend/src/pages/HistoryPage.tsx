@@ -135,10 +135,7 @@ export function HistoryPage() {
                 <ArrangedNext
                   output={arrangedOutput}
                   sent={wasSent(arrangedRow)}
-                  onPrint={() => {
-                    setQueueing(false)
-                    setPrintFor(arrangedOutput)
-                  }}
+                  onPrint={() => setPrintFor(arrangedOutput)}
                 />
               </div>
             )}
@@ -188,10 +185,10 @@ export function HistoryPage() {
                     })
                   }
                   onSend={() => setSendFor(output)}
-                  onPrint={() => {
-                    setQueueing(false)
-                    setPrintFor(output)
-                  }}
+                  onPrint={() => setPrintFor(output)}
+                  onDelete={() => setConfirmFor(output)}
+                  bambuddyUrl={bambuddyUrl}
+                  pinned={modelState.data?.libraries}
                   onQueue={() => {
                     setQueueing(true)
                     setPrintFor(output)
@@ -201,9 +198,6 @@ export function HistoryPage() {
                     outputsState.setData((outputsState.data ?? []).map((o) => (o.id === renamed.id ? renamed : o)))
                   }
                   lastPrint={lastPrints.get(output.id)}
-                  onDelete={() => setConfirmFor(output)}
-                  bambuddyUrl={bambuddyUrl}
-                  pinned={modelState.data?.libraries}
                   // Its plates show once, in the next-step card above (#2754 review).
                   platesAbove={arrangedRow?.id === output.id}
                 />
@@ -227,7 +221,11 @@ export function HistoryPage() {
         open={printFor !== undefined}
         source={printFor ? { kind: 'output', output: printFor } : undefined}
         queue={queueing}
-        onClose={() => setPrintFor(undefined)}
+        onClose={() => {
+          setPrintFor(undefined)
+          // A Queue lasts as long as its dialog: the next one opened is a Print unless asked.
+          setQueueing(false)
+        }}
         onRan={() => {
           outputsState.reload()
           printsState.refresh()
