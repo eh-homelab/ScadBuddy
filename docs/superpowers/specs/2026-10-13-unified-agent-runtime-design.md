@@ -265,7 +265,7 @@ What changes for each session operation:
     `agent/test/fixtures/agent_session_histories/`, as `AgentOperation` does
     (`workflows.ts:45`).
   - The workflow continues-as-new after every turn, which keeps histories small and makes
-    every new turn run the newest code. **Open decision D4.**
+    every new turn run the newest code (D4, decided).
 - **State.**
   - `owner`;
   - `home`: the host queue of the last turn, or none;
@@ -322,8 +322,10 @@ lack them (§2.3).
   - `scheduleToStartTimeout: 5s`. It is non-retryable; this is how a dead home is
     detected (§2.3).
   - `heartbeatTimeout: 20s`, with a heartbeat every 5 s while the turn runs or holds.
-  - `startToCloseTimeout: 2h`. A turn running longer is cut. This is new, since classic
-    has no wall clock; **open decision D5.**
+  - `startToCloseTimeout` = the setting `turn_max_seconds`, default 7200 (2 h). A turn
+    running longer is cut. This is new, since classic has no wall clock (D5, decided).
+    The workflow reads it, with the other settings below, through a `session_settings`
+    activity at the start of each turn, so a change applies from the next turn.
   - `retry: { maximumAttempts: 1 }`. As the guide says, the workflow never retries on the
     failed worker's queue.
 - **Recovery is a workflow loop**, at most 3 cycles per turn.
@@ -398,9 +400,12 @@ type WarmEntry = {
 - **Eviction.**
   - **Idle.** After `warm_idle_seconds` (default 600, the same 10 min as `SessionClients`,
     `agent/src/temporal/sessionClients.ts:5-27`).
-  - **LRU.** Past `warm_max_per_replica`, which defaults to **4**. An idle process is
-    about 206 MiB (E6) and the container's limit is 2Gi (§2.4). Raising either is **open
-    decision D3**.
+  - **LRU.** Past `warm_max_per_replica`, a setting with default **8** (D3, decided). An
+    idle process is about 206 MiB (E6), so 8 is about 1.6 GiB before remote MCP
+    connections. The agent container's limit rises from 2Gi (§2.4) to **8Gi** in a
+    clusters PR that lands with Phase 2. A replica reads the setting when it starts and on
+    `NOTIFY scadbuddy_settings`. A lowered cap evicts idle entries down to it, and never
+    one with a turn running.
   - **Explicit**, on:
     - handoff, archive, forget and end;
     - a credential, plugin or package change (`NOTIFY scadbuddy_warm_evict` with the
@@ -481,9 +486,9 @@ its timers are the durable spec's §6.6.
      `ai_input_responses`, the audit row and the events.
    - The held activity sees the row and returns the decision or answer to `canUseTool`.
      The turn goes on exactly as a classic turn does.
-4. **Release.** The hold ends after `park_hold_seconds`. The default is 300 s, which is
-   below the default approval expiry of 600 s and well below the default question expiry
-   of 3600 s; **open decision D2**. It also ends at shutdown. On release, the activity:
+4. **Release.** The hold ends after the setting `park_hold_seconds`, default 300 s (D2,
+   decided). That is below the default approval expiry of 600 s and well below the
+   default question expiry of 3600 s. It also ends at shutdown. On release, the activity:
    - closes the query (`q.close()`, so the process ends; E3 shows the transcript then
      carries a synthetic "interrupted" result for the parked call);
    - evicts the warm entry;
@@ -533,8 +538,9 @@ never did (`questions/service.ts:34-38`).
   (`stopTurns` `graceMs`, `main.ts:691-695`), and is then closed with `q.close()`, which
   gives E3's graceful synthetic result. The activity fails with `ShuttingDown`, which is
   retryable, and the new pods resume it as above. `Recreate` means every turn of every
-  session takes this path at each deploy. **Open decision D6** asks whether to move the
-  agent to a `RollingUpdate` once its queues are versioned.
+  session takes this path at each deploy. Under D6 (decided), the pod moves to
+  `RollingUpdate` once its queues are versioned (Phase 11). Then a deploy drains one
+  replica at a time and only that replica's turns move.
 
 ### 5.6 Interrupt
 
@@ -683,8 +689,8 @@ All of these are classic's, because the turn is classic's:
   with a free slot, which becomes the new home.
 - **One replica per session.** The workflow schedules one activity at a time, and the
   transcript-tail check (§5.3) catches a process that went stale.
-- **Capacity.** The slot count is `warm_max_per_replica` for each replica, so 12 warm
-  sessions across 3 replicas with the defaults.
+- **Capacity.** The slot count is `warm_max_per_replica` for each replica, so 24 warm
+  sessions across 3 replicas with the default of 8.
   - When every replica is full, `acquire_worker` evicts its least-recently-used *idle*
     slot, never one with a turn running, rather than refusing.
   - `NoCapacity` arises only when every slot on a replica is running a turn.
@@ -859,27 +865,38 @@ done. Their conversation exists only in workflow state.
   - that `q.close()` during a held `canUseTool` writes E3's synthetic result and not
     E4's (Task 5.4). Both are error results the continuation message overrides, so this
     only changes the wording the model sees.
-- **The `Recreate` deploy restarts every turn** (§5.5, D6).
-- **Warm memory.** 4 × about 206 MiB, plus remote MCP connections, against a 2Gi limit
-  (D3). The `agent.turn.spawn` panel shows whether the hit ratio justifies a larger cap.
+- **The `Recreate` deploy restarts every turn** (§5.5) until Phase 11 versions the queues
+  and moves the pod to `RollingUpdate` (D6).
+- **Warm memory.** 8 × about 206 MiB, plus remote MCP connections and the service itself,
+  against the 8Gi limit (D3). The memory request stays at 512Mi, so a node's scheduler sees
+  only the request. The clusters PR checks the nodes' allocatable memory for 3 × 8Gi
+  limits before it raises the limit.
 - **SDK `sessionStore` is `@alpha`** (`sdk.d.ts:1826-1834`). Classic has relied on it
   since #828 (`8ee7a89f4`), with eager flush. Task 1.1's pinned tests catch a behaviour change at a bump.
 - **The flow turn-tool hash bug** (`turnTools.ts:422`). It is independent of this design
   and filed as #2728, since flows keep that path.
 
-## 13. Open decisions for the user
+## 13. Decisions (the user, 2026-10-13)
 
-- **D1. Retire classic as a mode** (recommended, §10.1), or keep a Temporal-free fallback
-  driver that shares `TurnRunner`.
-- **D2. `park_hold_seconds` default.** 300 s is recommended: below the 600 s approval
-  expiry, so most approvals are answered warm, and the process is released after that.
-- **D3. Warm cache size.** 4 per replica at the current 2Gi limit is recommended. The
-  alternative is raising the agent's limit to 3Gi and the cap to 8. That is a clusters
-  change.
-- **D4. `AUTO_UPGRADE` plus continue-as-new per turn** (recommended), or Pinned with drain.
-- **D5. Turn wall clock** `startToCloseTimeout: 2h`, which is new; classic has none.
-- **D6.** Move the ScadBuddy pod to `RollingUpdate` once `library` and `agent-sessions`
-  are versioned, so a deploy stops restarting every turn at once. This is a clusters
-  change, outside this plan's PRs.
-- **D7. Seal `ai_session_entries`** (recommended, §6.2), so forgetting a session also
-  shreds the transcript in backups, as for durable payloads today.
+- **D1. Classic is retired as a mode** (§10.1). There is no Temporal-free driver.
+- **D2. `park_hold_seconds`** defaults to 300 s and is a setting (§5.4).
+- **D3. Warm cache.** `warm_max_per_replica` defaults to **8** and is a setting. The agent
+  container's memory limit rises to **8Gi** (a clusters PR, with Phase 2; §5.3).
+- **D4. `AUTO_UPGRADE` plus continue-as-new per turn** (§5.1).
+- **D5. Turn wall clock.** `turn_max_seconds` defaults to 7200 (2 h) and is a setting
+  (§5.2).
+- **D6. `RollingUpdate`**, once the pod's queues are versioned. Phase 11 versions them:
+  the agent's `agent-tools` and host queues, and the backend's `library` queue, which the
+  clusters manifest names as what blocks it (`scadbuddy.yaml:125-131`). The clusters PR
+  then lands.
+- **D7. `ai_session_entries` is sealed** (§6.2).
+
+Settings: `park_hold_seconds`, `warm_max_per_replica`, `warm_idle_seconds` and
+`turn_max_seconds` are `ai_settings` keys. They are read and written through one route
+group, `GET`/`PUT /api/v1/ai/settings/session-runtime` (a `src/routes/` module), and edited
+in Settings → Assistant beside Session limits. Each value is validated:
+
+- `park_hold_seconds` from 30 to 3600;
+- `warm_max_per_replica` from 0 to 32 (0 means no warm processes, so every turn is cold);
+- `warm_idle_seconds` from 60 to 86400;
+- `turn_max_seconds` from 300 to 86400.

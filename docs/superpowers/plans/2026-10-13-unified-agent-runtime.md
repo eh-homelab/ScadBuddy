@@ -13,7 +13,7 @@
 
 **Tech Stack:** TypeScript (agent, Claude Agent SDK 0.3.296 / Claude Code 2.1.296, `@temporalio/*` 1.24.0, postgres.js, vitest), Postgres, Temporal. Python only for reading old `DurableSession` histories during migration.
 
-**Spec:** `docs/superpowers/specs/2026-10-13-unified-agent-runtime-design.md` (read it first; §2 holds the measured facts, §13 the open decisions D1–D7).
+**Spec:** `docs/superpowers/specs/2026-10-13-unified-agent-runtime-design.md` (read it first; §2 holds the measured facts, §13 the user's decisions D1–D7).
 
 ## Global Constraints
 
@@ -24,7 +24,14 @@
 - **Workflow changes.** `AgentSession` changes after Phase 5 merges go behind `patched()`, and `agent/test/fixtures/agent_session_histories/` replays. `AgentOperation` is unchanged.
 - **Migrations.** An agent migration is a NEW file, `agent/src/db/migrations/$(date -u +%Y%m%dT%H%MZ)_<slug>.sql`. Never edit a merged one.
 - **Workflow ids.** They stay `session-<uuid>`. The workflow type is `AgentSession` on queue `agent-sessions`. `DurableSession` on `agent` is never served by the TypeScript worker.
-- **Defaults:** `park_hold_seconds` 300, `warm_idle_seconds` 600, `warm_max_per_replica` 4, `session_turn` heartbeat timeout 20 s with a heartbeat every 5 s, start-to-close 2 h, home schedule-to-start 5 s, 1 activity attempt and 3 recovery cycles. These are pending D2/D3/D5 and change only if the user rules otherwise.
+- **Settings (D2/D3/D5, decided).** These are `ai_settings` keys with defaults in code, read through `GET`/`PUT /api/v1/ai/settings/session-runtime` (Task 2.5):
+  - `park_hold_seconds` 300 (30–3600);
+  - `warm_max_per_replica` 8 (0–32);
+  - `warm_idle_seconds` 600 (60–86400);
+  - `turn_max_seconds` 7200 (300–86400).
+- **Fixed:** the `session_turn` heartbeat timeout is 20 s with a heartbeat every 5 s, the home schedule-to-start is 5 s, there is 1 activity attempt and 3 recovery cycles.
+- **Clusters.** Clusters PRs are on `eh-homelab/clusters` and follow that repo's conventions. Each is merged only together with the ScadBuddy phase that needs it. Never touch prod by hand.
+- **Shared database.** Test suites share the Postgres `sb-parity-pg` with other agents, so run one suite at a time and use a database of your own (`scadbuddy_test_unify`).
 - **Commits** end with:
   ```
   Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
@@ -346,7 +353,6 @@ export class WarmSessions {
 
 **Files:**
 - Modify: `agent/src/sessions/manager.ts` (`runTurn`, handoff, done, fork, `stopTurns`), `agent/src/harness/fallback.ts` (`runWithFallback` takes an `acquire`), `agent/src/main.ts` (construct `WarmSessions`, `LISTEN scadbuddy_warm_evict`), `agent/src/credentials.ts`, `agent/src/plugins/registry.ts`, `agent/src/plugins/packages/store.ts` (`NOTIFY scadbuddy_warm_evict, '*'` on change), `agent/src/sessions/forget.ts`
-- Create: `agent/src/db/migrations/<ts>_warm_settings.sql`, which inserts the defaults `warm_idle_seconds=600` and `warm_max_per_replica=4` into `ai_settings` `ON CONFLICT DO NOTHING`
 - Test: `agent/test/sessions.e2e.test.ts` (new cases), `agent/test/sessions.manager.test.ts`
 
 - [ ] **Step 1: Write the tests.** In `sessions.e2e.test.ts`:
@@ -396,7 +402,45 @@ CREATE TABLE ai_plugin_sessions (
 - [ ] **Step 2: Run them.** Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run them.** Expected: PASS.
-- [ ] **Step 5: Commit** with `fix(agent): close a warm process's plugin sessions; sweep a dead replica's`.  Open PR 2.
+- [ ] **Step 5: Commit** with `fix(agent): close a warm process's plugin sessions; sweep a dead replica's`.
+
+### Task 2.5: The session-runtime settings
+
+**Files:**
+- Create: `agent/src/routes/sessionRuntime.ts`, modelled on `agent/src/routes/sessionLimits.ts`: guarded by `uiRequestProblem`/`uiReadProblem`, each key audited as a `settings` row, errors as `{ detail }`. Also create `agent/src/sessions/runtimeSettings.ts`.
+- Create: `frontend/src/components/SessionRuntimeSetting.tsx`, beside `SessionLimitsSetting.tsx` in Settings → Assistant. Add its msw handlers in `frontend/src/mocks/features/assistantSessions.ts`, and `getSessionRuntime`/`putSessionRuntime` in `frontend/src/api/client.ts`.
+- Modify: `agent/src/main.ts` (`WarmSessions` reads `warm_max_per_replica` and `warm_idle_seconds` at start and on `NOTIFY scadbuddy_settings`; the PUT sends that notify)
+- Test: `agent/test/sessionRuntimeRoutes.test.ts`, `frontend/src/components/SessionRuntimeSetting.test.tsx`
+
+**Interfaces:**
+- Produces:
+  - `type RuntimeSettings = { park_hold_seconds: number; warm_max_per_replica: number; warm_idle_seconds: number; turn_max_seconds: number }`;
+  - `RUNTIME_DEFAULTS: RuntimeSettings = { park_hold_seconds: 300, warm_max_per_replica: 8, warm_idle_seconds: 600, turn_max_seconds: 7200 }`;
+  - `RUNTIME_BOUNDS`, as spec §13;
+  - `readRuntimeSettings(settings: SettingsRepo): Promise<RuntimeSettings>`.
+  - The endpoints are `GET /api/v1/ai/settings/session-runtime` → `RuntimeSettings` (the defaults when unset), and `PUT` with a partial body, validated by zod against the bounds and answering 422 `{ detail }` on a value out of range.
+- `WarmSessions.resize(max: number, idleMs: number)`. A lowered max evicts idle entries down to it, never one with a turn running.
+
+- [ ] **Step 1: Write the tests.**
+  - GET returns the defaults.
+  - PUT `{warm_max_per_replica: 2}` stores the value, writes one audit row, and a GET returns it.
+  - PUT `{park_hold_seconds: 5}` answers 422.
+  - A cross-origin PUT answers 403.
+  - `resize(1)` with two idle entries evicts one; with one running and one idle, it evicts the idle one.
+  - The frontend form shows the four fields and saves them.
+- [ ] **Step 2: Run them.** Run `cd agent && pnpm exec vitest run test/sessionRuntimeRoutes.test.ts test/warm.pg.test.ts`, then `cd frontend && pnpm exec vitest run src/components/SessionRuntimeSetting.test.tsx`. Expected: FAIL.
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run them.** Expected: PASS. Then run each package's full `lint`, `typecheck` and `test`, one suite at a time.
+- [ ] **Step 5: Commit** with `feat(agent): session runtime settings (park hold, warm cache, turn limit)`. Open PR 2.
+
+### Task 2.6: Clusters: the agent container's limit to 8Gi (D3)
+
+**Files (eh-homelab/clusters):**
+- Modify: `applications/scadbuddy/scadbuddy.yaml`, the `agent` container's `resources.limits.memory` from `2Gi` to `8Gi`, with a comment citing spec §5.3 and D3. The request is unchanged.
+
+- [ ] **Step 1: Read the clusters repo's conventions.** That means its `CLAUDE.md`/`README.md`, the PR template, how ScadBuddy image bumps land, and whether `applications/scadbuddy` changes need a verify workflow. Then check the nodes' allocatable memory in the manifests or inventory docs for three pods at 8Gi limits on separate nodes (`topologyKey: kubernetes.io/hostname`, `scadbuddy.yaml:179`). If the nodes cannot fit it, **stop and ask**.
+- [ ] **Step 2:** Branch, edit, and open the PR. Its body links ScadBuddy PR 2 and says it merges only after PR 2 merges.
+- [ ] **Step 3:** After ScadBuddy PR 2 merges, drive this PR to green and merge it by that repo's process. Never apply anything to the cluster by hand.
 
 ---
 
@@ -514,6 +558,7 @@ CREATE TABLE ai_plugin_sessions (
   - The handlers in spec §5.1.
   - `type SessionTurnInput = { sessionId: string; turnId: string; message?: Message; continuation?: Continuation; traceparent?: string }`.
   - `type SessionTurnResult = { status: 'done' | 'released' | 'failed' | 'interrupted' | 'budget_exhausted'; hostQueue: string; parked?: string[]; error?: string }`.
+  - `session_settings(): Promise<RuntimeSettings>`, a local activity reading `readRuntimeSettings` (Task 2.5). `local = proxyLocalActivities({ startToCloseTimeout: '10s' })`.
   - `type Continuation = { kind: 'restarted' } | { kind: 'parked'; calls: { requestId: string; toolUseId: string; tool: string; input: unknown; resolution: Resolution }[] }`.
 
 - [ ] **Step 1: Write the tests.** Use a stub `session_turn` activity that returns `done`:
@@ -550,11 +595,12 @@ const acquire = proxyActivities<Affinity>({ taskQueue: TASK_QUEUE, scheduleToClo
   retry: { initialInterval: '1s', maximumInterval: '10s', maximumAttempts: 10 } })
 
 async function runTurn(input: SessionTurnInput): Promise<SessionTurnResult> {
+  const settings = await local.session_settings()    // RuntimeSettings (Task 2.5), read per turn
   let continuation = input.continuation
   for (let cycle = 0; cycle < 3; cycle++) {
     if (!state.home) state.home = (await acquire.acquire_worker({ sessionId: input.sessionId })).hostQueue
     const onHome = proxyActivities<Turn>({ taskQueue: state.home, scheduleToStartTimeout: '5s',
-      heartbeatTimeout: '20s', startToCloseTimeout: '2h', retry: { maximumAttempts: 1 } })
+      heartbeatTimeout: '20s', startToCloseTimeout: `${settings.turn_max_seconds}s`, retry: { maximumAttempts: 1 } })
     try {
       return await onHome.session_turn({ ...input, ...(continuation ? { continuation } : {}) })
     } catch (err) {
@@ -609,7 +655,6 @@ async function runTurn(input: SessionTurnInput): Promise<SessionTurnResult> {
 **Files:**
 - Modify: `turnHost.ts` (hold timer `park_hold_seconds` → close and evict, return `released`; on a `parked` continuation, run approved calls with `runToolWithOutcome(..., gate: 'workflow')` and `callKey = requestId`, then push the outcome message), `workflow.ts` (wait for every released entry, then schedule with the continuation)
 - Modify: `agent/src/tools/command.ts:148`, `agent/src/tools/customizer.ts:209`, `agent/src/tools/flows.ts:307` (`Idempotency-Key: ctx.callKey ?? randomUUID()`), `agent/src/tools/registry.ts` (`ToolContext.callKey?: string`, set from `toolUseID` as `call:<session>:<toolUseID>` by the in-process server)
-- Create: `agent/src/db/migrations/<ts>_park_hold.sql` (`park_hold_seconds=300` default)
 - Test: `agent/test/sessionRelease.temporal.test.ts`, `agent/test/callKey.test.ts`
 
 - [ ] **Step 1: Write the tests**, with `park_hold_seconds=1`:
@@ -856,4 +901,49 @@ DELETE FROM ai_settings WHERE key = 'session_mode';
   - §10 → 6.1, 7, 10
   - §11 → 8
   - §12's unverified items → 5.4, 7.1, 9.2
-- **Decisions D1–D7** change only defaults or the order of phases. D1 is assumed in Phase 6; if the user keeps a fallback driver, Phase 6 keeps `TurnHost` callable without Temporal and drops Task 6.3's mode grep.
+- **Decisions D1–D7** were made by the user on 2026-10-13 (spec §13):
+  - D1 → Phase 6;
+  - D2/D3/D5 → Task 2.5 settings;
+  - D3 limit → Task 2.6;
+  - D4 → 5.1;
+  - D6 → Phase 11;
+  - D7 → Phase 3.
+
+---
+
+## Phase 11: Versioned queues, then `RollingUpdate` (D6) (PR 11 plus a backend PR, then a clusters PR)
+
+The ScadBuddy pod uses `Recreate` because the API polls the backend's `library` queue
+unversioned. The manifest says moving to RollingUpdate needs that queue versioned first
+(`eh-homelab/clusters` `applications/scadbuddy/scadbuddy.yaml:125-131`). After Phase 8,
+the agent polls `agent-tools`, `agent-tools.<hostname>` and `agent-sessions`; only the last
+is versioned (Task 5.1).
+
+### Task 11.1: Design check (gate)
+
+- [ ] **Write the check.** Write `docs/superpowers/plans/2026-10-13-unified-agent-runtime-phase-11.md`. It records how Worker Deployment versioning routes activity tasks on a queue that both of these schedule onto:
+  - a versioned workflow (`AgentSession`, `AgentOperation` once versioned);
+  - an unversioned one (`ProjectWorkflow` on `projects`, which runs tools on `agent-tools`).
+
+  Cite Temporal's Worker Versioning docs. Measure it on the dev server: one old-build and one new-build worker on `agent-tools`, with a new activity name only on the new build. Show where tasks from each kind of caller land.
+- [ ] **If the gate fails, stop and ask.** It fails if an unversioned caller's activity can reach an old-build worker that lacks the activity, and no documented setting prevents that.
+
+### Task 11.2: Version the agent's queues
+
+**Files:** `agent/src/temporal/worker.ts`, `agent/src/main.ts` (deployment `scadbuddy-agent` on every agent worker, the same build id), `agent/src/temporal/workflows.ts` (`AgentOperation` versioning behavior per Task 11.1's findings)
+- [ ] **Test** (`agent/test/temporal.versioning.temporal.test.ts`): a task with a new activity name never fails as unregistered while an old-build worker is polling.
+- [ ] **Implement, then run** the agent suite.
+- [ ] **Commit** with `feat(agent): version the agent's task queues`, and open PR 11.
+
+### Task 11.3: Version the backend's `library` queue
+
+**Files:** `backend/scadbuddy/workflows/client.py`, `backend/scadbuddy/workflows/housekeeping.py` (the `library` worker gets a deployment and build id like the render worker's `make_current`)
+- [ ] **Test:** the same property for a new sweep activity, in `backend/tests/test_library_versioning.py` (`requires_temporal`).
+- [ ] **Implement, then run** the backend suite: `uv run --frozen pytest -n auto`, one suite at a time, against a database of its own.
+- [ ] **Commit** with `feat(library): version the library queue`, and open its PR.
+
+### Task 11.4: Clusters: `RollingUpdate`
+
+**Files (eh-homelab/clusters):** `applications/scadbuddy/scadbuddy.yaml`
+- [ ] Change `strategy` to `RollingUpdate` with `maxUnavailable: 1, maxSurge: 0`. Pod anti-affinity means no surge node is guaranteed; check that against the nodes. Set `terminationGracePeriodSeconds: 60`, so `stopTurns` (12 s) and the worker's force stop (15 s) finish. Rewrite the comment block at `:125-131` to say why.
+- [ ] Open it only after both PRs from Tasks 11.2 and 11.3 have merged and deployed, then drive it to green and merge it by the clusters repo's process.
