@@ -453,6 +453,27 @@ describe('HistoryPage', () => {
     expect(await screen.findByRole('dialog', { name: 'Print' })).toBeInTheDocument()
   })
 
+  it('keeps the list up while it reads it again after an arrange (#2283)', async () => {
+    let slow = false
+    server.use(
+      http.get('/api/v1/models/name-keychain/outputs', async () => {
+        if (slow) await delay(3000)
+        return undefined // the default handler answers
+      }),
+    )
+    const { user } = render()
+    await user.click(within(await row('Reagan')).getByRole('checkbox', { name: 'Select Reagan' }))
+    await user.click(screen.getByRole('button', { name: 'Arrange selected (1)' }))
+    const arrange = await screen.findByRole('button', { name: 'Arrange' })
+    slow = true
+    await user.click(arrange)
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Arrange' })).not.toBeInTheDocument())
+    expect(screen.queryByText('Loading history')).not.toBeInTheDocument()
+    expect(screen.getByRole('status', { name: 'Arranged' })).toBeInTheDocument()
+    expect(screen.getAllByText('Reagan').length).toBeGreaterThan(0)
+    expect(await screen.findByText('Arranged from 1 output', {}, { timeout: 5000 })).toBeInTheDocument()
+  })
+
   it('says the result was saved here, with no link to where it already is (#2542)', async () => {
     const { user } = render()
     await user.click(within(await row('Reagan')).getByRole('checkbox', { name: 'Select Reagan' }))

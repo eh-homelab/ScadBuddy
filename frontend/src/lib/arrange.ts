@@ -87,6 +87,19 @@ export function arrangedNote(plates: number): string {
   return `Arranged onto ${plates} ${plates === 1 ? 'plate' : 'plates'}.`
 }
 
+/** #2283 — what `runArrange` says at each stage, in order. */
+export const ARRANGE_STAGES = {
+  starting: 'Starting the arrange…',
+  waiting: 'Waiting for a worker…',
+  laying: 'Laying out the objects…',
+  saving: 'Saving the arranged output…',
+} as const
+
+/** #2283 — the re-render stage's line; each output's own progress is listed under it. */
+export function rerenderStage(count: number): string {
+  return `Re-rendering ${count} ${count === 1 ? 'output' : 'outputs'} first…`
+}
+
 /**
  * spec 2026-09-27 §7 — lay objects out again, wait for the job, save its output. The
  * plate count is the job's: `plates` lists every plate of the new file and is empty
@@ -121,12 +134,14 @@ export async function runArrange(
   const within = opts.within ?? untraced
   let done = opts.arranged
   if (!done) {
+    // #2283 — every stage says itself, so the last message never stands for the next one.
+    opts.onProgress?.(ARRANGE_STAGES.starting)
     const started = await within(() => api.arrangeOutputs(body))
     signal?.throwIfAborted()
     const job = await waitForJob(started.id, {
       pollMs: opts.pollMs ?? 1000,
       signal,
-      onJob: (read) => opts.onProgress?.(read.status === 'running' ? 'Arranging…' : 'Waiting for a worker…'),
+      onJob: (read) => opts.onProgress?.(read.status === 'running' ? ARRANGE_STAGES.laying : ARRANGE_STAGES.waiting),
     })
     if (job.status === 'failed' || job.status === 'cancelled') {
       throw new Error(job.error ?? `The arrange was ${job.status}.`)
@@ -134,6 +149,7 @@ export async function runArrange(
     done = { jobId: job.id, plates: Math.max(1, (job.plates ?? []).length) }
     opts.onArranged?.(done)
   }
+  opts.onProgress?.(ARRANGE_STAGES.saving)
   const jobId = done.jobId
   const output = await within(() =>
     api.createOutput(slug, jobId, body.name ?? undefined, undefined, undefined, opts.saveKey),

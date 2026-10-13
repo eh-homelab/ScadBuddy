@@ -10,6 +10,7 @@ import {
   fromOutputs,
   GOAL_LABELS,
   needsBackfill,
+  rerenderStage,
   runArrange,
   sourceKey,
   type ArrangeGoal,
@@ -22,6 +23,7 @@ import { AddFiles, AddFromModel } from './ArrangeSourcePicker'
 import { BackfillProgress, BackfillPrompt } from './BackfillPrompt'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
+import { Spinner } from './ui/Spinner'
 
 type Props = {
   open: boolean
@@ -137,6 +139,16 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
   const [name, setName] = useState('')
   const [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState<string | null>(null)
+  /**
+   * #2283 — when the stage on screen began, and the clock it is read against: a stage
+   * that runs long shows how long, so a slow save does not read as nothing happening.
+   */
+  const stage = useRef<{ message: string | null; at: number }>({ message: null, at: 0 })
+  const [clock, setClock] = useState(0)
+  const say = (message: string | null) => {
+    if (stage.current.message !== message) stage.current = { message, at: Date.now() }
+    setProgress(message)
+  }
   const [asking, setAsking] = useState(false)
   const [backfill, setBackfill] = useState<Record<string, string>>({})
   const [failures, setFailures] = useState<string | null>(null)
@@ -234,6 +246,13 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
     running.current = null
   }, [open])
   useEffect(() => () => running.current?.abort(), [])
+  useEffect(() => {
+    if (!busy) return
+    setClock(Date.now())
+    const tick = setInterval(() => setClock(Date.now()), 1000)
+    return () => clearInterval(tick)
+  }, [busy])
+  const elapsed = busy && progress ? Math.max(0, Math.floor((clock - stage.current.at) / 1000)) : 0
 
   /** Read again every file or output whose read failed, as opening the dialog again does. */
   function readAgain() {
@@ -263,6 +282,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
           let usable = outputs.filter((output) => !unusable.includes(output))
           let skipped: string | undefined
           if (stale.length > 0) {
+            say(rerenderStage(stale.length))
             const { ready, failed } = await backfillOutputs(stale, {
               signal: controller.signal,
               within,
@@ -316,7 +336,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
           if (attempt.current?.body !== signature) attempt.current = { key: newRequestId(), body: signature }
           const current = attempt.current
           const arranged = await runArrange(slug, body, {
-            onProgress: setProgress,
+            onProgress: say,
             within,
             signal: controller.signal,
             saveKey: current.key,
@@ -358,7 +378,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
     } finally {
       if (running.current === controller) running.current = null
       setBusy(false)
-      setProgress(null)
+      say(null)
       setBackfill({})
     }
   }
@@ -491,8 +511,15 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
           className="sb-field"
         />
         <BackfillProgress outputs={outputs} progress={backfill} />
-        <p aria-live="polite" className="text-[12px] text-faint">
-          {progress}
+        <p className="flex items-center gap-2 text-[12px] text-faint">
+          {busy && <Spinner />}
+          <span aria-live="polite">{progress}</span>
+          {/* Not announced: a screen reader hears the stage, not every second of it. */}
+          {elapsed >= 3 && (
+            <span aria-hidden="true" data-testid="arrange-elapsed" className="sb-num">
+              {elapsed} s
+            </span>
+          )}
         </p>
         {(failures || error) && (
           <p role="alert" className="text-[13px] text-warn">

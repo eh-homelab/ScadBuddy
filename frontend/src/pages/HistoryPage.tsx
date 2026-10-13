@@ -214,7 +214,9 @@ export function HistoryPage() {
           setArranging(false)
           setPicked([])
           setArrangedOutput(arranged.output)
-          outputsState.reload()
+          // #2283 — in place: the list stays up and gains the new row, rather than
+          // dropping to "Loading history" until the read answers.
+          outputsState.refresh()
         }}
       />
     </div>

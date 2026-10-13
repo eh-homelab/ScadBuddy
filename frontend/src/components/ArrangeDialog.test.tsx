@@ -344,6 +344,8 @@ describe('ArrangeDialog', () => {
       )
       await user.click(screen.getByRole('button', { name: 'Re-render' }))
       expect(await screen.findByRole('list', { name: 'Re-render progress' })).toHaveTextContent('Nova')
+      // #2283 — the stage, above each output's own line.
+      expect(screen.getByText('Re-rendering 2 outputs first…')).toBeInTheDocument()
       await waitFor(() => expect(onArranged).toHaveBeenCalledOnce(), { timeout: 5000 })
       expect(backfill.mock.calls.map(([id]) => id).sort()).toEqual([nova.id, workshop.id].sort())
       expect(lastArrangeRequest()?.objects).toEqual([
@@ -517,9 +519,23 @@ describe('ArrangeDialog', () => {
       <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={vi.fn()} />,
     )
     await user.click(screen.getByRole('button', { name: 'Arrange' }))
-    const progress = await screen.findByText('Arranging…')
+    const progress = await screen.findByText('Laying out the objects…')
     expect(progress).toHaveAttribute('aria-live', 'polite')
     expect(screen.getByRole('button', { name: 'Arrange' })).toHaveAttribute('aria-busy', 'true')
+  })
+
+  it('says it is saving once the layout is done, and how long a stage has run (#2283)', async () => {
+    server.use(http.post('/api/v1/models/:slug/outputs', () => new Promise<never>(() => {})))
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={vi.fn()} />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    expect(await screen.findByText('Saving the arranged output…', {}, { timeout: 5000 })).toHaveAttribute(
+      'aria-live',
+      'polite',
+    )
+    expect(screen.queryByText('Laying out the objects…')).not.toBeInTheDocument()
+    expect(await screen.findByTestId('arrange-elapsed', {}, { timeout: 5000 })).toHaveTextContent(/^\d+ s$/)
   })
 
   it('stops waiting when it is closed, so the job is never saved behind its back', async () => {
