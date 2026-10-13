@@ -6,15 +6,20 @@ import { CataloguePage } from './pages/CataloguePage'
 
 // #2356 — every page but the catalogue is its own chunk, so the shell's entry chunk
 // carries no page's dependencies: three.js only loads with a page that draws in 3D.
-// The shell's Suspense (`AppShell`) shows while a page's chunk loads.
+// The shell's Suspense (`AppShell`) shows while a page's chunk loads: on a first visit.
+// A navigation does not blank the page it leaves, as `BrowserRouter` applies a location
+// change inside `startTransition` (react-router 8, unless `useTransitions={false}`), so
+// React keeps the old page up until the next one's chunk is in.
 const CustomizePage = lazy(async () => ({ default: (await import('./pages/CustomizePage')).CustomizePage }))
 const EditPage = lazy(async () => ({ default: (await import('./pages/EditPage')).EditPage }))
 const FlowPage = lazy(async () => ({ default: (await import('./pages/FlowPage')).FlowPage }))
 const HistoryPage = lazy(async () => ({ default: (await import('./pages/HistoryPage')).HistoryPage }))
 const LibraryPage = lazy(async () => ({ default: (await import('./pages/LibraryPage')).LibraryPage }))
 const PrintDetailPage = lazy(async () => ({ default: (await import('./pages/PrintDetailPage')).PrintDetailPage }))
-const PrintsPage = lazy(async () => ({ default: (await import('./pages/PrintsPage')).PrintsPage }))
-const TemplatePrintsPage = lazy(async () => ({ default: (await import('./pages/PrintsPage')).TemplatePrintsPage }))
+// Two pages of one module, so one chunk.
+const loadPrints = () => import('./pages/PrintsPage')
+const PrintsPage = lazy(async () => ({ default: (await loadPrints()).PrintsPage }))
+const TemplatePrintsPage = lazy(async () => ({ default: (await loadPrints()).TemplatePrintsPage }))
 const SettingsPage = lazy(async () => ({ default: (await import('./pages/SettingsPage')).SettingsPage }))
 const VersionsPage = lazy(async () => ({ default: (await import('./pages/VersionsPage')).VersionsPage }))
 const WorkflowRunPage = lazy(async () => ({ default: (await import('./pages/WorkflowRunPage')).WorkflowRunPage }))

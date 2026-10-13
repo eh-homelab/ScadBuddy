@@ -17,4 +17,15 @@ describe('App routes (#2356)', () => {
     expect(await screen.findByRole('heading', { name: 'Settings', level: 1 })).toBeInTheDocument()
     expect(three.loaded).toBe(false)
   })
+
+  // A lazy page is looked up by its export's name, which no type checks: one renamed
+  // would leave its route blank.
+  it.each([
+    ['/prints', 'Print history'],
+    ['/m/chunky-name-sign/prints', 'Prints'],
+  ])('renders %s through its lazy chunk', async (route, heading) => {
+    const { App } = await import('./App')
+    renderPage(<App />, { route })
+    expect(await screen.findByRole('heading', { name: heading, level: 1 })).toBeInTheDocument()
+  })
 })
