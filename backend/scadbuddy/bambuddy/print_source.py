@@ -70,9 +70,11 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class ReadFile:
     """The library file the filament step reads slots from, and the colors to show
-    in place of the file's own (a copy recolored for a run, #457)."""
+    in place of the file's own (a copy recolored for a run, #457). ``id`` is ``None``
+    for an output whose slots were read from its own 3MF, with no copy in Bambuddy
+    yet (#2720)."""
 
-    id: int
+    id: int | None
     own_colours: list[str] | None = None
 
 
@@ -455,6 +457,9 @@ class OutputSource(PrintPipeline):
     meta: OutputMeta
     #: The template's ``print_settings`` as they are now (``Catalogue.print_settings``).
     print_settings: dict[str, str] = field(default_factory=dict)
+    #: The 3MF's filament slots, once :meth:`read_local` has read them (#2720).
+    local: LocalFilaments | None = None
+    _local_unreadable: bool = field(default=False, repr=False)
 
     @property
     def subject(self) -> PrintSubject:
@@ -488,6 +493,34 @@ class OutputSource(PrintPipeline):
 
     async def fetch_3mf(self, client: BambuddyClient) -> bytes | None:
         return await read_3mf(self.store, self.meta)
+
+    async def file_to_read(self, client: BambuddyClient) -> ReadFile:
+        """The slots are the output's own 3MF's (#2720): reading them needs no copy in
+        Bambuddy, whose upload (the 3MF laid out for the printer) kept an output's first
+        dialog waiting ~20 s. Every copy of the output has the same slots. Only a 3MF
+        they cannot be read from is uploaded, for Bambuddy to read."""
+        if await self.read_local() is not None:
+            return ReadFile(None)
+        return await PrintPipeline.file_to_read(self, client)
+
+    async def file_read_already(self, client: BambuddyClient) -> ReadFile | None:
+        if await self.read_local() is not None:
+            return ReadFile(None)
+        return await PrintPipeline.file_read_already(self, client)
+
+    async def read_local(self) -> LocalFilaments | None:
+        """The 3MF's slots, read once (:attr:`local`); ``None`` when unreadable."""
+        if self.local is None and not self._local_unreadable:
+            payload = await read_3mf(self.store, self.meta)
+            try:
+                self.local = await asyncio.to_thread(read_filaments, io.BytesIO(payload))
+            except UnreadableFilamentsError as error:
+                logger.info(
+                    "could not read the output's filament slots; Bambuddy is asked instead",
+                    extra={"output_id": self.meta.id, "reason": str(error)},
+                )
+                self._local_unreadable = True
+        return self.local
 
 
 #: The ``file_type`` values the dialog prints from the library (spec 2026-09-28 §2). An

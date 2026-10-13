@@ -39,6 +39,7 @@ from tests.api.test_print_filaments import (
     prepared,
     queue_route,
     slice_routes,
+    slots_from_bambuddy,
 )
 from tests.api.test_send import (
     BASE,
@@ -875,10 +876,11 @@ def two_plate_output(client: TestClient, model: str, paths: DataPaths) -> str:
 
 @respx.mock
 def test_the_all_plates_filament_read_offers_every_plates_slots(
-    client: TestClient, model: str, paths: DataPaths
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Spec §2 step 1: one row per colour in the model. Plate 1 alone would never show
     slot 2, which only plate 2 uses."""
+    slots_from_bambuddy(monkeypatch)
     output_id = two_plate_output(client, model, paths)
     upload_route()
     split_plates_routes()
@@ -896,10 +898,11 @@ def test_the_all_plates_filament_read_offers_every_plates_slots(
 
 @respx.mock
 def test_the_all_plates_filament_read_reads_the_spools_once(
-    client: TestClient, model: str, paths: DataPaths
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Two plates, one spool inventory: the spools are the same for every plate, so an
     all-plates read asks for them once (#480)."""
+    slots_from_bambuddy(monkeypatch)
     output_id = two_plate_output(client, model, paths)
     upload_route()
     split_plates_routes()
@@ -1813,11 +1816,13 @@ def test_a_slot_error_is_the_checks_error_too(
     plan: list[dict[str, int]] | None,
     overrides: dict[str, Any],
     detail: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#1050: ``/check`` judged only what the choices decide, so a plan the run refuses
     by its slots (no spool, a spool Bambuddy lacks, an override it lacks) passed the
     check, and the run then uploaded the file and failed after its 202. The check now
     makes the run's own slot refusal, in the run's words."""
+    slots_from_bambuddy(monkeypatch)
     output_id = prepared(client, model)
     upload_route()
     run_routes()
@@ -1837,6 +1842,26 @@ def test_a_slot_error_is_the_checks_error_too(
     assert check.status_code == 200, check.text
     assert check.json()["errors"] == [run.json()["detail"]]
     assert not sliced.called
+
+
+@respx.mock
+def test_the_check_judges_an_outputs_slots_with_nothing_uploaded(
+    client: TestClient, model: str
+) -> None:
+    """#2720: the check read slots only from a copy the dialog's choices had uploaded,
+    and passed a plan it could not judge. An output's slots are its own 3MF's now, so
+    it judges them with no copy in Bambuddy and uploads nothing."""
+    output_id = prepared(client, model)
+    upload = upload_route()
+    run_routes()
+
+    check = client.post(
+        f"/api/v1/print/outputs/{output_id}/check", json={**body(), "filament_plan": {"slots": []}}
+    )
+
+    assert check.status_code == 200, check.text
+    assert check.json()["errors"] == ["Slot 1 has no spool chosen."]
+    assert not upload.called
 
 
 @respx.mock
