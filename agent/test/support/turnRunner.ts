@@ -3,6 +3,7 @@ import { createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk'
 import { ROOT_CONTEXT } from '@opentelemetry/api'
 import type { ApprovalRequest } from '../../src/harness/permissions.js'
 import { builtInPolicy } from '../../src/plugins/builtInTools.js'
+import { forwardForRun, type PluginForwarder } from '../../src/plugins/forwarder.js'
 import type { ClaimedSession, TurnPrincipal } from '../../src/sessions/manager.js'
 import { TurnRunner } from '../../src/sessions/turnRunner.js'
 import type { TurnContext } from '../../src/sessions/turnSlot.js'
@@ -16,9 +17,10 @@ import { browser, tempPaths } from './sessions.js'
  * turn can be assembled with switched on: a browser-owned session (so a question
  * gate), the in-process registry and http servers, a remote plugin that is a
  * Hindsight bank (so memory hooks), plugin packages, an own plugin and a model.
- * `resume` says whether the session already has a transcript.
+ * `resume` says whether the session already has a transcript; `pluginUrl` is
+ * the Hindsight plugin's configured endpoint.
  */
-export async function turnRunnerForTest(options: { resume?: boolean } = {}) {
+export async function turnRunnerForTest(options: { resume?: boolean; pluginUrl?: string } = {}) {
   const paths = await tempPaths()
   const now = new Date().toISOString()
   const session: ClaimedSession = {
@@ -54,17 +56,29 @@ export async function turnRunnerForTest(options: { resume?: boolean } = {}) {
     builtInTools: () => Promise.resolve(builtInPolicy([])),
     pluginPaths: [],
     ownPlugin: '/plugins/own',
+    // The real forwardForRun over a forwarder that, like the real one, gives
+    // every registration a loopback URL of its own.
     remotePlugins: () =>
-      Promise.resolve({
-        plugins: [{ name: 'hindsight', url: 'http://127.0.0.1:1/p/token', toolTiers: {}, disabledTools: [] }],
-        problems: [],
-        secrets: ['plugin-token'],
-        hindsight: {
-          plugin: { name: 'hindsight', url: 'https://hindsight.example/mcp/bank/', toolTiers: {}, disabledTools: [] },
-          address: '192.0.2.1',
-        },
-        release: () => {},
-      }),
+      Promise.resolve(
+        forwardForRun(
+          {
+            plugins: [
+              {
+                plugin: {
+                  name: 'hindsight',
+                  url: options.pluginUrl ?? 'https://hindsight.example/mcp/bank/',
+                  header: { name: 'Authorization', value: 'Bearer plugin-token' },
+                  toolTiers: {},
+                  disabledTools: [],
+                },
+                address: '192.0.2.1',
+              },
+            ],
+            problems: [],
+          },
+          { register: () => ({ url: `http://127.0.0.1:1/p/${randomUUID()}`, release: () => {} }) } as unknown as PluginForwarder,
+        ),
+      ),
     packagePlugins: () =>
       Promise.resolve({ paths: ['/plugins/a'], allowedPaths: ['/plugins/b'], builtinTools: ['Bash'], loaded: [], problems: [], release: () => {} }),
     httpRequest: {},

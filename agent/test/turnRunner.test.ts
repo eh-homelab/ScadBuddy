@@ -34,6 +34,23 @@ describe('TurnRunner', () => {
     expect(gateCalls.seen).toHaveLength(1)
   })
 
+  it('fingerprints an unchanged configuration the same on every assembly, and a moved plugin URL differently', async () => {
+    const { runner, session, principal } = await turnRunnerForTest()
+    const first = await runner.assemble(session, principal, createTurnSlot())
+    const second = await runner.assemble(session, principal, createTurnSlot())
+    // Each assembly registers its own loopback route, which the fingerprint never names.
+    expect(second.run.remotePlugins![0]!.url).not.toBe(first.run.remotePlugins![0]!.url)
+    expect(second.fingerprintParts).toEqual(first.fingerprintParts)
+    expect(first.fingerprintParts.plugins).toEqual([
+      { id: 'hindsight', url: 'https://hindsight.example/mcp/bank/', headerVersion: expect.stringMatching(/^[\w-]{43}$/) },
+    ])
+
+    const moved = await turnRunnerForTest({ pluginUrl: 'https://hindsight.example/mcp/other/' })
+    const elsewhere = await moved.runner.assemble(session, principal, createTurnSlot())
+    expect(elsewhere.fingerprintParts).not.toEqual(first.fingerprintParts)
+    expect(elsewhere.fingerprintParts.plugins[0]!.url).toBe('https://hindsight.example/mcp/other/')
+  })
+
   it('names every HarnessRun key either in the fingerprint or as per-turn', async () => {
     // `sessionId` (a first turn) and `resume` (a later one) never come together,
     // so both assemblies' keys together are every key a run can be given.

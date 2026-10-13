@@ -399,11 +399,9 @@ export class TurnRunner {
         credentialUpdatedAt: first ? String(first.epoch) : '',
         model: run.model ?? null,
         ownPlugin: ownPlugin !== undefined,
-        plugins: remotePlugins.map((p) => ({
-          id: p.name,
-          url: p.url,
-          headerVersion: forwarded?.keep?.(p.name)?.fingerprint ?? '',
-        })),
+        // Each plugin's configured endpoint and header version, never the loopback
+        // URL this assembly registered (forwarder.ts `pluginEndpoint`).
+        plugins: [...(forwarded?.endpoints ?? []), ...(packageServers?.endpoints ?? [])],
         packageHashes: (packages?.loaded ?? []).map((p) => p.contentHash),
         tiers: principal.tiers ? [...principal.tiers] : null,
         owner: `${session.owner.kind}:${session.owner.id}`,

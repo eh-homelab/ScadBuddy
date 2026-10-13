@@ -487,8 +487,28 @@ export type HarnessPlugin = {
   disabledTools: string[]
 }
 
+/**
+ * A plugin as a warm process's fingerprint names it (sessions/turnRunner.ts
+ * `FingerprintParts`): its configured endpoint, never the per-run loopback URL,
+ * and a hash of its header that moves when the header (name or secret) does and
+ * not otherwise. Not the route's `pluginFingerprint`, which also moves with the
+ * address a lookup returned, so a round-robin name would change it every turn.
+ */
+export type PluginEndpoint = { id: string; url: string; headerVersion: string }
+
+export function pluginEndpoint(plugin: Pick<RemotePlugin, 'name' | 'url' | 'header'>): PluginEndpoint {
+  const { header } = plugin
+  return {
+    id: plugin.name,
+    url: plugin.url,
+    headerVersion: header ? createHash('sha256').update(JSON.stringify([header.name, header.value])).digest('base64url') : '',
+  }
+}
+
 export type PluginsForRun = {
   plugins: HarnessPlugin[]
+  /** Each plugin's `pluginEndpoint`, in `plugins` order (forwardForRun sets it). */
+  endpoints?: PluginEndpoint[]
   problems: string[]
   /** Header values and their bare tokens, for redaction. */
   secrets: string[]
@@ -530,6 +550,7 @@ export function forwardForRun(loaded: LoadedPlugins, forwarder: PluginForwarder)
       toolTiers: plugin.toolTiers,
       disabledTools: plugin.disabledTools,
     })),
+    endpoints: registrations.map(({ plugin }) => pluginEndpoint(plugin)),
     problems: loaded.problems,
     secrets: loaded.plugins.flatMap(({ plugin }) => (plugin.header ? headerSecretVariants(plugin.header.value) : [])),
     ...(hindsight ? { hindsight } : {}),
