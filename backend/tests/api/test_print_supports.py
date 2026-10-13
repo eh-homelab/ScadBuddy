@@ -145,6 +145,26 @@ def test_bambuddy_failing_the_read_still_sends_the_prints_choice(
 
 
 @respx.mock
+def test_a_failed_read_names_a_short_cause(client: TestClient, model: str) -> None:
+    """Review of #2835: the warning gives Bambuddy's answer, not the client's whole
+    error text, which would repeat what the sentence already says."""
+    output_id = prepared(client, model)
+    routes()
+    respx.get(f"{BASE}/api/v1/slicer/preset-values").mock(
+        return_value=httpx.Response(502, json={"detail": "bad gateway"})
+    )
+
+    response = run_print(
+        client, output_id, json={**body(), "supports": {"enabled": True, "threshold_angle": 40}}
+    )
+
+    assert response.status_code == 200, response.text
+    [warning] = [w for w in response.json()["warnings"] if w["kind"] == "supports-not-applied"]
+    assert warning["message"].endswith(": Bambuddy failed the read (HTTP 502).")
+    assert "read the values of process preset" not in warning["message"]
+
+
+@respx.mock
 def test_a_choice_that_leaves_a_field_out_keeps_the_templates(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:

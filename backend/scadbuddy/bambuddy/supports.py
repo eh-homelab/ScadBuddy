@@ -101,7 +101,9 @@ async def support_overrides(
         try:
             read = await client.preset_values(process)
         except ApiError as error:
-            reason = error.detail
+            # Not ``error.detail``: that repeats the operation ("read the values of
+            # process preset …"), which the sentence around it already says.
+            reason = f"Bambuddy failed the read (HTTP {error.status})"
         else:
             if read.resolved:
                 values = read.values
