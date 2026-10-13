@@ -50,7 +50,7 @@ is LAN-only (README, "LAN only").
 ## 3. Shape
 
 ```
-bambuddy-fs mount --api http://scadbuddy.lan/api/v1 [--ro] [--all] [--attr-ttl 5s] <mountpoint>
+bambuddy-fs mount --api http://scadbuddy.lan/api/v1 [--ro] [--all] [--allow-other] [--attr-ttl 5s] <mountpoint>
 ```
 
 - Without `--all`, the mount lists what the library dialog lists by default
@@ -201,8 +201,8 @@ templates to verify"):
 - On a pull request it diffs `HEAD^1..HEAD`; in a merge group it diffs against the
   queue's base.
 - It does the Go work only when that diff touches `go.work*`, `vendor/**`,
-  `tools/go/**`, `scripts/generate-go-client.sh` or
-  `.github/workflows/go-module-ci.yml`.
+  `tools/go/**`, `scripts/generate-go-client.sh`,
+  `.github/workflows/go-module-ci.yml` or `Dockerfile`.
 - On push to main, on the schedule, or when the diff cannot be computed, it does the
   Go work every time.
 - Otherwise it writes "No Go changes" to the job summary and succeeds.
@@ -216,6 +216,45 @@ A spec change reaches the `go` job through the regen commit, which touches
 
 **Dependabot.** A `gomod` entry for both modules, grouping
 `github.com/microsoft/kiota-*` (forge's group) and `github.com/hanwen/go-fuse`.
+
+### 7.1 Container image
+
+`bambuddy-fs` is also published as `ghcr.io/eh-homelab/scadbuddy-bambuddy-fs`, built
+from the root `Dockerfile` like the other images.
+
+**The `bambuddy-fs` target**
+- **Build stage:** `golang:<go.work toolchain>-bookworm`, on `--platform=$BUILDPLATFORM`.
+  It cross-compiles with `GOOS`/`GOARCH` from `TARGETOS`/`TARGETARCH`,
+  `CGO_ENABLED=0` and `-mod=vendor` from the committed workspace vendor tree, so the
+  build never reaches the network.
+- **Runtime:** `debian:bookworm-slim` with `fuse3` and `ca-certificates`.
+  `ENTRYPOINT ["bambuddy-fs"]`, default `CMD ["mount", "--help"]`. It runs as root:
+  mounting needs `CAP_SYS_ADMIN` and `/dev/fuse` in a container anyway.
+
+**Running it**
+```
+docker run --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor:unconfined \
+  -v /mnt/bambuddy:/mnt/bambuddy:rshared ghcr.io/eh-homelab/scadbuddy-bambuddy-fs \
+  mount --api http://scadbuddy/api/v1 --allow-other /mnt/bambuddy
+```
+`--allow-other` (FUSE `allow_other`) lets processes other than the mounting one,
+such as the host and other containers, see the files. The README states it and the
+`rshared` propagation a sidecar needs.
+
+**Publishing.** A `bambuddy-fs` job in `build-image.yml`, on push to main and `v*`
+tags as the others are:
+- `linux/amd64,linux/arm64`;
+- the `type=gha` cache with `scope=bambuddy-fs,mode=min`;
+- tags from `docker/metadata-action` like the agent's.
+
+The package must be public, as the header of `build-image.yml` says of the others.
+
+**CI.** The `go` job (§7) also runs `docker build --target bambuddy-fs` and then
+`docker run --rm <image> --help` whenever it does the Go work. Its selector also
+matches `Dockerfile`, so a Dockerfile change rebuilds the image.
+
+**`.dockerignore`.** `tools/`, `go.work*` and `vendor/` must reach the build context;
+nothing ignores them.
 
 ## 8. Caching and consistency
 
