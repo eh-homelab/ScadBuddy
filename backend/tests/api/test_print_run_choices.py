@@ -1556,6 +1556,7 @@ def test_the_check_gives_the_runs_choice_refusal_word_for_word(
         "warnings": [],
         "rack": None,
         "nozzle_plan": None,
+        "objects": None,
     }
     assert not uploaded.called
     assert not sliced.called
