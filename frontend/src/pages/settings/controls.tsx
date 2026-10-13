@@ -112,7 +112,11 @@ export function FieldRow({
   const helpId = `${id}-help`
   const errorId = `${id}-error`
   // The control is whatever the caller rendered with `id` (an input, a select, the bytes
-  // input), so its description is set on it here rather than through every caller.
+  // input), so its description is set on it here rather than through every caller. It
+  // runs after every render of this row, and only then: a control that re-renders on its
+  // own and writes its own `aria-describedby` drops the help and error ids until the row
+  // renders again. No control here sets that prop; one that must should take the ids as
+  // props instead.
   useLayoutEffect(() => {
     const control = row.current?.querySelector<HTMLElement>(`#${CSS.escape(id)}`)
     if (!control) return

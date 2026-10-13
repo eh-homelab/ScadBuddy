@@ -98,12 +98,23 @@ export function useSectionNav(
     const update = () => setCurrent(sectionInView(element, nav.current, ids))
     update()
     element.addEventListener('scroll', update, { passive: true })
-    return () => element.removeEventListener('scroll', update)
+    // A section that loads above the one in view moves it without scrolling the pane.
+    const content = element.lastElementChild
+    const observer = content && typeof ResizeObserver !== 'undefined' ? new ResizeObserver(update) : null
+    if (content) observer?.observe(content)
+    return () => {
+      element.removeEventListener('scroll', update)
+      observer?.disconnect()
+    }
   }, [loaded, pane, nav, ids])
 
-  /** A section link's activation. */
-  const go = (id: string) => {
-    if (sectionId(hash) === id) showSection(pane.current, nav.current, id, true)
+  /**
+   * A section link's activation. With `inPlace` (the page has unsaved changes) it only
+   * scrolls and focuses: a pushed `#hash` would land above the leave guard's sentinel
+   * entry, so Back would pop into the sentinel and seem to do nothing.
+   */
+  const go = (id: string, { inPlace = false }: { inPlace?: boolean } = {}) => {
+    if (inPlace || sectionId(hash) === id) showSection(pane.current, nav.current, id, true)
     else {
       focusNext.current = true
       navigate({ hash: `#${id}` })
