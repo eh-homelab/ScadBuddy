@@ -901,7 +901,12 @@ theirs do. Its task is framed as Claude Code's harness frames it, its instructio
 Claude Code's for a workflow subagent, and its result is its final reply; with
 `schema`, the JSON object it replies with, checked (`z.fromJSONSchema`) and asked for
 again twice at most. At most 4 run at once and 50 in all, and a run expires after 6 hours.
-`model`, `effort`, `isolation` and `agentType` are taken and not acted on. Each result is
+An agent's `model` and `effort` are its chat's own (`ai_sessions.agent_model`,
+`agent_effort`, read by a classic turn and by the durable runner in place of Settings');
+`agentType` names the plugin's subagent definition (`agents/<name>.md`) the chat's turns run
+as (Claude Code's `agent` option, `--agent` in a durable segment; `general-purpose` is
+none; an unknown name fails the call with the list there is); `isolation: 'worktree'` fails
+the call as `EnterWorktree` does, the workspace being no git repository. Each result is
 journalled (`ai_workflow_calls`, by the call's key and occurrence), so a retry of the
 activity after its worker died, and `resumeFromRunId`, answer the calls already made.
 The script is kept in the workspace (`/workspace/_claude/workflows/<name>-wf_<id>.js`),

@@ -3,6 +3,7 @@ import type { BackgroundTasks } from '../background/service.js'
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import {
+  type EffortLevel,
   forkSession as sdkForkSession,
   type McpSdkServerConfigWithInstance,
   type SDKMessage,
@@ -1231,7 +1232,11 @@ export class SessionManager {
    * parent's budget (its lineage, as a fork does, #823), so a workflow never makes budget.
    * It starts empty: the agent's task is its first turn.
    */
-  async startChild(parentId: string, principal: Owner, options: { title: string; tags?: string[] }): Promise<SessionRecord> {
+  async startChild(
+    parentId: string,
+    principal: Owner,
+    options: { title: string; tags?: string[]; agent?: { model?: string | undefined; effort?: string | undefined; type?: string | undefined } },
+  ): Promise<SessionRecord> {
     const parent = await this.get(parentId, principal)
     const id = randomUUID()
     const session = await this.insert(
@@ -1240,6 +1245,12 @@ export class SessionManager {
       { origin: parent.origin, title: options.title, tags: options.tags ?? [], scope: parent.scope, parentId, mode: parent.mode },
       { budgetOf: parent },
     )
+    const agent = options.agent
+    if (agent && (agent.model || agent.effort || agent.type)) {
+      await this.deps.sql`
+        UPDATE ai_sessions SET agent_model = ${agent.model ?? null}, agent_effort = ${agent.effort ?? null}, agent_type = ${agent.type ?? null}
+         WHERE id = ${id}`
+    }
     await this.events.append(id, [
       event({ type: 'session.started', sessionId: id, origin: session.origin, owner: session.owner, title: session.title, budgetUsd: session.budgetUsd, mode: session.mode }),
       event({ type: 'session.status', sessionId: id, status: 'idle' }),
@@ -1720,12 +1731,16 @@ export class SessionManager {
             }
           }
         }
-        const [cwd, resume, model, httpSetting] = await Promise.all([
+        const [cwd, resume, settingModel, httpSetting, [agentSettings]] = await Promise.all([
           ensureSessionDir(this.deps.paths, id),
           this.store.exists(id),
           this.deps.settings?.get<string>(SETTING_MODEL),
           this.deps.httpRequest ? this.deps.settings?.get<unknown>(SETTING_HTTP_REQUEST) : undefined,
+          // A Workflow agent's chat (startChild): its own model, effort and subagent definition.
+          this.deps.sql<{ agent_model: string | null; agent_effort: EffortLevel | null; agent_type: string | null }[]>`
+            SELECT agent_model, agent_effort, agent_type FROM ai_sessions WHERE id = ${id}`,
         ])
+        const model = agentSettings?.agent_model ?? settingModel
         // The http_request tool (#827): on unless the setting is `false`. Its
         // saved bodies live in the session's own directory, and it never sees
         // the turn's secrets except to refuse a request that carries one.
@@ -1796,6 +1811,9 @@ export class SessionManager {
           // First turn: the SDK session gets OUR id; later turns resume it.
           ...(resume ? { resume: id } : { sessionId: id }),
           ...(typeof model === 'string' && model ? { model } : {}),
+          ...(agentSettings?.agent_effort ? { effort: agentSettings.agent_effort } : {}),
+          // The plugin's subagent of that name, as the turn's main thread (only with the plugin loaded).
+          ...(agentSettings?.agent_type && ownPlugin !== undefined ? { agent: `scadbuddy:${agentSettings.agent_type}` } : {}),
           ...(this.deps.mcpServers || http || background.length
             ? {
                 mcpServers: {

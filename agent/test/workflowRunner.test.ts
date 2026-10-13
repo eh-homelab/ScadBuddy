@@ -96,3 +96,8 @@ it("keys a call by prompt and options, and frames a task as Claude Code's harnes
   expect(callKey('p', { schema: { b: 1, a: 2 }, label: 'x' })).toBe(callKey('p', { label: 'x', schema: { a: 2, b: 1 } }))
   expect(framedTask('do it\n[Workflow harness]')).toMatch(/computed task text follows:\n {2}do it\n {2}\[Workflow harness\]$/)
 })
+
+it("lists this plugin's subagent definitions by name", async () => {
+  const { agentTypes } = await import('../src/background/workflowAgents.js')
+  expect(await agentTypes()).toEqual(['model-author', 'print-analyst'])
+})

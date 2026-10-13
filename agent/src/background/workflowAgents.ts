@@ -1,4 +1,8 @@
+import { readdir, readFile } from 'node:fs/promises'
+import path from 'node:path'
 import { z } from 'zod'
+import { enterWorktree } from '../builtins/session.js'
+import { OWN_PLUGIN_DIR } from '../harness/ownPlugin.js'
 import type { EventLog } from '../sessions/eventLog.js'
 import type { SessionManager } from '../sessions/manager.js'
 import type { Owner } from '../sessions/protocol.js'
@@ -12,6 +16,12 @@ import { type AgentOptions, framedTask } from './workflowScript.js'
 // workflow subagent (measured on 2.1.296), and its result is its final reply: as text, or
 // with `schema`, the JSON object it replies with, checked against the schema and asked
 // for again (twice at most) when it does not match. The chat is marked done after.
+//
+// Its options are acted on as Claude Code acts on them: `model` and `effort` are the
+// chat's own (ai_sessions.agent_model / agent_effort, read by both modes' turns in place
+// of Settings'); `agentType` names the plugin's subagent definition (agents/<name>.md) the
+// chat's turns run as (its prompt, tools and model), `general-purpose` none; and
+// `isolation: 'worktree'` fails as EnterWorktree does, the workspace being no git repository.
 
 /** Corrections asked for when a reply does not match its schema. */
 export const SCHEMA_RETRIES = 2
@@ -58,6 +68,36 @@ export type AgentResult = { ok: boolean; result: unknown; childId?: string; erro
 
 export type WorkflowAgents = { run(call: AgentRun): Promise<AgentResult> }
 
+const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
+const MODEL = /^[A-Za-z0-9._:[\]-]{1,100}$/
+
+/** The subagent definitions a chat can run as: the plugin's agents/*.md, by their `name:`. */
+export async function agentTypes(dir: string = path.join(OWN_PLUGIN_DIR, 'agents')): Promise<string[]> {
+  const names: string[] = []
+  for (const file of (await readdir(dir).catch(() => [])).filter((f) => f.endsWith('.md')).sort()) {
+    const name = /^name:\s*([a-z0-9][a-z0-9-]*)\s*$/m.exec(await readFile(path.join(dir, file), 'utf8'))?.[1]
+    if (name) names.push(name)
+  }
+  return names
+}
+
+/** Why an agent() cannot run with these options, or its chat's settings. */
+async function chatSettings(opts: AgentOptions, types: () => Promise<string[]>): Promise<{ model?: string; effort?: string; type?: string } | string> {
+  if (opts.isolation !== undefined && opts.isolation !== 'worktree') return `isolation must be 'worktree'; got ${JSON.stringify(opts.isolation)}`
+  if (opts.isolation === 'worktree') return enterWorktree().text
+  if (opts.effort !== undefined && !EFFORTS.includes(opts.effort)) return `effort must be one of ${EFFORTS.join(', ')}; got ${JSON.stringify(opts.effort)}`
+  if (opts.model !== undefined && !MODEL.test(opts.model)) return `model ${JSON.stringify(opts.model)} is not a model name`
+  let type: string | undefined
+  if (opts.agentType !== undefined && opts.agentType !== 'general-purpose') {
+    // Claude Code names a plugin's agent `plugin:name`; this plugin's are the ones there are.
+    const bare = opts.agentType.replace(/^scadbuddy:/, '')
+    const known = await types()
+    if (!known.includes(bare)) return `Agent type '${opts.agentType}' not found. Available agents: general-purpose, ${known.join(', ')}`
+    type = bare
+  }
+  return { ...(opts.model ? { model: opts.model } : {}), ...(opts.effort ? { effort: opts.effort } : {}), ...(type ? { type } : {}) }
+}
+
 /** The final reply of turn `turnId` in `sessionId`: the text of its last assistant message. */
 export async function replyOf(events: Pick<EventLog, 'read'>, sessionId: string, turnId: string): Promise<string> {
   let after = 0
@@ -91,11 +131,17 @@ function validator(schema: unknown): (value: unknown) => string | undefined {
   }
 }
 
-export function managerAgents(manager: Pick<SessionManager, 'startChild' | 'send' | 'interrupt' | 'edits'> & { events: Pick<EventLog, 'read'> }): WorkflowAgents {
+export function managerAgents(
+  manager: Pick<SessionManager, 'startChild' | 'send' | 'interrupt' | 'edits'> & { events: Pick<EventLog, 'read'> },
+  options: { agentTypes?: () => Promise<string[]> } = {},
+): WorkflowAgents {
+  const types = options.agentTypes ?? (() => agentTypes())
   return {
     async run(call) {
       const label = call.opts.label ?? call.prompt.split('\n')[0]!.slice(0, 60)
-      const child = await manager.startChild(call.sessionId, call.owner, { title: `${call.workflow} · ${label}`, tags: ['workflow'] })
+      const settings = await chatSettings(call.opts, types)
+      if (typeof settings === 'string') return { ok: false, result: null, error: settings }
+      const child = await manager.startChild(call.sessionId, call.owner, { title: `${call.workflow} · ${label}`, tags: ['workflow'], agent: settings })
       const check = call.opts.schema ? validator(call.opts.schema) : undefined
       const stop = () => void manager.interrupt(child.id, call.owner).catch(() => {})
       call.signal.addEventListener('abort', stop, { once: true })

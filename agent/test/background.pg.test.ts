@@ -212,6 +212,30 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
     const obj = await agents.run({ sessionId: parent, owner: browser, workflow: 'probe', prompt: 'give n', opts: { schema }, signal })
     expect(obj, JSON.stringify(obj)).toMatchObject({ ok: true, result: { n: 7 } })
     expect(scripted.runs.at(-1)!.prompt).toMatch(/^Your reply did not match the schema:/)
+
+    // Its options act as Claude Code's: the chat's own model, effort and subagent definition.
+    const typed = managerAgents(mm, { agentTypes: async () => ['model-author', 'print-analyst'] })
+    const tuned = await typed.run({
+      sessionId: parent,
+      owner: browser,
+      workflow: 'probe',
+      prompt: 'say hi',
+      opts: { model: 'claude-haiku-test', effort: 'low', agentType: 'scadbuddy:model-author' },
+      signal,
+    })
+    expect(tuned.ok).toBe(true)
+    const [own] = await db.sql<{ agent_model: string; agent_effort: string; agent_type: string }[]>`
+      SELECT agent_model, agent_effort, agent_type FROM ai_sessions WHERE id = ${tuned.childId!}`
+    expect(own).toEqual({ agent_model: 'claude-haiku-test', agent_effort: 'low', agent_type: 'model-author' })
+    expect(scripted.runs.at(-1)).toMatchObject({ model: 'claude-haiku-test', effort: 'low' })
+    expect(await typed.run({ sessionId: parent, owner: browser, workflow: 'p', prompt: 'x', opts: { agentType: 'nope' }, signal })).toMatchObject({
+      ok: false,
+      error: "Agent type 'nope' not found. Available agents: general-purpose, model-author, print-analyst",
+    })
+    expect(await typed.run({ sessionId: parent, owner: browser, workflow: 'p', prompt: 'x', opts: { isolation: 'worktree' }, signal })).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('Cannot create a worktree: not in a git repository'),
+    })
     mm.abortAll()
   })
 
