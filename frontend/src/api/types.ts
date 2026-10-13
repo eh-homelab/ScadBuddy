@@ -387,6 +387,17 @@ export interface SessionModeSetting {
 }
 
 /**
+ * Where a durable segment's subagents reach ScadBuddy's tools
+ * (`GET/PUT /api/v1/ai/settings/durable-subagents`, agent `src/routes/durableSubagents.ts`).
+ * `url` replaces agent-durable's own (null: the pod's loopback); `peers` are the addresses or
+ * CIDR ranges besides loopback the agent answers on that route (empty: loopback only).
+ */
+export interface DurableSubagentsSetting {
+  url: string | null
+  peers: string[]
+}
+
+/**
  * The long edge, in pixels, the assistant panel scales an attached image to before
  * sending it (`GET/PUT /api/v1/ai/settings/images`, agent `src/routes/imageSettings.ts`).
  * `min` and `max` are the bounds the agent accepts; the PUT sends `long_edge` only.

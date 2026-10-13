@@ -275,4 +275,12 @@ export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: str
     route: 'PUT /api/v1/ai/settings/session-mode',
     reason: 'Changes how every new session runs: an operator decision made in Settings, never by an agent.',
   },
+  {
+    route: 'GET /api/v1/ai/settings/durable-subagents',
+    reason: "Settings → Durable subagents: deployment wiring for the agent-durable worker, for the operator.",
+  },
+  {
+    route: 'PUT /api/v1/ai/settings/durable-subagents',
+    reason: 'Widens which network peers may call the agent: an operator decision made in Settings, never by an agent.',
+  },
 ]

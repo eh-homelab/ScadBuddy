@@ -625,7 +625,14 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   `session_mode`, the mode a new session gets when whoever starts it names none
   (`durable` unless it says `classic`), which Settings → Assistant session mode writes
   through `PUT /api/v1/ai/settings/session-mode`
-  ([`agent/src/routes/sessionMode.ts`](../../agent/src/routes/sessionMode.ts)). A
+  ([`agent/src/routes/sessionMode.ts`](../../agent/src/routes/sessionMode.ts));
+  `durable_subagents`, `{url, peers}`: the URL an `agent-durable` worker gives its
+  subagents for ScadBuddy's tools (null: its `SCADBUDDY_DURABLE_SUBAGENT_MCP_URL`), and
+  the addresses or CIDR ranges besides loopback the agent answers on
+  `/internal/durable/subagent-mcp` (empty: loopback only, a worker in the agent's pod),
+  which Settings → Durable subagents writes through
+  `PUT /api/v1/ai/settings/durable-subagents`
+  ([`agent/src/routes/durableSubagents.ts`](../../agent/src/routes/durableSubagents.ts)). A
   durable session needs Temporal, the KEK and an `agent-durable` worker polling the
   `agent` queue; without them a session whose mode came from this default runs classic
   and says why (`session.started` `modeFallback`, `mode_fallback` on `POST /sessions`

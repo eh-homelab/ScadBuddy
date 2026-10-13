@@ -582,8 +582,9 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   09-27 template-pipelines spec makes Postgres and Temporal required.
 - `agent-durable/` — durable agent sessions (#1056, spec 2026-10-01 §6), Python on
   `temporalio-claude-agent-sdk` (ai-integrations#33, git-pinned by SHA in `uv.lock`, never
-  vendored), shipped as the Dockerfile's `agent-durable` target, a sidecar trusted like
-  `agent`. `secrets.py`/`credentials.py` open `ai_credentials` as the agent does (open
+  vendored), shipped as the Dockerfile's `agent-durable` target, trusted like `agent`
+  (clusters runs it as a Deployment of its own; its subagents reach the agent's
+  `/internal/durable/subagent-mcp` from the peers `routes/durableSubagents.ts` stores). `secrets.py`/`credentials.py` open `ai_credentials` as the agent does (open
   only; the agent alone writes it); `check_cli_version.py` is the build's bundled-CLI
   check (Python `claude-agent-sdk` pinned exactly; it bundles a Claude Code of its own,
   not the TypeScript SDK's). `python -m scadbuddy_durable` serves `/healthz` on 8082
