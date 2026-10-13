@@ -1731,6 +1731,7 @@ def test_the_check_says_a_spool_is_not_loaded_and_the_plan_mixes_materials(
         "slots": [{"slot_id": 1, "spool_id": 9}, {"slot_id": 2, "spool_id": 10}]
     }
     plain = client.post(f"/api/v1/print/outputs/{output_id}/check", json=request)
+    assert plain.status_code == 200, plain.text
     kinds = {w["kind"] for w in plain.json()["warnings"]}
     assert not kinds & {"not-loaded", "mixed-materials"}
 

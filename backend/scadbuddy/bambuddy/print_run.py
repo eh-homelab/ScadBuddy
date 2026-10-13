@@ -812,7 +812,7 @@ def plan_warnings(
     inventory: Inventory,
     *,
     printer_id: int,
-    printer_name: str | None = None,
+    printer_name: str | None,
     status: PrinterStatus | None,
 ) -> list[FilamentWarning]:
     """What the chosen spools themselves say, for Checks (#2722): a spool not loaded in
@@ -840,12 +840,14 @@ def plan_warnings(
     ]
     by_id = {option.spool_id: option for option in options.spools}
     materials: list[str] = []
+    families: set[str] = set()
     for slot in plan.slots:
         tray = tray_material_colour(slot.spool_id, status)
         option = by_id.get(slot.spool_id)
         material = tray[0] if tray else option.material if option else None
-        if material and family(material) not in {family(seen) for seen in materials}:
+        if material and family(material) not in families:
             materials.append(material)
+            families.add(family(material))
     if len(materials) > 1:
         named = ", ".join(family(material) for material in materials[:-1])
         found.append(

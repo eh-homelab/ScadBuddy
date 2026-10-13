@@ -49,7 +49,9 @@ def plan(*spool_ids: int) -> FilamentPlan:
 
 def kinds(*spool_ids: int, assignments: list[SpoolAssignment]) -> list[tuple[str, int | None]]:
     shelf = [spool(1), spool(2, "TPU 95A"), spool(3, "PLA Matte", "Green"), spool(4)]
-    found = plan_warnings(plan(*spool_ids), (shelf, assignments), printer_id=1, status=None)
+    found = plan_warnings(
+        plan(*spool_ids), (shelf, assignments), printer_id=1, printer_name=None, status=None
+    )
     return [(warning.kind, warning.slot_id) for warning in found]
 
 
@@ -62,6 +64,7 @@ def test_the_mosaic_plan_of_2461_is_flagged_twice() -> None:
             [loaded(1, 0), loaded(3, 1)],
         ),
         printer_id=1,
+        printer_name=None,
         status=None,
     )
     assert [(w.kind, w.slot_id) for w in found] == [("not-loaded", 2), ("mixed-materials", None)]
@@ -89,7 +92,9 @@ def test_a_tray_chosen_as_itself_is_loaded_and_counts_by_its_material() -> None:
         ]
     )
     shelf = [spool(2, "TPU 95A")]
-    found = plan_warnings(tray_plan, (shelf, [loaded(2, 3)]), printer_id=1, status=status)
+    found = plan_warnings(
+        tray_plan, (shelf, [loaded(2, 3)]), printer_id=1, printer_name=None, status=status
+    )
     assert [w.kind for w in found] == ["mixed-materials"]
     assert found[0].message.startswith("This print mixes TPU and PLA.")
 
@@ -115,6 +120,7 @@ def test_a_spool_the_inventory_lacks_or_archived_says_nothing_here() -> None:
         plan(1, 2, 99),
         ([spool(1), archived], [loaded(1, 0)]),
         printer_id=1,
+        printer_name=None,
         status=None,
     )
     assert found == []
