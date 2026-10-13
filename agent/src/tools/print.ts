@@ -81,7 +81,11 @@ export function sourceOf(args: { output_id?: string | undefined; library_file_id
 }
 
 /** How a source is named in an approval line, a title or an error. */
-export /** #1899 — a print's supports, as its approval line names them. */
+export function sourceName(args: { output_id?: string | undefined; library_file_id?: number | undefined }): string {
+  return args.library_file_id !== undefined ? `library file ${args.library_file_id}` : `output ${args.output_id ?? ''}`
+}
+
+/** #1899 — a print's supports, as its approval line names them. */
 function supportsPhrase(
   supports: { enabled: boolean; type?: string; threshold_angle?: number; on_build_plate_only?: boolean } | undefined,
 ): string {
@@ -92,10 +96,6 @@ function supportsPhrase(
     `${supports.threshold_angle === undefined ? '' : ` at ${supports.threshold_angle}°`}` +
     `${supports.on_build_plate_only ? ' on the build plate only' : ''}`
   )
-}
-
-function sourceName(args: { output_id?: string | undefined; library_file_id?: number | undefined }): string {
-  return args.library_file_id !== undefined ? `library file ${args.library_file_id}` : `output ${args.output_id ?? ''}`
 }
 
 /** The folder a library move or copy names, in its approval line (#2670). */
@@ -722,7 +722,7 @@ export const printTools: Tool[] = [
             .max(90)
             .optional()
             .describe('Degrees from vertical; omit for the template\'s, else the preset\'s'),
-          on_build_plate_only: z.boolean().optional(),
+          on_build_plate_only: z.boolean().optional().describe("Omit for the template's, else the preset's"),
         })
         .optional()
         .describe(

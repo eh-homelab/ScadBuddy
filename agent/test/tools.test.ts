@@ -625,7 +625,9 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       'with normal supports at 40° on the build plate only',
     )
     expect(t.summarize({ ...args, supports: { enabled: false } })).toContain('without supports')
+    // Only what was given is named: no type, angle or build-plate clause (#2840 review).
     expect(t.summarize({ ...args, supports: { enabled: true } })).toContain(', with supports')
+    expect(t.summarize({ ...args, supports: { enabled: true } })).not.toMatch(/supports (at|on)|tree|normal/)
   })
 
   it('sends a new request_id per call, so the same choices again are a new print (#470)', async () => {
