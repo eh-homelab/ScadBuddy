@@ -137,11 +137,17 @@ and answers it exactly as the POST would have.
   own response: 200 with its body, or its refusal problem (429/503 queue full, 500
   unstartable, and so on). The client cannot tell it from a POST that answered at once.
 - **Still waiting:** 202 with the same `CommandAccepting` body.
+- **Pacing.** The follow already waits up to `FOLLOW_WAIT` on the server, so a client
+  follows again at once after a "still waiting", with only its own small polling floor.
+  It does not also wait `Retry-After`, which would wait twice per round. `Retry-After`
+  is sent for HTTP's sake, and for a client that does not long-poll.
 - **`NOT_FOUND` (the Update or the execution):** 409, type
   `https://scadbuddy.dev/problems/command-resend`. This happens when:
   - the Update was never durably admitted (an admitted Update lives in the server's
     registry, not in history, until the worker accepts it);
-  - the run closed and rejected it (§2.3);
+  - the run closed and rejected it (§2.3). The POST's own `_accepted` loop waits out a
+    closing run and starts the next one before it answers. A followed request cannot
+    do that, so it takes one extra round trip, the re-send, that a fast POST does not;
   - the execution is gone.
 
   The client then sends the **original POST again with the same key**. That is exactly
@@ -191,7 +197,9 @@ web client reads only `job_id`.
 ### 5.5 Observability
 
 - A 202 `accepting` is not an error: no error span and no 5xx in the access log. It
-  still counts as `render_accept_pending` (and the per-kind equivalents).
+  still counts as `render_accept_pending` (and the per-kind equivalents), once per
+  request, not per follow. That metric's help text (`core/metrics.py`), which says
+  "answered 503 command-still-accepting", changes with it to cover the 202.
 - The follow route gets its own server span, linked to the POST's trace through the
   render's `traceparent`.
 
@@ -199,8 +207,10 @@ web client reads only `job_id`.
 
 Each step is its own PR, stacked on this one.
 
-1. **Render submit** (`POST /models/{slug}/render`, and Arrange, which shares
-   `RenderService._answer`):
+1. **Render submit** (`POST /models/{slug}/render`). Arrange shares
+   `RenderService._answer` but is not opted in at this step: its route keeps the 503
+   re-send, so §5.3 needs no Arrange row yet. Opting it in later means adding a row
+   whose response is Arrange's own `RenderAccepted`-shaped job answer.
    - `start_command`'s `accept_within` and `CommandAcceptingError`
    - `CommandAccepting` and the follow route, with the render adapter
    - the supersede in the follow
