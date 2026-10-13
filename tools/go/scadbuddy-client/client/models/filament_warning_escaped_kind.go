@@ -15,6 +15,7 @@ const (
 	NOPROCESS_FILAMENTWARNING_KIND
 	NOTINSTALLED_FILAMENTWARNING_KIND
 	PLATEDIFFERS_FILAMENTWARNING_KIND
+	PLATENOTLISTED_FILAMENTWARNING_KIND
 	HFUNSUPPORTED_FILAMENTWARNING_KIND
 	HFMOUNTED_FILAMENTWARNING_KIND
 	RACKUNSAFEMATERIAL_FILAMENTWARNING_KIND
@@ -23,7 +24,7 @@ const (
 )
 
 func (i FilamentWarning_kind) String() string {
-	return []string{"not-loaded", "low-filament", "no-choice", "no-preset", "no-fan-out", "mixed-sizes", "no-process", "not-installed", "plate-differs", "hf-unsupported", "hf-mounted", "rack-unsafe-material", "rack-left-to-bambuddy", "rack-manual-partial"}[i]
+	return []string{"not-loaded", "low-filament", "no-choice", "no-preset", "no-fan-out", "mixed-sizes", "no-process", "not-installed", "plate-differs", "plate-not-listed", "hf-unsupported", "hf-mounted", "rack-unsafe-material", "rack-left-to-bambuddy", "rack-manual-partial"}[i]
 }
 
 func ParseFilamentWarning_kind(v string) (any, error) {
@@ -47,6 +48,8 @@ func ParseFilamentWarning_kind(v string) (any, error) {
 		result = NOTINSTALLED_FILAMENTWARNING_KIND
 	case "plate-differs":
 		result = PLATEDIFFERS_FILAMENTWARNING_KIND
+	case "plate-not-listed":
+		result = PLATENOTLISTED_FILAMENTWARNING_KIND
 	case "hf-unsupported":
 		result = HFUNSUPPORTED_FILAMENTWARNING_KIND
 	case "hf-mounted":

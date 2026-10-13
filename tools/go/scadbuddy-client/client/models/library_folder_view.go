@@ -20,6 +20,10 @@ type LibraryFolderView struct {
 	name *string
 	// The parent_id property
 	parent_id LibraryFolderView_LibraryFolderView_parent_idable
+	// The project_id property
+	project_id LibraryFolderView_LibraryFolderView_project_idable
+	// The project_name property
+	project_name LibraryFolderView_LibraryFolderView_project_nameable
 }
 
 // LibraryFolderView_LibraryFolderView_file_count composed type wrapper for classes int32, LibraryFolderView_file_countMember1able
@@ -194,6 +198,178 @@ func (m *LibraryFolderView_LibraryFolderView_parent_id) SetLibraryFolderViewPare
 	m.libraryFolderView_parent_idMember1 = value
 }
 
+// LibraryFolderView_LibraryFolderView_project_id composed type wrapper for classes int32, LibraryFolderView_project_idMember1able
+type LibraryFolderView_LibraryFolderView_project_id struct {
+	// Composed type representation for type int32
+	integer *int32
+	// Composed type representation for type LibraryFolderView_project_idMember1able
+	libraryFolderView_project_idMember1 LibraryFolderView_project_idMember1able
+}
+
+// NewLibraryFolderView_LibraryFolderView_project_id instantiates a new LibraryFolderView_LibraryFolderView_project_id and sets the default values.
+func NewLibraryFolderView_LibraryFolderView_project_id() *LibraryFolderView_LibraryFolderView_project_id {
+	m := &LibraryFolderView_LibraryFolderView_project_id{}
+	return m
+}
+
+// CreateLibraryFolderView_LibraryFolderView_project_idFromDiscriminatorValue creates a new instance of the appropriate class based on discriminator value
+// returns a Parsable when successful
+func CreateLibraryFolderView_LibraryFolderView_project_idFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
+	result := NewLibraryFolderView_LibraryFolderView_project_id()
+	if parseNode != nil {
+		if val, err := parseNode.GetInt32Value(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetInteger(val)
+		} else if val, err := parseNode.GetObjectValue(CreateLibraryFolderView_project_idMember1FromDiscriminatorValue); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			if cast, ok := val.(LibraryFolderView_project_idMember1able); ok {
+				result.SetLibraryFolderViewProjectIdMember1(cast)
+			}
+		}
+	}
+	return result, nil
+}
+
+// GetFieldDeserializers the deserialization information for the current model
+// returns a map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error when successful
+func (m *LibraryFolderView_LibraryFolderView_project_id) GetFieldDeserializers() map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+	return make(map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error)
+}
+
+// GetInteger gets the integer property value. Composed type representation for type int32
+// returns a *int32 when successful
+func (m *LibraryFolderView_LibraryFolderView_project_id) GetInteger() *int32 {
+	return m.integer
+}
+
+// GetIsComposedType determines if the current object is a wrapper around a composed type
+// returns a bool when successful
+func (m *LibraryFolderView_LibraryFolderView_project_id) GetIsComposedType() bool {
+	return true
+}
+
+// GetLibraryFolderViewProjectIdMember1 gets the LibraryFolderView_project_idMember1 property value. Composed type representation for type LibraryFolderView_project_idMember1able
+// returns a LibraryFolderView_project_idMember1able when successful
+func (m *LibraryFolderView_LibraryFolderView_project_id) GetLibraryFolderViewProjectIdMember1() LibraryFolderView_project_idMember1able {
+	return m.libraryFolderView_project_idMember1
+}
+
+// Serialize serializes information the current object
+func (m *LibraryFolderView_LibraryFolderView_project_id) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
+	if m.GetInteger() != nil {
+		err := writer.WriteInt32Value("", m.GetInteger())
+		if err != nil {
+			return err
+		}
+	} else if m.GetLibraryFolderViewProjectIdMember1() != nil {
+		err := writer.WriteObjectValue("", m.GetLibraryFolderViewProjectIdMember1())
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetInteger sets the integer property value. Composed type representation for type int32
+func (m *LibraryFolderView_LibraryFolderView_project_id) SetInteger(value *int32) {
+	m.integer = value
+}
+
+// SetLibraryFolderViewProjectIdMember1 sets the LibraryFolderView_project_idMember1 property value. Composed type representation for type LibraryFolderView_project_idMember1able
+func (m *LibraryFolderView_LibraryFolderView_project_id) SetLibraryFolderViewProjectIdMember1(value LibraryFolderView_project_idMember1able) {
+	m.libraryFolderView_project_idMember1 = value
+}
+
+// LibraryFolderView_LibraryFolderView_project_name composed type wrapper for classes LibraryFolderView_project_nameMember1able, string
+type LibraryFolderView_LibraryFolderView_project_name struct {
+	// Composed type representation for type LibraryFolderView_project_nameMember1able
+	libraryFolderView_project_nameMember1 LibraryFolderView_project_nameMember1able
+	// Composed type representation for type string
+	string *string
+}
+
+// NewLibraryFolderView_LibraryFolderView_project_name instantiates a new LibraryFolderView_LibraryFolderView_project_name and sets the default values.
+func NewLibraryFolderView_LibraryFolderView_project_name() *LibraryFolderView_LibraryFolderView_project_name {
+	m := &LibraryFolderView_LibraryFolderView_project_name{}
+	return m
+}
+
+// CreateLibraryFolderView_LibraryFolderView_project_nameFromDiscriminatorValue creates a new instance of the appropriate class based on discriminator value
+// returns a Parsable when successful
+func CreateLibraryFolderView_LibraryFolderView_project_nameFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
+	result := NewLibraryFolderView_LibraryFolderView_project_name()
+	if parseNode != nil {
+		if val, err := parseNode.GetStringValue(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetString(val)
+		} else if val, err := parseNode.GetObjectValue(CreateLibraryFolderView_project_nameMember1FromDiscriminatorValue); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			if cast, ok := val.(LibraryFolderView_project_nameMember1able); ok {
+				result.SetLibraryFolderViewProjectNameMember1(cast)
+			}
+		}
+	}
+	return result, nil
+}
+
+// GetFieldDeserializers the deserialization information for the current model
+// returns a map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error when successful
+func (m *LibraryFolderView_LibraryFolderView_project_name) GetFieldDeserializers() map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+	return make(map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error)
+}
+
+// GetIsComposedType determines if the current object is a wrapper around a composed type
+// returns a bool when successful
+func (m *LibraryFolderView_LibraryFolderView_project_name) GetIsComposedType() bool {
+	return true
+}
+
+// GetLibraryFolderViewProjectNameMember1 gets the LibraryFolderView_project_nameMember1 property value. Composed type representation for type LibraryFolderView_project_nameMember1able
+// returns a LibraryFolderView_project_nameMember1able when successful
+func (m *LibraryFolderView_LibraryFolderView_project_name) GetLibraryFolderViewProjectNameMember1() LibraryFolderView_project_nameMember1able {
+	return m.libraryFolderView_project_nameMember1
+}
+
+// GetString gets the string property value. Composed type representation for type string
+// returns a *string when successful
+func (m *LibraryFolderView_LibraryFolderView_project_name) GetString() *string {
+	return m.string
+}
+
+// Serialize serializes information the current object
+func (m *LibraryFolderView_LibraryFolderView_project_name) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
+	if m.GetString() != nil {
+		err := writer.WriteStringValue("", m.GetString())
+		if err != nil {
+			return err
+		}
+	} else if m.GetLibraryFolderViewProjectNameMember1() != nil {
+		err := writer.WriteObjectValue("", m.GetLibraryFolderViewProjectNameMember1())
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetLibraryFolderViewProjectNameMember1 sets the LibraryFolderView_project_nameMember1 property value. Composed type representation for type LibraryFolderView_project_nameMember1able
+func (m *LibraryFolderView_LibraryFolderView_project_name) SetLibraryFolderViewProjectNameMember1(value LibraryFolderView_project_nameMember1able) {
+	m.libraryFolderView_project_nameMember1 = value
+}
+
+// SetString sets the string property value. Composed type representation for type string
+func (m *LibraryFolderView_LibraryFolderView_project_name) SetString(value *string) {
+	m.string = value
+}
+
 type LibraryFolderView_LibraryFolderView_file_countable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetInteger() *int32
@@ -208,6 +384,22 @@ type LibraryFolderView_LibraryFolderView_parent_idable interface {
 	GetLibraryFolderViewParentIdMember1() LibraryFolderView_parent_idMember1able
 	SetInteger(value *int32)
 	SetLibraryFolderViewParentIdMember1(value LibraryFolderView_parent_idMember1able)
+}
+
+type LibraryFolderView_LibraryFolderView_project_idable interface {
+	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
+	GetInteger() *int32
+	GetLibraryFolderViewProjectIdMember1() LibraryFolderView_project_idMember1able
+	SetInteger(value *int32)
+	SetLibraryFolderViewProjectIdMember1(value LibraryFolderView_project_idMember1able)
+}
+
+type LibraryFolderView_LibraryFolderView_project_nameable interface {
+	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
+	GetLibraryFolderViewProjectNameMember1() LibraryFolderView_project_nameMember1able
+	GetString() *string
+	SetLibraryFolderViewProjectNameMember1(value LibraryFolderView_project_nameMember1able)
+	SetString(value *string)
 }
 
 // NewLibraryFolderView instantiates a new LibraryFolderView and sets the default values.
@@ -291,6 +483,26 @@ func (m *LibraryFolderView) GetFieldDeserializers() map[string]func(i878a80d2330
 		}
 		return nil
 	}
+	res["project_id"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreateLibraryFolderView_LibraryFolderView_project_idFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetProjectId(val.(LibraryFolderView_LibraryFolderView_project_idable))
+		}
+		return nil
+	}
+	res["project_name"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreateLibraryFolderView_LibraryFolderView_project_nameFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetProjectName(val.(LibraryFolderView_LibraryFolderView_project_nameable))
+		}
+		return nil
+	}
 	return res
 }
 
@@ -316,6 +528,18 @@ func (m *LibraryFolderView) GetName() *string {
 // returns a LibraryFolderView_LibraryFolderView_parent_idable when successful
 func (m *LibraryFolderView) GetParentId() LibraryFolderView_LibraryFolderView_parent_idable {
 	return m.parent_id
+}
+
+// GetProjectId gets the project_id property value. The project_id property
+// returns a LibraryFolderView_LibraryFolderView_project_idable when successful
+func (m *LibraryFolderView) GetProjectId() LibraryFolderView_LibraryFolderView_project_idable {
+	return m.project_id
+}
+
+// GetProjectName gets the project_name property value. The project_name property
+// returns a LibraryFolderView_LibraryFolderView_project_nameable when successful
+func (m *LibraryFolderView) GetProjectName() LibraryFolderView_LibraryFolderView_project_nameable {
+	return m.project_name
 }
 
 // Serialize serializes information the current object
@@ -346,6 +570,18 @@ func (m *LibraryFolderView) Serialize(writer i878a80d2330e89d26896388a3f487eef27
 	}
 	{
 		err := writer.WriteObjectValue("parent_id", m.GetParentId())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteObjectValue("project_id", m.GetProjectId())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteObjectValue("project_name", m.GetProjectName())
 		if err != nil {
 			return err
 		}
@@ -389,6 +625,16 @@ func (m *LibraryFolderView) SetParentId(value LibraryFolderView_LibraryFolderVie
 	m.parent_id = value
 }
 
+// SetProjectId sets the project_id property value. The project_id property
+func (m *LibraryFolderView) SetProjectId(value LibraryFolderView_LibraryFolderView_project_idable) {
+	m.project_id = value
+}
+
+// SetProjectName sets the project_name property value. The project_name property
+func (m *LibraryFolderView) SetProjectName(value LibraryFolderView_LibraryFolderView_project_nameable) {
+	m.project_name = value
+}
+
 type LibraryFolderViewable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.AdditionalDataHolder
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
@@ -397,9 +643,13 @@ type LibraryFolderViewable interface {
 	GetId() *int32
 	GetName() *string
 	GetParentId() LibraryFolderView_LibraryFolderView_parent_idable
+	GetProjectId() LibraryFolderView_LibraryFolderView_project_idable
+	GetProjectName() LibraryFolderView_LibraryFolderView_project_nameable
 	SetDepth(value *int32)
 	SetFileCount(value LibraryFolderView_LibraryFolderView_file_countable)
 	SetId(value *int32)
 	SetName(value *string)
 	SetParentId(value LibraryFolderView_LibraryFolderView_parent_idable)
+	SetProjectId(value LibraryFolderView_LibraryFolderView_project_idable)
+	SetProjectName(value LibraryFolderView_LibraryFolderView_project_nameable)
 }

@@ -72,6 +72,12 @@ func NewV1PrintLibraryRequestBuilder(rawUrl string, requestAdapter i2ae4187f7dae
 	return NewV1PrintLibraryRequestBuilderInternal(urlParams, requestAdapter)
 }
 
+// Copy the copy property
+// returns a *V1PrintLibraryCopyRequestBuilder when successful
+func (m *V1PrintLibraryRequestBuilder) Copy() *V1PrintLibraryCopyRequestBuilder {
+	return NewV1PrintLibraryCopyRequestBuilderInternal(m.BaseRequestBuilder.PathParameters, m.BaseRequestBuilder.RequestAdapter)
+}
+
 // DeletePath the deletePath property
 // returns a *V1PrintLibraryDeleteRequestBuilder when successful
 func (m *V1PrintLibraryRequestBuilder) DeletePath() *V1PrintLibraryDeleteRequestBuilder {
@@ -109,6 +115,18 @@ func (m *V1PrintLibraryRequestBuilder) Get(ctx context.Context, requestConfigura
 		return nil, nil
 	}
 	return res.(i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.LibraryListingable), nil
+}
+
+// Move the move property
+// returns a *V1PrintLibraryMoveRequestBuilder when successful
+func (m *V1PrintLibraryRequestBuilder) Move() *V1PrintLibraryMoveRequestBuilder {
+	return NewV1PrintLibraryMoveRequestBuilderInternal(m.BaseRequestBuilder.PathParameters, m.BaseRequestBuilder.RequestAdapter)
+}
+
+// Rename the rename property
+// returns a *V1PrintLibraryRenameRequestBuilder when successful
+func (m *V1PrintLibraryRequestBuilder) Rename() *V1PrintLibraryRenameRequestBuilder {
+	return NewV1PrintLibraryRenameRequestBuilderInternal(m.BaseRequestBuilder.PathParameters, m.BaseRequestBuilder.RequestAdapter)
 }
 
 // Restore the restore property

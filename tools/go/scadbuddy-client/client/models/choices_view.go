@@ -12,6 +12,8 @@ type ChoicesView struct {
 	additionalData map[string]any
 	// The bed_type property
 	bed_type *string
+	// The bed_type_labels property
+	bed_type_labels ChoicesView_bed_type_labelsable
 	// The bed_types property
 	bed_types []string
 	// The default_nozzles property
@@ -257,6 +259,12 @@ func (m *ChoicesView) GetBedType() *string {
 	return m.bed_type
 }
 
+// GetBedTypeLabels gets the bed_type_labels property value. The bed_type_labels property
+// returns a ChoicesView_bed_type_labelsable when successful
+func (m *ChoicesView) GetBedTypeLabels() ChoicesView_bed_type_labelsable {
+	return m.bed_type_labels
+}
+
 // GetBedTypes gets the bed_types property value. The bed_types property
 // returns a []string when successful
 func (m *ChoicesView) GetBedTypes() []string {
@@ -280,6 +288,16 @@ func (m *ChoicesView) GetFieldDeserializers() map[string]func(i878a80d2330e89d26
 		}
 		if val != nil {
 			m.SetBedType(val)
+		}
+		return nil
+	}
+	res["bed_type_labels"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreateChoicesView_bed_type_labelsFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetBedTypeLabels(val.(ChoicesView_bed_type_labelsable))
 		}
 		return nil
 	}
@@ -526,6 +544,12 @@ func (m *ChoicesView) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6
 			return err
 		}
 	}
+	{
+		err := writer.WriteObjectValue("bed_type_labels", m.GetBedTypeLabels())
+		if err != nil {
+			return err
+		}
+	}
 	if m.GetDefaultNozzles() != nil {
 		cast := make([]i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, len(m.GetDefaultNozzles()))
 		for i, v := range m.GetDefaultNozzles() {
@@ -636,6 +660,11 @@ func (m *ChoicesView) SetBedType(value *string) {
 	m.bed_type = value
 }
 
+// SetBedTypeLabels sets the bed_type_labels property value. The bed_type_labels property
+func (m *ChoicesView) SetBedTypeLabels(value ChoicesView_bed_type_labelsable) {
+	m.bed_type_labels = value
+}
+
 // SetBedTypes sets the bed_types property value. The bed_types property
 func (m *ChoicesView) SetBedTypes(value []string) {
 	m.bed_types = value
@@ -705,6 +734,7 @@ type ChoicesViewable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.AdditionalDataHolder
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetBedType() *string
+	GetBedTypeLabels() ChoicesView_bed_type_labelsable
 	GetBedTypes() []string
 	GetDefaultNozzles() []NozzleChoiceable
 	GetFilamentPresets() ChoicesView_filament_presetsable
@@ -719,6 +749,7 @@ type ChoicesViewable interface {
 	GetRackAlgorithm() *ChoicesView_rack_algorithm
 	GetTiers() ChoicesView_tiersable
 	SetBedType(value *string)
+	SetBedTypeLabels(value ChoicesView_bed_type_labelsable)
 	SetBedTypes(value []string)
 	SetDefaultNozzles(value []NozzleChoiceable)
 	SetFilamentPresets(value ChoicesView_filament_presetsable)
