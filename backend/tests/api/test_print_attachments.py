@@ -295,9 +295,7 @@ def test_promote_copies_an_attachment_into_the_template_gallery(
     assert detail["attachment_count"] == 1
     assert detail["media"]["attachments"][0]["promoted_to"] == [model]
     # A second copy is refused (review on #2832): a reload offered it again.
-    again = client.post(
-        f"{URL}/{attachment['id']}/promote", json={"slug": model}, headers=press()
-    )
+    again = client.post(f"{URL}/{attachment['id']}/promote", json={"slug": model}, headers=press())
     assert again.status_code == 409, again.text
     assert "gallery already" in again.json()["detail"]
     assert len(client.get(f"/api/v1/models/{model}").json()["media"]) == 1
