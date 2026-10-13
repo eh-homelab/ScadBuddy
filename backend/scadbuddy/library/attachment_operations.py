@@ -8,6 +8,7 @@ worker does not hold. Neither run is repeated: Bambuddy does not dedupe an uploa
 from __future__ import annotations
 
 import asyncio
+import logging
 import shutil
 import uuid
 from typing import TYPE_CHECKING, Any
@@ -29,6 +30,9 @@ if TYPE_CHECKING:
 
 #: Where to look when a run may have done its work before failing.
 WHERE = "the print in Bambuddy, and its project's Media folder"
+
+
+logger = logging.getLogger(__name__)
 
 
 def attachment_kinds(state: AppState, components: Components) -> list[OperationKind]:
@@ -89,18 +93,26 @@ def attachment_kinds(state: AppState, components: Components) -> list[OperationK
                 cache.forget(client, archive_id)
         finally:
             await asyncio.to_thread(shutil.rmtree, staging, True)
-        added = await state.print_attachments.add(
-            Attachment(
-                id=0,
-                archive_id=archive_id,
-                kind=request["kind"],
-                archive_photo=photo,
-                library_file_id=copy,
-                filename=request["filename"],
-                size_bytes=request["size"],
-                caption=request["caption"] or None,
+        try:
+            added = await state.print_attachments.add(
+                Attachment(
+                    id=0,
+                    archive_id=archive_id,
+                    kind=request["kind"],
+                    archive_photo=photo,
+                    library_file_id=copy,
+                    filename=request["filename"],
+                    size_bytes=request["size"],
+                    caption=request["caption"] or None,
+                )
             )
-        )
+        except Exception:
+            # Uploaded but not recorded: name what is left in Bambuddy so it can be found.
+            logger.exception(
+                "an attachment was uploaded but could not be recorded",
+                extra={"archive_id": archive_id, "archive_photo": photo, "library_file_id": copy},
+            )
+            raise
         dumped: dict[str, Any] = added.model_dump(mode="json")
         return dumped
 

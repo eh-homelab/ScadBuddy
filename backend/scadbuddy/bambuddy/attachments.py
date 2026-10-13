@@ -41,8 +41,6 @@ AttachmentKind = Literal["photo", "video"]
 
 #: The folder a project's attachments go in, under its own folder.
 MEDIA_FOLDER = "Media"
-#: The image types Bambuddy's archive takes (``archives.py:3280`` at v1.2.5.6).
-ARCHIVE_PHOTO_TYPES = frozenset({"jpg", "jpeg", "png", "webp"})
 #: The names Bambuddy gives a photo (``uuid[:8] + ext``, or a finish photo's). Anything
 #: else is never kept: the name goes into the media proxy's path to Bambuddy.
 ARCHIVE_PHOTO_NAME = re.compile(r"^[A-Za-z0-9_-]+\.(jpg|jpeg|png|webp)$")
@@ -196,9 +194,11 @@ async def upload(
     file: IO[bytes],
     inbox_folder_id: int | None,
 ) -> tuple[str | None, int | None]:
-    """Put the file in Bambuddy: ``(archive photo name, library file id)``. A photo
-    whose library copy fails is taken off the archive again, so nothing half-attached is
-    left without a row naming it."""
+    """Put the file in Bambuddy: ``(archive photo name, library file id)``. The folder is
+    found (or made) first, so a key or a Bambuddy that cannot give one posts nothing; a
+    photo whose library copy fails is taken off the archive again. Either way nothing
+    half-attached is left without a row naming it."""
+    folder_id = await media_folder(client, archive, inbox_folder_id)
     photo: str | None = None
     if kind == "photo":
         answer = await client.upload_archive_photo(archive.id, filename, file)
@@ -209,7 +209,6 @@ async def upload(
             )
         photo = answer.filename
         file.seek(0)
-    folder_id = await media_folder(client, archive, inbox_folder_id)
     try:
         copy = await client.upload_library_file(
             filename, file, folder_id=folder_id, media_type=content_type

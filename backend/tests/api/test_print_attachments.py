@@ -162,6 +162,24 @@ def test_a_photo_whose_media_copy_fails_is_taken_off_the_print(
 
 
 @respx.mock
+@pytest.mark.parametrize("step", ["by_project", "made"])
+def test_a_photo_is_not_posted_when_its_media_folder_cannot_be_had(
+    client: TestClient, model: str, step: str
+) -> None:
+    """Review on #2831: a key without Manage Library, or Bambuddy failing to make
+    ``Media/``, must not leave a photo on the archive that no row names."""
+    linked(client, model)
+    bambuddy = Bambuddy()
+    getattr(bambuddy, step).mock(return_value=httpx.Response(403, json={"detail": "no"}))
+
+    failed = attach(client, "p.png", PNG)
+
+    assert failed.status_code >= 400
+    assert not bambuddy.photo.called and not bambuddy.library.called
+    assert client.get("/api/v1/prints/35").json()["attachment_count"] == 0
+
+
+@respx.mock
 def test_what_is_not_a_photo_or_video_is_refused_before_bambuddy(
     client: TestClient, model: str
 ) -> None:

@@ -343,8 +343,9 @@ async def get_attachment_file(
 ) -> Response:
     """#309: only a file recorded as one of this print's attachments, so the proxy is no
     window onto the rest of Bambuddy's library. Its ``Media/`` copy, through Bambuddy's
-    library download (Read Status, which serves ``Range``); a photo whose copy is gone,
-    from the archive. Served inline, typed by what it is, for an ``<img>`` or ``<video>``."""
+    library download (Read Status, which serves ``Range``); a photo with no copy
+    recorded, from the archive. Served inline, typed by what it is, for an ``<img>``
+    or ``<video>``."""
     found = await attachments.get(archive_id, attachment_id)
     if found is None:
         raise ApiError(
