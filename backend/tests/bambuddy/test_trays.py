@@ -5,10 +5,9 @@ loaded with an untagged black PLA, ``27272C``, as the maintainer's AMS-D slot 4 
 
 from __future__ import annotations
 
-from scadbuddy.bambuddy.filaments import FilamentOptions, LoadedAt, SpoolOption
+from scadbuddy.bambuddy.filaments import FilamentOptions, LoadedAt, SpoolOption, family
 from scadbuddy.bambuddy.trays import (
     colour_word,
-    family,
     tray_label,
     tray_material_colour,
     tray_of_spool_id,
