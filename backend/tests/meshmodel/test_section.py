@@ -9,7 +9,14 @@ import numpy as np
 import pytest
 import trimesh
 
-from scadbuddy.meshmodel.section import CutSpec, OpenSectionError, _clip, cut_points, measure
+from scadbuddy.meshmodel.section import (
+    CutSpec,
+    OpenSectionError,
+    _clip,
+    cut_points,
+    layer_areas,
+    measure,
+)
 
 
 def neck() -> trimesh.Trimesh:
@@ -208,3 +215,27 @@ def test_a_section_that_does_not_close_is_refused() -> None:
     cut: CutSpec = ((0.0, 0.0, 0.0), (0.0, 1.0, 0.0), "above")
     with pytest.raises(OpenSectionError):
         _clip(a, b, np.zeros(3), np.array([1.0, 0, 0]), np.array([0, 1.0, 0]), cut)
+
+
+def test_layer_areas_are_measures_areas() -> None:
+    carrot = neck()
+    zs = np.arange(0.1, 45.0, 0.2)
+    areas = layer_areas(np.asarray(carrot.vertices), np.asarray(carrot.faces), zs)
+    expected = []
+    for z in zs:
+        section = measure(carrot, (0, 0, float(z)), (0, 0, 1))
+        expected.append(0.0 if section is None else section.area)
+    assert np.allclose(areas, expected, atol=1e-9)
+
+
+def test_layer_areas_are_zero_off_the_mesh() -> None:
+    box = trimesh.creation.box((10, 10, 10))
+    areas = layer_areas(
+        np.asarray(box.vertices), np.asarray(box.faces), np.array([-6.0, -4.9, 0.0, 4.9, 6.0])
+    )
+    assert np.allclose(areas, [0, 100, 100, 100, 0])
+
+
+def test_layer_areas_of_nothing() -> None:
+    empty = layer_areas(np.zeros((0, 3)), np.zeros((0, 3), dtype=np.int64), np.array([1.0]))
+    assert empty.tolist() == [0.0]
