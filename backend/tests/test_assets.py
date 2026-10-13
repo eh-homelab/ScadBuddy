@@ -204,8 +204,21 @@ def test_a_png_declaring_too_many_pixels_is_refused_before_decoding(store: Asset
 
 
 def test_a_truncated_png_is_refused(store: AssetStore) -> None:
-    with pytest.raises(AssetRejectedError, match="could not be decoded"):
+    with pytest.raises(AssetRejectedError, match="not a readable PNG"):
         store.put(png_bytes(32, 32)[:60], "cut.png")
+
+
+def test_an_undecodable_png_is_refused_without_pillows_text(
+    store: AssetStore, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A PNG signature followed by text. Pillow's own text (in prod "cannot identify image
+    # file <_io.BytesIO object at 0x...>") goes to the log, never to the user (#2383).
+    with caplog.at_level("INFO"), pytest.raises(AssetRejectedError) as refused:
+        store.put(b"\x89PNG\r\n\x1a\n" + b"not really a picture " * 15, "bad.png")
+    assert str(refused.value) == "the file is not a readable PNG; re-export it as PNG and try again"
+    logged = [r for r in caplog.records if r.getMessage() == "a PNG upload could not be decoded"]
+    assert len(logged) == 1
+    assert getattr(logged[0], "error", "")
 
 
 def test_an_oversized_upload_is_refused(store: AssetStore) -> None:

@@ -300,7 +300,11 @@ def normalise_png(data: bytes) -> tuple[bytes, int, int]:
             picture.save(out, format="PNG")
             return out.getvalue(), picture.width, picture.height
     except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as error:
-        raise AssetRejectedError(f"the PNG could not be decoded: {error}") from None
+        # Pillow's text names its stream object by address (#2383): for the log, not the user.
+        logger.info("a PNG upload could not be decoded", extra={"error": str(error)})
+        raise AssetRejectedError(
+            "the file is not a readable PNG; re-export it as PNG and try again"
+        ) from None
 
 
 def sniff(data: bytes) -> AssetKind:
