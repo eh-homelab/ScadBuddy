@@ -181,6 +181,30 @@ def test_the_role_reaches_only_render_activity_rows(owner: Pool, granted: Pool) 
     ]
 
 
+def test_a_changed_row_predicate_replaces_the_old_policy(
+    owner: Pool, granted: Pool, role: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(worker_role, "RENDER_ROWS", {"activity": "id LIKE 'render:x%'"})
+    with owner.connection() as conn:
+        assert grant_render_role(conn, role)
+        conn.execute(
+            "INSERT INTO activity (id, kind, status, title, source, source_id) VALUES"
+            " ('render:a1', 'render', 'running', 'A', 'render_jobs', 'a1'),"
+            " ('render:x1', 'render', 'running', 'X', 'render_jobs', 'x1')"
+        )
+        mine = [
+            r["policyname"]
+            for r in conn.execute(
+                "SELECT policyname FROM pg_policies WHERE tablename = 'activity'"
+                " AND policyname LIKE %s",
+                (f"only_{role}_%",),
+            )
+        ]
+    assert len(mine) == 1
+    with granted.connection() as conn:
+        assert [r["id"] for r in conn.execute("SELECT id FROM activity")] == ["render:x1"]
+
+
 def test_the_role_cannot_migrate(granted: Pool) -> None:
     with granted.connection() as conn, pytest.raises(psycopg.errors.InsufficientPrivilege):
         migrate(conn, (Migration("29991231T2359Z_later", "CREATE TABLE later (id int)"),))

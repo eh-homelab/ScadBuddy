@@ -12,4 +12,16 @@ test.describe('activity', () => {
     await page.getByRole('switch', { name: 'Advanced' }).click()
     await expect(page.getByText(/op-model_import/)).toBeVisible()
   })
+
+  test('on a phone the bell is the way to the page, and the header fits', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto('/')
+    // Hidden from the nav row there, which would overflow.
+    await expect(page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Activity' })).toBeHidden()
+    await page.getByRole('button', { name: /^Activity/ }).click()
+    await page.getByRole('link', { name: 'All activity' }).click()
+    await expect(page).toHaveURL(/\/activity$/)
+    await expect(page.getByRole('heading', { name: 'Activity' })).toBeVisible()
+    expect(await page.evaluate('document.documentElement.scrollWidth')).toBeLessThanOrEqual(390)
+  })
 })

@@ -10,6 +10,7 @@ The worker never migrates; it waits until the API has (`wait_until_ready`).
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from collections.abc import Callable, Mapping
@@ -105,23 +106,34 @@ def grant_render_role(conn: Connection[Any], role: str | None = None) -> bool:
 
 
 def _hold_to_rows(conn: Connection[Any], role: str, table: str, rows: str) -> None:
-    def exists(policy: str) -> bool:
-        found = conn.execute(
-            "SELECT 1 FROM pg_policies WHERE schemaname = current_schema()"
-            " AND tablename = %s AND policyname = %s",
-            (table, policy),
-        ).fetchone()
-        return found is not None
-
+    """Hold ``role`` to ``rows`` of ``table``. Enabling row security takes effect because
+    the API's role owns the table (it migrates) and so bypasses it; `everyone`, the
+    permissive policy, keeps every other non-owner role (a separately credentialed print
+    or projects worker) unrestricted, since with row security on and no policy a role
+    sees no row. The role's policy is named by its predicate, so a changed predicate
+    replaces the old one rather than leaving it in force."""
+    existing = {
+        row[0]
+        for row in conn.cursor(row_factory=tuple_row).execute(
+            "SELECT policyname FROM pg_policies WHERE schemaname = current_schema()"
+            " AND tablename = %s",
+            (table,),
+        )
+    }
     conn.execute(sql.SQL("ALTER TABLE {} ENABLE ROW LEVEL SECURITY").format(sql.Identifier(table)))
-    if not exists("everyone"):
+    if "everyone" not in existing:
         conn.execute(
             sql.SQL("CREATE POLICY everyone ON {} USING (true) WITH CHECK (true)").format(
                 sql.Identifier(table)
             )
         )
-    policy = f"only_{role}"
-    if not exists(policy):
+    prefix = f"only_{role}_"
+    policy = prefix + hashlib.sha256(rows.encode()).hexdigest()[:8]
+    for stale in sorted(p for p in existing if p.startswith(prefix) and p != policy):
+        conn.execute(
+            sql.SQL("DROP POLICY {} ON {}").format(sql.Identifier(stale), sql.Identifier(table))
+        )
+    if policy not in existing:
         conn.execute(
             sql.SQL(
                 "CREATE POLICY {} ON {} AS RESTRICTIVE TO {} USING ({rows}) WITH CHECK ({rows})"
