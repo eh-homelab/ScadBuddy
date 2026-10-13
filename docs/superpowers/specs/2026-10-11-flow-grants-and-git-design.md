@@ -828,7 +828,12 @@ run as well (Ruling 21).
      hour makes it `skipped` (`rate`), so a flow that causes its own event cannot loop;
    - a trigger changed since step 4 read it makes it `skipped` (`changed`): nothing
      starts on settings that were not the ones checked.
-   Admitted, it is marked `admitted`, which a retried activity takes up where it stopped.
+   - a Schedule's fire reaching a trigger that is no longer a schedule (a Schedule left
+     by an edit while Temporal was away), or an event's reaching a schedule trigger, is
+     `skipped`; each worker start removes the Schedule of every non-schedule trigger.
+   Admitted, it is marked `admitted`, which a retried activity takes up where it stopped;
+   an edit between admission and the start starts nothing (`changed`), and a fire whose
+   every attempt failed is settled `failed`, so it holds neither the overlap nor the cap.
 6. Starts the run with the same `start_execution` the route uses, with the id
    `uuid5(TRIGGER_NAMESPACE, "<trigger id>:<fire key>")`. Its namespace is its own, so
    no request's `Idempotency-Key` can reach it.

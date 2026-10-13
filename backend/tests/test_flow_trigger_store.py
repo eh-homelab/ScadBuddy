@@ -88,7 +88,7 @@ async def admit_all(triggers: TriggerStore, trigger: Trigger, n: int, cap: int) 
         assert await triggers.claim_fire(trigger.id, key, f"run-{key}", None) is not None
     return list(
         await asyncio.gather(
-            *(triggers.admit(trigger.id, key, cap, state_hash(trigger, None)) for key in keys)
+            *(triggers.admit(trigger.id, key, cap, state_hash(trigger, None), True) for key in keys)
         )
     )
 
@@ -111,13 +111,17 @@ async def test_an_admitted_fire_is_admitted_again_on_a_retry(triggers: TriggerSt
     trigger = await make(triggers)
     [first] = await admit_all(triggers, trigger, 1, cap=60)
     assert first is None
-    assert await triggers.admit(trigger.id, "fire-0", 60, state_hash(trigger, None)) is None
+    assert await triggers.admit(trigger.id, "fire-0", 60, state_hash(trigger, None), True) is None
     # Paused, or changed, since: the retry starts nothing.
     edited = await triggers.update(trigger.id, {"overlap": "allow_all"}, BROWSER, "edit")
     assert edited is not None
-    assert await triggers.admit(trigger.id, "fire-0", 60, state_hash(trigger, None)) == "changed"
+    assert (
+        await triggers.admit(trigger.id, "fire-0", 60, state_hash(trigger, None), True) == "changed"
+    )
     await triggers.set_paused(trigger.id, True, BROWSER, None)
-    assert await triggers.admit(trigger.id, "fire-0", 60, state_hash(edited, None)) == "paused"
+    assert (
+        await triggers.admit(trigger.id, "fire-0", 60, state_hash(edited, None), True) == "paused"
+    )
 
 
 def arrange_pick(run_id: str, request_id: str) -> Callable[[Grant], Consumption | str]:
@@ -237,8 +241,8 @@ async def test_admission_and_seeding_need_the_hash_the_fire_decided_on(
     spec = GrantSpec(expires_at=datetime.now(UTC) + timedelta(days=1), rules=[])
     await approved(triggers, trigger, spec)
     assert await triggers.claim_fire(trigger.id, "k", "r", None) is not None
-    assert await triggers.admit(trigger.id, "k", None, None) == "changed"  # type: ignore[arg-type]
-    assert (
+    assert await triggers.admit(trigger.id, "k", None, None, True) == "changed"  # type: ignore[arg-type]
+    with pytest.raises(TriggerChangedError):
         await triggers.seed_run_grant(
             "r",
             trigger.id,
@@ -246,5 +250,7 @@ async def test_admission_and_seeding_need_the_hash_the_fire_decided_on(
             datetime.now(UTC),
             None,  # type: ignore[arg-type]
         )
-        is None
+    # A Schedule's fire never admits an event trigger, nor an event's a schedule one.
+    assert await triggers.admit(trigger.id, "k", None, state_hash(trigger, None), False) == (
+        "not an event trigger"
     )

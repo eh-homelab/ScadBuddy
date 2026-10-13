@@ -174,8 +174,8 @@ class TriggerStore:
     ) -> str | None:
         """The run's own grant from the trigger's standing grant in force (§12.4), under
         that grant's lock so a revocation lands wholly before or after it. Its id, or None
-        with no standing grant in force, or when the trigger is no longer the `checked`
-        one (`state_hash` without its grant): its grant was approved for something else."""
+        with no standing grant in force; `TriggerChangedError` when the trigger is no longer
+        the `checked` one (`state_hash` without its grant): nothing may start on it."""
         return await self._call(
             self._seed_run_grant, run_id, trigger_id, requested_by, now, checked
         )
@@ -202,15 +202,17 @@ class TriggerStore:
         return await self._call(self._fire_of_run, run_id)
 
     async def admit(
-        self, trigger_id: str, fire_key: str, rate_cap: int | None, checked: str
+        self, trigger_id: str, fire_key: str, rate_cap: int | None, checked: str, scheduled: bool
     ) -> str | None:
         """Admit the pending fire under the trigger's row lock (§12.2): None when it may
         start its run (marked `admitted`; one admitted already stays so), else why not:
         `deleted`, `paused`, `overlap` (with `overlap: skip`, another admitted or started
         fire's run is open) or `rate` (`rate_cap` fires admitted or started in the last
         hour), or `changed` when the trigger is no longer the `checked` one
-        (`state_hash` without its grant)."""
-        return await self._call(self._admit, trigger_id, fire_key, rate_cap, checked)
+        (`state_hash` without its grant), or `not a schedule trigger` / `not an event
+        trigger` when a Schedule's fire (`scheduled`) or an event's reaches a trigger of the
+        other kind (a stale Schedule left by an edit while Temporal was away)."""
+        return await self._call(self._admit, trigger_id, fire_key, rate_cap, checked, scheduled)
 
     # -- implementation -------------------------------------------------------------
 
@@ -489,7 +491,7 @@ class TriggerStore:
                 return None
             # Fails closed: no hash, or another, matches nothing.
             if not checked or checked != state_hash(trigger, None):
-                return None
+                raise TriggerChangedError(trigger_id)
             row = conn.execute(
                 f"SELECT {_GRANT} FROM flow_trigger_grants WHERE trigger_id = %s"
                 " AND status = 'approved' AND revoked_at IS NULL AND expires_at > %s"
@@ -574,7 +576,7 @@ class TriggerStore:
         return Fire.model_validate(row), self._get(row["trigger_id"])
 
     def _admit(
-        self, trigger_id: str, fire_key: str, rate_cap: int | None, checked: str
+        self, trigger_id: str, fire_key: str, rate_cap: int | None, checked: str, scheduled: bool
     ) -> str | None:
         with self._pool.connection() as conn, conn.transaction():
             trigger = self._locked_trigger(conn, trigger_id)
@@ -582,6 +584,8 @@ class TriggerStore:
                 return "deleted"
             if trigger.paused:
                 return "paused"
+            if scheduled != (trigger.kind == "schedule"):
+                return "not a schedule trigger" if scheduled else "not an event trigger"
             # Fails closed: no hash, or another, matches nothing.
             if not checked or checked != state_hash(trigger, None):
                 return "changed"
@@ -595,8 +599,11 @@ class TriggerStore:
                 "SELECT f.fired_at, r.status, now() - f.fired_at AS age"
                 " FROM flow_trigger_fires f LEFT JOIN workflow_runs r ON r.id = f.run_id"
                 " WHERE f.trigger_id = %s AND f.fire_key <> %s"
-                " AND f.outcome IN ('admitted', 'started')",
-                (trigger_id, fire_key),
+                " AND f.outcome IN ('admitted', 'started')"
+                # Only what can count: the last hour's, and older ones whose run is open.
+                " AND (f.fired_at > now() - interval '1 hour'"
+                " OR (r.status IS NOT NULL AND r.status <> ALL(%s)))",
+                (trigger_id, fire_key, sorted(TERMINAL)),
             ).fetchall()
             if trigger.overlap == "skip" and any(
                 (o["status"] is None and o["age"] < STARTING_GRACE)

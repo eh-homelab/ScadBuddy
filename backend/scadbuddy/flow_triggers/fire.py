@@ -26,14 +26,14 @@ from scadbuddy.flow_triggers.models import (
     Trigger,
     state_hash,
 )
-from scadbuddy.flow_triggers.store import TriggerStore
+from scadbuddy.flow_triggers.store import TriggerChangedError, TriggerStore
 from scadbuddy.flows.component import Flows
 from scadbuddy.flows.definitions import ScriptMissingError
 from scadbuddy.flows.inputs import InputsError, resolve_inputs
 from scadbuddy.flows.launch import approval_timeout, execution_status, start_execution
 from scadbuddy.flows.manifest import raise_tiers, tiers
 from scadbuddy.flows.typecheck import check_script
-from scadbuddy.workflows.flow_triggers import FIRE_ACTIVITY, ensure_trigger_schedule
+from scadbuddy.workflows.flow_triggers import FIRE_ACTIVITY, FIRE_ATTEMPTS, ensure_trigger_schedule
 
 logger = logging.getLogger(__name__)
 
@@ -105,12 +105,19 @@ class TriggerFires:
             return "skipped"  # the trigger is gone
         if claimed.outcome not in ("pending", "admitted"):
             return claimed.outcome  # a retry, or the same event heard twice
-        outcome, reason = await self._decide(trigger_id, fire_key, run_id)
+        try:
+            outcome, reason = await self._decide(trigger_id, fire_key, run_id, event is None)
+        except Exception:
+            # The last attempt: settled, so an admitted fire that never started does
+            # not hold the overlap or count toward the rate cap.
+            if activity.info().attempt >= FIRE_ATTEMPTS:
+                await self.store.settle_fire(trigger_id, fire_key, "failed", "could not start")
+            raise
         await self.store.settle_fire(trigger_id, fire_key, outcome, reason)
         return outcome
 
     async def _decide(
-        self, trigger_id: str, fire_key: str, run_id: str
+        self, trigger_id: str, fire_key: str, run_id: str, scheduled: bool
     ) -> tuple[FireOutcome, str | None]:
         trigger = await self.store.get(trigger_id)
         if trigger is None:
@@ -147,12 +154,19 @@ class TriggerFires:
             # request can name a run id in the trigger namespace.
             return "started", None
         # Admitted again on a retry too: paused or changed since, it starts nothing.
-        if (refused := await self.store.admit(trigger_id, fire_key, cap, checked)) is not None:
-            return "skipped", refused
+        admitted = await self.store.admit(trigger_id, fire_key, cap, checked, scheduled)
+        if admitted is not None:
+            return "skipped", admitted
         started_by = runs_as(trigger.created_by)
         # No execution: a grant held for this run is an earlier attempt's.
         await flows.store.delete_grant(run_id)
-        await self.store.seed_run_grant(run_id, trigger_id, started_by, datetime.now(UTC), checked)
+        try:
+            await self.store.seed_run_grant(
+                run_id, trigger_id, started_by, datetime.now(UTC), checked
+            )
+        except TriggerChangedError:
+            # Edited since it was admitted: nothing starts on its old settings.
+            return "skipped", "changed"
         await start_execution(
             flows,
             flows.client,
@@ -172,11 +186,10 @@ SCHEDULES_RETRY = 5.0
 
 
 async def ensure_trigger_schedules(client: Client, task_queue: str, store: TriggerStore) -> None:
-    """Every schedule trigger's Schedule as its row says (§12.1): one edited while
-    Temporal was away is put right here."""
+    """Every trigger's Schedule as its row says (§12.1): one edited while Temporal was
+    away is put right here, and a trigger that is no longer a schedule loses its own."""
     for trigger in await store.list_triggers():
-        if trigger.kind == "schedule":
-            await ensure_trigger_schedule(client, trigger, task_queue)
+        await ensure_trigger_schedule(client, trigger, task_queue)
 
 
 async def ensure_trigger_schedules_logged(
