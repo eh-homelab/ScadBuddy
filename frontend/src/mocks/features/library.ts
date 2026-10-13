@@ -491,6 +491,7 @@ function batchHandlers() {
         summary: choice.summary ?? null,
         problems: choice.problems ?? [],
       })
+      if (choice.step != null) batch.step = choice.step
       return HttpResponse.json(batch)
     }),
     http.post(`${base}/print/batches/:id/queue`, ({ params }) => {

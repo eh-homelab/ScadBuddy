@@ -78,6 +78,25 @@ describe('BatchPrintDialog (#2672)', () => {
     expect(screen.getByTestId('batch-row-1')).toHaveTextContent(/Slot 1: /)
   })
 
+  it('saves a choice and its next step in one write, so neither is left behind (#2718 review)', async () => {
+    const saved = watchItems()
+    const batch = await newBatch(89, 91)
+    // The separate step route down: Next and Skip never need it.
+    server.use(
+      http.put(`/api/v1/print/batches/${batch.id}/step`, () =>
+        HttpResponse.json({ detail: 'down' }, { status: 500 }),
+      ),
+    )
+    const { user } = renderPage(<BatchPrintDialog batchId={batch.id} onClose={vi.fn()} />)
+    await step(1, 2)
+    await loaded()
+    await user.click(screen.getByTestId('batch-next'))
+
+    await step(2, 2)
+    expect(saved[0]?.step).toBe(1)
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
   it('opens a file whose slots differ on its own suggestion', async () => {
     server.use(
       http.get('/api/v1/print/library/91/choices', () =>

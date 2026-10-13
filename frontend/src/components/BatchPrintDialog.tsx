@@ -215,16 +215,25 @@ export function BatchPrintDialog({ batchId, onClose }: Props) {
           seedIsOwn: own !== null,
           seedSlots: carried?.summary?.slots ?? [],
           onBack: back === undefined ? null : () => goTo(back),
+          // One write each, the choice and the step together (#2718 review): a choice
+          // saved with its step left behind would look lost.
           onSkip: () =>
-            void save(async () => {
-              await api.putPrintBatchItem(batchId, current.position, { skipped: true, removed: false })
-              return api.putPrintBatchStep(batchId, after(current.position))
-            }),
+            void save(() =>
+              api.putPrintBatchItem(batchId, current.position, {
+                skipped: true,
+                removed: false,
+                step: after(current.position),
+              }),
+            ),
           onNext: (choice) =>
-            void save(async () => {
-              await api.putPrintBatchItem(batchId, current.position, { ...choice, skipped: false, removed: false })
-              return api.putPrintBatchStep(batchId, after(current.position))
-            }),
+            void save(() =>
+              api.putPrintBatchItem(batchId, current.position, {
+                ...choice,
+                skipped: false,
+                removed: false,
+                step: after(current.position),
+              }),
+            ),
           last: after(current.position) === total,
           busy,
         }}

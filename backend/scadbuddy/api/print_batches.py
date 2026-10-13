@@ -110,8 +110,10 @@ async def get_batch(batch_id: BatchIdPath, batches: PrintBatchesDep) -> PrintBat
 async def put_batch_step(
     batch_id: BatchIdPath, body: BatchStep, batches: PrintBatchesDep
 ) -> PrintBatch:
-    """The step in view: a file's position, or the file count for the review."""
+    """The step in view: a file's position, or the file count for the review. A queued
+    batch's step no longer moves, as its files no longer change."""
     batch = await _batch(batches, batch_id)
+    _open(batch)
     if body.step > len(batch.items):
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "The batch print has no such step.")
     updated = await batches.set_step(batch_id, body.step)
@@ -128,10 +130,13 @@ async def put_batch_item(
     batch_id: BatchIdPath, position: PositionPath, body: BatchChoice, batches: PrintBatchesDep
 ) -> PrintBatch:
     """What the file's step chose (the run request it would send), or that it is skipped
-    or removed. Nothing is checked or queued here: Queue all runs each file's own print."""
+    or removed, and with ``step`` the step to show next, in the same write. Nothing is
+    checked or queued here: Queue all runs each file's own print."""
     batch = await _batch(batches, batch_id)
     _open(batch)
     _changeable(_item(batch, position))
+    if body.step is not None and body.step > len(batch.items):
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "The batch print has no such step.")
     updated = await batches.choose(batch_id, position, body)
     assert updated is not None
     return updated

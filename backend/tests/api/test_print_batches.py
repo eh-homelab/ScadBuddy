@@ -4,6 +4,7 @@ Postgres so a reload resumes it, and queued as each file's own library run."""
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from typing import Any
 
 import httpx
@@ -16,12 +17,15 @@ from scadbuddy.api.operations import STILL_ACCEPTING_PROBLEM
 from scadbuddy.api.print_batches import batch_request_id
 from scadbuddy.api.printing import STILL_CHECKING_DETAIL
 from scadbuddy.bambuddy.print_run import PrintRunRequest
+from scadbuddy.batches.component import PRINT_BATCHES
 from scadbuddy.batches.store import BatchItem
 from scadbuddy.core.problems import ApiError
+from scadbuddy.main import BATCH_TTL
 from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_library import SLICED_RUN, sliced_3mf, sliced_file
 from tests.api.test_print_run_choices import follow_run, run_routes
 from tests.api.test_send import BASE, configure
+from tests.api.test_settings_runtime import _state
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -258,3 +262,54 @@ def test_a_files_press_is_its_choices() -> None:
     assert batch_request_id("b1", item) != batch_request_id("b1", other)
     assert batch_request_id("b1", item).startswith("batch:b1:2:")
     assert len(batch_request_id("b" * 32, item)) <= 128
+
+
+def test_a_choice_moves_the_step_in_the_same_write(client: TestClient) -> None:
+    """#2718 review: Next saved the choice, then moved the step in a second PUT, so a
+    failed second write left a saved choice on a step that had not moved. One write
+    now carries both, and a step past the end refuses the choice with it."""
+    batch = new_batch(client, 104, 105)
+
+    moved = choose(client, batch["id"], 0, request=SLICED_RUN, step=1)
+
+    assert moved["step"] == 1
+    assert moved["items"][0]["request"] is not None
+    past = client.put(f"{BATCHES}/{batch['id']}/items/1", json={"skipped": True, "step": 3})
+    assert past.status_code == 422, past.text
+    kept = client.get(f"{BATCHES}/{batch['id']}").json()
+    assert (kept["step"], kept["items"][1]["skipped"]) == (1, False)
+    # Without a step, the step stays where it is.
+    assert choose(client, batch["id"], 1, skipped=True)["step"] == 1
+
+
+@respx.mock
+def test_a_queued_batchs_step_no_longer_moves(client: TestClient) -> None:
+    configure(client)
+    sliced_file(104)
+    run_routes()
+    queue_route()
+    batch = new_batch(client, 104)
+    choose(client, batch["id"], 0, request=SLICED_RUN)
+    queued = client.post(f"{BATCHES}/{batch['id']}/queue").json()
+    assert queued["status"] == "queued"
+
+    moved = client.put(f"{BATCHES}/{batch['id']}/step", json={"step": 0})
+
+    assert moved.status_code == 409, moved.text
+
+
+async def test_a_batch_nobody_touched_for_a_week_is_forgotten(client: TestClient) -> None:
+    """#2718 review: a batch closed without Cancel or Done (the tab closed) would stay
+    for good; the claims sweep forgets one untouched past BATCH_TTL."""
+    stale, fresh = new_batch(client, 104), new_batch(client, 105)
+    store = _state(client).components.get(PRINT_BATCHES)
+    with store._pool.connection() as conn:
+        conn.execute(
+            "UPDATE print_batches SET updated_at = now() - %s WHERE id = %s",
+            (BATCH_TTL + timedelta(hours=1), stale["id"]),
+        )
+
+    assert await store.prune(BATCH_TTL) == 1
+
+    assert client.get(f"{BATCHES}/{stale['id']}").status_code == 404
+    assert client.get(f"{BATCHES}/{fresh['id']}").status_code == 200

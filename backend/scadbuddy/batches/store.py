@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Literal
 
 from psycopg import Connection
@@ -91,6 +91,9 @@ class BatchChoice(BaseModel):
     removed: bool = False
     summary: BatchSummary | None = None
     problems: list[str] = Field(default_factory=list)
+    #: The step to show next, moved with the choice in one write (#2718 review): a
+    #: choice saved with its step left behind would read as lost. Omitted, it stays.
+    step: int | None = Field(default=None, ge=0)
 
 
 def _request_json(request: PrintRunRequest | None) -> Jsonb | None:
@@ -126,6 +129,18 @@ class PrintBatchStore:
 
     async def mark_queued(self, batch_id: str) -> None:
         await asyncio.to_thread(self._mark_queued, batch_id)
+
+    async def prune(self, older_than: timedelta) -> int:
+        """Forgets every batch nobody has touched for ``older_than``: one closed without
+        Cancel or Done (a tab closed) would otherwise stay for good (#2718 review)."""
+        return await asyncio.to_thread(self._prune, older_than)
+
+    def _prune(self, older_than: timedelta) -> int:
+        with self._pool.connection() as conn:
+            deleted = conn.execute(
+                "DELETE FROM print_batches WHERE updated_at < now() - %s", (older_than,)
+            )
+            return deleted.rowcount
 
     async def delete(self, batch_id: str) -> bool:
         return await asyncio.to_thread(self._delete, batch_id)
@@ -193,7 +208,11 @@ class PrintBatchStore:
                     position,
                 ),
             )
-            conn.execute("UPDATE print_batches SET updated_at = now() WHERE id = %s", (batch_id,))
+            conn.execute(
+                "UPDATE print_batches SET step = COALESCE(%s, step), updated_at = now()"
+                " WHERE id = %s",
+                (choice.step, batch_id),
+            )
         return self._get(batch_id)
 
     def _record_outcome(self, batch_id: str, position: int, outcome: BatchOutcome) -> None:
