@@ -70,13 +70,14 @@ jobs:
         run: |
           set -u
           tmp=${RUNNER_TEMP:-/tmp}
+          # NUL-delimited, so a path with a space or newline is one argument.
           find . -mindepth 1 \( -name '.?*' -o -name vendor \) -prune \
-            -o -name '*.go' -print | sort > "$tmp/go-files"
+            -o -name '*.go' -print0 | sort -z > "$tmp/go-files"
 
           # gofmt over nothing reports nothing: a walk that finds almost no
           # files means the prune broke, not that the tree is clean. The tree
           # is small, so the floor is gooey's 100 lowered to 5.
-          n=$(wc -l < "$tmp/go-files")
+          n=$(tr -cd '\0' < "$tmp/go-files" | wc -c)
           if [ "$n" -lt 5 ]; then
             echo "::error::the walk found only $n .go files — the prune broke, not the tree"
             exit 1
@@ -84,7 +85,7 @@ jobs:
 
           # `gofmt -l` exits 0 whether or not it lists a file, so the check is
           # the output, not the status. A parse error does fail it.
-          if ! xargs gofmt -l < "$tmp/go-files" > "$tmp/unformatted"; then
+          if ! xargs -0 gofmt -l < "$tmp/go-files" > "$tmp/unformatted"; then
             echo "::error::gofmt could not process the sources (parse error?)"
             exit 1
           fi

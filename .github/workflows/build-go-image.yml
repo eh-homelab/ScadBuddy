@@ -98,7 +98,7 @@ jobs:
     concurrency:
       # Unique per (module, run), so a dispatched build is never cancelled by a
       # later one; a cancelled push leaves a half-written manifest list.
-      # `latest` is last-writer-wins across concurrent runs; `sha-<sha>` is
+      # `latest` is last-writer-wins across concurrent runs; `sha-<short>` is
       # unique per commit.
       group: build-go-image-${{ matrix.module }}-${{ github.run_id }}
       cancel-in-progress: false
@@ -124,12 +124,19 @@ jobs:
         env:
           MODULE: ${{ matrix.module }}
           REF: ${{ github.ref }}
+          EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
           name=$(basename "$MODULE")
           image="ghcr.io/eh-homelab/scadbuddy-${name}"
           sha=$(git rev-parse HEAD)
-          tags="${image}:sha-${sha}"$'\n'"${image}:latest"
+          # `sha-<short>`, 7 characters, as build-image.yml tags the app image.
+          tags="${image}:sha-${sha:0:7}"
+          # `latest` is main's head only: a dispatched build of another ref or an
+          # older commit, or a tag push, must not move it.
+          if [[ "$EVENT" == push && "$REF" == refs/heads/main ]]; then
+            tags+=$'\n'"${image}:latest"
+          fi
           if [[ "$REF" == refs/tags/v* ]]; then
             tags+=$'\n'"${image}:${REF#refs/tags/v}"
           fi
