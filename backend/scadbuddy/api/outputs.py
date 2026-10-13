@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from scadbuddy.activity.component import ACTIVITY, ActivityComponent
+from scadbuddy.activity.index import attribute_request
 from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import (
     AppState,
@@ -597,6 +598,7 @@ async def arrange_outputs(
     store: SettingsStoreDep,
     catalogue: CatalogueDep,
     state: StateDep,
+    activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
 ) -> JobStatus:
     body, plain = await resolve_library_files(uploads, outputs, body)
     stored = await asyncio.to_thread(store.load)
@@ -620,6 +622,7 @@ async def arrange_outputs(
         await asyncio.to_thread(require_model_exists, catalogue, slug)
     with submit_problems():
         job = await render.arrange(slug, inputs)
+    await attribute_request(activity.index, f"render:{job.id}")
     return _job_status(job, None)
 
 

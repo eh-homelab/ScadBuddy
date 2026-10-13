@@ -1,10 +1,15 @@
 """Who started a render or a print: the route records it on the activity row."""
 
 import asyncio
+from pathlib import Path
 
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from scadbuddy.activity.index import ActivityIndex
+from scadbuddy.api.deps import get_render
+from tests.api.test_arrange_api import Arranger
+from tests.support.arrange import saved_output
 
 
 def test_coalesced_render_keeps_first_principal(
@@ -80,3 +85,21 @@ def test_a_failing_ingest_is_counted_not_lost(client: TestClient) -> None:
     while index.metrics.activity_write_failures._value.get() == before:
         assert time.monotonic() < deadline
         time.sleep(0.05)
+
+
+def test_an_arrange_is_attributed_to_who_started_it(
+    client: TestClient, app: FastAPI, activity_index: ActivityIndex, tmp_path: Path
+) -> None:
+    _, meta, written = asyncio.run(saved_output(tmp_path))
+    arranger = Arranger()
+    app.dependency_overrides[get_render] = lambda: arranger
+    response = client.post(
+        "/api/v1/outputs/arrange",
+        json={"objects": [{"output_id": meta.id, "part": written.manifest[0].part, "count": 1}]},
+        headers={"X-ScadBuddy-Agent-Author": "token:t2"},
+    )
+    assert response.status_code == 202, response.text
+    # The fake render inserts no job row, so the attribution is a placeholder `get` hides.
+    with activity_index.pool.connection() as conn:
+        row = conn.execute("SELECT principal FROM activity WHERE id = 'render:arr-1'").fetchone()
+    assert row is not None and row["principal"] == "token:t2"
