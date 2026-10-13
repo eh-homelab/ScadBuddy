@@ -11,7 +11,13 @@ from typing import Any
 import pytest
 from temporalio import activity
 
-from scadbuddy_durable.background import MonitorActivities, event_notice, monitor_env
+from scadbuddy_durable.background import (
+    EVENT_MAX_CHARS,
+    LineSplitter,
+    MonitorActivities,
+    event_notice,
+    monitor_env,
+)
 
 
 def test_the_command_gets_a_shells_environment_only() -> None:
@@ -109,3 +115,12 @@ async def test_stops_a_monitor_that_makes_too_many_events(
     acts = _activities(tmp_path, {"command": cmd, "timeoutMs": 20_000}, events, cap=2)
     result = await asyncio.wait_for(acts.bg_monitor_command({"taskId": "ab12cd34"}), 10)
     assert result == {"end": {"outcome": "too_many"}, "events": 2}
+
+
+def test_a_line_without_a_newline_is_cut_not_held() -> None:
+    lines = LineSplitter()
+    for _ in range(100):
+        lines.push("x" * 1000)
+    lines.push("\nnext\n")
+    out = lines.take()
+    assert out == ["x" * EVENT_MAX_CHARS + " […cut]", "next"]

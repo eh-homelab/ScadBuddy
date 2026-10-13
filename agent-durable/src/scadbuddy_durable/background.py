@@ -49,6 +49,40 @@ def event_notice(task_id: str, description: str, text: str) -> str:
     )
 
 
+class LineSplitter:
+    """Lines of a stream, never holding more than EVENT_MAX_CHARS of one: a longer line is
+    cut there and the rest of it dropped (agent/src/background/monitor.ts ``lineSplitter``)."""
+
+    def __init__(self) -> None:
+        self._line = ""
+        self._dropping = False
+        self._out: list[str] = []
+
+    def push(self, chunk: str) -> None:
+        parts = chunk.split("\n")
+        for i, part in enumerate(parts):
+            if not self._dropping:
+                self._line += part
+                if len(self._line) > EVENT_MAX_CHARS:
+                    self._out.append(self._line[:EVENT_MAX_CHARS] + " […cut]")
+                    self._line = ""
+                    self._dropping = True
+            if i < len(parts) - 1:
+                if not self._dropping:
+                    self._out.append(self._line)
+                self._line = ""
+                self._dropping = False
+
+    def end(self) -> None:
+        if self._line and not self._dropping:
+            self._out.append(self._line)
+        self._line = ""
+
+    def take(self) -> list[str]:
+        out, self._out = self._out, []
+        return out
+
+
 def monitor_env(env: dict[str, str] | None = None) -> dict[str, str]:
     source = os.environ if env is None else env
     return {name: source[name] for name in _ENV if name in source}
@@ -118,27 +152,48 @@ class MonitorActivities:
         async def read() -> None:
             nonlocal too_many
             assert proc.stdout is not None
+            splitter = LineSplitter()
             batch: list[str] = []
+            chars = 0
+            dropped = 0
             deadline: float | None = None
             loop = asyncio.get_running_loop()
+
+            async def flush() -> bool:
+                nonlocal batch, chars, dropped, deadline
+                lines = batch + (
+                    [f"[…{dropped} more line(s) in this batch cut]"] if dropped else []
+                )
+                batch, chars, dropped, deadline = [], 0, 0, None
+                return not lines or await emit(lines)
+
             while True:
                 wait = None if deadline is None else max(0.0, deadline - loop.time())
                 try:
-                    raw = await asyncio.wait_for(proc.stdout.readline(), wait)
+                    chunk: bytes | None = await asyncio.wait_for(proc.stdout.read(65536), wait)
                 except TimeoutError:
-                    raw = None
-                if raw is None or (raw == b"" and batch):
-                    if batch and not await emit(batch):
+                    chunk = None
+                if chunk is None or chunk == b"":
+                    if chunk == b"":
+                        splitter.end()
+                    for line in splitter.take():
+                        batch.append(line)
+                    if not await flush():
                         too_many = True
                         return
-                    batch, deadline = [], None
-                    if raw is None:
-                        continue
-                if raw == b"":
-                    return
-                batch.append(raw.decode("utf-8", "replace").rstrip("\n"))
-                if deadline is None:
-                    deadline = loop.time() + BATCH_S
+                    if chunk == b"":
+                        return
+                    continue
+                splitter.push(chunk.decode("utf-8", "replace"))
+                for line in splitter.take():
+                    # One batch is one event: past EVENT_MAX_CHARS its lines are counted, not kept.
+                    if chars + len(line) > EVENT_MAX_CHARS:
+                        dropped += 1
+                    else:
+                        batch.append(line)
+                        chars += len(line) + 1
+                    if deadline is None:
+                        deadline = loop.time() + BATCH_S
 
         async def beat() -> None:
             while True:
