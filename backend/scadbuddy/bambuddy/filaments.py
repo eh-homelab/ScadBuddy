@@ -47,6 +47,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.concurrent import settled
 from scadbuddy.bambuddy.models import (
     FilamentRequirements,
     NozzleInfo,
@@ -749,9 +750,12 @@ Inventory = tuple[list[Spool], list[SpoolAssignment]]
 
 
 async def read_inventory(client: BambuddyClient) -> Inventory:
-    """The spools, then their assignments, in the order every reader reads them."""
-    spools = await client.spools()
-    return spools, await client.spool_assignments()
+    """The spools and their assignments, read together (#2354); a failure surfaces in
+    the order every reader once read them in, the spools' first."""
+    spools, assignments = await asyncio.gather(
+        client.spools(), client.spool_assignments(), return_exceptions=True
+    )
+    return settled(spools), settled(assignments)
 
 
 async def gather_plate_options(
@@ -782,19 +786,21 @@ async def gather_plate_options(
             _requirements(client, library_file_id, plate, fallback_colours, own_colours, known)
             for plate in plate_ids
         ),
+        *(
+            (client.printer(printer_id), client.inventory_remain(printer_id))
+            if printer_id is not None
+            else ()
+        ),
         return_exceptions=True,
     )
-    per_plate: list[list[SlotNeed]] = []
-    for answer in answers:
-        if isinstance(answer, BaseException):
-            raise answer
-        per_plate.append(answer)
+    per_plate: list[list[SlotNeed]] = [settled(answer) for answer in answers[: len(plate_ids)]]
 
     printer = None
     slot_materials: list[SlotMaterial] = []
     if printer_id is not None:
-        printer = await client.printer(printer_id)
-        slot_materials = (await client.inventory_remain(printer_id)).slot_materials
+        # Read beside the plates (#2354), and still failing after them.
+        printer = settled(answers[len(plate_ids)])
+        slot_materials = settled(answers[len(plate_ids) + 1]).slot_materials
 
     return [
         build_options(
