@@ -982,11 +982,15 @@ def test_an_undeclared_slot_follows_the_declared_material_not_its_best_match() -
     assert {choice.slot_id: choice.spool_id for choice in built.suggested} == {1: 1, 2: 3}
 
 
+@respx.mock
 async def test_a_shared_status_read_without_its_printer_is_refused(
     bambuddy: BambuddyClient,
 ) -> None:
-    """#2814: a contract, not an assert, so `python -O` keeps it."""
+    """#2814: a contract, not an assert, so `python -O` keeps it. Refused before
+    anything is read: no request reaches Bambuddy (review #3007)."""
+    anything = respx.route(url__startswith=API).mock(return_value=httpx.Response(200, json=[]))
     reading: asyncio.Future[PrinterStatus | None] = asyncio.get_running_loop().create_future()
     with pytest.raises(ValueError, match="printer_id"):
         await filament_options(bambuddy, cast(PrintSource, _ReadSource()), status=reading)
     reading.cancel()
+    assert not anything.called
