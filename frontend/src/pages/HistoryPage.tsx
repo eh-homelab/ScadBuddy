@@ -637,7 +637,7 @@ function OutputRow({
           {arrangedFrom > 0 && !platesAbove && <LazyArrangedPlates outputId={output.id} size="sm" />}
         </div>
 
-        <div className="flex shrink-0 flex-wrap items-center gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
           {arrangedFrom > 0 ? (
             <span className="text-[12px] text-muted">
               {`Arranged from ${arrangedSources(output.arranged_from ?? [])}`}
