@@ -385,6 +385,11 @@ rendered (and an STL, which is wrapped in one) is also replated for the printer
 placement, and only its settings state the choices. A file nothing can be stated into
 (a 3MF from another slicer) is sliced as it is, taken as Standard flow.
 
+A folder linked to a Bambuddy project is marked "project" in the folder tree, and is
+that project's file list (#2724): it says which project it is, and **Select all** ticks
+every listed printable file (sliced ones too, under **Advanced**) for **Print N files**.
+`/library?project=<id>` opens a project's folder directly.
+
 **Print N files** (#2672) prints every ticked printable file, sliced or not, in one
 stepped dialog. Each step is the print dialog for one file, titled "File 2 of 5 — name",
 with **Back**, **Skip** and **Next**, and a strip above it to jump to any file (a jump

@@ -86,6 +86,8 @@ export function LibraryPage() {
   const printParam = idParam(search.get('print'))
   /** #2672 — the batch print open, by id: a reload resumes it. */
   const batchParam = search.get('batch')
+  /** #2724 — a Bambuddy project, opened on the library folder linked to it. */
+  const projectParam = idParam(search.get('project'))
 
   const [advanced, toggleAdvanced] = useAdvanced(ADVANCED_KEY)
   const [tree, setTree] = useState<LibraryFolderView[] | null>(null)
@@ -331,6 +333,22 @@ export function LibraryPage() {
     scrolled.current = key
     card.scrollIntoView?.({ block: 'center' })
   }, [fileParam, listing])
+  // #2724 — `?project=` opens the folder linked to that project: its file list.
+  const projectFolder = projectParam === null ? undefined : tree?.find((folder) => folder.project_id === projectParam)
+  const projectMissing = projectParam !== null && tree !== null && projectFolder === undefined
+  useEffect(() => {
+    if (!projectFolder || !tree) return
+    const next = new URLSearchParams(search)
+    next.delete('project')
+    const rest = next.toString()
+    navigate({ pathname: libraryPath(tree, projectFolder.id), search: rest ? `?${rest}` : '' }, { replace: true })
+    // Once per project link: the link is dropped as it is followed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectFolder?.id])
+  const currentFolder = tree?.find((folder) => folder.id === folderId)
+  /** #2724 — every listed printable file of this folder, ticked at once. */
+  const listedPrintable = files.filter((file) => file.printable)
+  const unpicked = listedPrintable.filter((file) => !isPicked(file))
   const linkedMissing = fileParam !== null && listing !== null && !files.some((file) => file.id === fileParam)
 
   return (
@@ -419,6 +437,15 @@ export function LibraryPage() {
             >
               Delete selected ({picked.length})
             </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              data-testid="library-select-all"
+              disabled={unpicked.length === 0}
+              onClick={() => setPicked((now) => [...now, ...unpicked])}
+            >
+              Select all ({listedPrintable.length})
+            </Button>
             {picked.length > 0 && (
               <Button size="sm" variant="ghost" onClick={() => setPicked([])}>
                 Clear selection
@@ -451,6 +478,17 @@ export function LibraryPage() {
               Advanced lists every file, sliced files and STLs too.
             </span>
           </header>
+          {currentFolder?.project_id != null && (
+            <p className="text-[13px] text-muted" data-testid="library-project">
+              {`Project ${currentFolder.project_name ?? currentFolder.project_id}: this folder is its file list. `}
+              Select all, then Print, to print them in one batch.
+            </p>
+          )}
+          {projectMissing && (
+            <p role="alert" className="text-[13px] text-warn">
+              {`No library folder is linked to project ${projectParam}, so it has no files to list.`}
+            </p>
+          )}
           {batchError && (
             <p role="alert" className="text-[13px] text-warn">
               {batchError}

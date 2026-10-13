@@ -20,11 +20,14 @@ interface Props {
 /**
  * #975, #2457, #2879 — a folder's count, as its treeitem's description: "49 files". The
  * name is the visible folder name alone (WCAG 2.5.3: "click MakerWorld" works), so a
- * name ending in a number ("v2") never runs into its count ("v2 3 files").
+ * name ending in a number ("v2") never runs into its count ("v2 3 files"). #2724: a
+ * folder linked to a Bambuddy project holds that project's files, and says which.
  */
 function fileCountText(folder: LibraryFolderView): string | undefined {
-  if (!folder.file_count) return undefined
-  return `${folder.file_count} ${folder.file_count === 1 ? 'file' : 'files'}`
+  const parts: string[] = []
+  if (folder.file_count) parts.push(`${folder.file_count} ${folder.file_count === 1 ? 'file' : 'files'}`)
+  if (folder.project_id != null) parts.push(`project ${folder.project_name ?? folder.project_id}`)
+  return parts.length ? parts.join(', ') : undefined
 }
 
 /**
@@ -152,7 +155,7 @@ export function LibraryTree({
         aria-selected={selectedKey === folder.id}
         aria-expanded={branch ? open : undefined}
         aria-label={folder.name}
-        aria-describedby={folder.file_count ? `${testIdPrefix}-count-${folder.id}` : undefined}
+        aria-describedby={fileCountText(folder) ? `${testIdPrefix}-count-${folder.id}` : undefined}
         tabIndex={tabStop === folder.id ? 0 : -1}
         data-testid={`${testIdPrefix}-${folder.id}`}
         onKeyDown={(event) => onKeyDown(event, folder.id)}
@@ -185,16 +188,21 @@ export function LibraryTree({
             <span aria-hidden className="size-5 shrink-0" />
           )}
           <span className="truncate">{folder.name}</span>
+          {folder.project_id != null && (
+            <span className="shrink-0 text-[11px] text-faint" aria-hidden>
+              project
+            </span>
+          )}
           {folder.file_count ? (
-            <>
-              <span aria-hidden className="sb-num ml-auto pl-1 text-faint">
-                {folder.file_count}
-              </span>
-              <span id={`${testIdPrefix}-count-${folder.id}`} className="sr-only">
-                {fileCountText(folder)}
-              </span>
-            </>
+            <span aria-hidden className="sb-num ml-auto pl-1 text-faint">
+              {folder.file_count}
+            </span>
           ) : null}
+          {fileCountText(folder) && (
+            <span id={`${testIdPrefix}-count-${folder.id}`} className="sr-only">
+              {fileCountText(folder)}
+            </span>
+          )}
         </div>
         {branch && open && (
           <ul role="group" className="mt-0.5 space-y-0.5">

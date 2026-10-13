@@ -56,6 +56,8 @@ export const libraryFolders: LibraryFolderView[] = [
   { id: 9, name: 'Bulk', parent_id: null, depth: 0, file_count: 300 },
   // #2670 — a folder linked to a Bambuddy project: a move out of it takes a file out of the project.
   { id: 13, name: 'Lamp', parent_id: null, depth: 0, file_count: 1, project_id: 7, project_name: 'Desk lamp' },
+  // #2724 — the folder linked to a Bambuddy project: that project's file list.
+  { id: 14, name: 'Raegan', parent_id: null, depth: 0, file_count: 3, project_id: 1, project_name: 'Reagan Keychain' },
   // #2165 — a name repeated under another folder, as the live library has it.
   { id: 10, name: 'Spec', parent_id: null, depth: 0, file_count: 0 },
   { id: 11, name: 'MakerWorld', parent_id: 10, depth: 1, file_count: 0 },
@@ -103,6 +105,9 @@ export const libraryFiles: LibraryEntry[] = [
   entry(120, 'drawer-label.3mf', '3mf', 12),
   entry(121, 'alex-headphone-hook.3mf', '3mf', 12),
   entry(122, 'nas-share-bracket.3mf', '3mf', 12, { is_external: true }),
+  entry(140, 'keychain-reagan.3mf', '3mf', 14),
+  entry(141, 'keychain-reagan-2.3mf', '3mf', 14),
+  entry(142, 'keychain-reagan.gcode.3mf', 'gcode.3mf', 14),
   ...Array.from({ length: 300 }, (_, n) => entry(2000 + n, `part-${n}.3mf`, '3mf', 9)),
   // #2670 — the Desk lamp project's file.
   entry(130, 'lamp-shade.3mf', '3mf', 13),

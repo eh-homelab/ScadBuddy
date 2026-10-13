@@ -168,6 +168,41 @@ describe('LibraryPage', () => {
     expect(await screen.findByRole('dialog', { name: /^File 2 of 2 — / })).toBeInTheDocument()
   })
 
+  it("prints a project's file list as one batch, from the folder linked to it (#2724)", async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library' })
+    const folder = await screen.findByTestId('library-folder-14')
+    expect(folder).toHaveAccessibleName('Raegan, 3 files, project Reagan Keychain')
+    await user.click(folder)
+    expect(await screen.findByTestId('library-project')).toHaveTextContent('Project Reagan Keychain')
+    await screen.findByTestId('library-file-140')
+    // Without Advanced the sliced file is not listed, so not selected either.
+    await user.click(screen.getByTestId('library-select-all'))
+    expect(screen.getByTestId('library-select-all')).toBeDisabled()
+    await user.click(screen.getByTestId('library-print-selected'))
+    expect(await screen.findByRole('dialog', { name: /^File 1 of 2 — keychain-reagan\.3mf$/ })).toBeInTheDocument()
+    expect(screen.getByTestId('batch-strip')).toHaveTextContent('keychain-reagan-2.3mf')
+  })
+
+  it('selects every listed printable file, sliced ones too under Advanced (#2724)', async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library?project=1' })
+    await screen.findByTestId('library-file-140')
+    await user.click(screen.getByRole('switch', { name: 'Advanced' }))
+    await screen.findByTestId('library-file-142')
+    await user.click(screen.getByTestId('library-select-all'))
+    expect(screen.getByTestId('library-print-selected')).toHaveTextContent('Print 3 files')
+  })
+
+  it('opens a project on its linked folder, and says when it has none (#2724)', async () => {
+    renderPage(<LibraryPage />, { route: '/library?project=1' })
+    expect(await screen.findByTestId('library-file-140')).toBeInTheDocument()
+    expect(screen.getByTestId('library-project')).toBeInTheDocument()
+  })
+
+  it('says a project with no linked folder has no files to list (#2724)', async () => {
+    renderPage(<LibraryPage />, { route: '/library?project=99' })
+    expect(await screen.findByRole('alert')).toHaveTextContent('No library folder is linked to project 99')
+  })
+
   it('renders a folder of hundreds of files with lazy thumbnails', async () => {
     const { user, container } = renderPage(<LibraryPage />, { route: '/library' })
     await user.click(await screen.findByTestId('library-folder-9'))

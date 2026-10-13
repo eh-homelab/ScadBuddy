@@ -163,6 +163,14 @@ def test_the_root_lists_unsliced_3mfs_and_advanced_lists_every_file(client: Test
     assert {"Supplies": 0, "Storage": 1}.items() <= {
         row["name"]: row["depth"] for row in plain["folders"]
     }.items()
+    # #2724: a folder linked to a Bambuddy project names it; that folder is the
+    # project's file list, which a batch print can take. Any other folder names none.
+    by_name = {row["name"]: row for row in plain["folders"]}
+    assert (by_name["Raegan"]["project_id"], by_name["Raegan"]["project_name"]) == (
+        1,
+        "Reagan Keychain",
+    )
+    assert by_name["Supplies"]["project_id"] is None
 
 
 @respx.mock
