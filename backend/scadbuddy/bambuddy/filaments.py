@@ -40,6 +40,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import re
 from collections.abc import Callable, Sequence
 from typing import Literal
 
@@ -77,6 +78,7 @@ WarningKind = Literal[
     "no-process",
     "not-installed",
     "plate-differs",
+    "plate-not-listed",
     # No longer given since the slice states its flow (#484), but kept so a run recorded
     # with one still reads back.
     "hf-unsupported",
@@ -464,6 +466,16 @@ def _display_order(printer_id: int | None) -> Callable[[SpoolOption], tuple[int,
     return key
 
 
+_SPLIT = re.compile(r"[-\s_]+")
+
+
+def family(material: str | None) -> str:
+    """What can share a hotend (#2166): the material's first word (PLA, PETG, ABS,
+    TPU ...), so ``PLA Basic``, ``PLA-Matte`` and ``PLA-CF`` are one family."""
+    words = [word for word in _SPLIT.split((material or "").upper()) if word]
+    return words[0] if words else ""
+
+
 def suggest(
     slots: list[SlotNeed], spools: list[SpoolOption], *, printer_id: int | None = None
 ) -> list[SlotChoice]:
@@ -472,23 +484,57 @@ def suggest(
     This only fills the picker in so the common case needs no clicks; it decides
     nothing. A spool already taken by an earlier slot is not offered again, because a
     two-colour plate opening with the same spool in both slots reads as a bug.
+
+    A slot that declares no material (every generated template's) stays in the plate's
+    material family (#2461): the declared ones, else the family of the best match on
+    the plate. Opening a PLA print with an unloaded TPU in one slot looks deliberate,
+    for the reason :func:`_match_score` gives for PETG in a PLA slot. Such a slot with no
+    free spool of that family shares a loaded one already chosen whose colour fits, and
+    is otherwise left for the user.
     """
+    scored = [
+        (score, index, option)
+        for index, slot in enumerate(slots)
+        for option in spools
+        if (score := _match_score(slot, option, printer_id=printer_id)) is not None
+    ]
+    declared = {family(slot.material) for slot in slots if slot.material}
+    anchor = min(scored, key=lambda row: (row[0], row[1]), default=None)
+    families = declared or ({family(anchor[2].material)} if anchor is not None else set())
     taken: set[int] = set()
     chosen: list[SlotChoice] = []
     for slot in slots:
         best: tuple[float, int] | None = None
+        shared: tuple[float, int] | None = None
         for option in spools:
-            if option.spool_id in taken:
-                continue
             score = _match_score(slot, option, printer_id=printer_id)
             if score is None:
                 continue
-            if best is None or score < best[0]:
-                best = (score, option.spool_id)
+            if not slot.material and family(option.material) not in families:
+                continue
+            if option.spool_id not in taken:
+                if best is None or score < best[0]:
+                    best = (score, option.spool_id)
+            elif (
+                not slot.material
+                and _loaded_here(option, printer_id)
+                and (shared is None or score < shared[0])
+            ):
+                shared = (score, option.spool_id)
         if best is not None:
             taken.add(best[1])
             chosen.append(SlotChoice(slot_id=slot.slot_id, spool_id=best[1]))
+        elif shared is not None:
+            chosen.append(SlotChoice(slot_id=slot.slot_id, spool_id=shared[1]))
     return chosen
+
+
+def _loaded_here(option: SpoolOption, printer_id: int | None) -> bool:
+    return (
+        option.loaded is not None
+        and printer_id is not None
+        and option.loaded.printer_id == printer_id
+    )
 
 
 def _match_score(slot: SlotNeed, option: SpoolOption, *, printer_id: int | None) -> float | None:
@@ -512,11 +558,7 @@ def _match_score(slot: SlotNeed, option: SpoolOption, *, printer_id: int | None)
         return None
     else:
         base = distance
-    loaded_here = (
-        option.loaded is not None
-        and printer_id is not None
-        and option.loaded.printer_id == printer_id
-    )
+    loaded_here = _loaded_here(option, printer_id)
     # A loaded spool wins every tie and beats a marginally closer shelf spool: the
     # point of the picker is that the common case needs no clicks *and* no reloading.
     return base + (0.0 if loaded_here else COLOUR_MATCH_DISTANCE + 1.0)

@@ -57,6 +57,8 @@ const WARNING_TONE: Record<FilamentWarning['kind'], string> = {
   'no-process': 'text-warn',
   'not-installed': 'text-warn',
   'plate-differs': 'text-muted',
+  // #2366 — a plate the printer's model does not take: it sets the bed temperature.
+  'plate-not-listed': 'text-warn',
   'hf-unsupported': 'text-muted',
   'hf-mounted': 'text-warn',
   // spec 2026-10-01 (#836) — the rack pick's own kinds; plate-wide, from PrintRunResult/check.
