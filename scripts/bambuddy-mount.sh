@@ -20,6 +20,7 @@ DIR="${BAMBUDDY_FS_DIR:-$HOME/bambuddy}"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/bambuddy-fs"
 BIN="$STATE/bambuddy-fs"
 LOG="$STATE/mount.log"
+PIDFILE="$STATE/mount.pid"
 
 die() { echo "bambuddy-mount: $*" >&2; exit 1; }
 
@@ -43,6 +44,31 @@ build() {
 
 mounted() { mountpoint -q "$DIR"; }
 
+# The running mount's pid, if its process is still alive.
+running() {
+  local pid
+  pid=$(cat "$PIDFILE" 2>/dev/null) || return 1
+  kill -0 "$pid" 2>/dev/null && echo "$pid"
+}
+
+# fusermount3 -u alone can leave the process serving: on WSL, Windows reaches the
+# mount through \\wsl$ from another mount namespace, whose copy of the mount keeps the
+# FUSE connection open. Wait for the process, then SIGTERM it (it stops its retrier and
+# exits; unsent writes are on disk), then SIGKILL as the last resort.
+stop() {
+  local pid
+  pid=$(running) || { rm -f "$PIDFILE"; return 0; }
+  for sig in "" TERM KILL; do
+    [[ -n "$sig" ]] && kill -s "$sig" "$pid" 2>/dev/null
+    for _ in $(seq 100); do
+      kill -0 "$pid" 2>/dev/null || { rm -f "$PIDFILE"; return 0; }
+      sleep 0.1
+    done
+    echo "bambuddy-mount: pid $pid still running${sig:+ after SIG$sig}" >&2
+  done
+  die "pid $pid would not exit"
+}
+
 cmd=mount
 case "${1:-}" in mount|umount|unmount|status|build) cmd=$1; shift ;; esac
 
@@ -62,10 +88,12 @@ case "$cmd" in
   status)
     if mounted; then echo "mounted at $DIR"; else echo "not mounted ($DIR)"; exit 1; fi ;;
   umount|unmount)
-    mounted || { echo "not mounted ($DIR)"; exit 0; }
-    fusermount3 -u "$DIR" && echo "unmounted $DIR" ;;
+    if mounted; then fusermount3 -u "$DIR"; fi
+    stop
+    echo "unmounted $DIR" ;;
   mount)
     mounted && die "already mounted at $DIR (bambuddy-mount umount first)"
+    if pid=$(running); then die "pid $pid from an earlier mount is still running (bambuddy-mount umount stops it)"; fi
     [[ -e /dev/fuse ]] || die "/dev/fuse is missing"
     command -v fusermount3 >/dev/null || die "install fuse3 (sudo apt install fuse3)"
     build
@@ -80,6 +108,7 @@ case "$cmd" in
     fi
     nohup "$BIN" mount --api "$API" --all "${ro[@]}" "${allow[@]}" "${extra[@]}" "$DIR" >"$LOG" 2>&1 &
     pid=$!
+    echo "$pid" >"$PIDFILE"
     for _ in $(seq 50); do
       mounted && { echo "mounted $API at $DIR (pid $pid, log $LOG)"; exit 0; }
       kill -0 "$pid" 2>/dev/null || break
