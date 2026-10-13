@@ -709,6 +709,7 @@ async def check_print(
         rack=rack,
         laid_out=laid_out,
         nozzle_plan=nozzle_plan,
+        inventory=inventory,
     )
     # A refused manual pick still previews the rack, so the dialog can offer another,
     # and is said once: as the error, not again as a rack-manual-partial warning.
@@ -892,6 +893,7 @@ async def rack_preview(
     rack: RackUsage | None,
     laid_out: bool,
     nozzle_plan: NozzlePlan | None = None,
+    inventory: Inventory | None = None,
 ) -> tuple[RackPickView | None, list[FilamentWarning]]:
     """The rack side ranked as one group from the dialog's size and spools (spec §5):
     the preview ``/check`` shows. Judged on the flow the slice will carry on the rack side
@@ -899,7 +901,9 @@ async def rack_preview(
     (``laid_out``, :func:`~scadbuddy.bambuddy.extruders.rack_volume_type`). Every chosen
     spool counts toward the material test, since the slice may put any of them on the
     rack side, unless ScadBuddy's nozzle plan (#2166) says which do: then only those
-    on the rack side count. Advisory: a failure previews nothing."""
+    on the rack side count. Advisory: a failure previews nothing. ``inventory`` is the
+    check's own read, reused so a check reads the spools once (#2936); without it the
+    spools are read here."""
     if status is None or not rack_positions(status.nozzle_rack):
         return None, []
     rack_letter = side_of(RACK_SIDE)
@@ -909,8 +913,9 @@ async def rack_preview(
         if nozzle_plan is None or nozzle_plan.side_of_slot(slot.slot_id) in (None, rack_letter)
     ]
     try:
-        inventory = {spool.id: spool for spool in await client.spools()}
-        chosen = [inventory.get(slot.spool_id) for slot in slots]
+        spools = inventory[0] if inventory is not None else await client.spools()
+        by_id = {spool.id: spool for spool in spools}
+        chosen = [by_id.get(slot.spool_id) for slot in slots]
         known = [spool for spool in chosen if spool is not None]
         first = known[0].rgba if known else None
         group = RackGroup(
