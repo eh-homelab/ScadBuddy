@@ -99,6 +99,7 @@ permission layer. Durability is about *where* and *when* that turn runs:
 | E4 | The same, but `SIGKILL` of the Claude Code process during the call (pod death); then resume on a fresh config dir with a `canUseTool` that records calls. | The store ends at the assistant `tool_use`: entries mirrored up to the kill and none after it. On resume, Claude Code synthesizes an error result: *"[Tool call interrupted: the session ended before this call's result was recorded, so its outcome is unknown. Check whether it took effect before relying on it or running it again.]"* **The tool ran once. `canUseTool` was not called on resume.** |
 | E5 | A streaming-input query with `maxBudgetUsd: 0.00012` (one reply costs $0.000105), then one with `maxTurns: 2`, four messages each. | **`maxBudgetUsd` is per process, cumulative.** The results were `success`, then `error_max_budget_usd` three times, with no further model calls. **`maxTurns` is per message:** `num_turns` was 1 on every result, and all four succeeded. |
 | E6 | `/proc/<pid>/status` of an idle warm process after 3 turns, with no plugins and no MCP. | `VmRSS` 211012 kB (about 206 MiB), 18 threads. |
+| E7 | A Streamable HTTP MCP server (`@modelcontextprotocol/sdk` `StreamableHTTPServerTransport` with session ids) as an `http` `mcpServers` entry; one turn; then `q.close()`, or `SIGKILL`; log every request for 4 s afterwards. | During the turn: `POST` (initialize), `POST`, `POST`/`GET` with `mcp-session-id`. **After `q.close()`: nothing. After `SIGKILL`: nothing.** Claude Code does not send the session `DELETE` when its process ends. |
 
 ### 2.2 From the SDK's type declarations (0.3.296, `sdk.d.ts`)
 
@@ -362,6 +363,26 @@ type WarmEntry = {
     straggling hook, so a stray call fails closed.
   - **What can stay static.** `systemAppend()` (`manager.ts:836-838`) is static, so it is
     safe to fix at spawn.
+- **Closing a process does not close its plugin sessions (E7).** Every recycle or
+  eviction would leave the upstream MCP session open. For Playwright MCP `--isolated`,
+  that is a browser context left alive until Playwright's own cleanup, and the
+  `playwright-mcp` pod is capped at 2Gi. #2641 closed this leak on the durable path with
+  `terminateSession()` (`agent/src/temporal/sessionClients.ts:60`). The runtime closes
+  them itself:
+  - **The forwarder remembers the session ids.** It already passes `mcp-session-id`
+    through (`agent/src/plugins/forwarder.ts:90-91`). Each route now records the ids its
+    upstream answers with, and `Registration` gains `terminate()`. That sends `DELETE`
+    with each id and the plugin's header to the checked address, then releases the route.
+  - **Eviction terminates first.** A warm entry registers its own routes, one per process.
+    Evicting it calls `terminate()` on each and then `q.close()`. A turn-scoped run (the
+    credential test) releases as today.
+  - **A dead pod's sessions are swept.** On SIGKILL or pod death the forwarder dies with
+    the pod, and that is every pod at every `Recreate` deploy (§2.4). So each id is also
+    recorded in `ai_plugin_sessions(plugin_id, upstream_session_id, replica, created_at)`.
+    At start, and every 5 minutes, a replica sends `DELETE` for rows whose `replica` is
+    not a live agent worker (Temporal `DescribeTaskQueue` on `agent-tools` lists the
+    pollers' identities), then removes them. The same table and sweep cover today's
+    durable `SessionClients`, which has the same pod-death gap.
 - **What warmth buys besides spawn time.**
   - A remote plugin's MCP connection lives in the process. A stateful plugin, such as
     Playwright MCP `--isolated` since #2568, keeps its page between turns while the

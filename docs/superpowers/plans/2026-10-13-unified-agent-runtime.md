@@ -38,11 +38,12 @@
 
 ## Review Focus
 
-1. **A warm process after a credential is disabled.** The next turn must spawn with the next credential and never reuse the old env. Test: Task 2.2, `recycles when the credential row changes`.
-2. **A turn that ran on another replica while this one stayed warm** (a fallback and back). The stale process must not answer from an old transcript. Test: Task 2.2, `recycles when the transcript tail moved`.
-3. **An approval granted after the hold released the process.** The call runs exactly once, with the request id as its Idempotency-Key, even if the continuing activity is retried. Test: Task 5.4, `an approved released call runs once across an activity retry`.
-4. **An interrupt while parked and held.** The entry is cancelled, the turn ends `interrupted`, the process survives, and no further model call is made. Test: Task 5.6, `interrupt while held cancels the entry and keeps the process`.
-5. **A send to a session whose `DurableSession` is still open.** It is migrated before the turn runs, its parked entries are cancelled `migrated`, and the old workflow closes. Test: Task 7.2, `a send migrates an open DurableSession first`.
+1. **A warm process recycled while a Playwright page is open.** Its upstream MCP session must be deleted, not leaked; this includes a dead pod's sessions after a `Recreate` deploy. Test: Task 2.4.
+2. **A warm process after a credential is disabled.** The next turn must spawn with the next credential and never reuse the old env. Test: Task 2.2, `recycles when the credential row changes`.
+3. **A turn that ran on another replica while this one stayed warm** (a fallback and back). The stale process must not answer from an old transcript. Test: Task 2.2, `recycles when the transcript tail moved`.
+4. **An approval granted after the hold released the process.** The call runs exactly once, with the request id as its Idempotency-Key, even if the continuing activity is retried. Test: Task 5.4, `an approved released call runs once across an activity retry`.
+5. **An interrupt while parked and held.** The entry is cancelled, the turn ends `interrupted`, the process survives, and no further model call is made. Test: Task 5.6, `interrupt while held cancels the entry and keeps the process`.
+6. **A send to a session whose `DurableSession` is still open.** It is migrated before the turn runs, its parked entries are cancelled `migrated`, and the old workflow closes. Test: Task 7.2, `a send migrates an open DurableSession first`.
 
 ---
 
@@ -362,7 +363,39 @@ export class WarmSessions {
   - **Shutdown:** `stopTurns` closes the cache after the grace period.
   - **Spans:** emit `agent.turn.spawn` with `warm.outcome` and `warm.reason`, as `WARM_SPAN = 'agent.turn.spawn'` in `agent/src/telemetry/turn.ts`.
 - [ ] **Step 4: Run the full agent suite and `pnpm build`.** Expected: PASS.
-- [ ] **Step 5: Commit** with `perf(agent): turns reuse the session's warm Claude Code`. Open PR 2.
+- [ ] **Step 5: Commit** with `perf(agent): turns reuse the session's warm Claude Code`.
+
+### Task 2.4: Close plugin sessions on recycle; sweep a dead replica's
+
+Spec §5.3 (E7): Claude Code sends no MCP session `DELETE` when its process ends.
+
+**Files:**
+- Modify: `agent/src/plugins/forwarder.ts`. Each route records the upstream `mcp-session-id`s it sees in responses. `Registration.terminate(): Promise<void>` sends `DELETE` with each id and the plugin's header to the checked address, with a 5 s timeout and errors ignored, then releases the route.
+- Modify: `agent/src/sessions/warm.ts`. An entry keeps its registrations; `evict` calls `terminate()` on each, then `q.close()`.
+- Create: `agent/src/plugins/pluginSessions.ts`. It records `(plugin_id, upstream_session_id, replica)` on first sight and deletes the row on terminate. `sweepDeadReplicas(sql, liveReplicas: Set<string>)` sends `DELETE` for every row whose replica is not live, then deletes those rows.
+- Create: `agent/src/db/migrations/<ts>_plugin_sessions.sql`:
+
+```sql
+CREATE TABLE ai_plugin_sessions (
+  plugin_id text NOT NULL,
+  upstream_session_id text NOT NULL,
+  replica text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (plugin_id, upstream_session_id)
+);
+```
+
+- Modify: `agent/src/main.ts`. Run the sweep at start and every 5 min. The live replicas are the poller identities from `DescribeTaskQueue('agent-tools')`, and this replica's own identity is always live. `temporal/sessionClients.ts` records its clients' ids too.
+- Test: `agent/test/forwarder.test.ts`, `agent/test/pluginSessions.pg.test.ts`, `agent/test/warm.sdk.test.ts`
+
+- [ ] **Step 1: Write the tests.**
+  - `evicting a warm entry deletes its upstream MCP session`. Use a fake Streamable HTTP server with session ids (as `test/support/fakeMcp.ts`, with `sessionIdGenerator: randomUUID`), run one turn, then `warm.evict(id, 'test')`. The fake logs exactly one `DELETE` carrying the session's id.
+  - `terminate sends the plugin's header`.
+  - `the sweep deletes a dead replica's sessions and keeps a live one's`.
+- [ ] **Step 2: Run them.** Expected: FAIL.
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run them.** Expected: PASS.
+- [ ] **Step 5: Commit** with `fix(agent): close a warm process's plugin sessions; sweep a dead replica's`.  Open PR 2.
 
 ---
 
@@ -770,7 +803,7 @@ DELETE FROM ai_settings WHERE key = 'session_mode';
 - **Spec coverage, section by section:**
   - §5.1 → 5.1
   - §5.2 → 5.2
-  - §5.3 → 2.1–2.3
+  - §5.3 → 2.1–2.4
   - §5.4 → 5.3–5.4
   - §5.5 → 5.5
   - §5.6 → 5.6
