@@ -9,7 +9,7 @@ import {
   sleep,
   workflowInfo,
 } from '@temporalio/workflow'
-import type { DeliverResult, FireResult, MonitorPlan, MonitorResult, NextStep } from '../background/activities.js'
+import type { DeliverResult, FireResult, MonitorPlan, MonitorResult, NextStep, WorkflowOutcome } from '../background/activities.js'
 import type { MonitorEnd } from '../background/monitor.js'
 
 // A session's background task (src/background/): a cron job or a wakeup, fired as the
@@ -28,6 +28,7 @@ type Activities = {
   bg_monitor_plan(input: { taskId: string }): Promise<MonitorPlan>
   bg_monitor_end(input: { taskId: string; end: MonitorEnd }): Promise<void>
   bg_deliver(input: { taskId: string; waitedMs: number }): Promise<DeliverResult>
+  wf_end(input: { taskId: string; outcome: Exclude<WorkflowOutcome, { status: 'gone' }> }): Promise<void>
 }
 
 type Source = (input: { taskId: string }) => Promise<MonitorResult>
@@ -50,6 +51,10 @@ export async function BackgroundTask(input: { taskId: string; kind?: string; ret
   try {
     if (input.kind === 'monitor') {
       await monitor(taskId, retryMs)
+      return
+    }
+    if (input.kind === 'workflow') {
+      await scriptRun(taskId, retryMs)
       return
     }
     for (;;) {
@@ -130,4 +135,43 @@ async function monitor(taskId: string, retryMs: number): Promise<void> {
     if (sent.result === 'busy') await sleep(retryMs)
   }
   await acts.bg_finish({ taskId, state: 'done', detail: ended.outcome })
+}
+
+/** A Workflow script's run: as long as its agents take, past any one worker (its journal resumes it). */
+const scripts = proxyActivities<{ wf_run(input: { taskId: string }): Promise<WorkflowOutcome> }>({
+  startToCloseTimeout: '6 hours',
+  heartbeatTimeout: '1 minute',
+  retry: { initialInterval: '5s', maximumAttempts: 3 },
+})
+
+/**
+ * A Workflow (Claude Code's): its script runs as one heartbeating activity
+ * (background/activities.ts `wf_run`, in QuickJS), each agent() a child chat; its end is
+ * Claude Code's notice, sent as the session's next message once it is idle.
+ */
+async function scriptRun(taskId: string, retryMs: number): Promise<void> {
+  let outcome: WorkflowOutcome
+  try {
+    outcome = await scripts.wf_run({ taskId })
+  } catch (err) {
+    if (isCancellation(err)) throw err
+    const zero = { agents: 0, done: 0, errors: 0, empty: 0, durationMs: 0 }
+    outcome = { status: 'failed', error: err instanceof Error ? err.message : String(err), usage: zero }
+  }
+  if (outcome.status === 'gone') {
+    await acts.bg_finish({ taskId, state: 'done', detail: 'gone' })
+    return
+  }
+  await acts.wf_end({ taskId, outcome })
+  const due = Date.now()
+  for (;;) {
+    const sent = await acts.bg_deliver({ taskId, waitedMs: Date.now() - due })
+    if (sent.result === 'none') break
+    if (sent.result === 'end') {
+      await acts.bg_finish({ taskId, state: sent.state, detail: sent.reason })
+      return
+    }
+    if (sent.result === 'busy') await sleep(retryMs)
+  }
+  await acts.bg_finish({ taskId, state: outcome.status === 'completed' ? 'done' : 'failed', detail: outcome.status })
 }

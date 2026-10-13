@@ -637,10 +637,10 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   only, through the agent's loopback server (`routes/subagentMcp.ts`), since the Temporal
   plugin refuses a subagent the turn's durable tools; and of the built-ins an
   `allow_refused` package names, a durable turn does not offer the ones that work in the
-  background of a classic turn's Claude Code and are not yet provided (`Workflow` and
-  `PushNotification`), and says which it left out. Every other one is offered, each
+  background of a classic turn's Claude Code and are not yet provided (`PushNotification`),
+  and says which it left out. Every other one is offered, each
   parked for approval (#2393, below); `CronCreate`, `CronDelete`, `CronList`,
-  `ScheduleWakeup`, `Monitor` and `TaskStop` are the session's own in both modes (below). The worker check counts only a
+  `ScheduleWakeup`, `Monitor`, `Workflow` and `TaskStop` are the session's own in both modes (below). The worker check counts only a
   poller Temporal saw in the last 70 s (it lists one for minutes after its worker has
   gone), so an `agent-durable` that died counts for at most about that long;
   and `mcp_oidc`, the
@@ -852,7 +852,7 @@ as a classic turn counts Claude Code's own calls. The inputs are Claude Code's o
 `test/builtins.sdk.test.ts`; `UPDATE_BUILTIN_SCHEMAS=1` rewrites it after a bump) and the
 answers its wording, measured in a classic turn on Claude Code 2.1.296.
 
-`CronCreate`, `CronDelete`, `CronList`, `ScheduleWakeup`, `Monitor` and `TaskStop` are kept by the
+`CronCreate`, `CronDelete`, `CronList`, `ScheduleWakeup`, `Monitor`, `Workflow` and `TaskStop` are kept by the
 session, in both modes (`agent/src/background/`). Claude Code keeps its own jobs in its
 process ("Session-only (not written to disk, dies when Claude exits)"), which a turn
 ends, so a classic turn gets these in place of its own too (`mcp__builtin__<Name>`, the
@@ -887,7 +887,27 @@ untrusted-data envelope every tool result gets
 (what a command prints or a socket sends is data, never the user's words), as the
 session's next message once it is idle (Claude Code
 shows them mid-turn; here they wait for the turn to end), and the watch's end last.
-`Workflow` and `PushNotification` are not provided yet, and the session says so. The
+A `Workflow` is a task of the same kind too (Claude Code's tool, its texts measured on
+2.1.296). Its script runs as one heartbeating activity on any agent (`wf_run`), in
+QuickJS compiled to WebAssembly (`background/workflowRunner.ts`), never in the service's
+own JavaScript: a script is model-written code, and Node's `vm`, Temporal's workflow
+sandbox included, is not a boundary. Inside it there is no `process`, `require`, `fetch`,
+file or clock (`new Date()`, `Date.now()` and `Math.random()` throw, as Claude Code's
+do), memory is capped at 64 MiB, and a stretch that runs 5 s without awaiting is
+stopped. Each `agent()` is a chat of its own under the session (`SessionManager.startChild`,
+`background/workflowAgents.ts`): the session's mode, its budget (the lineage's, as a
+fork's), owned by whoever started the workflow, so its tool calls park in the gate as
+theirs do. Its task is framed as Claude Code's harness frames it, its instructions are
+Claude Code's for a workflow subagent, and its result is its final reply; with
+`schema`, the JSON object it replies with, checked (`z.fromJSONSchema`) and asked for
+again twice at most. At most 4 run at once and 50 in all, and a run expires after 6 hours.
+`model`, `effort`, `isolation` and `agentType` are taken and not acted on. Each result is
+journalled (`ai_workflow_calls`, by the call's key and occurrence), so a retry of the
+activity after its worker died, and `resumeFromRunId`, answer the calls already made.
+The script is kept in the workspace (`/workspace/_claude/workflows/<name>-wf_<id>.js`),
+which `scriptPath` and `workflow({scriptPath})` read. Its end is Claude Code's
+`<task-notification>`, sent as a monitor's events are.
+`PushNotification` is not provided yet, and the session says so. The
 Temporal plugin owns the engine's settings, so a durable turn cannot set
 `disableSkillShellExecution`, and skill shell injection follows Claude Code's default
 there. Only an allowed package can carry one (`vet.ts` refuses it everywhere else), and

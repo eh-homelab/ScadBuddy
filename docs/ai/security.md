@@ -823,6 +823,28 @@ so a name re-pointed between check and connect reaches nothing new.
   behind `uiRequestProblem` like the other AI settings writes, and the write is audited
   as a `settings` row. Settings → AI shows it as "Let the assistant make HTTP requests".
 
+## Workflow scripts (#2393)
+
+A session's `Workflow` (Claude Code's tool, `docs/ai/operating.md`) runs a script the
+model wrote. The call is `outward`, so the user approves it, and sees the script, first.
+The script then runs on an agent replica, which holds the KEK and the database's
+credentials, so it never runs in the service's own JavaScript. Node's `vm`, Temporal's
+workflow sandbox included, is not a boundary: a host object's `constructor` reaches the
+host's `Function`, and through it `process`. It runs in QuickJS compiled to WebAssembly
+(`background/workflowRunner.ts`, `quickjs-emscripten`, pinned exactly). That is an
+interpreter of its own, whose only way out is four host functions: `agent`, `phase`, `log`
+and `script`.
+- **Isolated:** inside it there is no `process`, `require`, `fetch`, file, socket or
+  clock. `test/workflowRunner.test.ts` checks that the constructor escape finds none.
+- **Bounded:** memory is capped at 64 MiB, and a stretch that runs 5 s without awaiting
+  is interrupted.
+- **Through the gate:** each `agent()` is a chat of the session's owner on the session's
+  budget, so its tool calls go through the gate theirs do.
+- **Marked as computed:** its task is framed as computed text with no user authority, as
+  Claude Code frames it.
+- **Delivered as data:** the result reaches the model in the untrusted-data envelope,
+  redacted of every saved credential.
+
 ## Browser bridge and pairing (#254)
 
 The `browser_*` tools act in the user's own tab. How they are built is

@@ -1226,6 +1226,28 @@ export class SessionManager {
   }
 
   /**
+   * A new chat that runs one agent() of a session's Workflow (background/workflowAgents.ts):
+   * owned by `principal`, its parent recorded, in the parent's mode, and spending from the
+   * parent's budget (its lineage, as a fork does, #823), so a workflow never makes budget.
+   * It starts empty: the agent's task is its first turn.
+   */
+  async startChild(parentId: string, principal: Owner, options: { title: string; tags?: string[] }): Promise<SessionRecord> {
+    const parent = await this.get(parentId, principal)
+    const id = randomUUID()
+    const session = await this.insert(
+      id,
+      principal,
+      { origin: parent.origin, title: options.title, tags: options.tags ?? [], scope: parent.scope, parentId, mode: parent.mode },
+      { budgetOf: parent },
+    )
+    await this.events.append(id, [
+      event({ type: 'session.started', sessionId: id, origin: session.origin, owner: session.owner, title: session.title, budgetUsd: session.budgetUsd, mode: session.mode }),
+      event({ type: 'session.status', sessionId: id, status: 'idle' }),
+    ])
+    return session
+  }
+
+  /**
    * Adds a user turn and starts it. Resolves once the turn has been claimed
    * and started; `done` settles when it ends. Only the owner may send.
    */
@@ -1803,6 +1825,7 @@ export class SessionManager {
                           now: () => new Date(),
                           // A Monitor's command runs where this turn's Bash runs: this replica.
                           commandQueue: this.deps.background.commandQueue,
+                          workspace: this.files,
                         }),
                       }
                     : {}),

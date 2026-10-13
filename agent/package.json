@@ -44,6 +44,7 @@
     "jose": "^6.2.12",
     "openapi-fetch": "^0.17.0",
     "postgres": "^3.4.9",
+    "quickjs-emscripten": "0.32.0",
     "turndown": "7.2.2",
     "ws": "^8.22.0",
     "yaml": "^2.9.1",

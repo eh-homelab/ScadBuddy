@@ -2,6 +2,7 @@ import type { TestWorkflowEnvironment } from '@temporalio/testing'
 import { fileURLToPath } from 'node:url'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { backgroundActivities, type FireResult } from '../src/background/activities.js'
+import type { AgentResult } from '../src/background/workflowAgents.js'
 import { BACKGROUND_WORKFLOW, BackgroundTasks, backgroundWorkflowId } from '../src/background/service.js'
 import { eventNotice } from '../src/background/monitor.js'
 import { unwrapUntrusted } from '../src/safety/untrusted.js'
@@ -29,6 +30,9 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a background task's workfl
   let sessionId: string
   let answers: FireResult[]
   const sent: string[] = []
+  // agent() calls the stand-in agents saw, and what each answers.
+  const ran: { prompt: string; opts: Record<string, unknown> }[] = []
+  let agentAnswer: (prompt: string) => AgentResult = (p) => ({ ok: true, result: `did ${p}` })
 
   beforeAll(async () => {
     env = await localTemporal()
@@ -44,6 +48,8 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a background task's workfl
     sessionId = (await m.start(browser, { origin: 'chat' })).session.id
     sent.length = 0
     answers = []
+    ran.length = 0
+    agentAnswer = (p) => ({ ok: true, result: `did ${p}` })
     worker = AgentWorker.start({
       address: env.address,
       namespace: 'default',
@@ -51,6 +57,14 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a background task's workfl
         store,
         tz: 'UTC',
         paths: await tempPaths(),
+        agents: {
+          run: async (call) => {
+            expect(call.sessionId).toBe(sessionId)
+            ran.push({ prompt: call.prompt, opts: call.opts as Record<string, unknown> })
+            await new Promise((r) => setTimeout(r, 20))
+            return agentAnswer(call.prompt)
+          },
+        },
         send: async (_t, prompt) => {
           const answer = answers.shift() ?? { result: 'sent' }
           if (answer.result === 'sent') sent.push(prompt)
@@ -118,6 +132,58 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a background task's workfl
     expect(all).toContain(`<summary>Monitor "build" stream ended</summary>\n<event>exit code 2 · 2 events</event>`)
     expect(await store.pendingEvents(t.id)).toEqual([])
     expect(await store.get(t.id)).toMatchObject({ state: 'done', detail: 'exited' })
+  }, 60_000)
+
+  const runWorkflow = async (body: string, extra: Record<string, unknown> = {}) => {
+    const t = (await store.create({
+      sessionId,
+      kind: 'workflow',
+      description: 'probe it',
+      spec: { name: 'probe', description: 'probe it', body, args: { x: 1 }, scriptPath: '/workspace/_claude/workflows/probe-wf_x.js', ...extra },
+      createdBy: browser,
+    }))!
+    await (
+      await env.client.workflow.start(BACKGROUND_WORKFLOW, {
+        workflowId: backgroundWorkflowId(sessionId, t.id),
+        taskQueue: TASK_QUEUE,
+        args: [{ taskId: t.id, kind: 'workflow', retryMs: 200 }],
+      })
+    ).result()
+    return t
+  }
+
+  it("runs a Workflow's script, its agents through the journal, and sends Claude Code's notice of its end", async () => {
+    answers = [{ result: 'busy' }]
+    const t = await runWorkflow(
+      `phase('One')
+       const [a, b] = await parallel([() => agent('one', { label: 'a' }), () => agent('two')])
+       const c = await pipeline(['p', 'q'], (x) => agent(x))
+       return { a, b, c, args }`,
+    )
+    expect(ran.map((r) => r.prompt).sort()).toEqual(['one', 'p', 'q', 'two'])
+    expect(sent).toHaveLength(1)
+    const notice = unwrapUntrusted(sent[0]!)
+    expect(notice).toContain(`<task-id>${t.id}</task-id>\n<status>completed</status>\n<summary>Dynamic workflow "probe it" completed</summary>`)
+    expect(notice).toContain('<result>{"a":"did one","b":"did two","c":["did p","did q"],"args":{"x":1}}</result>')
+    expect(notice).toContain(`resumeFromRunId: 'wf_${t.id}', args: {"x":1}`)
+    expect(notice).toContain('<agent_count>4</agent_count><agents_done>4</agents_done><agents_error>0</agents_error>')
+    expect(await store.get(t.id)).toMatchObject({ state: 'done', detail: 'completed' })
+
+    // A resume answers the calls already made from the journal; a new one runs.
+    ran.length = 0
+    const again = await runWorkflow(`const a = await agent('one', { label: 'a' }); const n = await agent('new'); return [a, n]`, { resumeFrom: t.id })
+    expect(ran.map((r) => r.prompt)).toEqual(['new'])
+    expect(unwrapUntrusted(sent[1]!)).toContain('<result>["did one","did new"]</result>')
+    expect(await store.get(again.id)).toMatchObject({ state: 'done' })
+  }, 60_000)
+
+  it('reports a failed agent as null and a script that throws as failed', async () => {
+    agentAnswer = () => ({ ok: false, result: null, error: 'boom' })
+    const t = await runWorkflow(`const a = await agent('x'); if (a === null) throw new Error('no answer'); return a`)
+    const notice = unwrapUntrusted(sent[0]!)
+    expect(notice).toContain('<status>failed</status>\n<summary>Dynamic workflow "probe it" failed</summary>\n<error>Error: no answer</error>')
+    expect(notice).toContain('<agents_error>1</agents_error>')
+    expect(await store.get(t.id)).toMatchObject({ state: 'failed' })
   }, 60_000)
 
   it('is cancelled while it waits, through the service, and never fires', async () => {

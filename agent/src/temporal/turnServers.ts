@@ -282,6 +282,7 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
               tz: tasks.tz,
               now: tasks.now ?? (() => new Date()),
               commandQueue: tasks.commandQueue,
+              workspace: builtins.files,
             }
           : undefined
         servers.push({

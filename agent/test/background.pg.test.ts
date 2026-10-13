@@ -13,6 +13,8 @@ import type { Database } from '../src/db.js'
 import { originPolicy } from '../src/http/origins.js'
 import { SessionError, type SessionManager } from '../src/sessions/manager.js'
 import { connectInProcess } from '../src/temporal/turnTools.js'
+import { SessionFiles } from '../src/workspace/store.js'
+import { managerAgents } from '../src/background/workflowAgents.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
@@ -23,7 +25,7 @@ import { agentA, browser, manager, scriptedRunner, tempPaths } from './support/s
 // that drives the activities is test/background.temporal.test.ts.
 
 const skip = TEST_DATABASE_URL ? undefined : `${TEST_DATABASE_URL_ENV} is not set`
-const NAMES = ['CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'Monitor', 'TaskStop']
+const NAMES = ['CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'Monitor', 'Workflow', 'TaskStop']
 const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-forwarded-proto': 'https' }
 const UI_READ = { host: 'scadbuddy.example', 'x-forwarded-proto': 'https', 'sec-fetch-site': 'same-origin' }
 const NOW = new Date('2026-10-13T08:00:30Z')
@@ -56,7 +58,9 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
     m = manager({ sql: db.sql, paths: await tempPaths(), run: scriptedRunner(() => ({ reply: 'ok' })).runner })
     sessionId = (await m.start(browser, { origin: 'chat' })).session.id
     const context = () =>
-      ({ background: { tasks, sessionId, owner: browser, tz: 'UTC', now: () => NOW, commandQueue: 'agent-tools.pod-a' } }) as unknown as BuiltinContext
+      ({
+        background: { tasks, sessionId, owner: browser, tz: 'UTC', now: () => NOW, commandQueue: 'agent-tools.pod-a', workspace: new SessionFiles(db.sql) },
+      }) as unknown as BuiltinContext
     client = await connectInProcess(() => builtinServer(NAMES, context))
   }, 60_000)
   afterEach(async () => {
@@ -156,6 +160,59 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
     expect(await tasks.endSession(sessionId, 'gone', { terminate: true })).toBe(1)
     expect(terminated).toEqual([b.id])
     expect(await tasks.endSession(sessionId, 'again')).toBe(0)
+  })
+
+  it("starts a Workflow in Claude Code's words, keeping its script in the workspace to edit and resume", async () => {
+    const script = "export const meta = { name: 'Find Bugs', description: 'find them' }\nreturn await agent('look')"
+    const started_ = await call('Workflow', { script, args: { dir: 'src' } })
+    const id = /Task ID: ([0-9a-f]{8})/.exec(started_.text)![1]!
+    const scriptPath = `/workspace/_claude/workflows/find-bugs-wf_${id}.js`
+    expect(started_.text).toMatch(new RegExp(`^Workflow launched in background\\. Task ID: ${id}\\nSummary: find them\\nScript file: ${scriptPath}\\n`))
+    expect(started_.text).toContain(`Run ID: wf_${id}`)
+    expect(await store.get(id)).toMatchObject({
+      kind: 'workflow',
+      description: 'find them',
+      spec: { name: 'Find Bugs', body: "\nreturn await agent('look')", args: { dir: 'src' }, scriptPath },
+    })
+    const kept = await new SessionFiles(db.sql).read({ kind: 'session', sessionId }, scriptPath.slice('/workspace/'.length))
+    expect(kept?.bytes.toString('utf8')).toBe(script)
+    // Still running: no resume until it is stopped; then one from the kept script.
+    expect(await call('Workflow', { scriptPath, resumeFromRunId: `wf_${id}` })).toMatchObject({ isError: true, text: expect.stringContaining('still running') })
+    await call('TaskStop', { task_id: id })
+    const resumed = await call('Workflow', { scriptPath, resumeFromRunId: `wf_${id}` })
+    expect(resumed.isError).toBe(false)
+    expect(await store.get(/Task ID: ([0-9a-f]{8})/.exec(resumed.text)![1]!)).toMatchObject({ spec: { resumeFrom: id } })
+    // What it refuses, as Claude Code would.
+    expect(await call('Workflow', { script: 'return 1' })).toMatchObject({ isError: true, text: expect.stringContaining('export const meta') })
+    expect(await call('Workflow', { script: "export const meta = { name: N, description: 'd' }\n" })).toMatchObject({ isError: true, text: expect.stringContaining('N is a variable') })
+    expect(await call('Workflow', { name: 'saved' })).toMatchObject({ isError: true, text: expect.stringContaining('No saved workflow named "saved"') })
+    expect(await call('Workflow', { scriptPath: '/workspace/nope.js' })).toMatchObject({ isError: true })
+  })
+
+  it("runs an agent() as a child chat on the session's budget, its reply the result, a schema checked and asked again", async () => {
+    const scripted = scriptedRunner((run) => {
+      const prompt = String(run.prompt)
+      if (prompt.includes('give n')) return { reply: 'not json' }
+      if (prompt.startsWith('Your reply did not match the schema')) return { reply: '```json\n{"n": 7}\n```' }
+      return { reply: 'hello from the agent' }
+    })
+    const mm = manager({ sql: db.sql, paths: await tempPaths(), run: scripted.runner })
+    const parent = (await mm.start(browser, { origin: 'chat' })).session.id
+    const agents = managerAgents(mm)
+    const signal = new AbortController().signal
+    const text = await agents.run({ sessionId: parent, owner: browser, workflow: 'probe', prompt: 'say hi', opts: { label: 'hi' }, signal })
+    expect(text).toMatchObject({ ok: true, result: 'hello from the agent' })
+    const child = await mm.get(text.childId!, browser)
+    expect(child).toMatchObject({ parentId: parent, title: 'probe · hi', tags: ['workflow'], status: 'done' })
+    const [row] = await db.sql<{ root: string }[]>`SELECT budget_root_id AS root FROM ai_sessions WHERE id = ${child.id}`
+    expect(row!.root).toBe(parent)
+    // Claude Code's frame and instructions reach the child's turn.
+    expect(scripted.runs[0]!.prompt).toMatch(/^\[Workflow harness — computed task\][\s\S]*follows:\n {2}say hi\n\nYou are a subagent spawned by a workflow orchestration script/)
+    const schema = { type: 'object', properties: { n: { type: 'number' } }, required: ['n'] }
+    const obj = await agents.run({ sessionId: parent, owner: browser, workflow: 'probe', prompt: 'give n', opts: { schema }, signal })
+    expect(obj, JSON.stringify(obj)).toMatchObject({ ok: true, result: { n: 7 } })
+    expect(scripted.runs.at(-1)!.prompt).toMatch(/^Your reply did not match the schema:/)
+    mm.abortAll()
   })
 
   it('stops any task by its ID with TaskStop', async () => {
