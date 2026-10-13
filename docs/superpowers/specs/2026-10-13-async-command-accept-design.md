@@ -158,9 +158,9 @@ and answers it exactly as the POST would have.
 A render's supersede ran after acceptance inside the POST. It now runs wherever the
 answer arrives: the POST when it was fast, the follow otherwise. The follow URL carries
 the superseded job id as `?supersedes=<job id>`. The release is already idempotent, its
-Update id being `{request_id}:release:{job id}`. A render's `inputs` echo is likewise
-carried in the follow URL's query only if needed. Otherwise the client keeps the inputs
-it sent (§5.4).
+Update id being `{request_id}:release:{job id}`. A followed render's `inputs` are the
+job's, which differ from the request's only when it joined another request's job. The
+web client reads only `job_id`.
 
 ### 5.4 Clients
 
