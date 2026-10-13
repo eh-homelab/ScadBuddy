@@ -15,6 +15,7 @@ import {
   flowPath,
   flowRunTopic,
   hopActor,
+  hopUntilText,
   isStaleEntry,
   proposalDiff,
   STALE_ENTRY_MESSAGE,
@@ -264,7 +265,7 @@ function Escalation({ entry }: { entry: FlowPending }) {
     <div className="text-[12px] text-muted">
       {entry.hop === 'parent' && entry.hop_until && (
         <p>
-          With the session that started the run until {new Date(entry.hop_until).toLocaleTimeString()}; you may decide
+          With the session that started the run until {hopUntilText(entry.hop_until)}; you may decide
           it now.
         </p>
       )}

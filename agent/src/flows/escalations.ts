@@ -164,11 +164,15 @@ export class Escalations {
   async deliver(): Promise<number> {
     const send = this.#deps.send
     if (!send) return 0
+    await this.#prune()
     const bySession = new Map<string, { principal: string; calls: Waiting[] }>()
+    // Entries naming another principal for the same session cannot both be its owner's:
+    // the session changed hands since one of them parked, so that one goes to the person.
+    const handedOff: Waiting[] = []
     const add = (session: string, principal: string, call: Waiting) => {
       const held = bySession.get(session) ?? { principal, calls: [] }
-      // Entries naming another principal for the same session cannot both be its owner's.
       if (held.principal === principal) held.calls.push(call)
+      else handedOff.push(call)
       bySession.set(session, held)
     }
     for (const r of await this.#deps.sql<
@@ -189,7 +193,10 @@ export class Escalations {
       })
     }
     for (const own of await this.#flowOwn()) add(own.session, own.principal, own.call)
+    if (handedOff.length) await this.#skip(handedOff)
     let delivered = 0
+    // One session's failure never holds back the others: the first is thrown at the end.
+    const failures: unknown[] = []
     for (const [session, { principal, calls: held }] of bySession) {
       // A child that is the starter session (spec §4.4) is in its own turn while its
       // call waits, so it is never asked: the call goes to the person now.
@@ -210,12 +217,39 @@ export class Escalations {
         delivered += claimed.length
       } catch (err) {
         await this.#unclaim(claimed)
-        if (err instanceof SessionError && err.code === 'busy') continue
-        if (!(err instanceof SessionError)) throw err
+        // Busy, or this replica cannot start a turn yet (no Temporal, no key): try again on
+        // a later tick; the hop's own timer still bounds the wait.
+        if (err instanceof SessionError && (err.code === 'busy' || err.code === 'unavailable')) continue
+        if (!(err instanceof SessionError)) {
+          failures.push(err)
+          continue
+        }
         await this.#skip(claimed)
       }
     }
+    if (failures.length) throw failures[0]
     return delivered
+  }
+
+  /**
+   * Forgets the delivery record of a run's own call once it no longer waits at hop
+   * `parent` (decided, passed up, or its run gone), so `ai_escalation_deliveries` holds
+   * only calls still with a starter session. A record is never removed while its call
+   * is still there, so nothing is sent twice.
+   */
+  async #prune(): Promise<void> {
+    try {
+      await this.#deps.sql`
+        DELETE FROM ai_escalation_deliveries d
+         WHERE NOT EXISTS (
+           SELECT 1 FROM workflow_runs r CROSS JOIN LATERAL jsonb_array_elements(r.waiting_on) w
+            WHERE r.status = 'waiting' AND w ->> 'hop' = 'parent'
+              AND d.request_id = 'flow:' || r.id || ':' || r.workflow_run_id || ':' || (w ->> 'call_id'))`
+    } catch (err) {
+      // A deployment without flows has no `workflow_runs`, and so no records either.
+      if ((err as { code?: string }).code === '42P01') return
+      throw err
+    }
   }
 
   /** A run's own calls at hop `parent`, from the backend's projection, not yet sent. */

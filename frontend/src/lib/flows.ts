@@ -51,6 +51,15 @@ export function proposalDiff(original: unknown, proposed: unknown, path = ''): P
   return JSON.stringify(original) === JSON.stringify(proposed) ? [] : [{ path, was: shown(original), now: shown(proposed) }]
 }
 
+/**
+ * #2482 — when a hop ends, as a person reads it: the time alone today, with the date
+ * otherwise, so a hop that runs past midnight never reads as already over.
+ */
+export function hopUntilText(iso: string, now: Date = new Date()): string {
+  const at = new Date(iso)
+  return at.toDateString() === now.toDateString() ? at.toLocaleTimeString() : at.toLocaleString()
+}
+
 /** #2482 — who did what to a call on its way up, as the run page lists it. */
 export function hopActor(actor: string): string {
   if (actor === 'flow') return 'the flow'

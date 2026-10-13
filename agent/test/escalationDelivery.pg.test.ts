@@ -32,8 +32,12 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
   let parent: string
   let child: string
 
+  /** A send that fails for one session only. */
+  const refuseFor = new Map<string, Error>()
   const send: EscalationSend = async (sessionId, owner, text, tiers) => {
     if (refuse) throw refuse
+    const own = refuseFor.get(sessionId)
+    if (own) throw own
     sent.push({ sessionId, owner, text, tiers })
   }
 
@@ -43,6 +47,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     for (const file of readdirSync(MIGRATIONS).sort()) await db.sql.unsafe(readFileSync(`${MIGRATIONS}${file}`, 'utf8'))
     sent = []
     refuse = undefined
+    refuseFor.clear()
     escalations = new Escalations({ sql: db.sql, durable: () => undefined, send })
     parent = await session('bearer', TOKEN)
     child = await session('flow', `flow:${RUN}`)
@@ -60,7 +65,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     return sid
   }
 
-  async function park(parentSession = parent, childSession = child): Promise<string> {
+  async function park(parentSession = parent, childSession = child, principal = TOKEN): Promise<string> {
     const id = durableRequestId(childSession, 'run-1', `toolu_${randomUUID()}`)
     await db.sql`
       INSERT INTO ai_pending_input (request_id, session_id, workflow_id, workflow_run_id, kind, tool, summary, input_hash, prompt,
@@ -68,7 +73,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
                                     parent_principal, outside_reason)
       VALUES (${id}, ${childSession}, ${`session-${childSession}`}, 'run-1', 'approval', 'print_output', 'print box on printer 5', ${'a'.repeat(64)}, '',
               ${db.sql.json({ kind: 'flow', id: `flow:${RUN}`, label: 'Flow' })}, ${['browser']}, now() + interval '1 hour',
-              ${RUN}, 'parent', now() + interval '10 minutes', ${parentSession}, ${TOKEN}, 'printer 5 is not in the grant')`
+              ${RUN}, 'parent', now() + interval '10 minutes', ${parentSession}, ${principal}, 'printer 5 is not in the grant')`
     return id
   }
 
@@ -172,4 +177,48 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     const data = JSON.parse(sent[0]!.text.slice(sent[0]!.text.indexOf('{'))) as { untrusted_data: { content: { request_id: string }[] } }
     expect(data.untrusted_data.content.map((c) => c.request_id)).toEqual([other])
   })
+
+  it('a replica that cannot start a turn yet leaves the call with the starter session, for a later tick', async () => {
+    const id = await park()
+    refuse = new SessionError('unavailable', 'durable sessions need Temporal')
+    expect(await escalations.deliver()).toBe(0)
+    expect(await hop(id)).toMatchObject({ hop: 'parent', delivered: false })
+    refuse = undefined
+    expect(await escalations.deliver()).toBe(1)
+  })
+
+  it("one session's failure holds back no other session's delivery, and is reported", async () => {
+    const other = await session('bearer', TOKEN)
+    const failing = await park()
+    const fine = await park(other)
+    const boom = new Error('Temporal RPC failed')
+    refuseFor.set(parent, boom)
+    await expect(escalations.deliver()).rejects.toBe(boom)
+    expect(sent.map((s) => s.sessionId)).toEqual([other])
+    expect(await hop(fine)).toMatchObject({ delivered: true })
+    // The failed one was released, so a later tick tries it again.
+    expect(await hop(failing)).toMatchObject({ hop: 'parent', delivered: false })
+  })
+
+  it('a call naming another principal for the same session goes to the person: the session changed hands', async () => {
+    const first = await park()
+    const stale = await park(parent, child, 'token:11111111-1111-4111-8111-111111111111')
+    expect(await escalations.deliver()).toBe(1)
+    expect(await hop(first)).toMatchObject({ hop: 'parent', delivered: true })
+    expect(await hop(stale)).toMatchObject({ hop: 'person' })
+  })
+
+  it("forgets a run's own call's delivery once the call no longer waits at the starter session", async () => {
+    const ownCall = await flowRun()
+    expect(await escalations.deliver()).toBe(1)
+    const records = async () => (await db.sql<{ request_id: string }[]>`SELECT request_id FROM ai_escalation_deliveries`).map((r) => r.request_id)
+    // Still waiting there: kept, so it is not sent again.
+    expect(await escalations.deliver()).toBe(0)
+    expect(await records()).toEqual([ownCall])
+    // Passed up to the person: forgotten.
+    await db.sql`UPDATE workflow_runs SET waiting_on = jsonb_set(waiting_on, '{0,hop}', '"person"') WHERE id = ${RUN}`
+    await escalations.deliver()
+    expect(await records()).toEqual([])
+  })
 })
+
