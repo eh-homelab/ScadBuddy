@@ -4,6 +4,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { backgroundActivities, type FireResult } from '../src/background/activities.js'
 import { BACKGROUND_WORKFLOW, BackgroundTasks, backgroundWorkflowId } from '../src/background/service.js'
 import { eventNotice } from '../src/background/monitor.js'
+import { unwrapUntrusted } from '../src/safety/untrusted.js'
 import { BackgroundTaskStore } from '../src/background/store.js'
 import { temporalTaskRunner } from '../src/background/temporal.js'
 import type { Database } from '../src/db.js'
@@ -109,7 +110,9 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a background task's workfl
         args: [{ taskId: t.id, kind: 'monitor', retryMs: 200 }],
       })
     ).result()
-    const all = sent.join('\n\n')
+    // The events reach the model as data, in the untrusted envelope.
+    expect(sent.every((m) => m.startsWith('{\n  "untrusted_data"'))).toBe(true)
+    const all = sent.map((m) => unwrapUntrusted(m)).join('\n\n')
     expect(all).toContain(eventNotice(t.id, 'build', 'step one'))
     expect(all).toContain(eventNotice(t.id, 'build', 'step two'))
     expect(all).toContain(`<summary>Monitor "build" stream ended</summary>\n<event>exit code 2 · 2 events</event>`)

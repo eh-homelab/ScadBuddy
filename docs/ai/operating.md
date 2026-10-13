@@ -867,13 +867,17 @@ A `Monitor` is a task of the same kind whose source runs as one heartbeating act
 where the session's Bash runs: a classic session's command in its session directory on
 the replica that ran the turn (`agent-tools.<hostname>`, `background/monitor.ts`), a
 durable session's in agent-durable's working directory (`scadbuddy_durable/background.py`,
-on the `agent` queue), a WebSocket on any agent (egress-checked, loopback refused). The
+on the `agent` queue), a WebSocket on any agent (egress-checked, loopback refused, and connected only to the addresses the
+check passed, with no redirect). A line is cut at 8000 characters and the rest of it
+dropped, and so is a batch, so a command that never writes a newline holds no more. The
 command gets a shell's environment only (`PATH`, `HOME`, `LANG`, `LC_ALL`, `TZ`, `TERM`),
 never the service's. As Claude Code's: stdout lines within 200 ms are one event, exit ends
 the watch with its code, it expires after `timeout_ms` (default 5 minutes, at most 30),
 and more than 200 events stop it. Each event is a row of `ai_background_events`; the
 source signals the workflow, which sends the undelivered ones, as Claude Code's
-`<task-notification>` blocks, as the session's next message once it is idle (Claude Code
+`<task-notification>` blocks inside the untrusted-data envelope every tool result gets
+(what a command prints or a socket sends is data, never the user's words), as the
+session's next message once it is idle (Claude Code
 shows them mid-turn; here they wait for the turn to end), and the watch's end last.
 `Workflow` and `PushNotification` are not provided yet, and the session says so. The
 Temporal plugin owns the engine's settings, so a durable turn cannot set
