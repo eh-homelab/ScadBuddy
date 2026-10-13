@@ -1,6 +1,8 @@
-import { fireEvent, screen, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { bridge } from '../agent/bridge'
+import { useGlobalAgentTools } from '../agent/global'
 import { api } from '../api/client'
 import type { FlowHostInterface, FlowScriptProblem } from '../api/types'
 import { COASTER_INPUTS, flowRequests, setFlowState } from '../mocks/features/flows'
@@ -182,6 +184,46 @@ describe('FlowPage', () => {
     ])
   })
 
+  it('starts a run with a grant (#2481), approved as sent', async () => {
+    const { user } = render('def-swap')
+    await user.click(await screen.findByRole('button', { name: 'Start with a grant…' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Start with a grant' })
+    const arrange = await within(dialog).findByRole('group', { name: 'Rule arrange' })
+    await user.click(within(arrange).getByRole('checkbox', { name: 'Allow without asking' }))
+    await user.type(within(arrange).getByLabelText('Max calls'), '2')
+    await user.click(within(dialog).getByRole('button', { name: 'Start run' }))
+    expect(await screen.findByText('Run page')).toBeInTheDocument()
+    const sent = flowRequests()
+    expect(sent).toHaveLength(1)
+    expect(sent[0]).toMatchObject({ path: '/api/v1/workflows/def-swap/runs', key: expect.stringMatching(/^[0-9a-f]{32}$/) })
+    expect(sent[0]!.body['grant']).toMatchObject({
+      sessions: false,
+      ask_starter_session: true,
+      rules: [{ fn: 'arrange', max_calls: 2 }],
+    })
+  })
+
+  it('keeps "Start with a grant…" from the browser bridge (#2481)', async () => {
+    function Agent() {
+      useGlobalAgentTools()
+      return null
+    }
+    renderPage(
+      <>
+        <Agent />
+        <Routes>
+          <Route path="/workflows/flows/:id" element={<FlowPage />} />
+        </Routes>
+      </>,
+      { route: '/workflows/flows/def-swap' },
+    )
+    await screen.findByRole('button', { name: 'Start with a grant…' })
+    await waitFor(() => expect(bridge.liveNames()).toContain('click'))
+    const outcome = await bridge.call('click', { role: 'button', name: 'Start with a grant…' })
+    expect(!outcome.ok && outcome.error.code).toBe('refused')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
   it('on a phone, shows the script and a diff read only: no editor, Save or Restore', async () => {
     asPhone()
     const { user } = render('def-plates-1')
@@ -296,6 +338,27 @@ describe('FlowPage inputs (#2483)', () => {
     expect(flowRequests().map((r) => r.body)).toEqual([
       { inputs: { slug: 'coaster', copies: 2, colour: 'red', dry_run: false, plates: [1] } },
     ])
+  })
+
+  it('starts a flow with both its inputs and a grant (#2481, #2483)', async () => {
+    const { user } = render('def-coasters')
+    await user.click(await screen.findByRole('button', { name: 'Start with a grant…' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Start with a grant' })
+    const inputs = within(dialog).getByRole('region', { name: 'Inputs' })
+    const arrange = await within(dialog).findByRole('group', { name: 'Rule arrange' })
+    await user.click(within(arrange).getByRole('checkbox', { name: 'Allow without asking' }))
+    await user.type(within(arrange).getByLabelText('Max calls'), '2')
+    // The inputs are checked too: a required one left blank keeps the run from starting.
+    await user.click(within(dialog).getByRole('button', { name: 'Start run' }))
+    expect(within(inputs).getByText('Required')).toBeInTheDocument()
+    expect(flowRequests()).toEqual([])
+    await user.type(within(inputs).getByRole('textbox', { name: /Template/ }), 'lid')
+    await user.click(within(dialog).getByRole('button', { name: 'Start run' }))
+    expect(await screen.findByText('Run page')).toBeInTheDocument()
+    const [sent] = flowRequests()
+    expect(sent!.path).toBe('/api/v1/workflows/def-coasters/runs')
+    expect(sent!.body['inputs']).toEqual({ slug: 'lid', copies: 2, colour: 'red', dry_run: false, plates: [1] })
+    expect(sent!.body['grant']).toMatchObject({ rules: [{ fn: 'arrange', max_calls: 2 }] })
   })
 
   it('shows the inputs schema read only on a phone', async () => {

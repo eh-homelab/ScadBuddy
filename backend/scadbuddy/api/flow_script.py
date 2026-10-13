@@ -8,7 +8,9 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from scadbuddy.flows.component import FlowsDep
 from scadbuddy.flows.host_interface import HostInterface, host_interface
+from scadbuddy.flows.manifest import raise_tiers, tiers
 from scadbuddy.flows.typecheck import ScriptProblem, check_script
 
 router = APIRouter(tags=["flows"])
@@ -44,7 +46,8 @@ async def check_flow_script(body: ScriptCheck) -> ScriptCheckResult:
     response_model=HostInterface,
     summary="The host functions, result types and manifest tools a flow script may use",
 )
-async def flow_host_functions() -> HostInterface:
+async def flow_host_functions(flows: FlowsDep) -> HostInterface:
     """Rendered from the same host functions the type check uses, and the tool manifest
-    `tool(name, args)` reads."""
-    return host_interface()
+    `tool(name, args)` reads, each tool at its tier as a run enforces it: Settings'
+    raised tiers applied, as the grant routes check a grant's rules (#2481)."""
+    return host_interface(raise_tiers(tiers(), await flows.store.tool_overrides()))

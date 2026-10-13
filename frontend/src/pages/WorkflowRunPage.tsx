@@ -4,6 +4,7 @@ import { api, ApiError } from '../api/client'
 import type { FlowPending, FlowRunView, FlowStep } from '../api/types'
 import { FlowScript } from '../components/flows/FlowScript'
 import { ForgetRun } from '../components/flows/ForgetRun'
+import { GrantPanel } from '../components/flows/GrantPanel'
 import { ResetPanel } from '../components/flows/ResetPanel'
 import { Button } from '../components/ui/Button'
 import {
@@ -28,7 +29,7 @@ const FIELD = 'w-full rounded-[6px] border border-line bg-bg px-2 py-1.5 text-[1
  * what it waits on, answered or approved here (`POST …/answer`, `…/decide`). Live over
  * `workflow-run:<id>`, and read every 5 s while the socket is down. #2350 — the version
  * it ran and that version's script, who started it, a Reset (preview first, then a
- * confirmation), and forgetting it.
+ * confirmation), and forgetting it. #2481 — its grant, when it has one (`GrantPanel`).
  */
 export function WorkflowRunPage() {
   const { id = '' } = useParams()
@@ -106,6 +107,7 @@ export function WorkflowRunPage() {
               </p>
             )}
             {run?.inputs && Object.keys(run.inputs).length > 0 && <Inputs inputs={run.inputs} />}
+            {view.data.grant && <GrantPanel runId={id} grant={view.data.grant} onChange={() => view.refresh()} />}
             {view.data.pending.map((entry) => (
               <PendingCard key={entry.call_id} entry={entry} runId={id} respond={respond} />
             ))}

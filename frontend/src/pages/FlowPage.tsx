@@ -108,6 +108,8 @@ export function FlowPage() {
                   name={flow.data.name}
                   schema={flow.data.inputs_schema ?? null}
                   disabled={state !== null}
+                  // #2481: a grant is approved as sent: the user's own button.
+                  withGrant
                 />
                 {!phone && !deleted && viewed && !viewed.current && (
                   <Button onClick={() => void restore(flow.data!.name, viewed)} disabled={restoring}>

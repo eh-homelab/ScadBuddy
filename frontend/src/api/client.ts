@@ -81,6 +81,8 @@ import type {
   PrintRun,
   FlowDecided,
   FlowDefinition,
+  FlowGrantSpec,
+  FlowGrantView,
   FlowHostInterface,
   FlowRegister,
   FlowRunOptions,
@@ -741,7 +743,8 @@ export const api = {
 
   /**
    * A start is keyed per press: a re-send after an answer that never arrived reaches the same run.
-   * #2483: `options.inputs` are the run's typed inputs; a 422 `flow-inputs` lists the ones that do not fit.
+   * `options.grant` (#2481) is approved as sent; `options.inputs` (#2483) are the run's typed
+   * inputs, and a 422 `flow-inputs` lists the ones that do not fit.
    */
   startFlowRun: (id: string, key: string = newRequestId(), options: FlowRunOptions = {}) =>
     reattach(() =>
@@ -751,6 +754,18 @@ export const api = {
         body: JSON.stringify(options),
       }),
     ),
+
+  // #2481 — a run's grant: a person approves a requested one (as asked, or edited),
+  // declines it, or revokes one. Each is final; a second answers 409 `flow-grant-state`.
+  approveFlowGrant: (id: string, spec?: FlowGrantSpec) =>
+    request<FlowGrantView>(`/workflow-runs/${seg(id)}/grant/approve`, {
+      method: 'POST',
+      body: JSON.stringify(spec ? { spec } : {}),
+    }),
+  declineFlowGrant: (id: string) =>
+    request<FlowGrantView>(`/workflow-runs/${seg(id)}/grant/decline`, { method: 'POST' }),
+  revokeFlowGrant: (id: string) =>
+    request<FlowGrantView>(`/workflow-runs/${seg(id)}/grant/revoke`, { method: 'POST' }),
 
   /** Forgets a run: its payload key, its workflow (stopped if open) and its row. */
   deleteFlowRun: (id: string) => request<void>(`/workflow-runs/${seg(id)}`, { method: 'DELETE' }),
