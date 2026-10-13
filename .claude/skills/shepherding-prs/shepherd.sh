@@ -34,10 +34,12 @@ declare -A tracked noted done_
 mine=".[]|select(.isCrossRepository|not)|select(.body|contains(\"claude-agent-owner: $owner\"))|.number"
 # PRs that merged while no shepherd ran (between --hours restarts): their claims are
 # released on the first pass, as an open PR's are when it merges (#2570).
-for pr in $(gh pr list -R "$repo" --state merged --limit 50 --author "$author" --json number,body,isCrossRepository \
-    -q "$mine" 2>/dev/null); do
-  tracked[$pr]=1
-done
+if merged=$(gh pr list -R "$repo" --state merged --limit 50 --author "$author" --json number,body,isCrossRepository \
+    -q "$mine" 2>/dev/null); then
+  for pr in $merged; do tracked[$pr]=1; done
+else
+  echo "$(date +%H:%M) merged PRs unread: claims of PRs merged while stopped wait for the next restart"
+fi
 end=$(( $(date +%s) + hours * 3600 ))
 while [ "$(date +%s)" -lt "$end" ]; do
   for pr in $(gh pr list -R "$repo" --state open --limit 100 --author "$author" --json number,body,isCrossRepository \

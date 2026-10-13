@@ -58,7 +58,10 @@ Run it in the background; its log is the status. Each pass it:
 - logs a failure or conflict once per head SHA and keeps going.
 
 Restart it when it stops after `--hours`. Its first pass also releases the claims of
-PRs that merged while it was stopped (the last 50 merged PRs carrying the marker).
+PRs that merged while it was stopped (the last 50 merged PRs carrying the marker). If
+that list cannot be read, it logs "merged PRs unread" and the sweep waits for the next
+restart. A sweep releases only claims that name the merged PR, so a later claim of a
+reopened issue stays live.
 
 ## When the log says FAILING or CONFLICTS
 
@@ -68,6 +71,7 @@ PRs that merged while it was stopped (the last 50 merged PRs carrying the marker
 | `claude-review` is red with findings | Only `## Blocking` gates. Fix each finding in code, or answer it on the PR with evidence when it is wrong. Non-blocking findings never gate. |
 | `claude-review` is red, `num_turns: 1`, `total_cost_usd: 0`, or "session limit" | The review never ran. Re-dispatch `claude-code-review.yml` for the PR. |
 | The review was skipped because the workflow file is stale | Rebase onto `main`, then re-dispatch the review. |
+| A check is `CANCELLED` | Usually a `concurrency: cancel-in-progress` run replaced by a newer one on the same SHA; FAILING clears once that run lands. If nothing replaces it, re-run it. |
 | CONFLICTS | Rebase, resolve, re-run the checks you touched, then lease-push. |
 | Green and reviewed, but not in the queue | It was dropped (a conflict or a queue failure). The next pass enqueues it again. |
 
