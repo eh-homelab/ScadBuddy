@@ -6,6 +6,7 @@ import {
   type SDKMessage,
   type SDKResultMessage,
   type SDKUserMessage,
+  type SessionStoreEntry,
 } from '@anthropic-ai/claude-agent-sdk'
 import { type Context, context as otelContext } from '@opentelemetry/api'
 import type { Sql } from 'postgres'
@@ -44,6 +45,7 @@ import {
   type MemoryHooks,
   type MemoryHooksOptions,
   hindsightTarget,
+  turnRecallMaxQueryChars,
 } from '../memory/hindsight.js'
 import type { LoadedPackage, PackagesForRun } from '../plugins/packages/install.js'
 import { type PackageServers, withoutRemoteServers } from '../plugins/packages/mcp.js'
@@ -75,7 +77,7 @@ import {
 import { SessionBlobs, sentImageBlobs, type StoredBlob } from './blobs.js'
 import { SessionFiles } from '../workspace/store.js'
 import { SessionEdits } from './edits.js'
-import { blobNames, forkHistory, transcriptCut } from './forkPoint.js'
+import { blobNames, durableReplies, entriesThrough, forkHistory, transcriptCut } from './forkPoint.js'
 import { scrubForLog, SdkEventMapper, ShownCalls, type TitleResolver } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
 import { UnpricedSpend } from './unpricedSpend.js'
@@ -83,8 +85,9 @@ import { userPrompt, type UserImage } from './images.js'
 import { type ResourceRef, SessionResources, type TouchedRecord } from './touched.js'
 import { TurnTrace } from '../telemetry/turn.js'
 import { type DurableGate, DurableUnavailable } from '../gate/durable.js'
-import type { DurableTurns } from './durable.js'
+import type { DurableTurns, ForkedAgent } from './durable.js'
 import { PendingProjection } from '../gate/projection.js'
+import { Escalations } from '../flows/escalations.js'
 import { ownPluginEnabled } from '../plugins/packages/builtins.js'
 
 // The session manager (#300, spec §6): durable, shared sessions that a human
@@ -918,6 +921,8 @@ export class SessionManager {
   readonly questions: QuestionService
   /** Durable sessions' parked calls as projected in ai_pending_input (spec §6.6). */
   readonly projection: PendingProjection
+  /** A flow run's calls waiting at the session that started it (#2482, flows/escalations.ts). */
+  readonly escalations: Escalations
   /** Renaming a session and marking it done (#795, edits.ts). */
   readonly edits: SessionEdits
   /**
@@ -973,6 +978,7 @@ export class SessionManager {
       ...(deps.settings ? { settings: deps.settings } : {}),
     })
     this.projection = new PendingProjection(deps.sql)
+    this.escalations = new Escalations({ sql: deps.sql, durable: () => this.durable })
     this.edits = new SessionEdits({
       sql: deps.sql,
       events: this.events,
@@ -1586,7 +1592,7 @@ export class SessionManager {
         // event log like the credential. Claude Code never holds them (the
         // forwarder adds them), but a plugin could echo one in a tool result.
         secrets.push(...(forwarded?.secrets ?? []))
-        const memory = forwarded?.hindsight ? this.memoryHooks(forwarded.hindsight, secrets, userText, { session, turnId }) : undefined
+        const memory = forwarded?.hindsight ? await this.memoryHooks(forwarded.hindsight, secrets, userText, { session, turnId }) : undefined
         // Settings → plugin packages may switch it off (plugins/packages/builtins.ts).
         const ownPlugin =
           this.deps.ownPlugin !== undefined && (await ownPluginEnabled(this.deps.settings))
@@ -1882,13 +1888,16 @@ export class SessionManager {
    * (#818; hooks make no SDK message, so TurnAuditor never sees them). A
    * retain reports after the turn ended; both writes work then too, since
    * they need only the session row. A failure is logged by the hooks.
+   *
+   * The recall query's cap (`recallMaxQueryChars`) is read from Settings at
+   * each turn, so a change applies to the next one.
    */
-  private memoryHooks(
+  private async memoryHooks(
     plugin: CheckedPlugin,
     secrets: readonly string[],
     userText: string,
     turn: { session: SessionRecord; turnId: string },
-  ): MemoryHooks | undefined {
+  ): Promise<MemoryHooks | undefined> {
     const config = this.deps.memory
     if (config === false) return undefined
     const log = (line: string) => this.deps.stderr?.(line)
@@ -1900,9 +1909,10 @@ export class SessionManager {
       return undefined
     }
     const fixed = config?.hookConfig?.recallQuery
+    const recallMaxQueryChars = await turnRecallMaxQueryChars(this.deps.settings, config?.hookConfig)
     return createMemoryHooks({
       ...config,
-      hookConfig: { ...config?.hookConfig, recallQuery: fixed && fixed !== '$prompt' ? fixed : userText },
+      hookConfig: { ...config?.hookConfig, recallQuery: fixed && fixed !== '$prompt' ? fixed : userText, recallMaxQueryChars },
       client,
       secrets,
       log,
@@ -2297,20 +2307,23 @@ export class SessionManager {
     const startedAt = new Date()
     const fresh = options.freshBudget === true && principal.kind === 'browser'
     const parent = await this.get(id, principal)
-    if (parent.mode === 'durable') {
-      throw new SessionError(
-        'invalid',
-        `session ${id} is durable: its conversation is held by its workflow and cannot be forked; start a new chat instead`,
-      )
-    }
-    const transcript = await this.store.load({ projectKey: '', sessionId: id })
-    if (!transcript) {
-      throw new SessionError('no_transcript', `session ${id} has no transcript to fork yet; send it a turn first`)
-    }
-    const upToMessageId = options.upTo === undefined ? undefined : transcriptCut(transcript, options.upTo)
-    const history = await forkHistory(this.events, id, options.upTo)
-    if (!history || (options.upTo !== undefined && upToMessageId === undefined)) {
-      throw new SessionError('invalid', `session ${id} has no finished reply ${options.upTo} to fork from`)
+    // A durable parent's conversation is its workflow's (#2688), read before anything is written.
+    const durable = parent.mode === 'durable' ? await this.durableForkPoint(parent, options.upTo) : undefined
+    let classic: { transcript: SessionStoreEntry[]; upToMessageId: string | undefined } | undefined
+    let history: ServerEvent[] | undefined
+    if (durable) {
+      history = durable.history
+    } else {
+      const transcript = await this.store.load({ projectKey: '', sessionId: id })
+      if (!transcript) {
+        throw new SessionError('no_transcript', `session ${id} has no transcript to fork yet; send it a turn first`)
+      }
+      const upToMessageId = options.upTo === undefined ? undefined : transcriptCut(transcript, options.upTo)
+      history = await forkHistory(this.events, id, options.upTo)
+      if (!history || (options.upTo !== undefined && upToMessageId === undefined)) {
+        throw new SessionError('invalid', `session ${id} has no finished reply ${options.upTo} to fork from`)
+      }
+      classic = { transcript, upToMessageId }
     }
     // A fork of a spent lineage could not run a turn; say why now rather than at its first send.
     if (!fresh && parent.costUsd >= parent.budgetUsd) {
@@ -2326,21 +2339,32 @@ export class SessionManager {
     // review). Checked first too, so a refused fork leaves no SDK copy behind; the
     // insert's check under the lock is the one that holds.
     await this.withinNewSessionLimit(principal, this.deps.sql)
-    const { sessionId: childId } = await sdkForkSession(id, {
-      sessionStore: this.store,
-      dir: sessionWorkDir(this.deps.paths, id),
-      title,
-      ...(upToMessageId === undefined ? {} : { upToMessageId }),
-    })
-    const child = await this.insert(childId, principal, {
-      origin: options.origin ?? parent.origin,
-      title,
-      tags: parent.tags,
-      scope: parent.scope,
-      parentId: parent.id,
-      // A fork copies the SDK transcript, which only a classic session has.
-      mode: 'classic',
-    }, { rateLimited: options.rateLimited ?? true, ...(fresh ? {} : { budgetOf: parent }) })
+    const fields = { origin: options.origin ?? parent.origin, title, tags: parent.tags, scope: parent.scope, parentId: parent.id }
+    const insertOptions = { rateLimited: options.rateLimited ?? true, ...(fresh ? {} : { budgetOf: parent }) }
+    let child: SessionRecord
+    if (durable) {
+      // A new durable session whose workflow starts with a copy of the parent's
+      // conversation as it stood at the fork point, under the parent's Claude session
+      // (only ever resumed inside each workflow's own segments, never shared).
+      child = await this.insert(randomUUID(), principal, { ...fields, mode: 'durable' }, insertOptions)
+      try {
+        await durable.turns.startFork(child, durable.agent)
+      } catch (err) {
+        // Nothing else of the child is written yet: it goes, rather than run empty.
+        await this.deps.sql`DELETE FROM ai_sessions WHERE id = ${child.id}`
+        throw err
+      }
+    } else {
+      const { sessionId: forkedId } = await sdkForkSession(id, {
+        sessionStore: this.store,
+        dir: sessionWorkDir(this.deps.paths, id),
+        title,
+        ...(classic?.upToMessageId === undefined ? {} : { upToMessageId: classic.upToMessageId }),
+      })
+      // A classic fork copies the SDK transcript, which only a classic session has.
+      child = await this.insert(forkedId, principal, { ...fields, mode: 'classic' }, insertOptions)
+    }
+    const childId = child.id
     // The images the copied events name (#782, #2150), before the events that name them: the
     // parent's others (a later turn's, past `upTo`) stay the parent's, so a fork chain does not
     // copy every image of every ancestor.
@@ -2378,6 +2402,40 @@ export class SessionManager {
       })
     }
     return child
+  }
+
+  /**
+   * Where a durable session forks (#2688): its workflow's committed conversation through
+   * `upTo`'s reply, or all of it. A parent whose turn is running forks at its last
+   * finished reply, as the conversation past it is not committed yet.
+   */
+  private async durableForkPoint(
+    parent: SessionRecord,
+    upTo: string | undefined,
+  ): Promise<{ turns: DurableTurns; agent: ForkedAgent; history: ServerEvent[] }> {
+    const id = parent.id
+    const turns = this.durableOrRefuse()
+    const source = await turns.forkSource(id)
+    const all = source ? await forkHistory(this.events, id) : undefined
+    if (!source || !all) {
+      throw new SessionError('no_transcript', `session ${id} has no conversation to fork yet; send it a turn first`)
+    }
+    const replies = durableReplies(source.entries, all)
+    const at = upTo ?? (source.busy ? [...replies.keys()].at(-1) : undefined)
+    if (upTo === undefined && source.busy && at === undefined) {
+      throw new SessionError('no_transcript', `session ${id} has no finished reply to fork yet; wait for its turn to answer`)
+    }
+    const cut = at === undefined ? source.checkpoint : replies.get(at)
+    const entries = cut === undefined ? undefined : entriesThrough(source.entries, cut)
+    const history = at === undefined ? all : await forkHistory(this.events, id, at)
+    if (!entries || !history) {
+      throw new SessionError('invalid', `session ${id} has no finished reply ${upTo} to fork from`)
+    }
+    return {
+      turns,
+      agent: { session_id: source.claudeSessionId, checkpoint: entries.at(-1)!.uuid!, conversation: entries.map((e) => JSON.stringify(e)) },
+      history,
+    }
   }
 
   /**

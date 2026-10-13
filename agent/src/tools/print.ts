@@ -86,6 +86,13 @@ export function sourceName(args: { output_id?: string | undefined; library_file_
   return args.library_file_id !== undefined ? `library file ${args.library_file_id}` : `output ${args.output_id ?? ''}`
 }
 
+/** The folder a library move or copy names, in its approval line (#2670). */
+function folderName(folderId: number | undefined, folderPath: string | undefined): string {
+  if (folderId !== undefined) return `library folder ${folderId}`
+  if (folderPath?.replaceAll('/', '').trim()) return `library folder ${JSON.stringify(folderPath)}`
+  return "the library's top level"
+}
+
 type FilamentQuery = { printer_id?: number | undefined; plate_id?: number | undefined; all_plates?: boolean | undefined }
 
 function getChoices(ctx: ToolContext, source: Source, printer_id: number | undefined) {
@@ -578,6 +585,79 @@ export const printTools: Tool[] = [
             params: { path: { folder_id } },
             headers,
           }),
+        ),
+      ),
+  }),
+
+  // #2670 — reorganising the library: a move and a rename keep each file's id; a copy is a new file.
+  defineTool({
+    name: 'move_library_file',
+    description:
+      "Move files in Bambuddy's library (ids from list_library) into a folder: `folder_id`, or `folder_path` " +
+      "(folder names from the top, joined by '/'), or neither for the top level. Each keeps its id, so its " +
+      'print history, slices and remembered print choices stay with it. A file that leaves a project\'s folder ' +
+      'names that project in `left_project`: the project no longer lists it, so say so. Bambuddy may skip a ' +
+      "file its API key's user did not add: those are listed in `skipped`, not moved. A file moved into the " +
+      "inbox (Settings' library folder) stops being tracked as an output's copy, so ScadBuddy never deletes it; " +
+      'the next send uploads a fresh copy.',
+    input: z.object({
+      file_ids: z.array(libraryFileId).min(1).max(500),
+      folder_id: z.number().int().positive().optional().describe('The folder to move into (list_library)'),
+      folder_path: z.string().max(1024).optional().describe("The folder by path, e.g. 'Projects/Lamp', in place of folder_id"),
+    }),
+    risk: 'outward',
+    bambuddyScope: ['Manage Library'],
+    routes: ['POST /api/v1/print/library/move'],
+    summarize: ({ file_ids, folder_id, folder_path }) =>
+      `Move ${file_ids.length === 1 ? `library file ${file_ids[0]}` : `${file_ids.length} library files`} to ${folderName(folder_id, folder_path)}`,
+    handler: async ({ file_ids, folder_id, folder_path }, ctx) =>
+      json(
+        await command(ctx, 'move library files', (headers) =>
+          ctx.backend.POST('/api/v1/print/library/move', { body: { file_ids, folder_id, folder_path }, headers }),
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'copy_library_file',
+    description:
+      "Copy files in Bambuddy's library (ids from list_library) into a folder: `folder_id`, or `folder_path` " +
+      "(folder names from the top, joined by '/'), or neither for the top level. Each copy is a new file with " +
+      'its own id (`copied[].id`), the same name, bytes and notes. A file too large to copy, or one Bambuddy ' +
+      'failed on (and any after it), is listed in `skipped`; the copies made before it are still in `copied`.',
+    input: z.object({
+      file_ids: z.array(libraryFileId).min(1).max(500),
+      folder_id: z.number().int().positive().optional().describe('The folder to copy into (list_library)'),
+      folder_path: z.string().max(1024).optional().describe("The folder by path, e.g. 'Projects/Lamp', in place of folder_id"),
+    }),
+    risk: 'outward',
+    bambuddyScope: ['Manage Library'],
+    routes: ['POST /api/v1/print/library/copy'],
+    summarize: ({ file_ids, folder_id, folder_path }) =>
+      `Copy ${file_ids.length === 1 ? `library file ${file_ids[0]}` : `${file_ids.length} library files`} to ${folderName(folder_id, folder_path)}`,
+    handler: async ({ file_ids, folder_id, folder_path }, ctx) =>
+      json(
+        await command(ctx, 'copy library files', (headers) =>
+          ctx.backend.POST('/api/v1/print/library/copy', { body: { file_ids, folder_id, folder_path }, headers }),
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'rename_library_file',
+    description:
+      "Rename a file in Bambuddy's library (an id from list_library), keeping its id. The new name keeps the " +
+      "file's extension ('.3mf', or '.gcode.3mf' for a sliced file); Bambuddy refuses a name a printer's SD card " +
+      'would not take.',
+    input: z.object({ file_id: libraryFileId, filename: z.string().min(1).max(255) }),
+    risk: 'outward',
+    bambuddyScope: ['Manage Library'],
+    routes: ['POST /api/v1/print/library/rename'],
+    summarize: ({ file_id, filename }) => `Rename library file ${file_id} to ${JSON.stringify(filename)}`,
+    handler: async ({ file_id, filename }, ctx) =>
+      json(
+        await command(ctx, 'rename a library file', (headers) =>
+          ctx.backend.POST('/api/v1/print/library/rename', { body: { file_id, filename }, headers }),
         ),
       ),
   }),

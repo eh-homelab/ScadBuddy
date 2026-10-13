@@ -568,6 +568,28 @@ async def test_an_stl_is_wrapped_and_laid_out_like_a_render(tmp_path: Path) -> N
     assert await source.states_nozzles(cast(BambuddyClient, bambuddy))
 
 
+async def test_an_stl_too_large_to_wrap_prints_as_it_is_saying_why(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Running out of memory wrapping an STL for a print falls back to the STL itself,
+    which Bambuddy slices as it is (#2502); the log names the memory, not the mesh."""
+    stl = trimesh.creation.box(extents=(20, 10, 5)).export(file_type="stl")
+    bambuddy, uploads = _Bambuddy(stl), _Copies()
+    source = _library(uploads, filename="bracket.stl", file_type="stl", colours=[UNKNOWN_COLOUR])
+
+    def out_of_memory(*_: object, **__: object) -> bytes:
+        raise MemoryError
+
+    monkeypatch.setattr(print_source, "stl_3mf", out_of_memory)
+    with caplog.at_level("WARNING", logger=print_source.logger.name):
+        printed = await _print(source, bambuddy)
+
+    assert printed.id == ORIGIN and bambuddy.uploaded == []
+    assert [record.getMessage() for record in caplog.records] == [
+        "ran out of memory wrapping the STL; printing it as it is"
+    ]
+
+
 async def test_a_file_nothing_can_be_stated_into_prints_as_it_is() -> None:
     """A sliced 3MF (or another slicer's) has nothing to lay out: in the inbox the file
     itself is sliced, and the run takes it as Standard. Into a project it is copied, as

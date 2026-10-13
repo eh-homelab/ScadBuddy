@@ -168,13 +168,16 @@ def _unavailable(error: AssetUnavailableError, missing: set[str] | None) -> Appl
 async def _heartbeating[T](work: asyncio.Task[T], every: float = 5.0) -> T:
     """Heartbeat while a long openscad run is on. When Temporal cancels the activity,
     cancel `work` and await it so the runner kills the openscad process group before
-    the activity returns."""
+    the activity returns. Called outside an activity (a test, or a caller that runs the
+    stage directly), as `_stage` allows, there is nothing to beat to."""
+    beating = activity.in_activity()
     try:
         while True:
             done, _ = await asyncio.wait({work}, timeout=every)
             if done:
                 return work.result()
-            activity.heartbeat()
+            if beating:
+                activity.heartbeat()
     finally:
         if not work.done():
             work.cancel()

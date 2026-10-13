@@ -1,3 +1,4 @@
+import type { SessionStoreEntry } from '@anthropic-ai/claude-agent-sdk'
 import {
   type Client,
   WithStartWorkflowOperation,
@@ -36,6 +37,9 @@ import { event, type Owner, type SentImage, type SessionStatus } from './protoco
 //   status `finish_turn` writes, and is read only when asked for.
 // - interrupt: `cancel_input`, then the `interrupt` Signal, which is recorded even while
 //   no worker runs.
+// - fork (#2688): the parent's conversation is read from its workflow (`fork_point`, a
+//   page at a time), and the child's workflow is started with a copy of it as the
+//   agent's state, sealed under the child's own key like every payload of `session-<child>`.
 // - handoff: after the owner change is committed, `cancel_input`, best-effort; when
 //   it goes unanswered the `interrupt` Signal ends the parked calls (and the turn).
 //
@@ -45,6 +49,11 @@ import { event, type Owner, type SentImage, type SessionStatus } from './protoco
 export const DURABLE_WORKFLOW = 'DurableSession'
 export const DURABLE_TASK_QUEUE = 'agent'
 export const SEND_MESSAGE_UPDATE = 'send_message'
+export const FORK_POINT_QUERY = 'fork_point'
+/** The most characters of entries one `fork_point` page carries: under Temporal's 512 KiB warning. */
+const FORK_PAGE_CHARS = 384 * 1024
+/** How often reading the parent's pages starts again when a turn commits while they are read. */
+const FORK_READS = 3
 
 /** How long a readiness answer is reused (plan 5d Ruling 2): one Temporal call per window, not per start. */
 const READY_TTL_MS = 15_000
@@ -68,13 +77,33 @@ const SETTLED: readonly SessionStatus[] = ['idle', 'failed', 'done']
 type WireOwner = { kind: string; id: string; label: string }
 type ImageRef = { name: string; mediaType: string }
 
-/** DurableSession's input (models.py `SessionStart`); the agent's state starts empty. */
+/**
+ * The part of the plugin's `AgentState` a fork seeds (#2688): the Claude session, where it
+ * was last committed, and its transcript entries as JSON text, as the workflow keeps them.
+ */
+export type ForkedAgent = { session_id: string; checkpoint: string; conversation: string[] }
+
+/** DurableSession's input (models.py `SessionStart`); the agent's state starts empty, or a fork's copy. */
 export type SessionStart = {
   session_id: string
   creator: WireOwner
   owner: WireOwner
   max_turns: number
   system_append: string | null
+  agent?: ForkedAgent
+}
+
+/** One page of `fork_point` (models.py `ForkPoint`). */
+type ForkPointPage = { session_id: string | null; checkpoint: string | null; busy: boolean; total: number; entries: string[] }
+
+/** A durable session's committed conversation, for a fork. */
+export type ForkSource = {
+  /** The Claude session the entries belong to, and the entry it was last committed at. */
+  claudeSessionId: string
+  checkpoint: string
+  /** A turn runs: what it has written past the checkpoint is not in `entries`' committed part yet. */
+  busy: boolean
+  entries: SessionStoreEntry[]
 }
 
 /** The `send_message` Update's argument (models.py `Message`); each turn carries its own append (#2525). */
@@ -313,6 +342,82 @@ export class DurableTurns {
       // Not accepted in time, or the call itself failed: Temporal may hold the Update
       // already and deliver it when a worker polls, so this is no refusal.
       throw new OutcomeUnknown()
+    }
+  }
+
+  /**
+   * The parent's committed conversation (#2688), read from its workflow a page at a time.
+   * Undefined when it has none: no workflow (no turn ever ran, or retention removed it),
+   * or nothing committed yet. A turn that commits while the pages are read changes the
+   * count, and the read starts again.
+   */
+  async forkSource(sessionId: string): Promise<ForkSource | undefined> {
+    const handle = this.#client.workflow.getHandle(sessionWorkflowId(sessionId))
+    const page = (start: number) =>
+      this.#client.withDeadline(Date.now() + this.#sendTimeoutMs, () =>
+        handle.query<ForkPointPage, [{ start: number; limit: number }]>(FORK_POINT_QUERY, { start, limit: FORK_PAGE_CHARS }),
+      )
+    try {
+      for (let read = 0; read < FORK_READS; read++) {
+        const first = await page(0)
+        if (!first.session_id || !first.checkpoint || first.total === 0) return undefined
+        const texts = [...first.entries]
+        let moved = false
+        while (texts.length < first.total) {
+          const next = await page(texts.length)
+          if (next.total !== first.total || next.checkpoint !== first.checkpoint || next.entries.length === 0) {
+            moved = true
+            break
+          }
+          texts.push(...next.entries)
+        }
+        if (moved) continue
+        return {
+          claudeSessionId: first.session_id,
+          checkpoint: first.checkpoint,
+          busy: first.busy,
+          entries: texts.map((t) => JSON.parse(t) as SessionStoreEntry),
+        }
+      }
+    } catch (err) {
+      if (err instanceof WorkflowNotFoundError) return undefined
+      throw new SessionError('unavailable', `session ${sessionId}'s workflow could not be read to fork it; try again in a moment`)
+    }
+    throw new SessionError('busy', `session ${sessionId} kept moving while it was read; fork it again once its turn ends`)
+  }
+
+  /**
+   * Starts a fork's workflow with the conversation it carries (#2688), before its first
+   * message: that message's update-with-start then finds it running (`USE_EXISTING`).
+   * Refused `unavailable` when Temporal does not take it in time.
+   */
+  async startFork(child: SessionRecord, agent: ForkedAgent): Promise<void> {
+    const start: SessionStart = {
+      session_id: child.id,
+      creator: wire(child.creator),
+      owner: wire(child.owner),
+      max_turns: child.maxTurns,
+      // Each message carries the append as Settings stand when it is sent (#2525).
+      system_append: null,
+      agent,
+    }
+    try {
+      await this.#client.withDeadline(Date.now() + this.#sendTimeoutMs, () =>
+        this.#client.workflow.start<(start: SessionStart) => Promise<void>>(DURABLE_WORKFLOW, {
+          workflowId: sessionWorkflowId(child.id),
+          taskQueue: this.#taskQueue,
+          args: [start],
+          workflowIdReusePolicy: 'REJECT_DUPLICATE',
+        }),
+      )
+    } catch {
+      // Taken or not, a fork whose workflow is in doubt is not handed out: its first
+      // message would start it empty.
+      await this.#client.workflow
+        .getHandle(sessionWorkflowId(child.id))
+        .terminate('the fork was not completed')
+        .catch(() => {})
+      throw new SessionError('unavailable', `the fork of session ${child.id} could not be started; try again in a moment`)
     }
   }
 

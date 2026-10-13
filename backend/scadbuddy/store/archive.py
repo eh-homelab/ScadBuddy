@@ -5,13 +5,18 @@ that directory; a per-colour-objects 3MF Part arrives with phase 5's manifests."
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import errno
 import io
 import os
 import shutil
+import tempfile
 import uuid
 import zipfile
+from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import BinaryIO
 
 #: The sha256 of the blob a cached directory holds exactly: written only by `unpack_dir`
 #: and by a successful publish, and removed before a stage writes into the directory.
@@ -20,13 +25,21 @@ MARKER = ".blob-sha256"
 #: between moving the old one aside and moving the new one in.
 _SWAP_ATTEMPTS = 8
 _EPOCH = (1980, 1, 1, 0, 0, 0)
+_COPY_CHUNK = 1 << 20
 
 
 def pack_dir(directory: Path) -> bytes:
     """Every regular file under ``directory`` except dot-named ones, in name order with
     fixed timestamps, so the same content always packs to the same bytes."""
     buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+    pack_dir_to(directory, buffer)
+    return buffer.getvalue()
+
+
+def pack_dir_to(directory: Path, out: BinaryIO) -> None:
+    """:func:`pack_dir` into ``out``, a seekable file, each file copied a chunk at a time
+    (#503): a piece's mesh is never held whole, and neither is the archive."""
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
         for path in sorted(directory.rglob("*")):
             rel = path.relative_to(directory)
             if path.is_symlink() or not path.is_file() or any(p.startswith(".") for p in rel.parts):
@@ -34,8 +47,21 @@ def pack_dir(directory: Path) -> bytes:
             info = zipfile.ZipInfo(rel.as_posix(), date_time=_EPOCH)
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = 0o644 << 16
-            archive.writestr(info, path.read_bytes())
-    return buffer.getvalue()
+            with path.open("rb") as source, archive.open(info, "w") as entry:
+                shutil.copyfileobj(source, entry, _COPY_CHUNK)
+
+
+@contextlib.asynccontextmanager
+async def staged_pack(directory: Path) -> AsyncIterator[BinaryIO]:
+    """``directory`` packed (:func:`pack_dir_to`) into an unnamed file beside it, open at
+    its start, for a put to hash and upload a chunk at a time (#503): a piece of any
+    size costs the put a chunk of memory, not the piece."""
+    with await asyncio.to_thread(
+        lambda: tempfile.TemporaryFile("w+b", dir=directory.parent)
+    ) as out:
+        await asyncio.to_thread(pack_dir_to, directory, out)
+        out.seek(0)
+        yield out
 
 
 def unpack_dir(data: bytes, directory: Path, *, sha256: str | None = None) -> None:

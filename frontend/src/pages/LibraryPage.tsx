@@ -67,11 +67,16 @@ export function LibraryPage() {
   const segments = folderSegments(location.pathname)
   const fileParam = idParam(search.get('file'))
   const printParam = idParam(search.get('print'))
-  const linked = fileParam ?? printParam
 
   const [advanced, setAdvanced] = useState(readAdvanced)
   const [tree, setTree] = useState<LibraryFolderView[] | null>(null)
   const [listing, setListing] = useState<LibraryListing | null>(null)
+  // A print link to a file the listing on screen already holds (Print pressed on its
+  // card) finds nothing new: reading it again would empty the listing, closing and
+  // reopening the dialog on a fresh copy of the file, which then reads everything
+  // twice (#2361).
+  const printListed = printParam !== null && (listing?.files ?? []).some((file) => file.id === printParam)
+  const linked = fileParam ?? (printListed ? null : printParam)
   const [error, setError] = useState<string | null>(null)
   const [reload, setReload] = useState(0)
   const [picked, setPicked] = useState<LibraryEntry[]>([])

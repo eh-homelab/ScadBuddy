@@ -15,9 +15,11 @@ import { McpAuthSection } from '../components/McpAuthSection'
 import { HttpRequestSetting } from '../components/HttpRequestSetting'
 import { RenderLimitsSetting } from '../components/RenderLimitsSetting'
 import { ImageSettingsSetting } from '../components/ImageSettingsSetting'
+import { MemorySettingsSetting } from '../components/MemorySettingsSetting'
 import { SessionLimitsSetting } from '../components/SessionLimitsSetting'
 import { WorkspaceSettingsSetting } from '../components/WorkspaceSettingsSetting'
 import { SessionModeSetting } from '../components/SessionModeSetting'
+import { DurableSubagentsSetting } from '../components/DurableSubagentsSetting'
 import { ModelSetting } from '../components/ModelSetting'
 import { PrinterCameraSetting } from '../components/PrinterCameraSetting'
 import { McpAuthBanner } from '../components/McpAuthBanner'
@@ -1219,6 +1221,7 @@ export function SettingsPage() {
             <WorkspaceSettingsSetting />
             {/* Plan 5d — saves on its own; hidden without the agent's database, like the limits above. */}
             <SessionModeSetting />
+            <DurableSubagentsSetting />
             {/* The agent service serves these routes, so they show only where the assistant
                 would (#251): when the agent answers /api/v1/ai/status as available
                 (useAiAvailability). */}
@@ -1249,6 +1252,8 @@ export function SettingsPage() {
                 </p>
                 <PluginPackagesPanel />
                 <RemotePluginsPanel />
+                {/* Beside the plugins, where a hindsight plugin is added; saves on its own, read at each turn. */}
+                <MemorySettingsSetting />
               </div>
             )}
             {/* Saves on its own (#258); shown only when the assistant is available. */}

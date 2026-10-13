@@ -416,6 +416,7 @@ async def _run_operation(
         author=_author(),
         prelude=prelude,
         idempotency_key=idempotency_key,
+        answer_running=kind.answers_running,
     )
     try:
         answer = await start_command(

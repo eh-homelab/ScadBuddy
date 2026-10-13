@@ -13,9 +13,12 @@ file exactly as before and every other part is left byte-for-byte alone.
 from __future__ import annotations
 
 import hashlib
+import io
+import json
 import os
 import re
 import zipfile
+from collections.abc import Mapping
 from pathlib import Path
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape
@@ -26,7 +29,7 @@ from scadbuddy.core.paths import MODEL_META_NAME, RENDERS_DIR_NAME
 from scadbuddy.library.catalogue import README_NAME, THUMBNAIL_NAME
 from scadbuddy.library.deeplink import EDIT_NOTE
 from scadbuddy.library.media import MEDIA_DIR
-from scadbuddy.render.bambu3mf import CORE_NS, ZIP_TIMESTAMP
+from scadbuddy.render.bambu3mf import CORE_NS, PROJECT_SETTINGS_NAME, ZIP_TIMESTAMP
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.solids import WRAPPER_PREFIX
 
@@ -133,8 +136,24 @@ def _stamped_root_model(xml: str, provenance: Provenance) -> str:
     return xml[: tag.start()] + opening + "\n" + "\n".join(entries) + rest
 
 
-def stamp(path: Path, provenance: Provenance) -> None:
-    """Rewrite ``path`` with the provenance on its root model, leaving the rest alone."""
+def with_print_settings(project_settings: bytes, print_settings: Mapping[str, str]) -> bytes:
+    """``project_settings.config`` with a template's ``print_settings`` (#770) over the
+    process, listed in ``different_settings_to_system`` (the process's edits first, then
+    one entry per filament and one for the printer, as Bambu Studio saves a project), so
+    Bambu Studio shows them as changes to the system preset. Every other key stays."""
+    settings = json.loads(project_settings)
+    settings.update(print_settings)
+    filaments = len(settings.get("filament_settings_id") or [])
+    settings["different_settings_to_system"] = [";".join(print_settings), *[""] * filaments, ""]
+    return (json.dumps(settings, indent=4) + "\n").encode("utf-8")
+
+
+def stamp(
+    path: Path, provenance: Provenance, print_settings: Mapping[str, str] | None = None
+) -> None:
+    """Rewrite ``path`` with the provenance on its root model and the template's
+    ``print_settings`` in its project settings, leaving the rest alone. Written when the
+    output is saved, so the saved file is what a download serves (#2652)."""
     with zipfile.ZipFile(path) as archive:
         entries = [
             (info.filename, info.compress_type, archive.read(info.filename))
@@ -146,6 +165,8 @@ def stamp(path: Path, provenance: Provenance) -> None:
             compression,
             _stamped_root_model(payload.decode("utf-8"), provenance).encode("utf-8")
             if name == ROOT_MODEL
+            else with_print_settings(payload, print_settings)
+            if name == PROJECT_SETTINGS_NAME and print_settings
             else payload,
         )
         for name, compression, payload in entries
@@ -166,6 +187,37 @@ def stamp(path: Path, provenance: Provenance) -> None:
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _unstamped(xml: str) -> str:
+    """The root model without what :func:`stamp` writes onto it."""
+    tag = _MODEL_TAG.search(xml)
+    if tag is None:
+        return xml
+    head, marker, tail = xml[tag.end() :].partition("<resources")
+    return xml[: tag.end()] + _OWNED.sub("", head) + marker + tail
+
+
+def content_key(payload: bytes) -> str:
+    """What a 3MF holds, less the stamp naming the output it was saved as (#2476): two
+    outputs of one render, saved twice, have the same key. Every entry by name and
+    bytes, the root model's with the stamp taken out. Bytes that are no archive are
+    keyed as they are."""
+    digest = hashlib.sha256()
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(payload))
+    except zipfile.BadZipFile:
+        return "sha256:" + hashlib.sha256(payload).hexdigest()
+    with archive:
+        for name in sorted(archive.namelist()):
+            data = archive.read(name)
+            if name == ROOT_MODEL:
+                data = _unstamped(data.decode("utf-8")).encode("utf-8")
+            digest.update(name.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(data)
+            digest.update(b"\0")
+    return "sha256:" + digest.hexdigest()
 
 
 def read(path: Path) -> Provenance | None:

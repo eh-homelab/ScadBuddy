@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field, StringConstraints
 
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.models import FileUpdate, Folder, FolderCreate, FolderUpdate, LibraryFile
+from scadbuddy.bambuddy.send import is_inbox
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.library_file_operations import (
     MAX_FILES,
@@ -184,10 +185,18 @@ def library_write_kinds(state: Core) -> list[OperationKind]:
 
     async def update_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         body = LibraryFileUpdate.model_validate(request["update"])
-        async with client_for(await settings()) as client:
+        stored = await settings()
+        async with client_for(stored) as client:
             found = await client.update_library_file(
                 request["file_id"], FileUpdate(filename=body.filename, folder_id=body.folder_id)
             )
+        if body.folder_id is not None:
+            # As ``library_file_move`` does (#2670): a file moved into the inbox stops
+            # being recorded as an output's copy; moved elsewhere, its rows follow it.
+            if is_inbox(found.folder_id, stored):
+                await state.uploads.forget_files([found.id])
+            else:
+                await state.uploads.relocate([found.id], found.folder_id)
         return LibraryEntryUpdated(
             id=found.id, filename=found.filename, folder_id=found.folder_id
         ).model_dump(mode="json")

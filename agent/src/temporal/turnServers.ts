@@ -127,6 +127,7 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
         // An unlisted plugin tool is outward (registry.ts), as in a classic turn.
         tierOf: (name) => tiers(name) ?? 'outward',
         mayPark: (name) => (tiers(name) ?? 'outward') === 'outward',
+        fixedTier: (name) => tiers(name) ?? 'outward',
         // Its MCP session is kept for the durable session, on its own route (#2581).
         ...(keep
           ? {
@@ -175,6 +176,8 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
         tierOf: (name, input) => httpTierOf(name, input) ?? 'outward',
         // http_request is outward by its method; only reading a saved body never is.
         mayPark: (name) => name !== HTTP_READ_TOOL_NAME,
+        // http_request's tier is its method's; reading a saved body is always read.
+        fixedTier: (name) => (name === HTTP_READ_TOOL_NAME ? 'read' : undefined),
         pinned: true,
       })
     }

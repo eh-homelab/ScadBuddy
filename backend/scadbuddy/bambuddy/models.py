@@ -537,6 +537,26 @@ class LibraryPlates(BambuddyModel):
     is_multi_plate: bool = False
 
 
+class MoveSkip(BambuddyModel):
+    """One of ``POST /api/v1/library/files/move``'s ``skipped_reasons``: ``code`` is
+    ``not_owner``, ``source_readonly`` or a relocation's own (a name taken on the NAS, a
+    file no longer on disk), ``reason`` the sentence Bambuddy gives."""
+
+    file_id: int
+    code: str | None = None
+    reason: str | None = None
+
+
+class MoveResult(BambuddyModel):
+    """``POST /api/v1/library/files/move`` (no response schema in the OpenAPI; read off
+    Bambuddy's ``move_files``): how many it moved and why it skipped the rest. An id it
+    does not have is neither."""
+
+    moved: int = 0
+    skipped: int = 0
+    skipped_reasons: list[MoveSkip] = Field(default_factory=list)
+
+
 class SliceRequest(BambuddyModel):
     """``POST /api/v1/library/files/{id}/slice``.
 

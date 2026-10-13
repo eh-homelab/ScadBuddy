@@ -244,4 +244,57 @@ describe.skipIf(skip !== undefined)(`a durable turn from the chat socket${skip ?
     expect(reply).toMatch(/^fetched \(ok\): /)
     expect(reply).toContain('hello from the web')
   }, 300_000)
+
+  it("forks a durable session from the panel's route into a durable one that goes on from its conversation (#2688)", async () => {
+    const { clientMessage } = await frontendClientMessages()
+    const p = panel!
+    const idleAfterReply = (from: number) => (f: Record<string, unknown>) => {
+      if (f.type === 'error') return true
+      const done = p.frames.findIndex((g, i) => i >= from && g.type === 'assistant.text.done')
+      return done >= 0 && p.frames.indexOf(f) > done && f.type === 'session.status' && f.status === 'idle'
+    }
+    let from = p.frames.length
+    p.send(clientMessage({ type: 'user.message', text: 'remember the parrot', context: { route: '/' } }))
+    const first = await p.until(idleAfterReply(from), { from, timeoutMs: 120_000 })
+    expect(first.filter((f) => f.type === 'error')).toEqual([])
+    const parentId = first.find((f) => f.type === 'session.started')!.sessionId as string
+    sessionIds.push(parentId)
+    const pages = (id: string) =>
+      client.workflow
+        .getHandle(sessionWorkflowId(id))
+        .query<{ checkpoint: string; total: number; entries: string[] }, [{ start: number; limit: number }]>('fork_point', {
+          start: 0,
+          limit: 1 << 20,
+        })
+    const parentPoint = await pages(parentId)
+    expect(parentPoint.total).toBeGreaterThan(0)
+
+    const res = await fetch(`${agent!.url}/api/v1/ai/sessions/${parentId}/fork`, {
+      method: 'POST',
+      headers: { origin: agent!.origin, 'content-type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+    expect(res.status).toBe(201)
+    const { session: child } = (await res.json()) as { session: { id: string; mode: string; parent_id: string } }
+    sessionIds.push(child.id)
+    expect(child).toMatchObject({ mode: 'durable', parent_id: parentId })
+    // Its workflow runs already, holding the parent's conversation, sealed under its own key.
+    expect((await pages(child.id)).entries).toEqual(parentPoint.entries)
+
+    from = p.frames.length
+    p.send(clientMessage({ type: 'user.message', sessionId: child.id, text: 'and in the fork', context: { route: '/' } }))
+    const second = await p.until(idleAfterReply(from), { from, timeoutMs: 120_000 })
+    expect(second.filter((f) => f.type === 'error')).toEqual([])
+    expect(second.filter((f) => f.type === 'assistant.text.delta').map((f) => f.delta).join('')).toMatch(/^you said: and in the fork\n/)
+    const grown = await pages(child.id)
+    expect(grown.entries.slice(0, parentPoint.total)).toEqual(parentPoint.entries)
+    expect(grown.total).toBeGreaterThan(parentPoint.total)
+    // The parent is as it was.
+    expect((await pages(parentId)).entries).toEqual(parentPoint.entries)
+    const { history } = await env.client.workflowService.getWorkflowExecutionHistory({
+      namespace: 'default',
+      execution: { workflowId: sessionWorkflowId(child.id) },
+    })
+    expect(Buffer.from(JSON.stringify(history)).toString()).not.toContain(Buffer.from('remember the parrot').toString('base64').slice(0, 12))
+  }, 300_000)
 })

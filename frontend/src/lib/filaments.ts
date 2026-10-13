@@ -1,6 +1,7 @@
 import type {
   FilamentOptions,
   FilamentWarning,
+  SlicePreview,
   SlotChoice,
   SlotNeed,
   SpoolOption,
@@ -78,6 +79,28 @@ export function slotNeed(slot: SlotNeed, copies: number): number | null {
   const used = slot.used_grams
   if (used === null || used === undefined || used <= 0) return null
   return used * copies
+}
+
+/**
+ * #2365 — the slots with the background slice's grams where it has them. A ScadBuddy
+ * upload carries none until it is sliced, so without this every slot read "grams
+ * unknown" beside the slice's own grams, and nothing could judge a spool short. `null`
+ * (no slice for the plate the slots describe) leaves the options as they are.
+ */
+export function withSlicedGrams(
+  options: FilamentOptions,
+  slice: Pick<SlicePreview, 'slots'> | null,
+): FilamentOptions {
+  const sliced = new Map((slice?.slots ?? []).map((entry) => [entry.slot_id, entry.grams]))
+  if (sliced.size === 0) return options
+  return {
+    ...options,
+    slots: (options.slots ?? []).map((slot) => {
+      const grams = sliced.get(slot.slot_id)
+      // A slot the slice gives no grams keeps the 3MF's own figure: the intended fallback.
+      return grams != null && grams > 0 ? { ...slot, used_grams: grams } : slot
+    }),
+  }
 }
 
 export interface SpoolFilters {

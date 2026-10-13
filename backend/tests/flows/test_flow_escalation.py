@@ -7,26 +7,26 @@ import asyncio
 import dataclasses
 import time
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 from temporalio import activity
+from temporalio.api.enums.v1 import EventType
 from temporalio.testing import ActivityEnvironment
 from temporalio.worker import Worker
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.flows.approval_hash import input_hash
 from scadbuddy.flows.grants import GrantSpec
-from scadbuddy.flows.manifest import use_manifest
 from scadbuddy.flows.models import Decision, Run
 from scadbuddy.flows.operations import FLOW_ESCALATE, flow_kinds, request_id
 from scadbuddy.workflows.flow_grants import FlowGrants
 from scadbuddy.workflows.flow_models import DecisionAsk, DecisionRead
 from tests.flows import test_agent_host_functions as host
 from tests.flows.fake_api import PLAN, FakeApi, Outward
-from tests.flows.flows_support import HASH_KEY, Keys, parent_session, script
+from tests.flows.flows_support import HASH_KEY, AgentTiers, Keys, parent_session, script
 from tests.flows.test_agent_host_functions import DURABLE, Sessions
 from tests.flows.test_grant_children import Child
 from tests.flows.test_grant_gate import api_client_of
@@ -109,10 +109,27 @@ async def test_a_parent_that_never_answers_passes_up_then_the_person_timer_denie
     run = await outward.finished(run_id)
     assert run.result is not None and "timed out" in run.result
     assert api.sent == []
-    # The person's timer ran from the end of the parent hop: one timeout each.
-    [step] = run.steps
-    assert step.ended_at is not None
-    assert step.ended_at - step.started_at >= timedelta(seconds=6)
+    # The person's timer ran from the end of the parent hop: one timeout each, in turn,
+    # read from the history (workflow time), not from the projection's wall-clock stamps.
+    history = await outward.client.get_workflow_handle(run.workflow_id).fetch_history()
+    timers = [
+        (
+            e.event_type,
+            e.event_id,
+            e.event_time.ToDatetime().isoformat(),
+            e.timer_started_event_attributes,
+        )
+        for e in history.events
+        if e.event_type in (EventType.EVENT_TYPE_TIMER_STARTED, EventType.EVENT_TYPE_TIMER_FIRED)
+    ]
+    kinds = [t[0] for t in timers]
+    assert kinds == [
+        EventType.EVENT_TYPE_TIMER_STARTED,
+        EventType.EVENT_TYPE_TIMER_FIRED,
+        EventType.EVENT_TYPE_TIMER_STARTED,
+        EventType.EVENT_TYPE_TIMER_FIRED,
+    ], timers
+    assert [t[3].start_to_fire_timeout.ToSeconds() for t in timers if t[0] == kinds[0]] == [3, 3]
 
 
 async def test_with_no_run_timeout_the_parent_hop_still_ends_and_nothing_denies(
@@ -226,20 +243,14 @@ class Tools:
         return [send_to_bambuddy]
 
 
-@pytest.fixture(autouse=True)
-def manifest() -> Iterator[None]:
-    use_manifest(
-        {"sessions_start": "write", "sessions_send": "write", "send_to_bambuddy": "outward"}
-    )
-    yield
-    use_manifest({})
-
-
 @pytest.fixture
 async def tools(outward: Outward) -> AsyncIterator[tuple[Tools, str]]:
     served = Tools()
     queue = f"agent-tools-{uuid.uuid4().hex[:8]}"
-    async with Worker(outward.client, task_queue=queue, activities=served.all()):
+    agent = AgentTiers({"send_to_bambuddy": "outward"})
+    async with Worker(
+        outward.client, task_queue=queue, activities=[*served.all(), agent.activity()]
+    ):
         yield served, queue
 
 
@@ -329,4 +340,25 @@ async def test_a_starter_session_that_is_also_the_child_has_no_parent_hop(
         assert (verdict.verdict, verdict.parent_hop) == ("outside", parent)
         assert verdict.on_outside == "deny"
         assert verdict.hop_s == (30 if parent else 0)
+        # Who the parent is comes from the run's own record, for the agent to write on
+        # the entry and authorise the parent's answer against (#2482).
+        assert (verdict.parent_session, verdict.parent_principal) == (
+            (STARTER["session"], STARTER["principal"]) if parent else (None, None)
+        )
         await outward.client.get_workflow_handle(f"flow-{run_id}").terminate()
+
+
+async def test_a_parents_tiers_are_its_owners_now(outward: Outward) -> None:
+    """Matched as the agent writes the author header (`principalHeader`: printable ASCII
+    kept as it is, `%` included); an archived session is no parent (spec §4.4)."""
+    odd = "5e551011-0000-4000-8000-0000000000aa"
+    with outward.store._pool.connection() as conn:
+        parent_session(conn, PARENT_SESSION, STARTER["principal"], tier="write")
+        parent_session(conn, odd, "oidc:https://idp#a%41b", kind="oidc")
+    store = outward.store
+    assert await store.parent_tiers(PARENT_SESSION, STARTER["principal"]) == ["read", "write"]
+    assert await store.parent_tiers(odd, "oidc:https://idp#a%41b") == ["read"]
+    assert await store.parent_tiers(odd, "oidc:https://idp#aAb") is None
+    with outward.store._pool.connection() as conn:
+        conn.execute("UPDATE ai_sessions SET archived_at = now() WHERE id = %s", (PARENT_SESSION,))
+    assert await store.parent_tiers(PARENT_SESSION, STARTER["principal"]) is None

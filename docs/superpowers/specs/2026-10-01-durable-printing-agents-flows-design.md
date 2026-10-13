@@ -783,7 +783,11 @@ subagents, the model setting, credential fallback and MCP sender tiers. The pari
 - **Tool-result images** (#2325): a tool result's images are stored as the session's
   blobs and named in its text; the model reads them with `view_tool_images`.
 
-The differences left between the modes: a durable session cannot be forked; a durable
+- **Fork** (#2688): a durable session forks into a durable child whose workflow starts
+  with a copy of the parent's committed conversation (`fork_point`), from the same points
+  as a classic fork.
+
+The differences left between the modes: a durable
 subagent has ScadBuddy's own tools only; and of an `allow_refused` package's named
 built-ins only `Bash` and `PowerShell` are offered (#2393).
 

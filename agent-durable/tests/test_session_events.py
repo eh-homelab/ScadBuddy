@@ -323,3 +323,45 @@ async def test_a_tool_result_names_the_images_its_call_produced(
     logged = "".join(str(r[0]) for r in await cur.fetchall())
     assert base64.b64encode(PNG).decode()[:24] not in logged
     assert PNG.hex()[:24] not in logged
+
+
+@pytest.mark.requires_postgres
+async def test_a_turn_tools_call_is_labelled_with_the_tier_the_listing_gave(
+    agent_db: Conn, connect: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A plugin's tool is not in the manifest, so its calls read "outward" in the
+    transcript whatever Settings tiered it; the turn's listing carries its tier."""
+    sid = await insert_session(agent_db)
+    stream = [
+        {"type": "prompt", "text": "look", "offset": 0},
+        {"type": "tool_call", "id": "a", "name": "playwright__browser_snapshot", "offset": 1},
+        {"type": "tool_call", "id": "b", "name": "playwright__browser_navigate", "offset": 2},
+        {"type": "tool_call", "id": "c", "name": "other__unlisted", "offset": 3},
+        {"type": "done", "result": "", "offset": 4},
+    ]
+
+    async def follow(*_: object, **__: object) -> AsyncIterator[dict[str, object]]:
+        for e in stream:
+            yield dict(e)
+
+    monkeypatch.setattr(events_module, "follow_agent", follow)
+    env = ActivityEnvironment(client=cast(Client, object()))
+    acts = SessionEvents(connect)  # type: ignore[arg-type]
+    await env.run(
+        acts.follow_session,
+        FollowArgs(
+            session_id=sid,
+            workflow_id=f"session-{sid}",
+            prompted=True,
+            tiers={
+                "playwright__browser_snapshot": "read",
+                "playwright__browser_navigate": "write",
+            },
+        ),
+    )
+    risks = {e["name"]: e["risk"] for e in await events(agent_db, sid) if e["type"] == "tool.call"}
+    assert risks == {
+        "playwright__browser_snapshot": "read",
+        "playwright__browser_navigate": "write",
+        "other__unlisted": "outward",
+    }

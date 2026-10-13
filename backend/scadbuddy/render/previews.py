@@ -40,6 +40,7 @@ from scadbuddy.render.jobs import (
     SnapshotPendingError,
     extruder_order,
     library_lease,
+    plate_defines,
     plate_thumbnails,
     resolve_source,
     staged_assets,
@@ -111,7 +112,8 @@ async def render_preview(
     revision: str | None = None,
     fetcher: CheckoutFetcher | None = None,
 ) -> bytes:
-    """The plate image of ``slug`` rendered at its default parameters.
+    """The plate image of ``slug`` rendered at its default parameters: plate 1's, for a
+    template that spreads its parts over several plates (spec §6.4, #453).
 
     The same pipeline as a render job up to its cover image, and no further: no
     closed solids, no 3MF, no output. Its scratch space is its own, under
@@ -131,10 +133,26 @@ async def render_preview(
         try:
             raw = work / RAW_RENDER_NAME
             async with staged_assets(schema, {}, source.scad.parent, assets) as params:
-                await render_3mf(source.scad, schema, params, raw, config=config)
+                drawn = await render_3mf(source.scad, schema, params, raw, config=config)
                 parts = extruder_order(
                     await asyncio.to_thread(split_by_material, raw), schema, params
                 )
+                if (drawn.plates or 1) > 1:
+                    # A multi-plate template draws every plate's parts at once; plate 1
+                    # alone is what its first plate prints, as a job renders it (#453).
+                    first = work / "plate-1" / RAW_RENDER_NAME
+                    first.parent.mkdir()
+                    await render_3mf(
+                        source.scad,
+                        schema,
+                        params,
+                        first,
+                        config=config,
+                        extra_defines=plate_defines(1),
+                    )
+                    parts = extruder_order(
+                        await asyncio.to_thread(split_by_material, first), schema, params
+                    )
         finally:
             await asyncio.to_thread(lambda: shutil.rmtree(work, ignore_errors=True))
     # Rasterising reads the meshes in memory, not the checkouts: out of the lease.

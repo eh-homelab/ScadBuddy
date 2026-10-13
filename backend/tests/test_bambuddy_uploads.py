@@ -192,3 +192,29 @@ async def test_folderless_projects_match_by_name_and_parent_newest_first(
     await uploads.forget_folderless(8)
     await uploads.forget_folderless(8)  # forgetting one not recorded is not an error
     assert await uploads.folderless("Fidget", None) == [7]
+
+
+@pytest.mark.requires_postgres
+async def test_copies_are_found_by_what_they_hold_and_told_apart_when_shared(
+    uploads: BambuddyUploadStore,
+) -> None:
+    """#2476: identical outputs' copies are found by content, and a copy recorded under
+    two outputs is shared; re-recording without a key keeps the one it had."""
+    await uploads.record("a" * 32, copy(41).model_copy(update={"content_key": "sha256:x"}))
+    await uploads.record("b" * 32, copy(42).model_copy(update={"content_key": "sha256:y"}))
+    await uploads.record(
+        "c" * 32, copy(43, folder_id=3).model_copy(update={"content_key": "sha256:x"})
+    )
+    found = await uploads.same_content(2, "H2D", "sha256:x")
+    assert [(owner, found.id) for owner, found in found] == [("a" * 32, 41)]
+    assert await uploads.same_content(2, "H2C", "sha256:x") == []
+
+    await uploads.record("b" * 32, copy(41))
+    # Of each output's own copies, those another output has too.
+    assert await uploads.shared([41], "a" * 32) == {41}
+    assert await uploads.shared([42], "b" * 32) == set()
+    [kept] = [c for c in await uploads.for_output("b" * 32) if c.id == 41]
+    assert kept.content_key is None
+    await uploads.record("a" * 32, copy(41))
+    [still] = await uploads.same_content(2, "H2D", "sha256:x")
+    assert still[1].content_key == "sha256:x"

@@ -224,6 +224,24 @@ describe('the library routes', () => {
     })
   })
 
+  it("reads one plate of an output's 3MF, as the print dialog's pane does (#2169)", async () => {
+    let plate: string | null = null
+    server.use(
+      http.get(`${BACKEND}/api/v1/outputs/${OUT}/preview.glb`, ({ request }) => {
+        plate = new URL(request.url).searchParams.get('plate')
+        return new HttpResponse(new Uint8Array([1, 2]), { headers: { 'content-type': 'model/gltf-binary' } })
+      }),
+    )
+    const preview = await tool('get_output_preview').execute({ output_id: OUT, plate: 2 }, ctx({ maxInlineBytes: 16 }))
+    expect(plate).toBe('2')
+    expect(preview.content).toContainEqual({
+      type: 'resource',
+      resource: { uri: `scadbuddy://outputs/${OUT}/preview.glb?plate=2`, mimeType: 'model/gltf-binary', blob: 'AQI=' },
+    })
+    const link = await tool('get_output_preview').execute({ output_id: OUT, plate: 2 }, ctx({ maxInlineBytes: 1 }))
+    expect(link.content[0]).toMatchObject({ type: 'resource_link', uri: `/api/v1/outputs/${OUT}/preview.glb?plate=2` })
+  })
+
   it('lists one folder of the library, paged', async () => {
     let query = ''
     server.use(
@@ -424,5 +442,66 @@ describe('library writes for the mount (#2686)', () => {
     for (const name of ['upload_library_file', 'update_library_file', 'create_library_folder', 'update_library_folder', 'delete_library_folder']) {
       expect(tool(name).bambuddyScope).toEqual(['Manage Library'])
     }
+  })
+})
+
+describe('copying, moving and renaming library files (#2670)', () => {
+  it('moves by folder path with an Idempotency-Key, and names the folder in its approval line', async () => {
+    let sent: { body: unknown; key: string | null } | undefined
+    const answer = {
+      folder_id: 11,
+      moved: [{ id: 1, filename: 'a.3mf', left_project: { id: 7, name: 'Lamp' } }],
+      skipped: [],
+    }
+    server.use(
+      http.post(`${BACKEND}/api/v1/print/library/move`, async ({ request }) => {
+        sent = { body: await request.json(), key: request.headers.get('Idempotency-Key') }
+        return HttpResponse.json(answer)
+      }),
+    )
+    const t = tool('move_library_file')
+    expect(t.risk).toBe('outward')
+    expect(firstText(await t.execute({ file_ids: [1], folder_path: 'Projects/Desk' }, ctx()))).toEqual(answer)
+    expect(sent?.body).toEqual({ file_ids: [1], folder_path: 'Projects/Desk' })
+    expect(sent?.key).toBeTruthy()
+    expect(t.summarize({ file_ids: [1], folder_path: 'Projects/Desk' })).toBe(
+      'Move library file 1 to library folder "Projects/Desk"',
+    )
+    expect(t.summarize({ file_ids: [1, 2], folder_id: 4 })).toBe('Move 2 library files to library folder 4')
+    expect(t.summarize({ file_ids: [1] })).toBe("Move library file 1 to the library's top level")
+  })
+
+  it('copies into a folder by id', async () => {
+    let sent: unknown
+    server.use(
+      http.post(`${BACKEND}/api/v1/print/library/copy`, async ({ request }) => {
+        sent = await request.json()
+        return HttpResponse.json({ folder_id: 4, copied: [{ source_id: 1, id: 9, filename: 'a.3mf' }], skipped: [] })
+      }),
+    )
+    const t = tool('copy_library_file')
+    expect(t.risk).toBe('outward')
+    const result = firstText(await t.execute({ file_ids: [1], folder_id: 4 }, ctx())) as { copied: { id: number }[] }
+    expect(sent).toEqual({ file_ids: [1], folder_id: 4 })
+    expect(result.copied.map((file) => file.id)).toEqual([9])
+  })
+
+  it('renames a file', async () => {
+    let sent: unknown
+    server.use(
+      http.post(`${BACKEND}/api/v1/print/library/rename`, async ({ request }) => {
+        sent = await request.json()
+        return HttpResponse.json({ id: 1, filename: 'Lamp.3mf', previous: 'a.3mf' })
+      }),
+    )
+    const t = tool('rename_library_file')
+    expect(t.risk).toBe('outward')
+    expect(firstText(await t.execute({ file_id: 1, filename: 'Lamp.3mf' }, ctx()))).toEqual({
+      id: 1,
+      filename: 'Lamp.3mf',
+      previous: 'a.3mf',
+    })
+    expect(sent).toEqual({ file_id: 1, filename: 'Lamp.3mf' })
+    expect(t.summarize({ file_id: 1, filename: 'Lamp.3mf' })).toBe('Rename library file 1 to "Lamp.3mf"')
   })
 })

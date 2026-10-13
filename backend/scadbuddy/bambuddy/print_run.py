@@ -50,12 +50,14 @@ from scadbuddy.bambuddy.hardware import (
     installed_nozzles,
     last_bed_type,
     nozzle_warning,
+    plate_unlisted_warning,
     plate_warning,
 )
 from scadbuddy.bambuddy.models import (
     DEFAULT_ALGORITHM,
     FilamentRequirements,
     FlowType,
+    Printer,
     PrinterStatus,
     RackAlgorithm,
     Spool,
@@ -117,20 +119,6 @@ RACK_USAGE_FALLBACK = "rack usage unreadable; ranked without it"
 RACK_FALLBACKS = frozenset({RACK_PICK_FALLBACK, RACK_PREVIEW_FALLBACK, RACK_USAGE_FALLBACK})
 
 QUEUE_PATH = "/queue"
-
-#: Bambuddy documents these in ``SliceRequest.bed_type``'s own description as the
-#: canonical BambuStudio / OrcaSlicer values. The field itself is a free 64-character
-#: string, not an enum, so this is a menu rather than a validation rule — an unknown
-#: value a pipeline already carries is still shown as it stands.
-BED_TYPES: tuple[str, ...] = (
-    "Cool Plate",
-    "Cool Plate (SuperTack)",
-    "Supertack Plate",
-    "Engineering Plate",
-    "High Temp Plate",
-    "Textured PEI Plate",
-    "Smooth PEI Plate",
-)
 
 
 class PrintRunRequest(BaseModel):
@@ -289,16 +277,20 @@ async def filament_options(
     the step still opens, with no mounted nozzles to compare against.
 
     The file, the spools and the printer's status are read concurrently (#2504);
-    ``status`` is that read when the caller has started it already: a task the caller
-    keeps, and cancels if it must, since this never does.
+    ``status`` is that read when the caller has started it already: the caller's to
+    keep, and to cancel if it must, since this call never does, even when it is itself
+    cancelled. That promise is this call's alone: in ``choices_for`` a cancelled request
+    still cancels the read, through the rack's ``_record_seen`` awaiting it, which is
+    right, since the read is the request's (#2630).
     """
-    reading = (
-        status
-        if status is not None
-        else asyncio.ensure_future(read_status(client, printer_id))
-        if printer_id is not None
-        else None
-    )
+    reading: asyncio.Future[PrinterStatus | None] | None
+    if status is not None:
+        assert printer_id is not None, "a shared status read is some printer's"
+        reading = status
+    elif printer_id is not None:
+        reading = asyncio.ensure_future(read_status(client, printer_id))
+    else:
+        reading = None
     try:
         read_file, inventory = await asyncio.gather(
             source.file_to_read(client), read_inventory(client), return_exceptions=True
@@ -686,10 +678,19 @@ async def check_print(
                 sides=nozzle_plan.sides if nozzle_plan is not None else None,
             ),
             *rack_notes,
+            *_listed(
+                plate_unlisted_warning(
+                    request.choices.bed_type, PRINTER_MODEL, prepared.printer_name
+                )
+            ),
         ],
         rack=rack_view,
         nozzle_plan=nozzle_plan,
     )
+
+
+def _listed(warning: FilamentWarning | None) -> list[FilamentWarning]:
+    return [] if warning is None else [warning]
 
 
 def _rack_option(candidate: RackCandidate) -> RackOption:
@@ -870,6 +871,7 @@ class PreparedRun:
     #: The printer's live status, read once for the run's hardware warnings; ``None``
     #: when it was unreadable.
     printer_status: PrinterStatus | None
+    printer_name: str | None = None
 
 
 async def prepare_run(
@@ -915,7 +917,7 @@ async def prepare_run(
         raise not_configured(
             "no printer is chosen and none is configured, so there is nothing to print on"
         )
-    await _require_resolvable_printer(client, printer_id)
+    printer = await _require_resolvable_printer(client, printer_id)
     # Read once for every plate: the catalogue is ~4000 presets on the live instance.
     # Read before the upload, so that what the choices alone refuse — mixed nozzle
     # sizes, no printer or process preset — is a 422 that leaves nothing in Bambuddy's
@@ -940,6 +942,7 @@ async def prepare_run(
         printer_id=printer_id,
         catalogue=catalogue,
         printer_status=printer_status,
+        printer_name=printer.name,
     )
 
 
@@ -1264,7 +1267,7 @@ def finish_run(
     )
 
 
-async def _require_resolvable_printer(client: BambuddyClient, printer_id: int) -> None:
+async def _require_resolvable_printer(client: BambuddyClient, printer_id: int) -> Printer:
     """A 422 before anything is uploaded or sliced when the resolver cannot serve this
     printer: one Bambuddy does not list, one it has deactivated (#479; the dialog never
     offers those), or any model but the H2C, whose presets are the only ones the
@@ -1284,6 +1287,7 @@ async def _require_resolvable_printer(client: BambuddyClient, printer_id: int) -
             f"ScadBuddy can only choose slicer presets for a Bambu Lab {PRINTER_MODEL} so "
             f"far, and {printer.name}'s model is {printer.model or 'not reported'}.",
         )
+    return printer
 
 
 async def _hardware_warnings(
@@ -1310,6 +1314,8 @@ async def _hardware_warnings(
         for size in dict.fromkeys(nozzle.size for nozzle in choices.nozzles)
     ]
     found.append(plate_warning(choices.bed_type, last, printer_name))
+    # The run is only ever for a PRINTER_MODEL printer (_require_resolvable_printer).
+    found.append(plate_unlisted_warning(choices.bed_type, PRINTER_MODEL, printer_name))
     return [warning for warning in found if warning is not None]
 
 

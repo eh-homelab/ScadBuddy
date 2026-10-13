@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import os
 import re
 import shutil
@@ -11,7 +10,13 @@ from contextlib import suppress
 from pathlib import Path
 
 from scadbuddy.store import PieceStateLostError
-from scadbuddy.store.content_models import BlobKind, BlobMissingError, BlobScope
+from scadbuddy.store.content_models import (
+    BlobData,
+    BlobKind,
+    BlobMissingError,
+    BlobScope,
+    blob_digest,
+)
 
 _KEY = re.compile(r"[A-Za-z0-9._-]{1,128}")
 
@@ -98,18 +103,22 @@ class LocalContentBackend:
             raise ValueError(f"not a local object id: {backend_id!r}")
         return self.root / backend_id
 
-    async def upload(self, kind: BlobKind, data: bytes, *, name: str, scope: BlobScope) -> str:
-        backend_id = f"{kind}/{hashlib.sha256(data).hexdigest()}"
-        path = self._path(backend_id)
-
-        def write() -> None:
+    async def upload(self, kind: BlobKind, data: BlobData, *, name: str, scope: BlobScope) -> str:
+        def write() -> str:
+            backend_id = f"{kind}/{blob_digest(data)[0]}"
+            path = self._path(backend_id)
             path.parent.mkdir(parents=True, exist_ok=True)
             staging = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
-            staging.write_bytes(data)
+            if isinstance(data, bytes):
+                staging.write_bytes(data)
+            else:
+                with staging.open("wb") as out:
+                    shutil.copyfileobj(data, out)
+                data.seek(0)
             os.replace(staging, path)
+            return backend_id
 
-        await asyncio.to_thread(write)
-        return backend_id
+        return await asyncio.to_thread(write)
 
     async def download(self, backend_id: str) -> AsyncGenerator[bytes]:
         try:

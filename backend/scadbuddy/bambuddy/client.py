@@ -26,7 +26,7 @@ from contextlib import AbstractContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import date
 from types import TracebackType
-from typing import Any, Literal, Self
+from typing import Any, BinaryIO, Literal, Self
 
 import httpx
 from fastapi import status
@@ -51,6 +51,7 @@ from scadbuddy.bambuddy.models import (
     LibraryListRow,
     LibraryPlates,
     LocalPresetCatalogue,
+    MoveResult,
     PresetCatalogue,
     Printer,
     PrinterMedia,
@@ -120,8 +121,10 @@ Operation = Literal[
     "library.folders.read",
     "library.folders.update",
     "library.listing",
+    "library.move",
     "library.plate_thumbnail",
     "library.plates",
+    "library.rename",
     "library.thumbnail",
     "library.trash.list",
     "library.trash.restore",
@@ -776,11 +779,15 @@ class BambuddyClient:
     async def upload_library_file(
         self,
         filename: str,
-        content: bytes,
+        content: bytes | BinaryIO,
         *,
         folder_id: int | None = None,
         media_type: str = THREE_MF_MEDIA_TYPE,
     ) -> LibraryFile:
+        """``content`` as bytes, or a seekable file, which is sent from its start a chunk
+        at a time rather than read whole (#503); a retry sends it from its start again."""
+        if not isinstance(content, bytes):
+            content.seek(0)
         response = await self._send(
             "POST",
             "/library/files",
@@ -935,6 +942,37 @@ class BambuddyClient:
             operation="library.folders.delete",
             what=f"delete library folder {folder_id}",
         )
+
+    async def rename_library_file(self, file_id: int, filename: str) -> LibraryFile:
+        """``PUT /library/files/{id}`` with ``filename`` alone (#2670): the same partial
+        update as :meth:`annotate_library_file`, under the same id. Bambuddy refuses a
+        name a printer's SD card would (``validate_print_filename``) with a 400."""
+        response = await self._send(
+            "PUT",
+            f"/library/files/{file_id}",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="library.rename",
+            what=f"rename library file {file_id} to {filename!r}",
+            json={"filename": filename},
+        )
+        return LibraryFile.model_validate(response.json())
+
+    async def move_library_files(self, file_ids: list[int], folder_id: int | None) -> MoveResult:
+        """``POST /library/files/move`` (``FileMoveRequest``, #2670): each file into
+        ``folder_id``, the root when ``None``, under its own id. Bambuddy skips a file its
+        key's user did not add, or one it cannot relocate, each with a reason, and passes
+        over an id it does not have without a word; it 404s a folder it does not have and
+        403s a read-only external one."""
+        target = "the library root" if folder_id is None else f"library folder {folder_id}"
+        response = await self._send(
+            "POST",
+            "/library/files/move",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="library.move",
+            what=f"move {len(file_ids)} library files to {target}",
+            json={"file_ids": file_ids, "folder_id": folder_id},
+        )
+        return MoveResult.model_validate(response.json())
 
     async def delete_library_file(self, file_id: int) -> bool:
         """``DELETE /library/files/{id}``: moves the file to Bambuddy's trash, and says

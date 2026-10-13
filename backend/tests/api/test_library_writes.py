@@ -1,6 +1,7 @@
 """Renaming and moving library files, and making, changing and deleting folders
 (#2686), through ScadBuddy's operations."""
 
+import asyncio
 import json
 from collections.abc import Callable
 from typing import Any
@@ -8,13 +9,18 @@ from typing import Any
 import httpx
 import pytest
 import respx
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.bambuddy.uploads import LibraryCopy
 from tests.api.test_library_delete import API, files, queue
 from tests.api.test_send import configure
 from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_postgres
+
+OUTPUT = "b" * 32
 
 
 def folders(*tree: dict[str, object]) -> None:
@@ -53,6 +59,32 @@ def test_rename_and_move_send_only_what_was_given(client: TestClient) -> None:
     assert response.status_code == 200, response.text
     assert response.json() == {"id": 7, "filename": "b.3mf", "folder_id": 3}
     assert json.loads(put.calls.last.request.content) == {"filename": "b.3mf", "folder_id": 3}
+
+
+@respx.mock
+def test_a_move_keeps_the_upload_rows_right(client: TestClient, app: FastAPI) -> None:
+    """As ``/move`` does (#2670): an inbox copy moved out follows to its new folder, and
+    a copy moved into the inbox stops being recorded, so no send deletes it."""
+    configure(client)  # the inbox is folder 2
+    state: AppState = getattr(app.state, STATE_ATTR)
+    asyncio.run(state.uploads.record(OUTPUT, LibraryCopy(id=7, folder_id=2, target_key="k")))
+    asyncio.run(state.uploads.record(OUTPUT, LibraryCopy(id=8, folder_id=3, target_key="j")))
+    files((7, False), (8, False))
+    respx.put(f"{API}/library/files/7").mock(
+        return_value=httpx.Response(200, json={"id": 7, "filename": "a.3mf", "folder_id": 3})
+    )
+    respx.put(f"{API}/library/files/8").mock(
+        return_value=httpx.Response(200, json={"id": 8, "filename": "b.3mf", "folder_id": 2})
+    )
+
+    for file_id, folder_id in ((7, 3), (8, 2)):
+        response = client.patch(
+            f"/api/v1/print/library/{file_id}", json={"folder_id": folder_id}, headers=press()
+        )
+        assert response.status_code == 200, response.text
+
+    copies = asyncio.run(state.uploads.for_output(OUTPUT))
+    assert [(copy.id, copy.folder_id) for copy in copies] == [(7, 3)]
 
 
 def test_a_filename_with_a_slash_is_refused(client: TestClient) -> None:
