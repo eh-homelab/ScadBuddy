@@ -196,12 +196,20 @@ export class TurnTrace implements GateTrace {
 
   /** SDK callback hooks (harness/run.ts HarnessRun.traceHooks): every tool's start and end. */
   hooks(): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
+    return TurnTrace.hooksFor(() => this)
+  }
+
+  /**
+   * The same hooks for whichever turn `current` names when each fires (a turn
+   * slot, sessions/turnSlot.ts); with none they do nothing.
+   */
+  static hooksFor(current: () => TurnTrace | undefined): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
     return {
       PreToolUse: [
         {
           hooks: [
             (input) => {
-              if (input.hook_event_name === 'PreToolUse') this.toolStarted(input.tool_use_id, input.tool_name)
+              if (input.hook_event_name === 'PreToolUse') current()?.toolStarted(input.tool_use_id, input.tool_name)
               return Promise.resolve({})
             },
           ],
@@ -211,7 +219,7 @@ export class TurnTrace implements GateTrace {
         {
           hooks: [
             (input) => {
-              if (input.hook_event_name === 'PostToolUse') this.toolEnded(input.tool_use_id, true)
+              if (input.hook_event_name === 'PostToolUse') current()?.toolEnded(input.tool_use_id, true)
               return Promise.resolve({})
             },
           ],
@@ -221,7 +229,7 @@ export class TurnTrace implements GateTrace {
         {
           hooks: [
             (input) => {
-              if (input.hook_event_name === 'PostToolUseFailure') this.toolEnded(input.tool_use_id, false)
+              if (input.hook_event_name === 'PostToolUseFailure') current()?.toolEnded(input.tool_use_id, false)
               return Promise.resolve({})
             },
           ],
