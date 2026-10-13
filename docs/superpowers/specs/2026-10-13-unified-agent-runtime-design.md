@@ -66,7 +66,7 @@ Gaps remain even after it (durable spec §6.3b, last paragraph):
 The duplication also hides bugs. One example: a flow's approved outward turn tool is
 always refused, because `turnTools.ts:422` drops the input hash that `PgFlowRuns.approved`
 requires (`agent/src/temporal/flowRuns.ts:84`). The unit test's fake ignores the hash
-(`agent/test/turnTools.test.ts:118`). This is filed separately, and §12 lists it.
+(`agent/test/turnTools.test.ts:118`). This is filed as #2728, and §12 lists it.
 
 **The ask, restated.** There is one turn implementation, the classic one, and one tool and
 permission layer. Durability is about *where* and *when* that turn runs:
@@ -780,7 +780,7 @@ done. Their conversation exists only in workflow state.
 - **SDK `sessionStore` is `@alpha`** (`sdk.d.ts:1826-1834`). Classic has relied on it
   since #828 (`8ee7a89f4`), with eager flush. Task 1.1's pinned tests catch a behaviour change at a bump.
 - **The flow turn-tool hash bug** (`turnTools.ts:422`). It is independent of this design
-  and filed as its own issue, since flows keep that path.
+  and filed as #2728, since flows keep that path.
 
 ## 13. Open decisions for the user
 
