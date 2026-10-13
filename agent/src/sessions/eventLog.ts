@@ -106,7 +106,9 @@ export class EventLog {
 
   /**
    * The words of a turn's `user.turn` (the last one logged with that `turnId`), or
-   * undefined when none is. One keyed read, however long the session (#2419).
+   * undefined when none is. One round trip in place of reading the log (#2419). The
+   * JSON is not indexed, so Postgres still parses every row of the session to find
+   * it: the read's cost still grows with the session, only the transfer does not.
    */
   async userTurnText(sessionId: string, turnId: string): Promise<string | undefined> {
     const [row] = await this.sql<{ event: string }[]>`

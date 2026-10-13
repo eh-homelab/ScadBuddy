@@ -1,6 +1,4 @@
 import { randomUUID } from 'node:crypto'
-import { readdirSync, readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { EventLog } from '../src/sessions/eventLog.js'
 import { event, type Owner } from '../src/sessions/protocol.js'
@@ -8,7 +6,6 @@ import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase, type Throw
 
 // EventLog.userTurnText (#2419): a turn's words found by its turnId, without reading the log.
 
-const MIGRATIONS = fileURLToPath(new URL('./fixtures/backend-flow-migrations/', import.meta.url))
 const BROWSER: Owner = { kind: 'browser', id: 'browser', label: 'You' }
 
 describe.skipIf(!TEST_DATABASE_URL)(`EventLog.userTurnText${TEST_DATABASE_URL ? '' : ` (set ${TEST_DATABASE_URL_ENV})`}`, () => {
@@ -18,7 +15,6 @@ describe.skipIf(!TEST_DATABASE_URL)(`EventLog.userTurnText${TEST_DATABASE_URL ? 
   beforeEach(async () => {
     t = await throwawayDatabase()
     expect(await t.db.ready()).toBe(true)
-    for (const file of readdirSync(MIGRATIONS).sort()) await t.db.sql.unsafe(readFileSync(`${MIGRATIONS}${file}`, 'utf8'))
     log = new EventLog(t.db.sql)
   })
   afterEach(async () => {
