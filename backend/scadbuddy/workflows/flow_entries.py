@@ -34,6 +34,8 @@ with workflow.unsafe.imports_passed_through():
         ToolApprovalError,
     )
 
+    from scadbuddy.workflows.flow_models import FLOW_HOP_DUE
+
 FLOW_ENTRY_TIMEOUT = "flow_entry_timeout"
 #: The error a timed-out callback is resolved with; what the harness hands the caller.
 TIMED_OUT = "timed out"
@@ -140,6 +142,37 @@ async def run_gated(
     after `timeout_s` seconds with the harness's own Update (0: never). `started` says
     the tool's body is running, so the call was approved and the timer is over."""
     call = asyncio.ensure_future(run_tool(call_id, tool, **kwargs))
+    return await await_gated(call, timeout_s, started, call_id=call_id)
+
+
+async def await_escalated(
+    call: "asyncio.Future[Any]",
+    hop_s: float,
+    timeout_s: float,
+    started: Callable[[], bool],
+    *,
+    call_id: str,
+) -> Any:
+    """`await_gated` for a call parked at the starter session first (#2482, spec 2026-10-11
+    §4.6): after `hop_s` seconds still waiting, it passes up to the person (never denied:
+    a parent that does not answer fails toward asking), and the person's own `timeout_s`
+    (0: never) runs from there."""
+    try:
+        await workflow.wait_condition(
+            lambda: call.done() or started(), timeout=timedelta(seconds=hop_s)
+        )
+    except TimeoutError:
+        # The entry's hop is Postgres state (Ruling 12): moved there, once, unless the
+        # parent passed it up first. A failure leaves it at `parent`, where the person
+        # may decide it all the same (§4.1).
+        with contextlib.suppress(ActivityError):
+            await workflow.execute_activity(
+                FLOW_HOP_DUE,
+                call_id,
+                result_type=bool,
+                start_to_close_timeout=timedelta(seconds=10),
+                retry_policy=RetryPolicy(maximum_attempts=5),
+            )
     return await await_gated(call, timeout_s, started, call_id=call_id)
 
 
