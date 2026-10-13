@@ -79,6 +79,28 @@ describe('PreviewPane: where the slice departs from the plan (#2449)', () => {
     )
   })
 
+  it("warns that a spool moved to the other side may not reach it without the Track Switch (#2737 review)", () => {
+    pane(
+      slice([
+        { slot_id: 1, grams: 14.5, side: 'R' },
+        { slot_id: 2, grams: 0.5, side: 'R' },
+        { slot_id: 3, grams: 4.8, side: 'R' },
+      ]),
+      { ...plan, track_switch: false },
+    )
+    const notes = screen.getByTestId('slice-departures')
+    expect(notes).toHaveTextContent(
+      'The slicer put Indigo Purple (slot 1) on the right nozzle, not the left as planned: it groups filaments itself to cut purging. Without the Filament Track Switch its AMS may not feed the right nozzle: check where the spool is loaded before printing.',
+    )
+    // A slot left on its side says nothing.
+    expect(notes).not.toHaveTextContent('Magenta')
+  })
+
+  it('says nothing about feeding with the Track Switch, which reaches either nozzle', () => {
+    pane(slice([{ slot_id: 1, grams: 14.5, side: 'R' }]))
+    expect(screen.getByTestId('slice-departures')).not.toHaveTextContent('Track Switch')
+  })
+
   it('says nothing when the slice follows the plan', () => {
     pane(
       slice([

@@ -100,6 +100,11 @@ export function NozzlePlanStep({ plan, sides, onSide }: StepProps) {
           The Filament Track Switch feeds any spool to either nozzle.
         </p>
       )}
+      {/* #2737 review: say it here, before a slice lands to show it. */}
+      <p className="mt-1.5 text-[12px] text-muted" data-testid="nozzle-side-hint">
+        The slicer groups filaments itself to cut purging, so it may put one on the other side: the preview
+        shows where it went once sliced.
+      </p>
     </fieldset>
   )
 }

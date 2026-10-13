@@ -1725,9 +1725,14 @@ describe('PrintPicker · departures of a stale slice (#2702 review)', () => {
 describe('PrintPicker · the nozzles as sliced (#2703)', () => {
   it('shows the sides the slicer used once a slice of these choices lands', async () => {
     // The H2C plans Mistletoe Green → right and Inland Black → left; this slicer swaps them.
+    // The slice is held until the planned sides have been read (#2737 review: under load
+    // it could land first).
+    let land = () => {}
+    const held = new Promise<void>((resolve) => (land = resolve))
     server.use(
-      http.get('/api/v1/print/:kind/:id/preview-slices/:job', ({ params }) =>
-        HttpResponse.json({
+      http.get('/api/v1/print/:kind/:id/preview-slices/:job', async ({ params }) => {
+        await held
+        return HttpResponse.json({
           job_id: Number(params['job']),
           status: 'completed',
           print_time_seconds: 2843,
@@ -1737,8 +1742,8 @@ describe('PrintPicker · the nozzles as sliced (#2703)', () => {
             { slot_id: 2, grams: 3.1, side: 'R' },
           ],
           filament_changes: 1,
-        }),
-      ),
+        })
+      }),
     )
     renderPage(
       <PrintPicker
@@ -1750,6 +1755,7 @@ describe('PrintPicker · the nozzles as sliced (#2703)', () => {
     )
     const line = await screen.findByTestId('nozzle-plan')
     expect(line).toHaveTextContent('Nozzles:Mistletoe Green → right')
+    land()
 
     await waitFor(() => expect(screen.getByTestId('nozzle-plan')).toHaveTextContent('Nozzles, as sliced:'), {
       timeout: 8000,
