@@ -126,3 +126,58 @@ def test_an_idle_printer_names_no_job(client: TestClient) -> None:
 
     assert card["activity"] == "finished"
     assert card["job_name"] is None and card["progress"] is None and card["archive_id"] is None
+
+
+@respx.mock
+def test_a_drifted_status_field_reads_as_unknown_not_a_failed_strip(client: TestClient) -> None:
+    """#2750 review: an int HMS code, a fractional ``remaining_time`` or a non-dict HMS
+    entry reads leniently, so neither /prints nor the print dialog's own status reads
+    fail on a field they barely use."""
+    configure(client)
+    respx.get(f"{API}/printers/").mock(return_value=httpx.Response(200, json=[printer(1)]))
+    respx.get(f"{API}/printers/1/status").mock(
+        return_value=httpx.Response(
+            200,
+            json=status(
+                1,
+                state="PAUSE",
+                progress="n/a",
+                remaining_time=12.7,
+                layer_num=None,
+                total_layers="90",
+                hms_errors=[
+                    {"code": 32834, "full_code": 201359426, "severity": "2", "actions": "STOP"},
+                    "garbage",
+                ],
+            ),
+        )
+    )
+
+    response = client.get("/api/v1/print/printers/now")
+
+    assert response.status_code == 200, response.text
+    (card,) = response.json()["printers"]
+    assert card["activity"] == "paused" and card["error"] is None
+    assert (card["progress"], card["remaining_minutes"], card["total_layers"]) == (None, 12, 90)
+    assert [hms["code"] for hms in card["hms"]] == ["201359426"]
+
+
+@respx.mock
+def test_a_status_in_an_unreadable_shape_is_that_printers_card(client: TestClient) -> None:
+    configure(client)
+    respx.get(f"{API}/printers/").mock(
+        return_value=httpx.Response(200, json=[printer(1), printer(2)])
+    )
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(200, json=status(1)))
+    # A field the print decisions do model, in a shape nothing coerces.
+    respx.get(f"{API}/printers/2/status").mock(
+        return_value=httpx.Response(200, json=status(2, nozzles="not a list"))
+    )
+
+    response = client.get("/api/v1/print/printers/now")
+
+    assert response.status_code == 200, response.text
+    cards = {card["printer_id"]: card for card in response.json()["printers"]}
+    assert cards[1]["activity"] == "printing"
+    assert cards[2]["activity"] == "unknown"
+    assert "can't read" in cards[2]["error"]

@@ -29,17 +29,21 @@ export function NowPrinting() {
 
   useEffect(() => {
     let live = true
+    // A timer read and a visibility read can overlap; only the newest one may land.
+    let sent = 0
     const read = () => {
       if (document.hidden) return
+      const mine = ++sent
+      const current = () => live && mine === sent
       api
         .getPrintersNow()
         .then((now) => {
-          if (!live) return
+          if (!current()) return
           setPrinters(now.printers ?? [])
           setError(null)
         })
         .catch((cause: unknown) => {
-          if (live) setError(cause instanceof ApiError ? cause.detail : 'The printers could not be read.')
+          if (current()) setError(cause instanceof ApiError ? cause.detail : 'The printers could not be read.')
         })
     }
     read()
@@ -129,8 +133,8 @@ function PrinterCard({ printer }: { printer: PrinterNow }) {
           aria-label={`${printer.name} errors`}
           data-testid={`printer-now-hms-${printer.printer_id}`}
         >
-          {hms.map((error) => (
-            <li key={error.code}>
+          {hms.map((error, index) => (
+            <li key={`${index}-${error.code}`}>
               {error.description ?? 'No description from Bambuddy'}{' '}
               <span className="sb-num text-faint">HMS {error.code}</span>
             </li>

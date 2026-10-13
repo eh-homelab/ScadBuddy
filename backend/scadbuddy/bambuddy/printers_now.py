@@ -13,7 +13,7 @@ import asyncio
 import logging
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import HmsError, Printer, PrinterStatus
@@ -102,6 +102,15 @@ async def printer_now(
         logger.info("printer status unreadable", extra={"printer_id": printer.id})
         return PrinterNow(
             printer_id=printer.id, name=printer.name, activity="unknown", error=error.detail
+        )
+    except ValidationError:
+        # A shape the model cannot take is this printer's card, not the strip's 500.
+        logger.warning("printer status malformed", extra={"printer_id": printer.id})
+        return PrinterNow(
+            printer_id=printer.id,
+            name=printer.name,
+            activity="unknown",
+            error="Bambuddy's status for this printer is in a shape ScadBuddy can't read.",
         )
     activity = _activity(status)
     working = activity in ("printing", "paused")

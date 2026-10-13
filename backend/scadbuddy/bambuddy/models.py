@@ -360,6 +360,19 @@ class FilaSwitch(BambuddyModel):
     installed: bool = False
 
 
+def _number(value: Any, kind: type[int] | type[float]) -> int | float | None:
+    """``value`` as ``kind``, or None when Bambuddy sent something that is not a number."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        number = float(value)
+    except ValueError:
+        return None
+    if number != number or number in (float("inf"), float("-inf")):
+        return None
+    return int(number) if kind is int else number
+
+
 class HmsError(BambuddyModel):
     """One of ``status.hms_errors``: a Bambu HMS code with Bambuddy's description,
     which is ``null`` for a code it has no text for (measured on the recordings)."""
@@ -373,7 +386,22 @@ class HmsError(BambuddyModel):
     @field_validator("actions", mode="before")
     @classmethod
     def _actions(cls, value: Any) -> Any:
-        return [str(action) for action in value or []]
+        return [str(action) for action in value or []] if isinstance(value, list) else []
+
+    @field_validator("code", "full_code", mode="before")
+    @classmethod
+    def _text(cls, value: Any) -> Any:
+        return "" if value is None else str(value)
+
+    @field_validator("severity", mode="before")
+    @classmethod
+    def _severity(cls, value: Any) -> Any:
+        return _number(value, int)
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def _description(cls, value: Any) -> Any:
+        return value if isinstance(value, str) else None
 
 
 class PrinterStatus(BambuddyModel):
@@ -415,6 +443,38 @@ class PrinterStatus(BambuddyModel):
     awaiting_plate_clear: bool = False
     cover_url: str | None = None
     hms_errors: list[HmsError] = Field(default_factory=list)
+
+    # #2750 review: these are read on every status read (the print dialog's tray checks
+    # too), only for /prints' cards, so a drifted field reads as unknown rather than
+    # failing a print decision that never looks at it.
+    @field_validator("progress", mode="before")
+    @classmethod
+    def _progress(cls, value: Any) -> Any:
+        return _number(value, float)
+
+    @field_validator(
+        "remaining_time", "layer_num", "total_layers", "current_archive_id", mode="before"
+    )
+    @classmethod
+    def _count(cls, value: Any) -> Any:
+        return _number(value, int)
+
+    @field_validator("subtask_name", "current_print", "cover_url", mode="before")
+    @classmethod
+    def _name(cls, value: Any) -> Any:
+        return value if isinstance(value, str) else None
+
+    @field_validator("awaiting_plate_clear", mode="before")
+    @classmethod
+    def _flag(cls, value: Any) -> Any:
+        return value if isinstance(value, bool) else False
+
+    @field_validator("hms_errors", mode="before")
+    @classmethod
+    def _hms(cls, value: Any) -> Any:
+        return (
+            [entry for entry in value if isinstance(entry, dict)] if isinstance(value, list) else []
+        )
 
 
 class AvailableFilament(BambuddyModel):
