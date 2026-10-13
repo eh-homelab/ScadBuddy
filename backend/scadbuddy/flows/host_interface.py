@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import ast
 import copy
+from collections.abc import Mapping
 
 from pydantic import BaseModel
 from temporal_agent_harness.harness.code_mode.stubs import render_host_interface
@@ -42,7 +43,9 @@ class HostInterface(BaseModel):
     tools: list[ManifestTool]
 
 
-def host_interface() -> HostInterface:
+def host_interface(tool_tiers: Mapping[str, str] | None = None) -> HostInterface:
+    """The host functions and types, and the manifest's tools at `tool_tiers` (the
+    manifest's own tiers when None)."""
     source = render_host_interface(SCRIPT_TOOLS)
     functions: list[HostFunction] = []
     types: list[HostType] = []
@@ -64,5 +67,6 @@ def host_interface() -> HostInterface:
             types.append(
                 HostType(name=node.name, source=ast.get_source_segment(source, node) or "")
             )
-    tools = [ManifestTool(name=name, tier=tier) for name, tier in sorted(tiers().items())]
+    tiered = tiers() if tool_tiers is None else tool_tiers
+    tools = [ManifestTool(name=name, tier=tier) for name, tier in sorted(tiered.items())]
     return HostInterface(functions=functions, types=types, tools=tools)
