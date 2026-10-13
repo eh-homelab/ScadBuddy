@@ -235,7 +235,13 @@ async def read_preview(
 _TOOLPATHS: OrderedDict[tuple[int, int, str | None, int], bytes] = OrderedDict()
 #: How many are kept: each is up to ~13 MB (``toolpath.MAX_SEGMENTS``).
 TOOLPATHS_KEPT = 4
-_READING_TOOLPATH = asyncio.Lock()
+#: Toolpaths read at once.
+TOOLPATH_READS = 2
+_READING_TOOLPATHS = asyncio.Semaphore(TOOLPATH_READS)
+#: How long a request waits for a turn to read before a 503.
+TOOLPATH_WAIT_SECONDS = 20
+#: How long a read may spend downloading the sliced file before it gives its turn up.
+TOOLPATH_DOWNLOAD_SECONDS = 120
 #: A slice's toolpath never changes, but its job id is reused once Bambuddy restarts.
 TOOLPATH_HEADERS = {"Cache-Control": "private, no-cache", "X-Content-Type-Options": "nosniff"}
 
@@ -254,13 +260,29 @@ async def read_toolpath(
     if job.status != "completed" or job.result is None or sliced is None:
         raise ApiError(status.HTTP_409_CONFLICT, f"background slice {job_id} has not finished")
     key = (row.id or 0, sliced, job.result.name, row.plate_id)
-    # One read at a time: each holds up to a 256 MB G-code while it parses, and a
-    # second request for the same slice then finds the first one's answer kept.
-    async with _READING_TOOLPATH:
+    if (cached := _TOOLPATHS.get(key)) is not None:
+        _TOOLPATHS.move_to_end(key)
+        return cached
+    # A bounded number of reads at once, as each holds up to a 256 MB G-code while it
+    # parses; a request that cannot get a turn soon is told to come back rather than
+    # queue behind them, and a read whose download stalls gives its turn up.
+    try:
+        async with asyncio.timeout(TOOLPATH_WAIT_SECONDS):
+            await _READING_TOOLPATHS.acquire()
+    except TimeoutError:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "other toolpaths are being read; try again"
+        ) from None
+    try:
         if (cached := _TOOLPATHS.get(key)) is not None:
-            _TOOLPATHS.move_to_end(key)
             return cached
-        gcode = await _plate_gcode(client, sliced, row.plate_id)
+        try:
+            async with asyncio.timeout(TOOLPATH_DOWNLOAD_SECONDS):
+                gcode = await _plate_gcode(client, sliced, row.plate_id)
+        except TimeoutError:
+            raise ApiError(
+                status.HTTP_504_GATEWAY_TIMEOUT, "the sliced file took too long to download"
+            ) from None
         if gcode is None:
             raise ApiError(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -272,6 +294,8 @@ async def read_toolpath(
         while len(_TOOLPATHS) > TOOLPATHS_KEPT:
             _TOOLPATHS.popitem(last=False)
         return encoded
+    finally:
+        _READING_TOOLPATHS.release()
 
 
 async def _filament_changes(client: BambuddyClient, sliced: int, plate_id: int) -> int | None:

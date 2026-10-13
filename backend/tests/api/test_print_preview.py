@@ -22,6 +22,7 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.bambuddy import preview
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.preview import _TOOLPATHS, PREVIEW_GRACE, sweep_preview_slices
 from scadbuddy.core.paths import DataPaths
@@ -253,6 +254,20 @@ def test_a_toolpath_waits_for_the_slice_and_needs_its_g_code(
         == 404
     )
     assert client.get("/api/v1/print/library/5/preview-slices/9/toolpath").status_code == 404
+
+
+@respx.mock
+def test_a_toolpath_read_with_no_turn_free_is_told_to_come_back(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reads are bounded: one that cannot get a turn soon is a 503, not a queue."""
+    output_id, _, _ = _toolpath_slice(client, model)
+    monkeypatch.setattr(preview, "TOOLPATH_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(preview, "_READING_TOOLPATHS", asyncio.Semaphore(0))
+
+    busy = client.get(f"/api/v1/print/outputs/{output_id}/preview-slices/9/toolpath")
+
+    assert busy.status_code == 503, busy.text
 
 
 def _preview_then_change(client: TestClient, model: str, change: str) -> tuple[str, respx.Route]:
