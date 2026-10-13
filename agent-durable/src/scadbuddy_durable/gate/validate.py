@@ -21,7 +21,9 @@ ANSWER_MAX = 20_000
 # at its worst JSON encoding.
 RESPONSE_MAX = QUESTIONS_MAX * (QUESTION_TEXT_MAX + ANSWER_MAX) * 6 + 1024
 
-Role = Literal["browser", "grant", "owner"]
+# `parent`: the run's starter session at hop `parent` (#2482); `run_grant`: the gate's
+# own inside verdict, which no response carries.
+Role = Literal["browser", "grant", "owner", "parent", "run_grant"]
 RefusalCode = Literal[
     "stale",
     "resolved",
@@ -60,6 +62,8 @@ class GateEntry:
     session_creator: Principal | None
     questions: tuple[Question, ...] | None = None
     options: tuple[str, ...] | None = None
+    # A child session's call in a flow run's turn (#2482): the run's queue, the person's.
+    in_run: bool = False
 
 
 @dataclass(frozen=True)
@@ -82,7 +86,10 @@ class RespondRefused(Exception):  # noqa: N818 - the name the spec gives the ref
         self.code: RefusalCode = code
 
 
-_ALLOWED: dict[str, tuple[Role, ...]] = {"approval": ("browser", "grant"), "answer": ("browser",)}
+_ALLOWED: dict[str, tuple[Role, ...]] = {
+    "approval": ("browser", "grant", "parent"),
+    "answer": ("browser",),
+}
 _HEX64 = frozenset("0123456789abcdef")
 
 
@@ -142,6 +149,15 @@ def validate_respond(entry: GateEntry | None, request: RespondRequest) -> ValidR
             else "outward actions need a human approval in the ScadBuddy UI, or another agent"
             " with a per-token approval grant",
         )
+    if entry.kind == "approval" and request.role == "grant" and entry.in_run:
+        raise RespondRefused(
+            "forbidden",
+            "a flow run's calls are decided by the person, never by an approval grant",
+        )
+    if entry.kind == "approval" and request.role == "parent" and not entry.in_run:
+        raise RespondRefused(
+            "forbidden", "only a flow run's call goes to the session that started the run"
+        )
     if entry.kind == "approval" and request.role != "browser":
         own = (entry.requested_by, entry.session_owner, entry.session_creator)
         if any(_same(o, request.responder) for o in own):
@@ -154,7 +170,14 @@ def validate_respond(entry: GateEntry | None, request: RespondRequest) -> ValidR
     if not isinstance(body, dict) or body.get("kind") not in ("approval", "answer"):
         raise _malformed('a response is {"kind": "approval", …} or {"kind": "answer", …}')
     if entry.kind == "approval":
-        return _approval(entry, rid, body)
+        valid = _approval(entry, rid, body)
+        if request.role == "parent" and valid.decision != "deny":
+            raise RespondRefused(
+                "forbidden",
+                "the session that started the run may deny the call or pass it up, never"
+                " approve it",
+            )
+        return valid
     return _answer(entry, rid, body)
 
 

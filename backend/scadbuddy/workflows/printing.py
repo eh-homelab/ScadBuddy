@@ -10,7 +10,10 @@
    repeat (``USE_EXISTING``) gets the same row (§5.2); a cancelled one closes at once.
 
 ``print_slice_start`` and ``print_enqueue`` each start something Bambuddy does not
-dedupe, so they run once (``maximum_attempts = 1``). Only pure database writes retry
+dedupe, so they run once (``maximum_attempts = 1``). A slice that left nothing behind
+(``SLICE_LOST``) is the one exception: the workflow starts the plate's slice again, a
+few times, since a second slice costs only slicer time and the plate is still queued
+once (#2081). Only pure database writes retry
 without limit; ``print_record`` also touches the data volume and Bambuddy, so it gives
 up and the run is recorded as failed. ``print_finish`` remembers the project's printer
 best effort and, like ``print_succeed``, retries without limit, so once every plate is
@@ -41,7 +44,7 @@ from temporalio.exceptions import (
 
 with workflow.unsafe.imports_passed_through():
     from scadbuddy.bambuddy.dispatch import QueueOutcome, SliceStarted
-    from scadbuddy.bambuddy.print_run import PlannedRun, PrintRunResult, QueuedPlate
+    from scadbuddy.bambuddy.print_run import PlannedRun, PlatePlan, PrintRunResult, QueuedPlate
     from scadbuddy.bambuddy.runs import PrintRun, PrintRunError
     from scadbuddy.bambuddy.subject import PrintSubject
     from scadbuddy.library.outputs import PlateSend
@@ -50,6 +53,7 @@ with workflow.unsafe.imports_passed_through():
         ACCEPTED_UPDATE,
         PRINT_RUN_WORKFLOW,
         REFUSED,
+        SLICE_LOST,
         AcceptAnswer,
         Accepted,
         Checked,
@@ -96,6 +100,11 @@ PLAN_TIMEOUT = timedelta(minutes=5)
 SHORT = timedelta(seconds=60)
 #: ``DEFAULT_SLICE_TIMEOUT`` (600 s) and a margin; polled inside the activity.
 SLICE_WAIT_TIMEOUT = timedelta(seconds=660)
+#: How many times a plate is sliced when its slices leave nothing behind (#2081), and
+#: the wait before the next, times the attempt: a slicer pod's Recreate rollout or
+#: restart takes about one to two minutes.
+SLICE_ATTEMPTS = 3
+SLICE_BACKOFF = timedelta(seconds=60)
 #: The upload and the slice wait beat while they run, so a worker that died is noticed
 #: within this rather than at the activity's whole budget.
 HEARTBEAT = timedelta(seconds=30)
@@ -157,6 +166,9 @@ FOLLOW_PATCH = "follow-print"
 #: ``workflow.patched`` id of a library file's follow (#1073): a library print is followed
 #: and settled as an output's is. A library run from before it replays unfollowed.
 LIBRARY_FOLLOW_PATCH = "follow-library-print"
+#: ``workflow.patched`` id of slicing a plate again when its slice was lost (#2081). A
+#: history from before it recorded the run failed at the first lost slice.
+SLICE_RETRY_PATCH = "print-slice-again-when-lost"
 
 
 @workflow.defn(name=PRINT_RUN_WORKFLOW)
@@ -304,6 +316,49 @@ class PrintRunWorkflow:
         self._upsert(status="refused")
         await workflow.wait_condition(workflow.all_handlers_finished)
 
+    async def _slice(self, planned: PlannedRun, plate: PlatePlan) -> tuple[SliceStarted, int]:
+        """Slice one plate: its job and the sliced file. A slice that left nothing
+        behind (``SLICE_LOST``: the sidecar died under it, Bambuddy restarted and forgot
+        it, or could not be reached to start it) is started again after
+        :data:`SLICE_BACKOFF`, up to :data:`SLICE_ATTEMPTS` in all (#2081). Starting it
+        again is safe: nothing was queued, and the run queues each plate once, from the
+        slice that finished. Any other failure ends the run as before."""
+        attempt = 1
+        while True:
+            try:
+                started = await workflow.execute_activity(
+                    "print_slice_start",
+                    SliceStartInput(
+                        library_file_id=planned.library_file_id,
+                        plan=plate.plan,
+                        plate_id=plate.plate_id,
+                    ),
+                    result_type=SliceStarted,
+                    start_to_close_timeout=SHORT,
+                    retry_policy=ONCE,
+                )
+                sliced = await workflow.execute_activity(
+                    "print_slice_wait",
+                    started.job_id,
+                    result_type=int,
+                    start_to_close_timeout=SLICE_WAIT_TIMEOUT,
+                    heartbeat_timeout=HEARTBEAT,
+                    retry_policy=READ_RETRY,
+                )
+            except ActivityError as error:
+                lost = isinstance(error.cause, ApplicationError) and error.cause.type == SLICE_LOST
+                # A history from before the retry ended the run here (`SLICE_RETRY_PATCH`).
+                if not lost or attempt >= SLICE_ATTEMPTS or not workflow.patched(SLICE_RETRY_PATCH):
+                    raise
+                workflow.logger.warning(
+                    "a slice left nothing behind; slicing the plate again",
+                    extra={"plate_id": plate.plate_id, "attempt": attempt},
+                )
+                await workflow.sleep(SLICE_BACKOFF * attempt)
+                attempt += 1
+                continue
+            return started, sliced
+
     async def _print(self, input: PrintRunInput, accepted: Accepted) -> PrintRun:
         planned = await workflow.execute_activity(
             "print_plan",
@@ -318,25 +373,7 @@ class PrintRunWorkflow:
         sent: list[PlateSend] = []
         last = len(planned.plates) - 1
         for index, plate in enumerate(planned.plates):
-            started = await workflow.execute_activity(
-                "print_slice_start",
-                SliceStartInput(
-                    library_file_id=planned.library_file_id,
-                    plan=plate.plan,
-                    plate_id=plate.plate_id,
-                ),
-                result_type=SliceStarted,
-                start_to_close_timeout=SHORT,
-                retry_policy=ONCE,
-            )
-            sliced = await workflow.execute_activity(
-                "print_slice_wait",
-                started.job_id,
-                result_type=int,
-                start_to_close_timeout=SLICE_WAIT_TIMEOUT,
-                heartbeat_timeout=HEARTBEAT,
-                retry_policy=READ_RETRY,
-            )
+            started, sliced = await self._slice(planned, plate)
             if not self.enqueue_attempted:
                 # Before the first POST /queue/: from here a failure may have queued. The
                 # flag follows the row's column, so a cancel's message agrees with it. A

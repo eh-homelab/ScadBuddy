@@ -173,6 +173,11 @@ class GrantVerdict(BaseModel):
     hop_s: int = 0
     #: A child's call: what the script said a call outside does (its step's policy).
     on_outside: Literal["escalate", "deny"] = "escalate"
+    #: With `parent_hop`, the starter session and its principal, from the run's own
+    #: `started_by`: what the agent writes on a child's entry and authorises the
+    #: parent's answer against (#2482), never anything a caller said.
+    parent_session: str | None = None
+    parent_principal: str | None = None
 
 
 class DecisionAsk(BaseModel):

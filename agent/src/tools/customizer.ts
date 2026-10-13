@@ -51,16 +51,38 @@ async function getJob(ctx: ToolContext, id: string) {
 /**
  * A slot under the per-principal render bounds (renderLimits.ts, #252) for a job
  * the agent puts on the render queue (render_model, arrange). Past the bound this
- * waits for a slot rather than refusing. Call the returned function when the job settles.
+ * waits for a slot rather than refusing, for at most the tool's own waits
+ * (`waitsMs`: ACCEPTING_MS + renderWaitMs), so a long queue is answered "not
+ * rendered" with nothing submitted, before the tool's deadline (registry.ts
+ * `TOOL_DEADLINE_MS` past its waits) would answer it as "may have taken effect".
+ * Hand the returned function to `releaseWhenSettled`.
  */
 export function acquireRenderSlot(ctx: ToolContext): Promise<() => void> {
   const limiter = ctx.renderLimiter ?? DEFAULT_RENDER_LIMITER
   return limiter.acquire(renderPrincipal(ctx.principal), {
     signal: ctx.signal,
+    maxWaitMs: ACCEPTING_MS + ctx.renderWaitMs,
     onWait: (ahead) => {
       ctx.progress(0, undefined, `waiting for a render slot (${ahead} ahead of this one)`).catch(() => {})
     },
   })
+}
+
+/**
+ * Frees a render slot once the job it was taken for settles: at once when nothing
+ * was submitted or the job is known settled, else after `holdUntilSettled`.
+ */
+export function releaseWhenSettled(
+  ctx: ToolContext,
+  submitted: string | undefined,
+  job: { status: JobStatus['status'] } | undefined,
+  release: () => void,
+): void {
+  if (submitted !== undefined && (job === undefined || !settled(job.status))) {
+    void holdUntilSettled(ctx, submitted, (ctx.renderLimiter ?? DEFAULT_RENDER_LIMITER).limits.holdMs).finally(release)
+  } else {
+    release()
+  }
 }
 
 /**
@@ -234,11 +256,7 @@ export const customizerTools: Tool[] = [
           isError: true,
         }
       } finally {
-        if (submitted !== undefined && (job === undefined || !settled(job.status))) {
-          void holdUntilSettled(ctx, submitted, (ctx.renderLimiter ?? DEFAULT_RENDER_LIMITER).limits.holdMs).finally(release)
-        } else {
-          release()
-        }
+        releaseWhenSettled(ctx, submitted, job, release)
       }
       const summary = jobSummary(job)
       if (job.status === 'failed' || job.status === 'cancelled') {

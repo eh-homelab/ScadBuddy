@@ -28,7 +28,7 @@ describe('LibraryPage', () => {
     const { user } = renderPage(<LibraryPage />, { route: '/library' })
     const arrange = await screen.findByRole('button', { name: 'Arrange selected (0)' })
     expect(arrange).toBeDisabled()
-    await user.click(within(screen.getByTestId('library-file-89')).getByRole('checkbox', { name: /^Select bag-clip/ }))
+    await user.click(within(await screen.findByTestId('library-file-89')).getByRole('checkbox', { name: /^Select bag-clip/ }))
     // Picks are kept across folders: one file here, one in MakerWorld.
     await user.click(screen.getByTestId('library-folder-1'))
     await user.click(await screen.findByRole('checkbox', { name: "Select Clara's Wand.3mf" }))
@@ -179,8 +179,8 @@ describe('LibraryPage', () => {
     server.use(http.get('/api/v1/print/library', () => delay('infinite')))
     await user.click(screen.getByTestId('library-folder-9'))
 
-    await waitFor(() => expect(screen.queryByTestId('library-print-89')).toBeNull())
-    expect(screen.getByText(/Reading the Bambuddy library/)).toBeInTheDocument()
+    expect(await screen.findByText(/Reading the Bambuddy library/)).toBeInTheDocument()
+    expect(screen.queryByTestId('library-print-89')).toBeNull()
   })
 
   it('cuts a name with an early dot in the middle, keeping only its end whole (#935)', async () => {
@@ -249,11 +249,11 @@ describe('LibraryPage, item context (#975)', () => {
     const tree = screen.getByRole('tree', { name: 'Library folders' })
     expect(within(tree).getByRole('treeitem', { name: 'Top level' })).toHaveAttribute('aria-selected', 'true')
 
-    const bulk = within(tree).getByRole('treeitem', { name: 'Bulk, 300 files' })
+    const bulk = within(tree).getByRole('treeitem', { name: 'Bulk 300 files' })
     await user.click(bulk)
     expect(bulk).toHaveAttribute('aria-selected', 'true')
     expect(within(tree).getByRole('treeitem', { name: 'Top level' })).toHaveAttribute('aria-selected', 'false')
-    expect(within(tree).getByRole('treeitem', { name: 'MakerWorld, 2 files' })).toBeInTheDocument()
+    expect(within(tree).getByRole('treeitem', { name: 'MakerWorld 2 files' })).toBeInTheDocument()
   })
 
   it('opens and closes folders with the keyboard, others starting closed (#2165)', async () => {

@@ -3,7 +3,14 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 import { ApiError, OFFLINE, STILL_ACCEPTING, TEMPORAL_UNAVAILABLE, UNANSWERED, api } from '../api/client'
 import type { Job, RenderAccepted } from '../api/types'
 import { fakeRealtime } from './realtime.fake'
-import { READ_RETRIES, SNAPSHOT_PENDING_MAX_SECONDS, TRANSIENT_RETRIES, canRetry, useRenderJob } from './useRenderJob'
+import {
+  QUEUE_READ_MS,
+  READ_RETRIES,
+  SNAPSHOT_PENDING_MAX_SECONDS,
+  TRANSIENT_RETRIES,
+  canRetry,
+  useRenderJob,
+} from './useRenderJob'
 
 const JOB_A = 'a'.repeat(32)
 const JOB_B = 'b'.repeat(32)
@@ -432,8 +439,9 @@ describe('useRenderJob', () => {
   })
 
   describe('following a job (#267)', () => {
-    it('reads the job when the subscription is confirmed and on each event, never on a timer', async () => {
+    it('reads a running job when the subscription is confirmed and on each event, never on a timer', async () => {
       const read = vi.mocked(api.getJob)
+      read.mockImplementation(async (id) => job(id, 'running'))
       const { result } = mount({ slug: 'demo', params: { n: 1 } })
       await settle()
       expect(realtime.following()).toEqual([`job:${JOB_A}`])
@@ -444,7 +452,6 @@ describe('useRenderJob', () => {
       })
       expect(read).toHaveBeenCalledTimes(1)
 
-      read.mockImplementation(async (id) => job(id, 'running'))
       await realtime.signal(`job:${JOB_A}`)
       expect(read).toHaveBeenCalledTimes(2)
       expect(result.current.job?.status).toBe('running')
@@ -453,6 +460,32 @@ describe('useRenderJob', () => {
       await realtime.signal(`job:${JOB_A}`)
       expect(result.current.rendering).toBe(false)
       expect(result.current.job?.status).toBe('done')
+    })
+
+    it('reads a job waiting for a worker again every few seconds, for its queue place (#1638)', async () => {
+      const read = vi.mocked(api.getJob)
+      read.mockImplementation(async (id) => ({ ...job(id, 'pending'), queue_position: 3 }))
+      const { result } = mount({ slug: 'demo', params: { n: 1 } })
+      await settle()
+      expect(read).toHaveBeenCalledTimes(1)
+      expect(result.current.job?.queue_position).toBe(3)
+
+      // No event says another job started: the place moves only on a read.
+      read.mockImplementation(async (id) => ({ ...job(id, 'pending'), queue_position: 1 }))
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(QUEUE_READ_MS + 500)
+      })
+      expect(read).toHaveBeenCalledTimes(2)
+      expect(result.current.job?.queue_position).toBe(1)
+
+      // Once a worker has it, its events are enough.
+      read.mockImplementation(async (id) => job(id, 'running'))
+      await realtime.signal(`job:${JOB_A}`)
+      const reads = read.mock.calls.length
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(QUEUE_READ_MS * 3)
+      })
+      expect(read).toHaveBeenCalledTimes(reads)
     })
 
     it('shows the step a job.progress names without reading the job, and clears it on settle', async () => {

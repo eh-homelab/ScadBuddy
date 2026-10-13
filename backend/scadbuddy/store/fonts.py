@@ -12,7 +12,7 @@ from pathlib import Path
 
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.googlefonts import licence_slug
-from scadbuddy.store.archive import pack_dir, read_marker, unpack_dir
+from scadbuddy.store.archive import read_marker, staged_pack, unpack_dir
 from scadbuddy.store.bambuddy import SHARED_TITLE
 from scadbuddy.store.content import BlobCorruptError, BlobMissingError, BlobScope, ContentStore
 from scadbuddy.store.locks import KeyLocks
@@ -62,15 +62,15 @@ class FontMirror:
         self.locks = locks or KeyLocks()
 
     async def _publish_dir(self, directory: Path) -> None:
-        data = await asyncio.to_thread(pack_dir, directory)
-        await self.content.put(
-            "font",
-            data,
-            name=f"{font_key(directory.name)}.zip",
-            scope=SHARED,
-            key=font_key(directory.name),
-            meta={"dir": directory.name},
-        )
+        async with staged_pack(directory) as data:
+            await self.content.put(
+                "font",
+                data,
+                name=f"{font_key(directory.name)}.zip",
+                scope=SHARED,
+                key=font_key(directory.name),
+                meta={"dir": directory.name},
+            )
 
     async def publish(self, family: str) -> None:
         directory = self.fonts.family_dir(family)

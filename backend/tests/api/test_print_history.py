@@ -123,9 +123,11 @@ def test_a_linked_print_is_listed_with_its_summary(client: TestClient, model: st
         "completed_at": "2026-09-27T05:56:53.660315",
         "actual_time_seconds": 6437,
         "filament_used_grams": 16.36,
+        # #2355: the card's cover is the photo shrunk; the lightbox has it whole.
         "cover": {
             "kind": "photo",
-            "url": "/api/v1/prints/35/photos/finish_20260927_015703_93372185.jpg",
+            "url": "/api/v1/prints/35/photos/finish_20260927_015703_93372185.jpg?size=card&v=1",
+            "full_url": "/api/v1/prints/35/photos/finish_20260927_015703_93372185.jpg",
         },
         "has_timelapse": True,
         "attachment_count": 0,
@@ -144,7 +146,11 @@ def test_without_photos_the_cover_is_the_thumbnail(client: TestClient, model: st
 
     [summary] = client.get("/api/v1/prints").json()["items"]
 
-    assert summary["cover"] == {"kind": "thumbnail", "url": "/api/v1/prints/35/thumbnail"}
+    assert summary["cover"] == {
+        "kind": "thumbnail",
+        "url": "/api/v1/prints/35/thumbnail",
+        "full_url": "/api/v1/prints/35/thumbnail",
+    }
     assert summary["has_timelapse"] is False
 
 
