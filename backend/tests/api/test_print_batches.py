@@ -4,6 +4,7 @@ Postgres so a reload resumes it, and queued as each file's own library run."""
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 import respx
@@ -22,7 +23,7 @@ pytestmark = pytest.mark.requires_postgres
 BATCHES = "/api/v1/print/batches"
 
 
-def new_batch(client: TestClient, *ids: int) -> dict:
+def new_batch(client: TestClient, *ids: int) -> Any:
     response = client.post(
         BATCHES,
         json={
@@ -36,7 +37,7 @@ def new_batch(client: TestClient, *ids: int) -> dict:
     return response.json()
 
 
-def choose(client: TestClient, batch_id: str, position: int, **choice: object) -> dict:
+def choose(client: TestClient, batch_id: str, position: int, **choice: object) -> Any:
     response = client.put(f"{BATCHES}/{batch_id}/items/{position}", json=choice)
     assert response.status_code == 200, response.text
     return response.json()
