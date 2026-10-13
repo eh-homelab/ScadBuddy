@@ -1022,6 +1022,35 @@ describe('CustomizePage', () => {
     expect(screen.queryByText(/not answering right now/)).not.toBeInTheDocument()
   }, 30000)
 
+  it('flags a colour that is no colour on its field and neither renders nor generates it (#2357)', async () => {
+    const renders = watchRenders()
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    const before = renders.length
+
+    await user.click(screen.getByRole('tab', { name: 'Colours' }))
+    const hex = screen.getByRole('textbox', { name: 'Text hex' })
+    await user.tripleClick(hex)
+    await user.keyboard('#RREEDD')
+    await user.tab()
+
+    expect(hex).toHaveValue('#RREEDD')
+    expect(hex).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByTestId('generate')).toBeDisabled()
+    await new Promise((resolve) => setTimeout(resolve, RENDER_DEBOUNCE_MS * 2))
+    expect(renders.length).toBe(before)
+
+    await user.tripleClick(hex)
+    await user.keyboard('red')
+    await user.tab()
+    expect(hex).toHaveValue('#FF0000')
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled(), { timeout: 4000 })
+    const sent = (await Promise.all(renders.slice(before))).map((body) => body.inputs.params['text_color'])
+    expect(sent).not.toContain('#RREEDD')
+    expect(sent.at(-1)).toBe('#FF0000')
+  }, 20000)
+
   it('links to the versions panel', async () => {
     render()
     await firstRender()

@@ -1,4 +1,5 @@
 import type { CustomizerSchema, Param, ParamGroup, ParamValue } from '../api/types'
+import { CSS_COLOURS } from './cssColours'
 import { normalizeHex } from './format'
 
 export type ParamValues = Record<string, ParamValue>
@@ -147,11 +148,30 @@ export function textLength(value: string): number {
 }
 
 /**
+ * #2357 — a colour value as the `#RRGGBB` it renders as, or null when it is no colour:
+ * a hex (`#RGB`, `#RGBA`, `#RRGGBB`, `#RRGGBBAA`, alpha dropped) or one of OpenSCAD's
+ * colour names in any case (`red` is `#FF0000`), as the renderer reads them.
+ */
+export function colourHex(value: string): string | null {
+  const trimmed = value.trim()
+  if (HEX.test(trimmed)) return normalizeHex(trimmed)
+  return CSS_COLOURS[trimmed.toLowerCase()] ?? null
+}
+
+/**
  * #921 — why a number field's value is outside the range the model declares, in the
  * field's own words, or null when it is inside (or the parameter is not a number).
  * The render would refuse it with a 422; the field says so before any request goes out.
+ * A colour parameter's value that is not a hex colour is refused the same way (#2357).
  */
 export function rangeProblem(param: Param, value: ParamValue | undefined): string | null {
+  // #2357 — a colour field's value that is no hex colour ("red", "#12") would render with
+  // the colour dropped and the extruders reshuffled: refused like an out-of-range number.
+  // The model's own default is left to the model, as it always rendered.
+  if (param.type === 'color') {
+    if (value === undefined || value === param.initial || colourHex(String(value)) !== null) return null
+    return `${param.caption || param.name} must be a colour: a hex such as #FF8800, or a name such as red.`
+  }
   if (param.type !== 'number' && param.type !== 'integer' && param.type !== 'slider') return null
   if (typeof value !== 'number' || !Number.isFinite(value)) return null
   const below = param.min != null && value < param.min
@@ -162,7 +182,7 @@ export function rangeProblem(param: Param, value: ParamValue | undefined): strin
   return below ? `${label} must be at least ${param.min}.` : `${label} must be at most ${param.max}.`
 }
 
-/** #921 — the first parameter whose value is out of its declared range: nothing renders or generates while there is one. */
+/** #921 — the first parameter whose value is out of its declared range (or no colour, #2357): nothing renders or generates while there is one. */
 export function outOfRange(schema: CustomizerSchema, values: ParamValues): Param | undefined {
   return allParams(schema).find((param) => param.name in values && rangeProblem(param, values[param.name]) !== null)
 }
@@ -210,10 +230,12 @@ export function checkParamValue(param: Param, value: ParamValue): CheckedValue {
             message: `${label} is one of ${options.map((option) => JSON.stringify(option.value)).join(', ')}.`,
           }
     }
-    case 'color':
-      return typeof value === 'string' && HEX.test(value.trim())
-        ? { ok: true, value: normalizeHex(value) }
+    case 'color': {
+      const hex = typeof value === 'string' ? colourHex(value) : null
+      return hex !== null
+        ? { ok: true, value: hex }
         : { ok: false, message: `${label} takes a hex colour such as "#FF8800".` }
+    }
     case 'file': {
       if (typeof value !== 'string') return { ok: false, message: `${label} takes a file name.` }
       const samples = param.samples ?? []
