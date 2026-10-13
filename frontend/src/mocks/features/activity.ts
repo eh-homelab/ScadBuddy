@@ -48,6 +48,8 @@ function defaultRows(): Activity[] {
       principal: 'token:t1',
       via_tool: 'import_model',
       detail: { error: 'boom', summary: 'could not fetch' },
+      workflow_id: 'op-model_import-1',
+      run_id: 'run-1',
       created_at: '2026-10-09T10:01:00Z',
       updated_at: '2026-10-09T10:01:30Z',
       finished_at: '2026-10-09T10:01:30Z',

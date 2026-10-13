@@ -77,6 +77,19 @@ test.describe('real backend', () => {
     expect(bambu.meshes).toEqual(['3D/Objects/object_1.model', '3D/Objects/object_2.model'])
   })
 
+  test('lists a render in Activity as the user\'s and reaches Succeeded', async ({ page }) => {
+    test.setTimeout(180_000)
+
+    await page.goto('/')
+    await page.getByRole('link', { name: /Name Keychain/ }).click()
+    await expect(page.getByTestId('bbox-readout')).toContainText('mm', { timeout: 120_000 })
+
+    await page.getByRole('link', { name: 'Activity' }).click()
+    const row = page.getByTestId(/^activity-row-render/).filter({ hasText: /^.*Render / }).first()
+    await expect(row).toContainText('You', { timeout: 30_000 })
+    await expect(row).toContainText('Succeeded', { timeout: 120_000 })
+  })
+
   /**
    * Issue #82's acceptance, end to end: Pacifico is NOT one of the image's font
    * packages, so this only passes if the picker downloaded it onto the data volume and
