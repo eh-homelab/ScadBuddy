@@ -1346,6 +1346,27 @@ def test_only_a_press_with_a_request_id_is_offered_the_202(
     assert pressed.json()["update_id"] == "r" * 32
 
 
+def test_a_request_id_a_follow_url_cannot_carry_keeps_the_resend(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3078: the `request_id` is the follow URL's last segment, and Starlette asserts on a
+    `/` in one, so such a press is the 503 re-send it was, not a 500."""
+    output_id = prepared(client, model)
+
+    async def slow(*args: Any, **kwargs: Any) -> AcceptAnswer:
+        raise CommandStillAcceptingError("print-x")
+
+    monkeypatch.setattr(printing_api, "start_command", slow)
+    response = client.post(
+        f"/api/v1/print/outputs/{output_id}/run",
+        json={**body(), "request_id": "press/1"},
+        headers={"Prefer": "respond-async"},
+    )
+
+    assert response.status_code == 503, response.text
+    assert response.json()["type"] == operations_api.STILL_ACCEPTING_PROBLEM
+
+
 def test_following_a_refused_run_answers_the_refusal(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -134,6 +135,10 @@ from scadbuddy.workflows.print_models import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: The `request_id`s a follow URL can carry as its Update id: the web client's hex and the
+#: agent's UUIDs both match.
+_FOLLOWABLE_ID = re.compile(r"[A-Za-z0-9_.-]+")
 
 #: ``TemporalRefusedError``. Not "nothing was queued": some refusals come after the start
 #: was persisted, and the same request sent again follows it (review #1316 4).
@@ -779,7 +784,8 @@ async def accept_run(
     carries. ``prepare`` completes ``source`` for a run that is not a repeat (#2550).
     ``http`` asking for ``Prefer: respond-async`` makes a start no worker has accepted
     within `FAST_ACCEPT` a 202 to follow (spec 2026-10-13 §5.1, #2793); its Update id is
-    the request's ``request_id``. A request without one keeps the 503 re-send: a repeat
+    the request's ``request_id``. A request without one, or with one a URL path cannot
+    carry, keeps the 503 re-send: a repeat
     of an ended run must start anew (``ended``), which a follow cannot tell apart.
     """
     key = run_key(subject.run_subject, request)
@@ -804,7 +810,14 @@ async def accept_run(
     # Only for a press with a `request_id` (review #2834): without one, a repeat of an
     # ended run outside its window must start anew (`ended` below), which a follow of the
     # Update cannot tell from the run this request made. Those keep the 503 re-send.
-    respond_async = http is not None and prefers_async(http) and has_request_id
+    # A `request_id` is the follow URL's last path segment, so one Starlette cannot put
+    # in a path (a `/`, say) keeps the 503 re-send too, rather than a 500 (#3078).
+    respond_async = (
+        http is not None
+        and prefers_async(http)
+        and request.request_id is not None
+        and _FOLLOWABLE_ID.fullmatch(request.request_id) is not None
+    )
     update_id = request.request_id if respond_async else None
 
     began = time.monotonic()
