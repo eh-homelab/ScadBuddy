@@ -4,10 +4,20 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PRINTERS_NOW, setPrintersNow } from '../../mocks/features/printersNow'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
+import { resetBambuddyLinks, setBambuddyLinks } from '../../lib/bambuddyLinks'
 import { NOW_POLL_MS, NowPrinting } from './NowPrinting'
+
+const frame = vi.hoisted(() => ({ embedded: false }))
+vi.mock('../../lib/embed', async (original) => ({
+  ...(await original<typeof import('../../lib/embed')>()),
+  isEmbedded: () => frame.embedded,
+}))
 
 afterEach(() => {
   vi.useRealTimers()
+  frame.embedded = false
+  resetBambuddyLinks()
+  Object.defineProperty(document, 'referrer', { value: '', configurable: true })
 })
 
 describe('NowPrinting (#977)', () => {
@@ -42,6 +52,19 @@ describe('NowPrinting (#977)', () => {
     expect(idle).toHaveTextContent('Idle')
     expect(within(idle).queryByRole('progressbar')).toBeNull()
     expect(within(idle).queryByRole('link')).toBeNull()
+  })
+
+  it('opens Bambuddy on the hostname framing ScadBuddy', async () => {
+    setBambuddyLinks({ bambuddy_url: null, bambuddy_web_urls: 'http://bambuddy.local, http://bambuddy.lan:8000' })
+    frame.embedded = true
+    Object.defineProperty(document, 'referrer', { value: 'http://bambuddy.lan:8000/external/3', configurable: true })
+    renderPage(<NowPrinting />)
+
+    const paused = await screen.findByTestId('printer-now-1')
+    expect(within(paused).getByRole('link', { name: 'Open in Bambuddy (archive 90)' })).toHaveAttribute(
+      'href',
+      'http://bambuddy.lan:8000/archives',
+    )
   })
 
   it('follows the printers as they change', async () => {

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router'
 import { api, ApiError } from '../../api/client'
 import type { PrinterNow } from '../../api/types'
+import { bambuddyLink } from '../../lib/bambuddyLinks'
 import { formatDuration } from '../../lib/format'
 
 /** How often the printers are read while the page is visible. */
@@ -143,7 +144,7 @@ function PrinterCard({ printer }: { printer: PrinterNow }) {
           </Link>
         ) : printer.bambuddy_url ? (
           <a
-            href={printer.bambuddy_url}
+            href={bambuddyLink(printer.bambuddy_url)}
             target="_blank"
             rel="noreferrer"
             className="mt-1.5 inline-block text-[12px] text-accent hover:underline"
