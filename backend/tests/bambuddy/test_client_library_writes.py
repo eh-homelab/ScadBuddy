@@ -54,3 +54,33 @@ async def test_delete_folder_maps_errors(bambuddy: BambuddyClient, status: int) 
     with pytest.raises(ApiError) as raised:
         await bambuddy.delete_folder(4)
     assert raised.value.status in {404, 409, 502}
+
+
+@respx.mock
+async def test_trashed_library_files_reads_every_page(bambuddy: BambuddyClient) -> None:
+    def item(i: int, folder_id: int | None) -> dict[str, object]:
+        return {
+            "id": i,
+            "filename": f"f{i}.3mf",
+            "file_size": 1,
+            "folder_id": folder_id,
+            "deleted_at": "2026-10-13T00:00:00Z",
+            "auto_purge_at": "2026-11-12T00:00:00Z",
+        }
+
+    first = [item(i, 4) for i in range(500)]
+    route = respx.get(f"{API}/library/trash").mock(
+        side_effect=[
+            httpx.Response(200, json={"items": first, "total": 501, "retention_days": 30}),
+            httpx.Response(
+                200, json={"items": [item(500, None)], "total": 501, "retention_days": 30}
+            ),
+        ]
+    )
+    found = await bambuddy.trashed_library_files()
+    assert len(found) == 501
+    assert found[0].folder_id == 4 and found[-1].folder_id is None
+    assert [dict(call.request.url.params) for call in route.calls] == [
+        {"limit": "500", "offset": "0"},
+        {"limit": "500", "offset": "500"},
+    ]

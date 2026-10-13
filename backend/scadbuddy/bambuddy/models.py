@@ -490,6 +490,16 @@ class LibraryFile(BambuddyModel):
     is_external: bool = False
 
 
+class TrashedLibraryFile(BambuddyModel):
+    """An item of ``GET /api/v1/library/trash`` (Bambuddy's ``TrashFile``, v1.2.5.5
+    ``backend/app/schemas/library_trash.py``). ``folder_id`` is the folder the file was
+    in when it was trashed, which Bambuddy's folder delete still cascades to."""
+
+    id: int
+    filename: str
+    folder_id: int | None = None
+
+
 class LibraryListRow(BambuddyModel):
     """A row of ``GET /api/v1/library/files/`` (Bambuddy's ``FileListResponse``;
     ``library-files-root.json``). ``file_type`` is ``"3mf"``, ``"gcode.3mf"`` for a

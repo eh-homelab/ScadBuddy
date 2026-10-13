@@ -67,6 +67,7 @@ from scadbuddy.bambuddy.models import (
     SpoolFilamentPreset,
     TimelapseInfo,
     TimelapseThumbnails,
+    TrashedLibraryFile,
 )
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import split_urls
@@ -84,6 +85,8 @@ DEFAULT_TIMEOUT = 30.0
 DEFAULT_UPLOAD_TIMEOUT = 180.0
 DEFAULT_SLICE_TIMEOUT = 600.0
 DEFAULT_SLICE_POLL = 2.0
+#: The largest page ``GET /library/trash`` serves (``limit`` is ``le=500``).
+TRASH_PAGE = 500
 
 
 #: What a Bambuddy call does, which names its span (``bambuddy.<operation>``, spec
@@ -120,6 +123,7 @@ Operation = Literal[
     "library.plate_thumbnail",
     "library.plates",
     "library.thumbnail",
+    "library.trash.list",
     "library.trash.restore",
     "library.upload",
     "media.download",
@@ -971,6 +975,28 @@ class BambuddyClient:
                 f"Bambuddy did not say how many files it deleted when asked to {what}",
             )
         return deleted
+
+    async def trashed_library_files(self) -> list[TrashedLibraryFile]:
+        """``GET /library/trash``: every file in Bambuddy's trash that its API key's user
+        may see, page by page (``limit`` at most 500). Bambuddy v1.2.5.5
+        ``backend/app/api/routes/library_trash.py`` ``list_trash`` (lines 88-150):
+        ``{items, total, retention_days}``, each item with its ``folder_id``; a key with
+        only ``library:delete_own`` sees only its user's files."""
+        found: list[TrashedLibraryFile] = []
+        while True:
+            response = await self._send(
+                "GET",
+                "/library/trash",
+                scope=Scope.MANAGE_LIBRARY,
+                operation="library.trash.list",
+                what="list Bambuddy's library trash",
+                params={"limit": TRASH_PAGE, "offset": len(found)},
+            )
+            body = response.json()
+            items = [TrashedLibraryFile.model_validate(row) for row in body["items"]]
+            found.extend(items)
+            if not items or len(found) >= body["total"]:
+                return found
 
     async def restore_library_file(self, file_id: int) -> None:
         """``POST /library/trash/{id}/restore``: a trashed file back where it was. A file
