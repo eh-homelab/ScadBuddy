@@ -79,14 +79,14 @@ Inode model:
 
 ## 4. New ScadBuddy routes (backend + agent)
 
-Each route is a new operation kind on the `bambuddy` queue, run through
+Each route is a new operation kind on the `library` queue, beside `library_file_delete` (`library/library_file_operations.py`), run through
 `run_operation` (the `Idempotency-Key` header, 202 plus `GET /operations/{id}` past
 the deadline). Each one gets an agent tool or a `coverage.ts` entry, and works in
 both session modes.
 
 | Route | Effect |
 |---|---|
-| `POST /print/library/files` (multipart: `folder_id`, file) | Upload into a folder. The bytes go by claim check (`ClaimStore.hold_file`, streamed), like a media upload. |
+| `POST /print/library/files` (multipart: `folder_id`, file) | Upload into a folder. The bytes go by claim check (`ClaimStore.hold_file`, streamed), like a mesh upload (`api/mesh_models.py`), under a `RouteLimit` of `MAX_DOWNLOAD_BYTES` plus 64 KiB, since multipart is otherwise capped at 32 MiB. |
 | `PATCH /print/library/{id}` `{filename?, folder_id?}` | Rename and/or move a file (`PUT /library/files/{id}`). |
 | `POST /print/library/folders` `{name, parent_id?}` | mkdir. |
 | `PATCH /print/library/folders/{id}` `{name?, parent_id?}` | Rename or move a folder. |
@@ -194,15 +194,25 @@ forge's version:
 - `GOTOOLCHAIN` is pinned to `go.work`'s toolchain.
 - `apt install fuse3` for the mount tests.
 
-**Gating.** The `go` job runs only when the PR's diff against its base touches
-`go.work*`, `vendor/**`, `tools/go/**`, `scripts/generate-go-client.sh` or
-`.github/workflows/go-module-ci.yml`, and always on push to main. `layout` gains a
-`go` output from that diff.
+**Gating.** `ci.yml` never gates a job by path: CI Summary counts a skipped job as
+passed, which is the vacuous-green trap its comments describe. The `go` job therefore
+always runs and decides inside itself, as the `models` job does (`ci.yml`, "Select the
+templates to verify"):
+- On a pull request it diffs `HEAD^1..HEAD`; in a merge group it diffs against the
+  queue's base.
+- It does the Go work only when that diff touches `go.work*`, `vendor/**`,
+  `tools/go/**`, `scripts/generate-go-client.sh` or
+  `.github/workflows/go-module-ci.yml`.
+- On push to main, on the schedule, or when the diff cannot be computed, it does the
+  Go work every time.
+- Otherwise it writes "No Go changes" to the job summary and succeeds.
+
+The Go work runs in the reusable workflow's steps, so the job's selection step sets
+an output that each later step checks.
 
 A spec change reaches the `go` job through the regen commit, which touches
-`tools/go/**`. `CI Summary` adds `go` to `needs` and accepts its skip only when its
-own re-derivation of the same diff touches no Go path, keeping the summary's rule of
-re-deriving rather than trusting `layout`.
+`tools/go/**`. `CI Summary` asserts `go` as required on every event, and
+`dispatch-review` adds it to its `needs`.
 
 **Dependabot.** A `gomod` entry for both modules, grouping
 `github.com/microsoft/kiota-*` (forge's group) and `github.com/hanwen/go-fuse`.
