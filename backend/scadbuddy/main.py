@@ -1284,13 +1284,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if worker is not None:
             stop.set()
             await _stop_worker(state, *worker)
-        await components.aclose()
-        await state.render.aclose()
-        await asyncio.to_thread(state.projection.close)
-        await asyncio.to_thread(state.presets.close)
-        await state.events.aclose()
-        await state.store.aclose()
-        await asyncio.to_thread(state.settings_store.close)
+        try:
+            await components.aclose()
+        finally:
+            # A component whose `run` raises on its way out must not leak the pools
+            # and the bus's listener below (#653).
+            await state.render.aclose()
+            await asyncio.to_thread(state.projection.close)
+            await asyncio.to_thread(state.presets.close)
+            await state.events.aclose()
+            await state.store.aclose()
+            await asyncio.to_thread(state.settings_store.close)
 
 
 def create_app(settings_override: Settings | None = None) -> FastAPI:

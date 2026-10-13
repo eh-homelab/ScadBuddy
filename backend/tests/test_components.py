@@ -335,6 +335,43 @@ def test_the_lifespan_enters_a_discovered_components_run(
     assert log == ["enter probe", "exit probe"]
 
 
+def test_a_component_that_raises_on_exit_still_lets_the_core_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pg_conninfo: str
+) -> None:
+    """#653: the error is raised, after the render queue's pool, the projection's and
+    the settings store's are closed."""
+    for name in list(os.environ):
+        if name.startswith("SCADBUDDY_"):
+            monkeypatch.delenv(name)
+    probe: Key[str] = Key("probe")
+
+    @asynccontextmanager
+    async def raises_on_exit(_value: str) -> AsyncIterator[None]:
+        yield
+        raise RuntimeError("lost its connection on the way out")
+
+    component = Component(probe, build=lambda core, components: "probe", run=raises_on_exit)
+    monkeypatch.setattr(deps, "discover_components", lambda: [component])
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    app = create_app(
+        Settings(
+            openscad=str(tmp_path / "no-openscad"),
+            data_dir=tmp_path / "data",
+            seed_models_dir=seed,
+            frontend_dir=Path("/nonexistent"),
+            database_url=pg_conninfo,
+            temporal_address=UNUSED_TEMPORAL_ADDRESS,
+            preview_renders=False,
+        )
+    )
+    state = getattr(app.state, STATE_ATTR)
+    with pytest.raises(RuntimeError, match="on the way out"), TestClient(app):
+        assert not state.projection._pool.closed
+    assert state.projection._pool.closed
+    assert state.settings_store._pool.closed
+
+
 def test_build_state_alone_registers_every_features_operation_kinds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
