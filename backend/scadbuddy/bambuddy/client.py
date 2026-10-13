@@ -833,7 +833,10 @@ class BambuddyClient:
 
         ``Range`` and ``If-Range`` pass through, so Bambuddy's ``FileResponse`` answers
         a seek with a ``206`` and only those bytes. The response is open for the
-        duration of the ``async with``; read it with ``aiter_raw``. A failure is mapped
+        duration of the ``async with``. Read it with ``aiter_raw`` to pass the bytes on
+        as Bambuddy sent them (the media proxy keeps its ``Content-Encoding``), or with
+        ``aiter_bytes`` where the caller counts or uses the decoded bytes, as the camera
+        frame's cap does. A failure is mapped
         as every other call's is, once its (small) body has been read, except a ``416``:
         that is the answer to a seek past the end, and its ``Content-Range`` carries the
         length the media element needs, so it is passed through.

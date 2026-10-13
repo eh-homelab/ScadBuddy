@@ -372,6 +372,41 @@ def test_a_component_that_raises_on_exit_still_lets_the_core_close(
     assert state.settings_store._pool.closed
 
 
+def test_a_core_close_that_raises_still_lets_the_rest_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pg_conninfo: str
+) -> None:
+    """#653 review: not only a component's exit; the render queue's close raising
+    still closes the projection's pool and the settings store's after it."""
+    for name in list(os.environ):
+        if name.startswith("SCADBUDDY_"):
+            monkeypatch.delenv(name)
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    app = create_app(
+        Settings(
+            openscad=str(tmp_path / "no-openscad"),
+            data_dir=tmp_path / "data",
+            seed_models_dir=seed,
+            frontend_dir=Path("/nonexistent"),
+            database_url=pg_conninfo,
+            temporal_address=UNUSED_TEMPORAL_ADDRESS,
+            preview_renders=False,
+        )
+    )
+    state = getattr(app.state, STATE_ATTR)
+    close_render = state.render.aclose
+
+    async def raises() -> None:
+        await close_render()
+        raise RuntimeError("render pool lost on the way out")
+
+    monkeypatch.setattr(state.render, "aclose", raises)
+    with pytest.raises(RuntimeError, match="render pool lost"), TestClient(app):
+        pass
+    assert state.projection._pool.closed
+    assert state.settings_store._pool.closed
+
+
 def test_build_state_alone_registers_every_features_operation_kinds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -1284,17 +1284,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if worker is not None:
             stop.set()
             await _stop_worker(state, *worker)
-        try:
-            await components.aclose()
-        finally:
-            # A component whose `run` raises on its way out must not leak the pools
-            # and the bus's listener below (#653).
-            await state.render.aclose()
-            await asyncio.to_thread(state.projection.close)
-            await asyncio.to_thread(state.presets.close)
-            await state.events.aclose()
-            await state.store.aclose()
-            await asyncio.to_thread(state.settings_store.close)
+        # Each close runs even when one before it raises, so a component (or a pool)
+        # failing on its way out cannot leak the pools and the bus's listener (#653).
+        # The stack unwinds last-pushed first: pushed here in reverse of the order run.
+        async with AsyncExitStack() as closing:
+            closing.push_async_callback(asyncio.to_thread, state.settings_store.close)
+            closing.push_async_callback(state.store.aclose)
+            closing.push_async_callback(state.events.aclose)
+            closing.push_async_callback(asyncio.to_thread, state.presets.close)
+            closing.push_async_callback(asyncio.to_thread, state.projection.close)
+            closing.push_async_callback(state.render.aclose)
+            closing.push_async_callback(components.aclose)
 
 
 def create_app(settings_override: Settings | None = None) -> FastAPI:

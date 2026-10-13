@@ -27,6 +27,18 @@ from scadbuddy.bambuddy.client import mjpeg_type
 from scadbuddy.bambuddy import client as bambuddy_client
 from tests.api.test_send import API, configure
 
+
+class _AsyncStream(httpx.AsyncByteStream):
+    """A body served chunk by chunk, as a slow upstream would."""
+
+    def __init__(self, chunks: AsyncIterator[bytes]) -> None:
+        self._chunks = chunks
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        async for chunk in self._chunks:
+            yield chunk
+
+
 JPEG = b"\xff\xd8\xff\xe0camera-frame\xff\xd9"
 
 
@@ -416,12 +428,13 @@ def test_a_mint_with_no_token_is_a_bad_gateway(client: TestClient) -> None:
     configure(client)
     snapshot = respx.get(f"{API}/printers/7/camera/snapshot")
     bodies: list[object] = [{}, None, [], {"token": 5}]
-    for body in bodies:
-        respx.post(f"{API}/printers/camera/stream-token").mock(
-            return_value=httpx.Response(200, json=body)
-        )
+    answers = [httpx.Response(200, json=body) for body in bodies]
+    # Not JSON at all: a proxy's error page.
+    answers.append(httpx.Response(200, content=b"<html>", headers={"Content-Type": "text/html"}))
+    for answer in answers:
+        respx.post(f"{API}/printers/camera/stream-token").mock(return_value=answer)
         response = client.get("/api/v1/print/printers/7/camera")
-        assert response.status_code == 502, body
+        assert response.status_code == 502, answer.content
         assert "no camera token" in response.json()["detail"]
     assert not snapshot.called
 
@@ -430,15 +443,26 @@ def test_a_mint_with_no_token_is_a_bad_gateway(client: TestClient) -> None:
 def test_a_frame_past_the_cap_is_refused_before_it_is_all_read(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#1006: the frame is read with a cap, not buffered whole."""
+    """#1006: the frame is read with a cap, not buffered whole: the read stops at the
+    chunk that passes it, and the chunks after it are never pulled."""
     monkeypatch.setattr(bambuddy_client, "MAX_CAMERA_FRAME_BYTES", 64)
     configure(client)
     token_route()
+    pulled: list[int] = []
+
+    async def chunks() -> AsyncIterator[bytes]:
+        for index in range(4):
+            pulled.append(index)
+            yield b"x" * 40
+
     respx.get(f"{API}/printers/7/camera/snapshot").mock(
-        return_value=httpx.Response(200, content=b"x" * 65, headers={"Content-Type": "image/jpeg"})
+        return_value=httpx.Response(
+            200, stream=_AsyncStream(chunks()), headers={"Content-Type": "image/jpeg"}
+        )
     )
 
     response = client.get("/api/v1/print/printers/7/camera")
 
     assert response.status_code == 502
     assert "over 64 bytes" in response.json()["detail"]
+    assert pulled == [0, 1], "the third and fourth chunks are never read"
