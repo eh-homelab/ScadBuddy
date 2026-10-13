@@ -1553,6 +1553,24 @@ describe('render (#1053)', () => {
     expect(keys[1]).toBe(keys[0])
   })
 
+  it('after an abort, a last follow still accepting is the abort, not a failure (review #2805)', async () => {
+    printRunPoll.intervalMs = 50
+    const controller = new AbortController()
+    server.use(
+      http.post('/api/v1/models/box/render', () => {
+        setTimeout(() => controller.abort(), 10)
+        return stillAccepting()
+      }),
+      http.post(followUrl, () => stillAccepting()),
+    )
+
+    const failure = await api
+      .render('box', { params: {} }, undefined, undefined, controller.signal)
+      .catch((caught: unknown) => caught)
+    expect(failure).not.toBeInstanceOf(ApiError)
+    expect((failure as Error).name).toBe('AbortError')
+  })
+
   it('after an abort while following, follows once more to learn the job it claimed', async () => {
     printRunPoll.intervalMs = 50
     const controller = new AbortController()

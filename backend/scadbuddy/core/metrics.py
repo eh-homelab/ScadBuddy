@@ -94,8 +94,9 @@ class Metrics:
         )
         self.render_accept_pending = Counter(
             "scadbuddy_render_accept_pending",
-            "Render requests answered 503 command-still-accepting: their job was not"
-            " answered in time, and the client sends the same request again; by kind.",
+            "Render requests whose job was not answered in time: answered 503"
+            " command-still-accepting (the client sends the same request again), or 202"
+            " accepting to a client that follows it (#2340); once per request, by kind.",
             ["kind"],
             registry=r,
         )

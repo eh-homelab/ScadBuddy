@@ -2361,9 +2361,7 @@ async def test_retry_after_is_how_long_renders_take_now(
 @pytest.fixture
 def short_follow(monkeypatch: pytest.MonkeyPatch) -> None:
     """One follow waits a second, not `FOLLOW_WAIT`, so a test sees it still waiting."""
-    defaults = commands_module.follow_update.__kwdefaults__
-    assert defaults is not None
-    monkeypatch.setitem(defaults, "wait", timedelta(seconds=1))
+    monkeypatch.setattr(commands_module, "FOLLOW_WAIT", timedelta(seconds=1))
 
 
 async def test_a_submit_no_worker_has_picked_up_is_followed_to_its_job(
@@ -2397,7 +2395,8 @@ async def test_a_submit_no_worker_has_picked_up_is_followed_to_its_job(
 
     assert job.slug == SLUG and job.claims == 1
     assert _sample(service.metrics, "scadbuddy_render_jobs_submitted_total", RENDER) == 1
-    assert _sample(service.metrics, "scadbuddy_render_accept_pending_total") == 2
+    # Once, by the submit's 202: a follow still waiting is the same request (review #2805).
+    assert _sample(service.metrics, "scadbuddy_render_accept_pending_total", RENDER) == 1
 
 
 async def test_following_an_update_temporal_does_not_know_is_a_resend(

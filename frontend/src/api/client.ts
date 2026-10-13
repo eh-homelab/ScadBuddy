@@ -603,7 +603,10 @@ async function untilAccepted<T>(send: () => Promise<T | CommandAccepting>, signa
   let answer = await send()
   let last = false
   while (isAccepting(answer)) {
-    if (last || performance.now() - began >= printRunPoll.acceptingMs) {
+    // The last follow after an abort named no claim yet: the abort it is, so a caller
+    // that keeps a superseded action quiet still can (review #2805).
+    if (last) throw signal?.reason
+    if (performance.now() - began >= printRunPoll.acceptingMs) {
       throw new ApiError({
         type: STILL_ACCEPTING,
         title: 'Still starting',
@@ -611,8 +614,10 @@ async function untilAccepted<T>(send: () => Promise<T | CommandAccepting>, signa
         detail: 'ScadBuddy is still starting this. It may start anyway.',
       })
     }
+    // Not `retry_after`: the follow is itself a long-poll that waits for the answer, so
+    // waiting first only delays it (review #2849). `intervalMs` keeps a floor.
     try {
-      await wait(Math.max(printRunPoll.intervalMs, answer.retry_after * 1000), signal)
+      await wait(printRunPoll.intervalMs, signal)
     } catch {
       last = true
     }

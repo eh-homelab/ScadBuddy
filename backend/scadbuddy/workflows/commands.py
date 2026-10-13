@@ -318,13 +318,16 @@ async def follow_update[T](
     update_id: str,
     *,
     result_type: type[T],
-    wait: timedelta = FOLLOW_WAIT,
+    wait: timedelta | None = None,
 ) -> T:
     """The outcome of the Update ``update_id`` that a command route sent ``id`` and
-    answered 202 for (spec 2026-10-13 §5.2), waited on for up to ``wait``. Still not
+    answered 202 for (spec 2026-10-13 §5.2), waited on for up to ``wait`` (`FOLLOW_WAIT`,
+    read at call time so a test can shorten it). Still not
     answered, it is `CommandStillAcceptingError`; unknown (or its execution gone, or it
     outlived its execution), `CommandResendError`; a failed call, as `start_command`
     reads one. A refusal the Update itself raised is raised as it is."""
+    if wait is None:
+        wait = FOLLOW_WAIT
     handle = client.get_workflow_handle(id).get_update_handle(update_id, result_type=result_type)
     # As in `start_command`: `rpc_timeout` bounds each poll, the outer bound the wait.
     bound = asyncio.timeout(wait.total_seconds() + CONNECT_MARGIN_SECONDS)

@@ -51,7 +51,7 @@ async def follow_command(
     render: RenderDep,
     supersedes: Annotated[str | None, Query(max_length=64)] = None,
 ) -> RenderAccepted | JSONResponse:
-    """Waits up to ten seconds on the Update, then answers it as the render route would
+    """Waits up to `FOLLOW_WAIT` on the Update, then answers it as the render route would
     have: its job, or its refusal."""
     if not workflow_id.startswith(RENDER_PREFIX):
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no command {workflow_id!r} to follow")

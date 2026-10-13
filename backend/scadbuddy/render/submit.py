@@ -351,7 +351,7 @@ class RenderService:
                 self.client, workflow_id, update_id, result_type=RenderAnswer
             )
         except CommandStillAcceptingError:
-            self.metrics.render_accept_pending.inc()
+            # Counted once, by the submit that answered 202; not once per follow.
             raise
         except WorkflowUpdateFailedError as error:
             cause = error.cause
@@ -446,7 +446,7 @@ class RenderService:
         client sends it again with the same key."""
         workflow_id = workflow_id_for_key(start.render_key)
         # `start_command`'s own default unless the caller set one.
-        deadline: dict[str, Any] = {"deadline": accept_within} if accept_within else {}
+        deadline: dict[str, Any] = {"deadline": accept_within} if accept_within is not None else {}
         for _ in range(2):
             try:
                 answer = await start_command(
