@@ -17,6 +17,13 @@ describe('backend flow migration fixtures', () => {
     expect(names.length).toBeGreaterThan(0)
   })
 
+  // A backend flow migration with no copy here tests the agent against a schema without it.
+  it('include every backend workflow_* and flow_* migration', () => {
+    const backend = readdirSync(BACKEND).filter((name) => /^\d{8}T\d{4}Z_(workflow|flow)_.*\.sql$/.test(name))
+    expect(backend.length).toBeGreaterThan(0)
+    expect(backend.filter((name) => !names.includes(name))).toEqual([])
+  })
+
   it.each(names)('%s matches the backend migration of the same name', (name) => {
     const backend = `${BACKEND}${name}`
     expect(existsSync(backend), `${name} is not a backend migration`).toBe(true)

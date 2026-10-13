@@ -41,8 +41,11 @@ async function allowed(deps: FlowSessionDeps, what: string, sessionId: unknown):
   const flow = flowOf(workflowExecution?.workflowId)
   if (flow === undefined) throw ApplicationFailure.nonRetryable(`${what} serves only flow runs`, NOT_FOR_FLOWS)
   if (typeof sessionId !== 'string' || !/^[0-9a-f-]{36}$/.test(sessionId)) throw refused(`${what}: no session ${String(sessionId)}`)
+  // #2258: as flowCaller and turnCaller refuse it, a call without its execution's run id.
+  const runId = workflowExecution?.runId
+  if (!runId) throw ApplicationFailure.nonRetryable(`${what}: flow run ${flow}'s call carries no workflow execution run id`, UNKNOWN_FLOW)
   // A lookup that throws (the database is away) is left to the activity's retries.
-  const starter = deps.flows ? await deps.flows.startedBy(flow, workflowExecution?.runId ?? '') : undefined
+  const starter = deps.flows ? await deps.flows.startedBy(flow, runId) : undefined
   if (starter === undefined) throw ApplicationFailure.nonRetryable(`${what}: no open flow run ${flow} is recorded for this execution`, UNKNOWN_FLOW)
   const [row] = await deps.sql<Row[]>`SELECT mode, owner_kind, owner_id FROM ai_sessions WHERE id::text = ${sessionId}`
   if (!row || !sameOwner(starter, { kind: row.owner_kind, id: row.owner_id })) {
@@ -76,6 +79,9 @@ function turnReader(sql: Sql, sessionId: string, turnId: string): () => Promise<
   }
 }
 
+/** How far `settled` has looked for the turn's end, across polls. */
+type Scan = { from: number; ended?: number; stopped?: boolean }
+
 /**
  * The answer once the turn ended (its `session.result`, written by every end), else undefined.
  * Its text is the deltas logged before that result. A delta that `follow_session` was still
@@ -84,17 +90,24 @@ function turnReader(sql: Sql, sessionId: string, turnId: string): () => Promise<
  * read (#2277): the answer then ends early. Waiting for the session to leave `running` would
  * not close that, since a cancelled write may still commit after it.
  */
-function settled(sessionId: string, turnId: string, events: readonly ServerEvent[]): TurnAnswer | undefined {
-  let ended = -1
-  for (let i = 0; i < events.length; i++) {
-    const e = events[i]!
-    if (e.type === 'user.turn') break
-    if (e.type === 'session.result') {
-      ended = i
-      break
+function settled(sessionId: string, turnId: string, events: readonly ServerEvent[], scan: Scan): TurnAnswer | undefined {
+  // Only the events this poll added are looked at, as turnReader reads only new rows.
+  if (scan.ended === undefined && !scan.stopped) {
+    for (; scan.from < events.length; scan.from++) {
+      const e = events[scan.from]!
+      if (e.type === 'user.turn') {
+        // The next turn began with no result for this one: it never settles.
+        scan.stopped = true
+        break
+      }
+      if (e.type === 'session.result') {
+        scan.ended = scan.from
+        break
+      }
     }
   }
-  if (ended < 0) return undefined
+  const ended = scan.ended
+  if (ended === undefined) return undefined
   const failed = events.slice(ended + 1).find((e) => e.type === 'error' || e.type === 'user.turn' || e.type === 'session.status')
   if (failed?.type === 'error') throw ApplicationFailure.nonRetryable(failed.message, TURN_FAILED)
   const texts = new Map<string, string>()
@@ -128,6 +141,7 @@ export function flowSessionActivities(deps: FlowSessionDeps): Record<string, (ar
       if (typeof turn_id !== 'string' || turn_id === '') throw refused(`${FLOW_SESSION_TURN} takes a turn_id`)
       const context = Context.current()
       const read = turnReader(deps.sql, sessionId, turn_id)
+      const scan: Scan = { from: 0 }
       for (;;) {
         context.heartbeat()
         // #2277: a session deleted mid-wait never logs the result; without this the step
@@ -135,7 +149,7 @@ export function flowSessionActivities(deps: FlowSessionDeps): Record<string, (ar
         const [here] = await deps.sql`SELECT 1 FROM ai_sessions WHERE id::text = ${sessionId}`
         if (!here) throw refused(`session ${sessionId} is gone; its turn ${turn_id} will not finish`)
         const events = await read()
-        const answer = events && settled(sessionId, turn_id, events)
+        const answer = events && settled(sessionId, turn_id, events, scan)
         if (answer) return answer
         await context.sleep(pollMs)
       }

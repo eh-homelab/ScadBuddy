@@ -15,7 +15,7 @@ import {
   TURN_FAILED,
   type TurnAnswer,
 } from '../src/temporal/flowSessions.js'
-import { NOT_FOR_FLOWS } from '../src/temporal/toolActivities.js'
+import { NOT_FOR_FLOWS, UNKNOWN_FLOW } from '../src/temporal/toolActivities.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase, type Throwaway } from './support/postgres.js'
 
 // A flow's `agent(...)` and `ask_session(...)` (#1057, phase 6g): the activities on
@@ -56,10 +56,10 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow session activities${TEST_DATABASE_URL 
     return id
   }
 
-  function env(workflowId = `flow-${runId}`) {
+  function env(workflowId = `flow-${runId}`, execution = 'wr1') {
     return new MockActivityEnvironment({
       activityId: 'turn-agent-c1',
-      workflowExecution: { workflowId, runId: 'wr1' },
+      workflowExecution: { workflowId, runId: execution },
       activityType: FLOW_SESSION_TURN,
       taskQueue: 'agent-tools',
     })
@@ -141,6 +141,14 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow session activities${TEST_DATABASE_URL 
       const waited = await failure(turn(sid, 't1'))
       expect(waited.type).toBe(SESSION_REFUSED)
     }
+  })
+
+  // #2258: as flowCaller and turnCaller refuse it, never looked up as execution ''.
+  it("refuses a call that carries no execution run id", async () => {
+    const sid = await session()
+    const err = await failure(env(undefined, '').run(acts[FLOW_SESSION_CHECK]!, { session_id: sid }))
+    expect([err.type, err.nonRetryable]).toEqual([UNKNOWN_FLOW, true])
+    expect(err.message).toMatch(/carries no workflow execution run id/)
   })
 
   it('serves only flow runs', async () => {

@@ -71,10 +71,16 @@ export class PgFlowRuns implements FlowRuns {
   }
 
   async startedBy(runId: string, execution: string): Promise<Owner | undefined> {
-    const [row] = await this.#sql<{ started_by: StartedBy }[]>`
-      SELECT started_by FROM workflow_runs
-      WHERE id = ${runId} AND status IN ('running', 'waiting') AND NOT (${execution} = ANY(superseded_run_ids))`
-    if (!row) return undefined
+    // A Reset of a closed run (backend flows/store.py _reset_run) holds the row FOR
+    // UPDATE while it starts the new execution, and opens it only after: the lock waits
+    // for that, or the new execution's first call reads the old closed row and is
+    // refused. It is taken by id alone, as a row a WHERE filters out is never waited on.
+    const [row] = await this.#sql<{ started_by: StartedBy; open: boolean }[]>`
+      SELECT started_by,
+             status IN ('running', 'waiting') AND NOT (${execution} = ANY(superseded_run_ids)) AS open
+        FROM workflow_runs WHERE id = ${runId}
+         FOR SHARE`
+    if (!row?.open) return undefined
     const by = row.started_by
     if (by.kind === 'browser') return { kind: 'browser', id: 'browser', label: 'You' }
     if (by.kind !== 'agent' || typeof by.principal !== 'string') return undefined

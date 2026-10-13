@@ -77,6 +77,30 @@ describe.skipIf(!TEST_DATABASE_URL)(`PgFlowRuns${TEST_DATABASE_URL ? '' : ` (set
     }
   })
 
+  // A Reset of a closed run holds the row while it starts the new execution, and opens
+  // the row after: the new execution's first call waits for that, not refused meanwhile.
+  it("waits for a Reset in flight to reopen a closed run, then names its starter", async () => {
+    const id = await run({ kind: 'browser' })
+    await t.db.sql`UPDATE workflow_runs SET status = 'succeeded' WHERE id = ${id}`
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    let locked!: () => void
+    const isLocked = new Promise<void>((resolve) => (locked = resolve))
+    const reset = t.db.sql.begin(async (tx) => {
+      await tx`SELECT 1 FROM workflow_runs WHERE id = ${id} FOR UPDATE`
+      locked()
+      await held
+      await tx`UPDATE workflow_runs SET status = 'running', superseded_run_ids = '{wr1}', workflow_run_id = 'wr2' WHERE id = ${id}`
+    })
+    await isLocked
+    const starter = flows.startedBy(id, 'wr2')
+    // Still waiting on the reset's lock, not answered from the closed row.
+    expect(await Promise.race([starter.then(() => 'answered'), new Promise((r) => setTimeout(() => r('waiting'), 200))])).toBe('waiting')
+    release()
+    await reset
+    expect(await starter).toEqual({ kind: 'browser', id: 'browser', label: 'You' })
+  })
+
   it("approves only a call whose decision is an approval that approved, for the same input", async () => {
     const id = await run({ kind: 'browser' })
     const decide = async (call: string, kind: string, outcome: string, hash: string | null = 'h1') =>
