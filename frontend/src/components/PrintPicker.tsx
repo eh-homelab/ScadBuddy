@@ -572,6 +572,9 @@ export function PrintPicker({
           all_plates: allPlates,
           rack_position: rackPosition,
           rack_algorithm: chosenAlgorithm,
+          // #2367: the sequence is a process override, so it changes what the run
+          // slices; the check and the background slice must see it as the run does.
+          ...(printSequence === null ? {} : { print_sequence: printSequence }),
         }
       : null
   const check = usePrintCheck(source, checkRequest)

@@ -1546,6 +1546,22 @@ describe('PrintPicker · Print sequence (#1862)', () => {
     expect(bodies[0]).toMatchObject({ print_sequence: 'by layer' })
   })
 
+  it('checks and reslices for the chosen sequence, as the run will slice it (#2367)', async () => {
+    const checks = watch('POST', '/check')
+    const previews = watch('POST', '/preview-slice')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+    await waitFor(() => expect(previews.bodies.length).toBeGreaterThan(0), { timeout: 5000 })
+    expect(previews.bodies.at(-1)).not.toHaveProperty('print_sequence')
+
+    await user.selectOptions(screen.getByLabelText('Print sequence'), 'by object')
+    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ print_sequence: 'by object' }))
+    await waitFor(() => expect(previews.bodies.at(-1)).toMatchObject({ print_sequence: 'by object' }), {
+      timeout: 5000,
+    })
+  })
+
   it('does not carry over to another source', async () => {
     const { bodies } = watch('POST', '/run')
     const { user, rerender } = renderPicker()
