@@ -32,12 +32,15 @@ from scadbuddy.meshmodel.compile import compile_scene
 from scadbuddy.meshmodel.edits import Edit, MeshOf, SceneEditError, apply_edits, removed_parameters
 from scadbuddy.meshmodel.ingest import scene_from_objects
 from scadbuddy.meshmodel.scene import (
+    MESHES_DIR,
     SCENE_NAME,
     Scene,
     SceneSource,
     dump_scene,
     exposed_values,
     load_scene,
+    mesh_files,
+    source_name,
     text_sha256,
 )
 from scadbuddy.operations.claims import ClaimStore
@@ -108,6 +111,24 @@ def read_scene(directory: Path, slug: str) -> Scene:
     if not path.is_file():
         raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} is not a mesh model (it has no scene)")
     return load_scene(path.read_text(encoding="utf-8"))
+
+
+def unused_meshes(directory: Path, scene: Scene) -> list[str]:
+    """The scene's own files under ``meshes/`` that no part of ``scene`` uses any more (a
+    deleted object's): an edit removes them, so they leave the volume and every later
+    revision, and ``restore_version`` brings them back with the scene that used them
+    (#2632). Eject keeps them: the ejected ``model.scad`` imports the meshes."""
+    meshes = directory / MESHES_DIR
+    if not meshes.is_dir():
+        return []
+    used = mesh_files(scene)
+    return sorted(
+        f"{MESHES_DIR}/{path.name}"
+        for path in meshes.iterdir()
+        if path.is_file()
+        and SCENE_FILE.fullmatch(f"{MESHES_DIR}/{path.name}")
+        and f"{MESHES_DIR}/{path.name}" not in used
+    )
 
 
 def mesh_loader(directory: Path) -> MeshOf:
@@ -209,7 +230,7 @@ def mesh_kinds(state: AppState) -> list[OperationKind]:
             data, name = payload, filename
         found_at = SceneSource(
             kind=source["kind"],
-            name=name,
+            name=source_name(name),
             sha256=hashlib.sha256(data).hexdigest(),
             file_id=source.get("file_id"),
             output_id=source.get("output_id"),
@@ -313,7 +334,12 @@ def mesh_kinds(state: AppState) -> list[OperationKind]:
                         "send drop_from_presets to remove it from them",
                     )
             after, text = compiled(after)
-            return scene_files({SCENE_NAME: dump_scene(after).encode(), SOURCE_NAME: text.encode()})
+            writes: dict[str, bytes | None] = {
+                SCENE_NAME: dump_scene(after).encode(),
+                SOURCE_NAME: text.encode(),
+            }
+            writes.update(dict.fromkeys(unused_meshes(directory, after)))
+            return scene_files(writes)
 
         update = partial(state.catalogue.update_files, slug, compute, message=request["message"])
         record = await to_thread_to_end(
