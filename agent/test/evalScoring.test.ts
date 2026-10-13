@@ -5,7 +5,8 @@ import { EVAL_BACKEND_URL, EvalBackend, keychain3mf } from '../evals/backend.js'
 import { claimsOf, REPO_ROOT, repoSources, scoreCitations, suggestionsOf } from '../evals/citations.js'
 import { RealBackend } from '../evals/realBackend.js'
 import { collectRenders, keychainProblems, KEYCHAIN_HEIGHTS } from '../evals/render.js'
-import { collectWithin } from '../evals/runner.js'
+import { foldEvents, type Logged, pollPending, type Polled, timedOut } from '../evals/durable.js'
+import { collectWithin, evalModes } from '../evals/runner.js'
 import { createBackendClient } from '../src/api/backend.js'
 import { readBambu3mf, readZip, writeZip } from '../evals/threemf.js'
 
@@ -287,5 +288,50 @@ describe('real-render checks: the 3MF', () => {
     expect(keychainProblems(blue, { ...KEYCHAIN_HEIGHTS, lettersRed: true })).toEqual(['the letters are #0000FF, not red'])
     const one = readBambu3mf(keychain3mf({ baseColour: '#1E1E1E', textColour: '#FF0000', ...KEYCHAIN_HEIGHTS, lettersMissing: true }))
     expect(keychainProblems(one, { ...KEYCHAIN_HEIGHTS, lettersRed: true })).toEqual(['1 non-empty part(s), expected 2 (base and letters)'])
+  })
+})
+
+describe('evalModes: SCADBUDDY_EVAL_MODE (#2466)', () => {
+  it('runs both modes when unset or blank', () => {
+    expect(evalModes(undefined)).toEqual(['classic', 'durable'])
+    expect(evalModes('  ')).toEqual(['classic', 'durable'])
+  })
+
+  it('reads a mode in any case', () => {
+    expect(evalModes('Classic')).toEqual(['classic'])
+    expect(evalModes('DURABLE')).toEqual(['durable'])
+    expect(evalModes('both')).toEqual(['classic', 'durable'])
+  })
+
+  it('refuses any other value', () => {
+    expect(() => evalModes('nope')).toThrow(/classic, durable or both, not "nope"/)
+  })
+})
+
+describe('the durable run: gate failures and turn errors (#2465)', () => {
+  const base = { v: 1, sessionId: 's' }
+  const result: Logged = { ...base, type: 'session.result', costUsd: 0.1, turns: 1 }
+  const failed: Logged = { ...base, type: 'error', code: 'turn_failed', message: 'boom' }
+  const status: Logged = { ...base, type: 'session.status', status: 'idle' }
+  const fold = (log: Logged[]) => foldEvents(log, new Map()).result?.subtype
+
+  it("names the gate's last failure when the run times out", async () => {
+    const polled: Polled = {}
+    const broken = { pendingInput: () => Promise.reject(new Error('gate unreachable')) }
+    expect(await pollPending(broken, 's', polled)).toEqual([])
+    expect(timedOut(polled)).toBe("eval timed out; the gate's pending input last failed: gate unreachable")
+
+    await pollPending({ pendingInput: () => Promise.resolve([]) }, 's', polled)
+    expect(timedOut(polled)).toBe('eval timed out')
+  })
+
+  it('scores a failed turn as failed whichever of its error and result is logged first', () => {
+    expect(fold([result, failed, status])).toBe('error: turn_failed: boom')
+    expect(fold([failed, result, status])).toBe('error: turn_failed: boom')
+  })
+
+  it("keeps one turn's error out of the next turn's result", () => {
+    expect(fold([result, failed, status, result, status])).toBe('success')
+    expect(fold([failed, result, status, result, status])).toBe('success')
   })
 })
