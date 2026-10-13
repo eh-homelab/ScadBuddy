@@ -68,6 +68,15 @@ describe('transcriptOf', () => {
       { type: 'assistant', message: { content: [{ type: 'text', text: 'Done.' }] } },
     ])
   })
+
+  it("keeps a message on one line across a subagent's call between its deltas (#3089)", () => {
+    const turn = log(
+      event({ type: 'assistant.text.delta', sessionId: SESSION, messageId: 'm1', delta: 'Looking ' }),
+      event({ type: 'tool.call', sessionId: SESSION, id: 't2', name: 'grep', input: { pattern: 'x' }, risk: 'read', parent: 't1' }),
+      event({ type: 'assistant.text.delta', sessionId: SESSION, messageId: 'm1', delta: 'it up.' }),
+    )
+    expect(transcriptOf(turn)).toEqual([{ type: 'assistant', message: { content: [{ type: 'text', text: 'Looking it up.' }] } }])
+  })
 })
 
 describe('memory activities in a durable turn', () => {
