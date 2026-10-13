@@ -361,3 +361,13 @@ describe('a reload (#2372)', () => {
     expect(activeTitle()).toHaveTextContent(PARENT)
   })
 })
+
+describe('the chat header (#2380)', () => {
+  it('keeps the title a readable width: the badges and actions wrap under it rather than squeeze it', async () => {
+    await openParent()
+    // flex-1 alone is a 0% basis, so the row never wrapped and the title took the squeeze.
+    expect(activeTitle()).toHaveClass('min-w-[min(12rem,100%)]')
+    expect(activeTitle()).not.toHaveClass('min-w-0')
+    expect(screen.getByTestId('active-session-header')).toHaveClass('flex-wrap')
+  })
+})
