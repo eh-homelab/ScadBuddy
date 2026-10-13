@@ -216,11 +216,16 @@ def sweep_assets(state: AppState, stop: threading.Event | None = None) -> list[s
     saved preset, output and template (`referenced_asset_ids`) -- and any failure to read
     them raises before anything is removed. What is referenced after that is kept by
     its last use, which the sweep re-checks under the store's lock per asset.
-    ``stop``, once set, ends it before its next asset (#2140).
+    ``stop``, once set, ends it before its next asset (#2140), and before and after
+    reading the references, which no per-asset check can interrupt (#2554).
     """
+    if stop is not None and stop.is_set():
+        return []
     jobs = state.render.store.list_jobs()
     params = [job.params for job in jobs] + state.presets.saved_params()
     referenced = referenced_asset_ids(state.paths, params)
+    if stop is not None and stop.is_set():
+        return []
     removed = state.assets.sweep(referenced, grace=state.config.asset_sweep_grace, stop=stop)
     state.metrics.assets_swept.inc(len(removed))
     if removed:
@@ -300,7 +305,10 @@ async def _sweep_assets_logged(state: AppState, stop: threading.Event | None = N
         if stop is not None and stop.is_set():
             # Stopped (#2140): only mark what it removed, which no later sweep could
             # find otherwise -- `reconcile` retries marked copies, never a diff against
-            # the volume. The next sweep's reconcile removes them.
+            # the volume. The next sweep's reconcile removes them. This runs inside the
+            # shutdown's bounded join: one that times out cancels it, and a copy left
+            # unmarked then is never retried, so it stays in the store until something
+            # else removes it (#2554).
             if removed:
                 await remote.mark_swept(removed, cutoff=cutoff)
             return
