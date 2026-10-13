@@ -3,10 +3,10 @@ import type { AddressInfo } from 'node:net'
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from '../src/db.js'
-import type { BuiltinResult } from '../src/builtins/files.js'
+import { type BuiltinResult, GREP_BUDGET_MS } from '../src/builtins/files.js'
 import { BUILTIN_SERVER, builtinServer, type BuiltinContext } from '../src/builtins/server.js'
 import { TASKS_PATH } from '../src/builtins/session.js'
-import type { NestedQueries } from '../src/builtins/web.js'
+import { type NestedQueries, webFetch } from '../src/builtins/web.js'
 import { unwrapUntrusted } from '../src/safety/untrusted.js'
 import { connectInProcess } from '../src/temporal/turnTools.js'
 import { SessionFiles, type WorkspaceRef } from '../src/workspace/store.js'
@@ -53,7 +53,7 @@ describe.skipIf(skip !== undefined)(`a durable turn's built-ins${skip ? ` (skipp
     ws = { kind: 'session', sessionId: session.id }
     const context = (): BuiltinContext => ({
       files: { files, ws },
-      web: { nested, secrets: () => ['sk-secret-token'], actor: browser, sessionId: session.id, signal: new AbortController().signal, resolve: async () => ['127.0.0.1'] },
+      web: { nested, secrets: () => ['sk-secret-token'], actor: browser, sessionId: session.id, signal: new AbortController().signal, resolve: async () => ['127.0.0.1'], allowLoopback: true },
     })
     client = await connectInProcess(() => builtinServer(ALL, context))
     asked.length = 0
@@ -109,6 +109,13 @@ describe.skipIf(skip !== undefined)(`a durable turn's built-ins${skip ? ` (skipp
     expect(await call('Write', { file_path: '/workspace/../x', content: '' })).toMatchObject({ isError: true })
   })
 
+  it('stops a pattern that backtracks without end, and answers in time', async () => {
+    await files.write(ws, 'slow.txt', Buffer.from(`${'a'.repeat(40)}b\n`))
+    const started = Date.now()
+    expect(await call('Grep', { pattern: '(a+)+$', output_mode: 'content' })).toMatchObject({ isError: true, text: expect.stringContaining('took longer than') })
+    expect(Date.now() - started).toBeLessThan(GREP_BUDGET_MS + 2_000)
+  })
+
   it('edits a notebook cell', async () => {
     const nb = { cells: [{ cell_type: 'code', id: 'c1', source: ['print(1)'], metadata: {}, outputs: [], execution_count: 3 }], metadata: {}, nbformat: 4, nbformat_minor: 5 }
     await files.write(ws, 'nb.ipynb', Buffer.from(JSON.stringify(nb)))
@@ -160,8 +167,22 @@ describe.skipIf(skip !== undefined)(`a durable turn's built-ins${skip ? ` (skipp
     expect(asked[0]).toContain('What is the title?')
     expect((await call('WebFetch', { url: `http://pages.test:${port}/moved`, prompt: 'p' })).text).toContain('REDIRECT DETECTED')
     expect(await call('WebFetch', { url: 'http://localhost/', prompt: 'p' })).toMatchObject({ isError: true })
+    expect(asked).toHaveLength(1)
     expect(await call('WebFetch', { url: `http://pages.test:${port}/?k=sk-secret-token`, prompt: 'p' })).toMatchObject({ isError: true })
     expect(asked).toHaveLength(1)
+  })
+
+  it("refuses the pod's loopback, by literal or by what a name resolves to", async () => {
+    const web = { nested, secrets: () => [], actor: browser, signal: new AbortController().signal }
+    expect(await webFetch({ ...web, resolve: async () => ['93.184.215.14'] }, { url: 'http://127.0.0.1:9/', prompt: 'p' })).toMatchObject({
+      isError: true,
+      text: expect.stringContaining('loopback'),
+    })
+    expect(await webFetch({ ...web, resolve: async () => ['127.0.0.1'] }, { url: 'http://rebound.example/', prompt: 'p' })).toMatchObject({
+      isError: true,
+      text: expect.stringContaining('loopback'),
+    })
+    expect(asked).toEqual([])
   })
 
   it('hands a search to the nested query as it was asked', async () => {

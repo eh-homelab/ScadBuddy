@@ -46,6 +46,8 @@ export type WebContext = {
   turnId?: string | undefined
   signal: AbortSignal
   resolve?: Resolver
+  /** Tests only: a page served on loopback. WebFetch refuses the pod's loopback otherwise. */
+  allowLoopback?: boolean
 }
 
 const cache = new Map<string, { at: number; markdown: string; finalUrl: string }>()
@@ -77,6 +79,7 @@ async function page(url: URL, ctx: WebContext): Promise<{ markdown: string; fina
       turnId: ctx.turnId,
       signal: ctx.signal,
       sameHostRedirects: true,
+      refuseLoopback: ctx.allowLoopback !== true,
       ...(ctx.resolve ? { resolve: ctx.resolve } : {}),
     },
   )

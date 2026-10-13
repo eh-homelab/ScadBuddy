@@ -6,7 +6,7 @@ import { createSdkMcpServer, type McpSdkServerConfigWithInstance, tool } from '@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import { type AuditActor, type AuditSink, safeDetail } from '../audit/log.js'
-import { assertHostAllowed, assertHttpUrl, type Resolver, systemResolver } from '../http/egress.js'
+import { assertHostAllowed, assertHttpUrl, embeddedIPv4, isLoopbackHost, type Resolver, systemResolver } from '../http/egress.js'
 import { pinnedRequestOptions, requestFor } from '../http/pinned.js'
 import { markUntrusted } from '../safety/untrusted.js'
 import { type SessionFiles, WorkspaceError, type WorkspaceRef, workspacePath } from '../workspace/store.js'
@@ -213,6 +213,8 @@ export type HttpRequestContext = {
   workspace?: { files: SessionFiles; ref: WorkspaceRef } | undefined
   /** A redirect to another host is returned (`redirectTo`) instead of followed, as Claude Code's WebFetch does (#2393). */
   sameHostRedirects?: boolean | undefined
+  /** Refuse a host that is, or resolves to, the pod's loopback: WebFetch fetches web pages, and loopback is the agent's own services (#2679). */
+  refuseLoopback?: boolean | undefined
 }
 
 function contains(value: string, secrets: readonly string[]): boolean {
@@ -413,6 +415,10 @@ export async function exchange(args: HttpRequestArgs, context: HttpRequestContex
     let addresses: string[]
     try {
       addresses = await assertHostAllowed(url.href, resolve, 'url', 'an allowed host')
+      const loopback = context.refuseLoopback ? addresses.find((a) => isLoopbackHost(embeddedIPv4(a) ?? a)) : undefined
+      if (loopback !== undefined || (context.refuseLoopback && isLoopbackHost(url.hostname))) {
+        throw new Error(`url host ${url.hostname} is, or resolves to, this pod's loopback, not a web page`)
+      }
     } catch (err) {
       const reason = (err as Error).message
       await audited('refused', { detail: reason })

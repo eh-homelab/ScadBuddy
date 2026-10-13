@@ -1,3 +1,4 @@
+import vm from 'node:vm'
 import path from 'node:path'
 import {
   decodeText,
@@ -235,6 +236,28 @@ function paged<T>(items: T[], input: GrepInput): T[] {
   return items.slice(from, limit === 0 ? undefined : from + limit)
 }
 
+/** How long one Grep call may spend matching, across its files. */
+export const GREP_BUDGET_MS = 2_000
+
+// Claude Code's Grep is ripgrep, whose regex engine runs in linear time; a JavaScript
+// RegExp backtracks, so a pattern such as `(a+)+$` can hold the event loop for ever.
+// Matching runs under vm's timeout, which interrupts a RegExp mid-match (measured on
+// Node 24: `(a+)+$` on 40 a's then b, stopped after 200 ms).
+function matchesOf(text: string, re: RegExp, deadline: number): { index: number; text: string }[] {
+  const timeout = Math.max(1, deadline - Date.now())
+  try {
+    return vm.runInNewContext('Array.from(text.matchAll(re), (m) => ({ index: m.index, text: m[0] }))', { text, re }, { timeout }) as {
+      index: number
+      text: string
+    }[]
+  } catch (err) {
+    if ((err as { code?: string }).code === 'ERR_SCRIPT_EXECUTION_TIMEOUT') {
+      throw new BuiltinError(`Grep stopped: the pattern took longer than ${GREP_BUDGET_MS / 1000} s to match; use a simpler pattern`)
+    }
+    throw err
+  }
+}
+
 export function grep(ctx: FileToolContext, input: GrepInput): Promise<BuiltinResult> {
   return guarded(async () => {
     let flags = 'g'
@@ -253,6 +276,7 @@ export function grep(ctx: FileToolContext, input: GrepInput): Promise<BuiltinRes
     const mode = input.output_mode ?? 'files_with_matches'
     const name = (p: string) => (target && !single ? shown(p) : p)
     const matched: { path: string; lines: string[]; count: number }[] = []
+    const deadline = Date.now() + GREP_BUDGET_MS
     for (const info of candidates.sort((a, b) => (a.path < b.path ? -1 : 1))) {
       const base = path.posix.basename(info.path)
       if (input.glob && !path.posix.matchesGlob(base, input.glob) && !path.posix.matchesGlob(info.path, input.glob)) continue
@@ -260,7 +284,7 @@ export function grep(ctx: FileToolContext, input: GrepInput): Promise<BuiltinRes
       const file = await ctx.files.read(ctx.ws, info.path)
       const text = file && decodeText(file.bytes, file.mediaType)
       if (text === undefined || text === null || text === '') continue
-      const hits = [...text.matchAll(re)]
+      const hits = matchesOf(text, re, deadline)
       if (!hits.length) continue
       const lines: string[] = []
       if (mode === 'content') {
@@ -284,12 +308,12 @@ export function grep(ctx: FileToolContext, input: GrepInput): Promise<BuiltinRes
         const show = new Map<number, string>()
         for (const hit of hits) {
           const first = lineOf(hit.index)
-          const last = lineOf(hit.index + Math.max(0, hit[0].length - 1))
+          const last = lineOf(hit.index + Math.max(0, hit.text.length - 1))
           for (let l = Math.max(0, first - before); l <= Math.min(all.length - 1, last + after); l++) {
             const isMatch = l >= first && l <= last
             if (!show.has(l) || isMatch) show.set(l, isMatch ? ':' : '-')
           }
-          if (input['-o']) lines.push(`${name(info.path)}:${numbered ? `${first + 1}:` : ''}${hit[0]}`)
+          if (input['-o']) lines.push(`${name(info.path)}:${numbered ? `${first + 1}:` : ''}${hit.text}`)
         }
         if (!input['-o']) {
           for (const l of [...show.keys()].sort((a, b) => a - b)) {
