@@ -25,6 +25,7 @@ from scadbuddy.render.provenance import (
     ROOT_MODEL,
     SCADBUDDY_NS,
     Provenance,
+    content_key,
     read,
     source_version,
     stamp,
@@ -454,3 +455,25 @@ def test_no_print_settings_leave_the_project_settings_alone(written: Path) -> No
     stamp(written, PROVENANCE, {})
     with zipfile.ZipFile(written) as archive:
         assert archive.read(PROJECT_SETTINGS_NAME) == before
+
+
+def test_the_content_key_leaves_out_the_stamp(written: Path) -> None:
+    """#2476: one render saved as two outputs differs only in the stamp."""
+    other = written.with_name("other.3mf")
+    other.write_bytes(written.read_bytes())
+    stamp(written, PROVENANCE)
+    stamp(other, PROVENANCE.model_copy(update={"output": "e" * 32, "edit_url": None}))
+
+    assert written.read_bytes() != other.read_bytes()
+    assert content_key(written.read_bytes()) == content_key(other.read_bytes())
+
+
+def test_the_content_key_tells_different_content_apart(tmp_path: Path) -> None:
+    keys = set()
+    for height in (4, 5):
+        out = tmp_path / f"box-{height}.3mf"
+        parts = [ColourPart(1, "C", "#FF6AC1", trimesh.creation.box(extents=(10, 10, height)))]
+        write_bambu_3mf(parts, out, thumbnails=None, model_name="box")
+        stamp(out, PROVENANCE)
+        keys.add(content_key(out.read_bytes()))
+    assert len(keys) == 2

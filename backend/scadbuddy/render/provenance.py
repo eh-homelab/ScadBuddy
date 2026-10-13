@@ -13,6 +13,7 @@ file exactly as before and every other part is left byte-for-byte alone.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
@@ -186,6 +187,37 @@ def stamp(
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _unstamped(xml: str) -> str:
+    """The root model without what :func:`stamp` writes onto it."""
+    tag = _MODEL_TAG.search(xml)
+    if tag is None:
+        return xml
+    head, marker, tail = xml[tag.end() :].partition("<resources")
+    return xml[: tag.end()] + _OWNED.sub("", head) + marker + tail
+
+
+def content_key(payload: bytes) -> str:
+    """What a 3MF holds, less the stamp naming the output it was saved as (#2476): two
+    outputs of one render, saved twice, have the same key. Every entry by name and
+    bytes, the root model's with the stamp taken out. Bytes that are no archive are
+    keyed as they are."""
+    digest = hashlib.sha256()
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(payload))
+    except zipfile.BadZipFile:
+        return "sha256:" + hashlib.sha256(payload).hexdigest()
+    with archive:
+        for name in sorted(archive.namelist()):
+            data = archive.read(name)
+            if name == ROOT_MODEL:
+                data = _unstamped(data.decode("utf-8")).encode("utf-8")
+            digest.update(name.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(data)
+            digest.update(b"\0")
+    return "sha256:" + digest.hexdigest()
 
 
 def read(path: Path) -> Provenance | None:
