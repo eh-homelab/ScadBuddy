@@ -365,6 +365,11 @@ class BambuddyUploadStore:
         print dialog's background slices: Bambuddy's job ids next to a lost start's."""
         return await asyncio.to_thread(self._slice_jobs_after, after, within)
 
+    async def prune_slice_starts(self, before: datetime) -> int:
+        """Forget the slice starts recorded before ``before``, answered or lost (#2911):
+        the table is read only beside a lost start, and only for a while after it."""
+        return await asyncio.to_thread(self._prune_slice_starts, before)
+
     async def slice_jobs_recorded(self, job_ids: Iterable[int], since: datetime) -> set[int]:
         """Of ``job_ids``, the ones a run or a background slice recorded since ``since``:
         their files are someone's. Ids restart with Bambuddy, hence ``since``."""
@@ -376,6 +381,12 @@ class BambuddyUploadStore:
                 "INSERT INTO print_slice_starts (library_file_id, job_id) VALUES (%s, %s)",
                 (library_file_id, job_id),
             )
+
+    def _prune_slice_starts(self, before: datetime) -> int:
+        with self._pool.connection() as conn:
+            return conn.execute(
+                "DELETE FROM print_slice_starts WHERE created_at < %s", (before,)
+            ).rowcount
 
     def _lost_starts(self) -> list[LostStart]:
         with self._pool.connection() as conn:

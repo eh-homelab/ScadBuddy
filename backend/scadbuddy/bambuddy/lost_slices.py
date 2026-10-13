@@ -10,6 +10,12 @@ minutes, so the housekeeping sweep (``housekeeping_sweep_preview_slices``, every
 ``PRUNE_INTERVAL``) looks at the jobs numbered beside the first one recorded after a
 lost start: one that slices the same copy, was created then, and that nobody recorded
 is the lost start's, and the file it sliced to is removed.
+
+A slice someone starts by hand in Bambuddy's UI on the same ScadBuddy copy, within
+that window, matches the rule too and its file is removed with the lost start's
+(#2911): a slice job says what it slices, and when, but not with which presets or
+plate, so nothing tells the two apart. The copy is ScadBuddy's own inbox file, never
+the user's, which is what keeps that case narrow.
 """
 
 from __future__ import annotations
@@ -36,6 +42,10 @@ NEIGHBOURS_WITHIN = timedelta(minutes=30)
 #: Past this a lost start is finished with, whatever was found: Bambuddy has dropped a
 #: job finished 30 minutes before.
 GIVE_UP_AFTER = timedelta(minutes=45)
+#: How long a recorded slice start is kept (#2911): well past the longest a lost start
+#: is looked at (:data:`GIVE_UP_AFTER`) and the window it looks back and ahead over
+#: (:data:`NEIGHBOURS_WITHIN`), so pruning never makes a recorded job look unrecorded.
+STARTS_KEPT = timedelta(days=1)
 
 
 async def sweep_lost_slices(
@@ -44,6 +54,8 @@ async def sweep_lost_slices(
     """Remove the sliced files of jobs that lost slice starts left; how many. A lost
     start whose job may still be slicing is kept for the next sweep."""
     now = now or datetime.now(UTC)
+    # Answered starts and swept lost ones are read only beside a lost start (#2911).
+    await uploads.prune_slice_starts(now - STARTS_KEPT)
     removed = 0
     for lost in await uploads.lost_starts():
         try:
@@ -82,33 +94,53 @@ async def _sweep(
         if job_id in recorded:
             continue
         try:
-            job = await client.slice_job(job_id)
+            found = await _remove_if_lost(client, lost, job_id)
         except ApiError as error:
-            if error.status == status.HTTP_404_NOT_FOUND:
-                continue
-            raise
-        if job.kind != "library_file" or job.source_id != lost.library_file_id:
-            continue
-        created = _parsed(job.created_at)
-        if (
-            created is None
-            or created < lost.created_at - CLOCK_SKEW
-            or created > lost.created_at + NEIGHBOURS_WITHIN
-        ):
-            continue
-        if not job.finished:
+            # This job is looked at again next sweep; the files already removed for
+            # this lost start still count (#2911).
+            logger.warning(
+                "could not look at a job beside a lost slice start; trying again next sweep",
+                extra={"slice_job_id": job_id, "status": error.status},
+            )
             settled = False
             continue
-        result = job.result
-        if job.status != "completed" or result is None or result.library_file_id is None:
-            continue
-        if await _remove(client, result.library_file_id, result.name):
-            logger.info(
-                "removed the file a lost slice start sliced to",
-                extra={"slice_job_id": job_id, "library_file_id": result.library_file_id},
-            )
+        if found is None:
+            settled = False
+        elif found:
             removed += 1
     return settled, removed
+
+
+async def _remove_if_lost(client: BambuddyClient, lost: LostStart, job_id: int) -> bool | None:
+    """Whether ``job_id`` was ``lost``'s and its file removed; ``None`` while it is still
+    slicing, so the lost start is looked at again."""
+    try:
+        job = await client.slice_job(job_id)
+    except ApiError as error:
+        if error.status == status.HTTP_404_NOT_FOUND:
+            return False
+        raise
+    if job.kind != "library_file" or job.source_id != lost.library_file_id:
+        return False
+    created = _parsed(job.created_at)
+    if (
+        created is None
+        or created < lost.created_at - CLOCK_SKEW
+        or created > lost.created_at + NEIGHBOURS_WITHIN
+    ):
+        return False
+    if not job.finished:
+        return None
+    result = job.result
+    if job.status != "completed" or result is None or result.library_file_id is None:
+        return False
+    if not await _remove(client, result.library_file_id, result.name):
+        return False
+    logger.info(
+        "removed the file a lost slice start sliced to",
+        extra={"slice_job_id": job_id, "library_file_id": result.library_file_id},
+    )
+    return True
 
 
 async def _remove(client: BambuddyClient, file_id: int, name: str | None) -> bool:
