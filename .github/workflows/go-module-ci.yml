@@ -39,7 +39,7 @@ jobs:
     steps:
       - name: No Go changes
         if: ${{ inputs.run != 'true' }}
-        run: echo "No Go changes in this PR; nothing to check." >> "$GITHUB_STEP_SUMMARY"
+        run: echo "This change touches no Go; nothing to check." >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/checkout@v7
         if: ${{ inputs.run == 'true' }}
