@@ -1,13 +1,14 @@
 import { type ChildProcess, spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import type { SDKMessage, SDKResultMessage } from '@anthropic-ai/claude-agent-sdk'
+import type { Sql } from 'postgres'
 import { vi } from 'vitest'
 import type { Credential } from '../../src/credentials.js'
 import { userMessage } from '../../src/harness/inbox.js'
 import { ensureStateDirs } from '../../src/harness/stateDirs.js'
 import { PostgresSessionStore } from '../../src/sessions/store.js'
 import type { AssembledTurn, FingerprintParts } from '../../src/sessions/turnRunner.js'
-import { WarmSessions } from '../../src/sessions/warm.js'
+import { type WarmEntry, WarmSessions } from '../../src/sessions/warm.js'
 import { type FakeAnthropic, startFakeAnthropic } from './fakeAnthropic.js'
 import { tempPaths } from './sessions.js'
 import type { Throwaway } from './postgres.js'
@@ -21,17 +22,32 @@ export const KEY = 'gw-warm-test-token-0000111122223333'
 
 export type Spawned = { env: Record<string, string | undefined>; child: ChildProcess; exited: Promise<unknown> }
 
-export async function warmHarness(db: Throwaway, options: { maxEntries?: number; idleMs?: number; now?: () => number } = {}) {
-  const fake: FakeAnthropic = await startFakeAnthropic(() => ({ text: 'ok' }))
+export type WarmHarnessOptions = {
+  maxEntries?: number
+  idleMs?: number
+  now?: () => number
+  /** Wraps the Postgres client WarmSessions is given (the store keeps the real one). */
+  sql?: (sql: Sql) => Sql
+  /** Runs at each model request, before the fake replies. */
+  onRequest?: () => Promise<void>
+  log?: (message: string) => void
+}
+
+export async function warmHarness(db: Throwaway, options: WarmHarnessOptions = {}) {
+  const fake: FakeAnthropic = await startFakeAnthropic(async () => {
+    await options.onRequest?.()
+    return { text: 'ok' }
+  })
   const paths = await tempPaths()
   await ensureStateDirs(paths)
   const store = new PostgresSessionStore(db.db.sql)
   const spawns: Spawned[] = []
   const warm = new WarmSessions({
-    sql: db.db.sql,
+    sql: options.sql ? options.sql(db.db.sql) : db.db.sql,
     maxEntries: options.maxEntries ?? 8,
     idleMs: options.idleMs ?? 600_000,
     ...(options.now ? { now: options.now } : {}),
+    ...(options.log ? { log: options.log } : {}),
   })
   const credential = (secret = KEY): Credential => ({ kind: 'gateway', baseUrl: fake.url, secret })
   const parts: FingerprintParts = {
@@ -71,14 +87,16 @@ export async function warmHarness(db: Throwaway, options: { maxEntries?: number;
     observe: () => Promise.resolve(),
     release: vi.fn(),
   })
-  /** One turn: acquire, push, read to the `result`, settle. */
-  const turn = async (sessionId: string, turn: AssembledTurn, remainingUsd: number, cred = credential()) => {
-    const warmTurn = await warm.acquire(sessionId, turn, cred, remainingUsd)
+  /** One turn on an acquired entry: push, read to the `result`, settle. */
+  const run = async <T extends { entry: WarmEntry }>(warmTurn: T) => {
     warmTurn.entry.inbox.push(userMessage('hello'))
     const result = await nextResult(warmTurn.entry.iterator)
     await warm.settle(warmTurn.entry, result)
     return { ...warmTurn, result }
   }
+  /** One turn: acquire, push, read to the `result`, settle. */
+  const turn = async (sessionId: string, assembly: AssembledTurn, remainingUsd: number, cred = credential()) =>
+    run(await warm.acquire(sessionId, assembly, cred, remainingUsd))
   return {
     warm,
     fake,
@@ -87,6 +105,7 @@ export async function warmHarness(db: Throwaway, options: { maxEntries?: number;
     credential,
     assembled,
     turn,
+    run,
     newSession: () => randomUUID(),
     close: async () => {
       await warm.close()

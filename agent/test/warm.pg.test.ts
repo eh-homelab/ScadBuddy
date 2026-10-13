@@ -2,7 +2,32 @@ import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, type Throwaway, throwawayDatabase } from './support/postgres.js'
+import type { Sql } from 'postgres'
 import { warmHarness } from './support/warm.js'
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+/** A Postgres client whose next transcript-tail read waits until the test lets it go. */
+function gatedSql(real: Sql) {
+  let gate: { reached: () => void; release: Promise<void> } | undefined
+  const sql = ((strings: TemplateStringsArray, ...values: never[]) => {
+    const held = gate
+    if (held && strings[0]?.trim().startsWith('SELECT uuid FROM ai_session_entries')) {
+      gate = undefined
+      held.reached()
+      return held.release.then(() => real(strings, ...values))
+    }
+    return real(strings, ...values)
+  }) as unknown as Sql
+  const hold = () => {
+    let reached!: () => void
+    let release!: () => void
+    const at = new Promise<void>((r) => (reached = r))
+    gate = { reached, release: new Promise<void>((r) => (release = r)) }
+    return { reached: at, release }
+  }
+  return { sql, hold }
+}
 
 // WarmSessions' transcript tail and budget rules (spec 2026-10-13 §5.3 "Reuse
 // rule"), against the bundled Claude Code mirroring into ai_session_entries.
@@ -48,6 +73,78 @@ describe.skipIf(skip !== undefined)(`WarmSessions' tail and budget rules${skip ?
       expect(t.outcome).toBe(i === 0 ? 'miss' : 'hit')
     }
     expect(h.spawns).toHaveLength(1)
+  }, 60_000)
+
+  it('keeps the entry it is checking from an idle expiry during the tail read', async () => {
+    let now = 1_000
+    const gated: { hold?: ReturnType<typeof gatedSql>['hold'] } = {}
+    h = await warmHarness(db, {
+      idleMs: 200,
+      now: () => now,
+      sql: (real) => {
+        const g = gatedSql(real)
+        gated.hold = g.hold
+        return g.sql
+      },
+    })
+    const id = h.newSession()
+    const one = await h.turn(id, h.assembled(), 1)
+    await sleep(300) // the process's late transcript writes land
+    const held = gated.hold!()
+    const acquiring = h.warm.acquire(id, h.assembled(), h.credential(), 1 - one.result.total_cost_usd)
+    await held.reached
+    // Idle by the clock, and the idle timer fires while the read waits.
+    now += 1_000
+    await sleep(500)
+    held.release()
+    const two = await h.run(await acquiring)
+    expect(two.outcome).toBe('hit')
+    expect(two.result.subtype).toBe('success')
+    expect(h.warm.size()).toBe(1)
+    expect(h.spawns).toHaveLength(1)
+  }, 60_000)
+
+  it('recycles an entry evicted during the tail read', async () => {
+    const gated: { hold?: ReturnType<typeof gatedSql>['hold'] } = {}
+    h = await warmHarness(db, {
+      sql: (real) => {
+        const g = gatedSql(real)
+        gated.hold = g.hold
+        return g.sql
+      },
+    })
+    const id = h.newSession()
+    const first = h.assembled()
+    const one = await h.turn(id, first, 1)
+    await sleep(300)
+    const held = gated.hold!()
+    const acquiring = h.warm.acquire(id, h.assembled(), h.credential(), 1 - one.result.total_cost_usd)
+    await held.reached
+    h.warm.evict(id, 'the credential changed')
+    held.release()
+    const two = await h.run(await acquiring)
+    expect(two).toMatchObject({ outcome: 'recycle', reason: 'evicted' })
+    expect(two.result.subtype).toBe('success')
+    expect(h.spawns).toHaveLength(2)
+    expect(first.release).toHaveBeenCalledTimes(1)
+    expect(h.warm.size()).toBe(1)
+  }, 60_000)
+
+  it('recycles when another write landed before one of its own', async () => {
+    let foreign: (() => Promise<void>) | undefined
+    h = await warmHarness(db, { onRequest: () => foreign?.() ?? Promise.resolve() })
+    const id = h.newSession()
+    const one = await h.turn(id, h.assembled(), 1)
+    // During turn two's model call, another process writes; this one's own writes follow it.
+    foreign = async () => {
+      foreign = undefined
+      await h?.store.append({ projectKey: 'elsewhere', sessionId: id }, [{ type: 'user', uuid: randomUUID() }])
+    }
+    const two = await h.turn(id, h.assembled(), 1 - one.result.total_cost_usd)
+    expect(two.outcome).toBe('hit')
+    await sleep(300)
+    const three = await h.turn(id, h.assembled(), 1 - two.result.total_cost_usd)
+    expect(three).toMatchObject({ outcome: 'recycle', reason: 'tail' })
   }, 60_000)
 
   it('recycles when the remaining budget moved', async () => {

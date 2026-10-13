@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { fingerprint } from '../src/sessions/warm.js'
+import { costStateUsd, fingerprint } from '../src/sessions/warm.js'
 import { type FingerprintParts, TurnRunner } from '../src/sessions/turnRunner.js'
 
 const plugin = { id: 'p', url: 'https://x', headerVersion: '1', toolTiers: ['a=read'], disabledTools: ['b'] }
@@ -66,5 +66,18 @@ describe('TurnRunner.FINGERPRINTED_BY', () => {
   it('names only real parts', () => {
     const names = new Set([...Object.keys(parts), 'slot', 'spawn'])
     for (const [key, by] of Object.entries(TurnRunner.FINGERPRINTED_BY)) expect(names.has(by), key).toBe(true)
+  })
+})
+
+describe('costStateUsd', () => {
+  it('reads the total a cost-state entry carries', () => {
+    expect(costStateUsd(JSON.stringify({ type: 'cost-state', totalCostUSD: 0.25 }), () => {})).toBe(0.25)
+    expect(costStateUsd(null, () => {})).toBe(0)
+  })
+  it('takes a malformed row as no baseline, and says so', () => {
+    const logged: string[] = []
+    expect(costStateUsd('{"type":"cost-state", nope', (m) => logged.push(m))).toBe(0)
+    expect(costStateUsd(JSON.stringify({ type: 'cost-state', totalCostUSD: 'x' }), (m) => logged.push(m))).toBe(0)
+    expect(logged).toHaveLength(2)
   })
 })

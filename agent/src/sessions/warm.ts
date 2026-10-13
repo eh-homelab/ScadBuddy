@@ -87,6 +87,14 @@ const BUDGET_EPSILON = 1e-6
 /** The least cap a spawn is given, as TurnRunner's (`maxBudgetUsd` must be positive). */
 const MIN_CAP_USD = 0.000001
 
+/** `acquire` while a turn holds the session's entry: the caller runs one turn per session at a time, so this is its bug. */
+export class WarmBusyError extends Error {
+  override name = 'WarmBusyError'
+  constructor(sessionId: string) {
+    super(`session ${sessionId} already has a turn running on its warm process`)
+  }
+}
+
 /**
  * The service's transcript mirror as one process sees it: every append goes
  * through to `inner`, in call order, and the last main-transcript uuid that
@@ -95,22 +103,34 @@ const MIN_CAP_USD = 0.000001
  * land after its `result` (a `prompt_snapshot` attachment and `last-prompt`
  * did; a streaming process's `cost-state` only as it ends: measured against
  * the fake endpoint, test/warm.pg.test.ts), so the rule never compares a tail
- * read at the result with a later one.
+ * read at the result with a later one. And since another process's write
+ * could land just before one of this process's own, which would then be the
+ * tail again, each of its own appends first checks that the table's tail is
+ * still the last one it wrote (`foreign`).
  */
 class MirroredTranscript {
   readonly store: SessionStore
   lastUuid: string | null
   /** Every append so far, in order; never rejects. */
   pending: Promise<void> = Promise.resolve()
+  /** Another write landed in the main transcript between two of this process's own. */
+  foreign = false
 
-  constructor(inner: SessionStore, tail: string | null) {
+  constructor(inner: SessionStore, tail: string | null, readTail: () => Promise<string | null>) {
     this.lastUuid = tail
     const append = (key: SessionKey, entries: SessionStoreEntry[]): Promise<void> => {
-      const write = this.pending.then(() => inner.append(key, entries))
+      const main = (key.subpath ?? '') === ''
+      const uuid = main ? entries.findLast((e) => typeof e.uuid === 'string')?.uuid : undefined
+      const write = this.pending.then(async () => {
+        if (typeof uuid === 'string' && !this.foreign) {
+          // A failed read cannot tell: taken as moved, which only costs a respawn.
+          const tail = await readTail().catch(() => undefined)
+          if (tail !== this.lastUuid) this.foreign = true
+        }
+        await inner.append(key, entries)
+      })
       this.pending = write.then(
         () => {
-          if ((key.subpath ?? '') !== '') return
-          const uuid = entries.findLast((e) => typeof e.uuid === 'string')?.uuid
           if (typeof uuid === 'string') this.lastUuid = uuid
         },
         // A failed append is the SDK's to retry; the tail stays where it landed.
@@ -131,21 +151,24 @@ class MirroredTranscript {
 
 type Slot = {
   entry: WarmEntry
-  credential: Credential
+  /** sha256 of the credential it was spawned with (`credentialHash`): the secret itself is not kept. */
+  credential: string
   mirror: MirroredTranscript | undefined
   /** What the transcript's last `cost-state` held at spawn: what a resume restores (manager.ts `finish`). */
   carriedUsd: number
   settled: boolean
-  /** Between `acquire` and `settle`: never evicted for idleness or the cap. */
+  /** From `acquire` (its checks included) to `settle` or `abandon`: never evicted for idleness or the cap. */
   busy: boolean
-  /** Evicted while busy: closed at `settle`, or recycled by the next `acquire`. */
+  /** Evicted while busy: closed at `settle`, or, during `acquire`'s checks, recycled (`evicted`). */
   doomed?: string
   timer?: ReturnType<typeof setTimeout>
   closed: boolean
 }
 
-const sameCredential = (a: Credential, b: Credential) =>
-  a.kind === b.kind && a.secret === b.secret && (a.kind === 'gateway' ? a.baseUrl : '') === (b.kind === 'gateway' ? b.baseUrl : '')
+const credentialHash = (c: Credential) =>
+  createHash('sha256')
+    .update(JSON.stringify([c.kind, c.kind === 'gateway' ? c.baseUrl : '', c.secret]))
+    .digest('hex')
 
 /**
  * One warm Claude Code per session on this replica (spec §5.3). `acquire`
@@ -159,6 +182,7 @@ const sameCredential = (a: Credential, b: Credential) =>
 export class WarmSessions {
   private readonly deps: WarmSessionsDeps
   private readonly now: () => number
+  private readonly log: (message: string) => void
   /** By session, least recently used first. */
   private readonly slots = new Map<string, Slot>()
   /** Each session's acquire, one at a time: two would spawn two processes. */
@@ -167,11 +191,15 @@ export class WarmSessions {
   constructor(deps: WarmSessionsDeps) {
     this.deps = deps
     this.now = deps.now ?? Date.now
+    this.log = deps.log ?? (() => {})
   }
 
   /**
    * The session's process for this turn, which the turn then holds until
-   * `settle`. On a throw the assembly is still the caller's to release.
+   * `settle` (it ended with a `result`) or `abandon` (any other end). One turn
+   * per session at a time: an acquire while one holds the entry throws
+   * WarmBusyError and leaves that turn alone. On a throw the assembly is still
+   * the caller's to release.
    */
   acquire(sessionId: string, turn: AssembledTurn, credential: Credential, remainingUsd: number): Promise<WarmTurn> {
     const previous = this.acquiring.get(sessionId) ?? Promise.resolve()
@@ -206,6 +234,16 @@ export class WarmSessions {
     this.trim()
   }
 
+  /**
+   * After a turn that ended without a `result` (the process died, an abort, a
+   * throwing iterator): its process is closed and its assembly released, busy
+   * or not. The next acquire spawns afresh.
+   */
+  abandon(entry: WarmEntry, reason: string): void {
+    const slot = this.slots.get(entry.sessionId)
+    if (slot?.entry === entry) this.drop(slot, `abandoned: ${reason}`)
+  }
+
   /** Closes the session's process (`*`: every one). One with a turn running is closed when the turn settles. */
   evict(sessionId: string | '*', reason: string): void {
     for (const slot of [...this.slots.values()]) {
@@ -230,19 +268,28 @@ export class WarmSessions {
     this.sweepIdle()
     const print = fingerprint(turn.fingerprintParts)
     const slot = this.slots.get(sessionId)
+    if (slot?.busy) throw new WarmBusyError(sessionId)
     let reason: RecycleReason | undefined
     if (slot) {
+      // Held while it is checked: the idle timer, the cap and `evict` leave it be.
+      slot.busy = true
+      clearTimeout(slot.timer)
       reason = await this.mismatch(slot, print, credential, remainingUsd)
-      if (reason === undefined) {
-        turn.release()
-        clearTimeout(slot.timer)
-        slot.busy = true
-        slot.entry.lastUsedAt = this.now()
-        this.slots.delete(sessionId)
-        this.slots.set(sessionId, slot)
-        return { entry: slot.entry, outcome: 'hit' }
+      // Closed meanwhile (shutdown): nothing to reuse or recycle.
+      const gone = slot.closed || this.slots.get(sessionId) !== slot
+      if (gone) reason = undefined
+      else {
+        if (slot.doomed !== undefined) reason = 'evicted'
+        if (reason === undefined) {
+          turn.release()
+          slot.entry.lastUsedAt = this.now()
+          this.slots.delete(sessionId)
+          this.slots.set(sessionId, slot)
+          return { entry: slot.entry, outcome: 'hit' }
+        }
+        slot.busy = false
+        this.drop(slot, `recycled: ${reason}`)
       }
-      this.drop(slot, `recycled: ${reason}`)
       // Its last appends land before the new process loads the transcript.
       await slot.mirror?.pending
     }
@@ -253,12 +300,9 @@ export class WarmSessions {
 
   /** Why the process cannot serve this turn (§5.3 "Reuse rule"), or undefined when it can. */
   private async mismatch(slot: Slot, print: string, credential: Credential, remainingUsd: number): Promise<RecycleReason | undefined> {
-    // Still held: evicted during its turn, or its turn ended without `settle`,
-    // so its stream may yet hold that turn's messages.
-    if (slot.busy || slot.doomed !== undefined) return 'evicted'
     // The credential is in the process's env (run.ts `credentialEnv`); a
     // fallback to another candidate keeps the fingerprint but not the key.
-    if (slot.entry.fingerprint !== print || !sameCredential(slot.credential, credential)) return 'fingerprint'
+    if (slot.entry.fingerprint !== print || slot.credential !== credentialHash(credential)) return 'fingerprint'
     if (await this.tailMoved(slot)) return 'tail'
     const entry = slot.entry
     const expected = entry.capUsd - (entry.lastTotalUsd - entry.costAtSpawnUsd)
@@ -276,7 +320,7 @@ export class WarmSessions {
       const pending = mirror.pending
       await pending
       const tail = await this.tail(slot.entry.sessionId)
-      if (mirror.pending === pending) return tail !== mirror.lastUuid
+      if (mirror.pending === pending) return mirror.foreign || tail !== mirror.lastUuid
     }
     return true
   }
@@ -301,8 +345,10 @@ export class WarmSessions {
         (SELECT entry FROM ai_session_entries
           WHERE session_id = ${sessionId} AND subpath = '' AND uuid IS NULL AND entry LIKE '%"cost-state"%'
           ORDER BY id DESC LIMIT 1) AS cost_state`
-    const carriedUsd = row?.resume ? costStateUsd(row.cost_state) : 0
-    const mirror = turn.run.sessionStore ? new MirroredTranscript(turn.run.sessionStore, row?.tail ?? null) : undefined
+    const carriedUsd = row?.resume ? costStateUsd(row.cost_state, this.log) : 0
+    const mirror = turn.run.sessionStore
+      ? new MirroredTranscript(turn.run.sessionStore, row?.tail ?? null, () => this.tail(sessionId))
+      : undefined
     const inbox = new Inbox()
     const { resume: _resume, sessionId: _sessionId, ...run } = turn.run
     const query = runHarness({
@@ -325,7 +371,7 @@ export class WarmSessions {
       lastTotalUsd: carriedUsd,
       lastUsedAt: this.now(),
     }
-    this.slots.set(sessionId, { entry, credential, mirror, carriedUsd, settled: false, busy: true, closed: false })
+    this.slots.set(sessionId, { entry, credential: credentialHash(credential), mirror, carriedUsd, settled: false, busy: true, closed: false })
     return entry
   }
 
@@ -373,13 +419,25 @@ export class WarmSessions {
     slot.entry.inbox.close()
     slot.entry.query.close()
     slot.entry.turn.release()
-    this.deps.log?.(`warm: closed session ${id}'s process: ${reason}`)
+    this.log(`warm: closed session ${id}'s process: ${reason}`)
   }
 }
 
-/** The `totalCostUSD` of a `cost-state` transcript entry; 0 when there is none. */
-function costStateUsd(entry: string | null): number {
+/**
+ * The `totalCostUSD` of a `cost-state` transcript entry; 0 when there is none.
+ * A row it cannot read is no baseline either, said in `log`: it must not stop
+ * the spawn (a wrong baseline only costs a `budget` respawn).
+ */
+export function costStateUsd(entry: string | null, log: (message: string) => void): number {
   if (entry === null) return 0
-  const parsed = JSON.parse(entry) as { type?: unknown; totalCostUSD?: unknown }
-  return parsed.type === 'cost-state' && typeof parsed.totalCostUSD === 'number' ? parsed.totalCostUSD : 0
+  let parsed: { type?: unknown; totalCostUSD?: unknown }
+  try {
+    parsed = JSON.parse(entry) as typeof parsed
+  } catch (err) {
+    log(`warm: a cost-state transcript entry is not JSON (${(err as Error).message}); counting from 0`)
+    return 0
+  }
+  if (parsed.type === 'cost-state' && typeof parsed.totalCostUSD === 'number') return parsed.totalCostUSD
+  log('warm: a cost-state transcript entry has no numeric totalCostUSD; counting from 0')
+  return 0
 }

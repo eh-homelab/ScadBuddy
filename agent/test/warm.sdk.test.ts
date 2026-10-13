@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
+import { userMessage } from '../src/harness/inbox.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, type Throwaway, throwawayDatabase } from './support/postgres.js'
+import { WarmBusyError } from '../src/sessions/warm.js'
 import { warmHarness } from './support/warm.js'
 
 // WarmSessions against the bundled Claude Code (spec 2026-10-13 §5.3): one process
@@ -88,6 +90,44 @@ describe.skipIf(skip !== undefined)(`WarmSessions${skip ? ` (skipped: ${skip})` 
     expect(h.warm.size()).toBe(2)
     await h.spawns[0]?.exited
     expect(turns.map((t) => vi.mocked(t.release).mock.calls.length)).toEqual([1, 0, 0])
+  }, 60_000)
+
+  it('abandon releases a turn that ended without a result', async () => {
+    h = await warmHarness(db)
+    const id = h.newSession()
+    const first = h.assembled()
+    const warmTurn = await h.warm.acquire(id, first, h.credential(), 1)
+    warmTurn.entry.inbox.push(userMessage('hello'))
+    // The process dies mid-turn: the turn's iterator throws, and no result comes.
+    const iterated = (async () => {
+      for (;;) {
+        const { done } = await warmTurn.entry.iterator.next()
+        if (done) throw new Error('query ended')
+      }
+    })()
+    await expect.poll(() => h?.spawns.length).toBe(1)
+    h.spawns[0]?.child.kill('SIGKILL')
+    await expect(iterated).rejects.toThrow()
+    h.warm.abandon(warmTurn.entry, 'the turn failed')
+    expect(h.warm.size()).toBe(0)
+    expect(first.release).toHaveBeenCalledTimes(1)
+    await h.spawns[0]?.exited
+    // The next turn starts a fresh process.
+    const next = await h.turn(id, h.assembled(), 1)
+    expect(next.outcome).toBe('miss')
+  }, 60_000)
+
+  it('refuses a second acquire while a turn holds the entry', async () => {
+    h = await warmHarness(db)
+    const id = h.newSession()
+    const held = await h.warm.acquire(id, h.assembled(), h.credential(), 1)
+    const second = h.assembled()
+    await expect(h.warm.acquire(id, second, h.credential(), 1)).rejects.toBeInstanceOf(WarmBusyError)
+    // The running turn's process is untouched; the refused assembly stays the caller's.
+    expect(second.release).not.toHaveBeenCalled()
+    const done = await h.run(held)
+    expect(done.result.subtype).toBe('success')
+    expect(h.spawns).toHaveLength(1)
   }, 60_000)
 
   it('close() ends every process', async () => {
