@@ -224,8 +224,22 @@ describe('the library routes', () => {
     })
   })
 
-  it("refuses a plate with an output, whose preview is the whole output", async () => {
-    await expect(tool('get_output_preview').execute({ output_id: OUT, plate: 2 }, ctx())).rejects.toThrow(/library file's/)
+  it("reads one plate of an output's 3MF, as the print dialog's pane does (#2169)", async () => {
+    let plate: string | null = null
+    server.use(
+      http.get(`${BACKEND}/api/v1/outputs/${OUT}/preview.glb`, ({ request }) => {
+        plate = new URL(request.url).searchParams.get('plate')
+        return new HttpResponse(new Uint8Array([1, 2]), { headers: { 'content-type': 'model/gltf-binary' } })
+      }),
+    )
+    const preview = await tool('get_output_preview').execute({ output_id: OUT, plate: 2 }, ctx({ maxInlineBytes: 16 }))
+    expect(plate).toBe('2')
+    expect(preview.content).toContainEqual({
+      type: 'resource',
+      resource: { uri: `scadbuddy://outputs/${OUT}/preview.glb?plate=2`, mimeType: 'model/gltf-binary', blob: 'AQI=' },
+    })
+    const link = await tool('get_output_preview').execute({ output_id: OUT, plate: 2 }, ctx({ maxInlineBytes: 1 }))
+    expect(link.content[0]).toMatchObject({ type: 'resource_link', uri: `/api/v1/outputs/${OUT}/preview.glb?plate=2` })
   })
 
   it('lists one folder of the library, paged', async () => {
