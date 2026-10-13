@@ -15,7 +15,10 @@ while [ $# -gt 2 ]; do
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
-[ -n "$owner" ] && [ $# -eq 2 ] || { echo "usage: release-claim.sh --owner ID [--author LOGIN] [--repo R] PR ISSUE" >&2; exit 2; }
+if [ -z "$owner" ] || [ $# -ne 2 ]; then
+  echo "usage: release-claim.sh --owner ID [--author LOGIN] [--repo R] PR ISSUE" >&2
+  exit 2
+fi
 pr=$1 iss=$2
 [ -n "$author" ] || author=$(gh api user -q .login)
 # The owner's claims for THIS PR, oldest first, each with whether it is released
