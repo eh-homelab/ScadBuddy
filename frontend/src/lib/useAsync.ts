@@ -108,6 +108,15 @@ export function useAsync<T>(
   const queued = useRef(false)
   const accepting = useRef<((data: T) => boolean) | undefined>(undefined)
   const failing = useRef<(() => void)[]>([])
+  // A refresh that lands after unmount is dropped: nothing reads it, and in a test it
+  // can land after the environment that would render it is gone.
+  const mounted = useRef(false)
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
   const refresh = useCallback((accept?: (data: T) => boolean, failed?: () => void) => {
     // Signals that arrive together are read once, deciding by the latest `accept`; each
     // caller's `failed` is kept, so none misses the failure of the read it was merged into.
@@ -124,12 +133,12 @@ export function useAsync<T>(
       const mine = ++sequence.current
       current().then(
         (data) => {
-          if (sequence.current !== mine) return
+          if (!mounted.current || sequence.current !== mine) return
           if (decide && !decide(data)) return
           setSnapshot({ key: at, data })
         },
         (cause: unknown) => {
-          if (sequence.current !== mine) return
+          if (!mounted.current || sequence.current !== mine) return
           const error = cause instanceof Error ? cause : new Error(String(cause))
           // A failed background read keeps what is on screen: the next change reads
           // again. Only a key with nothing to show yet shows the error.

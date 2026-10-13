@@ -204,6 +204,45 @@ it('tells every caller merged into one read that it failed', async () => {
   expect(first).toHaveBeenCalledOnce()
 })
 
+function refreshAfterFirst() {
+  const settle: { resolve: (v: number) => void; reject: (e: Error) => void }[] = []
+  let first = true
+  const load = () => {
+    if (first) {
+      first = false
+      return Promise.resolve(1)
+    }
+    return new Promise<number>((resolve, reject) => settle.push({ resolve, reject }))
+  }
+  return { load, settle }
+}
+
+it('never asks accept about a refresh that lands after unmount', async () => {
+  const { load, settle } = refreshAfterFirst()
+  const { result, unmount } = renderHook(() => useAsync(load, []))
+  await waitFor(() => expect(result.current.data).toBe(1))
+  const accept = vi.fn(() => true)
+  act(() => result.current.refresh(accept))
+  await waitFor(() => expect(settle).toHaveLength(1))
+  unmount()
+  settle[0]!.resolve(2)
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  expect(accept).not.toHaveBeenCalled()
+})
+
+it('never tells failed about a refresh that fails after unmount', async () => {
+  const { load, settle } = refreshAfterFirst()
+  const { result, unmount } = renderHook(() => useAsync(load, []))
+  await waitFor(() => expect(result.current.data).toBe(1))
+  const failed = vi.fn()
+  act(() => result.current.refresh(undefined, failed))
+  await waitFor(() => expect(settle).toHaveLength(1))
+  unmount()
+  settle[0]!.reject(new Error('down'))
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  expect(failed).not.toHaveBeenCalled()
+})
+
 describe('with the socket already open (#1039)', () => {
   beforeEach(() => {
     vi.spyOn(getRealtime(), 'willResync', 'get').mockReturnValue(true)
