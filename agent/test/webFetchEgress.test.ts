@@ -47,11 +47,17 @@ describe('webFetchRefusal', () => {
   })
 
   // #2758: literal hosts that only the address checks catch.
+  // Each case names the check that caught it, so one that stops catching it shows.
   it('refuses an IPv4-mapped loopback literal and the unspecified addresses', async () => {
-    expect(await webFetchRefusal('http://[::ffff:127.0.0.1]/', publicHost)).toMatch(/^WebFetch refused/)
-    expect(await webFetchRefusal('http://[::ffff:7f00:1]/', publicHost)).toMatch(/^WebFetch refused/)
-    expect(await webFetchRefusal('http://0.0.0.0/', publicHost)).toMatch(/^WebFetch refused/)
-    expect(await webFetchRefusal('http://[::]/', publicHost)).toMatch(/^WebFetch refused/)
+    // The dotted form is not WHATWG's normal form, so that check catches it first.
+    expect(await webFetchRefusal('http://[::ffff:127.0.0.1]/', publicHost)).toBe(
+      'WebFetch refused: give the URL in its normal form, http://[::ffff:7f00:1]/',
+    )
+    expect(await webFetchRefusal('http://[::ffff:7f00:1]/', publicHost)).toBe(
+      "WebFetch refused: url host [::ffff:7f00:1] resolves to ::ffff:7f00:1, this pod's loopback",
+    )
+    expect(await webFetchRefusal('http://0.0.0.0/', publicHost)).toMatch(/^WebFetch refused: url host 0\.0\.0\.0 resolves to 0\.0\.0\.0, a link-local/)
+    expect(await webFetchRefusal('http://[::]/', publicHost)).toMatch(/^WebFetch refused: url host :: resolves to ::, a link-local/)
   })
 })
 

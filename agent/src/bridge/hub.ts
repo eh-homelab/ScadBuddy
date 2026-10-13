@@ -415,9 +415,7 @@ export class TabHub implements BrowserTabs {
     { signal, timeoutMs = this.#callTimeoutMs }: { signal: AbortSignal; timeoutMs?: number },
   ): Promise<CallOutcome> {
     // The pairing lookup stops with the call (#1410): a hung read is not waited out.
-    const resolved = await this.#resolve(target, signal).catch((err: unknown) => {
-      throw signal.aborted ? abortError() : err
-    })
+    const resolved = await this.#resolve(target, signal).catch(rethrowAborted(signal))
     if ('problem' in resolved) return failure('no_browser', resolved.problem)
     const { tab } = resolved
     if (tab) return this.#callTab(tab, tool, args, signal, timeoutMs)
@@ -465,9 +463,7 @@ export class TabHub implements BrowserTabs {
 
   async status(target: BrowserTarget, { signal }: { signal?: AbortSignal } = {}): Promise<BrowserStatus> {
     // An abort rejects as call()'s does (#1814), not with the signal's raw reason.
-    const resolved = await this.#resolve(target, signal).catch((err: unknown) => {
-      throw signal?.aborted ? abortError() : err
-    })
+    const resolved = await this.#resolve(target, signal).catch(rethrowAborted(signal))
     if ('problem' in resolved) return { attached: false, reason: resolved.problem }
     let state: { route: string; live: string[] } = resolved.tab ?? { route: '', live: [] }
     if (!resolved.tab) {
@@ -567,6 +563,13 @@ export class TabHub implements BrowserTabs {
 
 /** Where a call goes: the tab here, or (`tab` undefined) one the relay finds on another replica. */
 type Resolved = { tabId: string; tab?: TabConnection; via: 'session' | 'pairing'; pairing?: PairingView }
+
+/** A lookup's failure as `call()` and `status()` both reject: an abort as `abortError()`, not the signal's raw reason. */
+function rethrowAborted(signal: AbortSignal | undefined): (err: unknown) => never {
+  return (err) => {
+    throw signal?.aborted ? abortError() : err
+  }
+}
 
 function entry(view: PairingView): PairingEntry {
   return { id: view.id, label: view.label, expiresAt: view.expiresAt.toISOString() }
