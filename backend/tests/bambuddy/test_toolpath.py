@@ -117,10 +117,13 @@ def test_the_end_code_is_not_drawn() -> None:
 
 def test_the_speed_scale_is_of_the_moves_drawn() -> None:
     """#2885: a cut layer's fastest move does not set the Speed view's scale."""
-    fast_last_layer = GCODE.replace(b"G3 X100 Y120 I0 J5 E1 F3000", b"G1 X100 Y130 E1 F60000")
+    # The cut layer's fast move is drawn first, then the bound is met on the next one.
+    fast_last_layer = GCODE.replace(
+        b"G3 X100 Y120 I0 J5 E1 F3000", b"G1 X100 Y130 E1 F60000\nG1 X90 Y130 E1 F3000"
+    )
     assert parse(fast_last_layer).max_speed == 1000
 
-    path = parse(fast_last_layer, max_segments=6)
+    path = parse(fast_last_layer, max_segments=7)
 
     assert path.truncated
     assert path.max_speed == 200
