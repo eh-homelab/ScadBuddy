@@ -53,6 +53,7 @@ from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
 from scadbuddy.workflows.print_models import (
     FAILED,
     REFUSED,
+    SLICE_LOST,
     AcceptAnswer,
     Checked,
     CheckInput,
@@ -124,6 +125,11 @@ class Fake:
         self.start_enqueue_delay = 0.0
         #: The queue items `print_record` wrote, in order.
         self.recorded: list[int] = []
+        #: What the next `print_slice_wait`s raise, in order, before one succeeds.
+        self.slice_errors: list[ApplicationError] = []
+        self.slice_starts = 0
+        #: Each queued plate's outcome, as `print_record` was given it.
+        self.outcomes: list[QueueOutcome] = []
 
     async def _gate(self, name: str) -> None:
         if name in self.gates:
@@ -179,12 +185,15 @@ class Fake:
     @activity.defn(name="print_slice_start")
     async def slice_start(self, input: SliceStartInput) -> SliceStarted:
         self.calls.append(f"slice_start:{input.plate_id}")
-        return SliceStarted(job_id=9, preset_key="k")
+        self.slice_starts += 1
+        return SliceStarted(job_id=8 + self.slice_starts, preset_key="k")
 
     @activity.defn(name="print_slice_wait")
     async def slice_wait(self, job_id: int) -> int:
-        self.calls.append("slice_wait")
+        self.calls.append(f"slice_wait:{job_id}")
         await self._gate("slice_wait")
+        if self.slice_errors:
+            raise self.slice_errors.pop(0)
         return 52
 
     @activity.defn(name="print_start_enqueue")
@@ -209,6 +218,7 @@ class Fake:
         if self.record_error is not None:
             raise self.record_error
         self.recorded.extend(input.outcome.queue_item_ids)
+        self.outcomes.append(input.outcome)
         return input.sent
 
     @activity.defn(name="print_finish")
@@ -348,12 +358,12 @@ async def test_an_accepted_run_answers_the_row_then_succeeds(
         "insert",
         "plan",
         "slice_start:1",
-        "slice_wait",
+        "slice_wait:9",
         "start_enqueue",
         "enqueue:1",
         "record",
         "slice_start:2",
-        "slice_wait",
+        "slice_wait:10",
         "enqueue:2",
         "record",
         "finish",
@@ -1098,3 +1108,94 @@ async def test_a_library_plate_is_recorded_by_subject_without_reading_bambuddy()
     assert sends.recorded == [(PrintSubject.library(41), [51])]
     assert sent == [PlateSend(plate_id=1, queue_item_id=51, slice_job_id=9)]
     assert uploads.sliced == [("library:41", 41)]
+
+
+LOST = PrintRunError(
+    status=502,
+    title="Bad Gateway",
+    detail="Bambuddy failed to slice the plate: Slicer sidecar unreachable: ConnectError",
+)
+
+
+def _lost() -> ApplicationError:
+    return ApplicationError(LOST.detail, LOST, type=SLICE_LOST, non_retryable=True)
+
+
+@pytest.fixture
+async def quick(client: Client, fake: Fake, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[str]:
+    """A worker whose slices are started again a second apart (unsandboxed, so the
+    backoff can be shortened)."""
+    monkeypatch.setattr(printing, "SLICE_BACKOFF", timedelta(seconds=1))
+    queue = f"print-{uuid.uuid4().hex[:8]}"
+    async with Worker(
+        client,
+        task_queue=queue,
+        workflows=[PrintRunWorkflow],
+        activities=fake.all(),
+        workflow_runner=UnsandboxedWorkflowRunner(),
+    ):
+        yield queue
+
+
+async def _timers(client: Client, arg: PrintRunInput) -> list[float]:
+    timers = []
+    async for event in client.get_workflow_handle(f"print-{arg.key}").fetch_history_events():
+        if event.event_type == EventType.EVENT_TYPE_TIMER_STARTED:
+            attributes = event.timer_started_event_attributes
+            timers.append(attributes.start_to_fire_timeout.ToTimedelta().total_seconds())
+    return timers
+
+
+async def test_a_lost_slice_is_sliced_again_and_the_plate_queued_once(
+    client: Client, quick: str, fake: Fake
+) -> None:
+    """#2081: the slicer sidecar died under the first two slices. Nothing was sliced or
+    queued, so the plate is sliced again, waiting longer each time, and queued once
+    from the slice that finished."""
+    fake.slice_errors = [_lost(), _lost()]
+    arg = run_input()
+    await start(client, quick, arg)
+    run = await ended(client, arg)
+
+    assert run.status == "succeeded"
+    assert [call for call in fake.calls if call.startswith(("slice", "enqueue"))] == [
+        "slice_start:1",
+        "slice_wait:9",
+        "slice_start:1",
+        "slice_wait:10",
+        "slice_start:1",
+        "slice_wait:11",
+        "enqueue:1",
+    ]
+    [outcome] = fake.outcomes
+    assert outcome.slice_job_id == 11
+    # The backoff, times the attempt; then the (empty) repeat window.
+    assert await _timers(client, arg) == [1.0, 2.0, 0.0]
+
+
+async def test_a_slice_lost_every_time_ends_the_run_failed_with_nothing_queued(
+    client: Client, quick: str, fake: Fake
+) -> None:
+    fake.slice_errors = [_lost() for _ in range(printing.SLICE_ATTEMPTS)]
+    arg = run_input()
+    await start(client, quick, arg)
+    run = await ended(client, arg)
+
+    assert run.status == "failed" and run.error == LOST and not run.may_have_queued
+    assert fake.slice_starts == printing.SLICE_ATTEMPTS
+    assert not [call for call in fake.calls if call.startswith("enqueue")]
+
+
+async def test_a_slice_the_slicer_refused_is_not_sliced_again(
+    client: Client, quick: str, fake: Fake
+) -> None:
+    refused = PrintRunError(
+        status=502, title="Bad Gateway", detail="Bambuddy failed to slice the plate: bad plate"
+    )
+    fake.slice_errors = [ApplicationError(refused.detail, refused, type=FAILED, non_retryable=True)]
+    arg = run_input()
+    await start(client, quick, arg)
+    run = await ended(client, arg)
+
+    assert run.status == "failed" and run.error == refused
+    assert fake.slice_starts == 1
