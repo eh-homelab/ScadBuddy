@@ -1729,13 +1729,29 @@ def test_the_library_file_itself_is_served(client: TestClient) -> None:
 
 
 @respx.mock
-def test_the_library_file_is_always_a_download_never_a_page(client: TestClient) -> None:
-    """Whatever type Bambuddy names, the file is never rendered on ScadBuddy's origin."""
+@pytest.mark.parametrize("hashed", [False, True], ids=["streamed", "from-the-cache"])
+def test_the_library_file_is_always_a_download_never_a_page(
+    client: TestClient, hashed: bool
+) -> None:
+    """Whatever type Bambuddy names, the file is never rendered on ScadBuddy's origin,
+    streamed from Bambuddy or served from the download cache (#2788)."""
     configure(client)
+    content = b"<svg onload='alert(1)'/>"
+    respx.get(f"{API}/library/files/89").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": 89,
+                "filename": "x.svg",
+                "file_type": "svg",
+                "file_hash": hashlib.sha256(content).hexdigest() if hashed else None,
+            },
+        )
+    )
     respx.get(f"{API}/library/files/89/download").mock(
         return_value=httpx.Response(
             200,
-            content=b"<svg onload='alert(1)'/>",
+            content=content,
             headers={"content-type": "image/svg+xml", "content-disposition": "inline"},
         )
     )
@@ -1743,9 +1759,89 @@ def test_the_library_file_is_always_a_download_never_a_page(client: TestClient) 
     served = client.get("/api/v1/print/library/89/file")
 
     assert served.status_code == 200, served.text
+    assert served.content == content
     assert served.headers["content-type"] == "application/octet-stream"
     assert served.headers["content-disposition"].startswith("attachment")
     assert served.headers["x-content-type-options"] == "nosniff"
+
+
+@respx.mock
+def test_a_library_file_with_a_hash_is_downloaded_from_bambuddy_once(
+    client: TestClient, app: FastAPI
+) -> None:
+    """#2788: the second ask, and a ranged one, are served from the download cache."""
+    configure(client)
+    content = library_3mf()
+    download = library_file(89, content=content, file_hash=hashlib.sha256(content).hexdigest())
+
+    first = client.get("/api/v1/print/library/89/file")
+    second = client.get("/api/v1/print/library/89/file")
+    ranged = client.get("/api/v1/print/library/89/file", headers={"range": "bytes=0-3"})
+
+    assert first.content == second.content == content
+    assert (ranged.status_code, ranged.content) == (206, content[:4])
+    assert download.call_count == 1
+    state: AppState = getattr(app.state, STATE_ATTR)
+    downloads = state.store.downloads
+    assert downloads is not None and downloads.has(hashlib.sha256(content).hexdigest())
+
+
+@respx.mock
+def test_a_cached_library_file_that_is_not_its_hash_is_never_served(
+    client: TestClient, app: FastAPI
+) -> None:
+    """Bytes planted under a file's hash in the shared directory are dropped, and the
+    file is served as Bambuddy has it (#2788). Each served copy is the request's own,
+    removed once sent."""
+    configure(client)
+    content = library_3mf()
+    sha = hashlib.sha256(content).hexdigest()
+    download = library_file(89, content=content, file_hash=sha)
+    state: AppState = getattr(app.state, STATE_ATTR)
+    downloads = state.store.downloads
+    assert downloads is not None
+    downloads.root.mkdir(parents=True, exist_ok=True)
+    downloads.path(sha).write_bytes(b"planted")
+
+    assert client.get("/api/v1/print/library/89/file").content == content
+    assert download.call_count == 1
+    assert not downloads.has(sha)
+    assert client.get("/api/v1/print/library/89/file").content == content
+    assert downloads.path(sha).read_bytes() == content
+    spool = state.paths.cache / "library-spool"
+    assert not spool.exists() or list(spool.iterdir()) == []
+
+
+@respx.mock
+def test_a_library_file_too_large_to_keep_is_streamed_as_before(
+    client: TestClient, app: FastAPI
+) -> None:
+    configure(client)
+    content = library_3mf()
+    respx.get(f"{API}/library/files/89").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": 89,
+                "filename": "big.3mf",
+                "file_type": "3mf",
+                "file_size": len(content),
+                "file_hash": hashlib.sha256(content).hexdigest(),
+            },
+        )
+    )
+    download = respx.get(f"{API}/library/files/89/download").mock(
+        return_value=httpx.Response(200, content=content)
+    )
+    state: AppState = getattr(app.state, STATE_ATTR)
+    downloads = state.store.downloads
+    assert downloads is not None
+    # A quarter of the cap is the most one file may take of it.
+    downloads.max_bytes = 4 * len(content) - 4
+
+    assert client.get("/api/v1/print/library/89/file").content == content
+    assert client.get("/api/v1/print/library/89/file").content == content
+    assert download.call_count == 2
 
 
 def two_plate_3mf() -> bytes:

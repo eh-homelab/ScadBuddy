@@ -93,6 +93,8 @@ DEFAULT_STORE_MAX_TOTAL_BYTES = 50 * 1024**3
 DEFAULT_STORE_MAX_COUNT = 200_000
 #: A worker's local copy of pieces it fetched or rendered; least recently used goes first.
 DEFAULT_WORKER_CACHE_MAX_BYTES = 10 * 1024**3
+#: The shared cache of Bambuddy downloads (#2788): least recently used goes first.
+DEFAULT_DOWNLOAD_CACHE_MAX_BYTES = 4 * 1024**3
 # How old a duplicate's staging folder must be before a sweep treats it as a crashed
 # copy rather than another replica's copy in flight (#212).
 DEFAULT_DUPLICATE_STAGING_MAX_AGE = 3600.0
@@ -158,6 +160,12 @@ class Config:
     store_max_total_bytes: int = DEFAULT_STORE_MAX_TOTAL_BYTES
     store_max_count: int = DEFAULT_STORE_MAX_COUNT
     worker_cache_max_bytes: int = DEFAULT_WORKER_CACHE_MAX_BYTES
+    #: #2788: the directory of whole Bambuddy downloads by sha256. Unset, the API keeps
+    #: it under its data volume's ``cache/downloads`` and a render worker keeps none.
+    #: A worker runs template code: never point one at a directory the API reads.
+    download_cache_dir: Path | None = None
+    #: Its cap; 0 keeps no downloads at all.
+    download_cache_max_bytes: int = DEFAULT_DOWNLOAD_CACHE_MAX_BYTES
 
     @property
     def activity_timeout(self) -> float:
@@ -316,6 +324,7 @@ def available_cpus(cgroup_root: Path = CGROUP_ROOT) -> int:
 def load_config(env: Mapping[str, str] | None = None) -> Config:
     source: Mapping[str, str] = os.environ if env is None else env
     data_dir = source.get("SCADBUDDY_DATA_DIR")
+    downloads_dir = source.get("SCADBUDDY_DOWNLOAD_CACHE_DIR")
     return Config(
         openscad=source.get("SCADBUDDY_OPENSCAD") or DEFAULT_OPENSCAD,
         data_dir=Path(data_dir) if data_dir else DEFAULT_DATA_DIR,
@@ -373,6 +382,10 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         store_max_count=_int_or(source.get("SCADBUDDY_STORE_MAX_COUNT"), DEFAULT_STORE_MAX_COUNT),
         worker_cache_max_bytes=_int_or(
             source.get("SCADBUDDY_WORKER_CACHE_MAX_BYTES"), DEFAULT_WORKER_CACHE_MAX_BYTES
+        ),
+        download_cache_dir=Path(downloads_dir) if downloads_dir else None,
+        download_cache_max_bytes=_int_or(
+            source.get("SCADBUDDY_DOWNLOAD_CACHE_MAX_BYTES"), DEFAULT_DOWNLOAD_CACHE_MAX_BYTES
         ),
     )
 

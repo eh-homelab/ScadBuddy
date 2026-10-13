@@ -61,6 +61,7 @@ from scadbuddy.api.deps import (
     SettingsStoreDep,
     StateDep,
     UploadsDep,
+    downloads_of,
 )
 from scadbuddy.api.models import require_model_exists
 from scadbuddy.api.params import require_valid_params, schema_of
@@ -75,6 +76,7 @@ from scadbuddy.library.settings_store import ModelPrintChoices, SettingsStore, S
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.render.read_budget import ReadBudget, budget_of
 from scadbuddy.render.schema import ParamValue
+from scadbuddy.store.download_cache import DownloadCache
 
 logger = logging.getLogger(__name__)
 
@@ -300,6 +302,7 @@ async def _context(
     uploads: BambuddyUploadStore,
     paths: DataPaths,
     budget: ReadBudget,
+    downloads: DownloadCache | None = None,
 ) -> AnalysisContext:
     slug, params, meta = await asyncio.to_thread(_subject, target, outputs, catalogue)
     settings = store.load()
@@ -322,6 +325,7 @@ async def _context(
         library_subject=target.library_file_id,
         cache=paths.cache,
         budget=budget,
+        downloads=downloads,
     )
 
 
@@ -439,7 +443,15 @@ async def post_run(
     await check(body.target)
     budget = budget_of(state.settings, body.request.read_budget)
     context = await _context(
-        body.target, body.request, outputs, catalogue, store, uploads, paths, budget
+        body.target,
+        body.request,
+        outputs,
+        catalogue,
+        store,
+        uploads,
+        paths,
+        budget,
+        downloads_of(state),
     )
     try:
         stored = await asyncio.to_thread(decisions.list, scopes=context.scopes())
@@ -474,7 +486,15 @@ async def post_preview(
     await check(body.target)
     budget = budget_of(state.settings, body.request.read_budget)
     context = await _context(
-        body.target, body.request, outputs, catalogue, store, uploads, paths, budget
+        body.target,
+        body.request,
+        outputs,
+        catalogue,
+        store,
+        uploads,
+        paths,
+        budget,
+        downloads_of(state),
     )
     diagnostic, fix = _find_fix(context, body)
     scope = _fix_scope(context, diagnostic, body.scope)
@@ -522,7 +542,15 @@ async def post_apply(
     await check(body.target)
     budget = budget_of(state.settings, body.request.read_budget)
     context = await _context(
-        body.target, body.request, outputs, catalogue, store, uploads, paths, budget
+        body.target,
+        body.request,
+        outputs,
+        catalogue,
+        store,
+        uploads,
+        paths,
+        budget,
+        downloads_of(state),
     )
     diagnostic, fix = _find_fix(context, body)
     scope = _fix_scope(context, diagnostic, body.scope)

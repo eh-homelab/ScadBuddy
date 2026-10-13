@@ -10,16 +10,22 @@ reaches the browser.
 from __future__ import annotations
 
 import asyncio
+import os
+import tempfile
+from contextlib import aclosing
 from functools import partial
+from pathlib import Path as FsPath
 from typing import Annotated
 
 from fastapi import APIRouter, Path, Query, Request, Response, status
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 
 from scadbuddy.activity.component import ACTIVITY, ActivityComponent
 from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import (
+    DownloadsDep,
     OutputsDep,
     PathsDep,
     PrintLinksDep,
@@ -49,6 +55,7 @@ from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.filaments3mf import LocalFilaments
 from scadbuddy.bambuddy.library_listing import LibraryListing, list_library
 from scadbuddy.bambuddy.library_view import (
+    SPOOL_DIRNAME,
     NotViewableError,
     library_filaments,
     library_preview,
@@ -99,6 +106,7 @@ from scadbuddy.operations.component import OperationsDep
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.render.geometry import NoSuchPlateError
 from scadbuddy.render.read_budget import ReadBudget
+from scadbuddy.store.download_cache import DownloadCache, is_sha256
 from scadbuddy.workflows.component import FollowsDep
 from scadbuddy.workflows.print_models import SourceSpec
 
@@ -543,6 +551,7 @@ async def get_library_preview(
     store: SettingsStoreDep,
     paths: PathsDep,
     budget: ReadBudgetDep,
+    downloads: DownloadsDep,
     plate: Annotated[int, Query(ge=1)] = 1,
 ) -> Response:
     """Plate ``plate`` of the file, read from the 3MF a print of it slices (#1753), as an
@@ -551,7 +560,7 @@ async def get_library_preview(
     damaged, past a read budget, #2087) is a 422 saying why; a plate it lacks is a 404."""
     async with client_for(store.load()) as client:
         try:
-            data = await library_preview(client, paths.cache, file_id, plate, budget)
+            data = await library_preview(client, paths.cache, file_id, plate, budget, downloads)
         except NotViewableError as error:
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
         except NoSuchPlateError as error:
@@ -566,11 +575,26 @@ async def get_library_preview(
     summary="The library file itself",
 )
 async def get_library_file(
-    file_id: FileIdPath, request: Request, store: SettingsStoreDep
+    file_id: FileIdPath,
+    request: Request,
+    store: SettingsStoreDep,
+    paths: PathsDep,
+    downloads: DownloadsDep,
 ) -> Response:
     """The file as Bambuddy's library holds it: what a print of it was made from. Always
     a download: a library file can be any type (an SVG, an HTML page), and served on
-    ScadBuddy's origin under the type Bambuddy names it could run script there."""
+    ScadBuddy's origin under the type Bambuddy names it could run script there.
+
+    #2788: a file Bambuddy states a hash for is served from the shared download cache,
+    downloaded into it first when it is not there yet."""
+    cached = await _cached_library_file(store, downloads, paths, file_id)
+    if cached is not None:
+        return FileResponse(
+            cached,
+            media_type="application/octet-stream",
+            headers={"content-disposition": "attachment", "x-content-type-options": "nosniff"},
+            background=BackgroundTask(cached.unlink, missing_ok=True),
+        )
     response = await _proxy(
         store,
         request,
@@ -581,6 +605,43 @@ async def get_library_file(
     response.headers["content-type"] = "application/octet-stream"
     response.headers["content-disposition"] = "attachment"
     return response
+
+
+async def _cached_library_file(
+    store: SettingsStore, downloads: DownloadCache | None, paths: DataPaths, file_id: int
+) -> FsPath | None:
+    """A private, checked copy of library file ``file_id`` from the shared download
+    cache, downloaded into the cache first on a miss; the caller removes it once served.
+    None for a file to stream from Bambuddy as before: no cache, no hash stated (#2160),
+    a file too large to keep beside the others, or bytes that are not the stated hash."""
+    if downloads is None:
+        return None
+    async with client_for(store.load()) as client:
+        file = await client.library_file(file_id)
+        sha = (file.file_hash or "").lower()
+        if not is_sha256(sha) or (file.file_size or 0) > downloads.max_bytes // 4:
+            return None
+        if not await asyncio.to_thread(downloads.has, sha):
+            with downloads.fill(sha) as fill:
+                async with aclosing(client.download_library_file(file_id)) as chunks:
+                    async for chunk in chunks:
+                        await asyncio.to_thread(fill.write, chunk)
+                if not await asyncio.to_thread(fill.commit):
+                    return None
+    return await asyncio.to_thread(_private_copy, downloads, sha, paths.cache / SPOOL_DIRNAME)
+
+
+def _private_copy(downloads: DownloadCache, sha: str, spool: FsPath) -> FsPath | None:
+    """The entry copied, digest-checked, into a file under ``spool`` that only this
+    request reads: served from there, the bytes are the ones checked."""
+    spool.mkdir(parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(dir=spool)
+    path = FsPath(name)
+    with os.fdopen(descriptor, "w+b") as out:
+        if downloads.copy_verified(sha, out, what="library_file"):
+            return path
+    path.unlink(missing_ok=True)
+    return None
 
 
 @router.get(
@@ -634,6 +695,7 @@ async def get_library_choices(
     rack: RackUsageDep,
     paths: PathsDep,
     budget: ReadBudgetDep,
+    downloads: DownloadsDep,
     printer_id: Annotated[int | None, Query()] = None,
 ) -> ChoicesView:
     """As ``/print/outputs/{id}/choices``; ``model_choices`` is what this file last
@@ -649,7 +711,9 @@ async def get_library_choices(
             file_id,
             uploads=uploads,
             settings=settings,
-            filaments=partial(library_filaments, client, paths.cache, budget=budget),
+            filaments=partial(
+                library_filaments, client, paths.cache, budget=budget, downloads=downloads
+            ),
         )
         return await choices_for(
             client,
@@ -685,6 +749,7 @@ async def get_library_filaments(
     uploads: UploadsDep,
     paths: PathsDep,
     budget: ReadBudgetDep,
+    downloads: DownloadsDep,
     printer_id: Annotated[int | None, Query()] = None,
     plate_id: Annotated[int, Query(ge=1)] = 1,
     all_plates: Annotated[bool, Query()] = False,
@@ -699,7 +764,9 @@ async def get_library_filaments(
             printer_id=printer_id,
             plate_id=plate_id,
             all_plates=all_plates,
-            filaments=partial(library_filaments, client, paths.cache, budget=budget),
+            filaments=partial(
+                library_filaments, client, paths.cache, budget=budget, downloads=downloads
+            ),
         )
 
 
@@ -726,6 +793,7 @@ async def post_library_run(
     store: SettingsStoreDep,
     paths: PathsDep,
     budget: ReadBudgetDep,
+    downloads: DownloadsDep,
 ) -> PrintRun:
     """As ``/print/outputs/{id}/run`` (202, then follow ``GET /print/runs/{id}``; a
     repeat of the same request is its run, #742), on the file as it stands in Bambuddy.
@@ -737,7 +805,7 @@ async def post_library_run(
     ``/choices`` read them (#2550)."""
 
     async def prepare(source: SourceSpec) -> SourceSpec:
-        filaments = await _run_filaments(store, paths, budget, file_id)
+        filaments = await _run_filaments(store, paths, budget, file_id, downloads)
         return source.model_copy(update={"filaments": filaments})
 
     return await accept_run(
@@ -753,7 +821,11 @@ async def post_library_run(
 
 
 async def _run_filaments(
-    store: SettingsStore, paths: DataPaths, budget: ReadBudget, file_id: int
+    store: SettingsStore,
+    paths: DataPaths,
+    budget: ReadBudget,
+    file_id: int,
+    downloads: DownloadCache | None,
 ) -> LocalFilaments | None:
     """The slots a run of library file ``file_id`` reads (#2550): from the cache the
     dialog filled, or a download of the file that fills it. Only for a file Bambuddy
@@ -766,7 +838,7 @@ async def _run_filaments(
             file = await client.library_file(file_id)
             if not file.file_hash:
                 return None
-            return await library_filaments(client, paths.cache, file, budget)
+            return await library_filaments(client, paths.cache, file, budget, downloads)
     except ApiError:
         return None
 
@@ -910,6 +982,7 @@ async def post_library_check(
     rack: RackUsageDep,
     paths: PathsDep,
     budget: ReadBudgetDep,
+    downloads: DownloadsDep,
 ) -> PrintCheck:
     """As ``/print/outputs/{id}/check``, on the file as it stands in Bambuddy (#755, #760);
     its slots read from the file itself, as ``/choices`` reads them (#2550)."""
@@ -922,5 +995,7 @@ async def post_library_check(
             file_id,
             body,
             rack=rack,
-            filaments=partial(library_filaments, client, paths.cache, budget=budget),
+            filaments=partial(
+                library_filaments, client, paths.cache, budget=budget, downloads=downloads
+            ),
         )

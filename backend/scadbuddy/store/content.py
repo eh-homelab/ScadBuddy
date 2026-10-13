@@ -19,7 +19,7 @@ from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import aclosing
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, BinaryIO, Protocol
 
 from psycopg.errors import DeadlockDetected
 
@@ -38,6 +38,7 @@ from scadbuddy.store.content_models import (
     StoreUsage,
     blob_digest,
 )
+from scadbuddy.store.download_cache import DownloadCache
 from scadbuddy.store.index import BlobIndex
 from scadbuddy.store.refs import BlobRefs
 
@@ -76,11 +77,17 @@ class ContentStore:
         max_total_bytes: int = 0,
         max_count: int = 0,
         metrics: Metrics | None = None,
+        downloads: DownloadCache | None = None,
     ) -> None:
         self.backend = backend
         self.index = index
         #: `_keep` tasks still running after the call that started them was cancelled.
         self._keeping: set[asyncio.Task[None]] = set()
+        #: #2788: whole blobs by sha256, shared by the API's replicas. What one
+        #: process put or got is read back from it, not downloaded again.
+        self.downloads = downloads
+        #: Copies into `downloads` still being written after the put that made them.
+        self._filling: set[asyncio.Task[None]] = set()
         self.max_total_bytes = max_total_bytes
         self.max_count = max_count
         self.metrics = metrics
@@ -147,6 +154,7 @@ class ContentStore:
                 raise
         backend_id = await self.backend.upload(kind, data, name=name, scope=scope)
         self._count("put", "ok")
+        await self._keep_download(sha, data)
         ref = BlobRef(sha256=sha, kind=kind, backend=self.name, backend_id=backend_id, size=size)
         return ref, False
 
@@ -254,9 +262,85 @@ class ContentStore:
             await self._release_replaced(key, previous.ref)
         return ref
 
+    async def _keep_download(self, sha: str, data: BlobData) -> None:
+        """Copy what was just uploaded into `downloads`: the next process to want it
+        reads it there. Bytes are copied after the put has answered; a file is the
+        caller's, closed once the put returns, so it is copied before. Best effort: a
+        failed copy is a later miss, never a failed put."""
+        downloads = self.downloads
+        if downloads is None:
+            return
+        if not isinstance(data, bytes):
+            try:
+                await asyncio.to_thread(downloads.put_file, sha, data)
+            except OSError:
+                logger.warning(
+                    "could not keep an uploaded blob", extra={"sha256": sha}, exc_info=True
+                )
+            return
+
+        async def copy() -> None:
+            try:
+                await asyncio.to_thread(downloads.put, sha, data)
+            except OSError:
+                logger.warning(
+                    "could not keep an uploaded blob", extra={"sha256": sha}, exc_info=True
+                )
+
+        task = asyncio.create_task(copy())
+        self._filling.add(task)
+        task.add_done_callback(self._filling.discard)
+
     async def get(self, ref: BlobRef) -> AsyncGenerator[bytes]:
         """The object's bytes, sha-checked at the end. On `BlobMissingError` the index
-        row is kept; a caller that gets it should `forget` the key."""
+        row is kept; a caller that gets it should `forget` the key. With `downloads`
+        (#2788) a blob another process put or got is read from there, and one downloaded
+        here is kept there."""
+        downloads = self.downloads
+        if downloads is not None:
+            cached = await asyncio.to_thread(downloads.open, ref.sha256, what="blob")
+            if cached is not None:
+                async with aclosing(self._read_cached(downloads, ref, cached)) as chunks:
+                    async for chunk in chunks:
+                        yield chunk
+                return
+            try:
+                fill_cm = downloads.fill(ref.sha256)
+                fill = await asyncio.to_thread(fill_cm.__enter__)
+            except OSError:
+                logger.warning("could not start keeping a blob", extra={"sha256": ref.sha256})
+            else:
+                try:
+                    async with aclosing(self._download(ref)) as chunks:
+                        async for chunk in chunks:
+                            await asyncio.to_thread(fill.write, chunk)
+                            yield chunk
+                    await asyncio.to_thread(fill.commit)
+                finally:
+                    await asyncio.to_thread(fill_cm.__exit__, None, None, None)
+                return
+        async with aclosing(self._download(ref)) as chunks:
+            async for chunk in chunks:
+                yield chunk
+
+    async def _read_cached(
+        self, downloads: DownloadCache, ref: BlobRef, handle: BinaryIO
+    ) -> AsyncGenerator[bytes]:
+        digest = hashlib.sha256()
+        try:
+            while chunk := await asyncio.to_thread(handle.read, 1024 * 1024):
+                digest.update(chunk)
+                yield chunk
+        finally:
+            await asyncio.to_thread(handle.close)
+        if digest.hexdigest() != ref.sha256:
+            self._count("get", "corrupt")
+            # Gone, so the retry this error asks for downloads it again.
+            await asyncio.to_thread(downloads.discard, ref.sha256)
+            raise BlobCorruptError(f"the cached copy of {ref.sha256} is not that sha256")
+        self._count("get", "ok")
+
+    async def _download(self, ref: BlobRef) -> AsyncGenerator[bytes]:
         digest = hashlib.sha256()
         try:
             # Closed with this generator: a consumer that stops early (and closes it)
@@ -342,9 +426,10 @@ class ContentStore:
             )
 
     async def aclose(self) -> None:
-        """Wait for the rows still going back: one dropped at shutdown orphans its object."""
-        if self._keeping:
-            await asyncio.gather(*self._keeping, return_exceptions=True)
+        """Wait for the rows still going back: one dropped at shutdown orphans its object.
+        And for the copies into `downloads`, which are only a cache but cost little."""
+        if self._keeping or self._filling:
+            await asyncio.gather(*self._keeping, *self._filling, return_exceptions=True)
 
     async def list(self, scope: BlobScope) -> AsyncIterator[BlobStat]:
         for stat in await asyncio.to_thread(self.index.stats, None, scope.slug, backend=self.name):
