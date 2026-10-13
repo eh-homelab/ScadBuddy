@@ -557,14 +557,21 @@ async def _named(
     names = await _printer_names(cache, client)
     return [
         item.model_copy(
-            update={"printer_name": names.get(item.printer_id) if item.printer_id else None}
+            update={
+                "printer_name": names.get(item.printer_id) if item.printer_id is not None else None
+            }
         )
         for item in items
     ]
 
 
 def _window(batch: Sequence[LinkedPrint]) -> tuple[date | None, date | None]:
-    """The days a batch's archives were created in, for one list read of them (#2359)."""
+    """The days a batch's archives were created in, for one list read of them (#2359).
+
+    Approximate: it is built from when ScadBuddy first saw each print, which for a
+    library-linked print can come long after Bambuddy created the archive. Those fall
+    outside the window and are read singly; ``prints.archive_window`` records how many
+    the list held (#2819)."""
     seen = [_utc(link.first_seen) for link in batch if link.first_seen is not None]
     if not seen:
         return None, None
@@ -707,13 +714,18 @@ async def list_prints(
             batch = await links.page(limit=wanted, before=before, subjects=subjects)
             scanned += len(batch)
             date_from, date_to = _window(batch)
-            await cache.prime(
-                client,
-                [link.archive_id for link in batch],
-                date_from=date_from,
-                date_to=date_to,
-                limit=min(ARCHIVE_WINDOW_ROWS * len(batch), MAX_ARCHIVE_WINDOW),
-            )
+            with span(
+                "prints.archive_window", attributes={"scadbuddy.archives": len(batch)}
+            ) as current:
+                # How many the list read held, so a trace shows its hit rate (#2819).
+                held = await cache.prime(
+                    client,
+                    [link.archive_id for link in batch],
+                    date_from=date_from,
+                    date_to=date_to,
+                    limit=min(ARCHIVE_WINDOW_ROWS * len(batch), MAX_ARCHIVE_WINDOW),
+                )
+                current.set_attribute("scadbuddy.archives_listed", held)
             archives = await _bounded(
                 [cache.archive(client, link.archive_id) for link in batch], READ_CONCURRENCY
             )
@@ -1000,7 +1012,7 @@ async def get_print(
         # The name the list and the filter show, else the one Bambuddy recorded on the
         # print's runs, for a printer it has no longer (#2363).
         printers = await _printer_names(cache, client)
-        printer_name = printers.get(summary.printer_id) if summary.printer_id else None
+        printer_name = printers.get(summary.printer_id) if summary.printer_id is not None else None
         summary = summary.model_copy(update={"printer_name": printer_name or _printer_name(runs)})
         library = _library_files(link, archive, file) if meta is None else []
         files = await asyncio.to_thread(_files, outputs, meta, archive, library)

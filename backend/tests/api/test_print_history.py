@@ -17,6 +17,7 @@ import psycopg
 import pytest
 import respx
 from fastapi.testclient import TestClient
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from scadbuddy.api import print_history
 from scadbuddy.api.deps import STATE_ATTR, AppState
@@ -272,7 +273,28 @@ def test_a_failed_printers_read_leaves_the_list_unnamed_not_failed(
 
 
 @respx.mock
-def test_a_page_reads_its_archives_in_one_list_read(client: TestClient, model: str) -> None:
+def test_a_printer_whose_id_is_0_is_named(client: TestClient, model: str) -> None:
+    """#2819: an id of 0 is a printer, as the frontend's ``printer_id !== null`` has it."""
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 35)
+    mock_archive(35, printer_id=0)
+    [printer] = recording("printers.json")[:1]
+    respx.get(f"{API}/printers/", name="printers").mock(
+        return_value=httpx.Response(200, json=[{**printer, "id": 0, "name": "Zero"}])
+    )
+
+    [summary] = client.get("/api/v1/prints").json()["items"]
+    detail = client.get("/api/v1/prints/35").json()
+
+    assert (summary["printer_id"], summary["printer_name"]) == (0, "Zero")
+    assert detail["printer_name"] == "Zero"
+
+
+@respx.mock
+def test_a_page_reads_its_archives_in_one_list_read(
+    client: TestClient, model: str, spans: InMemorySpanExporter
+) -> None:
     """#2359: 24 single reads, 8 at a time, were a third of the page's time. Bambuddy's
     list filters only by day, so it is read over the days the page's links were seen."""
     configure(client)
@@ -294,6 +316,13 @@ def test_a_page_reads_its_archives_in_one_list_read(client: TestClient, model: s
     assert params["date_from"] == (today - timedelta(days=1)).isoformat()
     assert params["date_to"] == (today + timedelta(days=1)).isoformat()
     assert params["limit"] == "12", "four rows per linked print"
+    # #2819: how many of the batch the list read held, so a trace shows its hit rate.
+    [window] = [held for held in spans.get_finished_spans() if held.name == "prints.archive_window"]
+    assert window.attributes is not None
+    assert (
+        window.attributes["scadbuddy.archives"],
+        window.attributes["scadbuddy.archives_listed"],
+    ) == (3, 3)
 
 
 @respx.mock
@@ -329,23 +358,25 @@ def test_a_page_reads_its_template_revisions_defaults_at_once(
     for archive_id, slug in ((35, model), (36, other)):
         link(client, make_output(client, slug), archive_id)
         mock_archive(archive_id)
-    running = 0
-    most = 0
+    arrived = 0
+    both: asyncio.Event | None = None
 
-    async def slow_schema_of(*args: Any, **kwargs: Any) -> Any:
-        nonlocal running, most
-        running += 1
-        most = max(most, running)
-        await asyncio.sleep(0.2)
-        running -= 1
+    async def barrier_schema_of(*args: Any, **kwargs: Any) -> Any:
+        # #2820: each read waits for the other, so a page that read them one after
+        # another times out here rather than passing on a lucky overlap.
+        nonlocal arrived, both
+        both = both or asyncio.Event()
+        arrived += 1
+        if arrived == 2:
+            both.set()
+        await asyncio.wait_for(both.wait(), timeout=5)
         return await schema_of(*args, **kwargs)
 
-    monkeypatch.setattr(print_history, "schema_of", slow_schema_of)
+    monkeypatch.setattr(print_history, "schema_of", barrier_schema_of)
 
     items = client.get("/api/v1/prints").json()["items"]
 
     assert [item["params_diff"] is not None for item in items] == [True, True]
-    assert most == 2
 
 
 @respx.mock
