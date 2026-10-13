@@ -119,7 +119,10 @@ function harness(
     }),
     hostQueue: 'agent-tools.host-1',
     approvals: {
-      approved: async (requestId, binding) => (bindings.push(binding?.inputHash), requestId.endsWith(':toolu_approved')),
+      approved: async (requestId, binding) => {
+        bindings.push(binding?.inputHash)
+        return requestId.endsWith(':toolu_approved')
+      },
     },
     flows: {
       startedBy: async (run) => (run === FLOW ? (options.flowStarter ?? BROWSER) : undefined),

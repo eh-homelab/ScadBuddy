@@ -139,8 +139,11 @@ async def test_a_flow_turns_plugin_tool_call_inside_the_grant_runs_with_no_entry
 ) -> None:
     """#2649: a turn tool (a plugin's, or http_request) is described with an input hash
     like ScadBuddy's own, so a run grant that names it covers it in a flow turn, and its
-    approval is bound to that hash."""
+    approval is bound to that hash: one of its own, not the grant reply's."""
+    described = "d" * 64
     harness.stand_in.turn_offered = [base.NOTES_POST]
+    harness.stand_in.input_hashes["notes__post"] = described
+    granted.use_hash = described
     sid, handle = await harness.session(agent_db)
     await send_flow(handle, "post it")
     assert await settled(connect, sid) == "idle"
@@ -148,13 +151,20 @@ async def test_a_flow_turns_plugin_tool_call_inside_the_grant_runs_with_no_entry
     [checked] = granted.checked
     assert (checked["tool"], checked["args"]) == ("notes__post", {"method": "POST", "body": "x"})
     cur = await agent_db.execute(
+        "SELECT outcome, responder FROM ai_input_responses WHERE request_id = %s",
+        (checked["request_id"],),
+    )
+    assert await cur.fetchall() == [
+        ("approved", {"kind": "run_grant", "id": "g1", "label": "Run grant"})
+    ]
+    cur = await agent_db.execute(
         "SELECT action, principal_kind, principal_id, input_hash FROM ai_audit"
         " WHERE request_id = %s AND kind = 'approval'",
         (checked["request_id"],),
     )
-    assert await cur.fetchall() == [("approved", "run_grant", "g1", HASH)]
+    assert await cur.fetchall() == [("approved", "run_grant", "g1", described)]
     log = base._types(await events(agent_db, sid))
-    assert "approval.required" not in log
+    assert "approval.required" not in log and "input.resolved" not in log
     await base._replays(harness, handle)
 
 
