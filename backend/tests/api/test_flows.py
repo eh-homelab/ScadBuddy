@@ -497,6 +497,17 @@ def test_an_answer_to_a_run_with_no_key_is_404(client: TestClient) -> None:
     assert response.status_code == 404
 
 
+@pytest.mark.parametrize("blank", ["", "  \n\t"])
+def test_a_blank_answer_is_422(client: TestClient, blank: str) -> None:
+    """#2379: a click on an empty box is not an answer."""
+    response = client.post(
+        f"/api/v1/workflow-runs/{uuid.uuid4()}/answer",
+        json={"call_id": "c", "answer": blank},
+        headers={"Idempotency-Key": "b"},
+    )
+    assert response.status_code == 422
+
+
 def test_an_answer_to_a_call_not_waiting_is_stale(client: TestClient) -> None:
     definition = register(client, script("await wait_for_human('q?', 600)"))
     run_id = start(client, definition["id"], "w").json()["id"]

@@ -779,6 +779,15 @@ class AnswerBody(BaseModel):
     call_id: str = Field(min_length=1, max_length=64)
     answer: str = Field(max_length=16_384)
 
+    @field_validator("answer")
+    @classmethod
+    def _not_blank(cls, answer: str) -> str:
+        """A blank answer is a click on an empty box, not an answer the script can use
+        (#2379)."""
+        if not answer.strip():
+            raise ValueError("an answer is required")
+        return answer
+
 
 class DecideBody(BaseModel):
     """A person's decision on a run's outward call."""
