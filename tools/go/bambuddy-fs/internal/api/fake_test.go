@@ -46,7 +46,12 @@ type fake struct {
 	skip map[int]string
 	// slow names the writes ("mkdir", "update_file", "update_folder", "delete",
 	// "delete_folder", "upload") that answer 202 and finish on the second poll.
-	slow           map[string]bool
+	slow map[string]bool
+	// keep makes a folder delete keep the folder without naming anything in skipped.
+	keep map[int]bool
+	// failPolls answers that many operation polls with 503; lostOps answers them 404.
+	failPolls      int
+	lostOps        bool
 	ops            map[string]*fakeOp
 	operationPolls int
 	nextID         int
@@ -62,6 +67,7 @@ func newFake(t *testing.T) *fake {
 		queued:  map[int]bool{},
 		skip:    map[int]string{},
 		slow:    map[string]bool{},
+		keep:    map[int]bool{},
 		ops:     map[string]*fakeOp{},
 		nextID:  100,
 	}
@@ -146,8 +152,14 @@ func (f *fake) write(kind string, handle func(*http.Request) (int, any)) http.Ha
 func (f *fake) operation(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failPolls > 0 {
+		f.failPolls--
+		f.operationPolls++
+		writeProblem(w, 503, "the database is restarting")
+		return
+	}
 	op, ok := f.ops[r.PathValue("id")]
-	if !ok {
+	if !ok || f.lostOps {
 		writeProblem(w, 404, "no such operation")
 		return
 	}
@@ -385,7 +397,7 @@ func (f *fake) deleteFolder(r *http.Request) (int, any) {
 		return problem(409, "a file is waiting to print")
 	}
 	folders := []int{}
-	if len(skipped) == 0 {
+	if len(skipped) == 0 && !f.keep[id] {
 		delete(f.folders, id)
 		folders = append(folders, id)
 	}

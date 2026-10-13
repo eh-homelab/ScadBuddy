@@ -87,6 +87,39 @@ func TestAnOperationThatOutlivesTheContextIsEIO(t *testing.T) {
 	}
 }
 
+func TestAPollThatFailsIsRetried(t *testing.T) {
+	f := newFake(t)
+	f.slow["mkdir"] = true
+	f.failPolls = 1
+	got, err := f.client(t).Mkdir(context.Background(), 0, "Parts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "Parts" || f.operationPolls < 3 {
+		t.Fatalf("%+v polls=%d", got, f.operationPolls)
+	}
+}
+
+func TestALostOperationIsEIO(t *testing.T) {
+	f := newFake(t)
+	f.slow["mkdir"] = true
+	f.lostOps = true
+	_, err := f.client(t).Mkdir(context.Background(), 0, "Parts")
+	if Errno(err) != syscall.EIO || !strings.Contains(err.Error(), "op1") {
+		t.Fatalf("errno %v from %v", Errno(err), err)
+	}
+}
+
+func TestAKeptFolderIsEBUSY(t *testing.T) {
+	f := newFake(t)
+	f.folder(4, "Top", 0)
+	f.keep[4] = true
+	err := f.client(t).DeleteFolder(context.Background(), 4)
+	if Errno(err) != syscall.EBUSY {
+		t.Fatalf("errno %v from %v", Errno(err), err)
+	}
+}
+
 func TestAQueuedFileIsEBUSY(t *testing.T) {
 	f := newFake(t)
 	f.file(10, "a.3mf", 0, nil, false)
@@ -233,6 +266,9 @@ func TestDownloadStreamsAndUploadSendsAKey(t *testing.T) {
 		t.Fatal("no Idempotency-Key on upload")
 	}
 	stored := f.files[up.ID]
+	if up.Size != 2 || time.Since(up.Created) > time.Minute {
+		t.Fatalf("size and created: %+v", up)
+	}
 	if up.Name != "new.3mf" || up.FolderID != 4 || stored == nil || string(stored.data) != "PK" || stored.folder != 4 {
 		t.Fatalf("%+v stored=%+v", up, stored)
 	}

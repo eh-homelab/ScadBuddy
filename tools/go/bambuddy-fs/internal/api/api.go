@@ -12,6 +12,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -60,8 +61,9 @@ type Client struct {
 }
 
 const (
-	firstPoll = 250 * time.Millisecond
-	lastPoll  = 2 * time.Second
+	firstPoll    = 250 * time.Millisecond
+	lastPoll     = 2 * time.Second
+	maxErrorBody = 64 << 10
 )
 
 // New takes ScadBuddy's API root, like http://host/api/v1. A nil httpClient is
@@ -140,7 +142,7 @@ func (c *Client) Download(ctx context.Context, fileID int, w io.Writer) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
 		return errorFrom("download", resp.StatusCode, body)
 	}
 	if _, err := io.Copy(w, resp.Body); err != nil {
@@ -149,9 +151,13 @@ func (c *Client) Download(ctx context.Context, fileID int, w io.Writer) error {
 	return nil
 }
 
-// Upload streams r into a new file called name in folderID (0 is the top level).
+// Upload streams r into a new file called name in folderID (0 is the top level). The
+// File it returns has the size of the bytes sent and Created set to now, since the
+// route's answer carries neither.
 func (c *Client) Upload(ctx context.Context, folderID int, name string, r io.Reader) (File, error) {
 	pr, pw := io.Pipe()
+	// Closing the reader on return fails the writer's next write, so it stops.
+	defer pr.Close()
 	form := multipart.NewWriter(pw)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/print/library/files", pr)
 	if err != nil {
@@ -159,10 +165,12 @@ func (c *Client) Upload(ctx context.Context, folderID int, name string, r io.Rea
 	}
 	req.Header.Set("Content-Type", form.FormDataContentType())
 	req.Header.Set("Idempotency-Key", newKey())
+	sent := make(chan int64, 1)
 	go func() {
-		pw.CloseWithError(writeForm(form, folderID, name, r))
+		n, err := writeForm(form, folderID, name, r)
+		sent <- n
+		pw.CloseWithError(err)
 	}()
-	// Do closes the body on every path, which ends the writer above.
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return File{}, fmt.Errorf("upload: %w", err)
@@ -176,27 +184,35 @@ func (c *Client) Upload(ctx context.Context, folderID int, name string, r io.Rea
 	if err != nil {
 		return File{}, err
 	}
-	return updatedFile(entry), nil
+	// A success means the route read the whole form, so the writer has finished.
+	file := updatedFile(entry)
+	file.Size = <-sent
+	file.Created = time.Now().UTC()
+	return file, nil
 }
 
-func writeForm(form *multipart.Writer, folderID int, name string, r io.Reader) error {
+// writeForm writes the upload's form and returns the number of file bytes in it.
+func writeForm(form *multipart.Writer, folderID int, name string, r io.Reader) (int64, error) {
 	part, err := form.CreateFormFile("file", name)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	if _, err := io.Copy(part, r); err != nil {
-		return err
+	n, err := io.Copy(part, r)
+	if err != nil {
+		return n, err
 	}
 	if folderID != 0 {
 		if err := form.WriteField("folder_id", strconv.Itoa(folderID)); err != nil {
-			return err
+			return n, err
 		}
 	}
-	return form.Close()
+	return n, form.Close()
 }
 
 // UpdateFile renames and/or moves a file; a nil field is left as it is, and a
-// folderID of 0 moves it to the top level.
+// folderID of 0 moves it to the top level. The route answers only the ID, name and
+// folder, so the File's Size, Created and External are unknown and left zero: keep
+// the ones the file had.
 func (c *Client) UpdateFile(ctx context.Context, fileID int, name *string, folderID *int) (File, error) {
 	body := models.NewLibraryFileUpdate()
 	if name != nil {
@@ -296,7 +312,14 @@ func (c *Client) DeleteFolder(ctx context.Context, folderID int) error {
 	if err != nil {
 		return err
 	}
-	return skippedError("rmdir", result.GetSkipped())
+	if err := skippedError("rmdir", result.GetSkipped()); err != nil {
+		return err
+	}
+	// The route can keep a folder without naming anything in `skipped`.
+	if !slices.Contains(result.GetFolders(), int32(folderID)) {
+		return &Error{Op: "rmdir", Status: http.StatusConflict, Detail: "the folder was kept"}
+	}
+	return nil
 }
 
 func skippedError(op string, skipped []models.SkippedLibraryFileable) error {
@@ -361,7 +384,9 @@ func answer[T any](ctx context.Context, c *Client, op string, status int, body [
 }
 
 // follow polls GET /operations/{id} until the operation finishes, backing off from
-// 250 ms to 2 s, and returns its result's JSON. The caller's context bounds it.
+// 250 ms to 2 s, and returns its result's JSON. The caller's context bounds it. A
+// network error or a 5xx is retried, since the operation is still running; a 404 is
+// an EIO, since it is the operation that is gone, not the file.
 func (c *Client) follow(ctx context.Context, op, id string) ([]byte, error) {
 	delay := firstPoll
 	for {
@@ -370,10 +395,18 @@ func (c *Client) follow(ctx context.Context, op, id string) ([]byte, error) {
 			return nil, err
 		}
 		status, body, err := c.send(ctx, op, info)
-		if err != nil {
+		switch {
+		case err != nil && ctx.Err() != nil:
 			return nil, fmt.Errorf("%s: operation %s: %w", op, id, err)
-		}
-		if status != http.StatusOK {
+		case err != nil || status >= http.StatusInternalServerError:
+			if err := wait(ctx, op, id, delay); err != nil {
+				return nil, err
+			}
+			delay = min(delay*2, lastPoll)
+			continue
+		case status == http.StatusNotFound:
+			return nil, fmt.Errorf("%s: operation %s is gone: %s", op, id, errorFrom(op, status, body).Detail)
+		case status != http.StatusOK:
 			return nil, errorFrom(op, status, body)
 		}
 		operation, err := decode[models.Operationable](op, body, models.CreateOperationFromDiscriminatorValue)
@@ -399,12 +432,19 @@ func (c *Client) follow(ctx context.Context, op, id string) ([]byte, error) {
 			}
 			return nil, errorFrom(op, failed, raw.Error)
 		}
-		select {
-		case <-ctx.Done():
-			return nil, fmt.Errorf("%s: operation %s: %w", op, id, ctx.Err())
-		case <-time.After(delay):
+		if err := wait(ctx, op, id, delay); err != nil {
+			return nil, err
 		}
 		delay = min(delay*2, lastPoll)
+	}
+}
+
+func wait(ctx context.Context, op, id string, delay time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("%s: operation %s: %w", op, id, ctx.Err())
+	case <-time.After(delay):
+		return nil
 	}
 }
 
