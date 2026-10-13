@@ -45,6 +45,7 @@ from scadbuddy.library.libraries import (
     search_path,
 )
 from scadbuddy.meshmodel.paint import carry_paint, read_carried, turned, write_carried
+from scadbuddy.meshmodel.scene import SCENE_NAME
 from scadbuddy.render.bambu3mf import PlateParts, single_plate, write_plates_3mf
 from scadbuddy.render.colours import colour_hex
 from scadbuddy.render.glb import BoundingBox, bounding_box, write_glb
@@ -431,6 +432,10 @@ def result_parts(layout: PlateLayout) -> list[PartInfo]:
 
 #: A painted part's carried painting beside the layout (spec 2026-10-11 §7): plate, part.
 PAINT_FILE = "paint-{plate}-{part}.json"
+PAINT_NOT_CARRIED = (
+    "the mesh model's painting could not be read, so it is not carried: "
+    "its parts print in their own colour"
+)
 
 
 def paint_layout(
@@ -444,6 +449,21 @@ def paint_layout(
     scene, or no painted part, too (`carry_paint`)."""
     if scad.name != SOURCE_NAME or len(layout.plates) != 1:
         return layout
+    try:
+        return _painted(layout, scad, params, work)
+    except (OSError, ValueError) as error:
+        # A scene.json or mesh file that cannot be read (pydantic's ValidationError,
+        # UnicodeDecodeError and SceneEditError are ValueErrors) costs the painting,
+        # never the render.
+        logger.warning(
+            "could not carry the painting of %s: %s", scad.parent.name, type(error).__name__
+        )
+        return replace(layout, warnings=[*layout.warnings, PAINT_NOT_CARRIED])
+
+
+def _painted(
+    layout: PlateLayout, scad: Path, params: Mapping[str, ParamValue], work: Path
+) -> PlateLayout:
     plate, sources = layout.plates[0], layout.sources[0]
     carried, warnings = carry_paint(scad.parent, params, plate.parts)
     if not any(found is not None for found in carried) and not warnings:
@@ -966,9 +986,10 @@ async def _render_solids(
             # A failed plate warns as a failed whole render does (#451).
             error.warnings = failed_render_warnings(error.missing_files, schema, params)
             raise
-    with stage("paint"):
-        # A mesh model's painting, onto the parts the layout names (spec 2026-10-11 §7).
-        layout = await asyncio.to_thread(paint_layout, layout, prepared.scad, params, work)
+    if (prepared.scad.parent / SCENE_NAME).is_file():
+        with stage("paint"):
+            # A mesh model's painting, onto the parts the layout names (spec 2026-10-11 §7).
+            layout = await asyncio.to_thread(paint_layout, layout, prepared.scad, params, work)
     layout.save(work / LAYOUT_NAME)
     return layout
 

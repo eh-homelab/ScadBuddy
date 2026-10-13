@@ -5,6 +5,7 @@ import json
 import shutil
 import threading
 import zipfile
+from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -22,6 +23,7 @@ from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.libraries import CheckoutGate, LibraryNotInstalledError
+from scadbuddy.meshmodel.scene import SCENE_NAME
 from scadbuddy.render import jobs
 from scadbuddy.render import solids as solids_module
 from scadbuddy.render.bambu3mf import plates_of, single_plate
@@ -1348,10 +1350,11 @@ async def test_a_colour_fallback_leaves_no_span_in_error(
     ) == [0, 3]
 
 
-async def test_a_mesh_models_painting_reaches_its_3mf(paths: DataPaths) -> None:
-    """Spec 2026-10-11 §7: the solid of a painted part's colour carries the part's codes
-    into model.3mf, through the layout that `finish_piece` and an output re-read; the
-    colours the painting uses get filaments."""
+async def _render_painted(
+    paths: DataPaths, sabotage: Callable[[Path], None] | None = None
+) -> tuple[JobResult, tuple[str, ...]]:
+    """A one-box mesh model with a painted part, rendered through `render_job` with the
+    OpenSCAD calls faked; ``sabotage`` damages the model's directory first."""
     model_dir = paths.model_dir("demo")
     model_dir.mkdir(parents=True)
     mesh, codes = painted_box()
@@ -1360,6 +1363,8 @@ async def test_a_mesh_models_painting_reaches_its_3mf(paths: DataPaths) -> None:
     ]
     scene = written(model_dir, read)
     world = rendered(model_dir, scene, ORANGE)
+    if sabotage is not None:
+        sabotage(model_dir)
 
     async def render(*args: object, **kwargs: object) -> object:
         out = args[3]
@@ -1397,7 +1402,14 @@ async def test_a_mesh_models_painting_reaches_its_3mf(paths: DataPaths) -> None:
         result, _ = await jobs.render_job(
             _job("p"), config=CONFIG, paths=paths, assets=AssetStore(paths.assets)
         )
+    return result, codes
 
+
+async def test_a_mesh_models_painting_reaches_its_3mf(paths: DataPaths) -> None:
+    """Spec 2026-10-11 §7: the solid of a painted part's colour carries the part's codes
+    into model.3mf, through the layout that `finish_piece` and an output re-read; the
+    colours the painting uses get filaments."""
+    result, codes = await _render_painted(paths)
     assert result.colors == [ORANGE, GREEN]
     assert [(p.colour, p.extruder) for p in result.parts] == [(ORANGE, 1), (GREEN, 2)]
     [obj] = read_objects((paths.root / result.model_3mf).read_bytes(), ReadBudget())
@@ -1407,6 +1419,44 @@ async def test_a_mesh_models_painting_reaches_its_3mf(paths: DataPaths) -> None:
     [loaded] = layout.plates[0].parts
     assert loaded.paint == Paint(codes, (ORANGE, GREEN))
     assert layout.sources[0][0].paint == "paint-1-1.json"
+
+
+def _delete_meshes(model_dir: Path) -> None:
+    for file in model_dir.rglob("*.3mf"):
+        file.unlink()
+
+
+def _break_scene(model_dir: Path) -> None:
+    (model_dir / SCENE_NAME).write_text('{"objects": 3', encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "sabotage", [_delete_meshes, _break_scene], ids=["no-mesh-file", "bad-scene"]
+)
+async def test_an_unreadable_painting_costs_the_painting_not_the_render(
+    paths: DataPaths, sabotage: Callable[[Path], None]
+) -> None:
+    result, _ = await _render_painted(paths, sabotage)
+    assert result.colors == [ORANGE]
+    assert jobs.PAINT_NOT_CARRIED in result.warnings
+    layout = PlateLayout.load(paths.cache / "render-job" / "p" / LAYOUT_NAME)
+    assert layout.plates[0].parts[0].paint is None
+    assert layout.sources[0][0].paint is None
+
+
+def test_a_non_mesh_layout_comes_back_identical_with_no_warnings(tmp_path: Path) -> None:
+    mesh = trimesh.creation.box((1, 1, 1))
+    part = ColourPart(1, "Color 1", "#FF0000", mesh)
+    layout = PlateLayout(
+        [single_plate([part])],
+        ["#FF0000"],
+        [],
+        BoundingBox(min=(0, 0, 0), max=(1, 1, 1), size=(1, 1, 1)),
+        [(PartSource(RAW_RENDER_NAME),)],
+    )
+    painted = jobs.paint_layout(layout, tmp_path / "model.scad", {}, tmp_path)
+    assert painted is layout
+    assert painted.warnings == []
 
 
 def test_a_layout_part_without_paint_is_saved_as_before(tmp_path: Path) -> None:
