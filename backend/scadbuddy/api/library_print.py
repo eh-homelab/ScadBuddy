@@ -60,6 +60,13 @@ from scadbuddy.bambuddy.runs import PrintRun
 from scadbuddy.bambuddy.subject import PrintSubject, library_slug
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.library_file_moves import (
+    LibraryCopyResult,
+    LibraryMoveResult,
+    LibraryRenameRequest,
+    LibraryRenameResult,
+    LibraryTransferRequest,
+)
 from scadbuddy.library.library_file_operations import (
     LibraryDeleteResult,
     LibraryFilesRequest,
@@ -75,7 +82,7 @@ from scadbuddy.workflows.print_models import SourceSpec
 
 router = APIRouter(prefix="/print/library", tags=["print"])
 
-#: The operations record's subject for a library delete or restore.
+#: The operations record's subject for a library delete, restore, copy, move or rename.
 LIBRARY_FILES_SUBJECT = "library-files"
 
 FileIdPath = Annotated[int, Path(ge=1)]
@@ -158,6 +165,88 @@ async def post_library_restore(
         idempotency_key=idempotency_key,
     )
     return operation_answer(result, LibraryRestoreResult)
+
+
+@router.post(
+    "/move",
+    response_model=LibraryMoveResult,
+    summary="Move library files to another folder through Bambuddy",
+    responses=OPERATION_RESPONSES,
+)
+async def post_library_move(
+    body: LibraryTransferRequest,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> LibraryMoveResult | JSONResponse:
+    """Moves each file into ``folder_id`` or ``folder_path`` (the top level with neither)
+    under its own id (#2670), so everything ScadBuddy keys by the id stays with it, and
+    its upload rows (#316) follow it to the new folder. A file that leaves a project's
+    folder names that project in ``left_project``: the project no longer lists it. A file
+    Bambuddy skipped is in ``skipped``. A folder or file Bambuddy does not have is a 404,
+    and a path two folders share a 409, both before anything moves."""
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["library_file_move"],
+        subject=LIBRARY_FILES_SUBJECT,
+        request=body,
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, LibraryMoveResult)
+
+
+@router.post(
+    "/copy",
+    response_model=LibraryCopyResult,
+    summary="Copy library files into a folder",
+    responses=OPERATION_RESPONSES,
+)
+async def post_library_copy(
+    body: LibraryTransferRequest,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> LibraryCopyResult | JSONResponse:
+    """Copies each file into ``folder_id`` or ``folder_path`` (the top level with neither)
+    as a new library file (#2670). Bambuddy has no copy, so each is downloaded and
+    uploaded, its notes copied after; a copy of an output's copy is recorded as one more
+    copy of that output. A file too large to copy, or gone by then, is in ``skipped``."""
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["library_file_copy"],
+        subject=LIBRARY_FILES_SUBJECT,
+        request=body,
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, LibraryCopyResult)
+
+
+@router.post(
+    "/rename",
+    response_model=LibraryRenameResult,
+    summary="Rename a library file through Bambuddy",
+    responses=OPERATION_RESPONSES,
+)
+async def post_library_rename(
+    body: LibraryRenameRequest,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> LibraryRenameResult | JSONResponse:
+    """Renames the file under its own id (#2670). The new name keeps the file's
+    extension (``.3mf``, ``.gcode.3mf``), or the rename is a 422; Bambuddy refuses a name a
+    printer's SD card would not take."""
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["library_file_rename"],
+        subject=LIBRARY_FILES_SUBJECT,
+        request=body,
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, LibraryRenameResult)
 
 
 @router.get(

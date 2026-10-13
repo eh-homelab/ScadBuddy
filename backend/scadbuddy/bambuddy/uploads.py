@@ -158,6 +158,19 @@ class BambuddyUploadStore:
         two outputs record is the later upload's."""
         return await asyncio.to_thread(self._outputs_for_files, list(library_file_ids))
 
+    async def relocate(self, library_file_ids: Iterable[int], folder_id: int | None) -> None:
+        """Record that a person moved these files into ``folder_id`` (#2670). Bambuddy
+        keeps a moved file's id, so its slices and everything else keyed by the id stay
+        right; only the folder its copy row names would be stale, and that folder is what
+        tells an inbox copy (which ScadBuddy replaces) from a project's (which it never
+        touches)."""
+        await asyncio.to_thread(self._relocate, list(library_file_ids), folder_id)
+
+    async def recorded_as(self, library_file_id: int) -> list[tuple[str, str]]:
+        """Each ``(output_id, target_key)`` that records ``library_file_id`` as a copy:
+        what a byte-for-byte copy of it is a copy of too (#2670)."""
+        return await asyncio.to_thread(self._recorded_as, library_file_id)
+
     async def forget(self, output_id: str, library_file_id: int) -> None:
         """Drop one copy, and its slices, once the file has actually gone.
 
@@ -495,6 +508,24 @@ class BambuddyUploadStore:
                 (ids,),
             ).fetchall()
         return {row["library_file_id"]: row["output_id"] for row in rows}
+
+    def _relocate(self, ids: list[int], folder_id: int | None) -> None:
+        if not ids:
+            return
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE output_bambuddy_uploads SET folder_id = %s WHERE library_file_id = ANY(%s)",
+                (folder_id, ids),
+            )
+
+    def _recorded_as(self, library_file_id: int) -> list[tuple[str, str]]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT output_id, target_key FROM output_bambuddy_uploads"
+                " WHERE library_file_id = %s ORDER BY created_at, output_id",
+                (library_file_id,),
+            ).fetchall()
+        return [(row["output_id"], row["target_key"]) for row in rows]
 
     def _forget(self, output_id: str, library_file_id: int) -> None:
         with self._pool.connection() as conn:
