@@ -55,6 +55,9 @@ type tree struct {
 
 	mu       sync.Mutex
 	listings map[int]listing
+
+	// released, if set, is called when a write handle's release has finished (tests).
+	released func()
 }
 
 // listing is one folder's entries by the names they show as.
@@ -189,10 +192,11 @@ func (d *dir) Getattr(_ context.Context, _ fs.FileHandle, out *fuse.AttrOut) sys
 
 func (d *dir) attr(out *fuse.Attr) {
 	out.Mode = syscall.S_IFDIR | d.tree.mode(0o755)
+	out.Nlink = 1
 }
 
 // file is a library file. Its bytes, size and creation time never change for its ID:
-// a write uploads a new file under the same name (writer.upload). A file created here
+// a write uploads a new file under the same name (pending.upload). A file created here
 // has ID 0 until its first upload gives it one.
 type file struct {
 	fs.Inode
@@ -200,8 +204,8 @@ type file struct {
 
 	mu   sync.Mutex
 	file api.File
-	// writing is the file's latest write handle, whose size is the file's until it ends.
-	writing *writer
+	// pending is the file's write while handles are open on it; its size is the file's.
+	pending *pending
 }
 
 func (n *file) current() api.File {
@@ -228,12 +232,14 @@ func (n *file) Getattr(_ context.Context, _ fs.FileHandle, out *fuse.AttrOut) sy
 
 func (n *file) attr(out *fuse.Attr) {
 	n.mu.Lock()
-	f, w := n.file, n.writing
+	f, p := n.file, n.pending
 	n.mu.Unlock()
 	out.Mode = syscall.S_IFREG | n.tree.mode(0o644)
+	// A link count of 0 means unlinked: link(2) would answer ENOENT.
+	out.Nlink = 1
 	out.Size = uint64(f.Size)
-	if w != nil {
-		out.Size = uint64(w.size.Load())
+	if p != nil {
+		out.Size = uint64(p.size.Load())
 	}
 	out.SetTimes(&f.Created, &f.Created, &f.Created)
 }

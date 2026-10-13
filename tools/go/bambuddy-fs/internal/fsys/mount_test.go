@@ -20,17 +20,27 @@ import (
 // mount mounts lib on a temporary directory with the kernel's entry and attribute
 // timeouts at opts.TTL, as the CLI does, and unmounts it when the test ends. It
 // skips without /dev/fuse; with it, a failed mount fails the test.
+// A test closes (defer) every file it opens on the mount: one left open when a test
+// fails would be flushed at exit into this process's own stopped server, and hang.
 func mount(t *testing.T, lib Library, opts Options) string {
+	t.Helper()
+	dir, _ := mountRoot(t, lib, opts)
+	return dir
+}
+
+// mountRoot mounts as mount does and also returns the root.
+func mountRoot(t *testing.T, lib Library, opts Options) (string, *dir) {
 	t.Helper()
 	if _, err := os.Stat("/dev/fuse"); err != nil {
 		t.Skip("no /dev/fuse")
 	}
-	dir := t.TempDir()
+	mnt := t.TempDir()
 	if opts.CacheDir == "" {
 		opts.CacheDir = t.TempDir()
 	}
 	ttl := opts.TTL
-	server, err := fs.Mount(dir, NewRoot(lib, opts), &fs.Options{EntryTimeout: &ttl, AttrTimeout: &ttl})
+	root := NewRoot(lib, opts).(*dir)
+	server, err := fs.Mount(mnt, root, &fs.Options{EntryTimeout: &ttl, AttrTimeout: &ttl})
 	if err != nil {
 		t.Fatalf("mount: %v", err)
 	}
@@ -40,7 +50,7 @@ func mount(t *testing.T, lib Library, opts Options) string {
 			t.Errorf("unmount: %v", err)
 		}
 	})
-	return dir
+	return mnt, root
 }
 
 // logs sends slog's output to a buffer until the test ends.
@@ -205,6 +215,7 @@ func TestContentIsDownloadedOnceAndReadAtRandom(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer f.Close()
 	buf := make([]byte, 3)
 	if _, err := f.ReadAt(buf, 6); err != nil || string(buf) != "678" {
 		t.Fatalf("%q %v", buf, err)

@@ -20,6 +20,7 @@ func TestWriteUploadsOnceOnClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer f.Close()
 	for i := 0; i < 3; i++ {
 		_, _ = f.Write([]byte("abc"))
 		_ = f.Sync()
@@ -38,13 +39,48 @@ func TestWriteUploadsOnceOnClose(t *testing.T) {
 	}
 }
 
+// releases mounts lib and reports each write release once it has finished.
+func releases(t *testing.T, lib Library, opts Options) (string, <-chan struct{}) {
+	t.Helper()
+	dir, root := mountRoot(t, lib, opts)
+	done := make(chan struct{}, 16)
+	root.tree.released = func() { done <- struct{}{} }
+	return dir, done
+}
+
+// waitRelease waits for one release.
+func waitRelease(t *testing.T, released <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-released:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no release")
+	}
+}
+
+// onlyUpdate is the one update the library got.
+func onlyUpdate(t *testing.T, lib *fakeLibrary) update {
+	t.Helper()
+	var u update
+	lib.locked(func() {
+		if len(lib.updates) != 1 {
+			t.Fatalf("updates %+v", lib.updates)
+		}
+		u = lib.updates[0]
+	})
+	return u
+}
+
+func intIs(p *int, v int) bool { return p != nil && *p == v }
+
 func TestSeveralFlushesUploadOnce(t *testing.T) {
 	lib := newFakeLibrary()
-	dir := mount(t, lib, Options{})
+	dir, released := releases(t, lib, Options{})
 	f, err := os.Create(filepath.Join(dir, "new.3mf"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer f.Close()
 	if _, err := f.Write([]byte("abc")); err != nil {
 		t.Fatal(err)
 	}
@@ -61,8 +97,8 @@ func TestSeveralFlushesUploadOnce(t *testing.T) {
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
-	// Release runs after close returns, so give it time to (wrongly) upload again.
-	time.Sleep(100 * time.Millisecond)
+	// Release runs after close returns.
+	waitRelease(t, released)
 	lib.locked(func() {
 		if lib.uploads != 1 {
 			t.Fatalf("uploads %d", lib.uploads)
@@ -115,6 +151,7 @@ func TestWritingIntoAFileKeepsTheRestOfIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer f.Close()
 	if _, err := f.WriteAt([]byte("J"), 0); err != nil {
 		t.Fatal(err)
 	}
@@ -195,15 +232,9 @@ func TestRenameInPlaceIsOneUpdateOfTheName(t *testing.T) {
 	if err := os.Rename(filepath.Join(dir, "a.3mf"), filepath.Join(dir, "A.3mf")); err != nil {
 		t.Fatal(err)
 	}
-	lib.locked(func() {
-		if len(lib.updates) != 1 {
-			t.Fatalf("%+v", lib.updates)
-		}
-		u := lib.updates[0]
-		if u.folder || u.id != 10 || u.name == nil || *u.name != "A.3mf" || u.parent != nil {
-			t.Fatalf("%+v", u)
-		}
-	})
+	if u := onlyUpdate(t, lib); u.folder || u.id != 10 || u.name == nil || *u.name != "A.3mf" || u.parent != nil {
+		t.Fatalf("%+v", u)
+	}
 }
 
 func TestMovingToTheTopLevelSendsZero(t *testing.T) {
@@ -214,9 +245,9 @@ func TestMovingToTheTopLevelSendsZero(t *testing.T) {
 	if err := os.Rename(filepath.Join(dir, "Top", "a.3mf"), filepath.Join(dir, "a.3mf")); err != nil {
 		t.Fatal(err)
 	}
+	u := onlyUpdate(t, lib)
 	lib.locked(func() {
-		u := lib.updates[0]
-		if u.name != nil || u.parent == nil || *u.parent != 0 || lib.files[10].FolderID != 0 {
+		if u.name != nil || !intIs(u.parent, 0) || lib.files[10].FolderID != 0 {
 			t.Fatalf("%+v %+v", u, lib.files[10])
 		}
 	})
@@ -231,12 +262,9 @@ func TestMovingAFolderSetsItsParent(t *testing.T) {
 	if err := os.Rename(filepath.Join(dir, "Inner"), filepath.Join(dir, "Top", "Inner")); err != nil {
 		t.Fatal(err)
 	}
-	lib.locked(func() {
-		u := lib.updates[0]
-		if len(lib.updates) != 1 || !u.folder || u.id != 5 || u.name != nil || u.parent == nil || *u.parent != 4 {
-			t.Fatalf("%+v", lib.updates)
-		}
-	})
+	if u := onlyUpdate(t, lib); !u.folder || u.id != 5 || u.name != nil || !intIs(u.parent, 4) {
+		t.Fatalf("%+v", u)
+	}
 	if data, err := os.ReadFile(filepath.Join(dir, "Top", "Inner", "deep.3mf")); err != nil || string(data) != "d" {
 		t.Fatalf("%q %v", data, err)
 	}
@@ -409,9 +437,9 @@ func TestRenamingAShownNameSendsTheRealOne(t *testing.T) {
 	if err := os.Rename(filepath.Join(dir, "a (id 11).3mf"), filepath.Join(dir, "Top", "a.3mf")); err != nil {
 		t.Fatal(err)
 	}
+	u := onlyUpdate(t, lib)
 	lib.locked(func() {
-		u := lib.updates[0]
-		if u.name != nil || *u.parent != 4 || lib.files[11] != (api.File{ID: 11, Name: "a.3mf", FolderID: 4, Created: lib.files[10].Created}) {
+		if u.name != nil || !intIs(u.parent, 4) || lib.files[11] != (api.File{ID: 11, Name: "a.3mf", FolderID: 4, Created: lib.files[10].Created}) {
 			t.Fatalf("%+v %+v", u, lib.files[11])
 		}
 	})
@@ -441,6 +469,7 @@ func TestAFileBeingWrittenCanBeFoundRenamedAndRemoved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer f.Close()
 	if _, err := f.Write([]byte("abc")); err != nil {
 		t.Fatal(err)
 	}
@@ -466,6 +495,7 @@ func TestAFileBeingWrittenCanBeFoundRenamedAndRemoved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer g.Close()
 	if err := os.Remove(filepath.Join(dir, "scratch.3mf")); err != nil {
 		t.Fatal(err)
 	}
@@ -475,6 +505,234 @@ func TestAFileBeingWrittenCanBeFoundRenamedAndRemoved(t *testing.T) {
 	lib.locked(func() {
 		if lib.uploads != 1 {
 			t.Fatalf("uploads %d", lib.uploads)
+		}
+	})
+}
+
+func TestReadingAFileBeingCreated(t *testing.T) {
+	lib := newFakeLibrary()
+	dir := mount(t, lib, Options{})
+	path := filepath.Join(dir, "draft.3mf")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.Write([]byte("abc")); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "abc" {
+		t.Fatalf("read while writing: %q %v", data, err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	lib.locked(func() {
+		if lib.uploads != 1 || lib.downloads != 0 || string(lib.data[101]) != "abc" {
+			t.Fatalf("uploads %d downloads %d data %q", lib.uploads, lib.downloads, lib.data)
+		}
+	})
+}
+
+func TestTwoHandlesOnANewFileShareOneWrite(t *testing.T) {
+	lib := newFakeLibrary()
+	dir, released := releases(t, lib, Options{})
+	path := filepath.Join(dir, "draft.3mf")
+	a, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	if _, err := a.Write([]byte("abc")); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	if _, err := b.Write([]byte("XYZ")); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []*os.File{a, b} {
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitRelease(t, released)
+	waitRelease(t, released)
+	lib.locked(func() {
+		if lib.uploads != 1 || len(lib.files) != 1 || string(lib.data[101]) != "abcXYZ" {
+			t.Fatalf("uploads %d files %v data %q", lib.uploads, lib.files, lib.data)
+		}
+	})
+}
+
+func TestTwoHandlesOnAStoredFileReplaceItOnce(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.file(10, "a.3mf", 0, []byte("hello"))
+	dir, released := releases(t, lib, Options{})
+	path := filepath.Join(dir, "a.3mf")
+	a, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	if _, err := a.WriteAt([]byte("J"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.WriteAt([]byte("E"), 1); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []*os.File{a, b} {
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitRelease(t, released)
+	waitRelease(t, released)
+	lib.locked(func() {
+		if lib.uploads != 1 || !lib.deleted[10] || len(lib.files) != 1 || string(lib.data[101]) != "JEllo" {
+			t.Fatalf("uploads %d files %v data %q", lib.uploads, lib.files, lib.data)
+		}
+	})
+}
+
+func TestAFailedUploadIsRetriedOnRelease(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.failUploads = 1
+	dir, released := releases(t, lib, Options{})
+	logs(t)
+	err := os.WriteFile(filepath.Join(dir, "a.3mf"), []byte("abc"), 0o644)
+	if !errors.Is(err, syscall.EIO) {
+		t.Fatalf("%v", err)
+	}
+	waitRelease(t, released)
+	lib.locked(func() {
+		if lib.uploads != 1 || string(lib.data[101]) != "abc" {
+			t.Fatalf("uploads %d data %q", lib.uploads, lib.data)
+		}
+	})
+}
+
+func TestAFileThatNeverUploadsIsDropped(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.failUploads = 2
+	dir, released := releases(t, lib, Options{})
+	log := logs(t)
+	path := filepath.Join(dir, "a.3mf")
+	if err := os.WriteFile(path, []byte("abc"), 0o644); !errors.Is(err, syscall.EIO) {
+		t.Fatalf("%v", err)
+	}
+	waitRelease(t, released)
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("%v", err)
+	}
+	if got := log.String(); !strings.Contains(got, "lost") {
+		t.Fatalf("log: %q", got)
+	}
+}
+
+func TestXattrsSymlinksAndLinks(t *testing.T) {
+	for _, ro := range []bool{false, true} {
+		lib := newFakeLibrary()
+		lib.file(10, "a.3mf", 0, nil)
+		dir := mount(t, lib, Options{ReadOnly: ro})
+		path := filepath.Join(dir, "a.3mf")
+		refused := syscall.ENOTSUP
+		if ro {
+			refused = syscall.EROFS
+		}
+		if err := syscall.Setxattr(path, "user.x", []byte("1"), 0); !errors.Is(err, refused) {
+			t.Fatalf("ro %v setxattr: %v", ro, err)
+		}
+		if err := syscall.Removexattr(path, "user.x"); !errors.Is(err, refused) {
+			t.Fatalf("ro %v removexattr: %v", ro, err)
+		}
+		if err := os.Symlink("a.3mf", filepath.Join(dir, "s")); !errors.Is(err, refused) {
+			t.Fatalf("ro %v symlink: %v", ro, err)
+		}
+		if err := os.Link(path, filepath.Join(dir, "l.3mf")); !errors.Is(err, refused) {
+			t.Fatalf("ro %v link: %v", ro, err)
+		}
+		if _, err := syscall.Getxattr(path, "user.x", make([]byte, 16)); !errors.Is(err, syscall.ENODATA) {
+			t.Fatalf("ro %v getxattr: %v", ro, err)
+		}
+		if n, err := syscall.Listxattr(path, make([]byte, 16)); err != nil || n != 0 {
+			t.Fatalf("ro %v listxattr: %d %v", ro, n, err)
+		}
+	}
+}
+
+func TestSettingTimesIsAccepted(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.folder(4, "Top", 0)
+	lib.file(10, "a.3mf", 0, []byte("abc"))
+	dir := mount(t, lib, Options{})
+	at := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	for _, name := range []string{"a.3mf", "Top"} {
+		if err := os.Chtimes(filepath.Join(dir, name), at, at); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	if err := os.Chmod(filepath.Join(dir, "Top"), 0o700); !errors.Is(err, syscall.ENOTSUP) {
+		t.Fatalf("chmod: %v", err)
+	}
+	if err := os.Lchown(filepath.Join(dir, "a.3mf"), os.Getuid(), os.Getgid()); !errors.Is(err, syscall.ENOTSUP) {
+		t.Fatalf("chown: %v", err)
+	}
+	lib.locked(func() {
+		if lib.uploads != 0 || len(lib.updates) != 0 {
+			t.Fatalf("uploads %d updates %v", lib.uploads, lib.updates)
+		}
+	})
+}
+
+func TestRmdirOfAnEmptyFolder(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.folder(4, "Top", 0)
+	dir := mount(t, lib, Options{})
+	if err := os.Remove(filepath.Join(dir, "Top")); err != nil {
+		t.Fatal(err)
+	}
+	lib.locked(func() {
+		if !lib.folderDeleted[4] {
+			t.Fatal("not deleted")
+		}
+	})
+}
+
+func TestMkdirOntoATakenNameIsEEXIST(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.folder(4, "Top", 0)
+	lib.file(10, "a.3mf", 0, nil)
+	dir := mount(t, lib, Options{})
+	for _, name := range []string{"Top", "a.3mf"} {
+		if err := os.Mkdir(filepath.Join(dir, name), 0o755); !errors.Is(err, syscall.EEXIST) {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+}
+
+func TestRenameOntoAFolderIsEEXIST(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.folder(4, "Top", 0)
+	lib.folder(5, "Other", 0)
+	lib.file(10, "a.3mf", 0, nil)
+	dir := mount(t, lib, Options{})
+	for _, from := range []string{"a.3mf", "Other"} {
+		if err := os.Rename(filepath.Join(dir, from), filepath.Join(dir, "Top")); !errors.Is(err, syscall.EEXIST) {
+			t.Fatalf("%s: %v", from, err)
+		}
+	}
+	lib.locked(func() {
+		if len(lib.updates) != 0 {
+			t.Fatalf("%+v", lib.updates)
 		}
 	})
 }

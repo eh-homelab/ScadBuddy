@@ -119,13 +119,19 @@ func (c *cache) drop(id int) {
 }
 
 func (n *file) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
-	if flags&(syscall.O_WRONLY|syscall.O_RDWR) != 0 {
-		if n.tree.opts.ReadOnly {
-			return nil, 0, syscall.EROFS
-		}
-		return n.write(false), 0, 0
+	write := flags&(syscall.O_WRONLY|syscall.O_RDWR) != 0
+	if write && n.tree.opts.ReadOnly {
+		return nil, 0, syscall.EROFS
+	}
+	// While a write is pending, every handle reads and writes its contents.
+	if h := n.attach(write, false); h != nil {
+		return h, 0, 0
 	}
 	f := n.current()
+	if f.ID == 0 {
+		// Created here, never uploaded, and no longer being written.
+		return nil, 0, syscall.EIO
+	}
 	fh, err := n.tree.cache.open(ctx, n.tree.lib, f)
 	if err != nil {
 		slog.Warn("open failed", "file", f.ID, "err", err)

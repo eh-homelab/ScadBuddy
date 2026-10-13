@@ -29,6 +29,8 @@ type fakeLibrary struct {
 	folderDeleted map[int]bool
 	// busy files are refused by a delete, as a queued print's file is.
 	busy map[int]bool
+	// failUploads is how many uploads fail, with a 502, before they succeed.
+	failUploads int
 }
 
 // update is one UpdateFile or UpdateFolder call, as sent.
@@ -112,6 +114,10 @@ func (l *fakeLibrary) Upload(_ context.Context, folderID int, name string, r io.
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.failUploads > 0 {
+		l.failUploads--
+		return api.File{}, &api.Error{Op: "upload", Status: http.StatusBadGateway}
+	}
 	l.uploads++
 	l.nextID++
 	f := api.File{ID: l.nextID, Name: name, FolderID: folderID, Size: int64(len(data)), Created: time.Now().UTC()}
