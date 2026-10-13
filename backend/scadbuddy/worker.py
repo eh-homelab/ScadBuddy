@@ -983,6 +983,8 @@ def main() -> None:
     queue = parse_queue()
     settings = Settings()
     configure_logging(settings.log_level)
+    # parse_queue returns a Queue, and SERVICE_NAMES must name every one (#2894).
+    assert queue in SERVICE_NAMES, f"queue {queue!r} has no service name"
     configure_tracing(SERVICE_NAMES[queue], version=settings.version, revision=settings.revision)
     asyncio.run(_main(settings, queue))
 

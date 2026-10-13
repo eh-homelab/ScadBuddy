@@ -462,8 +462,10 @@ export function PrintPicker({
       // One action from the re-render to the save, as the Arrange dialog's (#2292).
       await traceAction(
         'arrange',
-        { 'scadbuddy.output_id': target.id, 'scadbuddy.rerendered': backfill ? 1 : 0 },
-        async (within) => {
+        // `scadbuddy.output_id` is the arranged output, as on the Arrange dialog's span
+        // (#2891); the output it was arranged from is its own attribute.
+        { 'scadbuddy.source_output_id': target.id, 'scadbuddy.rerendered': backfill ? 1 : 0 },
+        async (within, span) => {
           let from = target
           if (backfill) {
             const { ready, failed } = await backfillOutputs([target], {
@@ -474,6 +476,8 @@ export function PrintPicker({
             const read = ready[0]
             if (!read) {
               setArrangeError(backfillFailures(failed, 'Re-arrange'))
+              // Not a failure the span would see, nor a success (#2891).
+              span.setAttribute('scadbuddy.outcome', 'rerender_failed')
               return
             }
             from = read
@@ -496,6 +500,7 @@ export function PrintPicker({
             },
             { signal: controller.signal, within },
           )
+          span.setAttribute('scadbuddy.output_id', next.output.id)
           // Closed while the output was being saved: it is saved, a normal output in
           // History, but this dialog keeps the output it was opened for.
           if (controller.signal.aborted) return
