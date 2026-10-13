@@ -79,8 +79,10 @@ export function DurableSubagentsSetting() {
         <p id="durable-subagents-help" className="text-[12px] text-muted">
           A durable session&apos;s subagents call ScadBuddy&apos;s tools on the assistant service. Leave both empty when
           the durable worker runs beside the assistant (the same pod). When it runs on its own, set the URL it reaches
-          the assistant at, and the addresses or CIDR ranges it calls from, separated by commas. Each call still needs
-          a token for one running turn; limit the network to the durable worker as well. Applies from the next turn.
+          the assistant at, and the addresses or CIDR ranges it calls from, separated by commas: the durable
+          worker&apos;s own pods, as narrowly as you can, and no range wider than /8 (IPv4) or /32 (IPv6). Each call
+          still needs a token for one running turn. A range that holds other pods needs a NetworkPolicy admitting only
+          the durable worker to the assistant&apos;s port. Applies from the next turn.
         </p>
         <div className="flex items-center gap-3">
           <Button type="submit" variant="primary" size="sm" disabled={!changed || saving} aria-busy={saving} {...USER_ONLY}>

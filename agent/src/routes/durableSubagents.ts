@@ -1,4 +1,4 @@
-import type { BlockList } from 'node:net'
+import { type BlockList, isIP } from 'node:net'
 import type { Hono } from 'hono'
 import { z } from 'zod'
 import { UI_ACTOR } from '../audit/writes.js'
@@ -42,6 +42,32 @@ export type DurableSubagentsRouteDeps = {
 }
 
 const MAX_PEERS = 32
+/**
+ * The widest range a peer entry may name (#2881): `0.0.0.0/0` or `::/0` would open the
+ * subagent route to every peer, leaving the per-turn token its only guard.
+ */
+const MIN_PREFIX = { 4: 8, 6: 32 } as const
+
+/** What is wrong with one peer entry, or undefined when it is one address or range. */
+function peerProblem(entry: string): string | undefined {
+  if (entry === '' || entry.includes(',')) return 'each entry must be one IP address or CIDR range'
+  if (peerList([entry]) === undefined) return 'each entry must be an IP address or CIDR range'
+  const [address = '', prefixText] = entry.split('/')
+  const family = isIP(address) as 4 | 6
+  if (prefixText !== undefined && Number(prefixText) < MIN_PREFIX[family]) {
+    return `a range may be no wider than /${MIN_PREFIX[family]} for IPv${family}`
+  }
+  return undefined
+}
+
+const PeerEntry = z
+  .string()
+  .max(64)
+  .transform((s) => s.trim())
+  .superRefine((entry, ctx) => {
+    const problem = peerProblem(entry)
+    if (problem) ctx.addIssue({ code: 'custom', message: problem })
+  })
 
 const PutBody = z.strictObject({
   url: z
@@ -55,10 +81,7 @@ const PutBody = z.strictObject({
       }
     }, 'must be an http(s) URL')
     .nullable(),
-  peers: z
-    .array(z.string().max(64))
-    .max(MAX_PEERS)
-    .refine((peers) => peerList(peers) !== undefined, 'each entry must be an IP address or CIDR range'),
+  peers: z.array(PeerEntry).max(MAX_PEERS),
 })
 
 /** The stored peers as a list, or undefined when any entry is not an address or range. */
@@ -88,7 +111,9 @@ function stored(raw: unknown): DurableSubagentsView {
 export async function subagentPeers(settings: SettingsRepo | undefined): Promise<BlockList | undefined> {
   if (!settings) return undefined
   const { peers } = stored(await settings.get<unknown>(SETTING_DURABLE_SUBAGENTS))
-  return peers.length === 0 ? undefined : peerList(peers)
+  // Held to what the route accepts now (#2881): a range stored before the floor answers none.
+  if (peers.length === 0 || peers.some((p) => peerProblem(p) !== undefined)) return undefined
+  return peerList(peers)
 }
 
 const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
@@ -126,7 +151,7 @@ export function registerDurableSubagentsRoutes(app: Hono, deps: DurableSubagents
           : 'body is not valid JSON'
       return c.json({ detail }, 400)
     }
-    const value: DurableSubagentsView = { url: body.url, peers: body.peers.map((p) => p.trim()) }
+    const value: DurableSubagentsView = { url: body.url, peers: body.peers }
     await settings.set(SETTING_DURABLE_SUBAGENTS, value, {
       actor: UI_ACTOR,
       surface: 'http',

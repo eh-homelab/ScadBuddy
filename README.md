@@ -1059,10 +1059,16 @@ see the subagents bullet for what the second needs.
   subagents no ScadBuddy tools. The path is not under `/api/v1/ai/`, so the
   ingress never routes to it. The agent answers it on loopback only, unless
   Settings → Durable subagents (`/api/v1/ai/settings/durable-subagents`) lists
-  more addresses or CIDR ranges: a worker in its own pods needs its pod range
-  there, and a NetworkPolicy that admits only those pods to the agent's port.
-  Each call still needs a token minted under the KEK for one session, turn and
-  owner, and is a request with no `X-Forwarded-For`. The same setting's URL,
+  more addresses or CIDR ranges, each one range and none wider than `/8`
+  (IPv4) or `/32` (IPv6). Name the agent-durable pods' own addresses as
+  narrowly as the cluster allows, never the whole pod CIDR (`10.42.0.0/16`):
+  that range holds the ingress controller's pods too, and every other pod.
+  Whenever a listed range holds more than the agent-durable pods, a
+  NetworkPolicy that admits only those pods to the agent's port is
+  **required**, not just recommended: without it the route's guard is only the
+  per-turn token and the ingress adding `X-Forwarded-For`. Each call still needs
+  a token minted under the KEK for one session, turn and owner, and is a
+  request with no `X-Forwarded-For`. The same setting's URL,
   when set, replaces `SCADBUDDY_DURABLE_SUBAGENT_MCP_URL` (not `off`) from the
   next segment.
 - It runs as uid 10001 and writes only under `/srv/agent` (`HOME`, Claude

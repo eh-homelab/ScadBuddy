@@ -1,7 +1,7 @@
-import { screen, waitFor } from '@testing-library/react'
+import { act, screen, waitFor } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
-import { describe, expect, it } from 'vitest'
-import { api } from '../api/client'
+import { describe, expect, it, vi } from 'vitest'
+import { ApiError, api } from '../api/client'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { DurableSubagentsSetting } from './DurableSubagentsSetting'
@@ -53,8 +53,15 @@ describe('DurableSubagentsSetting', () => {
         HttpResponse.json({ detail: 'AI features need the database' }, { status: 503 }),
       ),
     )
+    const read = vi.spyOn(api, 'getDurableSubagents')
     renderPage(<DurableSubagentsSetting />)
-    await new Promise((r) => setTimeout(r, 50))
-    await waitFor(() => expect(screen.queryByText('Durable subagents')).not.toBeInTheDocument())
+    // #2884: it is hidden while loading too, so the absence means something only once
+    // the GET has answered 503 and the component has rendered that.
+    await waitFor(() => expect(read).toHaveBeenCalled())
+    await act(async () => {
+      await expect(read.mock.results[0]?.value).rejects.toBeInstanceOf(ApiError)
+    })
+    expect(screen.queryByText('Durable subagents')).not.toBeInTheDocument()
+    read.mockRestore()
   })
 })

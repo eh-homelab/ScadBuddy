@@ -80,10 +80,24 @@ describe('the durable subagents setting', () => {
     [{ url: null, peers: [1] }],
     [{ url: null, peers: Array.from({ length: 33 }, () => '10.0.0.1') }],
     [{ url: null, peers: [], extra: 1 }],
+    // #2881: every peer, a range wider than the floor, two in one entry, an empty one.
+    [{ url: null, peers: ['0.0.0.0/0'] }],
+    [{ url: null, peers: ['::/0'] }],
+    [{ url: null, peers: ['10.0.0.0/7'] }],
+    [{ url: null, peers: ['fd00::/31'] }],
+    [{ url: null, peers: ['10.0.0.1,10.0.0.2'] }],
+    [{ url: null, peers: [''] }],
+    [{ url: null, peers: ['10.42.0.0/16', '  '] }],
   ])('refuses the body %j, and stores nothing', async (body) => {
     const { app, values } = setup()
     expect((await put(app, body)).status).toBe(400)
     expect(values.size).toBe(0)
+  })
+
+  it('stores the widest ranges the floor allows, one range per entry, trimmed (#2881)', async () => {
+    const { app, values } = setup()
+    expect((await put(app, { url: null, peers: [' 10.0.0.0/8', 'fd00::/32 ', '10.42.3.9'] })).status).toBe(200)
+    expect(values.get(SETTING_DURABLE_SUBAGENTS)).toEqual({ url: null, peers: ['10.0.0.0/8', 'fd00::/32', '10.42.3.9'] })
   })
 
   it.each([['nonsense'], [null], [{ url: 1, peers: 'x' }], [{ url: 'http://a/', peers: [1] }]])(
@@ -121,6 +135,11 @@ describe('subagentPeers', () => {
     expect(await subagentPeers(repo().settings)).toBeUndefined()
     expect(await subagentPeers(repo({ url: null, peers: [] }).settings)).toBeUndefined()
     expect(await subagentPeers(repo({ url: null, peers: ['10.42.0.0/16', 'bogus'] }).settings)).toBeUndefined()
+  })
+
+  it('is none for a stored range the route would now refuse (#2881)', async () => {
+    expect(await subagentPeers(repo({ url: null, peers: ['0.0.0.0/0'] }).settings)).toBeUndefined()
+    expect(await subagentPeers(repo({ url: null, peers: ['10.0.0.1,10.0.0.2'] }).settings)).toBeUndefined()
   })
 
   it('is the stored ranges', async () => {
