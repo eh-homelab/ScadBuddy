@@ -512,6 +512,29 @@ describe('PrintDetailPage (#311)', () => {
     expect(within(dialog).queryByTestId('preview')).not.toBeInTheDocument()
   })
 
+  it('copies the parameters as JSON, and says so when there is no clipboard', async () => {
+    // user-event stands in a clipboard of its own.
+    const { user } = render(35)
+    const files = await section('Files')
+    await user.click(within(files).getByRole('button', { name: /^Parameters, .*, open$/ }))
+    let dialog = await screen.findByRole('dialog', { name: 'Parameters' })
+    await user.click(within(dialog).getByRole('button', { name: 'Copy JSON' }))
+    expect(await within(dialog).findByRole('button', { name: 'Copied' })).toBeInTheDocument()
+    expect(JSON.parse(await navigator.clipboard.readText())).toMatchObject({ name: 'Reagan' })
+    await user.keyboard('{Escape}')
+
+    const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+    Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true })
+    try {
+      await user.click(within(files).getByRole('button', { name: /^Parameters, .*, open$/ }))
+      dialog = await screen.findByRole('dialog', { name: 'Parameters' })
+      await user.click(within(dialog).getByRole('button', { name: 'Copy JSON' }))
+      expect(within(dialog).getByRole('alert')).toHaveTextContent('could not be copied here')
+    } finally {
+      if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard)
+    }
+  })
+
   it('downloads the parameters as JSON', async () => {
     const { user } = render(35)
     const files = await section('Files')

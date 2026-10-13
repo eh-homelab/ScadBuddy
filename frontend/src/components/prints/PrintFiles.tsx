@@ -16,14 +16,11 @@ type PrintFile = PrintDetail['files'][number]
 /** What a row of the panel is: a file of the print, its parameters, or its media (#894). */
 type Kind = PrintFile['kind'] | 'parameters' | 'photo' | 'timelapse'
 
-interface Entry {
-  key: string
-  kind: Kind
-  name: string
-  size: number | null
-  /** Where its bytes are; none for the parameters, which are the print's own JSON. */
-  url: string | null
-}
+/** Every file has its bytes at a URL but the parameters, which are the print's own JSON. */
+type Entry = { key: string; name: string; size: number | null } & (
+  | { kind: 'parameters'; url: null }
+  | { kind: Exclude<Kind, 'parameters'>; url: string }
+)
 
 /** #894 — a friendly name for each kind of file, with its own name underneath. */
 const FILE_LABELS: Record<Kind, string> = {
@@ -220,7 +217,7 @@ export function PrintFiles({ print }: { print: PrintDetail }) {
 function FileView({ print, entry }: { print: PrintDetail; entry: Entry }) {
   switch (entry.kind) {
     case 'preview_glb':
-      return <MeshView print={print} url={entry.url as string} />
+      return <MeshView print={print} url={entry.url} />
     case 'output_3mf':
       return <ModelView print={print} meshUrl={print.files.find((file) => file.kind === 'preview_glb')?.url ?? null} />
     case 'sliced':
@@ -230,11 +227,11 @@ function FileView({ print, entry }: { print: PrintDetail; entry: Entry }) {
     case 'parameters':
       return <ParametersView print={print} />
     case 'photo':
-      return <img src={entry.url as string} alt={entry.name} className="max-h-[70vh] w-full object-contain" />
+      return <img src={entry.url} alt={entry.name} className="max-h-[70vh] w-full object-contain" />
     case 'timelapse':
       return (
         <video
-          src={entry.url as string}
+          src={entry.url}
           controls
           playsInline
           preload="metadata"
@@ -358,7 +355,7 @@ function FragmentRow({ label, value }: { label: string; value: string }) {
 
 /** The parameters, those that differ from the template's defaults marked, to copy or save. */
 function ParametersView({ print }: { print: PrintDetail }) {
-  const [copied, setCopied] = useState(false)
+  const [copied, setCopied] = useState<'idle' | 'copied' | 'failed'>('idle')
   if (!print.provenance) return null
   const params = print.provenance.params
   const changed = new Set(Object.keys(print.params_diff ?? {}))
@@ -382,15 +379,25 @@ function ParametersView({ print }: { print: PrintDetail }) {
       </table>
       <Button
         size="sm"
-        onClick={() =>
-          void navigator.clipboard?.writeText(json).then(
-            () => setCopied(true),
-            () => setCopied(false),
+        onClick={() => {
+          // No clipboard on an insecure origin, and some frames refuse it: say so.
+          if (!navigator.clipboard) {
+            setCopied('failed')
+            return
+          }
+          void navigator.clipboard.writeText(json).then(
+            () => setCopied('copied'),
+            () => setCopied('failed'),
           )
-        }
+        }}
       >
-        {copied ? 'Copied' : 'Copy JSON'}
+        {copied === 'copied' ? 'Copied' : 'Copy JSON'}
       </Button>
+      {copied === 'failed' && (
+        <p role="alert" className="text-[13px] text-warn">
+          The parameters could not be copied here. Download them as JSON instead.
+        </p>
+      )}
     </div>
   )
 }
