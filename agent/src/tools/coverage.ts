@@ -238,6 +238,12 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "to the print dialog's question; an agent cannot see which spool is physically in the tray.",
   },
   {
+    operation: 'GET /api/v1/print/printers/now',
+    reason:
+      "The Prints page's \"Now printing\" strip (#977). An agent already reads each printer's live state, " +
+      'job and progress through get_print_targets, and its camera through get_printer_camera.',
+  },
+  {
     operation: 'GET /api/v1/print/printers/{printer_id}/rack-usage',
     reason:
       "Settings' Hotend usage table (#1298). An agent already sees each rack position's prints, " +

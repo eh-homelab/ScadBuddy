@@ -775,6 +775,15 @@ describe('TemplatePrintsPage (#310): a template’s Prints tab', () => {
   })
 })
 
+describe('now printing (#977)', () => {
+  it('shows every printer above the history, a job ScadBuddy did not start included', async () => {
+    render()
+    const strip = await screen.findByRole('region', { name: 'Now printing' })
+    expect(within(strip).getByTestId('printer-now-1')).toHaveTextContent('Bracket')
+    expect(await list()).toBeInTheDocument()
+  })
+})
+
 function summaryOf(archiveId: number): PrintPage['items'][number] {
   const print = prints.find((p) => p.archive_id === archiveId)
   if (!print) throw new Error(`no fixture print ${archiveId}`)

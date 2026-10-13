@@ -79,6 +79,7 @@ import type {
   PrintDetail,
   PrintPage,
   PrintProgress,
+  PrintersNow,
   PrintCheck,
   PreviewStarted,
   SlicePreview,
@@ -1528,6 +1529,9 @@ export const api = {
    */
   getPrintProgress: (outputId: string) =>
     request<PrintProgress | null>(`/print/outputs/${seg(outputId)}/progress`),
+
+  /** #977 — every active printer's live state, whoever started its job. */
+  getPrintersNow: () => request<PrintersNow>('/print/printers/now'),
 
   /** #308 — the print history, newest first, a page at a time; `cursor` is the last
    * page's `next_cursor`. */

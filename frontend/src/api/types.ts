@@ -229,6 +229,9 @@ export type LibraryFileObject = Schemas['LibraryFileObject']
  * hand-kept copy would drift the moment it gains a state.
  */
 export type PrintProgress = Schemas['PrintProgress']
+/** #977 — what each printer is doing now, whoever started it. */
+export type PrintersNow = Schemas['PrintersNow']
+export type PrinterNow = Schemas['PrinterNow']
 /** #308 — ScadBuddy's print history: one linked Bambuddy archive per print. */
 export type PrintSummary = Schemas['PrintSummary']
 export type PrintPage = Schemas['PrintPage']
