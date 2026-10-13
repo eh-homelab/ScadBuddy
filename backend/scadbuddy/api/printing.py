@@ -67,6 +67,7 @@ from scadbuddy.bambuddy.print_run import (
     check_for_output,
     filament_options_for_output,
 )
+from scadbuddy.bambuddy.printers_now import PrintersNow, printers_now
 from scadbuddy.bambuddy.progress import QUEUE_PATH, PrintProgress, from_failed_run, progress_for
 from scadbuddy.bambuddy.projects import (
     AttachResult,
@@ -515,6 +516,23 @@ async def post_tray_spool(
         idempotency_key=idempotency_key,
     )
     return operation_answer(result, TrayAssigned)
+
+
+@router.get(
+    "/printers/now",
+    response_model=PrintersNow,
+    summary="What each printer is doing now",
+    description=(
+        "Every active Bambuddy printer's live state (#977): what it prints, how far, "
+        "time left and its HMS errors, whoever started the job. A job whose archive "
+        "ScadBuddy linked is `linked` (its print is `/prints/{archive_id}`); any other "
+        "names Bambuddy's archives page. A printer whose status cannot be read is a "
+        "card with `error`, never a failed page."
+    ),
+)
+async def get_printers_now(store: SettingsStoreDep, links: PrintLinksDep) -> PrintersNow:
+    async with client_for(store.load()) as client:
+        return await printers_now(client, links)
 
 
 @router.get(
