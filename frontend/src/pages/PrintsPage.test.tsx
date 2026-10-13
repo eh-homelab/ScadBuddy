@@ -775,6 +775,29 @@ describe('TemplatePrintsPage (#310): a template’s Prints tab', () => {
   })
 })
 
+describe('changed parameters markup (#2457)', () => {
+  it('keeps "+N more" out of the definition list, which holds only term groups', async () => {
+    const params = { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6 }
+    server.use(
+      http.get('/api/v1/prints', () =>
+        HttpResponse.json({
+          items: [{ ...summaryOf(prints[0]!.archive_id), params_diff: params }],
+          next_cursor: null,
+        } satisfies PrintPage),
+      ),
+    )
+    render()
+    const dl = await within(await list()).findByLabelText('Changed parameters')
+    expect(dl.tagName).toBe('DL')
+    for (const child of Array.from(dl.children)) {
+      expect(child.tagName).toBe('DIV')
+      expect(Array.from(child.children).map((node) => node.tagName)).toEqual(['DT', 'DD'])
+    }
+    expect(dl).not.toHaveTextContent('more')
+    expect(screen.getByTestId('params-more')).toHaveTextContent('+2 more')
+  })
+})
+
 function summaryOf(archiveId: number): PrintPage['items'][number] {
   const print = prints.find((p) => p.archive_id === archiveId)
   if (!print) throw new Error(`no fixture print ${archiveId}`)
