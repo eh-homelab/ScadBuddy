@@ -52,7 +52,7 @@ _GRANT_USE = (
 )
 _RUN = (
     "id, definition_id, version, name, status, waiting_on, steps, result,"
-    " result_truncated, approval_timeout_s, commit, workflow_id, workflow_run_id,"
+    " result_truncated, approval_timeout_s, commit, inputs, workflow_id, workflow_run_id,"
     " started_by, created_at, updated_at"
 )
 
@@ -673,9 +673,9 @@ class FlowStore:
             # A run started before #2503 names no commit: its version's, once backfilled.
             row = conn.execute(
                 "INSERT INTO workflow_runs (id, definition_id, version, name, status,"
-                " approval_timeout_s, commit, workflow_id, workflow_run_id, started_by)"
+                " approval_timeout_s, commit, inputs, workflow_id, workflow_run_id, started_by)"
                 " VALUES (%s, %s, %s, %s, 'running', %s, COALESCE(NULLIF(%s, ''),"
-                " (SELECT commit FROM workflow_definitions WHERE id = %s)), %s, %s, %s)"
+                " (SELECT commit FROM workflow_definitions WHERE id = %s)), %s, %s, %s, %s)"
                 f" ON CONFLICT (id) DO NOTHING RETURNING {_RUN}",
                 (
                     record.run_id,
@@ -685,6 +685,7 @@ class FlowStore:
                     record.approval_timeout_s,
                     record.commit,
                     record.definition_id,
+                    None if record.inputs is None else Jsonb(record.inputs),
                     record.workflow_id,
                     record.workflow_run_id,
                     Jsonb(record.started_by),
