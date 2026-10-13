@@ -83,6 +83,7 @@ import type {
   FlowDefinition,
   FlowHostInterface,
   FlowRegister,
+  FlowRunOptions,
   FlowScriptCheck,
   FlowReset,
   FlowResetPoints,
@@ -720,9 +721,13 @@ export const api = {
   registerFlow: (body: FlowRegister) =>
     request<FlowDefinition>('/workflows', { method: 'POST', body: JSON.stringify(body) }),
 
-  /** The check a registration runs, storing nothing. */
-  checkFlowScript: (script: string, signal?: AbortSignal) =>
-    request<FlowScriptCheck>('/workflow-script/check', { method: 'POST', body: JSON.stringify({ script }), signal }),
+  /** The check a registration runs, storing nothing; with the inputs schema it would be saved with (#2483). */
+  checkFlowScript: (script: string, signal?: AbortSignal, inputsSchema?: Record<string, unknown> | null) =>
+    request<FlowScriptCheck>('/workflow-script/check', {
+      method: 'POST',
+      body: JSON.stringify(inputsSchema ? { script, inputs_schema: inputsSchema } : { script }),
+      signal,
+    }),
 
   /** What the editor completes: the host functions the check uses, and the manifest's tools. */
   getFlowHostFunctions: () => request<FlowHostInterface>('/workflow-script/host-functions'),
@@ -734,13 +739,16 @@ export const api = {
   restoreFlowVersion: (name: string, commit: string) =>
     request<FlowDefinition>(`/workflows/names/${seg(name)}/versions/${seg(commit)}/restore`, { method: 'POST' }),
 
-  /** A start is keyed per press: a re-send after an answer that never arrived reaches the same run. */
-  startFlowRun: (id: string, key: string = newRequestId()) =>
+  /**
+   * A start is keyed per press: a re-send after an answer that never arrived reaches the same run.
+   * #2483: `options.inputs` are the run's typed inputs; a 422 `flow-inputs` lists the ones that do not fit.
+   */
+  startFlowRun: (id: string, key: string = newRequestId(), options: FlowRunOptions = {}) =>
     reattach(() =>
       request<FlowRunStarted>(`/workflows/${seg(id)}/runs`, {
         method: 'POST',
         headers: { 'Idempotency-Key': key },
-        body: JSON.stringify({}),
+        body: JSON.stringify(options),
       }),
     ),
 

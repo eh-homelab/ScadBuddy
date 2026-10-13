@@ -31,6 +31,31 @@ function render(id: string) {
 const KEY = /^[0-9a-f]{32}$/
 
 describe('WorkflowRunPage', () => {
+  it('shows the inputs a run started with (#2483)', async () => {
+    render('run-coasters')
+    const inputs = await screen.findByRole('region', { name: 'Inputs' })
+    expect(within(inputs).getAllByRole('term').map((t) => t.textContent)).toEqual([
+      'slug',
+      'copies',
+      'colour',
+      'dry_run',
+      'plates',
+    ])
+    expect(within(inputs).getAllByRole('definition').map((d) => d.textContent)).toEqual([
+      '"coaster"',
+      '2',
+      '"red"',
+      'false',
+      '[1]',
+    ])
+  })
+
+  it('shows no inputs for a run of a flow with none', async () => {
+    render('run-done')
+    expect(await screen.findByRole('region', { name: 'Result' })).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'Inputs' })).toBeNull()
+  })
+
   it('answers a question with a key, and the run moves on', async () => {
     const { user } = render('run-ask')
     await user.type(await screen.findByLabelText('Your answer'), 'yes')

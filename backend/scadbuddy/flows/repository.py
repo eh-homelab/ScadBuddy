@@ -3,7 +3,9 @@
 
 A flow's script is source, so it is versioned as the templates' source is: in git, on
 the core model history uses (``core/gitrepo.py``), but in a repository of its own, since
-flows are not models. The layout is ``<name>/flow.py``, with no metadata file.
+flows are not models. The layout is ``<name>/flow.py``, and ``<name>/inputs.json`` for a
+flow that declares typed inputs (#2483): source, versioned with the script in the same
+commit, never state (an approval timeout stays in Postgres).
 
 Every version is its own commit: a registration, a restore and a backfilled row each
 make exactly one, ``--allow-empty`` when the script is unchanged. A commit carries two
@@ -17,10 +19,12 @@ process or two, never interleave.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from scadbuddy.core.authorship import PRINCIPAL_TRAILER, SESSION_TRAILER, AgentAuthor
 from scadbuddy.core.gitrepo import (
@@ -34,6 +38,7 @@ from scadbuddy.core.gitrepo import (
     RepoCoordinator,
     RevisionNotFoundError,
 )
+from scadbuddy.flows.inputs import INPUTS_FILE
 
 FLOW_FILE = "flow.py"
 FLOW_TRAILER = "ScadBuddy-Flow"
@@ -52,6 +57,10 @@ _FORMAT = (
 
 def flow_path(name: str) -> str:
     return f"{name}/{FLOW_FILE}"
+
+
+def inputs_path(name: str) -> str:
+    return f"{name}/{INPUTS_FILE}"
 
 
 @dataclass(frozen=True)
@@ -100,19 +109,20 @@ class FlowHistory(GitRepo):
         index: Callable[[str, int], None],
         *,
         script: str | None = None,
+        inputs: dict[str, Any] | None = None,
         restore: str | None = None,
         reconcile: Callable[[], object] | None = None,
         date: datetime | None = None,
     ) -> tuple[str, int]:
-        """One new version of ``name``: ``script``, or the script at the commit
-        ``restore``. Under the write lock: ``reconcile`` (index what an earlier failed
-        insert left), the commit, then ``index(commit, version)``. The commit and its
-        version number."""
+        """One new version of ``name``: ``script`` with its ``inputs`` schema (none when
+        None), or the script and schema at the commit ``restore``. Under the write lock:
+        ``reconcile`` (index what an earlier failed insert left), the commit, then
+        ``index(commit, version)``. The commit and its version number."""
         with self.write_lock():
             if reconcile is not None:
                 reconcile()
             return self.register_locked(
-                name, version_id, index, script=script, restore=restore, date=date
+                name, version_id, index, script=script, inputs=inputs, restore=restore, date=date
             )
 
     def register_locked(
@@ -122,6 +132,7 @@ class FlowHistory(GitRepo):
         index: Callable[[str, int], None],
         *,
         script: str | None = None,
+        inputs: dict[str, Any] | None = None,
         restore: str | None = None,
         date: datetime | None = None,
     ) -> tuple[str, int]:
@@ -141,6 +152,11 @@ class FlowHistory(GitRepo):
             directory = self.root / name
             directory.mkdir(parents=True, exist_ok=True)
             (directory / FLOW_FILE).write_text(script, encoding="utf-8")
+            schema = directory / INPUTS_FILE
+            if inputs is None:
+                schema.unlink(missing_ok=True)
+            else:
+                schema.write_text(json.dumps(inputs, indent=2) + "\n", encoding="utf-8")
             commit = self._commit_locked(
                 f"Register {name} v{version}", name, trailers=trailers, allow_empty=True, date=date
             )
@@ -236,6 +252,16 @@ class FlowHistory(GitRepo):
     def script_at(self, name: str, commit: str) -> str:
         """The flow's script at ``commit``; :class:`RevisionNotFoundError` without one."""
         return self.show(commit, flow_path(name)).decode("utf-8")
+
+    def inputs_at(self, name: str, commit: str) -> dict[str, Any] | None:
+        """The flow's inputs schema at ``commit``; None for a version that declares none
+        (#2483)."""
+        self.script_at(name, commit)  # a version that is not there is not "no inputs"
+        try:
+            found: dict[str, Any] = json.loads(self.show(commit, inputs_path(name)))
+        except RevisionNotFoundError:
+            return None
+        return found
 
     def diff_flow(self, name: str, base: str | None, head: str) -> tuple[str, str, str]:
         """The flow's script from ``base`` (its version before ``head`` when None) to

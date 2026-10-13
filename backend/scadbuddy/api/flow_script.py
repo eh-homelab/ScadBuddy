@@ -3,6 +3,8 @@ the editor completes and shows on hover. Neither reads or writes a flow."""
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter
 from pydantic import BaseModel
 
@@ -13,9 +15,11 @@ router = APIRouter(tags=["flows"])
 
 
 class ScriptCheck(BaseModel):
-    """A script to check, as a registration would."""
+    """A script to check, as a registration would, with the inputs schema it would be
+    registered with (#2483), if any."""
 
     script: str
+    inputs_schema: dict[str, Any] | None = None
 
 
 class ScriptCheckResult(BaseModel):
@@ -32,7 +36,7 @@ class ScriptCheckResult(BaseModel):
 async def check_flow_script(body: ScriptCheck) -> ScriptCheckResult:
     """The check `POST /workflows` runs before it registers a version, and nothing else:
     no version, no commit."""
-    return ScriptCheckResult(problems=await check_script(body.script))
+    return ScriptCheckResult(problems=await check_script(body.script, body.inputs_schema))
 
 
 @router.get(

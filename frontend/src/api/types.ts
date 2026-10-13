@@ -147,9 +147,12 @@ export type FlowState = Schemas['FlowState']
 /** #2487 — the editor's Save body, its check, and what it completes. */
 export type FlowRegister = Schemas['DefinitionCreate']
 export type FlowScriptCheck = Schemas['ScriptCheckResult']
-export type FlowScriptProblem = Schemas['ScriptProblem']
+/** A problem with a script or (#2483, `file` inputs.json) its inputs schema; `file` is flow.py when left out. */
+export type FlowScriptProblem = Omit<Schemas['ScriptProblem'], 'file'> & Partial<Pick<Schemas['ScriptProblem'], 'file'>>
 export type FlowHostInterface = Schemas['HostInterface']
 export type FlowRunStarted = Schemas['RunAnswer']
+/** #2483 — a run's options: its typed inputs (and its grant, #2481). */
+export type FlowRunOptions = Schemas['RunCreate']
 export type FlowResetPoints = Schemas['ResetPoints']
 export type FlowResetPreview = Schemas['ResetPreview']
 export type FlowReset = Schemas['Reset']

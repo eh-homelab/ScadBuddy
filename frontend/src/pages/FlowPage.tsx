@@ -4,10 +4,12 @@ import { api, ApiError } from '../api/client'
 import type { FlowDefinition, FlowRegister, FlowScriptProblem, FlowVersion } from '../api/types'
 import { FlowActions } from '../components/flows/FlowActions'
 import { FlowScript } from '../components/flows/FlowScript'
+import { StartRun } from '../components/flows/StartRun'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
+import { parseSchemaText, schemaText } from '../lib/flowInputs'
 import { timeAgo } from '../lib/format'
-import { actorText, flowPath, flowRunPath, FLOWS_PATH, flowStateText } from '../lib/flows'
+import { actorText, flowPath, FLOWS_PATH, flowStateText } from '../lib/flows'
 import { useAsync } from '../lib/useAsync'
 import { useDebounced } from '../lib/useDebounced'
 import { PHONE_QUERY, useMediaQuery } from '../lib/useMediaQuery'
@@ -18,6 +20,7 @@ const FlowEditor = lazy(async () => ({ default: (await import('../components/flo
 const SourceDiff = lazy(async () => ({ default: (await import('../components/SourceDiff')).SourceDiff }))
 
 const NO_PROBLEMS: FlowScriptProblem[] = []
+const INPUTS_FILE = 'inputs.json'
 
 /** How long typing settles before the script is checked. */
 export const FLOW_CHECK_DEBOUNCE_MS = 500
@@ -57,24 +60,11 @@ export function FlowPage() {
   const flow = useAsync(() => api.getFlow(id), [id])
   const name = flow.data?.name
   const versions = useAsync(() => (name ? api.listFlowVersions(name) : Promise.resolve([])), [name, id])
-  const [starting, setStarting] = useState(false)
   const [error, setError] = useState<string>()
   const [restoring, setRestoring] = useState(false)
   const viewed = versions.data?.find((v) => v.id === id)
   const state = flow.data ? flowStateText(flow.data) : null
   const deleted = flow.data?.deleted_at != null
-
-  async function start() {
-    setStarting(true)
-    setError(undefined)
-    try {
-      const run = await api.startFlowRun(id)
-      void navigate(flowRunPath(run.id))
-    } catch (caught) {
-      setError(errorText(caught))
-      setStarting(false)
-    }
-  }
 
   async function restore(flowName: string, version: FlowVersion) {
     setRestoring(true)
@@ -113,9 +103,12 @@ export function FlowPage() {
           <div className="flex flex-col gap-4 md:flex-row-reverse md:items-start">
             <aside className="flex flex-col gap-4 md:w-60 md:shrink-0">
               <div className="flex flex-wrap gap-2">
-                <Button variant="primary" onClick={() => void start()} disabled={starting || state !== null}>
-                  {starting ? <Spinner /> : 'Start run'}
-                </Button>
+                <StartRun
+                  flowId={id}
+                  name={flow.data.name}
+                  schema={flow.data.inputs_schema ?? null}
+                  disabled={state !== null}
+                />
                 {!phone && !deleted && viewed && !viewed.current && (
                   <Button onClick={() => void restore(flow.data!.name, viewed)} disabled={restoring}>
                     {restoring ? <Spinner /> : `Restore v${viewed.version}`}
@@ -173,7 +166,15 @@ export function FlowPage() {
               <section aria-label="Flow script">
                 <h2 className="mb-1 text-[13px] font-medium">Script</h2>
                 {phone ? (
-                  <FlowScript script={flow.data.script} />
+                  <>
+                    <FlowScript script={flow.data.script} />
+                    {flow.data.inputs_schema && (
+                      <>
+                        <h2 className="mb-1 mt-3 text-[13px] font-medium">Inputs</h2>
+                        <FlowScript script={schemaText(flow.data.inputs_schema)} label="Inputs" />
+                      </>
+                    )}
+                  </>
                 ) : (
                   <ScriptEditor key={flow.data.id} flow={flow.data} onSaved={(saved) => void navigate(flowPath(saved.id))} />
                 )}
@@ -197,8 +198,13 @@ export function FlowPage() {
 
 function ScriptEditor({ flow, onSaved }: { flow: FlowDefinition; onSaved: (saved: FlowDefinition) => void }) {
   const [draft, setDraft] = useState(flow.script)
-  const checked = useDebounced(draft, FLOW_CHECK_DEBOUNCE_MS)
-  // The last answer and the script it was for: kept while the next check runs, so the
+  // #2483: the inputs schema, edited as JSON beside the script and saved in its commit.
+  const savedSchema = schemaText(flow.inputs_schema)
+  const [schemaDraft, setSchemaDraft] = useState(savedSchema)
+  // What the check and Save send: both texts, as one, so either edit checks again.
+  const both = `${schemaDraft}\u0000${draft}`
+  const checked = useDebounced(both, FLOW_CHECK_DEBOUNCE_MS)
+  // The last answer and the texts it was for: kept while the next check runs, so the
   // markers do not flicker as you type.
   const [checkResult, setCheckResult] = useState<{ script: string; problems: FlowScriptProblem[] } | null>(null)
   const problems = checkResult?.problems ?? null
@@ -206,7 +212,8 @@ function ScriptEditor({ flow, onSaved }: { flow: FlowDefinition; onSaved: (saved
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string>()
   const help = useAsync(() => api.getFlowHostFunctions(), [])
-  const dirty = draft !== flow.script
+  const dirty = draft !== flow.script || schemaDraft !== savedSchema
+  const scriptProblems = problems?.filter((p) => p.file !== INPUTS_FILE) ?? NO_PROBLEMS
 
   // Leaving the page (a reload, a closed tab) asks first while an edit is unsaved.
   useEffect(() => {
@@ -217,9 +224,17 @@ function ScriptEditor({ flow, onSaved }: { flow: FlowDefinition; onSaved: (saved
   }, [dirty])
 
   useEffect(() => {
+    const [schemaPart = '', script = ''] = checked.split('\u0000')
+    const parsed = parseSchemaText(schemaPart)
+    if (parsed.error !== undefined) {
+      // Not JSON: nothing the server could check it against.
+      setCheckResult({ script: checked, problems: [{ line: null, message: parsed.error, file: INPUTS_FILE }] })
+      setCheckError(undefined)
+      return
+    }
     const controller = new AbortController()
     api
-      .checkFlowScript(checked, controller.signal)
+      .checkFlowScript(script, controller.signal, parsed.schema)
       .then((result) => {
         setCheckResult({ script: checked, problems: result.problems })
         setCheckError(undefined)
@@ -232,13 +247,25 @@ function ScriptEditor({ flow, onSaved }: { flow: FlowDefinition; onSaved: (saved
 
   async function save() {
     if (!dirty || saving) return
+    const parsed = parseSchemaText(schemaDraft)
+    if (parsed.error !== undefined) {
+      setSaveError(parsed.error)
+      return
+    }
     setSaving(true)
     setSaveError(undefined)
     try {
-      onSaved(await api.registerFlow({ name: flow.name, script: draft, ...approvalTimeout(flow.approval_timeout_s) }))
+      onSaved(
+        await api.registerFlow({
+          name: flow.name,
+          script: draft,
+          ...approvalTimeout(flow.approval_timeout_s),
+          ...(parsed.schema ? { inputs_schema: parsed.schema } : {}),
+        }),
+      )
     } catch (caught) {
       const refused = refusedProblems(caught)
-      if (refused) setCheckResult({ script: draft, problems: refused })
+      if (refused) setCheckResult({ script: both, problems: refused })
       setSaveError(errorText(caught))
       setSaving(false)
     }
@@ -252,12 +279,29 @@ function ScriptEditor({ flow, onSaved }: { flow: FlowDefinition; onSaved: (saved
           name={flow.name}
           initialValue={flow.script}
           onChange={setDraft}
-          problems={problems ?? NO_PROBLEMS}
+          problems={scriptProblems}
           hostFunctions={help.data}
           onSave={() => void save()}
           label="Script"
         />
       </Suspense>
+      <label className="mt-1 flex flex-col gap-1 text-[13px] font-medium">
+        Inputs (JSON Schema)
+        <textarea
+          className="min-h-24 rounded-[6px] border border-line bg-surface px-2 py-1.5 font-mono text-[12px] font-normal"
+          rows={schemaDraft ? Math.min(16, schemaDraft.split('\n').length + 1) : 3}
+          spellCheck={false}
+          placeholder='{"type": "object", "properties": {"slug": {"type": "string"}}, "required": ["slug"]}'
+          aria-describedby={`${flow.id}-inputs-help`}
+          value={schemaDraft}
+          onChange={(event) => setSchemaDraft(event.target.value)}
+        />
+      </label>
+      <p id={`${flow.id}-inputs-help`} className="text-[12px] text-faint">
+        Optional, saved as inputs.json beside the script. Each property is a string, integer, number, boolean or an
+        array of one, with an optional default and description. The script reads them with <code>inputs()</code>;
+        blank, its runs take none.
+      </p>
       <div className="flex flex-wrap items-center gap-3">
         <Button variant="primary" onClick={() => void save()} disabled={!dirty || saving}>
           {saving ? <Spinner /> : 'Save'}
@@ -266,7 +310,7 @@ function ScriptEditor({ flow, onSaved }: { flow: FlowDefinition; onSaved: (saved
         <span role="status" className="text-[12.5px] text-muted">
           {checkError
             ? `Could not check: ${checkError}`
-            : !checkResult || checkResult.script !== draft
+            : !checkResult || checkResult.script !== both
               ? 'Checking…'
               : checkResult.problems.length === 0
                 ? 'No problems'
@@ -284,7 +328,7 @@ function ScriptEditor({ flow, onSaved }: { flow: FlowDefinition; onSaved: (saved
           {problems.map((problem, i) => (
             <li key={i} className="rounded-[6px] border border-line bg-surface-2 px-2.5 py-1.5">
               <span className="mr-2 text-[12px] font-medium text-warn">
-                {problem.line != null ? `Line ${problem.line}` : 'Script'}
+                {problem.file === INPUTS_FILE ? 'Inputs' : problem.line != null ? `Line ${problem.line}` : 'Script'}
               </span>
               <span className="whitespace-pre-wrap font-mono text-[11.5px]">{problem.message}</span>
             </li>

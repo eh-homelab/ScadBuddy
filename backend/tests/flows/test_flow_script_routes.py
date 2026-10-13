@@ -56,7 +56,9 @@ def test_a_type_error_is_a_problem_by_line(client: TestClient) -> None:
 def test_an_oversized_script_is_one_problem_for_the_whole_script(client: TestClient) -> None:
     response = client.post("/api/v1/workflow-script/check", json={"script": "#" * 70_000})
     assert response.status_code == 200, response.text
-    assert response.json() == {"problems": [{"line": None, "message": "script is over 64 KiB"}]}
+    assert response.json() == {
+        "problems": [{"line": None, "message": "script is over 64 KiB", "file": "flow.py"}]
+    }
 
 
 def test_the_host_functions_are_the_ones_a_script_is_checked_against(

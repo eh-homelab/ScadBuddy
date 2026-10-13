@@ -10,7 +10,7 @@ test.describe('workflows (#1057)', () => {
     await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Workflows' }).click()
     await expect(page).toHaveURL(/\/workflows$/)
     const runs = page.getByRole('list', { name: 'Flow runs' })
-    await expect(runs.locator('[data-run]')).toHaveCount(3)
+    await expect(runs.locator('[data-run]')).toHaveCount(4)
     await expect(page.locator('[data-run="run-ask"]')).toContainText('Waiting for your answer: Swap to pink?')
 
     await page.locator('[data-run="run-ask"]').getByRole('link', { name: 'swap v1' }).click()
@@ -167,7 +167,7 @@ for (const { name, viewport } of [
       await expect(dialog.getByRole('button', { name: 'Forget run' })).toBeInViewport()
       await dialog.getByRole('button', { name: 'Forget run' }).click()
       await expect(page).toHaveURL(/\/workflows$/)
-      await expect(page.locator('[data-run]')).toHaveCount(2)
+      await expect(page.locator('[data-run]')).toHaveCount(3)
       await expect(page.locator('[data-run="run-done"]')).toHaveCount(0)
     })
 
@@ -180,7 +180,7 @@ for (const { name, viewport } of [
       await expect(dialog.getByRole('button', { name: 'Archive' })).toBeInViewport()
       await dialog.getByRole('button', { name: 'Archive' }).click()
       await expect(swap).toHaveCount(0)
-      await expect(page.locator('[data-flow]')).toHaveCount(1)
+      await expect(page.locator('[data-flow]')).toHaveCount(2)
 
       await page.getByRole('checkbox', { name: 'Show archived' }).check()
       await expect(swap).toContainText('Archived by you, in the browser')
@@ -215,6 +215,59 @@ for (const { name, viewport } of [
       await expect(page).toHaveURL(/\/workflows\/flows\/def-plates-3$/)
       await expect(page.getByText(/Deleted by/)).toHaveCount(0)
       await expect(page.getByRole('button', { name: 'Start run' })).toBeEnabled()
+    })
+
+    // #2483 — typed inputs: Start run asks for them in a form drawn from the flow's
+    // schema, and the run shows the ones it started with.
+    test('starts a flow with inputs from the Flows tab through its form (#2483)', async ({ page }) => {
+      await page.goto('/workflows/flows')
+      await page.locator('[data-flow="coasters"]').getByRole('button', { name: 'Start run' }).click()
+      const dialog = page.getByRole('dialog', { name: 'Start coasters' })
+      await expect(dialog.getByRole('spinbutton', { name: /Copies/ })).toHaveValue('2')
+      await expect(dialog.getByText('The template to render')).toBeVisible()
+      const start = dialog.getByRole('button', { name: 'Start run' })
+      await start.click()
+      await expect(dialog.getByText('Required')).toBeVisible()
+      await dialog.getByRole('textbox', { name: /Template/ }).fill('coaster')
+      await dialog.getByRole('combobox', { name: /Colour/ }).selectOption('blue')
+      await dialog.getByRole('spinbutton', { name: /Copies/ }).fill('99')
+      await expect(start).toBeInViewport()
+      await noSideScroll(page)
+      await start.click()
+      await expect(dialog.getByRole('alert')).toContainText('copies: 99 is greater than the maximum of 12')
+      await dialog.getByRole('spinbutton', { name: /Copies/ }).fill('3')
+      await start.click()
+
+      await expect(page).toHaveURL(/\/workflows\/runs\/run-new-1$/)
+      const inputs = page.getByRole('region', { name: 'Inputs' })
+      await expect(inputs).toContainText('slug"coaster"')
+      await expect(inputs).toContainText('copies3')
+      await expect(inputs).toContainText('colour"blue"')
+      await noSideScroll(page)
+    })
+
+    test("shows a flow's inputs schema beside its script, and edits it on a laptop (#2483)", async ({ page }) => {
+      await page.goto('/workflows/flows/def-coasters')
+      if (phone) {
+        await expect(page.getByLabel('Inputs', { exact: true })).toContainText('"slug"')
+        await expect(page.getByRole('textbox', { name: 'Inputs (JSON Schema)' })).toHaveCount(0)
+        await noSideScroll(page)
+        return
+      }
+      const schema = page.getByRole('textbox', { name: 'Inputs (JSON Schema)' })
+      await expect(schema).toHaveValue(/"slug"/)
+      await expect(page.getByRole('status')).toHaveText('No problems', { timeout: 15_000 })
+      await schema.fill('{"type": "array"}')
+      const problems = page.getByRole('list', { name: 'Problems' })
+      await expect(problems.getByRole('listitem')).toHaveText([/^Inputs.*top level/])
+      await schema.fill('{"type": "object", "properties": {"slug": {"type": "string"}}, "required": ["slug"]}')
+      await expect(page.getByRole('status')).toHaveText('No problems')
+      await noSideScroll(page)
+      await page.getByRole('button', { name: 'Save' }).click()
+      await expect(page).toHaveURL(/\/workflows\/flows\/def-coasters-2$/)
+      await expect(page.getByRole('heading', { name: 'coasters v2' })).toBeVisible()
+      await expect(schema).toHaveValue(/"required"/)
+      await expect(schema).not.toHaveValue(/"copies"/)
     })
   })
 }
