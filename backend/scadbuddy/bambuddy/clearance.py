@@ -30,13 +30,16 @@ from scadbuddy.render.bambu3mf import (
     MODEL_SETTINGS_NAME,
     PRODUCTION_NS,
     ROOT_MODEL_NAME,
+    ArchiveTooLargeError,
     ParsedModel,
+    TooManyTrianglesError,
     _read_capped,
     parse_model,
     plate_settings,
 )
 from scadbuddy.render.plate import plate_for
 from scadbuddy.render.plate_profiles import CLEARANCES
+from scadbuddy.render.read_budget import ReadBudget
 
 
 @dataclass(frozen=True)
@@ -82,44 +85,106 @@ def _transform(text: str | None) -> np.ndarray:
     return matrix
 
 
-def _points(
-    archive: zipfile.ZipFile,
-    models: dict[str, ParsedModel],
-    path: str,
-    object_id: str,
-    matrix: np.ndarray,
-    depth: int = 0,
-) -> list[np.ndarray]:
-    """The vertices of object ``object_id`` of model file ``path``, placed by ``matrix``,
-    its components followed (a few levels deep, as a slicer writes them)."""
-    if depth > 4:
-        return []
-    if path not in models:
-        models[path] = parse_model(archive, path)
-    model = models[path]
-    found = next(
-        (obj for obj in model.root.iter(f"{{{CORE_NS}}}object") if obj.get("id") == object_id),
-        None,
-    )
-    if found is None:
-        return []
-    points: list[np.ndarray] = []
-    mesh = found.find(f"{{{CORE_NS}}}mesh")
-    if mesh is not None and mesh in model.meshes:
-        vertices = np.asarray(model.meshes[mesh].vertices, dtype=float)
-        if vertices.size:
-            homogeneous = np.hstack([vertices, np.ones((len(vertices), 1))])
-            points.append((homogeneous @ matrix)[:, :3])
-    for component in found.iter(f"{{{CORE_NS}}}component"):
-        target = (component.get(f"{{{PRODUCTION_NS}}}path") or f"/{path}").lstrip("/")
-        inner = _transform(component.get("transform")) @ matrix
-        points += _points(archive, models, target, component.get("objectid", ""), inner, depth + 1)
-    return points
+class _Bounds:
+    """Each object's box in its own frame, read once (#956). An object a file names
+    many times through components costs one read, not one per mention, and every
+    component followed, triangle parsed and byte inflated counts against one
+    :class:`ReadBudget`, as Arrange's reader of an untrusted file spends one."""
+
+    def __init__(self, archive: zipfile.ZipFile, budget: ReadBudget) -> None:
+        self.archive = archive
+        self.models: dict[str, ParsedModel] = {}
+        self.boxes: dict[tuple[str, str], np.ndarray | None] = {}
+        self.visits = budget.max_visits
+        self.triangles = budget.limit("max_triangles")
+        self.bytes = budget.model_bytes()
+
+    def _model(self, path: str) -> ParsedModel:
+        if path not in self.models:
+            model = parse_model(
+                self.archive,
+                path,
+                self.bytes,
+                max_triangles=self.triangles,
+                max_vertices=None if self.triangles is None else 3 * self.triangles,
+            )
+            stored = sum(len(arrays.faces) for arrays in model.meshes.values())
+            inflated = self.archive.getinfo(path).file_size
+            if self.triangles is not None:
+                self.triangles = max(0, self.triangles - stored)
+            if self.bytes is not None:
+                self.bytes = max(0, self.bytes - inflated)
+            self.models[path] = model
+        return self.models[path]
+
+    def box(self, path: str, object_id: str, depth: int = 0) -> np.ndarray | None:
+        """The 8 corners of object ``object_id`` of ``path``'s box, in its own frame;
+        ``None`` when it holds no vertex or the budget ran out."""
+        key = (path, object_id)
+        if key in self.boxes:
+            return self.boxes[key]
+        self.boxes[key] = None  # a cycle reads as empty
+        self.visits -= 1
+        if depth > _MAX_DEPTH or self.visits < 0:
+            raise _OverBudgetError
+        model = self._model(path)
+        found = next(
+            (o for o in model.root.iter(f"{{{CORE_NS}}}object") if o.get("id") == object_id),
+            None,
+        )
+        if found is None:
+            return None
+        points: list[np.ndarray] = []
+        mesh = found.find(f"{{{CORE_NS}}}mesh")
+        if mesh is not None and mesh in model.meshes:
+            vertices = np.asarray(model.meshes[mesh].vertices, dtype=float)
+            if vertices.size:
+                points.append(vertices.reshape(-1, 3))
+        for component in found.iter(f"{{{CORE_NS}}}component"):
+            target = (component.get(f"{{{PRODUCTION_NS}}}path") or f"/{path}").lstrip("/")
+            inner = self.box(target, component.get("objectid", ""), depth + 1)
+            if inner is not None:
+                points.append(_moved(inner, _transform(component.get("transform"))))
+        if not points:
+            return None
+        every = np.vstack(points)
+        low, high = every.min(axis=0), every.max(axis=0)
+        corners = np.array(
+            [
+                [x, y, z]
+                for x in (low[0], high[0])
+                for y in (low[1], high[1])
+                for z in (low[2], high[2])
+            ]
+        )
+        self.boxes[key] = corners
+        return corners
 
 
-def placed_objects(payload: bytes, plate: int) -> list[PlacedObject]:
+#: How deep components may nest; a slicer writes two levels.
+_MAX_DEPTH = 8
+
+
+class _OverBudgetError(Exception):
+    """The file asks for more than the read budget allows: it is not checked."""
+
+
+def _moved(points: np.ndarray, matrix: np.ndarray) -> np.ndarray:
+    homogeneous = np.hstack([points, np.ones((len(points), 1))])
+    moved: np.ndarray = (homogeneous @ matrix)[:, :3]
+    return moved
+
+
+def placed_objects(
+    payload: bytes, plate: int, budget: ReadBudget | None = None
+) -> list[PlacedObject]:
     """Every build item on ``plate`` of a 3MF, each where it sits: the objects a
-    by-object print finishes one at a time. A file with no plate list is one plate."""
+    by-object print finishes one at a time. A file with no plate list is one plate.
+
+    Each box is the box of its components' boxes, so a rotated component can make it
+    larger than the object, never smaller (the module's one-way rule). Raises
+    `ValueError` for a file past ``budget`` (default: the default :class:`ReadBudget`).
+    """
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         names = set(archive.namelist())
         object_names: dict[str, str] = {}
@@ -139,28 +204,28 @@ def placed_objects(payload: bytes, plate: int) -> list[PlacedObject]:
                     if each.index == plate
                     for object_id in each.object_ids
                 }
-        models: dict[str, ParsedModel] = {}
-        root = parse_model(archive, ROOT_MODEL_NAME)
-        models[ROOT_MODEL_NAME] = root
+        bounds = _Bounds(archive, budget or ReadBudget())
         placed: list[PlacedObject] = []
-        for number, item in enumerate(root.root.iter(f"{{{CORE_NS}}}item"), start=1):
-            object_id = item.get("objectid", "")
-            if on_plate is not None and object_id not in on_plate:
-                continue
-            points = _points(
-                archive, models, ROOT_MODEL_NAME, object_id, _transform(item.get("transform"))
-            )
-            if not points:
-                continue
-            every = np.vstack(points)
-            low, high = every.min(axis=0), every.max(axis=0)
-            placed.append(
-                PlacedObject(
-                    object_names.get(object_id) or f"object {number}",
-                    (float(low[0]), float(low[1]), float(low[2])),
-                    (float(high[0]), float(high[1]), float(high[2])),
+        try:
+            root = bounds._model(ROOT_MODEL_NAME)
+            for number, item in enumerate(root.root.iter(f"{{{CORE_NS}}}item"), start=1):
+                object_id = item.get("objectid", "")
+                if on_plate is not None and object_id not in on_plate:
+                    continue
+                corners = bounds.box(ROOT_MODEL_NAME, object_id)
+                if corners is None:
+                    continue
+                where = _moved(corners, _transform(item.get("transform")))
+                low, high = where.min(axis=0), where.max(axis=0)
+                placed.append(
+                    PlacedObject(
+                        object_names.get(object_id) or f"object {number}",
+                        (float(low[0]), float(low[1]), float(low[2])),
+                        (float(high[0]), float(high[1]), float(high[2])),
+                    )
                 )
-            )
+        except (_OverBudgetError, TooManyTrianglesError, ArchiveTooLargeError) as error:
+            raise ValueError(f"the 3MF is past the read budget: {error}") from error
     return placed
 
 

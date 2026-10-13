@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import io
+import zipfile
 from pathlib import Path
 
 import numpy as np
+import pytest
 import trimesh
 
 from scadbuddy.bambuddy.clearance import (
@@ -14,6 +17,7 @@ from scadbuddy.bambuddy.clearance import (
     placed_objects,
 )
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
+from scadbuddy.render.read_budget import ReadBudget
 from scadbuddy.render.split import ColourPart
 
 H2C = clearance_for("H2C")
@@ -95,3 +99,43 @@ def test_the_writers_objects_are_read_where_they_sit(tmp_path: Path) -> None:
     assert abs(gap - 15) < 1e-6
     assert all(abs(obj.height - 10) < 1e-6 for obj in objects)
     assert placed_objects(payload, 2) == []
+
+
+def _fan_out_3mf(levels: int, fan: int) -> bytes:
+    """One build item whose object names the next level ``fan`` times, ``levels`` deep,
+    ending in one triangle: read naively, ``fan ** levels`` meshes."""
+    core = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+    objects = [
+        '<object id="1" type="model"><mesh><vertices>'
+        '<vertex x="0" y="0" z="0"/><vertex x="10" y="0" z="0"/><vertex x="0" y="10" z="5"/>'
+        '</vertices><triangles><triangle v1="0" v2="1" v3="2"/></triangles></mesh></object>'
+    ]
+    for level in range(2, levels + 2):
+        components = "".join(
+            f'<component objectid="{level - 1}" transform="1 0 0 0 1 0 0 0 1 {i} 0 0"/>'
+            for i in range(fan)
+        )
+        objects.append(
+            f'<object id="{level}" type="model"><components>{components}</components></object>'
+        )
+    model = (
+        f'<model xmlns="{core}" unit="millimeter"><resources>{"".join(objects)}</resources>'
+        f'<build><item objectid="{levels + 1}"/></build></model>'
+    )
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("3D/3dmodel.model", model)
+    return buffer.getvalue()
+
+
+def test_an_object_named_many_times_is_read_once() -> None:
+    """A security review's fan-out: 40 components a level, 6 levels, is 4e9 meshes read
+    naively; each object's box is read once, so it is 7."""
+    [obj] = placed_objects(_fan_out_3mf(levels=6, fan=40), 1)
+    assert obj.low == (0.0, 0.0, 0.0)
+    assert obj.high == (10.0 + 6 * 39, 10.0, 5.0)
+
+
+def test_a_file_past_the_read_budget_is_not_checked() -> None:
+    with pytest.raises(ValueError, match="read budget"):
+        placed_objects(_fan_out_3mf(levels=6, fan=2), 1, ReadBudget(max_visits=3))
