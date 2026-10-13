@@ -24,7 +24,7 @@ from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.libraries import CheckoutGate, LibraryNotInstalledError
 from scadbuddy.render import jobs
 from scadbuddy.render import solids as solids_module
-from scadbuddy.render.bambu3mf import plates_of
+from scadbuddy.render.bambu3mf import plates_of, single_plate
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.jobs import (
@@ -39,6 +39,7 @@ from scadbuddy.render.jobs import (
     Job,
     JobResult,
     PartInfo,
+    PartSource,
     PlateLayout,
     Prepared,
     extruder_order,
@@ -50,11 +51,14 @@ from scadbuddy.render.jobs import (
     solid_parts,
     unreadable_colour_warnings,
 )
+from scadbuddy.render.objects3mf import ReadObject, read_objects
+from scadbuddy.render.read_budget import ReadBudget
 from scadbuddy.render.runner import OpenSCADError, ProcessOutput
 from scadbuddy.render.schema import CustomizerSchema, Parameter, ParamValue
-from scadbuddy.render.solids import STAGED_ASSET_PREFIX, SolidRender
-from scadbuddy.render.split import ColourPart
+from scadbuddy.render.solids import STAGED_ASSET_PREFIX, SolidRender, solid_file, solid_mesh
+from scadbuddy.render.split import ColourPart, Paint
 from tests.conftest import PgPool, write_openscad_3mf
+from tests.meshmodel.test_paint import GREEN, ORANGE, painted_box, rendered, written
 
 CONFIG = Config(data_dir=Path("/unused"), render_concurrency=2, job_ttl=3600.0)
 
@@ -1342,3 +1346,84 @@ async def test_a_colour_fallback_leaves_no_span_in_error(
     assert sorted(
         cast(int, (s.attributes or {})["scadbuddy.openscad.exit_code"]) for s in exports
     ) == [0, 3]
+
+
+async def test_a_mesh_models_painting_reaches_its_3mf(paths: DataPaths) -> None:
+    """Spec 2026-10-11 §7: the solid of a painted part's colour carries the part's codes
+    into model.3mf, through the layout that `finish_piece` and an output re-read; the
+    colours the painting uses get filaments."""
+    model_dir = paths.model_dir("demo")
+    model_dir.mkdir(parents=True)
+    mesh, codes = painted_box()
+    read = [
+        ReadObject("Box", 1, [ColourPart(0, "Body", ORANGE, mesh, Paint(codes, (ORANGE, GREEN)))])
+    ]
+    scene = written(model_dir, read)
+    world = rendered(model_dir, scene, ORANGE)
+
+    async def render(*args: object, **kwargs: object) -> object:
+        out = args[3]
+        assert isinstance(out, Path)
+        write_openscad_3mf(out, [("Body", f"{ORANGE}00", world)])
+        return mock.Mock(
+            log_tail=[],
+            missing_files=(),
+            diagnostics=(),
+            diagnostics_dropped=0,
+            notes=(),
+            plates=None,
+        )
+
+    async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
+        return CustomizerSchema()
+
+    async def render_solids(*args: object, **kwargs: object) -> SolidRender:
+        colours, work_dir = args[3], args[4]
+        assert isinstance(colours, list) and isinstance(work_dir, Path)
+        meshes = {}
+        for index, colour in enumerate(colours, start=1):
+            path = solid_file(work_dir, index)
+            write_openscad_3mf(path, [("Body", f"{colour}00", world)])
+            found = solid_mesh(path)
+            assert found is not None
+            meshes[colour] = found
+        return SolidRender(meshes=meshes)
+
+    with (
+        mock.patch.object(jobs, "render_3mf", render),
+        mock.patch.object(jobs, "cached_schema", cached_schema),
+        mock.patch.object(jobs, "render_solids", render_solids),
+    ):
+        result, _ = await jobs.render_job(
+            _job("p"), config=CONFIG, paths=paths, assets=AssetStore(paths.assets)
+        )
+
+    assert result.colors == [ORANGE, GREEN]
+    assert [(p.colour, p.extruder) for p in result.parts] == [(ORANGE, 1), (GREEN, 2)]
+    [obj] = read_objects((paths.root / result.model_3mf).read_bytes(), ReadBudget())
+    [part] = obj.parts
+    assert part.paint is not None and part.paint.codes == codes
+    layout = PlateLayout.load(paths.cache / "render-job" / "p" / LAYOUT_NAME)
+    [loaded] = layout.plates[0].parts
+    assert loaded.paint == Paint(codes, (ORANGE, GREEN))
+    assert layout.sources[0][0].paint == "paint-1-1.json"
+
+
+def test_a_layout_part_without_paint_is_saved_as_before(tmp_path: Path) -> None:
+    """Regression guard: no "paint" key unless a part carries paint, and a layout
+    written before still loads."""
+    mesh = trimesh.creation.box((1, 1, 1))
+    raw = tmp_path / RAW_RENDER_NAME
+    write_openscad_3mf(raw, [("Color 1", "#FF000000", mesh)])
+    part = ColourPart(1, "Color 1", "#FF0000", mesh)
+    layout = PlateLayout(
+        [single_plate([part])],
+        ["#FF0000"],
+        [],
+        BoundingBox(min=(0, 0, 0), max=(1, 1, 1), size=(1, 1, 1)),
+        [(PartSource(RAW_RENDER_NAME),)],
+    )
+    layout.save(tmp_path / LAYOUT_NAME)
+    entry = json.loads((tmp_path / LAYOUT_NAME).read_text())["plates"][0]["parts"][0]
+    assert "paint" not in entry
+    assert PlateLayout.load(tmp_path / LAYOUT_NAME).plates[0].parts[0].paint is None

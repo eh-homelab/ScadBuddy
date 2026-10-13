@@ -11,9 +11,9 @@ export const RENDER_DEBOUNCE_MS = 400
 const POLL_MS = 400
 
 /** A render's steps, as `job.progress` names them (backend `core/metrics.py` `RenderStage`). */
-export type RenderStage = 'source' | 'render' | 'split' | 'solids' | 'thumbnail' | 'write'
+export type RenderStage = 'source' | 'render' | 'split' | 'solids' | 'paint' | 'thumbnail' | 'write'
 
-const STAGES: readonly string[] = ['source', 'render', 'split', 'solids', 'thumbnail', 'write']
+const STAGES: readonly string[] = ['source', 'render', 'split', 'solids', 'paint', 'thumbnail', 'write']
 
 /** A submit this hook made: what it rendered, and the job id it was answered with. */
 interface Submission {

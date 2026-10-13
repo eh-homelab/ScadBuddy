@@ -44,6 +44,7 @@ from scadbuddy.library.libraries import (
     resolve_search_path,
     search_path,
 )
+from scadbuddy.meshmodel.paint import carry_paint, read_carried, turned, write_carried
 from scadbuddy.render.bambu3mf import PlateParts, single_plate, write_plates_3mf
 from scadbuddy.render.colours import colour_hex
 from scadbuddy.render.glb import BoundingBox, bounding_box, write_glb
@@ -179,10 +180,12 @@ def plate_defines(index: int) -> list[str]:
 @dataclass(frozen=True)
 class PartSource:
     """Where a layout part's mesh is on disk, relative to the render's directory:
-    a closed solid's own file, or the material of a split render."""
+    a closed solid's own file, or the material of a split render; and, for a mesh
+    model's painted part, the file of the painting carried onto it (#2146)."""
 
     file: str
     solid: bool = False
+    paint: str | None = None
 
 
 @dataclass(frozen=True)
@@ -211,6 +214,7 @@ class PlateLayout:
                         "file": source.file,
                         "solid": source.solid,
                         **({"negative": True} if part.negative else {}),
+                        **({"paint": source.paint} if source.paint is not None else {}),
                     }
                     for part, source in zip(plate.parts, sources, strict=True)
                 ],
@@ -233,7 +237,7 @@ class PlateLayout:
         splits: dict[str, list[ColourPart]] = {}
 
         def part(entry: dict[str, Any]) -> tuple[ColourPart, PartSource]:
-            source = PartSource(entry["file"], entry["solid"])
+            source = PartSource(entry["file"], entry["solid"], entry.get("paint"))
             if source.solid:
                 mesh, paint = solid_mesh(work / source.file), None
                 if mesh is None:
@@ -247,6 +251,8 @@ class PlateLayout:
                     if split.material_index == entry["material_index"]
                 )
                 mesh, paint = split.mesh, split.paint
+            if source.paint is not None:
+                mesh, paint = read_carried(work / source.paint, mesh)
             return (
                 ColourPart(
                     entry["material_index"],
@@ -421,6 +427,47 @@ def result_parts(layout: PlateLayout) -> list[PartInfo]:
             )
         )
     return infos
+
+
+#: A painted part's carried painting beside the layout (spec 2026-10-11 §7): plate, part.
+PAINT_FILE = "paint-{plate}-{part}.json"
+
+
+def paint_layout(
+    layout: PlateLayout, scad: Path, params: Mapping[str, ParamValue], work: Path
+) -> PlateLayout:
+    """A mesh model's painting carried onto its render (#2146, spec 2026-10-11 §7): each
+    painted part's codes written beside the layout and named by its `PartSource`, its
+    faces turned to start where their source triangles do, the colours its painting
+    prints with added to the filament list, and the transfer's warnings. Anything but a
+    one-plate render of a model's own model.scad comes back as it was; a model with no
+    scene, or no painted part, too (`carry_paint`)."""
+    if scad.name != SOURCE_NAME or len(layout.plates) != 1:
+        return layout
+    plate, sources = layout.plates[0], layout.sources[0]
+    carried, warnings = carry_paint(scad.parent, params, plate.parts)
+    if not any(found is not None for found in carried) and not warnings:
+        return layout
+    parts, placed, colours = list(plate.parts), list(sources), list(layout.colours)
+    for index, found in enumerate(carried):
+        if found is None:
+            continue
+        name = PAINT_FILE.format(plate=1, part=index + 1)
+        write_carried(work / name, found)
+        parts[index] = replace(
+            parts[index], mesh=turned(parts[index].mesh, found.turns), paint=found.paint
+        )
+        placed[index] = replace(placed[index], paint=name)
+        for colour in found.paint.used():
+            if colour.upper() not in {c.upper() for c in colours}:
+                colours.append(colour.upper())
+    return replace(
+        layout,
+        plates=[replace(plate, parts=tuple(parts))],
+        colours=colours,
+        warnings=[*layout.warnings, *warnings],
+        sources=[tuple(placed)],
+    )
 
 
 def result_plates(layout: PlateLayout) -> list[PlateInfo]:
@@ -919,6 +966,9 @@ async def _render_solids(
             # A failed plate warns as a failed whole render does (#451).
             error.warnings = failed_render_warnings(error.missing_files, schema, params)
             raise
+    with stage("paint"):
+        # A mesh model's painting, onto the parts the layout names (spec 2026-10-11 §7).
+        layout = await asyncio.to_thread(paint_layout, layout, prepared.scad, params, work)
     layout.save(work / LAYOUT_NAME)
     return layout
 

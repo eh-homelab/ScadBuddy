@@ -35,7 +35,7 @@ __all__ = [
 
 #: How a job settled; ``superseded`` was replaced by a newer render first.
 RenderOutcome = Literal["done", "failed", "superseded"]
-RenderStage = Literal["source", "render", "split", "solids", "thumbnail", "write"]
+RenderStage = Literal["source", "render", "split", "solids", "paint", "thumbnail", "write"]
 #: What a `render_jobs` call that failed was doing: the per-scrape read of the
 #: queue gauges, a render's start (Temporal unavailable, or the start refused or
 #: unstartable; one still accepting is `render_accept_pending`), or releasing or
