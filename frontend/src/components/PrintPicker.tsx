@@ -31,7 +31,7 @@ import { openExternal } from '../lib/embed'
 import { plateLabel } from '../lib/plate'
 import { resolvedColors } from '../lib/plateColors'
 import { checkPlan, slicedPlateSlots, withSlicedGrams } from '../lib/filaments'
-import { printChoicesOf } from '../lib/printChoices'
+import { printChoicesOf, sliceOverrides } from '../lib/printChoices'
 import { resolveOptions } from '../lib/printOptions'
 import {
   attachPrintToProject,
@@ -589,7 +589,7 @@ export function PrintPicker({
           rack_algorithm: chosenAlgorithm,
           // #2367: the sequence is a process override, so it changes what the run
           // slices; the check and the background slice must see it as the run does.
-          ...(printSequence === null ? {} : { print_sequence: printSequence }),
+          ...sliceOverrides(printSequence),
         }
       : null
   const check = usePrintCheck(source, checkRequest)

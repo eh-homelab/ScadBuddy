@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, delay, http } from 'msw'
 import { useLocation } from 'react-router'
 import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
@@ -151,16 +151,11 @@ describe('LibraryPage', () => {
 
   it("reads the dialog's choices, plates, projects and options once per open (#2361)", async () => {
     const asked: string[] = []
-    const analysed: unknown[] = []
+    const analysed: Promise<unknown>[] = []
     const listen = ({ request }: { request: Request }) => {
       const url = new URL(request.url)
       asked.push(`${request.method} ${url.pathname}${url.search}`)
-      if (url.pathname === '/api/v1/analyzers/run') {
-        void request
-          .clone()
-          .json()
-          .then((body: unknown) => analysed.push(body))
-      }
+      if (url.pathname === '/api/v1/analyzers/run') analysed.push(request.clone().json())
     }
     server.events.on('request:start', listen)
     try {
@@ -179,9 +174,34 @@ describe('LibraryPage', () => {
       // The file the page listed is not read again to open its dialog.
       expect(asked.filter((line) => line.includes('file_id='))).toEqual([])
       // No analysis of an empty plan before the suggested spools are set.
-      for (const body of analysed) {
+      for (const body of await Promise.all(analysed)) {
         expect((body as { request: { filament_plan: { slots: unknown[] } } }).request.filament_plan.slots).not.toEqual([])
       }
+    } finally {
+      server.events.removeListener('request:start', listen)
+    }
+  })
+
+  it('does not read the printed file on its own when the listing is read again (#2822)', async () => {
+    const asked: string[] = []
+    const listen = ({ request }: { request: Request }) => {
+      const url = new URL(request.url)
+      asked.push(`${request.method} ${url.pathname}${url.search}`)
+    }
+    server.events.on('request:start', listen)
+    try {
+      renderPage(<LibraryPage />, { route: '/library' })
+      fireEvent.click(await screen.findByTestId('library-print-89'))
+      await screen.findByRole('dialog', { name: 'Print' })
+      const lists = () => asked.filter((line) => line.startsWith('GET /api/v1/print/library?')).length
+      const before = lists()
+
+      // Advanced empties the listing and reads it again, with the dialog still open.
+      fireEvent.click(screen.getByTestId('library-advanced'))
+      await waitFor(() => expect(lists()).toBeGreaterThan(before))
+      await screen.findByTestId('library-file-104')
+
+      expect(asked.filter((line) => line.includes('file_id='))).toEqual([])
     } finally {
       server.events.removeListener('request:start', listen)
     }
