@@ -327,6 +327,27 @@ describe('runPrint follows the run the server answers with 202 (#470)', () => {
     expect(posts).toBe(2)
   })
 
+  // #3035: the one 503 the print route keeps under respond-async is a repeat of an
+  // ended run without a request_id (`ended`), or any start the server would not offer a
+  // 202 for. `reattach` still sends the same request again, still asking to follow.
+  it('re-posts a 503 still-accepting under respond-async, the same request each time (#3035)', async () => {
+    printRunPoll.intervalMs = 1
+    const result = { queue_item_ids: [7], warnings: [] }
+    const sent: { prefer: string | null; body: unknown }[] = []
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', async ({ request }) => {
+        sent.push({ prefer: request.headers.get('Prefer'), body: await request.json() })
+        return sent.length < 2 ? stillAccepting() : HttpResponse.json(started, { status: 202 })
+      }),
+      http.get('/api/v1/print/runs/run-1', () => HttpResponse.json({ ...started, status: 'succeeded', result })),
+    )
+
+    await expect(api.runPrint('out-1', body)).resolves.toEqual(result)
+    expect(sent).toHaveLength(2)
+    expect(sent.map((s) => s.prefer)).toEqual(['respond-async', 'respond-async'])
+    expect(sent[1]!.body).toEqual(sent[0]!.body)
+  })
+
   // Review #1316 (13) 1a: the backend's `may_have_started` says whether the start may
   // have reached Temporal; true, only the same request_id may follow it.
   const temporalProblem = (type: string, status: number, mayHaveStarted: boolean) =>

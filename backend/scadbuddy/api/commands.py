@@ -41,6 +41,9 @@ UpdateIdPath = Annotated[str, Path(max_length=128)]
             "description": "still accepting: follow again after `Retry-After` seconds",
         },
         status.HTTP_404_NOT_FOUND: {"description": "not a command this route follows"},
+        status.HTTP_422_UNPROCESSABLE_CONTENT: {
+            "description": "`supersedes` on a command other than a render's"
+        },
         status.HTTP_409_CONFLICT: {
             "description": (
                 "`command-resend`: the Update is not known (never admitted, rejected by a"
@@ -61,9 +64,16 @@ async def follow_command(
 ) -> RenderAccepted | PrintRun | JSONResponse:
     """Waits up to `FOLLOW_WAIT` on the Update, then answers it as the route that answered
     202 would have: a render's job (`RenderAccepted`) or a print's run (`PrintRun`),
-    or the refusal. A render's job is attributed in Activity as its route attributes
-    it, since that route answered 202 first and attributed nothing."""
+    or the refusal. An answer is always **200**: a print run answers 200 here whether
+    its own route would have said 202 (a new run) or 200 (a repeat); its ``repeated``
+    says which. ``supersedes`` is a render's only (§5.3). A render's job is attributed
+    in Activity as its route attributes it, since that route answered 202 first and
+    attributed nothing."""
     if workflow_id.startswith(PRINT_PREFIX):
+        if supersedes is not None:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, "only a render's follow supersedes a job"
+            )
         try:
             return await follow_run(runs, workflow_id, update_id)
         except CommandStillAcceptingError:

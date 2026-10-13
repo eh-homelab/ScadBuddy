@@ -779,7 +779,8 @@ async def accept_run(
     carries. ``prepare`` completes ``source`` for a run that is not a repeat (#2550).
     ``http`` asking for ``Prefer: respond-async`` makes a start no worker has accepted
     within `FAST_ACCEPT` a 202 to follow (spec 2026-10-13 §5.1, #2793); its Update id is
-    the request's ``request_id``, or a fresh one.
+    the request's ``request_id``. A request without one keeps the 503 re-send: a repeat
+    of an ended run must start anew (``ended``), which a follow cannot tell apart.
     """
     key = run_key(subject.run_subject, request)
     has_request_id = request.request_id is not None

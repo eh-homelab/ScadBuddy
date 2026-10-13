@@ -59,7 +59,7 @@ from tests.api.test_print_run_choices import (
     run_request,
     run_routes,
 )
-from tests.api.test_send import died_after_the_upload, stored_files, upload_route
+from tests.api.test_send import configure, died_after_the_upload, stored_files, upload_route
 from tests.bambuddy.conftest import recording
 from tests.support.temporal import WorkflowReaper, namespace_not_found_error
 from tests.test_bambu3mf import add_plate
@@ -1374,3 +1374,74 @@ def test_following_a_run_temporal_does_not_know_says_to_send_it_again(
     response = client.post("/api/v1/commands/print-x/updates/r1")
     assert response.status_code == 409, response.text
     assert response.json()["type"] == COMMAND_RESEND_PROBLEM
+
+
+def test_a_library_press_with_a_request_id_is_offered_the_202(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #2834: the library route hands its request to `accept_run` as the output
+    route does, so a slow start of a library file's run is a 202 to follow too."""
+    configure(client)
+
+    async def slow(*args: Any, **kwargs: Any) -> AcceptAnswer:
+        raise CommandStillAcceptingError("print-x")
+
+    monkeypatch.setattr(printing_api, "start_command", slow)
+    pressed = client.post(
+        "/api/v1/print/library/89/run",
+        json={**body(), "request_id": "r" * 32},
+        headers={"Prefer": "respond-async"},
+    )
+
+    assert pressed.status_code == 202, pressed.text
+    assert pressed.json()["update_id"] == "r" * 32
+    assert pressed.headers["preference-applied"] == "respond-async"
+
+
+@respx.mock
+def test_a_followed_run_the_check_refuses_answers_the_refusal(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #2834, end to end on a real worker: a run answered 202 whose check then
+    refuses it (Bambuddy has no such printer) is that refusal when followed, and
+    nothing is sent to the printer."""
+    monkeypatch.setattr(printing_api, "FAST_ACCEPT", timedelta(seconds=1))
+    monkeypatch.setattr(commands_module, "FOLLOW_WAIT", timedelta(seconds=1))
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    slice_routes()
+    queued = queue_route()
+    held = threading.Event()
+
+    async def no_printers(request: httpx.Request) -> httpx.Response:
+        while not held.is_set():
+            await asyncio.sleep(0.01)
+        return httpx.Response(200, json=[])
+
+    respx.get(f"{API}/printers/").mock(side_effect=no_printers)
+    try:
+        posted = client.post(
+            f"/api/v1/print/outputs/{output_id}/run",
+            json={**body(), "request_id": uuid.uuid4().hex},
+            headers={"Prefer": "respond-async"},
+        )
+        assert posted.status_code == 202, posted.text
+    finally:
+        held.set()
+    answered = client.post(posted.json()["follow_url"])
+    for _ in range(10):
+        if answered.status_code != 202:
+            break
+        answered = client.post(posted.json()["follow_url"])
+
+    assert answered.status_code == 422, answered.text
+    assert "has no printer 1" in answered.json()["detail"]
+    assert queued.call_count == 0
+
+
+def test_a_print_follow_refuses_a_supersedes(client: TestClient) -> None:
+    """Review #2834: `supersedes` is a render's; on a print's follow it is refused, not
+    silently ignored."""
+    response = client.post("/api/v1/commands/print-x/updates/r1", params={"supersedes": "j"})
+    assert response.status_code == 422, response.text
