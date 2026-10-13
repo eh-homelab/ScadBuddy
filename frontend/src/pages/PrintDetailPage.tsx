@@ -285,8 +285,13 @@ function RenderSection({ print }: { print: PrintDetail }) {
   }, [glb, print.output_id, print.slug, print.library_file_id, output.data])
   // #2731 — a library file's plate mesh is the whole file's geometry for that plate (11 MB
   // for one print): its image first, and the mesh only when asked for.
-  const [meshAsked, setMeshAsked] = useState(false)
+  // Keyed by the mesh's URL (#2915): another print shown in this same section starts on
+  // its image again, rather than loading its mesh unasked.
+  const [meshAskedFor, setMeshAskedFor] = useState<string | null>(null)
+  // #2915 — the plate image that would not load: shown as a placeholder, not a broken image.
+  const [brokenImage, setBrokenImage] = useState<string | null>(null)
   if (!glb || !job) return null
+  const meshAsked = meshAskedFor === glb.url
   const library = print.library_file_id
   const plate = Number(new URL(glb.url, window.location.origin).searchParams.get('plate') ?? '1')
   return (
@@ -294,12 +299,19 @@ function RenderSection({ print }: { print: PrintDetail }) {
       <div className="relative aspect-[4/3] overflow-hidden rounded-[4px]">
         {library !== null && !meshAsked ? (
           <>
-            <img
-              src={api.libraryPlateThumbnailUrl(library, plate)}
-              alt={`Plate ${plate} of the library file`}
-              className="size-full bg-surface-2 object-contain"
-            />
-            <Button size="sm" className="absolute right-2 bottom-2" onClick={() => setMeshAsked(true)}>
+            {brokenImage === api.libraryPlateThumbnailUrl(library, plate) ? (
+              <p className="flex size-full items-center justify-center bg-surface-2 text-[12px] text-faint">
+                No image of plate {plate}
+              </p>
+            ) : (
+              <img
+                src={api.libraryPlateThumbnailUrl(library, plate)}
+                alt={`Plate ${plate} of the library file`}
+                className="size-full bg-surface-2 object-contain"
+                onError={() => setBrokenImage(api.libraryPlateThumbnailUrl(library, plate))}
+              />
+            )}
+            <Button size="sm" className="absolute right-2 bottom-2" onClick={() => setMeshAskedFor(glb.url)}>
               Show in 3D
             </Button>
           </>
