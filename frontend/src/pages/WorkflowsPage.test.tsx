@@ -57,12 +57,18 @@ describe('WorkflowsPage', () => {
     expect(within(plates).getByRole('link', { name: 'plates' })).toHaveAttribute('href', '/workflows/flows/def-plates-2')
     expect(plates).toHaveTextContent('latest v2')
     // `GET /workflows` is each name's newest version: one row per flow.
-    expect(within(flows).getAllByRole('listitem')).toHaveLength(3)
+    expect(flows.querySelectorAll('[data-flow]')).toHaveLength(3)
     expect(plates).toHaveTextContent('Registered by you, in the browser')
     const swap = flows.querySelector<HTMLElement>('[data-flow="swap"]')!
     expect(swap).toHaveTextContent('latest v1')
     expect(swap).toHaveTextContent('Registered by an assistant (session sess-1)')
     expect(screen.getByRole('link', { name: 'Flows' })).toHaveAttribute('aria-current', 'page')
+    // #2484: its triggers under it, each with its last run and pause or resume.
+    const triggers = await within(swap).findByRole('list', { name: 'Triggers' })
+    const hourly = within(triggers).getByRole('listitem', { name: /Every hour/ })
+    expect(within(hourly).getByRole('link', { name: 'run, succeeded' })).toHaveAttribute('href', '/workflows/runs/run-done')
+    expect(within(hourly).getByRole('button', { name: 'Pause' })).toBeInTheDocument()
+    expect(plates.querySelector('[aria-label="Triggers"]')).toBeNull()
   })
 
   it('archives a flow from the Flows tab, after saying what happens to its runs, and shows it again (#2485)', async () => {

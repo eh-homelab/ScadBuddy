@@ -775,8 +775,9 @@ export const api = {
   // #2484 — flow triggers: a schedule or an event that starts runs of a pinned version,
   // as whoever made it. A standing grant is approved as sent from here; only a person
   // approves or declines an agent's.
+  /** The newest 200, the route's most. */
   listFlowTriggers: (name?: string) =>
-    request<FlowTrigger[]>(`/flow-triggers${name ? `?name=${encodeURIComponent(name)}` : ''}`),
+    request<FlowTrigger[]>(`/flow-triggers?limit=200${name ? `&name=${encodeURIComponent(name)}` : ''}`),
   getFlowTrigger: (id: string) => request<FlowTrigger>(`/flow-triggers/${seg(id)}`),
   createFlowTrigger: (body: FlowTriggerCreate) =>
     request<FlowTrigger>('/flow-triggers', { method: 'POST', body: JSON.stringify(body) }),
