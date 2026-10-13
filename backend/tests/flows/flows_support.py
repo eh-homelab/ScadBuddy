@@ -138,7 +138,8 @@ async def history_payloads(client: Client, workflow_id: str) -> bytes:
 #: reads them; the agent's own migrations make them in a deployment.
 _AGENT_OWNERS = """
 CREATE TABLE IF NOT EXISTS ai_sessions (
-    id uuid PRIMARY KEY, owner_kind text NOT NULL, owner_id text NOT NULL
+    id uuid PRIMARY KEY, owner_kind text NOT NULL, owner_id text NOT NULL,
+    archived_at timestamptz
 );
 CREATE TABLE IF NOT EXISTS ai_mcp_tokens (
     id uuid PRIMARY KEY, tier text NOT NULL, expires_at timestamptz, revoked_at timestamptz
@@ -146,11 +147,13 @@ CREATE TABLE IF NOT EXISTS ai_mcp_tokens (
 """
 
 
-def parent_session(conn: Any, session: str, owner: str, tier: str = "outward") -> None:
+def parent_session(
+    conn: Any, session: str, owner: str, tier: str = "outward", kind: str | None = None
+) -> None:
     """Session `session`, owned by `owner` (`browser`, or a `token:<id>` holding `tier`),
     as the agent records it: whose tiers a parent acts with."""
     conn.execute(_AGENT_OWNERS)
-    kind = "browser" if owner == "browser" else "bearer"
+    kind = kind or ("browser" if owner == "browser" else "bearer")
     conn.execute(
         "INSERT INTO ai_sessions (id, owner_kind, owner_id) VALUES (%s, %s, %s)"
         " ON CONFLICT (id) DO UPDATE SET owner_kind = EXCLUDED.owner_kind,"

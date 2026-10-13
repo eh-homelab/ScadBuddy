@@ -353,3 +353,19 @@ async def test_a_starter_session_that_is_also_the_child_has_no_parent_hop(
             (STARTER["session"], STARTER["principal"]) if parent else (None, None)
         )
         await outward.client.get_workflow_handle(f"flow-{run_id}").terminate()
+
+
+async def test_a_parents_tiers_are_its_owners_now(outward: Outward) -> None:
+    """Matched as the agent writes the author header (`principalHeader`: printable ASCII
+    kept as it is, `%` included); an archived session is no parent (spec §4.4)."""
+    odd = "5e551011-0000-4000-8000-0000000000aa"
+    with outward.store._pool.connection() as conn:
+        parent_session(conn, PARENT_SESSION, STARTER["principal"], tier="write")
+        parent_session(conn, odd, "oidc:https://idp#a%41b", kind="oidc")
+    store = outward.store
+    assert await store.parent_tiers(PARENT_SESSION, STARTER["principal"]) == ["read", "write"]
+    assert await store.parent_tiers(odd, "oidc:https://idp#a%41b") == ["read"]
+    assert await store.parent_tiers(odd, "oidc:https://idp#aAb") is None
+    with outward.store._pool.connection() as conn:
+        conn.execute("UPDATE ai_sessions SET archived_at = now() WHERE id = %s", (PARENT_SESSION,))
+    assert await store.parent_tiers(PARENT_SESSION, STARTER["principal"]) is None

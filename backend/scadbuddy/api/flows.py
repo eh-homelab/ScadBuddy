@@ -933,8 +933,10 @@ async def get_flow_run_proposal(
     original is read from the run's parked call, never from anything stored with the
     proposal."""
     _browser_only("Only a person reads a proposal it may approve.")
+    if flows.client is None:
+        raise _unavailable()
     run = await flows.store.get_run(run_id)
-    if run is None or flows.client is None:
+    if run is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such proposal.")
     held = await flows.store.get_proposal(f"flow:{run.id}:{run.workflow_run_id}:{call_id}")
     if held is None:
