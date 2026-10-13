@@ -222,10 +222,13 @@ class OperationStore:
             ).fetchone()
             if row is not None:
                 op = Operation.model_validate(row)
+                # A session with no principal is not the browser: it is left unattributed.
                 attribution = (
-                    Attribution(author.principal or "browser", author.session, author.tool)
-                    if author is not None
-                    else Attribution("browser", None, None)
+                    Attribution("browser", None, None)
+                    if author is None
+                    else Attribution(author.principal, author.session, author.tool)
+                    if author.principal is not None
+                    else None
                 )
                 self._announce(conn, op, row, attribution)
                 return op

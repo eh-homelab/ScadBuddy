@@ -82,6 +82,14 @@ async def test_operation_without_author_is_the_browsers(
     assert got is not None and got.principal == "browser"
 
 
+async def test_operation_from_a_session_without_a_principal_is_not_the_browsers(
+    jobs: JobProjection, index: ActivityIndex
+) -> None:
+    await _insert(OperationStore(jobs.pool, activity=index), OperationAuthor(session="s1"))
+    got = await index.get("operation:o1")
+    assert got is not None and got.principal is None
+
+
 async def test_operation_without_activity_index_still_inserts(jobs: JobProjection) -> None:
     op = await _insert(OperationStore(jobs.pool))
     assert op.status == "running"
