@@ -15,6 +15,8 @@ const LABELS: Record<string, string> = {
   wipe_tower_no_sparse_layers: 'No sparse layers on the prime tower',
   enable_support: 'Supports',
   support_type: 'Support type',
+  support_threshold_angle: 'Support threshold angle',
+  support_on_build_plate_only: 'Supports on build plate only',
   brim_width: 'Brim width',
   brim_type: 'Brim',
   print_sequence: 'Print sequence',
@@ -24,11 +26,20 @@ const LABELS: Record<string, string> = {
 const MILLIMETRES = new Set(['brim_width'])
 
 /** Keys whose value is Bambu's `0` / `1` switch. */
-const SWITCHES = new Set(['enable_prime_tower', 'wipe_tower_no_sparse_layers', 'enable_support'])
+const SWITCHES = new Set([
+  'enable_prime_tower',
+  'wipe_tower_no_sparse_layers',
+  'enable_support',
+  'support_on_build_plate_only',
+])
+
+/** Keys whose value is an angle in degrees (#1899). */
+const DEGREES = new Set(['support_threshold_angle'])
 
 function valueOf(key: string, value: string): string {
   if (SWITCHES.has(key) && (value === '0' || value === '1')) return value === '1' ? 'On' : 'Off'
   if (MILLIMETRES.has(key)) return `${value} mm`
+  if (DEGREES.has(key)) return `${value}°`
   return value
 }
 
