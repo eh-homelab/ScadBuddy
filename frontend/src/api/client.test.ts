@@ -618,7 +618,7 @@ describe('runPrint follows the run the server answers with 202 (#470)', () => {
         prefer = request.headers.get('Prefer')
         return runAccepting()
       }),
-      http.get(runFollowUrl, () => {
+      http.post(runFollowUrl, () => {
         follows += 1
         return follows === 1 ? runAccepting() : HttpResponse.json(started)
       }),
@@ -640,7 +640,7 @@ describe('runPrint follows the run the server answers with 202 (#470)', () => {
         sent.push(await request.text())
         return sent.length === 1 ? runAccepting() : HttpResponse.json(started, { status: 202 })
       }),
-      http.get(runFollowUrl, () =>
+      http.post(runFollowUrl, () =>
         HttpResponse.json({ type: COMMAND_RESEND, title: 'Conflict', status: 409, detail: 'send it again' }, { status: 409 }),
       ),
       http.get('/api/v1/print/runs/run-1', () => HttpResponse.json({ ...started, status: 'succeeded', result })),
@@ -656,7 +656,7 @@ describe('runPrint follows the run the server answers with 202 (#470)', () => {
     printRunPoll.acceptingMs = 20
     server.use(
       http.post('/api/v1/print/outputs/out-1/run', () => runAccepting()),
-      http.get(runFollowUrl, () => runAccepting()),
+      http.post(runFollowUrl, () => runAccepting()),
     )
 
     const error = await api.runPrint('out-1', body).catch((caught: unknown) => caught)

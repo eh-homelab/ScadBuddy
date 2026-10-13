@@ -1306,11 +1306,11 @@ def test_a_run_no_worker_has_accepted_yet_is_followed_to_its_run(
         assert accepting["update_id"] == request_id
         assert accepting["workflow_id"].startswith("print-")
 
-        still = client.get(accepting["follow_url"])
+        still = client.post(accepting["follow_url"])
         assert still.status_code == 202, still.text
     finally:
         held.set()
-    answered = client.get(accepting["follow_url"])
+    answered = client.post(accepting["follow_url"])
 
     assert answered.status_code == 200, answered.text
     run = answered.json()
