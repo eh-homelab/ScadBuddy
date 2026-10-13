@@ -626,8 +626,11 @@ are set ([headless-browser.md](ai/headless-browser.md)).
   reviewed them and press **Approve this pin**, then **Enable**. Anything that would
   start a process or run code inside the assistant is refused by the vetting rules and
   listed; the only way past is to approve loading the package as it is, which runs its
-  code with the assistant service's own access. A newer commit is **Fetch re-pin**,
-  approved the same way.
+  code with the assistant service's own access. Such a package may also use Claude
+  Code's own tools (Bash, Read, Write, WebFetch and the like), each asking first. A
+  durable chat offers only Bash and PowerShell of them and tells you which it left out;
+  use a classic chat for a package that needs the others. A newer commit is
+  **Fetch re-pin**, approved the same way.
 - **Plugins**. ScadBuddy's own tools come first, marked **Built in**: `scadbuddy` (the
   assistant's ScadBuddy tools). **Review tools**
   lists each one with its tier and **Disable**. A tier can only be raised above the one

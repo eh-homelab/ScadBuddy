@@ -705,7 +705,10 @@ A turn that loads an allowed pin also gets two more things:
   name in `allowed-tools` or `tools` (`review.builtin_tools`, for example `Bash`, `Read`
   or `Write`). They are offered beside the run's own `Skill` and `Agent` (`run.ts`
   `builtinTools`). They are not ScadBuddy's tools, so a model's call to one is
-  `outward`, and in a session it parks for a human.
+  `outward`, and in a session it parks for a human. A durable session offers only `Bash`
+  and `PowerShell` of them, each parked the same way. The others cannot run as their own
+  Temporal activity, so they could not park, and they are left out
+  ([operating.md](operating.md), #2393).
 - **Shell injection.** Skill shell injection is on (`disableSkillShellExecution`
   false). Only an allowed package can carry it, because the vetting refuses it
   everywhere else. Measured on Claude Code 2.1.287 (`test/pluginPackages.e2e.test.ts`):

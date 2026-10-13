@@ -818,7 +818,17 @@ forwarder (above), and their forwarder URLs and headers are redacted like a plug
 local one runs only for a package approved with `allow_refused`, started in the
 package's folder with `PATH`, `HOME` and its declared `env`. Of the built-ins an allowed package names, only `Bash` and `PowerShell` can run as
 their own activities, and so wait for a human. A durable turn offers those two and parks
-each call for approval. It does not offer the others, and says so in the session. The
+each call for approval. It does not offer the others, and says so in the session. This
+gap is kept on purpose (#2393). The Temporal plugin refuses any other built-in in
+`tool_activities` ([`_check_tool_activities`](https://github.com/temporalio/ai-integrations/blob/b1cf3848b15ad5cd1f009bd19524e3f751140439/python/claude_agent_sdk/src/temporalio/claude_agent_sdk/_workflow.py#L73-L97), at the
+pinned commit), for reasons it tested. A tool step answers the engine's model calls with
+a stand-in, and Claude Code checks a file tool's call again when the next segment
+delivers its result. So an `Edit` run in its own step happens, but Claude is told it
+failed, because the file changed since Claude read it. A tool that calls the model itself
+(`WebFetch`) and a subagent cannot run in a tool step at all. A built-in that stays in the
+segment cannot park, and every package built-in is outward, so a durable turn leaves it
+out rather than run it unasked. A package that needs `Read`, `Write`, `Edit`, `WebFetch`
+or the like works in a classic chat. The
 Temporal plugin owns the engine's settings, so a durable turn cannot set
 `disableSkillShellExecution`, and skill shell injection follows Claude Code's default
 there. Only an allowed package can carry one (`vet.ts` refuses it everywhere else), and
