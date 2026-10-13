@@ -1,6 +1,10 @@
 import { api, ApiError, NEEDS_BACKFILL } from '../api/client'
 import type { ArrangeRequest, LibraryEntry, NeedsBackfillProblem, Output } from '../api/types'
+import type { Within } from './traceAction'
 import { followUntil, JobStillRunning, waitForJob } from './waitForJob'
+
+/** No action to join: the call runs as it is. */
+const untraced: Within = (call) => call()
 
 export type ArrangeGoal = NonNullable<ArrangeRequest['goal']>
 
@@ -90,7 +94,8 @@ export function arrangedNote(plates: number): string {
  * The job is followed over the realtime socket (#1909); `pollMs` is the read interval
  * only while the socket is unavailable. An aborted `signal` stops the wait and rejects
  * with its reason: nothing is saved after the caller has gone (a closed dialog), so a
- * job is saved once.
+ * job is saved once. `within` makes the arrange's start and its save children of the
+ * caller's action (#2292); the job's follow is a poll, and stays out of it.
  */
 export async function runArrange(
   slug: string,
@@ -109,12 +114,14 @@ export async function runArrange(
     arranged?: ArrangedJob
     /** Called once the arrange's job is done, before it is saved. */
     onArranged?: (job: ArrangedJob) => void
+    within?: Within
   } = {},
 ): Promise<Arranged> {
   const { signal } = opts
+  const within = opts.within ?? untraced
   let done = opts.arranged
   if (!done) {
-    const started = await api.arrangeOutputs(body)
+    const started = await within(() => api.arrangeOutputs(body))
     signal?.throwIfAborted()
     const job = await waitForJob(started.id, {
       pollMs: opts.pollMs ?? 1000,
@@ -127,7 +134,10 @@ export async function runArrange(
     done = { jobId: job.id, plates: Math.max(1, (job.plates ?? []).length) }
     opts.onArranged?.(done)
   }
-  const output = await api.createOutput(slug, done.jobId, body.name ?? undefined, undefined, undefined, opts.saveKey)
+  const jobId = done.jobId
+  const output = await within(() =>
+    api.createOutput(slug, jobId, body.name ?? undefined, undefined, undefined, opts.saveKey),
+  )
   return { output, plates: done.plates }
 }
 
@@ -213,6 +223,7 @@ export const BACKFILL_WAIT_MS = 5 * 60_000
  * job until it ends (over the socket, #1909), then follow the output (`output.updated`, #1970) until the server has attached what the
  * render recorded (`backfill` gone) or says why not (`backfill.error`). An aborted
  * `signal` stops every wait and rejects; the server still finishes the re-renders.
+ * `within` makes each re-render's start a child of the caller's action (#2292).
  */
 export async function backfillOutputs(
   outputs: OutputRef[],
@@ -221,9 +232,11 @@ export async function backfillOutputs(
     waitMs?: number
     onProgress?: (output: OutputRef, message: string) => void
     signal?: AbortSignal
+    within?: Within
   } = {},
 ): Promise<Backfilled> {
   const { signal } = opts
+  const within = opts.within ?? untraced
   const pollMs = opts.pollMs ?? BACKFILL_POLL_MS
   const deadline = Date.now() + (opts.waitMs ?? BACKFILL_WAIT_MS)
   const one = async (output: OutputRef): Promise<Output> => {
@@ -231,7 +244,7 @@ export async function backfillOutputs(
     say('Queuing a re-render…')
     let job
     try {
-      job = await api.backfillOutput(output.id)
+      job = await within(() => api.backfillOutput(output.id))
     } catch (cause) {
       // Re-rendered since the list was read (a closed dialog's backfill finished). By its
       // code, not the status alone: another 409 is no sign the objects are there (#1007).

@@ -922,6 +922,14 @@ async def run_projects_worker(
 
 Queue = Literal["render", "bambuddy", "projects"]
 
+#: Each worker's ``service.name`` (#2292): the Deployment it runs as, so the render and
+#: print workers are told apart in Tempo rather than all reporting as one service.
+SERVICE_NAMES: dict[Queue, str] = {
+    "render": "scadbuddy-render",
+    "bambuddy": "scadbuddy-print",
+    "projects": "scadbuddy-projects",
+}
+
 
 def _on_signal(stop: asyncio.Event, stop_now: asyncio.Event) -> Callable[[], None]:
     """The first SIGTERM/SIGINT stops and drains; a second cuts the drain short (#605)."""
@@ -965,7 +973,7 @@ def main() -> None:
     queue = parse_queue()
     settings = Settings()
     configure_logging(settings.log_level)
-    configure_tracing("scadbuddy-worker", version=settings.version, revision=settings.revision)
+    configure_tracing(SERVICE_NAMES[queue], version=settings.version, revision=settings.revision)
     asyncio.run(_main(settings, queue))
 
 

@@ -9,6 +9,18 @@ import { resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { LibraryPage } from './LibraryPage'
+import type * as TraceAction from '../lib/traceAction'
+
+/** The user actions started, by name (#2292): `traceAction` itself, recorded. */
+const actions = vi.hoisted(() => [] as string[])
+vi.mock('../lib/traceAction', async (importOriginal) => {
+  const actual = await importOriginal<typeof TraceAction>()
+  const traceAction: typeof actual.traceAction = (name, attributes, run) => {
+    actions.push(name)
+    return actual.traceAction(name, attributes, run)
+  }
+  return { ...actual, traceAction }
+})
 
 describe('LibraryPage', () => {
   beforeEach(() => {
@@ -281,6 +293,8 @@ describe('LibraryPage, item context (#975)', () => {
     await user.click(within(toast).getByRole('button', { name: 'Undo' }))
     expect(await within(toast).findByText('Restored 1 file.')).toBeInTheDocument()
     expect(await screen.findByTestId('library-file-120')).toBeInTheDocument()
+    // Each a user action of its own in Tempo (#2292).
+    expect(actions).toEqual(expect.arrayContaining(['library_delete', 'library_restore']))
   })
 
   it('deletes the selection, warns of an external file, and reports the one skipped (#2167)', async () => {
