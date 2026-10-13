@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { api } from '../api/client'
 import type { Activity } from '../api/types'
+import { ActivityDrawer } from '../components/activity/ActivityDrawer'
 import { ActivityFilters } from '../components/activity/ActivityFilters'
 import { ActivityTable } from '../components/activity/ActivityTable'
 import { sinceTime } from '../components/activity/labels'
@@ -23,6 +24,7 @@ export function ActivityPage() {
   const [more, setMore] = useState<{ key: string; items: Activity[]; cursor: string | null } | null>(null)
   const [loadingMore, setLoadingMore] = useState(false)
   const [moreError, setMoreError] = useState<string>()
+  const [open, setOpen] = useState<string | null>(null)
 
   const onChange = useCallback(
     (next: ActivityQuery) => setParams(toActivityParams(next), { replace: true }),
@@ -61,7 +63,7 @@ export function ActivityPage() {
       ) : items.length === 0 ? (
         <p className="text-[13px] text-muted">No activity matches.</p>
       ) : (
-        <ActivityTable items={items} facets={facets.data} />
+        <ActivityTable items={items} facets={facets.data} onOpen={setOpen} />
       )}
       {moreError && (
         <p role="alert" className="text-[13px] text-warn">
@@ -75,6 +77,7 @@ export function ActivityPage() {
           </Button>
         </div>
       )}
+      {open && <ActivityDrawer id={open} onClose={() => setOpen(null)} />}
     </div>
   )
 }
