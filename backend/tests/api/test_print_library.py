@@ -595,12 +595,20 @@ def test_a_sliced_file_is_never_preview_sliced(client: TestClient) -> None:
     run_routes()
     sliced = slice_routes()
 
-    response = client.post(
+    started = client.post(
         "/api/v1/print/library/104/preview-slice", json=SLICED_RUN, headers=press()
     )
 
-    assert response.status_code == 422, response.text
-    assert "sliced already" in response.json()["detail"]
+    # #2700: the route answers 202 once the operation is recorded; the refusal is the
+    # operation's failure, so it is followed until it settles.
+    assert started.status_code == 202, started.text
+    op = started.json()
+    deadline = time.monotonic() + 30
+    while op["status"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.1)
+        op = client.get(f"/api/v1/operations/{op['id']}").json()
+    assert op["status"] == "failed", op
+    assert "sliced already" in json.dumps(op["error"])
     assert not sliced.called
 
 
