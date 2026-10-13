@@ -107,23 +107,74 @@ export const DEFAULT_MAX_TOKENS = 4096
 export const DEFAULT_RECALL_TAGS_MATCH: TagsMatch = 'any'
 
 /**
- * Hindsight refuses a recall query over 500 tokens (HTTP 400 "Query too long", seen in
- * prod 2026-10-12 on a 6192-token prompt), so the query is cut below that. Tokens are
- * estimated conservatively: a quarter per ASCII character, one per any other
- * character (CJK runs about one token each).
+ * The longest recall query sent, in characters (code points): the start of the redacted
+ * query is kept, as the Claude Code Hindsight plugin does (`recallMaxQueryChars`, env
+ * `HINDSIGHT_RECALL_MAX_QUERY_CHARS`, `query[:max]`), with the same default of 800 and
+ * `0` for no cut. Settings → Assistant plugins sets it (`ai_settings`
+ * `memory_recall_max_query_chars`, routes/memorySettings.ts), read at each turn.
+ *
+ * The bank has its own limit in tokens, `HINDSIGHT_API_RECALL_MAX_QUERY_TOKENS` (default
+ * 500, counted with tiktoken), and refuses a longer query with HTTP 400 "Query too long"
+ * (seen in prod 2026-10-12 on a 6192-token prompt). The two are set apart, so a recall the
+ * bank still refuses is retried once, shortened by the ratio it reported
+ * (`retryQueryLength`).
  */
-export const RECALL_QUERY_MAX_TOKENS = 400
+export const SETTING_RECALL_MAX_QUERY_CHARS = 'memory_recall_max_query_chars'
+export const DEFAULT_RECALL_MAX_QUERY_CHARS = 800
+export const MAX_RECALL_MAX_QUERY_CHARS = 100_000
 
-/** The start of `text` whose estimated token count fits `maxTokens`. */
-export function capRecallQuery(text: string, maxTokens = RECALL_QUERY_MAX_TOKENS): string {
-  let tokens = 0
+/** The stored cap, or the default for anything the PUT could not have written. */
+export function recallMaxQueryChars(stored: unknown): number {
+  return typeof stored === 'number' && Number.isInteger(stored) && stored >= 0 && stored <= MAX_RECALL_MAX_QUERY_CHARS
+    ? stored
+    : DEFAULT_RECALL_MAX_QUERY_CHARS
+}
+
+/** Reads ai_settings (sessions/manager.ts `SettingsReader`). */
+export type SettingsReader = { get<T>(key: string): Promise<T | undefined> }
+
+/** A turn's recall cap: the setting when it is stored, else the hook config's, else the default. */
+export async function turnRecallMaxQueryChars(
+  settings: SettingsReader | undefined,
+  hookConfig: Partial<MemoryHookConfig> | undefined,
+): Promise<number> {
+  const stored = await settings?.get<unknown>(SETTING_RECALL_MAX_QUERY_CHARS)
+  if (stored === undefined || stored === null) return hookConfig?.recallMaxQueryChars ?? DEFAULT_RECALL_MAX_QUERY_CHARS
+  return recallMaxQueryChars(stored)
+}
+
+/**
+ * The first `maxChars` code points of `text` (`0`: all of it). Code points, as Python's
+ * slice counts them, so an emoji or other non-BMP character is never cut in half.
+ */
+export function capRecallQuery(text: string, maxChars: number): string {
+  if (maxChars <= 0) return text
+  let count = 0
   let end = 0
   for (const ch of text) {
-    tokens += ch.charCodeAt(0) < 0x80 ? 0.25 : 1
-    if (tokens > maxTokens) return text.slice(0, end)
+    if (count === maxChars) return text.slice(0, end)
+    count += 1
     end += ch.length
   }
   return text
+}
+
+/**
+ * The query length, in code points, to retry a recall the bank refused as too long: the
+ * sent length scaled by the bank's maximum over the tokens it counted, less a fifth for
+ * margin. Half the length when the reply does not say both numbers.
+ */
+export function retryQueryLength(sentChars: number, reply: string): number {
+  const match = /(\d+) tokens exceeds maximum of (\d+)/.exec(reply)
+  const tokens = match ? Number(match[1]) : 0
+  const max = match ? Number(match[2]) : 0
+  const ratio = tokens > 0 && max > 0 && max < tokens ? (max / tokens) * 0.8 : 0.5
+  return Math.max(1, Math.floor(sentChars * ratio))
+}
+
+/** True for the bank's refusal of an over-long query (Hindsight api/http.py). */
+export function isQueryTooLong(err: unknown): err is HindsightError {
+  return err instanceof HindsightError && err.status === 400 && /query too long/i.test(err.body)
 }
 
 /** hooks.py `MemoryHookConfig`, same fields in camelCase, plus `retainMode`. */
@@ -144,6 +195,8 @@ export type MemoryHookConfig = {
   retainPrefix: string
   /** ScadBuddy's: the whole conversation as one upserted document, or upstream's last result only. */
   retainMode: 'transcript' | 'result'
+  /** The Claude Code plugin's `recallMaxQueryChars`: the query's longest start sent; 0 sends it whole. */
+  recallMaxQueryChars: number
 }
 
 export const DEFAULT_MEMORY_HOOK_CONFIG: MemoryHookConfig = {
@@ -156,6 +209,7 @@ export const DEFAULT_MEMORY_HOOK_CONFIG: MemoryHookConfig = {
   retainTags: ['source:claude-agent-sdk'],
   retainPrefix: 'Agent session result: ',
   retainMode: 'transcript',
+  recallMaxQueryChars: DEFAULT_RECALL_MAX_QUERY_CHARS,
 }
 
 /** Where the plugin's Hindsight is: its API base, the bank, and how to reach it. */
@@ -200,6 +254,14 @@ export type RetainItem = {
 
 export class HindsightError extends Error {
   override name = 'HindsightError'
+  /** The HTTP status, and the start of the reply's body, when the bank answered. */
+  readonly status: number | undefined
+  readonly body: string
+  constructor(message: string, status?: number, body = '') {
+    super(message)
+    this.status = status
+    this.body = body
+  }
 }
 
 /** The two REST calls, over the pinned address. */
@@ -219,7 +281,8 @@ export class HindsightClient {
     if (this.target.header) headers[this.target.header.name] = this.target.header.value
     const res = await pinnedFetch(url, this.target.address, { method: 'POST', headers, body: JSON.stringify(body), signal })
     if (res.status < 200 || res.status >= 300) {
-      throw new HindsightError(`POST ${path} answered HTTP ${res.status}: ${res.body.slice(0, 200)}`)
+      const body = res.body.slice(0, 200)
+      throw new HindsightError(`POST ${path} answered HTTP ${res.status}: ${body}`, res.status, body)
     }
     try {
       return JSON.parse(res.body) as unknown
@@ -541,7 +604,7 @@ export function createMemoryHooks(options: MemoryHooksOptions): MemoryHooks {
       if (!query) return { output: {} }
       if (cfg.recallQuery !== '$prompt') query = cfg.recallQuery
       // The query leaves for the bank like a retain does, so it is redacted the same way.
-      const body: RecallBody = { query: capRecallQuery(scrub(query)), budget, max_tokens: maxTokens }
+      const body: RecallBody = { query: capRecallQuery(scrub(query), cfg.recallMaxQueryChars), budget, max_tokens: maxTokens }
       if (options.recallTags?.length) {
         body.tags = options.recallTags
         body.tags_match = options.recallTagsMatch ?? DEFAULT_RECALL_TAGS_MATCH
@@ -550,7 +613,21 @@ export function createMemoryHooks(options: MemoryHooksOptions): MemoryHooks {
       const timeout = AbortSignal.timeout(recallTimeoutMs)
       const startedAt = new Date()
       try {
-        results = await client.recall(body, AbortSignal.any([signal, timeout]))
+        const both = AbortSignal.any([signal, timeout])
+        try {
+          results = await client.recall(body, both)
+        } catch (err) {
+          // The bank's token limit is set apart from the cap above, so it may still refuse:
+          // once, shorter by the ratio it reported. A second refusal is the failure below.
+          if (!isQueryTooLong(err)) throw err
+          const sent = [...body.query].length
+          body.query = capRecallQuery(body.query, retryQueryLength(sent, err.body))
+          log(
+            `hindsight: bank ${client.bankId} refused a ${sent}-character recall query as too long (${err.body}); ` +
+              `retrying once with ${[...body.query].length} characters`,
+          )
+          results = await client.recall(body, both)
+        }
       } catch (err) {
         const why = timeout.aborted ? `timed out after ${recallTimeoutMs} ms` : describe(err)
         log(`hindsight: recall from bank ${client.bankId} failed (${why}); no memories were injected`)
