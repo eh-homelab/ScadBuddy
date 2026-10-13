@@ -336,13 +336,13 @@ async def test_the_sweep_prunes_even_when_repair_fails() -> None:
     assert [call[0] for call in index.calls] == ["repair", "prune"]
 
 
-async def test_the_sweep_uses_the_defaults_when_the_settings_cannot_be_read() -> None:
+async def test_the_sweep_prunes_nothing_when_the_settings_cannot_be_read() -> None:
     def broken() -> StoredSettings:
         raise RuntimeError("database down")
 
     index = RecordingIndex()
     state = sweep_state(StoredSettings(), index)
     state.settings_store.load = broken
-    with pytest.raises(RuntimeError, match="activity sweep failed"):
+    with pytest.raises(RuntimeError, match="database down"):
         await main._sweep_activity_logged(state)
-    assert index.calls == [("repair", DAY, None), ("prune", 30 * DAY, DAY)]
+    assert index.calls == []

@@ -513,17 +513,15 @@ async def _sweep_activity_logged(state: AppState) -> None:
     whatever repair did. The window is never longer than the TTL, or a pruned row would
     be restored from its source on the next run."""
     failed = False
-    ttl, window = ACTIVITY_TTL_DEFAULT, ACTIVITY_REPAIR_WINDOW_DEFAULT
     try:
         settings = await asyncio.to_thread(state.settings_store.load)
-        ttl = settings.activity_ttl_seconds or ACTIVITY_TTL_DEFAULT
-        window = settings.activity_repair_window_seconds or ACTIVITY_REPAIR_WINDOW_DEFAULT
     except Exception:
-        # The stored TTL is unknown, so the defaults apply: the table must not grow for
-        # as long as the settings cannot be read. The run still reports the failure.
-        logger.exception("could not load the activity settings; using the defaults")
-        failed = True
-    window = min(window, ttl)
+        # The stored TTL is unknown, and the default may be shorter than the operator's:
+        # pruning with it would delete rows they chose to keep. Skip the run, which fails.
+        logger.warning("could not load the activity settings; skipping the sweep", exc_info=True)
+        raise
+    ttl = settings.activity_ttl_seconds or ACTIVITY_TTL_DEFAULT
+    window = min(settings.activity_repair_window_seconds or ACTIVITY_REPAIR_WINDOW_DEFAULT, ttl)
     index = state.components.get(ACTIVITY).index
     try:
         await index.repair(window)
