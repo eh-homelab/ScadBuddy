@@ -95,6 +95,8 @@ function harness(
   const audits: AuditEntry[] = []
   const reported: string[] = []
   const stored: string[] = []
+  /** The input hash each session approval check was bound to (#2649). */
+  const bindings: (string | undefined)[] = []
   const owner = options.owner ?? BROWSER
   let connects = 0
   const server: TurnServer = {
@@ -116,7 +118,9 @@ function harness(
       release: () => {},
     }),
     hostQueue: 'agent-tools.host-1',
-    approvals: { approved: async (requestId) => requestId.endsWith(':toolu_approved') },
+    approvals: {
+      approved: async (requestId, binding) => (bindings.push(binding?.inputHash), requestId.endsWith(':toolu_approved')),
+    },
     flows: {
       startedBy: async (run) => (run === FLOW ? (options.flowStarter ?? BROWSER) : undefined),
       // Only the backend's workflow_run_decisions approves a flow's call, and only for the
@@ -140,6 +144,7 @@ function harness(
     audits,
     reported,
     stored,
+    bindings,
     connects: () => connects,
     activities: turnToolActivities(deps),
     call: turnToolActivity(deps),
@@ -330,8 +335,13 @@ describe('turn tools in a durable session', () => {
     expect(refused.type).toBe('NotApproved')
     expect(h.calls).toEqual([])
     expect(await env('turn:notes__post', 'tool-toolu_approved').run(h.call, { method: 'POST', body: 'x' })).toBe('posted x')
+    // #2649: each check is bound to the call's own input hash, as a ScadBuddy tool's is,
+    // so an approval (a person's, or a run grant's use) covers only the input it was for.
+    const hash = `hash:notes__post:${JSON.stringify({ method: 'POST', body: 'x' })}`
+    expect(h.bindings).toEqual([hash, hash])
     // A GET needs none.
     expect(await env('turn:notes__post').run(h.call, { method: 'GET', body: 'y' })).toBe('posted y')
+    expect(h.bindings).toHaveLength(2)
   })
 
   it("holds a call to the turn's tiers", async () => {
