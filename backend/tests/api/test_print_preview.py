@@ -556,6 +556,11 @@ def test_a_plate_too_big_to_read_is_refused_as_a_library_plate_is(
     assert response.status_code == 422, response.text
     assert response.json()["detail"] == str(ReadOutOfMemoryError())
 
+    # Nothing is kept: the same plate reads once there is memory for it.
+    monkeypatch.undo()
+    again = client.get(f"/api/v1/outputs/{output_id}/preview.glb?plate=1")
+    assert again.status_code == 200, again.text
+
 
 def _sweep(client: TestClient, grace: timedelta = PREVIEW_GRACE) -> int:
     state = _state(client)
