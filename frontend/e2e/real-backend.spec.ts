@@ -85,7 +85,7 @@ test.describe('real backend', () => {
     await expect(page.getByTestId('bbox-readout')).toContainText('mm', { timeout: 120_000 })
 
     await page.getByRole('link', { name: 'Activity' }).click()
-    const row = page.getByTestId(/^activity-row-render/).filter({ hasText: /^.*Render / }).first()
+    const row = page.getByTestId(/^activity-row-render/).filter({ hasText: /Render .*name-keychain/ }).first()
     await expect(row).toContainText('You', { timeout: 30_000 })
     await expect(row).toContainText('Succeeded', { timeout: 120_000 })
   })
