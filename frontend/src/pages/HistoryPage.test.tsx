@@ -57,6 +57,11 @@ async function row(name: string): Promise<HTMLElement> {
   return (headings[0] as HTMLElement).closest('li') as HTMLElement
 }
 
+/** No print on record: a row says only where its file went. */
+function noPrints() {
+  server.use(http.get('/api/v1/prints', () => HttpResponse.json({ items: [], next_cursor: null })))
+}
+
 describe('HistoryPage', () => {
   it('shows a pipeline output\'s bill of materials and links its files', async () => {
     const first = outputs[0]!
@@ -201,12 +206,14 @@ describe('HistoryPage', () => {
   })
 
   it('shows where an output already went, by Bambuddy id', async () => {
+    noPrints()
     render()
     expect(within(await row('Reagan')).getByText('queued #4471')).toBeInTheDocument()
     expect(within(await row('Nova')).getByText('in library #8790')).toBeInTheDocument()
   })
 
   it('deep-links each recorded id into Bambuddy', async () => {
+    noPrints()
     render()
     // The base comes from Settings, because an output record carries ids and no URL.
     const queued = within(await row('Reagan')).getByRole('link', { name: 'queued #4471' })
@@ -543,6 +550,95 @@ describe('HistoryPage', () => {
       'href',
       '/m/gridfinity-bin/history',
     )
+  })
+
+  it("says how an output's last print went, linked to its print, in place of the queue id (#2288)", async () => {
+    render()
+    // Reagan's newest print (archive 36) failed; its earlier one (35) succeeded.
+    const reagan = await row('Reagan')
+    const outcome = await within(reagan).findByRole('link', { name: 'Last print: Failed' })
+    expect(outcome).toHaveAttribute('href', '/prints/36')
+    expect(outcome).not.toHaveClass('text-ok')
+    expect(within(reagan).queryByText('queued #4471')).not.toBeInTheDocument()
+    // Nova's is still printing; Workshop's archive is gone from Bambuddy.
+    expect(await within(await row('Nova')).findByRole('link', { name: 'Last print: Printing' })).toHaveAttribute(
+      'href',
+      '/prints/37',
+    )
+    expect(
+      await within(await row('Workshop')).findByRole('link', { name: 'Last print: Deleted in Bambuddy' }),
+    ).toBeInTheDocument()
+  })
+
+  it('keeps the rows when the prints cannot be read (#2288)', async () => {
+    server.use(http.get('/api/v1/prints', () => problem(503, 'Bambuddy is unreachable')))
+    render()
+    expect(await within(await row('Reagan')).findByText('queued #4471')).toBeInTheDocument()
+    expect(screen.queryByText(/Last print/)).not.toBeInTheDocument()
+  })
+
+  it('shows a preview of every output that has one, larger on a click (#2288)', async () => {
+    const { user } = render()
+    const reagan = await row('Reagan')
+    const preview = within(reagan).getByRole('button', { name: 'Preview Reagan' })
+    // Decorative inside its button, which carries the name.
+    expect(preview.querySelector('img')).toHaveAttribute('src', `/api/v1/outputs/${outputs[0]!.id}/thumbnail`)
+    await user.click(preview)
+    const dialog = await screen.findByRole('dialog', { name: 'Reagan' })
+    expect(within(dialog).getByRole('img', { name: 'Preview of Reagan' })).toBeInTheDocument()
+    // One with no thumbnail says so rather than leaving a gap.
+    const without = outputs.find((o) => !o.has_thumbnail && o.name)!
+    expect(within(await row(without.name!)).getByLabelText(`No preview of ${without.name!}`)).toBeInTheDocument()
+  })
+
+  it('offers Queue, Download 3MF and Rename on every output (#2288)', async () => {
+    const { user } = render()
+    for (const name of ['Reagan', 'Nova', 'Workshop']) {
+      const item = await row(name)
+      expect(within(item).getByRole('button', { name: `Queue ${name}` })).toBeInTheDocument()
+      expect(within(item).getByRole('button', { name: 'Download 3MF' })).toBeInTheDocument()
+      expect(within(item).getByRole('button', { name: `Rename ${name}` })).toBeInTheDocument()
+    }
+    await user.click(within(await row('Workshop')).getByRole('button', { name: 'Queue Workshop' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Queue' })
+    expect(within(dialog).getByTestId('run-print')).toHaveTextContent('Queue')
+  })
+
+  it('opens Print as Print after a Queue was closed (#2288)', async () => {
+    const { user } = render()
+    await user.click(within(await row('Workshop')).getByRole('button', { name: 'Queue Workshop' }))
+    await user.click(within(await screen.findByRole('dialog', { name: 'Queue' })).getByRole('button', { name: 'Cancel' }))
+    await user.click(within(await row('Workshop')).getByRole('button', { name: 'Print Workshop' }))
+    expect(await screen.findByRole('dialog', { name: 'Print' })).toBeInTheDocument()
+  })
+
+  it('renames an output, and a blank name gives it back its short id (#2288)', async () => {
+    const { user } = render()
+    await user.click(within(await row('Workshop')).getByRole('button', { name: 'Rename Workshop' }))
+    const field = screen.getByRole('textbox', { name: 'Name for Workshop' })
+    expect(field).toHaveValue('Workshop')
+    await user.clear(field)
+    await user.type(field, 'Shed sign{Enter}')
+    const renamed = await row('Shed sign')
+    expect(screen.queryByRole('textbox', { name: 'Name for Workshop' })).not.toBeInTheDocument()
+    // The server has it, not only the row.
+    const id = outputs.find((o) => o.name === 'Workshop')!.id
+    expect(((await (await fetch(`/api/v1/outputs/${id}`)).json()) as Output).name).toBe('Shed sign')
+
+    await user.click(within(renamed).getByRole('button', { name: 'Rename Shed sign' }))
+    await user.clear(screen.getByRole('textbox', { name: 'Name for Shed sign' }))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(await screen.findByText(id.slice(0, 8))).toBeInTheDocument()
+  })
+
+  it('keeps the name being typed and says why when a rename fails (#2288)', async () => {
+    server.use(http.patch('/api/v1/outputs/:id', () => problem(503, 'the volume is not writable')))
+    const { user } = render()
+    await user.click(within(await row('Workshop')).getByRole('button', { name: 'Rename Workshop' }))
+    await user.type(screen.getByRole('textbox', { name: 'Name for Workshop' }), ' 2')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('the volume is not writable')
+    expect(screen.getByRole('textbox', { name: 'Name for Workshop' })).toHaveValue('Workshop 2')
   })
 
   it('offers Print on every output (#2287)', async () => {

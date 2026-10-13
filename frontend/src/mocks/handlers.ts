@@ -2923,6 +2923,14 @@ export const handlers = [
     })
   }),
 
+  http.patch(`${base}/outputs/:id`, async ({ params, request }) => {
+    const output = state.outputs.find((o) => o.id === params['id'])
+    if (!output) return problem(404, 'Output not found')
+    const { name } = (await request.json()) as { name?: string | null }
+    output.name = name?.trim() || null
+    return HttpResponse.json(output)
+  }),
+
   http.delete(`${base}/outputs/:id`, ({ params }) => {
     state.outputs = state.outputs.filter((o) => o.id !== params['id'])
     return new HttpResponse(null, { status: 204 })

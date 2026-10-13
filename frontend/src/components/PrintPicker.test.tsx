@@ -3649,3 +3649,44 @@ describe('PrintPicker · a sliced file that does not fit is warned of, never hel
     await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
   })
 })
+
+describe('PrintPicker · Queue (#2288)', () => {
+  it('queues the print to wait for a manual start, unless that is unticked', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPage(
+      <PrintPicker open queue source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />,
+    )
+    expect(await screen.findByRole('dialog', { name: 'Queue' })).toBeInTheDocument()
+    await loaded()
+    await showAdvanced()
+    await user.click(screen.getByText('Options'))
+    expect(await screen.findByLabelText('Wait for a manual start')).toHaveValue('true')
+    await user.click(screen.getByTestId('run-print'))
+    await screen.findByTestId('queued-items')
+    expect(bodies[0]).toMatchObject({ options: { manual_start: true } })
+  })
+
+  it('starts as Print does once the manual start is unticked', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPage(
+      <PrintPicker open queue source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />,
+    )
+    await loaded()
+    await showAdvanced()
+    await user.click(screen.getByText('Options'))
+    await user.selectOptions(await screen.findByLabelText('Wait for a manual start'), 'false')
+    await user.click(screen.getByTestId('run-print'))
+    await screen.findByTestId('queued-items')
+    expect(bodies[0]).toMatchObject({ options: { manual_start: false } })
+  })
+
+  it('leaves the manual start to the remembered options for Print', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    expect(await screen.findByRole('dialog', { name: 'Print' })).toBeInTheDocument()
+    await loaded()
+    await user.click(screen.getByTestId('run-print'))
+    await screen.findByTestId('queued-items')
+    expect(bodies[0]).not.toHaveProperty('options.manual_start')
+  })
+})

@@ -142,6 +142,11 @@ interface Props {
    * output. A library file has none of ScadBuddy's.
    */
   printSettings?: Record<string, string> | undefined
+  /**
+   * #2288 — History's Queue: the same dialog with "Wait for a manual start" ticked, so
+   * the print waits in Bambuddy's queue rather than starting. It can be unticked.
+   */
+  queue?: boolean
 }
 
 export function PrintPicker({
@@ -152,6 +157,7 @@ export function PrintPicker({
   onPrinterModel,
   project,
   printSettings,
+  queue = false,
 }: Props) {
   /** §7 — the output a Re-arrange made of the one passed in, printed in its place. */
   const [arranged, setArranged] = useState<Output | null>(null)
@@ -257,6 +263,9 @@ export function PrintPicker({
   const [remembered, setRemembered] = useState<PrintOptionsState | null>(null)
   /** #88 — this print's overrides, all but `quantity`, which is `copies`. */
   const [options, setOptions] = useState<PrintOptions>({})
+  /** The options this print sends: a Queue's start waits for a hand, unless unticked (#2288). */
+  // Memoised: it is a dependency of the run and of the background analysis.
+  const sentOptions = useMemo(() => (queue ? { manual_start: true, ...options } : options), [queue, options])
   /**
    * #1862 — this print's sequence, `null` for the template's or the process's. Per print,
    * never remembered (until #1754 decides remembered choices by subject).
@@ -414,7 +423,7 @@ export function PrintPicker({
     planChanged,
     copies,
     projectId,
-    options,
+    options: sentOptions,
     printSequence,
     rackPosition,
     rackAlgorithm: chosenAlgorithm,
@@ -587,7 +596,7 @@ export function PrintPicker({
           plate_id: allPlates ? 1 : plate,
           all_plates: allPlates,
           copies: effectiveCopies,
-          options,
+          options: sentOptions,
         }
       : null
 
@@ -715,7 +724,7 @@ export function PrintPicker({
   return (
     <Dialog
       open={open}
-      title="Print"
+      title={queue ? 'Queue' : 'Print'}
       description={
         result || unanswered !== null
           ? undefined
@@ -774,7 +783,7 @@ export function PrintPicker({
               {...USER_ONLY}
             >
               {running && <Spinner />}
-              Print
+              {queue ? 'Queue' : 'Print'}
             </Button>
           </>
         )
@@ -1108,7 +1117,7 @@ export function PrintPicker({
                       <PrintOptionsDisclosure
                         subject={subject}
                         printerId={printerId}
-                        value={copies === null ? options : { ...options, quantity: copies }}
+                        value={copies === null ? sentOptions : { ...sentOptions, quantity: copies }}
                         onChange={({ quantity, ...rest }) => {
                           setCopies(quantity ?? null)
                           setOptions(rest)

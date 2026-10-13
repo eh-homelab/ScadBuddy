@@ -2101,6 +2101,7 @@ describe('uploads, outputs, fonts and presets as operations (#1054)', () => {
   it.each([
     ['save_output', { slug: 'w', job_id: 'j' }, 'post', '/api/v1/models/w/outputs', { id: OUT }],
     ['delete_output', { output_id: OUT }, 'delete', `/api/v1/outputs/${OUT}`, {}],
+    ['rename_output', { output_id: OUT, name: 'Shed sign' }, 'patch', `/api/v1/outputs/${OUT}`, { id: OUT }],
     ['upload_asset', { slug: 'w', filename: 'logo.svg', content_base64: svg }, 'post', '/api/v1/models/w/assets', { id: 'a1' }],
     ['fetch_asset', { slug: 'w', url: 'https://openmoji.org/x.svg' }, 'post', '/api/v1/models/w/assets/fetch', { id: 'a1' }],
     ['install_font', { family: 'Pacifico' }, 'post', '/api/v1/fonts/install', { family: 'Pacifico' }],
