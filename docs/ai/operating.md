@@ -865,7 +865,10 @@ occurrence is given up after an hour busy). Bounds: 10 active tasks per session;
 recurring cron jobs expire after 7 days, as Claude Code's; one wakeup at a time, clamped
 to [60, 3600] s. Cron times are in the agent's timezone (`TZ`, UTC unless the
 deployment sets one), which every answer names. The panel lists a session's running tasks
-above the conversation and its owner cancels them (`routes/backgroundTasks.ts`).
+above the conversation and its owner cancels them (`routes/backgroundTasks.ts`). A
+task's workflow is `bgtask-<session id>-<task id>`, which both payload codecs seal under
+the session's data key; archiving the chat or marking it done ends its tasks, and
+`forgetSubject` ends them and terminates their workflows before it deletes the key.
 
 A `Monitor` is a task of the same kind whose source runs as one heartbeating activity
 where the session's Bash runs: a classic session's command in its session directory on
@@ -879,7 +882,8 @@ never the service's. As Claude Code's: stdout lines within 200 ms are one event,
 the watch with its code, it expires after `timeout_ms` (default 5 minutes, at most 30),
 and more than 200 events stop it. Each event is a row of `ai_background_events`; the
 source signals the workflow, which sends the undelivered ones, as Claude Code's
-`<task-notification>` blocks inside the untrusted-data envelope every tool result gets
+`<task-notification>` blocks, redacted of every saved credential and inside the
+untrusted-data envelope every tool result gets
 (what a command prints or a socket sends is data, never the user's words), as the
 session's next message once it is idle (Claude Code
 shows them mid-turn; here they wait for the turn to end), and the watch's end last.
