@@ -116,13 +116,15 @@ function harness(
     approvals: { approved: async (requestId) => requestId.endsWith(':toolu_approved') },
     flows: {
       startedBy: async (run) => (run === FLOW ? (options.flowStarter ?? BROWSER) : undefined),
-      // Only the backend's workflow_run_decisions approves a flow's call.
-      approved: async (requestId) => requestId === `flow:${FLOW}:run-1:flow_approved`,
+      // Only the backend's workflow_run_decisions approves a flow's call, and only for the
+      // input it was decided on (PgFlowRuns refuses a call with no hash, #2728).
+      approved: async (requestId, inputHash) =>
+        requestId === `flow:${FLOW}:run-1:flow_approved` && inputHash === `hash:notes__post:${JSON.stringify({ method: 'POST', body: 'x' })}`,
     },
     currentTiers: async () => options.starterTiers,
     audit: {
       record: async (entry) => void audits.push(entry),
-      hash: (tool) => `hash:${tool}`,
+      hash: (tool, input) => `hash:${tool}:${JSON.stringify(input)}`,
       summarise: (tool) => `summary:${tool}`,
     },
     report: async (_session, problems) => void reported.push(...problems),
@@ -374,6 +376,10 @@ describe('turn tools in a durable session', () => {
       expect(refused.type).toBe('NotApproved')
       expect(h.calls).toEqual([])
       expect(await flowEnv('turn:notes__post', 'tool-flow_approved').run(h.call, { method: 'POST', body: 'x' })).toBe('posted x')
+      // #2728: the decision binds the input it approved; another input is refused.
+      const changed = await failure(flowEnv('turn:notes__post', 'tool-flow_approved').run(h.call, { method: 'POST', body: 'y' }))
+      expect(changed.type).toBe('NotApproved')
+      expect(h.calls).toEqual(['post x'])
     })
 
     it('holds a token starter to the tiers its token holds now', async () => {
