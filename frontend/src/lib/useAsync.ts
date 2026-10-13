@@ -127,7 +127,12 @@ export function useAsync<T>(
     queued.current = true
     queueMicrotask(() => {
       queued.current = false
-      if (!mounted.current) return
+      if (!mounted.current) {
+        // Gone: the callers' closures are let go now, not when the hook is collected.
+        accepting.current = undefined
+        failing.current = []
+        return
+      }
       const { load: current, key: at } = latest.current
       const decide = accepting.current
       const fail = failing.current

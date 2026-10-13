@@ -220,6 +220,8 @@ it('does nothing with a background read that lands after unmount', async () => {
       else pass = resolve
     })
   }
+  // No state update either: React would warn (an act() or unmounted-update warning).
+  const errors = vi.spyOn(console, 'error')
   const { result, unmount } = renderHook(() => useAsync(load, [], ['m']))
   await waitFor(() => expect(result.current.data).toBe('first'))
   const failed = vi.fn()
@@ -238,6 +240,8 @@ it('does nothing with a background read that lands after unmount', async () => {
   second.unmount()
   await act(async () => pass('late'))
   expect(accept).not.toHaveBeenCalled()
+  expect(errors).not.toHaveBeenCalled()
+  errors.mockRestore()
 })
 
 describe('with the socket already open (#1039)', () => {
