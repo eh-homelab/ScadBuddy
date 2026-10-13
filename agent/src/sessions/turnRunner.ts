@@ -156,6 +156,39 @@ export class TurnRunner {
     'stderr',
   ]
 
+  /**
+   * What decides each `FIXED_AT_SPAWN` key for the warm cache (warm.ts): the
+   * `FingerprintParts` field that moves with it, `slot` for a callback that
+   * reads the TurnSlot (so a turn's own state never needs a respawn), or `spawn`
+   * for a value the cache sets per spawn and checks by its own rule (§5.3
+   * "Reuse rule": fingerprint, transcript tail, budget).
+   */
+  static readonly FINGERPRINTED_BY: Readonly<Record<string, keyof FingerprintParts | 'slot' | 'spawn'>> = {
+    paths: 'spawn', // fixed config of the service: the same for every process it spawns (fingerprint rule)
+    cwd: 'spawn', // the session's own directory: a warm process is per session (fingerprint rule)
+    sessionStore: 'spawn', // the service's one transcript mirror (transcript tail rule)
+    includePartialMessages: 'spawn', // a constant (fingerprint rule)
+    maxTurns: 'spawn', // the session row's cap, fixed for the session (fingerprint rule)
+    maxBudgetUsd: 'spawn', // what is left of the budget at spawn: its own reuse check (budget rule)
+    tierOf: 'plugins', // the registry's tiers, widened by each plugin's `toolTiers`
+    builtInPolicy: 'raisedTiers', // Settings -> Plugins' raised tiers and disabled built-ins (`disabledTools`)
+    approvalGate: 'slot',
+    questionGate: 'slot', // present only for a browser-owned session, which `owner` fingerprints
+    systemPromptAppend: 'systemAppend',
+    resume: 'spawn', // resume or new id: the transcript tail rule
+    sessionId: 'spawn', // as `resume` (transcript tail rule)
+    model: 'model',
+    mcpServers: 'tiers', // the in-process servers depend on the principal's tiers (and `owner`, `httpRequest`)
+    pluginPaths: 'packageHashes',
+    allowedPluginPaths: 'allowedPackageHashes',
+    builtinTools: 'builtinTools',
+    ownPlugin: 'ownPlugin',
+    remotePlugins: 'plugins',
+    memoryHooks: 'slot',
+    traceHooks: 'slot',
+    stderr: 'spawn', // a constant sink (fingerprint rule)
+  }
+
   private readonly deps: TurnRunnerDeps
 
   constructor(deps: TurnRunnerDeps) {
