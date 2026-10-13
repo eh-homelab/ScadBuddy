@@ -665,6 +665,11 @@ class Catalogue:
         for model_id in model_ids:
             self._ui_versions.pop(model_id, None)
 
+    def caches_ui_version(self, slug: str) -> bool:
+        """Whether the template's `ui_version` is cached, and so not read again until
+        HEAD moves or :meth:`forget` drops it."""
+        return slug in self._ui_versions
+
     def notify_change(self, *slugs: str) -> None:
         """Tell :attr:`on_change` about a change made other than through this class
         -- a revision restored straight through the history."""

@@ -22,9 +22,10 @@ connection would silently miss what was sent before its ``LISTEN``.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import random
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
 
@@ -38,10 +39,16 @@ LISTENER_APPLICATION_NAME = "scadbuddy-listener"
 DEFAULT_CHECK_INTERVAL = 30.0
 
 
+#: A channel's callback. One that returns an awaitable is awaited before the next
+#: callback runs or the next notification is read, so an owner can move slow work off the
+#: event loop (to a thread) and still keep the order its channel is delivered in.
+type Callback[T] = Callable[[T], Awaitable[None] | None]
+
+
 @dataclass(frozen=True)
 class _Channel:
-    on_notify: Callable[[str], None]
-    on_connect: Callable[[bool], None] | None
+    on_notify: Callback[str]
+    on_connect: Callback[bool] | None
 
 
 class PgListener:
@@ -78,14 +85,15 @@ class PgListener:
         self,
         channel: str,
         *,
-        on_notify: Callable[[str], None],
-        on_connect: Callable[[bool], None] | None = None,
+        on_notify: Callback[str],
+        on_connect: Callback[bool] | None = None,
     ) -> None:
         """Follow ``channel``: ``on_notify(payload)`` per notification, and
         ``on_connect(reconnected)`` each time the LISTEN is (re)established.
 
-        Both run on the event loop and must be quick. Registering a channel twice
-        replaces its callbacks."""
+        Both run on the event loop and must be quick; slow work returns an awaitable
+        (``asyncio.to_thread``), which is awaited in order (:data:`Callback`).
+        Registering a channel twice replaces its callbacks."""
         if self._task is not None and channel not in self._channels:
             raise RuntimeError(f"register {channel!r} before the listener runs")
         self._channels[channel] = _Channel(on_notify=on_notify, on_connect=on_connect)
@@ -154,21 +162,23 @@ class PgListener:
             try:
                 for registered in self._channels.values():
                     if registered.on_connect is not None:
-                        self._call(registered.on_connect, reconnected)
+                        await self._call(registered.on_connect, reconnected)
                 while True:
                     async for notify in conn.notifies(timeout=self.check_interval):
                         target = self._channels.get(notify.channel)
                         if target is not None:
-                            self._call(target.on_notify, notify.payload)
+                            await self._call(target.on_notify, notify.payload)
                     await conn.execute(b"SELECT 1")
             finally:
                 self.backend_pid = None
                 self._state(False)
 
     @staticmethod
-    def _call[T](callback: Callable[[T], None], argument: T) -> None:
+    async def _call[T](callback: Callback[T], argument: T) -> None:
         # One owner's bug must not take the connection down for the others.
         try:
-            callback(argument)
+            result = callback(argument)
+            if inspect.isawaitable(result):
+                await result
         except Exception:
             logger.exception("a LISTEN callback failed")

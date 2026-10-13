@@ -9,11 +9,13 @@ that directory -- the revalidation the follower makes on hearing A's commit.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import threading
 import time
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import psycopg
 import pytest
@@ -112,7 +114,7 @@ async def test_pod_b_sees_pod_a_commit_as_soon_as_it_is_announced(
     )
     # B has a cached revision for the template, keyed on the HEAD it read then.
     assert reader.ui_version("keychain") is None
-    assert "keychain" in reader._ui_versions
+    assert reader.caches_ui_version("keychain")
     follows = Follows(paths, reader, pg_conninfo)
     listening = asyncio.create_task(follows.listener.run())
     try:
@@ -132,7 +134,7 @@ async def test_pod_b_sees_pod_a_commit_as_soon_as_it_is_announced(
         assert paths.model_dir("keychain") in opened
         assert paths.models / ".git" / "refs" / "heads" in opened
         assert opened.index(paths.models) < opened.index(paths.model_dir("tag"))
-        assert "keychain" not in reader._ui_versions
+        assert not reader.caches_ui_version("keychain")
     finally:
         listening.cancel()
         await asyncio.gather(listening, return_exceptions=True)
@@ -195,7 +197,7 @@ async def test_a_dropped_listen_connection_refreshes_every_template_on_reconnect
 
         # Whatever was announced while it was down is unknown: everything is looked at.
         assert {paths.model_dir("keychain"), paths.model_dir("tag")} <= set(opened)
-        assert reader._ui_versions == {}
+        assert not reader.caches_ui_version("keychain")
     finally:
         listening.cancel()
         await asyncio.gather(listening, return_exceptions=True)
@@ -211,3 +213,68 @@ def test_a_change_naming_too_many_templates_asks_for_everything() -> None:
     assert decode_change(encode_change(small)) == small
     with pytest.raises(ValueError):
         decode_change('{"head": 1}')
+
+
+def test_a_change_too_large_to_name_says_why_everything_is_refreshed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#2619: the fallback to `models: null` costs every replica a whole-library refresh."""
+    with caplog.at_level(logging.DEBUG, logger="scadbuddy.library.repo_lock"):
+        encode_change(HeadChange("a" * 40, [f"model-{i}" for i in range(500)]))
+    [record] = [r for r in caplog.records if "too many templates" in r.getMessage()]
+    assert (record.commit, record.models) == ("a" * 40, 500)  # type: ignore[attr-defined]
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger="scadbuddy.library.repo_lock"):
+        encode_change(HeadChange("b" * 40, ["keychain"]))
+    assert not caplog.records
+
+
+class _NoListener:
+    def listen(self, channel: str, **_: Any) -> None:
+        pass
+
+
+async def test_the_follower_refreshes_off_the_loop_and_moves_head_after(
+    paths: DataPaths,
+) -> None:
+    """#2617: the NFS walk runs on a thread, and `head` names a commit only once this
+    replica has revalidated for it."""
+    history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX)
+    follower = ModelsHeadFollower(paths, history, cast(PgListener, _NoListener()))
+    seen: list[tuple[bool, str | None]] = []
+    loop_thread = threading.current_thread()
+
+    def revalidate(model_ids: list[str] | None) -> None:
+        seen.append((threading.current_thread() is loop_thread, follower.head))
+
+    follower.revalidate = revalidate  # type: ignore[method-assign]
+    await follower._received(encode_change(HeadChange("c" * 40, ["keychain"])))
+    await follower._connected(True)
+    assert seen == [(False, None), (False, "c" * 40)]
+    assert follower.head == "c" * 40
+
+
+async def test_the_listener_awaits_a_callback_before_the_next(pg_conninfo: str) -> None:
+    """A callback's awaitable (slow work moved to a thread) is awaited in delivery
+    order: what is NOTIFYed after it is not handed on before it finishes."""
+    listener = PgListener(pg_conninfo, check_interval=1.0)
+    order: list[str] = []
+    connected = asyncio.Event()
+
+    async def slow(payload: str) -> None:
+        await asyncio.sleep(0.2)
+        order.append(f"slow {payload}")
+
+    listener.listen("scadbuddy_test_slow", on_notify=slow, on_connect=lambda _r: connected.set())
+    listener.listen("scadbuddy_test_fast", on_notify=lambda p: order.append(f"fast {p}"))
+    running = asyncio.create_task(listener.run())
+    try:
+        await asyncio.wait_for(connected.wait(), PROMPTLY)
+        with psycopg.connect(pg_conninfo, autocommit=True) as conn, conn.transaction():
+            conn.execute("NOTIFY scadbuddy_test_slow, '1'")
+            conn.execute("NOTIFY scadbuddy_test_fast, '2'")
+        await _until(lambda: len(order) == 2)
+        assert order == ["slow 1", "fast 2"]
+    finally:
+        running.cancel()
+        await asyncio.gather(running, return_exceptions=True)

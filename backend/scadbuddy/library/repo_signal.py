@@ -16,7 +16,8 @@ publishes them on the bus as before -- ``version.committed`` for every commit
 (`api.deps.announce_commits`), ``source.changed`` from the routes that change a
 source -- and they are NOTIFYed after the HEAD is, which commits under the write lock
 first. Postgres delivers a session's notifications in commit order, both channels
-share this process's listener, and the refresh is made in the callback itself, so a
+share this process's listener, and the listener awaits the refresh before it reads
+the next notification (the NFS work itself runs on a thread, off the event loop), so a
 Customize or editor page that hears "changed elsewhere" and reads again is answered
 by a replica that already sees the change, whichever one it lands on. Publishing a
 second copy from each replica would only send every page each event twice.
@@ -30,6 +31,7 @@ events the writer publishes after it.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from pathlib import Path
@@ -56,23 +58,32 @@ class ModelsHeadFollower:
         self.head: str | None = None
         listener.listen(HEAD_CHANNEL, on_notify=self._received, on_connect=self._connected)
 
-    def _received(self, payload: str) -> None:
+    async def _received(self, payload: str) -> None:
         try:
             change = decode_change(payload)
         except ValueError:
             logger.warning("ignored an undecodable models HEAD payload")
             return
+        await self.refresh(change.models)
+        # Only once this replica sees it (#2617): whatever waits on `head` reads it then.
         self.head = change.commit
-        self.refresh(change.models)
 
-    def _connected(self, reconnected: bool) -> None:
+    async def _connected(self, reconnected: bool) -> None:
         if reconnected:
             logger.warning("the models HEAD listener reconnected; refreshing every template")
-            self.refresh(None)
+            await self.refresh(None)
 
-    def refresh(self, model_ids: list[str] | None) -> None:
+    async def refresh(self, model_ids: list[str] | None) -> None:
         """Revalidate the repository and the templates ``model_ids`` -- every one for
-        None -- and forget what is cached about them."""
+        None -- and forget what is cached about them. The revalidation walks and opens
+        directories over NFS, so it runs on a thread (#2617): a large library or a slow
+        mount holds up this channel, never the event loop."""
+        await asyncio.to_thread(self.revalidate, model_ids)
+        if self.catalogue is not None:
+            self.catalogue.forget(model_ids)
+
+    def revalidate(self, model_ids: list[str] | None) -> None:
+        """Have the NFS client revalidate the repository and those templates."""
         self.history.revalidate()
         directories: list[Path] = [self.paths.models, self.paths.builtins]
         if model_ids is None:
@@ -81,8 +92,6 @@ class ModelsHeadFollower:
         else:
             directories += [self.paths.model_dir(model_id) for model_id in model_ids]
         revalidate_dirs(*directories)
-        if self.catalogue is not None:
-            self.catalogue.forget(model_ids)
 
 
 def _template_dirs(parent: Path) -> list[Path]:
