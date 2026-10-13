@@ -58,6 +58,8 @@ BODY_LIMITS: Mapping[str, int] = {
 MEDIA_UPLOAD_PATH = re.compile(r"^/api/v1/models/[^/]+/media$")
 #: A mesh model's upload (#2146): a 3MF up to the library download cap, streamed like
 #: a media upload, so it has its own limit in place of the multipart cap.
+#: A print's photo or video upload (#309): as large as a template's media.
+ATTACHMENT_UPLOAD_PATH = re.compile(r"^/api/v1/prints/\d+/attachments$")
 MESH_UPLOAD_PATH = re.compile(r"^/api/v1/models/from-mesh/upload$")
 #: An upload into a Bambuddy library folder (#2686): a file up to the library download
 #: cap, streamed like a mesh upload.

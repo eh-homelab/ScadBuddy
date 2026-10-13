@@ -14,6 +14,7 @@ from psycopg import Connection
 from starlette.requests import HTTPConnection
 from temporalio.client import Client
 
+from scadbuddy.bambuddy.attachments import AttachmentStore
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.follow import Follower
 from scadbuddy.bambuddy.output_reader import LocalOutputs
@@ -153,6 +154,8 @@ class AppState:
     uploads: BambuddyUploadStore
     #: Which Bambuddy archives an output's prints produced (#306), on the same pool.
     print_links: PrintLinkStore
+    #: Photos and videos added to a print (#309), on the same pool.
+    print_attachments: AttachmentStore
     presets: PresetStore
     settings_store: SettingsStore
     fonts: FontService
@@ -414,6 +417,7 @@ def _build_core(settings: Settings) -> AppState:
         outputs=outputs,
         uploads=uploads,
         print_links=print_links,
+        print_attachments=AttachmentStore(pool),
         presets=presets,
         settings_store=settings_store,
         fonts=FontService(
@@ -524,6 +528,10 @@ def get_print_links(state: StateDep) -> PrintLinkStore:
     return state.print_links
 
 
+def get_print_attachments(state: StateDep) -> AttachmentStore:
+    return state.print_attachments
+
+
 def get_presets(state: StateDep) -> PresetStore:
     return state.presets
 
@@ -587,6 +595,7 @@ HistoryDep = Annotated[ModelHistory, Depends(get_history)]
 OutputsDep = Annotated[OutputStore, Depends(get_outputs)]
 UploadsDep = Annotated[BambuddyUploadStore, Depends(get_uploads)]
 PrintLinksDep = Annotated[PrintLinkStore, Depends(get_print_links)]
+PrintAttachmentsDep = Annotated[AttachmentStore, Depends(get_print_attachments)]
 PresetsDep = Annotated[PresetStore, Depends(get_presets)]
 SettingsStoreDep = Annotated[SettingsStore, Depends(get_settings_store)]
 FontsDep = Annotated[FontService, Depends(get_fonts)]

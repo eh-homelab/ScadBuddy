@@ -23,7 +23,7 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Depends, Path, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 
-from scadbuddy.api.deps import PrintLinksDep, SettingsStoreDep
+from scadbuddy.api.deps import PrintAttachmentsDep, PrintLinksDep, SettingsStoreDep
 from scadbuddy.api.media import (
     CARD_SIDE,
     IMMUTABLE_CACHE_CONTROL,
@@ -34,7 +34,7 @@ from scadbuddy.api.media import (
 )
 from scadbuddy.bambuddy.client import Operation, client_for
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.media import MAX_IMAGE_BYTES
+from scadbuddy.library.media import MAX_IMAGE_BYTES, content_type_of
 from scadbuddy.library.settings_store import SettingsStore
 
 #: What the proxy answers: Bambuddy's bytes, whole (200) or a range of them (206).
@@ -328,3 +328,36 @@ async def get_source_file(
         operation="media.source",
         what="download the source 3MF",
     )
+
+
+@_media_route(
+    "/attachments/{attachment_id}/file", "A photo or video added to the print (Range supported)"
+)
+async def get_attachment_file(
+    archive_id: ArchiveIdPath,
+    attachment_id: Annotated[int, Path(ge=1)],
+    request: Request,
+    store: SettingsStoreDep,
+    attachments: PrintAttachmentsDep,
+) -> Response:
+    """#309: only a file recorded as one of this print's attachments, so the proxy is no
+    window onto the rest of Bambuddy's library. Its ``Media/`` copy, through Bambuddy's
+    library download (Read Status, which serves ``Range``); a photo whose copy is gone,
+    from the archive. Served inline, typed by what it is, for an ``<img>`` or ``<video>``."""
+    found = await attachments.get(archive_id, attachment_id)
+    if found is None:
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND, f"print {archive_id} has no attachment {attachment_id}"
+        )
+    path = (
+        f"/library/files/{found.library_file_id}/download"
+        if found.library_file_id is not None
+        else f"/archives/{archive_id}/photos/{found.archive_photo}"
+    )
+    response = await _proxy(
+        store, request, path, operation="media.attachment", what="show the attachment"
+    )
+    response.headers["content-type"] = content_type_of(found.filename)
+    if "content-disposition" in response.headers:
+        del response.headers["content-disposition"]
+    return response

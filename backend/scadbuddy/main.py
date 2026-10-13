@@ -42,6 +42,7 @@ from scadbuddy.api.compression import Compression
 from scadbuddy.api.cross_site import CrossSiteGate
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state
 from scadbuddy.api.limits import (
+    ATTACHMENT_UPLOAD_PATH,
     BODY_LIMITS,
     LIBRARY_UPLOAD_PATH,
     MEDIA_UPLOAD_PATH,
@@ -1268,6 +1269,13 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                 # The value in effect, which Settings can change while running (#322).
                 lambda: state.settings.media_upload_max_bytes,
                 "a media upload",
+                "the upload limit in Settings, seeded by SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES",
+            ),
+            RouteLimit(
+                "POST",
+                ATTACHMENT_UPLOAD_PATH,
+                lambda: state.settings.media_upload_max_bytes,
+                "a print's photo or video",
                 "the upload limit in Settings, seeded by SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES",
             ),
             RouteLimit(

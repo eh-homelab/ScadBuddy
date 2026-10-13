@@ -219,6 +219,21 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
         'elsewhere until it names the project; get_remembered_choices lists them as `model_projects`.',
     }),
   ),
+  ...(
+    [
+      'POST /api/v1/prints/{archive_id}/attachments',
+      'PATCH /api/v1/prints/{archive_id}/attachments/{attachment_id}',
+      'DELETE /api/v1/prints/{archive_id}/attachments/{attachment_id}',
+      'POST /api/v1/prints/{archive_id}/attachments/{attachment_id}/promote',
+      'GET /api/v1/prints/{archive_id}/attachments/{attachment_id}/file',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      "A print's own photos and videos of the finished object (#309): taken with the person's camera " +
+      'and added on the print detail page, which the agent has no file of; get_print lists them under ' +
+      '`media.attachments`. Captioning, removing and promoting them land UI-first with the upload.',
+  })),
   {
     operation: 'PUT /api/v1/print/printers/{printer_id}/rack-algorithm',
     reason:

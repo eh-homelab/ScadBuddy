@@ -26,7 +26,7 @@ from contextlib import AbstractContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import date
 from types import TracebackType
-from typing import Any, BinaryIO, Literal, Self
+from typing import IO, Any, Literal, Self
 
 import httpx
 from fastapi import status
@@ -96,6 +96,7 @@ LIBRARY_DELETE_ALL = "library:delete_all"
 #: What a Bambuddy call does, which names its span (``bambuddy.<operation>``, spec
 #: 2026-10-01 §4). A closed set, so a span name never carries an id or free text.
 Operation = Literal[
+    "media.attachment",
     "archives.list",
     "archives.photo.delete",
     "archives.photo.upload",
@@ -668,10 +669,11 @@ class BambuddyClient:
         )
 
     async def upload_archive_photo(
-        self, archive_id: int, filename: str, content: bytes
+        self, archive_id: int, filename: str, content: bytes | IO[bytes]
     ) -> ArchivePhotoUpload:
         """Bambuddy takes only ``.jpg``, ``.jpeg``, ``.png`` and ``.webp`` here, and
-        renames the file; the answer's ``filename`` is the name to keep."""
+        renames the file; the answer's ``filename`` is the name to keep. A file object
+        is streamed from where it is, never read whole (#309)."""
         response = await self._send(
             "POST",
             f"/archives/{archive_id}/photos",
@@ -784,7 +786,7 @@ class BambuddyClient:
     async def upload_library_file(
         self,
         filename: str,
-        content: bytes | BinaryIO,
+        content: bytes | IO[bytes],
         *,
         folder_id: int | None = None,
         media_type: str = THREE_MF_MEDIA_TYPE,
