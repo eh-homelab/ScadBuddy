@@ -226,6 +226,31 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
     classic.abortAll()
   })
 
+  it("gives a classic turn the session's pinned WebFetch in place of Claude Code's (#2684)", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'web-pkg-'))
+    await mkdir(path.join(dir, '.claude-plugin'))
+    await writeFile(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'web' }))
+    const pkg = { name: 'web', contentHash: (await hashTree(dir)).hash, dir, allowed: true, builtinTools: ['WebFetch', 'WebSearch'] }
+    const scripted = scriptedRunner(() => ({ reply: 'ok' }))
+    // No background tasks here: WebFetch is served all the same.
+    const classic = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      run: scripted.runner,
+      packagePlugins: async () => ({ paths: [], allowedPaths: [dir], builtinTools: pkg.builtinTools, loaded: [pkg], problems: [], release: () => {} }),
+    })
+    const { session } = await classic.start(browser, { origin: 'chat' })
+    await classic.send(session.id, browser, 'fetch it')
+    await expect.poll(() => scripted.runs.length).toBe(1)
+    const run = scripted.runs[0]!
+    // Claude Code's WebSearch stays (a server tool: the API searches, not this pod).
+    expect(run.builtinTools).toEqual(['WebSearch'])
+    expect(Object.keys(run.mcpServers ?? {})).toContain('builtin')
+    expect(run.systemPromptAppend).toContain('WebFetch (mcp__builtin__WebFetch)')
+    expect(run.systemPromptAppend).not.toContain('jobs, wakeups')
+    classic.abortAll()
+  })
+
   it("lists a session's tasks for the panel, and lets its owner cancel one", async () => {
     const deps: AppDeps = {
       database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },

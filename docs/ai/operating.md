@@ -838,7 +838,9 @@ prompt names them (`turnServers.ts` `builtinNote`, carried as the listing's `sys
 - `WebFetch` fetches through `http_request`'s exchange (every hop egress-checked and
   pinned; a cross-host redirect is returned, as Claude Code returns it; http is not
   upgraded), converts the page with turndown and asks a small model (`haiku`) about it in
-  a one-shot Claude Code query with no tools, on the session's credential;
+  a one-shot Claude Code query with no tools, on the session's credential. A classic
+  turn gets this `WebFetch` too, as `mcp__builtin__WebFetch` in place of Claude Code's
+  (#2684), its model call counted in the turn's cost;
 - `WebSearch` runs Claude Code's own WebSearch in a one-shot query that may make only the
   search asked for, and returns its result as it is;
 - `TaskCreate`, `TaskGet`, `TaskList` and `TaskUpdate` keep the task list in the

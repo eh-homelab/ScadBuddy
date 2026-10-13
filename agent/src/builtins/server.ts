@@ -254,27 +254,42 @@ export function builtinServer(names: readonly string[], context: () => BuiltinCo
  * ("Session-only (not written to disk, dies when Claude exits)"), while these are kept by
  * the session (src/background/). Each call is outward, as every package built-in is.
  */
-export function backgroundSdkServer(names: readonly string[], context: BackgroundContext): McpSdkServerConfigWithInstance {
+/**
+ * The built-ins a classic turn gets from the session instead of Claude Code: the
+ * background ones, which Claude Code would lose with the turn's process, and WebFetch,
+ * whose fetch connects only to the addresses its egress check passed (#2684; Claude Code's
+ * resolves the name again as it connects).
+ */
+export const CLASSIC_BUILTINS: readonly string[] = [...BACKGROUND_BUILTINS, 'WebFetch']
+
+/** A classic turn's in-process `builtin` server, serving the CLASSIC_BUILTINS of `names`. */
+export function classicBuiltinServer(
+  names: readonly string[],
+  context: { background?: BackgroundContext | undefined; web?: WebContext | undefined },
+): McpSdkServerConfigWithInstance {
   return createSdkMcpServer({
     name: BUILTIN_SERVER,
     tools: names
-      .filter((n) => BACKGROUND_BUILTINS.includes(n))
+      .filter((n) => CLASSIC_BUILTINS.includes(n))
       .map((name) => {
         const builtin = BUILTINS[name]!
         return tool(name, builtin.description, (builtin.input as z.ZodObject).shape, async (args) =>
-          toResult(await builtin.run({ background: context } as BuiltinContext, args as never)),
+          toResult(await builtin.run(context as BuiltinContext, args as never)),
         )
       }),
   })
 }
 
-/** What a classic turn's model is told about the background built-ins it gets that way. */
-export function backgroundNote(names: readonly string[]): string {
+/** What a classic turn's model is told about the built-ins it gets that way. */
+export function classicBuiltinNote(names: readonly string[]): string {
   const tools = names.map((n) => `${n} (mcp__${BUILTIN_SERVER}__${n})`).join(', ')
+  const kept = names.some((n) => BACKGROUND_BUILTINS.includes(n))
+    ? ' The session keeps the jobs, wakeups and watches they start past this turn: each sends its prompt or events to the ' +
+      'session as a new message when it is due and the session is idle.'
+    : ''
   return (
     `Claude Code's built-in tools ${tools} are provided in this session as tools of the "${BUILTIN_SERVER}" server, because a ` +
     'plugin package you have names them. Use them where its skills or agents say to use the built-in of that name: they take ' +
-    'the same input. Every call of one asks the user first. The session keeps the jobs and wakeups they schedule past this ' +
-    'turn: each sends its prompt to the session as a new message when it is due and the session is idle.'
+    `the same input. Every call of one asks the user first.${kept}`
   )
 }

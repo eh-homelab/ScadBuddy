@@ -13,8 +13,9 @@ import { assertHostAllowed, assertHttpUrl, embeddedIPv4, isLoopbackHost, type Re
 // own services (the plugin forwarder, the subagent MCP route).
 //
 // Claude Code resolves the name again when it connects, so a name re-pointed between
-// this check and that connection is not caught here; a durable turn's WebFetch (the
-// agent's own, builtins/web.ts) connects to the checked address.
+// this check and that connection is not caught here. Since #2684 a classic turn is never
+// offered Claude Code's WebFetch: it gets the agent's (builtins/web.ts), which connects to
+// the checked address, as a durable turn does. This hook stays as a second line.
 
 export const WEB_FETCH = 'WebFetch'
 
