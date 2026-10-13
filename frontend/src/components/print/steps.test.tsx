@@ -112,4 +112,28 @@ describe('PlateStep', () => {
       lastBedType="Textured PEI Plate" printerName={null} onChange={vi.fn()} />)
     expect(screen.getByText(/The printer's last print used Textured PEI Plate\./)).toBeInTheDocument()
   })
+
+  it("names each plate by Bambu Studio's label, and a remembered one outside the list as it is (#2366)", () => {
+    render(
+      <PlateStep
+        bedTypes={['Cool Plate', 'Textured PEI Plate', 'Supertack Plate']}
+        labels={{ 'Textured PEI Plate': 'Textured PEI Plate', 'Supertack Plate': 'Bambu Cool Plate SuperTack' }}
+        value="Cool Plate"
+        lastBedType={null}
+        printerName="H2C"
+        onChange={vi.fn()}
+      />,
+    )
+    const options = screen.getAllByRole('option')
+    expect(options.map((option) => option.textContent)).toEqual([
+      'Cool Plate',
+      'Textured PEI Plate',
+      'Bambu Cool Plate SuperTack',
+    ])
+    expect(options.map((option) => (option as HTMLOptionElement).value)).toEqual([
+      'Cool Plate',
+      'Textured PEI Plate',
+      'Supertack Plate',
+    ])
+  })
 })
