@@ -307,6 +307,46 @@ describe('print_output on a library file', () => {
     })
   })
 
+  it('sends the filament profiles it is told to, and names them in its approval line (#717)', async () => {
+    let body: Record<string, unknown> | undefined
+    server.use(
+      http.get(`${LIB}/choices`, () =>
+        HttpResponse.json({
+          printer_id: 1,
+          bed_type: 'Cool Plate',
+          filaments: { slots: [{ slot_id: 1, colour_matches: [10] }], suggested: [{ slot_id: 1, spool_id: 10 }] },
+          model_choices: { tier: 'fine' },
+        }),
+      ),
+      http.post(`${LIB}/run`, async ({ request }) => {
+        body = (await request.json()) as Record<string, unknown>
+        return HttpResponse.json({ ...running, status: 'succeeded' }, { status: 200 })
+      }),
+    )
+    const t = tool('print_output')
+    await t.execute({ library_file_id: FILE, filament_profiles: ['silk-pla'] }, ctx())
+    expect(body).toMatchObject({ filament_profiles: ['silk-pla'] })
+    expect(t.summarize({ library_file_id: FILE, filament_profiles: ['silk-pla'] })).toContain(
+      'with the silk-pla profile',
+    )
+
+    // Never sent unless named.
+    await t.execute({ library_file_id: FILE }, ctx())
+    expect(body).not.toHaveProperty('filament_profiles')
+  })
+
+  it('lists the filament profiles (#717)', async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/print/filament-profiles`, () =>
+        HttpResponse.json([{ id: 'silk-pla', name: 'Silk PLA', settings: [] }]),
+      ),
+    )
+    const t = tool('list_filament_profiles')
+    expect(t.risk).toBe('read')
+    const result = await t.execute({}, ctx())
+    expect(firstText(result)).toEqual([{ id: 'silk-pla', name: 'Silk PLA', settings: [] }])
+  })
+
   it('names the library file in its approval line and title', () => {
     const t = tool('print_output')
     expect(t.summarize({ library_file_id: FILE })).toMatch(new RegExp(`^Print library file ${FILE}: 1 copy of plate 1`))

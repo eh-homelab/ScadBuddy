@@ -227,6 +227,9 @@ export type LibraryFileObject = Schemas['LibraryFileObject']
 /** #2351 — Bambuddy's spool inventory and loaded slots, read through `/farm/inventory`. */
 export type InventoryView = Schemas['InventoryView']
 export type InventorySpool = Schemas['InventorySpool']
+/** #717 — filament profiles: cited process changes suggested for a spool. */
+export type FilamentProfile = Schemas['FilamentProfile']
+export type ProfilePreview = Schemas['ProfilePreview']
 
 /**
  * #89 — run tracking.

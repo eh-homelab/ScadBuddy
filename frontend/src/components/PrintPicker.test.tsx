@@ -7,6 +7,7 @@ import type { AnalysisRequest, Output, PrintRunResult } from '../api/types'
 import { analysisReport, openEdgesDiagnostic } from '../mocks/analyzers'
 import { choicesView, queuedResult } from '../mocks/choices'
 import * as fixtures from '../mocks/fixtures'
+import { setSilkPreview, silkPreview } from '../mocks/features/filamentProfiles'
 import { MULTI_PLATE_FILE } from '../mocks/features/library'
 import { lastArrangeRequest, problem, resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
@@ -313,6 +314,8 @@ describe('PrintPicker', () => {
       rack_position: null,
       // Not chosen in this dialog, so the backend applies the printer's remembered one.
       rack_algorithm: null,
+      // Slot 1's spool is Bambu PLA Silk, so the Silk profile is suggested and on (#717).
+      filament_profiles: ['silk-pla'],
       request_id: expect.stringMatching(/^[0-9a-f]{32}$/),
     })
   })
@@ -3552,5 +3555,47 @@ describe('PrintPicker · Slicer defaults from the template (#1294)', () => {
     await loaded()
     await showAdvanced()
     expect(screen.queryByRole('region', { name: 'Slicer defaults from this template' })).toBeNull()
+  })
+})
+
+describe('PrintPicker · Filament profiles (#717)', () => {
+  it('suggests Silk for a silk spool, shows its change against the preset, and prints without it when switched off', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+
+    const step = await screen.findByTestId('filament-profile-silk-pla')
+    expect(step).toHaveTextContent('Silk PLA for slot 1 (Bambu Lab PLA Silk)')
+    const checkbox = within(step).getByRole('checkbox', { name: /Silk PLA/ })
+    expect(checkbox).toBeChecked()
+    // Each distinct value the H2C preset has per extruder variant, then the profile's.
+    expect(await within(step).findByText('Outer wall speed: 200 / 500 → 50 mm/s')).toBeInTheDocument()
+    expect(within(step).getByRole('link', { name: /Why: Bambu PLA Silk/ })).toHaveAttribute(
+      'href',
+      'https://wiki.bambulab.com/en/x1/manual/printing-with-silk-filaments',
+    )
+    expect(step).toHaveTextContent('235 °C')
+
+    await user.click(checkbox)
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+    expect(bodies[0]).not.toHaveProperty('filament_profiles')
+  })
+
+  it("says why a profile can't apply, and leaves it off", async () => {
+    setSilkPreview(silkPreview({ applicable: false, reason: "The process preset's values could not be read (Bambuddy's slicer is not reachable).", changes: [] }))
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+
+    const step = await screen.findByTestId('filament-profile-silk-pla')
+    expect(await within(step).findByRole('status')).toHaveTextContent("Can't apply: The process preset's values could not be read")
+    const checkbox = within(step).getByRole('checkbox', { name: /Silk PLA/ })
+    expect(checkbox).not.toBeChecked()
+    expect(checkbox).toBeDisabled()
+
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+    expect(bodies[0]).not.toHaveProperty('filament_profiles')
   })
 })

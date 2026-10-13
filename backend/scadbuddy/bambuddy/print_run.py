@@ -40,6 +40,9 @@ from scadbuddy.bambuddy.extruders import (
     slicer_volume_types,
     with_sides,
 )
+from scadbuddy.bambuddy.filament_profiles import BUILTIN, unknown_profiles
+from scadbuddy.bambuddy.filament_profiles import overrides as profile_process_overrides
+from scadbuddy.bambuddy.filament_profiles import preview as preview_profile
 from scadbuddy.bambuddy.filaments import (
     FilamentOptions,
     FilamentPlan,
@@ -64,8 +67,10 @@ from scadbuddy.bambuddy.models import (
     DEFAULT_ALGORITHM,
     FilamentRequirements,
     FlowType,
+    PresetRef,
     Printer,
     PrinterStatus,
+    ProcessValue,
     RackAlgorithm,
     Spool,
 )
@@ -82,6 +87,7 @@ from scadbuddy.bambuddy.resolver import (
     PrintChoices,
     Resolved,
     choice_errors,
+    process_preset_for,
     resolve,
 )
 from scadbuddy.bambuddy.send import request_scope, resolve_print_options
@@ -172,6 +178,18 @@ class PrintRunRequest(BaseModel):
     #: How to rank the rack for this print (#836). Omitted means the printer's remembered
     #: algorithm, else Least used.
     rack_algorithm: RackAlgorithm | None = None
+    #: Filament profiles this print applies (#717), by id, as the dialog suggested them
+    #: and the user left them on. Their changes go over the template's
+    #: ``print_settings`` and under ``print_sequence``.
+    filament_profiles: list[str] = Field(default_factory=list, max_length=8)
+
+    @field_validator("filament_profiles")
+    @classmethod
+    def _known_profiles(cls, ids: list[str]) -> list[str]:
+        unknown = unknown_profiles(ids)
+        if unknown:
+            raise ValueError(f"no filament profile {', '.join(map(repr, unknown))}")
+        return list(dict.fromkeys(ids))
 
 
 class RackOption(BaseModel):
@@ -1156,6 +1174,10 @@ async def plan_run(
     printer_status = prepared.printer_status
     choices = request.choices
     catalogue = await _catalogue(client)
+    # Refused before anything is uploaded: a profile left on must apply as shown (#717).
+    profile_overrides = await _profile_overrides(
+        client, process_preset_for(choices, catalogue), request.filament_profiles
+    )
     # The source places, recolors and uploads what it prints (#105, #126, #476), into
     # the project's folder when there is one (#79, #316).
     project_id = chosen_project(request, settings)
@@ -1233,11 +1255,15 @@ async def plan_run(
             filament_presets=resolved.filament_presets,
             filament_colours=resolved.filament_colours,
             bed_type=resolved.bed_type,
-            process_overrides=(
-                source.print_settings
-                if request.print_sequence is None
-                else {**source.print_settings, "print_sequence": request.print_sequence}
-            ),
+            process_overrides={
+                **profile_overrides,
+                **source.print_settings,
+                **(
+                    {}
+                    if request.print_sequence is None
+                    else {"print_sequence": request.print_sequence}
+                ),
+            },
         )
         planned.append((plate_id, options, resolved, plan))
     if errors:
@@ -1293,6 +1319,25 @@ async def plan_run(
         has_rack=printer_status is None or bool(rack_positions(printer_status.nozzle_rack)),
         nozzle_plan=nozzle_plan,
     )
+
+
+async def _profile_overrides(
+    client: BambuddyClient, process: PresetRef | None, profile_ids: list[str]
+) -> dict[str, ProcessValue]:
+    """The process overrides of every profile the print applies, each read against the
+    print's own process preset; a profile that cannot apply as shown refuses the print
+    (#717), naming why, so it is never sliced without it."""
+    merged: dict[str, ProcessValue] = {}
+    for profile_id in profile_ids:
+        shown = await preview_profile(client, process, BUILTIN[profile_id])
+        if not shown.applicable:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"The {shown.profile.name} profile cannot be applied: {shown.reason} "
+                "Turn it off to print without it.",
+            )
+        merged.update(profile_process_overrides(shown))
+    return merged
 
 
 def _filament_map(plan: NozzlePlan | None, filaments: int) -> FilamentMap | None:
