@@ -696,6 +696,8 @@ export type SessionManagerDeps = {
    */
   background?: { tasks: BackgroundTasks; tz: string }
   run?: QueryRunner
+  /** The session WebFetch's own model calls (builtins/nested.ts); a test's stand-in. */
+  nestedQueries?: typeof nestedQueries
   /** Per-token approval grants (spec §6); nobody but the browser user may approve without one. */
   approvalGrants?: GrantCheck
   /**
@@ -1814,7 +1816,7 @@ export class SessionManager {
                             : {}),
                           web: {
                             // The answer's model call, on the turn's first credential; its cost is the turn's.
-                            nested: nestedQueries({
+                            nested: (this.deps.nestedQueries ?? nestedQueries)({
                               paths: this.deps.paths,
                               credential: async () => candidates[0]!.credential,
                               spent: async (cost) => {
@@ -1995,7 +1997,10 @@ export class SessionManager {
     refused: Refused | undefined,
     failure: string | undefined,
     secrets: readonly string[],
-    /** What the request the turn was cut off in used, which no result prices (#991, unpricedSpend.ts). */
+    /**
+     * What the turn spent that no result prices: the request it was cut off in (#991,
+     * unpricedSpend.ts), and its WebFetch's own model calls, in every outcome (#2684).
+     */
     cutUsd: number,
   ): Promise<TurnOutcome> {
     const id = session.id
@@ -2052,7 +2057,8 @@ export class SessionManager {
       tail.push(event({ type: 'error', sessionId: id, code: 'interrupted', message: 'the turn was interrupted' }))
       outcome = { kind: 'interrupted' }
     } else if (result) {
-      costUsd = fromTotal(result.total_cost_usd)
+      // WebFetch's own model calls (the only spend in `cutUsd` of a turn that ended on its own) are in no result.
+      costUsd = fromTotal(result.total_cost_usd) + cutUsd
       if (refused) {
         // Claude Code reports a refused request as a `success` result with
         // `is_error` set, and its "API Error: …" text as a synthetic reply
