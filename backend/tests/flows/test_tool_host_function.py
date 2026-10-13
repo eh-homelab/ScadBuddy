@@ -418,10 +418,6 @@ async def test_an_outward_turn_tool_waits_for_approval(
     assert served.calls == [
         ("turn:scadbuddy_http__http_request", f"tool-{call_id}", {"method": "POST"})
     ]
-    if RECORD:
-        # `turned.json` (test_project_replay.py), recorded on the workflow before #2937.
-        handle = outward.client.get_workflow_handle(f"flow-{run_id}")
-        (HISTORIES / "turned.json").write_text((await handle.fetch_history()).to_json())
 
 
 async def test_an_approved_turn_tool_runs_on_the_replica_live_once_approved(
@@ -480,7 +476,9 @@ async def test_a_turn_tool_on_a_gone_replicas_queue_fails_instead_of_waiting(
             host_queue_start_s=2,
         )
         run = await outward.finished(run_id)
-    assert "the agent replica that holds its state is gone" in (run.result or "")
+    assert "no worker on the agent replica that holds its state picked it up in 2s" in (
+        run.result or ""
+    )
     assert served.calls == []
 
 

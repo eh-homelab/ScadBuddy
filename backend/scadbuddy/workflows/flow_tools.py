@@ -16,7 +16,8 @@ from urllib.parse import quote
 from pydantic import BaseModel, Field, ValidationError
 from temporalio import workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ActivityError, ApplicationError, TimeoutError, TimeoutType
+from temporalio.exceptions import ActivityError, ApplicationError, TimeoutType
+from temporalio.exceptions import TimeoutError as ActivityTimeoutError
 
 with workflow.unsafe.imports_passed_through():
     import jsonschema
@@ -644,10 +645,14 @@ async def _call_tool(
     except ActivityError as err:
         if isinstance(err.cause, ApplicationError):
             raise ToolFailedError(err.cause.message) from None
-        if isinstance(err.cause, TimeoutError) and err.cause.type == TimeoutType.SCHEDULE_TO_START:
+        if (
+            isinstance(err.cause, ActivityTimeoutError)
+            and err.cause.type == TimeoutType.SCHEDULE_TO_START
+        ):
+            # Gone in a deploy, or alive with every slot busy: either way nothing ran.
             raise ToolFailedError(
-                f"{name} was not run: the agent replica that holds its state is gone "
-                f"(redeployed) and nothing picked the call up in {owner.host_queue_start_s}s. "
+                f"{name} was not run: no worker on the agent replica that holds its state "
+                f"picked it up in {owner.host_queue_start_s}s (it may have been redeployed). "
                 "Call it again."
             ) from None
         raise
@@ -671,7 +676,9 @@ async def approved_turn_tool(call: str, name: str, args: dict[str, Any], queue: 
     """An outward plugin or http_request call, run once a person approved it, at most once."""
     await _approved(call)
     if workflow.patched(FLOW_HOST_QUEUE_PATCH):
-        # The replica that tiered it may have gone while it waited (#2937): ask again.
+        # The replica that tiered it may have gone while it waited (#2937): ask again. Only
+        # the queue is taken: a tier raised or a tool disabled since is the `turn:`
+        # activity's to refuse, which checks the call again when it runs.
         queue = await _turn_queue(name, args)
     return await _call_tool(
         call, name, args, attempts=1, activity=f"{TURN_TOOL_PREFIX}{name}", queue=queue
