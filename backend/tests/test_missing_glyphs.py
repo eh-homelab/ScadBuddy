@@ -8,8 +8,8 @@ import subprocess
 
 import pytest
 
-from scadbuddy.library.fonts import font_coverage, missing_glyphs, parse_charset
-from scadbuddy.render.jobs import missing_glyph_warnings
+from scadbuddy.library.fonts import FC_TIMEOUT, font_coverage, missing_glyphs, parse_charset
+from scadbuddy.render.jobs import GLYPH_CHECK_TIMEOUT, missing_glyph_warnings
 from scadbuddy.render.schema import CustomizerSchema, Parameter
 
 #: Basic Latin, Latin-1 and the letters a lobster needs: no emoji, no CJK.
@@ -65,6 +65,23 @@ def test_the_coverage_asks_for_a_face_a_render_can_draw(monkeypatch: pytest.Monk
             "Lobster Two:style=Bold:outline=true:scalable=true",
         ]
     ]
+
+
+def test_a_render_waits_on_fontconfig_only_briefly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The check is advisory: a wedged fc-match gives up well before FC_TIMEOUT."""
+    timeouts: list[object] = []
+
+    def wedged(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        timeouts.append(kwargs["timeout"])
+        raise subprocess.TimeoutExpired(argv, float(str(kwargs["timeout"])))
+
+    monkeypatch.setattr(shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(subprocess, "run", wedged)
+
+    assert font_coverage("Lobster Two", {}, GLYPH_CHECK_TIMEOUT) is None
+    assert font_coverage("Lobster Two", {}) is None
+    assert timeouts == [GLYPH_CHECK_TIMEOUT, FC_TIMEOUT]
+    assert GLYPH_CHECK_TIMEOUT < FC_TIMEOUT
 
 
 def _schema(*parameters: Parameter) -> CustomizerSchema:

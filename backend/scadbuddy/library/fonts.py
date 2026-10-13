@@ -176,7 +176,7 @@ def parse_fc_list(output: str) -> list[FontFamily]:
     ]
 
 
-def _run_fc(argv: list[str], env: Mapping[str, str]) -> str | None:
+def _run_fc(argv: list[str], env: Mapping[str, str], timeout: float = FC_TIMEOUT) -> str | None:
     """Run an fc-* tool on the allowlisted environment (#281), whatever ``env`` holds."""
     if shutil.which(argv[0]) is None:
         logger.warning("%s is not on PATH", argv[0])
@@ -186,7 +186,7 @@ def _run_fc(argv: list[str], env: Mapping[str, str]) -> str | None:
             argv,
             capture_output=True,
             text=True,
-            timeout=FC_TIMEOUT,
+            timeout=timeout,
             check=True,
             env=minimal_env(env),
         )
@@ -255,10 +255,13 @@ def _drawn(char: str) -> bool:
     return unicodedata.category(char) not in ("Cc", "Cf")
 
 
-def font_coverage(font: str, env: Mapping[str, str]) -> tuple[str, list[tuple[int, int]]] | None:
+def font_coverage(
+    font: str, env: Mapping[str, str], timeout: float = FC_TIMEOUT
+) -> tuple[str, list[tuple[int, int]]] | None:
     """The family fontconfig gives ``font`` (an OpenSCAD font string) among the faces a
-    render can draw, and the code points it has glyphs for; None without fontconfig."""
-    output = _run_fc([FC_MATCH, "-f", "%{family}\n%{charset}", f"{font}{RENDERABLE}"], env)
+    render can draw, and the code points it has glyphs for; None without fontconfig,
+    or when it takes longer than ``timeout``."""
+    output = _run_fc([FC_MATCH, "-f", "%{family}\n%{charset}", f"{font}{RENDERABLE}"], env, timeout)
     if output is None:
         return None
     family, _, charset = output.partition("\n")

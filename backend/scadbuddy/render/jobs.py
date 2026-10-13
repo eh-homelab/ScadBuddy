@@ -104,6 +104,11 @@ def unreadable_colour_warnings(
     return warnings
 
 
+#: How long a render waits on fontconfig for one font's glyphs (#2358). The check is
+#: advisory: a wedged fontconfig costs the render this per font, and then no warning.
+GLYPH_CHECK_TIMEOUT = 5.0
+
+
 def missing_glyph_warnings(
     schema: CustomizerSchema,
     params: Mapping[str, ParamValue],
@@ -1145,7 +1150,10 @@ async def finish_piece_stage(
     warnings += unreadable_colour_warnings(schema, params)
     fonts_env = env_for(config.data_dir)
     warnings += await asyncio.to_thread(
-        missing_glyph_warnings, schema, params, lambda font: font_coverage(font, fonts_env)
+        missing_glyph_warnings,
+        schema,
+        params,
+        lambda font: font_coverage(font, fonts_env, GLYPH_CHECK_TIMEOUT),
     )
 
     model_3mf = work / MODEL_NAME
