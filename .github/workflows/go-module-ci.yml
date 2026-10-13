@@ -3,9 +3,11 @@ name: Go Module CI
 
 # Reusable workflow, called once from ci.yml's `go` job (#2686, spec 2026-10-13
 # §7). Adapted from WonderForgeLabs/forge's go-module-ci.yml: one runner checks
-# every module under tools/go/ (gofmt, vet, build, `test -race`, and a
-# module-mode vendor build for a module that ships its own vendor/), then checks
-# that the root vendor/ is what `go work vendor` writes.
+# every module under tools/go/ (vet, build, `test -race`, and a module-mode
+# vendor build for a module that ships its own vendor/), then checks that the
+# root vendor/ is what `go work vendor` writes. gofmt is one walk of the whole
+# tree, gooey's step, and each CLI's image is built and run once
+# (build-go-image.yml publishes them).
 #
 # Never path-gated. ci.yml's `go-select` decides whether this change touched Go
 # and passes `run`; on "false" the job still runs, says so in its summary and
@@ -58,14 +60,52 @@ jobs:
         if: ${{ inputs.run == 'true' }}
         run: sudo apt-get update -qq && sudo apt-get install -y fuse3
 
+      # WonderForgeLabs/gooey's gofmt step (its ci.yml, "gofmt"): one walk, not
+      # one per module. gofmt is purely syntactic, so a single walk covers every
+      # module and also a .go file that belongs to no module. The prune skips
+      # dot-directories at every depth (.claude/worktrees holds whole
+      # checkouts) and vendor/, whose sources are formatted by their authors.
+      - name: gofmt
+        if: ${{ inputs.run == 'true' }}
+        run: |
+          set -u
+          tmp=${RUNNER_TEMP:-/tmp}
+          find . -mindepth 1 \( -name '.?*' -o -name vendor \) -prune \
+            -o -name '*.go' -print | sort > "$tmp/go-files"
+
+          # gofmt over nothing reports nothing: a walk that finds almost no
+          # files means the prune broke, not that the tree is clean. The tree
+          # is small, so the floor is gooey's 100 lowered to 5.
+          n=$(wc -l < "$tmp/go-files")
+          if [ "$n" -lt 5 ]; then
+            echo "::error::the walk found only $n .go files — the prune broke, not the tree"
+            exit 1
+          fi
+
+          # `gofmt -l` exits 0 whether or not it lists a file, so the check is
+          # the output, not the status. A parse error does fail it.
+          if ! xargs gofmt -l < "$tmp/go-files" > "$tmp/unformatted"; then
+            echo "::error::gofmt could not process the sources (parse error?)"
+            exit 1
+          fi
+          if [ -s "$tmp/unformatted" ]; then
+            while IFS= read -r f; do
+              echo "::error file=${f#./}::not gofmt'd — run: gofmt -w ${f#./}"
+            done < "$tmp/unformatted"
+            echo "::error::$(wc -l < "$tmp/unformatted") file(s) are not gofmt'd; see the annotations above"
+            exit 1
+          fi
+          echo "gofmt clean across $n .go files"
+
       # Every module and every check runs even after a failure; failures are
       # collected and the step fails at the end. Each module's output is
       # buffered and replayed in order, so concurrent modules do not interleave
       # their `::group::` blocks. Each module records its failures in its own
       # file: an array assigned in a background subshell dies with it, and a
       # lost failure would read as green.
-      - name: gofmt, vet, build, test all modules
-        if: ${{ inputs.run == 'true' }}
+      # `!cancelled()`: a gofmt failure must not hide these checks' results.
+      - name: vet, build, test all modules
+        if: ${{ !cancelled() && inputs.run == 'true' }}
         env:
           # Per-check cap, so one wedged `go test` cannot take the job budget.
           TASK_TIMEOUT: 12m
@@ -93,22 +133,9 @@ jobs:
           # `bash -e` an aborted subshell would drop the checks after it and
           # the record of why.
           check_module() {
-            local mod=$1 log=$2 failfile=$3 unformatted check
+            local mod=$1 log=$2 failfile=$3 check
             local cmd
             {
-              echo "::group::${mod} — gofmt"
-              if ! unformatted=$(find "$mod" -name '*.go' -not -path '*/vendor/*' -print0 | xargs -0 -r gofmt -l); then
-                echo "::error::${mod} failed: gofmt could not process the module's sources (parse error?)"
-                echo "${mod}: gofmt" >> "$failfile"
-                unformatted=""
-              fi
-              if [ -n "$unformatted" ]; then
-                echo "::error::${mod} failed: gofmt (files not gofmt-clean):"
-                echo "$unformatted"
-                echo "${mod}: gofmt" >> "$failfile"
-              fi
-              echo "::endgroup::"
-
               # Workspace mode: with go.work and the root vendor/, Go builds
               # with -mod=vendor by default, so a package missing from vendor/
               # fails here.
@@ -191,3 +218,19 @@ jobs:
             printf '%s\n' "Failed module checks:" "${failed[@]}"
             exit 1
           fi
+
+      # Each CLI's image (tools/go/<m>/Dockerfile, the repo root as context),
+      # built and run once, as build-go-image.yml will publish it. amd64 only;
+      # the publish adds arm64. Every CLI must have a Dockerfile, as there.
+      - name: Build and run each CLI image
+        if: ${{ !cancelled() && inputs.run == 'true' }}
+        run: |
+          set -euo pipefail
+          for d in tools/go/*/; do
+            [ -f "$d/main.go" ] || continue
+            name=$(basename "$d")
+            echo "::group::${name} image"
+            docker build -f "$d/Dockerfile" -t "go-$name:ci" .
+            docker run --rm "go-$name:ci" --help
+            echo "::endgroup::"
+          done

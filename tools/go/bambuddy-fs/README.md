@@ -42,17 +42,37 @@ Windows Explorer reaches a WSL mount only when other users may see it. Uncomment
 
 ## Container image
 
-Published as `ghcr.io/eh-homelab/scadbuddy-bambuddy-fs`. Mounting in a container needs
-`/dev/fuse` and `CAP_SYS_ADMIN`:
+Published as `ghcr.io/eh-homelab/scadbuddy-bambuddy-fs` (`sha-<commit>`, `latest`, and
+the version on a `v*` tag; amd64 and arm64) by `.github/workflows/build-go-image.yml` on
+every push to main that touches Go. Build it from the repo root, since it needs the
+workspace and the root `vendor/`:
 
 ```bash
+docker build -f tools/go/bambuddy-fs/Dockerfile -t scadbuddy-bambuddy-fs:dev .
+```
+
+It runs as the unprivileged user `bambuddy` (uid 10001) and mounts through the setuid
+`fusermount3`. The container needs:
+
+- `/dev/fuse`: `--device /dev/fuse`;
+- `CAP_SYS_ADMIN` in its bounding set: `--cap-add SYS_ADMIN`;
+- privilege escalation allowed, for the setuid helper: not `--security-opt
+  no-new-privileges` (in Kubernetes, `allowPrivilegeEscalation: true`);
+- under Docker's default AppArmor profile, which denies `mount`:
+  `--security-opt apparmor:unconfined`;
+- a mountpoint uid 10001 can write. Otherwise run it with `--user 0`.
+
+```bash
+sudo install -d -o 10001 -g 10001 /mnt/bambuddy
 docker run --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor:unconfined \
   -v /mnt/bambuddy:/mnt/bambuddy:rshared ghcr.io/eh-homelab/scadbuddy-bambuddy-fs \
   mount --api http://scadbuddy/api/v1 --allow-other /mnt/bambuddy
 ```
 
 `--allow-other` lets processes other than the mounting one, such as the host and other
-containers, see the files.
+containers, see the files; the image's `/etc/fuse.conf` sets `user_allow_other` so the
+unprivileged user may pass it. `--cache-dir` defaults to `/home/bambuddy/.cache/bambuddy-fs`
+inside the container. With no arguments the image prints `mount --help`.
 
 ## Flags
 

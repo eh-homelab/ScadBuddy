@@ -214,11 +214,14 @@ jobs:
         run: .github/scripts/fonts-probe.test.sh
 
       # The config lives in .hadolint.yaml so the same rules apply to a local
-      # `hadolint Dockerfile` as to this job.
+      # `hadolint Dockerfile` as to this job. `recursive` lints every file
+      # named `Dockerfile` (the action's `**/Dockerfile` glob): the root one and
+      # each Go CLI's, tools/go/<m>/Dockerfile (#2686).
       - name: hadolint
         uses: hadolint/hadolint-action@v3.5.0
         with:
           dockerfile: Dockerfile
+          recursive: true
           config: .hadolint.yaml
           failure-threshold: warning
 
