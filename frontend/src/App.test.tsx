@@ -1,4 +1,5 @@
 import { screen } from '@testing-library/react'
+import type * as Three from 'three'
 import { describe, expect, it, vi } from 'vitest'
 import { renderPage } from './test/utils'
 
@@ -6,7 +7,7 @@ import { renderPage } from './test/utils'
 const three = vi.hoisted(() => ({ loaded: false }))
 vi.mock('three', async (actual) => {
   three.loaded = true
-  return await actual<typeof import('three')>()
+  return await actual<typeof Three>()
 })
 
 describe('App routes (#2356)', () => {
