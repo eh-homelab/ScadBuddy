@@ -579,6 +579,13 @@ def check(
     """
     by_id = {option.spool_id: option for option in options.spools}
     warnings: list[FilamentWarning] = []
+    # What every slot on one spool needs together (#2851): a spool shared by two slots,
+    # which `suggest` can pick as well as a hand pick, has to cover both.
+    sharing: dict[int, list[SlotNeed]] = {}
+    for slot in options.slots:
+        spool_id = plan.spool_for(slot.slot_id)
+        if spool_id is not None and slot.used_grams is not None:
+            sharing.setdefault(spool_id, []).append(slot)
 
     for slot in options.slots:
         spool_id = plan.spool_for(slot.slot_id)
@@ -592,7 +599,8 @@ def check(
                 )
             )
             continue
-        warnings.extend(_slot_warnings(options, slot, option, copies=copies))
+        shared = tuple(other for other in sharing.get(option.spool_id, []) if other is not slot)
+        warnings.extend(_slot_warnings(options, slot, option, copies=copies, shared=shared))
 
     return warnings
 
@@ -635,8 +643,14 @@ def every_plate(plates: list[FilamentOptions]) -> FilamentOptions:
 
 
 def _slot_warnings(
-    options: FilamentOptions, slot: SlotNeed, option: SpoolOption, *, copies: int
+    options: FilamentOptions,
+    slot: SlotNeed,
+    option: SpoolOption,
+    *,
+    copies: int,
+    shared: tuple[SlotNeed, ...] = (),
 ) -> list[FilamentWarning]:
+    """``shared``: the other slots with known grams printing from ``option``."""
     found: list[FilamentWarning] = []
     label = spool_label(option)
 
@@ -680,6 +694,21 @@ def _slot_warnings(
                 ),
             )
         )
+    elif needed is not None and option.remaining_g is not None and shared:
+        together = needed + sum((other.used_grams or 0.0) * copies for other in shared)
+        if option.remaining_g < together:
+            ids = sorted([slot.slot_id, *(other.slot_id for other in shared)])
+            names = ", ".join(str(i) for i in ids[:-1]) + f" and {ids[-1]}"
+            found.append(
+                FilamentWarning(
+                    kind="low-filament",
+                    slot_id=slot.slot_id,
+                    message=(
+                        f"{label} has about {option.remaining_g:.0f} g left and slots "
+                        f"{names} need {together:.0f} g of it between them."
+                    ),
+                )
+            )
 
     return found
 
