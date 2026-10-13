@@ -2,6 +2,8 @@
 (#2686), through ScadBuddy's operations."""
 
 import json
+from collections.abc import Callable
+from typing import Any
 
 import httpx
 import pytest
@@ -84,74 +86,232 @@ def test_mkdir_and_folder_rename(client: TestClient) -> None:
     assert renamed.json()["name"] == "Bits"
 
 
+class FakeLibrary:
+    """Bambuddy 1.2.5.5's library as a folder delete meets it, cascade and all. Trashing
+    a file only marks it, and ``DELETE /library/folders/{id}`` drops every file row,
+    trashed or not, whose folder is in the subtree (``routes/library.py``
+    ``delete_folder``); each such row is recorded in ``destroyed``. A trashed file
+    cannot be moved (``update_file`` reads only active rows), and a file in
+    ``not_owned`` is refused a move or a delete, as for a key with only ``*_own``."""
+
+    def __init__(self) -> None:
+        self.folders: dict[int, dict[str, Any]] = {}
+        self.files: dict[int, dict[str, Any]] = {}
+        self.not_owned: set[int] = set()
+        self.log: list[tuple[str, int]] = []
+        self.destroyed: list[int] = []
+        #: Runs once, at the first move: what someone else does after the check.
+        self.on_move: Callable[[], None] | None = None
+        self._mount()
+
+    def folder(self, folder_id: int, parent_id: int | None = None) -> None:
+        self.folders[folder_id] = {"name": f"folder-{folder_id}", "parent_id": parent_id}
+
+    def file(
+        self, file_id: int, folder_id: int | None, *, external: bool = False, trashed: bool = False
+    ) -> None:
+        self.files[file_id] = {"folder_id": folder_id, "external": external, "trashed": trashed}
+
+    def live(self, file_id: int) -> bool:
+        return file_id in self.files and not self.files[file_id]["trashed"]
+
+    def _row(self, file_id: int) -> dict[str, Any]:
+        found = self.files[file_id]
+        return {
+            "id": file_id,
+            "filename": f"file-{file_id}.3mf",
+            "file_type": "3mf",
+            "folder_id": found["folder_id"],
+            "is_external": found["external"],
+        }
+
+    def _tree(self, parent_id: int | None) -> list[dict[str, Any]]:
+        return [
+            {"id": i, "name": f["name"], "parent_id": parent_id, "children": self._tree(i)}
+            for i, f in self.folders.items()
+            if f["parent_id"] == parent_id
+        ]
+
+    def _subtree(self, folder_id: int) -> set[int]:
+        found = {folder_id}
+        for i, f in self.folders.items():
+            if f["parent_id"] == folder_id:
+                found |= self._subtree(i)
+        return found
+
+    def _delete(self, file_id: int) -> bool:
+        external = self.files[file_id]["external"]
+        if external:
+            del self.files[file_id]
+        else:
+            self.files[file_id]["trashed"] = True
+        self.log.append(("delete", file_id))
+        return not external
+
+    def _mount(self) -> None:
+        def missing() -> httpx.Response:
+            return httpx.Response(404, json={"detail": "File not found"})
+
+        def read(request: httpx.Request, file_id: str) -> httpx.Response:
+            return (
+                httpx.Response(200, json=self._row(int(file_id)))
+                if self.live(int(file_id))
+                else missing()
+            )
+
+        def move(request: httpx.Request, file_id: str) -> httpx.Response:
+            i = int(file_id)
+            if not self.live(i):
+                return missing()
+            if i in self.not_owned:
+                return httpx.Response(403, json={"detail": "You can only update your own files"})
+            folder_id = json.loads(request.content)["folder_id"]
+            self.files[i]["folder_id"] = None if folder_id == 0 else folder_id
+            self.log.append(("move", i))
+            if self.on_move is not None:
+                then, self.on_move = self.on_move, None
+                then()
+            return httpx.Response(200, json=self._row(i))
+
+        def delete_one(request: httpx.Request, file_id: str) -> httpx.Response:
+            i = int(file_id)
+            if not self.live(i):
+                return missing()
+            if i in self.not_owned:
+                return httpx.Response(403, json={"detail": "You can only delete your own files"})
+            return httpx.Response(200, json={"status": "success", "trashed": self._delete(i)})
+
+        def bulk(request: httpx.Request) -> httpx.Response:
+            ids = json.loads(request.content)["file_ids"]
+            done = [i for i in ids if self.live(i) and i not in self.not_owned]
+            for i in done:
+                self._delete(i)
+            return httpx.Response(200, json={"deleted_files": len(done)})
+
+        def listing(request: httpx.Request) -> httpx.Response:
+            folder_id = int(request.url.params["folder_id"])
+            rows = [
+                self._row(i)
+                for i, f in self.files.items()
+                if f["folder_id"] == folder_id and not f["trashed"]
+            ]
+            return httpx.Response(200, json=rows)
+
+        def trash(request: httpx.Request) -> httpx.Response:
+            items = [
+                {**self._row(i), "file_size": 1, "deleted_at": "2026-10-13T00:00:00Z"}
+                for i, f in self.files.items()
+                if f["trashed"]
+            ]
+            return httpx.Response(
+                200, json={"items": items, "total": len(items), "retention_days": 30}
+            )
+
+        def rmdir(request: httpx.Request, folder_id: str) -> httpx.Response:
+            subtree = self._subtree(int(folder_id))
+            for i in [i for i, f in self.files.items() if f["folder_id"] in subtree]:
+                self.destroyed.append(i)
+                del self.files[i]
+            for i in subtree:
+                del self.folders[i]
+            self.log.append(("rmdir", int(folder_id)))
+            return httpx.Response(200, json={"status": "success"})
+
+        library = "/api/v1/library"
+        respx.get(f"{API}/library/folders").mock(
+            side_effect=lambda request: httpx.Response(200, json=self._tree(None))
+        )
+        respx.get(path__regex=rf"^{library}/files/(?P<file_id>\d+)$").mock(side_effect=read)
+        respx.put(path__regex=rf"^{library}/files/(?P<file_id>\d+)$").mock(side_effect=move)
+        respx.delete(path__regex=rf"^{library}/files/(?P<file_id>\d+)$").mock(
+            side_effect=delete_one
+        )
+        respx.post(f"{API}/library/bulk-delete").mock(side_effect=bulk)
+        respx.get(path=f"{library}/files").mock(side_effect=listing)
+        respx.get(path=f"{library}/trash").mock(side_effect=trash)
+        respx.delete(path__regex=rf"^{library}/folders/(?P<folder_id>\d+)$").mock(side_effect=rmdir)
+        queue()
+
+    def moved_before_deleted(self, file_id: int) -> bool:
+        return self.log.index(("move", file_id)) < self.log.index(("delete", file_id))
+
+
+def delete_folder(client: TestClient, folder_id: int) -> httpx.Response:
+    response: httpx.Response = client.post(
+        f"/api/v1/print/library/folders/{folder_id}/delete", headers=press()
+    )
+    return response
+
+
 @respx.mock
 def test_folder_delete_takes_its_files_and_subfolders(client: TestClient) -> None:
     configure(client)
-    folders(
-        {
-            "id": 4,
-            "name": "Top",
-            "children": [{"id": 5, "name": "Sub", "parent_id": 4, "children": []}],
-        }
-    )
-    folder_files(4, (10, False))
-    folder_files(5, (11, True))
-    files((10, False), (11, True))
-    queue()
-    respx.post(f"{API}/library/bulk-delete").mock(
-        return_value=httpx.Response(200, json={"deleted_files": 2})
-    )
-    gone5 = respx.delete(f"{API}/library/folders/5").mock(return_value=httpx.Response(200, json={}))
-    gone4 = respx.delete(f"{API}/library/folders/4").mock(return_value=httpx.Response(200, json={}))
+    bambuddy = FakeLibrary()
+    bambuddy.folder(4)
+    bambuddy.folder(5, parent_id=4)
+    bambuddy.file(10, 4)
+    bambuddy.file(11, 5, external=True)
+    bambuddy.file(12, 5)
+    bambuddy.file(30, None, trashed=True)  # elsewhere in the trash: no reason to refuse
 
-    response = client.post("/api/v1/print/library/folders/4/delete", headers=press())
+    response = delete_folder(client, 4)
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert sorted((f["id"], f["trashed"]) for f in body["deleted"]) == [(10, True), (11, False)]
+    assert sorted((f["id"], f["trashed"]) for f in body["deleted"]) == [
+        (10, True),
+        (11, False),
+        (12, True),
+    ]
+    assert body["skipped"] == []
     assert body["folders"] == [5, 4]
-    assert gone5.called and gone4.called
+    # Nothing was left for the cascade: the managed files wait in the trash, at the top
+    # level, where Undo restores them.
+    assert bambuddy.destroyed == []
+    assert bambuddy.moved_before_deleted(10) and bambuddy.moved_before_deleted(12)
+    assert ("move", 11) not in bambuddy.log
+    for file_id in (10, 12):
+        assert bambuddy.files[file_id] == {"folder_id": None, "external": False, "trashed": True}
+    assert 11 not in bambuddy.files
 
 
 @respx.mock
 def test_folder_delete_keeps_a_folder_whose_file_was_skipped(client: TestClient) -> None:
     configure(client)
-    folders(
-        {
-            "id": 4,
-            "name": "Top",
-            "children": [{"id": 5, "name": "Sub", "parent_id": 4, "children": []}],
-        }
-    )
-    folder_files(4, (10, False))
-    folder_files(5, (11, False))
-    queue()
-    respx.post(f"{API}/library/bulk-delete").mock(
-        return_value=httpx.Response(200, json={"deleted_files": 1})
-    )
-    # File 10 reads as gone once deleted; 11 is still listed, so Bambuddy skipped it.
-    respx.get(f"{API}/library/files/10").mock(
-        side_effect=[
-            httpx.Response(200, json={"id": 10, "filename": "file-10.3mf", "file_type": "3mf"}),
-            httpx.Response(404, json={"detail": "File not found"}),
-        ]
-    )
-    respx.get(f"{API}/library/files/11").mock(
-        return_value=httpx.Response(
-            200, json={"id": 11, "filename": "file-11.3mf", "file_type": "3mf"}
-        )
-    )
-    gone5 = respx.delete(f"{API}/library/folders/5").mock(return_value=httpx.Response(200, json={}))
-    gone4 = respx.delete(f"{API}/library/folders/4").mock(return_value=httpx.Response(200, json={}))
+    bambuddy = FakeLibrary()
+    bambuddy.folder(4)
+    bambuddy.folder(5, parent_id=4)
+    bambuddy.file(10, 4)
+    bambuddy.file(11, 5)
+    bambuddy.not_owned.add(11)
 
-    response = client.post("/api/v1/print/library/folders/4/delete", headers=press())
+    response = delete_folder(client, 4)
 
     assert response.status_code == 200, response.text
     body = response.json()
     assert [f["id"] for f in body["deleted"]] == [10]
     assert [f["id"] for f in body["skipped"]] == [11]
     assert body["folders"] == []
-    assert not gone5.called and not gone4.called
+    assert bambuddy.destroyed == []
+    assert bambuddy.files[11] == {"folder_id": 5, "external": False, "trashed": False}
+    assert not any(entry[0] == "rmdir" for entry in bambuddy.log)
+
+
+@respx.mock
+def test_folder_delete_refuses_when_the_trash_holds_its_files(client: TestClient) -> None:
+    configure(client)
+    bambuddy = FakeLibrary()
+    bambuddy.folder(4)
+    bambuddy.folder(5, parent_id=4)
+    bambuddy.file(10, 4)
+    bambuddy.file(20, 5, trashed=True)
+
+    response = delete_folder(client, 4)
+
+    assert response.status_code == 409, response.text
+    assert "1 file in Bambuddy's trash" in response.json()["detail"]
+    assert bambuddy.log == []
+    assert bambuddy.files[10]["folder_id"] == 4
 
 
 @respx.mock
@@ -161,57 +321,101 @@ def test_folder_delete_refuses_before_anything_when_a_print_waits(client: TestCl
     folder_files(4, (10, False))
     files((10, False))
     queue({"id": 1, "status": "pending", "library_file_id": 10})
+    moved = respx.put(f"{API}/library/files/10")
     bulk = respx.post(f"{API}/library/bulk-delete")
     gone = respx.delete(f"{API}/library/folders/4")
 
     response = client.post("/api/v1/print/library/folders/4/delete", headers=press())
 
     assert response.status_code == 409
-    assert not bulk.called and not gone.called
+    assert not moved.called and not bulk.called and not gone.called
+
+
+@respx.mock
+def test_an_unknown_folder_is_a_404(client: TestClient) -> None:
+    configure(client)
+    bambuddy = FakeLibrary()
+    bambuddy.folder(4)
+
+    response = delete_folder(client, 99)
+
+    assert response.status_code == 404, response.text
+    assert bambuddy.log == []
 
 
 @respx.mock
 def test_an_empty_folder_delete_drops_only_the_folder(client: TestClient) -> None:
     configure(client)
-    folders({"id": 4, "name": "Top", "children": []})
-    folder_files(4)
-    queue()
-    gone = respx.delete(f"{API}/library/folders/4").mock(return_value=httpx.Response(200, json={}))
-    response = client.post("/api/v1/print/library/folders/4/delete", headers=press())
+    bambuddy = FakeLibrary()
+    bambuddy.folder(4)
+    response = delete_folder(client, 4)
     assert response.status_code == 200, response.text
     assert response.json() == {"deleted": [], "skipped": [], "folders": [4]}
-    assert gone.called
+    assert bambuddy.log == [("rmdir", 4)]
 
 
 @respx.mock
 def test_a_file_added_after_the_check_keeps_its_folder(client: TestClient) -> None:
     configure(client)
-    folders({"id": 4, "name": "Top", "children": []})
+    bambuddy = FakeLibrary()
+    bambuddy.folder(4)
+    bambuddy.file(10, 4)
+    bambuddy.on_move = lambda: bambuddy.file(12, 4)
 
-    def row(i: int) -> dict[str, object]:
-        return {"id": i, "filename": f"file-{i}.3mf", "file_type": "3mf", "folder_id": 4}
-
-    respx.get(f"{API}/library/files", params={"folder_id": 4}).mock(
-        side_effect=[
-            httpx.Response(200, json=[row(10)]),
-            httpx.Response(200, json=[row(10), row(12)]),
-        ]
-    )
-    files((10, False))
-    queue()
-    respx.delete(f"{API}/library/files/10").mock(
-        return_value=httpx.Response(200, json={"status": "success", "trashed": True})
-    )
-    gone = respx.delete(f"{API}/library/folders/4").mock(return_value=httpx.Response(200, json={}))
-
-    response = client.post("/api/v1/print/library/folders/4/delete", headers=press())
+    response = delete_folder(client, 4)
 
     assert response.status_code == 200, response.text
     body = response.json()
     assert [f["id"] for f in body["deleted"]] == [10]
     assert [f["id"] for f in body["skipped"]] == [12]
     assert body["folders"] == []
-    assert not gone.called
+    assert bambuddy.destroyed == []
+    assert bambuddy.live(12)
+
+
+@respx.mock
+def test_a_file_trashed_from_the_folder_after_the_check_keeps_it(client: TestClient) -> None:
+    configure(client)
+    bambuddy = FakeLibrary()
+    bambuddy.folder(4)
+    bambuddy.file(10, 4)
+    bambuddy.on_move = lambda: bambuddy.file(14, 4, trashed=True)
+
+    response = delete_folder(client, 4)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert [f["id"] for f in body["skipped"]] == [14]
+    assert "trash" in body["skipped"][0]["reason"]
+    assert body["folders"] == []
+    assert bambuddy.destroyed == []
+    assert 14 in bambuddy.files
+
+
+@respx.mock
+def test_a_subfolder_made_after_the_check_keeps_its_ancestors(client: TestClient) -> None:
+    configure(client)
+    bambuddy = FakeLibrary()
+    bambuddy.folder(4)
+    bambuddy.folder(5, parent_id=4)
+    bambuddy.file(10, 5)
+
+    def mkdir() -> None:
+        bambuddy.folder(6, parent_id=5)
+        bambuddy.file(13, 6)
+
+    bambuddy.on_move = mkdir
+
+    response = delete_folder(client, 4)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert [f["id"] for f in body["deleted"]] == [10]
+    assert [(f["id"], f["filename"]) for f in body["skipped"]] == [(6, "folder-6")]
+    assert "folder" in body["skipped"][0]["reason"]
+    assert body["folders"] == []
+    assert bambuddy.destroyed == []
+    assert bambuddy.live(13) and {4, 5, 6} <= set(bambuddy.folders)
 
 
 @respx.mock

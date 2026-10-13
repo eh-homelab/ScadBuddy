@@ -2,11 +2,16 @@
 library folders (#2686, spec 2026-10-13 §4-§5). The mount (``tools/go/bambuddy-fs``)
 and the agent call these. Every effect is Bambuddy's API.
 
-A folder delete takes everything in it: it walks the folder and its subfolders,
-refuses with 409 before anything is deleted when a print waiting in Bambuddy's queue
-names any file, deletes the files as ``library_file_delete`` does (managed files to
-the trash, external ones for good), then the folders, deepest first. A folder with a
-file Bambuddy skipped, or with a subfolder kept for that reason, is not deleted.
+A folder delete takes everything in it, and never lets Bambuddy's own folder delete,
+which cascades to every file row in the folder, trashed ones included, reach a file
+(spec §5). It walks the folder and its subfolders and refuses with 409 before anything
+is deleted when a print waiting in Bambuddy's queue names any file, or when Bambuddy's
+trash holds files from the folder. It moves each managed file to the top level, then
+deletes the files as ``library_file_delete`` does (managed files to the trash, external
+ones for good), then the folders, deepest first, each only once a fresh read finds
+nothing in it: no file, trashed file or subfolder. A folder with a file Bambuddy
+skipped, with anything that arrived after the check, or with a subfolder kept for
+either reason, is not deleted.
 """
 
 from __future__ import annotations
@@ -18,11 +23,12 @@ from typing import TYPE_CHECKING, Annotated, Any
 from fastapi import status
 from pydantic import BaseModel, Field, StringConstraints
 
-from scadbuddy.bambuddy.client import client_for
-from scadbuddy.bambuddy.models import FileUpdate, Folder, FolderCreate, FolderUpdate
+from scadbuddy.bambuddy.client import BambuddyClient, client_for
+from scadbuddy.bambuddy.models import FileUpdate, Folder, FolderCreate, FolderUpdate, LibraryFile
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.library_file_operations import (
     MAX_FILES,
+    READ_CONCURRENCY,
     WHERE,
     DeletedLibraryFile,
     SkippedLibraryFile,
@@ -41,6 +47,15 @@ Name = Annotated[str, StringConstraints(min_length=1, max_length=255, pattern=r"
 
 
 ADDED_AFTER_CHECK = "added to the folder after the delete was checked; the folder was kept"
+FOLDER_ADDED_AFTER_CHECK = (
+    "a folder made in the folder after the delete was checked; the folder was kept"
+)
+TRASHED_AFTER_CHECK = (
+    "trashed from the folder after the delete was checked; the folder was kept, "
+    "since deleting it would empty this file from Bambuddy's trash"
+)
+NOT_MOVED_OUT = "Bambuddy moves only files its API key's user added; the folder was kept"
+MOVED_TO_TOP = "It was moved to the top level of the library first."
 
 
 class LibraryFileUpdate(BaseModel):
@@ -101,6 +116,58 @@ def _deepest_first(folder: Folder) -> list[Folder]:
     return [f for _, f in sorted(folder.walk_with_depth(), key=lambda pair: -pair[0])]
 
 
+def _by_id(tree: list[Folder]) -> dict[int, Folder]:
+    return {folder.id: folder for top in tree for folder in top.walk()}
+
+
+async def _to_top_level(
+    client: BambuddyClient, files: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[SkippedLibraryFile]]:
+    """Moves each managed file out of the folder before it is trashed.
+
+    Bambuddy v1.2.5.5 trashes a file by setting ``deleted_at`` only, and its folder
+    delete (``backend/app/api/routes/library.py`` ``delete_folder``, lines 1419-1485)
+    removes from disk every file whose ``folder_id`` is in the folder, trashed or not,
+    then drops the rows by ``LibraryFile.folder_id``'s ``ondelete="CASCADE"``
+    (``backend/app/models/library.py`` line 104). A file trashed while still in the
+    folder would be gone for good. Moved to the top level first, Undo restores it there.
+
+    A file Bambuddy will not move (its key's user did not add it: ``update_file``'s 403)
+    or no longer has (404) is skipped, and keeps its folder."""
+    gate = asyncio.Semaphore(READ_CONCURRENCY)
+
+    async def one(entry: dict[str, Any]) -> SkippedLibraryFile | None:
+        async with gate:
+            try:
+                await client.update_library_file(entry["id"], FileUpdate(folder_id=0))
+            except ApiError as error:
+                if error.extensions.get("bambuddy_status") == status.HTTP_403_FORBIDDEN:
+                    reason = NOT_MOVED_OUT
+                elif error.status == status.HTTP_404_NOT_FOUND:
+                    reason = "it is no longer in Bambuddy's library"
+                else:
+                    raise
+                return SkippedLibraryFile(id=entry["id"], filename=entry["filename"], reason=reason)
+        return None
+
+    outcomes = await asyncio.gather(*(one(entry) for entry in files))
+    moved = [entry for entry, out in zip(files, outcomes, strict=True) if out is None]
+    return moved, [out for out in outcomes if out is not None]
+
+
+def _moved_first(
+    skipped: list[SkippedLibraryFile], moved: list[dict[str, Any]]
+) -> list[SkippedLibraryFile]:
+    """A moved file the delete then skipped sits at the top level now; say so."""
+    ids = {entry["id"] for entry in moved}
+    return [
+        entry.model_copy(update={"reason": f"{entry.reason}. {MOVED_TO_TOP}"})
+        if entry.id in ids
+        else entry
+        for entry in skipped
+    ]
+
+
 def library_write_kinds(state: Core) -> list[OperationKind]:
     async def settings() -> Any:
         return await asyncio.to_thread(state.settings_store.load)
@@ -152,7 +219,13 @@ def library_write_kinds(state: Core) -> list[OperationKind]:
         async with waiting_on_bambuddy(), client_for(await settings()) as client:
             folder = _find(await client.folders(), request["folder_id"])
             order = _deepest_first(folder)
-            listed = await asyncio.gather(*(client.library_files(f.id) for f in order))
+            gate = asyncio.Semaphore(READ_CONCURRENCY)
+
+            async def listed_in(folder_id: int) -> list[LibraryFile]:
+                async with gate:
+                    return await client.library_files(folder_id)
+
+            listed = await asyncio.gather(*(listed_in(f.id) for f in order))
             ids = [row.id for rows in listed for row in rows]
             if len(ids) > MAX_FILES:
                 raise ApiError(
@@ -162,6 +235,20 @@ def library_write_kinds(state: Core) -> list[OperationKind]:
                 )
             found = await read_files(client, ids)
             await refuse_queued(client, found)
+            subtree = {f.id for f in order}
+            trashed = [t.id for t in await client.trashed_library_files() if t.folder_id in subtree]
+            if trashed:
+                # Bambuddy's folder delete would empty them from its trash for good, and
+                # they cannot be moved out first: v1.2.5.5's ``PUT /library/files/{id}``
+                # reads ``LibraryFile.active()`` (``routes/library.py`` line 5092), which
+                # leaves out trashed rows, so it answers 404 for one.
+                raise ApiError(
+                    status.HTTP_409_CONFLICT,
+                    f"{len(trashed)} {'file' if len(trashed) == 1 else 'files'} in Bambuddy's "
+                    "trash still belong to this folder. Restore or empty "
+                    f"{'it' if len(trashed) == 1 else 'them'} first, then delete the folder.",
+                    file_ids=trashed,
+                )
         tree = [
             {"id": f.id, "children": [c.id for c in f.children], "files": [row.id for row in rows]}
             for f, rows in zip(order, listed, strict=True)
@@ -171,30 +258,52 @@ def library_write_kinds(state: Core) -> list[OperationKind]:
     async def folder_delete_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         files: list[dict[str, Any]] = checked["files"]
         async with client_for(await settings()) as client:
-            gone = await delete_files(client, files) if files else None
-            skipped = {entry.id for entry in gone.skipped} if gone else set()
+            moved, not_moved = await _to_top_level(
+                client, [entry for entry in files if not entry["external"]]
+            )
+            doomed = moved + [entry for entry in files if entry["external"]]
+            gone = await delete_files(client, doomed) if doomed else None
             result = LibraryFolderDeleteResult(
                 deleted=gone.deleted if gone else [],
-                skipped=gone.skipped if gone else [],
+                skipped=not_moved + _moved_first(gone.skipped if gone else [], moved),
                 folders=[],
             )
+            skipped = {entry.id for entry in result.skipped}
             kept: set[int] = set()
             checked_ids = {entry["id"] for entry in files}
             for node in checked["tree"]:
                 if skipped.intersection(node["files"]) or kept.intersection(node["children"]):
                     kept.add(node["id"])
                     continue
-                # Bambuddy's folder delete may take whatever the folder holds, so a file
-                # that arrived after the check keeps the folder (and its ancestors).
+                # Bambuddy's folder delete takes whatever the folder holds, its trash and
+                # its subfolders included, so anything that arrived after the check keeps
+                # the folder (and its ancestors).
+                now = _by_id(await client.folders()).get(node["id"])
+                if now is None:
+                    continue
                 left = await client.library_files(node["id"])
-                if left:
+                in_trash = [
+                    t for t in await client.trashed_library_files() if t.folder_id == node["id"]
+                ]
+                if left or in_trash or now.children:
                     kept.add(node["id"])
+                    result.skipped.extend(
+                        SkippedLibraryFile(
+                            id=c.id, filename=c.name, reason=FOLDER_ADDED_AFTER_CHECK
+                        )
+                        for c in now.children
+                        if c.id not in node["children"]
+                    )
                     result.skipped.extend(
                         SkippedLibraryFile(
                             id=row.id, filename=row.filename, reason=ADDED_AFTER_CHECK
                         )
                         for row in left
                         if row.id not in checked_ids
+                    )
+                    result.skipped.extend(
+                        SkippedLibraryFile(id=t.id, filename=t.filename, reason=TRASHED_AFTER_CHECK)
+                        for t in in_trash
                     )
                     continue
                 await client.delete_folder(node["id"])
