@@ -775,6 +775,13 @@ describe('TemplatePrintsPage (#310): a template’s Prints tab', () => {
   })
 })
 
+function summaryOf(archiveId: number): PrintPage['items'][number] {
+  const print = prints.find((p) => p.archive_id === archiveId)
+  if (!print) throw new Error(`no fixture print ${archiveId}`)
+  const { provenance: _p, files: _f, media: _m, outcome: _o, printer_media: _pm, links: _l, ...summary } = print
+  return summary
+}
+
 describe('now printing (#977)', () => {
   it('shows every printer above the history, a job ScadBuddy did not start included', async () => {
     render()
@@ -783,10 +790,3 @@ describe('now printing (#977)', () => {
     expect(await list()).toBeInTheDocument()
   })
 })
-
-function summaryOf(archiveId: number): PrintPage['items'][number] {
-  const print = prints.find((p) => p.archive_id === archiveId)
-  if (!print) throw new Error(`no fixture print ${archiveId}`)
-  const { provenance: _p, files: _f, media: _m, outcome: _o, printer_media: _pm, links: _l, ...summary } = print
-  return summary
-}
