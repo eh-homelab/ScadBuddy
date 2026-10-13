@@ -52,10 +52,11 @@ export function ActivityPage() {
   );
   const gate = useRef<{
     since: string | null;
+    loaded: boolean;
     last: number;
     pending: Promise<ActivityFacets> | null;
     timer: ReturnType<typeof setTimeout> | undefined;
-  }>({ since: null, last: 0, pending: null, timer: undefined });
+  }>({ since: null, loaded: false, last: 0, pending: null, timer: undefined });
   const sinceRef = useRef(query.since);
   useEffect(() => {
     sinceRef.current = query.since;
@@ -69,11 +70,17 @@ export function ActivityPage() {
 
   const facets = useAsync(
     () => {
-      const read = () =>
-        api.activityFacets(sinceTime(sinceRef.current) || undefined);
       const g = gate.current;
-      // Only a live re-read is throttled; a first read, or one for another `since`, is not.
-      if (g.since !== query.since) {
+      const read = () =>
+        api
+          .activityFacets(sinceTime(sinceRef.current) || undefined)
+          .then((f) => {
+            g.loaded = true;
+            return f;
+          });
+      // Only a live re-read is throttled; a first read (until one lands: a mount's effect
+      // can run twice), or one for another `since`, is not.
+      if (g.since !== query.since || !g.loaded) {
         g.since = query.since;
         clearTimeout(g.timer);
         g.pending = null;

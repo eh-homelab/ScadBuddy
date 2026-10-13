@@ -11,6 +11,12 @@ const region = () => {
 }
 const save = () => within(region()).getByRole('button', { name: 'Save Administration' })
 
+// The next edit starts once the save has landed and its fields are re-seeded.
+async function landed(put: { mock: { results: { value: unknown }[] } }, call: number) {
+  await put.mock.results[call]?.value
+  await waitFor(() => expect(within(region()).getByText(/Saved at/)).toBeInTheDocument())
+}
+
 async function loaded() {
   await waitFor(() => expect(screen.getByLabelText('Notify me about activity from')).toBeInTheDocument())
   await waitFor(() => expect(screen.getByLabelText('Bambuddy URL')).toHaveValue('https://bambuddy.internal.nullreference.io'))
@@ -49,6 +55,7 @@ describe('SettingsPage activity settings', () => {
     expect(put.mock.calls[0]?.[0]).toMatchObject({ activity_follow: ['browser', 'token:t1'] })
     await waitFor(async () => expect((await api.getSettings()).activity_follow).toEqual(['browser', 'token:t1']))
     expect(follow).toHaveValue('browser, token:t1')
+    await landed(put, 0)
 
     await user.clear(follow)
     await user.type(follow, 'none')
@@ -57,6 +64,7 @@ describe('SettingsPage activity settings', () => {
     expect(put.mock.calls[1]?.[0]).toMatchObject({ activity_follow: [] })
     await waitFor(async () => expect((await api.getSettings()).activity_follow).toEqual([]))
     expect(follow).toHaveValue('none')
+    await landed(put, 1)
 
     await user.clear(follow)
     await user.click(save())
@@ -89,6 +97,7 @@ describe('SettingsPage activity settings', () => {
       activity_repair_window_seconds: 3600,
     })
     await waitFor(async () => expect((await api.getSettings()).activity_ttl_seconds).toBe(172800))
+    await landed(put, 0)
 
     await user.clear(ttl)
     await user.click(save())

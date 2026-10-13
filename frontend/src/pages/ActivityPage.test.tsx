@@ -28,6 +28,9 @@ function Back() {
   );
 }
 
+// A role query walks every row; with 250 of them it alone outlasts a loaded runner.
+const button = (name: string) => screen.getByText(name, { selector: "button" });
+
 function render(route = "/activity") {
   return renderPage(
     <>
@@ -160,7 +163,7 @@ describe("ActivityPage", () => {
     await waitFor(() =>
       expect(screen.getAllByTestId(/^activity-row-/)).toHaveLength(50),
     );
-    await user.click(screen.getByRole("button", { name: "Load more" }));
+    await user.click(button("Load more"));
     await waitFor(() =>
       expect(screen.getAllByTestId(/^activity-row-/)).toHaveLength(60),
     );
@@ -178,9 +181,15 @@ describe("ActivityPage", () => {
   it("restores chips and a facet input from a deep link", async () => {
     render("/activity?kind=render&facet.slug=box");
     expect(
-      await screen.findByRole("button", { name: "Render", pressed: true }),
+      await screen.findByRole(
+        "button",
+        { name: "Render", pressed: true },
+        { timeout: 5000 },
+      ),
     ).toBeInTheDocument();
-    expect(await screen.findByLabelText("Template")).toHaveValue("box");
+    expect(
+      await screen.findByLabelText("Template", {}, { timeout: 5000 }),
+    ).toHaveValue("box");
   });
 
   it("shows an applied value the facets do not list, and clears it", async () => {
@@ -230,12 +239,12 @@ describe("ActivityPage", () => {
         HttpResponse.json({ detail: "down" }, { status: 500 }),
       ),
     );
-    await user.click(screen.getByRole("button", { name: "Load more" }));
+    await user.click(button("Load more"));
     expect(
       await screen.findByText("Could not load more. Try again."),
     ).toBeInTheDocument();
     expect(screen.getAllByTestId(/^activity-row-/)).toHaveLength(50);
-    expect(screen.getByRole("button", { name: "Load more" })).toBeEnabled();
+    expect(button("Load more")).toBeEnabled();
   });
 
   it("pauses live updates past the cap, and Show latest brings them back", async () => {
@@ -247,13 +256,13 @@ describe("ActivityPage", () => {
       expect(screen.getAllByTestId(/^activity-row-/)).toHaveLength(50),
     );
     for (const n of [100, 150, 200]) {
-      await user.click(screen.getByRole("button", { name: "Load more" }));
+      await user.click(button("Load more"));
       await waitFor(() =>
         expect(screen.getAllByTestId(/^activity-row-/)).toHaveLength(n),
       );
     }
     expect(screen.queryByText(/Live updates paused/)).toBeNull();
-    await user.click(screen.getByRole("button", { name: "Load more" }));
+    await user.click(button("Load more"));
     await waitFor(() =>
       expect(screen.getAllByTestId(/^activity-row-/)).toHaveLength(250),
     );
@@ -266,10 +275,10 @@ describe("ActivityPage", () => {
     });
     expect(screen.getAllByTestId(/^activity-row-/)).toHaveLength(250);
     expect(screen.queryByTestId("activity-row-new")).toBeNull();
-    await user.click(screen.getByRole("button", { name: "Show latest" }));
+    await user.click(button("Show latest"));
     expect(await screen.findByTestId("activity-row-new")).toBeInTheDocument();
     expect(screen.queryByText(/Live updates paused/)).toBeNull();
-  });
+  }, 60_000);
 
   it("reads the list once for a burst of signals", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
@@ -308,13 +317,17 @@ describe("ActivityPage", () => {
       expect(screen.getAllByTestId(/^activity-row-/)).toHaveLength(50),
     );
     for (const n of [100, 150, 200, 250]) {
-      await user.click(screen.getByRole("button", { name: "Load more" }));
+      await user.click(button("Load more"));
       await waitFor(() =>
         expect(screen.getAllByTestId(/^activity-row-/)).toHaveLength(n),
       );
     }
     expect(screen.getByText(/Live updates paused/)).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Running" }));
+    await user.click(
+      within(screen.getByLabelText("Activity filters")).getByRole("button", {
+        name: "Running",
+      }),
+    );
     await waitFor(() =>
       expect(screen.getByTestId("location").textContent).toContain(
         "status=running",
@@ -328,5 +341,5 @@ describe("ActivityPage", () => {
       expect(screen.getAllByTestId(/^activity-row-/)).toHaveLength(50),
     );
     expect(screen.queryByText(/Live updates paused/)).toBeNull();
-  });
+  }, 60_000);
 });
