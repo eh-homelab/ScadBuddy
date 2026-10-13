@@ -371,7 +371,10 @@ def _prelude(
         return None
     first = ops.kinds[kind.prelude]
     return PreludeStep(
-        kind=first.name, task_queue=ops.queues[first.queue], run_attempts=first.run_attempts
+        kind=first.name,
+        task_queue=ops.queues[first.queue],
+        run_attempts=first.run_attempts,
+        where=first.where,
     )
 
 

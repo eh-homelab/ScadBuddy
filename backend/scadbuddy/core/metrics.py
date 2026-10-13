@@ -255,7 +255,8 @@ class Metrics:
         self.project_retries = Counter(
             "scadbuddy_render_project_retries_total",
             "Retried writes of a render job's row (the `project` activity), which retries "
-            "without limit: a steady rise is a write that never lands (#857).",
+            "without limit: counted as each retry starts, so one per failed write. A "
+            "steady rise is a write that never lands (#857).",
             registry=r,
         )
         self.render_duration = Histogram(

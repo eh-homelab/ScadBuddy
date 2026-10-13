@@ -182,9 +182,13 @@ class OperationWorkflow:
         """The kind's prelude, if any, then its run; whatever happened is recorded, and
         the execution completes. A prelude that fails is the operation's failure, and
         the run never starts."""
+        # Whose effect a cancel or failure may have left half done: the prelude's while it
+        # runs, then the kind's own. A local, so replay is unchanged.
+        where = input.where
         try:
             prelude = input.prelude
             if prelude is not None and workflow.patched(PRELUDE_PATCH):
+                where = prelude.where or input.where
                 await workflow.execute_activity(
                     run_activity(prelude.kind),
                     RunOp(request=input.request, checked={}, author=input.author),
@@ -198,6 +202,7 @@ class OperationWorkflow:
                         backoff_coefficient=2.0,
                     ),
                 )
+            where = input.where
             result: dict[str, Any] = await workflow.execute_activity(
                 run_activity(input.kind),
                 RunOp(request=input.request, checked=checked, author=input.author),
@@ -215,16 +220,12 @@ class OperationWorkflow:
         except (ActivityError, ApplicationError, asyncio.CancelledError) as error:
             if is_cancelled_exception(error):
                 # The effect may have reached Bambuddy before the cancel (review #1063 2).
-                return FinishOp(
-                    operation_id=operation_id, error=operation_cancelled_running(input.where)
-                )
+                return FinishOp(operation_id=operation_id, error=operation_cancelled_running(where))
             # A crash or timeout may come after Bambuddy took the write (review #1063
             # second review 1), so the unexpected failure says it may have been done.
             return FinishOp(
                 operation_id=operation_id,
-                error=problem_of(
-                    error, unexpected=operation_unexpected_running_detail(input.where)
-                ),
+                error=problem_of(error, unexpected=operation_unexpected_running_detail(where)),
             )
         return FinishOp(operation_id=operation_id, result=result)
 

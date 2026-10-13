@@ -142,7 +142,10 @@ def _stage(metrics: Metrics | None) -> Callable[[RenderStage], AbstractContextMa
 
 #: What a piece's stages raise on a bad render that no retry changes: a raw 3MF that
 #: does not split or parse, a mesh past the 3MF's limits (#604). Retrying one only
-#: triples the time to the failure.
+#: triples the time to the failure. A truncated cache copy cannot raise these here:
+#: `_checkout` runs before the stage's ``try`` (its own errors stay retryable), and it
+#: unpacks a blob into a staging directory swapped in whole (`store.archive.unpack_dir`),
+#: so a stage never reads a half-written file.
 DETERMINISTIC = (
     MaterialSplitError,
     PaintCodeError,

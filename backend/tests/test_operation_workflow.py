@@ -520,6 +520,45 @@ async def test_a_failed_prelude_fails_the_operation_and_the_run_never_starts(
     assert fake.calls == ["check", "insert", "prelude", "finish:502"]
 
 
+async def test_a_failed_prelude_says_to_check_where_the_prelude_writes(
+    client: Client, worker: str, fake: Fake, prelude: tuple[str, Prelude]
+) -> None:
+    """#1174 review: a prelude that dies unexpectedly may have done its part where it
+    writes (Bambuddy's inbox), not where the outer kind's run would have."""
+    queue, step = prelude
+    step.error = RuntimeError("boom")
+    arg = op_input(where="the model and its libraries").model_copy(
+        update={
+            "prelude": PreludeStep(
+                kind="inbox", task_queue=queue, where="the inbox folder in Bambuddy"
+            )
+        }
+    )
+    answer = await start(client, worker, arg)
+    assert answer.operation is not None and answer.operation.error is not None
+    detail = answer.operation.error.detail
+    assert "Check the inbox folder in Bambuddy before" in detail
+    assert "the model and its libraries" not in detail
+
+    # Once the prelude is done, a failed run names the kind's own place again.
+    step.error = None
+    fake.run_error = RuntimeError("boom")
+    answer = await start(client, worker, arg.model_copy(update={"key": uuid.uuid4().hex}))
+    assert answer.operation is not None and answer.operation.error is not None
+    assert "Check the model and its libraries before" in answer.operation.error.detail
+
+
+def test_a_kind_name_with_a_dash_is_refused() -> None:
+    """#1174 review: the lost-operation sweep reads a kind back out of ``op-<kind>-<key>``
+    up to the next dash, so a dash in the name would name the wrong kind's place."""
+
+    async def step(request: dict[str, Any], *_: Any) -> dict[str, Any]:
+        return {}
+
+    with pytest.raises(ValueError, match="no dash"):
+        OperationKind(name="foo-bar", check=step, run=step)
+
+
 async def test_an_operation_without_a_prelude_records_no_patch_marker(
     client: Client, worker: str, fake: Fake
 ) -> None:

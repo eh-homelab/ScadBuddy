@@ -44,6 +44,9 @@ class PreludeStep(BaseModel):
     kind: str
     task_queue: str
     run_attempts: int = 1
+    #: The prelude kind's ``where`` (#1174): what to check when the prelude may have
+    #: done its part, which is not where the outer kind's run writes.
+    where: str | None = None
 
 
 class OperationInput(BaseModel):
