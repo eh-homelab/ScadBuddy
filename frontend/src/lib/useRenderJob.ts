@@ -9,6 +9,9 @@ import { useLatest } from './useLatest'
 export const RENDER_DEBOUNCE_MS = 400
 /** Only while the realtime socket is unavailable (#267): otherwise events drive the reads. */
 const POLL_MS = 400
+/** #1638 — how often a job waiting for a worker is read again, for its queue place. No
+ * event says another job started, so the place would otherwise stand still. */
+export const QUEUE_READ_MS = 3_000
 
 /** A render's steps, as `job.progress` names them (backend `core/metrics.py` `RenderStage`). */
 export type RenderStage = 'source' | 'render' | 'split' | 'solids' | 'thumbnail' | 'write'
@@ -240,6 +243,9 @@ export function useRenderJob(
       let again = false
       let settled = false
       let failures = 0
+      // Whether the last read found the job waiting, and when it was read (#1638).
+      let waiting = false
+      let readAt = 0
 
       const finish = () => {
         settled = true
@@ -263,6 +269,8 @@ export function useRenderJob(
           const next = await api.getJob(jobId)
           if (isStale()) return
           failures = 0
+          waiting = next.status === 'pending'
+          readAt = Date.now()
           setJob(next)
           setJobFor(params)
           if (next.status === 'done' || next.status === 'failed' || next.status === 'cancelled') finish()
@@ -307,7 +315,10 @@ export function useRenderJob(
         timer = setTimeout(() => {
           if (settled || isStale()) return
           // A failed read's retry is already waiting: polling past it would spend the budget.
-          if (realtime.status === 'unavailable' && !retryTimer) void read()
+          if (!retryTimer) {
+            if (realtime.status === 'unavailable') void read()
+            else if (waiting && Date.now() - readAt >= QUEUE_READ_MS) void read()
+          }
           fallback()
         }, POLL_MS)
       }

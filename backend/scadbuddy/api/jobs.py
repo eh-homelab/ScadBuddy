@@ -226,6 +226,9 @@ class JobStatus(BaseModel):
     created_at: datetime
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    #: Where a pending job waits for a render worker (#1638): 1 is next. None once it
+    #: has started or settled, and on every response but `GET /jobs/{id}`.
+    queue_position: int | None = None
     error: str | None = None
     log_tail: list[str] = Field(default_factory=list)
     preview_url: str | None = None
@@ -539,7 +542,9 @@ def _temporal_problem(
 @router.get("/jobs/{job_id}", response_model=JobStatus, summary="Render job state")
 def get_job(job_id: JobIdPath, request: Request, render: RenderDep) -> JobStatus:
     job = require_job(render, job_id)
-    return _job_status(job, request.url_for("get_job_preview", job_id=job_id).path)
+    view = _job_status(job, request.url_for("get_job_preview", job_id=job_id).path)
+    view.queue_position = render.store.queue_position(job)
+    return view
 
 
 @router.get(
