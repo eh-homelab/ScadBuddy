@@ -1115,7 +1115,7 @@ export function PrintPicker({
                 plateSlots={slicedPlateSlots(filaments?.slots ?? [], {
                   plates: picker.plates.length,
                   chosen: plate,
-                  sliced: previewPlate,
+                  sliced: previewSlice.plateId,
                 })}
                 stale={previewSlice.stale}
                 slicing={previewSlice.slicing}

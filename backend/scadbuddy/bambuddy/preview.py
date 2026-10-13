@@ -301,7 +301,9 @@ async def read_toolpath(
 def _total_grams(slots: list[PreviewSlot], reported: float | None) -> float | None:
     """The plate's filament: the sum of its slots' grams when every slot has them.
     Bambuddy's ``filament_used_g`` is the first filament's alone (#2450: 5.2 g reported
-    for slots of 5.2, 5.6 and 0.3 g), so it is used only when the slots cannot say."""
+    for slots of 5.2, 5.6 and 0.3 g), so it is used only when the slots cannot say. The
+    slots' grams are the sliced plate's own (``filament-requirements`` for that plate),
+    never the whole file's, so their sum is this plate's need."""
     if slots and all(slot.grams is not None for slot in slots):
         return round(sum(slot.grams or 0.0 for slot in slots), 2)
     return reported
