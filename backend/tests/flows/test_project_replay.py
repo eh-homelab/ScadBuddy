@@ -12,7 +12,8 @@ The histories were recorded on 6b's workflow (`SCADBUDDY_RECORD_HISTORIES=1`): `
 (`render`, `save_output` and an approved `queue_print`, recorded by
 `test_outward_host_functions.py::test_printed`); `tooled` on the workflow before #2704
 (a read `tool(...)` and an approved outward one at the tiers the run started with,
-recorded by `test_tool_host_function.py::test_tooled`). Never re-record them.
+recorded by `test_tool_host_function.py::test_tooled`); `inputted` on the workflow of
+#2483 (`inputs()` of a flow with an inputs schema, #2663). Never re-record them.
 Their payloads are sealed under `flows_support.Keys`, a key derived from each subject.
 """
 
@@ -37,7 +38,7 @@ from scadbuddy.workflows.projects_worker import projects_runner, projects_worker
 from tests.flows.flows_support import Flows, Keys, script
 
 HISTORIES = Path(__file__).parent.parent / "fixtures" / "project_workflow_histories"
-NAMES = ["slept", "answered", "restarted", "printed", "tooled"]
+NAMES = ["slept", "answered", "restarted", "printed", "tooled", "inputted"]
 RECORD = os.environ.get("SCADBUDDY_RECORD_HISTORIES") == "1"
 
 
@@ -83,6 +84,28 @@ async def test_answered(flows: Flows) -> None:
     )
     await flows.finished(run_id)
     await _record(flows, "answered", run_id)
+
+
+@pytest.mark.requires_temporal
+@pytest.mark.requires_postgres
+async def test_inputted(flows: Flows) -> None:
+    """A run of a flow with an inputs schema, whose script reads `inputs()` (#2663)."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "slug": {"type": "string"},
+            "copies": {"type": "integer", "default": 2},
+        },
+        "required": ["slug"],
+    }
+    run_id = await flows.start(
+        script("i = await inputs()", "return [i['slug'], i['copies']]"),
+        inputs_schema=schema,
+        inputs={"slug": "box", "copies": 2},
+    )
+    run = await flows.finished(run_id)
+    assert run.result == "result: ['box', 2]"
+    await _record(flows, "inputted", run_id)
 
 
 @pytest.mark.requires_temporal
