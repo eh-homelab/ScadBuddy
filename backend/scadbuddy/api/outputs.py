@@ -79,8 +79,10 @@ from scadbuddy.bambuddy.project_file import (
 from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.bambuddy.send import SendRequest, SendResult
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
+from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
+from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import DATABASE_ERRORS, PROBLEM_MEDIA_TYPE, ApiError
-from scadbuddy.library.history import COMMIT_ID_PATTERN
+from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
 from scadbuddy.library.outputs import (
     MODEL_NAME,
     OUTPUT_ID_PATTERN,
@@ -92,6 +94,7 @@ from scadbuddy.library.outputs import (
     OutputStore,
     require_output,
 )
+from scadbuddy.meshmodel.locate import attribute
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.operations.store import Operation
@@ -101,6 +104,7 @@ from scadbuddy.render.inputs import (
     legacy_inputs,
 )
 from scadbuddy.render.job_models import BomEntry, JobNotFoundError, ManifestObject, OutputRecord
+from scadbuddy.render.jobs import SnapshotUnavailableError, source_directory
 from scadbuddy.render.objects3mf import UnreadableObjectsError
 from scadbuddy.render.read_budget import ReadBudget, ReadBudgetOverride, budget_of
 from scadbuddy.render.schema import ParamValue
@@ -1010,21 +1014,25 @@ def get_output_plate_thumbnail(
     response_model=GeometryAnalysis,
     summary="Mesh geometry analysis",
 )
-def get_output_geometry(
+async def get_output_geometry(
     output_id: OutputIdPath,
     outputs: OutputsDep,
+    paths: PathsDep,
+    history: HistoryDep,
     plate: Annotated[int, Query(ge=1, description="The plate to measure (1-based)")] = 1,
 ) -> GeometryAnalysis:
     """Printability measurements of the closed per-colour solids on one plate of the
     output (#284): open and non-manifold edges with their locations, bounding box,
-    bed contact, height-to-base ratio, overhang area by angle, and estimates of the
-    thinnest wall and smallest feature. Coordinates are the model's own (mm, Z up),
-    as in the preview. A 3MF with more than one plate (#289) is measured a plate at
-    a time; ``plates`` in the result says how many there are. Computed on first ask
-    and cached beside the output."""
+    bed contact, height-to-base ratio, overhang area by angle, estimates of the
+    thinnest wall and smallest feature, and weak joints (#2146): level sections narrow
+    enough to snap, each with a `split_at_plane` edit whose `object` names the scene
+    object for a mesh model's output. Coordinates are the model's own (mm, Z up), as in
+    the preview. A 3MF with more than one plate (#289) is measured a plate at a time;
+    ``plates`` in the result says how many there are. Computed on first ask and cached
+    beside the output."""
     require_output(outputs, output_id)
     try:
-        return outputs.geometry(output_id, plate)
+        analysis = await asyncio.to_thread(outputs.geometry, output_id, plate)
     except FileNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF") from None
     except NoSuchPlateError as error:
@@ -1034,6 +1042,36 @@ def get_output_geometry(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"the 3MF of output {output_id!r} cannot be analysed: {error}",
         ) from None
+    return await _attributed(analysis, outputs, output_id, paths=paths, history=history)
+
+
+async def _attributed(
+    analysis: GeometryAnalysis,
+    outputs: OutputStore,
+    output_id: str,
+    *,
+    paths: DataPaths,
+    history: ModelHistory,
+) -> GeometryAnalysis:
+    """``analysis`` with its weak joints naming their scene objects, when the output is
+    a render of a mesh model (spec 2026-10-11 §9), read at the output's revision. An
+    arranged output's objects were moved off the scene's frame, so it is left as it is,
+    as is one whose revision cannot be read."""
+    if not analysis.weak_joints:
+        return analysis
+    if await asyncio.to_thread(outputs.arranged_from, output_id):
+        return analysis
+    meta = await asyncio.to_thread(outputs.get, output_id)
+    version = meta.model_version
+    requested = (
+        version if version is not None and re.fullmatch(COMMIT_ID_PATTERN, version) else None
+    )
+    try:
+        directory, _ = await source_directory(meta.slug, requested, paths=paths, history=history)
+    except (GitError, RevisionNotFoundError, SnapshotUnavailableError, OSError) as error:
+        logger.warning("weak joints of %s left unattributed: %s", output_id, type(error).__name__)
+        return analysis
+    return await asyncio.to_thread(attribute, analysis, directory)
 
 
 @router.put(

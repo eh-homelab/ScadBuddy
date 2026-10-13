@@ -14,6 +14,7 @@ from pydantic import TypeAdapter
 from scadbuddy.meshmodel.compile import compile_scene
 from scadbuddy.meshmodel.edits import Edit, apply_edits
 from scadbuddy.meshmodel.ingest import scene_from_objects
+from scadbuddy.meshmodel.locate import object_at
 from scadbuddy.meshmodel.meshes import part_loader
 from scadbuddy.meshmodel.paint import placement
 from scadbuddy.meshmodel.scene import Scene, SceneObject, SceneSource, value
@@ -189,3 +190,18 @@ def test_the_carrot_gardens_weak_joints_are_its_two_necks(tmp_path: Path) -> Non
     assert 30.0 < small.z < 32.0
     assert 32.5 < big.z < 35.0
     assert all(j.suggestion.joint is not None for j in joints)
+
+
+def test_the_carrot_gardens_suggested_splits_name_their_carrots_and_fit(tmp_path: Path) -> None:
+    """The carrot loop (spec §9): each weak joint's suggestion, sent to edit_scene with
+    the object `object_at` names, splits that carrot with a joint that fits."""
+    _, scene = opened(CARROT, tmp_path)
+    load = part_loader(tmp_path)
+    joints = analyze_geometry(placed_parts(scene, tmp_path)).weak_joints
+    named = {object_at(scene, load, joint.centroid): joint for joint in joints}
+    painted = {o.id for o in scene.objects if any(p.painted for p in o.parts)}
+    assert set(named) == painted
+    for oid, joint in named.items():
+        edit = {**joint.suggestion.model_dump(), "object": oid}
+        split = apply_edits(scene, EDITS.validate_python([edit]), load)
+        assert len(split.objects) == len(scene.objects) + 1

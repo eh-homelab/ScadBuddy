@@ -15,14 +15,18 @@ from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import outputs as outputs_module
 from scadbuddy.library.outputs import OutputMeta, OutputStore
+from scadbuddy.meshmodel.ingest import scene_from_objects
+from scadbuddy.meshmodel.scene import SCENE_NAME, SceneSource, dump_scene, text_sha256
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
 from scadbuddy.render.inputs import InputsError
+from scadbuddy.render.objects3mf import ReadObject
 from scadbuddy.render.provenance import Provenance, source_version
 from scadbuddy.render.provenance import read as read_provenance
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.split import ColourPart
 from tests.api.conftest import FAIL_WIDTH, PNG_BYTES, wait_for_job
 from tests.support.operations import press
+from tests.test_geometry import carrot
 
 
 def _finished_job(client: TestClient, slug: str, width: float = 12) -> str:
@@ -762,3 +766,56 @@ def test_a_copy_that_fails_otherwise_is_the_same_404_without_a_path(
     assert str(paths.root) not in response.text
     outputs = paths.output_dir(model, "x").parent
     assert not outputs.exists() or not any(outputs.iterdir())
+
+
+def _carrot_output(client: TestClient, model: str, paths: DataPaths, *, scene: bool) -> str:
+    """An output of ``model`` whose 3MF is the test carrot; with ``scene``, the model is
+    a mesh model of that carrot (its scene's hash is the model.scad already there)."""
+    directory = paths.model_dir(model)
+    if scene:
+        read = [ReadObject("Carrot", 1, [ColourPart(0, "Body", "#F08A24", carrot())])]
+        built, files = scene_from_objects(
+            read, SceneSource(kind="upload", name="neck.stl", sha256="ab" * 32)
+        )
+        for name, data in files.items():
+            (directory / name).parent.mkdir(parents=True, exist_ok=True)
+            (directory / name).write_bytes(data)
+        source = (directory / "model.scad").read_text()
+        stamped = built.model_copy(update={"generated_sha256": text_sha256(source)})
+        (directory / SCENE_NAME).write_text(dump_scene(stamped))
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(client, model)},
+        headers=press(),
+    ).json()
+    part = ColourPart(1, "Body", "#F08A24", carrot())
+    write_plates_3mf(
+        [PlateParts((part,), (1,))],
+        ["#F08A24"],
+        paths.output_dir(model, created["id"]) / "model.3mf",
+        thumbnails=None,
+    )
+    return str(created["id"])
+
+
+def test_a_mesh_models_weak_joint_names_its_scene_object(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    output = _carrot_output(client, model, paths, scene=True)
+    [joint] = client.get(f"/api/v1/outputs/{output}/geometry").json()["weak_joints"]
+    assert joint["suggestion"]["object"] == "o1"
+    assert joint["suggestion"]["edit"] == "split_at_plane"
+
+
+def test_a_weak_joint_names_no_object_outside_a_mesh_models_render(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """A template's render, and an arranged output (its objects moved off the scene's
+    frame): the joint is reported, with no object rather than a wrong one."""
+    plain = _carrot_output(client, model, paths, scene=False)
+    [joint] = client.get(f"/api/v1/outputs/{plain}/geometry").json()["weak_joints"]
+    assert joint["suggestion"]["object"] is None
+    arranged = _carrot_output(client, model, paths, scene=True)
+    (paths.output_dir(model, arranged) / "arranged_from.json").write_text(json.dumps([plain]))
+    [joint] = client.get(f"/api/v1/outputs/{arranged}/geometry").json()["weak_joints"]
+    assert joint["suggestion"]["object"] is None
