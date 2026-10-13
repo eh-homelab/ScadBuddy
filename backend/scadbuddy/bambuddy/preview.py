@@ -273,6 +273,9 @@ async def read_toolpath(
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE, "other toolpaths are being read; try again"
         ) from None
+    # The turn is the parse's as well as the request's: a request cancelled while the
+    # thread parses hands it to the thread, which gives it back when it is done (#2886).
+    handed_off = False
     try:
         if (cached := _TOOLPATHS.get(key)) is not None:
             return cached
@@ -288,14 +291,25 @@ async def read_toolpath(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
                 "the sliced file has no G-code for this plate that can be read",
             )
-        encoded = (await asyncio.to_thread(toolpath.parse, gcode)).encode()
+        parsing = asyncio.ensure_future(asyncio.to_thread(_encode_toolpath, gcode))
         del gcode
+        try:
+            encoded = await asyncio.shield(parsing)
+        except asyncio.CancelledError:
+            parsing.add_done_callback(lambda _: _READING_TOOLPATHS.release())
+            handed_off = True
+            raise
         _TOOLPATHS[key] = encoded
         while len(_TOOLPATHS) > TOOLPATHS_KEPT:
             _TOOLPATHS.popitem(last=False)
         return encoded
     finally:
-        _READING_TOOLPATHS.release()
+        if not handed_off:
+            _READING_TOOLPATHS.release()
+
+
+def _encode_toolpath(gcode: bytes) -> bytes:
+    return toolpath.parse(gcode).encode()
 
 
 async def _filament_changes(client: BambuddyClient, sliced: int, plate_id: int) -> int | None:
@@ -317,7 +331,11 @@ async def _plate_gcode(client: BambuddyClient, sliced: int, plate_id: int) -> by
                 data += chunk
                 if len(data) > MAX_SLICED_BYTES:
                     return None
-        with zipfile.ZipFile(io.BytesIO(bytes(data))) as archive:
+        # One copy of the archive, not two (#2886): ``bytes`` copies it, and the
+        # downloaded buffer goes before the G-code member is read beside it.
+        payload = bytes(data)
+        data.clear()
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
             names = [
                 name
                 for name in archive.namelist()

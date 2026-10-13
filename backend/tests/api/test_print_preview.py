@@ -11,11 +11,14 @@ import asyncio
 import io
 import json
 import struct
+import threading
 import time
+import tracemalloc
 import zipfile
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from datetime import timedelta
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -265,6 +268,107 @@ def test_a_toolpath_read_with_no_turn_free_is_told_to_come_back(
     busy = client.get(f"/api/v1/print/outputs/{output_id}/preview-slices/9/toolpath")
 
     assert busy.status_code == 503, busy.text
+
+
+@respx.mock
+def test_a_stalled_download_is_a_504_and_gives_its_turn_back(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2886: a read whose download stalls past `TOOLPATH_DOWNLOAD_SECONDS` answers 504
+    and frees its turn, so the next read is not refused."""
+    output_id, _, download = _toolpath_slice(client, model)
+    monkeypatch.setattr(preview, "TOOLPATH_DOWNLOAD_SECONDS", 0.1)
+    turns = asyncio.Semaphore(1)
+    monkeypatch.setattr(preview, "_READING_TOOLPATHS", turns)
+    _TOOLPATHS.clear()
+
+    async def stalls(_request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(5)
+        return httpx.Response(200)
+
+    served = download.side_effect, download.return_value
+    download.side_effect = stalls
+    url = f"/api/v1/print/outputs/{output_id}/preview-slices/9/toolpath"
+
+    assert client.get(url).status_code == 504
+    assert not turns.locked(), "the turn was given back"
+    download.side_effect, download.return_value = served
+    assert client.get(url).status_code == 200
+
+
+async def test_a_cancelled_read_keeps_its_turn_until_the_parse_ends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2886: the parse thread cannot be stopped, so a request cancelled while it runs
+    leaves the turn with it: no more than `TOOLPATH_READS` parses hold memory at once."""
+    turns = asyncio.Semaphore(1)
+    monkeypatch.setattr(preview, "_READING_TOOLPATHS", turns)
+    _TOOLPATHS.clear()
+    started, finish = threading.Event(), threading.Event()
+
+    def slow_parse(_gcode: bytes) -> bytes:
+        started.set()
+        finish.wait(5)
+        return b"encoded"
+
+    class Row:
+        id = 1
+        plate_id = 1
+
+    class Uploads:
+        async def preview(self, _job_id: int, _subject: str) -> Row:
+            return Row()
+
+    async def still_sliced(*_args: object) -> Any:
+        return SimpleNamespace(
+            status="completed", result=SimpleNamespace(library_file_id=7, name="p.gcode.3mf")
+        )
+
+    async def plate_gcode(*_args: object) -> bytes:
+        return b"G1 X1"
+
+    monkeypatch.setattr(preview, "_still_sliced", still_sliced)
+    monkeypatch.setattr(preview, "_plate_gcode", plate_gcode)
+    monkeypatch.setattr(preview, "_encode_toolpath", slow_parse)
+
+    reading = asyncio.create_task(
+        preview.read_toolpath(cast(Any, None), cast(Any, Uploads()), 9, "output:x")
+    )
+    await asyncio.to_thread(started.wait, 5)
+    reading.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await reading
+    assert turns.locked(), "the parse still holds the turn"
+    finish.set()
+    for _ in range(100):
+        if not turns.locked():
+            break
+        await asyncio.sleep(0.01)
+    assert not turns.locked(), "given back once the parse ended"
+
+
+async def test_the_downloaded_archive_is_held_once_while_its_gcode_is_read() -> None:
+    """#2886: the download buffer is dropped once copied, so a read peaks near twice the
+    file (the archive and its G-code), not three times."""
+    size = 8 * 1024 * 1024
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_STORED) as zipped:
+        zipped.writestr("Metadata/plate_1.gcode", b"G" * size)
+    payload = archive.getvalue()
+
+    class Client:
+        async def download_library_file(self, _file_id: int) -> AsyncIterator[bytes]:
+            for at in range(0, len(payload), 1 << 20):
+                yield payload[at : at + (1 << 20)]
+
+    tracemalloc.start()
+    try:
+        gcode = await preview._plate_gcode(cast(Any, Client()), 7, 1)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert gcode is not None and len(gcode) == size
+    assert peak < 2.6 * size, peak
 
 
 def _preview_then_change(client: TestClient, model: str, change: str) -> tuple[str, respx.Route]:
