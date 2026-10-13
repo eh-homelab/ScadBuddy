@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
-import { useLocation } from 'react-router'
+import { useLocation, useNavigate } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import { server } from '../mocks/server'
@@ -17,11 +17,21 @@ function Location() {
   return <output data-testid="location">{`${location.pathname}${location.search}`}</output>
 }
 
+function Back() {
+  const navigate = useNavigate()
+  return (
+    <button type="button" onClick={() => void navigate(-1)}>
+      Go back
+    </button>
+  )
+}
+
 function render(route = '/activity') {
   return renderPage(
     <>
       <ActivityPage />
       <Location />
+      <Back />
     </>,
     { route },
   )
@@ -212,5 +222,22 @@ describe('ActivityPage', () => {
     expect(facets.mock.calls.length).toBe(before + 1)
     await vi.advanceTimersByTimeAsync(3500)
     expect(facets.mock.calls.length).toBe(before + 2)
+  })
+
+  it('drops the held pages when the query changes, and Back shows a fresh first page', async () => {
+    seedActivity(many(260))
+    const { user } = render()
+    await waitFor(() => expect(screen.getAllByTestId(/^activity-row-/)).toHaveLength(50))
+    for (const n of [100, 150, 200, 250]) {
+      await user.click(screen.getByRole('button', { name: 'Load more' }))
+      await waitFor(() => expect(screen.getAllByTestId(/^activity-row-/)).toHaveLength(n))
+    }
+    expect(screen.getByText(/Live updates paused/)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Running' }))
+    await waitFor(() => expect(screen.getByTestId('location').textContent).toContain('status=running'))
+    await user.click(screen.getByRole('button', { name: 'Go back' }))
+    await waitFor(() => expect(screen.getByTestId('location').textContent).toBe('/activity'))
+    await waitFor(() => expect(screen.getAllByTestId(/^activity-row-/)).toHaveLength(50))
+    expect(screen.queryByText(/Live updates paused/)).toBeNull()
   })
 })

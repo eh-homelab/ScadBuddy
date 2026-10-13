@@ -32,20 +32,43 @@ export function ActivityPage() {
   // (a new row would open a gap before them); the facets stay live.
   const [older, setOlder] = useState<{ key: string; items: Activity[]; cursor: string | null } | null>(null)
   const olderRef = useRef(older)
-  const dataRef = useRef<ActivityPageData | undefined>(undefined)
-  const gate = useRef<{ last: number; pending: Promise<ActivityFacets> | null }>({ last: 0, pending: null })
+  const dataRef = useRef<{ key: string; data: ActivityPageData } | undefined>(undefined)
+  const gate = useRef<{
+    since: string | null
+    last: number
+    pending: Promise<ActivityFacets> | null
+    timer: ReturnType<typeof setTimeout> | undefined
+  }>({ since: null, last: 0, pending: null, timer: undefined })
+  const sinceRef = useRef(query.since)
+  useEffect(() => {
+    sinceRef.current = query.since
+  })
+  // A query change drops the pages appended under the old one.
+  const [seenKey, setSeenKey] = useState(key)
+  if (seenKey !== key) {
+    setSeenKey(key)
+    setOlder(null)
+  }
 
   const facets = useAsync(
     () => {
-      const read = () => api.activityFacets(sinceTime(query.since) || undefined)
+      const read = () => api.activityFacets(sinceTime(sinceRef.current) || undefined)
       const g = gate.current
+      // Only a live re-read is throttled; a first read, or one for another `since`, is not.
+      if (g.since !== query.since) {
+        g.since = query.since
+        clearTimeout(g.timer)
+        g.pending = null
+        g.last = Date.now()
+        return read()
+      }
       const wait = g.last + FACETS_EVERY_MS - Date.now()
       if (wait <= 0) {
         g.last = Date.now()
         return read()
       }
       g.pending ??= new Promise<ActivityFacets>((resolve, reject) => {
-        setTimeout(() => {
+        g.timer = setTimeout(() => {
           g.pending = null
           g.last = Date.now()
           read().then(resolve, reject)
@@ -58,8 +81,12 @@ export function ActivityPage() {
   )
   const list = useAsync(
     () => {
-      if (olderRef.current?.key === key && dataRef.current) return Promise.resolve(dataRef.current)
-      if (want.current.key !== key) want.current = { key, count: PAGE }
+      if (want.current.key !== key) {
+        want.current = { key, count: PAGE }
+        olderRef.current = null
+      }
+      const kept = dataRef.current
+      if (olderRef.current?.key === key && kept?.key === key) return Promise.resolve(kept.data)
       return api.listActivity(wire(query), { limit: want.current.count })
     },
     [key],
@@ -70,8 +97,15 @@ export function ActivityPage() {
   const [open, setOpen] = useState<string | null>(null)
 
   useEffect(() => {
-    dataRef.current = list.data
-  }, [list.data])
+    dataRef.current = list.data ? { key, data: list.data } : undefined
+  }, [list.data, key])
+  useEffect(() => {
+    const g = gate.current
+    return () => {
+      clearTimeout(g.timer)
+      g.pending = null
+    }
+  }, [])
 
   const onChange = useCallback(
     (next: ActivityQuery, options?: { typing?: boolean }) =>
@@ -109,12 +143,16 @@ export function ActivityPage() {
     }
     const cursor = held ? held.cursor : (list.data?.next_cursor ?? null)
     if (!cursor) return
+    // Freeze before asking, so a live re-read cannot move the base past the cursor.
+    const before = held
+    keepOlder({ key, items: before?.items ?? [], cursor })
     api.listActivity(wire(query), { cursor, limit: PAGE }).then(
       (page) => {
-        keepOlder({ key, items: [...(held?.items ?? []), ...page.items], cursor: page.next_cursor })
+        keepOlder({ key, items: [...(before?.items ?? []), ...page.items], cursor: page.next_cursor })
         setLoadingMore(false)
       },
       () => {
+        keepOlder(before)
         setLoadingMore(false)
         setMoreFailed(key)
       },
