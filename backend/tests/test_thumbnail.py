@@ -9,12 +9,14 @@ size and transparency are the properties that carry the meaning.
 
 from __future__ import annotations
 
+import tracemalloc
 from typing import get_args
 
 import numpy as np
 import pytest
 import trimesh
 
+from scadbuddy.render import thumbnail
 from scadbuddy.render.split import ColourPart
 from scadbuddy.render.thumbnail import (
     MAX_BREAKDOWN_COLOURS,
@@ -475,3 +477,42 @@ def test_a_breakdown_refuses_too_many_colours() -> None:
     colours = [f"#0000{index:02X}" for index in range(MAX_BREAKDOWN_COLOURS + 1)]
     with pytest.raises(ValueError, match="more than a breakdown draws"):
         render_colour_breakdown(_cubes(*colours), "top", 64)
+
+
+def _peak_drawing(parts: list[ColourPart]) -> int:
+    tracemalloc.start()
+    try:
+        render_view(parts, "iso", 128)
+        return tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+
+def test_drawing_memory_follows_the_chunk_not_the_plate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#2573: an arranged plate joins every copy of a colour into one part, so a part
+    can be the sum of every piece on the plate. Its triangles are projected, and their
+    fragments resolved, a chunk at a time, and no normals are left cached on the
+    mesh: sixteen copies cost what one does, give or take."""
+    monkeypatch.setattr(thumbnail, "CHUNK_TRIANGLES", 4096, raising=False)
+    monkeypatch.setattr(thumbnail, "BATCH_PIXELS", 1 << 14)
+    piece = trimesh.creation.icosphere(subdivisions=5, radius=10)
+    copies = []
+    for index in range(16):
+        copy = piece.copy()
+        copy.apply_translation((25.0 * (index % 4), 25.0 * (index // 4), 0.0))
+        copies.append(copy)
+    one = [ColourPart(1, "One", PINK, piece.copy())]
+    joined = trimesh.util.concatenate(copies)
+    assert isinstance(joined, trimesh.Trimesh)
+    many = [ColourPart(1, "Many", PINK, joined)]
+
+    grown = _peak_drawing(many) - _peak_drawing(one)
+
+    assert grown < 8 * 2**20, f"16 copies peaked {grown / 2**20:.0f} MiB above one"
+    assert "face_normals" not in many[0].mesh._cache
+
+
+def test_a_plate_drawn_in_small_chunks_is_the_same_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    whole = render_plate_thumbnails(_two_colour_parts())
+    monkeypatch.setattr(thumbnail, "CHUNK_TRIANGLES", 5, raising=False)
+    assert render_plate_thumbnails(_two_colour_parts()) == whole
