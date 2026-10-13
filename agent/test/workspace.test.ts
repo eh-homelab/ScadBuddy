@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
-import { runHttpRequest, withDefaults } from '../src/harness/httpRequest.js'
+import { dirBodies, runHttpRequest, withDefaults } from '../src/harness/httpRequest.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { DURABLE_TOOLS } from '../src/tools/manifest.js'
 import { runTool, type ToolContext } from '../src/tools/registry.js'
@@ -139,7 +139,7 @@ describe('uploads take a workspace file (#2329 part 2)', () => {
 
 describe('http_request save_to_workspace, before anything is sent', () => {
   const base = {
-    saveDir: '/nonexistent',
+    saved: dirBodies('/nonexistent'),
     secrets: () => [],
     actor: { kind: 'browser' as const, id: 'user', label: 'User' },
   }

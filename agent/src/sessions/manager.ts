@@ -75,6 +75,7 @@ import {
   type SessionStatus,
 } from './protocol.js'
 import { SessionBlobs, sentImageBlobs, type StoredBlob } from './blobs.js'
+import { PgHttpBodies } from './httpBodies.js'
 import { SessionFiles } from '../workspace/store.js'
 import { SessionEdits } from './edits.js'
 import { blobNames, durableReplies, entriesThrough, forkHistory, transcriptCut } from './forkPoint.js'
@@ -1057,7 +1058,7 @@ export class SessionManager {
   /** `id` is the saved response's id as `savedBody` checked it: a UUID, safe in a header or a path. */
   async httpBody(id: string, saved: string, principal: Owner): Promise<{ id: string; meta: SavedMeta; bytes: Buffer }> {
     await this.get(id, principal)
-    const body = await savedBody(path.join(sessionWorkDir(this.deps.paths, id), 'http'), saved)
+    const body = await savedBody(new PgHttpBodies(this.deps.sql, id), saved)
     if (!body) throw new SessionError('not_found', `no saved response ${saved} in session ${id}`)
     return { id: saved, ...body }
   }
@@ -1731,7 +1732,8 @@ export class SessionManager {
         const http =
           this.deps.httpRequest && httpRequestEnabled(httpSetting)
             ? httpRequestServer({
-                saveDir: path.join(cwd, 'http'),
+                // In Postgres, so any replica serves it, after a deploy too (#2374).
+                saved: new PgHttpBodies(this.deps.sql, id),
                 // save_to_workspace (#2329): the body becomes one of the session's files.
                 workspace: { files: this.files, ref: { kind: 'session', sessionId: id } },
                 secrets: () => secrets,

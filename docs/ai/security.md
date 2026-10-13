@@ -795,9 +795,12 @@ so a name re-pointed between check and connect reaches nothing new.
 - **Limits.** One deadline for the whole request, redirects included: `timeout_ms`,
   default 30 s, at most 120 s. At most 5 redirects. The body is read up to 20 MiB and
   returned inline up to 1 MiB (text only, cut on a UTF-8 boundary); a longer or binary
-  body is saved under the session's directory (`work/sessions/<id>/http/`, the 10
-  newest kept) and read in pages of up to 1 MiB, text as text and anything else as
-  base64. The UI can fetch a saved body whole (#1292,
+  body is saved with its session in Postgres (`ai_session_http_bodies`, the 10 newest
+  kept, deleted with the session; #2374), so any replica reads it, after a deploy
+  too. A flow run's, which has no session, is kept on the pod that ran the call
+  (`<state>/durable-turns/flow-<run>/http/`, swept with the run). Either is read in
+  pages of up to 1 MiB, text as text and anything else as base64. Like
+  `ai_session_blobs`, the bytes are plaintext. The UI can fetch a saved body whole (#1292,
   `GET /api/v1/ai/sessions/:id/http/:saved`): a UI read, gated by whether the
   principal may see the session, by the UUID the audit row names and nothing else.
   It is untrusted bytes from whatever server answered, so it is never rendered:

@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createBackendClient } from '../src/api/backend.js'
 import { tiersUpTo } from '../src/auth/principal.js'
 import type { Database } from '../src/db.js'
-import { HTTP_SERVER, HTTP_TOOL, runHttpRequest, withDefaults } from '../src/harness/httpRequest.js'
+import { dirBodies, HTTP_SERVER, HTTP_TOOL, runHttpRequest, withDefaults } from '../src/harness/httpRequest.js'
 import { turnToolActivity } from '../src/temporal/turnTools.js'
 import { turnServers } from '../src/temporal/turnServers.js'
 import { unwrapUntrusted } from '../src/safety/untrusted.js'
@@ -561,7 +561,7 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       const deps = {
         sessions: { ownerOf: async (id: string) => (id === sessionId ? browser : undefined) },
         servers: turnServers({
-          httpRequest: { saveRoot: (await tempPaths()).stateDir, files },
+          httpRequest: { saveRoot: (await tempPaths()).stateDir, sql: db.sql, files },
           settings: { get: async <T,>() => true as T },
         }),
       }
@@ -588,7 +588,7 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
     }
 
     const context = (dir: string) => ({
-      saveDir: dir,
+      saved: dirBodies(dir),
       secrets: () => [],
       actor: browser,
       workspace: { files, ref: ws },

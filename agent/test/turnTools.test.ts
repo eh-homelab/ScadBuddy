@@ -272,7 +272,8 @@ describe('turn tools in a durable session', () => {
     const saveRoot = await mkdtemp(path.join(os.tmpdir(), 'turn-http-'))
     const deps: TurnToolsDeps = {
       sessions: { ownerOf: async (id) => (id === SESSION ? (BROWSER as never) : undefined) },
-      servers: turnServers({ httpRequest: { saveRoot } }),
+      // Its saved bodies are in Postgres; this test saves none.
+      servers: turnServers({ httpRequest: { saveRoot, sql: {} as never } }),
       approvals: { approved: async () => false },
     }
     const activities = turnToolActivities(deps)
