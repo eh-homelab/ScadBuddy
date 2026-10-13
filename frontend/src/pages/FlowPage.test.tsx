@@ -5,7 +5,7 @@ import { bridge } from '../agent/bridge'
 import { useGlobalAgentTools } from '../agent/global'
 import { api } from '../api/client'
 import type { FlowHostInterface, FlowScriptProblem } from '../api/types'
-import { flowRequests, setFlowState } from '../mocks/features/flows'
+import { COASTER_INPUTS, flowRequests, setFlowState } from '../mocks/features/flows'
 import { renderPage } from '../test/utils'
 import { FlowPage } from './FlowPage'
 
@@ -285,5 +285,87 @@ describe('FlowPage', () => {
   it('says when there is no such flow', async () => {
     render('def-gone')
     expect(await screen.findByRole('alert')).toHaveTextContent('No such flow.')
+  })
+})
+
+describe('FlowPage inputs (#2483)', () => {
+  it('edits the inputs schema beside the script, checks it, and saves it with the version', async () => {
+    const { user } = render('def-coasters')
+    const schema = (await screen.findByRole('textbox', { name: 'Inputs (JSON Schema)' })) as HTMLTextAreaElement
+    expect(JSON.parse(schema.value)).toEqual(COASTER_INPUTS)
+    expect(await screen.findByText('No problems', undefined, LOAD)).toBeInTheDocument()
+
+    fireEvent.change(schema, { target: { value: '{"type": ' } })
+    let problems = await screen.findByRole('list', { name: 'Problems' }, LOAD)
+    expect(within(problems).getByRole('listitem')).toHaveTextContent(/^InputsNot JSON/)
+    // A problem in the schema is not a line of the script.
+    expect(screen.getByTestId('marked-lines')).toHaveTextContent('')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(screen.getByRole('alert')).toHaveTextContent('Not JSON')
+
+    fireEvent.change(schema, { target: { value: '{"type": "array"}' } })
+    problems = await screen.findByRole('list', { name: 'Problems' }, LOAD)
+    await vi.waitFor(() =>
+      expect(within(problems).getByRole('listitem')).toHaveTextContent('Inputsthe top level must be {"type": "object"}'),
+    )
+
+    const next = { type: 'object', properties: { slug: { type: 'string' } }, required: ['slug'] }
+    fireEvent.change(schema, { target: { value: JSON.stringify(next) } })
+    expect(await screen.findByText('No problems', undefined, LOAD)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(await screen.findByRole('heading', { name: 'coasters v2' })).toBeInTheDocument()
+    expect(flowRequests().map((r) => r.body)).toEqual([
+      { name: 'coasters', script: expect.stringContaining('await inputs()'), inputs_schema: next },
+    ])
+  })
+
+  it('saves a blank schema as a flow with no inputs', async () => {
+    const { user } = render('def-coasters')
+    const schema = await screen.findByRole('textbox', { name: 'Inputs (JSON Schema)' })
+    fireEvent.change(schema, { target: { value: '  ' } })
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(await screen.findByRole('heading', { name: 'coasters v2' })).toBeInTheDocument()
+    expect(flowRequests()[0]!.body).not.toHaveProperty('inputs_schema')
+  })
+
+  it("asks for a flow's inputs before it starts", async () => {
+    const { user } = render('def-coasters')
+    await user.click(await screen.findByRole('button', { name: 'Start run' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Start coasters' })
+    await user.type(within(dialog).getByRole('textbox', { name: /Template/ }), 'coaster')
+    await user.click(within(dialog).getByRole('button', { name: 'Start run' }))
+    expect(await screen.findByText('Run page')).toBeInTheDocument()
+    expect(flowRequests().map((r) => r.body)).toEqual([
+      { inputs: { slug: 'coaster', copies: 2, colour: 'red', dry_run: false, plates: [1] } },
+    ])
+  })
+
+  it('starts a flow with both its inputs and a grant (#2481, #2483)', async () => {
+    const { user } = render('def-coasters')
+    await user.click(await screen.findByRole('button', { name: 'Start with a grant…' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Start with a grant' })
+    const inputs = within(dialog).getByRole('region', { name: 'Inputs' })
+    const arrange = await within(dialog).findByRole('group', { name: 'Rule arrange' })
+    await user.click(within(arrange).getByRole('checkbox', { name: 'Allow without asking' }))
+    await user.type(within(arrange).getByLabelText('Max calls'), '2')
+    // The inputs are checked too: a required one left blank keeps the run from starting.
+    await user.click(within(dialog).getByRole('button', { name: 'Start run' }))
+    expect(within(inputs).getByText('Required')).toBeInTheDocument()
+    expect(flowRequests()).toEqual([])
+    await user.type(within(inputs).getByRole('textbox', { name: /Template/ }), 'lid')
+    await user.click(within(dialog).getByRole('button', { name: 'Start run' }))
+    expect(await screen.findByText('Run page')).toBeInTheDocument()
+    const [sent] = flowRequests()
+    expect(sent!.path).toBe('/api/v1/workflows/def-coasters/runs')
+    expect(sent!.body['inputs']).toEqual({ slug: 'lid', copies: 2, colour: 'red', dry_run: false, plates: [1] })
+    expect(sent!.body['grant']).toMatchObject({ rules: [{ fn: 'arrange', max_calls: 2 }] })
+  })
+
+  it('shows the inputs schema read only on a phone', async () => {
+    asPhone()
+    render('def-coasters')
+    const inputs = await screen.findByLabelText('Inputs')
+    expect(inputs.tagName).toBe('PRE')
+    expect(inputs).toHaveTextContent('"slug"')
   })
 })

@@ -73,10 +73,19 @@ class FlowDefinitions:
     # -- writes -----------------------------------------------------------------
 
     async def register(
-        self, name: str, script: str, author: dict[str, Any], *, approval_timeout_s: int | None
+        self,
+        name: str,
+        script: str,
+        author: dict[str, Any],
+        *,
+        approval_timeout_s: int | None,
+        inputs_schema: dict[str, Any] | None = None,
     ) -> Definition:
-        """A new version of ``name``: always one commit, an unchanged script too."""
-        return await asyncio.to_thread(self._write, name, author, approval_timeout_s, script, None)
+        """A new version of ``name``: always one commit, an unchanged script too, with
+        its inputs schema beside it (#2483) or none."""
+        return await asyncio.to_thread(
+            self._write, name, author, approval_timeout_s, script, None, inputs_schema
+        )
 
     async def restore(self, name: str, commit: str, author: dict[str, Any]) -> Definition:
         """A new version of ``name`` with its script at ``commit`` (one of its versions):
@@ -96,6 +105,7 @@ class FlowDefinitions:
         approval_timeout_s: int | None,
         script: str | None,
         restore: str | None,
+        inputs_schema: dict[str, Any] | None = None,
     ) -> Definition:
         self._require()
         version_id = str(uuid.uuid4())
@@ -120,6 +130,7 @@ class FlowDefinitions:
             version_id,
             index,
             script=script,
+            inputs=inputs_schema,
             restore=restore,
             reconcile=lambda: backfill_locked(self.history, self.store),
         )
@@ -128,6 +139,7 @@ class FlowDefinitions:
                 **rows[0].model_dump(),
                 **self._flags(self.states.state(name)),
                 "script": self.history.script_at(name, commit),
+                "inputs_schema": self.history.inputs_at(name, commit),
             }
         )
 
@@ -181,16 +193,22 @@ class FlowDefinitions:
         row = self.store.stored_definition(definition_id)
         if row is None:
             return None
-        script = row.script
+        script, inputs = row.script, None
         if row.commit is not None:
             self._require()
             try:
                 script = self.history.script_at(row.name, row.commit)
+                inputs = self.history.inputs_at(row.name, row.commit)
             except RevisionNotFoundError:
                 raise ScriptMissingError(row.commit) from None
         assert script is not None
         return Definition.model_validate(
-            {**row.model_dump(), **self._flags(self.states.state(row.name)), "script": script}
+            {
+                **row.model_dump(),
+                **self._flags(self.states.state(row.name)),
+                "script": script,
+                "inputs_schema": inputs,
+            }
         )
 
     async def flows(self, *, hidden: bool = False) -> list[DefinitionSummary]:
@@ -228,6 +246,13 @@ class FlowDefinitions:
 
     def _source(self, name: str, commit: str) -> str:
         return self.history.script_at(name, self._version(name, commit).commit)
+
+    async def inputs_schema(self, name: str, commit: str) -> dict[str, Any] | None:
+        """The flow's inputs schema at ``commit``, one of its versions; None for none."""
+        return await asyncio.to_thread(self._inputs_schema, name, commit)
+
+    def _inputs_schema(self, name: str, commit: str) -> dict[str, Any] | None:
+        return self.history.inputs_at(name, self._version(name, commit).commit)
 
     async def diff(self, name: str, commit: str, base: str | None) -> FlowDiff:
         """The flow's script from ``base`` (its version before ``commit`` when None) to

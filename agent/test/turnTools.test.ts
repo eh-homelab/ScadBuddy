@@ -124,7 +124,7 @@ function harness(
       summarise: (tool) => `summary:${tool}`,
     },
     report: async (_session, problems) => void reported.push(...problems),
-    blobs: { put: async (session, images) => void stored.push(...images.map((i) => `${session}/${i.name}`)) },
+    blobs: { put: async (session, images, toolUseId) => void stored.push(...images.map((i) => `${session}/${i.name}/${toolUseId}`)) },
   }
   return {
     contexts,
@@ -305,8 +305,10 @@ describe('turn tools in a durable session', () => {
     const h = harness()
     const out = String(await env('turn:notes__shot', 'tool-toolu_approved').run(h.call as (input: unknown) => Promise<unknown>, {}))
     expect(h.stored).toHaveLength(1)
-    const [session, name] = h.stored[0]!.split('/')
+    const [session, name, toolUseId] = h.stored[0]!.split('/')
     expect(session).toBe(SESSION)
+    // The call that produced it, which the panel's tool.result names it under (#2478).
+    expect(toolUseId).toBe('toolu_approved')
     expect(out).toContain(`[image ${name}]`)
     expect(out).toContain('view_tool_images')
   })

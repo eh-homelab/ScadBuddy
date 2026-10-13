@@ -12,7 +12,9 @@ For each segment, ``ScadBuddyRunner``:
 - runs the segment with the plugin's ``ClaudeAgentSdkRunner``, built for this segment
   with that credential's environment and the remaining budget as its cap;
 - adds what the segment cost to ``ai_sessions.cost_usd`` and one to ``turns``. Every
-  attempt that reports a cost is counted: each was really spent.
+  attempt that reports a cost is counted: each was really spent. A segment that reached
+  its cap is charged at least what was left (the plugin reports no cost for it), and
+  ends the task as ``budget_exhausted``.
 
 The images the user sent with the turn are offered through a read-only in-segment
 MCP server, ``scadbuddy_images``, whose tool ``view_user_images`` returns them
@@ -129,6 +131,9 @@ _FINAL = re.compile(
     r"\b(?:too (?:large|long)|exceeds)\b|too many tokens|request entity too large",
     re.IGNORECASE,
 )
+# Claude Code's own words when a segment reaches its max_budget_usd (the result's
+# subtype is error_max_budget_usd; its text is "Reached maximum budget ($N)").
+_BUDGET_REACHED = re.compile(r"Reached maximum budget|error_max_budget_usd")
 # sessions/images.ts and routes/imageSettings.ts: what one message's images may be.
 IMAGES_MAX = 4
 IMAGE_BYTES_MAX = 5 * 1024 * 1024 * 3 // 4  # 5 MB of base64, the Messages API's limit
@@ -580,7 +585,16 @@ class ScadBuddyRunner:
                 **({"model": settings.model} if settings.model else {}),
             )
             try:
-                return await runner.run(inp, attempt)
+                out = await runner.run(inp, attempt)
+                if out.is_error and out.error and _BUDGET_REACHED.search(out.error):
+                    # The plugin answers a segment that reached its cap with the error's
+                    # text only: no subtype, and no cost. Claude Code stops only once the
+                    # cost reached the cap, so at least what was left was spent; charged
+                    # as 0, the next send would find the budget unspent and run again.
+                    # BUDGET_EXHAUSTED ends the turn as the budget's, not as a failure,
+                    # so the panel offers the raise.
+                    return replace(out, error=BUDGET_EXHAUSTED, cost_usd=max(out.cost_usd, left))
+                return out
             except Exception as err:
                 # Never the text: like the codec's sealed failures, it is the session's content.
                 logger.warning(

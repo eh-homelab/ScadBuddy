@@ -178,3 +178,24 @@ def test_a_deleted_flow_is_restored_as_its_next_version(history: FlowHistory) ->
 def test_deleting_a_flow_with_no_version_is_refused(history: FlowHistory) -> None:
     with pytest.raises(RevisionNotFoundError):
         history.delete("nothing", lambda _c: None)
+
+
+INPUTS = {"type": "object", "properties": {"slug": {"type": "string"}}, "required": ["slug"]}
+
+
+def test_inputs_are_committed_with_the_script_and_restored_with_it(history: FlowHistory) -> None:
+    """#2483: `<name>/inputs.json` beside `flow.py`, in the version's one commit."""
+    first, version = history.register(
+        "swap", str(uuid.uuid4()), lambda c, v: None, script=ONE, inputs=INPUTS
+    )
+    assert version == 1
+    assert history.inputs_at("swap", first) == INPUTS
+    changed = history._out("show", "--name-only", "--format=", first).split()
+    assert changed == ["swap/flow.py", "swap/inputs.json"]
+    # A version without inputs drops the file; restoring the first brings it back.
+    second, _ = history.register("swap", str(uuid.uuid4()), lambda c, v: None, script=TWO)
+    assert history.inputs_at("swap", second) is None
+    assert not (history.root / "swap" / "inputs.json").exists()
+    restored, _ = history.register("swap", str(uuid.uuid4()), lambda c, v: None, restore=first)
+    assert history.inputs_at("swap", restored) == INPUTS
+    assert history.script_at("swap", restored) == ONE
