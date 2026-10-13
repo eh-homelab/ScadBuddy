@@ -27,6 +27,7 @@ from scadbuddy.bambuddy.filaments import FilamentWarning
 from scadbuddy.render.bambu3mf import (
     CORE_NS,
     MAX_SETTINGS_BYTES,
+    MAX_UNCOMPRESSED_BYTES,
     MODEL_SETTINGS_NAME,
     PRODUCTION_NS,
     ROOT_MODEL_NAME,
@@ -101,10 +102,17 @@ class _Bounds:
 
     def _model(self, path: str) -> ParsedModel:
         if path not in self.models:
+            # Never past the one-file cap parse_model holds every read to, whatever
+            # the budget leaves (no limit included).
+            cap = (
+                MAX_UNCOMPRESSED_BYTES
+                if self.bytes is None
+                else min(self.bytes, MAX_UNCOMPRESSED_BYTES)
+            )
             model = parse_model(
                 self.archive,
                 path,
-                self.bytes,
+                cap,
                 max_triangles=self.triangles,
                 max_vertices=None if self.triangles is None else 3 * self.triangles,
             )

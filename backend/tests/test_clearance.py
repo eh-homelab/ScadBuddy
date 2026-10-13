@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import trimesh
 
+from scadbuddy.bambuddy import clearance
 from scadbuddy.bambuddy.clearance import (
     PlacedObject,
     clearance_for,
@@ -139,3 +140,11 @@ def test_an_object_named_many_times_is_read_once() -> None:
 def test_a_file_past_the_read_budget_is_not_checked() -> None:
     with pytest.raises(ValueError, match="read budget"):
         placed_objects(_fan_out_3mf(levels=6, fan=2), 1, ReadBudget(max_visits=3))
+
+
+def test_a_model_file_is_held_to_the_one_file_cap_whatever_the_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(clearance, "MAX_UNCOMPRESSED_BYTES", 100)
+    with pytest.raises(ValueError, match="read budget"):
+        placed_objects(_fan_out_3mf(levels=1, fan=1), 1, ReadBudget.widest())
