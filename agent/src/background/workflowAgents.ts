@@ -1,8 +1,6 @@
-import { readdir, readFile } from 'node:fs/promises'
-import path from 'node:path'
 import { z } from 'zod'
 import { enterWorktree } from '../builtins/session.js'
-import { OWN_PLUGIN_DIR } from '../harness/ownPlugin.js'
+import { loadAgentDefinitions } from '../harness/agentDefinitions.js'
 import type { EventLog } from '../sessions/eventLog.js'
 import type { SessionManager } from '../sessions/manager.js'
 import type { Owner } from '../sessions/protocol.js'
@@ -72,13 +70,8 @@ const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 const MODEL = /^[A-Za-z0-9._:[\]-]{1,100}$/
 
 /** The subagent definitions a chat can run as: the plugin's agents/*.md, by their `name:`. */
-export async function agentTypes(dir: string = path.join(OWN_PLUGIN_DIR, 'agents')): Promise<string[]> {
-  const names: string[] = []
-  for (const file of (await readdir(dir).catch(() => [])).filter((f) => f.endsWith('.md')).sort()) {
-    const name = /^name:\s*([a-z0-9][a-z0-9-]*)\s*$/m.exec(await readFile(path.join(dir, file), 'utf8'))?.[1]
-    if (name) names.push(name)
-  }
-  return names
+export async function agentTypes(dir?: string): Promise<string[]> {
+  return Object.keys(await loadAgentDefinitions(dir))
 }
 
 /** Why an agent() cannot run with these options, or its chat's settings. */

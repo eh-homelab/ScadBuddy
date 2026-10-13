@@ -89,6 +89,7 @@ import { TurnTrace } from '../telemetry/turn.js'
 import { type DurableGate, DurableUnavailable } from '../gate/durable.js'
 import type { DurableTurns } from './durable.js'
 import { PendingProjection } from '../gate/projection.js'
+import { loadAgentDefinitions } from '../harness/agentDefinitions.js'
 import { ownPluginEnabled } from '../plugins/packages/builtins.js'
 
 // The session manager (#300, spec §6): durable, shared sessions that a human
@@ -1741,6 +1742,7 @@ export class SessionManager {
             SELECT agent_model, agent_effort, agent_type FROM ai_sessions WHERE id = ${id}`,
         ])
         const model = agentSettings?.agent_model ?? settingModel
+        const agentDefinition = agentSettings?.agent_type ? (await loadAgentDefinitions())[agentSettings.agent_type] : undefined
         // The http_request tool (#827): on unless the setting is `false`. Its
         // saved bodies live in the session's own directory, and it never sees
         // the turn's secrets except to refuse a request that carries one.
@@ -1812,8 +1814,8 @@ export class SessionManager {
           ...(resume ? { resume: id } : { sessionId: id }),
           ...(typeof model === 'string' && model ? { model } : {}),
           ...(agentSettings?.agent_effort ? { effort: agentSettings.agent_effort } : {}),
-          // The plugin's subagent of that name, as the turn's main thread (only with the plugin loaded).
-          ...(agentSettings?.agent_type && ownPlugin !== undefined ? { agent: `scadbuddy:${agentSettings.agent_type}` } : {}),
+          // The plugin's subagent of that name (its agents/<name>.md), as the turn's main thread.
+          ...(agentDefinition ? { agent: { name: agentSettings!.agent_type!, definition: agentDefinition } } : {}),
           ...(this.deps.mcpServers || http || background.length
             ? {
                 mcpServers: {
