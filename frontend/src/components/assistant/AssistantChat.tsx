@@ -429,6 +429,8 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
     }
     const id = sessionToRestore(rememberedSession(), state.order, state.sessions)
     if (id) select(id)
+    // A remembered chat that is no longer listed, with nothing under way to show instead.
+    else rememberSession(null)
   }, [state.order, state.sessions, state.activeId, state.awaitingStart, openRequest, select])
   // After the restore, so it does not forget the chat before reading it.
   useEffect(() => {

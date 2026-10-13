@@ -384,6 +384,17 @@ describe('a reload (#2372)', () => {
     expect(await screen.findByText(PARENT_REPLY)).toBeInTheDocument()
     expect(activeTitle()).toHaveTextContent(PARENT)
   })
+
+  it('forgets a remembered chat that is no longer listed (#2962 review)', async () => {
+    window.sessionStorage.setItem('scadbuddy.assistant.open', '1')
+    window.sessionStorage.setItem('scadbuddy.assistant.session', 'a-chat-since-deleted')
+
+    renderShell()
+    expect(await screen.findByRole('complementary', { name: 'Assistant' })).toBeVisible()
+    await waitFor(() =>
+      expect(window.sessionStorage.getItem('scadbuddy.assistant.session')).not.toBe('a-chat-since-deleted'),
+    )
+  })
 })
 
 describe('the chat header (#2380)', () => {
