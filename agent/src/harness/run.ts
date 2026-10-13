@@ -215,6 +215,8 @@ export type HarnessRun = {
   traceHooks?: Partial<Record<HookEvent, HookCallbackMatcher[]>>
   /** Claude Code's stderr, whole lines, already redacted of the credential. */
   stderr?: (line: string) => void
+  /** Tests only: the SDK's own process hook, to count and inspect spawns (test/warm.sdk.test.ts). */
+  spawnClaudeCodeProcess?: Options['spawnClaudeCodeProcess']
 }
 
 /** The permission seam's PreToolUse hook first, then the memory hooks, then the trace hooks, by event. */
@@ -424,6 +426,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     options.sessionStoreFlush = 'eager'
   }
   if (run.cwd !== undefined) options.cwd = run.cwd
+  if (run.spawnClaudeCodeProcess !== undefined) options.spawnClaudeCodeProcess = run.spawnClaudeCodeProcess
   if (run.includePartialMessages) options.includePartialMessages = true
   const plugins = [...(run.ownPlugin !== undefined ? [run.ownPlugin] : []), ...(run.pluginPaths ?? [])].map((p) => {
     assertPluginAllowed(p)
