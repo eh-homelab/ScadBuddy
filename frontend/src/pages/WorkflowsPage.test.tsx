@@ -57,7 +57,7 @@ describe('WorkflowsPage', () => {
     expect(within(plates).getByRole('link', { name: 'plates' })).toHaveAttribute('href', '/workflows/flows/def-plates-2')
     expect(plates).toHaveTextContent('latest v2')
     // `GET /workflows` is each name's newest version: one row per flow.
-    expect(within(flows).getAllByRole('listitem')).toHaveLength(2)
+    expect(within(flows).getAllByRole('listitem')).toHaveLength(3)
     expect(plates).toHaveTextContent('Registered by you, in the browser')
     const swap = flows.querySelector<HTMLElement>('[data-flow="swap"]')!
     expect(swap).toHaveTextContent('latest v1')
@@ -74,7 +74,7 @@ describe('WorkflowsPage', () => {
     expect(dialog).toHaveTextContent('Runs in progress keep running')
     await user.click(within(dialog).getByRole('button', { name: 'Archive' }))
     await waitFor(() => expect(swap()).toBeNull())
-    expect(within(flows).getAllByRole('listitem')).toHaveLength(1)
+    expect(within(flows).getAllByRole('listitem')).toHaveLength(2)
 
     await user.click(screen.getByRole('checkbox', { name: 'Show archived' }))
     await waitFor(() => expect(swap()).not.toBeNull())
@@ -114,6 +114,46 @@ describe('WorkflowsPage', () => {
     expect(flows.querySelector('[data-flow="swap"]')).toBeNull()
     await user.click(screen.getByRole('checkbox', { name: 'Show archived' }))
     await waitFor(() => expect(flowRow('swap')).toHaveTextContent('Archived by an assistant (session s9)'))
+  })
+
+  it("starts a flow from the Flows tab, asking for its inputs first (#2483)", async () => {
+    const { user } = renderPage(
+      <Routes>
+        <Route path="/workflows/flows" element={<WorkflowsPage tab="flows" />} />
+        <Route path="/workflows/runs/:id" element={<p>Run page</p>} />
+      </Routes>,
+      { route: '/workflows/flows' },
+    )
+    await screen.findByRole('list', { name: 'Flows' })
+    await user.click(within(flowRow('coasters')!).getByRole('button', { name: 'Start run' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Start coasters' })
+    await user.type(within(dialog).getByRole('textbox', { name: /Template/ }), 'lid')
+    await user.click(within(dialog).getByRole('button', { name: 'Start run' }))
+    expect(await screen.findByText('Run page')).toBeInTheDocument()
+    expect(flowRequests().map((r) => [r.path, r.body])).toEqual([
+      [
+        '/api/v1/workflows/def-coasters/runs',
+        { inputs: { slug: 'lid', copies: 2, colour: 'red', dry_run: false, plates: [1] } },
+      ],
+    ])
+  })
+
+  it('starts a flow with no inputs from the Flows tab at once, and offers no start for an archived one', async () => {
+    setFlowState({ name: 'plates', archived_at: '2026-10-12T00:00:00Z', archived_by: { kind: 'browser' } })
+    const { user } = renderPage(
+      <Routes>
+        <Route path="/workflows/flows" element={<WorkflowsPage tab="flows" />} />
+        <Route path="/workflows/runs/:id" element={<p>Run page</p>} />
+      </Routes>,
+      { route: '/workflows/flows' },
+    )
+    await screen.findByRole('list', { name: 'Flows' })
+    await user.click(screen.getByRole('checkbox', { name: 'Show archived' }))
+    await waitFor(() => expect(flowRow('plates')).not.toBeNull())
+    expect(within(flowRow('plates')!).queryByRole('button', { name: 'Start run' })).toBeNull()
+    await user.click(within(flowRow('swap')!).getByRole('button', { name: 'Start run' }))
+    expect(await screen.findByText('Run page')).toBeInTheDocument()
+    expect(flowRequests().map((r) => [r.path, r.body])).toEqual([['/api/v1/workflows/def-swap/runs', {}]])
   })
 
   it('says when no flow is registered', async () => {
