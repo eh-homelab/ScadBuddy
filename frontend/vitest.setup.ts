@@ -16,9 +16,11 @@ import { FakeIntersectionObserver } from './src/test/intersection'
 // error a wait finally throws still gets the DOM, from waitFor's onTimeout.
 const elementError = getConfig().getElementError
 configure({
-  // As testTimeout in vitest.config.ts: a find*/waitFor on a busy host gets 3 s, not 1 s,
-  // to see what a page shows (#1485). A wait that is meant to fail still fails.
-  asyncUtilTimeout: 3000,
+  // As testTimeout in vitest.config.ts: a find*/waitFor on a busy host gets 8 s, not 1 s,
+  // to see what a page shows (#1485). 3 s was still missed on CI runners under a full
+  // queue (#2938: PrintPicker's Advanced switch, LibraryPage's loading text). A wait that
+  // is meant to fail still fails, only later; testTimeout (15 s) stays above it.
+  asyncUtilTimeout: 8000,
   getElementError(message, container) {
     if (!(getConfig() as { _disableExpensiveErrorDiagnostics?: boolean })._disableExpensiveErrorDiagnostics) {
       return elementError(message, container)
