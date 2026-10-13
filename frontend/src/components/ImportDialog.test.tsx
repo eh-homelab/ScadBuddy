@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
+import { ApiError, api } from '../api/client'
 import { server } from '../mocks/server'
 import { ImportDialog } from './ImportDialog'
 
@@ -166,6 +167,28 @@ describe('ImportDialog (#1295)', () => {
     })
     expect(await screen.findByRole('alert')).toHaveTextContent('not a .scad file')
     expect(posts).toBe(1)
+  })
+
+  it('holds a submit made after a refusal asked a wait, before the wait has rendered (#2558)', async () => {
+    const refused = new ApiError({ title: 'Busy', status: 503, detail: 'try again soon', retry_after: 3 })
+    const answer = Promise.reject(refused)
+    answer.catch(() => {})
+    const importModel = vi.spyOn(api, 'importModel').mockReturnValue(answer)
+    onTestFinished(() => importModel.mockRestore())
+    const user = userEvent.setup()
+    render(<ImportDialog open onClose={vi.fn()} onImported={vi.fn()} />)
+    await user.type(screen.getByLabelText('URL'), URL_)
+    const form = screen.getByLabelText('URL').closest('form')!
+    // The refusal is handled (the ref cleared) before its wait renders. The handler then
+    // in place is the in-flight render's, whose `importing` is still true, and holds it.
+    await act(async () => {
+      fireEvent.submit(form)
+      await answer.catch(() => {})
+      await Promise.resolve()
+      fireEvent.submit(form)
+    })
+    expect(await screen.findByRole('alert')).toHaveTextContent('try again soon')
+    expect(importModel).toHaveBeenCalledTimes(1)
   })
 
   it('shows only the alert for a 503 that names no wait (#2114)', async () => {
