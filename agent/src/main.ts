@@ -504,6 +504,8 @@ const turnToolDeps = temporal
       audit,
       currentTiers: liveTokenTiers(tokens),
       blobs: new SessionBlobs(temporal.sql),
+      // A flow's plugin and http_request calls keep their images as its own tools' do (#2578).
+      ...(payloadKeys ? { flowBlobs: new PgFlowBlobs(temporal.sql, payloadKeys) } : {}),
       ...(sessions
         ? {
             report: async (session: string, problems: readonly string[]) => {

@@ -12,6 +12,7 @@ import time
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import psycopg
@@ -24,6 +25,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.flows.images import blob_context
 from scadbuddy.flows.keys import payload_keys
 from scadbuddy.main import create_app
+from scadbuddy.workflows import payload_codec
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
 
@@ -424,6 +426,53 @@ def test_a_runs_images_are_listed_served_from_their_blobs_and_forgotten_with_it(
     with psycopg.connect(pg_conninfo) as conn:
         assert conn.execute("SELECT count(*) FROM ai_flow_blobs").fetchone() == (0,)
     assert client.get(f"/api/v1/workflow-runs/{run_id}/images/{name}").status_code == 404
+
+
+def test_an_image_whose_key_is_gone_is_404(
+    client: TestClient, settings: Settings, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2578: a row left behind a deleted key opens to nothing: 404, never a 500."""
+    definition = register(client, script("return 1"))
+    run_id = start(client, definition["id"], "gone").json()["id"]
+    until(client, run_id, lambda v: v["status"] == "succeeded")
+    subject = f"flow-{run_id}"
+    name = hashlib.sha256(PNG).hexdigest() + ".png"
+    keys = payload_keys(settings)
+    assert keys is not None
+    key = asyncio.run(keys[0].key_for(subject, False))
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO ai_flow_blobs (subject, name, media_type, size, data)"
+            " VALUES (%s, %s, 'image/png', %s, %s)",
+            (subject, name, len(PNG), seal_bytes(key, PNG, blob_context(subject, name))),
+        )
+        conn.execute("INSERT INTO ai_forgotten_subjects (subject) VALUES (%s)", (subject,))
+        conn.execute("DELETE FROM ai_payload_keys WHERE subject = %s", (subject,))
+    # Past the 30 s a process keeps a key it read (`PgPayloadKeys`).
+    later = time.monotonic() + 3600
+    monkeypatch.setattr(payload_codec, "time", SimpleNamespace(monotonic=lambda: later))
+    response = client.get(f"/api/v1/workflow-runs/{run_id}/images/{name}")
+    assert response.status_code == 404
+
+
+def test_a_run_is_forgotten_before_the_agent_made_its_images_table(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    """#2578: the backend may deploy before the agent migrated; forgetting still deletes
+    the key and the run."""
+    definition = register(client, script("return 1"))
+    run_id = start(client, definition["id"], "early").json()["id"]
+    until(client, run_id, lambda v: v["status"] == "succeeded")
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute("ALTER TABLE ai_flow_blobs RENAME TO ai_flow_blobs_later")
+        try:
+            assert client.delete(f"/api/v1/workflow-runs/{run_id}").status_code == 204
+        finally:
+            conn.execute("ALTER TABLE ai_flow_blobs_later RENAME TO ai_flow_blobs")
+        assert conn.execute(
+            "SELECT count(*) FROM ai_payload_keys WHERE subject = %s", (f"flow-{run_id}",)
+        ).fetchone() == (0,)
+    assert client.get(f"/api/v1/workflow-runs/{run_id}").status_code == 404
 
 
 class TestWithoutAKey:

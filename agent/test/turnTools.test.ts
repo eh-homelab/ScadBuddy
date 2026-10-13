@@ -68,7 +68,7 @@ function notes(calls: string[]): () => McpServer {
 // read.note is read; post is tiered as httpTierOf tiers http_request: no method or a
 // GET is read, anything else outward. So only its input says whether a call is outward.
 const tierOf = (name: string, input: unknown): RiskTier => {
-  if (name.endsWith('__read_note')) return 'read'
+  if (name.endsWith('__read_note') || name.endsWith('__shot')) return 'read'
   if (name.endsWith('__post')) return ((input as { method?: string } | undefined)?.method ?? 'GET') === 'GET' ? 'read' : 'outward'
   return 'outward'
 }
@@ -86,6 +86,7 @@ function harness(
     mayPark?: boolean
     fixedTier?: (name: string) => RiskTier | undefined
     listingKey?: string
+    flowBlobs?: TurnToolsDeps['flowBlobs']
   } = {},
 ) {
   const contexts: TurnContext[] = []
@@ -130,6 +131,7 @@ function harness(
     },
     report: async (_session, problems) => void reported.push(...problems),
     blobs: { put: async (session, images, toolUseId) => void stored.push(...images.map((i) => `${session}/${i.name}/${toolUseId}`)) },
+    ...(options.flowBlobs ? { flowBlobs: options.flowBlobs } : {}),
   }
   return {
     contexts,
@@ -383,6 +385,31 @@ describe('turn tools in a durable session', () => {
 
   describe("from a flow's tool(name, args) (#2320 phase 8)", () => {
     const flowEnv = (activityType: string, activityId = 'tool-flow_01') => env(activityType, activityId, `flow-${FLOW}`)
+
+    it("keeps a call's images under the run, as its own tools' are, and answers pointers (#2578)", async () => {
+      const kept: string[] = []
+      const flowBlobs = {
+        put: async (subject: string, images: readonly { name: string }[]) => {
+          kept.push(...images.map((i) => `${subject}/${i.name}`))
+          return images.map((i) => i.name)
+        },
+        get: async () => undefined,
+      }
+      const h = harness({ flowBlobs })
+      const raw: unknown = await flowEnv('turn:notes__shot').run(h.call as (input: unknown) => Promise<unknown>, {})
+      const out = raw as {
+        text: string
+        images: { name: string; mediaType: string }[]
+      }
+      expect(h.stored).toEqual([])
+      expect(kept).toHaveLength(1)
+      const [name] = out.images.map((i) => i.name)
+      expect(kept[0]).toBe(`flow-${FLOW}/${name}`)
+      expect(out.images[0]!.mediaType).toBe('image/png')
+      expect(out.text).toContain(`[image ${name}]`)
+      expect(out.text).not.toContain('view_tool_images')
+      expect(JSON.stringify(out)).not.toContain('iVBORw0KGgo')
+    })
 
     it("tiers and runs a read call as the run's starter, with no session and no browser", async () => {
       const h = harness({ pinned: true })

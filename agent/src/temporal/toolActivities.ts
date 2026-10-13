@@ -10,7 +10,7 @@ import type { AnswerReader } from '../gate/answers.js'
 import { durableRequestId, flowRequestId } from '../gate/ids.js'
 import { DURABLE_ONLY_NAMES } from '../tools/answerTools.js'
 import { turnPrincipal } from '../tools/harness.js'
-import { type FlowBlobStore, type FlowImage, flowImageOf } from './flowBlobs.js'
+import { FLOW_IMAGES_MAX, type FlowBlobStore, type FlowImage, flowImageOf } from './flowBlobs.js'
 import { flowOf, type FlowRuns } from './flowRuns.js'
 import { FLOW_TOOL_TIER_ACTIVITY, flowToolTierActivity } from './flowTools.js'
 import { type SessionFiles, withWorkspaceSize } from '../workspace/store.js'
@@ -183,6 +183,8 @@ export const TOOL_IMAGES_TOOL = 'view_tool_images'
 export const UNUSABLE_IMAGE = '[an image the model cannot take]'
 /** Where a flow's call returned an image and this worker has no store to keep it in (#2477: `flowBlobs`). */
 export const FLOW_IMAGE = '[an image]'
+/** Where a flow's call returned an image past the run's FLOW_IMAGES_MAX (#2578). */
+export const FLOW_IMAGES_FULL = `[an image this run did not keep: it already keeps ${FLOW_IMAGES_MAX}]`
 
 /** Where a durable activity keeps a result's images: the session's blobs (sessions/blobs.ts). */
 export type ResultBlobs = { put(sessionId: string, images: readonly SessionImage[], toolUseId?: string): Promise<void> }
@@ -246,7 +248,8 @@ export type FlowToolResult = { text: string; images: FlowImage[] }
  * With images, each is kept under the run's subject (flowBlobs.ts) and the flow gets
  * `{text, images}`, the images as pointers `{name, mediaType, bytes}`: the bytes never
  * enter the activity's result, the run's history or its stored result. Without a store,
- * each image stays FLOW_IMAGE.
+ * each image stays FLOW_IMAGE; one the run did not keep (FLOW_IMAGES_MAX) is
+ * FLOW_IMAGES_FULL, with no pointer.
  */
 export async function flowResult(
   content: readonly Block[],
@@ -254,10 +257,12 @@ export async function flowResult(
 ): Promise<string | FlowToolResult> {
   if (!keep) return resultText(content)
   const { parts, images } = namedImages(content)
-  const text = parts.join('\n')
-  if (!images.length) return text
-  await keep.blobs.put(keep.subject, images)
-  return { text, images: images.map(flowImageOf) }
+  if (!images.length) return parts.join('\n')
+  const kept = new Set(await keep.blobs.put(keep.subject, images))
+  const dropped = new Set(images.filter((i) => !kept.has(i.name)).map((i) => `[image ${i.name}]`))
+  const text = parts.map((part) => (dropped.has(part) ? FLOW_IMAGES_FULL : part)).join('\n')
+  const pointers = images.filter((i) => kept.has(i.name)).map(flowImageOf)
+  return pointers.length ? { text, images: pointers } : text
 }
 
 // Lowercase only, as the codec's subjects are (payloadCodec.ts): a session's payloads are sealed.
