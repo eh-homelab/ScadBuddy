@@ -295,6 +295,132 @@ class PrintOutcome(_Response):
     runs: list[PrintedRun] = []
 
 
+class PrintFilamentSlot(_Response):
+    """One filament slot the sliced file used, and how much of it (#1860)."""
+
+    slot_id: int
+    used_grams: float | None = None
+    filament_type: str | None = None
+    #: ``#RRGGBB``.
+    color: str | None = None
+
+
+class PrintSlicing(_Response):
+    """What the sliced file says about the print, as Bambuddy read it (#1860)."""
+
+    #: The printer model the file was sliced for.
+    sliced_for_model: str | None = None
+    bed_type: str | None = None
+    layer_height_mm: float | None = None
+    total_layers: int | None = None
+    nozzle_diameter_mm: float | None = None
+    nozzle_temperature_c: float | None = None
+    bed_temperature_c: float | None = None
+    #: The objects on the plate, by name.
+    objects: list[str] = []
+    filament_used_mm: float | None = None
+    filament_slots: list[PrintFilamentSlot] = []
+
+
+#: Scalars of Bambuddy's archive the detail lists under "other" (#1860): every field it
+#: answers that is not one of these, nor a server path, nor a structure.
+_SHOWN_ELSEWHERE = frozenset(
+    {
+        *ArchiveDetail.model_fields,
+        "file_path",
+        "f3d_path",
+        "duplicates",
+        "duplicate_count",
+        "duplicate_sequence",
+        "created_by_id",
+    }
+)
+
+ScalarValue = str | int | float | bool | None
+
+
+class PrintRecord(_Response):
+    """Bambuddy's bookkeeping of the print (#1860)."""
+
+    project_id: int | None = None
+    project_name: str | None = None
+    designer: str | None = None
+    makerworld_url: str | None = None
+    external_url: str | None = None
+    notes: str | None = None
+    tags: str | None = None
+    is_favorite: bool | None = None
+    quantity: int = 1
+    #: When Bambuddy made the archive: the print was dispatched.
+    created_at: datetime | None = None
+    last_run_at: datetime | None = None
+    successful_run_count: int = 0
+    failed_run_count: int = 0
+    #: The actual time against the slicer's estimate, in percent.
+    time_accuracy_percent: float | None = None
+    #: What the runs used, by the spools' readings.
+    filament_actual_grams: float | None = None
+    energy_kwh: float | None = None
+    energy_cost: float | None = None
+    #: Every other field Bambuddy's archive answers, by its own name, so a field ScadBuddy
+    #: does not map yet is still shown.
+    other: dict[str, ScalarValue] = {}
+
+
+def _slicing(archive: ArchiveDetail) -> PrintSlicing:
+    extra = archive.extra_data
+    return PrintSlicing(
+        sliced_for_model=archive.sliced_for_model,
+        bed_type=archive.bed_type,
+        layer_height_mm=archive.layer_height,
+        total_layers=archive.total_layers,
+        nozzle_diameter_mm=archive.nozzle_diameter,
+        nozzle_temperature_c=archive.nozzle_temperature,
+        bed_temperature_c=archive.bed_temperature,
+        objects=list(extra.printable_objects.values()),
+        filament_used_mm=extra.filament_used_mm,
+        filament_slots=[
+            PrintFilamentSlot(
+                slot_id=slot.slot_id,
+                used_grams=slot.used_g,
+                filament_type=slot.type,
+                color=slot.color,
+            )
+            for slot in extra.filament_slots
+        ],
+    )
+
+
+def _record(archive: ArchiveDetail) -> PrintRecord:
+    other = {
+        name: value
+        for name, value in sorted((archive.model_extra or {}).items())
+        if name not in _SHOWN_ELSEWHERE
+        and not name.endswith("_path")
+        and (value is None or isinstance(value, str | int | float | bool))
+    }
+    return PrintRecord(
+        project_id=archive.project_id,
+        project_name=archive.project_name,
+        designer=archive.designer,
+        makerworld_url=archive.makerworld_url,
+        external_url=archive.external_url,
+        notes=archive.notes,
+        tags=archive.tags,
+        is_favorite=archive.is_favorite,
+        quantity=archive.quantity,
+        created_at=archive.created_at,
+        last_run_at=archive.last_run_at,
+        successful_run_count=archive.successful_run_count,
+        failed_run_count=archive.failed_run_count,
+        time_accuracy_percent=archive.time_accuracy,
+        filament_actual_grams=archive.total_filament_actual_grams,
+        energy_kwh=archive.energy_kwh,
+        energy_cost=archive.energy_cost,
+        other=other,
+    )
+
+
 class PrintLinks(_Response):
     #: Bambuddy's archives page; None when the archive is gone from it.
     bambuddy_url: str | None
@@ -311,6 +437,10 @@ class PrintDetail(PrintSummary):
     #: What the archive's printer holds (plan A5); only with ``?printer_media=1``.
     printer_media: PrinterMedia | None = None
     links: PrintLinks
+    #: What the sliced file says (#1860); None once Bambuddy no longer has the archive.
+    slicing: PrintSlicing | None = None
+    #: Bambuddy's bookkeeping of the print (#1860); None once it no longer has it.
+    record: PrintRecord | None = None
 
 
 def _prints_url(archive_id: int, path: str) -> str:
@@ -1023,6 +1153,8 @@ async def get_print(
         media=media,
         outcome=_outcome(summary, archive, runs),
         printer_media=on_printer,
+        slicing=_slicing(archive) if archive is not None else None,
+        record=_record(archive) if archive is not None else None,
         links=PrintLinks(
             bambuddy_url=bambuddy_url,
             customize_url=f"/m/{output.meta.slug}" if output is not None else None,

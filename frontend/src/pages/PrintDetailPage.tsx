@@ -1,4 +1,4 @@
-import { Suspense, lazy, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Fragment, Suspense, lazy, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Link, useParams } from 'react-router'
 import { api, ApiError } from '../api/client'
 import type { Job, PrintDetail, PrinterMedia } from '../api/types'
@@ -15,6 +15,7 @@ import { USER_ONLY } from '../agent/dom'
 import { DownloadBlockedError, downloadBlob, isEmbedded, openExternal } from '../lib/embed'
 import { formatBytes, formatDuration, formatValue } from '../lib/format'
 import { useAsync } from '../lib/useAsync'
+import { length, useDisplayUnit } from '../lib/units'
 
 // The 3D viewer is three.js, the biggest thing in the bundle: loaded only when shown.
 const Preview = lazy(async () => ({ default: (await import('../components/Preview')).Preview }))
@@ -204,7 +205,20 @@ function PrintView({ print, reload }: { print: PrintDetail; reload: () => void }
           <RenderSection print={print} />
           {!deleted && <TimelapseSection print={print} onPulled={reload} />}
           <OutcomeSection print={print} />
-          {print.provenance && <ProvenanceSection provenance={print.provenance} />}
+          {print.provenance ? (
+            <ProvenanceSection provenance={print.provenance} />
+          ) : (
+            <Section title="Provenance">
+              {/* #1860 — say why there is none, rather than leave the section out. */}
+              <p className="text-[13px] text-muted">
+                {print.library_file_id !== null
+                  ? 'Printed from a Bambuddy library file, not a ScadBuddy template: there is no template, revision or parameters.'
+                  : 'The ScadBuddy output this print came from is not known.'}
+              </p>
+            </Section>
+          )}
+          {print.slicing && <SlicingSection slicing={print.slicing} />}
+          {print.record && <RecordSection record={print.record} />}
           <FilesSection print={print} />
         </div>
       </div>
@@ -487,12 +501,7 @@ function OutcomeSection({ print }: { print: PrintDetail }) {
             value={
               <span className="flex gap-1">
                 {colours.map((colour) => (
-                  <span
-                    key={colour}
-                    title={colour}
-                    className="inline-block h-3.5 w-3.5 rounded-full border border-line"
-                    style={{ background: colour }}
-                  />
+                  <Swatch key={colour} colour={colour} />
                 ))}
               </span>
             }
@@ -509,6 +518,103 @@ function OutcomeSection({ print }: { print: PrintDetail }) {
             ))}
           </ul>
         </>
+      )}
+    </Section>
+  )
+}
+
+function Swatch({ colour }: { colour: string }) {
+  return (
+    <span
+      title={colour}
+      className="inline-block h-3.5 w-3.5 shrink-0 rounded-full border border-line"
+      style={{ background: colour }}
+    />
+  )
+}
+
+/** #1860 — what the sliced file says: the printer, bed, layers, nozzle and each slot. */
+function SlicingSection({ slicing }: { slicing: NonNullable<PrintDetail['slicing']> }) {
+  const unit = useDisplayUnit()
+  const metres = slicing.filament_used_mm !== null ? `${(slicing.filament_used_mm / 1000).toFixed(2)} m` : null
+  return (
+    <Section title="Slicing">
+      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
+        <Fact label="Sliced for" value={slicing.sliced_for_model} />
+        <Fact label="Bed" value={slicing.bed_type} />
+        <Fact
+          label="Layer height"
+          value={slicing.layer_height_mm !== null ? `${length(slicing.layer_height_mm, unit)} ${unit}` : null}
+        />
+        <Fact label="Layers" value={slicing.total_layers} />
+        <Fact
+          label="Nozzle"
+          value={slicing.nozzle_diameter_mm !== null ? `${length(slicing.nozzle_diameter_mm, unit)} ${unit}` : null}
+        />
+        <Fact label="Nozzle temp" value={slicing.nozzle_temperature_c !== null ? `${slicing.nozzle_temperature_c} °C` : null} />
+        <Fact label="Bed temp" value={slicing.bed_temperature_c !== null ? `${slicing.bed_temperature_c} °C` : null} />
+        <Fact label="Objects" value={slicing.objects.length > 0 ? slicing.objects.join(', ') : null} />
+        <Fact label="Filament length" value={metres} />
+      </dl>
+      {slicing.filament_slots.length > 0 && (
+        <>
+          <h3 className="mt-3 text-[12px] font-medium text-muted">Filament by slot</h3>
+          <ul aria-label="Filament by slot" className="mt-1 space-y-1">
+            {slicing.filament_slots.map((slot) => (
+              <li key={slot.slot_id} className="sb-num flex items-center gap-2 text-[13px] text-ink">
+                {slot.color && <Swatch colour={slot.color} />}
+                <span>Slot {slot.slot_id}</span>
+                {slot.filament_type && <span className="text-muted">{slot.filament_type}</span>}
+                {slot.used_grams !== null && <span>{slot.used_grams} g</span>}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </Section>
+  )
+}
+
+/** #1860 — Bambuddy's bookkeeping, and every field of its archive not shown elsewhere. */
+function RecordSection({ record }: { record: NonNullable<PrintDetail['record']> }) {
+  const other = Object.entries(record.other)
+  return (
+    <Section title="In Bambuddy">
+      <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
+        <Fact label="Project" value={record.project_name} />
+        <Fact label="Designer" value={record.designer} />
+        <Fact label="Dispatched" value={formatWhen(record.created_at)} />
+        <Fact label="Last run" value={formatWhen(record.last_run_at)} />
+        <Fact
+          label="Runs"
+          value={`${record.successful_run_count} succeeded, ${record.failed_run_count} failed`}
+        />
+        <Fact label="Copies" value={record.quantity > 1 ? record.quantity : null} />
+        <Fact
+          label="Time accuracy"
+          value={record.time_accuracy_percent !== null ? `${record.time_accuracy_percent}%` : null}
+        />
+        <Fact label="Filament read" value={record.filament_actual_grams !== null ? `${record.filament_actual_grams} g` : null} />
+        <Fact label="Energy" value={record.energy_kwh !== null ? `${record.energy_kwh} kWh` : null} />
+        <Fact label="Energy cost" value={record.energy_cost !== null ? record.energy_cost.toFixed(2) : null} />
+        <Fact label="Favourite" value={record.is_favorite ? 'Yes' : null} />
+        <Fact label="Tags" value={record.tags} />
+        <Fact label="Notes" value={record.notes} />
+        <Fact label="MakerWorld" value={record.makerworld_url} />
+        <Fact label="Link" value={record.external_url} />
+      </dl>
+      {other.length > 0 && (
+        <details className="mt-3">
+          <summary className="cursor-pointer text-[12px] text-muted">All other fields ({other.length})</summary>
+          <dl aria-label="All other fields" className="mt-1 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
+            {other.map(([name, value]) => (
+              <Fragment key={name}>
+                <dt className="sb-num text-[12px] text-faint">{name}</dt>
+                <dd className="sb-num text-[13px] break-all text-ink">{value === null ? '—' : String(value)}</dd>
+              </Fragment>
+            ))}
+          </dl>
+        </details>
       )}
     </Section>
   )

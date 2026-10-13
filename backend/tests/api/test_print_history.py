@@ -665,6 +665,61 @@ def test_without_a_finish_photo_every_photo_is_a_photo(client: TestClient, model
 
 
 @respx.mock
+def test_the_detail_shows_everything_bambuddy_knows_of_the_print(
+    client: TestClient, model: str
+) -> None:
+    """#1860: the slicing, the per-slot filament and Bambuddy's bookkeeping, and any
+    field ScadBuddy does not map yet, by its own name; never a server path."""
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 35)
+    mock_archive(35, timelapse_path=None, brand_new_field="kept", nested_field={"a": 1})
+
+    body = client.get("/api/v1/prints/35").json()
+
+    assert body["slicing"] == {
+        "sliced_for_model": "H2C",
+        "bed_type": "Textured PEI Plate",
+        "layer_height_mm": 0.08,
+        "total_layers": 86,
+        "nozzle_diameter_mm": 0.4,
+        "nozzle_temperature_c": 230,
+        "bed_temperature_c": 70,
+        "objects": ["name-keychain"],
+        "filament_used_mm": 3572.29,
+        "filament_slots": [
+            {"slot_id": 1, "used_grams": 11.34, "filament_type": "PLA", "color": "#00629B"},
+            {"slot_id": 2, "used_grams": 5.02, "filament_type": "PLA", "color": "#FF9425"},
+        ],
+    }
+    record = body["record"]
+    assert record["project_name"] == "3 keychains"
+    assert record["designer"] == "ScadBuddy"
+    assert record["time_accuracy_percent"] == 87.7
+    assert record["filament_actual_grams"] == 16.3
+    assert record["successful_run_count"] == 1
+    assert record["created_at"] == "2026-09-27T03:45:32.515537"
+    other = record["other"]
+    assert other["brand_new_field"] == "kept"
+    assert "nested_field" not in other, "only scalars"
+    assert not any(name.endswith("_path") for name in other)
+    assert "source_ip" not in json.dumps(body), "the sender's address stays in Bambuddy"
+
+
+@respx.mock
+def test_a_deleted_archive_has_no_slicing_or_record(client: TestClient, model: str) -> None:
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 35)
+    respx.get(f"{API}/archives/35").mock(return_value=httpx.Response(404))
+    respx.get(f"{API}/archives/35/runs").mock(return_value=httpx.Response(404))
+
+    body = client.get("/api/v1/prints/35").json()
+
+    assert body["slicing"] is None and body["record"] is None
+
+
+@respx.mock
 def test_the_timelapse_stills_are_jpegs_by_url_with_the_probe(
     client: TestClient, model: str
 ) -> None:
