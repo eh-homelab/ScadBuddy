@@ -18,27 +18,34 @@ const SIDE = { L: 'left', R: 'right' } as const
 
 /**
  * #2449 — where the slice departs from the plan it was made with: a planned slot the
- * sliced plate does not use (its parts too fine to print, so that colour is lost), and
- * a filament the slicer put on the other nozzle. Nothing is said without a plan, or
- * without slots read from the slice.
+ * sliced plate does not use (so that colour is lost), and a filament the slicer put on
+ * the other nozzle. Nothing is said without a plan, or without slots read from the
+ * slice.
+ *
+ * A dropped slot is judged only against `plateSlots`, the sliced plate's own slots, and
+ * not at all when they are unknown (`null`): the slice is always of one plate, while the
+ * plan and the dialog's slots may be every plate's, so a colour only another plate uses
+ * would read as dropped. A slot the slice did use is on the sliced plate, so its side is
+ * always checked.
  */
 function sliceDepartures(
   plan: NozzlePlan | null,
-  slots: readonly SlotNeed[],
+  plateSlots: readonly SlotNeed[] | null,
   slice: SlicePreview | null,
 ): string[] {
   const read = slice?.slots ?? []
   if (!plan || read.length === 0) return []
   const sliced = new Map(read.map((entry) => [entry.slot_id, entry]))
-  const onPlate = new Set(slots.map((slot) => slot.slot_id))
+  const onPlate = plateSlots === null ? null : new Set(plateSlots.map((slot) => slot.slot_id))
   const notes: string[] = []
   for (const planned of plan.slots ?? []) {
-    if (!onPlate.has(planned.slot_id)) continue
     const got = sliced.get(planned.slot_id)
     if (!got) {
-      notes.push(
-        `${planned.name} (slot ${planned.slot_id}) isn't used by the sliced plate: its parts are too small to print, so it won't print.`,
-      )
+      if (onPlate?.has(planned.slot_id)) {
+        notes.push(
+          `${planned.name} (slot ${planned.slot_id}) isn't used by the sliced plate, so it won't print: its parts may be too small to print.`,
+        )
+      }
     } else if (got.side && got.side !== planned.side) {
       notes.push(
         `The slicer put ${planned.name} (slot ${planned.slot_id}) on the ${SIDE[got.side]} nozzle, not the ${SIDE[planned.side]} as planned.`,
@@ -69,6 +76,12 @@ type Props = {
   slice: SlicePreview | null
   /** The nozzle plan the slice was made with (#2449). */
   nozzlePlan?: NozzlePlan | null
+  /**
+   * The sliced plate's own slots, or null when they are not known (every plate's, or
+   * another plate's than the one shown): a planned slot is called dropped only against
+   * these (`slicedPlateSlots`).
+   */
+  plateSlots?: readonly SlotNeed[] | null
   stale: boolean
   slicing: boolean
   sliceError: string | null
@@ -91,6 +104,7 @@ export function PreviewPane({
   colors,
   slice,
   nozzlePlan = null,
+  plateSlots = null,
   stale,
   slicing,
   sliceError,
@@ -109,7 +123,7 @@ export function PreviewPane({
   }, [colors, slots, tried])
   const sliced = new Map((slice?.slots ?? []).map((entry) => [entry.slot_id, entry]))
   const [thumbFailed, setThumbFailed] = useState(false)
-  const departures = sliceDepartures(nozzlePlan, slots, slice)
+  const departures = sliceDepartures(nozzlePlan, plateSlots, slice)
 
   return (
     <aside className="flex min-w-0 flex-col gap-3" data-testid="preview-pane" aria-label="Preview">

@@ -22,7 +22,11 @@ function slice(entries: SlicePreview['slots']): SlicePreview {
   return { job_id: 9, status: 'completed', print_time_seconds: 2666, filament_used_g: 19, slots: entries }
 }
 
-function pane(result: SlicePreview | null, nozzlePlan: NozzlePlan | null = plan) {
+function pane(
+  result: SlicePreview | null,
+  nozzlePlan: NozzlePlan | null = plan,
+  plateSlots: readonly SlotNeed[] | null = slots,
+) {
   render(
     <PreviewPane
       url={null}
@@ -33,6 +37,7 @@ function pane(result: SlicePreview | null, nozzlePlan: NozzlePlan | null = plan)
       colors={new Map()}
       slice={result}
       nozzlePlan={nozzlePlan}
+      plateSlots={plateSlots}
       stale={false}
       slicing={false}
       sliceError={null}
@@ -51,7 +56,7 @@ describe('PreviewPane: where the slice departs from the plan (#2449)', () => {
     )
     const notes = screen.getByTestId('slice-departures')
     expect(notes).toHaveTextContent(
-      "Magenta (slot 2) isn't used by the sliced plate: its parts are too small to print, so it won't print.",
+      "Magenta (slot 2) isn't used by the sliced plate, so it won't print: its parts may be too small to print.",
     )
     expect(notes).toHaveTextContent('The slicer put Indigo Purple (slot 1) on the right nozzle, not the left as planned.')
     expect(notes).toHaveTextContent('The slicer put Inland Black (slot 3) on the left nozzle, not the right as planned.')
@@ -68,7 +73,7 @@ describe('PreviewPane: where the slice departs from the plan (#2449)', () => {
     expect(screen.queryByTestId('slice-departures')).toBeNull()
   })
 
-  it('says nothing without a plan, or without slots read from the slice', () => {
+  it('says nothing without a plan', () => {
     pane(slice([{ slot_id: 1, grams: 14.5, side: 'R' }]), null)
     expect(screen.queryByTestId('slice-departures')).toBeNull()
   })
@@ -77,4 +82,22 @@ describe('PreviewPane: where the slice departs from the plan (#2449)', () => {
     pane(slice([]))
     expect(screen.queryByTestId('slice-departures')).toBeNull()
   })
+
+  it("never calls another plate's colour dropped when the sliced plate's own slots are unknown (#2702 review)", () => {
+    // A two-plate file under "All plates": slot 2 (Magenta) is only on plate 2, so the
+    // plan and the dialog's slots hold it, but the background slice is of plate 1.
+    pane(
+      slice([
+        { slot_id: 1, grams: 14.5, side: 'L' },
+        { slot_id: 3, grams: 4.8, side: 'L' },
+      ]),
+      plan,
+      null,
+    )
+    const notes = screen.getByTestId('slice-departures')
+    expect(notes).not.toHaveTextContent('Magenta')
+    // A slot the slice used is on the sliced plate, so its side is still checked.
+    expect(notes).toHaveTextContent('The slicer put Inland Black (slot 3) on the left nozzle, not the right as planned')
+  })
 })
+

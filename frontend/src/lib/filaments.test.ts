@@ -8,6 +8,7 @@ import {
   filterSpools,
   loadedLabel,
   seedPlan,
+  slicedPlateSlots,
   slotNeed,
   withSlicedGrams,
   spoolLabel,
@@ -363,3 +364,18 @@ describe('carriedPlan', () => {
     ).toEqual(options.suggested)
   })
 })
+
+describe('slicedPlateSlots (#2702 review)', () => {
+  const slots = [1, 2].map((slot_id) => ({ slot_id, colour_matches: [] }))
+
+  it("is unknown for a two-plate file under All plates, or with another plate's slice shown", () => {
+    expect(slicedPlateSlots(slots, { plates: 2, chosen: 'all', sliced: 1 })).toBeNull()
+    expect(slicedPlateSlots(slots, { plates: 2, chosen: 1, sliced: 2 })).toBeNull()
+  })
+
+  it("is the dialog's slots for the chosen plate's own slice, or a one-plate file", () => {
+    expect(slicedPlateSlots(slots, { plates: 2, chosen: 2, sliced: 2 })).toBe(slots)
+    expect(slicedPlateSlots(slots, { plates: 1, chosen: 'all', sliced: 1 })).toBe(slots)
+  })
+})
+

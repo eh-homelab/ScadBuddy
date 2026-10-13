@@ -30,7 +30,7 @@ import { BackfillProgress, BackfillPrompt } from './BackfillPrompt'
 import { openExternal } from '../lib/embed'
 import { plateLabel } from '../lib/plate'
 import { resolvedColors } from '../lib/plateColors'
-import { checkPlan, withSlicedGrams } from '../lib/filaments'
+import { checkPlan, slicedPlateSlots, withSlicedGrams } from '../lib/filaments'
 import { printChoicesOf } from '../lib/printChoices'
 import { resolveOptions } from '../lib/printOptions'
 import {
@@ -1112,6 +1112,11 @@ export function PrintPicker({
                 colors={previewColors}
                 slice={previewSlice.result}
                 nozzlePlan={previewSlice.plan}
+                plateSlots={slicedPlateSlots(filaments?.slots ?? [], {
+                  plates: picker.plates.length,
+                  chosen: plate,
+                  sliced: previewPlate,
+                })}
                 stale={previewSlice.stale}
                 slicing={previewSlice.slicing}
                 sliceError={previewSlice.error}
