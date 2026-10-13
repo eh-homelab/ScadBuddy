@@ -1399,8 +1399,12 @@ def refuse_delete(slug: str, catalogue: Catalogue, render: RenderService, force:
     # Best effort, not a lock: a render submitted after this check reads a model
     # that is gone and fails as an ordinary job error, which is harmless.
     if render.store.has_unfinished(slug):
+        # `render_in_progress` lets the delete dialog wait for it and retry (#2387): the
+        # render is most often the preview the model's own page started.
         raise ApiError(
-            status.HTTP_409_CONFLICT, f"{slug!r} has a render in progress; try again when it ends"
+            status.HTTP_409_CONFLICT,
+            f"{slug!r} has a render in progress; try again when it ends",
+            render_in_progress=True,
         )
 
 

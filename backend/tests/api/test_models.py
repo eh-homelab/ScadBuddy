@@ -639,6 +639,8 @@ def test_a_model_with_a_render_in_progress_cannot_be_deleted(
 
     assert response.status_code == 409
     assert response.headers["content-type"].startswith("application/problem+json")
+    # Marked, so the delete dialog waits for the render and retries (#2387).
+    assert response.json()["render_in_progress"] is True
     assert paths.model_source(model).is_file()
 
     job.state = "done"
