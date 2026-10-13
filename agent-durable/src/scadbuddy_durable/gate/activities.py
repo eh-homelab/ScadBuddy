@@ -19,7 +19,14 @@ import psycopg
 from temporalio import activity
 from temporalio.common import RetryPolicy
 
-from scadbuddy_durable.gate.store import OpenInput, ResolveInput, open_input, resolve_input
+from scadbuddy_durable.gate.store import (
+    GrantInput,
+    OpenInput,
+    ResolveInput,
+    grant_input,
+    open_input,
+    resolve_input,
+)
 
 Connect = Callable[[], AbstractAsyncContextManager[psycopg.AsyncConnection[Any]]]
 
@@ -47,3 +54,8 @@ class GateActivities:
     async def resolve_input(self, args: ResolveInput) -> bool:
         async with self._connect() as conn:
             return await resolve_input(conn, args)
+
+    @activity.defn(name="grant_input")
+    async def grant_input(self, args: GrantInput) -> bool:
+        async with self._connect() as conn:
+            return await grant_input(conn, args)

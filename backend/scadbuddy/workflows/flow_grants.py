@@ -152,11 +152,41 @@ class FlowGrants:
     async def check(self, req: GrantCheck) -> GrantVerdict:
         if self._hash_key is None:
             return GrantVerdict(verdict="outside", reason="no approval key")
-        # The run and the request id are the calling workflow's own, never the payload's
-        # word for them: a flow run's checks are its calls (`flow:<run>:<workflow run>:`).
-        own = _flow_request_prefix()
-        if own is None or req.run_id != own[0] or not req.request_id.startswith(own[1]):
-            return GrantVerdict(verdict="outside", reason="not this run's call")
+        # The caller and the request id are the calling workflow's own, never the
+        # payload's word for them: a flow run's checks are its calls
+        # (`flow:<run>:<workflow run>:`), a session's its own (`durable:<session>:…`),
+        # in a flow turn of a step the run recorded talking to that session.
+        narrowing = None
+        if req.session_id is None:
+            own = _flow_request_prefix()
+            if own is None or req.run_id != own[0] or not req.request_id.startswith(own[1]):
+                return GrantVerdict(verdict="outside", reason="not this run's call")
+        else:
+            prefix = _session_request_prefix()
+            if prefix is None or prefix[0] != req.session_id:
+                return GrantVerdict(verdict="outside", reason="not this session's call")
+            if not req.request_id.startswith(prefix[1]) or req.flow_call_id is None:
+                return GrantVerdict(verdict="outside", reason="not this session's call")
+            # The run is the one whose step talks to this very session, from its own
+            # record; the payload's run id must agree with it. The step must be an
+            # `agent`/`ask_session` call still running (its turn is the flow turn), and
+            # its policy recorded: anything missing is no flow turn (fail closed).
+            run = await self._store.run_talking_to(req.session_id, req.flow_call_id)
+            sent = next(
+                (s for s in (run.steps if run else []) if s.call_id == req.flow_call_id), None
+            )
+            if (
+                run is None
+                or run.id != req.run_id
+                or sent is None
+                or sent.session_id != req.session_id
+                or sent.fn not in ("agent", "ask_session")
+                or sent.status != "running"
+                or sent.policy is None
+            ):
+                return GrantVerdict(verdict="outside", reason="not a flow turn of this run")
+            # The script's narrowing, as the run recorded the step (spec §3.4).
+            narrowing = sent.policy.grant
         verdict = await match_grant(
             self._store,
             self.facts_of,
@@ -168,7 +198,7 @@ class FlowGrants:
             args=req.args,
             session_id=req.session_id,
             flow_call_id=req.flow_call_id,
-            narrowing=req.narrowing,
+            narrowing=narrowing,
             now=datetime.now(UTC),
         )
         if isinstance(verdict, Inside):
@@ -334,6 +364,19 @@ class FlowGrants:
 
 _PRINT_PATH = re.compile(r"^/api/v1/print/(outputs|library)/([^/]+)/run$")
 _FLOW_WORKFLOW = re.compile(r"^flow-([0-9a-f-]{36})$")
+_SESSION_WORKFLOW = re.compile(r"^session-([0-9a-f-]{36})$")
+
+
+def _session_request_prefix() -> tuple[str, str] | None:
+    """The calling durable session's id and its calls' request id prefix
+    (`durable:<session>:<workflow run>:`), from the activity's own workflow; None when
+    the caller is no durable session."""
+    info = activity.info()
+    found = _SESSION_WORKFLOW.match(info.workflow_id or "")
+    if found is None:
+        return None
+    session_id = found.group(1)
+    return session_id, f"durable:{session_id}:{info.workflow_run_id}:"
 
 
 def _flow_request_prefix() -> tuple[str, str] | None:

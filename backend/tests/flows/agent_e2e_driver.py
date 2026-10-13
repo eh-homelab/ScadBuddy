@@ -32,11 +32,13 @@ from temporalio.api.enums.v1 import EventType
 from temporalio.client import Client
 
 from scadbuddy.core.secrets import load_kek
+from scadbuddy.flows.approval_hash import approval_hash_key
 from scadbuddy.flows.history import outward_since
 from scadbuddy.flows.models import TERMINAL, Run
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.workflows.flow_activities import FlowActivities
+from scadbuddy.workflows.flow_grants import FlowGrants
 from scadbuddy.workflows.flows_client import connect_flows
 from scadbuddy.workflows.payload_codec import PgPayloadKeys
 from scadbuddy.workflows.project import PROJECT_WORKFLOW, FlowStart, RunFlow
@@ -144,8 +146,12 @@ async def main() -> None:
             os.environ["SCADBUDDY_TEMPORAL_ADDRESS"], "default", PgPayloadKeys(connect, kek)
         )
         store = FlowStore(jobs.pool)
-        queue = f"projects-{uuid.uuid4().hex[:8]}"
-        async with projects_worker(client, queue, FlowActivities(store).all()):
+        # The queue a durable session asks a flow turn's grant on (agent-durable
+        # `PROJECTS_QUEUE`), as the backend's projects worker serves it: this test's
+        # Temporal server is its own.
+        queue = "projects"
+        grants = FlowGrants(store, None, approval_hash_key(kek))
+        async with projects_worker(client, queue, [*FlowActivities(store).all(), *grants.all()]):
             print(json.dumps({"ready": True}), flush=True)
             loop = asyncio.get_running_loop()
             while line := await loop.run_in_executor(None, sys.stdin.readline):

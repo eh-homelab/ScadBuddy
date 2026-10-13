@@ -441,6 +441,8 @@ async function runAsActivity(
       ...(services.browser && session !== undefined ? { browser: services.browser.forSession(session) } : {}),
       // A flow's own images, which its calls may name as `flow_image` references (#2477).
       ...(flow !== undefined && deps.flowBlobs ? { flowImages: flowImagesOf(deps.flowBlobs, `flow-${flow}`) } : {}),
+      // The run and this call, for a turn it sends (#2481): from the context, never the input.
+      ...(flow !== undefined ? { flowTurn: { run_id: flow, call_id: toolUseId } } : {}),
       principal,
       ...(session === undefined ? {} : { session }),
       progress: async (progress, total, message) => context.heartbeat({ progress, total, message }),

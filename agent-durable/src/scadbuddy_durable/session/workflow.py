@@ -53,7 +53,7 @@ with workflow.unsafe.imports_passed_through():
         RESPOND_UPDATE,
         refused_failure_type,
     )
-    from scadbuddy_durable.gate.store import SYSTEM, OpenInput, Outcome, ResolveInput
+    from scadbuddy_durable.gate.store import SYSTEM, GrantInput, OpenInput, Outcome, ResolveInput
     from scadbuddy_durable.gate.validate import (
         GateEntry,
         Principal,
@@ -66,6 +66,7 @@ with workflow.unsafe.imports_passed_through():
         BUDGET_EXHAUSTED,
         MAX_SEGMENTS,
         MESSAGE_MAX,
+        PROJECTS_QUEUE,
         SEGMENT_ATTEMPTS,
         SEGMENT_CONTEXT_QUERY,
         SEND_MESSAGE_UPDATE,
@@ -73,6 +74,7 @@ with workflow.unsafe.imports_passed_through():
         TURN_QUERY,
         WORKFLOW,
         FinishTurn,
+        FlowTurn,
         FollowArgs,
         GateSettings,
         MemoryRecalled,
@@ -118,6 +120,8 @@ FOLLOW_TIMEOUT = timedelta(days=30)
 FOLLOW_HEARTBEAT = timedelta(seconds=30)
 FOLLOW_DRAIN = timedelta(seconds=30)
 SHORT = timedelta(seconds=30)
+#: How long a flow turn's call waits for the run grant's verdict before it parks.
+GRANT_CHECK_WAIT = timedelta(minutes=1)
 IMAGES_NOTE = (
     "\n\n[The user attached {n} image{s} to this message. Call the view_user_images tool"
     " to see {them} before you answer.]"
@@ -130,6 +134,9 @@ NOBODY_ANSWERED = "nobody answered in time"
 STOPPED_BEFORE_RUN = "stop-before-run-skips-the-turn"
 SETTLE_PARKED = "turn-end-settles-resolving-entries"
 STOP_FIRST = "stop-cancels-the-run-first"
+# #2481: a flow turn's approval call is checked against the run's grant first.
+SESSION_FLOW_GRANT = "session-flow-grant"
+FLOW_GRANT_CHECK = "flow_grant_check"
 
 
 def prompt_of(message: Message) -> str:
@@ -281,6 +288,7 @@ class DurableSession:
                     list(message.images),
                     message.system_append,
                     started_at=workflow.now().isoformat(),
+                    flow=message.flow,
                 )
                 await self._run_turn(prompt_of(message))
             self._turn = None
@@ -524,6 +532,38 @@ class DurableSession:
                 result_type=dict,
             )
             summary, input_hash = str(described["summary"]), str(described["input_hash"])
+        grant_timeout = 0
+        flow = self._turn.flow if self._turn is not None else None
+        if (
+            kind == "approval"
+            and flow is not None
+            and input_hash is not None
+            and workflow.patched(SESSION_FLOW_GRANT)
+        ):
+            verdict = await self._grant_verdict(rid, name, call, flow)
+            if verdict is not None and verdict.get("verdict") == "inside":
+                grant_id = str(verdict.get("grant_id") or "")
+                if grant_id and await workflow.execute_activity(
+                    "grant_input",
+                    GrantInput(
+                        request_id=rid,
+                        session_id=sid,
+                        tool=name,
+                        summary=summary,
+                        input_hash=input_hash,
+                        grant_id=grant_id,
+                        requested_by=_owner(author),
+                    ),
+                    start_to_close_timeout=SHORT,
+                    retry_policy=RetryPolicy(maximum_attempts=5),
+                    result_type=bool,
+                ):
+                    # Inside the run's grant (spec 2026-10-11 §3.3): no entry, nobody
+                    # asked; the tool's activity checks the grant again as it runs.
+                    self._agent.decide(str(call["id"]), True, approver=f"grant:{grant_id}")
+                    return
+            elif verdict is not None:
+                grant_timeout = int(verdict.get("timeout_s") or 0)
         try:
             built = build_entry(
                 request_id=rid,
@@ -540,7 +580,8 @@ class DurableSession:
             self._agent.decide(str(call["id"]), False, approver="scadbuddy")
             return
         if kind == "approval":
-            timeout = self._settings.approval_expiry_s
+            # A flow turn's call outside the grant waits as the run's own calls do.
+            timeout = grant_timeout or self._settings.approval_expiry_s
         elif name == ASK_USER:
             timeout = self._settings.question_expiry_s
         else:
@@ -600,6 +641,37 @@ class DurableSession:
                 await self._resolve(parked, "cancelled", SYSTEM, None, NOBODY_ANSWERED, timer=True)
             else:
                 await self._resolve(parked, "timed_out", SYSTEM, None, None, timer=True)
+
+    async def _grant_verdict(
+        self, rid: str, name: str, call: dict[str, Any], flow: FlowTurn
+    ) -> dict[str, Any] | None:
+        """The run's grant on a flow turn's call (`flow_grant_check` on the backend's
+        `projects` queue, spec 2026-10-11 §3.4). The backend finds the run from its own
+        record of the step that talks to this session; None when it could not answer,
+        which parks the call (fail toward asking)."""
+        try:
+            verdict: dict[str, Any] = await workflow.execute_activity(
+                FLOW_GRANT_CHECK,
+                {
+                    "run_id": flow.run_id,
+                    "request_id": rid,
+                    "fn": "tool",
+                    "tool": name,
+                    "args": call["input"],
+                    "session_id": self._start.session_id,
+                    "flow_call_id": flow.call_id,
+                },
+                task_queue=PROJECTS_QUEUE,
+                # No projects worker to answer (down, or a deployment without flows):
+                # the call parks after this, rather than waiting on it for ever.
+                schedule_to_close_timeout=GRANT_CHECK_WAIT,
+                start_to_close_timeout=SHORT,
+                retry_policy=RetryPolicy(maximum_attempts=3),
+                result_type=dict,
+            )
+        except FailureError:
+            return None
+        return verdict
 
     async def _outward(self, name: str, call: dict[str, Any]) -> bool:
         """Whether a turn tool's call is outward, by its input (turn_tool_tier). Only a

@@ -19,6 +19,17 @@ FLOW_GRANT_WITHDRAW = "flow_grant_withdraw"
 GRANT_REFUSED = "GrantApprovalRefused"
 
 
+class StepPolicy(BaseModel):
+    """What a script said about the outward calls of a session an `agent` or
+    `ask_session` step talks to (#2481, spec 2026-10-11 §4.3): its narrowing of the run
+    grant (None: the run grant as it is) and what a call outside it does (Part B)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    grant: Narrowing | None = None
+    on_outside: Literal["escalate", "deny"] = "escalate"
+
+
 class FlowStep(BaseModel):
     """One host call of a run."""
 
@@ -42,6 +53,9 @@ class FlowStep(BaseModel):
     session_id: str | None = None
     #: The run grant that let this outward call through without asking (#2481).
     grant_id: str | None = None
+    #: An `agent`/`ask_session` step's narrowing and `on_outside` (#2481), which
+    #: `flow_grant_check` reads for its session's calls.
+    policy: StepPolicy | None = None
 
 
 class FlowWaiting(BaseModel):
@@ -103,10 +117,10 @@ class GrantCheck(BaseModel):
     fn: str
     tool: str | None = None
     args: dict[str, Any] = {}
-    #: A child session's call: the session, and the run's step that sent its turn.
+    #: A child session's call: the session, and the run's step that sent its turn. The
+    #: step's narrowing is read from the run's record of it, never sent.
     session_id: str | None = None
     flow_call_id: str | None = None
-    narrowing: Narrowing | None = None
 
 
 class GrantVerdict(BaseModel):

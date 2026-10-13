@@ -203,6 +203,18 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     expect(row).toEqual({ status: 'running', turn_id: null })
   }, 60_000)
 
+  it("marks a turn a flow run sent with the run and its step, and no other turn (#2481)", async () => {
+    const m = await durableManager()
+    const flow = { run_id: '7e2a1c3b-4d5e-4f60-8a9b-0c1d2e3f4a5b', call_id: 'c1' }
+    const { session } = await m.start(browser, { origin: 'chat', prompt: 'from a flow', flow })
+    const { messages } = await recorded(session.id)
+    expect(messages).toEqual([expect.objectContaining({ flow })])
+    const { session: plain } = await m.start(browser, { origin: 'chat', prompt: 'from a person' })
+    const { messages: theirs } = await recorded(plain.id)
+    expect(theirs).toHaveLength(1)
+    expect(theirs[0]).not.toHaveProperty('flow')
+  }, 60_000)
+
   it("records the tiers a turn was sent with, for its tool activities, and none for a browser turn (#2320)", async () => {
     const m = await durableManager()
     const token = { kind: 'bearer' as const, id: 'token:t', label: 'MCP token' }

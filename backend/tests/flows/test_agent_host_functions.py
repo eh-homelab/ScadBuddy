@@ -3,6 +3,8 @@
 `sessions_send` tools, and its turn waited for with `flow_session_turn`, all on
 `agent-tools`. Here stand-ins registered under the agent's names on a test queue."""
 
+import asyncio
+import contextlib
 import json
 import uuid
 from collections.abc import AsyncIterator, Iterator
@@ -39,6 +41,8 @@ class Sessions:
         self.answer = "plain words"
         self.outward_calls = 0
         self.fail_turn: str | None = None
+        #: Set: each turn runs (heartbeating) until it is set; None: answers at once.
+        self.hold: asyncio.Event | None = None
 
     def _record(self, name: str, args: dict[str, Any]) -> None:
         self.calls.append((name, activity.info().activity_id, args))
@@ -73,6 +77,10 @@ class Sessions:
         @activity.defn(name="flow_session_turn")
         async def flow_session_turn(args: dict[str, Any]) -> dict[str, Any]:
             self._record("flow_session_turn", args)
+            while self.hold is not None and not self.hold.is_set():
+                activity.heartbeat()
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self.hold.wait(), 0.2)
             if self.fail_turn is not None:
                 raise ApplicationError(self.fail_turn, type="TurnFailed", non_retryable=True)
             return {

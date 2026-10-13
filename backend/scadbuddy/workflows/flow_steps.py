@@ -14,7 +14,7 @@ from typing import Literal, Protocol
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
-from scadbuddy.workflows.flow_models import FlowStep, FlowWaiting, ProjectionWrite
+from scadbuddy.workflows.flow_models import FlowStep, FlowWaiting, ProjectionWrite, StepPolicy
 
 FLOW_PROJECT = "flow_project"
 
@@ -101,6 +101,7 @@ async def step(
     waiting: Literal["approval", "answer"] | None = None,
     prompt: str | None = None,
     grant_id: str | None = None,
+    policy: StepPolicy | None = None,
 ) -> AsyncIterator[StepHandle]:
     """Record a host call around its body: `running` on enter (and parked, with
     `waiting`; or let through by the run grant `grant_id`), `succeeded` or `failed` on
@@ -117,6 +118,7 @@ async def step(
         started_at=workflow.now(),
         history_length=info.get_current_history_length(),
         grant_id=grant_id,
+        policy=policy,
     )
     parked = (
         FlowWaiting(

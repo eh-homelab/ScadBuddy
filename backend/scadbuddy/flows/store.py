@@ -344,6 +344,11 @@ class FlowStore:
         that failed after inserting its grant (the sweep checks the execution too)."""
         return await asyncio.to_thread(self._orphan_grants, older_than)
 
+    async def run_talking_to(self, session_id: str, call_id: str) -> Run | None:
+        """The run whose step `call_id` talks to session `session_id` (#2481, spec §3.4):
+        how a session's call finds its run, from the run's own record."""
+        return await asyncio.to_thread(self._run_talking_to, session_id, call_id)
+
     async def delete_grant(self, run_id: str) -> None:
         await asyncio.to_thread(self._delete_grant, run_id)
 
@@ -519,6 +524,15 @@ class FlowStore:
                 (older_than,),
             ).fetchall()
         return [row["run_id"] for row in rows]
+
+    def _run_talking_to(self, session_id: str, call_id: str) -> Run | None:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT {_RUN} FROM workflow_runs WHERE steps @> %s LIMIT 2",
+                (Jsonb([{"call_id": call_id, "session_id": session_id}]),),
+            ).fetchall()
+        # A call id is a uuid4 the run drew: two runs naming it is no run's.
+        return Run.model_validate(rows[0]) if len(rows) == 1 else None
 
     def _delete_grant(self, run_id: str) -> None:
         with self._pool.connection() as conn:

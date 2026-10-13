@@ -13,7 +13,7 @@ from datetime import timedelta
 from typing import Any, Literal, NamedTuple
 from urllib.parse import quote
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError, ApplicationError
@@ -35,6 +35,7 @@ with workflow.unsafe.imports_passed_through():
         GrantCheck,
         GrantVerdict,
         ProjectionWrite,
+        StepPolicy,
     )
     from scadbuddy.workflows.flow_routes import (
         API_URL_MISSING,
@@ -768,13 +769,26 @@ def _refs(images: list[Image]) -> dict[str, Any]:
     return {"images": [{"kind": "flow_image", "name": image.name} for image in images]}
 
 
+def _policy(grant: dict[str, Any] | None, on_outside: str) -> StepPolicy:
+    """The step's record of the script's narrowing and `on_outside` (spec §4.3); a bad
+    one is the script's error, before anything is sent."""
+    try:
+        return StepPolicy.model_validate({"grant": grant, "on_outside": on_outside})
+    except ValidationError as err:
+        raise ValueError(f"grant or on_outside: {err.errors()[0]['msg']}") from None
+
+
 async def _start_session(
-    prompt: str, skills: list[str], result_schema: dict[str, Any] | None, images: list[Image]
+    prompt: str,
+    skills: list[str],
+    result_schema: dict[str, Any] | None,
+    images: list[Image],
+    policy: StepPolicy | None = None,
 ) -> Any:
     if result_schema is not None:
         _check_schema(result_schema)
     call_id = str(workflow.uuid4())
-    async with step("agent", call_id, outward=False) as at:
+    async with step("agent", call_id, outward=False, policy=policy) as at:
         # Never retried: a lost answer would start a second session (Ruling 4's key is
         # not one a session start takes).
         body: dict[str, Any] = {"prompt": _prompt(prompt, skills, result_schema), "mode": "durable"}
@@ -794,6 +808,8 @@ async def _agent_session(
     skills: list[str],
     result_schema: dict[str, Any] | None,
     images: list[Image] | None = None,
+    grant: dict[str, Any] | None = None,
+    on_outside: str = "escalate",
 ) -> Any:
     """Start a durable agent session with `prompt`, as the person who started this run,
     and wait for its answer. `skills` names ScadBuddy skills for it to use (may be
@@ -801,8 +817,12 @@ async def _agent_session(
     it answered with, checked against the schema; without, its text. `images` (this
     run's, from `tool_result`) are sent with the prompt: the session sees them as images
     its user sent, never as text. The session's own outward calls wait for approval in
-    its chat."""
-    return await _start_session(prompt, skills, result_schema, images or [])
+    its chat, unless the run's grant extends to its sessions and admits them. `grant`
+    ({"rules": [...]}, the run grant's rule shape) narrows that for this session: a
+    call must be admitted by both, so it can never widen it; None is the run grant as
+    it is. `on_outside` ("escalate" or "deny") says what a call outside it does."""
+    policy = _policy(grant, on_outside)
+    return await _start_session(prompt, skills, result_schema, images or [], policy)
 
 
 # `agent` is the harness's module here; the host function takes the name the script calls.
@@ -819,9 +839,11 @@ async def agent_with_images(
     return await _start_session(prompt, skills, result_schema, images)
 
 
-async def _ask(session_id: str, message: str, images: list[Image]) -> str:
+async def _ask(
+    session_id: str, message: str, images: list[Image], policy: StepPolicy | None = None
+) -> str:
     call_id = str(workflow.uuid4())
-    async with step("ask_session", call_id, outward=False) as at:
+    async with step("ask_session", call_id, outward=False, policy=policy) as at:
         await _check_session(session_id)
         await at.note_session(session_id)
         # Never retried: a lost answer would send the message twice.
@@ -833,12 +855,19 @@ async def _ask(session_id: str, message: str, images: list[Image]) -> str:
 
 
 @agent.tool_defn(inherently_safe=True)
-async def ask_session(session_id: str, message: str, images: list[Image] | None = None) -> str:
+async def ask_session(
+    session_id: str,
+    message: str,
+    images: list[Image] | None = None,
+    grant: dict[str, Any] | None = None,
+    on_outside: str = "escalate",
+) -> str:
     """Send `message` to the durable agent session `session_id` (one the person who
     started this run owns) and wait for its answer's text. `images` (this run's, from
     `tool_result`) are sent with the message: the session sees them as images its user
-    sent, never as text."""
-    return await _ask(session_id, message, images or [])
+    sent, never as text. `grant` and `on_outside` are as `agent`'s, for this turn."""
+    policy = _policy(grant, on_outside)
+    return await _ask(session_id, message, images or [], policy)
 
 
 @agent.tool_defn(inherently_safe=True)
