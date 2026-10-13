@@ -351,8 +351,11 @@ def _cover_metadata(plate_index: int) -> str:
 #: ``--load-settings``/``--load-filaments``. Measured: placeholder ids, a
 #: deliberately wrong nozzle diameter (0.4 while slicing 0.2) and a wrong
 #: printable height all produce byte-identical results. So ScadBuddy states what
-#: it honestly knows and names itself for the rest, rather than inventing preset
-#: names that could be mistaken for real ones — it owns no slicer settings.
+#: it knows and names itself for the rest — it owns no slicer settings. What it
+#: knows includes the printer a file is laid out for, named as Bambu Studio names
+#: it (:func:`printer_preset`, #2639), since Bambuddy's slice dialog pre-picks the
+#: printer by that name; the process stays this placeholder, and marks the layout
+#: as ScadBuddy's (:func:`layout_of`).
 PRESET_PLACEHOLDER = "ScadBuddy"
 #: Only the arity-free presence of this option matters; 1 and 3 entries were both
 #: measured to slice identically on a two-extruder H2C. The print run replaces it
@@ -365,7 +368,12 @@ def printer_preset(plate: PlateGeometry, nozzle: str) -> str:
     """The printer preset a 3MF laid out for ``plate`` names, as Bambu Studio names
     it (``"Bambu Lab A1 0.4 nozzle"``): Bambuddy's slice dialog pre-picks the printer
     by this name, and with :data:`PRESET_PLACEHOLDER` it took the first printer it
-    lists. The fallback plate is no printer, so it keeps the placeholder."""
+    lists. The fallback plate is no printer, so it keeps the placeholder.
+
+    Before a print chooses a nozzle, ``nozzle`` is the file's stated diameter,
+    0.4 as written: a printer fitted with another size is pre-picked at 0.4, as
+    Bambu Studio itself opens a new project, and the dialog lets that be changed.
+    A print renames it for the nozzle it chose (:func:`replate_3mf`)."""
     return f"{plate.model} {nozzle} nozzle" if plate.model else PRESET_PLACEHOLDER
 
 

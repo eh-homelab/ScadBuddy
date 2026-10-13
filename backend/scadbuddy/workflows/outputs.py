@@ -200,7 +200,8 @@ def placement_matrix(box: BoundingBox, x: float, y: float, rot: float) -> np.nda
 
 def _materials(req: OutputRequest) -> dict[str, str]:
     """Each colour's material as the arranged objects' sources state it. Only a library
-    file states any; an output's objects leave theirs unknown. A colour two sources
+    file states any. A render's colour has a material only when a library object
+    shares its slot, since one slot is one filament. A colour two sources
     give different materials is unknown too: one slot prints both parts, and picking
     either would slice the other in the wrong material. The writer then states none
     (`project_settings`)."""
