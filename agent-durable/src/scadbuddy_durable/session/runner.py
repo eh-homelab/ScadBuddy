@@ -70,6 +70,10 @@ from temporalio.claude_agent_sdk import (
     SegmentOutput,
     ToolOutcome,
 )
+
+# Private to the git-pinned plugin (#2945): the per-activity ContextVar its `emit` reads
+# as it publishes. A pin bump (ai-integrations#33 and after) must check it still is, or
+# HeldText stops holding anything, with no error.
 from temporalio.claude_agent_sdk._events import _EMIT
 from temporalio.exceptions import ApplicationError
 
@@ -677,6 +681,9 @@ class ScadBuddyRunner:
                 )
                 if credentials_fault(err) and i + 1 < len(credentials):
                     if held is not None:
+                        # Mostly the refusal notice. A fault mid-segment also drops real
+                        # text since the last tool call, which the rerun on the next
+                        # credential writes again: dropped, never flushed.
                         held.drop()
                     cost = _cost(err)
                     if cost > 0:

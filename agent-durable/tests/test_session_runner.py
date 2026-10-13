@@ -761,6 +761,26 @@ async def test_a_refused_credentials_notice_never_reaches_the_transcript(
     assert refusing.tokens == [TOKEN, TOKEN + "-second"]
 
 
+async def test_a_first_credentials_answer_still_reaches_the_transcript(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """#2945: a non-last credential's text is held, and flushed when it answers."""
+    await _two_credentials(agent_db)
+    refusing = Refusing(set(), _result_error("API Error: 429 rate limited", status=429))
+    runner = ScadBuddyRunner(connect, KEK, cwd=str(tmp_path), make_runner=refusing)
+    async with running(temporal_env, connect, runner) as (client, queue):
+        sid = await insert_session(agent_db)
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "hi")
+            assert await settled(connect, sid) == "idle"
+        finally:
+            await handle.terminate()
+    texts = [e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"]
+    assert texts == ["done"]
+    assert refusing.tokens == [TOKEN]
+
+
 async def test_a_failure_of_the_request_does_not_try_another_credential(
     temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
 ) -> None:
