@@ -39,7 +39,16 @@ export type EscalationDeps = {
   durable: () => EscalationDurable | undefined
   /** How a delivery turn starts; without it nothing is delivered. */
   send?: EscalationSend | undefined
+  /**
+   * How long a delivery may hold its claim while its turn starts (CLAIM_HOLD_MS): past it,
+   * the delivery gives up and its transaction rolls back, so a send that hangs never
+   * holds the rows (and another replica's sweep) for longer. The call is sent again on a
+   * later tick, so a turn that did start late may see it twice; it is never lost.
+   */
+  claimHoldMs?: number | undefined
 }
+
+export const CLAIM_HOLD_MS = 30_000
 
 /** What one delivery lists of a waiting call: all of it scrubbed, none of it raw input. */
 type Waiting = {
@@ -84,6 +93,20 @@ type Entry = {
   due: boolean
   parent_session: string | null
   parent_principal: string | null
+}
+
+/** `started`, or a failure once `ms` pass first: the caller's transaction then rolls back. */
+async function withinHold(started: Promise<void>, ms: number): Promise<void> {
+  let timer: NodeJS.Timeout | undefined
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`the delivery turn did not start within ${ms} ms`)), ms)
+  })
+  started.catch(() => {})
+  try {
+    await Promise.race([started, late])
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 /** One step of an entry's way up (`hops`, spec §4.6). */
@@ -222,7 +245,7 @@ export class Escalations {
           claimed = await this.#claim(tx, session, calls)
           if (claimed.length === 0) return
           const text = `${DELIVERY_PREAMBLE}\n\n${wrapUntrustedText('escalation', 'flow runs this session started', JSON.stringify(claimed))}`
-          await send(session, owner.owner, text, owner.tiers)
+          await withinHold(send(session, owner.owner, text, owner.tiers), this.#deps.claimHoldMs ?? CLAIM_HOLD_MS)
         })
         delivered += claimed.length
       } catch (err) {

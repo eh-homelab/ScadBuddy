@@ -237,6 +237,20 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     expect(await escalations.deliver()).toBe(1)
   })
 
+  it('a send that hangs holds its claim no longer than the hold', async () => {
+    const id = await park()
+    let release!: (err: Error) => void
+    const stuck = new Promise<never>((_, reject) => (release = reject))
+    const hanging = new Escalations({ sql: db.sql, durable: () => undefined, send: async () => stuck, claimHoldMs: 200 })
+    const running = hanging.deliver().catch(() => undefined)
+    // Another replica skips the held row at first, and takes it once the hold ends.
+    expect(await escalations.deliver()).toBe(0)
+    await vi.waitFor(async () => expect(await escalations.deliver()).toBe(1), { timeout: 5000, interval: 100 })
+    expect(await hop(id)).toMatchObject({ hop: 'parent', delivered: true })
+    release(new Error('gone'))
+    await running
+  })
+
   it("a busy session's backlog does not keep another session's call out of the batch", async () => {
     const busy = await session('bearer', TOKEN)
     for (let i = 0; i < 200; i++) await park(busy)
