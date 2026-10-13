@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -684,4 +685,137 @@ func TestOfTwoReloadedSavesOfOneNameTheLaterIsSent(t *testing.T) {
 			t.Fatalf("uploads %d deleted %v", lib.uploads, lib.deleted)
 		}
 	})
+}
+
+func TestAStoredFileRenamedWhileOpenIsStillReplaced(t *testing.T) {
+	for _, down := range []bool{false, true} {
+		lib := newFakeLibrary()
+		lib.file(10, "a.3mf", 0, []byte("old"))
+		lib.down = down
+		state := t.TempDir()
+		dir, released := retrying(t, lib, Options{StateDir: state})
+		logs(t)
+		f, err := os.OpenFile(filepath.Join(dir, "a.3mf"), os.O_WRONLY|os.O_TRUNC, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		if _, err := f.Write([]byte("new")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(filepath.Join(dir, "a.3mf"), filepath.Join(dir, "b.3mf")); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatalf("down %v: close: %v", down, err)
+		}
+		waitRelease(t, released)
+		if down {
+			q := queued(t, state)
+			if len(q) != 1 || q[0].Name != "b.3mf" {
+				t.Fatalf("queue: %+v", q)
+			}
+			if rec, err := readRecord(q[0].Path); err != nil || len(rec.Bases) != 1 || rec.Bases[0].ID != 10 || rec.Bases[0].Name != "b.3mf" {
+				t.Fatalf("bases: %+v %v", rec.Bases, err)
+			}
+			lib.setDown(false)
+		}
+		eventually(t, "the replace", func() bool { return libraryHas(lib, map[string]string{"0/b.3mf": "new"}) })
+		lib.locked(func() {
+			if !lib.deleted[10] {
+				t.Fatalf("down %v: the old file was kept: %+v", down, lib.files)
+			}
+		})
+	}
+}
+
+func TestARenameDuringTheUploadThatFailsIsRetriedWithoutSendingAgain(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.file(10, "y.3mf", 0, []byte("old"))
+	lib.down = true
+	state := t.TempDir()
+	dir, released := retrying(t, lib, Options{StateDir: state})
+	log := logs(t)
+	if err := os.WriteFile(filepath.Join(dir, "x.3mf"), []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitRelease(t, released)
+	var once sync.Once
+	lib.locked(func() {
+		lib.down, lib.failUpdates = false, 1
+		lib.uploading = func(int) {
+			once.Do(func() {
+				// The rename lands while the upload runs, and its follow-up fails once.
+				if err := os.Rename(filepath.Join(dir, "x.3mf"), filepath.Join(dir, "y.3mf")); err != nil {
+					t.Errorf("rename: %v", err)
+				}
+			})
+		}
+	})
+	eventually(t, "the renamed upload", func() bool { return libraryHas(lib, map[string]string{"0/y.3mf": "new"}) })
+	eventually(t, "the queue to empty", func() bool { return len(queued(t, state)) == 0 })
+	lib.locked(func() {
+		if lib.uploads != 1 || !lib.deleted[10] {
+			t.Fatalf("uploads %d deleted %v", lib.uploads, lib.deleted)
+		}
+	})
+	if !strings.Contains(log.String(), "renamed on the next pass") {
+		t.Fatalf("log: %q", log.String())
+	}
+}
+
+func TestAWriterOfAQueuedSaveKeepsWorkingWhenTheSaveIsRemoved(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.down = true
+	state := t.TempDir()
+	dir, released := retrying(t, lib, Options{StateDir: state})
+	logs(t)
+	path := filepath.Join(dir, "a.3mf")
+	if err := os.WriteFile(path, []byte("abc"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitRelease(t, released)
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt([]byte("Z"), 0); err != nil {
+		t.Fatalf("write after the removal: %v", err)
+	}
+	buf := make([]byte, 3)
+	if _, err := f.ReadAt(buf, 0); err != nil || string(buf) != "Zbc" {
+		t.Fatalf("read: %q %v", buf, err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	waitRelease(t, released)
+	if q := queued(t, state); len(q) != 0 {
+		t.Fatalf("queue: %+v", q)
+	}
+}
+
+func TestRemovingAnUploadedFileGoneFromTheLibraryClearsIt(t *testing.T) {
+	lib := newFakeLibrary()
+	dir, released := releases(t, lib, Options{})
+	logs(t)
+	path := filepath.Join(dir, "notes.txt")
+	if err := os.WriteFile(path, []byte("n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitRelease(t, released)
+	if got := names(t, dir); !slices.Equal(got, []string{"notes.txt"}) {
+		t.Fatalf("listed: %v", got)
+	}
+	lib.remove(101)
+	if err := os.Remove(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rm: %v", err)
+	}
+	if got := names(t, dir); len(got) != 0 {
+		t.Fatalf("listed after: %v", got)
+	}
 }

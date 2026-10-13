@@ -39,10 +39,11 @@ type pending struct {
 	handles int
 
 	mu sync.Mutex
-	// base is the stored file the contents start from, ID 0 none; seedPath, if set, is
-	// a queued copy they start from instead.
+	// base is the stored file the contents start from, ID 0 none; seedFile, if set, is
+	// a queued copy they start from instead, held open so a removal of the queued save
+	// does not take it away.
 	base     api.File
-	seedPath string
+	seedFile *os.File
 	tmp      *os.File
 	path     string
 	seed     bool
@@ -96,12 +97,20 @@ func (n *file) attach(write, created bool) (*pendingHandle, syscall.Errno) {
 		}
 		if held != nil && n.queued == held {
 			rec, _ := n.tree.unsent.record(held)
-			p.base, p.seedPath = api.File{}, held.contents()
+			f, err := os.Open(held.contents())
+			if err != nil {
+				n.tree.unsent.unhold(held)
+				return nil, failed("open", err, "path", held.dir)
+			}
+			p.base, p.seedFile = api.File{}, f
 			p.bases, p.over = slices.Clone(rec.Bases), []*entry{held}
 			p.size.Store(rec.Size)
 			held = nil
 		}
 		n.pending = p
+		n.tree.mu.Lock()
+		n.tree.pendings[p] = true
+		n.tree.mu.Unlock()
 	}
 	if held != nil {
 		// The pending write already holds it, or the node is no longer its.
@@ -154,11 +163,11 @@ func (p *pending) ensure(ctx context.Context) syscall.Errno {
 	if err != nil {
 		return failed("write", err)
 	}
-	if p.seed && (p.seedPath != "" || p.base.ID != 0) {
+	if p.seed && (p.seedFile != nil || p.base.ID != 0) {
 		if err := p.seedInto(ctx, tmp); err != nil {
 			_ = tmp.Close()
 			_ = os.Remove(tmp.Name())
-			return failed("write", err, "file", p.base.ID, "path", p.seedPath)
+			return failed("write", err, "file", p.base.ID)
 		}
 	}
 	st, err := tmp.Stat()
@@ -175,14 +184,12 @@ func (p *pending) ensure(ctx context.Context) syscall.Errno {
 // seedInto copies the contents the write starts from into tmp: a queued copy's, or a
 // stored file's.
 func (p *pending) seedInto(ctx context.Context, tmp *os.File) error {
-	var src *os.File
-	var err error
-	if p.seedPath != "" {
-		src, err = os.Open(p.seedPath)
-	} else {
-		t := p.node.tree
-		src, err = t.cache.open(ctx, t.lib, p.base)
+	if p.seedFile != nil {
+		_, err := io.Copy(tmp, io.NewSectionReader(p.seedFile, 0, 1<<62))
+		return err
 	}
+	t := p.node.tree
+	src, err := t.cache.open(ctx, t.lib, p.base)
 	if err != nil {
 		return err
 	}
@@ -297,6 +304,9 @@ func (h *pendingHandle) Release(ctx context.Context) syscall.Errno {
 	ended := p.handles == 0
 	if ended {
 		n.pending = nil
+		t.mu.Lock()
+		delete(t.pendings, p)
+		t.mu.Unlock()
 	}
 	over, shadowed := p.over, p.shadowed
 	n.mu.Unlock()
@@ -311,11 +321,20 @@ func (h *pendingHandle) Release(ctx context.Context) syscall.Errno {
 		_ = os.Remove(p.path)
 		p.tmp = nil
 	}
+	p.setSeedFile(nil)
 	for _, e := range over {
 		t.unsent.unhold(e)
 	}
 	t.unsent.shadow(shadowed, -1)
 	return errno
+}
+
+// setSeedFile replaces the queued copy the write starts from, closing the old one.
+func (p *pending) setSeedFile(f *os.File) {
+	if p.seedFile != nil {
+		_ = p.seedFile.Close()
+	}
+	p.seedFile = f
 }
 
 // keepRefused keeps contents that could be neither sent nor queued under refused/,
@@ -413,7 +432,8 @@ func (p *pending) upload(ctx context.Context) syscall.Errno {
 		_ = os.Remove(p.path)
 	}
 	_ = p.tmp.Close()
-	p.tmp, p.seed, p.base, p.seedPath = nil, true, got, ""
+	p.tmp, p.seed, p.base = nil, true, got
+	p.setSeedFile(nil)
 	// The queued saves this one supersedes are now on the library.
 	for _, e := range over {
 		t.unsent.drop(e)
@@ -462,10 +482,11 @@ func (p *pending) queue(cur api.File, bases []base, over []*entry, cause error) 
 	if err != nil {
 		return errQueue(err, "folder", cur.FolderID, "name", cur.Name)
 	}
-	_ = f.Close()
 	_ = p.tmp.Close()
 	p.tmp, p.path, p.dirty = nil, "", false
-	p.seed, p.base, p.seedPath = true, api.File{}, e.contents()
+	// The write goes on from the queued copy, held open.
+	p.seed, p.base = true, api.File{}
+	p.setSeedFile(f)
 	n := p.node
 	n.mu.Lock()
 	// The superseded entries are gone (any add could not supersede stay held); add's

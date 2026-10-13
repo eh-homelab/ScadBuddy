@@ -34,6 +34,8 @@ type fakeLibrary struct {
 	failUploads int
 	failStatus  int
 	down        bool
+	// failUpdates is how many UpdateFile calls fail, with a 502.
+	failUpdates int
 	// uploading, if set, is called at the start of each upload with its attempt number.
 	uploading func(attempt int)
 	attempts  int
@@ -159,6 +161,10 @@ func (l *fakeLibrary) UpdateFile(_ context.Context, fileID int, name *string, fo
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.updates = append(l.updates, update{id: fileID, name: name, parent: folderID})
+	if l.failUpdates > 0 {
+		l.failUpdates--
+		return api.File{}, &api.Error{Op: "update file", Status: http.StatusBadGateway}
+	}
 	f, ok := l.files[fileID]
 	if !ok {
 		return api.File{}, &api.Error{Op: "update file", Status: http.StatusNotFound}
@@ -180,6 +186,9 @@ func (l *fakeLibrary) DeleteFiles(_ context.Context, ids ...int) error {
 	for _, id := range ids {
 		if l.busy[id] {
 			return &api.Error{Op: "delete", Status: http.StatusConflict, Detail: "queued for printing"}
+		}
+		if _, ok := l.files[id]; !ok {
+			return &api.Error{Op: "delete", Status: http.StatusNotFound}
 		}
 	}
 	for _, id := range ids {

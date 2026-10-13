@@ -55,6 +55,17 @@ type record struct {
 	SavedAt time.Time `json:"saved_at"`
 	// Base is the single base of a record written before Bases; it is read into Bases.
 	Base *base `json:"base,omitempty"`
+	// Uploaded is the file the write was sent as when a rename made during the upload
+	// could not be applied to it: the next pass renames that file instead of sending
+	// the write again.
+	Uploaded *uploadedAs `json:"uploaded,omitempty"`
+}
+
+// uploadedAs is a sent write's file, where it was sent.
+type uploadedAs struct {
+	ID       int    `json:"id"`
+	FolderID int    `json:"folder_id"`
+	Name     string `json:"name"`
 }
 
 // base is a stored file a write replaces, and where it was: it is deleted once the
@@ -143,6 +154,8 @@ type queue struct {
 	// shadowed counts, by ID, the stored files that writes still being written were
 	// renamed over; they are hidden as queued writes' bases are.
 	shadowed map[int]int
+	// discard deletes files that dropped entries had already sent (record.Uploaded).
+	discard func(ids ...int)
 }
 
 func newQueue(stateDir string) *queue {
@@ -150,7 +163,19 @@ func newQueue(stateDir string) *queue {
 		dir: filepath.Join(stateDir, "unsent"), refusedDir: filepath.Join(stateDir, "refused"),
 		now: time.Now, jitter: rand.Float64, first: retryFirst, max: retryMax,
 		wake: make(chan struct{}, 1), entries: map[uint64]*entry{}, nextSeq: 1, shadowed: map[int]int{},
+		discard: func(...int) {},
 	}
+}
+
+// uploadedIDs are the files the entries had already sent.
+func uploadedIDs(es ...*entry) []int {
+	var out []int
+	for _, e := range es {
+		if e.rec.Uploaded != nil {
+			out = append(out, e.rec.Uploaded.ID)
+		}
+	}
+	return out
 }
 
 // stored is an entry as read from disk; err says why its record could not be used.
@@ -480,7 +505,11 @@ func (q *queue) supersede(e *entry, over ...*entry) error {
 		o.gone = true
 		delete(q.entries, o.seq)
 	}
+	sent := uploadedIDs(earlier...)
 	q.mu.Unlock()
+	if len(sent) > 0 {
+		q.discard(sent...)
+	}
 	for _, o := range earlier {
 		slog.Info("an earlier unsent save is superseded", "path", o.dir, "by", e.dir, "folder", rec.FolderID, "name", rec.Name)
 		if err := os.RemoveAll(o.dir); err != nil {
@@ -556,9 +585,34 @@ func (q *queue) drop(e *entry) {
 	}
 	e.gone = true
 	delete(q.entries, e.seq)
+	sent := uploadedIDs(e)
 	q.mu.Unlock()
+	if len(sent) > 0 {
+		q.discard(sent...)
+	}
 	if err := os.RemoveAll(e.dir); err != nil {
 		slog.Warn("removing an unsent write failed", "path", e.dir, "err", err)
+	}
+}
+
+// rebase follows a stored file renamed through the mount in every record that
+// replaces it: a base is the file wherever it now lives.
+func (q *queue) rebase(id int, name string, folderID int) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	for _, e := range q.entries {
+		i := slices.IndexFunc(e.rec.Bases, func(b base) bool { return b.ID == id })
+		if i < 0 {
+			continue
+		}
+		rec := e.rec
+		rec.Bases = slices.Clone(rec.Bases)
+		rec.Bases[i].Name, rec.Bases[i].FolderID = name, folderID
+		if err := writeRecord(e.dir, rec); err != nil {
+			slog.Error("updating an unsent write's record failed", "path", e.dir, "err", err)
+			continue
+		}
+		e.rec = rec
 	}
 }
 
@@ -696,10 +750,19 @@ func (t *tree) send(ctx context.Context, e *entry) {
 		e.sending.Unlock()
 		return
 	}
-	name, conflict, err := t.target(ctx, rec.FolderID, rec.Name, rec.Bases, rec.SavedAt)
+	sentAs, conflict := rec, false
 	var got api.File
-	if err == nil {
-		got, err = t.uploadFile(ctx, rec.FolderID, name, e.contents())
+	var err error
+	if u := rec.Uploaded; u != nil {
+		// Sent on an earlier pass; only its rename is left.
+		got = api.File{ID: u.ID, Name: u.Name, FolderID: u.FolderID}
+		sentAs.Name, sentAs.FolderID = u.Name, u.FolderID
+	} else {
+		var name string
+		name, conflict, err = t.target(ctx, rec.FolderID, rec.Name, rec.Bases, rec.SavedAt)
+		if err == nil {
+			got, err = t.uploadFile(ctx, rec.FolderID, name, e.contents())
+		}
 	}
 	if err != nil {
 		e.sending.Unlock()
@@ -712,7 +775,7 @@ func (t *tree) send(ctx context.Context, e *entry) {
 	// run, and the kernel is told after, under no lock a lookup might wait on. What
 	// follows the upload finishes even if the retrier is being stopped.
 	post, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
-	n := t.sent(post, e, rec, got, conflict)
+	n := t.sent(post, e, sentAs, got, conflict)
 	cancel()
 	e.sending.Unlock()
 	if n != nil {
@@ -841,22 +904,55 @@ func (t *tree) folderGone(ctx context.Context, folderID int) bool {
 	return !slices.ContainsFunc(l.Folders, func(f api.Folder) bool { return f.ID == folderID })
 }
 
-// sent finishes an entry the library now has as got: applies a rename or removal made
-// during the upload, deletes the bases still in place unless it was sent as a conflict
-// copy, keeps its contents as got's cached ones, removes the entry and makes its node,
-// which it returns, got's.
+// sent finishes an entry the library now has as got, sent as sentAs says: applies a
+// rename or removal made during the upload, deletes the bases still in place unless it
+// was sent as a conflict copy, keeps its contents as got's cached ones, removes the
+// entry and makes its node, which it returns, got's. If the rename fails, the entry
+// stays, pointing at got, its bases untouched, and the next pass renames again.
 func (t *tree) sent(ctx context.Context, e *entry, sentAs record, got api.File, conflict bool) *file {
+	q := t.unsent
 	// Drop the listing first, so the folder shows the new file once the entry is gone.
 	t.forget(sentAs.FolderID)
-	rec, n, removed := t.unsent.finish(e)
+	at := sentAs
+	for !conflict {
+		rec, ok := q.record(e)
+		if !ok || (rec.Name == at.Name && rec.FolderID == at.FolderID) {
+			break
+		}
+		name, folder := changes(at.Name, rec.Name, at.FolderID, rec.FolderID)
+		moved, err := t.lib.UpdateFile(ctx, got.ID, name, folder)
+		if err != nil {
+			gone := status(err) == 404
+			uerr := q.update(e, func(r *record) {
+				r.Uploaded = &uploadedAs{ID: got.ID, FolderID: at.FolderID, Name: at.Name}
+				if gone {
+					// The sent file is gone: send the write again.
+					r.Uploaded = nil
+				}
+				r.Attempts++
+				r.LastError, r.LastAttempt = err.Error(), q.now().UTC()
+			})
+			if uerr != nil {
+				slog.Error("updating an unsent write's record failed", "path", e.dir, "err", uerr)
+			}
+			q.reschedule(e)
+			slog.Warn("renaming a sent write failed; it is renamed on the next pass", "path", e.dir, "file", got.ID, "name", rec.Name, "folder", rec.FolderID, "err", err)
+			return nil
+		}
+		got.Name, got.FolderID = moved.Name, moved.FolderID
+		at.Name, at.FolderID = rec.Name, rec.FolderID
+		t.forget(rec.FolderID)
+	}
+	rec, n, removed := q.finish(e)
 	if removed {
 		if err := t.lib.DeleteFiles(ctx, got.ID); err != nil {
 			slog.Warn("an unsent write removed or superseded while it was sent remains in the library", "file", got.ID, "name", got.Name, "err", err)
 		}
 		return nil
 	}
-	if !conflict && (rec.Name != sentAs.Name || rec.FolderID != sentAs.FolderID) {
-		name, folder := changes(sentAs.Name, rec.Name, sentAs.FolderID, rec.FolderID)
+	if !conflict && (rec.Name != at.Name || rec.FolderID != at.FolderID) {
+		// Renamed between the last rename and now.
+		name, folder := changes(at.Name, rec.Name, at.FolderID, rec.FolderID)
 		if moved, err := t.lib.UpdateFile(ctx, got.ID, name, folder); err != nil {
 			slog.Warn("renaming a sent write failed", "file", got.ID, "name", rec.Name, "folder", rec.FolderID, "err", err)
 		} else {

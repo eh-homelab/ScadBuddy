@@ -100,6 +100,11 @@ func (d *dir) Unlink(ctx context.Context, name string) syscall.Errno {
 	}
 	err := d.tree.lib.DeleteFiles(ctx, f.ID)
 	d.tree.forget(d.id)
+	if api.Errno(err) == syscall.ENOENT {
+		// Already gone from the library: no longer shown here either.
+		d.tree.unremember(f.ID)
+		d.tree.cache.drop(f.ID)
+	}
 	if err != nil {
 		return failed("unlink", err, "file", f.ID)
 	}
@@ -234,6 +239,7 @@ func (d *dir) renameStored(ctx context.Context, name string, f api.File, to *dir
 		return failed("rename", err, "file", f.ID)
 	}
 	d.tree.moved(f.ID, got.Name, got.FolderID)
+	d.tree.rebase(f.ID, got.Name, got.FolderID)
 	if child := d.GetChild(name); child != nil {
 		if n, ok := child.Operations().(*file); ok {
 			// The answer has no size or times: keep the file's.

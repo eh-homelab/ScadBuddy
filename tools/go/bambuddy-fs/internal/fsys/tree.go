@@ -48,8 +48,10 @@ type Options struct {
 func NewRoot(lib Library, opts Options) fs.InodeEmbedder {
 	t := &tree{
 		lib: lib, opts: opts, cache: newCache(opts.CacheDir), listings: map[int]listing{}, uploaded: map[int]api.File{},
-		unsent: newQueue(opts.StateDir),
+		pendings: map[*pending]bool{},
+		unsent:   newQueue(opts.StateDir),
 	}
+	t.unsent.discard = t.discardSent
 	t.unsent.load()
 	return &dir{tree: t}
 }
@@ -69,6 +71,8 @@ type tree struct {
 	// it), so they can still be renamed and removed. One goes once a listing shows it,
 	// or it is removed.
 	uploaded map[int]api.File
+	// pendings are the writes open now.
+	pendings map[*pending]bool
 
 	// released, if set, is called when a write handle's release has finished (tests).
 	released func()
@@ -135,6 +139,38 @@ func (t *tree) view(ctx context.Context, folderID int) (view, syscall.Errno) {
 		}
 	}
 	return view{listing: l, queued: queued}, 0
+}
+
+// discardSent deletes files that queued writes, since removed or superseded, had
+// already sent.
+func (t *tree) discardSent(ids ...int) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	if err := t.lib.DeleteFiles(ctx, ids...); err != nil {
+		slog.Warn("a removed unsent write's sent file remains in the library", "files", ids, "err", err)
+	}
+	for _, id := range ids {
+		t.unremember(id)
+	}
+}
+
+// rebase follows a stored file renamed through the mount in every write that replaces
+// it, open or queued: a base is the file wherever it now lives.
+func (t *tree) rebase(id int, name string, folderID int) {
+	t.unsent.rebase(id, name, folderID)
+	t.mu.Lock()
+	open := slices.Collect(maps.Keys(t.pendings))
+	t.mu.Unlock()
+	for _, p := range open {
+		n := p.node
+		n.mu.Lock()
+		for i := range p.bases {
+			if p.bases[i].ID == id {
+				p.bases[i].Name, p.bases[i].FolderID = name, folderID
+			}
+		}
+		n.mu.Unlock()
+	}
 }
 
 // remember keeps a file this mount uploaded, for a listing without --all.

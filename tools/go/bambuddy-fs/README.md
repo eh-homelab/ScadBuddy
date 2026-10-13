@@ -120,14 +120,16 @@ and the first read of an open file streams all of it. Listings are cached for
 
 Writes go to a temporary file, and the upload runs when the descriptor is closed
 (`flush`). A close with nothing new to send uploads nothing. `fsync()` makes the
-temporary file durable. Writing over an existing name uploads the new file and then
+temporary file durable, but nothing reads it back after a crash: a save that was
+fsync'd and not yet closed is lost if the machine crashes. Writing over an existing name uploads the new file and then
 deletes the old one, so the path keeps its name but its file ID changes: Bambuddy has
 no in-place replace. Truncating to 0 a file being written is allowed. If the upload
 fails, the write is queued (below) and `close()` succeeds.
 
 Without `--all`, a file this mount uploaded that the listing does not show (an app's
 `x.3mf.tmp`, say) stays visible until it is renamed, removed or the mount ends, so the
-app can still rename or remove it.
+app can still rename or remove it. Changes made outside the mount to such a file show
+only after a listing shows it, or after a remount.
 
 ## Renames
 
