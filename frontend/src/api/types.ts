@@ -357,8 +357,10 @@ export interface SessionLimits {
 
 /**
  * How many of the assistant's renders run at once (`GET/PUT /api/v1/ai/settings/render-limits`,
- * agent `src/routes/renderLimits.ts`). Past a limit a render waits for a slot; nothing
- * is refused for it. Read live by the agent, so a change applies to waiting renders too.
+ * agent `src/routes/renderLimits.ts`). Past a concurrency limit a render waits for a slot,
+ * up to the tool's own wait; a call is refused past 100 waiting per caller, or past
+ * `per_window`, which counts waiting renders. Read live by the agent, so a change
+ * applies to waiting renders too.
  */
 export interface RenderLimits {
   /** Each caller's renders at once, unless an override names it. */
