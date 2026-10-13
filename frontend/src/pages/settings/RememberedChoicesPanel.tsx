@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { Link } from 'react-router'
 import { USER_ONLY } from '../../agent/dom'
 import { api, ApiError } from '../../api/client'
 import type {
@@ -18,6 +19,8 @@ type Row = {
   key: string
   kind: string
   subject: string
+  /** Where the subject is opened: a library file's place in the Library (#2349). */
+  href?: string
   value: string
   forget: () => Promise<unknown>
 }
@@ -42,10 +45,24 @@ function describeOptions(options: PrintOptions): string {
   )
 }
 
-/** A model's id as it is, a library file's scope as the file. */
-function scopeName(scope: string): string {
+/**
+ * A model's id as it is, a library file's scope as the file (#2349): its name, linked to
+ * it in the Library, or "deleted file N" once Bambuddy no longer has it. Until the names
+ * have answered, or when they cannot be read, the file's id.
+ */
+function scopeName(scope: string, names: ReadonlyMap<number, string | null> | undefined): { subject: string; href?: string } {
   const fileId = libraryFileOfScope(scope)
-  return fileId === null ? scope : `Library file ${fileId}`
+  if (fileId === null) return { subject: scope }
+  const name = names?.get(fileId)
+  if (name === undefined) return { subject: `Library file ${fileId}` }
+  if (name === null) return { subject: `deleted file ${fileId}` }
+  return { subject: name, href: `/library?file=${fileId}` }
+}
+
+/** The library files the remembered choices and options are kept for, each once, in order. */
+function libraryFilesOf(remembered: RememberedChoices | undefined): number[] {
+  const scopes = [...Object.keys(remembered?.model_print_choices ?? {}), ...Object.keys(remembered?.model_print_options ?? {})]
+  return [...new Set(scopes.map(libraryFileOfScope).filter((id): id is number => id !== null))]
 }
 
 function isEmptyOptions(options: PrintOptions | undefined): boolean {
@@ -64,6 +81,15 @@ export function RememberedChoicesPanel({
   projects?: ProjectChoices | null
 }) {
   const state = useAsync(() => api.getRemembered(), [], ['settings'])
+  const fileIds = libraryFilesOf(state.data)
+  // One lookup for every library-file row's name (#2349); none when there are no such rows.
+  const names = useAsync(
+    () => (fileIds.length ? api.libraryFileNames(fileIds) : Promise.resolve([])),
+    [fileIds.join(',')],
+  )
+  const fileNames: ReadonlyMap<number, string | null> | undefined = names.data
+    ? new Map(names.data.map((file) => [file.id, file.name ?? null]))
+    : undefined
   const [busy, setBusy] = useState<string | null>(null)
   const [confirmAll, setConfirmAll] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -83,7 +109,7 @@ export function RememberedChoicesPanel({
       rows.push({
         key: `choices:${scope}`,
         kind: 'Printer and spools',
-        subject: scopeName(scope),
+        ...scopeName(scope, fileNames),
         value: describeChoices(choices, printerName),
         forget: () => (fileId === null ? api.putModelChoices(scope, {}) : api.putLibraryChoices(fileId, {})),
       })
@@ -157,7 +183,7 @@ export function RememberedChoicesPanel({
       rows.push({
         key: `options:model:${scope}`,
         kind: 'Print options',
-        subject: scopeName(scope),
+        ...scopeName(scope, fileNames),
         value: describeOptions(options),
         forget: () => api.putPrintOptions({ scope: 'model', key: scope, options: {} }),
       })
@@ -212,7 +238,15 @@ export function RememberedChoicesPanel({
             {rows.map((row) => (
               <tr key={row.key} className="border-t border-line align-top">
                 <td className="py-1.5 pr-3 text-muted">{row.kind}</td>
-                <td className="sb-num py-1.5 pr-3">{row.subject}</td>
+                <td className="sb-num py-1.5 pr-3">
+                  {row.href ? (
+                    <Link to={row.href} className="underline decoration-line underline-offset-2">
+                      {row.subject}
+                    </Link>
+                  ) : (
+                    row.subject
+                  )}
+                </td>
                 <td className="py-1.5 pr-3">{row.value}</td>
                 <td className="py-1.5 text-right">
                   <Button

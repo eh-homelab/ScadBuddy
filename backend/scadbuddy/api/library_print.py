@@ -147,6 +147,48 @@ async def get_library(
     return listing
 
 
+#: The most file ids one names lookup reads, and how many it asks Bambuddy at once.
+NAMES_MAX = 100
+NAMES_AT_ONCE = 8
+
+
+class LibraryFileName(BaseModel):
+    """#2349 — one library file as a row that names it shows it."""
+
+    id: int
+    name: str | None = Field(description="Null when Bambuddy no longer has the file")
+    folder_id: int | None = None
+
+
+@router.get(
+    "/names",
+    response_model=list[LibraryFileName],
+    summary="Library files' names, by id",
+)
+async def get_library_names(
+    store: SettingsStoreDep,
+    ids: Annotated[list[Annotated[int, Field(ge=1)]], Query(min_length=1, max_length=NAMES_MAX)],
+) -> list[LibraryFileName]:
+    """Each file's name and folder, in the order asked (a repeated id once), read from
+    Bambuddy one file at a time, so a page that labels a few ids (Settings → Remembered
+    choices, #2349) need not list the whole library. A file Bambuddy no longer has is
+    ``name: null``; any other failure is the route's."""
+    gate = asyncio.Semaphore(NAMES_AT_ONCE)
+    async with client_for(store.load()) as client:
+
+        async def one(file_id: int) -> LibraryFileName:
+            async with gate:
+                try:
+                    file = await client.library_file(file_id)
+                except ApiError as error:
+                    if error.status != status.HTTP_404_NOT_FOUND:
+                        raise
+                    return LibraryFileName(id=file_id, name=None)
+            return LibraryFileName(id=file_id, name=file.filename, folder_id=file.folder_id)
+
+        return list(await asyncio.gather(*(one(file_id) for file_id in dict.fromkeys(ids))))
+
+
 @router.post(
     "/delete",
     response_model=LibraryDeleteResult,

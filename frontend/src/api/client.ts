@@ -52,6 +52,7 @@ import type {
   LibraryFileObjects,
   LibraryCopyResult,
   LibraryDeleteResult,
+  LibraryFileName,
   LibraryListing,
   LibraryMoveResult,
   LibraryRenameResult,
@@ -1777,6 +1778,9 @@ export const api = {
   libraryPreviewGlbUrl: (fileId: number, plate: number) =>
     `${API_BASE}/print/library/${fileId}/preview.glb?plate=${plate}`,
 
+  /** #2349 — library files' names by id; `name: null` for one Bambuddy no longer has. */
+  libraryFileNames: (ids: readonly number[]) =>
+    request<LibraryFileName[]>(`/print/library/names?${ids.map((id) => `ids=${id}`).join('&')}`),
   getLibraryPlates: (fileId: number) => request<OutputPlate[]>(`/print/library/${fileId}/plates`),
 
   /** #1863 — the objects Arrange reads from a file ScadBuddy did not make. */

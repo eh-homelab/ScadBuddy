@@ -22,6 +22,12 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'already reports the same characters as a missing-glyph warning, which render_model returns to an agent.',
   },
   {
+    operation: 'GET /api/v1/print/library/names',
+    reason:
+      "Settings' Remembered choices labels its library-file rows by name (#2349). An agent reads a file's name " +
+      'with the library listing tools.',
+  },
+  {
     operation: 'GET /api/v1/prints/{archive_id}/timelapse/frames',
     reason:
       "The print page's timelapse stills and probe, read after the detail so it need not wait on Bambuddy's " +

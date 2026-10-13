@@ -1,5 +1,6 @@
 import { HttpResponse, delay, http } from 'msw'
 import type {
+  LibraryFileName,
   AttachResult,
   PrintCheck,
   PrintProgress,
@@ -146,6 +147,17 @@ function pngResponse() {
 }
 
 export const handlers = [
+  // #2349 — names by id; a file the mock library does not have is `name: null`.
+  http.get(`${base}/print/library/names`, ({ request }) => {
+    const ids = [...new Set(new URL(request.url).searchParams.getAll('ids').map(Number))]
+    return HttpResponse.json(
+      ids.map((id) => {
+        const file = listedFiles().find((row) => row.id === id)
+        return { id, name: file?.filename ?? null, folder_id: file?.folder_id ?? null }
+      }) satisfies LibraryFileName[],
+    )
+  }),
+
   http.get(`${base}/print/library`, ({ request }) => {
     const search = new URL(request.url).searchParams
     const asked = search.get('folder_id')
