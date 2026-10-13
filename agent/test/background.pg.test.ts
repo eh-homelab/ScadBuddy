@@ -226,6 +226,63 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
     classic.abortAll()
   })
 
+  it("gives a classic turn the session's pinned WebFetch in place of Claude Code's (#2684)", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'web-pkg-'))
+    await mkdir(path.join(dir, '.claude-plugin'))
+    await writeFile(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'web' }))
+    const pkg = { name: 'web', contentHash: (await hashTree(dir)).hash, dir, allowed: true, builtinTools: ['WebFetch', 'WebSearch'] }
+    const scripted = scriptedRunner(() => ({ reply: 'ok' }))
+    // No background tasks here: WebFetch is served all the same.
+    const classic = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      run: scripted.runner,
+      packagePlugins: async () => ({ paths: [], allowedPaths: [dir], builtinTools: pkg.builtinTools, loaded: [pkg], problems: [], release: () => {} }),
+    })
+    const { session } = await classic.start(browser, { origin: 'chat' })
+    await classic.send(session.id, browser, 'fetch it')
+    await expect.poll(() => scripted.runs.length).toBe(1)
+    const run = scripted.runs[0]!
+    // Claude Code's WebSearch stays (a server tool: the API searches, not this pod).
+    expect(run.builtinTools).toEqual(['WebSearch'])
+    expect(Object.keys(run.mcpServers ?? {})).toContain('builtin')
+    expect(run.systemPromptAppend).toContain('WebFetch (mcp__builtin__WebFetch)')
+    expect(run.systemPromptAppend).not.toContain('jobs, wakeups')
+    classic.abortAll()
+  })
+
+  it("counts WebFetch's own model calls in the cost of a turn that ends on its own (#2684)", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'web-pkg-'))
+    await mkdir(path.join(dir, '.claude-plugin'))
+    await writeFile(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'web' }))
+    const pkg = { name: 'web', contentHash: (await hashTree(dir)).hash, dir, allowed: true, builtinTools: ['WebFetch'] }
+    let spend: ((cost: number) => Promise<void>) | undefined
+    const scripted = scriptedRunner(() => ({ reply: 'ok', costUsd: 0.01 }))
+    const classic = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      packagePlugins: async () => ({ paths: [], allowedPaths: [dir], builtinTools: pkg.builtinTools, loaded: [pkg], problems: [], release: () => {} }),
+      // The turn's WebFetch answered with a nested query that cost 0.05 before Claude Code's result.
+      run: (run) =>
+        (async function* () {
+          await spend!(0.05)
+          yield* scripted.runner(run)
+        })(),
+      nestedQueries: (deps) => {
+        spend = deps.spent
+        return { ask: () => Promise.resolve(''), search: () => Promise.reject(new Error('unused')) }
+      },
+    })
+    const { session } = await classic.start(browser, { origin: 'chat' })
+    const turn = await classic.send(session.id, browser, 'fetch it')
+    expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success', costUsd: expect.closeTo(0.06) })
+    const [row] = await db.sql<{ cost_usd: string; unpriced_cost_usd: string }[]>`
+      SELECT cost_usd, unpriced_cost_usd FROM ai_sessions WHERE id = ${session.id}`
+    expect(Number(row!.cost_usd)).toBeCloseTo(0.06)
+    expect(Number(row!.unpriced_cost_usd)).toBeCloseTo(0.05)
+    classic.abortAll()
+  })
+
   it("lists a session's tasks for the panel, and lets its owner cancel one", async () => {
     const deps: AppDeps = {
       database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },

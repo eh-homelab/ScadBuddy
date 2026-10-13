@@ -1,4 +1,5 @@
-import { BACKGROUND_BUILTINS, BUILTIN_SERVER, backgroundNote, backgroundSdkServer } from '../builtins/server.js'
+import { nestedQueries } from '../builtins/nested.js'
+import { BACKGROUND_BUILTINS, BUILTIN_SERVER, CLASSIC_BUILTINS, classicBuiltinNote, classicBuiltinServer } from '../builtins/server.js'
 import type { BackgroundTasks } from '../background/service.js'
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
@@ -695,6 +696,8 @@ export type SessionManagerDeps = {
    */
   background?: { tasks: BackgroundTasks; tz: string }
   run?: QueryRunner
+  /** The session WebFetch's own model calls (builtins/nested.ts); a test's stand-in. */
+  nestedQueries?: typeof nestedQueries
   /** Per-token approval grants (spec §6); nobody but the browser user may approve without one. */
   approvalGrants?: GrantCheck
   /**
@@ -1508,6 +1511,8 @@ export class SessionManager {
       let lost = false
       /** Redacted from everything this turn writes to the durable event log. */
       let secrets: string[] = []
+      // What the session's own WebFetch model calls cost this turn (classicBuiltinServer).
+      let nestedUsd = 0
       // One audit row per tool call of this turn (#258, audit/turn.ts).
       const auditor = this.deps.audit
         ? new TurnAuditor(this.deps.audit, {
@@ -1723,11 +1728,13 @@ export class SessionManager {
                 ...(this.deps.httpRequest.limits ? { limits: this.deps.httpRequest.limits } : {}),
               })
             : undefined
-        // The background built-ins the packages name, kept by the session instead of Claude Code.
-        const background =
-          this.deps.background && allowedPluginPaths.length
-            ? (packages?.builtinTools ?? []).filter((n) => BACKGROUND_BUILTINS.includes(n))
-            : []
+        // The built-ins the packages name that the session serves instead of Claude Code: the
+        // background ones, kept past the turn, and WebFetch, pinned to the addresses it checked (#2684).
+        const served = allowedPluginPaths.length
+          ? (packages?.builtinTools ?? []).filter(
+              (n) => CLASSIC_BUILTINS.includes(n) && (this.deps.background !== undefined || !BACKGROUND_BUILTINS.includes(n)),
+            )
+          : []
         const gate = this.approvals.gate({
           sessionId: id,
           turnId,
@@ -1770,11 +1777,11 @@ export class SessionManager {
           ...(builtIn ? { builtInPolicy: builtIn } : {}),
           approvalGate: auditor ? auditor.gate(gate, (toolUseId) => this.approvals.idForToolUse(id, toolUseId)) : gate,
           ...(questionGate ? { questionGate } : {}),
-          systemPromptAppend: background.length ? `${systemAppend()}\n\n${backgroundNote(background)}` : systemAppend(),
+          systemPromptAppend: served.length ? `${systemAppend()}\n\n${classicBuiltinNote(served)}` : systemAppend(),
           // First turn: the SDK session gets OUR id; later turns resume it.
           ...(resume ? { resume: id } : { sessionId: id }),
           ...(typeof model === 'string' && model ? { model } : {}),
-          ...(this.deps.mcpServers || http || background.length
+          ...(this.deps.mcpServers || http || served.length
             ? {
                 mcpServers: {
                   ...(this.deps.mcpServers
@@ -1793,14 +1800,37 @@ export class SessionManager {
                       )
                     : {}),
                   ...(http ? { [HTTP_SERVER]: http } : {}),
-                  ...(background.length && this.deps.background
+                  ...(served.length
                     ? {
-                        [BUILTIN_SERVER]: backgroundSdkServer(background, {
-                          tasks: this.deps.background.tasks,
-                          sessionId: id,
-                          owner: session.owner,
-                          tz: this.deps.background.tz,
-                          now: () => new Date(),
+                        [BUILTIN_SERVER]: classicBuiltinServer(served, {
+                          ...(this.deps.background
+                            ? {
+                                background: {
+                                  tasks: this.deps.background.tasks,
+                                  sessionId: id,
+                                  owner: session.owner,
+                                  tz: this.deps.background.tz,
+                                  now: () => new Date(),
+                                },
+                              }
+                            : {}),
+                          web: {
+                            // The answer's model call, on the turn's first credential; its cost is the turn's.
+                            nested: (this.deps.nestedQueries ?? nestedQueries)({
+                              paths: this.deps.paths,
+                              credential: async () => candidates[0]!.credential,
+                              spent: async (cost) => {
+                                nestedUsd += cost
+                              },
+                            }),
+                            secrets: () => secrets,
+                            audit: this.deps.audit,
+                            actor: session.owner,
+                            sessionId: id,
+                            turnId,
+                            signal: controller.signal,
+                            ...(this.deps.httpRequest?.resolve ? { resolve: this.deps.httpRequest.resolve } : {}),
+                          },
                         }),
                       }
                     : {}),
@@ -1809,7 +1839,7 @@ export class SessionManager {
             : {}),
           ...(pluginPaths.length ? { pluginPaths } : {}),
           ...(allowedPluginPaths.length
-            ? { allowedPluginPaths, builtinTools: (packages?.builtinTools ?? []).filter((n) => !background.includes(n)) }
+            ? { allowedPluginPaths, builtinTools: (packages?.builtinTools ?? []).filter((n) => !served.includes(n)) }
             : {}),
           ...(ownPlugin !== undefined ? { ownPlugin } : {}),
           ...(remotePlugins.length ? { remotePlugins } : {}),
@@ -1887,8 +1917,9 @@ export class SessionManager {
         failure,
         secrets,
         // Only a turn that did not end on its own can be cut off mid-request;
-        // one that did has every request priced in its result.
-        stopped !== undefined || !result ? unpriced.usd() : 0,
+        // one that did has every request priced in its result. WebFetch's own
+        // model calls are in no result, so they are added the same way.
+        (stopped !== undefined || !result ? unpriced.usd() : 0) + nestedUsd,
       )
       return outcome
     } catch (err) {
@@ -1966,7 +1997,10 @@ export class SessionManager {
     refused: Refused | undefined,
     failure: string | undefined,
     secrets: readonly string[],
-    /** What the request the turn was cut off in used, which no result prices (#991, unpricedSpend.ts). */
+    /**
+     * What the turn spent that no result prices: the request it was cut off in (#991,
+     * unpricedSpend.ts), and its WebFetch's own model calls, in every outcome (#2684).
+     */
     cutUsd: number,
   ): Promise<TurnOutcome> {
     const id = session.id
@@ -2023,7 +2057,8 @@ export class SessionManager {
       tail.push(event({ type: 'error', sessionId: id, code: 'interrupted', message: 'the turn was interrupted' }))
       outcome = { kind: 'interrupted' }
     } else if (result) {
-      costUsd = fromTotal(result.total_cost_usd)
+      // WebFetch's own model calls (the only spend in `cutUsd` of a turn that ended on its own) are in no result.
+      costUsd = fromTotal(result.total_cost_usd) + cutUsd
       if (refused) {
         // Claude Code reports a refused request as a `success` result with
         // `is_error` set, and its "API Error: …" text as a synthetic reply
