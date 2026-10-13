@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { readdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Tier } from '../src/auth/principal.js'
 import type { Database } from '../src/db.js'
 import { Escalations, type EscalationSend } from '../src/flows/escalations.js'
@@ -206,6 +206,57 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     expect(await escalations.deliver()).toBe(1)
     expect(await hop(first)).toMatchObject({ hop: 'parent', delivered: true })
     expect(await hop(stale)).toMatchObject({ hop: 'person' })
+  })
+
+  it("compares each call with the session's owner now, not the first call seen", async () => {
+    // The stale one parked first: it must not make the current owner's call look handed off.
+    const stale = await park(parent, child, 'token:11111111-1111-4111-8111-111111111111')
+    const current = await park()
+    expect(await escalations.deliver()).toBe(1)
+    expect(await hop(stale)).toMatchObject({ hop: 'person' })
+    expect(await hop(current)).toMatchObject({ hop: 'parent', delivered: true })
+  })
+
+  it('a process that dies before the turn started leaves the call unclaimed for the next tick', async () => {
+    const id = await park()
+    let started!: () => void
+    const inSend = new Promise<void>((resolve) => (started = resolve))
+    let release!: (err: Error) => void
+    const stuck = new Promise<never>((_, reject) => (release = reject))
+    // The send never returns: the process died while starting the turn.
+    const dying = new Escalations({ sql: db.sql, durable: () => undefined, send: async () => (started(), stuck) })
+    const running = dying.deliver().catch(() => undefined)
+    await inSend
+    // Its connection goes with it.
+    await db.sql`
+      SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+      WHERE datname = current_database() AND state = 'idle in transaction' AND pid <> pg_backend_pid()`
+    expect(await hop(id)).toMatchObject({ hop: 'parent', delivered: false })
+    release(new Error('gone'))
+    await running
+    expect(await escalations.deliver()).toBe(1)
+  })
+
+  it("a busy session's backlog does not keep another session's call out of the batch", async () => {
+    const busy = await session('bearer', TOKEN)
+    for (let i = 0; i < 200; i++) await park(busy)
+    const idle = await park()
+    refuseFor.set(busy, new SessionError('busy', 'a turn is running'))
+    expect(await escalations.deliver()).toBe(1)
+    expect(sent.map((s) => s.sessionId)).toEqual([parent])
+    expect(await hop(idle)).toMatchObject({ delivered: true })
+  })
+
+  it('the sweep moves due entries first, then delivers', async () => {
+    const order: string[] = []
+    vi.spyOn(escalations, 'moveDue').mockImplementation(async () => (order.push('moveDue'), 0))
+    vi.spyOn(escalations, 'deliver').mockImplementation(async () => (order.push('deliver'), 0))
+    const stop = escalations.startSweeper(10)
+    try {
+      await vi.waitFor(() => expect(order.slice(0, 2)).toEqual(['moveDue', 'deliver']))
+    } finally {
+      stop()
+    }
   })
 
   it("forgets a run's own call's delivery once the call no longer waits at the starter session", async () => {

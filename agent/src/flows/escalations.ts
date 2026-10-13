@@ -1,4 +1,4 @@
-import type { Sql } from 'postgres'
+import type { Sql, TransactionSql } from 'postgres'
 import { type Principal, type Tier, TIERS, tiersUpTo } from '../auth/principal.js'
 import type { RespondArgs, RespondOutcome } from '../gate/durable.js'
 import { parseRequestId } from '../gate/ids.js'
@@ -165,23 +165,22 @@ export class Escalations {
     const send = this.#deps.send
     if (!send) return 0
     await this.#prune()
-    const bySession = new Map<string, { principal: string; calls: Waiting[] }>()
-    // Entries naming another principal for the same session cannot both be its owner's:
-    // the session changed hands since one of them parked, so that one goes to the person.
-    const handedOff: Waiting[] = []
+    const bySession = new Map<string, { principal: string; call: Waiting }[]>()
     const add = (session: string, principal: string, call: Waiting) => {
-      const held = bySession.get(session) ?? { principal, calls: [] }
-      if (held.principal === principal) held.calls.push(call)
-      else handedOff.push(call)
-      bySession.set(session, held)
+      bySession.set(session, [...(bySession.get(session) ?? []), { principal, call }])
     }
+    // Each session's oldest entry before any session's second: a backlog of one busy
+    // session's entries never holds another session's out of the batch.
     for (const r of await this.#deps.sql<
       { request_id: string; flow_run_id: string; tool: string; summary: string; outside_reason: string | null; hop_until: Date; session_id: string; parent_session: string; parent_principal: string }[]
     >`
       SELECT request_id, flow_run_id, tool, summary, outside_reason, hop_until, session_id::text, parent_session::text, parent_principal
-      FROM ai_pending_input
-      WHERE hop = 'parent' AND hop_until > now() AND delivered_at IS NULL
-      ORDER BY created_at LIMIT 200`) {
+      FROM (
+        SELECT *, row_number() OVER (PARTITION BY parent_session ORDER BY created_at) AS nth
+        FROM ai_pending_input
+        WHERE hop = 'parent' AND hop_until > now() AND delivered_at IS NULL
+      ) waiting
+      ORDER BY nth, created_at LIMIT 200`) {
       add(r.parent_session, r.parent_principal, {
         request_id: r.request_id,
         run_id: r.flow_run_id,
@@ -193,30 +192,40 @@ export class Escalations {
       })
     }
     for (const own of await this.#flowOwn()) add(own.session, own.principal, own.call)
-    if (handedOff.length) await this.#skip(handedOff)
     let delivered = 0
     // One session's failure never holds back the others: the first is thrown at the end.
     const failures: unknown[] = []
-    for (const [session, { principal, calls: held }] of bySession) {
+    for (const [session, held] of bySession) {
       // A child that is the starter session (spec §4.4) is in its own turn while its
       // call waits, so it is never asked: the call goes to the person now.
-      const self = held.filter((c) => c.child_session === session)
+      const self = held.filter((e) => e.call.child_session === session).map((e) => e.call)
       if (self.length) await this.#skip(self)
-      const calls = held.filter((c) => c.child_session !== session)
-      if (calls.length === 0) continue
-      const owner = await this.#parentOwner(session, principal)
-      if (!owner || !owner.tiers.includes('write')) {
+      const rest = held.filter((e) => e.call.child_session !== session)
+      if (rest.length === 0) continue
+      const owner = await this.#parentOwner(session)
+      // An entry naming another principal than the session's owner now parked before the
+      // session changed hands: it goes to the person, and the owner's own entries are sent.
+      const calls = rest.filter((e) => e.principal === owner?.principal).map((e) => e.call)
+      const handedOff = rest.filter((e) => e.principal !== owner?.principal).map((e) => e.call)
+      if (handedOff.length) await this.#skip(handedOff)
+      if (!owner || calls.length === 0) continue
+      if (!owner.tiers.includes('write')) {
         await this.#skip(calls)
         continue
       }
-      const claimed = await this.#claim(session, calls)
-      if (claimed.length === 0) continue
-      const text = `${DELIVERY_PREAMBLE}\n\n${wrapUntrustedText('escalation', 'flow runs this session started', JSON.stringify(claimed))}`
+      // The claim and the turn are one transaction: a process that dies before the turn
+      // started leaves nothing claimed, and the next tick sends them. A concurrent replica
+      // skips the rows this one holds.
+      let claimed: Waiting[] = []
       try {
-        await send(session, owner.owner, text, owner.tiers)
+        await this.#deps.sql.begin(async (tx) => {
+          claimed = await this.#claim(tx, session, calls)
+          if (claimed.length === 0) return
+          const text = `${DELIVERY_PREAMBLE}\n\n${wrapUntrustedText('escalation', 'flow runs this session started', JSON.stringify(claimed))}`
+          await send(session, owner.owner, text, owner.tiers)
+        })
         delivered += claimed.length
       } catch (err) {
-        await this.#unclaim(claimed)
         // Busy, or this replica cannot start a turn yet (no Temporal, no key): try again on
         // a later tick; the hop's own timer still bounds the wait.
         if (err instanceof SessionError && (err.code === 'busy' || err.code === 'unavailable')) continue
@@ -295,44 +304,52 @@ export class Escalations {
     return out.filter((o) => !sent.has(o.call.request_id))
   }
 
-  /** The parent session's owner and the tiers it holds now, when it is still the run starter's. */
-  async #parentOwner(session: string, principal: string): Promise<{ owner: Owner; tiers: Tier[] } | undefined> {
+  /**
+   * The session's owner now, the principal it acts as, and the tiers it holds: undefined
+   * when the session is gone or archived, or its token is revoked. Each entry names the
+   * principal that owned the session when it parked; only entries naming this one are its.
+   */
+  async #parentOwner(session: string): Promise<{ owner: Owner; principal: string; tiers: Tier[] } | undefined> {
     const [row] = await this.#deps.sql<{ owner_kind: Owner['kind']; owner_id: string; owner_label: string }[]>`
       SELECT owner_kind, owner_id, owner_label FROM ai_sessions WHERE id = ${session}::uuid AND archived_at IS NULL`
-    if (!row || principalHeader(row.owner_id) !== principal) return undefined
+    if (!row) return undefined
     const owner: Owner = { kind: row.owner_kind, id: row.owner_id, label: row.owner_label }
-    if (owner.kind === 'browser') return { owner, tiers: [...TIERS] }
+    const principal = principalHeader(row.owner_id)
+    if (owner.kind === 'browser') return { owner, principal, tiers: [...TIERS] }
     // A token's live tier, as the backend's `parent_tiers` reads it; any other owner `read`.
-    if (owner.kind !== 'bearer' || !owner.id.startsWith('token:')) return { owner, tiers: ['read'] }
+    if (owner.kind !== 'bearer' || !owner.id.startsWith('token:')) return { owner, principal, tiers: ['read'] }
     const [token] = await this.#deps.sql<{ tier: Tier }[]>`
       SELECT tier FROM ai_mcp_tokens WHERE id::text = ${owner.id.slice('token:'.length)}
         AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())`
-    return token ? { owner, tiers: tiersUpTo(token.tier) } : undefined
+    return token ? { owner, principal, tiers: tiersUpTo(token.tier) } : undefined
   }
 
-  /** Marks the calls sent, once across replicas; returns those this call claimed. */
-  async #claim(session: string, calls: Waiting[]): Promise<Waiting[]> {
+  /**
+   * Marks the calls sent in `tx`, once across replicas; returns those this call claimed.
+   * Rows another replica's open delivery holds are skipped, not waited on.
+   */
+  async #claim(tx: TransactionSql, session: string, calls: Waiting[]): Promise<Waiting[]> {
     const child = calls.filter((c) => c.child_session !== undefined).map((c) => c.request_id)
     const own = calls.filter((c) => c.child_session === undefined).map((c) => c.request_id)
     const won = new Set<string>()
     if (child.length) {
-      for (const r of await this.#deps.sql<{ request_id: string }[]>`
+      for (const r of await tx<{ request_id: string }[]>`
         UPDATE ai_pending_input SET delivered_at = now()
-        WHERE request_id = ANY(${child}) AND delivered_at IS NULL AND hop = 'parent' RETURNING request_id`) won.add(r.request_id)
+        WHERE request_id IN (
+          SELECT request_id FROM ai_pending_input
+          WHERE request_id = ANY(${child}) AND delivered_at IS NULL AND hop = 'parent'
+          FOR UPDATE SKIP LOCKED)
+        RETURNING request_id`) won.add(r.request_id)
     }
     for (const id of own) {
-      const [r] = await this.#deps.sql<{ request_id: string }[]>`
+      // A replica's uncommitted row for the same call makes this wait for its outcome:
+      // sent, and this one claims nothing; rolled back, and this one claims it.
+      const [r] = await tx<{ request_id: string }[]>`
         INSERT INTO ai_escalation_deliveries (request_id, session_id) VALUES (${id}, ${session}::uuid)
         ON CONFLICT (request_id) DO NOTHING RETURNING request_id`
       if (r) won.add(r.request_id)
     }
     return calls.filter((c) => won.has(c.request_id))
-  }
-
-  async #unclaim(calls: Waiting[]): Promise<void> {
-    const ids = calls.map((c) => c.request_id)
-    await this.#deps.sql`UPDATE ai_pending_input SET delivered_at = NULL WHERE request_id = ANY(${ids})`
-    await this.#deps.sql`DELETE FROM ai_escalation_deliveries WHERE request_id = ANY(${ids})`
   }
 
   /**
