@@ -107,6 +107,44 @@ describe('LibraryPage', () => {
     expect(await screen.findByRole('dialog', { name: 'Print' })).toBeInTheDocument()
   })
 
+  it("reads the dialog's choices, plates, projects and options once per open (#2361)", async () => {
+    const asked: string[] = []
+    const analysed: unknown[] = []
+    const listen = ({ request }: { request: Request }) => {
+      const url = new URL(request.url)
+      asked.push(`${request.method} ${url.pathname}${url.search}`)
+      if (url.pathname === '/api/v1/analyzers/run') {
+        void request
+          .clone()
+          .json()
+          .then((body: unknown) => analysed.push(body))
+      }
+    }
+    server.events.on('request:start', listen)
+    try {
+      const { user } = renderPage(<LibraryPage />, { route: '/library' })
+      await user.click(await screen.findByTestId('library-print-89'))
+      const dialog = await screen.findByRole('dialog', { name: 'Print' })
+      await within(dialog).findByTestId('filament-slot-1')
+      await waitFor(() => expect(analysed.length).toBeGreaterThan(0))
+      await waitFor(() => expect(within(dialog).getByRole('button', { name: /^Print$/ })).toBeEnabled())
+
+      const count = (path: string) => asked.filter((line) => line === `GET ${path}`).length
+      expect(count('/api/v1/print/library/89/choices')).toBe(1)
+      expect(count('/api/v1/print/library/89/plates')).toBe(1)
+      expect(count('/api/v1/print/projects')).toBe(1)
+      expect(count('/api/v1/settings/print-options')).toBe(1)
+      // The file the page listed is not read again to open its dialog.
+      expect(asked.filter((line) => line.includes('file_id='))).toEqual([])
+      // No analysis of an empty plan before the suggested spools are set.
+      for (const body of analysed) {
+        expect((body as { request: { filament_plan: { slots: unknown[] } } }).request.filament_plan.slots).not.toEqual([])
+      }
+    } finally {
+      server.events.removeListener('request:start', listen)
+    }
+  })
+
   it('prints a file in Simple mode under the last project printed to (#768)', async () => {
     server.use(
       http.get('/api/v1/print/projects', () =>
