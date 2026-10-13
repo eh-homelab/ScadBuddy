@@ -17,7 +17,7 @@ import {
   STALE_ENTRY_MESSAGE,
   waitingText,
 } from '../lib/flows'
-import { formatBytes, formatDuration } from '../lib/format'
+import { formatBytes, formatDuration, timeAgo } from '../lib/format'
 import { temporalWorkflowUrl } from '../lib/temporal'
 import { useAsync } from '../lib/useAsync'
 import { usePollWhileUnavailable } from '../lib/usePollWhileUnavailable'
@@ -92,6 +92,14 @@ export function WorkflowRunPage() {
                 <p>
                   <span className="text-muted">Started by </span>
                   {actorText(run.started_by)}
+                  {/* #2484: a trigger's run, as whoever made the trigger. */}
+                  {view.data.trigger && (
+                    <span className="text-muted">
+                      {' '}
+                      through {view.data.trigger.kind === 'schedule' ? 'a schedule' : 'an event trigger'}, fired{' '}
+                      {timeAgo(view.data.trigger.fired_at)}
+                    </span>
+                  )}
                 </p>
               )}
               <div className="ml-auto">

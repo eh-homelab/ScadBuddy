@@ -95,7 +95,11 @@ import type {
   FlowRunStarted,
   FlowRunView,
   FlowState,
+  FlowStandingGrant,
   FlowSummary,
+  FlowTrigger,
+  FlowTriggerCreate,
+  FlowTriggerUpdate,
   FlowVersion,
   Operation,
   OperationAccepted,
@@ -767,6 +771,35 @@ export const api = {
     request<FlowGrantView>(`/workflow-runs/${seg(id)}/grant/decline`, { method: 'POST' }),
   revokeFlowGrant: (id: string) =>
     request<FlowGrantView>(`/workflow-runs/${seg(id)}/grant/revoke`, { method: 'POST' }),
+
+  // #2484 — flow triggers: a schedule or an event that starts runs of a pinned version,
+  // as whoever made it. A standing grant is approved as sent from here; only a person
+  // approves or declines an agent's.
+  listFlowTriggers: (name?: string) =>
+    request<FlowTrigger[]>(`/flow-triggers${name ? `?name=${encodeURIComponent(name)}` : ''}`),
+  getFlowTrigger: (id: string) => request<FlowTrigger>(`/flow-triggers/${seg(id)}`),
+  createFlowTrigger: (body: FlowTriggerCreate) =>
+    request<FlowTrigger>('/flow-triggers', { method: 'POST', body: JSON.stringify(body) }),
+  updateFlowTrigger: (id: string, body: FlowTriggerUpdate) =>
+    request<FlowTrigger>(`/flow-triggers/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  pauseFlowTrigger: (id: string) => request<FlowTrigger>(`/flow-triggers/${seg(id)}/pause`, { method: 'POST' }),
+  resumeFlowTrigger: (id: string) => request<FlowTrigger>(`/flow-triggers/${seg(id)}/resume`, { method: 'POST' }),
+  deleteFlowTrigger: (id: string) => request<void>(`/flow-triggers/${seg(id)}`, { method: 'DELETE' }),
+  /** `seen` is the trigger's as it was shown: the server refuses (409) when it changed since. */
+  attachFlowTriggerGrant: (id: string, spec: FlowGrantSpec, seen: string) =>
+    request<FlowStandingGrant>(`/flow-triggers/${seg(id)}/grant`, {
+      method: 'POST',
+      body: JSON.stringify({ spec, seen }),
+    }),
+  approveFlowTriggerGrant: (id: string, seen: string, spec?: FlowGrantSpec) =>
+    request<FlowStandingGrant>(`/flow-triggers/${seg(id)}/grant/approve`, {
+      method: 'POST',
+      body: JSON.stringify(spec ? { spec, seen } : { seen }),
+    }),
+  declineFlowTriggerGrant: (id: string) =>
+    request<FlowStandingGrant>(`/flow-triggers/${seg(id)}/grant/decline`, { method: 'POST' }),
+  revokeFlowTriggerGrant: (id: string) =>
+    request<FlowStandingGrant>(`/flow-triggers/${seg(id)}/grant/revoke`, { method: 'POST' }),
 
   /** Forgets a run: its payload key, its workflow (stopped if open) and its row. */
   deleteFlowRun: (id: string) => request<void>(`/workflow-runs/${seg(id)}`, { method: 'DELETE' }),
