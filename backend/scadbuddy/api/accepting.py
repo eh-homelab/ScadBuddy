@@ -10,6 +10,7 @@ from urllib.parse import urlencode
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from starlette.requests import HTTPConnection
 
 from scadbuddy.core.problems import ApiError
 from scadbuddy.workflows.commands import RETRY_AFTER_SECONDS
@@ -47,10 +48,14 @@ def prefers_async(request: Request) -> bool:
 _respond_async: ContextVar[Request | None] = ContextVar("respond_async", default=None)
 
 
-async def note_preference(request: Request) -> None:
+async def note_preference(connection: HTTPConnection) -> None:
     """An app-wide dependency (#2794): records whether this request follows a 202
-    itself, for `respond_async_request`. Set on every request, so none inherits another's."""
-    _respond_async.set(request if prefers_async(request) else None)
+    itself, for `respond_async_request`. Set on every request, so none inherits another's.
+    It runs for the WebSocket routes too, which have no `Request` and never answer 202."""
+    async_request = connection if isinstance(connection, Request) else None
+    if async_request is not None and not prefers_async(async_request):
+        async_request = None
+    _respond_async.set(async_request)
 
 
 def respond_async_request() -> Request | None:
