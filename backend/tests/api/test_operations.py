@@ -501,11 +501,11 @@ def test_an_operation_still_accepting_answers_202_to_a_client_that_follows(
     assert accepting["workflow_id"].startswith("op-test_unhurried-")
     assert started.headers["Preference-Applied"] == "respond-async"
 
-    answer = client.get(accepting["follow_url"])
+    answer = client.post(accepting["follow_url"])
     deadline = time.monotonic() + 60
     while answer.status_code == 202 and answer.json().get("status") == "accepting":
         assert time.monotonic() < deadline, answer.text
-        answer = client.get(accepting["follow_url"])
+        answer = client.post(accepting["follow_url"])
 
     assert answer.status_code == 200, answer.text
     assert answer.json() == {"done": True, "n": 1}
@@ -523,11 +523,11 @@ def test_without_the_preference_an_operation_still_accepting_is_the_503(
 
 
 def test_following_an_operation_temporal_does_not_know_is_a_resend(client: TestClient) -> None:
-    response = client.get(f"/api/v1/commands/op-test-{'0' * 64}/updates/{uuid.uuid4().hex}")
+    response = client.post(f"/api/v1/commands/op-test-{'0' * 64}/updates/{uuid.uuid4().hex}")
     assert response.status_code == 409, response.text
     assert response.json()["type"] == COMMAND_RESEND_PROBLEM
 
 
 def test_only_an_operations_own_id_is_followed(client: TestClient) -> None:
-    response = client.get("/api/v1/commands/op-test-nothex/updates/k1")
+    response = client.post("/api/v1/commands/op-test-nothex/updates/k1")
     assert response.status_code == 404, response.text

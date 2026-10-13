@@ -1096,7 +1096,7 @@ describe('command() sends a key and follows an operation (#1053)', () => {
         prefer = request.headers.get('Prefer')
         return opAccepting()
       }),
-      http.get(opFollowUrl, () => {
+      http.post(opFollowUrl, () => {
         follows += 1
         return follows === 1 ? opAccepting() : HttpResponse.json(again)
       }),
@@ -1112,7 +1112,7 @@ describe('command() sends a key and follows an operation (#1053)', () => {
     printRunPoll.intervalMs = 1
     server.use(
       http.post('/api/v1/prints/35/reprint', () => opAccepting()),
-      http.get(opFollowUrl, () => HttpResponse.json({ ...operation, repeated: false }, { status: 202 })),
+      http.post(opFollowUrl, () => HttpResponse.json({ ...operation, repeated: false }, { status: 202 })),
       http.get('/api/v1/operations/op-1', () =>
         HttpResponse.json({ ...operation, status: 'succeeded', result: again }),
       ),
@@ -1129,7 +1129,7 @@ describe('command() sends a key and follows an operation (#1053)', () => {
         keys.push(request.headers.get('Idempotency-Key'))
         return keys.length === 1 ? opAccepting() : HttpResponse.json(again, { status: 201 })
       }),
-      http.get(opFollowUrl, () =>
+      http.post(opFollowUrl, () =>
         HttpResponse.json({ type: COMMAND_RESEND, title: 'Conflict', status: 409, detail: 'send it again' }, { status: 409 }),
       ),
     )
