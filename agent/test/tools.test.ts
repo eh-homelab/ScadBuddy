@@ -327,6 +327,40 @@ describe('render_model', () => {
     expect(keys[1]).toBe(keys[0])
   })
 
+  it('follows a render the backend answers 202 accepting to its job, posting it once (#2795)', async () => {
+    let posts = 0
+    let prefer: string | null = null
+    let followed: string | undefined
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(`${BACKEND}/api/v1/models/box/render`, ({ request }) => {
+        posts += 1
+        prefer = request.headers.get('Prefer')
+        return HttpResponse.json(
+          {
+            status: 'accepting',
+            workflow_id: 'render-x',
+            update_id: 'k',
+            follow_url: '/api/v1/commands/render-x/updates/k?supersedes=old',
+            retry_after: 0,
+          },
+          { status: 202 },
+        )
+      }),
+      http.get(`${BACKEND}/api/v1/commands/render-x/updates/k`, ({ request }) => {
+        followed = new URL(request.url).searchParams.get('supersedes') ?? undefined
+        return HttpResponse.json({ job_id: 'j', status_url: '', inputs: {} })
+      }),
+      http.get(`${BACKEND}/api/v1/jobs/j`, () => HttpResponse.json({ id: 'j', slug: 'box', created_at: '', status: 'done' })),
+    )
+    const result = await runTool(tool('render_model'), { slug: 'box' }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(firstText(result)).toMatchObject({ status: 'done' })
+    expect(posts).toBe(1)
+    expect(prefer).toBe('respond-async')
+    expect(followed).toBe('old')
+  })
+
   it.each([
     [503, 'https://scadbuddy.dev/problems/temporal-unavailable'],
     [500, 'https://scadbuddy.dev/problems/render-unstartable'],
@@ -806,6 +840,50 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       expect(firstText(lost)).toContain(`print run ${RUN} was started`)
       expect(firstText(lost)).toContain('get_print_run')
       expect(ids).toHaveLength(2)
+    })
+
+    // #2795 — spec 2026-10-13: a run no worker has picked up is a 202 to follow, not a 503 to re-send.
+    const followUrl = `${BACKEND}/api/v1/commands/print-x/updates/r1`
+    const runAccepting = () =>
+      HttpResponse.json(
+        { status: 'accepting', workflow_id: 'print-x', update_id: 'r1', follow_url: '/api/v1/commands/print-x/updates/r1', retry_after: 0 },
+        { status: 202 },
+      )
+
+    it('asks to follow, and follows a 202 accepting to its run without posting the print again (#2795)', async () => {
+      const prefer: (string | null)[] = []
+      const ids: string[] = []
+      let follows = 0
+      server.use(
+        http.post(`${BACKEND}/api/v1/print/outputs/${OUT}/run`, async ({ request }) => {
+          prefer.push(request.headers.get('Prefer'))
+          ids.push(((await request.json()) as { request_id: string }).request_id)
+          return runAccepting()
+        }),
+        http.get(followUrl, () => ((follows += 1), follows === 1 ? runAccepting() : HttpResponse.json(running))),
+        done,
+      )
+      const result = await tool('print_output').execute(args, ctx())
+      expect(result.isError).toBeFalsy()
+      expect(firstText(result)).toMatchObject({ id: RUN, status: 'succeeded' })
+      expect(prefer).toEqual(['respond-async'])
+      expect(ids).toHaveLength(1)
+      expect(follows).toBe(2)
+    })
+
+    it('posts the same request again when the follow says command-resend (#2795)', async () => {
+      const { ids, handler } = posts([runAccepting, () => HttpResponse.json(running, { status: 202 })])
+      server.use(
+        handler,
+        http.get(followUrl, () =>
+          HttpResponse.json({ type: 'https://scadbuddy.dev/problems/command-resend', title: 'Conflict', status: 409, detail: 'send it again' }, { status: 409 }),
+        ),
+        done,
+      )
+      const result = await tool('print_output').execute(args, ctx())
+      expect(result.isError).toBeFalsy()
+      expect(ids).toHaveLength(2)
+      expect(ids[1]).toBe(ids[0])
     })
   })
 
@@ -2498,5 +2576,32 @@ describe('list_models and list_outputs page in the backend (#843)', () => {
     const other = await runTool(tool('list_outputs'), { slug: 'lid', limit: 20, cursor: first.next_cursor }, ctx())
     expect(other.isError).toBe(true)
     expect(JSON.stringify(other.content)).toMatch(/another listing/)
+  })
+})
+
+
+describe('a command the backend answers 202 accepting (#2795)', () => {
+  const OUT = 'e'.repeat(32)
+
+  it('follows it to the route answer, sending the command once', async () => {
+    let deletes = 0
+    let prefer: string | null = null
+    server.use(
+      http.get(`${BACKEND}/api/v1/outputs/${OUT}`, () => HttpResponse.json({ slug: 'box' })),
+      http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, ({ request }) => {
+        deletes += 1
+        prefer = request.headers.get('Prefer')
+        return HttpResponse.json(
+          { status: 'accepting', workflow_id: 'op-delete_output-x', update_id: 'k', follow_url: '/api/v1/commands/op-delete_output-x/updates/k', retry_after: 0 },
+          { status: 202 },
+        )
+      }),
+      http.get(`${BACKEND}/api/v1/commands/op-delete_output-x/updates/k`, () => HttpResponse.json({ deleted: OUT })),
+    )
+    const result = await tool('delete_output').execute({ output_id: OUT }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(firstText(result)).toMatchObject({ deleted: OUT, slug: 'box' })
+    expect(deletes).toBe(1)
+    expect(prefer).toBe('respond-async')
   })
 })

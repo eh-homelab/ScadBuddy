@@ -88,6 +88,65 @@ export async function answered<T>(
   }
 }
 
+/**
+ * #2795 — RFC 7240's preference (spec 2026-10-13): a command the backend has not
+ * accepted within a few seconds answers 202 `accepting`, followed here, instead of 503
+ * `command-still-accepting` re-sent every few seconds.
+ */
+export const RESPOND_ASYNC = { Prefer: 'respond-async' } as const
+
+/** The followed Update is not known (never kept, or a closing run rejected it): send again. */
+const COMMAND_RESEND = 'https://scadbuddy.dev/problems/command-resend'
+
+type CommandAccepting = components['schemas']['CommandAccepting']
+
+function acceptingOf(result: FetchResult<unknown>): CommandAccepting | undefined {
+  const body = result.data as { status?: unknown } | undefined
+  return result.response.status === 202 && body?.status === 'accepting' ? (body as CommandAccepting) : undefined
+}
+
+function resendOf(result: FetchResult<unknown>): boolean {
+  const problem = typeof result.error === 'object' && result.error !== null ? (result.error as { type?: unknown }) : {}
+  return result.response.status === 409 && problem.type === COMMAND_RESEND
+}
+
+/**
+ * `answered` for a command sent with `RESPOND_ASYNC`: a 202 `accepting` is followed at
+ * `GET /api/v1/commands/{workflow_id}/updates/{update_id}` (a long-poll) to the answer
+ * the route would have given, for up to `ACCEPTING_MS` as the re-sends were. A follow
+ * answered 409 `command-resend` sends the request again, with its key.
+ */
+export async function answeredFollowing<T>(
+  ctx: ToolContext,
+  send: () => Promise<FetchResult<T>>,
+  what: string,
+  gaveUp = '',
+): Promise<FetchResult<T>> {
+  const began = performance.now()
+  let result = await answered(ctx, send, what, gaveUp)
+  for (let accepting = acceptingOf(result); accepting; accepting = acceptingOf(result)) {
+    if (performance.now() - began >= ACCEPTING_MS) {
+      throw new ToolError(`${what}: ScadBuddy is still starting it.${gaveUp}`)
+    }
+    await sleep(Math.max(ctx.pollIntervalMs, accepting.retry_after * 1000), undefined, { signal: ctx.signal })
+    const { workflow_id, update_id } = accepting
+    // The follow URL's query (a render's `supersedes`) rides along.
+    const query = Object.fromEntries(new URL(accepting.follow_url, 'http://follow').searchParams)
+    const followed = (await answered(
+      ctx,
+      () =>
+        ctx.backend.GET('/api/v1/commands/{workflow_id}/updates/{update_id}', {
+          params: { path: { workflow_id, update_id }, query },
+          signal: ctx.signal,
+        }),
+      what,
+      gaveUp,
+    )) as FetchResult<T>
+    result = resendOf(followed) ? await answered(ctx, send, what, gaveUp) : followed
+  }
+  return result
+}
+
 /** `answered`, then its body or the backend's problem as a ToolError. */
 export async function reattach<T>(
   ctx: ToolContext,
@@ -96,6 +155,16 @@ export async function reattach<T>(
   gaveUp = '',
 ): Promise<T> {
   return ok(answered(ctx, send, what, gaveUp), what)
+}
+
+/** `answeredFollowing`, then its body or the backend's problem as a ToolError. */
+export async function reattachFollowing<T>(
+  ctx: ToolContext,
+  send: () => Promise<FetchResult<T>>,
+  what: string,
+  gaveUp = '',
+): Promise<T> {
+  return ok(answeredFollowing(ctx, send, what, gaveUp), what)
 }
 
 type Operation = components['schemas']['Operation']
@@ -115,8 +184,9 @@ export function isRunning(result: unknown): result is OperationRunning {
   return (result as OperationRunning | undefined)?.status === 'running' && typeof (result as OperationRunning).operation_id === 'string'
 }
 
-/** The `Idempotency-Key` header a command sends: 32 hex digits, one per call. */
-export type CommandHeaders = { 'Idempotency-Key': string }
+/** The `Idempotency-Key` header a command sends (32 hex digits, one per call), and its
+ * preference to follow a slow start (#2795). */
+export type CommandHeaders = { 'Idempotency-Key': string; Prefer: 'respond-async' }
 
 /**
  * Run a command route: `send` with this call's key, re-sent with the same key while it
@@ -145,9 +215,9 @@ export async function commandAnswer<T>(
   what: string,
   send: (headers: CommandHeaders) => Promise<FetchResult<T>>,
 ): Promise<FetchResult<T> | OperationRunning> {
-  const headers = { 'Idempotency-Key': randomUUID().replaceAll('-', '') }
+  const headers: CommandHeaders = { 'Idempotency-Key': randomUUID().replaceAll('-', ''), ...RESPOND_ASYNC }
   const gaveUp = ' It may have been done anyway: check before trying again.'
-  const first = await answered(ctx, () => send(headers), what, gaveUp)
+  const first = await answeredFollowing(ctx, () => send(headers), what, gaveUp)
   if (first.response.status !== 202) return first
   let op = first.data as unknown as Operation
   const deadline = performance.now() + (ctx.commandFollowMs ?? COMMAND_FOLLOW_MS)

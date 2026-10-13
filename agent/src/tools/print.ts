@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
-import { ACCEPTING_MS, command, reattach } from './command.js'
+import { ACCEPTING_MS, command, reattach, reattachFollowing, RESPOND_ASYNC } from './command.js'
 import { binary } from './binary.js'
 import { ok } from './call.js'
 import { outputId, slug } from './common.js'
@@ -1043,17 +1043,21 @@ export const printTools: Tool[] = [
         ...(args.prime_tower === undefined ? {} : { prime_tower: args.prime_tower }),
         request_id: requestId,
       }
-      const started = await reattach(
+      // A run no worker has picked up yet is a 202 followed to the run, not a 503
+      // re-sent (#2795): each re-send of a print is a chance to print twice.
+      const started = await reattachFollowing(
         ctx,
         () =>
           source.kind === 'library'
             ? backend.POST('/api/v1/print/library/{file_id}/run', {
                 params: { path: { file_id: source.id } },
+                headers: RESPOND_ASYNC,
                 signal: ctx.signal,
                 body,
               })
             : backend.POST('/api/v1/print/outputs/{output_id}/run', {
                 params: { path: { output_id: source.id } },
+                headers: RESPOND_ASYNC,
                 signal: ctx.signal,
                 body,
               }),

@@ -36,8 +36,9 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
     operation: 'POST /api/v1/commands/{workflow_id}/updates/{update_id}',
     reason:
-      'Follows a command the backend answered 202 `accepting` (spec 2026-10-13). The web client follows it ' +
-      "itself; the agent's command tools keep the 503 re-send until they opt in (#2795). It is not an action of its own.",
+      'Follows a command the backend answered 202 `accepting` (#2795, spec 2026-10-13). The command tools ' +
+      "(render_model, print_output and every Operation route) follow it themselves through `answeredFollowing`; " +
+      'it is not an action of its own.',
   },
   {
     operation: 'POST /api/v1/workflow-runs/{run_id}/answer',
