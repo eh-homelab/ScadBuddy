@@ -777,6 +777,37 @@ describe('the page slot', () => {
     await waitFor(() => expect(shadowText()).toMatch(/^custom /))
   })
 
+  it("shows a preset's inputs read-only when they cannot be migrated, until another preset is applied (#1811)", async () => {
+    withRecord(UI_DEMO_SLUG, { ui: { module: 'ui/index.js', slot: 'page', api: 1 }, inputs_version: 1 })
+    setMockPresets(UI_DEMO_SLUG, [
+      { id: 'e'.repeat(32), name: 'Old', origin: 'mine', params: { name: 'Old' }, inputs: { params: { name: 'Old' }, v: 0 }, description: '', tags: [] },
+      { id: 'f'.repeat(32), name: 'Current', origin: 'mine', params: { name: 'Now' }, inputs: { params: { name: 'Now' }, v: 1 }, description: '', tags: [] },
+    ])
+    server.use(
+      http.post(`/api/v1/models/${UI_DEMO_SLUG}/inputs/migrate`, () =>
+        HttpResponse.json(
+          { title: 'Unprocessable Content', status: 422, detail: 'defines no migrate' },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const { user } = open(UI_DEMO_SLUG)
+    const preset = () => screen.getByRole('combobox', { name: 'Preset' })
+    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Old' })).toBeInTheDocument(), { timeout: 5000 })
+    await user.selectOptions(preset(), 'Old')
+
+    const workspace = screen.getByTestId('workspace')
+    expect(await within(workspace).findByRole('alert')).toHaveTextContent('could not be brought up to this template version: defines no migrate')
+    const saved = within(workspace).getByRole('textbox', { name: 'Saved inputs' })
+    expect(saved).toHaveAttribute('readonly')
+    expect(saved).toHaveTextContent('"name": "Old"')
+    // Short, so the textarea scrolls rather than the capped row around it too.
+    expect(saved).toHaveAttribute('rows', '4')
+
+    await user.selectOptions(preset(), 'Current')
+    await waitFor(() => expect(within(workspace).queryByRole('textbox', { name: 'Saved inputs' })).toBeNull())
+  })
+
   it('covers the frame in full screen where the Fullscreen API is refused, with no flyout button', async () => {
     Object.defineProperty(document, 'fullscreenEnabled', { configurable: true, value: false })
     setUiModuleLoader(async () => ({
