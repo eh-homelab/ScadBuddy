@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -137,6 +138,39 @@ def test_every_other_part_is_copied_as_its_compressed_bytes(tmp_path: Path) -> N
     assert read(target) == PROVENANCE
     # The source is the job's file, read and never written.
     assert _compressed(source) == before and read(source) is None
+
+
+def test_the_raw_copy_is_checked_on_this_python() -> None:
+    """#2910: _copy_raw writes through zipfile's private state. A Python minor bump fails
+    here until test_every_other_part_is_copied_as_its_compressed_bytes is run on it and
+    RAW_COPY_CHECKED moved; until then the stamp reads and writes every entry again."""
+    assert sys.version_info[:2] == provenance.RAW_COPY_CHECKED
+
+
+def test_an_unchecked_python_stamps_without_the_raw_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2910: on a Python the raw copy was not checked on, every entry is read and
+    written again through zipfile's public API, and the file is whole."""
+    source = tmp_path / "source.3mf"
+    mesh = b"<vertex x='1' y='2' z='3'/>" * 2_000
+    with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("3D/3dmodel.model", f'<model xmlns="{CORE_NS}">\n<resources/>\n</model>')
+        archive.writestr("3D/Objects/object_1.model", mesh)
+    monkeypatch.setattr(provenance, "RAW_COPY_CHECKED", (0, 0))
+
+    def unused(*args: object) -> None:
+        raise AssertionError("_copy_raw ran on an unchecked Python")
+
+    monkeypatch.setattr(provenance, "_copy_raw", unused)
+    target = tmp_path / "model.3mf"
+
+    stamp(target, PROVENANCE, source=source)
+
+    with zipfile.ZipFile(target) as archive:
+        assert archive.testzip() is None
+        assert archive.read("3D/Objects/object_1.model") == mesh
+    assert read(target) == PROVENANCE
 
 
 def test_bambu_studio_still_reads_the_root_model(written: Path) -> None:
