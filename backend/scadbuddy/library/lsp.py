@@ -98,7 +98,10 @@ def kill(process: asyncio.subprocess.Process) -> None:
     there. The watcher then finds nothing to read and reports 255 for it, so a crash's
     own status was lost (#1613). An exited server keeps its pid as a zombie until it is
     reaped, and only asyncio reaps it here, handing the status on in the next pass of
-    the loop; a server reaped in that gap is the ``ProcessLookupError``."""
+    the loop; a server reaped in that gap is the ``ProcessLookupError``. That relies on
+    asyncio's pidfd child watcher (Python 3.12's default on Linux, where this runs), whose
+    reap runs on the loop itself: under ``ThreadedChildWatcher`` a thread reaps it, and a
+    pid freed there could be reused before ``returncode`` is set."""
     with contextlib.suppress(ProcessLookupError):
         os.kill(process.pid, signal.SIGKILL)
 

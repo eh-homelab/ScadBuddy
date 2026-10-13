@@ -373,6 +373,7 @@ def test_a_server_that_crashes_is_logged(
     assert re.search(r"openscad-lsp exited with status 3\b", caplog.text)
 
 
+@pytest.mark.skipif(platform.system() != "Linux", reason="reads /proc/<pid>/stat")
 async def test_kill_leaves_an_exited_servers_status_to_asyncio() -> None:
     """#1613: a server that exited before asyncio's child watcher read it is killed
     without being reaped, so asyncio still reads its own status. `process.kill()` reaped
