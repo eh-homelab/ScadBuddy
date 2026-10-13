@@ -38,9 +38,11 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
   let client: Client
   const started: string[] = []
   const cancelled: string[] = []
+  const terminated: string[] = []
   const runner: TaskRunner = {
-    start: async (id) => void started.push(id),
-    cancel: async (id) => void cancelled.push(id),
+    start: async (t) => void started.push(t.id),
+    cancel: async (t) => void cancelled.push(t.id),
+    terminate: async (t) => void terminated.push(t.id),
   }
 
   beforeEach(async () => {
@@ -48,6 +50,7 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
     expect(await db.ready()).toBe(true)
     started.length = 0
     cancelled.length = 0
+    terminated.length = 0
     store = new BackgroundTaskStore(db.sql)
     tasks = new BackgroundTasks({ store, runner })
     m = manager({ sql: db.sql, paths: await tempPaths(), run: scriptedRunner(() => ({ reply: 'ok' })).runner })
@@ -118,6 +121,19 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
     expect((await call('ScheduleWakeup', { stop: true })).text).toMatch(/^Loop stopped — cancelled 1 pending wakeup\(s\);/)
     expect(await store.list(sessionId)).toEqual([])
     expect(await call('ScheduleWakeup', { delaySeconds: 60 })).toMatchObject({ isError: true })
+  })
+
+  it("ends a session's tasks when it is archived, and terminates them when it is forgotten", async () => {
+    const make = () =>
+      tasks.create({ sessionId, kind: 'wakeup', description: 'w', spec: { prompt: 'p' }, createdBy: browser, nextAt: new Date(NOW.getTime() + 60_000) })
+    const a = (await make())!
+    expect(await tasks.endSession(sessionId, 'the chat was archived')).toBe(1)
+    expect(cancelled).toEqual([a.id])
+    expect(await store.get(a.id)).toMatchObject({ state: 'cancelled', detail: 'the chat was archived' })
+    const b = (await make())!
+    expect(await tasks.endSession(sessionId, 'gone', { terminate: true })).toBe(1)
+    expect(terminated).toEqual([b.id])
+    expect(await tasks.endSession(sessionId, 'again')).toBe(0)
   })
 
   it('stops any task by its ID with TaskStop', async () => {
