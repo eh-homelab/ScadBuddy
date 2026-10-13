@@ -880,7 +880,7 @@ Branch: `feat/bambuddy-fs` from PR A's branch (stacked). PR title:
 - Generated and committed: `tools/go/scadbuddy-client/client/**`,
   `tools/go/scadbuddy-client/vendor/**`, `vendor/**`, `go.work.sum`
 - Modify:
-  - `.dockerignore`: add `vendor`, `tools`, `go.work`, `go.work.sum`
+  - `.dockerignore`: must NOT ignore `vendor`, `tools`, `go.work` or `go.work.sum`; the `bambuddy-fs` image (Task 11) builds from them
   - `.github/workflows/ci.yml:233-234`: the shellcheck glob adds `scripts/*.sh`
   - `CLAUDE.md`: a "Go tools" paragraph under Commands, and the #492 exception line
   - `.gitignore`: make sure nothing under `tools/go/` is ignored
@@ -1004,7 +1004,7 @@ Expected: the second run prints nothing and exits 0. Also run `shellcheck script
 and `(cd tools/go/scadbuddy-client && go build ./... && GOWORK=off go build -mod=vendor ./...)`,
 both of which must succeed.
 
-- [ ] **Step 4: Update CLAUDE.md and .dockerignore**
+- [ ] **Step 4: Update CLAUDE.md**
 
 - **CLAUDE.md.** Under "Generated API files (#492)", add: "The Go client
   `tools/go/scadbuddy-client/client` is the one exception: committed (a vendored Go
@@ -1432,7 +1432,7 @@ Expected: PASS.
 **Interfaces:**
 - Consumes: `api.New`, `fsys.NewRoot`, `fsys.Options`.
 - Produces:
-  `bambuddy-fs mount --api <url> [--ro] [--all] [--attr-ttl 5s] [--cache-dir <dir>] <mountpoint>`.
+  `bambuddy-fs mount --api <url> [--ro] [--all] [--allow-other] [--attr-ttl 5s] [--cache-dir <dir>] <mountpoint>`. `--allow-other` sets go-fuse's `MountOptions.AllowOther`.
   The `--cache-dir` default is `$XDG_CACHE_HOME/bambuddy-fs` (or
   `~/.cache/bambuddy-fs`). It unmounts on SIGINT/SIGTERM.
 
@@ -1464,6 +1464,7 @@ Expected: FAIL.
     or build from the workspace
   - needs `fuse3`
   - the flags
+  - running the container image (spec §7.1), with its `docker run` line
   - the delete semantics, verbatim from spec §5 (managed files to the trash, external
     files gone for good; `rmdir` takes the folder's contents; 409 is `EBUSY`)
   - the errno table from spec §9
@@ -1520,6 +1521,7 @@ expect true  go.work.sum
 expect true  vendor/modules.txt
 expect true  scripts/generate-go-client.sh
 expect true  .github/workflows/go-module-ci.yml
+expect true  Dockerfile
 expect false backend/scadbuddy/api/library_print.py
 expect false README.md
 expect false toolsy/go.mod
@@ -1539,7 +1541,7 @@ Expected: FAIL (no such file).
 #!/usr/bin/env bash
 # Prints true when any changed path on stdin is Go's (spec 2026-10-13 §7).
 set -euo pipefail
-if grep -qE '^(go\.work(\.sum)?|vendor/|tools/go/|scripts/generate-go-client\.sh$|\.github/workflows/go-module-ci\.yml$)'; then
+if grep -qE '^(go\.work(\.sum)?|vendor/|tools/go/|scripts/generate-go-client\.sh$|\.github/workflows/go-module-ci\.yml$|Dockerfile$)'; then
   echo true
 else
   echo false
@@ -1742,3 +1744,85 @@ Push and open PR B: base is PR A's branch, title as above, body `Fixes #2686` pl
 summary and the attribution footer. Watch CI. The `freshness` job should report
 "Up to date" for the Go client, and "Go modules" should run, because this PR touches
 `tools/go/**`.
+
+### Task 11: The container image
+
+**Files:**
+- Modify: `Dockerfile`: new stages `bambuddy-fs-build` and `bambuddy-fs`, after
+  `agent-durable` and before `openscad-lsp`
+- Modify: `.github/workflows/build-image.yml`: a `bambuddy-fs` job, copied from the
+  `agent-durable` job (`:333-430`)
+- Modify: `.github/workflows/go-module-ci.yml`: image build and smoke steps
+- Modify: `tools/go/bambuddy-fs/README.md`: "Container image" section
+
+**Interfaces:**
+- Consumes: the workspace vendor tree (Task 5) and `main.go` (Task 9).
+- Produces: Dockerfile target `bambuddy-fs` and the image
+  `ghcr.io/eh-homelab/scadbuddy-bambuddy-fs`.
+
+- [ ] **Step 1: Add the stages**
+
+```dockerfile
+# bambuddy-fs (#2686, spec 2026-10-13 §7.1): the library as a FUSE filesystem.
+# Cross-compiled on the build platform from the committed vendor tree; no network.
+FROM --platform=$BUILDPLATFORM golang:1.25.6-bookworm AS bambuddy-fs-build
+ARG TARGETOS
+ARG TARGETARCH
+WORKDIR /src
+COPY go.work go.work.sum ./
+COPY vendor/ vendor/
+COPY tools/go/ tools/go/
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH GOFLAGS=-mod=vendor \
+    go build -trimpath -ldflags="-s -w" -o /out/bambuddy-fs ./tools/go/bambuddy-fs
+
+FROM debian:bookworm-slim AS bambuddy-fs
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends fuse3 ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=bambuddy-fs-build /out/bambuddy-fs /usr/local/bin/bambuddy-fs
+ENTRYPOINT ["bambuddy-fs"]
+CMD ["mount", "--help"]
+```
+
+- The golang tag must equal `go.work`'s `toolchain` (Global Constraints).
+- `hadolint Dockerfile` must pass with `.hadolint.yaml`. For apt pins and `DL3008`,
+  follow the Dockerfile's existing practice, as the `agent` stage does.
+
+- [ ] **Step 2: Build and smoke it locally**
+
+Run:
+```
+docker build --target bambuddy-fs -t scadbuddy-bambuddy-fs:dev .
+docker run --rm scadbuddy-bambuddy-fs:dev --help
+docker buildx build --platform linux/arm64 --target bambuddy-fs .
+```
+Expected:
+- `--help` prints the usage and exits 0. Make `main` exit 0 on `--help`.
+- The arm64 build succeeds. Go cross-compiles, so only the runtime stage's
+  `apt-get` runs under emulation.
+
+- [ ] **Step 3: Smoke in the `go` job**
+
+In `go-module-ci.yml`, after the module loop, add two steps, both with
+`if: inputs.run == 'true'`:
+- `docker build --target bambuddy-fs -t bambuddy-fs:ci .`
+- `docker run --rm bambuddy-fs:ci --help`
+
+- [ ] **Step 4: Publish in `build-image.yml`**
+
+Copy the `agent-durable` job as `bambuddy-fs`, with these changes:
+- `images: ghcr.io/eh-homelab/scadbuddy-bambuddy-fs`
+- `target: bambuddy-fs`
+- `platforms: linux/amd64,linux/arm64`
+- `cache-from: type=gha,scope=bambuddy-fs`
+- `cache-to: type=gha,scope=bambuddy-fs,mode=min`
+- the summary heading names the new package
+
+Update the file's header comment to list the fourth package, and note that it must be
+public like the others.
+
+- [ ] **Step 5: Lint and commit**
+
+Run `actionlint` and `hadolint Dockerfile`.
+
+`git commit -m "build(bambuddy-fs): publish the mount as a container image (#2686)"`
