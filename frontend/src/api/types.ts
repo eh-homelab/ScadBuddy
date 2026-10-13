@@ -276,6 +276,22 @@ export interface SessionLimits {
   max_turns: number
 }
 
+/**
+ * How many of the assistant's renders run at once (`GET/PUT /api/v1/ai/settings/render-limits`,
+ * agent `src/routes/renderLimits.ts`). Past a limit a render waits for a slot; nothing
+ * is refused for it. Read live by the agent, so a change applies to waiting renders too.
+ */
+export interface RenderLimits {
+  /** Each caller's renders at once, unless an override names it. */
+  per_principal: number
+  /** Every caller's together; 0 is no limit. */
+  global: number
+  /** Renders one caller may start in 10 minutes; 0 is no limit. */
+  per_window: number
+  /** By principal id: `browser` (you and your chats), `token:<id>`, `oidc:<issuer>#<sub>`. */
+  overrides: { principal: string; concurrent: number }[]
+}
+
 /** One assistant session as the agent's HTTP routes answer it (agent `routes/sessions.ts` `SessionView`). */
 export interface AiSessionView {
   id: string

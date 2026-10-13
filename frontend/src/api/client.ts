@@ -21,6 +21,7 @@ import type {
   HeadlessBrowserSetting,
   HttpRequestSetting,
   AiSessionView,
+  RenderLimits,
   SessionLimits,
   SessionResource,
   ResourceRef,
@@ -1484,6 +1485,15 @@ export const api = {
 
   putSessionLimits: (limits: SessionLimits) =>
     request<SessionLimits>('/ai/settings/session-limits', {
+      method: 'PUT',
+      body: JSON.stringify(limits),
+    }),
+
+  /** How many of the assistant's renders run at once, per caller and in all; read live by the agent. */
+  getRenderLimits: () => request<RenderLimits>('/ai/settings/render-limits'),
+
+  putRenderLimits: (limits: RenderLimits) =>
+    request<RenderLimits>('/ai/settings/render-limits', {
       method: 'PUT',
       body: JSON.stringify(limits),
     }),

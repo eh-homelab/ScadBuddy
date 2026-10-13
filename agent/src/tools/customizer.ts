@@ -86,7 +86,7 @@ async function holdUntilSettled(ctx: ToolContext, id: string, holdMs: number): P
       await sleep(ctx.pollIntervalMs)
       const { data } = await ctx.backend.GET('/api/v1/jobs/{job_id}', {
         params: { path: { job_id: id } },
-        signal: AbortSignal.timeout(Math.max(1, deadline - performance.now())),
+        signal: AbortSignal.timeout(Math.max(1, Math.ceil(deadline - performance.now()))),
       })
       if (!data || settled(data.status)) return
     }
@@ -181,8 +181,14 @@ export const customizerTools: Tool[] = [
       }
       // Per-principal render bounds (renderLimits.ts, #252), held until the
       // backend job settles, past this call when it hands the job back running.
+      // Past the bound this waits for a slot rather than refusing.
       const limiter = ctx.renderLimiter ?? DEFAULT_RENDER_LIMITER
-      const release = limiter.acquire(ctx.principal.id)
+      const release = await limiter.acquire(ctx.principal.id, {
+        signal: ctx.signal,
+        onWait: (ahead) => {
+          ctx.progress(0, undefined, `waiting for a render slot (${ahead} ahead of this one)`).catch(() => {})
+        },
+      })
       let submitted: string | undefined
       let job: JobStatus | undefined
       try {

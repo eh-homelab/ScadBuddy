@@ -51,6 +51,7 @@ import { packageKinds } from './plugins/packages/operations.js'
 import { operationActivities } from './temporal/operationActivities.js'
 import { PendingActionStore } from './tools/pending.js'
 import type { ToolServices } from './tools/registry.js'
+import { RenderLimiter, settingsRenderLimits } from './tools/renderLimits.js'
 
 // Fixed rather than configurable: the listening port is part of the pod
 // contract with the ingress (spec §4.2), not something to tune per deploy, and
@@ -179,6 +180,8 @@ const toolServices: ToolServices = {
   pollIntervalMs: 1000,
   renderWaitMs: 10 * 60_000,
   publicBaseUrl: config.publicUrl,
+  // The render limits in Settings, read live (tools/renderLimits.ts).
+  ...(settings ? { renderLimiter: new RenderLimiter(settingsRenderLimits(settings)) } : {}),
 }
 // The browser bridge (#254, bridge/hub.ts): the tabs connected over
 // /api/v1/ai/bridge, which the browser_* tools drive; MCP clients pair with
