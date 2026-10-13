@@ -115,7 +115,7 @@ describe('uploads take a workspace file (#2329 part 2)', () => {
     }
     expect(Object.fromEntries(UPLOADS.map((n) => [n, byName(n).risk]))).toEqual({
       upload_asset: 'write',
-      upload_library_file: 'write',
+      upload_library_file: 'outward',
       add_model_media: 'write',
       set_model_thumbnail: 'write',
       set_output_thumbnail: 'write',

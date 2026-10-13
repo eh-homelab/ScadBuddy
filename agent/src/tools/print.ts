@@ -463,10 +463,11 @@ export const printTools: Tool[] = [
       workspace_path: workspacePathInput.optional(),
       workspace_sha256: workspaceShaInput.optional(),
     }),
-    risk: 'write',
+    risk: 'outward',
     bambuddyScope: ['Manage Library'],
     routes: ['POST /api/v1/print/library/files'],
-    title: ({ filename, workspace_path }) => `Upload ${filename ?? workspace_path ?? 'file'} to Bambuddy's library`,
+    summarize: ({ filename, workspace_path, folder_id }) =>
+      `Upload ${filename ?? workspace_path ?? 'file'} to Bambuddy's library folder ${folder_id ?? 'top level'}`,
     handler: async ({ folder_id, filename, content_base64, workspace_path, workspace_sha256 }, ctx) => {
       const source = await binarySource(ctx, {
         upload: 'upload_library_file',
@@ -503,10 +504,10 @@ export const printTools: Tool[] = [
       filename: z.string().min(1).optional(),
       folder_id: z.number().int().min(0).optional().describe('0 is the top level'),
     }),
-    risk: 'write',
+    risk: 'outward',
     bambuddyScope: ['Manage Library'],
     routes: ['PATCH /api/v1/print/library/{file_id}'],
-    title: ({ file_id }) => `Update library file ${file_id}`,
+    summarize: ({ file_id }) => `Rename/move library file ${file_id}`,
     handler: async ({ file_id, filename, folder_id }, ctx) =>
       json(
         await command(ctx, `update library file ${file_id}`, (headers) =>
@@ -526,10 +527,10 @@ export const printTools: Tool[] = [
       name: z.string().min(1),
       parent_id: z.number().int().positive().optional().describe('A folder id from list_library; omitted is the top level'),
     }),
-    risk: 'write',
+    risk: 'outward',
     bambuddyScope: ['Manage Library'],
     routes: ['POST /api/v1/print/library/folders'],
-    title: ({ name }) => `Create library folder "${name}"`,
+    summarize: ({ name }) => `Create library folder ${name}`,
     handler: async ({ name, parent_id }, ctx) =>
       json(
         await command(ctx, `create library folder ${name}`, (headers) =>
@@ -548,10 +549,10 @@ export const printTools: Tool[] = [
       name: z.string().min(1).optional(),
       parent_id: z.number().int().min(0).optional().describe('0 is the top level'),
     }),
-    risk: 'write',
+    risk: 'outward',
     bambuddyScope: ['Manage Library'],
     routes: ['PATCH /api/v1/print/library/folders/{folder_id}'],
-    title: ({ folder_id }) => `Update library folder ${folder_id}`,
+    summarize: ({ folder_id }) => `Rename/move library folder ${folder_id}`,
     handler: async ({ folder_id, name, parent_id }, ctx) =>
       json(
         await command(ctx, `update library folder ${folder_id}`, (headers) =>
@@ -569,7 +570,7 @@ export const printTools: Tool[] = [
     description:
       "Delete a folder from Bambuddy's library along with its files and subfolders. Managed files go to " +
       "Bambuddy's trash (restore_library_files undoes that); a file linked from an external folder " +
-      '(`is_external`) is deleted for good. Refused, before anything is deleted, if a print waiting in ' +
+      '(`is_external`) is deleted for good. Answers 409, before anything is deleted, if a print waiting in ' +
       "Bambuddy's queue names a file. A file that could not be deleted is listed in `skipped`, and its " +
       'folder and that folder\'s parents stay.',
     input: z.object({ folder_id: z.number().int().positive() }),

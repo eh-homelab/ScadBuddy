@@ -439,6 +439,12 @@ describe('library writes for the mount (#2686)', () => {
     expect(Buffer.from(await file.arrayBuffer()).equals(bytes)).toBe(true)
   })
 
+  it('every one is outward, so a human approves it', () => {
+    for (const name of ['upload_library_file', 'update_library_file', 'create_library_folder', 'update_library_folder', 'delete_library_folder']) {
+      expect(tool(name).risk).toBe('outward')
+    }
+  })
+
   it('every one asks for Manage Library', () => {
     for (const name of ['upload_library_file', 'update_library_file', 'create_library_folder', 'update_library_folder', 'delete_library_folder']) {
       expect(tool(name).bambuddyScope).toEqual(['Manage Library'])
