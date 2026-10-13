@@ -65,7 +65,7 @@ gofmt -w "$OUT"
 
 if [[ "$check" == "true" ]]; then
   # Against the index, not HEAD: staged files are not drift, anything the run changed or added since is.
-  drift=$(cd "$ROOT" && git ls-files --modified --others --deleted --exclude-standard -- tools/go/scadbuddy-client vendor go.work go.work.sum)
+  drift=$(cd "$ROOT" && git ls-files --modified --others --deleted --exclude-standard -- tools/go/scadbuddy-client tools/go/bambuddy-fs/go.mod tools/go/bambuddy-fs/go.sum vendor go.work go.work.sum)
   if [[ -n "$drift" ]]; then
     echo "The Go client is stale. Run scripts/generate-go-client.sh and commit:" >&2
     echo "$drift" >&2
