@@ -235,13 +235,15 @@ describe('tool activities', () => {
         ],
       }),
     })
-    const stored: { session: string; names: string[] }[] = []
+    const stored: { session: string; names: string[]; toolUseId: string | undefined }[] = []
     const blobs = {
-      put: async (session: string, images: readonly { name: string }[]) => void stored.push({ session, names: images.map((i) => i.name) }),
+      put: async (session: string, images: readonly { name: string }[], toolUseId?: string) =>
+        void stored.push({ session, names: images.map((i) => i.name), toolUseId }),
     }
     const out = String(await env().run(harness({ blobs }, [pic]).activities.pic as (input: unknown) => Promise<unknown>, {}))
     const name = `${createHash('sha256').update(Buffer.from(PNG, 'base64')).digest('hex')}.png`
-    expect(stored).toEqual([{ session: SESSION, names: [name] }])
+    // Recorded under the call that produced it, which the panel's tool.result names it under (#2478).
+    expect(stored).toEqual([{ session: SESSION, names: [name], toolUseId: 'toolu_01' }])
     expect(out).toContain('first')
     expect(out).toContain('second')
     expect(out).toContain(`[image ${name}]`)

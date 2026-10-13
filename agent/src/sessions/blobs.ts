@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { Sql } from 'postgres'
+import type { Sql, TransactionSql } from 'postgres'
 import { IMAGE_DATA_MAX, type ImageMediaType, IMAGE_MEDIA_TYPES, sniff, type UserImage } from './images.js'
 import type { ImageRef, SentImage } from './protocol.js'
 
@@ -13,7 +13,10 @@ import type { ImageRef, SentImage } from './protocol.js'
 // them. The event carries only `{name, mediaType}`, so the event log every
 // watcher replays stays small. The images a user sends with a turn, and their
 // previews, are stored here too (`sentImageBlobs`), before the `user.turn`
-// event that names them, so any tab loads them by name (#2479).
+// event that names them, so any tab loads them by name (#2479). A durable tool
+// call's images are stored by its agent-tools activity, which records them under
+// the call's tool_use_id (`ai_session_tool_images`); agent-durable's follow_session
+// names them on that call's `tool.result` (#2478).
 //
 // A blob is found by (session, name) and nothing else: no path is ever built
 // from a request. The name is the bytes' sha256 and the type's extension, so
@@ -96,10 +99,28 @@ export class SessionBlobs {
     this.sql = sql
   }
 
-  /** Stores a session's images; one already there (the same bytes) is left as it is. */
-  async put(sessionId: string, images: readonly SessionImage[]): Promise<void> {
+  /**
+   * Stores a session's images; one already there (the same bytes) is left as it is.
+   * With `toolUseId`, a durable tool call's images (#2478): they are recorded as what
+   * that call produced, in order, replacing what an earlier attempt of it recorded, so
+   * follow_session can name them on its `tool.result`.
+   */
+  async put(sessionId: string, images: readonly SessionImage[], toolUseId?: string): Promise<void> {
+    if (toolUseId === undefined) return this.insert(this.sql, sessionId, images)
+    await this.sql.begin(async (tx) => {
+      await this.insert(tx, sessionId, images)
+      await tx`DELETE FROM ai_session_tool_images WHERE session_id = ${sessionId} AND tool_use_id = ${toolUseId}`
+      for (const [ord, image] of images.entries()) {
+        await tx`
+          INSERT INTO ai_session_tool_images (session_id, tool_use_id, ord, name)
+          VALUES (${sessionId}, ${toolUseId}, ${ord}, ${image.name})`
+      }
+    })
+  }
+
+  private async insert(sql: Sql | TransactionSql, sessionId: string, images: readonly SessionImage[]): Promise<void> {
     for (const image of images) {
-      await this.sql`
+      await sql`
         INSERT INTO ai_session_blobs (session_id, name, media_type, data)
         VALUES (${sessionId}, ${image.name}, ${image.mediaType}, ${image.bytes})
         ON CONFLICT (session_id, name) DO NOTHING`
