@@ -9,8 +9,10 @@ from typing import cast
 import numpy as np
 import pytest
 import trimesh
+from pydantic import TypeAdapter
 
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.meshmodel.edits import Edit
 from scadbuddy.render import geometry
 from scadbuddy.render.bambu3mf import PlateParts, write_bambu_3mf, write_plates_3mf
 from scadbuddy.render.geometry import (
@@ -417,3 +419,86 @@ async def test_a_bundled_model_analyses_as_closed_and_printable(tmp_path: Path) 
     assert _bucket(analysis, 45).area_mm2 == pytest.approx(0.0, abs=1.0)
     assert analysis.thinnest_wall is not None
     assert 1.0 < analysis.thinnest_wall.thickness_mm <= 2.05
+
+
+EDITS = TypeAdapter(list[Edit])
+
+
+def revolved(profile: list[tuple[float, float]]) -> trimesh.Trimesh:
+    return trimesh.creation.revolve(np.array(profile, dtype=float), sections=64)
+
+
+def carrot() -> trimesh.Trimesh:
+    """Body r 10 to z 30, neck r 3 to 35, tuft r 7 to 45 (r 6 puts the neck's top layers
+    exactly on the 25 % rule, which float noise flips)."""
+    return revolved([(0, 0), (10, 0), (10, 30), (3, 30), (3, 35), (7, 35), (7, 45), (0, 45)])
+
+
+def test_a_carrots_neck_is_a_weak_joint_with_a_split_that_fits() -> None:
+    """Spec 2026-10-11 section 9 on the test carrot: the neck is under a quarter of the
+    body below it, with more than 1 cm3 above."""
+    [joint] = analyze_geometry([_part(carrot())]).weak_joints
+    assert 30 < joint.z < 35
+    assert joint.area_mm2 < 0.25 * joint.neighbour_area_mm2
+    assert joint.volume_above_mm3 >= 1000
+    assert joint.room_mm == pytest.approx(3 * math.cos(math.pi / 64), rel=1e-6)
+    suggestion = joint.suggestion
+    assert suggestion.object is None
+    assert suggestion.point == pytest.approx((0, 0, joint.z), abs=1e-6)
+    assert suggestion.normal == (0, 0, 1)
+    assert suggestion.joint is not None
+    assert suggestion.joint.diameter == round(1.2 * joint.room_mm, 2)
+    assert suggestion.joint.peg_on == "above"  # the socket goes into the wide body
+    # The suggestion is an edit_scene edit once it names its object.
+    [edit] = EDITS.validate_python([{**suggestion.model_dump(), "object": "o1"}])
+    assert edit.edit == "split_at_plane"
+
+
+def test_two_colours_printed_as_one_piece_are_measured_together() -> None:
+    """The demo's carrot: an orange body and a green neck and tuft sharing the z = 30
+    face. Apart, neither has a weak section; together the neck is one."""
+    body = revolved([(0, 0), (10, 0), (10, 30), (3, 30), (0, 30)])
+    leaves = revolved([(0, 30), (3, 30), (3, 35), (7, 35), (7, 45), (0, 45)])
+    analysis = analyze_geometry([_part(body, "#F08A24", 1), _part(leaves, "#3A7D2C", 2)])
+    [joint] = analysis.weak_joints
+    assert joint.parts == [1, 2]
+    assert 30 < joint.z < 35
+
+
+def test_two_carrots_are_two_weak_joints() -> None:
+    other = carrot()
+    other.apply_translation((40, 0, 0))
+    both = trimesh.util.concatenate([carrot(), other])
+    assert isinstance(both, trimesh.Trimesh)
+    joints = analyze_geometry([_part(both)]).weak_joints
+    assert sorted(round(j.centroid[0]) for j in joints) == [0, 40]
+
+
+def test_a_straight_cylinder_has_no_weak_joint() -> None:
+    assert (
+        analyze_geometry([_part(trimesh.creation.cylinder(radius=10, height=40))]).weak_joints == []
+    )
+
+
+def test_a_small_tip_is_no_weak_joint() -> None:
+    """A cone narrows to nothing, but under 1 cm3 is above any narrow layer."""
+    cone = revolved([(0, 0), (10, 0), (0, 30)])
+    assert analyze_geometry([_part(cone)]).weak_joints == []
+
+
+def test_a_thin_wall_on_a_floor_is_no_weak_joint() -> None:
+    """A cup: its walls are an eighth of the floor below them, but the section is a
+    ring, whose centre is outside it (measured: a planter in file 688)."""
+    cup = revolved([(0, 0), (30, 0), (30, 30), (28, 30), (28, 2), (0, 2)])
+    assert analyze_geometry([_part(cup)]).weak_joints == []
+
+
+def test_a_neck_too_thin_for_a_peg_suggests_no_joint() -> None:
+    """Room 1.5 mm: a 1.8 mm peg needs 0.9 + 0.2 + 0.8 = 1.9 mm."""
+    thin = revolved([(0, 0), (10, 0), (10, 30), (1.5, 30), (1.5, 35), (8, 35), (8, 45), (0, 45)])
+    [joint] = analyze_geometry([_part(thin)]).weak_joints
+    assert joint.suggestion.joint is None
+
+
+def test_an_open_split_part_is_not_sectioned() -> None:
+    assert analyze_geometry([_part(carrot())], split={"#FF0000"}).weak_joints == []

@@ -8,15 +8,20 @@ from typing import Any
 
 import numpy as np
 import pytest
+import trimesh
 from pydantic import TypeAdapter
 
 from scadbuddy.meshmodel.compile import compile_scene
 from scadbuddy.meshmodel.edits import Edit, apply_edits
 from scadbuddy.meshmodel.ingest import scene_from_objects
+from scadbuddy.meshmodel.meshes import part_loader
+from scadbuddy.meshmodel.paint import placement
 from scadbuddy.meshmodel.scene import Scene, SceneObject, SceneSource, value
 from scadbuddy.meshmodel.section import Section, measure
+from scadbuddy.render.geometry import analyze_geometry
 from scadbuddy.render.objects3mf import ReadObject, read_objects
 from scadbuddy.render.read_budget import ReadBudget
+from scadbuddy.render.split import ColourPart
 from tests.support.fixtures import makerworld, makerworld_path
 from tests.test_mesh_models_openscad import mesh_of, render
 
@@ -148,3 +153,39 @@ def test_the_carrot_neck_anchored_in_green_prints_as_one_piece(tmp_path: Path) -
     assert len(single.mesh.split(only_watertight=False)) == shells_before
     # No volume claimed by both colours.
     assert sum(p.mesh.volume for p in parts) == pytest.approx(single.mesh.volume, rel=0.005)
+
+
+def placed_parts(scene: Scene, directory: Path) -> list[ColourPart]:
+    """What the op-free render's solids are, without openscad: each colour's parts at
+    their objects' places (measured identical to the render, meshmodel/paint.py)."""
+    load = part_loader(directory)
+    by_colour: dict[str, list[trimesh.Trimesh]] = {}
+    for obj in scene.objects:
+        m, t = placement(obj)
+        for part in obj.parts:
+            if part.negative:
+                continue
+            mesh = load(part.mesh)
+            world = np.asarray(mesh.vertices) @ m.T + t
+            by_colour.setdefault(part.colour, []).append(
+                trimesh.Trimesh(vertices=world, faces=mesh.faces, process=False)
+            )
+    parts = []
+    for extruder, (colour, meshes) in enumerate(by_colour.items(), start=1):
+        joined = trimesh.util.concatenate(meshes)
+        assert isinstance(joined, trimesh.Trimesh)
+        parts.append(ColourPart(extruder, colour, colour, joined))
+    return parts
+
+
+def test_the_carrot_gardens_weak_joints_are_its_two_necks(tmp_path: Path) -> None:
+    """Measured 2026-10-13: the necks at z 30.9 (small carrot) and 33.5 (big); the
+    planter's walls and the big carrot's hollow body pass the 25 % rule but their
+    sections are rings, so they are not reported."""
+    _, scene = opened(CARROT, tmp_path)
+    joints = analyze_geometry(placed_parts(scene, tmp_path)).weak_joints
+    assert len(joints) == 2
+    small, big = sorted(joints, key=lambda j: j.z)
+    assert 30.0 < small.z < 32.0
+    assert 32.5 < big.z < 35.0
+    assert all(j.suggestion.joint is not None for j in joints)

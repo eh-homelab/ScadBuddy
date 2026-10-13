@@ -228,6 +228,16 @@ def test_layer_areas_are_measures_areas() -> None:
     assert np.allclose(areas, expected, atol=1e-9)
 
 
+@pytest.mark.parametrize("block", [1, 7, 100, 500])
+def test_layer_areas_do_not_depend_on_the_block_size(block: int) -> None:
+    carrot = neck()
+    vertices, faces = np.asarray(carrot.vertices), np.asarray(carrot.faces)
+    zs = np.arange(0.1, 45.0, 0.2)
+    assert np.allclose(
+        layer_areas(vertices, faces, zs, block=block), layer_areas(vertices, faces, zs), atol=1e-12
+    )
+
+
 def test_layer_areas_are_zero_off_the_mesh() -> None:
     box = trimesh.creation.box((10, 10, 10))
     areas = layer_areas(
