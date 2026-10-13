@@ -101,16 +101,33 @@ is today. The others take the tiers their library-write peers have.
   Bambuddy's trash, and external files are gone for good (the route's `trashed:
   false`). A 409 maps to `EBUSY` and a 404 to `ENOENT`.
 - `rmdir` → `POST /print/library/folders/{id}/delete`, **whether or not the folder is
-  empty**. The route:
-  1. Walks the folder and its subfolders.
-  2. Runs the same queued-print check across every file. Any hit is a 409 before
-     anything is deleted.
-  3. Deletes the files exactly as `/print/library/delete` does (trash; external gone
-     for good; at most 500 a batch).
-  4. Deletes the folders, deepest first.
+  empty**. Bambuddy's folder delete cascades: in 1.2.5.5, `DELETE /library/folders/{id}`
+  removes from disk every file row whose `folder_id` is in the folder, **including rows
+  already in the trash**, because trashing only sets `deleted_at`. So the route must
+  never let Bambuddy's folder delete reach a file. It:
+  1. walks the folder and its subfolders;
+  2. runs the same queued-print check across every live file (any hit is a 409 before
+     anything is deleted);
+  3. refuses with 409, before anything is deleted, if Bambuddy's trash
+     (`GET /library/trash`) holds files whose `folder_id` is in the subtree, unless they
+     can be moved out of it (see below);
+  4. moves each managed file to the top level (`folder_id: 0`), then deletes it as
+     `/print/library/delete` does, to the trash. Undo then restores it at the top
+     level, since its folder is gone. External files are deleted for good, as
+     always, and their result says `trashed: false`;
+  5. deletes the folders, deepest first. Before deleting each one it re-reads that
+     folder's files **and child folders**. A folder that still holds any file or
+     a child folder the check did not see is kept, with its ancestors, and what it
+     holds is reported in `skipped`.
 
-  Its result lists `deleted`, `trashed` and `skipped` like the file delete, so the
-  UI's Undo can restore the trashed files.
+  Its result lists `deleted` (each with `trashed`), `skipped` and `folders` (the folders
+  deleted), so the UI's Undo can restore the trashed files.
+
+  Measured from Bambuddy's source at the v1.2.5.5 tag (`backend/app/api/routes/library.py`
+  `delete_folder`, `LibraryFile.folder_id` `ondelete="CASCADE"`) by the PR #2798 final
+  review, 2026-10-13. Whether `PUT /library/files/{id}` accepts a trashed row decides
+  step 3: if it does, trashed files in the subtree are moved to the top level instead
+  of refusing.
 
 ## 6. Generated client (Kiota)
 
