@@ -57,16 +57,25 @@ A template that prints best with a process setting changed says so in `model.jso
 ```
 
 - Only `enable_prime_tower`, `wipe_tower_no_sparse_layers`, `enable_support`,
-  `support_type`, `brim_width`, `brim_type` and `print_sequence`. Any other key makes
+  `support_type`, `support_threshold_angle`, `support_on_build_plate_only`,
+  `brim_width`, `brim_type` and `print_sequence`. Any other key makes
   the template fail to load, and the error names the key.
 - Values are strings, as Bambu Studio's configs store them (`"1"`, not `1` or `true`),
   and each must be one its key takes (`PRINT_SETTING_VALUES`, from Bambu Studio's
   [`PrintConfig.cpp`](https://github.com/bambulab/BambuStudio/blob/master/src/libslic3r/PrintConfig.cpp)):
-  `"0"` or `"1"` for the three switches; `support_type` one of `normal(auto)`,
+  `"0"` or `"1"` for the four switches; `support_type` one of `normal(auto)`,
   `tree(auto)`, `normal(manual)`, `tree(manual)`; `brim_type` one of `auto_brim`,
   `brim_ears`, `outer_only`, `inner_only`, `outer_and_inner`, `no_brim`;
   `print_sequence` `by layer` or `by object`; `brim_width` a non-negative number of
-  millimetres. A bad value fails the load, as an unknown key does.
+  millimetres; `support_threshold_angle` whole degrees from vertical, `0` to `90`.
+  A bad value fails the load, as an unknown key does.
+- **Supports (#1899).** A template whose overhangs cannot be designed away declares
+  them: `"enable_support": "1"` with `"support_type": "tree(auto)"` (Bambu's default,
+  and the one to reach for on an H2C) or `"normal(auto)"`, and optionally the angle and
+  `support_on_build_plate_only`. The print dialog and `print_output` start from that
+  and can change it per print. The support settings, unlike the others, are written in
+  the shape the print's process preset stores them, so they need its values; when
+  those cannot be read the print goes ahead without supports, with a warning.
 - The print run sends them as the slice's `process_overrides`, over the process preset
   the dialog's choices resolve to (`backend/scadbuddy/bambuddy/dispatch.py`,
   `SlicePlan`). A print's own `print_sequence` (`print_output`, #907) goes over the
