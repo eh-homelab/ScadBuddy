@@ -1,6 +1,10 @@
-import { screen } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { screen, waitFor } from '@testing-library/react'
+import { useState } from 'react'
+import { http, HttpResponse } from 'msw'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Activity } from '../../api/types'
+import { fakeRealtime } from '../../lib/realtime.fake'
+import { server } from '../../mocks/server'
 import { seedActivity } from '../../mocks/features/activity'
 import { mockSettings, resetMockState, setMockSettings } from '../../mocks/handlers'
 import { renderPage } from '../../test/utils'
@@ -28,6 +32,10 @@ function failedImport(extra: Partial<Activity> = {}): Activity {
 }
 
 describe('ActivityDrawer', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
   beforeEach(() => {
     resetMockState()
     window.localStorage.clear()
@@ -61,11 +69,71 @@ describe('ActivityDrawer', () => {
     const opener = document.createElement('button')
     document.body.append(opener)
     opener.focus()
-    const { user } = renderPage(<ActivityDrawer id="operation:o1" onClose={onClose} />)
+    function Host() {
+      const [open, setOpen] = useState(true)
+      return open ? (
+        <ActivityDrawer
+          id="operation:o1"
+          onClose={() => {
+            onClose()
+            setOpen(false)
+          }}
+        />
+      ) : null
+    }
+    const { user } = renderPage(<Host />)
     await screen.findByText('Failed')
     await user.keyboard('{Escape}')
     expect(onClose).toHaveBeenCalled()
+    await waitFor(() => expect(opener).toHaveFocus())
     opener.remove()
+  })
+
+  it('reads with advanced=1 only once Advanced is on', async () => {
+    const seen: (string | null)[] = []
+    server.events.on('request:start', ({ request }) => {
+      const url = new URL(request.url)
+      if (url.pathname.startsWith('/api/v1/activity/')) seen.push(url.searchParams.get('advanced'))
+    })
+    const { user } = renderPage(<ActivityDrawer id="operation:o1" onClose={() => {}} />)
+    await screen.findByText('Failed')
+    expect(seen).not.toContain('1')
+    await user.click(screen.getByRole('switch', { name: 'Advanced' }))
+    await screen.findByText(/op-model_import/)
+    expect(seen.at(-1)).toBe('1')
+    server.events.removeAllListeners()
+  })
+
+  it('re-reads on its activity topic', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const live = fakeRealtime()
+    renderPage(<ActivityDrawer id="operation:o1" onClose={() => {}} />)
+    await screen.findByText('Failed')
+    expect(live.following()).toContain('activity:operation:o1')
+    seedActivity([failedImport({ status: 'succeeded', detail: {} })])
+    await live.signal('activity:operation:o1')
+    expect(await screen.findByText('Succeeded')).toBeInTheDocument()
+  })
+
+  it('treats an /api path as a same-origin anchor and drops an unsafe link', async () => {
+    server.use(
+      http.get('/api/v1/activity/:id', () =>
+        HttpResponse.json({
+          row: failedImport(),
+          children: [],
+          detail: {},
+          links: [
+            { rel: 'job', label: 'Render', href: '/api/v1/jobs/j1' },
+            { rel: 'x', label: 'Elsewhere', href: 'https://example.com/a' },
+            { rel: 'x', label: 'Evil', href: 'javascript:alert(1)' },
+          ],
+        }),
+      ),
+    )
+    renderPage(<ActivityDrawer id="operation:o1" onClose={() => {}} />)
+    expect(await screen.findByRole('link', { name: 'Render' })).toHaveAttribute('href', '/api/v1/jobs/j1')
+    expect(screen.getByRole('link', { name: 'Elsewhere' })).toHaveAttribute('rel', 'noreferrer')
+    expect(screen.queryByRole('link', { name: 'Evil' })).toBeNull()
   })
 
   it('opens a child in the same drawer', async () => {
@@ -76,5 +144,7 @@ describe('ActivityDrawer', () => {
     const { user } = renderPage(<ActivityDrawer id="render:p" onClose={() => {}} />)
     await user.click(await screen.findByRole('button', { name: 'Child piece' }))
     expect(await screen.findByRole('dialog', { name: 'Child piece' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Back' }))
+    expect(await screen.findByRole('dialog', { name: 'Parent' })).toBeInTheDocument()
   })
 })

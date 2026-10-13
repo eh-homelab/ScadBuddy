@@ -1,11 +1,13 @@
 import { useState } from 'react'
 import { Link } from 'react-router'
 import { api } from '../../api/client'
-import type { Activity } from '../../api/types'
+import type { Activity, ActivityDetail } from '../../api/types'
 import { formatDuration, timeAgo } from '../../lib/format'
 import { useAdvanced } from '../../lib/advanced'
+import { safeHttpUrl } from '../../lib/safeUrl'
 import { temporalWorkflowUrl } from '../../lib/temporal'
 import { useAsync } from '../../lib/useAsync'
+import { Button } from '../ui/Button'
 import { Dialog } from '../ui/Dialog'
 import { statusLabel } from '../prints/status'
 import { principalLabel } from './labels'
@@ -52,6 +54,24 @@ function timing(row: Activity): string {
   return `${started}, took ${formatDuration((Date.parse(row.finished_at) - Date.parse(row.created_at)) / 1000)}`
 }
 
+/**
+ * A link the backend emitted: an app path goes through the router; an `/api/` path is a
+ * plain same-origin anchor (the router has no such page); an absolute URL opens in a new
+ * tab only when it is http(s). Anything else is not shown.
+ */
+function ActivityLinkItem({ link }: { link: ActivityDetail['links'][number] }) {
+  const cls = 'text-accent hover:underline'
+  if (link.href.startsWith('/api/')) {
+    return <a href={link.href} className={cls}>{link.label}</a>
+  }
+  if (link.href.startsWith('/') && !link.href.startsWith('//')) {
+    return <Link to={link.href} className={cls}>{link.label}</Link>
+  }
+  const href = safeHttpUrl(link.href)
+  if (!href) return null
+  return <a href={href} target="_blank" rel="noreferrer" className={cls}>{link.label}</a>
+}
+
 function Json({ label, value }: { label: string; value: unknown }) {
   if (value === undefined) return null
   return (
@@ -76,8 +96,9 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
 /** One activity row's detail, in a drawer: Simple in words, Advanced with ids and raw JSON. */
 export function ActivityDrawer({ id, onClose }: Props) {
   // A child opened from the list replaces the row shown, until the page names another.
-  const [override, setOverride] = useState<{ from: string; id: string } | null>(null)
-  const current = override?.from === id ? override.id : id
+  const [trail, setTrail] = useState<{ from: string; ids: string[] }>({ from: id, ids: [] })
+  const ids = trail.from === id ? trail.ids : []
+  const current = ids.at(-1) ?? id
   const [advanced, toggleAdvanced] = useAdvanced(ADVANCED_KEY)
   const view = useAsync(() => api.getActivity(current, advanced), [current, advanced], [`activity:${current}`])
   const settings = useAsync(() => api.getSettings(), []).data
@@ -93,14 +114,19 @@ export function ActivityDrawer({ id, onClose }: Props) {
     <Dialog open title={row?.title ?? 'Activity'} onClose={onClose} placement="right">
       <div className="flex flex-col gap-4">
         <div className="flex items-center gap-2">
-          <span className="text-[13px] text-ink">
+          {ids.length > 0 && (
+            <Button size="sm" variant="ghost" onClick={() => setTrail({ from: id, ids: ids.slice(0, -1) })}>
+              Back
+            </Button>
+          )}
+          <span id="activity-advanced" className="ml-auto text-[13px] text-ink">
             Advanced
           </span>
           <button
             type="button"
             role="switch"
             aria-checked={advanced}
-            aria-label="Advanced"
+            aria-labelledby="activity-advanced"
             onClick={toggleAdvanced}
             className={`relative h-5 w-9 shrink-0 rounded-full border transition-colors ${
               advanced ? 'border-accent bg-accent' : 'border-line-strong bg-surface-3'
@@ -150,7 +176,9 @@ export function ActivityDrawer({ id, onClose }: Props) {
                 </>
               )}
             </dl>
-            {error && <p className="text-[13px] text-warn">{error}</p>}
+            {error && (
+              <p className={`text-[13px] ${row.status === 'failed' ? 'text-warn' : 'text-muted'}`}>{error}</p>
+            )}
             {stages.length > 0 && (
               <ol aria-label="Stages" className="flex flex-col gap-1 text-[13px]">
                 {stages.map((s, i) => (
@@ -165,9 +193,7 @@ export function ActivityDrawer({ id, onClose }: Props) {
               <ul aria-label="Links" className="flex flex-col gap-1 text-[13px]">
                 {view.data?.links.map((l) => (
                   <li key={l.href}>
-                    <a href={l.href} rel={l.rel || undefined} className="text-accent hover:underline">
-                      {l.label}
-                    </a>
+                    <ActivityLinkItem link={l} />
                   </li>
                 ))}
               </ul>
@@ -182,7 +208,7 @@ export function ActivityDrawer({ id, onClose }: Props) {
                       <button
                         type="button"
                         className="text-left hover:underline"
-                        onClick={() => setOverride({ from: id, id: c.id })}
+                        onClick={() => setTrail({ from: id, ids: [...ids, c.id] })}
                       >
                         {c.title}
                       </button>

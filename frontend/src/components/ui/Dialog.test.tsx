@@ -118,3 +118,17 @@ describe('Dialog focus (#351)', () => {
     expect(screen.getByRole('dialog', { name: 'Name it' })).toHaveAccessibleDescription('Shown in the preset list.')
   })
 })
+
+describe('Dialog placement', () => {
+  it('right anchors a full-height drawer and keeps the dialog role', () => {
+    render(
+      <Dialog open title="Side" onClose={() => {}} placement="right">
+        <p>Body</p>
+      </Dialog>,
+    )
+    const panel = screen.getByRole('dialog', { name: 'Side' })
+    expect(panel.className).toContain('h-full')
+    expect(panel.className).toContain('max-w-[480px]')
+    expect(panel.parentElement?.className).toContain('justify-end')
+  })
+})
