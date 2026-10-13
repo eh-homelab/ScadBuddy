@@ -187,9 +187,9 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
         for line in metrics.splitlines()
         if line and not line.startswith("#")
     }
-    assert samples['scadbuddy_render_duration_seconds_count{outcome="done"}'] == 1
-    assert samples['scadbuddy_render_job_latency_seconds_count{outcome="done"}'] == 1
-    assert samples['scadbuddy_render_jobs_finished_total{outcome="done"}'] == 1
+    assert samples['scadbuddy_render_duration_seconds_count{kind="render",outcome="done"}'] == 1
+    assert samples['scadbuddy_render_job_latency_seconds_count{kind="render",outcome="done"}'] == 1
+    assert samples['scadbuddy_render_jobs_finished_total{kind="render",outcome="done"}'] == 1
     for stage in ("source", "render", "split", "solids", "thumbnail", "write"):
         assert samples[f'scadbuddy_render_stage_seconds_count{{stage="{stage}"}}'] == 1, stage
     assert f'revision="{build_id}"' in metrics
