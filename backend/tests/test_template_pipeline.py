@@ -238,6 +238,7 @@ async def test_a_waiter_trusts_a_piece_for_its_whole_retried_budget(
     stages = [
         pipelines.CACHED_TIMEOUT,
         pipelines._prepare_timeout(),
+        pipelines.REUSE_TIMEOUT,
         pipelines._main_timeout(),
         pipelines._solids_timeout(),
         pipelines.FINISH_TIMEOUT,
