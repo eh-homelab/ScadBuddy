@@ -36,7 +36,7 @@ import numpy.typing as npt
 import trimesh
 
 from scadbuddy.core.paths import SOURCE_NAME
-from scadbuddy.meshmodel.edits import MeshOf, _matrix
+from scadbuddy.meshmodel.edits import MeshOf, transform_matrix
 from scadbuddy.meshmodel.meshes import part_loader
 from scadbuddy.meshmodel.scene import (
     SCENE_NAME,
@@ -77,7 +77,7 @@ def paint_file(part: Part) -> str:
 
 def placement(obj: SceneObject) -> tuple[FloatArray, FloatArray]:
     """The object's linear part and translation, mesh frame to world (`frames.py`)."""
-    return _matrix(obj.transform)
+    return transform_matrix(obj.transform)
 
 
 def mirrored(obj: SceneObject) -> bool:
@@ -144,7 +144,7 @@ class CarriedPaint:
 def transfer(
     output: trimesh.Trimesh,
     source: Source,
-    problems: list[str] | None = None,
+    problems: list[str],
     *,
     max_pairs: int = MAX_NEAR_PAIRS,
 ) -> tuple[list[str], IntArray, int]:
@@ -162,8 +162,7 @@ def transfer(
     try:
         ids = match_points(source.vertices, vertices, VERBATIM_MM)[faces]
     except ValueError as error:
-        if problems is not None:
-            problems.append(f"its painting is not carried, so it prints in its own colour: {error}")
+        problems.append(f"its painting is not carried, so it prints in its own colour: {error}")
         return codes, turns, 0
     whole = np.flatnonzero((ids >= 0).all(axis=1))
     found = np.full(len(faces), -1, dtype=np.int64)
@@ -174,9 +173,11 @@ def transfer(
             np.concatenate([known, np.sort(ids[whole], axis=1)]), axis=0, return_inverse=True
         )
         group = group.reshape(-1)
-        first = np.full(int(group.max()) + 1, -1, dtype=np.int64)
-        first[group[: len(known)][::-1]] = np.arange(len(known))[::-1]
-        found[whole] = first[group[len(known) :]]
+        # The lowest source face of each group, whatever the order of duplicates.
+        first = np.full(int(group.max()) + 1, len(known), dtype=np.int64)
+        np.minimum.at(first, group[: len(known)], np.arange(len(known)))
+        hit = first[group[len(known) :]]
+        found[whole] = np.where(hit < len(known), hit, -1)
     matched = np.flatnonzero(found >= 0)
     own = source.faces[found[matched]]
     seen = ids[matched]
@@ -202,11 +203,10 @@ def transfer(
                 centres, source.vertices[source.faces], NEAR_MM, max_pairs=max_pairs
             )
         except NearPairsExceeded as error:
-            if problems is not None:
-                problems.append(
-                    f"{len(rest)} faces are not its painting's own, and finding their colours "
-                    f"would take too long ({error}), so they print in the part's own colour"
-                )
+            problems.append(
+                f"{len(rest)} faces are not its painting's own, and finding their colours "
+                f"would take too long ({error}), so they print in the part's own colour"
+            )
             return codes, turns, len(verbatim)
         for row, face in zip(rest.tolist(), nearest.tolist(), strict=True):
             if face >= 0:
@@ -254,7 +254,10 @@ def _source(
             )
             own = None
         codes += list(own.codes) if own is not None else [""] * len(mesh.faces)
-    source = Source(np.concatenate(vertices), np.concatenate(faces), tuple(codes), palette)
+    # Members touching share points: one entry per distinct point, so a face's vertex
+    # indices are the ones `match_points` answers with.
+    points, inverse = np.unique(np.concatenate(vertices), axis=0, return_inverse=True)
+    source = Source(points, inverse.reshape(-1)[np.concatenate(faces)], tuple(codes), palette)
     return source, problems
 
 

@@ -203,7 +203,7 @@ def object_mesh(obj: SceneObject, mesh_of: MeshOf) -> trimesh.Trimesh:
     return merged
 
 
-def _matrix(t: Transform) -> tuple[np.ndarray, np.ndarray]:
+def transform_matrix(t: Transform) -> tuple[np.ndarray, np.ndarray]:
     return linear(_floats(t.rotate), _floats(t.scale)), np.asarray(_floats(t.translate))
 
 
@@ -385,7 +385,7 @@ def _added_points(obj: SceneObject) -> list[np.ndarray]:
                 )
             )
             corners = np.array(list(itertools.product(*[(-h, h) for h in half])))
-            m, translate = _matrix(op.transform)
+            m, translate = transform_matrix(op.transform)
             out.append((m @ corners.T).T + translate)
     return out
 
@@ -424,7 +424,7 @@ def _primitive(scene: Scene, edit: AddEdit | SubtractEdit) -> Scene:
     centre: Point = (0.0, 0.0, 0.0)
     if edit.at is not None:
         _needs_plane(obj, "frame to place a shape in")
-        m, translate = _matrix(obj.transform)
+        m, translate = transform_matrix(obj.transform)
         local = np.linalg.solve(m, np.asarray(edit.at) - translate)
         centre = (round(float(local[0]), 6), round(float(local[1]), 6), round(float(local[2]), 6))
     shape: dict[str, Any] = {

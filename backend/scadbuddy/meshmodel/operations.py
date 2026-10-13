@@ -16,7 +16,6 @@ from functools import partial, wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import trimesh
 from fastapi import status
 from pydantic import TypeAdapter
 
@@ -29,8 +28,9 @@ from scadbuddy.library.catalogue import ModelExistsError, ModelMeta, UnsafeModel
 from scadbuddy.library.operations import PIN_TIMEOUT, answered_as_routes
 from scadbuddy.library.presets import ParamPresetUpdate
 from scadbuddy.meshmodel.compile import compile_scene
-from scadbuddy.meshmodel.edits import Edit, MeshOf, SceneEditError, apply_edits, removed_parameters
+from scadbuddy.meshmodel.edits import Edit, SceneEditError, apply_edits, removed_parameters
 from scadbuddy.meshmodel.ingest import scene_from_objects
+from scadbuddy.meshmodel.meshes import mesh_loader
 from scadbuddy.meshmodel.scene import (
     SCENE_NAME,
     Scene,
@@ -108,22 +108,6 @@ def read_scene(directory: Path, slug: str) -> Scene:
     if not path.is_file():
         raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} is not a mesh model (it has no scene)")
     return load_scene(path.read_text(encoding="utf-8"))
-
-
-def mesh_loader(directory: Path) -> MeshOf:
-    """Each part mesh read once per run."""
-    cache: dict[str, trimesh.Trimesh] = {}
-
-    def mesh_of(path: str) -> trimesh.Trimesh:
-        if path not in cache:
-            data = (directory / path).read_bytes()
-            mesh = trimesh.load(io.BytesIO(data), file_type="3mf", force="mesh")
-            if not isinstance(mesh, trimesh.Trimesh):
-                raise SceneEditError(f"{path} holds no mesh")
-            cache[path] = mesh
-        return cache[path]
-
-    return mesh_of
 
 
 def stl_as_3mf(data: bytes, name: str, budget: ReadBudget) -> bytes:

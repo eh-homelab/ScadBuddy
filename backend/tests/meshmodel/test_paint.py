@@ -6,6 +6,8 @@ coordinates, to 6 decimals, each starting at another vertex."""
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -35,6 +37,7 @@ from scadbuddy.meshmodel.scene import (
     SCENE_NAME,
     Exposed,
     Scene,
+    SceneObject,
     SceneSource,
     Transform,
     dump_scene,
@@ -214,6 +217,8 @@ def test_an_exposed_translate_carries_the_paint_to_where_it_renders(tmp_path: Pa
 
 
 def test_a_mirrored_part_keeps_only_whole_colours_and_says_so(tmp_path: Path) -> None:
+    # That OpenSCAD renders a mirrored object's faces reversed is an assumption here;
+    # the image test (Task 6) measures it.
     scene = written(tmp_path, body())
     flipped = scene.objects[0].model_copy(update={"transform": Transform(scale=(-1.0, 1.0, 1.0))})
     scene = save(tmp_path, scene.model_copy(update={"objects": [flipped]}))
@@ -334,7 +339,7 @@ def test_too_many_candidate_pairs_leave_the_own_colour_and_say_so(tmp_path: Path
     assert verbatim == 0 and set(codes) == {""}
     assert len(problems) == 1 and "own colour" in problems[0]
     # Within the budget the same faces take their sources' whole colours.
-    assert any(transfer(shifted, source)[0])
+    assert any(transfer(shifted, source, [])[0])
 
 
 def test_a_crowded_cell_carries_no_painting_and_says_so(
@@ -350,3 +355,33 @@ def test_a_crowded_cell_carries_no_painting_and_says_so(
     codes, _, verbatim = transfer(shifted, source, problems)
     assert verbatim == 0 and set(codes) == {""}
     assert len(problems) == 1 and "not carried" in problems[0]
+
+
+def test_touching_parts_still_carry_every_code_verbatim(tmp_path: Path) -> None:
+    """Two painted copies of one mesh sharing a plane: their coincident points are one
+    source point, and every face's code survives (none falls back to a whole colour)."""
+    scene = written(tmp_path, body(count=2))
+    first, second = scene.objects
+
+    def shift(obj: SceneObject, x: float) -> SceneObject:
+        moved = obj.transform.model_copy(update={"translate": (x, 0.0, 0.0)})
+        return obj.model_copy(update={"transform": moved})
+
+    scene = save(
+        tmp_path, scene.model_copy(update={"objects": [shift(first, 0.0), shift(second, 10.0)]})
+    )
+    _, codes = painted_box()
+    output = rendered(tmp_path, scene, ORANGE)
+    assert carried_one(tmp_path, output).paint.codes == codes + codes
+
+
+def test_importing_paint_does_not_load_the_render_or_the_api() -> None:
+    """`render/jobs.py` imports paint at the top, so paint must not import jobs."""
+    code = (
+        "import sys, scadbuddy.meshmodel.paint;"
+        "bad = [m for m in sys.modules if m == 'scadbuddy.render.jobs' "
+        "or m == 'scadbuddy.api' or m.startswith('scadbuddy.api.')];"
+        "sys.exit(1 if bad else 0)"
+    )
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
