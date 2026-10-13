@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from scadbuddy.meshmodel.scene import (
     MAX_NAME,
+    MAX_SOURCE_NAME,
     Cut,
     Exposed,
     Joint,
@@ -18,8 +19,10 @@ from scadbuddy.meshmodel.scene import (
     dump_scene,
     exposed_values,
     load_scene,
+    mesh_files,
     named,
     next_object_id,
+    source_name,
 )
 
 SOURCE = SceneSource(kind="upload", name="carrot.3mf", sha256="ab" * 32)
@@ -149,3 +152,31 @@ def test_named_keeps_a_suffixed_name_within_the_cap() -> None:
     long = named("x" * 300, " (bottom)")
     assert len(long) == MAX_NAME and long.endswith(" (bottom)")
     assert named("y" * 300) == "y" * MAX_NAME
+
+
+def test_a_source_name_is_capped() -> None:
+    with pytest.raises(ValidationError):
+        SceneSource(kind="upload", name="x" * (MAX_SOURCE_NAME + 1) + ".stl", sha256="ab" * 32)
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("carrot.stl", "carrot.stl"),
+        ("x" * 300 + ".3mf", "x" * (MAX_SOURCE_NAME - 4) + ".3mf"),
+        ("x" * 300, "x" * MAX_SOURCE_NAME),
+    ],
+)
+def test_source_name_cuts_a_long_name_and_keeps_its_extension(name: str, expected: str) -> None:
+    assert source_name(name) == expected
+    SceneSource(kind="upload", name=source_name(name), sha256="ab" * 32)
+
+
+def test_mesh_files_are_each_parts_mesh_and_a_painted_ones_codes() -> None:
+    painted = Part(id="p2", mesh="meshes/o2-p2.3mf", colour="#3A7D2C", painted=True)
+    scene = Scene(source=SOURCE, objects=[obj(), obj("o2", parts=[painted])])
+    assert mesh_files(scene) == {
+        "meshes/o1-p1.3mf",
+        "meshes/o2-p2.3mf",
+        "meshes/o2-p2.paint.json",
+    }

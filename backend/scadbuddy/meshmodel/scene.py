@@ -43,6 +43,8 @@ PART_ID = r"^p[0-9]+\Z"
 MAX_OBJECTS = 200
 MAX_PARTS = 64
 MAX_NAME = 200
+#: A source file's name, as long as a filesystem name may be (NAME_MAX).
+MAX_SOURCE_NAME = 255
 MAX_OPS = 100
 #: `section.cut_points` is cubic in an object's cuts.
 MAX_CUTS = 16
@@ -163,7 +165,7 @@ class SceneObject(_Strict):
 
 class SceneSource(_Strict):
     kind: Literal["bambuddy_library", "upload", "output"]
-    name: str
+    name: str = Field(min_length=1, max_length=MAX_SOURCE_NAME)
     sha256: str = Field(pattern=r"^[0-9a-f]{64}\Z")
     file_id: int | None = None
     output_id: str | None = None
@@ -213,6 +215,29 @@ def named(name: str, suffix: str = "") -> str:
     """``name`` then ``suffix``, the name cut short to keep the whole within
     :data:`MAX_NAME`: a split appends " (bottom)" or " (top)" each time."""
     return name[: MAX_NAME - len(suffix)] + suffix
+
+
+def source_name(name: str) -> str:
+    """``name`` cut short to :data:`MAX_SOURCE_NAME`, keeping its extension: a file a
+    client uploads or Bambuddy lists may be named at any length (#2632)."""
+    if len(name) <= MAX_SOURCE_NAME:
+        return name
+    stem, dot, extension = name.rpartition(".")
+    if not dot or len(extension) >= MAX_SOURCE_NAME // 2:
+        return name[:MAX_SOURCE_NAME]
+    return f"{stem[: MAX_SOURCE_NAME - len(extension) - 1]}.{extension}"
+
+
+def mesh_files(scene: Scene) -> set[str]:
+    """The files under :data:`MESHES_DIR` the scene uses: each part's mesh and, beside a
+    painted one, its paint codes. Anything else there is left over from an edit."""
+    used: set[str] = set()
+    for obj in scene.objects:
+        for part in obj.parts:
+            used.add(part.mesh)
+            if part.painted:
+                used.add(part.mesh.removesuffix(".3mf") + ".paint.json")
+    return used
 
 
 def next_object_id(scene: Scene) -> str:
