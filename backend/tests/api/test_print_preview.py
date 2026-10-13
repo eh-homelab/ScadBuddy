@@ -169,10 +169,7 @@ def test_a_background_slice_totals_its_slots_not_bambuddys_first_filament(
     job.routes()
     sliced_routes()
 
-    started = client.post(
-        f"/api/v1/print/outputs/{output_id}/preview-slice", json=body(), headers=press()
-    )
-    assert started.status_code == 200, started.text
+    start_slice(client, output_id, body())
     answer = client.get(f"/api/v1/print/outputs/{output_id}/preview-slices/9").json()
 
     assert [slot["grams"] for slot in answer["slots"]] == [5.2, 5.6, 0.3]
