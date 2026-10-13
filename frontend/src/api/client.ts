@@ -1369,6 +1369,10 @@ export const api = {
     return request<FilamentOptions>(`/print/outputs/${seg(outputId)}/filaments${suffix}`)
   },
 
+  /** #2351 — Bambuddy's spool inventory, each spool with where it is loaded. */
+  getSpoolInventory: (includeArchived = false) =>
+    request<InventoryView>(`/farm/inventory${includeArchived ? '?include_archived=true' : ''}`),
+
   /**
    * spec 2026-09-27 §3 — one read for the whole spool-first print dialog: printers,
    * installed nozzles, quality tiers and processes per nozzle size, plates with the
@@ -1529,10 +1533,6 @@ export const api = {
    */
   getPrintProgress: (outputId: string) =>
     request<PrintProgress | null>(`/print/outputs/${seg(outputId)}/progress`),
-
-  /** #2351 — Bambuddy's spool inventory, each spool with where it is loaded. */
-  getSpoolInventory: (includeArchived = false) =>
-    request<InventoryView>(`/farm/inventory${includeArchived ? '?include_archived=true' : ''}`),
 
   /** #308 — the print history, newest first, a page at a time; `cursor` is the last
    * page's `next_cursor`. */
