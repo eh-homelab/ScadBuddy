@@ -1689,7 +1689,10 @@ jobs:
       # workflow, so the PR would sit on a commit CI never checked. Only git
       # runs here. The token is only ever in the URL, never in a remote's
       # config, and the checkout's persisted GITHUB_TOKEN header is cleared,
-      # or git would send it instead.
+      # or git would send it instead. --no-verify skips git-lfs's pre-push hook,
+      # whose lock check refused the app token ("You must have push access to
+      # verify locks"); the commit is generated Go only, so there is no LFS
+      # object for the hook to upload.
       - name: Push the regenerated Go client
         id: goclient-push
         if: ${{ steps.goclient-commit.outputs.sha != '' }}
@@ -1702,7 +1705,7 @@ jobs:
         run: |
           set -euo pipefail
           git -c "http.https://github.com/.extraheader=" \
-            push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:refs/heads/${HEAD_REF}"
+            push --no-verify "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:refs/heads/${HEAD_REF}"
           echo "sha=${SHA}" | tee -a "$GITHUB_OUTPUT"
 
       - name: Upload the API diff
