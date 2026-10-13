@@ -73,6 +73,9 @@ import type {
   PrintAgain,
   PrintDetail,
   PrintPage,
+  ActivityDetail,
+  ActivityFacets,
+  ActivityPage,
   PrintProgress,
   PrintCheck,
   PreviewStarted,
@@ -139,6 +142,7 @@ import type {
   AiCredentialList,
   AiCredentialSave,
 } from './aiCredential'
+import { apiParams, type ActivityQuery } from '../lib/activityQuery'
 import type { PrintFilters } from '../lib/printsQuery'
 import type { DefinitionFile } from '../lib/lsp'
 import type { JsonObject } from '../lib/inputs'
@@ -1516,6 +1520,24 @@ export const api = {
     const suffix = search.size > 0 ? `?${search.toString()}` : ''
     return request<PrintPage>(`/prints${suffix}`)
   },
+  /** The activity list, newest first, a page at a time; `cursor` is the last page's
+   * `next_cursor`. A `kind` or `status` of several comma-joined values is sent repeated. */
+  listActivity: (query: ActivityQuery, page: { cursor?: string | null; limit?: number } = {}) => {
+    const search = new URLSearchParams()
+    for (const [key, value] of Object.entries(apiParams(query))) {
+      if (key === 'kind' || key === 'status') {
+        for (const one of value.split(',')) if (one) search.append(key, one)
+      } else search.set(key, value)
+    }
+    if (page.limit !== undefined) search.set('limit', String(page.limit))
+    if (page.cursor) search.set('cursor', page.cursor)
+    const suffix = search.size > 0 ? `?${search.toString()}` : ''
+    return request<ActivityPage>(`/activity${suffix}`)
+  },
+  activityFacets: (since?: string) =>
+    request<ActivityFacets>(`/activity/facets${since ? `?since=${encodeURIComponent(since)}` : ''}`),
+  getActivity: (id: string, advanced: boolean) =>
+    request<ActivityDetail>(`/activity/${seg(id)}${advanced ? '?advanced=1' : ''}`),
 
   /** #313 — Bambuddy's folder tree and one folder's files; `all` adds sliced files and STLs. */
   /** `fileId` in place of `folderId` lists the folder that file is in (#2165). */
