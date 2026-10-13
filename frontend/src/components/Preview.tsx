@@ -1,5 +1,6 @@
 import {
   Suspense,
+  useCallback,
   useEffect,
   useId,
   useLayoutEffect,
@@ -10,12 +11,20 @@ import {
   type RefObject,
 } from 'react'
 import { Canvas, useLoader, useThree } from '@react-three/fiber'
-import { Grid, OrbitControls } from '@react-three/drei'
+import { Grid, Html, OrbitControls } from '@react-three/drei'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import * as THREE from 'three'
 import type { BoundingBox, Diagnostic, Job, Plate } from '../api/types'
 import { formatBbox } from '../lib/format'
-import { cameraFraming, framingSpan, sceneOffset, shouldRefit } from '../lib/previewFrame'
+import {
+  cameraReach,
+  framingSpan,
+  MIN_REACH,
+  modelBox,
+  plateFootprint,
+  sceneOffset,
+  shouldRefit,
+} from '../lib/previewFrame'
 import type { CameraView } from '../lib/framing'
 import { BBOX_OBJECT, captureSnapshot, PLATE_OBJECT, type SnapshotOptions } from '../lib/snapshot'
 import { plateSize, useDisplayUnit } from '../lib/units'
@@ -158,9 +167,14 @@ export function Preview({
         warnings: string[]
         diagnostics: Diagnostic[]
         plates: number
+        /** #2381 — each plate's box, in the render's coordinates; none for one plate. */
+        plateBoxes: BoundingBox[]
       }
     | undefined
   >()
+  // #2364 — the box of a mesh that came with none, measured once it loaded.
+  const [measuredBox, setMeasuredBox] = useState<{ url: string; bbox: BoundingBox }>()
+  const onMeasured = useCallback((url: string, box: BoundingBox) => setMeasuredBox({ url, bbox: box }), [])
 
   useEffect(() => {
     if (job?.status === 'done' && job.preview_url) {
@@ -174,9 +188,12 @@ export function Preview({
         // has its warnings to show, which OpenSCAD logs and goes on past (#937).
         diagnostics: (job.diagnostics ?? []).filter((d) => d.severity !== 'trace'),
         plates: Math.max(job.plates?.length ?? 0, 1),
+        plateBoxes: (job.plates ?? []).map((plate) => plate.bbox_mm),
       })
     }
   }, [job])
+  const bbox = shown?.bbox ?? (measuredBox?.url === shown?.url ? measuredBox?.bbox : undefined)
+  const multiPlate = shown !== undefined && bbox !== undefined && shown.plateBoxes.length > 1
 
   // #364 — the GLB that has been drawn, or failed to load: until one of them is the
   // shown one, the render is not on screen yet, so the spinner stays.
@@ -195,6 +212,7 @@ export function Preview({
   const overlayRef = useRef<HTMLDivElement>(null)
   const size = useBoxSize(overlayRef)
   const compact = size !== null && (size.height < COMPACT_HEIGHT || size.width < COMPACT_WIDTH)
+  const aspect = size ? size.width / Math.max(1, size.height) : 1
   const messages =
     shown && !failed && shown.warnings.length + shown.diagnostics.length + shown.notes.length > 0
       ? shown
@@ -243,7 +261,8 @@ export function Preview({
           // every frame: an idle page otherwise keeps the GPU busy.
           frameloop="demand"
           gl={{ preserveDrawingBuffer: true, antialias: true }}
-          camera={{ position: [210, 170, 230], fov: 35, near: 1, far: 4000 }}
+          // #2381 — far enough for a multi-plate row metres long, framed from further back.
+          camera={{ position: [210, 170, 230], fov: 35, near: 1, far: CAMERA_FAR }}
           onCreated={({ gl, get }) => {
             if (captureRef) {
               captureRef.current = {
@@ -279,14 +298,23 @@ export function Preview({
           <directionalLight position={[180, 320, 140]} intensity={2.1} />
           <directionalLight position={[-220, 140, -180]} intensity={0.7} />
 
-          {plate && <BuildPlate theme={theme} size={plate.size} />}
-          <FitCamera bbox={shown?.bbox} />
+          {/* #2381 — one plate's grid under the middle of a multi-plate row says nothing
+              of where each plate is: each plate gets an outline of its own instead. */}
+          {plate && !multiPlate && <BuildPlate theme={theme} size={plate.size} />}
+          {multiPlate && <PlateOutlines theme={theme} plates={shown.plateBoxes} whole={bbox} />}
+          <FitCamera bbox={bbox} />
 
           {shown && (
             <Suspense fallback={null}>
               {/* #364 — a failed render's outline would describe a model that is not
                   what the parameters now give. */}
-              <Model url={shown.url} bbox={shown.bbox} outline={!failed} onLoaded={setLoadedUrl} />
+              <Model
+                url={shown.url}
+                bbox={bbox}
+                outline={!failed}
+                onLoaded={setLoadedUrl}
+                onMeasured={onMeasured}
+              />
             </Suspense>
           )}
 
@@ -294,7 +322,8 @@ export function Preview({
             makeDefault
             enablePan
             minDistance={40}
-            maxDistance={1200}
+            // #2381 — far enough back to frame the whole model, however long the row.
+            maxDistance={bbox ? cameraReach(bbox.size, aspect).maxDistance : MIN_REACH}
             maxPolarAngle={Math.PI / 2 - 0.02}
             target={[0, 20, 0]}
           />
@@ -777,22 +806,76 @@ function FitCamera({ bbox }: { bbox?: BoundingBox }) {
   const camera = useThree((state) => state.camera)
   const controls = useThree((state) => state.controls) as { target: THREE.Vector3; update: () => void } | null
   const invalidate = useThree((state) => state.invalidate)
+  const aspect = useThree((state) => (state.size ? state.size.width / Math.max(1, state.size.height) : 1))
   const framedSpan = useRef<number | null>(null)
 
   useEffect(() => {
     if (!bbox || !controls || !shouldRefit(framedSpan.current, bbox.size)) return
     framedSpan.current = framingSpan(bbox.size)
 
-    const { target, distance } = cameraFraming(bbox.size)
+    // #2381 — `OrbitControls` is given the reach this needs (`cameraReach`), so the
+    // update below does not pull the camera back in.
+    const { target, distance } = cameraReach(bbox.size, aspect)
     const direction = new THREE.Vector3(0.78, 0.62, 0.86).normalize()
     camera.position.copy(direction.multiplyScalar(distance))
     controls.target.set(...target)
     camera.lookAt(controls.target)
     controls.update()
     invalidate?.()
-  }, [bbox, camera, controls, invalidate])
+  }, [bbox, aspect, camera, controls, invalidate])
 
   return null
+}
+
+/**
+ * #2381 — where each plate of a multi-plate render is: an outline of its parts'
+ * footprint, labelled with its number, the `plate_id` its print queues.
+ */
+function PlateOutlines({ theme, plates, whole }: { theme: ViewerTheme; plates: BoundingBox[]; whole: BoundingBox }) {
+  return (
+    <group name={PLATE_OBJECT}>
+      {plates.map((box, index) => (
+        <PlateOutline key={index} theme={theme} number={index + 1} {...plateFootprint(box, whole)} />
+      ))}
+    </group>
+  )
+}
+
+/** The margin drawn around a plate's parts, so neighbouring outlines stay apart. */
+const PLATE_OUTLINE_MARGIN = 4
+/** The camera's far plane, in mm: past `cameraReach`'s orbit for a row of several metres. */
+const CAMERA_FAR = 20000
+
+function PlateOutline({
+  theme,
+  number,
+  center,
+  size,
+}: {
+  theme: ViewerTheme
+  number: number
+  center: [number, number]
+  size: [number, number]
+}) {
+  const [width, depth] = [size[0] + PLATE_OUTLINE_MARGIN * 2, size[1] + PLATE_OUTLINE_MARGIN * 2]
+  const outline = useMemo(() => new THREE.BoxGeometry(width, 0.001, depth), [width, depth])
+  useEffect(() => () => outline.dispose(), [outline])
+  return (
+    <group name={`${PLATE_OBJECT}:${number}`} position={[center[0], 0.05, center[1]]}>
+      <lineSegments>
+        <edgesGeometry args={[outline]} attach="geometry" />
+        <lineBasicMaterial color={theme.edge} attach="material" />
+      </lineSegments>
+      <Html position={[0, 0, depth / 2 + 6]} center zIndexRange={[10, 0]}>
+        <span
+          data-testid="plate-label"
+          className="sb-num pointer-events-none rounded-[3px] bg-bg/80 px-1 text-[11px] whitespace-nowrap text-muted select-none"
+        >
+          Plate {number}
+        </span>
+      </Html>
+    </group>
+  )
 }
 
 /**
@@ -807,14 +890,23 @@ function Model({
   bbox,
   outline,
   onLoaded,
+  onMeasured,
 }: {
   url: string
   bbox?: BoundingBox
   outline: boolean
   onLoaded: (url: string) => void
+  onMeasured: (url: string, bbox: BoundingBox) => void
 }) {
   const gltf = useLoader(GLTFLoader, url)
   const scene = useMemo(() => gltf.scene.clone(true), [gltf])
+  // #2364 — a mesh that came with no box (a library file's plate, placed where the 3MF
+  // put it on the bed) is measured, so it is centred and framed like any other.
+  useEffect(() => {
+    if (bbox) return
+    const box = new THREE.Box3().setFromObject(gltf.scene)
+    if (!box.isEmpty()) onMeasured(url, modelBox(box.min.toArray(), box.max.toArray()))
+  }, [bbox, gltf, url, onMeasured])
   const group = useRef<THREE.Group>(null)
   // #364 — the GLB is in OpenSCAD's coordinates; the outline and the camera are
   // centred on the plate. Move the model there, as the slicer will.

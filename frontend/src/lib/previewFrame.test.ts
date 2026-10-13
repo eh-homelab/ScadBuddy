@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { cameraFraming, sceneOffset, shouldRefit } from './previewFrame'
+import type { BoundingBox } from '../api/types'
+import { cameraFraming, cameraReach, MIN_REACH, modelBox, plateFootprint, sceneOffset, shouldRefit } from './previewFrame'
 
 describe('sceneOffset (#364)', () => {
   it('moves a model drawn away from the origin onto the plate centre, on the floor', () => {
@@ -42,5 +43,38 @@ describe('cameraFraming', () => {
     const { target, distance } = cameraFraming([80, 40, 30])
     expect(target).toEqual([0, 15, 0])
     expect(distance).toBeCloseTo(80 * 1.9 + 40)
+  })
+})
+
+describe('cameraReach (#2381)', () => {
+  it('lets the orbit reach as far back as a long multi-plate row is framed from', () => {
+    const { distance, maxDistance } = cameraReach([1700, 305, 5])
+    expect(distance).toBeGreaterThan(MIN_REACH)
+    expect(maxDistance).toBeGreaterThanOrEqual(distance)
+  })
+
+  it('keeps the ordinary reach for an ordinary model', () => {
+    expect(cameraReach([80, 40, 20]).maxDistance).toBe(MIN_REACH)
+  })
+
+  it('stands back as far as a portrait view is narrow', () => {
+    expect(cameraReach([80, 40, 20], 0.5).distance).toBeCloseTo(cameraFraming([80, 40, 20]).distance * 2)
+  })
+})
+
+describe('modelBox (#2364)', () => {
+  it('reads a Y-up scene box as the model box that centres it on the plate', () => {
+    // A library plate's part at scene (88..168, 0..10, 108..148).
+    const bbox = modelBox([88, 0, 108], [168, 10, 148])
+    expect(bbox.size).toEqual([80, 40, 10])
+    expect(sceneOffset(bbox).map((v) => v + 0)).toEqual([-128, 0, -128])
+  })
+})
+
+describe('plateFootprint (#2381)', () => {
+  it('puts a plate where the whole render is moved to', () => {
+    const whole: BoundingBox = { min: [0, 0, 0], max: [600, 100, 5], size: [600, 100, 5] }
+    const second: BoundingBox = { min: [320, 0, 0], max: [600, 100, 5], size: [280, 100, 5] }
+    expect(plateFootprint(second, whole)).toEqual({ center: [160, 0], size: [280, 100] })
   })
 })
