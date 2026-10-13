@@ -40,6 +40,7 @@ RENDER_GRANTS: Mapping[str, tuple[str, ...]] = {
     "events": ("SELECT", "INSERT"),
     # The job's activity row (`render/projection.py` `_announce` through
     # `activity/index.py` `upsert_in`; ON CONFLICT and RETURNING principal read it).
+    # Only `render:` rows: `RENDER_ROWS` holds the role to them.
     "activity": ("SELECT", "INSERT", "UPDATE"),
     # The blob index (`store/index.py`): get, put, touch, and `forget` of a row whose
     # object is gone.
@@ -58,6 +59,14 @@ RENDER_GRANTS: Mapping[str, tuple[str, ...]] = {
     "render_settings": ("SELECT",),
     # Whether the API has migrated to this build's schema (`wait_until_ready`).
     "scadbuddy_migrations": ("SELECT",),
+}
+
+#: Tables the role may reach only some rows of, and which: a restrictive row policy
+#: for the role beside a permissive one for everyone else, so every other role reads
+#: and writes as before (the owner, which migrates, bypasses row security anyway).
+RENDER_ROWS: Mapping[str, str] = {
+    # Every principal's jobs are listed there; the worker writes its renders' rows only.
+    "activity": "id LIKE 'render:%'",
 }
 
 #: Seconds between looks while the worker waits for the API's migrations or grants.
@@ -90,7 +99,39 @@ def grant_render_role(conn: Connection[Any], role: str | None = None) -> bool:
                     sql.Identifier(role),
                 )
             )
+        for table, rows in RENDER_ROWS.items():
+            _hold_to_rows(conn, role, table, rows)
     return True
+
+
+def _hold_to_rows(conn: Connection[Any], role: str, table: str, rows: str) -> None:
+    def exists(policy: str) -> bool:
+        found = conn.execute(
+            "SELECT 1 FROM pg_policies WHERE schemaname = current_schema()"
+            " AND tablename = %s AND policyname = %s",
+            (table, policy),
+        ).fetchone()
+        return found is not None
+
+    conn.execute(sql.SQL("ALTER TABLE {} ENABLE ROW LEVEL SECURITY").format(sql.Identifier(table)))
+    if not exists("everyone"):
+        conn.execute(
+            sql.SQL("CREATE POLICY everyone ON {} USING (true) WITH CHECK (true)").format(
+                sql.Identifier(table)
+            )
+        )
+    policy = f"only_{role}"
+    if not exists(policy):
+        conn.execute(
+            sql.SQL(
+                "CREATE POLICY {} ON {} AS RESTRICTIVE TO {} USING ({rows}) WITH CHECK ({rows})"
+            ).format(
+                sql.Identifier(policy),
+                sql.Identifier(table),
+                sql.Identifier(role),
+                rows=sql.SQL(rows),
+            )
+        )
 
 
 def grant_at_start(pool: ConnectionPool[Any]) -> None:

@@ -151,6 +151,36 @@ def test_the_role_holds_every_grant_and_cannot_read_the_settings_table(granted: 
                 conn.execute(sql.SQL("SELECT 1 FROM {}").format(sql.Identifier(table)))
 
 
+def test_the_role_reaches_only_render_activity_rows(owner: Pool, granted: Pool) -> None:
+    with owner.connection() as conn:
+        conn.execute(
+            "INSERT INTO activity (id, kind, status, title, source, source_id, principal)"
+            " VALUES ('operation:o1', 'model_import', 'running', 'Import', 'operations', 'o1',"
+            " 'token:t1')"
+        )
+    with granted.connection() as conn:
+        assert conn.execute("SELECT id FROM activity").fetchall() == []
+        conn.execute(
+            "INSERT INTO activity (id, kind, status, title, source, source_id)"
+            " VALUES ('render:r1', 'render', 'running', 'Render', 'render_jobs', 'r1')"
+        )
+        updated = conn.execute(
+            "UPDATE activity SET status = 'failed' WHERE id = 'operation:o1' RETURNING id"
+        ).fetchall()
+        assert updated == []
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            conn.execute(
+                "INSERT INTO activity (id, kind, status, title, source, source_id)"
+                " VALUES ('operation:o2', 'model_import', 'running', 'Import', 'operations', 'o2')"
+            )
+    with owner.connection() as conn:
+        rows = conn.execute("SELECT id, status FROM activity ORDER BY id").fetchall()
+    assert [(r["id"], r["status"]) for r in rows] == [
+        ("operation:o1", "running"),
+        ("render:r1", "running"),
+    ]
+
+
 def test_the_role_cannot_migrate(granted: Pool) -> None:
     with granted.connection() as conn, pytest.raises(psycopg.errors.InsufficientPrivilege):
         migrate(conn, (Migration("29991231T2359Z_later", "CREATE TABLE later (id int)"),))
