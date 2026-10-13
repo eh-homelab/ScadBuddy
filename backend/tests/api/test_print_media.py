@@ -5,11 +5,13 @@ comes back as a 206. Only an archive one of ScadBuddy's outputs printed is serve
 from __future__ import annotations
 
 import asyncio
+import io
 
 import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
@@ -292,3 +294,87 @@ def test_bambuddys_address_never_reaches_the_browser(client: TestClient) -> None
     assert response.headers["content-disposition"].endswith('"name-keychain.gcode.3mf"')
     assert "bambuddy.test" not in str(response.headers)
     assert "s3cret" not in str(response.headers)
+
+
+def _jpeg(width: int = 1680, height: int = 1080) -> bytes:
+    out = io.BytesIO()
+    Image.new("RGB", (width, height), (200, 120, 40)).save(out, "JPEG", quality=90)
+    return out.getvalue()
+
+
+PHOTO = "finish_20261011_092639_34fa491a.jpg"
+
+
+@respx.mock
+def test_a_card_cover_is_the_photo_shrunk_once_and_kept(client: TestClient) -> None:
+    """#2355: the prints page loaded 1680x1080 photos of 180-600 KB as ~300 px covers."""
+    configure(client)
+    original = _jpeg()
+    route = respx.get(f"{API}/archives/35/photos/{PHOTO}").mock(
+        return_value=httpx.Response(200, content=original, headers={"Content-Type": "image/jpeg"})
+    )
+
+    first = client.get(f"/api/v1/prints/35/photos/{PHOTO}", params={"size": "card", "v": 1})
+    again = client.get(f"/api/v1/prints/35/photos/{PHOTO}", params={"size": "card", "v": 1})
+
+    assert first.status_code == 200
+    assert first.headers["content-type"] == "image/webp"
+    assert first.headers["cache-control"] == "private, max-age=31536000, immutable"
+    assert len(first.content) < len(original)
+    with Image.open(io.BytesIO(first.content)) as small:
+        assert max(small.size) == 800
+    assert again.content == first.content
+    assert route.call_count == 1, "made once, not on every page load"
+
+
+@respx.mock
+def test_a_card_cover_of_another_version_is_not_kept_by_the_browser(client: TestClient) -> None:
+    configure(client)
+    respx.get(f"{API}/archives/35/photos/{PHOTO}").mock(
+        return_value=httpx.Response(200, content=_jpeg(), headers={"Content-Type": "image/jpeg"})
+    )
+
+    response = client.get(f"/api/v1/prints/35/photos/{PHOTO}", params={"size": "card"})
+
+    assert response.headers["cache-control"] == "no-cache"
+
+
+@respx.mock
+def test_a_photo_that_cannot_be_shrunk_is_served_as_it_is(client: TestClient) -> None:
+    configure(client)
+    respx.get(f"{API}/archives/35/photos/{PHOTO}").mock(
+        return_value=httpx.Response(
+            200, content=b"not a jpeg", headers={"Content-Type": "image/jpeg"}
+        )
+    )
+
+    response = client.get(f"/api/v1/prints/35/photos/{PHOTO}", params={"size": "card", "v": 1})
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/jpeg"
+    assert response.content == b"not a jpeg"
+
+
+@respx.mock
+def test_a_whole_photo_is_cached_by_the_browser(client: TestClient) -> None:
+    """#2355: a photo's name is one capture's, and the route sent no Cache-Control."""
+    configure(client)
+    respx.get(f"{API}/archives/35/photos/{PHOTO}").mock(
+        return_value=httpx.Response(200, content=b"jpeg", headers={"Content-Type": "image/jpeg"})
+    )
+    respx.get(f"{API}/archives/35/photos/gone.jpg").mock(return_value=httpx.Response(404))
+
+    response = client.get(f"/api/v1/prints/35/photos/{PHOTO}")
+
+    assert response.headers["cache-control"] == "private, max-age=31536000, immutable"
+    assert "cache-control" not in client.get("/api/v1/prints/35/photos/gone.jpg").headers
+
+
+@respx.mock
+def test_a_card_cover_of_a_missing_photo_is_a_404(client: TestClient) -> None:
+    configure(client)
+    respx.get(f"{API}/archives/35/photos/{PHOTO}").mock(return_value=httpx.Response(404))
+
+    response = client.get(f"/api/v1/prints/35/photos/{PHOTO}", params={"size": "card", "v": 1})
+
+    assert response.status_code == 404

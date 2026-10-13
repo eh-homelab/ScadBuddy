@@ -350,6 +350,15 @@ describe('PrintsPage (#310): the global print history', () => {
     expect(await screen.findByTestId('print-route')).toHaveTextContent('35')
   })
 
+  it('covers a card with the photo shrunk for it (#2355)', async () => {
+    render()
+    const done = await item(35)
+    expect(within(done).getByRole('button', { name: /^Open media of/ }).querySelector('img')).toHaveAttribute(
+      'src',
+      '/api/v1/prints/35/photos/finish_20260927_015703_93372185.jpg?size=card&v=1',
+    )
+  })
+
   it('opens the lightbox on the image, with the photos and the timelapse', async () => {
     const { user } = render()
     const done = await item(35)

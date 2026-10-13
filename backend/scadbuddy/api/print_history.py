@@ -40,6 +40,7 @@ from scadbuddy.api.deps import (
     SettingsStoreDep,
     UploadsDep,
 )
+from scadbuddy.api.media import THUMBNAIL_VERSION
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
     IdempotencyKey,
@@ -121,7 +122,10 @@ class PrintCover(_Response):
     """The image a history card shows: a photo of the print, else Bambuddy's thumbnail."""
 
     kind: Literal["photo", "thumbnail"]
+    #: Sized for the card: a photo shrunk to a WebP (#2355), not the 1680x1080 original.
     url: str
+    #: The image whole, for the lightbox.
+    full_url: str
 
 
 class PrintSummary(_Response):
@@ -304,9 +308,13 @@ def _cover(archive: ArchiveDetail) -> PrintCover | None:
     if photos:
         # The one Bambuddy captured at the end of the print, when it did (plan L11).
         chosen = archive.finish_photo if archive.finish_photo in photos else photos[0]
-        return PrintCover(kind="photo", url=_prints_url(archive.id, f"photos/{chosen}"))
+        full = _prints_url(archive.id, f"photos/{chosen}")
+        return PrintCover(
+            kind="photo", url=f"{full}?size=card&v={THUMBNAIL_VERSION}", full_url=full
+        )
     if archive.thumbnail_path:
-        return PrintCover(kind="thumbnail", url=_prints_url(archive.id, "thumbnail"))
+        thumbnail = _prints_url(archive.id, "thumbnail")
+        return PrintCover(kind="thumbnail", url=thumbnail, full_url=thumbnail)
     return None
 
 
