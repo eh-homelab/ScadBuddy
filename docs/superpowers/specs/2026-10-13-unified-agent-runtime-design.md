@@ -306,7 +306,7 @@ lack them (§2.3).
 |---|---|---|
 | `workflow.CreateSession(ctx, SessionOptions{CreationTimeout, …})` | the `acquire_worker` activity on the shared queue `agent-tools`, with `scheduleToCloseTimeout: 60s` | any replica |
 | the session's worker-specific queue | `agent-tools.<hostname>`, returned by `acquire_worker` and stored as `home` | the replica that answered |
-| `MaxConcurrentSessionExecutionSize` | `warm_max_per_replica` (§5.3): `acquire_worker` refuses with `NoCapacity` (retryable) when the cache is full, so its retry lands on another replica | worker |
+| `MaxConcurrentSessionExecutionSize` | `warm_max_per_replica` (§5.3): when a replica's cache is full `acquire_worker` evicts its least-recently-used *idle* slot rather than refusing; it refuses with `NoCapacity` (retryable) only when every slot is running a turn, so the retry lands on another replica (§6.10) | worker |
 | activities run under the session context | `session_turn` (and `release_worker`) scheduled on `home` | `home` |
 | the session heartbeat / `ErrSessionFailed` | `session_turn`'s `heartbeatTimeout: 20s` and `scheduleToStartTimeout: 5s`, both timeout failures the workflow catches | workflow |
 | `workflow.RecreateSession` | on a timeout: `acquire_worker` again, then `session_turn` with `continuation: restarted` (§5.5) | workflow |
@@ -576,7 +576,10 @@ never did (`questions/service.ts:34-38`).
 - `ai_session_entries.entry` is sealed under the session's data key: the
   `ai_payload_keys` row for subject `session-<id>`, the same key the codec uses
   (`payloadCodec.ts:151-190`). The format is `secrets.ts`'s sealed format, with AAD
-  `ai_session_entries:<session_id>:<subpath>:<uuid|seq>`.
+  `ai_session_entries:<session_id>:<subpath>:<uuid|id>`, the row's own `uuid` where the
+  SDK gave one and its own `id` (the `bigserial` primary key, never shared with another
+  row) otherwise — never a constant, which would let two such rows in the same session
+  and subpath be swapped undetected.
 - `PostgresSessionStore` (`store.ts:59-123`) seals in `append` and opens in `load`. It is
   the only reader of the column. The others only name the table in comments, or delete
   from it (`forget.ts:88`).

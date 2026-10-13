@@ -137,7 +137,7 @@ describe('the bundled Claude Code (spec §2.1)', () => {
     const before = fake.messageCalls().length
     let asked = false
     for await (const _ of query({ prompt: 'continue', options: { ...base(), env: await env(fake), sessionStore: store, resume: sessionId,
-      mcpServers: { x: server }, allowedTools: ['mcp__x__slow'], canUseTool: async (_n, input) => { asked = true; return { behavior: 'allow', updatedInput: input } } } })) {}
+      mcpServers: { x: server }, canUseTool: async (_n, input) => { asked = true; return { behavior: 'allow', updatedInput: input } } } })) {}
     const resumed = JSON.stringify(fake.messageCalls()[before]?.body?.messages)
     expect(calls).toBe(1)
     expect(asked).toBe(false)
@@ -454,7 +454,7 @@ CREATE TABLE ai_plugin_sessions (
 - Test: `agent/test/sessions.store.test.ts`
 
 **Interfaces:**
-- Produces: `new PostgresSessionStore(sql, { keys })`. `append` writes `sealed = seal(dek, JSON, aad)` with `entry = NULL`. `load` opens `sealed`, or else reads the plaintext `entry` (pre-migration rows). The AAD is `ai_session_entries:<session_id>:<subpath>:<uuid ?? 'seq'>`.
+- Produces: `new PostgresSessionStore(sql, { keys })`. `append` writes `sealed = seal(dek, JSON, aad)` with `entry = NULL`. `load` opens `sealed`, or else reads the plaintext `entry` (pre-migration rows). The AAD is `ai_session_entries:<session_id>:<subpath>:<uuid ?? id>`, the row's own `uuid` or (never written, so no two rows share it) its own `id`, never the literal string `'seq'` — a constant AAD would let two such rows in one session and subpath be swapped undetected.
 
 - [ ] **Step 1: Write the tests:**
   - `round-trips sealed entries`;
@@ -702,9 +702,11 @@ async function runTurn(input: SessionTurnInput): Promise<SessionTurnResult> {
 ### Task 6.1: Route every new session to `AgentSession`; retire the mode switch
 
 **Files:**
-- Modify: `agent/src/sessions/manager.ts` (`startMode` and `sessionModeOf` removed; `send` always goes through `DurableTurns` with `AgentSession`; the lease, renew loop and `reapExpired` removed; `resumeApproved` removed), `agent/src/main.ts` (no reaper; sessions refuse `unavailable` without Temporal), `agent/src/routes/chat.ts:317`, `agent/src/routes/sessions.ts:108`, `agent/src/tools/sessions.ts` (`mode` accepted and ignored), `agent/src/routes/sessionMode.ts` (deleted; its settings key ignored), `agent/src/temporal/flowSessions.ts:50` (no mode check)
+- Modify: `agent/src/sessions/manager.ts` (`startMode` and `sessionModeOf` removed; `send` always goes through `DurableTurns` with `AgentSession`; the lease, renew loop and `reapExpired` removed; `resumeApproved` removed), `agent/src/main.ts` (no reaper; sessions refuse `unavailable` without Temporal), `agent/src/routes/chat.ts:317`, `agent/src/routes/sessions.ts:108`, `agent/src/routes/pendingInput.ts` (drops its `session_mode` branch), `agent/src/sessions/clientProtocol.ts` (drops its `sessionModeOf` branch), `agent/src/tools/sessions.ts` (`mode` accepted and ignored), `agent/src/routes/sessionMode.ts` (deleted; its settings key ignored), `agent/src/temporal/flowSessions.ts:50` (no mode check)
 - Modify: `frontend/src/components/assistant/*` (remove the Advanced mode select and the Durable badge; the `scadbuddy.assistant.mode` localStorage key is ignored), `frontend/src/mocks/features/*` (sessions)
 - Test: `agent/test/sessions.e2e.test.ts` (every case now runs through `AgentSession` on the dev server), `frontend` vitest for the composer
+
+With the lease retired, the claim is `durable_turn_id` alone (as it already is for a `DurableSession`, `plan:627`); `turn_id` and `lease_until` are never written again and stay `NULL`, so `ai_sessions`' `CHECK ((turn_id IS NULL) = (lease_until IS NULL))` (`20260928T0107Z_sessions.sql:36`) holds trivially until Phase 10 drops `lease_until` (Task 10.1) and the now-dead `turn_id` with it.
 
 - [ ] **Step 1: Write the tests.** Rewrite `sessions.e2e.test.ts`'s setup to start a dev server and the three workers, and keep every assertion. Add:
   - `a session created with mode classic runs as AgentSession`;
@@ -729,10 +731,9 @@ async function runTurn(input: SessionTurnInput): Promise<SessionTurnResult> {
 - Modify: `.github/workflows/ci.yml` (the `lint` job runs it)
 - [ ] **Step 1: Write `lint-one-runtime.test.sh`.** It creates fixture trees that each must fail:
   - a `mode === 'durable'` in `agent/src/harness/x.ts`;
-  - an `agent-durable/` directory;
   - a second `query(` call site outside `agent/src/harness/run.ts` and `testConnection.ts`.
 
-  The current tree must pass.
+  The current tree must pass. (`agent-durable/` still exists at this point — PR 7 migrates its sessions and PR 8 removes it — so its own check is added in Task 8.1, once checking for the directory's absence is actually meaningful.)
 - [ ] **Step 2: Run it.** `bash .github/scripts/lint-one-runtime.test.sh`. Expected: FAIL (no script).
 - [ ] **Step 3: Implement.**
 
@@ -745,7 +746,6 @@ fail=0
 if grep -rnE "mode ?={2,3} ?'(durable|classic)'|sessionModeOf|session_mode" "$root/agent/src" --include='*.ts' | grep -v '/db/migrations/'; then
   echo "a session mode branch is back: every session is an AgentSession" >&2; fail=1
 fi
-if [ -d "$root/agent-durable" ]; then echo "agent-durable/ is retired" >&2; fail=1; fi
 mapfile -t sites < <(grep -rlnE "\bquery\(\{" "$root/agent/src" --include='*.ts' || true)
 for f in "${sites[@]}"; do
   case "$f" in */harness/run.ts|*/harness/testConnection.ts) ;; *) echo "query() outside the harness: $f" >&2; fail=1 ;; esac
@@ -799,10 +799,11 @@ Merge this only after the PR 7 backfill reported 0 open `DurableSession`s in pro
 
 **Files:**
 - Delete: `agent-durable/`, `.github/scripts/agent-durable-pin.sh`, `.github/workflows/agent-durable-pin.yml`
-- Modify: `Dockerfile` (remove the `agent-durable` stage), `.github/workflows/ci.yml` and `build-image.yml` (remove the `agent-durable` jobs and the `CI Summary` needs), `.hadolint.yaml` if it names the stage, `CLAUDE.md` (the Durable sessions command block and layout bullet), `README.md` ("Deploying")
-- [ ] **Step 1:** Run `bash .github/scripts/lint-one-runtime.sh`. It now passes the `agent-durable/` check.
-- [ ] **Step 2:** Run `actionlint` and `hadolint Dockerfile`. Expected: clean.
-- [ ] **Step 3: Commit** with `chore!: retire agent-durable and the temporalio-claude-agent-sdk pin`.
+- Modify: `.github/scripts/lint-one-runtime.sh` and `lint-one-runtime.test.sh` (add the `agent-durable/` directory check Task 6.3 deferred: a fixture tree containing the directory must fail), `Dockerfile` (remove the `agent-durable` stage), `.github/workflows/ci.yml` and `build-image.yml` (remove the `agent-durable` jobs and the `CI Summary` needs), `.hadolint.yaml` if it names the stage, `CLAUDE.md` (the Durable sessions command block and layout bullet), `README.md` ("Deploying")
+- [ ] **Step 1:** Add `if [ -d "$root/agent-durable" ]; then echo "agent-durable/ is retired" >&2; fail=1; fi` to `lint-one-runtime.sh` and the matching fixture to its test. Run `bash .github/scripts/lint-one-runtime.test.sh`. Expected: PASS for the fixtures, FAIL for the real tree (`agent-durable/` still exists).
+- [ ] **Step 2:** Delete `agent-durable/` and the rest of the Files list above.
+- [ ] **Step 3:** Run `bash .github/scripts/lint-one-runtime.sh` and `lint-one-runtime.test.sh`. Both now pass. Run `actionlint` and `hadolint Dockerfile`. Expected: clean.
+- [ ] **Step 4: Commit** with `chore!: retire agent-durable and the temporalio-claude-agent-sdk pin`.
 
 ### Task 8.2: Remove the agent's durable-only code
 
@@ -863,9 +864,11 @@ Merge this only after the PR 7 backfill reported 0 open `DurableSession`s in pro
 
 ```sql
 -- Spec 2026-10-13 §10.2: one runtime. durable_offset was the Python follower's cursor;
--- mode was the switch; lease_until/interrupt_requested's lease half was classic's claim.
+-- mode was the switch; turn_id/lease_until was classic's claim, dead and NULL on every
+-- row since Task 6.1 (the CHECK that paired them goes with the columns).
 ALTER TABLE ai_sessions DROP COLUMN durable_offset;
 ALTER TABLE ai_sessions DROP COLUMN mode;
+ALTER TABLE ai_sessions DROP COLUMN turn_id;
 ALTER TABLE ai_sessions DROP COLUMN lease_until;
 DROP TABLE ai_questions;
 DELETE FROM ai_settings WHERE key = 'session_mode';
