@@ -12,6 +12,7 @@ import { lastArrangeRequest, problem, resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { normalizeHex } from '../lib/format'
 import { startTracing } from '../lib/tracing'
+import { installTestTracing } from '../test/tracing'
 import { renderPage } from '../test/utils'
 import { PrintPicker } from './PrintPicker'
 
@@ -520,6 +521,23 @@ describe('PrintPicker', () => {
     expect(save?.traceparent?.split('-')[1]).toBe(arrange?.traceparent?.split('-')[1])
   })
 
+  it('names the arranged output on the arrange span, and the one it came from apart (#2891)', async () => {
+    const tracing = installTestTracing()
+    try {
+      const { user } = renderPicker()
+      await loaded()
+      await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+      expect(await screen.findByText('Arranged onto 1 plate.')).toBeInTheDocument()
+      const span = tracing.exporter.getFinishedSpans().find((s) => s.name === 'arrange')
+      expect(span?.attributes['scadbuddy.source_output_id']).toBe(output.id)
+      expect(span?.attributes['scadbuddy.output_id']).toEqual(expect.any(String))
+      expect(span?.attributes['scadbuddy.output_id']).not.toBe(output.id)
+      expect(span?.attributes['scadbuddy.outcome']).toBeUndefined()
+    } finally {
+      tracing.uninstall()
+    }
+  })
+
   it('keeps the spools and settings a re-arrange was made for', async () => {
     const { bodies } = watch('POST', '/run')
     const { user } = renderPicker()
@@ -821,12 +839,50 @@ describe('PrintPicker', () => {
           ),
         ),
       )
-      const { user } = renderPage(picker())
-      await loaded()
-      await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
-      await user.click(screen.getByRole('button', { name: 'Re-render' }))
-      expect(await screen.findByRole('alert')).toHaveTextContent('Nova could not be re-rendered: revision abc is gone.')
+      const tracing = installTestTracing()
+      try {
+        const { user } = renderPage(picker())
+        await loaded()
+        await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+        await user.click(screen.getByRole('button', { name: 'Re-render' }))
+        expect(await screen.findByRole('alert')).toHaveTextContent('Nova could not be re-rendered: revision abc is gone.')
+        // #2891: the span ends without an error, but says the re-render failed.
+        await waitFor(() =>
+          expect(
+            tracing.exporter.getFinishedSpans().find((s) => s.name === 'arrange')?.attributes['scadbuddy.outcome'],
+          ).toBe('rerender_failed'),
+        )
+      } finally {
+        tracing.uninstall()
+      }
       expect(lastArrangeRequest()).toBeNull()
+    })
+
+    it('starts the re-render in the arrange’s trace (#2891)', async () => {
+      const seen: { method: string; path: string; traceparent: string | null }[] = []
+      const listen = ({ request }: { request: Request }) => {
+        seen.push({
+          method: request.method,
+          path: new URL(request.url).pathname,
+          traceparent: request.headers.get('traceparent'),
+        })
+      }
+      server.events.on('request:start', listen)
+      const stop = startTracing()
+      try {
+        const { user } = renderPage(picker())
+        await loaded()
+        await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+        await user.click(screen.getByRole('button', { name: 'Re-render' }))
+        expect(await screen.findByText('Arranged onto 1 plate.', {}, { timeout: 5000 })).toBeInTheDocument()
+      } finally {
+        server.events.removeListener('request:start', listen)
+        await stop()
+      }
+      const backfill = seen.find((call) => call.method === 'POST' && call.path === `/api/v1/outputs/${nova.id}/backfill`)
+      const arrange = seen.find((call) => call.method === 'POST' && call.path === '/api/v1/outputs/arrange')
+      expect(backfill?.traceparent).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/)
+      expect(backfill?.traceparent?.split('-')[1]).toBe(arrange?.traceparent?.split('-')[1])
     })
 
     it('asks when Arrange itself says the output needs a re-render', async () => {

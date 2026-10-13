@@ -16,7 +16,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, NoReturn, cast
+from typing import Any, NoReturn, cast, get_args
 
 import httpx
 import psycopg
@@ -1204,3 +1204,9 @@ def test_each_worker_reports_under_its_deployments_name(
     worker_module.main()
 
     assert named == [service]
+
+
+def test_every_queue_has_a_service_name() -> None:
+    """#2894: a queue added without a ``service.name`` would fail the worker at start
+    with a bare KeyError; here it fails in CI instead."""
+    assert set(worker_module.SERVICE_NAMES) == set(get_args(worker_module.Queue))

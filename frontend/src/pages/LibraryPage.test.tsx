@@ -11,6 +11,11 @@ import { renderPage } from '../test/utils'
 import { LibraryPage } from './LibraryPage'
 import type * as TraceAction from '../lib/traceAction'
 
+// Each test's actions only (#2892): `toContain` would otherwise pass on an earlier test's.
+beforeEach(() => {
+  actions.length = 0
+})
+
 /** The user actions started, by name (#2292): `traceAction` itself, recorded. */
 const actions = vi.hoisted(() => [] as string[])
 vi.mock('../lib/traceAction', async (importOriginal) => {
