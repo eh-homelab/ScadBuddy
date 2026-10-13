@@ -317,6 +317,82 @@ async def test_a_turn_with_an_image_gets_it_from_view_user_images(
         await asyncio.sleep(0)
 
 
+async def test_a_turn_that_runs_out_mid_segment_says_so_and_a_raise_lets_the_next_run(
+    temporal_env: WorkflowEnvironment,
+    agent_db: Conn,
+    connect: Connect,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bundled Claude Code stops at ``max_budget_usd`` inside a segment: the turn ends
+    as the budget's (``error_max_budget_usd``, the code the panel's budget card reads,
+    frontend agent/chat/state.ts BUDGET_CODES), not as a failure. A raise (what
+    manager.ts raiseBudget writes) is read by the next segment, whose turn then runs."""
+    raised = False
+
+    def reply(body: dict[str, Any]) -> dict[str, Any]:
+        if VIEW_TOOL_IMAGES_TOOL not in str(body.get("tools")):
+            return {"text": "ok"}  # Claude Code's own side requests
+        if raised:
+            return {"text": "back again"}
+        # A million input tokens: more than the $1 budget, so Claude Code stops
+        # before the call this tool_use would need next.
+        return {"tool_use": {"name": "no_such_tool", "input": {}}, "input_tokens": 1_000_000}
+
+    fake = FakeAnthropic(reply).start()
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
+    monkeypatch.setenv("HOME", str(home))
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    try:
+        await insert_gateway(agent_db, KEK, fake.url)
+        runner = ScadBuddyRunner(
+            connect, KEK, cwd=os.path.realpath(cwd), make_runner=ClaudeAgentSdkRunner
+        )
+        async with running(temporal_env, connect, runner) as (client, queue):
+            sid = await insert_session(agent_db, budget=1.0)
+            handle = await start_session(client, sid, queue)
+            try:
+                await send(handle, "go")
+                assert await settled(connect, sid, timeout=180) == "idle"
+                [error] = [e for e in await events(agent_db, sid) if e["type"] == "error"]
+                assert error["code"] == "error_max_budget_usd"
+                # The plugin reports no cost for it: charged at least the cap.
+                spent, _ = await _row(agent_db, sid)
+                assert spent == pytest.approx(1.0)
+
+                # The agent's claim (durable.ts send) refuses this send while spent; were
+                # one to reach the workflow anyway, it ends at once, with no model call.
+                calls = len(fake.messages())
+                await agent_db.execute(
+                    "UPDATE ai_sessions SET status = 'running' WHERE id = %s", (sid,)
+                )
+                await send_next(handle, "go on")
+                assert await settled(connect, sid) == "idle"
+                assert len(fake.messages()) == calls
+
+                await agent_db.execute(
+                    "UPDATE ai_sessions SET budget_usd = %s, status = 'running' WHERE id = %s",
+                    (spent + 5, sid),
+                )
+                raised = True
+                await send_next(handle, "go on again")
+                assert await settled(connect, sid, timeout=180) == "idle"
+            finally:
+                await handle.terminate()
+        log = await events(agent_db, sid)
+        assert [e["code"] for e in log if e["type"] == "error"] == ["error_max_budget_usd"] * 2
+        text = "".join(e["delta"] for e in log if e["type"] == "assistant.text.delta")
+        assert "back again" in text
+        result = [e for e in log if e["type"] == "session.result"][-1]
+        assert result["budgetUsd"] == pytest.approx(spent + 5)
+    finally:
+        fake.close()
+        await asyncio.sleep(0)
+
+
 class Failing:
     """make_runner for the runner: each segment raises the next of ``errors``, then the
     scripted model answers."""
