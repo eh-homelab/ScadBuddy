@@ -1722,6 +1722,49 @@ describe('PrintPicker · departures of a stale slice (#2702 review)', () => {
     await waitFor(() => expect(screen.queryByText(/isn't used by the sliced plate/)).toBeNull())
     release()
   }, 20000)
+
+describe('PrintPicker · Filament profiles (#717)', () => {
+  it('suggests Silk for a silk spool, shows its change against the preset, and prints without it when switched off', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+
+    const step = await screen.findByTestId('filament-profile-silk-pla')
+    expect(step).toHaveTextContent('Silk PLA for slot 1 (Bambu Lab PLA Silk)')
+    const checkbox = within(step).getByRole('checkbox', { name: /Silk PLA/ })
+    expect(checkbox).toBeChecked()
+    // Each distinct value the H2C preset has per extruder variant, then the profile's.
+    expect(await within(step).findByText('Outer wall speed: 200 / 500 → 50 mm/s')).toBeInTheDocument()
+    expect(within(step).getByRole('link', { name: /Why: Bambu PLA Silk/ })).toHaveAttribute(
+      'href',
+      'https://wiki.bambulab.com/en/x1/manual/printing-with-silk-filaments',
+    )
+    expect(step).toHaveTextContent('235 °C')
+
+    await user.click(checkbox)
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+    expect(bodies[0]).not.toHaveProperty('filament_profiles')
+  })
+
+  it("says why a profile can't apply, and leaves it off", async () => {
+    setSilkPreview(silkPreview({ applicable: false, reason: "couldn't read the preset's outer wall speed (Bambuddy's slicer is not reachable)", changes: [] }))
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+
+    const step = await screen.findByTestId('filament-profile-silk-pla')
+    expect(await within(step).findByRole('status')).toHaveTextContent(
+      "Not applied: couldn't read the preset's outer wall speed (Bambuddy's slicer is not reachable). The print uses the preset as it is.",
+    )
+    const checkbox = within(step).getByRole('checkbox', { name: /Silk PLA/ })
+    expect(checkbox).not.toBeChecked()
+    expect(checkbox).toBeDisabled()
+
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+    expect(bodies[0]).not.toHaveProperty('filament_profiles')
+  })
 })
 
 describe('PrintPicker · Print sequence (#1862)', () => {
