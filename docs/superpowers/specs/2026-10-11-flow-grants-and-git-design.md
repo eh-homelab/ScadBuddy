@@ -868,6 +868,14 @@ A triggered run has no person present, so:
     counters (`flow_trigger_grants.used`), which it spends with the run grant's own. So
     N fires never multiply its prints, grams or calls by N. A standing grant not in force
     (revoked, expired, back to `requested`) matches nothing, whatever its run grants say.
+  - **Each approval is its own.** Every approval gives the standing grant a fresh
+    `approval_id`; a run grant records the one that seeded it (`standing_approval_id`)
+    and spends only while the standing grant is still under that approval. The counters
+    are kept per approval id and only ever grow, so a re-approval (after an edit, perhaps
+    with other rules) neither lets older runs reach the new rules nor gives anyone fresh
+    counters for the old ones.
+  - **The bindings fail closed.** An approved attach without `seen`, and an admission or
+    a seed without the hash the fire decided on, are refused, never waved through.
     Everything else in §3 applies to the run grant unchanged.
   - **An approval is bound to what the person saw.** A trigger's view carries `seen`, a
     hash of the trigger (its version, inputs, kind, schedule or event, overlap, approval

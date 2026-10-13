@@ -43,8 +43,12 @@ CREATE TABLE flow_trigger_grants (
     revoked_by   text,
     revoked_at   timestamptz,
     expires_at   timestamptz,
-    -- Per rule index: {prints, filament_g, calls} across every run it seeded: its
-    -- limits are spent cumulatively, under its row lock (`FlowStore.consume_grant`).
+    -- A fresh id on each approval: a run grant it seeds names it, and spends only
+    -- while the standing grant is still under that approval.
+    approval_id  text,
+    -- Per approval id, per rule index: {prints, filament_g, calls} across every run
+    -- it seeded under that approval: its limits are spent cumulatively, under its
+    -- row lock (`FlowStore.consume_grant`), and never restart for one approval.
     used         jsonb NOT NULL DEFAULT '{}',
     created_at   timestamptz NOT NULL DEFAULT now()
 );
@@ -72,5 +76,6 @@ CREATE INDEX flow_trigger_fires_run ON flow_trigger_fires (run_id);
 
 -- The standing grant a run grant was seeded from: revoking it revokes them.
 ALTER TABLE flow_grants ADD COLUMN IF NOT EXISTS standing_grant_id text;
+ALTER TABLE flow_grants ADD COLUMN IF NOT EXISTS standing_approval_id text;
 CREATE INDEX IF NOT EXISTS flow_grants_standing ON flow_grants (standing_grant_id)
     WHERE standing_grant_id IS NOT NULL;

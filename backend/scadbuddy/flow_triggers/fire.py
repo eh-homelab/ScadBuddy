@@ -142,26 +142,28 @@ class TriggerFires:
         # trigger edited meanwhile starts nothing on its old settings.
         checked = state_hash(trigger, None)
         cap = MAX_EVENT_FIRES_PER_HOUR if trigger.kind == "event" else None
+        if await execution_status(flows.client, run_id) is not None:
+            # A retry after its start: only an admitted fire starts its run, and no
+            # request can name a run id in the trigger namespace.
+            return "started", None
+        # Admitted again on a retry too: paused or changed since, it starts nothing.
         if (refused := await self.store.admit(trigger_id, fire_key, cap, checked)) is not None:
             return "skipped", refused
         started_by = runs_as(trigger.created_by)
-        if await execution_status(flows.client, run_id) is None:
-            # No execution: a grant held for this run is an earlier attempt's.
-            await flows.store.delete_grant(run_id)
-            await self.store.seed_run_grant(
-                run_id, trigger_id, started_by, datetime.now(UTC), checked
-            )
-            await start_execution(
-                flows,
-                flows.client,
-                definition=definition,
-                run_id=run_id,
-                update_id=fire_key,
-                started_by=started_by,
-                inputs=inputs,
-                approval_timeout_s=approval_timeout(flows, definition, trigger.approval_timeout_s),
-                tool_tiers=raise_tiers(tiers(), await flows.store.tool_overrides()),
-            )
+        # No execution: a grant held for this run is an earlier attempt's.
+        await flows.store.delete_grant(run_id)
+        await self.store.seed_run_grant(run_id, trigger_id, started_by, datetime.now(UTC), checked)
+        await start_execution(
+            flows,
+            flows.client,
+            definition=definition,
+            run_id=run_id,
+            update_id=fire_key,
+            started_by=started_by,
+            inputs=inputs,
+            approval_timeout_s=approval_timeout(flows, definition, trigger.approval_timeout_s),
+            tool_tiers=raise_tiers(tiers(), await flows.store.tool_overrides()),
+        )
         return "started", None
 
 

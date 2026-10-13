@@ -473,19 +473,28 @@ class FlowStore:
             # standing grant's limits, across every run it seeded: its row is locked first
             # (as a revocation locks it before the run grants), and its counters are the
             # ones the rules are checked against.
+            # It spends only under the very approval that seeded it: one re-approved
+            # since (after an edit, maybe with other rules) is another approval, whose
+            # counters it may not reach and whose rules it never had.
             seeded = conn.execute(
-                "SELECT standing_grant_id FROM flow_grants WHERE run_id = %s", (run_id,)
+                "SELECT standing_grant_id, standing_approval_id FROM flow_grants WHERE run_id = %s",
+                (run_id,),
             ).fetchone()
             standing = None
             if seeded is not None and seeded["standing_grant_id"] is not None:
                 standing = conn.execute(
-                    "SELECT id, used, (status = 'approved' AND revoked_at IS NULL"
+                    "SELECT id, used, approval_id, (status = 'approved' AND revoked_at IS NULL"
                     " AND expires_at > now()) AS in_force"
                     " FROM flow_trigger_grants WHERE id = %s FOR UPDATE",
                     (seeded["standing_grant_id"],),
                 ).fetchone()
-                if standing is None or not standing["in_force"]:
-                    return "the trigger's standing grant is not in force"
+                if (
+                    standing is None
+                    or not standing["in_force"]
+                    or standing["approval_id"] is None
+                    or standing["approval_id"] != seeded["standing_approval_id"]
+                ):
+                    return "the trigger's standing grant is not in force for this run"
             grant = self._locked_grant(conn, run_id)
             if grant is None:
                 return "no grant in force"
@@ -495,7 +504,8 @@ class FlowStore:
             ).fetchone()
             if prior is not None:
                 return GrantUse.model_validate(prior)
-            shared = dict(standing["used"]) if standing is not None else {}
+            approval = standing["approval_id"] if standing is not None else ""
+            shared = dict(standing["used"].get(approval, {})) if standing is not None else {}
             checked = grant
             if standing is not None:
                 # Its narrowings' counters stay the run's own.
@@ -522,9 +532,10 @@ class FlowStore:
             used = spend({k: v.model_dump() for k, v in grant.used.items()}, keys)
             conn.execute("UPDATE flow_grants SET used = %s WHERE id = %s", (Jsonb(used), grant.id))
             if standing is not None:
+                counters = {**standing["used"], approval: spend(shared, [str(taken.rule_index)])}
                 conn.execute(
                     "UPDATE flow_trigger_grants SET used = %s WHERE id = %s",
-                    (Jsonb(spend(shared, [str(taken.rule_index)])), standing["id"]),
+                    (Jsonb(counters), standing["id"]),
                 )
             row = conn.execute(
                 "INSERT INTO flow_grant_uses (request_id, grant_id, run_id, fn, tool,"

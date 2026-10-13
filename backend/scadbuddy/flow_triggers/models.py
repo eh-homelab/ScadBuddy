@@ -189,9 +189,11 @@ class StandingGrant(BaseModel):
     revoked_at: datetime | None = None
     expires_at: datetime | None = None
     created_at: datetime
-    #: Per rule index: what it let through across every run it seeded. Its limits are
-    #: spent cumulatively, never once per run.
-    used: dict[str, RuleUse] = Field(default_factory=dict)
+    #: Set afresh on each approval; the run grants it seeds name it.
+    approval_id: str | None = None
+    #: Per approval id, per rule index: what it let through across every run it seeded
+    #: under that approval. Its limits are spent cumulatively, never once per run.
+    used: dict[str, dict[str, RuleUse]] = Field(default_factory=dict)
 
     def in_force(self, now: datetime) -> bool:
         return (
