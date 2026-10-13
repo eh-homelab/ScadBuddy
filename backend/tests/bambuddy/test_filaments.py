@@ -283,6 +283,27 @@ def test_a_spool_two_slots_share_must_cover_both() -> None:
     assert not [w for w in check(plenty, plan) if w.kind == "low-filament"]
 
 
+def test_three_slots_on_one_spool_are_named_and_an_unknown_one_is_left_out() -> None:
+    built = options(
+        requirements=[
+            SlotNeed(slot_id=1, colour="#0047BB", used_grams=10.0),
+            SlotNeed(slot_id=2, colour="#0047BB", used_grams=10.0),
+            SlotNeed(slot_id=3, colour="#0047BB", used_grams=10.0),
+            SlotNeed(slot_id=4, colour="#0047BB", used_grams=None),
+        ]
+    )
+    spool = built.spools[0]
+    built = built.model_copy(update={"spools": [spool.model_copy(update={"remaining_g": 25.0})]})
+    plan = FilamentPlan(
+        slots=[SlotChoice(slot_id=i, spool_id=spool.spool_id) for i in (1, 2, 3, 4)]
+    )
+
+    low = [warning for warning in check(built, plan) if warning.kind == "low-filament"]
+
+    assert [warning.slot_id for warning in low] == [1, 2, 3]
+    assert all("slots 1, 2 and 3 need 30 g of it between them" in w.message for w in low)
+
+
 def test_known_grams_are_multiplied_by_the_copies() -> None:
     built = options(requirements=[SlotNeed(slot_id=1, colour="#0047BB", used_grams=60.0)])
     plan = FilamentPlan(slots=list(built.suggested))
