@@ -334,6 +334,49 @@ def test_registering_a_deleted_name_brings_it_back(client: TestClient) -> None:
     assert register(client, script("return 3"))["archived_at"] is not None
 
 
+def test_a_deleted_flow_is_not_archived(client: TestClient) -> None:
+    """#2646: archiving a deleted flow is refused, and leaves it as it was."""
+    register(client, script("return 1"))
+    assert client.delete("/api/v1/workflows/names/swap").status_code == 200
+    refused = client.post("/api/v1/workflows/names/swap/archive")
+    assert (refused.status_code, refused.json()["type"].rsplit("/", 1)[1]) == (409, "flow-deleted")
+    # Restored, it comes back unarchived, as a deleted flow does.
+    assert register(client, script("return 2"))["archived_at"] is None
+
+
+def test_a_version_is_never_left_on_a_flow_still_marked_deleted(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    """#2646: the version's row and the flow's revival are one transaction. If the state
+    write fails, no row names the version, and the flow is still consistently deleted."""
+    register(client, script("return 1"))
+    assert client.delete("/api/v1/workflows/names/swap").status_code == 200
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute(
+            "CREATE FUNCTION refuse_state() RETURNS trigger LANGUAGE plpgsql AS"
+            " $$ BEGIN RAISE EXCEPTION 'state write refused'; END $$"
+        )
+        conn.execute(
+            "CREATE TRIGGER refuse_state BEFORE UPDATE ON workflow_flow_states"
+            " FOR EACH ROW EXECUTE FUNCTION refuse_state()"
+        )
+        try:
+            with pytest.raises(psycopg.errors.RaiseException):
+                client.post(
+                    "/api/v1/workflows",
+                    json={"name": "swap", "script": script("return 2")},
+                )
+        finally:
+            conn.execute("DROP TRIGGER refuse_state ON workflow_flow_states")
+            conn.execute("DROP FUNCTION refuse_state()")
+        assert conn.execute(
+            "SELECT count(*) FROM workflow_definitions WHERE name = 'swap'"
+        ).fetchone() == (1,)
+    assert listed(client) == []
+    again = register(client, script("return 3"))
+    assert (again["deleted_at"], listed(client)) == (None, [("swap", again["version"])])
+
+
 def test_the_approval_timeout_resolves_run_then_flow_then_setting(client: TestClient) -> None:
     inherits = register(client, script("return 1"), name="a")
     never = register(client, script("return 1"), name="b", approval_timeout="never")

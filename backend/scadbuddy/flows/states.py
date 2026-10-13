@@ -20,6 +20,18 @@ from scadbuddy.flows.models import DefinitionSummary, FlowState
 
 _STATE = "name, archived_at, archived_by, deleted_at, deleted_by, deleted_commit"
 
+#: A version was registered or restored: the flow is no longer deleted. A deleted flow
+#: comes back unarchived too, so its restore is one that runs; a flow only archived stays
+#: archived. Run in the transaction that inserts the version (`FlowStore.insert_version`),
+#: so a version never lands on a flow still marked deleted (#2646).
+REVIVE = (
+    "UPDATE workflow_flow_states SET"
+    " archived_at = CASE WHEN deleted_at IS NULL THEN archived_at END,"
+    " archived_by = CASE WHEN deleted_at IS NULL THEN archived_by END,"
+    " deleted_at = NULL, deleted_by = NULL, deleted_commit = NULL"
+    " WHERE name = %(name)s"
+)
+
 
 class FlowStates:
     def __init__(self, pool: ConnectionPool[Connection[DictRow]]) -> None:
@@ -41,12 +53,14 @@ class FlowStates:
         return FlowState.model_validate(row) if row else FlowState(name=name)
 
     def archive(self, name: str, by: dict[str, Any]) -> FlowState:
-        """Archive it; one archived already keeps when and by whom."""
+        """Archive it; one archived already keeps when and by whom. A deleted flow is left
+        as it is (#2646): the state answered says so."""
         return self._write(
             "INSERT INTO workflow_flow_states (name, archived_at, archived_by)"
             " VALUES (%(name)s, now(), %(by)s) ON CONFLICT (name) DO UPDATE SET"
             " archived_by = COALESCE(workflow_flow_states.archived_by, EXCLUDED.archived_by),"
-            " archived_at = COALESCE(workflow_flow_states.archived_at, EXCLUDED.archived_at)",
+            " archived_at = COALESCE(workflow_flow_states.archived_at, EXCLUDED.archived_at)"
+            " WHERE workflow_flow_states.deleted_at IS NULL",
             {"name": name, "by": Jsonb(by)},
         )
 
@@ -66,19 +80,6 @@ class FlowStates:
             " deleted_at = COALESCE(workflow_flow_states.deleted_at, EXCLUDED.deleted_at),"
             " deleted_commit = EXCLUDED.deleted_commit",
             {"name": name, "by": Jsonb(by), "commit": commit},
-        )
-
-    def revive(self, name: str) -> None:
-        """A version was registered or restored: the flow is no longer deleted. A deleted
-        flow comes back unarchived too, so its restore is one that runs; a flow only
-        archived stays archived."""
-        self._write(
-            "UPDATE workflow_flow_states SET"
-            " archived_at = CASE WHEN deleted_at IS NULL THEN archived_at END,"
-            " archived_by = CASE WHEN deleted_at IS NULL THEN archived_by END,"
-            " deleted_at = NULL, deleted_by = NULL, deleted_commit = NULL"
-            " WHERE name = %(name)s",
-            {"name": name},
         )
 
     def newest(self, *, hidden: bool) -> list[DefinitionSummary]:

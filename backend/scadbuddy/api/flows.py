@@ -43,6 +43,7 @@ from scadbuddy.core.settings import check_approval_timeout
 from scadbuddy.flows.agent_tools import AgentToolsUnavailableError
 from scadbuddy.flows.component import Flows, FlowsDep
 from scadbuddy.flows.definitions import (
+    FlowDeletedError,
     FlowHistoryUnavailableError,
     ScriptMissingError,
     UnknownFlowError,
@@ -342,6 +343,12 @@ def _versioned() -> Iterator[None]:
         yield
     except UnknownFlowError:
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow.") from None
+    except FlowDeletedError:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "This flow was deleted. Restore one of its versions first.",
+            type_=FLOW_DELETED,
+        ) from None
     except RevisionNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such version of this flow.") from None
     except ScriptMissingError:
@@ -432,7 +439,8 @@ async def restore_flow_version(name: NamePath, commit: CommitPath, flows: FlowsD
 )
 async def archive_flow(name: NamePath, flows: FlowsDep) -> FlowState:
     """Reversible (`unarchive`). Runs already started keep running; finished runs keep
-    their script. One archived already keeps who archived it and when."""
+    their script. One archived already keeps who archived it and when. A deleted flow
+    is refused: 409 `flow-deleted`."""
     with _versioned():
         return await flows.definitions.archive(name, _started_by())
 
