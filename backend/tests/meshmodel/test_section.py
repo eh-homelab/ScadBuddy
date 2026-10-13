@@ -239,3 +239,58 @@ def test_layer_areas_are_zero_off_the_mesh() -> None:
 def test_layer_areas_of_nothing() -> None:
     empty = layer_areas(np.zeros((0, 3)), np.zeros((0, 3), dtype=np.int64), np.array([1.0]))
     assert empty.tolist() == [0.0]
+
+
+def _measured(mesh: trimesh.Trimesh, zs: np.ndarray) -> list[float]:
+    out = []
+    for z in zs:
+        section = measure(mesh, (0, 0, float(z)), (0, 0, 1))
+        out.append(0.0 if section is None else section.area)
+    return out
+
+
+def _areas(mesh: trimesh.Trimesh, zs: np.ndarray) -> np.ndarray:
+    return layer_areas(np.asarray(mesh.vertices), np.asarray(mesh.faces), zs)
+
+
+def test_layer_areas_on_a_vertex_height_take_measures_side() -> None:
+    box = trimesh.creation.box((10, 10, 10))
+    zs = np.array([-5.0, -4.0, 0.0, 4.0, 5.0])
+    assert np.allclose(_areas(box, zs), _measured(box, zs), atol=1e-9)
+    low = trimesh.creation.box((10, 10, 5))
+    low.apply_translation((0, 0, 2.5))
+    high = trimesh.creation.box((6, 6, 5))
+    high.apply_translation((0, 0, 7.5))
+    stacked = trimesh.Trimesh(
+        vertices=np.concatenate([low.vertices, high.vertices]),
+        faces=np.concatenate([low.faces, high.faces + len(low.vertices)]),
+        process=False,
+    )
+    zs = np.array([0.0, 2.5, 5.0, 7.5, 10.0])
+    assert np.allclose(_areas(stacked, zs), _measured(stacked, zs), atol=1e-9)
+
+
+def test_layer_areas_of_an_inside_out_mesh_are_zero() -> None:
+    sphere = trimesh.creation.icosphere(radius=5)
+    sphere.invert()
+    zs = np.array([-1.0, 0.0, 2.0])
+    assert _areas(sphere, zs).tolist() == [0.0, 0.0, 0.0]
+    assert _measured(sphere, zs) == [0.0, 0.0, 0.0]
+
+
+def test_layer_areas_of_an_unwelded_mesh_match_measure() -> None:
+    carrot = neck()
+    count = len(carrot.faces)
+    loose = trimesh.Trimesh(
+        vertices=carrot.triangles.reshape(-1, 3),
+        faces=np.arange(count * 3).reshape(-1, 3),
+        process=False,
+    )
+    zs = np.arange(0.1, 45.0, 1.3)
+    assert np.allclose(_areas(loose, zs), _measured(loose, zs), atol=1e-9)
+
+
+def test_layer_areas_refuse_unsorted_heights() -> None:
+    box = trimesh.creation.box((10, 10, 10))
+    with pytest.raises(ValueError, match="ascending"):
+        _areas(box, np.array([1.0, 0.0]))

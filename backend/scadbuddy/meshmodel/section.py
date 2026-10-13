@@ -218,16 +218,20 @@ def layer_areas(vertices: np.ndarray, faces: np.ndarray, zs: np.ndarray) -> np.n
     """The level section's area at each of the ascending heights ``zs`` (weak joints,
     spec 2026-10-11 §9): :func:`measure`'s Green's-theorem sum over the segments each face
     leaves on the plane, oriented the same way, but every plane at once, each face
-    visited only for the planes it crosses (``lo < z <= hi``). Measured 2026-10-13: within
+    visited only for the planes it crosses (``lo <= z < hi``, the side `measure` takes at a
+    vertex's own height; a vertex on the plane counts as below it). A section of 1e-9 mm²
+    or less is 0, as `measure`'s None is. Measured 2026-10-13: within
     5e-13 mm² of `measure` on the test carrot, and the Carrot Garden's whole profile in
     milliseconds where `measure` per layer took seconds."""
+    if np.any(np.diff(zs) < 0):
+        raise ValueError("zs must be ascending")
     areas = np.zeros(len(zs))
     if len(faces) == 0 or len(zs) == 0:
         return areas
     corners = vertices[faces]
     heights = corners[:, :, 2]
-    first = np.searchsorted(zs, heights.min(axis=1), side="right")
-    last = np.searchsorted(zs, heights.max(axis=1), side="right")
+    first = np.searchsorted(zs, heights.min(axis=1), side="left")
+    last = np.searchsorted(zs, heights.max(axis=1), side="left")
     count = np.maximum(last - first, 0)
     total = int(count.sum())
     if total == 0:
@@ -237,7 +241,7 @@ def layer_areas(vertices: np.ndarray, faces: np.ndarray, zs: np.ndarray) -> np.n
     tri = corners[face]
     side = tri[:, :, 2] - zs[plane][:, None]
     starts, ends = np.array([0, 1, 2]), np.array([1, 2, 0])
-    crossing = (side[:, starts] >= 0) != (side[:, ends] >= 0)
+    crossing = (side[:, starts] <= 0) != (side[:, ends] <= 0)
     with np.errstate(divide="ignore", invalid="ignore"):
         t = side[:, starts] / (side[:, starts] - side[:, ends])
         points = tri[:, starts] + t[:, :, None] * (tri[:, ends] - tri[:, starts])
@@ -251,4 +255,5 @@ def layer_areas(vertices: np.ndarray, faces: np.ndarray, zs: np.ndarray) -> np.n
     flip = (-d[:, 1] * normal[:, 0] + d[:, 0] * normal[:, 1]) > 0
     a, b = np.where(flip[:, None], b, a), np.where(flip[:, None], a, b)
     np.add.at(areas, plane, (a[:, 0] * b[:, 1] - b[:, 0] * a[:, 1]) / 2)
+    areas[areas <= 1e-9] = 0.0
     return areas
