@@ -13,6 +13,7 @@ import type { RiskTier } from '../src/harness/permissions.js'
 import type { Owner } from '../src/sessions/protocol.js'
 import { HTTP_READ_TOOL, HTTP_SERVER, HTTP_TOOL } from '../src/harness/httpRequest.js'
 import { FLOW_BODIES_KEPT_MS, removeTurnDir, sweepTurnDirs, turnServers } from '../src/temporal/turnServers.js'
+import { FLOW_IMAGES_FULL } from '../src/temporal/toolActivities.js'
 import {
   connectInProcess,
   TURN_TOOL_TIER_ACTIVITY,
@@ -409,6 +410,39 @@ describe('turn tools in a durable session', () => {
       expect(out.text).toContain(`[image ${name}]`)
       expect(out.text).not.toContain('view_tool_images')
       expect(JSON.stringify(out)).not.toContain('iVBORw0KGgo')
+    })
+
+    it("says an image the run did not keep, with no pointer, when its run keeps no more (#2578)", async () => {
+      const flowBlobs = { put: async () => [], get: async () => undefined }
+      const h = harness({ flowBlobs })
+      const out = await flowEnv('turn:notes__shot').run(h.call as (input: unknown) => Promise<unknown>, {})
+      expect(out).toBe(FLOW_IMAGES_FULL)
+    })
+
+    it('keeps no image from an errored call: nothing would point at it', async () => {
+      const kept: string[] = []
+      const flowBlobs = {
+        put: async (subject: string, images: readonly { name: string }[]) => {
+          kept.push(...images.map((i) => `${subject}/${i.name}`))
+          return images.map((i) => i.name)
+        },
+        get: async () => undefined,
+      }
+      const failing = () => () => {
+        const server = new McpServer({ name: 'notes', version: '1' })
+        server.registerTool('shot', { description: 'a picture that fails', inputSchema: {} }, async () => ({
+          isError: true,
+          content: [
+            { type: 'text', text: 'it broke' },
+            { type: 'image', data: 'iVBORw0KGgo=', mimeType: 'image/png' },
+          ],
+        }))
+        return server
+      }
+      const h = harness({ flowBlobs, server: failing })
+      const err = await failure(flowEnv('turn:notes__shot').run(h.call as (input: unknown) => Promise<unknown>, {}))
+      expect(err.message).toContain('it broke')
+      expect(kept).toEqual([])
     })
 
     it("tiers and runs a read call as the run's starter, with no session and no browser", async () => {

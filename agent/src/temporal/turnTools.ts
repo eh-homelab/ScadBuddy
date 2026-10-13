@@ -618,10 +618,15 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
       // the payload; their names and the text go through the same scrub.
       const content = (result.content ?? []) as { type: string; text?: string; data?: unknown; mimeType?: unknown }[]
       const flow = caller.context.flow
+      // An errored call keeps no image: nothing would point at it, yet a flow's would count
+      // toward its run's FLOW_IMAGES_MAX.
       const answer =
-        flow !== undefined
+        flow !== undefined && !result.isError
           ? await flowResult(content, deps.flowBlobs ? { subject: `flow-${flow}`, blobs: deps.flowBlobs } : undefined)
-          : await resultText(content, deps.blobs && session ? { session, blobs: deps.blobs, toolUseId } : undefined)
+          : await resultText(
+              content,
+              flow === undefined && deps.blobs && session ? { session, blobs: deps.blobs, toolUseId } : undefined,
+            )
       const text = scrub((reset ? `[${reset}]\n\n` : '') + (typeof answer === 'string' ? answer : answer.text))
       await record(result.isError ? 'error' : 'ok')
       if (result.isError) throw ApplicationFailure.nonRetryable(text, TOOL_ERROR)

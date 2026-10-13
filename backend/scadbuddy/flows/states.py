@@ -54,7 +54,8 @@ class FlowStates:
 
     def archive(self, name: str, by: dict[str, Any]) -> FlowState:
         """Archive it; one archived already keeps when and by whom. A deleted flow is left
-        as it is (#2646): the state answered says so."""
+        as it is (#2646): the caller checks the answered state's `deleted_at`
+        (`FlowDefinitions._archive` raises `FlowDeletedError`)."""
         return self._write(
             "INSERT INTO workflow_flow_states (name, archived_at, archived_by)"
             " VALUES (%(name)s, now(), %(by)s) ON CONFLICT (name) DO UPDATE SET"
