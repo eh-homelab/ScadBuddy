@@ -6,7 +6,7 @@
 # Published by .github/workflows/build-go-image.yml as ghcr.io/eh-homelab/scadbuddy-bambuddy-fs.
 #
 # Tag plus index digest, as the root Dockerfile pins its base. The golang tag is
-# go.work's `toolchain`; move them together.
+# go.work's `toolchain`; CLAUDE.md lists the five pins that move together.
 FROM --platform=$BUILDPLATFORM golang:1.25.6-bookworm@sha256:f4490d7b261d73af4543c46ac6597d7d101b6e1755bcdd8c5159fda7046b6b3e AS build
 ARG TARGETOS
 ARG TARGETARCH
