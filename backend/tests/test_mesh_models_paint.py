@@ -1,7 +1,7 @@
 """Paint transfer on the real Carrot Garden (#2146, spec 2026-10-11 §7, §10): Bambuddy
 library file 688 rendered through the production pipeline (`render_job` into the image's
 openscad, `tests/conftest.py` `render_once`) carries its painting into the 3MF. Re-measures
-meshmodel/paint.py's docstring on the pinned image; tens of seconds each."""
+meshmodel/paint.py's docstring on the pinned image."""
 
 from __future__ import annotations
 
@@ -110,6 +110,7 @@ async def test_the_anchored_carrots_painted_leaves_print_green(tmp_path: Path) -
     _, palette = source_codes(directory, scene)
     printed = printed_codes(paths.root / result.model_3mf, palette)
     # Measured 2026-10-13: exactly these 5,639 of the 6,319 painted faces.
+    assert sum(expected.values()) == 5_639
     assert not expected - printed
     assert sum(printed.values()) <= sum(1 for code in codes if code)
     assert printed["8"]  # whole-green leaf faces (extruder 2: green)
