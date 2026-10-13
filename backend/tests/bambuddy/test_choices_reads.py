@@ -15,7 +15,7 @@ import pytest
 import respx
 
 from scadbuddy.bambuddy import catalogue, choices
-from scadbuddy.bambuddy.catalogue import cached_catalogue
+from scadbuddy.bambuddy.catalogue import CatalogueStore, cached_catalogue
 from scadbuddy.bambuddy.choices import choices_for
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.filaments import gather_plate_options, read_inventory
@@ -23,6 +23,7 @@ from scadbuddy.bambuddy.print_source import PrintSource, ReadFile
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import StoredSettings
 from tests.bambuddy.conftest import BASE_URL, recording
+from tests.conftest import PgPool
 
 API = f"{BASE_URL}/api/v1"
 
@@ -125,16 +126,91 @@ async def test_the_catalogue_is_read_once_between_opens(bambuddy: BambuddyClient
 
 
 @respx.mock
-async def test_a_kept_catalogue_is_read_again_once_it_expires(
+async def test_an_expired_catalogue_is_served_while_it_is_read_again(
+    bambuddy: BambuddyClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2978: past the TTL the kept catalogue still answers, and the fresh read runs
+    behind it; the open after that read gets what it read."""
+    presets, _ = _preset_routes()
+    first = await cached_catalogue(bambuddy)
+
+    monkeypatch.setattr(catalogue, "CATALOGUE_TTL", 0.0)
+    assert await cached_catalogue(bambuddy) is first
+    await catalogue.settle_refreshes()
+
+    assert presets.call_count == 2
+    assert await cached_catalogue(bambuddy) is not first
+
+
+@respx.mock
+async def test_an_expired_catalogue_answers_without_waiting_on_bambuddy(
+    bambuddy: BambuddyClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refresh hangs until the open has answered: a stale open that waited on it
+    would time out here."""
+    presets, _ = _preset_routes()
+    first = await cached_catalogue(bambuddy)
+    answered = asyncio.Event()
+    presets.mock(side_effect=_after(answered, "slicer-presets-h2c.json"))
+
+    monkeypatch.setattr(catalogue, "CATALOGUE_TTL", 0.0)
+    kept = await asyncio.wait_for(cached_catalogue(bambuddy), 5)
+    answered.set()
+    await catalogue.settle_refreshes()
+
+    assert kept is first
+    assert presets.call_count == 2
+
+
+@respx.mock
+async def test_a_stale_catalogue_is_read_again_once_however_often_it_is_opened(
     bambuddy: BambuddyClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     presets, _ = _preset_routes()
     await cached_catalogue(bambuddy)
+    answered = asyncio.Event()
+    presets.mock(side_effect=_after(answered, "slicer-presets-h2c.json"))
 
     monkeypatch.setattr(catalogue, "CATALOGUE_TTL", 0.0)
-    await cached_catalogue(bambuddy)
+    for _ in range(3):
+        await cached_catalogue(bambuddy)
+    answered.set()
+    await catalogue.settle_refreshes()
 
     assert presets.call_count == 2
+
+
+@respx.mock
+async def test_a_catalogue_one_replica_read_is_served_to_another(
+    bambuddy: BambuddyClient, pg_pool: PgPool
+) -> None:
+    """#2978: the API runs several processes, and the reopen rarely lands on the one
+    that read the catalogue. Another process here is this one with its memory gone."""
+    presets, local = _preset_routes()
+    store = CatalogueStore(pg_pool)
+    first = await cached_catalogue(bambuddy, store)
+
+    catalogue.forget_catalogues()
+    again = await cached_catalogue(bambuddy, store)
+
+    assert again == first
+    assert presets.call_count == 1
+    assert local.call_count == 1
+
+
+async def test_the_shared_catalogue_never_stores_the_api_key(
+    bambuddy: BambuddyClient, pg_pool: PgPool
+) -> None:
+    with respx.mock:
+        _preset_routes()
+        await cached_catalogue(bambuddy, CatalogueStore(pg_pool))
+
+    with pg_pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT key, catalogue::text AS body FROM bambuddy_preset_catalogues"
+        ).fetchall()
+    assert len(rows) == 1
+    assert "s3cret" not in rows[0]["key"] + rows[0]["body"]
 
 
 @respx.mock

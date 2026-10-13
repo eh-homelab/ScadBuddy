@@ -8,7 +8,7 @@ from collections.abc import Awaitable
 
 from pydantic import BaseModel, Field
 
-from scadbuddy.bambuddy.catalogue import PresetChoice, _Catalogue, cached_catalogue
+from scadbuddy.bambuddy.catalogue import CatalogueStore, PresetChoice, _Catalogue, cached_catalogue
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.concurrent import settled
 from scadbuddy.bambuddy.extruders import default_nozzles
@@ -132,16 +132,18 @@ async def choices_for(
     remembered: ModelPrintChoices | None,
     printer_id: int | None,
     rack: RackUsage | None = None,
+    catalogues: CatalogueStore | None = None,
 ) -> ChoicesView:
     """The dialog's choices, read in two waves (#2504): ``source`` and the printers
     together, then everything that needs the chosen printer together, its status read
     once. The preset catalogue is read beside both waves, never waited on before the
-    second (#2354), and kept between opens (#2361). A failure surfaces as it did when
+    second (#2354), and kept between opens (#2361), for every replica in ``catalogues``
+    (#2978). A failure surfaces as it did when
     the reads ran one by one: the source's, then the printers', the presets' and the
     filament step's. So a library file that is gone or unprintable still answers its
     404 or 422, though the printers have been read beside it by then: a few wasted
     reads on a rare path, for not waiting on the file every time."""
-    presets = asyncio.ensure_future(cached_catalogue(client))
+    presets = asyncio.ensure_future(cached_catalogue(client, catalogues))
     try:
         return await _choices(
             client,
@@ -255,6 +257,7 @@ async def choices_for_output(
     *,
     printer_id: int | None,
     rack: RackUsage | None = None,
+    catalogues: CatalogueStore | None = None,
 ) -> ChoicesView:
     return await choices_for(
         client,
@@ -263,6 +266,7 @@ async def choices_for_output(
         remembered=settings.model_print_choices.get(meta.slug),
         printer_id=printer_id,
         rack=rack,
+        catalogues=catalogues,
     )
 
 

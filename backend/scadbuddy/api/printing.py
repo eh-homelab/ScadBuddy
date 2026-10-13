@@ -52,6 +52,7 @@ from scadbuddy.api.operations import (
     temporal_refused,
     temporal_unavailable,
 )
+from scadbuddy.bambuddy.catalogue import CatalogueStore
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.filament_ids import filament_material, filament_name
@@ -970,7 +971,14 @@ async def get_choices(
     settings = store.load()
     async with client_for(settings) as client:
         return await choices_for_output(
-            client, outputs, uploads, meta, settings, printer_id=printer_id, rack=rack
+            client,
+            outputs,
+            uploads,
+            meta,
+            settings,
+            printer_id=printer_id,
+            rack=rack,
+            catalogues=CatalogueStore(store.pool),
         )
 
 
