@@ -21,10 +21,18 @@ The process stays in the foreground and unmounts cleanly on SIGINT or SIGTERM. I
 mount is busy it logs that and exits non-zero; close what uses it and run
 `fusermount3 -u <mountpoint>`.
 
-A helper that builds from a worktree and mounts at `~/bambuddy` is `~/bin/bambuddy-mount`
-(`bambuddy-mount`, `bambuddy-mount umount`, `bambuddy-mount status`; `SCADBUDDY_REPO`,
-`BAMBUDDY_FS_API` and `BAMBUDDY_FS_DIR` override its defaults). It adds `--allow-other`
-when `/etc/fuse.conf` allows it.
+A helper that builds from the checkout it lives in and mounts at `~/bambuddy` is
+`scripts/bambuddy-mount.sh`. Run it directly, or put it on PATH with
+`ln -s "$PWD/scripts/bambuddy-mount.sh" ~/bin/bambuddy-mount`:
+
+```bash
+scripts/bambuddy-mount.sh [mount] [--ro] [--api URL] [--dir DIR] [-- extra flags]
+scripts/bambuddy-mount.sh umount
+scripts/bambuddy-mount.sh status
+```
+
+`SCADBUDDY_REPO`, `BAMBUDDY_FS_API` and `BAMBUDDY_FS_DIR` override its defaults. It adds
+`--allow-other` when `/etc/fuse.conf` allows it.
 
 ### WSL and Windows
 
@@ -108,4 +116,6 @@ replace. Truncating to 0 a file being written is allowed.
 
 Reading xattrs answers `ENODATA` and an empty list, so `ls -l` and `cp` stay quiet, and
 a change of times only is accepted and ignored. Each error is logged with the operation
-and the problem `detail`.
+and the problem `detail`. A write that answers 202 is followed through
+`GET /operations/{id}`; if it is still running when the request's timeout passes, the
+result is `EIO` and the log names the operation id.
