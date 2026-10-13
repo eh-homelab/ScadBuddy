@@ -51,7 +51,7 @@ import type { LoadedPackage, PackagesForRun } from '../plugins/packages/install.
 import { type PackageServers, withoutRemoteServers } from '../plugins/packages/mcp.js'
 import { ensureSessionDir, isUuid, sessionWorkDir } from '../harness/stateDirs.js'
 import { type ApprovalRecord, ApprovalService, type GrantCheck, type ResumeResult } from '../approvals/service.js'
-import { QuestionService } from '../questions/service.js'
+import { ATTENTION_TIMER_STOP, QuestionService } from '../questions/service.js'
 import { attentionCard, attentionSpec, BACK_REPLIES, DEFAULT_REPLIES, IM_BACK, parseAttention, timedOutText } from '../harness/attention.js'
 import { isQuestionTool, type QuestionGate } from '../harness/questions.js'
 import { SERVER_NAME } from '../tools/projections.js'
@@ -344,6 +344,15 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
  */
 export function resolveTabWaits(tabs: { onSessionTab: ((sessionId: string) => Promise<unknown>) | undefined }, sessions: SessionManager): void {
   tabs.onSessionTab = (sessionId) => sessions.questions.reconnected(sessionId)
+}
+
+/**
+ * #1206 — a stopped turn's error message. A turn an attention request's timer ended says
+ * so (the panel then shows why), still under code `interrupted`, which marks a stopped
+ * turn (#2149); any other stop (the user's Stop, a takeover) reads as an interrupt.
+ */
+function interruptedMessage(stopped: string | undefined): string {
+  return stopped?.startsWith(ATTENTION_TIMER_STOP) ? `the turn ended: ${stopped}` : 'the turn was interrupted'
 }
 
 function abortMessage(signal: AbortSignal): string {
@@ -1998,7 +2007,7 @@ export class SessionManager {
       turns = session.turns + result.num_turns
       status = 'idle'
       tail.push(event({ type: 'session.result', sessionId: id, costUsd, turns }))
-      tail.push(event({ type: 'error', sessionId: id, code: 'interrupted', message: 'the turn was interrupted' }))
+      tail.push(event({ type: 'error', sessionId: id, code: 'interrupted', message: interruptedMessage(stopped) }))
       outcome = { kind: 'interrupted' }
     } else if (result) {
       costUsd = fromTotal(result.total_cost_usd)
@@ -2037,7 +2046,7 @@ export class SessionManager {
         costUsd = session.ownCostUsd + cutUsd
         tail.push(event({ type: 'session.result', sessionId: id, costUsd, turns }))
       }
-      tail.push(event({ type: 'error', sessionId: id, code: 'interrupted', message: 'the turn was interrupted' }))
+      tail.push(event({ type: 'error', sessionId: id, code: 'interrupted', message: interruptedMessage(stopped) }))
       outcome = { kind: 'interrupted' }
     } else {
       status = 'failed'

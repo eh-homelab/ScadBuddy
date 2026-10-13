@@ -183,7 +183,11 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     expect(row).toEqual({ outcome: 'timed_out' })
     const log = await events(m, session.id)
     expect(log.find((e) => e.type === 'question.resolved')).toMatchObject({ id, answered: false, reason: expect.stringMatching(/on_timeout: stop/) })
-    expect(log.find((e) => e.type === 'error')).toMatchObject({ code: 'interrupted' })
+    // #1206 — still a stopped turn to the panel, saying the timer ended it, not the user.
+    expect(log.find((e) => e.type === 'error')).toMatchObject({
+      code: 'interrupted',
+      message: expect.stringMatching(/^the turn ended: nobody replied to the attention request in 0\.3 s \(on_timeout: stop\)/),
+    })
     expect((await m.get(session.id, browser)).status).toBe('idle')
   })
 
@@ -908,8 +912,9 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     )
   })
 
-  it('refuses past the per-user rate limit without parking', async () => {
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }), approvalPollMs: 20 })
+  it('refuses past the per-user rate limit without parking, and audits the refusal (#1205)', async () => {
+    const audit = new AuditLog({ sql: db.sql })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }), approvalPollMs: 20, audit })
     const { session: other } = await m.start(browser, { origin: 'chat', title: 'earlier' })
     for (let i = 0; i < ATTENTION_RATE_LIMIT; i++) {
       await db.sql`
@@ -922,6 +927,18 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     await turn!.done
     expect(verdicts).toEqual([{ answered: false, message: expect.stringMatching(/at most 10 attention requests/) }])
     expect(await db.sql`SELECT 1 FROM ai_questions WHERE session_id = ${session.id}`).toEqual([])
+    expect(
+      await db.sql`SELECT action, surface, principal_kind, outcome, detail FROM ai_audit
+                   WHERE kind = 'question' AND session_id = ${session.id}`,
+    ).toEqual([
+      {
+        action: 'rate_limited',
+        surface: 'system',
+        principal_kind: 'system',
+        outcome: 'refused',
+        detail: expect.stringMatching(/attention request \(tab_disconnected\): The user was not asked: at most 10/),
+      },
+    ])
   })
 
   it('holds the rate limit across sessions raising at once: one parks, the other is refused', async () => {

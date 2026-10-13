@@ -92,6 +92,14 @@ export const PENDING_CAP = 500
  * post one, so a turn that timed out often must still be able to.
  */
 export const ATTENTION_RATE_LIMIT = 10
+
+/**
+ * #1206 — how the reason a `stop` or `wait` timer ends its turn with begins, so the
+ * turn's error says why (sessions/manager.ts `interruptedMessage`) rather than reading
+ * as the user's Stop.
+ */
+export const ATTENTION_TIMER_STOP = 'nobody replied to the attention request'
+
 export const ATTENTION_RATE_WINDOW_S = 600
 /**
  * #1344: browser_* calls' tab waits (sessions/manager.ts waitForTab) across the
@@ -966,7 +974,27 @@ export class QuestionService {
           finishedAt: new Date(),
         })),
       )
-      if (asked.limited !== undefined) return { answered: false, message: asked.limited }
+      if (asked.limited !== undefined) {
+        // #1205 — a refused request leaves a trail, as a timed-out or superseded one
+        // does, so a looping agent shows in the audit log.
+        await this.audited([
+          {
+            kind: 'question',
+            action: 'rate_limited',
+            surface: 'system',
+            actor: SYSTEM_ACTOR,
+            sessionId,
+            turnId,
+            toolUseId: request.toolUseId,
+            tier: 'read',
+            outcome: 'refused',
+            detail: safeDetail(`${request.tool} attention request (${attention?.reason ?? 'question'}): ${asked.limited}`),
+            startedAt,
+            finishedAt: new Date(),
+          },
+        ])
+        return { answered: false, message: asked.limited }
+      }
       if (!asked.asked) {
         return { answered: false, message: 'The question was not asked: the session is no longer the user’s, or its turn ended.' }
       }
@@ -1047,7 +1075,7 @@ export class QuestionService {
         if (attention.onTimeout === 'proceed') return { answered: false, timedOut: true, message: resolved.reason ?? 'timed out' }
         // `wait` waited to its ceiling and then does what `stop` does: end the
         // turn, as an interrupt would. Never an answer, never an approval.
-        const why = `nobody replied to the attention request in ${attention.timeoutS} s (on_timeout: ${attention.onTimeout})`
+        const why = `${ATTENTION_TIMER_STOP} in ${attention.timeoutS} s (on_timeout: ${attention.onTimeout})`
         context.stopTurn?.(why)
         return { answered: false, message: `The user did not reply: ${why}. Your turn ends here.` }
       }
