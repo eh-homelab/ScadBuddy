@@ -56,6 +56,23 @@ describe('flow inputs (#2483)', () => {
     })
   })
 
+  it('sends a string or array emptied over its default as empty, not the default (#2662)', () => {
+    const schema = {
+      type: 'object',
+      properties: {
+        note: { type: 'string', default: 'hello' },
+        tags: { type: 'array', items: { type: 'string' }, default: ['a'] },
+        copies: { type: 'integer', default: 2 },
+        colour: { type: 'string', enum: ['red', 'blue'], default: 'red' },
+        label: { type: 'string' },
+      },
+    }
+    const fields = inputFields(schema)
+    const values = { note: '', tags: '', copies: '', colour: '', label: '' }
+    // A number has no empty value, and an enum's blank is no choice: both take the default.
+    expect(toInputs(fields, values)).toEqual({ inputs: { note: '', tags: [] }, errors: {} })
+  })
+
   it('names each field that does not parse or is missing', () => {
     const fields = inputFields(SCHEMA)
     const values = { ...initialValues(fields), copies: '2.5', scale: 'big', plates: 'x' }

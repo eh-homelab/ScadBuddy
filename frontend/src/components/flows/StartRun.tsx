@@ -188,7 +188,7 @@ function InputsDialog({
     <Dialog
       open
       title={`Start ${name}`}
-      description="This flow takes inputs. Each starts at its default."
+      description="This flow takes inputs. Each starts at its default; text you clear is sent empty, and a number left blank takes its default."
       onClose={onClose}
       footer={
         <>
