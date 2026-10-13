@@ -5,6 +5,7 @@
 **Goal:** Every agent session runs the classic TypeScript turn, as an activity of a TypeScript `AgentSession` workflow. The activity lands on the replica that keeps the session's Claude Code process warm, so there is one tool and permission layer and no second mode. `agent-durable/` is retired.
 
 **Architecture:**
+- Session affinity follows Go Worker Sessions, built on worker-specific queues (spec §5.2).
 - `runTurn`'s assembly becomes `TurnRunner`. A per-replica `WarmSessions` cache keeps one streaming-input `query()` per session, reused only while a fingerprint, the transcript tail and the remaining budget match.
 - `AgentSession` (workflow id `session-<id>`, queue `agent-sessions`) schedules `session_turn` on its home queue `agent-tools.<hostname>` and falls back to `agent-tools`.
 - Parks go through the workflow (Update `open_input`, `ai_pending_input`). The activity holds a park for up to `park_hold_seconds`, then releases it. The next activity runs the approved call once and resumes.
@@ -23,7 +24,7 @@
 - **Workflow changes.** `AgentSession` changes after Phase 5 merges go behind `patched()`, and `agent/test/fixtures/agent_session_histories/` replays. `AgentOperation` is unchanged.
 - **Migrations.** An agent migration is a NEW file, `agent/src/db/migrations/$(date -u +%Y%m%dT%H%MZ)_<slug>.sql`. Never edit a merged one.
 - **Workflow ids.** They stay `session-<uuid>`. The workflow type is `AgentSession` on queue `agent-sessions`. `DurableSession` on `agent` is never served by the TypeScript worker.
-- **Defaults:** `park_hold_seconds` 300, `warm_idle_seconds` 600, `warm_max_per_replica` 4, `session_turn` heartbeat timeout 20 s with a heartbeat every 5 s, start-to-close 2 h, 3 attempts, home schedule-to-start 5 s. These are pending D2/D3/D5 and change only if the user rules otherwise.
+- **Defaults:** `park_hold_seconds` 300, `warm_idle_seconds` 600, `warm_max_per_replica` 4, `session_turn` heartbeat timeout 20 s with a heartbeat every 5 s, start-to-close 2 h, home schedule-to-start 5 s, 1 activity attempt and 3 recovery cycles. These are pending D2/D3/D5 and change only if the user rules otherwise.
 - **Commits** end with:
   ```
   Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
@@ -526,22 +527,55 @@ CREATE TABLE ai_plugin_sessions (
 - [ ] **Step 4: Run them.** Expected: PASS.
 - [ ] **Step 5: Commit** with `feat(agent): the AgentSession workflow`.
 
-### Task 5.2: `session_turn` and placement
+### Task 5.2: Session affinity (`acquire_worker`, `session_turn`, `release_worker`)
+
+Spec §5.2: Go Worker Sessions, built from worker-specific task queues as
+[docs.temporal.io/guides/worker-execution-affinity](https://docs.temporal.io/guides/worker-execution-affinity) prescribes.
 
 **Files:**
-- Create: `agent/src/temporal/session/turnActivity.ts`, `agent/src/sessions/turnHost.ts`
-- Modify: `agent/src/main.ts` (register `session_turn` on the shared and host workers; `maxConcurrentActivityTaskExecutions = warm_max_per_replica + 2` on the host worker), `agent/src/temporal/session/workflow.ts` (home first, with a 5 s schedule-to-start, then the shared queue)
-- Test: `agent/test/sessionTurn.temporal.test.ts`
+- Create: `agent/src/temporal/session/turnActivity.ts`, `agent/src/temporal/session/affinity.ts` (the activities `acquire_worker` and `release_worker`), `agent/src/sessions/turnHost.ts`
+- Modify: `agent/src/sessions/warm.ts` (`reserve(sessionId): 'reserved' | 'full'`, which evicts the LRU idle slot first; `release(sessionId)`), `agent/src/main.ts` (`acquire_worker` on the shared `agent-tools` worker; `session_turn` and `release_worker` on the host worker only, with `maxConcurrentActivityTaskExecutions = warm_max_per_replica + 2`), `agent/src/temporal/session/workflow.ts` (the recovery loop)
+- Test: `agent/test/sessionAffinity.temporal.test.ts`
 
 **Interfaces:**
 - Produces:
-  - `class TurnHost { constructor(deps: {runner: TurnRunner; warm: WarmSessions; sql; events; credentials; hostQueue: string}); run(input: SessionTurnInput, heartbeat: () => void, cancelled: AbortSignal): Promise<SessionTurnResult> }`;
+  - `acquire_worker(input: { sessionId: string }): Promise<{ hostQueue: string; identity: string }>`. It throws `ApplicationFailure.retryable('NoCapacity')` only when every slot is running a turn.
+  - `release_worker(input: { sessionId: string }): Promise<void>`.
+  - `class TurnHost { constructor(deps: {runner: TurnRunner; warm: WarmSessions; sql; events; credentials; hostQueue: string}); run(input: SessionTurnInput, heartbeat: () => void, cancelled: AbortSignal): Promise<SessionTurnResult> }`.
   - `sessionTurnActivity(host: TurnHost)`, which wraps `run` with `Context.current().heartbeat()` every 5 s.
+- The workflow's recovery loop, verbatim:
 
-- [ ] **Step 1: Write the tests.** Use two workers with different `hostQueue`s and the fake Anthropic:
-  - two turns run on the same host, and the second is warm (span `warm.outcome=hit`);
-  - stop worker A → the next turn lands on B after the schedule-to-start timeout, and `home` becomes B;
-  - the session's `ai_session_events` match a classic turn's sequence for the same script (compare `type` lists).
+```ts
+const acquire = proxyActivities<Affinity>({ taskQueue: TASK_QUEUE, scheduleToCloseTimeout: '60s',
+  retry: { initialInterval: '1s', maximumInterval: '10s', maximumAttempts: 10 } })
+
+async function runTurn(input: SessionTurnInput): Promise<SessionTurnResult> {
+  let continuation = input.continuation
+  for (let cycle = 0; cycle < 3; cycle++) {
+    if (!state.home) state.home = (await acquire.acquire_worker({ sessionId: input.sessionId })).hostQueue
+    const onHome = proxyActivities<Turn>({ taskQueue: state.home, scheduleToStartTimeout: '5s',
+      heartbeatTimeout: '20s', startToCloseTimeout: '2h', retry: { maximumAttempts: 1 } })
+    try {
+      return await onHome.session_turn({ ...input, ...(continuation ? { continuation } : {}) })
+    } catch (err) {
+      if (!movesWorker(err)) throw err          // BudgetExhausted, CredentialRefused, SessionGone
+      state.home = undefined                     // the guide: never retry on the failed worker's queue
+      continuation = mergeRestarted(continuation) // keeps a parked continuation's calls
+    }
+  }
+  return { status: 'failed', hostQueue: '', error: 'the turn could not be placed on a worker' }
+}
+```
+
+  `movesWorker(err)` is true for a `TimeoutFailure` of any type, and for an `ApplicationFailure` of type `ShuttingDown` or `NoCapacity`.
+
+- [ ] **Step 1: Write the tests.** Use two host workers (A, B), the shared worker and the fake Anthropic:
+  - `the first turn acquires and later turns stay on home`: `acquire_worker` runs once for two turns, and the second is warm (span `warm.outcome=hit`).
+  - `a dead home is re-acquired after schedule-to-start`: stop A between turns. The next turn ends `done` on B within 5 s plus its run, and `acquire_worker` ran a second time.
+  - `a worker killed mid-turn resumes on another`: kill A's Claude Code during a turn. The heartbeat times out at about 20 s, the turn resumes on B with the restart message, and the tool that was in flight ran once.
+  - `release_worker frees the slot on end`: after `end`, A's `warm.size()` is 0.
+  - `a full replica evicts its LRU idle slot, never a running one`.
+  - `events match a classic turn`: the `type` lists in `ai_session_events` match `sessions.e2e.test.ts`'s for the same script.
 - [ ] **Step 2: Run them.** Expected: FAIL.
 - [ ] **Step 3: Implement.** `TurnHost.run` does the following:
   1. Claim the turn (`durable_turn_id = turnId`).
@@ -553,7 +587,7 @@ CREATE TABLE ai_plugin_sessions (
   7. Write cost and turns as `manager.ts:1944-2052` does.
   8. Return `done`.
 - [ ] **Step 4: Run them.** Expected: PASS.
-- [ ] **Step 5: Commit** with `feat(agent): session_turn runs the classic turn on the session's home replica`.
+- [ ] **Step 5: Commit** with `feat(agent): session affinity in Go Sessions' shape on worker-specific queues`.
 
 ### Task 5.3: Parks open through the workflow and are held
 
@@ -580,7 +614,7 @@ CREATE TABLE ai_plugin_sessions (
 
 - [ ] **Step 1: Write the tests**, with `park_hold_seconds=1`:
   - `a released approval resumes and runs once`: approve after the release, then exactly one backend command with key `durable:<…>`, and the model's next request contains the outcome message;
-  - `an approved released call runs once across an activity retry`: make the continuing activity throw after the tool ran on attempt 1, then attempt 2's command is answered from the backend's operation record (msw/fake backend asserts 1 effect);
+  - `an approved released call runs once across an activity retry`: make the continuing activity's worker die after the tool ran, then the next recovery cycle's command is answered from the backend's operation record (msw/fake backend asserts 1 effect);
   - `a denied released call is reported, not run`;
   - `the closed process wrote a synthetic result`: assert the transcript holds an `is_error` tool_result for the parked `tool_use_id`. This verifies spec §12's unverified item.
 - [ ] **Step 2: Run them.** Expected: FAIL.
@@ -591,10 +625,10 @@ CREATE TABLE ai_plugin_sessions (
 ### Task 5.5: Restart mid-turn
 
 **Files:**
-- Modify: `turnHost.ts` (a `restarted` continuation pushes the restart message first), `workflow.ts` (attempt > 1 → `continuation: {kind: 'restarted'}` via `activityInfo` in the result of a failed attempt; implement by catching `TimeoutFailure` heartbeat and re-scheduling with the continuation, up to 3)
+- Modify: `turnHost.ts` (a `restarted` continuation pushes the restart message first; `mergeRestarted` keeps the calls of a `parked` continuation and runs them before the restart message)
 - Test: `agent/test/sessionRestart.temporal.test.ts`
 
-- [ ] **Step 1: Write the test.** A worker running a turn whose fake model hangs is stopped hard (`worker.shutdown()` plus killing the process through the spawn seam). A second worker picks the turn up after the heartbeat timeout. The tool that was in flight ran once, the model's request contains the restart message, and the turn ends `done`.
+- [ ] **Step 1: Write the test.** A worker running a turn whose fake model hangs is stopped hard (`worker.shutdown()` plus killing the process through the spawn seam). The workflow re-acquires (Task 5.2) after the heartbeat timeout, and a second worker takes the turn. The tool that was in flight ran once, the model's request contains the restart message, and the turn ends `done`.
 - [ ] **Step 2: Run it.** Expected: FAIL.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4: Run it.** Expected: PASS.

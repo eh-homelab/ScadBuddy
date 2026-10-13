@@ -119,16 +119,47 @@ permission layer. Durability is about *where* and *when* that turn runs:
 
 ### 2.3 Temporal (`@temporalio/*` 1.24.0, `agent/package.json`)
 
-- **Sticky execution is for workflow tasks only.** It caches workflow state, and "the
-  concept of Sticky Execution is not relevant to Activity Tasks"
+- **Sticky execution cannot hold a process.** Sticky execution routes a workflow's
+  *workflow tasks* back to the worker that has its state cached, and "the concept of
+  Sticky Execution is not relevant to Activity Tasks"
   ([docs.temporal.io/sticky-execution](https://docs.temporal.io/sticky-execution)).
-- **What the user's "sticky task queue" maps to.** Temporal documents a *worker-specific
-  task queue* for activities that cache data in a process ("Route Activity Tasks to a
-  specific process", [docs.temporal.io/task-routing](https://docs.temporal.io/task-routing)).
-  ScadBuddy already uses that pattern: `agent-tools.<hostname>`
-  (`agent/src/main.ts:426`, `530-539`).
-- **Worker Sessions are not in the TypeScript SDK.** A grep of `@temporalio/worker` and
-  `@temporalio/workflow` 1.24.0 `lib/*.d.ts` for a session API finds none.
+  Workflow code also runs in the SDK's deterministic sandbox, so it cannot own a child
+  process at all.
+- **Temporal's built-in mechanism is Go's Worker Sessions.** Temporal's worker-affinity
+  guide says: "**Go SDK** has a built-in Worker Sessions API that handles Worker-specific
+  routing automatically". It also says: "Other SDKs (such as Python and TypeScript) must
+  implement the pattern manually using unique Task Queue names", and that "This pattern
+  provides the same guarantees as Go's Sessions API for non-Go SDKs"
+  ([docs.temporal.io/guides/worker-execution-affinity](https://docs.temporal.io/guides/worker-execution-affinity)).
+- **The guide's recipe** has five parts (same page):
+  - "The Workflow calls an Activity on the shared queue to discover an Available Worker's
+    unique queue name".
+  - The workflow then "routes all subsequent Activities to that Worker's unique queue".
+  - The unique queue's name comes from "UUIDs (or the hostname if running in a
+    containerized environment)".
+  - A worker crash is detected by a short heartbeat timeout (30 s in its example) and by
+    the schedule-to-start timeout: "Although otherwise seldom used, this Timeout is
+    valuable here because it enables the system to detect a Worker crash".
+  - To recover, "the Workflow catches the timeout error and can route to a different
+    Worker (on a new unique task queue)". The workflow "doesn't retry on the failed
+    Worker's queue".
+- **The pattern page agrees.** "The `scheduleToStartTimeout` … is critical". That timeout
+  "is non-retryable: when it expires, the Activity fails rather than retrying", and the
+  workflow should "retry the entire sequence on a different host"
+  ([docs.temporal.io/design-patterns/worker-specific-taskqueue](https://docs.temporal.io/design-patterns/worker-specific-taskqueue)).
+- **TypeScript will not get Sessions.**
+  - [temporalio/sdk-typescript#1811](https://github.com/temporalio/sdk-typescript/issues/1811)
+    ("Sticky Sessions Support in TypeScript SDK") was closed as a duplicate on 2025-12-01.
+    The maintainer declined the contribution and pointed to the worker-specific task
+    queue pattern.
+  - A grep of `@temporalio/worker` and `@temporalio/workflow` 1.24.0 `lib/*.d.ts` finds no
+    session API.
+  - ScadBuddy already runs one unique queue per replica: `agent-tools.<hostname>`
+    (`agent/src/main.ts:426`, `530-539`).
+- **A Go worker is not worth it.** There is no Go Claude Agent SDK, so the turn itself
+  would stay in a TypeScript process: `canUseTool`, the in-process MCP servers, the hooks
+  and the tool registry. A Go worker would only add a third language and an IPC hop, to
+  buy guarantees the documented pattern already gives.
 - **Heartbeats are throttled to `heartbeatTimeout × 0.8`**
   (`@temporalio/worker/lib/worker-options.d.ts:427-435`). An activity learns that it was
   cancelled on a heartbeat round trip, so with a 20 s heartbeat timeout a cancel can take
@@ -183,8 +214,9 @@ permission layer. Durability is about *where* and *when* that turn runs:
 browser / MCP / flow ──send──▶ SessionManager.send ──update-with-start──▶ AgentSession workflow
                                                                           (session-<id>, queue agent-sessions)
                                                                                    │
-            ┌──────────── schedule session_turn on home queue ─────────────────────┘
-            ▼            (agent-tools.<hostname>, 5 s schedule-to-start; else agent-tools)
+            ┌── acquire_worker on agent-tools (first turn / after a failure) → home ┘
+            ▼   session_turn on home = agent-tools.<hostname> (5 s schedule-to-start, 20 s heartbeat;
+                on timeout: acquire again, resume from the checkpoint)
    agent replica  ──▶ TurnHost.run(turn)
                        ├─ WarmSessions: reuse the live Claude Code process if its fingerprint
                        │  and transcript tail match, else spawn with resume (SessionStore)
@@ -199,7 +231,7 @@ What changes for each session operation:
 
 | Concern | Today, classic | Today, durable | Unified |
 |---|---|---|---|
-| Who runs the turn | the replica that claimed the row (lease) | `run_claude_segment` on any `agent-durable` | the `session_turn` activity on the session's home replica |
+| Who runs the turn | the replica that claimed the row (lease) | `run_claude_segment` on any `agent-durable` | the `session_turn` activity on the replica `acquire_worker` gave the session (§5.2, Go Sessions' shape) |
 | Turn code | `runTurn` → `runHarness` (TS SDK) | the plugin's runner (Python SDK) | `TurnRunner`, the extracted classic turn |
 | Claude Code process | one per turn | one per segment | one per session, kept warm between turns |
 | Transcript | `ai_session_entries` (plaintext) | workflow state (sealed by codec) | `ai_session_entries`, sealed under the session's data key (§6.2) |
@@ -265,32 +297,61 @@ What changes for each session operation:
      - Failed after its retries: `finish_turn(failed)`.
   4. Continue-as-new.
 
-### 5.2 `session_turn` and placement
+### 5.2 Session affinity: Go Worker Sessions, built from worker-specific queues
 
-- **Placement.** The workflow schedules `session_turn(input)` on `home` when it has one,
-  with `scheduleToStartTimeout: 5s` and one attempt. On a schedule-to-start timeout it
-  schedules again on the shared `agent-tools` queue, so any replica may take it. The
-  pinned turn-tool listing does exactly this today (`session/workflow.py:407-438`).
-- **The result.** It carries the replica's own queue, and the workflow stores that as the
-  new `home`.
-- **Why `home` dies with its pod.** The queue name is `agent-tools.<os.hostname()>`, and in
-  Kubernetes the hostname is the pod name. A replaced pod therefore never inherits a dead
-  pod's queue, and a turn for a dead home always falls back after 5 s.
-- **Activity options.**
+This layer copies Go's Worker Sessions, built the way Temporal documents for SDKs that
+lack them (§2.3).
+
+| Go Sessions | `AgentSession` | Where |
+|---|---|---|
+| `workflow.CreateSession(ctx, SessionOptions{CreationTimeout, …})` | the `acquire_worker` activity on the shared queue `agent-tools`, with `scheduleToCloseTimeout: 60s` | any replica |
+| the session's worker-specific queue | `agent-tools.<hostname>`, returned by `acquire_worker` and stored as `home` | the replica that answered |
+| `MaxConcurrentSessionExecutionSize` | `warm_max_per_replica` (§5.3): `acquire_worker` refuses with `NoCapacity` (retryable) when the cache is full, so its retry lands on another replica | worker |
+| activities run under the session context | `session_turn` (and `release_worker`) scheduled on `home` | `home` |
+| the session heartbeat / `ErrSessionFailed` | `session_turn`'s `heartbeatTimeout: 20s` and `scheduleToStartTimeout: 5s`, both timeout failures the workflow catches | workflow |
+| `workflow.RecreateSession` | on a timeout: `acquire_worker` again, then `session_turn` with `continuation: restarted` (§5.5) | workflow |
+| `workflow.CompleteSession` | `release_worker` on `home`: evicts the warm entry and frees the slot. It runs on end, handoff, archive, forget, and when the workflow moves the session elsewhere | `home` |
+
+- **Acquire.** `acquire_worker({sessionId})` runs on whichever replica polls `agent-tools`.
+  It reserves a slot in that replica's `WarmSessions` and returns `{hostQueue, identity}`.
+  The reservation lapses after `warm_idle_seconds` like a warm entry. The workflow keeps
+  `home` across turns and across continue-as-new (`SessionStart.home`), so it acquires
+  only for a session's first turn and after a failure. Acquire is the session's creation,
+  not a per-turn cost.
+- **The turn.** `session_turn(input)` is scheduled on `home` with these options:
+  - `scheduleToStartTimeout: 5s`. It is non-retryable; this is how a dead home is
+    detected (§2.3).
   - `heartbeatTimeout: 20s`, with a heartbeat every 5 s while the turn runs or holds.
-  - `startToCloseTimeout: 2h`. A turn that runs longer than that is cut. Classic has no
-    wall clock today, so 2 h is new; **open decision D5.**
-  - `retry: { maximumAttempts: 3, nonRetryableErrorTypes: ['BudgetExhausted',
-    'CredentialRefused', 'SessionGone'] }`.
-- **The worker.** `session_turn` is registered on **both** the shared `agent-tools` worker
-  and the per-host worker. The host worker serves it only when the replica's warm cache
-  has room (§5.3); when it is full, the activity hands the turn back with `CacheFull`, and
-  the workflow schedules it on `agent-tools`.
-- **Ownership.** The activity *is* the turn's claim. The 60 s row lease, its renew loop
-  and the reaper retire (`manager.ts:351-354`, `1514-1530`, `2505-2538`):
+  - `startToCloseTimeout: 2h`. A turn running longer is cut. This is new, since classic
+    has no wall clock; **open decision D5.**
+  - `retry: { maximumAttempts: 1 }`. As the guide says, the workflow never retries on the
+    failed worker's queue.
+- **Recovery is a workflow loop**, at most 3 cycles per turn.
+  - **A timeout** (`ScheduleToStart`, `Heartbeat` or `StartToClose`) or a
+    `ShuttingDown`/`NoCapacity` failure means: re-acquire on the shared queue, then run
+    `session_turn` on the new home with `continuation: {kind: 'restarted'}`. That resumes
+    from the checkpoint, the sealed transcript (§5.5, §6.2).
+  - **A non-retryable application failure** (`BudgetExhausted`, `CredentialRefused`,
+    `SessionGone`) ends the turn with that outcome.
+  - **After 3 cycles** the turn ends `failed` with the last reason.
+- **The cost of a dead home.** It is detected only when the next activity is scheduled.
+  Between turns nothing runs on `home`, much as a Go session's heartbeat only matters
+  while its activities run. The first turn after a pod death therefore pays the 5 s
+  schedule-to-start before it re-acquires. Within a turn, the 20 s heartbeat detects it.
+- **Why the queue dies with its pod.** In Kubernetes the hostname is the pod's name, so a
+  replacement pod never polls a dead pod's queue. Work left on a dead queue expires by
+  its schedule-to-start; it is never picked up late by a stranger.
+- **The workers.**
+  - `acquire_worker` is registered on the shared `agent-tools` worker.
+  - `session_turn` and `release_worker` are registered on the per-host worker only.
+  - The host worker's `maxConcurrentActivityTaskExecutions` is `warm_max_per_replica + 2`:
+    the slots, plus room for releases.
+- **Ownership.** The acquired slot plus the running activity *is* the turn's claim. The
+  60 s row lease, its renew loop and the reaper retire (`manager.ts:351-354`, `1514-1530`,
+  `2505-2538`):
   - Two activities for one session cannot run at once, because the workflow schedules one
     at a time.
-  - A dead replica is noticed by the heartbeat timeout, not by a lease.
+  - A dead replica is noticed by Temporal's timeouts, not by a lease.
 
 ### 5.3 The warm process cache (`WarmSessions`)
 
@@ -457,8 +518,8 @@ never did (`questions/service.ts:34-38`).
 
 ### 5.5 A turn interrupted by a restart or deploy
 
-- **Heartbeat timeout.** The workflow retries `session_turn` on attempt 2, on the shared
-  queue, with `continuation = {kind: 'restarted'}`.
+- **Heartbeat timeout.** The workflow catches it and acquires a new worker (§5.2,
+  "Recovery"). It then runs `session_turn` there with `continuation = {kind: 'restarted'}`.
 - **Resume.**
   - The new activity resumes from `ai_session_entries`. Eager flush means entries are
     there up to the kill (E4).
@@ -466,7 +527,7 @@ never did (`questions/service.ts:34-38`).
   - The activity sends one user message: *"The agent service restarted during this turn.
     Calls that were in flight are marked as interrupted; check before repeating any of
     them. Continue the task."*
-- **Retries are bounded** by `maximumAttempts: 3`. After that the turn ends `failed`,
+- **Retries are bounded** by the recovery loop's 3 cycles. After that the turn ends `failed`,
   with the reason, as classic's `interrupted` does today.
 - **Deploy.** On SIGTERM the worker stops polling. A running turn gets up to 12 s
   (`stopTurns` `graceMs`, `main.ts:691-695`), and is then closed with `q.close()`, which
@@ -617,15 +678,18 @@ All of these are classic's, because the turn is classic's:
 
 ### 6.10 Scaling
 
-- **Three replicas, three warm caches.** A session's turns go to its home while that
-  replica lives and has room. Otherwise they go to any replica, which becomes the new
-  home.
+- **Three replicas, three warm caches.** A session's turns go to its home for as long as
+  that replica lives. Only a failure re-acquires, and the acquire lands on any replica
+  with a free slot, which becomes the new home.
 - **One replica per session.** The workflow schedules one activity at a time, and the
   transcript-tail check (§5.3) catches a process that went stale.
-- **Shared queue capacity.** The shared queue is served by every replica.
-  `maxConcurrentActivityTaskExecutions` for `session_turn` is set to
-  `warm_max_per_replica + 2`, so a replica with a full cache still takes cold turns, and
-  evicts its LRU entry to make room.
+- **Capacity.** The slot count is `warm_max_per_replica` for each replica, so 12 warm
+  sessions across 3 replicas with the defaults.
+  - When every replica is full, `acquire_worker` evicts its least-recently-used *idle*
+    slot, never one with a turn running, rather than refusing.
+  - `NoCapacity` arises only when every slot on a replica is running a turn.
+  - Idle sessions cost nothing beyond their reservation, which lapses after
+    `warm_idle_seconds`.
 
 ## 7. Exactly-once, call by call
 
@@ -640,7 +704,7 @@ a host-side run of an approved call after a release.
 | An outward call killed mid-call after approval | the same | It is not re-run. A repeat by the model is a new `tool_use_id`, so it parks again and a person sees it. |
 | An approved call after a release (§5.4, step 5) | the activity runs it once | The activity is retried only if it fails before it records the run. The backend command carries `Idempotency-Key: <request id>`, so a retried activity's second send is answered from the `operations` record, not run again. Agent-side commands use `AgentOperation` with the same key. |
 | A tool's own re-send after an answer that never arrived | the backend dedupes | Unchanged: `command()` re-sends with the same key (`agent/src/tools/command.ts`). |
-| A `turn` re-run by Temporal (attempt 2) | the turn resumes from the transcript | It is not replayed from the prompt, and calls in flight are unknown (E4). |
+| A turn re-run on a new worker (§5.2 recovery) | the turn resumes from the transcript | It is not replayed from the prompt, and calls in flight are unknown (E4). |
 
 **The change this needs.** Idempotency keys stop being `randomUUID()` per call
 (`tools/command.ts:148`, `tools/customizer.ts:209`, `tools/flows.ts:307`). They become
