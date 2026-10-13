@@ -95,6 +95,7 @@ describe('uploads take a workspace file (#2329 part 2)', () => {
   const byName = (name: string) => ALL_TOOLS.find((t) => t.name === name)!
   const UPLOADS = [
     'upload_asset',
+    'upload_library_file',
     'add_model_media',
     'set_model_thumbnail',
     'set_output_thumbnail',
@@ -114,6 +115,7 @@ describe('uploads take a workspace file (#2329 part 2)', () => {
     }
     expect(Object.fromEntries(UPLOADS.map((n) => [n, byName(n).risk]))).toEqual({
       upload_asset: 'write',
+      upload_library_file: 'write',
       add_model_media: 'write',
       set_model_thumbnail: 'write',
       set_output_thumbnail: 'write',

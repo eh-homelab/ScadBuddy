@@ -362,3 +362,86 @@ describe('deleting library files (#2167)', () => {
     expect(result).toEqual({ restored: [1], skipped: [] })
   })
 })
+
+describe('library writes for the mount (#2686)', () => {
+  it('deleting a folder is outward and sends a key', async () => {
+    let key: string | null = null
+    server.use(
+      http.post(`${BACKEND}/api/v1/print/library/folders/4/delete`, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json({ deleted: [], skipped: [], folders: [4] })
+      }),
+    )
+    expect(tool('delete_library_folder').risk).toBe('outward')
+    const result = firstText(await tool('delete_library_folder').execute({ folder_id: 4 }, ctx())) as { folders: number[] }
+    expect(key).toBeTruthy()
+    expect(result.folders).toEqual([4])
+  })
+
+  it('renames a file with only the fields given', async () => {
+    let sent: unknown
+    server.use(
+      http.patch(`${BACKEND}/api/v1/print/library/7`, async ({ request }) => {
+        sent = await request.json()
+        return HttpResponse.json({ id: 7, filename: 'b.3mf', folder_id: null })
+      }),
+    )
+    await tool('update_library_file').execute({ file_id: 7, filename: 'b.3mf' }, ctx())
+    expect(sent).toEqual({ filename: 'b.3mf' })
+  })
+
+  it('makes a folder', async () => {
+    let sent: unknown
+    server.use(
+      http.post(`${BACKEND}/api/v1/print/library/folders`, async ({ request }) => {
+        sent = await request.json()
+        return HttpResponse.json({ id: 9, name: 'Parts', parent_id: 2 })
+      }),
+    )
+    await tool('create_library_folder').execute({ name: 'Parts', parent_id: 2 }, ctx())
+    expect(sent).toEqual({ name: 'Parts', parent_id: 2 })
+  })
+
+  it('renames and moves a folder with only the fields given', async () => {
+    let sent: unknown
+    server.use(
+      http.patch(`${BACKEND}/api/v1/print/library/folders/9`, async ({ request }) => {
+        sent = await request.json()
+        return HttpResponse.json({ id: 9, name: 'Bits', parent_id: null })
+      }),
+    )
+    await tool('update_library_folder').execute({ folder_id: 9, name: 'Bits' }, ctx())
+    expect(sent).toEqual({ name: 'Bits' })
+  })
+
+  it('uploads a file as the multipart file with its folder', async () => {
+    let form: FormData | undefined
+    let key: string | null = null
+    server.use(
+      http.post(`${BACKEND}/api/v1/print/library/files`, async ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        form = await request.formData()
+        return HttpResponse.json({ id: 11, filename: 'cube.3mf', folder_id: 3 }, { status: 201 })
+      }),
+    )
+    const bytes = Buffer.from('PK-not-really')
+    const result = firstText(
+      await tool('upload_library_file').execute(
+        { folder_id: 3, filename: 'cube.3mf', content_base64: bytes.toString('base64') },
+        ctx(),
+      ),
+    ) as { id: number }
+    expect(result.id).toBe(11)
+    expect(key).toBeTruthy()
+    expect(form!.get('folder_id')).toBe('3')
+    const file = form!.get('file') as File
+    expect(file.name).toBe('cube.3mf')
+    expect(Buffer.from(await file.arrayBuffer()).equals(bytes)).toBe(true)
+  })
+
+  it('every one asks for Manage Library', () => {
+    for (const name of ['upload_library_file', 'update_library_file', 'create_library_folder', 'update_library_folder', 'delete_library_folder']) {
+      expect(tool(name).bambuddyScope).toEqual(['Manage Library'])
+    }
+  })
+})

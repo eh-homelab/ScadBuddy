@@ -371,6 +371,21 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
     }),
   restore_library_files: (_input, result) =>
     ids(field(result, 'restored')).map((id) => ({ type: 'bambuddy_file' as const, id, action: 'created' as const })),
+  // #2686: an upload makes a file, an update changes one. A folder delete records the files it
+  // deleted (as delete_library_files does); the folders themselves are no recorded resource.
+  upload_library_file: (_input, result) => {
+    const id = bambuddyId(field(result, 'id'))
+    return id ? [{ type: 'bambuddy_file', id, action: 'created' }] : []
+  },
+  update_library_file: (input, result) => {
+    const id = bambuddyId(field(result, 'id')) ?? bambuddyId(input.file_id)
+    return id ? [{ type: 'bambuddy_file', id, action: 'modified' }] : []
+  },
+  delete_library_folder: (_input, result) =>
+    (Array.isArray(field(result, 'deleted')) ? (field(result, 'deleted') as unknown[]) : []).flatMap((file) => {
+      const id = bambuddyId(field(file, 'id'))
+      return id ? [{ type: 'bambuddy_file' as const, id, action: 'deleted' as const }] : []
+    }),
   remember_model_print_choices: (input) => {
     const slug = str(input.slug)
     const file = bambuddyId(input.library_file_id)
@@ -457,6 +472,9 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'sessions_deny',
   'browser_pair',
   'confirm_action',
+  // #2686: a library folder is no recorded resource kind.
+  'create_library_folder',
+  'update_library_folder',
   // A re-pin's dry run (#1914): the pin and the history stay as they were. The candidate's
   // checkout is a cache on the volume, swept at boot when nothing pins it.
   'check_library_candidate',

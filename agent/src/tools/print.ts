@@ -7,6 +7,7 @@ import { ok } from './call.js'
 import { outputId, slug } from './common.js'
 import { defineTool, image, json, type Tool, type ToolContext, ToolError, toolErrorText } from './registry.js'
 import { page, PAGED, pageInput } from './pagination.js'
+import { binarySource, fromWorkspace, uploadInit, uploadName, withSent, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 
 // Bambuddy (issue #251, spec D8): ScadBuddy's own tools over its backend's
 // Bambuddy client, so the API key stays server-side and the backend's
@@ -444,6 +445,145 @@ export const printTools: Tool[] = [
       json(
         await command(ctx, 'restore library files', (headers) =>
           ctx.backend.POST('/api/v1/print/library/restore', { body: { file_ids }, headers }),
+        ),
+      ),
+  }),
+
+  // #2686: the writes the Bambuddy filesystem mount makes.
+  defineTool({
+    name: 'upload_library_file',
+    description:
+      "Upload a file into Bambuddy's library, at the top level or in `folder_id`. The library name is `filename`; " +
+      "with `workspace_path` it defaults to the workspace file's own name. Returns the file's id, name and folder." +
+      fromWorkspace('`content_base64`'),
+    input: z.object({
+      folder_id: z.number().int().positive().optional().describe('A folder id from list_library; omitted is the top level'),
+      filename: z.string().min(1).optional().describe('e.g. "cube.3mf"'),
+      content_base64: z.string().min(1).optional().describe("The file's bytes as base64"),
+      workspace_path: workspacePathInput.optional(),
+      workspace_sha256: workspaceShaInput.optional(),
+    }),
+    risk: 'write',
+    bambuddyScope: ['Manage Library'],
+    routes: ['POST /api/v1/print/library/files'],
+    title: ({ filename, workspace_path }) => `Upload ${filename ?? workspace_path ?? 'file'} to Bambuddy's library`,
+    handler: async ({ folder_id, filename, content_base64, workspace_path, workspace_sha256 }, ctx) => {
+      const source = await binarySource(ctx, {
+        upload: 'upload_library_file',
+        base64: content_base64,
+        base64Name: 'content_base64',
+        path: workspace_path,
+        sha256: workspace_sha256,
+      })
+      const name = filename ?? ('info' in source ? uploadName(source.info.path) : undefined)
+      if (name === undefined) throw new ToolError('give `filename` with `content_base64`')
+      const answer = await command(ctx, `upload ${name}`, (headers) =>
+        ctx.backend.POST('/api/v1/print/library/files', {
+          body: { file: name, folder_id: folder_id ?? null },
+          ...uploadInit(
+            ctx,
+            source,
+            { name: 'file', filename: name, type: 'application/octet-stream' },
+            headers,
+            folder_id === undefined ? {} : { folder_id: String(folder_id) },
+          ),
+        }),
+      )
+      return json(withSent(answer, 'info' in source ? source.info : undefined))
+    },
+  }),
+
+  defineTool({
+    name: 'update_library_file',
+    description:
+      "Rename a file in Bambuddy's library or move it to another folder (ids from list_library). Give " +
+      '`filename`, `folder_id` or both; `folder_id` 0 moves it to the top level.',
+    input: z.object({
+      file_id: libraryFileId,
+      filename: z.string().min(1).optional(),
+      folder_id: z.number().int().min(0).optional().describe('0 is the top level'),
+    }),
+    risk: 'write',
+    bambuddyScope: ['Manage Library'],
+    routes: ['PATCH /api/v1/print/library/{file_id}'],
+    title: ({ file_id }) => `Update library file ${file_id}`,
+    handler: async ({ file_id, filename, folder_id }, ctx) =>
+      json(
+        await command(ctx, `update library file ${file_id}`, (headers) =>
+          ctx.backend.PATCH('/api/v1/print/library/{file_id}', {
+            params: { path: { file_id } },
+            body: { filename, folder_id },
+            headers,
+          }),
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'create_library_folder',
+    description: "Make a folder in Bambuddy's library, at the top level or inside `parent_id`.",
+    input: z.object({
+      name: z.string().min(1),
+      parent_id: z.number().int().positive().optional().describe('A folder id from list_library; omitted is the top level'),
+    }),
+    risk: 'write',
+    bambuddyScope: ['Manage Library'],
+    routes: ['POST /api/v1/print/library/folders'],
+    title: ({ name }) => `Create library folder "${name}"`,
+    handler: async ({ name, parent_id }, ctx) =>
+      json(
+        await command(ctx, `create library folder ${name}`, (headers) =>
+          ctx.backend.POST('/api/v1/print/library/folders', { body: { name, parent_id }, headers }),
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'update_library_folder',
+    description:
+      "Rename a folder in Bambuddy's library or move it under another folder. Give `name`, `parent_id` or both; " +
+      '`parent_id` 0 moves it to the top level.',
+    input: z.object({
+      folder_id: z.number().int().positive(),
+      name: z.string().min(1).optional(),
+      parent_id: z.number().int().min(0).optional().describe('0 is the top level'),
+    }),
+    risk: 'write',
+    bambuddyScope: ['Manage Library'],
+    routes: ['PATCH /api/v1/print/library/folders/{folder_id}'],
+    title: ({ folder_id }) => `Update library folder ${folder_id}`,
+    handler: async ({ folder_id, name, parent_id }, ctx) =>
+      json(
+        await command(ctx, `update library folder ${folder_id}`, (headers) =>
+          ctx.backend.PATCH('/api/v1/print/library/folders/{folder_id}', {
+            params: { path: { folder_id } },
+            body: { name, parent_id },
+            headers,
+          }),
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'delete_library_folder',
+    description:
+      "Delete a folder from Bambuddy's library along with its files and subfolders. Managed files go to " +
+      "Bambuddy's trash (restore_library_files undoes that); a file linked from an external folder " +
+      '(`is_external`) is deleted for good. Refused, before anything is deleted, if a print waiting in ' +
+      "Bambuddy's queue names a file. A file that could not be deleted is listed in `skipped`, and its " +
+      'folder and that folder\'s parents stay.',
+    input: z.object({ folder_id: z.number().int().positive() }),
+    risk: 'outward',
+    bambuddyScope: ['Manage Library'],
+    routes: ['POST /api/v1/print/library/folders/{folder_id}/delete'],
+    summarize: ({ folder_id }) => `Delete library folder ${folder_id} and everything in it`,
+    handler: async ({ folder_id }, ctx) =>
+      json(
+        await command(ctx, `delete library folder ${folder_id}`, (headers) =>
+          ctx.backend.POST('/api/v1/print/library/folders/{folder_id}/delete', {
+            params: { path: { folder_id } },
+            headers,
+          }),
         ),
       ),
   }),
