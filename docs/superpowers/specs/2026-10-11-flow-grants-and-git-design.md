@@ -249,10 +249,17 @@ A call outside the grant does not go straight to the person:
 - **Parents never approve.** At every hop but the person's, the only actions are:
   - **deny**: the call does not run; the reason reaches the caller where the plugin
     allows (§4.2);
-  - **narrow**: replace the call's input with another input *for the same tool* that the
-    run grant admits. The narrowed call is matched by `flow_grant_check` like any call:
-    inside, it runs as approved by the grant (responder `run_grant`, with
-    `narrowed_by` recorded); outside, it goes up with the narrowed input as the proposal;
+  - **narrow**: replace the call's input with a *smaller* input for the same call
+    (`flows/narrowing.py`, a closed vocabulary like the grant's bounds: a print may drop
+    copies it named or all plates, an arrange objects or copies of one; every other
+    field stays as it was, so a different printer or source is a substitution and is
+    refused; an agent tool's call is never narrowed). Only a parent whose owner holds
+    `outward` now may narrow. The narrowed call is matched by `flow_grant_check` like any
+    call: inside, it runs as approved by the grant (responder `run_grant`, with
+    `narrowed_by` recorded); outside, it goes up with the narrowed input as the
+    proposal, written once per call with its input hash. The person sees it beside the
+    call (`GET /workflow-runs/{id}/proposals/{call}`, browser only) and approves it by
+    that hash, so a proposal replaced after it was shown is refused (409);
   - **pass up**: the call moves to the next hop unchanged.
 - **Never wider.** Every way a call runs without the person is a grant match, and the
   grant is the person's. A parent can make a call smaller or stop it; it can never make
@@ -653,8 +660,11 @@ sees or what is safe, and are listed in the PR for the user.
    `on_outside` (default `"escalate"`) parameters, and no script breaks** (§4.3).
    Amended by #2636: this ruling first made both required, because the harness rendered
    no defaults; the harness pin past c0f148f9 keeps them.
-10. **"Narrow" means "replace with an input the grant admits"** (§4.1). Whether the
-    replacement is semantically smaller is not checked; the grant is the bound.
+10. **"Narrow" means "replace with a smaller input of the same call that the grant
+    admits"** (§4.1; amended by #2482's security review, which found that "any input the
+    grant admits" let a parent substitute a call and have a person approve the
+    substitute as a narrowing). Smaller is checked against the parked call in a closed
+    vocabulary, and a tool call is never narrowed.
 11. **(user) A parent hop that times out passes up; with a run timeout of 0 the parent hop
     still ends after `approval_expiry_seconds`** (§4.6).
 12. **Hops are Postgres state, outside the workflows** (§4.6), so no workflow changes

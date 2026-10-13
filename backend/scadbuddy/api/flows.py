@@ -82,7 +82,7 @@ from scadbuddy.flows.store import GrantStateError
 from scadbuddy.flows.typecheck import MAX_SCRIPT_BYTES, ScriptProblem, check_script
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.workflows.commands import COMMAND_ANSWER_DEADLINE
-from scadbuddy.workflows.flow_grants import FlowGrants
+from scadbuddy.workflows.flow_grants import FlowGrants, parked_call
 from scadbuddy.workflows.flow_models import HopRecord
 from scadbuddy.workflows.flow_routes import api_client
 from scadbuddy.workflows.payload_codec import SubjectForgottenError
@@ -763,6 +763,24 @@ class DecideBody(BaseModel):
     #: Approve the starting session's narrowing of the call as it proposed it (#2482),
     #: rather than the call as it was parked.
     proposal: bool = False
+    #: With `proposal`: the `proposal_hash` of the proposal the person was shown
+    #: (`GET .../proposals/{call_id}`). Any other, or none, is refused: the person
+    #: approves what they saw, never a proposal replaced since.
+    proposal_hash: str | None = Field(default=None, max_length=128)
+
+
+class ProposalView(BaseModel):
+    """A parent's proposal beside the call it narrows, for the person to compare
+    (#2482). Only the person reads it; approving it names `proposal_hash`."""
+
+    call_id: str
+    fn: str
+    tool: str | None = None
+    #: The call's arguments as it is parked, and as the starting session narrowed them.
+    original: dict[str, Any]
+    proposed: dict[str, Any]
+    proposal_hash: str
+    proposed_by: str
 
 
 class EscalateBody(BaseModel):
@@ -875,6 +893,39 @@ async def decide_flow_run(
         idempotency_key=idempotency_key,
     )
     return operation_answer(result, Decided)
+
+
+@router.get(
+    "/workflow-runs/{run_id}/proposals/{call_id}",
+    response_model=ProposalView,
+    summary="Compare a parent's proposal with the call it narrows",
+)
+async def get_flow_run_proposal(
+    run_id: str, call_id: Annotated[str, Path(min_length=1, max_length=64)], flows: FlowsDep
+) -> ProposalView:
+    """Browser only: the proposal is the person's to judge, so no agent reads it. The
+    original is read from the run's parked call, never from anything stored with the
+    proposal."""
+    _browser_only("Only a person reads a proposal it may approve.")
+    run = await flows.store.get_run(run_id)
+    if run is None or flows.client is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, "No such proposal.")
+    held = await flows.store.get_proposal(f"flow:{run.id}:{run.workflow_run_id}:{call_id}")
+    if held is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, "No such proposal.")
+    for parked in await AgentClient(flows.client, run.workflow_id).get_pending_approvals():
+        if parked.tool_id == call_id and (call := parked_call(parked.tool_name, parked.tool_input)):
+            fn, tool, original = call
+            return ProposalView(
+                call_id=call_id,
+                fn=fn,
+                tool=tool,
+                original=original,
+                proposed=held.args,
+                proposal_hash=held.input_hash,
+                proposed_by=held.proposed_by,
+            )
+    raise ApiError(status.HTTP_404_NOT_FOUND, "That call is no longer waiting.")
 
 
 @router.post(

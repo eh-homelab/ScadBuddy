@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hmac
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -66,7 +67,8 @@ from scadbuddy.core.secrets import open_bytes, seal_bytes
 from scadbuddy.flows.approval_hash import input_hash
 from scadbuddy.flows.grants import Inside, Outside, Verdict, match_grant
 from scadbuddy.flows.history import outward_since
-from scadbuddy.flows.models import TERMINAL, Decision, Run
+from scadbuddy.flows.models import TERMINAL, Decision, Proposal, Run
+from scadbuddy.flows.narrowing import narrowing_problem
 from scadbuddy.flows.store import (
     FlowStore,
     HopMovedError,
@@ -92,6 +94,9 @@ FLOW_ESCALATE = "flow_escalate"
 NOT_PARENT = "https://scadbuddy.dev/problems/flow-escalation-not-parent"
 WITH_PERSON = "https://scadbuddy.dev/problems/flow-escalation-with-person"
 NO_PROPOSAL = "https://scadbuddy.dev/problems/flow-escalation-no-proposal"
+PROPOSAL_CHANGED = "https://scadbuddy.dev/problems/flow-escalation-proposal-changed"
+NOT_NARROWER = "https://scadbuddy.dev/problems/flow-escalation-not-a-narrowing"
+PARENT_TIER = "https://scadbuddy.dev/problems/flow-escalation-parent-tier"
 RESET_POINT = "https://scadbuddy.dev/problems/flow-reset-point"
 RESET_CHANGED = "https://scadbuddy.dev/problems/flow-reset-changed"
 RESET_UNRECORDED = "https://scadbuddy.dev/problems/flow-reset-unrecorded"
@@ -147,6 +152,21 @@ def _not_parent() -> ApiError:
         status.HTTP_403_FORBIDDEN,
         "Only the session that started the run acts on its calls before the person does.",
         type_=NOT_PARENT,
+    )
+
+
+def _proposal_changed() -> ApiError:
+    return ApiError(
+        status.HTTP_409_CONFLICT,
+        "That proposal is not the one you were shown, or it no longer fits the call. Reload it.",
+        type_=PROPOSAL_CHANGED,
+    )
+
+
+def _unavailable_key() -> ApiError:
+    return ApiError(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        "Narrowing needs ScadBuddy's secret key file (SCADBUDDY_SECRET_KEY_FILE).",
     )
 
 
@@ -342,18 +362,10 @@ def flow_kinds(
 
     async def check_decide(request: dict[str, Any]) -> dict[str, Any]:
         checked = await check("approval", request)
-        # The person approves a parent's narrowing as it was proposed (#2482): the
-        # proposal is the server's record, never the request's.
-        if (
-            request.get("proposal")
-            and request.get("approved")
-            and await store.get_proposal(str(checked["request_id"])) is None
-        ):
-            raise ApiError(
-                status.HTTP_409_CONFLICT,
-                "That call carries no proposal to approve.",
-                type_=NO_PROPOSAL,
-            )
+        if request.get("proposal") and request.get("approved"):
+            # The person approves a parent's narrowing (#2482): the server's record of
+            # it, and only the very one the person was shown (its hash).
+            await proposed(checked, request)
         return checked
 
     async def run_decide(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
@@ -365,9 +377,9 @@ def flow_kinds(
         if approved and request.get("proposal"):
             # Bound to the narrowed input, which the gated body runs only when it
             # hashes to this (`flow_decision`).
-            fn, tool, args, by = await proposed(checked, decision.call_id)
-            decision.response = {**response, "args": args, "narrowed_by": by}
-            decision.input_hash = hash_of(fn, tool, args)
+            held = await proposed(checked, request)
+            decision.response = {**response, "args": held.args, "narrowed_by": held.proposed_by}
+            decision.input_hash = held.input_hash
         elif approved and await store.get_decision(decision.request_id) is None:
             # Bound to the call as it waits now, which is what the person was shown; a
             # resend keeps the hash its first attempt recorded.
@@ -419,10 +431,10 @@ def flow_kinds(
                 return call
         raise _stale()
 
-    async def proposed(
-        checked: dict[str, Any], call_id: str
-    ) -> tuple[str, str | None, dict[str, Any], str]:
-        """The parent's proposal for the call, with the call's function and tool."""
+    async def proposed(checked: dict[str, Any], request: dict[str, Any]) -> Proposal:
+        """The parent's proposal for the call, exactly as the person was shown it: its
+        hash is the one the request names, its arguments still hash to it, and they are
+        still a narrowing of the call as it is parked. Anything else is a 409."""
         held = await store.get_proposal(str(checked["request_id"]))
         if held is None:
             raise ApiError(
@@ -430,8 +442,32 @@ def flow_kinds(
                 "That call carries no proposal to approve.",
                 type_=NO_PROPOSAL,
             )
-        fn, tool, _ = await parked_of(checked, call_id)
-        return fn, tool, held[0], held[1]
+        fn, tool, parked = await parked_of(checked, str(request["call_id"]))
+        shown = request.get("proposal_hash")
+        if (
+            not isinstance(shown, str)
+            or not hmac.compare_digest(shown, held.input_hash)
+            or hash_of(fn, tool, held.args) != held.input_hash
+            or narrowing_problem(fn, parked, held.args) is not None
+        ):
+            raise _proposal_changed()
+        return held
+
+    def narrowed_of(fn: str, parked: dict[str, Any], given: dict[str, Any]) -> dict[str, Any]:
+        """The parked call with the parent's input (a print's or arrange's request), when
+        that is a narrowing of it; a 422 otherwise (#2482)."""
+        narrowed = (
+            given
+            if fn == "tool"
+            else {**{k: v for k, v in parked.items() if k == "source"}, "request": given}
+        )
+        if (problem := narrowing_problem(fn, parked, narrowed)) is not None:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"That is not a narrowing of the call: {problem}.",
+                type_=NOT_NARROWER,
+            )
+        return narrowed
 
     async def check_escalate(request: dict[str, Any]) -> dict[str, Any]:
         """Spec 2026-10-11 §4.2: the caller is the run's starter session, read from the
@@ -453,6 +489,20 @@ def flow_kinds(
             or by.get("principal") != principal
         ):
             raise _not_parent()
+        # The session is still the starter's (no handoff since), and acts with its
+        # owner's tiers as they are now (spec §4.4, §5).
+        tiers = await store.parent_tiers(session, principal)
+        if tiers is None:
+            raise _not_parent()
+        if request.get("action") == "narrow" and "outward" not in tiers:
+            # A narrowing may run the call with no person: never past what the parent
+            # itself may do (every gated call is outward).
+            raise ApiError(
+                status.HTTP_403_FORBIDDEN,
+                "The starting session's owner does not hold the outward tier now, so it"
+                " cannot narrow an outward call; it may deny it or pass it up.",
+                type_=PARENT_TIER,
+            )
         if await store.get_decision(request_id(run, str(request["call_id"]))) is not None:
             raise _resolved()
         checked = await check("approval", request)
@@ -505,16 +555,10 @@ def flow_kinds(
         if not isinstance(given, dict):
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "A narrowing names its input.")
         fn, tool, parked = await parked_of(checked, call_id)
-        if fn == "tool":
-            narrowed: dict[str, Any] = given
-        elif "source" in given or "request" in given:
-            # The input is the call's request; its source stays the parked call's own.
-            raise ApiError(
-                status.HTTP_422_UNPROCESSABLE_CONTENT,
-                f"A narrowed {fn} names its request only; its source is the call's own.",
-            )
-        else:
-            narrowed = {**{k: v for k, v in parked.items() if k == "source"}, "request": given}
+        narrowed = narrowed_of(fn, parked, given)
+        if hash_key is None:
+            # No approval key: nothing can be bound, so nothing is narrowed.
+            raise _unavailable_key()
         verdict: Verdict = Outside(reason="no approval key")
         client = None if api is None else api()
         try:
@@ -535,6 +579,10 @@ def flow_kinds(
             if client is not None:
                 await client.aclose()
         now = datetime.now(UTC)
+        if isinstance(verdict, Inside) and verdict.input_hash != hash_of(fn, tool, verdict.args):
+            # The request id's earlier use (the call's own check, before its grant
+            # lapsed) answered for other input: never approved under that hash.
+            verdict = Outside(reason="the grant answered for the call's own input")
         if isinstance(verdict, Inside):
             decision = Decision(
                 request_id=str(checked["request_id"]),
@@ -559,7 +607,10 @@ def flow_kinds(
         record = HopRecord(
             hop="parent", action="narrow", actor=actor, at=now, reason=verdict.reason
         )
-        if await store.move_hop(run_id, call_id, record, proposal=narrowed) is None:
+        proposal = Proposal(
+            args=narrowed, input_hash=str(hash_of(fn, tool, narrowed)), proposed_by=actor
+        )
+        if await store.move_hop(run_id, call_id, record, proposal=proposal) is None:
             raise _with_person()
         return {**answer, "outcome": "with_person"}
 

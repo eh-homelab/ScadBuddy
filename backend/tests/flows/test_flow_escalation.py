@@ -26,7 +26,7 @@ from scadbuddy.workflows.flow_grants import FlowGrants
 from scadbuddy.workflows.flow_models import DecisionAsk, DecisionRead
 from tests.flows import test_agent_host_functions as host
 from tests.flows.fake_api import PLAN, FakeApi, Outward
-from tests.flows.flows_support import HASH_KEY, Keys, script
+from tests.flows.flows_support import HASH_KEY, Keys, parent_session, script
 from tests.flows.test_agent_host_functions import DURABLE, Sessions
 from tests.flows.test_grant_children import Child
 from tests.flows.test_grant_gate import api_client_of
@@ -35,8 +35,17 @@ pytestmark = [pytest.mark.requires_temporal, pytest.mark.requires_postgres]
 
 sessions = host.sessions
 
-STARTER = {"kind": "agent", "principal": "token:p1", "session": "s1"}
+PARENT_SESSION = "5e551011-0000-4000-8000-000000000001"
+STARTER = {
+    "kind": "agent",
+    "principal": "token:0f0e0d0c-0b0a-4908-8706-050403020100",
+    "session": PARENT_SESSION,
+}
+ACTOR = f"session:{PARENT_SESSION}"
 PRINT = f"o = await queue_print({{'output_id': 'o1'}}, {PLAN!r})"
+#: Five copies named: outside a grant of two prints, and narrowable down to it.
+FIVE = {**PLAN, "copies": 5}
+PRINT_FIVE = f"o = await queue_print({{'output_id': 'o1'}}, {FIVE!r})"
 
 
 def grant(*rules: dict[str, Any], **fields: Any) -> GrantSpec:
@@ -55,6 +64,8 @@ class Escalations:
     """The `flow_escalate` operation, as the backend's route runs it for the parent."""
 
     def __init__(self, outward: Outward, api: FakeApi) -> None:
+        with outward.store._pool.connection() as conn:
+            parent_session(conn, PARENT_SESSION, STARTER["principal"])
         kinds = flow_kinds(outward.store, Keys(), HASH_KEY, api=lambda: api_client_of(api))
         self.kind = next(k for k in kinds if k.name == FLOW_ESCALATE)
         self.env = ActivityEnvironment(client=outward.client)
@@ -124,28 +135,28 @@ async def test_with_no_run_timeout_the_parent_hop_still_ends_and_nothing_denies(
 async def test_a_parent_narrows_a_print_into_the_grant_and_it_runs_narrowed(
     outward: Outward, api: FakeApi, escalations: Escalations
 ) -> None:
-    api.quantity = 1
+    api.printer_id = 3
     run_id = await outward.run(
-        script(PRINT, "return [o['status'], o['narrowed_by']]"),
-        grant=grant({"fn": "queue_print", "printers": [3], "max_prints": 2}),
+        script(PRINT_FIVE, "return [o['status'], o['narrowed_by']]"),
+        grant=grant({"fn": "queue_print", "max_prints": 2}),
         started_by=STARTER,
     )
-    # Printer 4 is not in the grant: it goes to the starter session.
-    api.printer_id = 4
+    # Five prints is past the grant's two: it goes to the starter session.
     parked = await waiting(outward, run_id, "parent")
     call_id = parked.waiting_on[0].call_id
-    narrowed = {**PLAN, "printer_id": 3, "copies": 2}
+    narrowed = {**PLAN, "copies": 2}
     answer = await escalations(run_id, call_id, "narrow", input=narrowed)
     assert answer["outcome"] == "approved"
     run = await outward.finished(run_id)
-    assert run.result == "result: ['succeeded', 'session:s1']", run.result
+    assert run.result == f"result: ['succeeded', {ACTOR!r}]", run.result
     [(body, _)] = api.to("/api/v1/print/outputs/o1/run")
     assert (body["printer_id"], body["copies"]) == (3, 2)
     decision = await outward.store.get_decision(request_id(run, call_id))
     assert decision is not None and decision.responder.startswith("grant:")
-    sent = {"source": {"output_id": "o1"}, "request": narrowed}
+    # As checked: the configured printer pinned in, and the hash over that.
+    sent = {"source": {"output_id": "o1"}, "request": {**narrowed, "printer_id": 3}}
     assert decision.input_hash == input_hash(HASH_KEY, "queue_print", sent)
-    assert decision.response == {"args": sent, "narrowed_by": "session:s1"}
+    assert decision.response == {"args": sent, "narrowed_by": ACTOR}
     assert [h.action for h in decision.hops] == ["parked", "narrow"]
     [use] = await outward.store.grant_uses(run_id)
     assert use.prints == 2
@@ -155,38 +166,51 @@ async def test_a_narrow_the_grant_does_not_admit_goes_to_the_person(
     outward: Outward, api: FakeApi, escalations: Escalations
 ) -> None:
     run_id = await outward.run(
-        script(PRINT, "return o['status']"),
-        grant=grant({"fn": "queue_print", "printers": [3]}),
+        script(PRINT_FIVE, "return o['status']"),
+        grant=grant({"fn": "queue_print", "max_prints": 2}),
         started_by=STARTER,
     )
-    api.printer_id = 4
     parked = await waiting(outward, run_id, "parent")
     call_id = parked.waiting_on[0].call_id
-    answer = await escalations(run_id, call_id, "narrow", input={**PLAN, "printer_id": 5})
+    answer = await escalations(run_id, call_id, "narrow", input={**PLAN, "copies": 3})
     assert answer["outcome"] == "with_person"
     moved = await waiting(outward, run_id, "person")
     [entry] = moved.waiting_on
-    assert entry.proposed and entry.hops[-1].reason == "printer not in the grant"
+    assert entry.proposed and entry.hops[-1].reason == "print limit reached"
     assert api.sent == []
     assert await outward.store.grant_uses(run_id) == []
 
 
-async def test_a_parent_cannot_narrow_into_another_source(
-    outward: Outward, api: FakeApi, escalations: Escalations
+@pytest.mark.parametrize(
+    "given",
+    [
+        {"source": {"output_id": "o2"}, "request": FIVE},
+        {**FIVE, "printer_id": 3},
+        {**PLAN, "copies": 6},
+        {**PLAN, "copies": 2, "all_plates": True},
+        PLAN,
+    ],
+)
+async def test_a_parent_cannot_widen_or_substitute_a_print(
+    outward: Outward, api: FakeApi, escalations: Escalations, given: dict[str, Any]
 ) -> None:
-    """The narrowed input replaces the request; the source is the parked call's own."""
-    api.printer_id = 4
+    """A narrowing keeps the call: its source, its printer, its every choice; it may only
+    lower what the call named. Refused before the grant is asked, so nothing is used."""
+    api.printer_id = 3
     run_id = await outward.run(
-        script(PRINT, "return o['status']"),
-        grant=grant({"fn": "queue_print", "printers": [3]}),
+        script(PRINT_FIVE, "return o['status']"),
+        grant=grant({"fn": "queue_print", "max_prints": 2}),
         started_by=STARTER,
     )
     parked = await waiting(outward, run_id, "parent")
     call_id = parked.waiting_on[0].call_id
-    with pytest.raises(ApiError):
-        await escalations(
-            run_id, call_id, "narrow", input={"source": {"output_id": "o2"}, "request": PLAN}
-        )
+    with pytest.raises(ApiError) as err:
+        await escalations(run_id, call_id, "narrow", input=given)
+    assert err.value.status == 422
+    assert await outward.store.grant_uses(run_id) == []
+    still = await outward.store.get_run(run_id)
+    assert still is not None and [w.hop for w in still.waiting_on] == ["parent"]
+    assert api.sent == []
 
 
 class Tools:
@@ -219,9 +243,11 @@ async def tools(outward: Outward) -> AsyncIterator[tuple[Tools, str]]:
         yield served, queue
 
 
-async def test_a_narrowed_tool_call_runs_its_narrowed_input_and_says_so(
+async def test_a_tool_call_is_never_narrowed(
     outward: Outward, escalations: Escalations, tools: tuple[Tools, str]
 ) -> None:
+    """An agent tool's arguments mean nothing ScadBuddy could judge smaller: its parent
+    denies it or passes it up."""
     served, queue = tools
     rule = {"fn": "tool", "tool": "send_to_bambuddy", "args": [{"path": "/printer_id", "in": [3]}]}
     run_id = await outward.run(
@@ -232,14 +258,11 @@ async def test_a_narrowed_tool_call_runs_its_narrowed_input_and_says_so(
     )
     parked = await waiting(outward, run_id, "parent")
     call_id = parked.waiting_on[0].call_id
-    narrowed = {"output_id": "o1", "printer_id": 3}
-    assert (await escalations(run_id, call_id, "narrow", input=narrowed))["outcome"] == "approved"
-    run = await outward.finished(run_id)
-    assert served.calls == [narrowed]
-    assert run.result == "result: 'Ran narrowed by session:s1.\\nsent'", run.result
-    decision = await outward.store.get_decision(request_id(run, call_id))
-    assert decision is not None
-    assert decision.input_hash == input_hash(HASH_KEY, "send_to_bambuddy", narrowed)
+    with pytest.raises(ApiError) as err:
+        await escalations(run_id, call_id, "narrow", input={"output_id": "o1", "printer_id": 3})
+    assert err.value.status == 422
+    assert served.calls == []
+    assert await outward.store.grant_uses(run_id) == []
 
 
 async def test_a_narrowed_decision_whose_input_does_not_match_its_hash_runs_nothing(

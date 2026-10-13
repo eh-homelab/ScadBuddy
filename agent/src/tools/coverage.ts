@@ -39,6 +39,12 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'from the one the call runs in, never from a tool argument; no tool calls the backend route itself.',
   },
   {
+    operation: 'GET /api/v1/workflow-runs/{run_id}/proposals/{call_id}',
+    reason:
+      "A parent's narrowing beside the call it narrows, for the person to compare before approving it by " +
+      'its hash (#2482); browser only, the route refuses an agent-authored request.',
+  },
+  {
     operation: 'DELETE /api/v1/workflow-runs/{run_id}',
     reason:
       "Forgets a flow run: its payload key, workflow and row (#1057). A person's decision on the Workflows " +

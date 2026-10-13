@@ -16,6 +16,7 @@ import uuid
 from collections.abc import Callable, Coroutine
 from datetime import datetime, timedelta
 from typing import Any
+from urllib.parse import unquote
 
 import psycopg
 from psycopg import Connection
@@ -32,6 +33,7 @@ from scadbuddy.flows.models import (
     TERMINAL,
     BackfillRow,
     Decision,
+    Proposal,
     Run,
     StoredDefinition,
 )
@@ -98,6 +100,8 @@ class HopMovedError(Exception):
 
 #: `approval_expiry_seconds` (the agent's Settings → Assistant) when it is not set.
 DEFAULT_APPROVAL_EXPIRY_S = 600
+#: The agent's tiers, lowest first (agent `auth/principal.ts` `TIERS`).
+TIERS = ("read", "write", "outward")
 APPROVAL_EXPIRY_SETTING = "approval_expiry_seconds"
 
 
@@ -314,16 +318,24 @@ class FlowStore:
         call_id: str,
         record: HopRecord,
         *,
-        proposal: dict[str, Any] | None = None,
+        proposal: Proposal | None = None,
     ) -> FlowWaiting | None:
         """Move a parked approval from hop `parent` to `person`, recording `record` on
-        it, and keep a narrowed `proposal` beside it: under the run's row lock, so it
-        happens once. None when the call is not waiting at hop `parent`."""
+        it, and keep a narrowed `proposal` beside it, written once per call: under the
+        run's row lock, so it happens once. None when the call is not waiting at hop
+        `parent`."""
         return await asyncio.to_thread(self._move_hop, run_id, call_id, record, proposal)
 
-    async def get_proposal(self, request_id: str) -> tuple[dict[str, Any], str] | None:
-        """A parent's narrowed input for the call, and who proposed it."""
+    async def get_proposal(self, request_id: str) -> Proposal | None:
+        """A parent's narrowed input for the call, its hash, and who proposed it."""
         return await asyncio.to_thread(self._get_proposal, request_id)
+
+    async def parent_tiers(self, session: str, principal: str) -> list[str] | None:
+        """The tiers the starter session acts with now (#2482, spec §4.4): its owner's,
+        as the agent runs an escalation turn (`auth/principal.ts` `harnessPrincipal`,
+        a token's live tier). None when the session is gone or no longer the run
+        starter's (a handoff): it is no parent then."""
+        return await asyncio.to_thread(self._parent_tiers, session, principal)
 
     async def approval_expiry_s(self) -> int:
         """How long a parent hop lasts when the run never times out (spec §4.6): the
@@ -688,7 +700,7 @@ class FlowStore:
         run_id: str,
         call_id: str,
         record: HopRecord,
-        proposal: dict[str, Any] | None,
+        proposal: Proposal | None,
     ) -> FlowWaiting | None:
         with self._pool.connection() as conn, conn.transaction():
             row = conn.execute(
@@ -719,17 +731,18 @@ class FlowStore:
             waiting = [*run.waiting_on]
             waiting[index] = moved
             if proposal is not None:
+                # Once per call: what a person was shown is never replaced under them.
                 conn.execute(
                     "INSERT INTO workflow_run_proposals (request_id, run_id, call_id, args,"
-                    " proposed_by) VALUES (%s, %s, %s, %s, %s)"
-                    " ON CONFLICT (request_id) DO UPDATE SET args = EXCLUDED.args,"
-                    " proposed_by = EXCLUDED.proposed_by, created_at = now()",
+                    " input_hash, proposed_by) VALUES (%s, %s, %s, %s, %s, %s)"
+                    " ON CONFLICT (request_id) DO NOTHING",
                     (
                         f"flow:{run.id}:{run.workflow_run_id}:{call_id}",
                         run.id,
                         call_id,
-                        Jsonb(proposal),
-                        record.actor,
+                        Jsonb(proposal.args),
+                        proposal.input_hash,
+                        proposal.proposed_by,
                     ),
                 )
             updated = conn.execute(
@@ -741,13 +754,40 @@ class FlowStore:
             self._announce(conn, Run.model_validate(updated))
         return moved
 
-    def _get_proposal(self, request_id: str) -> tuple[dict[str, Any], str] | None:
+    def _get_proposal(self, request_id: str) -> Proposal | None:
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT args, proposed_by FROM workflow_run_proposals WHERE request_id = %s",
+                "SELECT args, input_hash, proposed_by FROM workflow_run_proposals"
+                " WHERE request_id = %s",
                 (request_id,),
             ).fetchone()
-        return None if row is None else (row["args"], row["proposed_by"])
+        return None if row is None else Proposal.model_validate(row)
+
+    def _parent_tiers(self, session: str, principal: str) -> list[str] | None:
+        with self._pool.connection() as conn:
+            try:
+                owner = conn.execute(
+                    "SELECT owner_kind, owner_id FROM ai_sessions WHERE id::text = %s",
+                    (session,),
+                ).fetchone()
+                if owner is None or owner["owner_id"] != unquote(principal):
+                    return None
+                if owner["owner_kind"] == "browser":
+                    return list(TIERS)
+                token = str(owner["owner_id"])
+                if owner["owner_kind"] != "bearer" or not token.startswith("token:"):
+                    return ["read"]
+                held = conn.execute(
+                    "SELECT tier FROM ai_mcp_tokens WHERE id::text = %s AND revoked_at IS NULL"
+                    " AND (expires_at IS NULL OR expires_at > now())",
+                    (token.removeprefix("token:"),),
+                ).fetchone()
+            except psycopg.errors.UndefinedTable:
+                # No agent service has migrated this database: no session is anyone's.
+                return None
+        if held is None or held["tier"] not in TIERS:
+            return []
+        return list(TIERS[: TIERS.index(held["tier"]) + 1])
 
     def _approval_expiry_s(self) -> int:
         with self._pool.connection() as conn:
