@@ -155,7 +155,9 @@ export function textLength(value: string): number {
 export function colourHex(value: string): string | null {
   const trimmed = value.trim()
   if (HEX.test(trimmed)) return normalizeHex(trimmed)
-  return CSS_COLOURS[trimmed.toLowerCase()] ?? null
+  const name = trimmed.toLowerCase()
+  // Own keys only: "constructor" or "__proto__" must not read Object.prototype.
+  return Object.hasOwn(CSS_COLOURS, name) ? (CSS_COLOURS[name] ?? null) : null
 }
 
 /**

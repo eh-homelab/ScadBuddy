@@ -231,6 +231,10 @@ describe('rangeProblem (#921)', () => {
     expect(colourHex('red')).toBe('#FF0000')
     expect(colourHex('#abc')).toBe('#AABBCC')
     expect(colourHex('#RREEDD')).toBeNull()
+    for (const inherited of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
+      expect(colourHex(inherited)).toBeNull()
+      expect(rangeProblem(colour, inherited)).not.toBeNull()
+    }
   })
 
   it('finds the first out-of-range value in a schema', () => {
