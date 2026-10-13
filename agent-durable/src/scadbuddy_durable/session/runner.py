@@ -238,7 +238,7 @@ def declares_remote_servers(root: str) -> bool:
                 maps.append(read(entry, True))
             else:
                 maps.append(entry)
-    except (OSError, ValueError):
+    except OSError, ValueError:
         return True
     for m in maps:
         servers = (
@@ -529,7 +529,7 @@ class ScadBuddyRunner:
             path = os.path.join(self._package_root, package.dir)
             try:
                 matches = hash_tree(path) == package.content_hash
-            except (OSError, PackageContentError):
+            except OSError, PackageContentError:
                 matches = False
             if not matches:
                 logger.warning(
