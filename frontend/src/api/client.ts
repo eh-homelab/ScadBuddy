@@ -25,6 +25,7 @@ import type {
   ModelSetting,
   PrinterCameraSetting,
   ImageSettings,
+  MemorySettings,
   WorkspaceFile,
   WorkspaceFileList,
   WorkspaceSettings,
@@ -1821,6 +1822,15 @@ export const api = {
     request<ImageSettings>('/ai/settings/images', {
       method: 'PUT',
       body: JSON.stringify({ long_edge: longEdge }),
+    }),
+
+  /** The automatic Hindsight recall query's cap, in characters, served by the agent service. */
+  getMemorySettings: () => request<MemorySettings>('/ai/settings/memory'),
+
+  putMemorySettings: (recallMaxQueryChars: number) =>
+    request<MemorySettings>('/ai/settings/memory', {
+      method: 'PUT',
+      body: JSON.stringify({ recall_max_query_chars: recallMaxQueryChars }),
     }),
 
   /** #2329 — the caps on the assistant's workspace (bytes), served by the agent service. */

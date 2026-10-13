@@ -396,6 +396,18 @@ export interface ImageSettings {
 }
 
 /**
+ * The longest automatic Hindsight recall query, in characters (`GET/PUT
+ * /api/v1/ai/settings/memory`, agent `src/routes/memorySettings.ts`): the Claude Code
+ * Hindsight plugin's `recallMaxQueryChars`. `0` sends the whole query; `default` and `max`
+ * come from the agent, and the PUT sends `recall_max_query_chars` only.
+ */
+export interface MemorySettings {
+  recall_max_query_chars: number
+  default: number
+  max: number
+}
+
+/**
  * #2329 — the caps on the assistant's workspace, in bytes (agent
  * `routes/workspaceSettings.ts`), with the bounds the form may save.
  */
