@@ -37,6 +37,9 @@ if TYPE_CHECKING:
 Name = Annotated[str, StringConstraints(min_length=1, max_length=255, pattern=r"^[^/\x00]+$")]
 
 
+ADDED_AFTER_CHECK = "added to the folder after the delete was checked; the folder was kept"
+
+
 class LibraryFileUpdate(BaseModel):
     filename: Name | None = None
     #: ``0`` moves the file to the top level.
@@ -165,9 +168,23 @@ def library_write_kinds(state: Core) -> list[OperationKind]:
                 folders=[],
             )
             kept: set[int] = set()
+            checked_ids = {entry["id"] for entry in files}
             for node in checked["tree"]:
                 if skipped.intersection(node["files"]) or kept.intersection(node["children"]):
                     kept.add(node["id"])
+                    continue
+                # Bambuddy's folder delete may take whatever the folder holds, so a file
+                # that arrived after the check keeps the folder (and its ancestors).
+                left = await client.library_files(node["id"])
+                if left:
+                    kept.add(node["id"])
+                    result.skipped.extend(
+                        SkippedLibraryFile(
+                            id=row.id, filename=row.filename, reason=ADDED_AFTER_CHECK
+                        )
+                        for row in left
+                        if row.id not in checked_ids
+                    )
                     continue
                 await client.delete_folder(node["id"])
                 result.folders.append(node["id"])
