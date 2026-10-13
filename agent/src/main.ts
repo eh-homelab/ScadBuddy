@@ -590,7 +590,7 @@ const temporalWorker =
           ...flowSessionActivities({ sql: temporal.sql, flows: new PgFlowRuns(temporal.sql) }),
           ...operationActivities(commandKinds, operationStore),
           ...(backgroundTasks && sessions
-            ? backgroundActivities({ store: backgroundTasks.store, send: managerSender(sessions), tz: agentTimezone(), paths })
+            ? backgroundActivities({ store: backgroundTasks.store, send: managerSender(sessions), tz: agentTimezone(), paths, secrets: toolServices.secrets })
             : {}),
         },
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
@@ -614,7 +614,7 @@ const hostWorker =
           // A classic session's Monitor commands, in its directory on this replica.
           ...(backgroundTasks && sessions
             ? {
-                bg_monitor_command: backgroundActivities({ store: backgroundTasks.store, send: managerSender(sessions), tz: agentTimezone(), paths })
+                bg_monitor_command: backgroundActivities({ store: backgroundTasks.store, send: managerSender(sessions), tz: agentTimezone(), paths, secrets: toolServices.secrets })
                   .bg_monitor_command,
               }
             : {}),

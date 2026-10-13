@@ -36,8 +36,10 @@ EVENTS_SIGNAL = "bg_events"
 _ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TZ", "TERM")
 
 
-def workflow_id(task_id: str) -> str:
-    return f"bgtask-{task_id}"
+def workflow_id(session_id: str, task_id: str) -> str:
+    """agent/src/background/service.ts ``backgroundWorkflowId``: it names the session,
+    whose key the codec seals the task's payloads under."""
+    return f"bgtask-{session_id}-{task_id}"
 
 
 def event_notice(task_id: str, description: str, text: str) -> str:
@@ -96,12 +98,14 @@ class MonitorActivities:
     async def _task(self, task_id: str) -> dict[str, Any] | None:
         async with self._connect() as conn:
             cur = await conn.execute(
-                "SELECT description, spec, state FROM ai_background_tasks WHERE id = %s", (task_id,)
+                "SELECT description, spec, state, session_id FROM ai_background_tasks "
+                "WHERE id = %s",
+                (task_id,),
             )
             row = await cur.fetchone()
         if row is None or row[2] != "active":
             return None
-        return {"description": row[0], "spec": row[1]}
+        return {"description": row[0], "spec": row[1], "session_id": str(row[3])}
 
     async def _append(self, task_id: str, text: str) -> bool:
         async with self._connect() as conn:
@@ -136,7 +140,7 @@ class MonitorActivities:
         )
         events = 0
         too_many = False
-        handle = activity.client().get_workflow_handle(workflow_id(task_id))
+        handle = activity.client().get_workflow_handle(workflow_id(task["session_id"], task_id))
 
         async def emit(lines: list[str]) -> bool:
             nonlocal events

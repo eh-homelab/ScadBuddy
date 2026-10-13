@@ -900,7 +900,8 @@ never the service's. As Claude Code's: stdout lines within 200 ms are one event,
 the watch with its code, it expires after `timeout_ms` (default 5 minutes, at most 30),
 and more than 200 events stop it. Each event is a row of `ai_background_events`; the
 source signals the workflow, which sends the undelivered ones, as Claude Code's
-`<task-notification>` blocks inside the untrusted-data envelope every tool result gets
+`<task-notification>` blocks, redacted of every saved credential and inside the
+untrusted-data envelope every tool result gets
 (what a command prints or a socket sends is data, never the user's words), as the
 session's next message once it is idle (Claude Code
 shows them mid-turn; here they wait for the turn to end), and the watch's end last.
