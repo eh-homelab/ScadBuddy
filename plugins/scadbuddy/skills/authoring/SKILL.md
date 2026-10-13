@@ -308,7 +308,9 @@ for (i = [1 : count])
 - **Draw each object where it sits**, not at the origin: objects share the plate, and
   their spacing is what lets the toolhead clear them. On the H2C a by-object print wants
   about 49 mm between objects, and only one object taller than 47.4 mm (it prints
-  last); ScadBuddy warns, but never refuses.
+  last), the H2C machine profile's `extruder_clearance_radius` and
+  `extruder_clearance_height_to_rod` ([BambuStudio `47a13eeb`](https://github.com/bambulab/BambuStudio/blob/47a13eeb1d9af65ef2371e361c856e21d4f6ca72/resources/profiles/BBL/machine/Bambu%20Lab%20H2C%200.4%20nozzle.json#L37-L40));
+  ScadBuddy warns, but never refuses.
 - With `echo(plates = N)` as well, ScadBuddy sets both: draw object *k* of plate *p*
   when `$plate == p && $object == k`. An object may be on some plates only, but each
   must be on one.

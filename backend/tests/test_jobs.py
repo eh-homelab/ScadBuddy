@@ -1448,6 +1448,37 @@ async def test_an_object_drawn_on_no_plate_fails_naming_it(tmp_path: Path) -> No
         await _object_layout(tmp_path, {(None, None): [TRAY], (None, 1): [TRAY]}, objects=2)
 
 
+async def test_a_plate_that_draws_no_object_still_fails_as_an_empty_plate(
+    tmp_path: Path,
+) -> None:
+    """#956 review: with plates and objects both declared, a plate that draws none of
+    its objects is the empty plate it always was, named as one."""
+    with pytest.raises(OpenSCADError, match=r"plate 2 of 2 rendered no geometry.*\$plate = 2"):
+        await _object_layout(
+            tmp_path,
+            {(None, None): [TRAY, LID], (1, 1): [TRAY], (1, 2): [LID]},
+            plates=2,
+            objects=2,
+        )
+
+
+async def test_a_colour_only_one_object_draws_is_named_by_plate_and_object(
+    tmp_path: Path,
+) -> None:
+    """#956 review: the warning's short label came from str.replace, which garbled
+    "object 3 of 12" on a one-plate layout; it is built from the numbers now."""
+    drawn: dict[tuple[int | None, int | None], list[tuple[str, str, trimesh.Trimesh]]] = {
+        (None, n): [TRAY] for n in range(1, 13)
+    }
+    drawn[(None, None)] = [TRAY]
+    drawn[(None, 3)] = [TRAY, LID]
+    layout, _, _ = await _object_layout(tmp_path, drawn, objects=12)
+
+    assert layout.warnings == [
+        "object 3: #FFFFFF is not in the everything-at-once render; it gets extruder 2"
+    ]
+
+
 async def test_too_many_objects_fails_the_job(tmp_path: Path) -> None:
     with pytest.raises(OpenSCADError, match="asks for 17 objects"):
         await _object_layout(tmp_path, {(None, None): [TRAY]}, objects=jobs.MAX_OBJECTS + 1)

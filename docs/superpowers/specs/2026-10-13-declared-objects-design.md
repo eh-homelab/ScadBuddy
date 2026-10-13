@@ -24,6 +24,8 @@ for (i = [1 : count])
   object and nothing changes. At most `MAX_OBJECTS` (16) objects.
 - ScadBuddy renders object *k* with `-D $object=k`, splits it by colour and solidifies
   it as it does a plate. Its colour parts are the object's parts.
+  Each object is a render of its own, so a layout of P plates and N objects is P × N
+  renders; the pipeline's `render_solids` budget scales with that count.
 - **An object is drawn where it is**, not at the origin. Unlike plates, objects share
   a plate, and the spacing between them is what decides whether the toolhead clears
   them (§4). The `$object = 0` render, which the preview shows, is every object at once.
@@ -70,7 +72,7 @@ gantry would hit. ScadBuddy says so before the print, as a warning in the check
 The values come from Bambu Studio's machine profiles, through
 `scripts/generate_plate_profiles.py`, per printer model:
 
-| H2C (BambuStudio master, 2026-10-13) | |
+| H2C ([BambuStudio `47a13eeb`, H2C 0.4 nozzle profile](https://github.com/bambulab/BambuStudio/blob/47a13eeb1d9af65ef2371e361c856e21d4f6ca72/resources/profiles/BBL/machine/Bambu%20Lab%20H2C%200.4%20nozzle.json#L37-L40)) | |
 |---|---|
 | `extruder_clearance_radius` | 49 mm |
 | `extruder_clearance_height_to_rod` | 47.4 mm |

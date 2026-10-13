@@ -142,10 +142,18 @@ def _main_timeout() -> timedelta:
     return _openscad_timeout() + 2 * TRANSFER
 
 
-def _solids_timeout() -> timedelta:
+def _solids_timeout(pieces: int = 1) -> timedelta:
     """`render_solids`: the piece fetched (one transfer), the render's uploads brought
-    in (one transfer), the openscad runs, the piece published (one transfer)."""
-    return _openscad_timeout() + 3 * TRANSFER
+    in (one transfer), the openscad runs, the piece published (one transfer). A layout
+    renders each plate's each declared object on its own (#956), so ``pieces`` (plates
+    times objects) scales the openscad budget. A timeout is no part of the replayed
+    command, so an older history reads the same."""
+    return _openscad_timeout() * max(1, pieces) + 3 * TRANSFER
+
+
+def _pieces(main: RenderMainResult) -> int:
+    """How many plate-and-object renders the main render's layout asks for."""
+    return max(1, main.plates or 1) * max(1, main.objects or 1)
 
 
 def _prepare_timeout() -> timedelta:
@@ -173,6 +181,8 @@ def _waiter_recheck() -> timedelta:
         _retried(CACHED_TIMEOUT)
         + _retried(_prepare_timeout())
         + _retried(_main_timeout())
+        # One piece's budget: a layout of many outlasts it, and the re-check that
+        # follows is harmless (below), so the wait is not stretched for the rare one.
         + _retried(_solids_timeout())
         + _retried(FINISH_TIMEOUT)
         + SHORT
@@ -292,7 +302,7 @@ class RenderPiece:
         await workflow.execute_activity(
             "render_solids",
             args=[req, prepared, main],
-            start_to_close_timeout=_solids_timeout(),
+            start_to_close_timeout=_solids_timeout(_pieces(main)),
             heartbeat_timeout=HEARTBEAT,
             retry_policy=RETRY,
         )

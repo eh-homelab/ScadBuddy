@@ -323,13 +323,16 @@ def _empty_object(index: int, count: int) -> str:
     )
 
 
-def _piece_label(plate: int | None, plates: int, obj: int | None, objects: int) -> str:
-    """How an error names one render of a layout: its plate, its object, or both."""
+def _piece_label(
+    plate: int | None, plates: int, obj: int | None, objects: int, *, counts: bool = True
+) -> str:
+    """How an error names one render of a layout: its plate, its object, or both, with
+    each count ("plate 2 of 3") or, for a warning, without ("plate 2")."""
     names = []
     if plate is not None:
-        names.append(f"plate {plate} of {plates}")
+        names.append(f"plate {plate} of {plates}" if counts else f"plate {plate}")
     if obj is not None:
-        names.append(f"object {obj} of {objects}")
+        names.append(f"object {obj} of {objects}" if counts else f"object {obj}")
     return ", ".join(names)
 
 
@@ -439,9 +442,10 @@ async def plate_layout(
             for part in split:
                 if part.colour not in colours:
                     colours.append(part.colour)
-                    short = label.replace(f" of {count}", "").replace(f" of {objects}", "")
+                    short = _piece_label(plate_number, count, object_number, objects, counts=False)
+                    everything = "all-plates" if object_number is None else "everything-at-once"
                     warnings.append(
-                        f"{short}: {part.colour} is not in the all-plates render; "
+                        f"{short}: {part.colour} is not in the {everything} render; "
                         f"it gets extruder {len(colours)}"
                     )
             split.sort(key=lambda part: colours.index(part.colour))
