@@ -3,13 +3,24 @@ import { delay, HttpResponse, http } from 'msw'
 import { describe, expect, it } from 'vitest'
 import { server } from '../mocks/server'
 import { settings } from '../mocks/fixtures'
-import { length, loadDisplayUnit, plateSize, setDisplayUnit, useDisplayUnit } from './units'
+import { fineLength, length, loadDisplayUnit, plateSize, setDisplayUnit, useDisplayUnit } from './units'
 
 describe('length', () => {
   it('keeps one decimal in millimetres and converts to two in inches', () => {
     expect(length(95.74, 'mm')).toBe('95.7')
     expect(length(25.4, 'in')).toBe('1.00')
     expect(length(6.8, 'in')).toBe('0.27')
+  })
+})
+
+describe('fineLength', () => {
+  it('keeps a layer height or nozzle as the slicer set it, in either unit', () => {
+    expect(fineLength(0.08, 'mm')).toBe('0.08')
+    expect(fineLength(0.25, 'mm')).toBe('0.25')
+    expect(fineLength(0.4, 'mm')).toBe('0.4')
+    expect(fineLength(0.12000000001, 'mm')).toBe('0.12')
+    expect(fineLength(0.08, 'in')).toBe('0.00315')
+    expect(fineLength(0.4, 'in')).toBe('0.0157')
   })
 })
 

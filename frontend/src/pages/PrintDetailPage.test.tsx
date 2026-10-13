@@ -98,6 +98,9 @@ describe('PrintDetailPage (#311)', () => {
     expect(facts.getByText('Textured PEI Plate')).toBeInTheDocument()
     expect(facts.getByText('86')).toBeInTheDocument()
     expect(facts.getByText('230 °C')).toBeInTheDocument()
+    // Not length()'s one decimal, which showed 0.08 mm as 0.1 mm.
+    expect(facts.getByText('0.08 mm')).toBeInTheDocument()
+    expect(facts.getByText('0.4 mm')).toBeInTheDocument()
     expect(facts.getByText('3.57 m')).toBeInTheDocument()
     const slots = within(slicing).getByRole('list', { name: 'Filament by slot' })
     expect(within(slots).getAllByRole('listitem').map((slot) => slot.textContent)).toEqual([
@@ -115,6 +118,19 @@ describe('PrintDetailPage (#311)', () => {
     expect(record).toHaveTextContent('1 succeeded, 0 failed')
     await user.click(within(record).getByText('All other fields (2)'))
     expect(within(record).getByLabelText('All other fields')).toHaveTextContent('original_archive_id—')
+  })
+
+  it('rounds a time accuracy Bambuddy answers as a long float', async () => {
+    const done = prints.find((print) => print.archive_id === 35)!
+    server.use(
+      http.get('/api/v1/prints/35', () =>
+        HttpResponse.json({ ...done, record: { ...done.record!, time_accuracy_percent: 87.666666 } }),
+      ),
+    )
+    render(35)
+    const record = await section('In Bambuddy')
+    expect(record).toHaveTextContent('87.7%')
+    expect(record).not.toHaveTextContent('87.666666')
   })
 
   it('paints only a hex colour as a swatch (#1860)', async () => {

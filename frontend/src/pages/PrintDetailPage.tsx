@@ -15,7 +15,7 @@ import { USER_ONLY } from '../agent/dom'
 import { DownloadBlockedError, downloadBlob, isEmbedded, openExternal } from '../lib/embed'
 import { formatBytes, formatDuration, formatValue } from '../lib/format'
 import { useAsync } from '../lib/useAsync'
-import { length, useDisplayUnit } from '../lib/units'
+import { fineLength, useDisplayUnit } from '../lib/units'
 
 // The 3D viewer is three.js, the biggest thing in the bundle: loaded only when shown.
 const Preview = lazy(async () => ({ default: (await import('../components/Preview')).Preview }))
@@ -470,6 +470,11 @@ function amount(value: number | null | undefined, unit: string): string | null {
   return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(value)} ${unit}`
 }
 
+/** A percentage, rounded as {@link amount} rounds. */
+function percent(value: number): string {
+  return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(value)}%`
+}
+
 /** A link Bambuddy keeps, opened outside the frame; only an http(s) one is a link. */
 function LinkFact({ label, url }: { label: string; url: string | null | undefined }) {
   if (!url) return null
@@ -578,12 +583,12 @@ function SlicingSection({ slicing }: { slicing: NonNullable<PrintDetail['slicing
         <Fact label="Bed" value={slicing.bed_type} />
         <Fact
           label="Layer height"
-          value={slicing.layer_height_mm !== null ? `${length(slicing.layer_height_mm, unit)} ${unit}` : null}
+          value={slicing.layer_height_mm !== null ? `${fineLength(slicing.layer_height_mm, unit)} ${unit}` : null}
         />
         <Fact label="Layers" value={slicing.total_layers} />
         <Fact
           label="Nozzle"
-          value={slicing.nozzle_diameter_mm !== null ? `${length(slicing.nozzle_diameter_mm, unit)} ${unit}` : null}
+          value={slicing.nozzle_diameter_mm !== null ? `${fineLength(slicing.nozzle_diameter_mm, unit)} ${unit}` : null}
         />
         <Fact label="Nozzle temp" value={slicing.nozzle_temperature_c !== null ? `${slicing.nozzle_temperature_c} °C` : null} />
         <Fact label="Bed temp" value={slicing.bed_temperature_c !== null ? `${slicing.bed_temperature_c} °C` : null} />
@@ -626,7 +631,7 @@ function RecordSection({ record }: { record: NonNullable<PrintDetail['record']> 
         <Fact label="Copies" value={record.quantity > 1 ? record.quantity : null} />
         <Fact
           label="Time accuracy"
-          value={record.time_accuracy_percent !== null ? `${record.time_accuracy_percent}%` : null}
+          value={record.time_accuracy_percent !== null ? percent(record.time_accuracy_percent) : null}
         />
         <Fact label="Filament read" value={amount(record.filament_actual_grams, 'g')} />
         <Fact label="Energy" value={amount(record.energy_kwh, 'kWh')} />

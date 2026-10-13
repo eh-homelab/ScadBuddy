@@ -341,10 +341,14 @@ ScalarValue = str | int | float | bool | None
 #: Names of archive fields "other" never passes on, whatever Bambuddy adds: who made it,
 #: where it is on Bambuddy's disk or network, and anything that may be a credential.
 _PRIVATE_FIELD = re.compile(
-    r"(?:^|_)(?:path|dir|file|url|ip|host|address|token|secret|password|passwd|key|auth"
-    r"|cookie|session|user|username|email|created_by|owner|code|serial|sn)(?:_|$)",
+    r"(?:^|_)(?:path|dir|file|url|uri|ip|mac|host|address|token|secret|password|passwd"
+    r"|key|apikey|auth|credential|credentials|cookie|session|user|username|email"
+    r"|created_by|owner|code|serial|sn)(?:_|$)",
     re.IGNORECASE,
 )
+#: Names `_PRIVATE_FIELD` would hide that are known to be harmless: a currency is an ISO
+#: code, not an access code.
+_PUBLIC_FIELD = frozenset({"currency_code"})
 
 
 class PrintRecord(_Response):
@@ -405,7 +409,7 @@ def _record(archive: ArchiveDetail) -> PrintRecord:
         name: value
         for name, value in sorted((archive.model_extra or {}).items())
         if name not in _SHOWN_ELSEWHERE
-        and not _PRIVATE_FIELD.search(name)
+        and (name in _PUBLIC_FIELD or not _PRIVATE_FIELD.search(name))
         and (value is None or isinstance(value, str | int | float | bool))
     }
     return PrintRecord(

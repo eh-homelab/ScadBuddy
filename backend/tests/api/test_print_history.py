@@ -706,6 +706,11 @@ def test_the_detail_shows_everything_bambuddy_knows_of_the_print(
         access_code="12345678",
         printer_serial="0948AB",
         shipping_description="kept too",
+        currency_code="EUR",
+        webhook_uri="https://hooks.example/x",
+        cloud_apikey="k",
+        printer_mac="aa:bb:cc:dd:ee:ff",
+        mqtt_credentials="u:p",
     )
 
     body = client.get("/api/v1/prints/35").json()
@@ -735,6 +740,7 @@ def test_the_detail_shows_everything_bambuddy_knows_of_the_print(
     other = record["other"]
     assert other["brand_new_field"] == "kept"
     assert other["shipping_description"] == "kept too", "a word that merely contains one"
+    assert other["currency_code"] == "EUR", "a currency is no access code"
     assert "nested_field" not in other, "only scalars"
     assert not any(name.endswith("_path") for name in other)
     for private in (
@@ -744,6 +750,10 @@ def test_the_detail_shows_everything_bambuddy_knows_of_the_print(
         "created_by_username",
         "access_code",
         "printer_serial",
+        "webhook_uri",
+        "cloud_apikey",
+        "printer_mac",
+        "mqtt_credentials",
     ):
         assert private not in other, private
     assert "source_ip" not in json.dumps(body), "the sender's address stays in Bambuddy"
