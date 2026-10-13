@@ -3,6 +3,7 @@ import { USER_ONLY } from '../../agent/dom'
 import type { Settings, SettingSource } from '../../api/types'
 import { Button } from '../../components/ui/Button'
 import { Spinner } from '../../components/ui/Spinner'
+import { useUnfolded } from './folding'
 import {
   BYTE_UNITS,
   LOG_LEVELS,
@@ -328,13 +329,18 @@ export function Section({
   children: ReactNode
 }) {
   const headingId = `${id}-heading`
+  const bodyId = `${id}-body`
+  // #2173 — folded from its header. The Unsaved badge and the Save bar stay outside the
+  // fold, so an edit is never hidden.
+  const [open, setOpen] = useUnfolded(id)
   return (
     <section
       id={id}
+      data-foldable=""
       aria-labelledby={headingId}
       className="mt-4 scroll-mt-14 rounded-[6px] border border-line bg-surface first:mt-0"
     >
-      <div className="flex items-center gap-2 border-b border-line px-4 py-2.5">
+      <div className={`flex items-center gap-2 px-4 py-2.5 ${open ? 'border-b border-line' : ''}`}>
         <h2 id={headingId} className="text-[13px] font-medium">
           {title}
         </h2>
@@ -343,8 +349,18 @@ export function Section({
             Unsaved
           </span>
         )}
+        <button
+          type="button"
+          aria-label={title}
+          aria-expanded={open}
+          aria-controls={bodyId}
+          onClick={() => setOpen(!open)}
+          className="ml-auto rounded-[4px] px-1.5 text-muted hover:bg-surface-2 hover:text-ink"
+        >
+          <span aria-hidden="true">{open ? '▾' : '▸'}</span>
+        </button>
       </div>
-      <div className="space-y-4 p-4">
+      <div id={bodyId} hidden={!open} className="space-y-4 p-4">
         {description && <p className="text-[13px] text-muted">{description}</p>}
         {children}
       </div>

@@ -80,6 +80,30 @@ describe('RemotePluginsPanel', () => {
     expect(await within(card).findByText('Enabled')).toBeInTheDocument()
   })
 
+  it('folds the tool review to its summary, by hand and once the tiers are saved (#2172)', async () => {
+    const { user } = renderPage(<RemotePluginsPanel />)
+    const card = await screen.findByRole('listitem', { name: 'Plugin endpoint hindsight' })
+    await user.click(within(card).getByRole('button', { name: 'Test connection' }))
+    const toggle = await within(card).findByRole('button', { name: /^3 tools/ })
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    expect(within(card).getByRole('table')).toBeInTheDocument()
+
+    await user.click(toggle)
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(within(card).queryByRole('table')).toBeNull()
+    expect(within(card).getByRole('status')).toHaveTextContent('connected; 3 tools')
+
+    await user.click(toggle)
+    await user.selectOptions(within(card).getByRole('combobox', { name: 'Tier of retain' }), 'write')
+    await user.click(within(card).getByRole('button', { name: 'Save tool settings' }))
+    await waitFor(() => expect(toggle).toHaveAttribute('aria-expanded', 'false'))
+    expect(within(card).queryByRole('table')).toBeNull()
+
+    // A new test opens it again.
+    await user.click(within(card).getByRole('button', { name: 'Test connection' }))
+    await waitFor(() => expect(within(card).getByRole('button', { name: /^3 tools/ })).toHaveAttribute('aria-expanded', 'true'))
+  })
+
   it('removes an endpoint after confirming', async () => {
     const { user } = renderPage(<RemotePluginsPanel />)
     const card = await screen.findByRole('listitem', { name: 'Plugin endpoint hindsight' })

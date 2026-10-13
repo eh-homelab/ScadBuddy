@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react'
+import { useId, useState, type FormEvent } from 'react'
 import { USER_ONLY } from '../../agent/dom'
 import {
   aiPlugins,
@@ -388,6 +388,8 @@ function RemoteCard({
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [test, setTest] = useState<PluginTest | null>(null)
+  const [reviewOpen, setReviewOpen] = useState(true)
+  const reviewId = useId()
   const [confirmDelete, setConfirmDelete] = useState(false)
 
   async function act(what: string, run: () => Promise<void>) {
@@ -431,7 +433,12 @@ function RemoteCard({
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <Button
           size="sm"
-          onClick={() => void act('test', async () => setTest(await aiPlugins.testRemote(plugin.name)))}
+          onClick={() =>
+            void act('test', async () => {
+              setTest(await aiPlugins.testRemote(plugin.name))
+              setReviewOpen(true)
+            })
+          }
           disabled={busy !== null}
           aria-busy={busy === 'test'}
           {...USER_ONLY}
@@ -455,11 +462,37 @@ function RemoteCard({
       </div>
       {test && (
         <div className="mt-2">
-          <p role="status" className={`text-[12px] ${test.ok ? 'text-ok' : 'text-warn'}`}>
-            {test.detail}
-            {test.server && ` (${test.server.name} ${test.server.version})`}
-          </p>
-          {test.ok && <ToolReview plugin={plugin} test={test} onSaved={onChange} />}
+          {/* #2172 — the review folds to this line, and does once its tiers are saved. */}
+          <div className="flex flex-wrap items-center gap-2">
+            <p role="status" className={`text-[12px] ${test.ok ? 'text-ok' : 'text-warn'}`}>
+              {test.detail}
+              {test.server && ` (${test.server.name} ${test.server.version})`}
+            </p>
+            {test.ok && (
+              <button
+                type="button"
+                aria-expanded={reviewOpen}
+                aria-controls={reviewId}
+                onClick={() => setReviewOpen(!reviewOpen)}
+                className="text-[12px] text-accent underline-offset-2 hover:underline"
+              >
+                {test.tools.length === 1 ? '1 tool' : `${test.tools.length} tools`}{' '}
+                <span aria-hidden="true">{reviewOpen ? '▾' : '▸'}</span>
+              </button>
+            )}
+          </div>
+          {test.ok && (
+            <div id={reviewId} hidden={!reviewOpen}>
+              <ToolReview
+                plugin={plugin}
+                test={test}
+                onSaved={(saved) => {
+                  onChange(saved)
+                  setReviewOpen(false)
+                }}
+              />
+            </div>
+          )}
         </div>
       )}
       {error && (

@@ -815,3 +815,129 @@ describe('SettingsPage Administration (#668)', () => {
     expect(screen.getByTestId('source-temporal_ui_url')).toHaveTextContent('From SCADBUDDY_TEMPORAL_UI_URL')
   })
 })
+
+// #2173 — every section folds from its header, remembered per browser; a jump unfolds.
+// #2769 — the Assistant section lists its groups, each foldable and linked.
+describe('SettingsPage folding (#2173, #2769)', () => {
+  function stubScroll(): { scrolled: string[]; restore: () => void } {
+    const scrolled: string[] = []
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolled.push(this.id)
+    }
+    return { scrolled, restore: () => delete (Element.prototype as Partial<Element>).scrollIntoView }
+  }
+
+  function toggleOf(section: HTMLElement, name: string): HTMLElement {
+    const toggle = section.querySelector<HTMLElement>(`[aria-controls="${section.id}-body"]`)
+    if (!toggle) throw new Error(`no toggle in ${section.id}`)
+    expect(toggle).toHaveAccessibleName(name)
+    return toggle
+  }
+
+  it('folds a section, keeps its unsaved edit in sight, and remembers the fold', async () => {
+    window.localStorage.clear()
+    const { user, unmount } = renderPage(<SettingsPage />)
+    await seeded()
+    const connection = region('Connection')
+    const toggle = toggleOf(connection, 'Connection')
+    expect(toggle).toHaveAttribute('aria-expanded', 'true')
+
+    await enter(user, screen.getByLabelText('ScadBuddy’s own URL'), '/x')
+    toggle.focus()
+    await user.keyboard('{Enter}')
+    expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    expect(document.getElementById('connection-body')).not.toBeVisible()
+    // The edit is folded away, not lost or hidden: the badge and Save stay.
+    expect(screen.getByTestId('connection-unsaved')).toBeVisible()
+    expect(within(connection).getByRole('button', { name: 'Save Connection' })).toBeEnabled()
+    unmount()
+
+    renderPage(<SettingsPage />)
+    await seeded()
+    expect(toggleOf(region('Connection'), 'Connection')).toHaveAttribute('aria-expanded', 'false')
+    expect(toggleOf(region('Fonts'), 'Fonts')).toHaveAttribute('aria-expanded', 'true')
+    window.localStorage.clear()
+  })
+
+  it('still folds when the browser refuses storage', async () => {
+    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('denied')
+    })
+    try {
+      const { user } = renderPage(<SettingsPage />)
+      await seeded()
+      const toggle = toggleOf(region('Fonts'), 'Fonts')
+      await user.click(toggle)
+      expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    } finally {
+      setItem.mockRestore()
+    }
+  })
+
+  it('unfolds the section the nav jumps to', async () => {
+    window.localStorage.setItem('scadbuddy.settings.collapsed', JSON.stringify(['libraries']))
+    const { scrolled, restore } = stubScroll()
+    try {
+      const { user } = renderPage(<SettingsPage />)
+      await seeded()
+      const toggle = toggleOf(region('Libraries'), 'Libraries')
+      expect(toggle).toHaveAttribute('aria-expanded', 'false')
+      const nav = screen.getByRole('navigation', { name: 'Settings sections' })
+      await user.click(within(nav).getByRole('link', { name: 'Libraries' }))
+      expect(toggle).toHaveAttribute('aria-expanded', 'true')
+      expect(scrolled).toEqual(['libraries'])
+    } finally {
+      restore()
+      window.localStorage.clear()
+    }
+  })
+
+  it('unfolds a group and the section around it for a #link', async () => {
+    window.localStorage.setItem('scadbuddy.settings.collapsed', JSON.stringify(['assistant', 'assistant-plugins']))
+    const { scrolled, restore } = stubScroll()
+    try {
+      renderPage(<SettingsPage />, { route: '/settings#assistant-plugins' })
+      await seeded()
+      await waitFor(() => expect(scrolled).toContain('assistant-plugins'))
+      expect(toggleOf(document.getElementById('assistant')!, 'Assistant')).toHaveAttribute('aria-expanded', 'true')
+      const group = document.getElementById('assistant-plugins')!
+      expect(within(group).getByRole('button', { name: /^Assistant plugins/ })).toHaveAttribute('aria-expanded', 'true')
+    } finally {
+      restore()
+      window.localStorage.clear()
+    }
+  })
+
+  it('lists the Assistant groups, and a link unfolds the group it names', async () => {
+    window.localStorage.clear()
+    const { scrolled, restore } = stubScroll()
+    try {
+      const { user } = renderPage(<SettingsPage />)
+      await seeded()
+      const assistant = document.getElementById('assistant')!
+      const contents = await within(assistant).findByRole('navigation', { name: 'Assistant settings' })
+      await waitFor(() =>
+        expect(within(contents).getAllByRole('link').map((link) => link.textContent)).toEqual([
+          'Status and credentials',
+          'Browser, HTTP and camera tools',
+          'Model, limits and sessions',
+          'MCP access',
+          'Assistant plugins',
+          'Audit log',
+        ]),
+      )
+      const group = document.getElementById('assistant-mcp')!
+      const toggle = within(group).getByRole('button', { name: /^MCP access/ })
+      await user.click(toggle)
+      expect(toggle).toHaveAttribute('aria-expanded', 'false')
+      expect(document.getElementById('assistant-mcp-body')).not.toBeVisible()
+
+      await user.click(within(contents).getByRole('link', { name: 'MCP access' }))
+      expect(toggle).toHaveAttribute('aria-expanded', 'true')
+      expect(scrolled).toEqual(['assistant-mcp'])
+    } finally {
+      restore()
+      window.localStorage.clear()
+    }
+  })
+})

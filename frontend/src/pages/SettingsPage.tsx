@@ -40,6 +40,8 @@ import { formatBytes } from '../lib/format'
 import { useAsync } from '../lib/useAsync'
 import { setBambuddyLinks } from '../lib/bambuddyLinks'
 import { plateSize, setDisplayUnit, type DisplayUnit } from '../lib/units'
+import { GroupContents, SettingsGroup } from './settings/collapse'
+import { revealSetting } from './settings/folding'
 import { FieldRow, RuntimeInput, Section, SourceBadge } from './settings/controls'
 import {
   RUNTIME_FIELDS,
@@ -229,7 +231,7 @@ export function SettingsPage() {
   const loaded = Boolean(settings)
   useEffect(() => {
     if (!loaded || hash.length < 2) return
-    document.getElementById(sectionId(hash))?.scrollIntoView?.({ block: 'start' })
+    revealSetting(sectionId(hash))
   }, [loaded, hash])
 
   const value = (name: FieldName): string => draft[name] ?? (settings ? baseline(settings, name) : '')
@@ -631,7 +633,7 @@ export function SettingsPage() {
                 href={`#${section.id}`}
                 onClick={(event) => {
                   event.preventDefault()
-                  document.getElementById(section.id)?.scrollIntoView?.({ block: 'start', behavior: 'smooth' })
+                  revealSetting(section.id, { block: 'start', behavior: 'smooth' })
                 }}
                 className="inline-flex items-center gap-1 rounded-[6px] px-2 py-1 text-muted hover:bg-surface-2 hover:text-ink"
               >
@@ -1194,79 +1196,88 @@ export function SettingsPage() {
           </Section>
 
           <Section id="assistant" title={sectionTitle('assistant')} description="Applied at once; not part of any saved section.">
-            <AiStatusSection />
-            {/* Not behind ai.available: a missing credential is why the assistant is off (#1000). */}
-            <AiCredentialSection />
-            {/* Per browser and applied at once. Only the user may flip it: an agent must
-                not grant itself access (#254). */}
-            <div>
-              <label className="flex items-start gap-2 text-[13px]" {...USER_ONLY}>
-                <input
-                  type="checkbox"
-                  checked={webMcp}
-                  onChange={(event) => setWebMcpEnabled(event.target.checked)}
-                  className="mt-0.5"
-                  aria-describedby="webmcp-help"
-                />
-                Let this browser&rsquo;s built-in agent use ScadBuddy tools (WebMCP)
-              </label>
-              <p id="webmcp-help" className="mt-1.5 text-[12px] text-muted">
-                Off by default, as AI design spec §8.5 has an outside agent pair before it drives a tab. Even
-                when on, the print and send tool can only open the dialog; you confirm it.
-              </p>
+            {/* #2769 — the section is most of the page: its groups, listed and each foldable. */}
+            <div className="space-y-6">
+              <GroupContents label="Assistant settings" />
+              <SettingsGroup id="assistant-access" title="Status and credentials">
+                <AiStatusSection />
+                {/* Not behind ai.available: a missing credential is why the assistant is off (#1000). */}
+                <AiCredentialSection />
+              </SettingsGroup>
+              <SettingsGroup id="assistant-tools" title="Browser, HTTP and camera tools">
+                {/* Per browser and applied at once. Only the user may flip it: an agent must
+                    not grant itself access (#254). */}
+                <div>
+                  <label className="flex items-start gap-2 text-[13px]" {...USER_ONLY}>
+                    <input
+                      type="checkbox"
+                      checked={webMcp}
+                      onChange={(event) => setWebMcpEnabled(event.target.checked)}
+                      className="mt-0.5"
+                      aria-describedby="webmcp-help"
+                    />
+                    Let this browser&rsquo;s built-in agent use ScadBuddy tools (WebMCP)
+                  </label>
+                  <p id="webmcp-help" className="mt-1.5 text-[12px] text-muted">
+                    Off by default, as AI design spec §8.5 has an outside agent pair before it drives a tab. Even
+                    when on, the print and send tool can only open the dialog; you confirm it.
+                  </p>
+                </div>
+                <HttpRequestSetting />
+                {/* #1911 — the camera tool's switch; hidden without the agent's database, like the switch above. */}
+                <PrinterCameraSetting />
+              </SettingsGroup>
+              <SettingsGroup id="assistant-model" title="Model, limits and sessions">
+                {/* Saves on its own (#1917), beside the chat limits; hidden without the agent's database. */}
+                <ModelSetting />
+                {/* Saves on its own (#790); hidden without the agent's database, like the switch above. */}
+                <SessionLimitsSetting />
+                {/* Saves on its own; read live by the agent, hidden without its database. */}
+                <RenderLimitsSetting />
+                {/* Saves on its own; hidden without the agent's database, like the limits above. */}
+                <ImageSettingsSetting />
+                {/* #2329 — the workspace caps; saves on its own, hidden without the agent's database. */}
+                <WorkspaceSettingsSetting />
+                {/* Plan 5d — saves on its own; hidden without the agent's database, like the limits above. */}
+                <SessionModeSetting />
+                <DurableSubagentsSetting />
+              </SettingsGroup>
+              {/* The agent service serves these routes, so they show only where the assistant
+                  would (#251): when the agent answers /api/v1/ai/status as available
+                  (useAiAvailability). */}
+              {ai.available && (
+                <SettingsGroup id="assistant-mcp" title="MCP access">
+                  <McpAuthSection
+                    onSaved={(setting) => {
+                      setMcpAuthMode(setting.mode)
+                      mcpAuthChanged()
+                    }}
+                  />
+                  <McpTokensSection authMode={mcpAuthMode} publicUrl={settings?.public_url} />
+                  <div>
+                    <p className="text-[13px]">MCP sign-in (OIDC)</p>
+                    {/* Saved on its own: the agent service owns it, not the backend's settings. */}
+                    <McpOidcSettings />
+                  </div>
+                </SettingsGroup>
+              )}
+              {/* Each action is its own request, applied at once. */}
+              {ai.available && (
+                <SettingsGroup id="assistant-plugins" title="Assistant plugins">
+                  <p className="mt-2 text-[12px] text-muted">
+                    What the assistant can load besides ScadBuddy&rsquo;s own tools. Each change applies at once.
+                  </p>
+                  <PluginPackagesPanel />
+                  <RemotePluginsPanel />
+                  {/* Beside the plugins, where a hindsight plugin is added; saves on its own, read at each turn. */}
+                  <MemorySettingsSetting />
+                </SettingsGroup>
+              )}
+              <SettingsGroup id="assistant-audit" title="Audit log">
+                {/* Saves on its own (#258); shown only when the assistant is available. */}
+                <AiAuditSection />
+              </SettingsGroup>
             </div>
-            <HttpRequestSetting />
-            {/* #1911 — the camera tool's switch; hidden without the agent's database, like the switch above. */}
-            <PrinterCameraSetting />
-            {/* Saves on its own (#1917), beside the chat limits; hidden without the agent's database. */}
-            <ModelSetting />
-            {/* Saves on its own (#790); hidden without the agent's database, like the switch above. */}
-            <SessionLimitsSetting />
-            {/* Saves on its own; read live by the agent, hidden without its database. */}
-            <RenderLimitsSetting />
-            {/* Saves on its own; hidden without the agent's database, like the limits above. */}
-            <ImageSettingsSetting />
-            {/* #2329 — the workspace caps; saves on its own, hidden without the agent's database. */}
-            <WorkspaceSettingsSetting />
-            {/* Plan 5d — saves on its own; hidden without the agent's database, like the limits above. */}
-            <SessionModeSetting />
-            <DurableSubagentsSetting />
-            {/* The agent service serves these routes, so they show only where the assistant
-                would (#251): when the agent answers /api/v1/ai/status as available
-                (useAiAvailability). */}
-            {ai.available && (
-              <>
-                <McpAuthSection
-                  onSaved={(setting) => {
-                    setMcpAuthMode(setting.mode)
-                    mcpAuthChanged()
-                  }}
-                />
-                <McpTokensSection authMode={mcpAuthMode} publicUrl={settings?.public_url} />
-              </>
-            )}
-            {ai.available && (
-              <div>
-                <p className="text-[13px]">MCP sign-in (OIDC)</p>
-                {/* Saved on its own: the agent service owns it, not the backend's settings. */}
-                <McpOidcSettings />
-              </div>
-            )}
-            {/* Each action is its own request, applied at once. */}
-            {ai.available && (
-              <div>
-                <p className="text-[13px]">Assistant plugins</p>
-                <p className="mt-0.5 text-[12px] text-muted">
-                  What the assistant can load besides ScadBuddy&rsquo;s own tools. Each change applies at once.
-                </p>
-                <PluginPackagesPanel />
-                <RemotePluginsPanel />
-                {/* Beside the plugins, where a hindsight plugin is added; saves on its own, read at each turn. */}
-                <MemorySettingsSetting />
-              </div>
-            )}
-            {/* Saves on its own (#258); shown only when the assistant is available. */}
-            <AiAuditSection />
           </Section>
 
           {saved('diagnostics', runtimeRows('diagnostics'))}
