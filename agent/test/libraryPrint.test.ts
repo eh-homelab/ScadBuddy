@@ -224,6 +224,10 @@ describe('the library routes', () => {
     })
   })
 
+  it("refuses a plate with an output, whose preview is the whole output", async () => {
+    await expect(tool('get_output_preview').execute({ output_id: OUT, plate: 2 }, ctx())).rejects.toThrow(/library file's/)
+  })
+
   it('lists one folder of the library, paged', async () => {
     let query = ''
     server.use(
