@@ -31,6 +31,8 @@ import { useGlobalAgentTools } from '../agent/global'
 import { isEmbedded } from '../lib/embed'
 import { ErrorBoundary } from './ErrorBoundary'
 import { LiveUpdatesIndicator } from './LiveUpdatesIndicator'
+import { ActivityBell } from './activity/ActivityBell'
+import { Toasts } from './ui/Toasts'
 import { Button } from './ui/Button'
 import { useLoadBambuddyLinks } from '../lib/bambuddyLinks'
 import { useLoadDisplayUnit } from '../lib/units'
@@ -243,6 +245,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
 
             <div className="ml-auto flex items-center gap-2">
               <LiveUpdatesIndicator />
+              <ActivityBell />
               {shown && (
                 // Announces the badge (#815): it appears while focus is elsewhere, so the
                 // button's own name changing is not enough. A bare live region, not
@@ -324,6 +327,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
                 <Outlet />
               </ErrorBoundary>
             </main>
+            <Toasts />
             {shown && mounted && (
               <aside
                 ref={setPanelElement}

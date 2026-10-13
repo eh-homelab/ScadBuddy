@@ -37,6 +37,7 @@ export type FieldKind =
   | 'bytes'
   | 'bool'
   | 'level'
+  | 'list'
 
 /** Every field `PUT /settings` takes, other than `reset`. */
 export type FieldName = Exclude<keyof SettingsUpdate, 'reset'>
@@ -57,6 +58,29 @@ export type FieldSpec = {
  * the unit) are not listed here; they are laid out by hand.
  */
 export const RUNTIME_FIELDS: readonly FieldSpec[] = [
+  {
+    name: 'activity_follow',
+    section: 'administration',
+    label: 'Notify me about activity from',
+    kind: 'list',
+    help: 'Principals whose finished activity rings the bell and shows a toast, comma-separated. "browser" is you; an agent session or token is named as on the Activity page.',
+  },
+  {
+    name: 'activity_ttl_seconds',
+    section: 'administration',
+    label: 'Keep activity for',
+    kind: 'seconds',
+    help: 'At least a day (86400 s).',
+    advanced: true,
+  },
+  {
+    name: 'activity_repair_window_seconds',
+    section: 'administration',
+    label: 'Repair activity rows from the last',
+    kind: 'seconds',
+    help: 'From 10 minutes (600 s) to 7 days (604800 s).',
+    advanced: true,
+  },
   {
     name: 'temporal_ui_url',
     section: 'administration',
@@ -291,7 +315,9 @@ export function envVar(name: string): string {
 export function serverValue(settings: Settings, name: FieldName): string {
   if (name === 'bambuddy_api_key' || name === 'bambuddy_render_api_key' || name === 'google_fonts_api_key') return ''
   const value = (settings as Record<string, unknown>)[name]
+  if (name === 'activity_follow') return (Array.isArray(value) ? value : ['browser']).join(', ')
   if (value === null || value === undefined) return ''
+  if (Array.isArray(value)) return value.join(', ')
   return String(value)
 }
 

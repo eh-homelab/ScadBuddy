@@ -139,6 +139,10 @@ function toPatchValue(name: FieldName, raw: string, settings: Settings): unknown
     return days * DAY_SECONDS
   }
   const kind = SPECS[name]?.kind ?? extraSpecs(settings).find((spec) => spec.name === name)?.kind
+  if (kind === 'list') {
+    const items = raw.split(',').map((one) => one.trim()).filter((one) => one !== '')
+    return items.length === 0 ? { problem: 'Name at least one principal.' } satisfies Problem : items
+  }
   if (kind === 'bool') return raw === 'true'
   if (kind === 'seconds' || kind === 'count' || kind === 'bytes') {
     if (raw.trim() === '') return { problem: 'Enter a value, or reset it to the deployment value.' } satisfies Problem
