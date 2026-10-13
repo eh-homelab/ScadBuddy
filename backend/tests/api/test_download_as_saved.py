@@ -34,7 +34,7 @@ def _stored(paths: DataPaths, model: str, output_id: str) -> bytes:
     return (paths.output_dir(model, output_id) / "model.3mf").read_bytes()
 
 
-def _declare(paths: DataPaths, model: str, settings: dict[str, str]) -> None:
+def _declare(paths: DataPaths, model: str, settings: dict[str, Any]) -> None:
     meta = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))
     meta["print_settings"] = settings
     paths.model_meta(model).write_text(json.dumps(meta), encoding="utf-8")
@@ -110,13 +110,14 @@ def test_a_template_s_invalid_model_json_fails_the_save_naming_the_key(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
     """#2868: the print settings are read when the output is saved, so a model.json made
-    invalid since the render fails the save, as a 409 naming it, never a 500."""
+    invalid since the render fails the save, as a 409 naming it, never a 500. It leaves
+    nothing held behind: the same save succeeds once model.json is fixed."""
     configure(client)
     job_id = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}}).json()[
         "job_id"
     ]
     wait_for_job(client, job_id)
-    _declare(paths, model, {"enable_support": 1})  # type: ignore[dict-item]
+    _declare(paths, model, {"enable_support": 1})
 
     saved = client.post(
         f"/api/v1/models/{model}/outputs", json={"job_id": job_id, "name": "Elan"}, headers=press()
@@ -126,3 +127,12 @@ def test_a_template_s_invalid_model_json_fails_the_save_naming_the_key(
     assert saved.json()["title"] == "Invalid Model Metadata"
     assert "model.json" in saved.json()["detail"]
     assert "print_settings" in saved.json()["detail"]
+
+    _declare(paths, model, KEYCHAIN)
+    retried = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": job_id, "name": "Elan"}, headers=press()
+    )
+    assert retried.status_code == 201, retried.text
+    assert (
+        _project_settings(_stored(paths, model, retried.json()["id"]))["enable_prime_tower"] == "1"
+    )
