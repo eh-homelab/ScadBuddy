@@ -421,7 +421,8 @@ export function Preview({
                   <RenderMessages {...messages} sourceLink={sourceLink} overlay />
                 </div>
               ))}
-            {shown?.bbox && <Dimensions bbox={shown.bbox} plates={shown.plates} compact={compact} />}
+            {/* The measured box too (#2866): a library plate framed by it has a size to show. */}
+            {shown && bbox && <Dimensions bbox={bbox} plates={shown.plates} compact={compact} />}
             {job && platesOfJob > 1 && (
               <PlatePicker
                 plates={platesOfJob}
@@ -971,6 +972,8 @@ function PlateOutline({
         <edgesGeometry args={[outline]} attach="geometry" />
         <lineBasicMaterial color={theme.edge} attach="material" />
       </lineSegments>
+      {/* A DOM overlay, so `captureSnapshot` with `plate: true` draws the outlines without
+          these numbers (#2866). Nothing that snapshots a multi-plate row needs them yet. */}
       <Html position={[0, 0, depth / 2 + 6]} center zIndexRange={[10, 0]}>
         <span
           data-testid="plate-label"
@@ -1009,9 +1012,10 @@ function Model({
   // put it on the bed) is measured, so it is centred and framed like any other.
   useEffect(() => {
     if (bbox) return
-    const box = new THREE.Box3().setFromObject(gltf.scene)
+    // The object drawn, the clone, rather than the loader's own (#2866).
+    const box = new THREE.Box3().setFromObject(scene)
     if (!box.isEmpty()) onMeasured(url, modelBox(box.min.toArray(), box.max.toArray()))
-  }, [bbox, gltf, url, onMeasured])
+  }, [bbox, scene, url, onMeasured])
   const group = useRef<THREE.Group>(null)
   // #364 — the GLB is in OpenSCAD's coordinates; the outline and the camera are
   // centred on the plate. Move the model there, as the slicer will.

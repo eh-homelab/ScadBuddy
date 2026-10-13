@@ -150,6 +150,8 @@ describe('Preview scene (#364)', () => {
     // Framed for its 80 mm, not left where the default camera looks.
     expect(scene.controls.target.y).toBeCloseTo(5)
     expect(scene.camera.position.length()).toBeCloseTo(80 * 1.9 + 40)
+    // And its measured size is shown, as a rendered model's is (#2866).
+    expect(screen.getByTestId('bbox-readout')).toHaveTextContent(/80.*40.*10/)
   })
 
   it('frames every plate of a long multi-plate row and outlines each by number (#2381)', () => {
