@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
-from scadbuddy.workflows.flow_models import FlowStep, FlowWaiting
+from scadbuddy.workflows.flow_models import FlowStep, FlowWaiting, HopRecord
 
 RunStatus = Literal["starting", "running", "waiting", "succeeded", "failed", "terminated"]
 TERMINAL: frozenset[str] = frozenset({"succeeded", "failed", "terminated"})
@@ -142,6 +142,16 @@ class Run(BaseModel):
     updated_at: datetime
 
 
+class Proposal(BaseModel):
+    """A parent's narrowing of a parked call that the grant did not admit (#2482): the
+    call's arguments as narrowed, their input hash (what a person's approval must name),
+    and who proposed it. Never shown but to the person (`workflow_run_proposals`)."""
+
+    args: dict[str, Any]
+    input_hash: str
+    proposed_by: str
+
+
 class Decision(BaseModel):
     """A person's answer to one parked call of a run (`workflow_run_decisions`)."""
 
@@ -156,4 +166,6 @@ class Decision(BaseModel):
     #: An approval's binding to the parked call's tool and input (#2318), which the
     #: agent checks before it runs the call; None for anything else.
     input_hash: str | None = None
+    #: The entry's way up before it was decided (#2482), and the decision's own step.
+    hops: list[HopRecord] = []
     created_at: datetime | None = None

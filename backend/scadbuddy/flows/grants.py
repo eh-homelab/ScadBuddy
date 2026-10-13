@@ -127,7 +127,8 @@ class Inside(BaseModel):
 
 class Outside(BaseModel):
     """No rule admitted the call: it waits for a decision, `timeout_s` at its hop.
-    `parent_hop` says it goes to the starter session first (Part B, #2482)."""
+    `parent_hop` says it goes to the starter session first (#2482, spec §4.4): the run
+    has a starter session other than the caller, and its grant (if any) asks it."""
 
     verdict: Literal["outside"] = "outside"
     reason: str
@@ -424,7 +425,10 @@ async def match_grant(
     grant = await store.get_grant(run_id)
 
     def outside(reason: str) -> Outside:
-        starter_session = run is not None and isinstance(run.started_by.get("session"), str)
+        starter = run.started_by.get("session") if run is not None else None
+        # A child that is the starter session itself would escalate to itself mid-turn,
+        # and it takes escalations only when idle: its calls go to the person (§4.4).
+        starter_session = isinstance(starter, str) and bool(starter) and starter != session_id
         ask = grant is None or grant.spec.ask_starter_session
         return Outside(
             reason=reason,

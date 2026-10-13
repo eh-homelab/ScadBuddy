@@ -38,7 +38,9 @@ describe('the built-ins a durable turn provides, on the bundled Claude Code', ()
     const from = fake.messageCalls().length
     for await (const _ of query({
       prompt: 'go',
-      options: { tools: names, settingSources: [], cwd: '/tmp', maxTurns: 1, env: { ...process.env, ANTHROPIC_BASE_URL: fake.url, ANTHROPIC_AUTH_TOKEN: TOKEN, ANTHROPIC_API_KEY: '' } },
+      // Only what the binary needs: a variable of the shell running the test (an
+      // experimental feature's) would change the schemas it sends.
+      options: { tools: names, settingSources: [], cwd: '/tmp', maxTurns: 1, env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '/tmp', ANTHROPIC_BASE_URL: fake.url, ANTHROPIC_AUTH_TOKEN: TOKEN } },
     }))
       void _
     const sent = fake.messageCalls().slice(from).find((c) => c.body?.tools?.length)!.body!.tools!

@@ -282,7 +282,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 # because the Claude Agent SDK's Temporal plugin is Python (ai-integrations#33,
 # git-pinned in agent-durable/uv.lock). Plain psycopg against apt's libpq5, as
 # the backend image does, so libpq fixes arrive with the OS.
-FROM python:3.12-slim-bookworm AS agent-durable
+FROM python:3.14-slim-bookworm AS agent-durable
 
 # hadolint ignore=DL3008
 RUN apt-get update \

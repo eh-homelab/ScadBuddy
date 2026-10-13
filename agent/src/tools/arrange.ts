@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { ok } from './call.js'
 import { ACCEPTING_MS, command } from './command.js'
 import { outputId, slug } from './common.js'
-import { waitForJob } from './customizer.js'
+import { acquireRenderSlot, waitForJob } from './customizer.js'
 import { slotChoice } from './print.js'
 import { defineTool, json, type Tool, ToolError } from './registry.js'
 
@@ -102,55 +102,61 @@ export const arrangeTools: Tool[] = [
     // Its own wait for the render, after the backend has accepted it.
     waitsMs: (_, ctx) => ACCEPTING_MS + ctx.renderWaitMs,
     handler: async ({ objects, goal, printer_id, filament_plan, colours, name, slug, read_budget }, ctx) => {
-      const sent = await ctx.backend.POST('/api/v1/outputs/arrange', {
-        body: {
-          objects,
-          goal,
-          printer_id: printer_id ?? null,
-          filament_plan: filament_plan ?? null,
-          colours: colours ?? null,
-          name: name ?? null,
-          slug: slug ?? null,
-          read_budget: read_budget ?? null,
-        },
-        signal: ctx.signal,
-      })
-      const problem = (sent.error ?? {}) as ArrangeProblem
-      if (problem.code === 'needs_backfill') {
-        throw new ToolError(
-          `not arranged: ${(problem.output_ids ?? []).join(', ')} were saved before Arrange existed, so ` +
-            'nothing records their objects. Ask the user to open Arrange on them in History, which offers ' +
-            'to re-render them first, or leave them out.',
-        )
-      }
-      if (problem.code === 'library_file_not_arrangeable') {
-        throw new ToolError(
-          `not arranged: library file(s) ${(problem.library_file_ids ?? []).join(', ')} cannot be arranged ` +
-            `(${(sent.error as { detail?: string }).detail ?? 'their objects could not be read'}). Leave them out.`,
-        )
-      }
-      const started = await ok(Promise.resolve(sent), 'arrange')
-      await ctx.progress(0, undefined, `arrange queued as ${started.id}`)
-      const job = await waitForJob(ctx, started.id)
-      if (job.status === 'failed' || job.status === 'cancelled') {
-        throw new ToolError(`the arrange was ${job.status}${job.error ? `: ${job.error}` : ''}`)
-      }
-      if (job.status !== 'done') {
-        return json({
-          job_id: job.id,
-          slug: job.slug,
-          status: job.status,
-          note: 'still arranging; poll get_render_job with this job_id, then save_output under this slug',
+      // A job on the render queue: under the same per-principal bounds as render_model.
+      const release = await acquireRenderSlot(ctx)
+      try {
+        const sent = await ctx.backend.POST('/api/v1/outputs/arrange', {
+          body: {
+            objects,
+            goal,
+            printer_id: printer_id ?? null,
+            filament_plan: filament_plan ?? null,
+            colours: colours ?? null,
+            name: name ?? null,
+            slug: slug ?? null,
+            read_budget: read_budget ?? null,
+          },
+          signal: ctx.signal,
         })
+        const problem = (sent.error ?? {}) as ArrangeProblem
+        if (problem.code === 'needs_backfill') {
+          throw new ToolError(
+            `not arranged: ${(problem.output_ids ?? []).join(', ')} were saved before Arrange existed, so ` +
+              'nothing records their objects. Ask the user to open Arrange on them in History, which offers ' +
+              'to re-render them first, or leave them out.',
+          )
+        }
+        if (problem.code === 'library_file_not_arrangeable') {
+          throw new ToolError(
+            `not arranged: library file(s) ${(problem.library_file_ids ?? []).join(', ')} cannot be arranged ` +
+              `(${(sent.error as { detail?: string }).detail ?? 'their objects could not be read'}). Leave them out.`,
+          )
+        }
+        const started = await ok(Promise.resolve(sent), 'arrange')
+        await ctx.progress(0, undefined, `arrange queued as ${started.id}`)
+        const job = await waitForJob(ctx, started.id)
+        if (job.status === 'failed' || job.status === 'cancelled') {
+          throw new ToolError(`the arrange was ${job.status}${job.error ? `: ${job.error}` : ''}`)
+        }
+        if (job.status !== 'done') {
+          return json({
+            job_id: job.id,
+            slug: job.slug,
+            status: job.status,
+            note: 'still arranging; poll get_render_job with this job_id, then save_output under this slug',
+          })
+        }
+        const output = await command(ctx, `save arranged output of ${job.id}`, (headers) =>
+          ctx.backend.POST('/api/v1/models/{slug}/outputs', {
+            params: { path: { slug: job.slug } },
+            body: { job_id: job.id, name: name ?? null },
+            headers,
+          }),
+        )
+        return json({ job_id: job.id, slug: job.slug, plates: Math.max(1, (job.plates ?? []).length), output })
+      } finally {
+        release()
       }
-      const output = await command(ctx, `save arranged output of ${job.id}`, (headers) =>
-        ctx.backend.POST('/api/v1/models/{slug}/outputs', {
-          params: { path: { slug: job.slug } },
-          body: { job_id: job.id, name: name ?? null },
-          headers,
-        }),
-      )
-      return json({ job_id: job.id, slug: job.slug, plates: Math.max(1, (job.plates ?? []).length), output })
     },
   }),
 ]
