@@ -15,7 +15,7 @@ import { Grid, Html, OrbitControls } from '@react-three/drei'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import * as THREE from 'three'
 import type { BoundingBox, Diagnostic, Job, Plate } from '../api/types'
-import { formatBbox } from '../lib/format'
+import { formatBbox, formatElapsed, queuePlace } from '../lib/format'
 import {
   cameraReach,
   framingSpan,
@@ -32,6 +32,16 @@ import { ErrorBoundary } from './ErrorBoundary'
 import { Button } from './ui/Button'
 import { Spinner } from './ui/Spinner'
 import type { RenderStage } from '../lib/useRenderJob'
+
+/** Seconds since ``since``, ticking; the server's clock may run ahead, so never below 0. */
+function RenderElapsed({ since }: { since: string }) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1_000)
+    return () => clearInterval(timer)
+  }, [])
+  return <span data-testid="render-elapsed">· {formatElapsed((now - Date.parse(since)) / 1000)}</span>
+}
 
 const STAGE_LABELS: Record<RenderStage, string> = {
   source: 'reading the model',
@@ -155,6 +165,9 @@ export function Preview({
   rejected = false,
   sourceLink,
 }: Props) {
+  // #1638 — the job this render waits on, once read: whether a worker has it yet,
+  // where it waits, and how long since it was submitted.
+  const live = rendering && (job?.status === 'pending' || job?.status === 'running') ? job : undefined
   // The last finished render stays on screen while the next one is in flight (spec §5.3).
   // Its notes and warnings travel with it: they explain the model on screen, not the
   // one rendering.
@@ -352,10 +365,14 @@ export function Preview({
                 data-overlay="chip"
                 className={`flex items-center gap-2 rounded-[6px] border border-line bg-surface/90 text-muted backdrop-blur-sm ${compact ? 'px-2 py-0.5 text-[11px]' : 'px-2.5 py-1 text-[12px]'}`}
               >
-                <Spinner /> Rendering
-                {rendering && stage && !compact && (
+                <Spinner /> {live?.status === 'pending' ? 'Waiting' : 'Rendering'}
+                {live?.status === 'pending' && live.queue_position && !compact && (
+                  <span data-testid="render-queue">· {queuePlace(live.queue_position)}</span>
+                )}
+                {rendering && stage && live?.status !== 'pending' && !compact && (
                   <span data-testid="render-stage">· {STAGE_LABELS[stage]}</span>
                 )}
+                {live && <RenderElapsed since={live.created_at} />}
               </span>
             )}
             {controls}

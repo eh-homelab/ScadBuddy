@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Diagnostic, Job, Plate } from '../api/types'
 import { CANCELLED_ERROR, JOB_WARNINGS, TEMPLATE_NOTES } from '../mocks/fixtures'
@@ -165,6 +165,54 @@ describe('Preview', () => {
   it('names the step a running render is on (#267)', () => {
     render(<Preview job={undefined} rendering stage="solids" />)
     expect(screen.getByTestId('render-stage')).toHaveTextContent('building each colour')
+  })
+
+  describe('while a render waits or runs (#1638)', () => {
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('says a render is waiting, where it waits and for how long', () => {
+      vi.useFakeTimers({ now: Date.parse('2026-09-27T10:00:14Z') })
+      render(
+        <Preview
+          job={job({ status: 'pending', preview_url: null, queue_position: 3 })}
+          rendering
+          stage="solids"
+        />,
+      )
+      const chip = screen.getByTestId('preview-rendering')
+      expect(chip).toHaveTextContent('Waiting')
+      expect(screen.getByTestId('render-queue')).toHaveTextContent('2 ahead')
+      // A stage left from an earlier render is no step of this one.
+      expect(screen.queryByTestId('render-stage')).toBeNull()
+      expect(screen.getByTestId('render-elapsed')).toHaveTextContent('0:14')
+      act(() => {
+        vi.advanceTimersByTime(60_000)
+      })
+      expect(screen.getByTestId('render-elapsed')).toHaveTextContent('1:14')
+    })
+
+    it('says rendering once a worker has it, with its step and time since submit', () => {
+      vi.useFakeTimers({ now: Date.parse('2026-09-27T10:04:12Z') })
+      render(
+        <Preview
+          job={job({ status: 'running', preview_url: null, started_at: '2026-09-27T10:03:00Z' })}
+          rendering
+          stage="render"
+        />,
+      )
+      expect(screen.getByTestId('preview-rendering')).toHaveTextContent('Rendering')
+      expect(screen.queryByTestId('render-queue')).toBeNull()
+      expect(screen.getByTestId('render-stage')).toHaveTextContent('running OpenSCAD')
+      expect(screen.getByTestId('render-elapsed')).toHaveTextContent('4:12')
+    })
+
+    it('shows no time for the finished render still on screen', () => {
+      render(<Preview job={job({})} rendering />)
+      expect(screen.getByTestId('preview-rendering')).toHaveTextContent('Rendering')
+      expect(screen.queryByTestId('render-elapsed')).toBeNull()
+    })
   })
 
   it("shows ScadBuddy's own job warnings next to the template notes, apart from them (#383)", () => {
