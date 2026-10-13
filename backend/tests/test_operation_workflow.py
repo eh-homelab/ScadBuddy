@@ -135,7 +135,9 @@ async def worker(client: Client, fake: Fake) -> AsyncIterator[str]:
         yield queue
 
 
-def op_input(*, run_attempts: int = 1, answer_running: bool = False) -> OperationInput:
+def op_input(
+    *, run_attempts: int = 1, answer_running: bool = False, where: str = "Bambuddy"
+) -> OperationInput:
     return OperationInput(
         kind="test",
         subject="s",
@@ -143,6 +145,7 @@ def op_input(*, run_attempts: int = 1, answer_running: bool = False) -> Operatio
         request={"archive_id": 5},
         run_attempts=run_attempts,
         answer_running=answer_running,
+        where=where,
     )
 
 
@@ -433,6 +436,32 @@ async def test_a_cancel_during_the_run_says_the_effect_may_have_happened(
     assert answer.operation is not None
     assert answer.operation.error == OPERATION_CANCELLED_RUNNING
     assert (await ended(client, arg)).status == "failed"
+
+
+async def test_a_library_kind_says_to_check_the_model_not_bambuddy(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """#1174: a cancel mid-run, or an unexpected failure, of a kind whose effect is on
+    the model and its libraries names that, not Bambuddy."""
+    where = "the model and its libraries"
+    fake.hold.clear()
+    arg = op_input(where=where)
+    accepting = asyncio.create_task(start(client, worker, arg))
+    try:
+        while "run" not in fake.calls:
+            await asyncio.sleep(0.05)
+        await client.get_workflow_handle(f"op-{arg.kind}-{arg.key}").cancel()
+        cancelled = await accepting
+    finally:
+        fake.hold.set()
+    assert cancelled.operation is not None and cancelled.operation.error is not None
+    assert "Check the model and its libraries before" in cancelled.operation.error.detail
+    assert "Bambuddy" not in cancelled.operation.error.detail
+
+    fake.run_error = RuntimeError("boom")
+    failed = await start(client, worker, op_input(where=where))
+    assert failed.operation is not None and failed.operation.error is not None
+    assert "Check the model and its libraries before" in failed.operation.error.detail
 
 
 # --- a prelude on another queue (#1060) ------------------------------------------

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import timedelta
 from typing import Any
 
@@ -41,7 +41,7 @@ from scadbuddy.workflows.pipelines import (
     TemplatePipeline,
 )
 from scadbuddy.workflows.printing import PrintRunWorkflow
-from scadbuddy.workflows.problems import OPERATION_LOST
+from scadbuddy.workflows.problems import operation_lost
 
 RENDER_TASK_QUEUE_DEFAULT = "render"
 DEPLOYMENT_NAME = "scadbuddy-render"
@@ -384,14 +384,27 @@ async def reconcile_lost_runs(
 
 
 async def reconcile_lost_operations(
-    client: Client, store: OperationStore, *, older_than: timedelta = LOST_RUN_GRACE
+    client: Client,
+    store: OperationStore,
+    *,
+    older_than: timedelta = LOST_RUN_GRACE,
+    where: Mapping[str, str] | None = None,
 ) -> int:
     """End each ``running`` operation whose execution has closed or is gone (review
     #1063 1): terminated after ``op_insert``, or past a timeout, it never runs
-    ``op_finish``. The same rule as :func:`reconcile_lost_runs`. Returns how many it
-    ended."""
+    ``op_finish``. The same rule as :func:`reconcile_lost_runs`. ``where`` is each
+    kind's ``OperationKind.where``, what its problem says to check (#1174); Bambuddy
+    for a kind not in it. Returns how many it ended."""
+    rows = await store.running_executions(older_than)
+    workflow_of = {op_id: workflow_id for op_id, workflow_id, _ in rows}
+
+    def where_of(op_id: str) -> str:
+        # The workflow ID is ``op-<kind>-<key>``, and a kind's name has no dash.
+        kind = workflow_of[op_id].removeprefix("op-").split("-", 1)[0]
+        return (where or {}).get(kind, "Bambuddy")
 
     async def end(op_id: str) -> bool:
-        return (await store.finish(op_id, error=OPERATION_LOST)).status == "failed"
+        lost = operation_lost(where_of(op_id))
+        return (await store.finish(op_id, error=lost)).status == "failed"
 
-    return await _end_closed(client, await store.running_executions(older_than), end, "operation")
+    return await _end_closed(client, rows, end, "operation")

@@ -68,6 +68,8 @@ class OperationInput(BaseModel):
     #: The kind's ``answers_running`` (#2462): the Update answers with the running
     #: record, not the finished one.
     answer_running: bool = False
+    #: The kind's ``where`` (#1174): what to check when it may have been done.
+    where: str = "Bambuddy"
 
 
 class OperationAnswer(BaseModel):

@@ -185,6 +185,38 @@ async def test_running_executions_names_each_running_rows_execution(
     assert await store.running_executions(timedelta(hours=1)) == []
 
 
+async def test_a_lost_operation_says_what_its_kind_says_to_check(store: OperationStore) -> None:
+    """#1174: a lost library operation points at the model, not Bambuddy."""
+    async with temporal_client() as client:
+        handle = await client.start_workflow(
+            "Operation",
+            "x",
+            id=f"op-model_upload-{uuid.uuid4().hex[:8]}",
+            task_queue=f"unserved-{uuid.uuid4().hex[:8]}",
+        )
+        await handle.terminate("an operator ended it")
+        await store.insert(
+            "lost",
+            kind="model_upload",
+            subject="m",
+            operation_key="lost",
+            request={},
+            workflow_id=handle.id,
+            workflow_run_id=handle.result_run_id or "",
+            retention=None,
+        )
+        ended = await reconcile_lost_operations(
+            client,
+            store,
+            older_than=timedelta(0),
+            where={"model_upload": "the model and its libraries"},
+        )
+    assert ended == 1
+    lost = await store.get("lost")
+    assert lost is not None and lost.error is not None
+    assert "Check the model and its libraries before" in lost.error.detail
+
+
 async def test_reconcile_fails_the_operations_whose_execution_is_gone_or_closed(
     store: OperationStore,
 ) -> None:

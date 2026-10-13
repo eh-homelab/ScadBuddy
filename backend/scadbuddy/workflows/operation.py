@@ -43,10 +43,10 @@ with workflow.unsafe.imports_passed_through():
     from scadbuddy.workflows.print_models import ACCEPTED_UPDATE, REFUSED
     from scadbuddy.workflows.problems import (
         OPERATION_CANCELLED,
-        OPERATION_CANCELLED_RUNNING,
         OPERATION_CHECK_TIMED_OUT,
         OPERATION_UNEXPECTED_DETAIL,
-        OPERATION_UNEXPECTED_RUNNING_DETAIL,
+        operation_cancelled_running,
+        operation_unexpected_running_detail,
         problem_of,
     )
 
@@ -215,12 +215,16 @@ class OperationWorkflow:
         except (ActivityError, ApplicationError, asyncio.CancelledError) as error:
             if is_cancelled_exception(error):
                 # The effect may have reached Bambuddy before the cancel (review #1063 2).
-                return FinishOp(operation_id=operation_id, error=OPERATION_CANCELLED_RUNNING)
+                return FinishOp(
+                    operation_id=operation_id, error=operation_cancelled_running(input.where)
+                )
             # A crash or timeout may come after Bambuddy took the write (review #1063
             # second review 1), so the unexpected failure says it may have been done.
             return FinishOp(
                 operation_id=operation_id,
-                error=problem_of(error, unexpected=OPERATION_UNEXPECTED_RUNNING_DETAIL),
+                error=problem_of(
+                    error, unexpected=operation_unexpected_running_detail(input.where)
+                ),
             )
         return FinishOp(operation_id=operation_id, result=result)
 
