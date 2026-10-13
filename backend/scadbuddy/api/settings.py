@@ -105,6 +105,12 @@ class SettingsView(BaseModel):
     print_run_retention_seconds: float | None = None
     #: How long a finished operation is kept, in seconds; ``None`` keeps every one.
     operation_retention_seconds: float | None = None
+    #: How long a finished activity row is kept, in seconds; ``None``: 30 days.
+    activity_ttl_seconds: float | None = None
+    #: How far back the activity sweep repairs, in seconds; ``None``: 1 day.
+    activity_repair_window_seconds: float | None = None
+    #: The principals whose activity the assistant follows; ``None``: ``["browser"]``.
+    activity_follow: list[str] | None = None
     last_project_id: int | None = None
     #: The domains an asset may be fetched from (#844), with their subdomains.
     asset_fetch_domains: list[str] = Field(default_factory=list)
@@ -320,6 +326,9 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
         display_unit=stored.display_unit,
         print_run_retention_seconds=stored.print_run_retention_seconds,
         operation_retention_seconds=stored.operation_retention_seconds,
+        activity_ttl_seconds=stored.activity_ttl_seconds,
+        activity_repair_window_seconds=stored.activity_repair_window_seconds,
+        activity_follow=stored.activity_follow,
         last_project_id=stored.last_project_id,
         asset_fetch_domains=list(stored.allowed_asset_domains()),
         has_google_fonts_api_key=bool(runtime.google_fonts_api_key),

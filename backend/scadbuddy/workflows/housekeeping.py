@@ -77,6 +77,11 @@ BACKFILL_SWEEP = "housekeeping_attach_backfills"
 REAP_SWEEP = "housekeeping_reap_output_holds"
 #: The `workflow.patched` id that adds `REAP_SWEEP` to a run (see the module docstring).
 REAP_PATCH = "housekeeping-reap-output-holds"
+#: Activity retention and repair (spec 2026-10-09 §6). Last: it reads what the sweeps
+#: before it settled.
+ACTIVITY_SWEEP = "housekeeping_activity"
+#: The `workflow.patched` id that adds `ACTIVITY_SWEEP` to a run.
+ACTIVITY_PATCH = "housekeeping-activity"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
 SWEEPS = (
     "housekeeping_prune_jobs",
@@ -86,6 +91,7 @@ SWEEPS = (
     "housekeeping_sweep_claims",
     BACKFILL_SWEEP,
     REAP_SWEEP,
+    ACTIVITY_SWEEP,
 )
 #: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs, and request claims,
 #: which would otherwise pile up for good with the sweeps off (review 3c M1).
@@ -132,6 +138,8 @@ class Housekeeping:
         for sweep in SWEEPS if sweeps is None else sweeps:
             # Added after runs that may still replay; one recorded before it skips it.
             if sweep == REAP_SWEEP and not workflow.patched(REAP_PATCH):
+                continue
+            if sweep == ACTIVITY_SWEEP and not workflow.patched(ACTIVITY_PATCH):
                 continue
             try:
                 await workflow.execute_activity(

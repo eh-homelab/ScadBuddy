@@ -74,6 +74,9 @@ _AGENT_STATUS: dict[str, ActivityStatus] = {
 }
 
 
+#: Stored-setting defaults (``activity_ttl_seconds``, ``activity_repair_window_seconds``).
+ACTIVITY_TTL_DEFAULT = 30 * 86400.0
+ACTIVITY_REPAIR_WINDOW_DEFAULT = 86400.0
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
 #: The window ``facets`` counts over when its caller names none.
@@ -301,6 +304,112 @@ class ActivityIndex:
                     op["principal"] or "browser", op["session"], op["via_tool"]
                 ),
             )
+
+    async def prune(self, ttl: float, placeholder_ttl: float) -> int:
+        """Delete finished rows older than ``ttl`` seconds and placeholders older than
+        ``placeholder_ttl`` (long enough for ``repair`` to fill one, and no longer)."""
+        return await asyncio.to_thread(self._prune, ttl, placeholder_ttl)
+
+    def _prune(self, ttl: float, placeholder_ttl: float) -> int:
+        with self.pool.connection() as conn:
+            return conn.execute(
+                "DELETE FROM activity WHERE finished_at < now() - make_interval(secs => %(ttl)s)"
+                " OR (source = '' AND created_at < now() - make_interval(secs => %(placeholder)s))",
+                {"ttl": ttl, "placeholder": placeholder_ttl},
+            ).rowcount
+
+    async def repair(self, window: float) -> int:
+        """Restore, from the sources, the rows changed within ``window`` seconds whose
+        activity write was lost: no row, or only a placeholder (whose attribution stays)."""
+        return await asyncio.to_thread(self._repair, window)
+
+    def _repair(self, window: float) -> int:
+        from scadbuddy.bambuddy.activity import row_of as print_row_of
+        from scadbuddy.bambuddy.runs import PrintRun
+        from scadbuddy.operations.activity import row_of as operation_row_of
+        from scadbuddy.operations.store import Operation
+        from scadbuddy.render.activity import row_of as render_row_of
+        from scadbuddy.render.job_models import Job
+        from scadbuddy.render.projection import PROJECTION_COLUMNS
+
+        restored = 0
+        params = {"window": window}
+
+        def missing(prefix: str, table: str, columns: str) -> sql.Composed:
+            return sql.SQL(
+                "SELECT {columns} FROM {table} r LEFT JOIN activity a ON a.id = {prefix} || r.id"
+                " WHERE (a.id IS NULL OR a.source = '')"
+                " AND (r.created_at >= now() - make_interval(secs => %(window)s)"
+                " OR r.finished_at >= now() - make_interval(secs => %(window)s))"
+            ).format(
+                columns=sql.SQL(columns),
+                table=sql.Identifier(table),
+                prefix=sql.Literal(prefix),
+            )
+
+        with self.pool.connection() as conn:
+            jobs = conn.execute(
+                missing("render:", "render_jobs", ", ".join(f"r.{c}" for c in PROJECTION_COLUMNS)),
+                params,
+            ).fetchall()
+            for found in jobs:
+                job = Job.model_validate({c: found[c] for c in PROJECTION_COLUMNS})
+                self.upsert_in(conn, render_row_of(job))
+                restored += 1
+            ops = conn.execute(
+                missing(
+                    "operation:",
+                    "operations",
+                    "r.id, r.kind, r.subject, r.status, r.result, r.error, r.created_at,"
+                    " r.finished_at, r.workflow_id, r.workflow_run_id",
+                ),
+                params,
+            ).fetchall()
+            for found in ops:
+                self.upsert_in(
+                    conn,
+                    operation_row_of(
+                        Operation.model_validate(found),
+                        found["workflow_id"],
+                        found["workflow_run_id"],
+                    ),
+                )
+                restored += 1
+            runs = conn.execute(
+                missing(
+                    "print_run:",
+                    "print_runs",
+                    "r.id, r.output_id, r.status, r.created_at, r.finished_at, r.result, r.error,"
+                    " (r.status = 'failed' AND r.enqueue_attempted) AS may_have_queued,"
+                    " r.workflow_id, r.workflow_run_id, r.slug",
+                ),
+                params,
+            ).fetchall()
+            for found in runs:
+                self.upsert_in(
+                    conn,
+                    print_row_of(
+                        PrintRun.model_validate(found),
+                        found["slug"] or "",
+                        found["workflow_id"],
+                        found["workflow_run_id"],
+                    ),
+                )
+                restored += 1
+            try:
+                with conn.transaction():
+                    agent_ids = [
+                        r["id"]
+                        for r in conn.execute(
+                            missing("agent_operation:", "ai_operations", "r.id"), params
+                        ).fetchall()
+                    ]
+            except errors.UndefinedTable:
+                agent_ids = []
+        for agent_id in agent_ids:
+            self._ingest_agent_operation(agent_id)
+            restored += 1
+        return restored
 
     async def get(self, activity_id: str) -> ActivityRow | None:
         return await asyncio.to_thread(self._get, activity_id)

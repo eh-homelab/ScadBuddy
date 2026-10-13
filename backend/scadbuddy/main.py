@@ -20,6 +20,8 @@ from temporalio.worker import Worker
 
 import scadbuddy.api
 from scadbuddy import __version__
+from scadbuddy.activity.component import ACTIVITY
+from scadbuddy.activity.index import ACTIVITY_REPAIR_WINDOW_DEFAULT, ACTIVITY_TTL_DEFAULT
 from scadbuddy.api import health, libraries, media, metrics, models, outputs, telemetry
 from scadbuddy.api.agent_actor import AgentActorGate, postgres_grants
 from scadbuddy.api.compression import Compression
@@ -72,6 +74,7 @@ from scadbuddy.workflows.client import (
 )
 from scadbuddy.workflows.follow import resume_followed
 from scadbuddy.workflows.housekeeping import (
+    ACTIVITY_SWEEP,
     BACKFILL_SWEEP,
     HEARTBEAT_TIMEOUT,
     REAP_SWEEP,
@@ -391,6 +394,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         # A scan of every output's directory can be slow on a network volume: heartbeat.
         await _heartbeating(_reap_output_holds_logged(state))
 
+    @activity.defn(name=ACTIVITY_SWEEP)
+    async def sweep_activity() -> None:
+        await _heartbeating(_sweep_activity_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -399,7 +406,23 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         sweep_claims,
         sweep_backfills,
         reap_output_holds,
+        sweep_activity,
     ]
+
+
+async def _sweep_activity_logged(state: AppState) -> None:
+    """Spec 2026-10-09 §6: repair what the sources' own writes missed, then prune.
+    Repair first, so a placeholder it can fill is filled before its time is up."""
+    try:
+        settings = await asyncio.to_thread(state.settings_store.load)
+        ttl = settings.activity_ttl_seconds or ACTIVITY_TTL_DEFAULT
+        window = settings.activity_repair_window_seconds or ACTIVITY_REPAIR_WINDOW_DEFAULT
+        index = state.components.get(ACTIVITY).index
+        await index.repair(window)
+        await index.prune(ttl, window)
+    except Exception:
+        logger.exception("could not sweep activity")
+        raise
 
 
 async def _prune_jobs_logged(state: AppState) -> None:

@@ -9,6 +9,7 @@ the new code (``workflows/housekeeping.py``'s docstring). A change to the comman
 (327f66551^, six sweeps), started with no list, so it runs `SWEEPS`. ``reap`` was
 recorded by the patched workflow, which also runs ``REAP_SWEEP``. Never re-record
 them: a later change adds a history recorded on the changed code beside them.
+``activity`` was recorded by the workflow with ``ACTIVITY_PATCH``, which adds ``ACTIVITY_SWEEP``.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ from scadbuddy.workflows.housekeeping import Housekeeping
 HISTORIES = Path(__file__).parent / "fixtures" / "housekeeping_histories"
 
 
-@pytest.mark.parametrize("name", ["before_reap", "reap"])
+@pytest.mark.parametrize("name", ["before_reap", "reap", "activity"])
 async def test_housekeeping_replays_its_recorded_history(name: str) -> None:
     history = WorkflowHistory.from_json(
         f"housekeeping-{name}", (HISTORIES / f"{name}.json").read_text()
