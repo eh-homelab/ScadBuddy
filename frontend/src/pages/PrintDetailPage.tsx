@@ -464,6 +464,32 @@ function duration(seconds: number | null | undefined): string | null {
   return seconds === null || seconds === undefined ? null : formatDuration(seconds)
 }
 
+/** A measured amount, rounded for reading: Bambuddy's floats can end `…000001`. */
+function amount(value: number | null | undefined, unit: string): string | null {
+  if (value === null || value === undefined) return null
+  return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 }).format(value)} ${unit}`
+}
+
+/** A link Bambuddy keeps, opened outside the frame; only an http(s) one is a link. */
+function LinkFact({ label, url }: { label: string; url: string | null | undefined }) {
+  if (!url) return null
+  const web = /^https?:\/\//i.test(url)
+  return (
+    <Fact
+      label={label}
+      value={
+        web ? (
+          <button type="button" className="break-all text-left text-accent underline" onClick={() => openExternal(url)}>
+            {url}
+          </button>
+        ) : (
+          url
+        )
+      }
+    />
+  )
+}
+
 function Fact({ label, value }: { label: string; value: ReactNode }) {
   if (value === null || value === undefined || value === '') return null
   return (
@@ -573,7 +599,7 @@ function SlicingSection({ slicing }: { slicing: NonNullable<PrintDetail['slicing
                 {slot.color && <Swatch colour={slot.color} />}
                 <span>Slot {slot.slot_id}</span>
                 {slot.filament_type && <span className="text-muted">{slot.filament_type}</span>}
-                {slot.used_grams !== null && <span>{slot.used_grams} g</span>}
+                {slot.used_grams !== null && <span>{amount(slot.used_grams, 'g')}</span>}
               </li>
             ))}
           </ul>
@@ -602,14 +628,17 @@ function RecordSection({ record }: { record: NonNullable<PrintDetail['record']> 
           label="Time accuracy"
           value={record.time_accuracy_percent !== null ? `${record.time_accuracy_percent}%` : null}
         />
-        <Fact label="Filament read" value={record.filament_actual_grams !== null ? `${record.filament_actual_grams} g` : null} />
-        <Fact label="Energy" value={record.energy_kwh !== null ? `${record.energy_kwh} kWh` : null} />
-        <Fact label="Energy cost" value={record.energy_cost !== null ? record.energy_cost.toFixed(2) : null} />
+        <Fact label="Filament read" value={amount(record.filament_actual_grams, 'g')} />
+        <Fact label="Energy" value={amount(record.energy_kwh, 'kWh')} />
+        <Fact
+          label="Energy cost"
+          value={record.energy_cost !== null ? `${record.energy_cost.toFixed(2)} (in Bambuddy's currency)` : null}
+        />
         <Fact label="Favourite" value={record.is_favorite ? 'Yes' : null} />
         <Fact label="Tags" value={record.tags} />
         <Fact label="Notes" value={record.notes} />
-        <Fact label="MakerWorld" value={record.makerworld_url} />
-        <Fact label="Link" value={record.external_url} />
+        <LinkFact label="MakerWorld" url={record.makerworld_url} />
+        <LinkFact label="Link" url={record.external_url} />
       </dl>
       {other.length > 0 && (
         <details className="mt-3">

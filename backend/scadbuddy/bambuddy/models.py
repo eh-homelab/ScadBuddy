@@ -11,7 +11,14 @@ import json
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    ValidatorFunctionWrapHandler,
+    field_validator,
+)
 
 PresetSource = Literal["orca_cloud", "cloud", "local", "standard"]
 SliceStatus = Literal["pending", "running", "completed", "failed"]
@@ -199,10 +206,18 @@ class ArchiveDetail(Archive):
     total_filament_actual_grams: float | None = None
     extra_data: ArchiveExtra = Field(default_factory=ArchiveExtra)
 
-    @field_validator("extra_data", mode="before")
+    @field_validator("extra_data", mode="wrap")
     @classmethod
-    def _no_extra(cls, value: Any) -> Any:
-        return value if isinstance(value, dict) else {}
+    def _no_extra(cls, value: Any, handler: ValidatorFunctionWrapHandler) -> ArchiveExtra:
+        """Free-form in Bambuddy: one archive of an odd shape reads as having none,
+        rather than failing it, and with it every list of archives it is in."""
+        if not isinstance(value, dict):
+            return ArchiveExtra()
+        try:
+            extra: ArchiveExtra = handler(value)
+        except ValidationError:
+            return ArchiveExtra()
+        return extra
 
     @field_validator("photos", mode="before")
     @classmethod

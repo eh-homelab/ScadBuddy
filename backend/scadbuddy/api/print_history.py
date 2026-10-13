@@ -342,7 +342,7 @@ ScalarValue = str | int | float | bool | None
 #: where it is on Bambuddy's disk or network, and anything that may be a credential.
 _PRIVATE_FIELD = re.compile(
     r"(?:^|_)(?:path|dir|file|url|ip|host|address|token|secret|password|passwd|key|auth"
-    r"|cookie|session|user|username|email|created_by|owner)(?:_|$)",
+    r"|cookie|session|user|username|email|created_by|owner|code|serial|sn)(?:_|$)",
     re.IGNORECASE,
 )
 

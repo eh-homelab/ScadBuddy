@@ -665,6 +665,27 @@ def test_without_a_finish_photo_every_photo_is_a_photo(client: TestClient, model
 
 
 @respx.mock
+def test_an_archive_of_an_odd_extra_data_shape_reads_as_having_none(
+    client: TestClient, model: str
+) -> None:
+    """Review on #2760: ``extra_data`` is free-form in Bambuddy. One archive whose slots
+    or objects are not the shape ScadBuddy reads must not fail its detail."""
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 35)
+    mock_archive(
+        35,
+        timelapse_path=None,
+        extra_data={"filament_slots": [{"slot_id": None}], "printable_objects": {"1": 2}},
+    )
+
+    answer = client.get("/api/v1/prints/35")
+
+    assert answer.status_code == 200, answer.text
+    assert answer.json()["slicing"]["filament_slots"] == []
+
+
+@respx.mock
 def test_the_detail_shows_everything_bambuddy_knows_of_the_print(
     client: TestClient, model: str
 ) -> None:
@@ -682,6 +703,8 @@ def test_the_detail_shows_everything_bambuddy_knows_of_the_print(
         storage_dir="/data/archive",
         printer_ip="10.0.0.5",
         created_by_username="elan",
+        access_code="12345678",
+        printer_serial="0948AB",
         shipping_description="kept too",
     )
 
@@ -714,7 +737,14 @@ def test_the_detail_shows_everything_bambuddy_knows_of_the_print(
     assert other["shipping_description"] == "kept too", "a word that merely contains one"
     assert "nested_field" not in other, "only scalars"
     assert not any(name.endswith("_path") for name in other)
-    for private in ("upload_token", "storage_dir", "printer_ip", "created_by_username"):
+    for private in (
+        "upload_token",
+        "storage_dir",
+        "printer_ip",
+        "created_by_username",
+        "access_code",
+        "printer_serial",
+    ):
         assert private not in other, private
     assert "source_ip" not in json.dumps(body), "the sender's address stays in Bambuddy"
 

@@ -135,6 +135,35 @@ describe('PrintDetailPage (#311)', () => {
     expect(within(slots).getByTitle('url(https://x.example/t.png)')).not.toHaveAttribute('style')
   })
 
+  it('rounds Bambuddy’s amounts, names whose currency the cost is in, and opens its links (#1860 review)', async () => {
+    const done = prints.find((print) => print.archive_id === 35)!
+    server.use(
+      http.get('/api/v1/prints/35', () =>
+        HttpResponse.json({
+          ...done,
+          record: {
+            ...done.record!,
+            filament_actual_grams: 16.300000001,
+            energy_kwh: 0.123456,
+            energy_cost: 0.5,
+            makerworld_url: 'https://makerworld.com/en/models/1',
+            external_url: 'javascript:alert(1)',
+          },
+        }),
+      ),
+    )
+    const { user } = render(35)
+    const record = await section('In Bambuddy')
+    expect(record).toHaveTextContent('16.3 g')
+    expect(record).not.toHaveTextContent('16.300000001')
+    expect(record).toHaveTextContent('0.12 kWh')
+    expect(record).toHaveTextContent("0.50 (in Bambuddy's currency)")
+    await user.click(within(record).getByRole('button', { name: 'https://makerworld.com/en/models/1' }))
+    expect(openExternal).toHaveBeenCalledWith('https://makerworld.com/en/models/1')
+    expect(within(record).queryByRole('button', { name: 'javascript:alert(1)' })).toBeNull()
+    expect(record).toHaveTextContent('javascript:alert(1)')
+  })
+
   it('says why a library print has no provenance (#1860)', async () => {
     const done = prints.find((print) => print.archive_id === 35)!
     server.use(
