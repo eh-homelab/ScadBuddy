@@ -132,6 +132,7 @@ def settings(
             "temporal_task_queue_render": queue,
             "temporal_task_queue_bambuddy": f"{queue}-bambuddy",
             "temporal_task_queue_library": f"{queue}-library",
+            "temporal_task_queue_projects": f"{queue}-projects",
             "temporal_worker_inprocess": True,
             # No sweep Schedule: its trigger at start would run every sweep once,
             # beside the test's own (#1095 CI). A test of the sweeps sets its interval.
@@ -147,6 +148,7 @@ def settings(
     workflow_reaper.terminate(queue)
     workflow_reaper.terminate(f"{queue}-bambuddy")
     workflow_reaper.terminate(f"{queue}-library")
+    workflow_reaper.terminate(f"{queue}-projects")
 
 
 @pytest.fixture

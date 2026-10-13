@@ -21,8 +21,13 @@ from collections.abc import Mapping
 from pydantic import BaseModel
 
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.extruders import slicer_nozzle_stats, slicer_volume_types
+from scadbuddy.bambuddy.extruders import (
+    _offered_sides,
+    nozzle_stats_for,
+    slicer_volume_types,
+)
 from scadbuddy.bambuddy.models import NozzleChoice
+from scadbuddy.bambuddy.nozzle_plan import NozzlePlan, one_side_map
 from scadbuddy.bambuddy.projects import folder_for
 from scadbuddy.bambuddy.send import Target, attach_edit_link, ensure_copy, target_for
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
@@ -133,7 +138,9 @@ async def generate_target(
     reuses this file. An unreadable status states nothing, as the print's does.
 
     It states each side's flow too (#484): the model's remembered flows, else Standard,
-    since a project remembers only the printer and size its last print used."""
+    since a project remembers only the printer, the size and the nozzle plan its last
+    print used. That plan (#2166), when there was one, also gives the sides offered and
+    the Manual map, so a print in the same spools reuses this file."""
     remembered = await uploads.project_target(project_id)
     nozzles: list[NozzleChoice] = []
     if remembered is not None:
@@ -147,12 +154,26 @@ async def generate_target(
         nozzles = list(choices.nozzles) if choices else []
         nozzle = nozzles[0].size if nozzles else None
     stats = None
+    plan = (
+        NozzlePlan.model_validate(remembered.nozzle_plan)
+        if remembered is not None and remembered.nozzle_plan is not None
+        else None
+    )
+    filament_map = None
     if printer_id is not None and nozzles:
         try:
-            stats = slicer_nozzle_stats(await client.printer_status(printer_id), nozzles)
+            status = await client.printer_status(printer_id)
+            filaments = len(meta.colors)
+            if plan is not None:
+                stats = plan.nozzle_stats(nozzles)
+                filament_map = plan.stated_map(filaments)
+            else:
+                sides = _offered_sides(status, nozzles)
+                stats = nozzle_stats_for(sides, nozzles) if sides is not None else None
+                filament_map = one_side_map(sides, nozzles, filaments)
         except (ApiError, ValueError):
             logger.info("printer status unreadable; no nozzle is known")
-            stats = None
+            stats, filament_map = None, None
     return await target_for(
         client,
         settings,
@@ -160,6 +181,7 @@ async def generate_target(
         nozzle_diameter=nozzle,
         nozzle_stats=stats,
         nozzle_volume_type=slicer_volume_types(nozzles) if nozzles else None,
+        filament_map=filament_map,
     )
 
 

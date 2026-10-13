@@ -38,6 +38,9 @@ class LibraryEntry(BaseModel):
     #: The output ScadBuddy uploaded this file as (#455), through which Arrange reads its
     #: objects (#1864); ``None`` for a file ScadBuddy did not make.
     output_id: str | None = None
+    #: Indexed from an external folder: Bambuddy deletes it for good, never to its
+    #: trash, so a delete of it cannot be undone (#2167).
+    is_external: bool = False
 
 
 class LibraryListing(BaseModel):
@@ -60,6 +63,7 @@ def _entry(row: LibraryListRow) -> LibraryEntry:
         printable=printable(row.file_type),
         file_size=row.file_size,
         created_at=_utc(row.created_at) if row.created_at is not None else None,
+        is_external=row.is_external,
     )
 
 

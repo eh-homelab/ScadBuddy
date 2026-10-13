@@ -10,12 +10,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Annotated, Any
 
 import psycopg
-from fastapi import APIRouter, Query, Response, status
+from fastapi import APIRouter, Path, Query, Response, status
 from fastapi.responses import JSONResponse
 from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, Field
@@ -23,6 +24,7 @@ from temporalio.common import WorkflowIDReusePolicy
 
 from scadbuddy.api.deps import (
     AppState,
+    CatalogueDep,
     OutputIdPath,
     OutputsDep,
     PrintCommands,
@@ -35,8 +37,10 @@ from scadbuddy.api.deps import (
     StateDep,
     UploadsDep,
 )
+from scadbuddy.api.models import require_model_exists
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
+    RETRY_FOLLOWS,
     STILL_ACCEPTING_PROBLEM,
     IdempotencyKey,
     operation_answer,
@@ -47,8 +51,10 @@ from scadbuddy.api.operations import (
 )
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
 from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.filament_ids import filament_material, filament_name
 from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.models import RackAlgorithm
+from scadbuddy.bambuddy.preview import PreviewStarted, SlicePreview, read_preview
 from scadbuddy.bambuddy.print_run import (
     PrintCheck,
     PrintRunRequest,
@@ -64,13 +70,22 @@ from scadbuddy.bambuddy.projects import (
     ProjectView,
     describe_projects,
 )
-from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, run_key
+from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, newest_failure, run_key
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.problems import DATABASE_ERRORS, DATABASE_UNAVAILABLE_PROBLEM, ApiError
 from scadbuddy.library.outputs import require_output
-from scadbuddy.library.settings_store import ModelPrintChoices, RackAlgorithmSupersededError
+from scadbuddy.library.presets import TEMPLATE_ID_PREFIX
+from scadbuddy.library.settings_store import (
+    ModelPrintChoices,
+    ModelProject,
+    RackAlgorithmSupersededError,
+    StoredSettings,
+    model_project_scope,
+)
+from scadbuddy.library.slugs import MAX_SLUG_LENGTH
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.rack.component import RackUsageDep
+from scadbuddy.rack.rank import Usage, rack_color, rack_positions
 from scadbuddy.workflows.commands import (
     COMMAND_ANSWER_DEADLINE,
     CONNECT_MARGIN_SECONDS,
@@ -99,28 +114,19 @@ logger = logging.getLogger(__name__)
 #: ``TemporalRefusedError``. Not "nothing was queued": some refusals come after the start
 #: was persisted, and the same request sent again follows it (review #1316 4).
 TEMPORAL_REFUSED_DETAIL = (
-    "Temporal refused to start this print; see ScadBuddy's logs. Send the same request"
-    " again to follow it if it started."
+    "ScadBuddy could not start this print; its server log says why." + RETRY_FOLLOWS
 )
 #: ``TemporalUnreachableError``: the first connect failed, so no request was written.
 TEMPORAL_UNREACHABLE_DETAIL = (
-    "ScadBuddy cannot reach Temporal, where print runs run. Nothing was queued; try again shortly."
+    "ScadBuddy's background service is not answering. Nothing was queued; try again shortly."
 )
 #: ``TemporalUnavailableError``: no answer within the bound, or ``UNAVAILABLE``. Either
 #: may follow a persisted start (review #1316 (9) 1a).
-TEMPORAL_DOWN_DETAIL = (
-    "ScadBuddy cannot reach Temporal, where print runs run. Send the same request again"
-    " shortly to follow it if it started."
-)
+TEMPORAL_DOWN_DETAIL = "ScadBuddy's background service did not answer." + RETRY_FOLLOWS
 #: ``TemporalBusyError``: Temporal answered, or gRPC ended the call, so it is not "cannot
 #: reach" (review #1316 (9) 1b).
-TEMPORAL_BUSY_DETAIL = (
-    "Temporal could not start this print right now. Send the same request again shortly"
-    " to follow it if it started."
-)
-STILL_CHECKING_DETAIL = (
-    "ScadBuddy is still checking this print. Send the same request again to follow it."
-)
+TEMPORAL_BUSY_DETAIL = "ScadBuddy's background service is busy right now." + RETRY_FOLLOWS
+STILL_CHECKING_DETAIL = "ScadBuddy is still checking this print. Try again to follow it."
 
 #: What a print run's routes answer beside the 200 and 202, built from the details the
 #: route sends (review #1316 (10) 3, (11) 1, (12) 2).
@@ -174,6 +180,56 @@ class PrinterRackAlgorithm(BaseModel):
     algorithm: RackAlgorithm
 
 
+class RackSpoolUse(BaseModel):
+    """One spool's settled prints on a hotend (#2170)."""
+
+    spool_id: int | None
+    label: str | None
+    material: str | None
+    #: ``#RRGGBB``.
+    colour: str | None
+    prints: int
+    grams: float
+    last_used_at: datetime | None
+
+
+class RackHotendUsage(BaseModel):
+    """What one rack position's hotend has printed (#1298), and what it is (#2170)."""
+
+    position: int
+    #: The hotend's own serial, for Settings alone (#2170, spec 2026-10-01 §7); ``null``
+    #: when the printer reports none. The usage below follows it, not the position.
+    serial: str | None = None
+    nozzle_diameter: str
+    nozzle_type: str
+    high_flow: bool
+    #: As the printer reports it: Bambuddy shows it as a percentage, but the H2C reports
+    #: 128 for most hotends, so the panel reads a value over 100 as not reported.
+    wear: int | None = None
+    #: The filament it last ran: Bambu's id (``GFA00``), its profile name and material
+    #: (``bambuddy.filament_ids``), and its colour as ``#RRGGBB``. ``null`` when unknown.
+    filament_id: str | None = None
+    filament_name: str | None = None
+    filament_material: str | None = None
+    filament_colour: str | None = None
+    #: Every spool that ran through it, most used first (#2170).
+    spools: list[RackSpoolUse] = Field(default_factory=list)
+    prints: int
+    print_seconds: int
+    grams: float
+    #: Picks whose print has not settled yet: queued, or printing (#1079).
+    pending: int
+    first_seen_at: datetime | None
+    last_used_at: datetime | None
+
+
+class PrinterRackUsage(BaseModel):
+    """The recorded use of each hotend on one printer's rack now (#1298)."""
+
+    printer_id: int
+    hotends: list[RackHotendUsage]
+
+
 @router.put(
     "/models/{slug}/choices",
     response_model=ModelPrintChoices,
@@ -190,6 +246,79 @@ def put_model_choices(
     """
     settings = store.set_model_choices(slug, body)
     return settings.model_print_choices.get(slug, ModelPrintChoices())
+
+
+#: A saved preset's id or a template preset's, as ``PresetIdPath`` takes them.
+PRESET_ID_PATTERN = rf"^[a-z0-9-]{{1,{len(TEMPLATE_ID_PREFIX) + MAX_SLUG_LENGTH}}}$"
+
+
+class RememberedModelProject(ModelProject):
+    """The project one model was last filed into with one preset, or with none (#1660)."""
+
+    #: ``null`` is the model with no preset loaded.
+    preset_id: str | None = None
+
+
+class ModelProjects(BaseModel):
+    """Every project remembered for one model (#1660), one per preset it was filed with."""
+
+    projects: list[RememberedModelProject] = Field(default_factory=list)
+
+
+class ModelProjectPut(BaseModel):
+    """The project Generate filed this model into with ``preset_id`` (#1660); a ``null``
+    ``project_id`` forgets it."""
+
+    preset_id: str | None = Field(default=None, pattern=PRESET_ID_PATTERN)
+    #: The preset's name now, which Settings shows beside the entry.
+    preset_name: str | None = Field(default=None, max_length=200)
+    project_id: int | None = None
+
+
+def _model_projects(settings: StoredSettings, slug: str) -> ModelProjects:
+    prefix = model_project_scope(slug, "")
+    projects: list[RememberedModelProject] = []
+    for scope, project in settings.model_projects.items():
+        if scope == slug:
+            preset_id = None
+        elif scope.startswith(prefix):
+            preset_id = scope[len(prefix) :]
+        else:
+            continue
+        projects.append(RememberedModelProject(preset_id=preset_id, **project.model_dump()))
+    return ModelProjects(projects=projects)
+
+
+@router.get(
+    "/models/{slug}/projects",
+    response_model=ModelProjects,
+    summary="The projects this model was last filed into",
+)
+def get_model_projects(slug: SlugPath, store: SettingsStoreDep) -> ModelProjects:
+    """One per preset it was generated with, and one for no preset (#1660): the Customize
+    page's Project picker moves to the one for the preset in use, and Generate asks
+    before filing into another. Needs no Bambuddy."""
+    return _model_projects(store.load(), slug)
+
+
+@router.put(
+    "/models/{slug}/project",
+    response_model=ModelProjects,
+    summary="Remember the project this model was filed into",
+)
+def put_model_project(
+    slug: SlugPath, body: ModelProjectPut, store: SettingsStoreDep, catalogue: CatalogueDep
+) -> ModelProjects:
+    """What Generate filed this model into with the preset in use (#1660); a ``null``
+    project forgets it. Answers with every project remembered for the model.
+
+    404 for a model not in the catalogue, so a stray id leaves no entry nobody can
+    trace; forgetting still works for one, so an entry left from before can go."""
+    project = None
+    if body.project_id is not None:
+        require_model_exists(catalogue, slug)
+        project = ModelProject(project_id=body.project_id, preset_name=body.preset_name)
+    return _model_projects(store.set_model_project(slug, body.preset_id, project), slug)
 
 
 @router.put(
@@ -272,6 +401,114 @@ def put_printer_rack_algorithm(
             type_=DATABASE_UNAVAILABLE_PROBLEM,
         ) from None
     return PrinterRackAlgorithm(printer_id=printer_id, algorithm=algorithm)
+
+
+@router.get(
+    "/printers/{printer_id}/rack-usage",
+    response_model=PrinterRackUsage,
+    summary="What each hotend on this printer's rack has printed",
+    responses={
+        status.HTTP_503_SERVICE_UNAVAILABLE: {
+            "description": "The recorded usage could not be read from the database."
+        },
+    },
+)
+async def get_printer_rack_usage(
+    printer_id: int, store: SettingsStoreDep, rack: RackUsageDep
+) -> PrinterRackUsage:
+    """The counts behind the Least used rack algorithm (#1298), for the hotends the
+    printer reports on its rack now. A printer with no rack lists none."""
+    async with client_for(store.load()) as client:
+        printer = await client.printer_status(printer_id)
+    positions = rack_positions(printer.nozzle_rack)
+    try:
+        serials = [slot.serial_number for slot in positions.values()]
+        usage = await rack.usage(serials)
+        history = await rack.spool_history(serials)
+    except DATABASE_ERRORS as error:
+        # By type only: a database error's text can carry a serial (spec §7).
+        logger.warning(
+            "rack usage read gave up on the database",
+            extra={"printer_id": printer_id, "error": type(error).__name__},
+        )
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"could not read the recorded hotend usage ({type(error).__name__})",
+            type_=DATABASE_UNAVAILABLE_PROBLEM,
+        ) from None
+    hotends = []
+    for position, slot in positions.items():
+        use = usage.get(slot.serial_number, Usage()) if slot.serial_number else Usage()
+        spools = history.get(slot.serial_number, []) if slot.serial_number else []
+        hotends.append(
+            RackHotendUsage(
+                position=position,
+                serial=slot.serial_number or None,
+                nozzle_diameter=slot.nozzle_diameter,
+                nozzle_type=slot.nozzle_type,
+                high_flow=slot.high_flow,
+                wear=slot.wear,
+                filament_id=slot.filament_id or None,
+                filament_name=filament_name(slot.filament_id),
+                filament_material=filament_material(slot.filament_id),
+                filament_colour=rack_color(slot.filament_colour),
+                spools=[RackSpoolUse(**spool.model_dump()) for spool in spools],
+                prints=use.prints,
+                print_seconds=use.print_seconds,
+                grams=use.grams,
+                pending=use.pending,
+                first_seen_at=use.first_seen_at,
+                last_used_at=use.last_used_at,
+            )
+        )
+    return PrinterRackUsage(printer_id=printer_id, hotends=hotends)
+
+
+class TraySpool(BaseModel):
+    """The spool a person confirmed is in a tray (#2164)."""
+
+    spool_id: int = Field(ge=1)
+
+
+class TrayAssigned(BaseModel):
+    spool_id: int
+    printer_id: int
+    ams_id: int
+    tray_id: int
+
+
+@router.post(
+    "/printers/{printer_id}/trays/{ams_id}/{tray_id}/spool",
+    response_model=TrayAssigned,
+    summary="Record which spool is in a tray",
+    responses=OPERATION_RESPONSES,
+)
+async def post_tray_spool(
+    printer_id: int,
+    ams_id: Annotated[int, Path(ge=0, le=255)],
+    tray_id: Annotated[int, Path(ge=0, le=15)],
+    body: TraySpool,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> TrayAssigned | JSONResponse:
+    """#2164: a filled tray Bambuddy has no spool for, answered by the person in the
+    print dialog. ``POST /inventory/assignments`` in Bambuddy, which needs the key's
+    Manage Inventory scope. Never sent without that confirmation."""
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["assign_tray_spool"],
+        subject=f"printer-{printer_id}",
+        request={
+            "printer_id": printer_id,
+            "ams_id": ams_id,
+            "tray_id": tray_id,
+            "spool_id": body.spool_id,
+        },
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, TrayAssigned)
 
 
 @router.get(
@@ -368,6 +605,7 @@ async def accept_run(
     slug: str,
     request: PrintRunRequest,
     source: SourceSpec,
+    prepare: Callable[[SourceSpec], Awaitable[SourceSpec]] | None = None,
 ) -> PrintRun:
     """The 202-and-follow model every print run shares (#470, #742), on Temporal
     (#1052, spec 2026-10-01 §5.1).
@@ -378,7 +616,7 @@ async def accept_run(
     answers 200 with its run and touches nothing else. Otherwise ``PrintRun`` is started
     (or attached to) with update-with-start, and its ``accepted`` Update answers with
     the new row (202), the run it repeats (200) or the refusal, raised as the problem it
-    carries.
+    carries. ``prepare`` completes ``source`` for a run that is not a repeat (#2550).
     """
     key = run_key(subject.run_subject, request)
     has_request_id = request.request_id is not None
@@ -386,6 +624,8 @@ async def accept_run(
     if repeated is not None:
         response.status_code = status.HTTP_200_OK
         return repeated.model_copy(update={"repeated": True})
+    if prepare is not None:
+        source = await prepare(source)
     arg = PrintRunInput(
         subject=subject.run_subject,
         slug=slug,
@@ -549,6 +789,55 @@ async def post_check(
         return await check_for_output(client, outputs, uploads, meta, settings, body, rack=rack)
 
 
+@router.post(
+    "/outputs/{output_id}/preview-slice",
+    response_model=PreviewStarted,
+    summary="Slice the dialog's choices in the background, without queueing",
+    responses=OPERATION_RESPONSES,
+)
+async def post_preview_slice(
+    output_id: OutputIdPath,
+    body: PrintRunRequest,
+    response: Response,
+    outputs: OutputsDep,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> PreviewStarted | JSONResponse:
+    """#2169: what the dialog's choices would print, sliced through the run's own path
+    and never queued. Follow ``GET /print/preview-slices/{job_id}``. A run of the same
+    choices queues this slice rather than slicing again."""
+    require_output(outputs, output_id)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["preview_slice"],
+        subject=output_id,
+        request={"output_id": output_id, "request": body.model_dump(mode="json")},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, PreviewStarted)
+
+
+@router.get(
+    "/outputs/{output_id}/preview-slices/{job_id}",
+    response_model=SlicePreview,
+    summary="How a background slice stands, and what it came to",
+)
+async def get_preview_slice(
+    output_id: OutputIdPath,
+    job_id: int,
+    outputs: OutputsDep,
+    store: SettingsStoreDep,
+    uploads: UploadsDep,
+) -> SlicePreview:
+    """#2169: grams per slot, print time, the side each filament went to and how many
+    filament changes the slice makes, once it has finished. Only a slice started for
+    this output, while Bambuddy's job is still that slice; else 404."""
+    meta = require_output(outputs, output_id)
+    async with client_for(store.load()) as client:
+        return await read_preview(client, uploads, job_id, PrintSubject.output(meta.id).run_subject)
+
+
 @router.get(
     "/outputs/{output_id}/filaments",
     response_model=FilamentOptions,
@@ -616,22 +905,9 @@ async def get_choices(
         )
 
 
-async def _failed_before_queueing(state: AppState, output_id: str) -> str | None:
-    """Why the output's newest run failed, when it failed before it queued anything
-    (#1049); else ``None``. A run that may have queued recorded what it queued, so its
-    print's own progress says more. Without a database, or with one that does not
-    answer, there are no runs to read, and the progress is read as it was before."""
-    runs = state.print_runs.store
-    if not runs.available:
-        return None
-    try:
-        latest = await runs.latest_for_output(output_id)
-    except DATABASE_ERRORS:
-        logger.warning("print runs unreadable; progress read without them")
-        return None
-    if latest is None or latest.status != "failed" or latest.may_have_queued:
-        return None
-    return latest.error.detail if latest.error is not None else None
+async def failed_before_queueing(state: AppState, run_subject: str) -> str | None:
+    """`newest_failure` over this process's print runs."""
+    return await newest_failure(state.print_runs.store, run_subject)
 
 
 @router.get(
@@ -661,15 +937,13 @@ async def get_progress(
     ``settled`` is what says the polling can stop.
     """
     meta = require_output(outputs, output_id)
-    failed = await _failed_before_queueing(state, meta.id)
+    failed = await failed_before_queueing(state, meta.id)
     progress: PrintProgress | None
     async with client_for(store.load()) as client:
         if failed is not None:
             progress = from_failed_run(failed, bambuddy_url=client.config.web_url(QUEUE_PATH))
         else:
-            progress = await progress_for(
-                client, meta, uploads=uploads, links=links if links.available else None
-            )
+            progress = await progress_for(client, meta, uploads=uploads, links=links)
     observer.observe(meta, progress)
     # Someone is looking at a print that is still moving: make sure it is followed
     # (#268, #1053). Its follow may have given up on a quiet print, or been sent before

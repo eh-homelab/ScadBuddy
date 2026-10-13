@@ -20,12 +20,15 @@ from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.component import ARCHIVE_CACHE
 from scadbuddy.bambuddy.linking import owned_queue_items
 from scadbuddy.bambuddy.models import QueueItemCreate
-from scadbuddy.bambuddy.options import PrintOptions
+from scadbuddy.bambuddy.options import PrintOptions, options_scope
 from scadbuddy.bambuddy.output_reader import LocalOutputs, OutputReader, require
+from scadbuddy.bambuddy.preview import start_preview
 from scadbuddy.bambuddy.print_links import PrintLinkStore
-from scadbuddy.bambuddy.print_run import chosen_project
+from scadbuddy.bambuddy.print_run import PrintRunRequest, chosen_project
+from scadbuddy.bambuddy.print_source import LibrarySource, OutputSource, PrintSource
 from scadbuddy.bambuddy.project_file import file_into_project
 from scadbuddy.bambuddy.projects import (
+    AttachResult,
     ProjectAttach,
     ProjectRequest,
     attach_results,
@@ -37,6 +40,7 @@ from scadbuddy.bambuddy.send import (
     resolve_print_options,
     send_output,
 )
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore
@@ -113,20 +117,47 @@ def bambuddy_kinds_over(
         request: dict[str, Any], checked: dict[str, Any]
     ) -> dict[str, Any]:
         async with client_for(await asyncio.to_thread(settings_store.load)) as client:
-            return _json(await ensure_project(client, ProjectRequest.model_validate(request)))
+            return _json(
+                await ensure_project(
+                    client, ProjectRequest.model_validate(request), folderless=uploads
+                )
+            )
 
     async def attach_check(request: dict[str, Any]) -> dict[str, Any]:
-        await require(outputs, request["output_id"])
+        # An output's request names it; a library file's (#1751) names the file instead.
+        library = request.get("library_file_id") is not None
+        if not library:
+            await require(outputs, request["output_id"])
         body = ProjectAttach.model_validate(request["body"])
         project_id = chosen_project(body, await asyncio.to_thread(settings_store.load))
         if project_id is None:
             raise ApiError(
                 status.HTTP_409_CONFLICT,
-                "this output has no project, so there is nothing to file it under",
+                f"this {'print' if library else 'output'} has no project, so there is"
+                " nothing to file it under",
             )
         return {"project_id": project_id}
 
+    async def attach_library(file_id: int, body: dict[str, Any], project_id: int) -> AttachResult:
+        """A library file's print filed under its project, as an output's is (#1751):
+        the queue items asked for, else its newest run's. Its archives are linked by its
+        progress read, so none is linked here."""
+        ids: list[int] = body.get("queue_item_ids") or []
+        if not ids:
+            sends = await links.last_run(PrintSubject.library(file_id))
+            ids = [send.queue_item_id for send in sends]
+        if not ids:
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                "ScadBuddy has not queued this file, so there is nothing to file under the project",
+            )
+        async with client_for(await asyncio.to_thread(settings_store.load)) as client:
+            return await attach_results(client, project_id, queue_item_ids=ids)
+
     async def attach_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        file_id: int | None = request.get("library_file_id")
+        if file_id is not None:
+            return _json(await attach_library(file_id, request["body"], checked["project_id"]))
         meta = await require(outputs, request["output_id"])
         wanted: list[int] = request["body"].get("queue_item_ids") or []
         ids = wanted or (
@@ -136,21 +167,19 @@ def bambuddy_kinds_over(
         async with client_for(await asyncio.to_thread(settings_store.load)) as client:
             # The body's ids are filed under the project as asked, but only the output's
             # own items are linked to it: a caller-named item would open its archive's media.
-            linkable = (
-                await owned_queue_items(client, meta, links, ids) if links.available else set()
-            )
+            linkable = await owned_queue_items(client, meta, links, ids)
             attached = await attach_results(
                 client,
                 checked["project_id"],
                 queue_item_ids=ids,
                 output_id=meta.id,
-                links=links if links.available else None,
+                links=links,
                 linkable=linkable,
             )
         return _json(attached)
 
     async def _linked(archive_id: int) -> Any:
-        linked = await links.linked(archive_id) if links.available else None
+        linked = await links.linked(archive_id)
         if linked is None:
             raise ApiError(
                 status.HTTP_404_NOT_FOUND,
@@ -177,13 +206,17 @@ def bambuddy_kinds_over(
                 f"no printer is known for archive {archive_id}; queue it from Bambuddy",
             )
         plate_id = archive.plate_id if archive.plate_id is not None else link.plate_id
-        # The model whose remembered print options apply, as for a print from the dialog.
-        # A library file's print (#976) has no output and so no model: global and the
-        # printer's options only.
-        if link.output_id is None:
-            return {"printer_id": printer_id, "plate_id": plate_id, "slug": None}
-        meta = await require(outputs, link.output_id)
-        return {"printer_id": printer_id, "plate_id": plate_id, "slug": meta.slug}
+        # Whose remembered print options apply, as for a print from the dialog: the
+        # output's model, or the library file's own (#976, #1754).
+        subject = PrintSubject.parse(link.subject)
+        slug = None if link.output_id is None else (await require(outputs, link.output_id)).slug
+        return {
+            "printer_id": printer_id,
+            "plate_id": plate_id,
+            "options_scope": options_scope(subject, slug),
+            # What an image from before #1754 reads, should it run this check's run.
+            "slug": slug,
+        }
 
     async def reprint_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         archive_id: int = request["archive_id"]
@@ -191,8 +224,10 @@ def bambuddy_kinds_over(
         # The remembered options (#1329): global, the printer's, the model's, as a run
         # applies them (#88). One copy, and no project: those are the dialog's own
         # controls, as `enqueue_plate` leaves them.
+        # A check from before #1754 named the model as ``slug``.
+        scope = checked.get("options_scope", checked.get("slug"))
         remembered = resolve_print_options(
-            settings, checked.get("slug"), checked["printer_id"], PrintOptions()
+            settings, scope, checked["printer_id"], PrintOptions()
         ).queue_fields()
         remembered.pop("quantity", None)
         remembered.pop("project_id", None)
@@ -244,6 +279,60 @@ def bambuddy_kinds_over(
                 await delete_inbox_copies(client, uploads, meta, settings)
         return {}
 
+    async def assign_tray_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        """#2164: the person confirmed which spool is in a filled tray Bambuddy had no
+        spool for. Bambuddy upserts by tray, so a rerun records the same answer."""
+        settings = await asyncio.to_thread(settings_store.load)
+        async with client_for(settings) as client:
+            assigned = await client.assign_spool(
+                spool_id=request["spool_id"],
+                printer_id=request["printer_id"],
+                ams_id=request["ams_id"],
+                tray_id=request["tray_id"],
+            )
+        return {
+            "spool_id": assigned.spool_id,
+            "printer_id": assigned.printer_id,
+            "ams_id": assigned.ams_id,
+            "tray_id": assigned.tray_id,
+        }
+
+    async def preview_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        """#2169: the dialog's background slice, through the run's own path. The upload
+        is reused and a finished slice of the same is answered again, so a rerun slices
+        nothing twice."""
+        settings = await asyncio.to_thread(settings_store.load)
+        body = PrintRunRequest.model_validate(request["request"])
+        async with client_for(settings) as client:
+            source: PrintSource
+            subject: str
+            if request.get("library_file_id") is not None:
+                subject = PrintSubject.library(request["library_file_id"]).run_subject
+                # Its slots from the download it uploads (#2550).
+                source = await LibrarySource.load(
+                    client,
+                    request["library_file_id"],
+                    uploads=uploads,
+                    settings=settings,
+                    read_own=True,
+                )
+            else:
+                meta = await require(outputs, request["output_id"])
+                subject = PrintSubject.output(meta.id).run_subject
+                naming = await outputs.naming(meta)
+                source = OutputSource(
+                    store=outputs,
+                    meta=meta,
+                    uploads=uploads,
+                    settings=settings,
+                    # The preview's copy goes to the inbox, never a project's folder.
+                    stem=None,
+                    print_settings=naming.print_settings,
+                )
+            return _json(
+                await start_preview(client, source, settings, uploads, body, subject=subject)
+            )
+
     async def sidebar_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         settings = await asyncio.to_thread(settings_store.load)
         async with client_for(settings) as client:
@@ -257,6 +346,8 @@ def bambuddy_kinds_over(
         OperationKind("reprint", reprint_check, reprint_run),
         OperationKind("timelapse_pull", timelapse_check, timelapse_run),
         OperationKind("register_sidebar", no_check, sidebar_run, run_attempts=3),
+        OperationKind("assign_tray_spool", no_check, assign_tray_run),
+        OperationKind("preview_slice", no_check, preview_run),
         # Only ever a prelude (`output_delete`); a copy already gone counts as deleted,
         # so a retry deletes nothing twice.
         OperationKind(

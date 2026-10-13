@@ -15,6 +15,8 @@ import type {
   FontFamily,
   Job,
   LastProject,
+  ModelProjectPut,
+  ModelProjects,
   CatalogueLibrary,
   InvalidLibraryEntry,
   ManifestObject,
@@ -56,6 +58,7 @@ import type {
   UpstreamStatus,
 } from '../api/types'
 import { editPath } from '../lib/deeplink'
+import { foldFamily } from '../lib/fonts'
 import { emitRealtime, realtimeHandler } from './realtime'
 import { features } from './features'
 import { mockRackCheck, mockRackPicks } from './features/rack'
@@ -73,8 +76,13 @@ import { aiPluginHandlers, resetAiPluginMocks } from './aiPlugins'
 import { choicesView } from './choices'
 import * as fixtures from './fixtures'
 import { UI_MODULES } from './templateUi'
+import { SLICED_REASON, mockLibraryObjects } from './libraryObjects'
 
 const base = '/api/v1'
+
+/** A 1×1 PNG, for the image routes whose pixels no test looks at. */
+const PLACEHOLDER_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='
+const bytesOf = (base64: string) => Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
 
 /** `ModelPrintChoices()` on the backend: every field at its default. */
 export const NO_MODEL_CHOICES: Required<ModelPrintChoices> = {
@@ -117,8 +125,6 @@ const state = {
   /** Per-template presets, shipped (`template-*`) and saved. */
   presets: structuredClone(fixtures.presets) as Record<string, ParamPreset[]>,
   settings: structuredClone(fixtures.settings) as Settings,
-  /** #349 — the agent's headless-browser setting (`ai_settings`), off by default. */
-  headlessBrowser: false,
   printOptions: structuredClone(fixtures.printOptions) as PrintOptionsState,
   jobs: new Map<string, Job>(),
   /** spec 2026-09-27 §7 — what each arrange job was built from, read when it is saved. */
@@ -129,16 +135,19 @@ const state = {
   lastArrange: null as ArrangeRequest | null,
   /** #1864 — the output each library file ScadBuddy uploaded is a copy of. */
   libraryOutputs: new Map(INITIAL_LIBRARY_OUTPUTS),
-  /** #78 — per-model printer and spools, the store's `model_print_choices`. */
+  /**
+   * #78 — per-model printer and spools, the store's `model_print_choices`; a library
+   * file's (#313) under `library:<file id>`, as the store keeps them since #1754.
+   */
   modelChoices: {} as Record<string, ModelPrintChoices>,
-  /** #313 — per library-file choices, the store's `library_print_choices`. */
-  libraryChoices: {} as Record<string, ModelPrintChoices>,
   /** #83 — the plate last printed on each printer, the store's `printer_bed_types`. */
   printerBedTypes: {} as Record<string, string>,
   projectTargets: {} as Record<string, { printer_id: number; nozzle_diameter?: string }>,
   projects: [...fixtures.projectViews] as ProjectView[],
   /** #79 — per-model projects. No global fallback. */
   lastProjectId: null as number | null,
+  /** #1660 — the store's `model_projects`: `<slug>` or `<slug>/<preset id>` -> project. */
+  modelProjects: {} as Record<string, { project_id: number; preset_name?: string | null }>,
   fonts: [...fixtures.fonts] as FontFamily[],
   /** #90 — one git history per model, newest first. */
   versions: structuredClone(fixtures.versions) as Record<string, ModelVersion[]>,
@@ -257,8 +266,11 @@ function settleBackfill(output: Output): Output {
   if (!job) {
     output.backfill = { ...pending, error: `the re-render ${pending.job_id} is gone` }
   } else if (job.status === 'done' && !state.backfillsSeen.has(job.id)) {
-    // The API attaches on its next reconcile pass, not as the job ends: one read waits.
+    // The API attaches on its next reconcile pass, not as the job ends: one read waits,
+    // and the attach is announced (#1970).
     state.backfillsSeen.add(job.id)
+    const { id, slug } = output
+    setTimeout(() => emitRealtime('output.updated', ['outputs', `model:${slug}`], { output_id: id, slug }), 0)
   } else if (job.status === 'done') {
     output.manifest = fixtures.backfilledManifest(output.slug, output.colors ?? [])
     output.backfill = null
@@ -283,7 +295,6 @@ export function resetMockState(): void {
   state.readmes = { 'name-keychain': fixtures.keychainReadme }
   state.presets = structuredClone(fixtures.presets)
   state.settings = structuredClone(fixtures.settings)
-  state.headlessBrowser = false
   state.printOptions = structuredClone(fixtures.printOptions)
   state.jobs.clear()
   state.arranged.clear()
@@ -291,11 +302,11 @@ export function resetMockState(): void {
   state.lastArrange = null
   state.libraryOutputs = new Map(INITIAL_LIBRARY_OUTPUTS)
   state.modelChoices = {}
-  state.libraryChoices = {}
   state.printerBedTypes = {}
   state.projectTargets = {}
   state.projects = fixtures.projectViews.map((p) => ({ ...p }))
   state.lastProjectId = null
+  state.modelProjects = {}
   state.fonts = fixtures.fonts.map((f) => ({ ...f }))
   state.versions = structuredClone(fixtures.versions)
   state.sourceAt = initialSourceAt()
@@ -391,7 +402,9 @@ export function setMockRemembered(remembered: {
   modelChoices?: Record<string, ModelPrintChoices>
   printerBedTypes?: Record<string, string>
   projectTargets?: Record<string, { printer_id: number; nozzle_diameter?: string }>
+  modelProjects?: Record<string, { project_id: number; preset_name?: string | null }>
 }): void {
+  if (remembered.modelProjects) state.modelProjects = structuredClone(remembered.modelProjects)
   if (remembered.modelChoices) state.modelChoices = structuredClone(remembered.modelChoices)
   if (remembered.printerBedTypes) state.printerBedTypes = { ...remembered.printerBedTypes }
   if (remembered.projectTargets) state.projectTargets = structuredClone(remembered.projectTargets)
@@ -413,6 +426,11 @@ export function setMockInvalidLibraries(slug: string, entries: InvalidLibraryEnt
 /** #169 — every model as the mock has it now, for a feature module (`features/`). */
 export function mockModels(): readonly ModelSummary[] {
   return state.models
+}
+
+/** #1290 — a model's `model.scad` as the mock has it now, for a feature module (`features/`). */
+export function mockSource(slug: string): string | undefined {
+  return state.sources[slug]
 }
 
 /** #169 — puts `model` in place of the one with its slug; answers it as the routes do. */
@@ -751,6 +769,18 @@ export function mockRemembered() {
     printer_print_options: structuredClone(state.printOptions.printers ?? {}),
     model_print_options: structuredClone(state.printOptions.models ?? {}),
     project_print_targets: structuredClone(state.projectTargets),
+    model_projects: structuredClone(state.modelProjects),
+  }
+}
+
+/** #1660 — `GET /print/models/{slug}/projects` from the store's `model_projects`. */
+function mockModelProjects(slug: string): ModelProjects {
+  return {
+    projects: Object.entries(state.modelProjects).flatMap(([key, project]): NonNullable<ModelProjects['projects']> => {
+      if (key === slug) return [{ preset_id: null, ...project }]
+      if (key.startsWith(`${slug}/`)) return [{ preset_id: key.slice(slug.length + 1), ...project }]
+      return []
+    }),
   }
 }
 
@@ -762,9 +792,9 @@ export function forgetMockProjectTarget(projectId: string): void {
 /** #322 — "Forget all": every remembered choice, and none of the settings. */
 export function forgetMockRemembered(): void {
   state.modelChoices = {}
-  state.libraryChoices = {}
   state.printerBedTypes = {}
   state.projectTargets = {}
+  state.modelProjects = {}
   state.printOptions.global_options = {}
   state.printOptions.printers = {}
   state.printOptions.models = {}
@@ -776,13 +806,13 @@ export function forgetMockRemembered(): void {
  * all" (`forgetMockRemembered`) drops it too.
  */
 export function mockLibraryChoices(fileId: number): Required<ModelPrintChoices> {
-  return { ...NO_MODEL_CHOICES, ...state.libraryChoices[String(fileId)] }
+  return { ...NO_MODEL_CHOICES, ...state.modelChoices[`library:${fileId}`] }
 }
 
 /** Remembers one library file's choices; the empty choice forgets them, as the store does. */
 export function setMockLibraryChoices(fileId: number, choices: ModelPrintChoices): Required<ModelPrintChoices> {
-  if (isNoModelChoices(choices)) delete state.libraryChoices[String(fileId)]
-  else state.libraryChoices[String(fileId)] = { ...NO_MODEL_CHOICES, ...choices }
+  if (isNoModelChoices(choices)) delete state.modelChoices[`library:${fileId}`]
+  else state.modelChoices[`library:${fileId}`] = { ...NO_MODEL_CHOICES, ...choices }
   return mockLibraryChoices(fileId)
 }
 
@@ -1080,11 +1110,14 @@ function printMatches(print: PrintDetail, query: URLSearchParams): boolean {
   if (to !== null && day !== null && day > to) return false
   const slug = query.get('slug')
   if (slug !== null && print.slug !== slug) return false
+  const file = query.get('library_file_id')
+  if (file !== null && print.library_file_id !== Number(file)) return false
   const q = query.get('q')?.toLowerCase()
   if (q) {
     const haystack = [
       print.output_name ?? '',
       print.slug ?? '',
+      print.library_file_name ?? '',
       archive?.print_name ?? '',
       JSON.stringify(print.provenance?.params ?? {}),
     ]
@@ -2488,6 +2521,31 @@ export const handlers = [
       }
     }
 
+    // #1286 — `require_installed_fonts` (api/params.py): a `// font` value the caller
+    // chose that names a family not installed is refused, naming both.
+    const installedFamilies = new Set(state.fonts.map((font) => foldFamily(font.family)))
+    const unfontedParams: string[] = []
+    const unfontedFamilies: string[] = []
+    for (const param of schema.parameters ?? []) {
+      const value = renderParams[param.name]
+      if (param.type !== 'font' || typeof value !== 'string' || value === param.initial) continue
+      // The template's own options are its business, as on the server.
+      if ((param.options ?? []).some((option) => option.value === value)) continue
+      const families = (value.split(':style=')[0] ?? '').split(',').map((family) => family.trim()).filter(Boolean)
+      const missing = families.filter((family) => !installedFamilies.has(foldFamily(family)))
+      if (missing.length === 0) continue
+      unfontedParams.push(param.name)
+      for (const family of missing) if (!unfontedFamilies.includes(family)) unfontedFamilies.push(family)
+    }
+    if (unfontedParams.length > 0) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        `parameter '${unfontedParams[0]}' names font family '${unfontedFamilies[0]}', which is not installed`,
+        { parameters: unfontedParams, families: unfontedFamilies },
+      )
+    }
+
     const jobId = nextHexId()
     const inputs = withVersion({ ...(body.inputs ?? {}), params: renderParams })
     state.jobs.set(jobId, {
@@ -2498,6 +2556,7 @@ export const handlers = [
       params: renderParams,
       inputs,
       log_tail: [],
+      workflow_id: `render-${jobId}`,
     })
     runJob(jobId)
     // #904 — the caller's own normalised inputs, as `RenderAccepted.inputs` carries them.
@@ -2577,27 +2636,33 @@ export const handlers = [
   http.post(`${base}/outputs/arrange`, async ({ request }) => {
     const body = (await request.json()) as ArrangeRequest
     state.lastArrange = body
-    // #1864 — a library file stands for the output it is a copy of; one ScadBuddy did not
-    // make is refused, every such file named at once.
-    const plain = [
+    // #1864 — a library file stands for the output it is a copy of; #1863 — any other is
+    // read from its 3MF, and one that cannot be (the sliced file) is refused, every such
+    // file named at once.
+    const isPlain = (o: ArrangeRequest['objects'][number]) =>
+      o.library_file_id != null && !state.libraryOutputs.has(o.library_file_id)
+    const refused = [
       ...new Set(
         body.objects.flatMap((o) =>
-          o.library_file_id != null && !state.libraryOutputs.has(o.library_file_id) ? [o.library_file_id] : [],
+          isPlain(o) && !mockLibraryObjects(o.library_file_id ?? 0) ? [o.library_file_id ?? 0] : [],
         ),
       ),
     ]
-    if (plain.length > 0) {
+    if (refused.length > 0) {
       return problem(
         422,
         'Unprocessable Content',
-        `${plain.length} library file(s) were not made by ScadBuddy, so nothing records their objects; arranging such a file is not supported yet`,
-        { code: 'library_file_not_arrangeable', library_file_ids: plain },
+        `${refused.length} library file(s) cannot be arranged: ${refused.map((id) => `file ${id}: ${SLICED_REASON}`).join('; ')}`,
+        { code: 'library_file_not_arrangeable', library_file_ids: refused },
       )
     }
-    const objects = body.objects.map((o) => ({
-      ...o,
-      output_id: o.output_id ?? state.libraryOutputs.get(o.library_file_id ?? 0) ?? '',
-    }))
+    const library = body.objects.filter(isPlain)
+    const objects = body.objects
+      .filter((o) => !isPlain(o))
+      .map((o) => ({
+        ...o,
+        output_id: o.output_id ?? state.libraryOutputs.get(o.library_file_id ?? 0) ?? '',
+      }))
     // #902 — every output saved before Arrange, named at once, as the API does.
     const chosen = [...new Set(objects.map((o) => o.output_id))]
     const missing = chosen.find((id) => !state.outputs.some((o) => o.id === id))
@@ -2637,25 +2702,62 @@ export const handlers = [
         if (count > 0) manifest.push({ ...entry, count, source_output: entry.source_output ?? source.id })
       }
     }
-    if (manifest.length === 0) {
-      return problem(422, 'Unprocessable Content', 'nothing to arrange: every count is 0')
+    if (slugs.length === 0 && body.slug == null) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        'a result of library files alone is filed under a template: name one in slug',
+      )
     }
-    if (body.slug != null && !slugs.includes(body.slug)) {
+    // #2284 — with a library file in the mix, any template.
+    if (slugs.length > 0 && library.length === 0 && body.slug != null && !slugs.includes(body.slug)) {
       return problem(
         422,
         'Unprocessable Content',
         `the result is filed under one of its objects' templates (${slugs.join(', ')}), not ${body.slug}`,
       )
     }
+    const filed = body.slug ?? slugs[0]!
+    for (const object of library) {
+      const fileId = object.library_file_id ?? 0
+      const read = mockLibraryObjects(fileId) ?? []
+      const entries = object.part == null ? read : read.filter((m) => m.part === object.part)
+      if (entries.length === 0) {
+        return problem(422, 'Unprocessable Content', `library file ${fileId} has no object ${object.part}`)
+      }
+      for (const entry of entries) {
+        const count = object.count ?? entry.count
+        const [x, y, z] = entry.size
+        if (count > 0) {
+          manifest.push({
+            part: entry.part,
+            file: entry.name,
+            // #2284 — a library file's objects are no template's, wherever it is filed.
+            slug: '',
+            revision: null,
+            bbox: { min: [0, 0, 0], max: [x, y, z], size: [x, y, z] },
+            footprint: [x, y],
+            colours: entry.colours,
+            count,
+            plates: 1,
+            library_file_id: fileId,
+          })
+        }
+      }
+    }
+    if (manifest.length === 0) {
+      return problem(422, 'Unprocessable Content', 'nothing to arrange: every count is 0')
+    }
     const first = state.outputs.find((o) => o.id === objects[0]?.output_id)
-    if (!first?.bbox_mm) return problem(409, 'Conflict', 'the output has no dimensions')
-    const colors = body.colours ?? first.colors ?? []
+    const bbox = first ? first.bbox_mm : manifest[0]!.bbox
+    if (!bbox) return problem(409, 'Conflict', 'the output has no dimensions')
+    const fromFiles = manifest.filter((m) => m.library_file_id != null).flatMap((m) => m.colours)
+    const colors = body.colours ?? [...new Set([...(first?.colors ?? []), ...fromFiles])]
     const copies = manifest.reduce((sum, m) => sum + m.count, 0)
-    const bbox = first.bbox_mm
     const jobId = nextHexId()
     const job: Job = {
       id: jobId,
-      slug: body.slug ?? first.slug,
+      slug: filed,
       status: 'done',
       created_at: new Date().toISOString(),
       finished_at: new Date().toISOString(),
@@ -2667,7 +2769,7 @@ export const handlers = [
     }
     state.jobs.set(jobId, job)
     state.arranged.set(jobId, {
-      sources: chosen,
+      sources: [...chosen, ...new Set(library.map((o) => `library:${o.library_file_id}`))],
       manifest,
     })
     return HttpResponse.json(job, { status: 202 })
@@ -2689,6 +2791,23 @@ export const handlers = [
     const glb = keychainGlb(job.colors ?? ['#9AA4B2'], { x, y, z })
     return HttpResponse.arrayBuffer(glb.buffer.slice(0) as ArrayBuffer, {
       headers: { 'Content-Type': 'model/gltf-binary' },
+    })
+  }),
+
+  // #1289 — the per-colour breakdown: a placeholder image, with the legend in the
+  // route's headers as the backend sends it (a near-square grid, render/thumbnail.py).
+  http.get(`${base}/jobs/:id/colours.png`, ({ params }) => {
+    const job = state.jobs.get(String(params['id']))
+    if (!job || !job.bbox_mm) return problem(404, 'Preview not ready')
+    const colours = (job.colors ?? []).map((colour) => colour.toUpperCase())
+    if (colours.length === 0) return problem(404, 'The preview has no geometry')
+    if (colours.length > 16) return problem(422, `${colours.length} colours is more than a breakdown draws (16)`)
+    return HttpResponse.arrayBuffer(bytesOf(PLACEHOLDER_PNG).buffer as ArrayBuffer, {
+      headers: {
+        'Content-Type': 'image/png',
+        'X-ScadBuddy-Colours': colours.join(','),
+        'X-ScadBuddy-Colour-Columns': String(Math.ceil(Math.sqrt(colours.length))),
+      },
     })
   }),
 
@@ -2837,6 +2956,9 @@ export const handlers = [
     const cursor = query.get('cursor')
     if (!Number.isInteger(limit) || limit < 1 || limit > 100 || (cursor !== null && !/^[1-9][0-9]*$/.test(cursor))) {
       return problem(422, 'Unprocessable Content', 'the request did not match the expected shape')
+    }
+    if (query.has('slug') && query.has('library_file_id')) {
+      return problem(422, 'Unprocessable Content', "a print is of a template's output or of a library file: filter by one")
     }
     const matches = fixtures.prints.filter((print) => printMatches(print, query))
     const after = cursor === null ? matches : matches.filter((print) => print.archive_id < Number(cursor))
@@ -3248,6 +3370,20 @@ export const handlers = [
     return HttpResponse.json({ project_id: state.lastProjectId } satisfies LastProject)
   }),
 
+  // #1660 — the project each model was last filed into, per preset.
+  http.get(`${base}/print/models/:slug/projects`, ({ params }) =>
+    HttpResponse.json(mockModelProjects(String(params['slug']))),
+  ),
+
+  http.put(`${base}/print/models/:slug/project`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    const body = (await request.json()) as ModelProjectPut
+    const key = body.preset_id ? `${slug}/${body.preset_id}` : slug
+    if (body.project_id === null || body.project_id === undefined) delete state.modelProjects[key]
+    else state.modelProjects[key] = { project_id: body.project_id, preset_name: body.preset_name ?? null }
+    return HttpResponse.json(mockModelProjects(slug))
+  }),
+
   // #317 — Generate with a project files the editable 3MF in its folder, once per
   // (folder, target): the same project again answers with the file already there.
   http.post(`${base}/outputs/:id/project-file`, async ({ params, request }) => {
@@ -3357,6 +3493,18 @@ export const handlers = [
 
   http.get(`${base}/libraries`, () => HttpResponse.json(state.libraries)),
 
+  // #1285 — a model whose includes all resolve; tests that need more override this.
+  http.post(`${base}/models/:slug/dependencies`, () =>
+    HttpResponse.json({
+      includes: [],
+      unresolved: 0,
+      fonts: [],
+      fonts_checked: true,
+      missing_checkouts: [],
+      truncated: false,
+    }),
+  ),
+
   // #93 — pins are per model: PUT clones at `ref` and pins it into this model alone.
   http.put(`${base}/models/:slug/libraries/:name`, async ({ params, request }) => {
     const slug = String(params['slug'])
@@ -3434,20 +3582,6 @@ export const handlers = [
     return HttpResponse.json(view(updated))
   }),
 
-  // #349 — served by the agent service, not the backend (agent/src/routes/headlessBrowser.ts).
-  http.get(`${base}/ai/settings/headless-browser`, () =>
-    HttpResponse.json({ enabled: state.headlessBrowser }),
-  ),
-
-  http.put(`${base}/ai/settings/headless-browser`, async ({ request }) => {
-    const body = (await request.json()) as { enabled?: unknown }
-    if (typeof body.enabled !== 'boolean') {
-      return HttpResponse.json({ detail: 'enabled: expected boolean' }, { status: 400 })
-    }
-    state.headlessBrowser = body.enabled
-    return HttpResponse.json({ enabled: state.headlessBrowser })
-  }),
-
   // #81 — the server resolves Bambuddy's code or the profile name, else the default.
   http.get(`${base}/plate`, ({ request }) =>
     HttpResponse.json(
@@ -3501,6 +3635,16 @@ export const handlers = [
     } else {
       const map = body.scope === 'printer' ? state.printOptions.printers : state.printOptions.models
       if (!map || !body.key) return problem(422, 'Unprocessable', 'the scope needs a key')
+      // #1754: a model's id (`MODEL_ID_PATTERN` in backend/scadbuddy/library/slugs.py, with
+      // its MAX_SLUG_LENGTH of 100; keep the two in step), or a library file's `library:<file id>`;
+      // a forget goes through for any key, as on the server.
+      if (
+        body.scope === 'model' &&
+        !empty &&
+        !/^((builtin:)?[a-z0-9][a-z0-9-]{0,99}|library:[1-9]\d*)$/.test(body.key)
+      ) {
+        return problem(422, 'Unprocessable', `${body.key} is neither a model nor a library file`)
+      }
       if (empty) delete map[body.key]
       else map[body.key] = options
     }

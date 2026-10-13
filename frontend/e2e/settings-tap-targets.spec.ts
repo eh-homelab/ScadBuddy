@@ -29,10 +29,15 @@ for (const [width, height] of [
     await page.setViewportSize({ width, height })
     await page.goto('/settings')
     await expect(page.getByRole('table', { name: 'Deployment values' })).toBeAttached()
+    await expect(page.getByRole('listitem', { name: 'Built-in plugin scadbuddy' })).toBeAttached()
     // Open every disclosure, so what is inside one is measured too.
-    for (const details of await page.locator('main details:not([open]) > summary').all()) {
-      await details.click()
-    }
+    // Each click takes one out of the closed set, so it is always the first that is left.
+    const closed = page.locator('main details:not([open]) > summary')
+    while ((await closed.count()) > 0) await closed.first().click()
+    // A plugin package's files (#1029) open with a button, not a summary.
+    const files = page.locator('main').getByRole('button', { name: /^Files to read/, expanded: false })
+    while ((await files.count()) > 0) await files.first().click()
+    await expect(page.getByRole('list', { name: 'Files to read in scadbuddy' })).toBeVisible()
     expect(await smallTargets(page)).toEqual([])
   })
 }

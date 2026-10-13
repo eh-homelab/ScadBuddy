@@ -1,10 +1,17 @@
 import { useState } from 'react'
 import { USER_ONLY } from '../../agent/dom'
 import { api, ApiError } from '../../api/client'
-import type { BambuddyTargets, ModelPrintChoices, PrintOptions, ProjectChoices, RememberedChoices } from '../../api/types'
+import type {
+  BambuddyTargets,
+  ModelPrintChoices,
+  PrintOptions,
+  ProjectChoices,
+  RememberedChoices,
+} from '../../api/types'
 import { ALGORITHM_LABELS } from '../../components/print/rackLabels'
 import { Button } from '../../components/ui/Button'
 import { Spinner } from '../../components/ui/Spinner'
+import { libraryFileOfScope } from '../../lib/printSource'
 import { useAsync } from '../../lib/useAsync'
 
 type Row = {
@@ -33,6 +40,12 @@ function describeOptions(options: PrintOptions): string {
       .map(([name, value]) => `${name.replaceAll('_', ' ')}: ${typeof value === 'object' ? JSON.stringify(value) : String(value)}`)
       .join(', ') || 'Options remembered'
   )
+}
+
+/** A model's id as it is, a library file's scope as the file. */
+function scopeName(scope: string): string {
+  const fileId = libraryFileOfScope(scope)
+  return fileId === null ? scope : `Library file ${fileId}`
 }
 
 function isEmptyOptions(options: PrintOptions | undefined): boolean {
@@ -64,13 +77,15 @@ export function RememberedChoicesPanel({
   const remembered: RememberedChoices | undefined = state.data
   const rows: Row[] = []
   if (remembered) {
-    for (const [slug, choices] of Object.entries(remembered.model_print_choices ?? {})) {
+    for (const [scope, choices] of Object.entries(remembered.model_print_choices ?? {})) {
+      // #1754: a library file's are in the same map, under `library:<file id>`.
+      const fileId = libraryFileOfScope(scope)
       rows.push({
-        key: `choices:${slug}`,
+        key: `choices:${scope}`,
         kind: 'Printer and spools',
-        subject: slug,
+        subject: scopeName(scope),
         value: describeChoices(choices, printerName),
-        forget: () => api.putModelChoices(slug, {}),
+        forget: () => (fileId === null ? api.putModelChoices(scope, {}) : api.putLibraryChoices(fileId, {})),
       })
     }
     for (const [printerId, bed] of Object.entries(remembered.printer_bed_types ?? {})) {
@@ -102,6 +117,24 @@ export function RememberedChoicesPanel({
         forget: () => api.forgetRememberedProject(projectId),
       })
     }
+    for (const [scope, entry] of Object.entries(remembered.model_projects ?? {})) {
+      // #1660: `<model id>` with no preset, `<model id>/<preset id>` with one. The
+      // server names a preset by its name now (one read for every model, not one
+      // `listPresets` each), and drops an entry for a preset its model no longer lists.
+      const slash = scope.indexOf('/')
+      const modelId = slash < 0 ? scope : scope.slice(0, slash)
+      const presetId = slash < 0 ? null : scope.slice(slash + 1)
+      rows.push({
+        key: `model-project:${scope}`,
+        kind: 'Project',
+        subject:
+          presetId === null
+            ? modelId
+            : `${modelId} · ${entry.preset_name ?? presetId}`,
+        value: projectName(String(entry.project_id)),
+        forget: () => api.putModelProject(modelId, { preset_id: presetId, project_id: null }),
+      })
+    }
     if (!isEmptyOptions(remembered.print_options)) {
       rows.push({
         key: 'options:global',
@@ -120,13 +153,13 @@ export function RememberedChoicesPanel({
         forget: () => api.putPrintOptions({ scope: 'printer', key: printerId, options: {} }),
       })
     }
-    for (const [slug, options] of Object.entries(remembered.model_print_options ?? {})) {
+    for (const [scope, options] of Object.entries(remembered.model_print_options ?? {})) {
       rows.push({
-        key: `options:model:${slug}`,
+        key: `options:model:${scope}`,
         kind: 'Print options',
-        subject: slug,
+        subject: scopeName(scope),
         value: describeOptions(options),
-        forget: () => api.putPrintOptions({ scope: 'model', key: slug, options: {} }),
+        forget: () => api.putPrintOptions({ scope: 'model', key: scope, options: {} }),
       })
     }
   }

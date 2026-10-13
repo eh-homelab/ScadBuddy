@@ -1,15 +1,13 @@
 import { useState } from 'react'
-import { Link } from 'react-router'
-import { toolLabel } from '../../agent/chat/labels'
 import { Markdown } from '../../agent/chat/Markdown'
 import { ANSWER_MAX, type Question as AskedQuestion, type DoneAttention, isDone } from '../../agent/chat/protocol'
 import type { FeedItem } from '../../agent/chat/state'
-import { safeHttpUrl } from '../../lib/safeUrl'
+import { formatBytes } from '../../lib/format'
 import { Button } from '../ui/Button'
 import { RiskBadge } from './badges'
 import { SentImages } from './SentImages'
+import { ToolCallView } from './ToolGroup'
 
-type Tool = Extract<FeedItem, { kind: 'tool' }>
 type Approval = Extract<FeedItem, { kind: 'approval' }>
 type Memory = Extract<FeedItem, { kind: 'memory' }>
 type QuestionItem = Extract<FeedItem, { kind: 'question' }>
@@ -68,65 +66,6 @@ function MemoryLine({ item, advanced }: { item: Memory; advanced: boolean }) {
         )}
       </div>
     </details>
-  )
-}
-
-/** Basic mode shows what ran, how it ended and its sources, collapsed; Advanced adds its arguments, and opens both. */
-function ToolCard({ item, advanced }: { item: Tool; advanced: boolean }) {
-  const { result } = item
-  return (
-    <div className="rounded-[6px] border border-line bg-surface-2 px-2.5 py-2 text-[12.5px]" data-testid="agent-tool">
-      <div className="flex items-center gap-2">
-        <RiskBadge risk={item.risk} />
-        <span className="min-w-0 truncate font-mono text-[12px]">{toolLabel(item.name)}</span>
-        <span className="ml-auto shrink-0 text-[11px] text-faint">
-          {result ? (result.ok ? 'done' : 'failed') : 'running…'}
-        </span>
-      </div>
-      {advanced && (
-        <details open className="mt-1" data-testid="agent-tool-arguments">
-          <summary className="cursor-pointer text-[11.5px] text-muted">Arguments</summary>
-          <pre className="mt-1 overflow-x-auto font-mono text-[11px] text-muted">
-            {JSON.stringify(item.input, null, 2)}
-          </pre>
-        </details>
-      )}
-      {result && (
-        <div className="mt-1.5 space-y-1">
-          <p className={result.ok ? 'text-ink' : 'text-warn'}>{result.summary}</p>
-          {result.version && (
-            <Link
-              to={`/m/${encodeURIComponent(result.version.slug)}/versions`}
-              className="text-[11.5px] text-accent underline"
-            >
-              Undo from version {result.version.revision.slice(0, 7)}
-            </Link>
-          )}
-          {result.sources.length > 0 && (
-            <details open={advanced}>
-              <summary className="cursor-pointer text-[11.5px] text-muted">Why? {result.sources.length} source{result.sources.length === 1 ? '' : 's'}</summary>
-              <ul className="mt-1 list-disc space-y-0.5 pl-4 text-[11.5px] text-muted">
-                {result.sources.map((source, i) => {
-                  const href = safeHttpUrl(source.url)
-                  return (
-                    <li key={i}>
-                      {href ? (
-                        <a href={href} target="_blank" rel="noreferrer noopener" className="underline">
-                          {source.title}
-                        </a>
-                      ) : (
-                        source.title
-                      )}
-                      {source.ref && <span className="ml-1 font-mono text-faint">{source.ref}</span>}
-                    </li>
-                  )
-                })}
-              </ul>
-            </details>
-          )}
-        </div>
-      )}
-    </div>
   )
 }
 
@@ -261,7 +200,7 @@ function DoneCard({ item, summary, onAnswer }: { item: QuestionItem; summary: st
       {item.state === 'pending' ? (
         <div className="mt-2" data-agent-user-only="">
           <Button type="button" variant="primary" size="sm" onClick={() => onAnswer([dismiss])}>
-            Dismiss
+            {dismiss}
           </Button>
         </div>
       ) : (
@@ -428,7 +367,7 @@ function QuestionCard({
                 : item.state === 'answered'
                 ? `Answered${item.by ? ` by ${item.by.label}` : ''}: ${(item.answers ?? []).join(' · ')}`
                 : item.reconnected
-                  ? 'The tab is back. The assistant re-reads the page before it changes anything.'
+                  ? 'The tab is back. A change that was waiting was not made; the assistant is told to check the page first.'
                   : item.attention
                   ? `No reply: ${item.reason ?? 'the request was cancelled'}.`
                   : `Not answered: ${item.reason ?? 'the question was cancelled'}.`}
@@ -439,12 +378,32 @@ function QuestionCard({
   )
 }
 
+/**
+ * #794 — shown on hover, and always to the keyboard (it is in the tab order) and on
+ * touch screens, which have no hover.
+ */
+function ForkHere({ onClick, title }: { onClick: () => void; title: string }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      data-agent-user-only=""
+      className="absolute -top-2.5 right-0 rounded-[4px] border border-line bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted opacity-0 hover:text-ink focus:opacity-100 group-hover:opacity-100 [@media(hover:none)]:opacity-100"
+    >
+      Fork from here
+    </button>
+  )
+}
+
 export function FeedItemView({
   item,
   onDecide,
   onAnswer,
   advanced = false,
   askedBy,
+  sessionId = '',
+  onForkHere,
 }: {
   item: FeedItem
   onDecide: (approvalId: string, approve: boolean) => void
@@ -454,21 +413,34 @@ export function FeedItemView({
   advanced?: boolean
   /** #1109 — a question's subagent (`askedBy` in chat/state.ts); undefined for the session's own agent. */
   askedBy?: string | undefined
+  /** #782 — the session the item is in, where its tool images are served. */
+  sessionId?: string
+  /**
+   * #794 — "Fork from here" on a message: a new chat with the conversation up to it.
+   * Absent where there is nothing to fork up to (the first message, a reply still streaming).
+   */
+  onForkHere?: (() => void) | undefined
 }) {
   switch (item.kind) {
     case 'user':
       return (
-        <div className="ml-8 rounded-[6px] bg-surface-3 px-2.5 py-1.5 text-[13px]">
+        <div data-feed-item="user" className="group relative ml-8 rounded-[6px] bg-surface-3 px-2.5 py-1.5 text-[13px]">
           {item.author.kind !== 'browser' && (
             <p className="mb-0.5 text-[11px] text-faint">{item.author.label}</p>
           )}
-          {item.images && <SentImages images={item.images} />}
+          {item.images && <SentImages images={item.images} sessionId={sessionId} />}
           <p className="whitespace-pre-wrap">{item.text}</p>
+          {onForkHere && (
+            <ForkHere
+              onClick={onForkHere}
+              title="Start a new chat with the conversation before this message, and this message to edit and send"
+            />
+          )}
         </div>
       )
     case 'assistant':
       return (
-        <div className="text-[13px] leading-relaxed" data-testid="agent-text">
+        <div data-feed-item="assistant" className="group relative text-[13px] leading-relaxed" data-testid="agent-text">
           <Markdown text={item.text} />
           {!item.done && (
             <span
@@ -476,10 +448,21 @@ export function FeedItemView({
               className="ml-0.5 inline-block h-3 w-1.5 bg-accent align-middle motion-safe:animate-pulse"
             />
           )}
+          {onForkHere && (
+            <ForkHere onClick={onForkHere} title="Start a new chat with the conversation up to this reply" />
+          )}
         </div>
       )
     case 'tool':
-      return <ToolCard item={item} advanced={advanced} />
+      // The panel shows calls in groups (ToolGroup); one shown alone has its own status.
+      return (
+        <ToolCallView
+          call={item}
+          status={item.result ? (item.result.ok ? 'done' : 'failed') : 'running'}
+          sessionId={sessionId}
+          advanced={advanced}
+        />
+      )
     case 'approval':
       return <ApprovalCard item={item} onDecide={(approve) => onDecide(item.id, approve)} />
     case 'question':
@@ -490,6 +473,18 @@ export function FeedItemView({
       )
     case 'memory':
       return <MemoryLine item={item} advanced={advanced} />
+    case 'file':
+      return (
+        <p className="text-[11.5px] text-faint" data-testid="agent-file">
+          {item.by.label} {item.change}{' '}
+          <span className="break-all font-mono" title={item.path}>
+            {item.path}
+          </span>
+          {item.size !== undefined && <> ({formatBytes(item.size)})</>}
+          {item.change === 'uploaded' && ' to the workspace'}
+          {item.change === 'deleted' && ' from the workspace'}
+        </p>
+      )
     case 'error':
       return (
         <p role="alert" className="text-[12.5px] text-warn">

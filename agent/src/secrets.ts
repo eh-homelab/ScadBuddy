@@ -162,6 +162,20 @@ function open(key: Buffer, sealed: Buffer, context: string): Buffer {
   return out
 }
 
+/**
+ * Seals raw bytes under `key` in `context`: the format `sealSecret` writes, for a
+ * caller that keeps its own data key (the payload codec, temporal/payloadCodec.ts).
+ * `random` exists for the vectors only, as for `sealSecret`.
+ */
+export function sealBytes(key: Buffer, bytes: Buffer, context: string, random: RandomSource = randomBytes): Buffer {
+  return seal(key, bytes, context, random)
+}
+
+/** Opens what `sealBytes` sealed. The caller owns the returned Buffer and zeroes it. */
+export function openBytes(key: Buffer, sealed: Buffer, context: string): Buffer {
+  return open(key, sealed, context)
+}
+
 /** What a row stores for one secret. */
 export type Envelope = {
   /** The secret, sealed under the data key. */

@@ -31,10 +31,10 @@ from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.api import operations as operations_api
 from scadbuddy.api import printing as printing_api
-from scadbuddy.api.deps import DATABASE_REQUIRED_PROBLEM, STATE_ATTR
+from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.print_run import PrintRunRequest
-from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, PrintRunStore, run_key
+from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, run_key
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
@@ -390,6 +390,29 @@ def test_the_output_listing_says_which_outputs_failed_before_queueing(
     assert listed() is False
 
 
+def test_the_output_listing_answers_when_print_runs_are_unreadable(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2137: a Postgres hiccup reading ``print_runs`` lists the outputs without the
+    flag rather than turning History, and every page that lists outputs, into a 500."""
+    output_id = prepared(client, model)
+
+    async def unreadable(output_ids: list[str]) -> set[str]:
+        raise psycopg.OperationalError("connection lost")
+
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    monkeypatch.setattr(state.print_runs.store, "failed_before_queueing", unreadable)
+
+    listing = client.get(f"/api/v1/models/{model}/outputs")
+    single = client.get(f"/api/v1/outputs/{output_id}")
+
+    assert listing.status_code == 200, listing.text
+    assert output_id in {output["id"] for output in listing.json()}
+    assert all(output["failed_before_queueing"] is False for output in listing.json())
+    assert single.status_code == 200, single.text
+    assert single.json()["failed_before_queueing"] is False
+
+
 @respx.mock
 def test_a_failed_slice_is_the_runs_failure_in_bambuddys_words(
     client: TestClient, model: str
@@ -672,7 +695,7 @@ def test_only_a_failed_connect_says_nothing_was_queued(
 
     assert response.status_code == 503, response.text
     assert response.json()["type"].endswith("/temporal-unavailable")
-    assert "cannot reach Temporal" in response.text
+    assert "background service" in response.text and "Temporal" not in response.text
     assert "Nothing was queued" in response.text
     assert response.json()["may_have_started"] is False
 
@@ -701,9 +724,9 @@ def test_an_unavailable_temporal_may_have_started_the_run(
 
     assert response.status_code == 503, response.text
     assert response.json()["type"].endswith("/temporal-unavailable")
-    assert "cannot reach Temporal" in response.text
+    assert "background service" in response.text and "Temporal" not in response.text
     assert "Nothing was queued" not in response.text
-    assert "follow it if it started" in response.text
+    assert "a retry picks this request up" in response.text
     # The client re-sends the same request_id, never a new one (review #1316 (13) 1a).
     assert response.json()["may_have_started"] is True
 
@@ -742,13 +765,13 @@ def test_a_transient_rpc_error_is_temporal_unavailable(
     assert response.json()["type"].endswith("/temporal-unavailable")
     # Each may follow a persisted start, as `DEADLINE_EXCEEDED` does (review #1316 (8) 1).
     assert "Nothing was queued" not in response.text
-    assert "follow it if it started" in response.text
+    assert "a retry picks this request up" in response.text
     # The client re-sends the same request_id, never a new one (review #1316 (13) 1a).
     assert response.json()["may_have_started"] is True
     # Temporal answered (or gRPC ended the call): not a network problem (review #1316
     # (9) 1b).
-    assert "cannot reach" not in response.text
-    assert "could not start this print right now" in response.text
+    assert "answer" not in response.json()["detail"]
+    assert "busy right now" in response.text
 
 
 @respx.mock
@@ -915,31 +938,6 @@ def test_an_unknown_run_is_a_404(client: TestClient) -> None:
     response = client.get(f"/api/v1/print/runs/{uuid.uuid4().hex}")
     assert response.status_code == 404
     assert client.get("/api/v1/print/runs/not-a-run").status_code == 422
-
-
-@respx.mock
-def test_without_a_database_both_routes_are_a_503_and_nothing_is_uploaded(
-    client: TestClient, model: str, app: FastAPI
-) -> None:
-    """Runs live only in Postgres: the established 503, not a 500 naming an exception."""
-    output_id = prepared(client, model)
-    run_routes()
-    uploaded = upload_route()
-    state = getattr(app.state, STATE_ATTR)
-    runs = state.print_runs
-    state.print_runs = dataclasses.replace(runs, store=PrintRunStore(None))
-    try:
-        for response in (
-            start(client, output_id, body()),
-            client.get(f"/api/v1/print/runs/{uuid.uuid4().hex}"),
-        ):
-            assert response.status_code == 503, response.text
-            problem = response.json()
-            assert problem["type"] == DATABASE_REQUIRED_PROBLEM
-            assert "Error" not in problem["detail"]
-    finally:
-        state.print_runs = runs
-    assert not uploaded.called
 
 
 @respx.mock

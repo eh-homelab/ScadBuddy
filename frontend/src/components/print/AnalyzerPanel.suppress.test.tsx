@@ -52,7 +52,7 @@ function watchDecisions() {
 }
 
 function renderPanel() {
-  return renderPage(<AnalyzerPanel outputId={output.id} request={request} />)
+  return renderPage(<AnalyzerPanel target={{ output_id: output.id }} request={request} />)
 }
 
 /** A suppression of SB1002:part-2 already stored, as another dialog or the agent leaves it. */

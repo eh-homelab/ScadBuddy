@@ -114,11 +114,18 @@ class InstalledLibrary(BaseModel):
     "/libraries",
     response_model=list[CatalogueLibrary],
     summary="The library catalogue",
-    description="Libraries ScadBuddy knows how to fetch, each with the ref it suggests. "
-    "Any other can be pinned to a model by URL.",
+    description="Libraries ScadBuddy knows how to fetch, each with the ref it suggests, "
+    "or with `q` the ones whose name, description or tags hold every word of it, "
+    "ignoring case. Any other can be pinned to a model by URL.",
 )
-def list_libraries(libraries: LibrariesDep) -> list[CatalogueLibrary]:
-    return libraries.entries()
+def list_libraries(
+    libraries: LibrariesDep,
+    q: Annotated[
+        str | None,
+        Query(max_length=200, description="Words each listed library must match"),
+    ] = None,
+) -> list[CatalogueLibrary]:
+    return libraries.entries(q)
 
 
 @router.put(

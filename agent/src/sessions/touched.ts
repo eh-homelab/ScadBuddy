@@ -1,6 +1,7 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import type { Sql } from 'postgres'
 import type { Risk } from '../tools/registry.js'
+import { RECORD_WAIT_MS, waitAtMost } from '../db/bounded.js'
 import { unwrapUntrusted } from '../safety/untrusted.js'
 
 // What a session touched (#931): every resource a session's tool calls
@@ -19,7 +20,8 @@ import { unwrapUntrusted } from '../safety/untrusted.js'
 //
 // Recording never fails the call: a row that cannot be written is reported
 // through `onError` and the call's result goes back unchanged, as the audit
-// log does (audit/log.ts).
+// log does (audit/log.ts). Nor does it hold the call up: past RECORD_WAIT_MS
+// the call goes on and the late write is reported (db/bounded.ts, #1076).
 
 export const RESOURCE_TYPES = [
   'model',
@@ -79,8 +81,25 @@ export type ResourceAction = (typeof RESOURCE_ACTIONS)[number]
 /**
  * One resource one call touched. `model` is the model it belongs to (its own
  * slug for a model), so a session's revisions can be grouped by model and a
- * model's sessions found. `before`/`after` are what it was and became where
- * that has an id: a revision's parent and new commit, a model's version.
+ * model's sessions found. `after` is the version it became, where it has one
+ * (a revision's or model's commit, a render's model version, the last project).
+ *
+ * `before` (column `before_id`) is what the resource came from, and what that
+ * is depends on its type (#1076):
+ *
+ * | type            | tools                                         | `before` is                          |
+ * |-----------------|-----------------------------------------------|--------------------------------------|
+ * | `revision`      | every revision tool, library pins             | the model's previous commit (#1071)  |
+ * | `model`         | duplicate_model, create_from_template         | the model or template copied         |
+ * | `preset`        | duplicate_preset                              | the preset copied                    |
+ * | `library`       | remove_library_checkout                       | the commit the checkout was at       |
+ * | `print_run`     | print_output                                  | the output printed                   |
+ * | `print`         | print_output, file_output_under_project       | the output printed or filed          |
+ * | `print`         | print_again                                   | the print archive printed again      |
+ * | `bambuddy_file` | send_to_bambuddy, file_output_in_project_folder, browser_generate | the output it holds |
+ * | `project`, `print_archive` | file_output_under_project          | the output filed                     |
+ *
+ * Every other row leaves it null.
  */
 export type Touch = {
   type: ResourceType
@@ -98,23 +117,38 @@ function str(value: unknown): string | null {
   return typeof value === 'string' && value !== '' ? value : null
 }
 
+/** What a print tool printed (#1756): its output, or `library:<file id>`, the run's own subject. */
+function printed(input: Record<string, unknown>): string | null {
+  const file = bambuddyId(input.library_file_id)
+  return file ? `library:${file}` : str(input.output_id)
+}
+
 function field(value: unknown, key: string): unknown {
   return value !== null && typeof value === 'object' ? (value as Record<string, unknown>)[key] : undefined
 }
 
 /**
  * A call that made a revision of `slug`: the ModelRecord it answers names the
- * new commit. `before` is the parent only where the call names it (`base`,
- * which apply_patch requires and update_source takes); the other revision
- * tools leave it null. With no new commit in the answer the model is recorded
- * as changed, never its slug as a revision id.
+ * new commit, and its parent in the model's own history as `previous_version`
+ * (#1071). Against a backend that predates that field, `before` is the parent
+ * only where the call names it (`base`, which apply_patch requires and
+ * update_source takes), else null. With no new commit in the answer the model
+ * is recorded as changed, never its slug as a revision id.
+ *
+ * A call that names its `base` was refused (409) unless the model was at it, so
+ * the commit it made is `base`'s child. The record is read after the write and
+ * can already name another writer's commit (#2158), so a `previous_version` that
+ * is not `base` (or `base` spelled out: it may be a short id) loses to `base`.
  */
 function revision(input: Record<string, unknown>, result: unknown): Touch[] {
   const slug = str(field(result, 'slug')) ?? str(input.slug)
   const after = str(field(result, 'version'))
   if (!slug) return []
   if (!after) return [{ type: 'model', id: slug, action: 'modified', model: slug }]
-  return [{ type: 'revision', id: after, action: 'created', model: slug, before: str(input.base), after }]
+  const previous = str(field(result, 'previous_version'))
+  const base = str(input.base)
+  const before = base !== null && !previous?.startsWith(base) ? base : previous
+  return [{ type: 'revision', id: after, action: 'created', model: slug, before, after }]
 }
 
 /**
@@ -171,13 +205,20 @@ function projectFile(result: unknown, output: string | null, project: string | n
 }
 
 /** A library pin: the model's new revision, and the library by name. */
-function libraryPin(action: ResourceAction): Extractor {
+function libraryPin(action: ResourceAction | ((result: unknown) => ResourceAction)): Extractor {
   return (input, result) => {
     const name = str(input.name)
     const model = str(field(result, 'slug')) ?? str(input.slug)
-    return [...revision(input, result), ...(name ? [{ type: 'library' as const, id: name, action, model }] : [])]
+    const done = typeof action === 'function' ? action(result) : action
+    return [...revision(input, result), ...(name ? [{ type: 'library' as const, id: name, action: done, model }] : [])]
   }
 }
+
+/**
+ * A pin replaces one of the same name (#1307): new only when the answer says the model did
+ * not pin it before (tools/libraries.ts `pinAnswer`), else a change, as `bambuddyFile` does.
+ */
+const pinned = libraryPin((result) => (field(result, 'pinned_before') === false ? 'created' : 'modified'))
 
 /** A stored setting, by what it is for. */
 function setting(id: string | null, extra: Partial<Touch> = {}): Touch[] {
@@ -186,11 +227,26 @@ function setting(id: string | null, extra: Partial<Touch> = {}): Touch[] {
 
 /** Tool name → extractor. A name that is not a registered tool fails test/touched.test.ts. */
 export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
+  // Flows (#1057) touch no kind of resource here: a session's runs are found by
+  // list_flow_runs' `session`, and a run's own steps say what it did.
+  register_flow: () => [],
+  restore_flow_version: () => [],
+  start_flow_run: () => [],
+  reset_flow_run: () => [],
+  archive_flow: () => [],
+  unarchive_flow: () => [],
+  delete_flow: () => [],
+  // A run's grant (#2481) is the run's: its page shows who revoked it, and when.
+  revoke_flow_grant: () => [],
   // Models.
   create_model: (_input, result) => modelCreated(result),
   import_model: (_input, result) => modelCreated(result),
   create_from_template: (input, result) => modelCreated(result, input.from === 'blank' ? null : str(input.from)),
   duplicate_model: (input, result) => modelCreated(result, str(input.slug)),
+  create_model_from_mesh: (_input, result) => modelCreated(result),
+  // Scene edits and eject are revisions of the model.
+  edit_scene: revision,
+  eject_scene: revision,
   update_model_details: (input, result) => {
     const slug = str(input.slug)
     if (!slug) return []
@@ -220,6 +276,7 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   delete_readme: revision,
   set_model_thumbnail: revision,
   delete_model_thumbnail: revision,
+  add_model_media: revision,
   // Presets.
   save_preset: (input, result) => {
     const id = str(field(result, 'id'))
@@ -258,15 +315,20 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   save_output: (input, result) => output(result, str(input.slug)),
   // #1864: nothing is recorded until the arrange is saved; a still-running one is not.
   arrange: (_input, result) => output(field(result, 'output'), str(field(result, 'slug'))),
-  delete_output: (input) => {
+  set_output_thumbnail: (input) => {
     const id = str(input.output_id)
-    return id ? [{ type: 'output', id, action: 'deleted' }] : []
+    return id ? [{ type: 'output', id, action: 'modified', model: null }] : []
+  },
+  // The answer names the output's model (#1071), read before it was deleted.
+  delete_output: (input, result) => {
+    const id = str(input.output_id)
+    return id ? [{ type: 'output', id, action: 'deleted', model: str(field(result, 'slug')) }] : []
   },
   // Prints. `print` is always a Bambuddy queue item id, whichever tool queued it;
   // `print_run` is ScadBuddy's own run (backend bambuddy/runs.py PrintRun.id).
   print_output: (input, result) => {
     const run = str(field(result, 'id'))
-    const output = str(input.output_id)
+    const output = printed(input)
     const items = field(field(result, 'result'), 'queue_item_ids')
     return [
       ...(run ? [{ type: 'print_run' as const, id: run, action: 'created' as const, before: output }] : []),
@@ -276,8 +338,8 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
     ]
   },
   // Libraries and fonts.
-  pin_library: libraryPin('created'),
-  pin_library_from_url: libraryPin('created'),
+  pin_library: pinned,
+  pin_library_from_url: pinned,
   repin_library: libraryPin('modified'),
   repin_library_from_pinned_url: libraryPin('modified'),
   unpin_library: libraryPin('deleted'),
@@ -297,11 +359,22 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
     const key = str(input.key)
     if (!scope || (scope !== 'global' && !key)) return []
     return setting(scope === 'global' ? 'print_options:global' : `print_options:${scope}:${key}`, {
-      model: scope === 'model' ? key : null,
+      // A library file's own scope (`library:<file id>`, #1754) names no model.
+      model: scope === 'model' && !key?.startsWith('library:') ? key : null,
     })
   },
+  // #2167: only the files Bambuddy deleted or restored; a skipped one was not touched.
+  delete_library_files: (_input, result) =>
+    (Array.isArray(field(result, 'deleted')) ? (field(result, 'deleted') as unknown[]) : []).flatMap((file) => {
+      const id = bambuddyId(field(file, 'id'))
+      return id ? [{ type: 'bambuddy_file' as const, id, action: 'deleted' as const }] : []
+    }),
+  restore_library_files: (_input, result) =>
+    ids(field(result, 'restored')).map((id) => ({ type: 'bambuddy_file' as const, id, action: 'created' as const })),
   remember_model_print_choices: (input) => {
     const slug = str(input.slug)
+    const file = bambuddyId(input.library_file_id)
+    if (file) return setting(`print_choices:library:${file}`, { model: null })
     return setting(slug ? `print_choices:${slug}` : null, { model: slug })
   },
   remember_last_project: (input) => setting('last_project', { after: bambuddyId(input.project_id) }),
@@ -321,7 +394,7 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   // The project, and the queue items and archives filed under it.
   file_output_under_project: (input, result) => {
     const project = bambuddyId(field(result, 'project_id')) ?? bambuddyId(input.project_id)
-    const before = str(input.output_id)
+    const before = printed(input)
     return [
       ...(project ? [{ type: 'project' as const, id: project, action: 'modified' as const, before }] : []),
       ...ids(field(result, 'queue_item_ids')).map((id) => ({ type: 'print' as const, id, action: 'modified' as const, before })),
@@ -384,6 +457,15 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'sessions_deny',
   'browser_pair',
   'confirm_action',
+  // A re-pin's dry run (#1914): the pin and the history stay as they were. The candidate's
+  // checkout is a cache on the volume, swept at boot when nothing pins it.
+  'check_library_candidate',
+  'check_library_candidate_from_pinned_url',
+  // The session's own workspace (#2329): its files are the session's, listed by
+  // workspace_list (and the panel's Files tab), not ScadBuddy resources it touched.
+  'workspace_write',
+  'workspace_edit',
+  'workspace_delete',
   // The user's tab: these change only what the open page shows or holds unsaved (a
   // parameter, the editor, a Settings field, a dialog a human then confirms). What is
   // saved is saved by a tool that records it. browser_click and browser_fill are not
@@ -402,9 +484,12 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
 /**
  * Tools whose error result still names what they made, so a failed call is
  * recorded too: a render_model whose render failed, or whose save_output did,
- * created its job all the same, and its error result is the job's summary.
+ * created its job all the same, and its error result is the job's summary. A
+ * print_output whose run failed after it tried to queue (`may_have_queued`)
+ * answers the run, so the session shows a print may have gone out (#1017); any
+ * other failed run answers plain text and records nothing.
  */
-export const RECORDED_WHEN_FAILED: ReadonlySet<string> = new Set(['render_model'])
+export const RECORDED_WHEN_FAILED: ReadonlySet<string> = new Set(['render_model', 'print_output'])
 
 /**
  * What a call touched: its extractor's rows, one `unclassified` row for a
@@ -490,13 +575,21 @@ function bounded(value: string | null | undefined): string | null {
 export class SessionResources implements TouchedSink {
   private readonly sql: Sql
   private readonly onError: ((err: unknown) => void) | undefined
+  private readonly waitMs: number
 
-  constructor(sql: Sql, onError?: (err: unknown) => void) {
+  /** `waitMs`: how long `record` waits for its rows before it lets the call go on (db/bounded.ts). */
+  constructor(sql: Sql, onError?: (err: unknown) => void, options: { waitMs?: number } = {}) {
     this.sql = sql
     this.onError = onError
+    this.waitMs = options.waitMs ?? RECORD_WAIT_MS
   }
 
+  /** Writes the call's rows, waiting for them at most `waitMs` (#1076); never throws. */
   async record(call: TouchedCall): Promise<void> {
+    await waitAtMost(this.insert(call), this.waitMs, "the session's resource rows", (err) => this.onError?.(err))
+  }
+
+  private async insert(call: TouchedCall): Promise<void> {
     try {
       const touches = touchesOf(call.tool, call.input, call.result, call.ok ?? true)
       if (touches.length === 0) return

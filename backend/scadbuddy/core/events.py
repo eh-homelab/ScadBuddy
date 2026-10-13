@@ -142,14 +142,18 @@ class UpstreamAvailable(BaseEvent):
 
 
 class OutputEvent(BaseEvent):
-    kind: Literal["output.created", "output.deleted"]
+    """An output was saved or deleted, or (``output.updated``) its re-render was
+    attached or marked failed (#1970): re-read ``GET /outputs/{id}``."""
+
+    kind: Literal["output.created", "output.deleted", "output.updated"]
     output_id: str
     slug: str
 
 
 class PrintEvent(BaseEvent):
-    """An output's print moved on (``print.progress``), or reached a state nothing
-    changes without another print (``print.settled``)."""
+    """A print moved on (``print.progress``), or reached a state nothing changes without
+    another print (``print.settled``). A library file's print (#1751) is announced as
+    its run is: ``output_id`` is ``library:<file id>``, on ``print:library:<file id>``."""
 
     kind: Literal["print.progress", "print.settled"]
     output_id: str
@@ -176,6 +180,17 @@ class OperationEvent(BaseEvent):
     operation_id: str
     op_kind: str
     subject: str
+
+
+class FlowRunEvent(BaseEvent):
+    """A flow run (#1057, spec 2026-10-01 §7.3) started, moved or ended: re-read
+    ``GET /workflow-runs/{run_id}``. Published on ``workflow-runs`` and
+    ``workflow-run:<run id>``."""
+
+    kind: Literal["flow_run.changed"] = "flow_run.changed"
+    run_id: str
+    definition_id: str
+    status: str
 
 
 class LibraryChanged(BaseEvent):
@@ -214,6 +229,7 @@ SettingsSection = Literal[
     "printer_bed_type",
     "printer_rack_algorithm",
     "last_project",
+    "model_project",
     "remembered",
 ]
 
@@ -292,6 +308,7 @@ Event = Annotated[
     | PrintEvent
     | PrintRunEvent
     | OperationEvent
+    | FlowRunEvent
     | LibraryChanged
     | LibraryRemoved
     | FontInstalled

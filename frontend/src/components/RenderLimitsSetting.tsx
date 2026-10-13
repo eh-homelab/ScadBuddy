@@ -82,6 +82,7 @@ export function RenderLimitsSetting() {
 
   const callers = [
     { id: 'browser', label: 'You, and every chat you start' },
+    { id: 'anonymous', label: 'Every anonymous MCP session, together' },
     ...(tokens.data?.tokens ?? []).filter((t) => t.status === 'active').map((t) => ({ id: `token:${t.id}`, label: `MCP token: ${t.name}` })),
   ]
 

@@ -6,7 +6,9 @@ printed, like every other prints route."""
 
 from __future__ import annotations
 
+import asyncio
 import json
+from typing import Any
 
 import httpx
 import pytest
@@ -17,7 +19,8 @@ from scadbuddy.bambuddy import operations
 from scadbuddy.bambuddy.archive_cache import ArchiveCache
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
-from tests.api.test_print_history import link, mock_archive
+from scadbuddy.operations.kinds import OperationKind
+from tests.api.test_print_history import link, link_library, mock_archive
 from tests.api.test_send import API, BASE, configure, make_output
 from tests.bambuddy.conftest import recording
 from tests.support.operations import press
@@ -95,6 +98,61 @@ def test_print_again_queues_with_the_remembered_print_options(
     assert sent["auto_off_after"] is False
     assert sent.get("quantity", 1) == 1
     assert sent.get("project_id") is None
+
+
+@respx.mock
+def test_print_again_of_a_library_file_queues_with_that_files_options(
+    client: TestClient,
+) -> None:
+    """H6 (#1754): a library file's print is printed again with the options remembered
+    for that file, as an output's is with its model's."""
+    configure(client)
+    link_library(client, 89, 35)
+    mock_archive(35, printer_id=3, plate_id=2)
+    queue = mock_enqueue()
+    options = "/api/v1/settings/print-options"
+    for body in (
+        {"scope": "printer", "key": "3", "options": {"timelapse": True, "use_ams": False}},
+        {"scope": "model", "key": "library:89", "options": {"timelapse": False}},
+        {"scope": "model", "key": "library:90", "options": {"use_ams": True}},
+    ):
+        assert client.put(options, json=body).status_code == 200
+
+    assert client.post("/api/v1/prints/35/reprint", headers=press()).status_code == 201
+
+    sent = json.loads(queue.calls.last.request.content)
+    assert sent["timelapse"] is False
+    assert sent["use_ams"] is False
+
+
+@respx.mock
+def test_a_reprint_checked_before_1754_still_applies_its_models_options(
+    settings: Settings, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An operation checked by an older image carries ``slug``, not ``options_scope``;
+    its run (after the upgrade) still applies that model's options."""
+    kinds: dict[str, OperationKind] = {}
+    over = operations.bambuddy_kinds_over
+
+    def capture(**deps: Any) -> list[OperationKind]:
+        built = over(**deps)
+        kinds.update({kind.name: kind for kind in built})
+        return built
+
+    monkeypatch.setattr(operations, "bambuddy_kinds_over", capture)
+    with TestClient(create_app(settings)) as client:
+        configure(client)
+        body = {"scope": "model", "key": model, "options": {"timelapse": True}}
+        assert client.put("/api/v1/settings/print-options", json=body).status_code == 200
+        queue = mock_enqueue()
+
+        asyncio.run(
+            kinds["reprint"].run(
+                {"archive_id": 35}, {"printer_id": 3, "plate_id": 2, "slug": model}
+            )
+        )
+
+    assert json.loads(queue.calls.last.request.content)["timelapse"] is True
 
 
 @respx.mock

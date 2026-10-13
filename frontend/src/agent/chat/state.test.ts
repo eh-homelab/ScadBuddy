@@ -19,6 +19,48 @@ const started = run([
   server({ type: 'session.started', sessionId: 's1', origin: 'chat', owner: you }),
 ])
 
+describe('the session switcher’s fields (#795)', () => {
+  const listed = (over: Record<string, unknown> = {}) =>
+    server({
+      type: 'sessions.snapshot',
+      sessions: [
+        { sessionId: 's1', title: 't', origin: 'chat', owner: you, status: 'idle', parentId: null, updatedAt: '2026-10-09T01:00:00Z', costUsd: 0.5, budgetUsd: 1 },
+        { sessionId: 'f1', title: 't (fork)', origin: 'chat', owner: you, status: 'idle', parentId: 's1', updatedAt: '2026-10-09T02:00:00Z', costUsd: 0.25, budgetUsd: 2, ...over },
+      ],
+    })
+
+  it("takes each listed session's parent, last activity and spend", () => {
+    const state = run([listed()])
+    expect(state.sessions.f1).toMatchObject({ parentId: 's1', updatedAt: '2026-10-09T02:00:00Z', budget: { costUsd: 0.25, budgetUsd: 2 } })
+    expect(state.sessions.s1).toMatchObject({ parentId: null, budget: { costUsd: 0.5, budgetUsd: 1 } })
+  })
+
+  it("keeps the open session's live spend over the list's older one", () => {
+    const live = run(
+      [server({ type: 'session.budget', sessionId: 's1', costUsd: 0.75, budgetUsd: 1 }), listed()],
+      started,
+    )
+    expect(live.sessions.s1?.budget).toEqual({ costUsd: 0.75, budgetUsd: 1 })
+  })
+
+  it('lays a route’s answer over a session, and adds one the panel has not heard of first', () => {
+    const renamed = run([{ type: 'session-patched', patch: { id: 's1', title: 'renamed', status: 'done' } }], started)
+    expect(renamed.sessions.s1).toMatchObject({ title: 'renamed', status: 'done' })
+    const forked = run([{ type: 'session-patched', patch: { id: 'f9', title: 'fork', parentId: 's1', costUsd: 0, budgetUsd: 1 } }], started)
+    expect(forked.order).toEqual(['f9', 's1'])
+    expect(forked.sessions.f9).toMatchObject({ title: 'fork', parentId: 's1', origin: 'chat', owner: you, status: 'idle', items: [] })
+  })
+
+  it('#1885 — keeps an archive a list read before it left out, and drops it when a newer list has the chat again', () => {
+    const archived = run([{ type: 'session-patched', patch: { id: 'f1', archived: true, updatedAt: '2026-10-09T03:00:00Z' } }], run([listed()], started))
+    expect(archived.sessions.f1?.archived).toBe(true)
+    // Read before the archive landed: still listed, and older than what the panel knows.
+    expect(run([listed()], archived).sessions.f1?.archived).toBe(true)
+    // Unarchived elsewhere: listed again, and newer.
+    expect(run([listed({ updatedAt: '2026-10-09T04:00:00Z' })], archived).sessions.f1?.archived).toBe(false)
+  })
+})
+
 describe('chatReducer', () => {
   it('adopts the session its own first turn started', () => {
     expect(started.activeId).toBe('s1')
@@ -227,7 +269,13 @@ describe('chatReducer', () => {
       sent,
     )
     expect(refused.sessions.s1?.items[0]).toMatchObject({ state: 'pending' })
-    expect(refused.sessions.s1?.items.at(-1)).toMatchObject({ kind: 'error', message: 'needs one answer each' })
+    expect(refused.sessions.s1?.items.at(-1)).toMatchObject({ kind: 'error', message: 'needs one answer each', about: 'q1' })
+    // …and, as the route's error is (#1359), it goes when the question resolves (#2133).
+    const refusedThenAnswered = run(
+      [server({ type: 'question.resolved', sessionId: 's1', id: 'q1', answered: true, answers: ['Approve'], by: you })],
+      refused,
+    )
+    expect(refusedThenAnswered.sessions.s1?.items).toEqual([expect.objectContaining({ kind: 'question', state: 'answered' })])
     // An unrelated error in the session leaves a sent answer alone.
     const unrelated = run([server({ type: 'error', sessionId: 's1', code: 'conflict', message: 'approval decided already' })], sent)
     expect(unrelated.sessions.s1?.items[0]).toMatchObject({ state: 'sent' })
@@ -512,5 +560,22 @@ describe('chatReducer', () => {
     expect(of('q2')).toBe('')
     expect(of('q3')).toBeUndefined()
     expect(of('q4')).toBeUndefined()
+  })
+})
+
+describe('workspace changes (#2329)', () => {
+  it('counts each workspace.file event, so the Files list reads again, and notes each in the feed (#2399)', () => {
+    const state = run(
+      [
+        server({ type: 'workspace.file', sessionId: 's1', path: 'uploads/a.stl', change: 'uploaded', by: you, size: 3 }),
+        server({ type: 'workspace.file', sessionId: 's1', path: 'uploads/a.stl', change: 'deleted', by: you }),
+      ],
+      started,
+    )
+    expect(state.sessions.s1?.workspaceChanges).toBe(2)
+    expect(state.sessions.s1?.items.slice(started.sessions.s1?.items.length)).toEqual([
+      { kind: 'file', id: expect.stringMatching(/^file-/), path: 'uploads/a.stl', change: 'uploaded', by: you, size: 3 },
+      { kind: 'file', id: expect.stringMatching(/^file-/), path: 'uploads/a.stl', change: 'deleted', by: you },
+    ])
   })
 })

@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
@@ -21,12 +21,12 @@ from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.filaments import SpoolOption, normalise_colour, spool_label
 from scadbuddy.bambuddy.follow import SettledHook
-from scadbuddy.bambuddy.models import ArchiveDetail, PrinterStatus
+from scadbuddy.bambuddy.models import ArchiveDetail, FilamentRequirement, PrinterStatus
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
-from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.rack.rank import Usage, rack_serials
 from scadbuddy.render.pg_store import migrate
@@ -49,8 +49,8 @@ ARCHIVE_TIMEOUT = 15.0
 #: The whole budget of a settle's settings read, its wait for a connection included (#1111):
 #: well inside the follow's ``SETTLE_TIMEOUT``. It covers a read Postgres is slow to
 #: answer, not a connection that gets no reply at all (#1226). A settle whose read is cut
-#: off records nothing: its archives are recorded only by that output's next settle,
-#: which a one-off output may never have. That loss is the price of freeing the thread.
+#: off records nothing: its archives are recorded only by that subject's next settle,
+#: which a one-off print may never have. That loss is the price of freeing the thread.
 SETTINGS_READ_TIMEOUT = 10.0
 #: How long an open pick (one whose print has not settled) counts toward Least used
 #: (#1079, spec §4). A cancelled queue item never settles, so its pick ages out here; a
@@ -77,12 +77,41 @@ RACK_STORE_FALLBACKS = frozenset(
 )
 
 
+class PickedSpool(BaseModel):
+    """One filament slot of a picked group, and the spool it printed from (#2170)."""
+
+    slot_id: int
+    #: Bambuddy's inventory spool; ``None`` when the slot had none.
+    spool_id: int | None = None
+    label: str | None = None
+    material: str | None = None
+    #: ``#RRGGBB``.
+    colour: str | None = None
+    #: The slicer's grams for one plate; ``None`` when it did not say.
+    grams: float | None = None
+
+
 class PickedHotend(BaseModel):
     """A sent pick with the hotend it named. Carries a serial: backend only (spec §7)."""
 
     group_id: int
     position: int
     serial: str = Field(repr=False)
+    #: The spools the group printed from (#2170), recorded with the pick.
+    spools: list[PickedSpool] = Field(default_factory=list)
+
+
+class SpoolUse(BaseModel):
+    """One spool's settled prints on one hotend (#2170). A slot that printed from no
+    inventory spool is one row per label, with ``spool_id`` ``None``."""
+
+    spool_id: int | None
+    label: str | None
+    material: str | None
+    colour: str | None
+    prints: int
+    grams: float
+    last_used_at: datetime | None
 
 
 class RackUsage(Protocol):
@@ -91,7 +120,12 @@ class RackUsage(Protocol):
     async def usage(self, serials: Iterable[str]) -> dict[str, Usage]: ...
 
     async def record_picks(
-        self, queue_item_id: int, printer_id: int, picks: Sequence[PickedHotend]
+        self,
+        queue_item_id: int,
+        printer_id: int,
+        picks: Sequence[PickedHotend],
+        *,
+        copies: int = 1,
     ) -> int: ...
 
     async def picked_items(self, queue_item_ids: Iterable[int]) -> set[int]: ...
@@ -199,7 +233,8 @@ class RackUsageStore:
 
     async def usage(self, serials: Iterable[str]) -> dict[str, Usage]:
         """One :class:`Usage` per non-empty serial; zeros for one with no rows (spec §4).
-        ``pending`` counts its open picks younger than ``PENDING_PICK_MAX_AGE`` (#1079)."""
+        ``pending`` counts its open picks younger than ``PENDING_PICK_MAX_AGE`` (#1079),
+        one per copy of the pick's queue item not yet settled (#2134)."""
         unique = sorted({serial for serial in serials if serial})
         if not unique:
             return {}
@@ -211,12 +246,15 @@ class RackUsageStore:
                 "SELECT s.serial, seen.first_seen_at, count(p.archive_id) AS prints,"
                 " coalesce(sum(p.print_seconds), 0) AS print_seconds,"
                 " coalesce(sum(p.grams), 0) AS grams,"
-                # Open picks (#1079): no print row for the pick's item and group yet.
-                " (SELECT count(*) FROM rack_nozzle_picks AS k"
-                "  WHERE k.serial = s.serial AND k.picked_at > now() - %s"
-                "  AND NOT EXISTS (SELECT 1 FROM rack_nozzle_prints AS done"
+                " max(p.settled_at) AS last_used_at,"
+                # Open picks (#1079): each of a pick's copies with no print row for its
+                # item and group yet, as every copy settles its own (#2134).
+                " (SELECT coalesce(sum(greatest(k.copies - (SELECT count(*)"
+                "   FROM rack_nozzle_prints AS done"
                 "   WHERE done.queue_item_id = k.queue_item_id"
-                "   AND done.group_id = k.group_id)) AS pending"
+                "   AND done.group_id = k.group_id), 0)), 0)"
+                "  FROM rack_nozzle_picks AS k"
+                "  WHERE k.serial = s.serial AND k.picked_at > now() - %s) AS pending"
                 " FROM unnest(%s::text[]) AS s(serial)"
                 " LEFT JOIN rack_nozzle_seen AS seen ON seen.serial = s.serial"
                 " LEFT JOIN rack_nozzle_prints AS p ON p.serial = s.serial"
@@ -230,29 +268,102 @@ class RackUsageStore:
                 grams=float(row["grams"]),
                 first_seen_at=row["first_seen_at"],
                 pending=int(row["pending"]),
+                last_used_at=row["last_used_at"],
             )
             for row in rows
         }
 
+    async def spool_history(self, serials: Iterable[str]) -> dict[str, list[SpoolUse]]:
+        """Each serial's settled spools, most used first (#2170). A serial with none is
+        missing from the answer."""
+        unique = sorted({serial for serial in serials if serial})
+        if not unique:
+            return {}
+        return await asyncio.to_thread(self._spool_history, unique)
+
+    def _spool_history(self, unique: list[str]) -> dict[str, list[SpoolUse]]:
+        with self._ready().connection() as conn:
+            rows = conn.execute(
+                "SELECT p.serial, s.spool_id,"
+                # A spool's newest label, colour and material: it may have been renamed.
+                " (array_agg(s.label ORDER BY p.settled_at DESC))[1] AS label,"
+                " (array_agg(s.material ORDER BY p.settled_at DESC))[1] AS material,"
+                " (array_agg(s.colour ORDER BY p.settled_at DESC))[1] AS colour,"
+                " count(DISTINCT p.archive_id) AS prints,"
+                " coalesce(sum(s.grams), 0) AS grams,"
+                " max(p.settled_at) AS last_used_at"
+                " FROM rack_nozzle_prints AS p"
+                " JOIN rack_nozzle_pick_spools AS s"
+                "  ON s.queue_item_id = p.queue_item_id AND s.group_id = p.group_id"
+                " WHERE p.serial = ANY(%s)"
+                # No inventory spool: one row per label instead.
+                " GROUP BY p.serial, s.spool_id,"
+                "  CASE WHEN s.spool_id IS NULL THEN s.label END"
+                " ORDER BY p.serial, prints DESC, last_used_at DESC",
+                (unique,),
+            ).fetchall()
+        history: dict[str, list[SpoolUse]] = {}
+        for row in rows:
+            history.setdefault(str(row["serial"]), []).append(
+                SpoolUse(
+                    spool_id=row["spool_id"],
+                    label=row["label"],
+                    material=row["material"],
+                    colour=row["colour"],
+                    prints=int(row["prints"]),
+                    grams=float(row["grams"]),
+                    last_used_at=row["last_used_at"],
+                )
+            )
+        return history
+
     async def record_picks(
-        self, queue_item_id: int, printer_id: int, picks: Sequence[PickedHotend]
+        self,
+        queue_item_id: int,
+        printer_id: int,
+        picks: Sequence[PickedHotend],
+        *,
+        copies: int = 1,
     ) -> int:
-        """The picks for one queue item; the rows actually written (#1015)."""
+        """The picks for one queue item of ``copies`` copies, with their spools; the
+        pick rows actually written (#1015)."""
         if not picks:
             return 0
-        return await asyncio.to_thread(self._record_picks, queue_item_id, printer_id, list(picks))
+        return await asyncio.to_thread(
+            self._record_picks, queue_item_id, printer_id, list(picks), copies
+        )
 
-    def _record_picks(self, queue_item_id: int, printer_id: int, picks: list[PickedHotend]) -> int:
+    def _record_picks(
+        self, queue_item_id: int, printer_id: int, picks: list[PickedHotend], copies: int
+    ) -> int:
         written = 0
         with self._ready().connection() as conn, conn.transaction():
             for pick in picks:
                 cursor = conn.execute(
-                    "INSERT INTO rack_nozzle_picks (queue_item_id, group_id, printer_id, serial)"
-                    " VALUES (%s, %s, %s, %s)"
+                    "INSERT INTO rack_nozzle_picks"
+                    " (queue_item_id, group_id, printer_id, serial, copies)"
+                    " VALUES (%s, %s, %s, %s, %s)"
                     " ON CONFLICT (queue_item_id, group_id) DO NOTHING",
-                    (queue_item_id, pick.group_id, printer_id, pick.serial),
+                    (queue_item_id, pick.group_id, printer_id, pick.serial, copies),
                 )
                 written += cursor.rowcount
+                for spool in pick.spools:
+                    conn.execute(
+                        "INSERT INTO rack_nozzle_pick_spools"
+                        " (queue_item_id, group_id, slot_id, spool_id, label, material,"
+                        " colour, grams) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
+                        " ON CONFLICT (queue_item_id, group_id, slot_id) DO NOTHING",
+                        (
+                            queue_item_id,
+                            pick.group_id,
+                            spool.slot_id,
+                            spool.spool_id,
+                            spool.label,
+                            spool.material,
+                            spool.colour,
+                            spool.grams,
+                        ),
+                    )
         return written
 
     async def picked_items(self, queue_item_ids: Iterable[int]) -> set[int]:
@@ -322,6 +433,31 @@ class RackUsageStore:
         return cursor.rowcount
 
 
+def group_spools(
+    filaments: Sequence[FilamentRequirement],
+    spools_by_slot: Mapping[int, SpoolOption],
+    group_id: int,
+) -> list[PickedSpool]:
+    """The used slots of one sliced group and the spool each printed from (#2170)."""
+    picked: list[PickedSpool] = []
+    for filament in filaments:
+        if not filament.used_in_plate or filament.group_id != group_id:
+            continue
+        spool = spools_by_slot.get(filament.slot_id)
+        picked.append(
+            PickedSpool(
+                slot_id=filament.slot_id,
+                spool_id=spool.spool_id if spool else None,
+                label=spool_label(spool) if spool else filament.type,
+                material=(spool.material if spool else None) or filament.type,
+                colour=normalise_colour(spool.colour if spool and spool.colour else filament.color),
+                # 0 is "not sliced", not "none" (``FilamentRequirement``).
+                grams=filament.used_grams or None,
+            )
+        )
+    return picked
+
+
 async def record_seen(
     store: RackUsage | None, printer_id: int, status: PrinterStatus | None
 ) -> None:
@@ -343,17 +479,21 @@ async def save_picks(
     printer_id: int,
     queue_item_ids: Sequence[int],
     picks: Sequence[PickedHotend],
+    *,
+    copies: int = 1,
 ) -> None:
-    """Write the sent picks against each queue item, right after ``POST /queue/`` (spec
-    §5). Advisory: the item is queued, so a failure is logged by type and dropped, and
-    that print's use goes uncounted. A pick of a hotend with no serial is skipped: it was
-    sent, but nothing can be attributed to it."""
+    """Write the sent picks against each queue item of ``copies`` copies, right after
+    ``POST /queue/`` (spec §5). Advisory: the item is queued, so a failure is logged by
+    type and dropped, and that print's use goes uncounted. A pick of a hotend with no
+    serial is skipped: it was sent, but nothing can be attributed to it."""
     attributable = [pick for pick in picks if pick.serial]
     if store is None or not attributable:
         return
     try:
         for queue_item_id in queue_item_ids:
-            written = await store.record_picks(queue_item_id, printer_id, attributable)
+            written = await store.record_picks(
+                queue_item_id, printer_id, attributable, copies=copies
+            )
             if written != len(attributable):
                 logger.warning(
                     "a rack pick was already recorded for this queue item",
@@ -387,7 +527,7 @@ SETTLED_STATUSES = frozenset({"completed", "failed", "cancelled"})
 
 
 async def record_settled(
-    output_id: str,
+    subject: PrintSubject,
     *,
     client: ArchiveReader,
     links: LinkReader,
@@ -401,8 +541,9 @@ async def record_settled(
     archive linked by hash has no queue item and is not counted. Idempotent, so a
     settle seen twice writes nothing the second time. Each failure is logged by type
     and ids and skipped, as is an archive read that stalls past ``archive_timeout``.
-    Nothing is retried now: an archive skipped here is recorded by the output's next
-    settle, which reads every linked archive not yet recorded. A settle cut off by the
+    ``subject`` is an output's or a library file's: both are linked by queue item
+    (#1073). Nothing is retried now: an archive skipped here is recorded by the subject's
+    next settle, which reads every linked archive not yet recorded. A settle cut off by the
     follow logs the ids of those it had not recorded (``RACK_SETTLE_CUT_OFF``, stage
     ``archives``). One cut off during the initial reads logs stage ``read`` with the
     links read so far, which may include archives already recorded. A cut-off before
@@ -411,7 +552,7 @@ async def record_settled(
     try:
         linked = [
             (link.archive_id, link.queue_item_id)
-            for link in await links.for_subject(PrintSubject.output(output_id))
+            for link in await links.for_subject(subject)
             if link.queue_item_id is not None
         ]
         picked = await store.picked_items(item for _, item in linked)
@@ -422,7 +563,7 @@ async def record_settled(
         logger.warning(
             RACK_SETTLE_CUT_OFF,
             extra={
-                "output_id": output_id,
+                "subject": subject.key,
                 "stage": "read",
                 "archive_ids": [archive for archive, _ in linked],
             },
@@ -431,14 +572,14 @@ async def record_settled(
     except Exception as exc:
         logger.warning(
             RACK_SETTLE_READ_FALLBACK,
-            extra={"output_id": output_id, "error": type(exc).__name__},
+            extra={"subject": subject.key, "error": type(exc).__name__},
         )
         return 0
 
     async def record_one(archive_id: int, queue_item_id: int) -> int:
         archive = await asyncio.wait_for(client.archive(archive_id), timeout=archive_timeout)
         if archive.status not in SETTLED_STATUSES:
-            # Another print of this output, still running: its own settle counts it,
+            # Another print of this subject, still running: its own settle counts it,
             # with its real time, which DO NOTHING would never let in after this.
             return 0
         seconds = (
@@ -469,7 +610,7 @@ async def record_settled(
             logger.warning(
                 RACK_SETTLE_CUT_OFF,
                 extra={
-                    "output_id": output_id,
+                    "subject": subject.key,
                     "stage": "archives",
                     "archive_ids": [archive for archive, _ in pending[index:]],
                 },
@@ -479,7 +620,7 @@ async def record_settled(
             logger.warning(
                 RACK_SETTLE_FALLBACK,
                 extra={
-                    "output_id": output_id,
+                    "subject": subject.key,
                     "archive_id": archive_id,
                     "error": type(exc).__name__,
                 },
@@ -497,9 +638,7 @@ def settle_hook(
     the hook runs after that read. So a print dispatched and settled between two polls is
     linked by the read that finds it settled (``tests/rack/test_settle.py``)."""
 
-    async def hook(meta: OutputMeta) -> None:
-        if not links.available:
-            return
+    async def hook(subject: PrintSubject) -> None:
         # A settings read is a database read: off the event loop, so the follow stops
         # waiting on it at its timeout (#1083), and bounded itself (#1111), so a read
         # stuck on a slow Postgres gives its thread back to the shared executor rather
@@ -510,10 +649,10 @@ def settle_hook(
             # Type only, as every rack log (spec §7).
             logger.warning(
                 RACK_SETTLE_SETTINGS_DROPPED,
-                extra={"output_id": meta.id, "error": type(exc).__name__},
+                extra={"subject": subject.key, "error": type(exc).__name__},
             )
             raise
         async with client_for(settings) as client:
-            await record_settled(meta.id, client=client, links=links, store=store)
+            await record_settled(subject, client=client, links=links, store=store)
 
     return hook

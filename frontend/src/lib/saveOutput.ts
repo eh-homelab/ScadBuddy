@@ -2,8 +2,9 @@ import { api, ApiError } from '../api/client'
 import type { Job, Output } from '../api/types'
 import { joinInputs, type InputsExtra, type JsonObject } from './inputs'
 import type { Within } from './traceAction'
+import { JobStillRunning, waitForJob } from './waitForJob'
 
-/** How often a render started for Generate is read until it ends. */
+/** How often a render started for Generate is read while the realtime socket is unavailable. */
 const POLL_MS = 500
 /**
  * How long Generate waits for a render it had to start: a whole-house pipeline renders
@@ -128,22 +129,10 @@ export async function saveOutput({
   return created
 }
 
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const onAbort = () => {
-      clearTimeout(timer)
-      reject(signal?.reason as Error)
-    }
-    // One listener per sleep, removed when it ends: a long wait does not stack them.
-    const timer = setTimeout(() => {
-      signal?.removeEventListener('abort', onAbort)
-      resolve()
-    }, ms)
-    signal?.addEventListener('abort', onAbort, { once: true })
-  })
-}
-
-/** A render of ``inputs`` at the revision ``job`` rendered, once it has finished. */
+/**
+ * A render of ``inputs`` at the revision ``job`` rendered, once it has finished: followed
+ * over the realtime socket, read every `POLL_MS` only while it is unavailable (#1909).
+ */
 async function renderFor(
   slug: string,
   job: Job,
@@ -154,16 +143,15 @@ async function renderFor(
   const deadline = Date.now() + waitMs
   signal?.throwIfAborted()
   const { job_id } = await api.render(slug, inputs, job.model_version ?? undefined)
-  for (;;) {
-    signal?.throwIfAborted()
-    const next = await api.getJob(job_id)
-    if (next.status === 'done') return next
-    if (next.status === 'failed' || next.status === 'cancelled') {
-      throw new ApiError(422, next.error ?? `The render for these inputs ${next.status}.`)
-    }
-    if (Date.now() >= deadline) {
-      throw new ApiError(504, `The render for these inputs did not finish within ${Math.round(waitMs / 1000)} s.`)
-    }
-    await sleep(POLL_MS, signal)
+  let next: Job
+  try {
+    next = await waitForJob(job_id, { pollMs: POLL_MS, waitMs: Math.max(0, deadline - Date.now()), signal })
+  } catch (cause) {
+    if (!(cause instanceof JobStillRunning)) throw cause
+    throw new ApiError(504, `The render for these inputs did not finish within ${Math.round(waitMs / 1000)} s.`)
   }
+  if (next.status === 'failed' || next.status === 'cancelled') {
+    throw new ApiError(422, next.error ?? `The render for these inputs ${next.status}.`)
+  }
+  return next
 }

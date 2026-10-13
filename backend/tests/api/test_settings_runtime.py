@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections.abc import Iterator
 from typing import Any
 
 import httpx
+import psycopg
 import pytest
 import respx
 from fastapi.testclient import TestClient
@@ -16,6 +18,7 @@ from fastapi.testclient import TestClient
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.bambuddy.uploads import ProjectTarget
 from scadbuddy.core.settings import APPLIES, ENV_SEEDED, Settings
+from scadbuddy.library.settings_store import ModelProject
 from scadbuddy.main import create_app
 from tests.api.conftest import read_stored
 from tests.support.operations import press
@@ -212,7 +215,23 @@ def test_the_upload_limit_is_editable_and_the_gate_follows_it(
 # -- remembered choices ----------------------------------------------------------------
 
 
+def _catalogue(client: TestClient, *slugs: str) -> None:
+    """Models a project can be remembered for: the route refuses one not catalogued."""
+    paths = _state(client).paths
+    for slug in slugs:
+        paths.model_dir(slug).mkdir(parents=True, exist_ok=True)
+        paths.model_source(slug).write_text("cube(1);\n", encoding="utf-8")
+
+
+def _template_presets(client: TestClient, slug: str, *names: str) -> None:
+    """The presets ``slug``'s ``model.json`` lists: ``template-<name lowercased>``."""
+    path = _state(client).paths.model_dir(slug) / "model.json"
+    presets = [{"name": name, "params": {}} for name in names]
+    path.write_text(json.dumps({"presets": presets}), encoding="utf-8")
+
+
 def _remember_everything(client: TestClient) -> None:
+    _catalogue(client, "gear")
     client.put("/api/v1/print/models/gear/choices", json={"tier": "fine"})
     client.put("/api/v1/print/models/box/choices", json={"tier": "draft"})
     client.put("/api/v1/print/printers/1/bed-type", json={"bed_type": "Cool Plate"})
@@ -225,6 +244,7 @@ def _remember_everything(client: TestClient) -> None:
         "/api/v1/settings/print-options",
         json={"scope": "global", "options": {"use_ams": True}},
     )
+    client.put("/api/v1/print/models/gear/project", json={"project_id": 5})
 
 
 def test_the_remembered_choices_are_listed(client: TestClient) -> None:
@@ -249,8 +269,202 @@ def test_forget_all_forgets_every_remembered_choice(client: TestClient) -> None:
         "model_print_options": {},
         "printer_rack_algorithms": {},
         "project_print_targets": {},
+        "model_projects": {},
     }
     assert client.get("/api/v1/settings").json()["printer_id"] == 4
+    assert client.get("/api/v1/print/models/gear/projects").json() == {"projects": []}
+
+
+def test_each_model_and_preset_remembers_its_own_project(client: TestClient) -> None:
+    """#1660: one model, three presets, each filed in its own project."""
+    _catalogue(client, "critter", "critter-2")
+    _template_presets(client, "critter", "Fish", "Snake")
+    assert client.get("/api/v1/print/models/critter/projects").json() == {"projects": []}
+    client.put("/api/v1/print/models/critter/project", json={"project_id": 1})
+    client.put(
+        "/api/v1/print/models/critter/project",
+        json={"preset_id": "template-fish", "preset_name": "Fish", "project_id": 2},
+    )
+    body = client.put(
+        "/api/v1/print/models/critter/project",
+        json={"preset_id": "template-snake", "preset_name": "Snake", "project_id": 3},
+    ).json()
+    # Another model whose id starts the same is not this one's.
+    client.put("/api/v1/print/models/critter-2/project", json={"project_id": 9})
+    expected = [
+        {"preset_id": None, "project_id": 1, "preset_name": None},
+        {"preset_id": "template-fish", "project_id": 2, "preset_name": "Fish"},
+        {"preset_id": "template-snake", "project_id": 3, "preset_name": "Snake"},
+    ]
+    assert sorted(body["projects"], key=lambda p: p["project_id"]) == expected
+    listed = client.get("/api/v1/print/models/critter/projects").json()["projects"]
+    assert sorted(listed, key=lambda p: p["project_id"]) == expected
+    remembered = client.get("/api/v1/settings/remembered").json()["model_projects"]
+    assert remembered == {
+        "critter": {"project_id": 1},
+        "critter/template-fish": {"project_id": 2, "preset_name": "Fish"},
+        "critter/template-snake": {"project_id": 3, "preset_name": "Snake"},
+        "critter-2": {"project_id": 9},
+    }
+
+
+def test_forgetting_one_model_project_leaves_the_rest(client: TestClient) -> None:
+    _catalogue(client, "critter")
+    client.put("/api/v1/print/models/critter/project", json={"project_id": 1})
+    client.put(
+        "/api/v1/print/models/critter/project",
+        json={"preset_id": "template-fish", "project_id": 2},
+    )
+    body = client.put(
+        "/api/v1/print/models/critter/project",
+        json={"preset_id": "template-fish", "project_id": None},
+    ).json()
+    assert body == {"projects": [{"preset_id": None, "project_id": 1, "preset_name": None}]}
+    # Forgetting what is not remembered is not an error.
+    response = client.put(
+        "/api/v1/print/models/critter/project",
+        json={"preset_id": "template-fish", "project_id": None},
+    )
+    assert response.status_code == 200
+
+
+def test_a_preset_id_with_a_separator_is_refused(client: TestClient) -> None:
+    response = client.put(
+        "/api/v1/print/models/critter/project", json={"preset_id": "a/b", "project_id": 1}
+    )
+    assert response.status_code == 422
+
+
+def test_a_project_is_not_remembered_for_a_model_not_in_the_catalogue(
+    client: TestClient,
+) -> None:
+    response = client.put("/api/v1/print/models/nowhere/project", json={"project_id": 1})
+    assert response.status_code == 404
+    assert client.get("/api/v1/settings/remembered").json()["model_projects"] == {}
+    # An entry left from before can still be forgotten.
+    response = client.put("/api/v1/print/models/nowhere/project", json={"project_id": None})
+    assert response.status_code == 200
+
+
+def test_deleting_a_preset_or_a_model_forgets_its_projects(client: TestClient) -> None:
+    _catalogue(client, "critter", "critter-2")
+    _template_presets(client, "critter", "Snake")
+    preset = client.post(
+        "/api/v1/models/critter/presets",
+        json={"name": "Fish", "params": {}},
+        headers=press(),
+    ).json()["id"]
+    client.put("/api/v1/print/models/critter/project", json={"project_id": 1})
+    for preset_id, project_id in ((preset, 2), ("template-snake", 3)):
+        client.put(
+            "/api/v1/print/models/critter/project",
+            json={"preset_id": preset_id, "project_id": project_id},
+        )
+    client.put("/api/v1/print/models/critter-2/project", json={"project_id": 9})
+
+    deleted = client.delete(f"/api/v1/models/critter/presets/{preset}", headers=press())
+    assert deleted.status_code == 204, deleted.text
+    assert set(client.get("/api/v1/settings/remembered").json()["model_projects"]) == {
+        "critter",
+        "critter/template-snake",
+        "critter-2",
+    }
+
+    deleted = client.delete("/api/v1/models/critter", headers=press())
+    assert deleted.status_code == 204, deleted.text
+    # Another model whose id starts the same keeps its own.
+    assert client.get("/api/v1/settings/remembered").json()["model_projects"] == {
+        "critter-2": {"project_id": 9}
+    }
+
+
+def test_a_failed_forget_still_deletes_the_preset(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2142's review: the preset is gone, so the cleanup after it cannot answer 500 (and a
+    retry 404). What it left behind goes the next time Settings reads it."""
+    _catalogue(client, "critter")
+    preset = client.post(
+        "/api/v1/models/critter/presets", json={"name": "Fish", "params": {}}, headers=press()
+    ).json()["id"]
+    client.put("/api/v1/print/models/critter/project", json={"preset_id": preset, "project_id": 2})
+    store = _state(client).settings_store
+    forget = store.forget_model_projects
+
+    def fail(*_: object) -> None:
+        raise psycopg.OperationalError("database is away")
+
+    monkeypatch.setattr(store, "forget_model_projects", fail)
+    deleted = client.delete(f"/api/v1/models/critter/presets/{preset}", headers=press())
+    assert deleted.status_code == 204, deleted.text
+    assert client.get("/api/v1/models/critter/presets").json() == []
+
+    monkeypatch.setattr(store, "forget_model_projects", forget)
+    assert client.get("/api/v1/settings/remembered").json()["model_projects"] == {}
+    assert client.get("/api/v1/print/models/critter/projects").json() == {"projects": []}
+
+
+def test_settings_names_presets_now_and_prunes_the_gone(client: TestClient) -> None:
+    """#2142's review: a template preset dropped from ``model.json`` deletes nothing of
+    ours, so Settings forgets its entry as it reads it; one still listed shows its name
+    now, in the same read (no request per model)."""
+    _catalogue(client, "critter", "gear")
+    _template_presets(client, "critter", "Fish", "Snake")
+    for preset_id, name in (("template-fish", "Fish"), ("template-snake", "Snake")):
+        client.put(
+            "/api/v1/print/models/critter/project",
+            json={"preset_id": preset_id, "preset_name": name, "project_id": 2},
+        )
+    client.put("/api/v1/print/models/critter/project", json={"project_id": 1})
+    client.put("/api/v1/print/models/gear/project", json={"project_id": 3})
+    # Kept as it is: a model not in the catalogue says nothing about its presets.
+    _state(client).settings_store.set_model_project(
+        "gone", "template-x", ModelProject(project_id=4, preset_name="X")
+    )
+
+    # The template is edited: Snake is gone, Fish is renamed but keeps its id.
+    path = _state(client).paths.model_dir("critter") / "model.json"
+    path.write_text(
+        json.dumps({"presets": [{"id": "fish", "name": "Big fish", "params": {}}]}),
+        encoding="utf-8",
+    )
+    expected = {
+        "critter": {"project_id": 1},
+        "critter/template-fish": {"project_id": 2, "preset_name": "Big fish"},
+        "gear": {"project_id": 3},
+        "gone/template-x": {"project_id": 4, "preset_name": "X"},
+    }
+    assert client.get("/api/v1/settings/remembered").json()["model_projects"] == expected
+    # Forgotten, not only hidden: the model's own read no longer has it either.
+    listed = client.get("/api/v1/print/models/critter/projects").json()["projects"]
+    assert {entry["preset_id"] for entry in listed} == {None, "template-fish"}
+
+
+@pytest.mark.parametrize(
+    "written",
+    [
+        '{"presets": [{"name": "Fi',  # half-written
+        '{"presets": "not a list"}',
+        "[]",
+    ],
+)
+def test_an_unreadable_model_json_prunes_nothing(client: TestClient, written: str) -> None:
+    """#2505: a model.json that cannot be read says nothing about which presets the
+    template has, so a read during a half-written save forgets none of its entries."""
+    _catalogue(client, "critter")
+    _template_presets(client, "critter", "Fish")
+    client.put(
+        "/api/v1/print/models/critter/project",
+        json={"preset_id": "template-fish", "preset_name": "Fish", "project_id": 2},
+    )
+    path = _state(client).paths.model_dir("critter") / "model.json"
+    path.write_text(written, encoding="utf-8")
+    remembered = {"critter/template-fish": {"project_id": 2, "preset_name": "Fish"}}
+    assert client.get("/api/v1/settings/remembered").json()["model_projects"] == remembered
+
+    # Readable again, it still has its entry: nothing was forgotten in between.
+    _template_presets(client, "critter", "Fish")
+    assert client.get("/api/v1/settings/remembered").json()["model_projects"] == remembered
 
 
 def _remember_project_targets(client: TestClient) -> None:
@@ -331,7 +545,10 @@ def test_the_connection_test_only_reads(client: TestClient) -> None:
         "Manage Queue": ("unknown", True),
         "Manage Projects": ("unknown", False),
         "Manage Archives": ("unknown", False),
+        "Manage Inventory": ("unknown", False),
     }
+    # One row per scope: the dict above would hide a repeated one.
+    assert len(body["scopes"]) == len(_scopes(body))
     assert {call.request.method for call in respx.calls} == {"GET"}
     unchecked = next(row for row in body["scopes"] if row["scope"] == "Manage Library")
     assert "Not checked" in unchecked["detail"]

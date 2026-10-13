@@ -28,7 +28,7 @@ from scadbuddy.core.events import (
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.outputs import OutputMeta
-from scadbuddy.library.settings_store import SettingsPatch, SettingsStore
+from scadbuddy.library.settings_store import ModelProject, SettingsPatch, SettingsStore
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS
 
@@ -209,10 +209,12 @@ def test_every_kind_from_the_spec_is_known() -> None:
         "upstream.available",
         "output.created",
         "output.deleted",
+        "output.updated",
         "print.progress",
         "print.settled",
         "print.run",
         "operation.changed",
+        "flow_run.changed",
         "library.changed",
         "library.removed",
         "font.installed",
@@ -259,6 +261,7 @@ def test_every_settings_write_is_announced_with_its_section(
         store.save(SettingsPatch(public_url="https://scad.example"))
         store.set_printer_bed_type(1, "Cool Plate")
         store.remember_project(7)
+        store.set_model_project("demo", None, ModelProject(project_id=7))
     finally:
         store.close()
 
@@ -266,6 +269,7 @@ def test_every_settings_write_is_announced_with_its_section(
         "connection",
         "printer_bed_type",
         "last_project",
+        "model_project",
     ]
 
 

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
-import { ChatConnection, type ChatConnectionOptions } from '../src/routes/chat.js'
+import { CHAT_FRAME_MAX, ChatConnection, type ChatConnectionOptions, MAX_QUEUED_FRAMES } from '../src/routes/chat.js'
+import { STALE_TAB_IMAGES } from '../src/sessions/clientProtocol.js'
 import type { LoggedEvent } from '../src/sessions/eventLog.js'
 import { SessionError, type SessionManager } from '../src/sessions/manager.js'
 import { event, type ServerEvent } from '../src/sessions/protocol.js'
@@ -236,27 +237,10 @@ describe('ChatConnection inbound limits', () => {
     connection.close()
   })
 
-  it('caps the bytes queued as well as the frames, so large image frames cannot pile up (#1866)', async () => {
-    const fake = fakeManager({ holdStart: true })
-    const out: ServerEvent[] = []
-    const connection = new ChatConnection(fake.manager, (e) => out.push(e), {
-      log: () => {},
-      limits: { maxQueuedBytes: 2500 },
-    })
-    await connection.open()
-    const frame = JSON.stringify({ v: 1, type: 'user.message', text: 'x'.repeat(1000), context: { route: '/' } })
-    const handled = Array.from({ length: 5 }, () => connection.receive(frame))
-    await settle()
-    // Two frames of about 1 KB fit under 2.5 KB; the rest are busy.
-    expect(fake.started()).toBe(1)
-    expect(errors(out, 'busy')).toBe(3)
-    fake.release()
-    await Promise.all(handled)
-    expect(fake.started()).toBe(2)
-    // Their bytes are given back once handled.
-    await connection.receive(frame)
-    expect(fake.started()).toBe(3)
-    connection.close()
+  it('holds at most MAX_QUEUED_FRAMES frames of CHAT_FRAME_MAX, now that images are uploaded, not framed (#1941)', () => {
+    expect(CHAT_FRAME_MAX).toBe(256 * 1024)
+    // The frame cap alone bounds a connection's queue; #1866's byte cap went with the 9 MiB frames.
+    expect(MAX_QUEUED_FRAMES * CHAT_FRAME_MAX).toBeLessThanOrEqual(8 * 1024 * 1024)
   })
 
   it('refuses a flood of malformed frames past the queue cap with busy, like valid ones', async () => {
@@ -325,6 +309,46 @@ describe('ChatConnection inbound limits', () => {
     await Promise.all(handled)
     expect(errors(out, 'invalid')).toBe(9)
     expect(fake.started()).toBe(0)
+    connection.close()
+  })
+
+  it('asks a tab loaded before #1941 that sends inline images to reload, in the session it names, and runs nothing (#1959)', async () => {
+    const fake = fakeManager()
+    const out: ServerEvent[] = []
+    const connection = new ChatConnection(fake.manager, (e) => out.push(e), { log: () => {} })
+    await connection.open()
+    const inline = {
+      v: 1,
+      type: 'user.message',
+      text: 'what is this?',
+      context: { route: '/' },
+      images: [{ mediaType: 'image/png', data: 'iVBORw0KGgo=', preview: { mediaType: 'image/png', data: 'iVBORw0KGgo=' } }],
+    }
+    await connection.receive(JSON.stringify(inline))
+    expect(out.at(-1)).toEqual(expect.objectContaining({ type: 'error', code: 'invalid', message: STALE_TAB_IMAGES }))
+    expect(out.at(-1)).not.toHaveProperty('sessionId')
+    const sessionId = randomUUID()
+    await connection.receive(JSON.stringify({ ...inline, sessionId }))
+    expect(out.at(-1)).toEqual(expect.objectContaining({ type: 'error', code: 'invalid', sessionId, message: STALE_TAB_IMAGES }))
+    expect(fake.started()).toBe(0)
+    connection.close()
+  })
+
+  it('names the session and question of a refused answer by the schema\'s own bounds (#2175)', async () => {
+    const fake = fakeManager()
+    const out: ServerEvent[] = []
+    const connection = new ChatConnection(fake.manager, (e) => out.push(e), { log: () => {} })
+    await connection.open()
+    // Malformed (no answers), but its ids are ones the schema takes: up to 200 characters.
+    const sessionId = 's'.repeat(150)
+    const id = 'q'.repeat(200)
+    await connection.receive(JSON.stringify({ v: 1, type: 'question.answer', sessionId, id, answers: [] }))
+    expect(out.at(-1)).toEqual(expect.objectContaining({ type: 'error', code: 'invalid', sessionId, questionId: id }))
+    // One the schema would refuse is not echoed.
+    await connection.receive(JSON.stringify({ v: 1, type: 'question.answer', sessionId: 's'.repeat(201), id, answers: [] }))
+    expect(out.at(-1)).toMatchObject({ type: 'error', code: 'invalid' })
+    expect(out.at(-1)).not.toHaveProperty('sessionId')
+    expect(out.at(-1)).not.toHaveProperty('questionId')
     connection.close()
   })
 

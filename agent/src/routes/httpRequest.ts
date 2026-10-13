@@ -1,18 +1,17 @@
 import type { Hono } from 'hono'
 import { z } from 'zod'
 import { httpRequestEnabled, SETTING_HTTP_REQUEST } from '../harness/httpRequest.js'
+import type { AuditContext } from '../audit/log.js'
 import { UI_ACTOR } from '../audit/writes.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
-import type { SettingsRepo } from './headlessBrowser.js'
 import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/settings/http-request (#827): turns the assistant's `http_request`
 // tool on or off for session turns. Stored in `ai_settings` under
 // `http_request_enabled`, read at the start of every turn by
 // sessions/manager.ts. ON by default (#827): anything but a stored `false` is
-// on. The same shape and guards as the headless-browser switch
-// (routes/headlessBrowser.ts):
+// on.
 //
 //   GET /api/v1/ai/settings/http-request   { "enabled": boolean }
 //   PUT /api/v1/ai/settings/http-request   body { "enabled": boolean }
@@ -20,6 +19,12 @@ import { ready, type RouteModule } from './module.js'
 // The PUT is a settings write (outward, spec §8.1), so it passes guard.ts
 // `uiRequestProblem`: from the UI's origin, through the HTTPS ingress, JSON
 // only. The store audits the write as the UI user (credentials.ts SettingsStore.set).
+
+export type SettingsRepo = {
+  get<T>(key: string): Promise<T | undefined>
+  /** `context` says who wrote it, for the audit row (credentials.ts SettingsStore.set). */
+  set(key: string, value: unknown, context: AuditContext): Promise<void>
+}
 
 export type HttpRequestRouteDeps = {
   /** Undefined when there is no database (spec §9). */
@@ -78,7 +83,14 @@ export function registerHttpRequestRoutes(app: Hono, deps: HttpRequestRouteDeps)
   })
 }
 
-/** The HTTP request tool's setting (#827). `deps.settings` is declared in routes/headlessBrowser.ts. */
+declare module '../app.js' {
+  interface AppDeps {
+    /** `ai_settings` (credentials.ts SettingsStore); the HTTP request tool's setting (#827) and the other settings routes (session limits #790, routes/sessionLimits.ts, ...) answer 503 without it. */
+    settings?: SettingsRepo | undefined
+  }
+}
+
+/** The HTTP request tool's setting (#827). */
 export const route: RouteModule = {
   register(app, deps) {
     registerHttpRequestRoutes(app, {

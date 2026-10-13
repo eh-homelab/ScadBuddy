@@ -19,7 +19,6 @@ function failure(cause: unknown, fallback: string): string {
 function PickList<T>({
   items,
   label,
-  note,
   keyOf,
   chosen,
   onAdd,
@@ -28,7 +27,6 @@ function PickList<T>({
 }: Props<T> & {
   items: T[]
   label: (item: T) => string
-  note?: (item: T) => string | null
   keyOf: (item: T) => string
   what: string
 }) {
@@ -43,7 +41,6 @@ function PickList<T>({
           {items.map((item) => {
             const key = keyOf(item)
             const already = chosen(item)
-            const extra = note?.(item)
             return (
               <li key={key} className="text-[13px]">
                 <label className="flex items-center gap-2">
@@ -56,7 +53,6 @@ function PickList<T>({
                     }
                   />
                   <span className="min-w-0 truncate">{label(item)}</span>
-                  {extra && <span className="text-[11px] text-faint">{extra}</span>}
                 </label>
               </li>
             )
@@ -125,7 +121,6 @@ export function AddFiles(props: Props<LibraryEntry>) {
           items={(listing.files ?? []).filter((file) => file.printable)}
           keyOf={(file) => String(file.id)}
           label={(file) => file.filename}
-          note={(file) => (file.output_id ? null : 'not made by ScadBuddy')}
           what="printable files"
         />
       )}

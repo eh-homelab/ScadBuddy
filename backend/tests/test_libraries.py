@@ -24,6 +24,7 @@ from scadbuddy.library import url_import
 from scadbuddy.library.catalogue import Catalogue, LibraryNotDeclaredError, ModelMeta
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import (
+    CURATED,
     STAGING_PREFIX,
     CatalogueLibrary,
     LibraryDeclarationError,
@@ -48,6 +49,7 @@ from tests.conftest import (
     UNUSED_TEMPORAL_ADDRESS,
     make_library_upstream,
 )
+from tests.support.media import MemoryMediaStore
 from tests.test_library_processes import _age, _running
 
 pytestmark = pytest.mark.requires_git
@@ -96,7 +98,7 @@ def store(paths: DataPaths, upstream: tuple[str, dict[str, str]]) -> LibraryStor
 
 @pytest.fixture
 def catalogue(paths: DataPaths, history: ModelHistory) -> Catalogue:
-    return Catalogue(paths, history, wrapper_prefix=WRAPPER_PREFIX)
+    return Catalogue(paths, history, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX)
 
 
 def _create(catalogue: Catalogue, slug: str = "widget") -> None:
@@ -186,6 +188,55 @@ def test_concurrent_clones_of_one_commit_both_succeed(
 
 def test_the_catalogue_is_what_can_be_suggested(store: LibraryStore) -> None:
     assert [entry.name for entry in store.entries()] == ["BOSL2"]
+
+
+def _entry(name: str, description: str = "", tags: tuple[str, ...] = ()) -> CatalogueLibrary:
+    return CatalogueLibrary(
+        name=name,
+        url=f"https://example.invalid/{name}.git",
+        ref="v1",
+        licence="MIT",
+        homepage=f"https://example.invalid/{name}",
+        description=description,
+        tags=list(tags),
+    )
+
+
+def test_a_query_matches_a_name_description_or_tag_whatever_its_case(paths: DataPaths) -> None:
+    store = LibraryStore(
+        paths,
+        catalogue=(
+            _entry("BOSL2", "Shapes, attachments and rounding", ("threads",)),
+            _entry("gridfinity-rebuilt-openscad", "Modular storage bins", ("gridfinity",)),
+            _entry("MCAD", "Gears, nuts and bolts", ("gears",)),
+        ),
+    )
+
+    def names(query: str | None) -> list[str]:
+        return [entry.name for entry in store.entries(query)]
+
+    assert names(None) == ["BOSL2", "gridfinity-rebuilt-openscad", "MCAD"]
+    assert names("") == ["BOSL2", "gridfinity-rebuilt-openscad", "MCAD"]
+    assert names("bosl") == ["BOSL2"]
+    assert names("STORAGE") == ["gridfinity-rebuilt-openscad"]
+    assert names("thread") == ["BOSL2"]
+    assert names("gears") == ["MCAD"]
+    # Every word must match, each anywhere in the entry.
+    assert names("gridfinity bins") == ["gridfinity-rebuilt-openscad"]
+    assert names("gridfinity gears") == []
+    assert names("nothing-like-it") == []
+
+
+def test_the_curated_catalogue_has_gridfinity_and_says_what_each_library_is() -> None:
+    gridfinity = next(entry for entry in CURATED if entry.name == "gridfinity-rebuilt-openscad")
+    assert gridfinity.url == "https://github.com/kennetek/gridfinity-rebuilt-openscad.git"
+    assert gridfinity.ref == "2.0.0"
+    assert gridfinity.licence == "MIT"
+    assert "gridfinity" in gridfinity.tags
+    for entry in CURATED:
+        assert entry.description, entry.name
+        assert entry.tags, entry.name
+        assert all(tag == tag.lower() for tag in entry.tags), entry.name
 
 
 @pytest.fixture

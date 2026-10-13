@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
+import respx
+import trimesh
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -24,9 +27,14 @@ from scadbuddy.bambuddy.uploads import LibraryCopy
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import META_NAME, OutputMeta, OutputStore
+from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.job_models import Job, now
+from scadbuddy.render.jobs import LAYOUT_NAME
+from scadbuddy.render.split import ColourPart
 from scadbuddy.tools.export_openapi import export
 from scadbuddy.workflows.models import ArrangeInputs
+from tests.api.test_print_library import library_file
+from tests.api.test_send import configure
 from tests.support.arrange import copied_output, saved_output
 
 #: A well-formed output id no output has: each test fails for its own reason, not the id's.
@@ -332,22 +340,219 @@ def test_two_templates_and_a_library_file_arrange_together(
     assert [i.count for i in inputs.items] == [1, 2, 2]
 
 
-def test_a_library_file_whose_output_was_deleted_is_a_404_naming_the_file(
-    client: TestClient, app: FastAPI
-) -> None:
-    state: AppState = getattr(app.state, STATE_ATTR)
-    asyncio.run(state.uploads.record(UNKNOWN, LibraryCopy(id=78, folder_id=None, target_key="k")))
-    response = client.post("/api/v1/outputs/arrange", json={"objects": [{"library_file_id": 78}]})
-    assert response.status_code == 404, response.text
-    assert "library file 78" in response.json()["detail"]
+def two_colour_3mf(tmp_path: Path) -> bytes:
+    """A two-colour project, as Bambuddy's library holds one ScadBuddy did not make."""
+    red = trimesh.creation.box(extents=(10, 10, 4))
+    blue = trimesh.creation.box(extents=(6, 6, 9))
+    out = tmp_path / "plain.3mf"
+    write_bambu_3mf(
+        [ColourPart(1, "Red", "#FF0000", red), ColourPart(2, "Blue", "#0000FF", blue)],
+        out,
+        thumbnails=None,
+        model_name="plain",
+    )
+    return out.read_bytes()
 
 
-def test_a_library_file_no_output_made_is_not_arrangeable_yet(
+@respx.mock
+def test_a_plain_library_file_arranges_beside_an_output(
     client: TestClient, app: FastAPI, tmp_path: Path
 ) -> None:
-    """Reading a plain file's objects from its 3MF is #1863: until then it is refused,
-    by a code the UI and the agent tell apart, naming every such file."""
+    """#1863: a file no output records is read from its 3MF, its objects stored as
+    pieces the job places and holds."""
+    configure(client)
     _, meta, written = asyncio.run(saved_output(tmp_path))
+    library_file(88, content=two_colour_3mf(tmp_path))
+    arranger = Arranger()
+    app.dependency_overrides[get_render] = lambda: arranger
+    response = client.post(
+        "/api/v1/outputs/arrange",
+        json={
+            "objects": [
+                {"output_id": meta.id, "part": written.manifest[0].part, "count": 1},
+                {"library_file_id": 88, "count": 3},
+            ]
+        },
+    )
+    assert response.status_code == 202, response.text
+    assert response.json()["slug"] == "demo"
+    [inputs] = arranger.inputs
+    [_, item] = inputs.items
+    key = item.part.piece_key
+    assert key.startswith("lib3-") and item.count == 3
+    assert item.part.colours == ["#FF0000", "#0000FF"]
+    assert "#FF0000" in inputs.colours and "#0000FF" in inputs.colours
+    assert inputs.provenance[key].library_file_id == 88
+    # #2284: filing the result under a template does not make the file its.
+    assert inputs.provenance[key].slug == ""
+    assert inputs.sources == [meta.id, "library:88"]
+    state: AppState = getattr(app.state, STATE_ATTR)
+    assert (state.store.blobs.dir_for(key) / LAYOUT_NAME).is_file()
+
+
+@respx.mock
+def test_a_mixed_arrange_is_filed_under_any_template(
+    client: TestClient, app: FastAPI, tmp_path: Path
+) -> None:
+    """#2284: with a library file in the mix the result may be filed under a template
+    none of its outputs is of, so long as it is one."""
+    configure(client)
+    paths, meta, written = asyncio.run(saved_output(tmp_path))
+    other = copied_output(paths, meta, slug="other", output_id=SECOND)
+    library_file(88, content=two_colour_3mf(tmp_path))
+    arranger = Arranger()
+    app.dependency_overrides[get_render] = lambda: arranger
+    objects = [
+        {"output_id": other.id, "part": written.manifest[0].part, "count": 1},
+        {"library_file_id": 88},
+    ]
+    unknown = client.post("/api/v1/outputs/arrange", json={"objects": objects, "slug": "nope"})
+    assert unknown.status_code == 404, unknown.text
+    named = client.post("/api/v1/outputs/arrange", json={"objects": objects, "slug": "demo"})
+    assert named.status_code == 202, named.text
+    assert named.json()["slug"] == "demo"
+    [inputs] = arranger.inputs
+    assert inputs.sources == [other.id, "library:88"]
+
+
+@respx.mock
+def test_a_library_file_that_places_nothing_is_no_source(
+    client: TestClient, app: FastAPI, tmp_path: Path
+) -> None:
+    """#2540: a library file whose every object is at count 0 placed nothing, so it
+    neither frees the result from its outputs' template nor shows in "Arranged from"."""
+    configure(client)
+    paths, meta, written = asyncio.run(saved_output(tmp_path))
+    copied_output(paths, meta, slug="other", output_id=SECOND)
+    library_file(88, content=two_colour_3mf(tmp_path))
+    arranger = Arranger()
+    app.dependency_overrides[get_render] = lambda: arranger
+    objects = [
+        {"output_id": meta.id, "part": written.manifest[0].part, "count": 1},
+        {"library_file_id": 88, "count": 0},
+    ]
+    elsewhere = client.post("/api/v1/outputs/arrange", json={"objects": objects, "slug": "other"})
+    assert elsewhere.status_code == 422, elsewhere.text
+    assert "not other" in elsewhere.json()["detail"]
+    response = client.post("/api/v1/outputs/arrange", json={"objects": objects})
+    assert response.status_code == 202, response.text
+    assert response.json()["slug"] == "demo"
+    [inputs] = arranger.inputs
+    assert inputs.sources == [meta.id]
+
+
+@respx.mock
+def test_a_library_file_whose_output_was_deleted_arranges_as_a_plain_file(
+    client: TestClient, app: FastAPI, tmp_path: Path
+) -> None:
+    """#2138: the upload row outlives a deleted output, so the file is read from its 3MF
+    like any other library file, as the listing already shows it."""
+    configure(client)
+    asyncio.run(saved_output(tmp_path))
+    state: AppState = getattr(app.state, STATE_ATTR)
+    asyncio.run(state.uploads.record(UNKNOWN, LibraryCopy(id=88, folder_id=None, target_key="k")))
+    library_file(88, content=two_colour_3mf(tmp_path))
+    arranger = Arranger()
+    app.dependency_overrides[get_render] = lambda: arranger
+    response = client.post(
+        "/api/v1/outputs/arrange",
+        json={"objects": [{"library_file_id": 88}], "slug": "demo"},
+    )
+    assert response.status_code == 202, response.text
+    [inputs] = arranger.inputs
+    [item] = inputs.items
+    assert item.part.piece_key.startswith("lib3-")
+    assert inputs.provenance[item.part.piece_key].library_file_id == 88
+    # #2284: a plain library file is listed as a source too.
+    assert inputs.sources == ["library:88"]
+
+
+@respx.mock
+def test_a_library_file_with_part_omitted_keeps_its_own_count(
+    client: TestClient, app: FastAPI, tmp_path: Path
+) -> None:
+    configure(client)
+    asyncio.run(saved_output(tmp_path))
+    library_file(88, content=two_colour_3mf(tmp_path))
+    listed = client.get("/api/v1/print/library/88/objects")
+    assert listed.status_code == 200, listed.text
+    [obj] = listed.json()["objects"]
+    assert obj["count"] == 1 and obj["colours"] == ["#FF0000", "#0000FF"]
+    assert obj["part"].startswith("lib3-") and obj["name"] == "plain"
+    assert [round(v) for v in obj["size"]] == [10, 10, 9]
+    arranger = Arranger()
+    app.dependency_overrides[get_render] = lambda: arranger
+    response = client.post(
+        "/api/v1/outputs/arrange",
+        json={"objects": [{"library_file_id": 88, "part": obj["part"]}], "slug": "demo"},
+    )
+    assert response.status_code == 202, response.text
+    [inputs] = arranger.inputs
+    assert [(i.part.piece_key, i.count) for i in inputs.items] == [(obj["part"], 1)]
+    unknown = client.post(
+        "/api/v1/outputs/arrange",
+        json={"objects": [{"library_file_id": 88, "part": "nope"}], "slug": "demo"},
+    )
+    assert unknown.status_code == 422 and "has no object nope" in unknown.json()["detail"]
+
+
+@respx.mock
+def test_a_library_file_listed_once_is_not_read_again_to_arrange(
+    client: TestClient, app: FastAPI, tmp_path: Path
+) -> None:
+    """#1973: the dialog's listing reads the file and stores its pieces; listing it
+    again and the arrange after it download nothing."""
+    configure(client)
+    asyncio.run(saved_output(tmp_path))
+    content = two_colour_3mf(tmp_path)
+    download = library_file(88, content=content, file_hash=hashlib.sha256(content).hexdigest())
+    listed = client.get("/api/v1/print/library/88/objects")
+    assert listed.status_code == 200, listed.text
+    assert client.get("/api/v1/print/library/88/objects").json() == listed.json()
+    [obj] = listed.json()["objects"]
+    arranger = Arranger()
+    app.dependency_overrides[get_render] = lambda: arranger
+    response = client.post(
+        "/api/v1/outputs/arrange",
+        json={"objects": [{"library_file_id": 88, "part": obj["part"]}], "slug": "demo"},
+    )
+    assert response.status_code == 202, response.text
+    assert download.call_count == 1
+    [inputs] = arranger.inputs
+    assert [i.part.piece_key for i in inputs.items] == [obj["part"]]
+    state: AppState = getattr(app.state, STATE_ATTR)
+    assert (state.store.blobs.dir_for(obj["part"]) / LAYOUT_NAME).is_file()
+
+
+@respx.mock
+def test_library_files_alone_are_filed_under_a_template_named(
+    client: TestClient, app: FastAPI, tmp_path: Path
+) -> None:
+    configure(client)
+    asyncio.run(saved_output(tmp_path))
+    library_file(88, content=two_colour_3mf(tmp_path))
+    arranger = Arranger()
+    app.dependency_overrides[get_render] = lambda: arranger
+    objects = [{"library_file_id": 88}]
+    unnamed = client.post("/api/v1/outputs/arrange", json={"objects": objects})
+    assert unnamed.status_code == 422 and "slug" in unnamed.json()["detail"]
+    unknown = client.post("/api/v1/outputs/arrange", json={"objects": objects, "slug": "nope"})
+    assert unknown.status_code == 404, unknown.text
+    named = client.post("/api/v1/outputs/arrange", json={"objects": objects, "slug": "demo"})
+    assert named.status_code == 202, named.text
+    assert named.json()["slug"] == "demo"
+
+
+@respx.mock
+def test_a_library_file_that_cannot_be_read_is_refused_saying_why(
+    client: TestClient, app: FastAPI, tmp_path: Path
+) -> None:
+    """A sliced file, and one that is no 3MF, are refused by a code the UI and the
+    agent tell apart, naming every such file and why."""
+    configure(client)
+    _, meta, written = asyncio.run(saved_output(tmp_path))
+    library_file(88, file_type="gcode.3mf")
+    library_file(89, content=b"not a zip")
     arranger = Arranger()
     app.dependency_overrides[get_render] = lambda: arranger
     response = client.post(
@@ -364,4 +569,9 @@ def test_a_library_file_no_output_made_is_not_arrangeable_yet(
     problem = response.json()
     assert problem["code"] == LIBRARY_FILE_NOT_ARRANGEABLE
     assert problem["library_file_ids"] == [88, 89]
+    assert "file-88.gcode.3mf: it is sliced already" in problem["detail"]
+    assert "file-89.3mf: the file is not a 3MF archive" in problem["detail"]
     assert arranger.inputs == []
+    listed = client.get("/api/v1/print/library/88/objects")
+    assert listed.status_code == 422
+    assert listed.json()["code"] == LIBRARY_FILE_NOT_ARRANGEABLE

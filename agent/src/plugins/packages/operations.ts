@@ -1,7 +1,7 @@
 import { EgressError } from '../../http/egress.js'
 import { type OperationKind, OperationRefusal, refusal } from '../../operations/kinds.js'
 import { PluginError } from '../registry.js'
-import { PackageRefusedError, type PackageInstaller } from './install.js'
+import { BuiltInPluginError, PackageRefusedError, type PackageInstaller } from './install.js'
 import { type PackageSource, validateRef, validateSource } from './source.js'
 import type { PackageRepo } from './store.js'
 
@@ -26,6 +26,7 @@ export type PackageKindDeps = {
 
 /** The route's refusals, in its words. */
 function asRefusal(err: unknown): unknown {
+  if (err instanceof BuiltInPluginError) return refusal(409, err.message, { built_in: true })
   if (err instanceof PackageRefusedError) return refusal(422, 'the plugin package is refused', { problems: err.problems })
   if (err instanceof PluginError) return refusal(err.status, err.message)
   if (err instanceof EgressError) return refusal(400, err.message)

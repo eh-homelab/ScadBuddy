@@ -1,24 +1,10 @@
 import { readFile } from 'node:fs/promises'
-import { expect, test, type Locator } from '@playwright/test'
+import { expect, test } from '@playwright/test'
+import { settled } from './canvas'
 
 /** A PNG's width and height, from its IHDR chunk. */
 function pngSize(bytes: Buffer): { width: number; height: number } {
   return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) }
-}
-
-/**
- * A screenshot of ``canvas`` once two in a row agree, as preview-overlays.spec.ts takes.
- * Fails if it never settles, so that is not later read as the camera having moved.
- */
-async function settled(canvas: Locator): Promise<Buffer> {
-  let last = await canvas.screenshot()
-  for (let tries = 0; tries < 20; tries += 1) {
-    await canvas.page().waitForTimeout(150)
-    const next = await canvas.screenshot()
-    if (next.equals(last)) return next
-    last = next
-  }
-  throw new Error('the canvas never settled: 20 screenshots 150 ms apart all differed')
 }
 
 test.describe('rendered image', () => {

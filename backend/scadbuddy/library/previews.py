@@ -12,8 +12,7 @@ whose default render fails is not retried until its source changes.
 
 They live in Postgres (#454): one ``model_previews`` row per model id (``builtin:``
 ids included), the record and the PNG together, so the two can never disagree, and
-they survive a restart, so only the first boot renders anything. Without a database
-there are no previews at all (the database becomes required with #401).
+they survive a restart, so only the first boot renders anything.
 """
 
 from __future__ import annotations

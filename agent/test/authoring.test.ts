@@ -125,6 +125,28 @@ describe('update_source', () => {
     await runTool(tool('update_source'), { slug: 'box', source: 'cube(3);', base: 'abc1234' }, ctx(client))
     expect(seen[0]!.body).toEqual({ source: 'cube(3);', message: null, force: false, base: 'abc1234' })
   })
+
+  // #866: the same structured answer apply_patch gives, not a prose error to parse.
+  it('answers a moved base as a conflict naming the current revision', async () => {
+    const current = 'b'.repeat(40)
+    const { client } = backend(() =>
+      Response.json({ status: 409, title: 'Conflict', detail: 'moved on', base: 'abc1234', current }, { status: 409 }),
+    )
+    const result = await runTool(tool('update_source'), { slug: 'box', source: 'cube(3);', base: 'abc1234' }, ctx(client))
+    expect(result.isError).toBe(true)
+    expect(content(result)).toMatchObject({ status: 'conflict', base: 'abc1234', current })
+    expect(String((content(result) as { next: string }).next)).toContain('get_source')
+  })
+
+  it('passes a 409 without a current revision through with the backend reason', async () => {
+    const { client } = backend(() =>
+      Response.json({ status: 409, title: 'Conflict', detail: 'a model with that name exists' }, { status: 409 }),
+    )
+    const result = await runTool(tool('update_source'), { slug: 'box', source: 'cube(3);' }, ctx(client))
+    expect(result.isError).toBe(true)
+    expect(String(firstText(result))).toContain('HTTP 409')
+    expect(String(firstText(result))).toContain('a model with that name exists')
+  })
 })
 
 describe('agent authorship (#252)', () => {
@@ -143,12 +165,11 @@ describe('agent authorship (#252)', () => {
     expect(authorHeaders(principal, 'sess-1')).toHaveProperty(AUTHOR_SESSION_HEADER, 'sess-1')
   })
 
-  it('leaves out the session outside one, and never sends the headless-browser marker', async () => {
+  it('leaves out the session outside one', async () => {
     const { client, seen } = backend()
     await runTool(tool('get_model'), { slug: 'box' }, ctx(client))
     expect(seen[0]!.headers.get(AUTHOR_HEADER)).toBe('token:t1')
     expect(seen[0]!.headers.has(AUTHOR_SESSION_HEADER)).toBe(false)
-    expect(seen[0]!.headers.has('X-ScadBuddy-Agent-Session')).toBe(false)
   })
 
   it('percent-encodes what the backend would refuse in a principal id', () => {

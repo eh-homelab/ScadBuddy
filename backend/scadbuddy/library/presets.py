@@ -9,10 +9,7 @@ Two kinds, listed together:
   metadata. A legacy ``presets.json`` (:data:`LEGACY_PRESETS_NAME`) beside the source
   is still read, below ``model.json``.
 - **mine** are the ones saved through the API, in Postgres (``saved_presets``, #332),
-  for built-ins as much as for templates of mine. The server always has a database
-  (#401); a store built without one reads only a template's own presets, as the
-  bundled-template checks do, and refuses a save
-  (:class:`SavedPresetsUnavailableError`).
+  for built-ins as much as for templates of mine.
 
 A preset holds only the values it sets. Applying one starts from the template's
 defaults, so a default the template changes later still reaches every preset that
@@ -91,12 +88,13 @@ class PresetExistsError(ValueError):
         self.existing = name if existing is None else existing
 
 
+class TemplatePresetsUnreadableError(ValueError):
+    """A template's preset list could not be read, which says nothing about which presets
+    it has: raised instead of reading as none when the caller asks (``strict``)."""
+
+
 class TooManyPresetsError(ValueError):
     pass
-
-
-class SavedPresetsUnavailableError(RuntimeError):
-    """Saved presets live in Postgres, and this server has no database."""
 
 
 def _refuse_nul(text: str) -> str:
@@ -407,80 +405,88 @@ class PresetStore:
     def __init__(
         self,
         paths: DataPaths,
-        conninfo: str | None = None,
+        conninfo: str,
         *,
         pool_size: int = 4,
         connect_timeout: float = 30.0,
     ) -> None:
         self.paths = paths
         self.connect_timeout = connect_timeout
-        self._pool: ConnectionPool[Connection[DictRow]] | None = (
-            ConnectionPool(
-                conninfo,
-                min_size=1,
-                max_size=pool_size,
-                open=False,
-                connection_class=Connection[DictRow],
-                kwargs={"autocommit": True, "row_factory": dict_row},
-                name="scadbuddy-presets",
-            )
-            if conninfo
-            else None
+        self._pool: ConnectionPool[Connection[DictRow]] = ConnectionPool(
+            conninfo,
+            min_size=1,
+            max_size=pool_size,
+            open=False,
+            connection_class=Connection[DictRow],
+            kwargs={"autocommit": True, "row_factory": dict_row},
+            name="scadbuddy-presets",
         )
 
     def open(self) -> None:
         """Connect, and apply the migrations (`pg_store`'s list, which is the backend's
         one list) if nothing has yet."""
-        if self._pool is None:
-            return
         self._pool.open(wait=True, timeout=self.connect_timeout)
         with self._pool.connection() as conn:
             migrate(conn)
 
     def close(self) -> None:
-        if self._pool is not None:
-            self._pool.close()
+        self._pool.close()
 
-    def _defined(self, model_id: str, name: str, raw: Any) -> list[TemplatePreset]:
-        """``raw`` as a checked preset list, or none when it is not one (logged)."""
+    def _defined(
+        self, model_id: str, name: str, raw: Any, strict: bool = False
+    ) -> list[TemplatePreset]:
+        """``raw`` as a checked preset list, or none when it is not one (logged; raised
+        with ``strict``)."""
         try:
             return _checked(
                 _PRESET_LIST.validate_python(_details_as_written(raw), context={STORED: True})
             )
         except (ValidationError, ValueError, RecursionError) as error:
+            if strict:
+                raise TemplatePresetsUnreadableError(f"{model_id}/{name}") from error
             logger.warning(
                 "ignored a template's presets in %s: %s", name, error, extra={"slug": model_id}
             )
             return []
 
-    def _read_json(self, model_id: str, name: str) -> Any:
-        """A JSON file of the template's, or None when it is missing or unreadable."""
+    def _read_json(self, model_id: str, name: str, strict: bool = False) -> Any:
+        """A JSON file of the template's, or None when it is missing or unreadable (with
+        ``strict``, unreadable raises)."""
         path = self.paths.model_dir(model_id) / name
         try:
             return json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return None
-        except (OSError, UnicodeDecodeError, ValueError, RecursionError):
+        except (OSError, UnicodeDecodeError, ValueError, RecursionError) as error:
+            if strict:
+                raise TemplatePresetsUnreadableError(f"{model_id}/{name}") from error
             logger.warning("could not read %s", name, extra={"slug": model_id})
             return None
 
-    def template_presets(self, model_id: str) -> list[ParamPreset]:
+    def template_presets(self, model_id: str, strict: bool = False) -> list[ParamPreset]:
         """The template's own: its ``model.json`` list, then any from a legacy
         ``presets.json`` whose key or name ``model.json`` does not already have.
 
         A list that is not a valid one is logged and treated as no presets: it costs
-        the picker that template's presets, never the page or the model.
+        the picker that template's presets, never the page or the model. With ``strict``
+        it raises :class:`TemplatePresetsUnreadableError` instead, for a caller that
+        would act on a preset being absent (#2142's review: Settings forgets entries for
+        presets a model no longer lists, and a half-written file lists none).
         """
-        meta = self._read_json(model_id, MODEL_META_NAME)
+        meta = self._read_json(model_id, MODEL_META_NAME, strict)
+        if strict and meta is not None and not isinstance(meta, dict):
+            raise TemplatePresetsUnreadableError(f"{model_id}/{MODEL_META_NAME}")
         defined: list[TemplatePreset] = []
         if isinstance(meta, dict) and meta.get(PRESETS_KEY) is not None:
-            defined = self._defined(model_id, MODEL_META_NAME, meta[PRESETS_KEY])
-        legacy = self._read_json(model_id, LEGACY_PRESETS_NAME)
+            defined = self._defined(model_id, MODEL_META_NAME, meta[PRESETS_KEY], strict)
+        legacy = self._read_json(model_id, LEGACY_PRESETS_NAME, strict)
+        if strict and legacy is not None and not isinstance(legacy, dict):
+            raise TemplatePresetsUnreadableError(f"{model_id}/{LEGACY_PRESETS_NAME}")
         if isinstance(legacy, dict) and legacy.get(PRESETS_KEY) is not None:
             keys = set(template_preset_keys(defined))
             names = {preset.name.casefold() for preset in defined}
             for preset in with_keys(
-                self._defined(model_id, LEGACY_PRESETS_NAME, legacy[PRESETS_KEY])
+                self._defined(model_id, LEGACY_PRESETS_NAME, legacy[PRESETS_KEY], strict)
             ):
                 if preset.id not in keys and preset.name.casefold() not in names:
                     defined.append(preset)
@@ -504,10 +510,6 @@ class PresetStore:
     @contextmanager
     def _locked(self, model_id: str) -> Iterator[Connection[DictRow]]:
         """A transaction holding ``model_id``'s preset lock, released at its end."""
-        if self._pool is None:
-            raise SavedPresetsUnavailableError(
-                "saved presets need a database: set SCADBUDDY_DATABASE_URL"
-            )
         with self._pool.connection() as conn, conn.transaction():
             conn.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
@@ -545,22 +547,19 @@ class PresetStore:
         ).fetchall()
 
     def saved_presets(self, model_id: str) -> list[ParamPreset]:
-        if self._pool is None:
-            return []
         with self._pool.connection() as conn:
             return [self._view(row) for row in self._saved(conn, model_id)]
 
     def saved_params(self) -> list[dict[str, ParamValue]]:
         """Every saved preset's values, of every template: references the upload sweep
         keeps. Raises when the database cannot be read, so that sweep removes nothing."""
-        if self._pool is None:
-            return []
         with self._pool.connection() as conn:
             return [row["params"] for row in conn.execute("SELECT params FROM saved_presets")]
 
-    def presets(self, model_id: str) -> list[ParamPreset]:
-        """The template's presets, then the saved ones, each in their own order."""
-        return self.template_presets(model_id) + self.saved_presets(model_id)
+    def presets(self, model_id: str, strict: bool = False) -> list[ParamPreset]:
+        """The template's presets, then the saved ones, each in their own order
+        (``strict``: see :meth:`template_presets`)."""
+        return self.template_presets(model_id, strict) + self.saved_presets(model_id)
 
     def find(self, model_id: str, preset_id: str) -> ParamPreset:
         """One preset of the template, shipped or saved."""
@@ -574,9 +573,7 @@ class PresetStore:
         ``names`` is a saved preset's, ignoring case: the other direction of
         :meth:`_require_free`. Under the template's preset lock, as a save is, so a
         save and the template's list can never each pass their check before the
-        other lands. Without a database there are no saved presets to clash with."""
-        if self._pool is None:
-            return write()
+        other lands."""
         with self._locked(model_id) as conn:
             saved = [row["name"] for row in self._saved(conn, model_id)]
             for name in names:
@@ -672,10 +669,8 @@ class PresetStore:
 
         The duplicate's own template presets came with its directory; these are the
         ones kept beside it. Fresh ids, so the two sets are edited independently, in
-        the original's order. Nothing to copy without a database.
+        the original's order.
         """
-        if self._pool is None:
-            return
         with self._locked(target_id) as conn:
             for row in self._saved(conn, source_id):
                 conn.execute(
@@ -698,16 +693,12 @@ class PresetStore:
 
     def forget(self, model_id: str) -> None:
         """Drop a template's saved presets: it is gone, or its slug is being reused."""
-        if self._pool is None:
-            return
         with self._locked(model_id) as conn:
             conn.execute("DELETE FROM saved_presets WHERE model_id = %s", (model_id,))
 
     def sweep_orphans(self, is_live: Callable[[str], bool]) -> list[str]:
         """Forget the saved presets of every template ``is_live`` says is gone: a
         delete's own cleanup can fail, as the catalogue's orphan sweep explains."""
-        if self._pool is None:
-            return []
         with self._pool.connection() as conn:
             model_ids = [
                 row["model_id"]

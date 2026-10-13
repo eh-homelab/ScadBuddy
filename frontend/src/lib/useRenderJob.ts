@@ -37,10 +37,17 @@ export interface RenderState {
    */
   settledFor: ParamValues | undefined
   /**
+   * #1685 — the `params` object the shown `job` was submitted with, by identity. Unlike
+   * `settledFor` it does not move when a submit fails before making a job, which leaves
+   * the previous `job` on show: its `colors` belong to these values, not to the new ones.
+   */
+  jobFor: ParamValues | undefined
+  /**
    * Seconds until the submit is tried again, and why: a 503 with `retry_after` (a full
-   * render queue, only when SCADBUDDY_RENDER_QUEUE_MAX is set; Temporal unavailable; the
-   * request still being accepted; or no answer from ScadBuddy). Not an error: the
-   * preview is still coming.
+   * render queue, only when SCADBUDDY_RENDER_QUEUE_MAX is set; on the Bambuddy blob
+   * store, the revision's first snapshot still uploading, problem `code`
+   * `snapshot_pending` (#1422); Temporal unavailable; the request still being accepted;
+   * or no answer from ScadBuddy). Not an error: the preview is still coming.
    */
   busy: RenderBusy | undefined
   /** Submits the same render again: after an `error` the caller offers it as "try again". */
@@ -49,7 +56,12 @@ export interface RenderState {
   stage: RenderStage | undefined
 }
 
-export type BusyReason = 'queue-full' | 'temporal-unavailable' | 'still-accepting' | 'unanswered'
+export type BusyReason =
+  | 'queue-full'
+  | 'snapshot-pending'
+  | 'temporal-unavailable'
+  | 'still-accepting'
+  | 'unanswered'
 
 export interface RenderBusy {
   seconds: number
@@ -64,6 +76,14 @@ export interface RenderBusy {
 export const TRANSIENT_RETRIES = 5
 
 /**
+ * #2101 — the most seconds a submit waits out a snapshot still uploading before it is
+ * shown as an error the person can try again. An upload that never completes (the blob
+ * store keeps refusing it, so the background pin keeps failing) answers
+ * `snapshot_pending` for ever; without a ceiling the page said "uploading" for ever.
+ */
+export const SNAPSHOT_PENDING_MAX_SECONDS = 300
+
+/**
  * #1040 — failed reads of a job in a row before the preview stops following it. A 5xx,
  * a gateway's 502/504 or a dropped connection says nothing about the render, which goes
  * on and settles on the server: the read is tried again after `readBackoffMs`, and the
@@ -72,12 +92,12 @@ export const TRANSIENT_RETRIES = 5
 export const READ_RETRIES = 5
 
 /** The wait before a failed read's `n`th retry (0-based): 400 ms doubling, capped. */
-function readBackoffMs(n: number): number {
+export function readBackoffMs(n: number): number {
   return Math.min(POLL_MS * 2 ** n, 8_000)
 }
 
 /** A read that says the job will never be readable: it is gone, or this is refused. */
-function definitive(cause: unknown): boolean {
+export function definitive(cause: unknown): boolean {
   return cause instanceof ApiError && cause.status >= 400 && cause.status < 500 && cause.status !== 408 && cause.status !== 429
 }
 
@@ -104,11 +124,18 @@ export function canRetry(error: unknown): boolean {
   if (error instanceof LostRenderError) return true
   if (error instanceof TypeError) return true // fetch's own network failure
   if (!(error instanceof ApiError)) return false
+  // A snapshot upload it gave up waiting for (#2101): it may have finished since.
+  if (error.problem['code'] === SNAPSHOT_PENDING_CODE) return true
   const { type } = error.problem
   return type === TEMPORAL_UNAVAILABLE || type === STILL_ACCEPTING || type === UNANSWERED || type === OFFLINE
 }
 
+/** The problem `code` of a 503 whose template snapshot is still uploading (#1422). */
+export const SNAPSHOT_PENDING_CODE = 'snapshot_pending'
+
 function busyReason(cause: ApiError): BusyReason {
+  // The snapshot's 503 has the queue's problem type; only its `code` tells them apart.
+  if (cause.problem['code'] === SNAPSHOT_PENDING_CODE) return 'snapshot-pending'
   switch (cause.problem.type) {
     case TEMPORAL_UNAVAILABLE:
       return 'temporal-unavailable'
@@ -123,7 +150,7 @@ function busyReason(cause: ApiError): BusyReason {
 
 /**
  * How long a refused render asks to wait: a 503's `retry_after`, from its body (a full
- * queue) or its `Retry-After` header (the client copies it in: still accepting, Temporal
+ * queue, or a snapshot still uploading) or its `Retry-After` header (the client copies it in: still accepting, Temporal
  * unavailable, or an unanswered request with one).
  */
 function retryAfterSeconds(cause: unknown): number | undefined {
@@ -133,7 +160,8 @@ function retryAfterSeconds(cause: unknown): number | undefined {
 }
 
 /**
- * Whether a refusal left no claim under its key: a full queue's. Its answer is what the
+ * Whether a refusal left no claim under its key: a full queue's, or a pending snapshot's
+ * (pinned before the job exists). Its answer is what the
  * key's run completed with, so sent again under that key it is answered from that run;
  * the retry takes a new key. Any other refusal may hold a claim, which only a re-send
  * with the same key keeps as one (review #1066 (7) 3).
@@ -166,6 +194,7 @@ export function useRenderJob(
   const [rendering, setRendering] = useState(false)
   const [error, setError] = useState<Error | undefined>(undefined)
   const [settledFor, setSettledFor] = useState<ParamValues | undefined>(undefined)
+  const [jobFor, setJobFor] = useState<ParamValues | undefined>(undefined)
   const [busy, setBusy] = useState<RenderBusy | undefined>(undefined)
   const [attempt, setAttempt] = useState(0)
   const retry = useCallback(() => setAttempt((n) => n + 1), [])
@@ -235,6 +264,7 @@ export function useRenderJob(
           if (isStale()) return
           failures = 0
           setJob(next)
+          setJobFor(params)
           if (next.status === 'done' || next.status === 'failed' || next.status === 'cancelled') finish()
         } catch (cause) {
           if (isStale()) return
@@ -295,6 +325,7 @@ export function useRenderJob(
       // names rather than showing a failure. A refused submit created no job, so
       // the same `supersedes` still applies.
       let requestId = newRequestId()
+      let snapshotWaited = 0
       for (let transient = 0; ; ) {
         try {
           const { job_id } = await api.render(
@@ -308,12 +339,17 @@ export function useRenderJob(
           if (!isStale()) setBusy(undefined)
           return job_id
         } catch (cause) {
-          // A full queue is waited out; any other wait is retried `TRANSIENT_RETRIES`
-          // times, then shown as an error the person can try again.
+          // A full queue is waited out; a snapshot still uploading for up to
+          // `SNAPSHOT_PENDING_MAX_SECONDS` (#2101); any other wait is retried
+          // `TRANSIENT_RETRIES` times. Past either, it is shown as an error the person can
+          // try again.
           const wait = retryAfterSeconds(cause)
           if (wait === undefined || isStale()) throw cause
           const reason = busyReason(cause as ApiError)
-          if (reason !== 'queue-full' && transient++ >= TRANSIENT_RETRIES) throw cause
+          if (reason === 'snapshot-pending') {
+            if (snapshotWaited >= SNAPSHOT_PENDING_MAX_SECONDS) throw cause
+            snapshotWaited += wait
+          } else if (reason !== 'queue-full' && transient++ >= TRANSIENT_RETRIES) throw cause
           if (claimedNothing(cause)) requestId = newRequestId()
           setBusy({ seconds: wait, reason })
           await waitUnlessStale(wait)
@@ -348,5 +384,5 @@ export function useRenderJob(
     }
   }, [slug, params, version, extraRef, attempt])
 
-  return { job, rendering, error, busy, retry, settledFor, stage }
+  return { job, rendering, error, busy, retry, settledFor, jobFor, stage }
 }

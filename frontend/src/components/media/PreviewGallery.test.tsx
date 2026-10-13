@@ -49,6 +49,31 @@ describe('PreviewGallery (#280, #624)', () => {
     expect(imgs()).toHaveLength(before - 1)
   })
 
+  it('tries a failed thumbnail again when the media is read again, not before (#1698)', () => {
+    // Its URL is not proven to change with the bytes (api/models.py): a thumbnail that
+    // failed once, say while it was being made, may load on the next read.
+    const view = (list: typeof items) => (
+      <PreviewGallery slug={GALLERY_SLUG} media={list} label="Crème Coaster" hidden={false}>
+        <p>live preview</p>
+      </PreviewGallery>
+    )
+    const { rerender } = render(view(items))
+    const strip = screen.getByRole('list', { name: 'Gallery' })
+    const imgs = () => [...strip.querySelectorAll('img')]
+    const image = items.findIndex((item) => item.kind === 'image')
+    const thumbnail = imgs()[image]!.getAttribute('src')
+    expect(thumbnail).toMatch(/\/thumbnail\?v=\d+$/)
+
+    fireEvent.error(imgs()[image]!)
+    expect(imgs()[image]!.getAttribute('src')).not.toBe(thumbnail)
+    // A render with the same media keeps the fallback: no retry loop on a broken URL.
+    rerender(view(items))
+    expect(imgs()[image]!.getAttribute('src')).not.toBe(thumbnail)
+    // The media read again (a new list, the same items): the thumbnail is tried again.
+    rerender(view([...items]))
+    expect(imgs()[image]!.getAttribute('src')).toBe(thumbnail)
+  })
+
   it('points aria-controls only at a panel that is rendered', async () => {
     const { user } = setup()
     const preview = screen.getByRole('tab', { name: 'Preview' })

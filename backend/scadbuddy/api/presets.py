@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Annotated
 
+import psycopg
 from fastapi import APIRouter, Path, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
@@ -14,6 +16,7 @@ from scadbuddy.api.deps import (
     CatalogueDep,
     EventsDep,
     PresetsDep,
+    SettingsStoreDep,
     SlugPath,
 )
 from scadbuddy.api.models import require_model_exists
@@ -51,6 +54,8 @@ from scadbuddy.library.slugs import MAX_SLUG_LENGTH
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.render.inputs import InputsError, legacy_inputs
 from scadbuddy.render.schema import ParamValue
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["presets"])
 
@@ -341,6 +346,7 @@ def delete_preset(
     catalogue: CatalogueDep,
     presets: PresetsDep,
     events: EventsDep,
+    store: SettingsStoreDep,
 ) -> Response:
     require_model_exists(catalogue, slug)
     require_saved(presets, slug, preset_id)
@@ -348,5 +354,15 @@ def delete_preset(
         presets.delete(slug, preset_id)
     except PresetNotFoundError:
         raise _missing(preset_id) from None
+    # What it was filed into goes with it (#1660), or Settings keeps listing its id.
+    # Best effort, like a deleted model's cleanup: the preset is gone, so a failure
+    # here must not answer 500 for a delete that happened (a retry would then 404).
+    # Settings prunes an entry left behind the next time it reads them.
+    try:
+        store.forget_model_projects(slug, preset_id)
+    except psycopg.Error:
+        logger.exception(
+            "could not forget a deleted preset's project", extra={"slug": slug, "id": preset_id}
+        )
     _changed(events, slug)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

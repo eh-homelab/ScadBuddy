@@ -21,12 +21,14 @@ from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.api.models import MAX_SOURCE_CHARS
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.catalogue import Catalogue, ModelMeta
+from scadbuddy.library.history import GitError
 from scadbuddy.library.presets import PresetStore
 from scadbuddy.render.job_models import Job
 from scadbuddy.render.runner import ProcessOutput, RenderTimeoutError
 from scadbuddy.render.schema import source_sha256
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.api.conftest import PNG_BYTES, set_fake_env
+from tests.support.media import MemoryMediaStore
 from tests.support.operations import press
 
 SOURCE = "width = 10;\ncube(width);\n"
@@ -327,7 +329,9 @@ def test_the_orphan_sweep_never_raises(paths: DataPaths, failing: tuple[str, ...
 
     presets = create_autospec(PresetStore, instance=True)
     presets.sweep_orphans.side_effect = sweep_presets
-    catalogue = Catalogue(paths, presets=presets, wrapper_prefix=WRAPPER_PREFIX)
+    catalogue = Catalogue(
+        paths, presets=presets, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX
+    )
 
     def fail(*_args: object, **_kwargs: object) -> NoReturn:
         raise OSError("EIO")
@@ -599,6 +603,28 @@ def test_a_delete_is_a_revision_of_the_shared_history(client: TestClient) -> Non
     # The model's revisions stay in the history, and the delete touched only it.
     assert {change.path.split("/")[0] for change in revisions[0].files} == {slug}
     assert {change.status for change in revisions[0].files} == {"D"}
+
+
+def test_a_create_whose_commit_fails_is_a_503_that_leaves_nothing(client: TestClient) -> None:
+    # #2385: the create answered 201 with no commit, and every render of the model was
+    # then a 409 `snapshot_unavailable` until its source was saved again.
+    state = client.app.state.scadbuddy  # type: ignore[attr-defined]
+
+    def fail(*_args: object) -> str | None:
+        raise GitError("git commit failed: fatal: cannot lock ref 'HEAD'", "fatal: cannot lock ref")
+
+    with patch.object(state.history, "_commit_locked", fail):
+        response = _upload(client)
+
+    assert response.status_code == 503, response.text
+    assert "try again" in response.json()["detail"]
+    # git's own words (paths on the volume, ref names) stay in the server's log.
+    assert "cannot lock ref" not in response.text
+    assert client.get("/api/v1/models/name-keychain").status_code == 404
+    # Nothing held the slug: the same create goes through, with its revision.
+    created = _upload(client)
+    assert created.status_code == 201, created.text
+    assert created.json()["version"] is not None
 
 
 def test_a_model_with_a_render_in_progress_cannot_be_deleted(

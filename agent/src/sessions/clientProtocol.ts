@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { ANSWER_MAX, QUESTIONS_MAX } from '../harness/questions.js'
-import { UserImagesSchema } from './images.js'
-import { PROTOCOL_VERSION } from './protocol.js'
+import { AttachmentRefsSchema } from '../attachments/store.js'
+import { PROTOCOL_VERSION, SESSION_MODES } from './protocol.js'
 
 // The panel → server half of the assistant panel's wire protocol, version 1,
 // as the agent's chat socket (routes/chat.ts) accepts it. The contract is the
@@ -16,6 +16,21 @@ export const MESSAGE_MAX = 32_000
 
 const v = z.literal(PROTOCOL_VERSION)
 const sessionId = z.string().min(1).max(200)
+/** The id of an approval or a question the client answers. */
+const answerId = z.string().min(1).max(200)
+
+/**
+ * Whether a refused frame's `sessionId` is one the schema would take, so a
+ * refusal echoes only such an id (staleImages here, routes/chat.ts `refusedAnswer`).
+ */
+export function isSessionId(value: unknown): value is string {
+  return sessionId.safeParse(value).success
+}
+
+/** Whether a refused answer's `id` is one the schema would take (routes/chat.ts `refusedAnswer`). */
+export function isAnswerId(value: unknown): value is string {
+  return answerId.safeParse(value).success
+}
 
 /** frontend protocol.ts `PageContextSchema`; `page` is whatever the mounted page reports. */
 export const PageContextSchema = z.object({
@@ -42,16 +57,25 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
      * one that is not a string of at most 256 characters is dropped here.
      */
     traceparent: z.string().max(256).optional().catch(undefined),
-    /** #1866: images for the model, each with the preview its `user.turn` shows (images.ts). */
-    images: UserImagesSchema.optional(),
+    /**
+     * Images for the model: the ids of images the panel uploaded (#1941,
+     * routes/attachments.ts). Inline images, which a tab loaded before that
+     * sends, are refused with STALE_TAB_IMAGES (#1959).
+     */
+    images: AttachmentRefsSchema.optional(),
+    /**
+     * Plan 5d: the new session's mode (spec §6.1). Absent, the `session_mode`
+     * setting's applies; with `sessionId` it is refused (routes/chat.ts).
+     */
+    mode: z.enum(SESSION_MODES).optional(),
   }),
-  z.object({ v, type: z.literal('approval.decision'), sessionId, id: z.string().min(1).max(200), approve: z.boolean() }),
+  z.object({ v, type: z.literal('approval.decision'), sessionId, id: answerId, approve: z.boolean() }),
   // #940: the user's answer to an AskUserQuestion (questions/service.ts).
   z.object({
     v,
     type: z.literal('question.answer'),
     sessionId,
-    id: z.string().min(1).max(200),
+    id: answerId,
     answers: z.array(z.string().min(1).max(ANSWER_MAX)).min(1).max(QUESTIONS_MAX),
   }),
   z.object({ v, type: z.literal('session.interrupt'), sessionId }),
@@ -64,7 +88,36 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
 ])
 export type ClientMessage = z.infer<typeof ClientMessageSchema>
 
-export type ParseResult<T> = { ok: true; value: T } | { ok: false; error: string }
+/**
+ * The answer to a `user.message` that carries its images inline, as a tab
+ * loaded before #1941 does (#1959): the panel shows it as it is.
+ *
+ * TODO(2026-12-01): a shim for tabs loaded before #1941 (deployed 2026-10-09,
+ * #1955). Remove it after that date, when no such tab can reasonably still be open,
+ * together with `staleImages`, routes/chat.ts's `CHAT_FRAME_MAX` docstring,
+ * docs/ai/security.md's mention and the tests that pin it (chatImages,
+ * chat.limits, chat.e2e).
+ */
+export const STALE_TAB_IMAGES =
+  'This page is out of date: it sent your images in a way the assistant no longer takes, so your message was not sent. ' +
+  'Please reload the page, then send the message with its images again.'
+
+/**
+ * A refusal the panel should show as an answer to what the user sent rather
+ * than as a malformed frame: in the session the frame names, if any.
+ */
+export type StaleFrame = { sessionId?: string }
+
+export type ParseResult<T> = { ok: true; value: T } | { ok: false; error: string; stale?: StaleFrame }
+
+/** Whether a frame is a `user.message` with an image that is not an attachment ref (an inline one). */
+function staleImages(value: object): StaleFrame | undefined {
+  const { type, images, sessionId } = value as Record<string, unknown>
+  if (type !== 'user.message' || !Array.isArray(images)) return undefined
+  const inline = images.some((i: unknown) => typeof i === 'object' && i !== null && !('kind' in i) && 'data' in i)
+  if (!inline) return undefined
+  return isSessionId(sessionId) ? { sessionId } : {}
+}
 
 /** A text frame from the socket. Never throws. */
 export function parseClientFrame(raw: string): ParseResult<ClientMessage> {
@@ -77,6 +130,8 @@ export function parseClientFrame(raw: string): ParseResult<ClientMessage> {
   if (typeof value === 'object' && value !== null && 'v' in value && value.v !== PROTOCOL_VERSION) {
     return { ok: false, error: `unsupported protocol version ${String(value.v)}` }
   }
+  const stale = typeof value === 'object' && value !== null ? staleImages(value) : undefined
+  if (stale) return { ok: false, error: STALE_TAB_IMAGES, stale }
   const parsed = ClientMessageSchema.safeParse(value)
   return parsed.success ? { ok: true, value: parsed.data } : { ok: false, error: z.prettifyError(parsed.error) }
 }

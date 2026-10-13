@@ -1,0 +1,736 @@
+[
+  {
+    "file": "2335-shaun-das-schaf-toilettenrollenhalter.3mf",
+    "covers": "single colour, one object (CC BY)",
+    "library_file_id": 2335,
+    "library_filename": "Shaun_the_Sheep_110mm_Tube.3mf",
+    "title": "Shaun das Schaf Toilettenrollenhalter",
+    "designer": "BrickBeat",
+    "designer_user_id": "3403918662",
+    "licence": "BY",
+    "origin": "profile",
+    "design_model_id": "US3f1a97c8ee5b52",
+    "application": "BambuStudio-02.06.01.55",
+    "sha256": "2ac349fcb1f8a7b401ba3fabdb7e1573ae6e2d4c86ae5ba81954ba137e204fcf",
+    "bytes": 983674,
+    "objects": 1,
+    "build_items": 1,
+    "parts": 1,
+    "extruders": [
+      "1"
+    ],
+    "part_subtypes": {
+      "normal_part": 1
+    },
+    "painted_triangles": 0,
+    "triangles": 5646,
+    "plates": 1,
+    "filament_colours": [
+      "#FFFFFF"
+    ],
+    "arrange_reads": {
+      "objects": 1,
+      "copies": 1,
+      "colours": [
+        "#FFFFFF"
+      ],
+      "painted_parts": 0,
+      "negative_parts": 0,
+      "notes": []
+    }
+  },
+  {
+    "file": "2330-shaun-das-schaf-toilettenrollenhalter.3mf",
+    "covers": "single colour, two objects on two plates (CC BY)",
+    "library_file_id": 2330,
+    "library_filename": "shaun_39mm.3mf",
+    "title": "Shaun das Schaf Toilettenrollenhalter",
+    "designer": "BrickBeat",
+    "designer_user_id": "3877415818",
+    "licence": "BY",
+    "origin": "remix",
+    "design_model_id": "US3f1a97c8ee5b52",
+    "application": "BambuStudio-02.00.03.54",
+    "sha256": "f21ac7c6be651170a95c3ace713bc70acd2f691bc9208650bb95689007a134f7",
+    "bytes": 2649203,
+    "objects": 2,
+    "build_items": 2,
+    "parts": 3,
+    "extruders": [
+      "1"
+    ],
+    "part_subtypes": {
+      "normal_part": 3
+    },
+    "painted_triangles": 0,
+    "triangles": 107782,
+    "plates": 2,
+    "filament_colours": [
+      "#FFFFFF",
+      "#000000"
+    ],
+    "arrange_reads": {
+      "objects": 2,
+      "copies": 2,
+      "colours": [
+        "#FFFFFF"
+      ],
+      "painted_parts": 0,
+      "negative_parts": 0,
+      "notes": []
+    }
+  },
+  {
+    "file": "411-broccoli.3mf",
+    "covers": "five colours by part, one object, no paint",
+    "library_file_id": 411,
+    "library_filename": "Broccoli — 66, 61.3mf",
+    "title": "broccoli",
+    "designer": "ScadBuddy",
+    "designer_user_id": null,
+    "licence": null,
+    "origin": "ScadBuddy",
+    "design_model_id": null,
+    "application": "BambuStudio-02.07.00.00",
+    "sha256": "4d5a4dd30433c12d2f5dc549046ccf5017ad879e16c4d9ff8c0d4b7b5f540b7c",
+    "bytes": 434315,
+    "objects": 1,
+    "build_items": 1,
+    "parts": 5,
+    "extruders": [
+      "1",
+      "2",
+      "3",
+      "4",
+      "5"
+    ],
+    "part_subtypes": {
+      "normal_part": 5
+    },
+    "painted_triangles": 0,
+    "triangles": 27920,
+    "plates": 1,
+    "filament_colours": [
+      "#1E9E46",
+      "#2FB457",
+      "#49C26A",
+      "#C7D98A",
+      "#EDEADE"
+    ],
+    "arrange_reads": {
+      "objects": 1,
+      "copies": 1,
+      "colours": [
+        "#1E9E46",
+        "#2FB457",
+        "#49C26A",
+        "#C7D98A",
+        "#EDEADE"
+      ],
+      "painted_parts": 0,
+      "negative_parts": 0,
+      "notes": []
+    }
+  },
+  {
+    "file": "400-blaubeere-fur-spielzeug-kaufladen-deko-blaubeere.3mf",
+    "covers": "two colours by object, 82 objects on two plates",
+    "library_file_id": 400,
+    "library_filename": "Heidelbeere.3mf",
+    "title": "Blaubeere für Spielzeug Kaufladen - Deko Blaubeere",
+    "designer": "FörsterSepp",
+    "designer_user_id": "2171648457",
+    "licence": "Standard Digital File License",
+    "origin": "original",
+    "design_model_id": "USfc8d0dd8080d23",
+    "application": "BambuStudio-02.08.02.61",
+    "sha256": "aa0dbaafb1131e60fa82373cd434641d4279d0eb8c3ed9e56b3c12430351a5ee",
+    "bytes": 1146476,
+    "objects": 82,
+    "build_items": 82,
+    "parts": 82,
+    "extruders": [
+      "1",
+      "2"
+    ],
+    "part_subtypes": {
+      "normal_part": 82
+    },
+    "painted_triangles": 0,
+    "triangles": 16436,
+    "plates": 2,
+    "filament_colours": [
+      "#63718DFF",
+      "#E8DBB7"
+    ],
+    "arrange_reads": {
+      "objects": 82,
+      "copies": 82,
+      "colours": [
+        "#63718D",
+        "#E8DBB7"
+      ],
+      "painted_parts": 0,
+      "negative_parts": 0,
+      "notes": []
+    }
+  },
+  {
+    "file": "2167-pumpkin-fidget-twist.3mf",
+    "covers": "painted (Bambu paint_color), one object, one part (CC BY-SA)",
+    "library_file_id": 2167,
+    "library_filename": "pumpkin-fidget.3mf",
+    "title": "Pumpkin Fidget Twist",
+    "designer": "JoshValjosh",
+    "designer_user_id": "1398364503",
+    "licence": "BY-SA",
+    "origin": "profile",
+    "design_model_id": "US4234778f0031bf",
+    "application": "BambuStudio-02.07.01.62",
+    "sha256": "55057d5ecb6e57aefac88fcd9138af7e34fb027aa9b41ea453ac809945c4e270",
+    "bytes": 1729461,
+    "objects": 1,
+    "build_items": 1,
+    "parts": 1,
+    "extruders": [
+      "1"
+    ],
+    "part_subtypes": {
+      "normal_part": 1
+    },
+    "painted_triangles": 48038,
+    "triangles": 64556,
+    "plates": 1,
+    "filament_colours": [
+      "#FF8D1C",
+      "#FFFF00"
+    ],
+    "arrange_reads": {
+      "objects": 1,
+      "copies": 1,
+      "colours": [
+        "#FF8D1C"
+      ],
+      "painted_parts": 1,
+      "negative_parts": 0,
+      "notes": []
+    }
+  },
+  {
+    "file": "2069-fidget-cubes-mc-edition.3mf",
+    "covers": "painted and 47 coloured parts in one object",
+    "library_file_id": 2069,
+    "library_filename": "MC+ore+fidget+cube+(all+over)(PETG Very Translucent Settings).3mf",
+    "title": "Fidget Cubes MC Edition",
+    "designer": "PiNK_3DP",
+    "designer_user_id": "643939902",
+    "licence": "Standard Digital File License",
+    "origin": "original",
+    "design_model_id": "US35dda6c19b6a6c",
+    "application": "BambuStudio-02.05.01.52",
+    "sha256": "e9080be2c7fa25b55f99d4e8aa05bdb493c68e638eb2a0f05232f705031d36f7",
+    "bytes": 1252362,
+    "objects": 1,
+    "build_items": 1,
+    "parts": 47,
+    "extruders": [
+      "1",
+      "2"
+    ],
+    "part_subtypes": {
+      "normal_part": 47
+    },
+    "painted_triangles": 622,
+    "triangles": 47466,
+    "plates": 1,
+    "filament_colours": [
+      "#757575",
+      "#61B0FF80",
+      "#FFFF00",
+      "#FF0000"
+    ],
+    "arrange_reads": {
+      "objects": 1,
+      "copies": 1,
+      "colours": [
+        "#61B0FF",
+        "#757575"
+      ],
+      "painted_parts": 8,
+      "negative_parts": 0,
+      "notes": []
+    }
+  },
+  {
+    "file": "688-carrot-garden.3mf",
+    "covers": "painted, four objects: Carrot Garden, the leaf-to-body joint scenario of #2146",
+    "library_file_id": 688,
+    "library_filename": "2 Carrot Garden Print by Object.3mf",
+    "title": "Carrot Garden",
+    "designer": "3DPmom",
+    "designer_user_id": "1697327253",
+    "licence": "Standard Digital File License",
+    "origin": "original",
+    "design_model_id": "USa64bbbae23d60f",
+    "application": "BambuStudio-01.10.02.73",
+    "sha256": "bebc330052a1cdb0844cca6e962b6e97e3bac6deb2896e85055a9c6e69c0f5f2",
+    "bytes": 1760367,
+    "objects": 4,
+    "build_items": 4,
+    "parts": 4,
+    "extruders": [
+      "1",
+      "3",
+      "4"
+    ],
+    "part_subtypes": {
+      "normal_part": 4
+    },
+    "painted_triangles": 13873,
+    "triangles": 69150,
+    "plates": 1,
+    "filament_colours": [
+      "#F98C36",
+      "#0ACC38",
+      "#9D432C",
+      "#D3B7A7"
+    ],
+    "arrange_reads": {
+      "objects": 4,
+      "copies": 4,
+      "colours": [
+        "#9D432C",
+        "#D3B7A7",
+        "#F98C36"
+      ],
+      "painted_parts": 2,
+      "negative_parts": 0,
+      "notes": []
+    }
+  },
+  {
+    "file": "448-articulated-pumpkin.3mf",
+    "covers": "two colours by part, 758k triangles: the Articulated Pumpkin 300% stem scenario of #2146",
+    "library_file_id": 448,
+    "library_filename": "Articulated Pumpkin for AMS attached 300percent.3mf",
+    "title": "Articulated Pumpkin",
+    "designer": "Fil&Form3D",
+    "designer_user_id": "2697118824",
+    "licence": "Standard Digital File License",
+    "origin": "original",
+    "design_model_id": "USe9604eede368d7",
+    "application": "BambuStudio-01.09.07.51",
+    "sha256": "7566d51b4a74fb3e4ad2432eb225ece820f401d939ef892088856359586b4841",
+    "bytes": 10287542,
+    "objects": 1,
+    "build_items": 1,
+    "parts": 2,
+    "extruders": [
+      "1",
+      "2"
+    ],
+    "part_subtypes": {
+      "normal_part": 2
+    },
+    "painted_triangles": 0,
+    "triangles": 758026,
+    "plates": 1,
+    "filament_colours": [
+      "#FF6A13",
+      "#19C344"
+    ],
+    "arrange_reads": {
+      "objects": 1,
+      "copies": 1,
+      "colours": [
+        "#19C344",
+        "#FF6A13"
+      ],
+      "painted_parts": 0,
+      "negative_parts": 0,
+      "notes": []
+    }
+  },
+  {
+    "file": "1943-mini-articulated-ankylosaurs-keychain-version.3mf",
+    "covers": "negative parts and paint: the file Arrange refused (negative part)",
+    "library_file_id": 1943,
+    "library_filename": "(3 Pieces) Multicolor Print Profile.3mf",
+    "title": "Mini Articulated Ankylosaurs | Keychain Version",
+    "designer": "Flexi JIMGA",
+    "designer_user_id": "2651468434",
+    "licence": "Standard Digital File License",
+    "origin": "profile",
+    "design_model_id": "US65c0a3b58a8622",
+    "application": "BambuStudio-02.07.01.57",
+    "sha256": "e4dd720fcc59d62f21366f0da726ed7c774b7aad81cdf561e2441c9b9fc9958c",
+    "bytes": 6555948,
+    "objects": 3,
+    "build_items": 3,
+    "parts": 6,
+    "extruders": [
+      "0",
+      "1"
+    ],
+    "part_subtypes": {
+      "normal_part": 3,
+      "negative_part": 3
+    },
+    "painted_triangles": 133534,
+    "triangles": 346492,
+    "plates": 1,
+    "filament_colours": [
+      "#9D432C",
+      "#000000",
+      "#F7E6DE",
+      "#9D2235"
+    ],
+    "arrange_reads": {
+      "objects": 3,
+      "copies": 3,
+      "colours": [
+        "#9D432C"
+      ],
+      "painted_parts": 3,
+      "negative_parts": 3,
+      "notes": []
+    }
+  },
+  {
+    "file": "2154-plane-launcher-for-lightweight-glider.3mf",
+    "covers": "a negative part, no paint",
+    "library_file_id": 2154,
+    "library_filename": "Dart.3mf",
+    "title": "Plane Launcher for Lightweight Glider",
+    "designer": "Tieq",
+    "designer_user_id": "384650461",
+    "licence": "Standard Digital File License",
+    "origin": "original",
+    "design_model_id": "US75db52be99bfda",
+    "application": "BambuStudio-02.00.03.54",
+    "sha256": "f9cda785e83651f28507c19a299ff405861720d6c084985a27483deba7b7295d",
+    "bytes": 1023787,
+    "objects": 1,
+    "build_items": 1,
+    "parts": 2,
+    "extruders": [
+      "0",
+      "1"
+    ],
+    "part_subtypes": {
+      "normal_part": 1,
+      "negative_part": 1
+    },
+    "painted_triangles": 0,
+    "triangles": 372,
+    "plates": 1,
+    "filament_colours": [
+      "#F99963",
+      "#0A2989",
+      "#3F8E43",
+      "#FFFFFF"
+    ],
+    "arrange_reads": {
+      "objects": 1,
+      "copies": 1,
+      "colours": [
+        "#F99963"
+      ],
+      "painted_parts": 0,
+      "negative_parts": 1,
+      "notes": []
+    }
+  },
+  {
+    "file": "2302-love-letter-box.3mf",
+    "covers": "a modifier part, seven objects on three plates",
+    "library_file_id": 2302,
+    "library_filename": "SpanishLoveBox.3mf",
+    "title": "Love letter box",
+    "designer": "ondisek00",
+    "designer_user_id": "3296145286",
+    "licence": "Standard Digital File License",
+    "origin": "original",
+    "design_model_id": "US9eb18c0e332835",
+    "application": "BambuStudio-02.04.00.70",
+    "sha256": "96e7ecc1272391d0b5575ffda88070c9f6e46ea28b8318d84a38e628fc1e9fc3",
+    "bytes": 1775531,
+    "objects": 7,
+    "build_items": 7,
+    "parts": 17,
+    "extruders": [
+      "1",
+      "2",
+      "3"
+    ],
+    "part_subtypes": {
+      "normal_part": 16,
+      "modifier_part": 1
+    },
+    "painted_triangles": 0,
+    "triangles": 21356,
+    "plates": 3,
+    "filament_colours": [
+      "#FFFFFF",
+      "#161616",
+      "#FF0000"
+    ],
+    "arrange_reads": {
+      "objects": 7,
+      "copies": 7,
+      "colours": [
+        "#161616",
+        "#FF0000",
+        "#FFFFFF"
+      ],
+      "painted_parts": 0,
+      "negative_parts": 0,
+      "notes": [
+        "a modifier part was left out"
+      ]
+    }
+  },
+  {
+    "file": "2485-5g-lizard-5g.3mf",
+    "covers": "a support blocker and paint",
+    "library_file_id": 2485,
+    "library_filename": "10g蜥蜴+lizard+5g放大120%-双色-眼睛颜色.3mf",
+    "title": "5g蜥蜴 lizard-关节可动蜥蜴-仅5g",
+    "designer": "魔趣MOQU",
+    "designer_user_id": "1149004762",
+    "licence": "Standard Digital File License",
+    "origin": "profile",
+    "design_model_id": "US387e72318a2969",
+    "application": "BambuStudio-02.07.01.57",
+    "sha256": "c1f57d66ff36d5b1eed3bc89eae507002f624c7e231f35d53a000233ca02a714",
+    "bytes": 2666721,
+    "objects": 1,
+    "build_items": 1,
+    "parts": 2,
+    "extruders": [
+      "3"
+    ],
+    "part_subtypes": {
+      "normal_part": 1,
+      "support_blocker": 1
+    },
+    "painted_triangles": 1838,
+    "triangles": 120668,
+    "plates": 1,
+    "filament_colours": [
+      "#FB0207",
+      "#AA6443",
+      "#0ACC38",
+      "#FFFFFF",
+      "#000000",
+      "#A6A9AA",
+      "#FFFF00",
+      "#FF0000",
+      "#0000FF"
+    ],
+    "arrange_reads": {
+      "objects": 1,
+      "copies": 1,
+      "colours": [
+        "#0ACC38"
+      ],
+      "painted_parts": 1,
+      "negative_parts": 0,
+      "notes": [
+        "a support blocker was left out"
+      ]
+    }
+  },
+  {
+    "file": "2178-find-100-mini-frogs-spot-search-game.3mf",
+    "covers": "200 objects, painted (Arrange's max_objects is 200)",
+    "library_file_id": 2178,
+    "library_filename": "200+Mini+frogsH2C.3mf",
+    "title": "Find 100 Mini Frogs – Spot & Search Game",
+    "designer": "TinyOrbit3D",
+    "designer_user_id": "1567481249",
+    "licence": "Standard Digital File License",
+    "origin": "profile",
+    "design_model_id": "US10b01e59edf7b4",
+    "application": "BambuStudio-02.06.01.55",
+    "sha256": "9701e5cf4b7367a09f3f014d97cab1bba0b659c98118d3e4727854f730d7a834",
+    "bytes": 33698429,
+    "objects": 200,
+    "build_items": 200,
+    "parts": 200,
+    "extruders": [
+      "1"
+    ],
+    "part_subtypes": {
+      "normal_part": 200
+    },
+    "painted_triangles": 22600,
+    "triangles": 1949200,
+    "plates": 1,
+    "filament_colours": [
+      "#B6FF43",
+      "#000000"
+    ],
+    "arrange_reads": {
+      "objects": 200,
+      "copies": 200,
+      "colours": [
+        "#B6FF43"
+      ],
+      "painted_parts": 200,
+      "negative_parts": 0,
+      "notes": []
+    }
+  },
+  {
+    "file": "2464-ghost-campfire-light.3mf",
+    "covers": "72 MB: painted, 16 objects on nine plates, 1.1M painted triangles",
+    "library_file_id": 2464,
+    "library_filename": "Ghost Campfire Light mit Stützen High Quality.3mf",
+    "title": "Ghost Campfire Light",
+    "designer": "Three Hearts Creations",
+    "designer_user_id": "951365270",
+    "licence": "Standard Digital File License",
+    "origin": "original",
+    "design_model_id": "US5aa5baf616cbc9",
+    "application": "BambuStudio-02.04.00.70",
+    "sha256": "ca039d70dd854d9aca018eed23b266825047236f24b7fec48019c79f4abc0877",
+    "bytes": 71803767,
+    "objects": 16,
+    "build_items": 16,
+    "parts": 16,
+    "extruders": [
+      "1",
+      "3",
+      "4",
+      "5"
+    ],
+    "part_subtypes": {
+      "normal_part": 16
+    },
+    "painted_triangles": 1125315,
+    "triangles": 4866372,
+    "plates": 9,
+    "filament_colours": [
+      "#FFFFFF",
+      "#898989",
+      "#7D6556",
+      "#804040",
+      "#FF8000",
+      "#000000"
+    ],
+    "arrange_reads": {
+      "objects": 16,
+      "copies": 16,
+      "colours": [
+        "#7D6556",
+        "#804040",
+        "#FF8000",
+        "#FFFFFF"
+      ],
+      "painted_parts": 6,
+      "negative_parts": 0,
+      "notes": []
+    }
+  },
+  {
+    "file": "381-olive-oil-bottle-passthrough.3mf",
+    "covers": "98 MB: three colours by object on three plates",
+    "library_file_id": 381,
+    "library_filename": "RJ Design - Olive Oil Bottle passthrough Sep Plate By Layer.3mf",
+    "title": "Olive Oil Bottle Passthrough",
+    "designer": "RJ Design",
+    "designer_user_id": "3022897934",
+    "licence": "Standard Digital File License",
+    "origin": "original",
+    "design_model_id": "USc3ee3ac8738781",
+    "application": "BambuStudio-02.06.00.51",
+    "sha256": "2db3ea5fe454b0134b1d18835a529192c006bb9d24f1d5e7e7d0d9ac5c295309",
+    "bytes": 98325251,
+    "objects": 13,
+    "build_items": 13,
+    "parts": 13,
+    "extruders": [
+      "1",
+      "2",
+      "3"
+    ],
+    "part_subtypes": {
+      "normal_part": 13
+    },
+    "painted_triangles": 0,
+    "triangles": 5863324,
+    "plates": 3,
+    "filament_colours": [
+      "#000000",
+      "#3F8E43",
+      "#BECF00",
+      "#FFFFFF",
+      "#FFFFFF",
+      "#002E96",
+      "#F772A4",
+      "#39699E",
+      "#F4EE2A",
+      "#0086D6",
+      "#EC008C"
+    ],
+    "arrange_reads": {
+      "objects": 13,
+      "copies": 13,
+      "colours": [
+        "#000000",
+        "#3F8E43",
+        "#BECF00"
+      ],
+      "painted_parts": 0,
+      "negative_parts": 0,
+      "notes": []
+    }
+  },
+  {
+    "file": "2602-tiny-flexi-frog-animal-separated-colors-print.3mf",
+    "covers": "55 MB: negative parts and three colours by part",
+    "library_file_id": 2602,
+    "library_filename": "Magnet Print Profile.3mf",
+    "title": "Tiny Flexi Frog Animal  -  Separated Colors Print",
+    "designer": "🟢 Flexi JIMGA",
+    "designer_user_id": "2651468434",
+    "licence": "Standard Digital File License",
+    "origin": "original",
+    "design_model_id": "US1ca9bab8901107",
+    "application": "BambuStudio-02.03.01.51",
+    "sha256": "c9909a53e4c2621b170795ee024d42beb6b70e13bfb9cefdb776e7ad6182ed26",
+    "bytes": 54747288,
+    "objects": 3,
+    "build_items": 3,
+    "parts": 8,
+    "extruders": [
+      "0",
+      "1",
+      "2"
+    ],
+    "part_subtypes": {
+      "normal_part": 4,
+      "negative_part": 4
+    },
+    "painted_triangles": 0,
+    "triangles": 3868466,
+    "plates": 2,
+    "filament_colours": [
+      "#B6FF43",
+      "#000000",
+      "#FEC600"
+    ],
+    "arrange_reads": {
+      "objects": 3,
+      "copies": 3,
+      "colours": [
+        "#000000",
+        "#B6FF43"
+      ],
+      "painted_parts": 0,
+      "negative_parts": 1,
+      "notes": []
+    }
+  }
+]

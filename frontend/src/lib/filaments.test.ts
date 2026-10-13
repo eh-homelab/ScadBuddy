@@ -71,22 +71,30 @@ describe('loadedLabel', () => {
   it('counts AMS slots from 1, the way the printer does', () => {
     // tray_id is 0-based on the wire; Bambu's own UI numbers the slots 1-4.
     expect(loadedLabel(spool({ loaded: loaded({ ams_id: 0, tray_id: 1 }) }), 1)).toBe(
-      'AMS 0 · slot 2',
+      'AMS-A · slot 2',
     )
+  })
+
+  it("names the unit the way Bambuddy does, by letter (the fourth AMS is not 'AMS 3')", () => {
+    const at = (ams_id: number) => loadedLabel(spool({ loaded: loaded({ ams_id, tray_id: 3 }) }), 1)
+    expect(at(3)).toBe('AMS-D · slot 4')
+    expect(at(128)).toBe('HT-A · slot 4')
+    expect(at(129)).toBe('HT-B · slot 4')
+    expect(at(255)).toBe('External · slot 4')
   })
 
   it('names the other printer when the spool is not in the one being printed on', () => {
     const away = spool({ loaded: loaded({ printer_id: 2, printer_name: '3DP-77A-114' }) })
-    expect(loadedLabel(away, 1)).toBe('AMS 0 · slot 2 · on 3DP-77A-114')
+    expect(loadedLabel(away, 1)).toBe('AMS-A · slot 2 · on 3DP-77A-114')
     // Same printer: repeating its name on every row would say nothing.
-    expect(loadedLabel(away, 2)).toBe('AMS 0 · slot 2')
+    expect(loadedLabel(away, 2)).toBe('AMS-A · slot 2')
     // No printer chosen yet, so there is nothing to differ from.
-    expect(loadedLabel(away, null)).toBe('AMS 0 · slot 2')
+    expect(loadedLabel(away, null)).toBe('AMS-A · slot 2')
   })
 
   it('falls back when Bambuddy did not name the other printer', () => {
     expect(loadedLabel(spool({ loaded: loaded({ printer_id: 2, printer_name: null }) }), 1)).toBe(
-      'AMS 0 · slot 2 · on another printer',
+      'AMS-A · slot 2 · on another printer',
     )
   })
 })

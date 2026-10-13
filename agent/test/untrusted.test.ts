@@ -206,6 +206,24 @@ describe('runTool marks handler output, not its own messages', () => {
     const message = (failed.result.content[0] as { text: string }).text
     expect(message.startsWith('print_broken failed: ')).toBe(true)
     expect(JSON.parse(message.slice('print_broken failed: '.length))[UNTRUSTED_KEY]).toMatchObject({ tool: 'print_broken', content: INJECTED })
+
+    // A ran tool's own report (print_output's may-have-queued detail, #1017) adds to
+    // confirm_action's, never replaces it.
+    const reporting = defineTool({
+      name: 'print_reporting',
+      description: 'stub',
+      input: z.object({}),
+      risk: 'outward',
+      routes: [],
+      summarize: () => 'print it',
+      handler: async (_args, inner) => {
+        inner.report?.({ detail: 'may have queued' })
+        return { ...text('{}'), isError: true }
+      },
+    })
+    tools.push(reporting)
+    const reported = await runToolWithOutcome(confirm, { pending_action_id: 'a1', arguments: {} }, confirmCtx('print_reporting'))
+    expect(reported).toMatchObject({ outcome: 'error', approvalId: 'a1', ran: { tool: 'print_reporting' }, detail: 'may have queued' })
   })
 
   it('an outward call is only prepared, whatever its arguments say about approval', async () => {

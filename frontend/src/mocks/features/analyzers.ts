@@ -39,16 +39,18 @@ function announceDecision(decision: AnalyzerDecision, action: 'recorded' | 'remo
 
 export const handlers = [
   /**
-   * `POST /analyzers/run` on an output: the keychain's two findings (`mocks/analyzers.ts`).
-   * A configuration target (`slug` + `params`) is not something the dialog sends.
+   * `POST /analyzers/run` on an output or a library file (#1753): the keychain's two
+   * findings (`mocks/analyzers.ts`). A configuration target (`slug` + `params`) is not
+   * something the dialog sends.
    */
   http.post(`${base}/run`, async ({ request }) => {
     const body = (await request.json()) as AnalysisRun
-    const output = mockOutput(body.target.output_id ?? '')
-    if (!output) return problem(404, 'Output not found')
+    const fileId = body.target.library_file_id
+    const subject = fileId != null ? { library_file_id: fileId } : mockOutput(body.target.output_id ?? '')
+    if (!subject) return problem(404, 'Output not found')
     return HttpResponse.json(
       analysisReport(
-        output,
+        subject,
         body.request ?? { plate_id: 1, all_plates: false },
         undefined,
         state.decisions,

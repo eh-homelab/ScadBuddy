@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from '../src/db.js'
 import { ChatConnection } from '../src/routes/chat.js'
 import type { SessionManager } from '../src/sessions/manager.js'
+import { event } from '../src/sessions/protocol.js'
 import { frontendClientMessages } from './support/frontendProtocol.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
@@ -101,6 +102,38 @@ describe.skipIf(skip !== undefined)(`ChatConnection${skip ? ` (skipped: ${skip})
     expect(m.events.watchedSessions()).toBe(0)
   })
 
+  it('does not send input.* on the socket; the cards keep their own events (spec §6.6)', async () => {
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'hi' })
+    await turn!.done
+    const entry = {
+      id: 'question:00000000-0000-4000-8000-000000000001',
+      kind: 'answer' as const,
+      session_id: session.id,
+      tool: 'AskUserQuestion',
+      summary: '',
+      input_hash: null,
+      prompt: 'Which colour?',
+      requested_by: null,
+      responders: ['browser' as const],
+      created_at: new Date().toISOString(),
+      expires_at: null,
+    }
+    await m.events.append(session.id, [
+      event({ type: 'input.requested', sessionId: session.id, entry }),
+      event({ type: 'question.asked', sessionId: session.id, id: '00000000-0000-4000-8000-000000000001', tool: 't', questions: [] }),
+      event({ type: 'input.resolved', sessionId: session.id, id: entry.id, kind: 'answer', outcome: 'cancelled' }),
+    ])
+    const out: { type?: string }[] = []
+    const connection = new ChatConnection(m, (e) => out.push(e as { type?: string }))
+    await connection.open()
+    const { clientMessage } = await frontendClientMessages()
+    await connection.receive(JSON.stringify(clientMessage({ type: 'session.attach', sessionId: session.id })))
+    await expect.poll(() => out.some((e) => e.type === 'question.asked')).toBe(true)
+    await settle()
+    connection.close()
+    expect(out.filter((e) => e.type?.startsWith('input.'))).toEqual([])
+  })
+
   it('answers a send to a spent session with its numbers, then the refusal (#790)', async () => {
     const { session } = await m.start(browser, { origin: 'chat' })
     await db.sql`UPDATE ai_sessions SET cost_usd = 1.0160000001 WHERE id = ${session.id}`
@@ -116,6 +149,29 @@ describe.skipIf(skip !== undefined)(`ChatConnection${skip ? ` (skipped: ${skip})
       { v: 1, type: 'session.budget', sessionId: session.id, costUsd: 1.0160000001, budgetUsd: 1 },
       expect.objectContaining({ type: 'error', sessionId: session.id, code: 'budget_exhausted', message: expect.stringContaining('($1.02 of $1.00)') }),
     ])
+    connection.close()
+  })
+
+  it("passes a new chat's mode, and refuses one on an existing session (plan 5d)", async () => {
+    const out: { type: string; sessionId?: string; mode?: string; code?: string }[] = []
+    const connection = new ChatConnection(m, (e) => out.push(e as never))
+    await connection.open()
+    const { clientMessage } = await frontendClientMessages()
+    await connection.receive(JSON.stringify(clientMessage({ type: 'user.message', text: 'hi', context: { route: '/' }, mode: 'classic' })))
+    await settle()
+    const started = out.find((e) => e.type === 'session.started') as { sessionId: string; mode?: string; modeFallback?: string }
+    expect(started).toMatchObject({ mode: 'classic' })
+    expect(started).not.toHaveProperty('modeFallback')
+    // Asked for, durable is refused here (no Temporal), not run as classic.
+    await connection.receive(JSON.stringify(clientMessage({ type: 'user.message', text: 'hi', context: { route: '/' }, mode: 'durable' })))
+    const errors = () => out.filter((e) => e.type === 'error')
+    expect(errors()).toEqual([expect.objectContaining({ code: 'unavailable' })])
+    await connection.receive(
+      JSON.stringify(
+        clientMessage({ type: 'user.message', sessionId: started.sessionId, text: 'more', context: { route: '/' }, mode: 'classic' }),
+      ),
+    )
+    expect(errors().at(-1)).toMatchObject({ code: 'invalid', sessionId: started.sessionId })
     connection.close()
   })
 })

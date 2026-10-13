@@ -44,11 +44,13 @@ interface RunInput {
 }
 
 /**
- * Spec 2026-10-01 §6: what is printed, on which printer, and which plate. A library
- * file's id is Bambuddy's, which §6 never records, so only an output names its source.
+ * Spec 2026-10-01 §6: what is printed, on which printer, and which plate. Every print
+ * says which kind of source it was (#1231), ScadBuddy's own word; a library file's id is
+ * Bambuddy's, which §6 never records, so only an output names its source.
  */
 function printAttributes(source: PrintSource, body: PrintRunRequest): Attributes {
   return {
+    'scadbuddy.print_source': source.kind,
     ...(source.kind === 'output' ? { 'scadbuddy.output_id': source.output.id } : {}),
     ...(typeof body.printer_id === 'number' ? { 'scadbuddy.printer_id': body.printer_id } : {}),
     'scadbuddy.plate_id': body.plate_id,

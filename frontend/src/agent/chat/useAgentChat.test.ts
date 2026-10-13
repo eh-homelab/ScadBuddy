@@ -6,7 +6,7 @@ import { server } from '../../mocks/server'
 import { installTestTracing } from '../../test/tracing'
 import { PROTOCOL_VERSION, type ClientMessage } from './protocol'
 import type { ChatTransport, SendResult, TransportHandlers } from './transport'
-import { useAgentChat } from './useAgentChat'
+import { requestIdOf, useAgentChat } from './useAgentChat'
 import { TAB_ID } from '../tabId'
 
 const owner = { kind: 'browser' as const, id: 'browser', label: 'You' }
@@ -516,5 +516,15 @@ describe('useAgentChat', () => {
     act(() => t.h().onOpen?.())
     act(() => result.current.send('hello', { route: '/' }))
     expect(t.chat()).toContainEqual({ v: 1, type: 'user.message', text: 'hello', context: { route: '/' } })
+  })
+})
+
+describe('requestIdOf', () => {
+  it("prefixes a classic card's row id with its store, and keeps a durable card's request id whole", () => {
+    expect(requestIdOf('approval', 'a1')).toBe('approval:a1')
+    expect(requestIdOf('question', 'q1')).toBe('question:q1')
+    const durable = 'durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1'
+    expect(requestIdOf('approval', durable)).toBe(durable)
+    expect(requestIdOf('question', durable)).toBe(durable)
   })
 })

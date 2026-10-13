@@ -25,14 +25,14 @@ ARG BOSL2_COMMIT=f47030c41d88d0676bca73be1c6b7ba58564f9dd
 # A FROM line, not `COPY --from=ghcr.io/astral-sh/uv:...`, so Dependabot's
 # docker ecosystem sees the version and can bump it. The image is scratch-based
 # and holds nothing but the two static binaries.
-FROM ghcr.io/astral-sh/uv:0.12.23 AS uv
+FROM ghcr.io/astral-sh/uv:0.13.0 AS uv
 
 # ── base: OS packages, fonts, users ───────────────────────────────────────────
 # Pinned to a dated nightly by tag AND index digest (amd64 + arm64), so the base
 # cannot move under a build. OpenSCAD's only stable release (2021.01) has no
 # Manifold backend, so a nightly it has to be. Bump deliberately: tag, digest and
 # OPENSCAD_VERSION below together, after re-verifying §3 of the design spec.
-FROM openscad/openscad:dev.2026-10-05@sha256:6c1a07342e37afcd7e360d1cfa98d0e1cad3f32f2ac91a2943691e117ce4d3b4 AS base
+FROM openscad/openscad:dev.2026-10-12@sha256:4098a7c2c37d5a9110121635a568e6596b8619362ced5c84cc67f47d395e7fd0 AS base
 
 # DL3008 (pin apt versions) is disabled repo-wide in .hadolint.yaml: the base is
 # a nightly on Debian trixie, so a pinned version here would break the
@@ -238,25 +238,9 @@ RUN groupadd --gid 10001 scadbuddy \
 WORKDIR /app/agent
 COPY --from=agent-deps /src/agent/node_modules ./node_modules
 
-# The headless browser (#349, AI spec D11 and §5.3): the Chromium build the
-# pinned @playwright/mcp's own `playwright-core` expects, installed at build
-# time with its system libraries, so nothing is downloaded at runtime (the
-# upstream plugin's `npx @playwright/mcp@latest` is what spec D11 rejects).
-# `install-browser` is @playwright/mcp's cli.js passing through to
-# `playwright install`. `--only-shell` installs chromium-headless-shell alone,
-# which is what a headless launch without a `channel` uses
-# (agent/src/harness/headlessBrowser.ts `playwrightConfig`); measured on
-# 0.0.82: 603 MB for it and its libraries, against 740 MB for full Chromium.
-# The pin moved to 0.0.83 without re-measuring this; re-check the size when
-# the image is next built. Bump with @playwright/mcp in agent/package.json.
-ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
-RUN node node_modules/@playwright/mcp/cli.js install-browser --with-deps --only-shell chromium \
-    && rm -rf /var/lib/apt/lists/*
-
 COPY --from=agent-build /src/agent/package.json ./
 COPY --from=agent-build /src/agent/dist ./dist
-# The vendored plugin manifest (agent/plugins/playwright/README.md); each
-# session gets a copy of it with its own `.mcp.json` (headlessBrowser.ts).
+# ScadBuddy's own plugin (agent/plugins/scadbuddy, harness/ownPlugin.ts).
 COPY --from=agent-build /src/agent/plugins ./plugins
 
 # The Agent SDK "runs the Claude Code binary"
@@ -321,17 +305,35 @@ COPY agent-durable/src ./src
 RUN uv sync --frozen --no-dev
 
 # ScadBuddy's own skills only, as the agent-build stage copies them (spec §6.3b).
+# A directory with no .claude-plugin/plugin.json: the bundled Claude Code takes a
+# --plugin-dir with `skills/` at its top as one plugin named after the directory
+# (checked 2026-10-10 on 2.1.292 with --debug-to-stderr: "Loaded 3 skills from
+# plugin scadbuddy"). SCADBUDDY_DURABLE_SKILLS_DIR below points at it.
 COPY plugins/scadbuddy/skills /app/plugins/scadbuddy/skills
+# Its subagents (#2320, #2562), outside the plugin directory: the runner gives each the
+# agent's loopback MCP server inline, which a plugin's own subagents cannot carry
+# (https://code.claude.com/docs/en/sub-agents). SCADBUDDY_DURABLE_AGENTS_DIR below.
+COPY plugins/scadbuddy/agents /app/subagents
+# The agent's tool manifest (agent `pnpm build` writes dist/tools.json): each entry
+# becomes an `activity_as_tool` on `agent-tools`, which the agent container of the
+# same build serves, so the two never disagree on a tool's name or schema (#1056, 5e).
+COPY --from=agent-build /src/agent/dist/tools.json /app/agent-durable/tools.json
 
 # Fails the build when the bundled Claude Code is missing for this platform or
-# is not the version claude-agent-sdk declares (agent/src/check-cli-version.ts's twin).
-RUN .venv/bin/python -m scadbuddy_durable.check_cli_version
+# is not the version claude-agent-sdk declares (agent/src/check-cli-version.ts's twin),
+# or when the tool manifest does not parse or is empty (rather than at the worker's start).
+RUN .venv/bin/python -m scadbuddy_durable.check_cli_version \
+    && .venv/bin/python -m scadbuddy_durable.check_manifest /app/agent-durable/tools.json
 
 ARG SCADBUDDY_REVISION=unknown
 ARG SCADBUDDY_VERSION=dev
 ENV PATH=/app/agent-durable/.venv/bin:$PATH \
     HOME=/srv/agent \
     CLAUDE_CONFIG_DIR=/srv/agent/claude \
+    SCADBUDDY_DURABLE_TOOLS_JSON=/app/agent-durable/tools.json \
+    SCADBUDDY_DURABLE_SKILLS_DIR=/app/plugins/scadbuddy \
+    SCADBUDDY_DURABLE_AGENTS_DIR=/app/subagents \
+    SCADBUDDY_DURABLE_CWD=/srv/agent \
     SCADBUDDY_REVISION=${SCADBUDDY_REVISION} \
     SCADBUDDY_VERSION=${SCADBUDDY_VERSION}
 
@@ -429,7 +431,7 @@ FROM base AS app
 # never fire; it stays as the check that the tag, digest and version agree. When
 # bumping the base, re-verify §3 of the design spec against the new build and
 # change the FROM line and the default below in the same commit.
-ARG OPENSCAD_VERSION=2026.10.05
+ARG OPENSCAD_VERSION=2026.10.12
 # Written to a file rather than piped into sed: every `run:`-style pipe here
 # trips hadolint's DL4006, and `SHELL -o pipefail` for one command is a worse
 # trade than a temp file.
@@ -575,6 +577,12 @@ CMD ["uv", "run", "--frozen", "pytest"]
 
 # ── runtime: what ships ───────────────────────────────────────────────────────
 FROM app AS runtime
+
+# The agent's tool manifest from this same build (agent `pnpm build` writes
+# dist/tools.json), which a flow's `tool(...)` reads names and tiers from on the
+# `projects` worker (#1057), as agent-durable reads its copy.
+COPY --from=agent-build /src/agent/dist/tools.json /app/flows/tools.json
+ENV SCADBUDDY_FLOW_TOOLS_JSON=/app/flows/tools.json
 
 # Build provenance, passed by build-image.yml. /healthz reports both; the
 # deploy pipeline (see README.md, "Deploying") proves a rollout by reading

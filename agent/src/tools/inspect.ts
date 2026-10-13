@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { binary } from './binary.js'
 import { ok } from './call.js'
-import { slug, VIEW } from './common.js'
+import { CAMERA, cameraOf, cameraQuery, slug, VIEW, withQuery } from './common.js'
 import { defineTool, image, json, ToolError, type Tool } from './registry.js'
 
 // Looking at a model while authoring it (issue #252): the language server's
@@ -58,17 +58,19 @@ export const inspectTools: Tool[] = [
       "A finished render drawn once per colour, as one PNG grid: on each tile that colour's parts are in " +
       'their colour and everything else is light grey, so you can see which colour goes where (a letter ' +
       'on the wrong extruder, a colour hidden inside another). The text names the tiles row by row, in ' +
-      'extruder order. At most 16 colours.',
+      'extruder order. At most 16 colours. The camera arguments are get_render_view\'s, so a colour check ' +
+      'can look from the same angle as a geometry check.',
     input: z.object({
       job_id: jobId,
       view: VIEW.default('iso'),
       size: z.number().int().min(64).max(512).optional().describe('Edge of each tile in pixels (256 by default)'),
+      ...CAMERA,
     }),
     risk: 'read',
     routes: ['GET /api/v1/jobs/{job_id}/colours.png'],
-    handler: async ({ job_id, view, size }, ctx) => {
+    handler: async ({ job_id, view, size, ...camera }, ctx) => {
       const answered = await ctx.backend.GET('/api/v1/jobs/{job_id}/colours.png', {
-        params: { path: { job_id }, query: { view, size } },
+        params: { path: { job_id }, query: { view, size, ...cameraQuery(camera) } },
         parseAs: 'stream',
       })
       const colours = coloursOf(answered.response.headers.get('x-scadbuddy-colours'))
@@ -85,13 +87,14 @@ export const inspectTools: Tool[] = [
           column: (index % columns) + 1,
         })),
         view,
+        ...(cameraOf(camera) ? { camera: cameraOf(camera) } : {}),
       }
       const drawn = await binary(
         Promise.resolve(answered),
         `draw colours of ${job_id}`,
         ctx,
         {
-          path: `/api/v1/jobs/${job_id}/colours.png?view=${view}${size ? `&size=${size}` : ''}`,
+          path: withQuery(`/api/v1/jobs/${job_id}/colours.png`, { view, size, ...cameraQuery(camera) }),
           name: `${job_id}-colours.png`,
           fallbackType: 'image/png',
         },

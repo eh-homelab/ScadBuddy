@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { Link } from 'react-router'
 import { api } from '../api/client'
 import { SourceWorkbench } from '../components/SourceWorkbench'
+import { Button } from '../components/ui/Button'
 import { modelPath } from '../lib/deeplink'
 import { detectLibraries } from '../lib/libraryImports'
 import { useAsync } from '../lib/useAsync'
@@ -14,6 +15,9 @@ export function NewModelPage() {
   const [declined, setDeclined] = useState<ReadonlySet<string>>(new Set())
   // No catalogue, no suggestions: the model can still be saved and pinned later.
   const { data: catalogue } = useAsync(() => api.listLibraries(), [])
+  // #1291 — the agent's blank starter, with its customizer annotations. Served by
+  // the agent service, so with no agent there is no button rather than an error.
+  const { data: blank } = useAsync(() => api.getBlankTemplate(), [])
   const detected = useMemo(
     () =>
       detectLibraries(
@@ -70,6 +74,12 @@ export function NewModelPage() {
             <span className="text-[12px] text-faint">
               The URL slug is derived from it, as a filename would be.
             </span>
+            {/* Only into an empty editor: it would replace whatever was pasted. */}
+            {blank && source === '' && (
+              <Button size="sm" className="ml-auto" onClick={() => setSource(blank.source)}>
+                Start from blank template
+              </Button>
+            )}
           </div>
           {detected.length > 0 && (
             <fieldset

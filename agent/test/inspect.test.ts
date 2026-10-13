@@ -176,3 +176,58 @@ describe('the authoring guide (#252)', () => {
     expect(stripFrontmatter('# No frontmatter\n')).toBe('# No frontmatter\n')
   })
 })
+
+describe('an explicit camera (#830)', () => {
+  const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+  const job = 'f'.repeat(32)
+  const camera = { azimuth: 135, elevation: 30, zoom: 2, target: { x: 10, z: -2.5 } }
+  const sent = { azimuth: '135', elevation: '30', zoom: '2', target_x: '10', target_z: '-2.5' }
+  const png = () =>
+    new Response(PNG, {
+      headers: { 'content-type': 'image/png', 'x-scadbuddy-colours': '#FF0000', 'x-scadbuddy-colour-columns': '1' },
+    })
+
+  function query(search: string): Record<string, string> {
+    return Object.fromEntries(new URLSearchParams(search))
+  }
+
+  it.each([
+    ['get_render_view', { job_id: job, view: 'front' }, `/api/v1/jobs/${job}/views/front.png`],
+    ['get_output_view', { output_id: job, view: 'front' }, `/api/v1/outputs/${job}/views/front.png`],
+  ])('%s sends the camera, and links the same picture when it is over the cap', async (name, args, path) => {
+    const { client, seen } = backend(png)
+    const inline = await runTool(tool(name), { ...args, size: 128, ...camera }, ctx(client))
+    expect(inline.isError, JSON.stringify(inline)).toBeFalsy()
+    expect(seen[0]!.path).toBe(path)
+    expect(query(seen[0]!.search)).toEqual({ size: '128', ...sent })
+
+    const linked = await runTool(tool(name), { ...args, ...camera }, { ...ctx(client), maxInlineBytes: PNG.length - 1 })
+    const link = linked.content.find((c) => c.type === 'resource_link') as { uri: string }
+    const [linkPath, linkSearch] = link.uri.split('?')
+    expect(linkPath).toBe(path)
+    expect(query(linkSearch ?? '')).toEqual(sent)
+  })
+
+  it('leaves the query alone without one, so a named view is drawn as before', async () => {
+    const { client, seen } = backend(png)
+    await runTool(tool('get_render_view'), { job_id: job, view: 'iso' }, ctx(client))
+    expect(seen[0]!.search).toBe('')
+  })
+
+  it('get_render_colours draws its tiles from the same camera, and says which', async () => {
+    const { client, seen } = backend(png)
+    const result = await runTool(tool('get_render_colours'), { job_id: job, view: 'front', ...camera }, ctx(client))
+    expect(query(seen[0]!.search)).toEqual({ view: 'front', ...sent })
+    expect(firstText(result)).toMatchObject({ view: 'front', camera })
+  })
+
+  it.each([{ elevation: 91 }, { azimuth: -361 }, { zoom: 0.5 }, { zoom: 65 }])(
+    'refuses %o before asking the backend',
+    async (bad) => {
+      const { client, seen } = backend(png)
+      const result = await runTool(tool('get_render_view'), { job_id: job, view: 'iso', ...bad }, ctx(client))
+      expect(result.isError).toBe(true)
+      expect(seen).toEqual([])
+    },
+  )
+})

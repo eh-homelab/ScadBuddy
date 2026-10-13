@@ -14,6 +14,7 @@ from scadbuddy.core.config import Config, load_config
 from scadbuddy.core.paths import LEGACY_PRESETS_NAME, MODEL_META_NAME, DataPaths
 from scadbuddy.library.presets import PresetStore
 from scadbuddy.render.runner import build_defines, export_schema
+from tests.conftest import UNUSED_DATABASE_URL
 
 MODELS = Path(__file__).resolve().parents[2] / "models"
 TEMPLATES = sorted(path.parent.name for path in MODELS.glob("*/model.scad"))
@@ -37,7 +38,7 @@ def _store(tmp_path: Path, slug: str) -> PresetStore:
     paths.model_dir(slug).mkdir(parents=True)
     source = MODELS / slug / MODEL_META_NAME
     (paths.model_dir(slug) / MODEL_META_NAME).write_bytes(source.read_bytes())
-    return PresetStore(paths)
+    return PresetStore(paths, UNUSED_DATABASE_URL)
 
 
 def test_some_bundled_models_ship_presets() -> None:

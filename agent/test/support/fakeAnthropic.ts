@@ -9,7 +9,7 @@ import type { AddressInfo } from 'node:net'
 // `/v1/messages?beta=true`), optionally `/v1/messages/count_tokens`, and may be
 // asked for `GET /v1/models` at start-up (model discovery).
 //
-// Replies are scripted: `reply(request)` picks what the "model" says for each
+// Replies are scripted: `reply(request)` picks (or resolves to) what the "model" says for each
 // /v1/messages call, as text or as one tool_use block. Streaming requests get
 // the Messages streaming SSE event sequence (message_start, content_block_*,
 // message_delta, message_stop); others get a JSON message.
@@ -163,12 +163,12 @@ function streamEvents(model: string, reply: ContentReply): string {
   ].join('')
 }
 
-export async function startFakeAnthropic(reply: (request: RecordedRequest) => Reply): Promise<FakeAnthropic> {
+export async function startFakeAnthropic(reply: (request: RecordedRequest) => Reply | Promise<Reply>, listenOn = 0): Promise<FakeAnthropic> {
   const requests: RecordedRequest[] = []
   const server: Server = createServer((req, res) => {
     const chunks: Buffer[] = []
     req.on('data', (chunk: Buffer) => chunks.push(chunk))
-    req.on('end', () => {
+    req.on('end', async () => {
       const path = (req.url ?? '/').split('?')[0] ?? '/'
       const raw = Buffer.concat(chunks).toString('utf8')
       let body: MessagesBody | undefined
@@ -192,7 +192,7 @@ export async function startFakeAnthropic(reply: (request: RecordedRequest) => Re
       }
       if (req.method === 'POST' && path === '/v1/messages') {
         const model = body?.model ?? 'claude-fake'
-        const answer = reply(recorded)
+        const answer = await reply(recorded)
         if ('hang' in answer) return
         if ('stall' in answer) {
           res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
@@ -230,7 +230,7 @@ export async function startFakeAnthropic(reply: (request: RecordedRequest) => Re
       res.end(JSON.stringify({ type: 'error', error: { type: 'not_found_error', message: path } }))
     })
   })
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  await new Promise<void>((resolve) => server.listen(listenOn, '127.0.0.1', resolve))
   const { port } = server.address() as AddressInfo
   return {
     url: `http://127.0.0.1:${port}`,

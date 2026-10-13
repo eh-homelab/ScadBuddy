@@ -294,6 +294,12 @@ class Metrics:
         self.worker_cache_bytes = Gauge(
             "scadbuddy_worker_cache_bytes", "Bytes in this process's local piece cache.", registry=r
         )
+        self.render_data_bytes = Gauge(
+            "scadbuddy_render_data_bytes",
+            "Bytes allocated under the render worker's data directory, as kubelet counts an"
+            " emptyDir against its sizeLimit.",
+            registry=r,
+        )
 
         # Uploads for `// file` parameters (#296). The usage gauges are read from the
         # store per scrape, like the render queue's from the projection.

@@ -24,7 +24,6 @@ from scadbuddy.api.jobs import require_job
 from scadbuddy.api.models import require_model_exists
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.send import delete_inbox_copies as remove_inbox_copies
-from scadbuddy.bambuddy.uploads import DatabaseRequiredError
 from scadbuddy.core.events import OutputEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.operations import answered_as_routes
@@ -202,7 +201,7 @@ def output_kinds(state: AppState) -> list[OperationKind]:
         # on its own, so a failed upload cleanup cannot leave links serving its archives.
         try:
             await state.uploads.delete_outputs([output_id])
-        except (DatabaseRequiredError, psycopg.Error):
+        except psycopg.Error:
             logger.exception(
                 "could not forget a deleted output's Bambuddy uploads", extra={"id": output_id}
             )
@@ -215,7 +214,7 @@ def output_kinds(state: AppState) -> list[OperationKind]:
                 )
         try:
             await state.print_links.delete_outputs([output_id])
-        except (DatabaseRequiredError, psycopg.Error):
+        except psycopg.Error:
             logger.exception(
                 "could not forget a deleted output's print links", extra={"id": output_id}
             )

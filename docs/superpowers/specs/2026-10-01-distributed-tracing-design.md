@@ -496,7 +496,10 @@ in Tempo as soon as it parks.
 
 **Attributes** (`scadbuddy.*`): model `slug`, `job_id`, `render_key`,
 `piece_key`, `output_id`; 3MF colour count, triangle count, size in bytes;
-piece cache hit; printer and plate IDs on send and print; for the agent, tool
+piece cache hit; printer and plate IDs on send and print, and on a print
+whether it prints every plate (`all_plates`) and what kind of source it is
+(`print_source`: `output` or `library`; ScadBuddy's own words, never a
+library file's id or name, which are Bambuddy's, #1231); for the agent, tool
 name, tier, outcome, token counts and cost. High cardinality is fine here.
 These are span attributes and never become metric labels.
 
@@ -549,9 +552,15 @@ loops (the reconciler's poll every 5 s, the event bus, the pool's checks)
 have no parent span. Without the rule each query would be a trace of its
 own, and Tempo would fill with them. A query made while handling a request
 or running an activity has a parent and is kept. `OTEL_TRACES_SAMPLER`, when
-set, replaces this default entirely. The browser's provider has the same
-rule, so a poll's `fetch` outside any user action goes with an unsampled
-`traceparent` (`-00`). The backend and agent honour the browser's decision.
+set, replaces this default entirely. The browser's provider narrows the
+rule to its polls (#2187): a `fetch` outside any user action is kept, so a
+page's or dialog's loads are traced without each needing an action. Only a
+poll's (the attention badge's `ai/pending-input` and running-session check,
+`ai/status`, a print's `…/progress`, and the client's 1 s follows of a print
+run, an operation and a render job, listed in `frontend/src/lib/tracing.ts`
+`isPoll`) or another origin's is dropped, and a poll's goes with an unsampled
+`traceparent` (`-00`). A new poll is added to that list. The backend and agent
+honour the browser's decision.
 
 **Errors:** `ERROR` status, with the exception's type and where it was raised,
 **never its message**. Our own spans add `scadbuddy.failure_class`:
@@ -628,7 +637,21 @@ hard-coded uids.
 - *Browser:* recent `scadbuddy-web` traces by action.
 
 Panels that need Tempo's metrics-generator (TraceQL metrics, service graph)
-are left out until clusters#1596 decides on it.
+are left out until clusters#1596 decides on it, with one exception: the "trace
+coverage" panels (`{resource.service.name="…"} | rate()`, one series per service),
+which stay empty, meaning not configured, until it does.
+
+**Per-area dashboards** (#2289), beside the overview and through the same
+generator, one ConfigMap `<uid>-dashboard` each: `scadbuddy-api` (latency,
+throughput and errors per route, the slowest routes, the slow list endpoints and
+Tempo searches per route), `scadbuddy-web` (page loads, fetches, user actions),
+`scadbuddy-renders` (queue, Arrange/backfill/save, Temporal activities),
+`scadbuddy-printing` (print routes, Bambuddy calls by scope, blob store, cache,
+uploads) and `scadbuddy-agent` (turns with cost, tool calls, approvals). Spans
+whose names are built at run time (FastAPI server spans, `bambuddy.<operation>`,
+`agent.tool/<name>`, Temporal's interceptor spans) are matched by attribute
+(`span.http.route`, `span.scadbuddy.bambuddy.scope`, `span.scadbuddy.tool_use_id`,
+`span.temporalActivityID`), which the lint does not check.
 
 **Pinned at the deployed revision.** Clusters' `clusters/prod/scadbuddy`
 overlay references it as a remote kustomize resource:

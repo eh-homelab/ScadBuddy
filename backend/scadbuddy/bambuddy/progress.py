@@ -16,18 +16,19 @@ import logging
 import threading
 import time
 from collections import OrderedDict
+from collections.abc import Awaitable
 from typing import Literal
 
 import psycopg
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.linking import link_by_hash, link_item
+from scadbuddy.bambuddy.linking import link_by_hash, link_item, scan_library_by_hash
 from scadbuddy.bambuddy.models import QueueItem, SliceJob
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.stages import Stage, stage_of
 from scadbuddy.bambuddy.subject import PrintSubject
-from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.events import EventBus, PrintEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, PrintRoute
@@ -176,7 +177,7 @@ _last_hash_scan: dict[str, float] = {}
 
 #: What recording a link can fail with. Linking is a side effect of the progress read:
 #: none of these may fail the read, nor another plate's read beside it (#522 review).
-_LINK_ERRORS = (ApiError, psycopg.Error, DatabaseRequiredError)
+_LINK_ERRORS = (ApiError, psycopg.Error)
 
 
 def _claim_hash_scan(output_id: str, now: float) -> bool:
@@ -439,6 +440,71 @@ async def progress_for(
     return await _queued_progress(client, meta.slice_job_id, meta.queue_item_id, url, linker=linker)
 
 
+async def library_progress(
+    client: BambuddyClient,
+    subject: PrintSubject,
+    links: PrintLinkStore,
+    *,
+    uploads: BambuddyUploadStore | None = None,
+) -> PrintProgress | None:
+    """The progress of a library file's print (#1073), read as an output's is: each of
+    its last run's queue items (`PrintLinkStore.last_run`, #1751), as one progress over
+    its plates. ``None`` when the file has no send. Each item that names its archive is
+    linked to the file on the way, so the settle hooks find it
+    (`linking.link_library_prints` does the same for the prints list); one Bambuddy no
+    longer has reads as done, as an output's does, and with ``uploads`` has the file's
+    archives looked for by hash (#1755), as an output's gone item does."""
+    sends = await links.last_run(subject)
+    if not sends:
+        return None
+    url = client.config.web_url(QUEUE_PATH)
+
+    async def linked(work: Awaitable[None], queue_item_id: int) -> None:
+        # As an output's read: a link that cannot be recorded never fails the read.
+        try:
+            await work
+        except _LINK_ERRORS:
+            logger.exception(
+                "could not link a library print's queue item",
+                extra={"subject": subject.key, "queue_item_id": queue_item_id},
+            )
+
+    async def read(queue_item_id: int) -> PrintProgress:
+        try:
+            item = await client.queue_item(queue_item_id)
+        except ApiError as error:
+            if error.status != 404:
+                raise
+            await linked(links.library_gone(queue_item_id), queue_item_id)
+            if uploads is not None and subject.file_id is not None:
+                await scan_library_by_hash(client, uploads, links, subject.file_id)
+            return PrintProgress(
+                route="slice_queue",
+                stage="done",
+                settled=True,
+                queue_item_id=queue_item_id,
+                copies_completed=1,
+                bambuddy_url=url,
+            )
+        if item.archive_id is not None:
+            await linked(
+                links.link_library(queue_item_id, item.archive_id, item.library_file_name),
+                queue_item_id,
+            )
+        return from_queue(item, bambuddy_url=url)
+
+    plates = await asyncio.gather(*(read(send.queue_item_id) for send in sends))
+    if len(plates) == 1:
+        return plates[0]
+    return from_plates(
+        list(plates),
+        [send.plate_id or 1 for send in sends],
+        slice_job_id=sends[-1].slice_job_id,
+        queue_item_id=sends[-1].queue_item_id,
+        bambuddy_url=url,
+    )
+
+
 #: Outputs whose last observed progress :class:`ProgressObserver` remembers.
 OBSERVED_OUTPUTS = 256
 
@@ -463,22 +529,33 @@ class ProgressObserver:
 
     def started(self, meta: OutputMeta) -> None:
         """A print of ``meta`` was just started: whatever was seen before is stale."""
+        self.started_subject(meta.id, meta.slug)
+
+    def started_subject(self, key: str, slug: str) -> None:
+        """A print of the run subject ``key`` (an output's id, or ``library:<file id>``,
+        #1751) was just started: whatever was seen before is stale."""
         with self._lock:
-            self._seen.pop(meta.id, None)
-        emit(self.events, PrintEvent(kind="print.progress", output_id=meta.id, slug=meta.slug))
+            self._seen.pop(key, None)
+        emit(self.events, PrintEvent(kind="print.progress", output_id=key, slug=slug))
 
     def observe(self, meta: OutputMeta, progress: PrintProgress | None) -> bool:
         """Publish what changed since the last read of ``meta``; True if anything did."""
+        return self.observe_subject(meta.id, meta.slug, progress)
+
+    def observe_subject(self, key: str, slug: str, progress: PrintProgress | None) -> bool:
+        """Publish what changed since the last read of the run subject ``key`` (an
+        output's id, or ``library:<file id>``, #1751) on ``print:<key>``; True if
+        anything did."""
         if progress is None:
             return False
         fingerprint = progress.model_dump_json()
         # Compare, decide and record under one hold of the lock, so two reads of the
-        # same output racing each other (two tabs polling) cannot both decide they are
+        # same print racing each other (two tabs polling) cannot both decide they are
         # the first to see it settled. Only the publishing happens outside it.
         kinds: list[Literal["print.progress", "print.settled"]] = []
         with self._lock:
-            previous = self._seen.pop(meta.id, None)
-            self._seen[meta.id] = (fingerprint, progress.settled)
+            previous = self._seen.pop(key, None)
+            self._seen[key] = (fingerprint, progress.settled)
             while len(self._seen) > self.capacity:
                 self._seen.popitem(last=False)
             if previous is None or previous[0] != fingerprint:
@@ -487,5 +564,5 @@ class ProgressObserver:
                 if progress.settled and not was_settled:
                     kinds.append("print.settled")
         for kind in kinds:
-            emit(self.events, PrintEvent(kind=kind, output_id=meta.id, slug=meta.slug))
+            emit(self.events, PrintEvent(kind=kind, output_id=key, slug=slug))
         return bool(kinds)

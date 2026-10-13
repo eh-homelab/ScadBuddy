@@ -11,35 +11,22 @@ from scadbuddy.analyzers.decisions import DecisionStore, PostgresDecisionStore
 from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
 
-#: In Postgres only. ``Settings`` requires a database (#401), so the built store is never
-#: ``None``; only ``Components.override`` sets that, and then the routes that persist
-#: answer 503.
-DECISIONS: Key[DecisionStore | None] = Key("decisions")
+#: In Postgres only.
+DECISIONS: Key[DecisionStore] = Key("decisions")
 
 
-def _build(core: Core, components: Components) -> DecisionStore | None:
+def _build(core: Core, components: Components) -> DecisionStore:
     return PostgresDecisionStore(core.settings.database_url)
 
 
 @asynccontextmanager
-async def _run(store: DecisionStore | None) -> AsyncIterator[None]:
+async def _run(store: DecisionStore) -> AsyncIterator[None]:
     try:
         yield
     finally:
-        if store is not None:
-            await asyncio.to_thread(store.close)
+        await asyncio.to_thread(store.close)
 
 
 COMPONENT = Component(DECISIONS, build=_build, run=_run)
 
-OptionalDecisionsDep = Annotated[DecisionStore | None, component_dep(DECISIONS)]
-#: The decision store, or a 503 naming what is missing. There is no file fallback.
-DecisionsDep = Annotated[
-    DecisionStore,
-    component_dep(
-        DECISIONS,
-        required=(
-            "analyzer decisions are stored in Postgres, and SCADBUDDY_DATABASE_URL is not set"
-        ),
-    ),
-]
+DecisionsDep = Annotated[DecisionStore, component_dep(DECISIONS)]

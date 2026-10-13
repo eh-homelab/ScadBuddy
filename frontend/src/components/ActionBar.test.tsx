@@ -59,6 +59,28 @@ describe("Generate's menu", () => {
     expect(screen.getByRole('dialog', { name: 'Rendered image' })).toBeInTheDocument()
   })
 
+  it('offers the colour breakdown only for a render with more than one colour (#1289)', async () => {
+    const { user } = setup()
+    await user.click(screen.getByRole('button', { name: 'More to generate' }))
+    expect(screen.queryByRole('menuitem', { name: /Colours/ })).not.toBeInTheDocument()
+  })
+
+  it('opens the colour breakdown of the render on screen (#1289)', async () => {
+    const getJobColours = vi
+      .spyOn(api, 'getJobColours')
+      .mockResolvedValue({ image: new Blob(['png']), colours: ['#FF0000', '#00FF00'], columns: 2 })
+    URL.createObjectURL = vi.fn(() => 'blob:colours')
+    URL.revokeObjectURL = vi.fn()
+    const { user } = setup(false, { ...job, colors: ['#FF0000', '#00FF00'] })
+    await user.click(screen.getByRole('button', { name: 'More to generate' }))
+    await user.click(screen.getByRole('menuitem', { name: /Colours/ }))
+
+    expect(screen.getByRole('dialog', { name: 'Colours' })).toBeInTheDocument()
+    expect(await screen.findByText('Tile 2: Extruder 2, #00FF00')).toBeInTheDocument()
+    expect(getJobColours).toHaveBeenCalledWith(job.id, 'iso', expect.any(AbortSignal))
+    getJobColours.mockRestore()
+  })
+
   it('closes on a click outside it, and not on one inside it', async () => {
     const { user } = setup()
     await user.click(screen.getByRole('button', { name: 'More to generate' }))
@@ -335,5 +357,61 @@ describe('keyboard focus and announcements (#967)', () => {
     await waitFor(() => expect(download).not.toHaveAttribute('aria-disabled', 'true'))
     expect(download).toHaveFocus()
     await waitFor(() => expect(screen.getByTestId('action-status')).toHaveTextContent('Downloaded'))
+  })
+})
+
+describe("the remembered project across a model change (#1660, #2142's review)", () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  function bar(slug: string) {
+    return (
+      <ActionBar
+        slug={slug}
+        job={{ ...job, slug }}
+        rendering={false}
+        output={undefined}
+        capture={async () => null}
+        captureImage={async () => null}
+        viewSize={() => ({ width: 800, height: 500 })}
+        extra={NO_EXTRA}
+        fit={undefined}
+        onPrinterModel={() => undefined}
+        onGenerated={() => undefined}
+        onSent={() => undefined}
+        onRan={() => undefined}
+      />
+    )
+  }
+
+  it("never moves the picker to the last model's project once the page is on another", async () => {
+    vi.spyOn(api, 'getModelProjects').mockImplementation(async (slug) => ({
+      projects: slug === 'apple' ? [{ preset_id: null, project_id: 1 }] : [],
+    }))
+    vi.spyOn(api, 'createOutput').mockResolvedValue(outputs[0]!)
+    vi.spyOn(api, 'fileIntoProject').mockResolvedValue({ file_id: 1, folder_id: 2, name: 'x.3mf' } as never)
+    let release!: () => void
+    vi.spyOn(api, 'putModelProject').mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve({ projects: [{ preset_id: null, project_id: 2 }] })
+        }),
+    )
+    const { user, rerender } = renderPage(bar('apple'))
+    const picker = () => screen.getByTestId('customize-project-select')
+    await waitFor(() => expect(picker()).toHaveValue('1'))
+    await user.selectOptions(picker(), '2')
+    await user.click(screen.getByRole('button', { name: 'Generate' }))
+    await user.click(await screen.findByTestId('generate-file-chosen'))
+    await waitFor(() => expect(api.putModelProject).toHaveBeenCalledOnce())
+
+    // The page moves to a model filed nowhere, then apple's filing answers.
+    rerender(bar('keychain'))
+    await waitFor(() => expect(picker()).toHaveValue(''))
+    release()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(picker()).toHaveValue('')
+    // And back on apple, its own projects are read again, not the late answer's.
+    rerender(bar('apple'))
+    await waitFor(() => expect(picker()).toHaveValue('1'))
   })
 })

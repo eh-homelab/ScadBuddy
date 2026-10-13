@@ -10,12 +10,14 @@ Three tables, all in ``migrations/20260928T0840Z_settings.sql``:
   presence alone is each field's source (:data:`SettingSource`). Map-valued settings
   (the per-printer and per-model print options) change one key at a time inside that
   row's upsert.
-- ``model_print_choices``: what the print dialog last chose, one row per model.
+- ``model_print_choices``: what the print dialog last chose, one row per options scope
+  (:func:`~scadbuddy.bambuddy.options.options_scope`): a model's slug, or a Bambuddy
+  library file's ``library:<file id>`` (#313, #1754).
 - ``printer_bed_types``: the plate last printed on, one row per printer.
 
-A fourth, ``library_print_choices`` (``migrations/20260928T1522Z_library_print_choices.sql``,
-#313), is the same shape as ``model_print_choices`` but keyed by Bambuddy's own library
-file id, for a library file that has no ScadBuddy slug.
+``library_print_choices`` (#313) held a library file's choices until #1754 copied them
+into ``model_print_choices`` (``migrations/20261009T0541Z_print_choices_by_subject.sql``);
+#1963 dropped it.
 
 The print dialog writes a model's choices and its printer's plate back to back on
 every print, and FastAPI runs each on its own threadpool thread; each write is one
@@ -24,10 +26,15 @@ statement on its own row, so neither can drop the other's change.
 
 from __future__ import annotations
 
+import base64
+import functools
+import hashlib
+import json
 import logging
 import time
 import types
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal, LiteralString, Self, Union, get_args, get_origin
 
 from psycopg import Connection
@@ -51,13 +58,21 @@ from scadbuddy.bambuddy.models import (
     SlotChoice,
     Tier,
 )
-from scadbuddy.bambuddy.options import OptionScope, PrintOptions
+from scadbuddy.bambuddy.options import OptionScope, PrintOptions, library_options_scope
 from scadbuddy.core.config import StoreBackend
 from scadbuddy.core.events import EventBus, SettingsChanged, SettingsSection, emit
 from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
-from scadbuddy.core.settings import ENV_SEEDED, Settings, check_value, env_var
+from scadbuddy.core.secrets import (
+    Envelope,
+    Kek,
+    SealError,
+    load_kek,
+    open_secret,
+    seal_secret,
+)
+from scadbuddy.core.settings import ENV_SEEDED, SECRET_FIELDS, Settings, check_value, env_var
 from scadbuddy.library.asset_fetch import DEFAULT_ASSET_FETCH_DOMAINS, normalise_domain
-from scadbuddy.render.pg_store import migrate
+from scadbuddy.render.pg_store import MIGRATION_LOCK, migrate
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +115,7 @@ REMEMBERED_ROWS = (
     "model_print_options",
     "printer_rack_algorithms",
     "printer_rack_algorithm_versions",
+    "model_projects",
 )
 
 
@@ -175,6 +191,21 @@ class ModelPrintChoices(BaseModel):
         return [nozzles[0], nozzles[0].model_copy()] if len(nozzles) == 1 else nozzles
 
 
+class ModelProject(BaseModel):
+    """The project Generate last filed one model's output into, with one preset or none
+    (#1660). ``preset_name`` is the preset's name when it was remembered, for Settings
+    to show: the key holds only its id."""
+
+    project_id: int
+    preset_name: str | None = Field(default=None, max_length=200)
+
+
+def model_project_scope(model_id: str, preset_id: str | None) -> str:
+    """The ``model_projects`` key for a model and the preset in use (#1660). A model id
+    and a preset id never hold a ``/``, so the two cannot run together."""
+    return model_id if preset_id is None else f"{model_id}/{preset_id}"
+
+
 class StoredSettings(BambuddyIds):
     """Bambuddy connection details. The API key never leaves the server.
 
@@ -184,12 +215,12 @@ class StoredSettings(BambuddyIds):
     """
 
     bambuddy_url: str | None = None
-    bambuddy_api_key: str | None = None
+    bambuddy_api_key: str | None = Field(default=None, repr=False)
     bambuddy_web_urls: str | None = None
     #: The Manage-Library-only key render workers hold (spec 2026-09-27 §9). Stored
-    #: exactly as `bambuddy_api_key` is (the backend has no secret store; see
-    #: tests/api/test_settings.py), written from Settings, never sent to the browser.
-    bambuddy_render_api_key: str | None = None
+    #: exactly as `bambuddy_api_key` is (sealed under SCADBUDDY_SECRET_KEY_FILE when it
+    #: is set, #602), written from Settings, never sent to the browser.
+    bambuddy_render_api_key: str | None = Field(default=None, repr=False)
     #: Where blobs live. Read at process start by the API and every worker.
     store_backend: StoreBackend = "local"
     public_url: str | None = None
@@ -210,8 +241,9 @@ class StoredSettings(BambuddyIds):
     #: its subdomains. ``None`` is :data:`DEFAULT_ASSET_FETCH_DOMAINS`; ``[]`` is none.
     asset_fetch_domains: list[str] | None = None
 
-    #: Model slug -> what the picker chose, set one model at a time
-    #: (:meth:`SettingsStore.set_model_choices`).
+    #: Options scope (a model slug, or ``library:<file id>``, #1754) -> what the picker
+    #: chose, set one at a time (:meth:`SettingsStore.set_model_choices`,
+    #: :meth:`SettingsStore.set_library_choices`).
     model_print_choices: dict[str, ModelPrintChoices] = Field(default_factory=dict)
     #: Stringified Bambuddy printer id -> the plate type last printed on it (#83). Per
     #: printer, not per model: the plate is a property of the machine. Set one printer at
@@ -220,15 +252,21 @@ class StoredSettings(BambuddyIds):
 
     #: The Bambuddy project the last send went to (#79), and nothing more. A project
     #: is Bambuddy's grouping, not a second one kept here, so ScadBuddy remembers only
-    #: enough to open the picker where it was left rather than modelling which models
-    #: belong to which project — that question is Bambuddy's to answer.
+    #: defaults for the next filing (this, and ``model_projects`` below) rather than
+    #: modelling which prints belong to which project: that question is Bambuddy's.
     last_project_id: int | None = None
+    #: :func:`model_project_scope` -> the project Generate last filed it into (#1660), so
+    #: the picker moves there when the model or the preset is opened, and Generate asks
+    #: before filing it elsewhere. Set one key at a time
+    #: (:meth:`SettingsStore.set_model_project`).
+    model_projects: dict[str, ModelProject] = Field(default_factory=dict)
 
     # #88 — remembered print options, least to most specific. All three start empty, so
     # a ScadBuddy that has never been told otherwise queues with Bambuddy's own
     # defaults. The dict keys are strings because JSON has no integer keys: the printer
-    # map is keyed by a stringified Bambuddy printer id, the model map by ScadBuddy's
-    # own model slug.
+    # map is keyed by a stringified Bambuddy printer id, the model map by the print's
+    # options scope: ScadBuddy's own model slug, or a library file's ``library:<file
+    # id>`` (#1754, ``options.options_scope``).
     print_options: PrintOptions = Field(default_factory=PrintOptions)
     printer_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
     model_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
@@ -246,6 +284,37 @@ class StoredSettings(BambuddyIds):
             return {}
         known = get_args(RackAlgorithm)
         return {key: algorithm for key, algorithm in value.items() if algorithm in known}
+
+    @field_validator("model_projects", mode="before")
+    @classmethod
+    def _readable_projects(cls, value: Any) -> Any:
+        """An entry this version cannot read is nothing remembered, not settings that
+        will not load."""
+        if not isinstance(value, dict):
+            return {}
+        kept: dict[str, ModelProject] = {}
+        for scope, project in value.items():
+            try:
+                kept[scope] = ModelProject.model_validate(project)
+            except ValidationError:
+                logger.warning("unreadable model project", extra={"scope": scope})
+        return kept
+
+    @field_validator("model_print_choices", mode="before")
+    @classmethod
+    def _readable_choices(cls, value: Any) -> Any:
+        """A row this version cannot read is nothing remembered for its scope, rather
+        than settings that will not load: the migration of ``library_print_choices``
+        (#1754) copies rows verbatim, and the per-file read always tolerated them."""
+        if not isinstance(value, dict):
+            return {}
+        kept: dict[str, ModelPrintChoices] = {}
+        for scope, choices in value.items():
+            try:
+                kept[scope] = ModelPrintChoices.model_validate(choices)
+            except ValidationError:
+                logger.warning("unreadable print choices", extra={"options_scope": scope})
+        return kept
 
     def rack_algorithm(self, printer_id: int | None) -> RackAlgorithm:
         """The printer's remembered rack algorithm, else Least used (spec §4)."""
@@ -339,11 +408,16 @@ class SettingsPatch(BaseModel):
     asset_sweep_interval: float | None = None
     duplicate_staging_max_age: float | None = None
     media_upload_max_bytes: int | None = None
+    read_max_objects: int | None = None
+    read_max_visits: int | None = None
+    read_max_triangles: int | None = None
+    read_max_paint_digits: int | None = None
     #: Write-only, like the Bambuddy key; ``""`` clears it.
     google_fonts_api_key: str | None = None
     fonts_catalogue_ttl: float | None = None
     event_log_retention_seconds: float | None = None
     event_log_retention_rows: int | None = None
+    flow_approval_timeout_seconds: int | None = None
     log_level: str | None = None
     temporal_ui_url: str | None = None
 
@@ -440,6 +514,8 @@ class SettingsStore:
         #: Told of every write, as ``settings.changed`` with the section it touched.
         self.events = events
         self.connect_timeout = connect_timeout
+        #: Seals the `SECRET_FIELDS` at rest (#602); None keeps them plaintext.
+        self._kek = settings_kek(defaults.secret_key_file)
         self._pool: ConnectionPool[Connection[DictRow]] = ConnectionPool(
             defaults.database_url,
             min_size=1,
@@ -455,8 +531,17 @@ class SettingsStore:
         self._pool.open(wait=True, timeout=self.connect_timeout)
         with self._pool.connection() as conn:
             applied = migrate(conn)
-        if applied:
-            logger.info("applied database migrations", extra={"versions": applied})
+            if applied:
+                logger.info("applied database migrations", extra={"versions": applied})
+            if self._kek is None:
+                logger.warning(
+                    "SCADBUDDY_SECRET_KEY_FILE is not set: the stored API keys are kept in"
+                    " plaintext"
+                )
+            else:
+                sealed = _seal_plaintext_rows(conn, self._kek)
+                if sealed:
+                    logger.info("sealed plaintext API keys", extra={"settings": sealed})
 
     def close(self) -> None:
         self._pool.close()
@@ -497,7 +582,7 @@ class SettingsStore:
             rows = read("SELECT name, value FROM settings")
             choices = read("SELECT model_id, choices FROM model_print_choices")
             beds = read("SELECT printer_id, bed_type FROM printer_bed_types")
-        stored_rows = {row["name"]: row["value"] for row in rows}
+        stored_rows = _opened(self._kek, {row["name"]: row["value"] for row in rows})
         runtime = self.defaults.model_copy()
         sources: dict[str, SettingSource] = {}
         for name in ENV_SEEDED:
@@ -550,7 +635,7 @@ class SettingsStore:
         # but never unset.
         changes = patch.model_dump(mode="json", exclude_unset=True)
         reset = changes.pop("reset", [])
-        for secret in ("bambuddy_api_key", "bambuddy_render_api_key", "google_fonts_api_key"):
+        for secret in SECRET_FIELDS:
             if changes.get(secret) == "":
                 changes[secret] = None
         if changes.get("store_backend") == "bambuddy":
@@ -571,7 +656,7 @@ class SettingsStore:
                 conn.execute("DELETE FROM settings WHERE name = %s", (name,))
             for name, value in changes.items():
                 if value is not None:
-                    _put(conn, name, value)
+                    _put(conn, name, _sealed(self._kek, name, value))
                 elif name in ENV_SEEDED:
                     # Cleared, which must beat the environment: a JSON null row.
                     _put(conn, name, None)
@@ -629,18 +714,22 @@ class SettingsStore:
                 " saved first"
             )
 
-    def set_model_choices(self, slug: str, choices: ModelPrintChoices) -> StoredSettings:
-        """Remember one model's printer and spools; an empty ``choices`` forgets them."""
+    def _put_choices(self, scope: str, choices: ModelPrintChoices) -> None:
+        """Remember one options scope's choices (#1754); an empty ``choices`` forgets."""
         with self._pool.connection() as conn:
             if choices == ModelPrintChoices():
-                conn.execute("DELETE FROM model_print_choices WHERE model_id = %s", (slug,))
+                conn.execute("DELETE FROM model_print_choices WHERE model_id = %s", (scope,))
             else:
                 conn.execute(
                     "INSERT INTO model_print_choices (model_id, choices) VALUES (%s, %s)"
                     " ON CONFLICT (model_id) DO UPDATE"
                     " SET choices = EXCLUDED.choices, updated_at = now()",
-                    (slug, Jsonb(choices.model_dump(mode="json"))),
+                    (scope, Jsonb(choices.model_dump(mode="json"))),
                 )
+
+    def set_model_choices(self, slug: str, choices: ModelPrintChoices) -> StoredSettings:
+        """Remember one model's printer and spools; an empty ``choices`` forgets them."""
+        self._put_choices(slug, choices)
         return self._written("model_choices")
 
     def set_printer_bed_type(self, printer_id: int, bed_type: str | None) -> StoredSettings:
@@ -703,10 +792,14 @@ class SettingsStore:
     def library_choices(self, file_id: int) -> ModelPrintChoices:
         """What the dialog last chose for one Bambuddy library file (#313); nothing
         remembered is the empty choice. A row this version cannot read is nothing
-        remembered too, rather than a dialog that will not open."""
+        remembered too, rather than a dialog that will not open.
+
+        In the one store, under the file's options scope (#1754): one row is read,
+        not every setting."""
+        scope = library_options_scope(file_id)
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT choices FROM library_print_choices WHERE file_id = %s", (file_id,)
+                "SELECT choices FROM model_print_choices WHERE model_id = %s", (scope,)
             ).fetchone()
         if row is None:
             return ModelPrintChoices()
@@ -718,16 +811,7 @@ class SettingsStore:
 
     def set_library_choices(self, file_id: int, choices: ModelPrintChoices) -> ModelPrintChoices:
         """Remember one library file's choices; an empty ``choices`` forgets them."""
-        with self._pool.connection() as conn:
-            if choices == ModelPrintChoices():
-                conn.execute("DELETE FROM library_print_choices WHERE file_id = %s", (file_id,))
-            else:
-                conn.execute(
-                    "INSERT INTO library_print_choices (file_id, choices) VALUES (%s, %s)"
-                    " ON CONFLICT (file_id) DO UPDATE"
-                    " SET choices = EXCLUDED.choices, updated_at = now()",
-                    (file_id, Jsonb(choices.model_dump(mode="json"))),
-                )
+        self._put_choices(library_options_scope(file_id), choices)
         # The dialog's remembered choices, as for a model: no new section is needed.
         emit(self.events, SettingsChanged(section="model_choices"))
         return self.library_choices(file_id)
@@ -740,6 +824,37 @@ class SettingsStore:
             else:
                 _put(conn, "last_project_id", project_id)
         return self._written("last_project")
+
+    def set_model_project(
+        self, model_id: str, preset_id: str | None, project: ModelProject | None
+    ) -> StoredSettings:
+        """Remember the project one model (with one preset, or none) was filed into
+        (#1660); ``None`` forgets it."""
+        with self._pool.connection() as conn:
+            _put_entry(
+                conn,
+                "model_projects",
+                model_project_scope(model_id, preset_id),
+                None if project is None else project.model_dump(mode="json"),
+            )
+        return self._written("model_project")
+
+    def forget_model_projects(self, model_id: str, preset_id: str | None = None) -> None:
+        """Drop what a deleted preset was filed into or, with no ``preset_id``, every
+        entry for a deleted model (#1660), so Settings lists no id that is gone."""
+        with self._pool.connection() as conn:
+            if preset_id is not None:
+                _put_entry(conn, "model_projects", model_project_scope(model_id, preset_id), None)
+            else:
+                prefix = model_project_scope(model_id, "")
+                conn.execute(
+                    "UPDATE settings SET value = COALESCE("
+                    " (SELECT jsonb_object_agg(e.key, e.value) FROM jsonb_each(settings.value) AS e"
+                    "  WHERE e.key <> %s AND left(e.key, length(%s)) <> %s), '{}'::jsonb),"
+                    " updated_at = now() WHERE name = 'model_projects'",
+                    (model_id, prefix, prefix),
+                )
+        emit(self.events, SettingsChanged(section="model_project"))
 
     def save_print_options(
         self, scope: OptionScope, key: str | None, options: PrintOptions
@@ -769,14 +884,104 @@ class SettingsStore:
 
     def forget_remembered(self) -> StoredSettings:
         """Forget every remembered choice (#322): the per-model and per-library-file
-        (#313) print-dialog choices, the per-printer plates, and the print options at
-        every scope. The settings themselves are left alone."""
+        (#313) print-dialog choices, the per-printer plates, the print options at every
+        scope, and each model's project (#1660). The settings themselves are left alone."""
         with self._pool.connection() as conn, conn.transaction():
             conn.execute("DELETE FROM model_print_choices")
-            conn.execute("DELETE FROM library_print_choices")
             conn.execute("DELETE FROM printer_bed_types")
             conn.execute("DELETE FROM settings WHERE name = ANY(%s)", (list(REMEMBERED_ROWS),))
         return self._written("remembered")
+
+
+#: The jsonb a sealed secret is stored as: ``{"sealed": {"secret", "dek", "kek_id"}}``,
+#: the first two base64. A plaintext secret is a JSON string, as before #602.
+SEALED = "sealed"
+
+
+@functools.cache
+def settings_kek(path: Path | None) -> Kek | None:
+    """The key the secret settings are sealed with, read once per process. A key file
+    that is set but unreadable or malformed raises `SecretKeyError`, failing the start."""
+    return None if path is None else load_kek(path)
+
+
+def _aad(name: str) -> str:
+    """Binds a sealed value to its setting: copied into another row, it does not open."""
+    return f"settings:{name}"
+
+
+def _sealed(kek: Kek | None, name: str, value: object) -> object:
+    """``value`` as stored: sealed when it is a secret and there is a key."""
+    if kek is None or name not in SECRET_FIELDS or not isinstance(value, str):
+        return value
+    envelope = seal_secret(kek, value, _aad(name))
+    return {
+        SEALED: {
+            "secret": base64.b64encode(envelope.secret_sealed).decode(),
+            "dek": base64.b64encode(envelope.dek_sealed).decode(),
+            "kek_id": envelope.kek_id,
+        }
+    }
+
+
+#: The sealed values `_opened` has already warned about, by setting and a digest. At
+#: most one per secret field per value stored while this process runs: no bound needed.
+_UNOPENED: set[tuple[str, str]] = set()
+
+
+def _opened(kek: Kek | None, rows: dict[str, Any]) -> dict[str, Any]:
+    """``rows`` with each sealed secret opened. One this process cannot open (no key,
+    another key, altered bytes) is dropped with a warning, so the field follows the
+    environment, as a row this version refuses does."""
+    out = dict(rows)
+    for name in SECRET_FIELDS & rows.keys():
+        value = rows[name]
+        if not (isinstance(value, dict) and SEALED in value):
+            continue
+        del out[name]
+        try:
+            if kek is None:
+                raise SealError("SCADBUDDY_SECRET_KEY_FILE is not set")
+            sealed = value[SEALED]
+            envelope = Envelope(
+                secret_sealed=base64.b64decode(sealed["secret"]),
+                dek_sealed=base64.b64decode(sealed["dek"]),
+                kek_id=str(sealed["kek_id"]),
+            )
+            out[name] = open_secret(kek, envelope, _aad(name))
+        except (SealError, KeyError, TypeError, ValueError) as error:
+            # Once per stored value: this runs on every read of the settings.
+            seen = (name, hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest())
+            if seen in _UNOPENED:
+                continue
+            _UNOPENED.add(seen)
+            # A SealError names key ids only; the others are not formatted at all.
+            reason = str(error) if isinstance(error, SealError) else "malformed"
+            logger.warning(
+                "ignoring a stored secret this process cannot open: %s",
+                reason,
+                extra={"setting": name},
+            )
+    return out
+
+
+def _seal_plaintext_rows(conn: Connection[DictRow], kek: Kek) -> list[str]:
+    """Seal every secret row still in plaintext (#602), under the migration lock, so
+    replicas starting together seal each row once. A sealed or cleared row is left
+    alone, so a second run changes nothing."""
+    with conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (MIGRATION_LOCK,))
+        rows = conn.execute(
+            "SELECT name, value FROM settings"
+            " WHERE name = ANY(%s) AND jsonb_typeof(value) = 'string' FOR UPDATE",
+            (sorted(SECRET_FIELDS),),
+        ).fetchall()
+        for row in rows:
+            conn.execute(
+                "UPDATE settings SET value = %s, updated_at = now() WHERE name = %s",
+                (Jsonb(_sealed(kek, row["name"], row["value"])), row["name"]),
+            )
+    return sorted(row["name"] for row in rows)
 
 
 def _put(conn: Connection[DictRow], name: str, value: object) -> None:
@@ -813,7 +1018,7 @@ class RenderStoreSettings(BaseModel):
 
     store_backend: StoreBackend = "local"
     bambuddy_url: str | None = None
-    api_key: str | None = None
+    api_key: str | None = Field(default=None, repr=False)
     #: True when `api_key` is the full key because no render key is stored.
     key_is_fallback: bool = False
     library_folder_id: int | None = None
@@ -822,17 +1027,20 @@ class RenderStoreSettings(BaseModel):
 def load_render_store_settings(
     pool: ConnectionPool[Connection[DictRow]], defaults: Settings
 ) -> RenderStoreSettings:
-    """Read only `RENDER_FIELDS`: a worker holds no settings store (spec §9)."""
+    """Read only `RENDER_FIELDS`: a worker holds no settings store (spec §9). Through
+    the `render_settings` view, all of the settings the render worker's own role may
+    read (#601); the full key is in it only while no render key is stored."""
+    kek = settings_kek(defaults.secret_key_file)
     with pool.connection() as conn:
         rows = conn.execute(
-            "SELECT name, value FROM settings WHERE name = ANY(%s)", (list(RENDER_FIELDS),)
+            "SELECT name, value FROM render_settings WHERE name = ANY(%s)",
+            (list(RENDER_FIELDS),),
         ).fetchall()
     values: dict[str, Any] = {
         name: getattr(defaults, name) for name in ENV_SEEDED if name in RENDER_FIELDS
     }
-    for row in rows:
-        # A JSON null is a field cleared in Settings: it beats the environment's seed.
-        values[row["name"]] = row["value"]
+    # A JSON null is a field cleared in Settings: it beats the environment's seed.
+    values.update(_opened(kek, {row["name"]: row["value"] for row in rows}))
     stored = StoredSettings.model_validate(values)
     key, fallback = stored.render_bambuddy_key()
     return RenderStoreSettings(

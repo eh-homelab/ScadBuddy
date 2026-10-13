@@ -1,10 +1,10 @@
 import { Link } from 'react-router'
-import { api } from '../../api/client'
+import { libraryOptionsScope, readPrintProgress } from '../../lib/printSource'
 import type { PrintSummary } from '../../api/types'
 import { formatDuration, formatValue } from '../../lib/format'
 import { useAsync } from '../../lib/useAsync'
 import type { PrintsView } from '../../lib/printsQuery'
-import { printerLabel, printLabel, printPath } from './prints'
+import { libraryPrintsPath, printerLabel, printLabel, printPath } from './prints'
 import { PrintStatus } from './PrintStatus'
 import { DELETED_STATUS } from './status'
 
@@ -26,6 +26,7 @@ interface Props {
  */
 export function PrintItem({ print, view, templateName, onOpenMedia }: Props) {
   const label = printLabel(print)
+  const subject = subjectOf(print)
   const raised = 'relative z-10'
   const cards = view === 'cards'
   return (
@@ -51,10 +52,24 @@ export function PrintItem({ print, view, templateName, onOpenMedia }: Props) {
           </h2>
           <PrintStatus status={print.status} />
         </div>
-        {templateName && <p className="mt-0.5 truncate text-[12px] text-muted">{templateName}</p>}
+        {templateName &&
+          (print.library_file_id !== null ? (
+            // #1755 — every print of the file, above the item's own link.
+            <p className="mt-0.5 truncate text-[12px] text-muted">
+              <Link
+                to={libraryPrintsPath(print.library_file_id)}
+                title="Every print of this file"
+                className={`${raised} hover:text-ink hover:underline`}
+              >
+                {templateName}
+              </Link>
+            </p>
+          ) : (
+            <p className="mt-0.5 truncate text-[12px] text-muted">{templateName}</p>
+          ))}
         <Facts print={print} />
-        {print.status === 'printing' && print.output_id !== null && (
-          <PrintingNow outputId={print.output_id} named={print.printer_name !== null} />
+        {print.status === 'printing' && subject !== null && (
+          <PrintingNow subject={subject} named={print.printer_name !== null} />
         )}
         <ParamsDiff diff={print.params_diff} />
       </div>
@@ -160,8 +175,14 @@ function Facts({ print }: { print: PrintSummary }) {
  * `print:<output id>`. That read follows the output's latest send, which is this print
  * while it is the one printing.
  */
-function PrintingNow({ outputId, named }: { outputId: string; named: boolean }) {
-  const { data } = useAsync(() => api.getPrintProgress(outputId), [outputId], [`print:${outputId}`])
+/** #1751 — what a print's live progress is read by: its output, or its library file. */
+function subjectOf(print: PrintSummary): string | null {
+  if (print.output_id !== null) return print.output_id
+  return print.library_file_id !== null ? libraryOptionsScope(print.library_file_id) : null
+}
+
+function PrintingNow({ subject, named }: { subject: string; named: boolean }) {
+  const { data } = useAsync(() => readPrintProgress(subject), [subject], [`print:${subject}`])
   const copies = data?.copies_detail ?? []
   const copy = copies.find((c) => c.stage === 'running') ?? copies[0]
   if (!copy) return null

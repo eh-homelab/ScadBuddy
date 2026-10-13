@@ -4,6 +4,7 @@ served with Range support, written through their own upload gate."""
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import os
@@ -21,12 +22,14 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
+from starlette.requests import Request
 from starlette.types import Message
 
 from scadbuddy.api import media as media_api
 from scadbuddy.api.limits import MAX_MULTIPART_BODY_BYTES
 from scadbuddy.api.media import MAX_CONCURRENT_THUMBNAILS, THUMBNAIL_VERSION
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.history import GIT, git_env
 from scadbuddy.main import create_app
@@ -308,15 +311,34 @@ def test_a_video_whose_poster_file_is_gone_has_no_thumbnail(
     assert response.json()["detail"] == f"{model!r} has no poster for {item['id']!r}"
 
 
-@pytest.mark.parametrize("error", [ValueError, SyntaxError])
-def test_an_image_whose_exif_cannot_be_read_is_its_own_thumbnail(
-    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch, error: type[Exception]
-) -> None:
-    def malformed(*_: object, **__: object) -> None:
-        raise error("malformed EXIF")
+def _jpeg_with_corrupt_exif(tag: int) -> bytes:
+    """A JPEG whose EXIF block holds an orientation and a string under ``tag``, a
+    tag Pillow expects a number for: it reads the block, then raises writing it back
+    in `exif_transpose`."""
+    exif = Image.Exif()
+    exif[0x0112] = 6  # Orientation, so exif_transpose has work to do.
+    exif[0x010F] = "Cam"  # Make, an ASCII tag, renumbered below.
+    block = exif.tobytes()
+    make = (0x010F).to_bytes(2, "big")
+    assert block.count(make) == 1
+    out = io.BytesIO()
+    Image.new("RGB", (400, 300), (200, 40, 40)).save(
+        out, "JPEG", exif=block.replace(make, tag.to_bytes(2, "big"))
+    )
+    return out.getvalue()
 
-    monkeypatch.setattr("scadbuddy.api.media.ImageOps.exif_transpose", malformed)
-    original = _real_image((400, 300), "JPEG")
+
+@pytest.mark.parametrize(
+    "tag",
+    [
+        pytest.param(0x0122, id="short-tag-holding-text"),  # GrayResponseUnit: struct.error
+        pytest.param(0x011A, id="rational-tag-holding-text"),  # XResolution: TypeError
+    ],
+)
+def test_an_image_whose_exif_cannot_be_read_is_its_own_thumbnail(
+    client: TestClient, model: str, tag: int
+) -> None:
+    original = _jpeg_with_corrupt_exif(tag)
     item = _upload(client, model, original).json()["media"][0]
 
     response = client.get(_thumbnail_url(model, item["id"]))
@@ -324,6 +346,25 @@ def test_an_image_whose_exif_cannot_be_read_is_its_own_thumbnail(
     assert response.status_code == 200, response.text
     assert response.content == original
     assert response.headers["content-type"] == "image/jpeg"
+
+
+def test_a_thumbnail_that_fails_to_save_is_logged_by_type(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A failure of ScadBuddy's own, not malformed EXIF, still falls back to the
+    original, but leaves a trace naming only the error's type (#2096)."""
+
+    def broken_save(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("secret detail")
+
+    source = io.BytesIO(_real_image((64, 64), "PNG"))
+    monkeypatch.setattr(Image.Image, "save", broken_save)
+    with caplog.at_level("INFO", logger="scadbuddy.api.media"):
+        small = media_api._shrink(source)
+
+    assert small is None
+    messages = [r.getMessage() for r in caplog.records if r.name == "scadbuddy.api.media"]
+    assert messages == ["thumbnail fell back to the original: RuntimeError"]
 
 
 def test_an_undecodable_image_is_its_own_thumbnail(client: TestClient, model: str) -> None:
@@ -490,6 +531,13 @@ def test_thumbnails_are_decoded_a_few_at_a_time(
 ) -> None:
     item = _upload(client, model, _real_image((400, 300), "PNG")).json()["media"][0]
     lock = threading.Lock()
+    # Each decode waits for a second to join it, so two provably overlap; with fewer
+    # than two allowed at once the wait times out and the request fails. That needs
+    # every request to decode, which holds because `slow` returns None (no thumbnail is
+    # cached), and an even count of requests, or the last decode waits alone.
+    requests = 8
+    assert requests % 2 == 0
+    pair = threading.Barrier(2, timeout=10)
     running = 0
     most = 0
 
@@ -498,18 +546,22 @@ def test_thumbnails_are_decoded_a_few_at_a_time(
         with lock:
             running += 1
             most = max(most, running)
+        pair.wait()
         time.sleep(0.05)
         with lock:
             running -= 1
         return None
 
     monkeypatch.setattr("scadbuddy.api.media._shrink", slow)
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    with ThreadPoolExecutor(max_workers=requests) as pool:
         codes = list(
-            pool.map(lambda _: client.get(_thumbnail_url(model, item["id"])).status_code, range(8))
+            pool.map(
+                lambda _: client.get(_thumbnail_url(model, item["id"])).status_code,
+                range(requests),
+            )
         )
 
-    assert codes == [200] * 8
+    assert codes == [200] * requests
     assert 1 < most <= MAX_CONCURRENT_THUMBNAILS
 
 
@@ -1278,3 +1330,44 @@ def test_the_thumbnail_cache_takes_the_same_key_to_put_and_get(tmp_path: Path) -
     cache.put(key, thumbnail)
     assert cache.get(key) is thumbnail
     assert cache.get(media_api._cache_key(source, stat, 128)) is None
+
+
+def _multipart_request(body: bytes) -> Request:
+    sent = False
+
+    async def receive() -> Message:
+        nonlocal sent
+        if sent:
+            return {"type": "http.disconnect"}
+        sent = True
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "headers": [(b"content-type", b"multipart/form-data; boundary=b")],
+    }
+    return Request(scope, receive)
+
+
+def test_receive_keeps_a_file_parts_name_and_the_text_parts_asked_for(tmp_path: Path) -> None:
+    """A mesh upload's type is its file name, and its model's name a text part (#2146)."""
+    body = (
+        b"--b\r\nContent-Disposition: form-data; name=file; filename=carrot.stl\r\n\r\n"
+        b"solid\r\n"
+        b"--b\r\nContent-Disposition: form-data; name=name\r\n\r\nCarrot\r\n"
+        b"--b\r\nContent-Disposition: form-data; name=other\r\n\r\nskipped\r\n--b--\r\n"
+    )
+    received = asyncio.run(
+        media_api._receive(_multipart_request(body), tmp_path, fields={"name": 10})
+    )
+    try:
+        assert received.filenames == {"file": "carrot.stl"}
+        assert received.fields == {"name": bytearray(b"Carrot")}
+        assert received.files["file"].read_bytes() == b"solid"
+    finally:
+        received.discard()
+    with pytest.raises(ApiError) as refused:
+        asyncio.run(media_api._receive(_multipart_request(body), tmp_path, fields={"name": 3}))
+    assert refused.value.status == 422
+    assert not list(tmp_path.iterdir())

@@ -1,0 +1,7 @@
+{
+  "name": "unknown-hook-event",
+  "hooks": {
+    "loaders": [{ "hooks": [{ "type": "prompt", "prompt": "ok?" }] }],
+    "Stop": [{ "hooks": [{ "type": "prompt", "prompt": "done?" }] }]
+  }
+}

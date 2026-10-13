@@ -14,7 +14,7 @@ describe('RenderLimitsSetting', () => {
     const window = screen.getByRole('spinbutton', { name: 'Renders per 10 min, per caller' })
     expect(perCaller).toHaveValue(4)
     expect(global).toHaveValue(0)
-    expect(window).toHaveValue(0)
+    expect(window).toHaveValue(30)
     const save = screen.getByRole('button', { name: 'Save' })
     expect(save).toBeDisabled()
 
@@ -32,7 +32,7 @@ describe('RenderLimitsSetting', () => {
 
     expect(await screen.findByRole('status')).toHaveTextContent('Saved. The assistant uses these limits now.')
     expect(mockRenderLimitWrites()).toEqual([
-      { per_principal: 8, global: 12, per_window: 0, overrides: [{ principal: 'browser', concurrent: 16 }] },
+      { per_principal: 8, global: 12, per_window: 30, overrides: [{ principal: 'browser', concurrent: 16 }] },
     ])
     expect(save).toBeDisabled()
   })

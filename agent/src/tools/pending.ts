@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { Principal } from '../auth/principal.js'
+import type { WorkspaceRef } from '../workspace/store.js'
 
 // Pending outward actions: spec §8.2's two-step flow for external MCP clients.
 // An outward tool call (the `prepare`) records what it would do and returns
@@ -35,6 +36,8 @@ export type PrepareCall = {
   input: Record<string, unknown>
   /** The tool's own human-readable line. */
   summary: string
+  /** The workspace the call would run in (workspaceOf), for a workspace upload's size on the card. */
+  workspace?: WorkspaceRef
 }
 
 export interface OutwardActions {

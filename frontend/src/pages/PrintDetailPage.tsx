@@ -6,6 +6,7 @@ import { MediaCarousel } from '../components/media/MediaCarousel'
 import { MediaLightbox } from '../components/media/MediaLightbox'
 import type { Slide } from '../components/media/slides'
 import { PrintAgainDialog } from '../components/PrintAgainDialog'
+import { libraryPrintsPath } from '../components/prints/prints'
 import { DELETED_STATUS, statusLabel } from '../components/prints/status'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
@@ -27,6 +28,7 @@ const FILE_LABELS: Record<PrintFile['kind'], string> = {
   preview_glb: 'Preview mesh',
   sliced: 'Sliced file',
   source: 'Source 3MF',
+  library_file: 'Library file',
 }
 
 function formatWhen(iso: string | null | undefined): string | null {
@@ -72,8 +74,9 @@ function gallerySlides(print: PrintDetail): Slide[] {
       key: `plate-${plate.index}`,
       kind: 'image',
       src: plate.url,
-      alt: `Plate ${plate.index} as sliced`,
-      caption: "The slicer's plate image",
+      alt: `${plate.name ?? `Plate ${plate.index}`} as sliced`,
+      // #2055 — the plate by what it holds, when that is known.
+      caption: plate.name ? `${plate.name}, as sliced` : "The slicer's plate image",
     })
   }
   media.attachments.forEach((attachment, index) => {
@@ -151,6 +154,11 @@ function PrintView({ print, reload }: { print: PrintDetail; reload: () => void }
           {print.slug !== null ? (
             <Link to={modelPath(print.slug)} className="text-muted hover:text-ink">
               {print.slug}
+            </Link>
+          ) : print.library_file_id !== null ? (
+            // #1755 — the file by its name, linking to every print of it.
+            <Link to={libraryPrintsPath(print.library_file_id)} className="text-muted hover:text-ink">
+              {print.library_file_name ?? 'Bambuddy library file'}
             </Link>
           ) : (
             <span className="text-muted">Bambuddy library file</span>
@@ -247,31 +255,36 @@ function GallerySection({ print }: { print: PrintDetail }) {
   )
 }
 
-/** ScadBuddy's own render of the output, beside the photos for comparison. */
+/**
+ * ScadBuddy's view of what was printed, beside the photos for comparison: the output's
+ * render, or the library file's plate, read from its 3MF as a print of it reads it (#1753).
+ */
 function RenderSection({ print }: { print: PrintDetail }) {
   const glb = print.files.find((file) => file.kind === 'preview_glb')
   const output = useAsync(
     async () => (glb && print.output_id ? await api.getOutput(print.output_id).catch(() => null) : null),
     [print.output_id, glb?.url],
   )
-  const job = useMemo<Job | undefined>(
-    () =>
-      glb && print.output_id !== null && print.slug !== null
-        ? {
-            id: print.output_id,
-            slug: print.slug,
-            status: 'done',
-            created_at: output.data?.created_at ?? '',
-            preview_url: glb.url,
-            bbox_mm: output.data?.bbox_mm ?? null,
-            colors: output.data?.colors ?? null,
-          }
-        : undefined,
-    [glb, print.output_id, print.slug, output.data],
-  )
+  const job = useMemo<Job | undefined>(() => {
+    const subject =
+      print.output_id !== null && print.slug !== null
+        ? { id: print.output_id, slug: print.slug }
+        : print.library_file_id !== null
+          ? { id: `library-${print.library_file_id}`, slug: '' }
+          : null
+    if (!glb || !subject) return undefined
+    return {
+      ...subject,
+      status: 'done',
+      created_at: output.data?.created_at ?? '',
+      preview_url: glb.url,
+      bbox_mm: output.data?.bbox_mm ?? null,
+      colors: output.data?.colors ?? null,
+    }
+  }, [glb, print.output_id, print.slug, print.library_file_id, output.data])
   if (!glb || !job) return null
   return (
-    <Section title="ScadBuddy render">
+    <Section title={print.output_id !== null ? 'ScadBuddy render' : 'Library file'}>
       <div className="aspect-[4/3] overflow-hidden rounded-[4px]">
         {!output.loading && (
           <Suspense fallback={null}>

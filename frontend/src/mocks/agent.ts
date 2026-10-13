@@ -9,7 +9,9 @@
  * cites its sources and links the version it made, then an `outward` send that pauses
  * on `approval.required` and goes nowhere until the panel decides it (spec §8.2). A
  * first message that mentions a draft gets a question instead (#940): a draft to
- * approve, which waits on `question.asked` until the panel answers. The panel answers
+ * approve, which waits on `question.asked` until the panel answers; one that says "post a
+ * summary" posts a `done` summary, and one that says the tab dropped parks on an attention
+ * request (#815). The panel answers
  * both over HTTP (`POST /api/v1/ai/pending-input/{id}`, #815: `features/pendingInput.ts`
  * calls `respond` below); the socket's `approval.decision` and `question.answer` still
  * work, as the real agent's do. It also lists a session an external MCP agent owns, so the picker's
@@ -26,14 +28,25 @@ import type { RespondBody } from '../agent/respond'
 import {
   PROTOCOL_VERSION,
   type ClientMessage,
+  type Origin,
   type Owner,
+  type SentImage,
   type ServerEvent,
+  type SessionMode,
   type SessionStatus,
   type SessionSummary,
 } from '../agent/chat/protocol'
+import { takeAttachment } from './features/assistantAttachments'
+import { PREVIEW_IMAGE } from './features/assistantBlobs'
 
 type Body<E> = E extends ServerEvent ? Omit<E, 'v'> : never
 type EventBody = Body<ServerEvent>
+
+
+/** The previews of the uploads a message names (#1941), with their stored names; one the mock never took is left out. */
+function uploadedPreviews(refs: { id: string }[]): SentImage[] {
+  return refs.map((ref) => takeAttachment(ref.id)).filter((p): p is SentImage => p !== undefined)
+}
 
 export const BROWSER_USER: Owner = { kind: 'browser', id: 'browser', label: 'You' }
 export const DESKTOP_AGENT: Owner = { kind: 'bearer', id: 'token-desktop', label: 'Claude Desktop' }
@@ -45,16 +58,44 @@ export interface MockAgentOptions {
   stepMs?: number
   /** What a new chat may spend in all; each turn costs COST_PER_TURN. */
   budgetUsd?: number
+  /**
+   * Plan 5d — whether a durable session can start (default true). When not, a new chat
+   * that names no mode runs classic and says why, and one asking for durable is refused.
+   */
+  durableAvailable?: boolean
+  /**
+   * Plan 5d — the mode a chat that names none gets. Classic here (the agent's default is
+   * durable) because the mock's scripts are classic sessions: they fork, which a durable
+   * session refuses.
+   */
+  defaultMode?: SessionMode
 }
+
+/** Plan 5d — why the mock's default durable chat ran classic (agent manager.ts `startMode`). */
+export const MOCK_MODE_FALLBACK = 'no durable session worker (agent-durable) polls Temporal\'s "agent" queue'
 
 /** What one scripted turn costs. */
 export const COST_PER_TURN = 0.0184
 
 /** The session routes' side of the open mock agent (fork, raise), for the msw handlers. */
 export interface MockAgentSessions {
-  /** The new session's id and title, or an error to answer with. */
-  fork(sessionId: string): { id: string; title: string; budgetUsd: number; parentId: string } | { error: string; status: number }
+  /**
+   * The new session's id and title, or an error to answer with. `upTo` (#793) is a
+   * reply's message id: the fork keeps the conversation through it.
+   */
+  fork(sessionId: string, upTo?: string): { id: string; title: string; budgetUsd: number; parentId: string } | { error: string; status: number }
+  /** #795, #1885 — renames a session, marks it done or archives it, as agent `sessions/edits.ts` does; the owner only. */
+  update(
+    sessionId: string,
+    edit: { title?: string; done?: boolean; archived?: boolean },
+  ): { title: string; status: SessionStatus; costUsd: number; budgetUsd: number; parentId: string | null; archivedAt: string | null } | { error: string; status: number }
+  /** #1885 — the archived sessions, newest first, as `GET /api/v1/ai/sessions?archived=true` lists them. */
+  archived(): { id: string; title: string; origin: Origin; status: SessionStatus; parentId: string | null; costUsd: number; budgetUsd: number; archivedAt: string }[]
   raise(sessionId: string, addUsd: number): { costUsd: number; budgetUsd: number } | { error: string; status: number }
+  /** #1284 — for tests: the chat titled `title` is offered to `to`, as `sessions_handoff` would. */
+  offerChat(title: string, to: Owner, forMs?: number): void
+  /** #1284 — `DELETE /api/v1/ai/sessions/:id/handoff`: withdraws the offer, the owner only. */
+  cancelOffer(sessionId: string): { cancelled: boolean } | { error: string; status: number }
   /** Whether the agent knows this session (#931, the resources route answers 404 otherwise). */
   has(sessionId: string): boolean
   /**
@@ -87,6 +128,10 @@ interface MockSession extends SessionSummary {
   turns: number
   costUsd: number
   budgetUsd: number
+  /** #795 — the session it was forked from. */
+  parentId?: string
+  /** #1885 — when it was archived; the snapshot leaves it out, and a send is refused. */
+  archivedAt?: string
 }
 
 /** Splits text into stream-sized pieces, the way `text_delta`s arrive. */
@@ -96,7 +141,12 @@ function chunks(text: string, size = 14): string[] {
   return out
 }
 
-export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAgentOptions = {}): MockAgentTransport {
+export function createMockAgentTransport({
+  stepMs = 120,
+  budgetUsd = 1,
+  durableAvailable = true,
+  defaultMode = 'classic',
+}: MockAgentOptions = {}): MockAgentTransport {
   let handlers: TransportHandlers | null = null
   const sent: ClientMessage[] = []
   const sessions = new Map<string, MockSession>()
@@ -161,6 +211,7 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
 
   const firstTurn = (s: MockSession): Array<() => void> => {
     const writeId = nextId('tool')
+    const viewId = nextId('tool')
     const sendId = nextId('tool')
     const approvalId = nextId('approval')
     return [
@@ -177,6 +228,7 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
           name: 'mcp__scadbuddy__set_parameters',
           input: { slug: 'name-keychain', params: { text_size: 14 } },
           risk: 'write',
+          title: 'Set text_size → 14 mm',
         }),
       () =>
         emit({
@@ -194,6 +246,26 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
           ],
           version: { slug: 'name-keychain', revision: 'a1b2c3d' },
         }),
+      // #782: a call in a row with the last, whose result is an image.
+      () =>
+        emit({
+          type: 'tool.call',
+          sessionId: s.sessionId,
+          id: viewId,
+          name: 'mcp__scadbuddy__get_render_view',
+          input: { job_id: 'job-1', view: 'iso', size: 512 },
+          risk: 'read',
+          title: 'Look at the render (iso)',
+        }),
+      () =>
+        emit({
+          type: 'tool.result',
+          sessionId: s.sessionId,
+          id: viewId,
+          ok: true,
+          summary: '{"view":"iso","size":512}',
+          images: [PREVIEW_IMAGE],
+        }),
       ...say(s, 'It still fits the A1 mini plate. Sending it needs your go-ahead.'),
       () =>
         emit({
@@ -203,6 +275,7 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
           name: 'mcp__scadbuddy__print_output',
           input: { slug: 'name-keychain', project: 'Keychains', copies: 2 },
           risk: 'outward',
+          title: 'Print name-keychain × 2',
         }),
       () => {
         s.pending = { id: approvalId, toolCallId: sendId }
@@ -256,6 +329,73 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
         setStatus(s, 'waiting_input')
       },
       // Parked. Only a respond (or `question.answer`) moves the script on.
+    ]
+  }
+
+  /**
+   * #815: an attention request. A first message that says "post a summary" posts a `done`
+   * summary, which waits for nothing, and the turn ends; one that mentions the tab
+   * parks on a tab-disconnected card until the panel answers it.
+   */
+  const attentionTurn = (s: MockSession, done: boolean): Array<() => void> => {
+    const askId = nextId('tool')
+    const questionId = nextId('question')
+    const questions = [
+      done
+        ? {
+            question: 'Rendered the sign headlessly.',
+            header: 'Done',
+            multiSelect: false,
+            options: [
+              { label: 'Dismiss', description: '' },
+              { label: 'Got it', description: '' },
+            ],
+          }
+        : {
+            question: 'I need your ScadBuddy tab, but it is not connected.',
+            header: 'Tab disconnected',
+            multiSelect: false,
+            options: [
+              { label: "I'm back", description: '' },
+              { label: 'Carry on without the tab', description: '' },
+            ],
+          },
+    ]
+    return [
+      () =>
+        emit({
+          type: 'tool.call',
+          sessionId: s.sessionId,
+          id: askId,
+          name: 'mcp__scadbuddy_questions__request_user_attention',
+          input: { reason: done ? 'done' : 'tab_disconnected' },
+          risk: 'read',
+        }),
+      () => {
+        if (done) {
+          emit({
+            type: 'question.asked',
+            sessionId: s.sessionId,
+            id: questionId,
+            tool: askId,
+            questions,
+            attention: { reason: 'done', summary: '**What this turn changed**\n- nothing' },
+          })
+          emit({ type: 'tool.result', sessionId: s.sessionId, id: askId, ok: true, summary: 'posted' })
+          finish(s)
+          return
+        }
+        s.asking = { id: questionId, toolCallId: askId }
+        emit({
+          type: 'question.asked',
+          sessionId: s.sessionId,
+          id: questionId,
+          tool: askId,
+          questions,
+          attention: { reason: 'tab_disconnected', onTimeout: 'proceed', expiresAt: new Date(Date.now() + 300_000).toISOString() },
+        })
+        setStatus(s, 'waiting_input')
+      },
     ]
   }
 
@@ -338,6 +478,15 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
           emit({ type: 'error', sessionId: s.sessionId, code: 'busy', message: 'A turn is already running in this session.' })
           return
         }
+        if (s?.archivedAt) {
+          emit({
+            type: 'error',
+            sessionId: s.sessionId,
+            code: 'archived',
+            message: `session ${s.sessionId} is archived, so it is read-only; unarchive it to continue it, or fork it`,
+          })
+          return
+        }
         if (s && s.owner.kind !== 'browser') {
           emit({ type: 'error', sessionId: s.sessionId, code: 'not_owner', message: `${s.owner.label} controls this session. Take over first.` })
           return
@@ -357,7 +506,18 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
           return
         }
         const isNew = !s
+        if (s && msg.mode) {
+          emit({ type: 'error', sessionId: s.sessionId, code: 'invalid', message: `session ${s.sessionId} exists: its mode is set when it starts` })
+          return
+        }
+        if (!s && msg.mode === 'durable' && !durableAvailable) {
+          emit({ type: 'error', code: 'unavailable', message: `durable sessions cannot run now: ${MOCK_MODE_FALLBACK}` })
+          return
+        }
         if (!s) {
+          const asked = msg.mode ?? defaultMode
+          const fellBack = !msg.mode && asked === 'durable' && !durableAvailable
+          const mode = fellBack ? 'classic' : asked
           s = {
             sessionId: nextId('chat'),
             title: msg.text.slice(0, 40),
@@ -369,9 +529,19 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
             turns: 0,
             costUsd: 0,
             budgetUsd,
+            mode,
           }
           sessions.set(s.sessionId, s)
-          emit({ type: 'session.started', sessionId: s.sessionId, origin: 'chat', owner: BROWSER_USER, title: s.title, budgetUsd })
+          emit({
+            type: 'session.started',
+            sessionId: s.sessionId,
+            origin: 'chat',
+            owner: BROWSER_USER,
+            title: s.title,
+            budgetUsd,
+            mode,
+            ...(fellBack ? { modeFallback: MOCK_MODE_FALLBACK } : {}),
+          })
         }
         emit({
           type: 'user.turn',
@@ -379,11 +549,20 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
           turnId: nextId('turn'),
           text: msg.text,
           author: BROWSER_USER,
-          // #1866 — the agent keeps only the previews in the transcript.
-          ...(msg.images?.length ? { images: msg.images.map((image) => image.preview) } : {}),
+          // #1866, #1941 — the agent keeps only the uploads' previews in the transcript.
+          ...(msg.images?.length ? { images: uploadedPreviews(msg.images) } : {}),
         })
         setStatus(s, 'running')
-        play(s, isNew ? (/draft/i.test(msg.text) ? questionTurn(s) : firstTurn(s)) : followUp(s, msg.text))
+        play(
+          s,
+          !isNew
+            ? followUp(s, msg.text)
+            : /draft/i.test(msg.text)
+              ? questionTurn(s)
+              : /post a summary|tab dropped/i.test(msg.text)
+                ? attentionTurn(s, /post a summary/i.test(msg.text))
+                : firstTurn(s),
+        )
         return
       }
       case 'question.answer': {
@@ -433,10 +612,31 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
     }
   }
 
+  /** The session picker's list, as the agent's `sessions.snapshot` carries it. */
+  const snapshot = (): ServerEvent => ({
+    v: PROTOCOL_VERSION,
+    type: 'sessions.snapshot',
+    sessions: [...sessions.values()].filter((s) => !s.archivedAt).map(({ sessionId, title, origin, owner, status, parentId, costUsd, budgetUsd, mode, offer }) => ({
+      sessionId,
+      title,
+      origin,
+      owner,
+      status,
+      parentId: parentId ?? null,
+      updatedAt: new Date().toISOString(),
+      costUsd,
+      budgetUsd,
+      ...(mode ? { mode } : {}),
+      offer: offer ?? null,
+    })),
+  })
+
   const controls: MockAgentSessions = {
-    fork(sessionId) {
+    fork(sessionId, upTo) {
       const parent = sessions.get(sessionId)
       if (!parent) return { error: `no session ${sessionId}`, status: 404 }
+      const cut = upTo === undefined ? parent.log.length : parent.log.findIndex((e) => e.type === 'assistant.text.done' && e.messageId === upTo) + 1
+      if (cut === 0) return { error: `session ${sessionId} has no finished reply ${upTo} to fork from`, status: 400 }
       const child: MockSession = {
         sessionId: nextId('chat'),
         title: `${parent.title || 'session'} (fork)`,
@@ -448,18 +648,72 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
         turns: 0,
         costUsd: 0,
         budgetUsd,
+        parentId: parent.sessionId,
       }
       sessions.set(child.sessionId, child)
       const conversation = new Set(['user.turn', 'assistant.text.delta', 'assistant.text.done', 'tool.call', 'tool.result'])
       child.log.push(
         { v: PROTOCOL_VERSION, type: 'session.started', sessionId: child.sessionId, origin: child.origin, owner: BROWSER_USER, title: child.title, budgetUsd },
-        ...parent.log.filter((e) => conversation.has(e.type)).map((e) => ({ ...e, sessionId: child.sessionId }) as ServerEvent),
+        ...parent.log
+          .slice(0, cut)
+          .filter((e) => conversation.has(e.type))
+          .map((e) => ({ ...e, sessionId: child.sessionId }) as ServerEvent),
         { v: PROTOCOL_VERSION, type: 'session.status', sessionId: child.sessionId, status: 'idle' },
       )
+      // The real agent's socket re-reads the list every few seconds; the mock sends it now.
+      deliver(snapshot())
       return { id: child.sessionId, title: child.title, budgetUsd, parentId: parent.sessionId }
+    },
+    update(sessionId, edit) {
+      const s = sessions.get(sessionId)
+      if (!s) return { error: `no session ${sessionId}`, status: 404 }
+      if (s.owner.kind !== 'browser') return { error: `session ${sessionId} is controlled by ${s.owner.label}; take it over first`, status: 403 }
+      const running = s.status === 'running' || s.status === 'waiting_approval' || s.status === 'waiting_input'
+      if (edit.done && running) {
+        return { error: `session ${sessionId} is running a turn; Stop it first, then mark it done`, status: 409 }
+      }
+      if (edit.archived && !s.archivedAt && running) {
+        return { error: `session ${sessionId} is running a turn; Stop it first, then archive it`, status: 409 }
+      }
+      if (edit.title !== undefined) s.title = edit.title
+      if (edit.done && s.status !== 'done') setStatus(s, 'done')
+      if (edit.archived === true) s.archivedAt ??= new Date().toISOString()
+      if (edit.archived === false) delete s.archivedAt
+      deliver(snapshot())
+      return { title: s.title, status: s.status, costUsd: s.costUsd, budgetUsd: s.budgetUsd, parentId: s.parentId ?? null, archivedAt: s.archivedAt ?? null }
+    },
+    archived() {
+      return [...sessions.values()]
+        .filter((s): s is MockSession & { archivedAt: string } => !!s.archivedAt)
+        .sort((a, b) => b.archivedAt.localeCompare(a.archivedAt))
+        .map((s) => ({
+          id: s.sessionId,
+          title: s.title,
+          origin: s.origin,
+          status: s.status,
+          parentId: s.parentId ?? null,
+          costUsd: s.costUsd,
+          budgetUsd: s.budgetUsd,
+          archivedAt: s.archivedAt,
+        }))
     },
     has(sessionId) {
       return sessions.has(sessionId)
+    },
+    offerChat(title, to, forMs = 3_600_000) {
+      const s = [...sessions.values()].find((one) => one.title === title)
+      if (!s) throw new Error(`no chat titled ${title}`)
+      s.offer = { to, until: new Date(Date.now() + forMs).toISOString() }
+      deliver(snapshot())
+    },
+    cancelOffer(sessionId) {
+      const s = sessions.get(sessionId)
+      if (!s) return { error: `no session ${sessionId}`, status: 404 }
+      if (s.owner.kind !== 'browser') return { error: `only the owner of session ${sessionId} can cancel the offer`, status: 403 }
+      const cancelled = !!s.offer
+      delete s.offer
+      deliver(snapshot())
+      return { cancelled }
     },
     respond(requestId, body) {
       const [store, id] = requestId.split(/:(.*)/s)
@@ -497,17 +751,7 @@ export function createMockAgentTransport({ stepMs = 120, budgetUsd = 1 }: MockAg
       // In-process, so open at once (the real socket reports it when its handshake is done).
       h.onOpen?.()
       seedExternal()
-      deliver({
-        v: PROTOCOL_VERSION,
-        type: 'sessions.snapshot',
-        sessions: [...sessions.values()].map(({ sessionId, title, origin, owner, status }) => ({
-          sessionId,
-          title,
-          origin,
-          owner,
-          status,
-        })),
-      })
+      deliver(snapshot())
     },
     send(message) {
       sent.push(message)

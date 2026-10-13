@@ -1,6 +1,8 @@
 import {
   PROTOCOL_VERSION,
   clientMessage,
+  isDone,
+  isDoneSummary,
   parseClientMessage,
   parseServerEvent,
   type ServerEvent,
@@ -93,5 +95,17 @@ describe('client messages', () => {
     expect(
       parseClientMessage({ v: 1, type: 'user.message', text: '', context: { route: '/' } }).ok,
     ).toBe(false)
+  })
+})
+
+describe('the done-summary rule (#1383)', () => {
+  it('is reason `done` with no timer, on the socket and on the badge', () => {
+    expect(isDoneSummary('done', false)).toBe(true)
+    // An older replica's timed done row is an attention request its turn is parked on.
+    expect(isDoneSummary('done', true)).toBe(false)
+    expect(isDoneSummary('blocked', false)).toBe(false)
+    expect(isDone({ reason: 'done', summary: '- x' })).toBe(true)
+    expect(isDone({ reason: 'done', onTimeout: 'proceed', expiresAt: '2026-10-09T00:00:00Z' })).toBe(false)
+    expect(isDone(undefined)).toBe(false)
   })
 })

@@ -6,7 +6,8 @@
 #
 #   - no uncoloured geometry; exactly the expected colour parts
 #   - every colour rendered closed on its own (ScadBuddy's per-colour
-#     wrapper, spec §6.3) adds up to the whole: the bands do not overlap
+#     wrapper, spec §6.3) adds up to the whole: the bands do not overlap,
+#     and each is a 2-manifold, as its 3MF export needs (#1883)
 #   - each pixel colour's volume is (its pixel count) x pixel_size^2 x
 #     pixel_height, the counts read from the pattern strings in model.scad or
 #     decoded from the PNG itself: every band is its own part, and every
@@ -166,6 +167,21 @@ def stl_volume(path):
     n = struct.unpack("<I", data[80:84])[0]
     return sum(tetvol(*[struct.unpack("<3f", data[84 + 50 * k + 12 * j: 96 + 50 * k + 12 * j]) for j in (1, 2, 3)])
                for k in range(n))
+
+
+def stl_nonconforming_edges(path):
+    """Edges not on exactly two faces: a conforming-edge check. It counts a corner
+    two same-colour pixels meet at, whose edge sits on four faces, which an STL
+    holds but a 3MF part cannot (#1883). It also counts T-junctions, where a vertex
+    lies along another face's edge, so it is stricter than "closed"."""
+    data = open(path, "rb").read()
+    n = struct.unpack("<I", data[80:84])[0]
+    edges = Counter()
+    for k in range(n):
+        a, b, c = (struct.unpack("<3f", data[84 + 50 * k + 12 * j: 96 + 50 * k + 12 * j]) for j in (1, 2, 3))
+        for e in ((a, b), (b, c), (c, a)):
+            edges[frozenset(e)] += 1
+    return sum(1 for m in edges.values() if m != 2)
 
 
 def first_hit_up(tris, x, y):
@@ -364,6 +380,8 @@ for line in open(os.path.join(OUT, "cases.txt")):
         path = os.path.join(OUT, "%s@%s.stl" % (name, mats[i][1][1:]))
         if os.path.exists(path):
             vols[mats[i][1]] = stl_volume(path)
+            bad = stl_nonconforming_edges(path)
+            check(name, bad == 0, "%s is a closed 2-manifold: every edge on two faces (%d are not)" % (mats[i][1], bad))
     check(name, len(vols) == len(named), "each of the %d colours rendered closed on its own" % len(named))
     total = sum(vols.values())
     check(name, abs(total - whole) <= 1e-3 * whole,

@@ -3,10 +3,11 @@ import type * as Monaco from 'monaco-editor/editor/editor.api'
 import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 import type { Diagnostic } from '../api/types'
 import { connectLanguageServer } from '../lib/languageClient'
+import { LEAVE_HINT, letTabLeave } from '../lib/editorExit'
 import { definitionFile, definitionLabel, directoryOf, type DefinitionFile } from '../lib/lsp'
 import { MARKER_OWNER, toMarkers } from '../lib/markers'
 import { OPENSCAD_LANGUAGE_ID, monaco, setupMonaco } from '../lib/monaco'
-import { SCADBUDDY_DARK, SCADBUDDY_LIGHT } from '../lib/openscadLanguage'
+import { editorTheme } from '../lib/openscadLanguage'
 import { useLatest } from '../lib/useLatest'
 import { Button } from './ui/Button'
 
@@ -209,11 +210,6 @@ export function SourceEditor({
     setViewing(null)
   }
 
-  const dark =
-    typeof window.matchMedia === 'function'
-      ? window.matchMedia('(prefers-color-scheme: dark)').matches
-      : true
-
   const fileName = uri.slice(uri.lastIndexOf('/') + 1)
 
   return (
@@ -235,7 +231,7 @@ export function SourceEditor({
         <Editor
           path={shown?.uri ?? uri}
           language={OPENSCAD_LANGUAGE_ID}
-          theme={dark ? SCADBUDDY_DARK : SCADBUDDY_LIGHT}
+          theme={editorTheme()}
           // Held back while a definition is shown: the wrapper writes `value` into
           // whichever model the editor has, and that is not the model's source then.
           value={shown ? undefined : value}
@@ -265,32 +261,8 @@ export function SourceEditor({
                 element: () => instance.getDomNode(),
               }
             }
-            // #997 — Tab indents, so on its own it can never leave the editor (WCAG 2.1.2).
-            // Escape arms Monaco's tab-focus mode for the next key: Tab or Shift+Tab then
-            // moves focus on, and any other key, or leaving, puts Tab back to indenting.
-            // Only with no widget open and nothing selected: Escape still closes completion,
-            // find and the rest, collapses a selection and removes secondary cursors.
-            instance.addCommand(
-              monaco.KeyCode.Escape,
-              () => instance.updateOptions({ tabFocusMode: true }),
-              '!suggestWidgetVisible && !findWidgetVisible && !parameterHintsVisible && ' +
-                '!renameInputVisible && !referenceSearchVisible && !inSnippetMode && !editorHasMultipleSelections && ' +
-                '!editorHasSelection',
-            )
-            const passing = new Set([
-              monaco.KeyCode.Escape,
-              monaco.KeyCode.Tab,
-              monaco.KeyCode.Shift,
-              monaco.KeyCode.Ctrl,
-              monaco.KeyCode.Alt,
-              monaco.KeyCode.Meta,
-            ])
-            instance.onKeyDown((event) => {
-              if (!passing.has(event.keyCode)) instance.updateOptions({ tabFocusMode: false })
-            })
-            instance.onDidBlurEditorText(() => instance.updateOptions({ tabFocusMode: false }))
+            letTabLeave(instance, label)
             instance.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => latest.current.onSave?.())
-            instance.updateOptions({ ariaLabel: label })
             applyMarkers()
             setTextModel(instance.getModel())
             // Only the model's own source: a definition shown read-only has no session.
@@ -305,8 +277,9 @@ export function SourceEditor({
           loading={<span className="text-[13px] text-muted">Loading the editor</span>}
         />
       </div>
-      <p className="shrink-0 border-t border-line px-3 py-0.5 text-[11px] text-faint">
-        Esc, then Tab, to leave the editor
+      {/* Read as part of the editor's name (#1672), so hidden here from screen readers. */}
+      <p aria-hidden="true" className="shrink-0 border-t border-line px-3 py-0.5 text-[11px] text-faint">
+        {LEAVE_HINT}
       </p>
     </div>
   )

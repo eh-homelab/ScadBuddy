@@ -68,7 +68,10 @@ class AnalysisSummary(BaseModel):
 
 class AnalysisReport(BaseModel):
     output_id: str | None
-    slug: str
+    #: The template judged; ``None`` for a library file (``library_file_id``).
+    slug: str | None
+    #: The Bambuddy library file judged, when that is what prints (#1753).
+    library_file_id: int | None
     detail: Detail
     summary: AnalysisSummary
     diagnostics: list[AnalyzerDiagnostic]
@@ -77,8 +80,8 @@ class AnalysisReport(BaseModel):
     inputs: list[InputStatus]
     #: The scopes a decision about this print can be stored at, broadest first.
     scopes: list[ScopeRef]
-    #: False when no decision store could be read (no database, #401); then no
-    #: decision was applied and ``decisions_reason`` says why.
+    #: False when the decision store could not be read; then no decision was
+    #: applied and ``decisions_reason`` says why.
     decisions_available: bool = True
     decisions_reason: str | None = None
     #: The presets the resolver would derive from the request's choices.
@@ -256,6 +259,7 @@ def build_report(
     return AnalysisReport(
         output_id=context.output.id if context.output else None,
         slug=context.slug,
+        library_file_id=context.library_file_id,
         detail=detail,
         summary=summary,
         diagnostics=diagnostics,

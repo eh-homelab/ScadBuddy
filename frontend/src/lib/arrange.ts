@@ -1,5 +1,6 @@
 import { api, ApiError, NEEDS_BACKFILL } from '../api/client'
 import type { ArrangeRequest, LibraryEntry, NeedsBackfillProblem, Output } from '../api/types'
+import { followUntil, JobStillRunning, waitForJob } from './waitForJob'
 
 export type ArrangeGoal = NonNullable<ArrangeRequest['goal']>
 
@@ -36,6 +37,38 @@ export interface Arranged {
   plates: number
   /** #902 — which outputs could not be re-rendered first, and why: left out of the arrange. */
   skipped?: string
+  /**
+   * #2284 — the name of the model whose History the result is filed in. Absent when the
+   * model list could not be read: then no name is known, and a slug is not one (#2541).
+   */
+  filedUnder?: string
+}
+
+/**
+ * #2284 — where an arrange's result went: "Saved as X in Lemon's history." Without the
+ * model's name it never falls back to the slug (#2541): it is "this model's" on `here`,
+ * the History page of the model it was filed under, and "its model's" anywhere else,
+ * where an "Open in History" link beside it names the place.
+ */
+export function savedNote(arranged: Arranged, here?: string): string {
+  const owner = arranged.filedUnder
+    ? `${arranged.filedUnder}'s`
+    : arranged.output.slug === here
+      ? "this model's"
+      : "its model's"
+  const model = `${owner} history`
+  return arranged.output.name ? `Saved as ${arranged.output.name} in ${model}.` : `Saved in ${model}.`
+}
+
+/** #2284 — an arranged output's `arranged_from` counted, files too: "3 outputs and 1 library file". */
+export function arrangedSources(sources: string[]): string {
+  const files = sources.filter((source) => source.startsWith('library:')).length
+  const outputs = sources.length - files
+  const counted = [
+    ...(outputs > 0 ? [`${outputs} ${outputs === 1 ? 'output' : 'outputs'}`] : []),
+    ...(files > 0 ? [`${files} ${files === 1 ? 'library file' : 'library files'}`] : []),
+  ]
+  return counted.join(' and ')
 }
 
 const ARRANGED = ' (arranged)'
@@ -54,44 +87,54 @@ export function arrangedNote(plates: number): string {
  * spec 2026-09-27 §7 — lay objects out again, wait for the job, save its output. The
  * plate count is the job's: `plates` lists every plate of the new file and is empty
  * when there is only one. A failed or cancelled job rejects with the job's own error.
- * An aborted `signal` stops the wait and rejects with its reason: nothing is saved
- * after the caller has gone (a closed dialog), so a job is saved once.
+ * The job is followed over the realtime socket (#1909); `pollMs` is the read interval
+ * only while the socket is unavailable. An aborted `signal` stops the wait and rejects
+ * with its reason: nothing is saved after the caller has gone (a closed dialog), so a
+ * job is saved once.
  */
 export async function runArrange(
   slug: string,
   body: ArrangeRequest,
-  opts: { pollMs?: number; onProgress?: (message: string) => void; signal?: AbortSignal } = {},
+  opts: {
+    pollMs?: number
+    onProgress?: (message: string) => void
+    signal?: AbortSignal
+    /** The save's key: a "Try again" passes the failed attempt's, so it saves one output. */
+    saveKey?: string
+    /**
+     * A job this arrange already finished: a "Try again" after only its save failed
+     * saves that job again, under the same key, rather than arranging anew (a new job
+     * is a new save, which the key could not tell from the first).
+     */
+    arranged?: ArrangedJob
+    /** Called once the arrange's job is done, before it is saved. */
+    onArranged?: (job: ArrangedJob) => void
+  } = {},
 ): Promise<Arranged> {
   const { signal } = opts
-  const started = await api.arrangeOutputs(body)
-  const pollMs = opts.pollMs ?? 1000
-  for (;;) {
+  let done = opts.arranged
+  if (!done) {
+    const started = await api.arrangeOutputs(body)
     signal?.throwIfAborted()
-    const job = await api.getJob(started.id)
-    signal?.throwIfAborted()
-    if (job.status === 'done') {
-      const output = await api.createOutput(slug, job.id, body.name ?? undefined)
-      return { output, plates: Math.max(1, (job.plates ?? []).length) }
-    }
+    const job = await waitForJob(started.id, {
+      pollMs: opts.pollMs ?? 1000,
+      signal,
+      onJob: (read) => opts.onProgress?.(read.status === 'running' ? 'Arranging…' : 'Waiting for a worker…'),
+    })
     if (job.status === 'failed' || job.status === 'cancelled') {
       throw new Error(job.error ?? `The arrange was ${job.status}.`)
     }
-    opts.onProgress?.(job.status === 'running' ? 'Arranging…' : 'Waiting for a worker…')
-    await pause(pollMs, signal)
+    done = { jobId: job.id, plates: Math.max(1, (job.plates ?? []).length) }
+    opts.onArranged?.(done)
   }
+  const output = await api.createOutput(slug, done.jobId, body.name ?? undefined, undefined, undefined, opts.saveKey)
+  return { output, plates: done.plates }
 }
 
-/** `ms`, or less when `signal` aborts; the caller checks the signal after. */
-function pause(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise<void>((resolve) => {
-    const timer = setTimeout(done, ms)
-    function done() {
-      clearTimeout(timer)
-      signal?.removeEventListener('abort', done)
-      resolve()
-    }
-    signal?.addEventListener('abort', done)
-  })
+/** An arrange's finished job, as its save needs it. */
+export interface ArrangedJob {
+  jobId: string
+  plates: number
 }
 
 /** An output as a caller may know it: its id, and its name when it has one. */
@@ -165,12 +208,9 @@ const BACKFILL_POLL_MS = 500
  */
 export const BACKFILL_WAIT_MS = 5 * 60_000
 
-/** The wait's limit passed with the re-render still going. */
-class StillRunning extends Error {}
-
 /**
- * #902 — re-render each output saved before Arrange, all at once: queue it, read its
- * job until it ends, then read the output until the server has attached what the
+ * #902 — re-render each output saved before Arrange, all at once: queue it, follow its
+ * job until it ends (over the socket, #1909), then follow the output (`output.updated`, #1970) until the server has attached what the
  * render recorded (`backfill` gone) or says why not (`backfill.error`). An aborted
  * `signal` stops every wait and rejects; the server still finishes the re-renders.
  */
@@ -186,10 +226,6 @@ export async function backfillOutputs(
   const { signal } = opts
   const pollMs = opts.pollMs ?? BACKFILL_POLL_MS
   const deadline = Date.now() + (opts.waitMs ?? BACKFILL_WAIT_MS)
-  const wait = async () => {
-    if (Date.now() >= deadline) throw new StillRunning('still re-rendering')
-    await pause(pollMs, signal)
-  }
   const one = async (output: OutputRef): Promise<Output> => {
     const say = (message: string) => opts.onProgress?.(output, message)
     say('Queuing a re-render…')
@@ -204,28 +240,34 @@ export async function backfillOutputs(
       }
       throw cause
     }
-    for (;;) {
-      signal?.throwIfAborted()
-      if (job.status === 'failed' || job.status === 'cancelled') {
-        throw new Error(job.error ?? `the re-render was ${job.status}`)
-      }
-      if (job.status === 'done') break
+    signal?.throwIfAborted()
+    if (job.status !== 'done' && job.status !== 'failed' && job.status !== 'cancelled') {
       say(job.status === 'running' ? 'Re-rendering…' : 'Waiting for a worker…')
-      await wait()
-      signal?.throwIfAborted()
-      job = await api.getJob(job.id)
+      // #1909 — over the socket; `pollMs` only while it is unavailable.
+      job = await waitForJob(job.id, {
+        pollMs,
+        waitMs: Math.max(0, deadline - Date.now()),
+        signal,
+        onJob: (read) => say(read.status === 'running' ? 'Re-rendering…' : 'Waiting for a worker…'),
+      })
+    }
+    if (job.status === 'failed' || job.status === 'cancelled') {
+      throw new Error(job.error ?? `the re-render was ${job.status}`)
     }
     say('Recording its layout…')
-    for (;;) {
-      signal?.throwIfAborted()
-      const read = await api.getOutput(output.id)
-      if (read.backfill?.error) throw new Error(read.backfill.error)
-      if (!read.backfill) {
-        if (needsBackfill(read)) throw new Error('the re-render recorded no objects')
-        return read
-      }
-      await wait()
-    }
+    // #1970 — the server announces the attach (or why not) as `output.updated`.
+    const read = await followUntil('outputs', {
+      read: () => api.getOutput(output.id),
+      done: (o) => !o.backfill || !!o.backfill.error,
+      relevant: (event) => event.data['output_id'] === output.id,
+      stillRunning: () => new JobStillRunning(job.id),
+      pollMs,
+      waitMs: Math.max(0, deadline - Date.now()),
+      signal,
+    })
+    if (read.backfill?.error) throw new Error(read.backfill.error)
+    if (needsBackfill(read)) throw new Error('the re-render recorded no objects')
+    return read
   }
   const settled = await Promise.allSettled(outputs.map(one))
   signal?.throwIfAborted()
@@ -236,7 +278,7 @@ export async function backfillOutputs(
     else {
       const cause = outcome.reason as unknown
       const error = cause instanceof ApiError ? cause.detail : (cause as Error).message
-      result.failed.push(cause instanceof StillRunning ? { output, error, running: true } : { output, error })
+      result.failed.push(cause instanceof JobStillRunning ? { output, error, running: true } : { output, error })
     }
   })
   return result

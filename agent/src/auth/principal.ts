@@ -51,8 +51,9 @@ export function hasTier(principal: Principal, tier: Tier): boolean {
  * its outward calls still park for its own approval (harness/permissions.ts).
  * Any other owner gets `read` only: an `Owner` does not carry the tiers of
  * the token or flow behind it. A turn sent through the `sessions_*` tools
- * passes its sender's tiers in (tools/harness.ts `turnPrincipal`, #300);
- * flows (#284, #297) will have to do the same before their sessions may write.
+ * passes its sender's tiers in (tools/harness.ts `turnPrincipal`, #300): a
+ * durable turn records them (`ai_sessions.turn_tiers`), and a flow's token
+ * starter runs with its token's live tiers (temporal/toolActivities.ts, #2320).
  */
 export function harnessPrincipal(owner: Owner): Principal {
   return { id: owner.id, kind: owner.kind, tiers: owner.kind === 'browser' ? [...TIERS] : ['read'] }

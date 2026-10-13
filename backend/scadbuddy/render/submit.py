@@ -593,14 +593,18 @@ class RenderService:
         the run is shared, so it is not cancelled (another caller may still be waiting
         on it, with time left) and bounds itself instead: its memo'd `preview_timeout`
         is ``timeout`` plus the margin. The timeout counts from the start, so it
-        includes any wait for a free worker. On the bambuddy store the worker renders
-        the snapshot of the slug's last commit, which it may first have to bring in:
-        the caller then waits `PREVIEW_TRANSFER` longer. There the run's id names the
+        includes the snapshot's `pin` (#1430) and any wait for a free worker; a pin
+        that spends all of it raises `TimeoutError` before any run starts. On the
+        bambuddy store the worker renders the snapshot of the slug's last commit, which
+        it may first have to bring in: the caller then waits `PREVIEW_TRANSFER` longer.
+        There the run's id names the
         revision too, so a join never spans two commits: a newer commit's call starts its
         own run while an older one finishes, and the scheduler (which stores the image
         under the source key it read first) never gets an older commit's image. On the
         local store the id names the source key the same way."""
         revision: str | None = None
+        loop = asyncio.get_running_loop()
+        started = loop.time()
         wait = timeout
         if self.snapshots is not None:
             # The bambuddy store: the worker has no volume, so it renders the snapshot
@@ -620,6 +624,10 @@ class RenderService:
             # of the source before it (#903).
             key = await asyncio.to_thread(source_key, self.paths, slug)
             run_id = f"preview-{slug}" if key is None else f"preview-{slug}-{key[:12]}"
+        # What the pin took comes off the wait, so the caller's total is ``timeout``.
+        wait -= loop.time() - started
+        if wait <= 0:
+            raise TimeoutError(f"bringing in {slug}'s snapshot took the whole preview timeout")
         preview_timeout = timeout + ACTIVITY_TIMEOUT_MARGIN
         handle = await self.client.start_workflow(
             RenderPreview.run,

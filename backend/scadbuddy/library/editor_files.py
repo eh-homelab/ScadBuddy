@@ -23,6 +23,7 @@ is refused rather than read.
 
 from __future__ import annotations
 
+import bisect
 import os
 import stat
 from pathlib import Path
@@ -106,6 +107,41 @@ def read_file(root: Path, relative: str, *, limit: int) -> bytes:
     if len(data) > limit:
         raise FileTooLargeError(relative)
     return data
+
+
+def list_files(root: Path, *, limit: int) -> tuple[list[tuple[str, int]], bool]:
+    """Every regular file under ``root`` that :func:`read_file` could serve, as its
+    relative ``/`` path and size in bytes, in path order; at most ``limit`` of them,
+    with True when more were left out (#1067).
+
+    A dot-file or dot-directory is neither listed nor walked into, and neither is a
+    symlink, so nothing listed is outside the root or on a hidden path. A cut listing
+    is the first ``limit`` paths of the whole tree in path order (#2237): the walk
+    visits every directory, since os.walk lists a directory's files before its
+    subdirectories' and a prefix of the walk is not a prefix of the sorted paths, but
+    keeps only the ``limit + 1`` smallest paths seen, so memory stays bounded.
+    """
+    base = root.resolve(strict=True)
+    found: list[tuple[str, int]] = []
+    for directory, dirnames, filenames in os.walk(base):
+        # os.walk does not descend a symlinked directory unless asked to.
+        dirnames[:] = sorted(name for name in dirnames if not name.startswith("."))
+        for name in sorted(filenames):
+            if name.startswith("."):
+                continue
+            path = Path(directory) / name
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                continue
+            relative = path.relative_to(base).as_posix()
+            if not stat.S_ISREG(info.st_mode) or len(relative) > MAX_PATH_LENGTH:
+                continue
+            if len(found) > limit and relative >= found[-1][0]:
+                continue
+            bisect.insort(found, (relative, info.st_size))
+            del found[limit + 1 :]
+    return found[:limit], len(found) > limit
 
 
 def opened_path(fd: int) -> Path | None:

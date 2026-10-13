@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Iterator
 from typing import Any
 
 import httpx
@@ -18,16 +19,27 @@ from fastapi.testclient import TestClient
 from scadbuddy.api import print_history
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.params import schema_of
+from scadbuddy.bambuddy import linking
 from scadbuddy.bambuddy.models import ArchiveDetail, ArchiveRun
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore, PrintSend
 from scadbuddy.bambuddy.subject import PrintSubject
+from scadbuddy.bambuddy.uploads import LibraryCopy, SlicedCopy
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.library.outputs import MODEL_NAME
 from tests.api.test_send import API, BASE, configure, make_output
 from tests.bambuddy.conftest import recording
 
 pytestmark = pytest.mark.requires_postgres
 
 OTHER_SLUG = "other"
+
+
+@pytest.fixture(autouse=True)
+def _no_recent_library_scans() -> Iterator[None]:
+    """Each test starts with no library file scanned by hash lately (#1755)."""
+    linking._last_library_scan.clear()
+    yield
+    linking._last_library_scan.clear()
 
 
 def state(client: TestClient) -> AppState:
@@ -88,6 +100,8 @@ def test_a_linked_print_is_listed_with_its_summary(client: TestClient, model: st
         "output_id": output_id,
         "slug": model,
         "library_file_id": None,
+        "library_file_name": None,
+        "queue_item_id": None,
         "output_name": "Elan",
         "status": "completed",
         "printer_id": 1,
@@ -432,8 +446,9 @@ def test_the_detail_joins_provenance_files_media_and_outcome(
         "timestamp": frames["timestamps"][0],
         "data_url": "data:image/jpeg;base64," + frames["thumbnails"][0],
     }
+    # #2055: named by what the output's plate holds, as the print dialog names it.
     assert media["plate_thumbnails"] == [
-        {"index": 1, "url": "/api/v1/prints/35/plates/1/thumbnail"}
+        {"index": 1, "url": "/api/v1/prints/35/plates/1/thumbnail", "name": "demo"}
     ]
     assert media["attachments"] == []
 
@@ -688,3 +703,282 @@ def test_the_list_answers_when_linking_a_library_print_fails_on_the_database(
 
     assert listed.status_code == 200, listed.text
     assert listed.json()["items"] == []
+
+
+def link_library(client: TestClient, file_id: int, archive_id: int) -> None:
+    asyncio.run(
+        state(client).print_links.record(
+            PrintSubject.library(file_id),
+            PrintLink(archive_id=archive_id, matched_by="queue_item", plate_id=2),
+        )
+    )
+
+
+def library_file_route(
+    file_id: int, *, deleted: bool = False, filename: str = "bracket.3mf"
+) -> respx.Route:
+    # The detail names the printed plate from the file's plates (#2055); none by default.
+    respx.get(f"{API}/library/files/{file_id}/plates").mock(
+        return_value=(
+            httpx.Response(404, json={"detail": "File not found"})
+            if deleted
+            else httpx.Response(200, json={"file_id": file_id, "plates": []})
+        )
+    )
+    return respx.get(f"{API}/library/files/{file_id}").mock(
+        return_value=(
+            httpx.Response(404, json={"detail": "File not found"})
+            if deleted
+            else httpx.Response(
+                200,
+                json={
+                    "id": file_id,
+                    "filename": filename,
+                    "file_type": "3mf",
+                    "file_size": 1234,
+                },
+            )
+        )
+    )
+
+
+@respx.mock
+def test_a_library_prints_files_name_the_file_and_its_preview(client: TestClient) -> None:
+    """#1753 (H5, F8): the file printed, and a preview of the plate printed, as an
+    output's print lists its 3MF and preview."""
+    configure(client)
+    link_library(client, 89, 90)
+    mock_archive(90, plate_id=2, timelapse_path=None)
+    library_file_route(89)
+
+    detail = client.get("/api/v1/prints/90")
+
+    assert detail.status_code == 200, detail.text
+    files = {file["kind"]: file for file in detail.json()["files"]}
+    assert files["library_file"] == {
+        "kind": "library_file",
+        "name": "bracket.3mf",
+        "size": 1234,
+        "url": "/api/v1/print/library/89/file",
+    }
+    assert files["preview_glb"] == {
+        "kind": "preview_glb",
+        "name": "bracket.glb",
+        "size": None,
+        "url": "/api/v1/print/library/89/preview.glb?plate=2",
+    }
+    assert {"sliced", "source"} <= files.keys()
+
+
+@respx.mock
+def test_a_library_prints_plate_is_named_by_what_it_holds(client: TestClient) -> None:
+    """#2055: the plate the archive printed, named from the library file's plates."""
+    configure(client)
+    link_library(client, 89, 90)
+    mock_archive(90, plate_id=2, timelapse_path=None)
+    library_file_route(89)
+    respx.get(f"{API}/library/files/89/plates").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "file_id": 89,
+                "filename": "bracket.3mf",
+                "plates": [
+                    {"index": 1, "name": "Base", "has_thumbnail": True},
+                    {"index": 2, "name": "Lid", "has_thumbnail": True},
+                ],
+            },
+        )
+    )
+
+    detail = client.get("/api/v1/prints/90")
+
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["media"]["plate_thumbnails"] == [
+        {"index": 2, "url": "/api/v1/prints/90/plates/2/thumbnail", "name": "Lid"}
+    ]
+
+
+@pytest.mark.parametrize("damage", ["deleted", "not-a-zip"])
+@respx.mock
+def test_an_output_prints_plates_that_cannot_be_read_leave_the_number(
+    client: TestClient, model: str, damage: str
+) -> None:
+    """#2097: an output whose model.3mf is gone or damaged still answers, unnamed."""
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 35, printer_id=1, plate_id=1)
+    mock_archive(35)
+    mock_detail_reads()
+    model_3mf = state(client).outputs.directory(output_id) / MODEL_NAME
+    if damage == "deleted":
+        model_3mf.unlink()
+    else:
+        model_3mf.write_bytes(b"not a zip")
+
+    detail = client.get("/api/v1/prints/35")
+
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["media"]["plate_thumbnails"] == [
+        {"index": 1, "url": "/api/v1/prints/35/plates/1/thumbnail", "name": None}
+    ]
+
+
+@respx.mock
+def test_a_library_prints_plates_that_cannot_be_read_leave_the_number(
+    client: TestClient,
+) -> None:
+    """#2055: the name is advisory; the detail still answers, unnamed."""
+    configure(client)
+    link_library(client, 89, 90)
+    mock_archive(90, plate_id=2, timelapse_path=None)
+    library_file_route(89)
+    respx.get(f"{API}/library/files/89/plates").mock(return_value=httpx.Response(500))
+
+    detail = client.get("/api/v1/prints/90")
+
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["media"]["plate_thumbnails"] == [
+        {"index": 2, "url": "/api/v1/prints/90/plates/2/thumbnail", "name": None}
+    ]
+
+
+@respx.mock
+def test_a_library_print_whose_file_is_gone_lists_bambuddys_files_alone(
+    client: TestClient,
+) -> None:
+    configure(client)
+    link_library(client, 89, 90)
+    mock_archive(90, timelapse_path=None)
+    library_file_route(89, deleted=True)
+
+    detail = client.get("/api/v1/prints/90")
+
+    assert detail.status_code == 200, detail.text
+    assert {file["kind"] for file in detail.json()["files"]} == {"sliced", "source"}
+
+
+@respx.mock
+def test_a_library_print_whose_file_cannot_be_read_still_has_its_detail(
+    client: TestClient,
+) -> None:
+    """#1755: the print is Bambuddy's archive; the file only names it and lists its files."""
+    configure(client)
+    link_library(client, 89, 90)
+    mock_archive(90, timelapse_path=None)
+    respx.get(f"{API}/library/files/89").mock(return_value=httpx.Response(500))
+    respx.get(f"{API}/library/files/89/plates").mock(return_value=httpx.Response(500))
+
+    detail = client.get("/api/v1/prints/90")
+
+    assert detail.status_code == 200, detail.text
+    assert detail.json()["library_file_name"] is None
+    assert {file["kind"] for file in detail.json()["files"]} == {"sliced", "source"}
+
+
+# --- one library file's history (#1755) ------------------------------------------
+
+
+@respx.mock
+def test_the_list_filters_by_library_file_and_names_each_print_by_its_file(
+    client: TestClient, model: str
+) -> None:
+    """H4 and F9: one file's prints, each named by the file as Bambuddy has it now; an
+    output's print names no file."""
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 35)
+    link_library(client, 89, 90)
+    link_library(client, 77, 91)
+    mock_archive(35)
+    mock_archive(90)
+    unasked = mock_archive(91)
+    library_file_route(89)
+    library_file_route(77, filename="hook.stl")
+
+    listed = client.get("/api/v1/prints", params={"library_file_id": 89})
+
+    assert listed.status_code == 200, listed.text
+    [item] = listed.json()["items"]
+    assert (item["archive_id"], item["library_file_id"]) == (90, 89)
+    assert item["library_file_name"] == "bracket.3mf"
+    assert not unasked.called, "another file's prints are not read from Bambuddy"
+    everything = client.get("/api/v1/prints").json()["items"]
+    names = {item["archive_id"]: item["library_file_name"] for item in everything}
+    assert names == {91: "hook.stl", 90: "bracket.3mf", 35: None}
+
+
+@respx.mock
+def test_a_library_print_whose_file_is_gone_or_unreadable_is_still_listed(
+    client: TestClient,
+) -> None:
+    """The name is a label: a file deleted in Bambuddy, or a read that fails, leaves it
+    out rather than the print."""
+    configure(client)
+    link_library(client, 89, 90)
+    link_library(client, 77, 91)
+    mock_archive(90)
+    mock_archive(91)
+    library_file_route(89, deleted=True)
+    respx.get(f"{API}/library/files/77").mock(return_value=httpx.Response(500))
+
+    listed = client.get("/api/v1/prints")
+
+    assert listed.status_code == 200, listed.text
+    assert [(item["archive_id"], item["library_file_name"]) for item in listed.json()["items"]] == [
+        (91, None),
+        (90, None),
+    ]
+
+
+@respx.mock
+def test_the_text_filter_matches_a_library_prints_file_name(client: TestClient) -> None:
+    configure(client)
+    link_library(client, 89, 90)
+    link_library(client, 77, 91)
+    mock_archive(90, print_name="plate 1")
+    mock_archive(91, print_name="plate 1")
+    library_file_route(89)
+    library_file_route(77, filename="hook.stl")
+
+    items = client.get("/api/v1/prints", params={"q": "HOOK"}).json()["items"]
+
+    assert [item["archive_id"] for item in items] == [91]
+
+
+def test_a_template_and_a_library_file_cannot_both_filter(client: TestClient, model: str) -> None:
+    configure(client)
+
+    response = client.get("/api/v1/prints", params={"slug": model, "library_file_id": 89})
+
+    assert response.status_code == 422, response.text
+
+
+@respx.mock
+def test_one_library_files_history_finds_its_reprints_made_inside_bambuddy(
+    client: TestClient,
+) -> None:
+    """H3: a reprint of the file's slice from Bambuddy's own library has no queue item
+    of ScadBuddy's; its hash names it, as an output's reprint is found."""
+    configure(client)
+    uploads = state(client).uploads
+    subject = PrintSubject.library(89).run_subject
+    asyncio.run(uploads.record(subject, LibraryCopy(id=12, folder_id=None, target_key="H2C")))
+    asyncio.run(uploads.record_sliced(subject, 12, SlicedCopy(id=81)))
+    asyncio.run(uploads.record_slice_hash(subject, 81, "f0" * 32))
+    respx.get(f"{API}/archives/").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {"id": 92, "printer_id": 1, "status": "completed", "content_hash": "f0" * 32},
+                {"id": 93, "printer_id": 1, "status": "completed", "content_hash": "other"},
+            ],
+        )
+    )
+    mock_archive(92)
+    library_file_route(89)
+
+    listed = client.get("/api/v1/prints", params={"library_file_id": 89})
+
+    assert listed.status_code == 200, listed.text
+    assert [item["archive_id"] for item in listed.json()["items"]] == [92]

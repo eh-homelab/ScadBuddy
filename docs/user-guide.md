@@ -1,13 +1,14 @@
 # ScadBuddy user guide
 
 Covers writing models for ScadBuddy, the multi-colour rules, connecting it to
-Bambuddy, and the day-to-day features. For installing it, see the
+Bambuddy, the day-to-day features, and the AI assistant. For installing it, see the
 [README](../README.md).
 
 - [Writing a model](#writing-a-model)
 - [Multi-colour output](#multi-colour-output)
 - [Connecting Bambuddy](#connecting-bambuddy)
 - [Using ScadBuddy](#using-scadbuddy)
+- [Assistant](#assistant)
 
 ## Writing a model
 
@@ -174,19 +175,27 @@ stored on ScadBuddy's server and is never sent to the browser.
    | **Manage Queue** | queueing prints from the print picker |
    | **Read Status** | listing printers, spools and AMS slots for the print picker and **Test connection** |
    | **Manage Projects** | only if you use the project picker |
+   | **Manage Archives** | uploading and deleting print photos, and pulling a timelapse off the printer |
+   | **Manage Inventory** | only to record which spool is in a tray, when the print dialog asks and you answer yes |
 
-2. Open **Settings** in ScadBuddy. Enter the Bambuddy URL and the key, then press
-   **Test connection**.
-3. Under **Where files go**, choose the library folder and the printer. **Send to
-   Bambuddy** lays its upload out for that printer's plate, and the print picker opens
-   on it.
-4. Under **Bambuddy sidebar**, enter ScadBuddy's own URL (the address Bambuddy
-   should link to; ScadBuddy can't work it out from behind a proxy). Then press
-   **Add to Bambuddy sidebar**. This creates an External Link called "ScadBuddy"
-   with "open in new tab" turned off, so ScadBuddy opens inside Bambuddy in a
-   sandboxed frame. Pressing it again updates the existing entry instead of adding
-   a second one.
-5. Press **Save changes**.
+2. Open **Settings** in ScadBuddy. Under **Connection**, enter the **Bambuddy URL**
+   and the **API key**, then press **Test connection**.
+3. Also under **Connection**, enter **ScadBuddy's own URL** (the address Bambuddy
+   should link to; ScadBuddy can't work it out from behind a proxy) and press the
+   section's **Save**. Then press **Add to Bambuddy sidebar**. This creates an External
+   Link called "ScadBuddy" with "open in new tab" turned off, so ScadBuddy opens inside
+   Bambuddy in a sandboxed frame. Pressing it again updates the existing entry instead
+   of adding a second one.
+4. Under **Printing defaults**, choose the **Printer**. **Send to Bambuddy** lays its
+   upload out for that printer's plate, and the print picker opens on it.
+5. Under **Projects & files**, choose the **Inbox folder, for sends without a
+   project**, where a 3MF sent without a project goes. **Default project** is where
+   the print dialog's project picker opens for a library file, and the project a send
+   without one is filed under. The Customize page does not use it: it opens on the
+   project remembered for the model (see [Customizing](#customizing)).
+
+Each section has its own **Save** and **Discard changes**: save every section you
+changed before leaving the page.
 
 If the Bambuddy URL is one only ScadBuddy's server can reach (an in-cluster address,
 say), list the addresses browsers use under **Bambuddy web URLs**, comma-separated.
@@ -222,7 +231,31 @@ Changing a parameter starts a real render. The preview *is* the render (debounce
 so it shows exactly what the 3MF will contain, with the bounding box in mm. Then:
 
 - **Generate** saves the current render as an output, with its parameters and a
-  thumbnail.
+  thumbnail. When the bottom bar's **Project** picker has a project selected,
+  Generate also uploads the 3MF into that project's folder in Bambuddy. Deleting the
+  output later never deletes that copy: it is the project's record. Choose **No
+  project** to only save the output.
+
+  **Which project the picker opens on.** Each time Generate files an output, ScadBuddy
+  remembers that project for the model and the preset in use (or the model alone, with
+  no preset loaded). Opening the model or loading a preset moves the picker to the
+  project remembered for that preset, else to the one remembered for the model with no
+  preset. With neither, it opens on **No project**: a project chosen on another model
+  is never carried over, so an unrelated model is not filed into it by accident.
+
+  **Generate asks before filing elsewhere.** When the picker is on a project other
+  than the one this model and preset were last filed in, Generate asks first: "*Fish*
+  was last filed in **Critters › Fish**. File this in **Critters › Snake**?" **File
+  in** files it there and makes that the remembered project; **Use** files it in the
+  remembered one and moves the picker there; **Cancel** saves nothing. Nothing is asked
+  when nothing is remembered for the preset yet, when they match, or with **No
+  project**. The picker is locked while Generate files and while the question is open.
+
+  These are only defaults for the next filing. Which outputs and prints a project holds
+  is on the project's own page in Bambuddy; ScadBuddy keeps no second list of it. Each
+  remembered project is listed in **Settings → Remembered choices** as "Project" with
+  its own **Forget**, and **Forget all** clears them. Deleting a model or a saved preset
+  forgets its entries too.
 - **Download 3MF** downloads that output. When the template declares default slicer
   settings (`print_settings` in its `model.json`, such as the name keychain's prime
   tower), the file carries them, and Bambu Studio shows them as changes to the system
@@ -296,7 +329,10 @@ Top to bottom, the dialog is:
   Filament, so a color only a later plate uses gets a spool too.
 - **Print options** — Bambuddy's own queue-item options (manual start, waiting for
   filament, and the rest), remembered per print, per printer or per model as before.
-- **Project** — file the print under a Bambuddy project.
+- **Project** — file the print under a Bambuddy project. Opened from the Customize page
+  it is the page's own picker. In Simple mode the step is hidden, but a "Filed under:
+  *project* (change)" line names where the print goes; **change** switches to Advanced
+  and puts the focus on the project picker.
 - **Copies** — leave the field blank to use the remembered quantity, shown beside it.
 - **Print** — slices, then queues through Bambuddy; the panel then follows the run to
   completion.
@@ -348,8 +384,14 @@ project, the same as an output's.
   volume. You can diff two revisions, **Customize this version** (render an old
   revision without restoring it), or **Restore this version** (restoring adds a new
   commit and never rewrites history).
-- **Edit source** opens the model's source in the editor. Saving it creates a new
-  revision.
+- **Edit source** opens the model's source in the editor. Saving it creates a
+  new revision. The row above the editor lists the model's `.scad` files:
+  `model.scad`, which every render opens, and any files beside it that it can
+  `include` or `use`. Open one to edit it on its own page, where **Save file**
+  and **Delete file** are each a revision too. **New file** adds one (`.scad` is
+  added to the name if you leave it off). If the model changed elsewhere since
+  you opened a file, saving it is refused and you can reload the file or keep
+  editing and save over it.
 
 ![Versions](images/versions.png)
 
@@ -360,3 +402,239 @@ you confirm. It is refused while one of its renders is still running. The source
 stays in the git history. A built-in template (a bundled example, such as the
 name keychain) cannot be deleted or edited; it is refreshed from the image on every
 restart.
+
+## Assistant
+
+ScadBuddy has an AI assistant, Claude, that can customize, author and print models the
+way you would, and that other Claude clients can reach over MCP. It runs in the agent
+sidecar. The operator's side (deploying it, the key-encryption key, routing) is in
+[Operating the agent sidecar](ai/operating.md), and what it may and may not do is in
+[AI security](ai/security.md). Everything below is in **Settings → Assistant** or the
+assistant panel.
+
+### Adding the Claude credential
+
+The assistant panel, MCP access tokens and plugins show only once a credential is saved
+([operating.md §4](ai/operating.md#4-setting-up-the-claude-credential),
+[AI README](ai/README.md#what-the-ai-integration-is-today)).
+
+1. Open **Settings → Assistant → Claude credentials**.
+2. Choose the kind: **Anthropic API** (an `sk-ant-api03-…` key), **Claude Code OAuth
+   token** (run `claude setup-token` on a machine signed in to your Claude subscription
+   and paste the `sk-ant-oat01-…` token it prints), or **Gateway (base URL and token)**.
+3. Press **Save**. **Test** sends one short prompt and shows "Works (…)" or the failure.
+
+You can **Add** more than one. They are tried in the order listed (**Up** and **Down**
+move them), and one that is rate limited is skipped until its limit resets. The key is
+encrypted on the server and never sent back to the browser.
+
+The same section sets **Assistant chat limits** (each new chat's budget in USD and its
+turns per reply), **Assistant images**, and **AI HTTP requests** (GET and HEAD run at
+once; anything else waits for your approval). **AI activity** is the
+log of what the assistant did.
+
+### The assistant panel
+
+Once the credential works, an **Assistant** button appears at the top right. It and
+**Ctrl+`** (Ctrl on macOS too) open the panel; **Esc** closes it. The assistant sees
+the page you are on, so "make the text bigger" on a model's page means that model.
+
+- Type and press **Enter** (Shift+Enter for a new line). **Image** attaches up to four
+  PNG, JPEG, GIF or WebP pictures; pasting or dropping them works too.
+- Type **/** at the start of a message to list the skills the assistant loads
+  (ScadBuddy's own `/scadbuddy:authoring`, `customize` and `print`, and those of enabled
+  plugin packages). Keep typing to filter; **Up**/**Down** move, **Enter** or **Tab**
+  puts the skill in the message, **Esc** closes the list. Nothing is sent until you send it.
+- The microphone is **Voice input** (press to talk and again to stop, or hold it), and
+  **Read replies aloud** speaks the answers. Inside Bambuddy's frame, voice needs
+  ScadBuddy open in a tab of its own.
+- **Stop** ends the running reply. Runs of tool calls fold into "N steps", with
+  **Details** to see each one.
+- Each chat has a budget. When it is spent the chat says so and offers **Continue in a
+  new chat**, **Raise this chat's budget** or **Start a new chat**.
+
+### Sessions, forks and the switcher
+
+Every chat is a session kept on the server: close the panel or the browser and it is
+still there
+([agent-sessions.md §4.2](ai/agent-sessions.md#42-forks-and-the-session-switcher-in-the-panel-792)).
+
+- **New chat** starts one. **Sessions (N)** lists them all, with who owns each ("you",
+  or the MCP client's token name), where it came from (chat, MCP, analyzer, plugin
+  hook), its status (Working, Waiting for input, Waiting for approval, Idle, Done,
+  Failed, Out of budget), its spend and when it last changed. Forks are listed under
+  their parent.
+- On a model's page, **Only sessions that changed {model}** narrows the list to those,
+  and the toolbar's **Changed by assistant (N)** opens one. **Touched** in a session's
+  bar lists everything that session created, changed or deleted, each linked to its
+  page ([agent-sessions.md §4.1](ai/agent-sessions.md#41-what-a-session-touched-931)).
+- **Rename** and **Done** are on your own chats. Done ends a chat: it takes no more
+  messages. Nothing is deleted.
+- **Fork** copies the whole chat into a new one and continues there; the original stays
+  as it was. **Fork from here** on a reply forks up to that reply; on one of your
+  messages it forks up to the reply before it and puts your message back in the box to
+  edit. A fork's bar says **Forked from …**, which opens the parent. Each fork you make
+  gets a budget of its own.
+- A session another agent started over MCP shows **Controlled by …**. Press **Take
+  over** to send it messages yourself
+  ([agent-sessions.md §2](ai/agent-sessions.md#2-who-sees-and-controls-what)).
+
+### What needs your approval
+
+Every tool has a tier ([security.md](ai/security.md#risk-tiers-and-the-permission-seam)):
+**Reads only**, **Changes a model** (undoable through its
+[history](#history-and-versions)), or **Leaves ScadBuddy** (send, print, delete, and
+any settings or credential change). The first two run at once. Anything that leaves
+ScadBuddy, any plugin tool not marked otherwise, and every mutating HTTP request stops
+and shows **Needs your approval** in the chat, with **Approve** and **Deny**. If nobody
+decides in time, it is not run. There is no "always allow".
+
+The assistant can also stop to ask you something ("A question for you", answered with
+**Send answer**), or call for your attention ("The assistant needs you: …"). The
+attention card says what happens if you don't reply in time: it carries on with work
+that needs no approval, it stops, or it waits. A timeout never approves anything. When
+it finishes a piece of work it may leave "The assistant is done", with what ScadBuddy
+recorded that turn doing; **Dismiss** clears it.
+
+All of these count on the **Assistant** button's badge (its tooltip breaks the count
+down), and the browser tab's title starts with the count, so you can leave the panel
+closed and still see that something is waiting for you. While any of your chats (or a
+Claude client's session) is working on a turn, a pulsing dot shows on the button too, so
+it says at a glance whether the assistant is idle, working, or waiting for you. It is
+read every 15 seconds and whenever you open or close the panel.
+
+Some buttons only you can press, whatever the assistant is allowed: Print, Send,
+Delete, Settings' **Save**, the approval and question cards, Fork, Take over, and every
+Assistant setting. Asked to press one, the assistant is told to ask you instead
+([browser-bridge.md](ai/browser-bridge.md#data-agent-user-only)).
+
+### Connecting Claude Code or Claude Desktop
+
+Other Claude clients reach ScadBuddy's tools at `https://<your ScadBuddy>/mcp` (plain
+HTTP is refused, except on loopback). They sign in with a token from **Settings →
+Assistant → MCP access tokens** ([operating.md §4.1](ai/operating.md#41-mcp-access-tokens)),
+or through your identity provider when the operator has turned on **MCP sign-in
+(OIDC)** ([operating.md §6a](ai/operating.md#6a-mcp-sign-in-with-oidc)).
+
+1. Under **MCP access tokens**, give the token a name ("Claude Desktop on my laptop"),
+   an **Access** level (Read, Write or Outward) and an expiry, and press **Create
+   token**. Copy it then: it is shown once. **Revoke** ends it. Outward actions still
+   wait for a human's approval in ScadBuddy, whatever the token allows.
+2. **Claude Code**, with ScadBuddy's plugin, which brings its skills and subagents as
+   well as the server ([claude-plugin.md](ai/claude-plugin.md)):
+
+   ```text
+   /plugin marketplace add eh-homelab/ScadBuddy
+   /plugin install scadbuddy@scadbuddy
+   ```
+
+   It asks for `scadbuddy_url` (your ScadBuddy's HTTPS address, no trailing slash) and
+   `scadbuddy_token` (the token). To add the server alone, without the plugin
+   ([Claude Code MCP docs](https://code.claude.com/docs/en/mcp)):
+
+   ```bash
+   claude mcp add --transport http scadbuddy https://scadbuddy.example/mcp \
+     --header "Authorization: Bearer sbmcp_…"
+   ```
+
+3. **Claude Desktop.** Its custom connectors take only a URL and sign in with OAuth
+   ([Anthropic help](https://support.claude.com/en/articles/11175166-getting-started-with-custom-connectors-using-remote-mcp)),
+   so they work only with MCP sign-in (OIDC) on: add `https://scadbuddy.example/mcp`
+   as a custom connector. With a token instead, add the server to
+   `claude_desktop_config.json`
+   ([connecting local servers](https://modelcontextprotocol.io/docs/develop/connect-local-servers))
+   through [`mcp-remote`](https://github.com/geelen/mcp-remote), which sends the header:
+
+   ```json
+   {
+     "mcpServers": {
+       "scadbuddy": {
+         "command": "npx",
+         "args": ["mcp-remote", "https://scadbuddy.example/mcp",
+                  "--header", "Authorization: Bearer ${SCADBUDDY_TOKEN}"],
+         "env": { "SCADBUDDY_TOKEN": "sbmcp_…" }
+       }
+     }
+   }
+   ```
+
+   Neither Desktop route has been tried against a ScadBuddy yet (**unverified**).
+
+A session an MCP client starts shows in **Sessions** like any other, and you can take
+it over ([agent-sessions.md](ai/agent-sessions.md)).
+
+### Pairing a browser tab
+
+The panel's own chats always drive the tab you chat from. An MCP client that wants to
+use your tab has to ask, and every open ScadBuddy tab then shows **Agent pairing**:
+"*name* asks to use this tab". Once paired it could see the page and change it as you
+can, but never press Print, Send, Delete or Save. Type the code the client gave you
+into **Pairing code** in the tab it should use, and press **Allow** (or **Deny**). The
+code works once, for 5 minutes. The pairing lasts until you press **Disconnect**, 8
+hours pass, or the tab reloads
+([browser-bridge.md](ai/browser-bridge.md#pairing-spec-85)).
+
+### The assistant's workspace
+
+The assistant has a workspace of its own for files: a session's files stay with it
+(and are deleted with it), and a fork starts with a copy. It can save a ScadBuddy file
+there (an output's 3MF, a model's file or picture, a print's photo or timelapse, a
+Bambuddy library file), download one from the web into it, and read, write, edit and
+delete its files, so a file it fetched does not have to pass through the conversation.
+It sends a workspace file on by
+name to any upload (an asset, a picture or video for the gallery, a thumbnail, a
+model's source, a README), and an approval it asks for names the file and its sha256.
+A file holds at most 25 MB and a session's workspace 200 MB. An MCP client working
+outside any session gets a workspace of its own whose files are deleted a day after
+they were last written ([operating.md §13](ai/operating.md#13-the-workspace-2329)).
+
+**Files** in a session's bar shows that session's workspace: each file's path, size,
+type, where it came from (uploaded by you, a web address, or the tool that saved it)
+and when it last changed.
+
+- **Download** saves a file; it works inside Bambuddy's frame too, through the same
+  popup as the 3MF download. A PNG, JPEG, GIF or WebP also has **Preview**, shown in the
+  panel. HTML and SVG files only ever download.
+- **Upload**, or a file dropped on the list, puts a file in the workspace under
+  `uploads/` (a name already there gets `-2`, `-3`, …) and adds
+  `[workspace file uploads/<name>]` to your message, so the assistant knows to look.
+  The assistant reads it with its workspace tools; no file passes through the chat.
+- **Delete** asks once more, then removes the file for the assistant too.
+
+Uploads and deletes are for your own chats that are not archived; anyone's chat can be
+listed and downloaded. Settings → **Assistant workspace** sets the caps (25 MiB a file
+and 200 MiB a chat by default), and they apply to uploads as to the assistant's own
+files ([operating.md §13](ai/operating.md#13-the-workspace-2329)).
+
+### A browser for the assistant
+
+A session with no tab of yours (one started over MCP, say) can drive a browser of its
+own when an admin adds Microsoft's Playwright MCP server as a plugin named
+`playwright` (**Plugins** below). Its tools ask before every call until their tiers
+are set ([headless-browser.md](ai/headless-browser.md)).
+
+### Plugins
+
+**Settings → Assistant → Assistant plugins** adds to what the assistant can do
+([operating.md §9](ai/operating.md#9-plugin-packages-297),
+[security.md](ai/security.md#plugin-packages)). ScadBuddy's own plugin is built in, with
+**Enable**/**Disable**.
+
+- **Plugin packages** (skills, agents and hooks). Give a **Git repository** or a
+  **Marketplace entry** and press **Fetch and review**. Nothing loads yet: the package
+  is pinned to the exact commit and content hash it fetched, and you tick that you
+  reviewed them and press **Approve this pin**, then **Enable**. Anything that would
+  start a process or run code inside the assistant is refused by the vetting rules and
+  listed; the only way past is to approve loading the package as it is, which runs its
+  code with the assistant service's own access. A newer commit is **Fetch re-pin**,
+  approved the same way.
+- **Plugins**. ScadBuddy's own tools come first, marked **Built in**: `scadbuddy` (the
+  assistant's ScadBuddy tools). **Review tools**
+  lists each one with its tier and **Disable**. A tier can only be raised above the one
+  ScadBuddy gives the tool (raise it to outward and it asks first), never lowered, and a
+  built-in is never removed. Every setting here applies to classic and durable chats
+  alike. Then the plugin endpoints (remote MCP servers): give a **Name**, the **MCP endpoint URL**
+  and, if it needs one, an auth header, and press **Add endpoint**. It starts disabled:
+  **Test connection** lists its tools, each with a tier (outward, which asks first, by
+  default) and **Hide**. Press **Save tool settings**, then **Enable**. Claude never
+  sees the endpoint's address or secret.

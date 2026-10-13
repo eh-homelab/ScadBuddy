@@ -17,9 +17,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import logging
 import os
 import uuid
 from collections import OrderedDict
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -28,7 +30,7 @@ from typing import IO, TYPE_CHECKING, Annotated, Any, Literal
 
 from fastapi import APIRouter, Path, Query, Request, Response, status
 from fastapi.responses import FileResponse, JSONResponse
-from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageOps
 from pydantic import BaseModel, Field, StringConstraints
 from python_multipart.exceptions import MultipartParseError
 from python_multipart.multipart import MultipartParser, parse_options_header
@@ -68,6 +70,8 @@ from scadbuddy.operations.component import OperationCommands, OperationsDep
 
 if TYPE_CHECKING:
     from _hashlib import HASH
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["media"])
 
@@ -130,7 +134,11 @@ class _Received:
     sizes: dict[str, int] = field(default_factory=dict)
     #: Each file part's sha256, computed while it streamed: its claim's name (#1054).
     hashes: dict[str, HASH] = field(default_factory=dict)
+    #: Each file part's name as the client sent it, or "" (#2146: a mesh's type).
+    filenames: dict[str, str] = field(default_factory=dict)
     caption: bytearray = field(default_factory=bytearray)
+    #: The other text parts the route asked ``_receive`` for, by name.
+    fields: dict[str, bytearray] = field(default_factory=dict)
 
     def discard(self) -> None:
         """Remove whatever was not moved into ``media/``."""
@@ -141,9 +149,11 @@ class _Received:
 class _Receiver:
     """`MultipartParser` callbacks writing ``file`` and ``poster`` to ``directory``."""
 
-    def __init__(self, directory: FilePath, received: _Received) -> None:
+    def __init__(self, directory: FilePath, received: _Received, fields: Mapping[str, int]) -> None:
         self.directory = directory
         self.received = received
+        #: The text parts to keep, each with its cap in bytes.
+        self._fields = fields
         self._field = bytearray()
         self._value = bytearray()
         self._disposition = b""
@@ -178,6 +188,7 @@ class _Receiver:
             self.received.files[name] = path
             self.received.sizes[name] = 0
             self.received.hashes[name] = hashlib.sha256()
+            self.received.filenames[name] = options.get(b"filename", b"").decode("utf-8", "replace")
             self._out = path.open("xb")
         self._part = name
 
@@ -193,6 +204,15 @@ class _Receiver:
                 raise ApiError(
                     status.HTTP_422_UNPROCESSABLE_CONTENT,
                     f"a caption is at most {MAX_CAPTION_CHARS} characters",
+                )
+        elif self._part is not None and self._part in self._fields:
+            part, cap = self._part, self._fields[self._part]
+            value = self.received.fields.setdefault(part, bytearray())
+            value += chunk
+            if len(value) > cap:
+                raise ApiError(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    f"the {part!r} part is at most {cap} bytes",
                 )
 
     def on_part_end(self) -> None:
@@ -215,14 +235,17 @@ def _boundary(request: Request) -> bytes:
     return boundary
 
 
-async def _receive(request: Request, directory: FilePath) -> _Received:
+async def _receive(
+    request: Request, directory: FilePath, *, fields: Mapping[str, int] | None = None
+) -> _Received:
     """Stream the body's parts to ``directory``. On any failure the files written
     so far are removed and the error raised -- including the gate's, when the
-    body passes the limit part-way."""
+    body passes the limit part-way. ``fields`` names the text parts besides the
+    caption to keep, each with its cap in bytes."""
     boundary = _boundary(request)
     directory.mkdir(parents=True, exist_ok=True)
     received = _Received()
-    receiver = _Receiver(directory, received)
+    receiver = _Receiver(directory, received, fields or {})
     parser = MultipartParser(
         boundary,
         callbacks={
@@ -308,18 +331,6 @@ def no_model(slug: str) -> ApiError:
     return ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}")
 
 
-#: Until #401 makes the database required, a deployment may run without one.
-NO_DATABASE = (
-    "template media needs a database: set SCADBUDDY_DATABASE_URL. Without one, only "
-    "the thumbnail is shown"
-)
-
-
-#: Every media write's answer when there is no database.
-NO_DATABASE_RESPONSE: dict[int | str, dict[str, Any]] = {
-    503: {"description": "No database: SCADBUDDY_DATABASE_URL is unset"}
-}
-
 #: A write to an item a built-in ships.
 READ_ONLY_RESPONSE: dict[int | str, dict[str, Any]] = {
     403: {"description": "The item is one a built-in template ships, and is read-only"}
@@ -332,13 +343,6 @@ def read_only(slug: str, item_id: str) -> ApiError:
         f"{item_id!r} is shipped with the built-in template {slug!r} and is read-only; "
         "only the media added to it can change",
     )
-
-
-def require_media_store(catalogue: Catalogue) -> None:
-    """503 before anything is read or written, so an upload is refused on its
-    headers rather than after a gigabyte of body."""
-    if catalogue.media_store is None:
-        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, NO_DATABASE)
 
 
 def no_item(slug: str, item_id: str) -> ApiError:
@@ -469,9 +473,12 @@ def _shrink(file: IO[bytes], side: int = THUMBNAIL_SIDE) -> bytes | None:
     cannot read it as one of `THUMBNAIL_FORMATS`, or it is over
     `MAX_THUMBNAIL_SOURCE_PIXELS` once ``draft`` has had its say (checked from the
     header, before decoding). ``draft`` lets a JPEG decode at a fraction of its size,
-    so a large photo is still cheap enough to shrink. Any error decoding it -- a
-    malformed EXIF block raises ``ValueError`` or ``SyntaxError`` -- is a None too,
-    since serving the file as it is is always safe.
+    so a large photo is still cheap enough to shrink. Any error decoding it is a None
+    too, since serving the file as it is is always safe: Pillow's metadata parser has
+    no single error type, and a malformed EXIF block raises ``ValueError``,
+    ``SyntaxError``, ``TypeError`` or ``struct.error`` among others (#1690). Each is
+    logged by type, so a bug of ScadBuddy's own that makes every thumbnail fall back
+    is still visible (#2096).
 
     The box is square, so an EXIF orientation of 5 to 8, which swaps width and height,
     fits it either way round: the image is shrunk before it is turned upright, and the
@@ -488,13 +495,9 @@ def _shrink(file: IO[bytes], side: int = THUMBNAIL_SIDE) -> bytes | None:
                 out = io.BytesIO()
                 upright.save(out, "WEBP", quality=80)
                 return out.getvalue()
-    except (
-        UnidentifiedImageError,
-        OSError,
-        Image.DecompressionBombError,
-        ValueError,
-        SyntaxError,
-    ):
+    except Exception as error:
+        # The type only: a message can carry the file's own bytes or path.
+        logger.info("thumbnail fell back to the original: %s", type(error).__name__)
         return None
 
 
@@ -689,7 +692,6 @@ async def get_media_thumbnail(
     "/models/{slug}/media",
     response_model=ModelRecord,
     responses={
-        **NO_DATABASE_RESPONSE,
         409: {"description": f"The template already holds {MAX_MEDIA_ITEMS} items"},
         413: {
             "description": "Larger than `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES`, or an image over 10 MB"
@@ -726,7 +728,6 @@ async def upload_media(
     idempotency_key: IdempotencyKey = None,
 ) -> ModelRecord | JSONResponse:
     require_model_exists(catalogue, slug)
-    require_media_store(catalogue)
     received = await _receive(request, catalogue.paths.cache)
     claims = ClaimStore(catalogue.paths.claims)
     held: list[Held] = []
@@ -779,7 +780,7 @@ async def upload_media(
 @router.patch(
     "/models/{slug}/media/{item_id}",
     response_model=ModelRecord,
-    responses={**NO_DATABASE_RESPONSE, **READ_ONLY_RESPONSE, **OPERATION_RESPONSES},
+    responses={**READ_ONLY_RESPONSE, **OPERATION_RESPONSES},
     summary="Caption a media item",
 )
 async def patch_media(
@@ -806,7 +807,7 @@ async def _edit(
     request: dict[str, Any],
     idempotency_key: str | None,
 ) -> ModelRecord | JSONResponse:
-    """A media edit as its operation (#1054); the check makes the 404 and the 503, so a
+    """A media edit as its operation (#1054); the check makes the 404, so a
     re-send gets its recorded answer whatever has changed since (review 3e final M1)."""
     result = await run_operation(
         ops,
@@ -822,7 +823,7 @@ async def _edit(
 @router.put(
     "/models/{slug}/media/order",
     response_model=ModelRecord,
-    responses={**NO_DATABASE_RESPONSE, **OPERATION_RESPONSES},
+    responses={**OPERATION_RESPONSES},
     summary="Reorder the media",
     description=(
         "Puts the items in the order given, which must name every item exactly once "
@@ -850,7 +851,7 @@ async def reorder_media(
 @router.put(
     "/models/{slug}/media/cover",
     response_model=ModelRecord,
-    responses={**NO_DATABASE_RESPONSE, **OPERATION_RESPONSES},
+    responses={**OPERATION_RESPONSES},
     summary="Choose the cover",
     description=(
         "Makes one item the cover. A template of mine's cover is its first item, so "
@@ -880,7 +881,7 @@ async def put_media_cover(
 @router.delete(
     "/models/{slug}/media/{item_id}",
     response_model=ModelRecord,
-    responses={**NO_DATABASE_RESPONSE, **READ_ONLY_RESPONSE, **OPERATION_RESPONSES},
+    responses={**READ_ONLY_RESPONSE, **OPERATION_RESPONSES},
     summary="Remove a media item",
     description=(
         "Removes one item and its files, as one revision. An entry whose file is "

@@ -5,7 +5,7 @@
  * `agent/src/audit/log.ts` `AuditRecord`.
  */
 
-export const AUDIT_KINDS = ['tool_call', 'resource', 'approval', 'credential', 'plugin', 'settings', 'token', 'memory', 'http', 'question'] as const
+export const AUDIT_KINDS = ['tool_call', 'resource', 'approval', 'credential', 'plugin', 'settings', 'token', 'memory', 'http', 'question', 'turn'] as const
 export type AuditKind = (typeof AUDIT_KINDS)[number]
 export const AUDIT_OUTCOMES = ['ok', 'error', 'refused', 'denied'] as const
 export type AuditOutcome = (typeof AUDIT_OUTCOMES)[number]
@@ -43,6 +43,12 @@ export interface AuditEntry {
   started_at: string | null
   finished_at: string | null
   duration_ms: number | null
+  /** On `turn` rows only (#1922): what the turn added to its session's spend, in USD. */
+  cost_usd: number | null
+  /** False when Claude Code never priced the turn (no result came back). */
+  cost_priced: boolean | null
+  /** The part of `cost_usd` ScadBuddy estimated itself (a request cut off mid-stream). */
+  cost_estimated_usd: number | null
 }
 
 export interface AuditPage {

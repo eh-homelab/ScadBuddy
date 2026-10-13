@@ -139,6 +139,26 @@ describe('global tools', () => {
     expect(!missing.ok && missing.error.code).toBe('invalid_args')
   })
 
+  it('highlights by role and name and changes nothing, a user-only confirmation included (#1919)', async () => {
+    const onSend = renderShell()
+    await waitFor(() => expect(bridge.liveNames()).toContain('highlight'))
+
+    const pointed = await bridge.call('highlight', { role: 'button', name: 'send to bambuddy' })
+    expect(pointed).toEqual({ ok: true, result: { highlighted: { role: 'button', name: 'Send to Bambuddy' } } })
+    expect(screen.getByRole('button', { name: 'Send to Bambuddy' })).toHaveClass(TOUCH_CLASS)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+
+    await bridge.call('click', { role: 'button', name: 'send to bambuddy' })
+    await screen.findByRole('dialog', { name: 'Send to Bambuddy' })
+    expect(await bridge.call('highlight', { role: 'button', name: 'Send' })).toMatchObject({ ok: true })
+    expect(screen.getByRole('button', { name: 'Send' })).toHaveClass(TOUCH_CLASS)
+    expect(onSend).not.toHaveBeenCalled()
+
+    const missing = await bridge.call('highlight', { role: 'link', name: 'Nowhere' })
+    expect(!missing.ok && missing.error.code).toBe('invalid_args')
+    expect(!missing.ok && missing.error.message).toBe('No visible link named "Nowhere". Take a snapshot to see what is on screen.')
+  })
+
   it('navigates in-app only, and reports where it landed', async () => {
     renderShell()
     await waitFor(() => expect(bridge.liveNames()).toContain('navigate'))

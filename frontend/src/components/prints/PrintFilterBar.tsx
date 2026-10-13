@@ -21,13 +21,15 @@ interface Props {
   /** Printers to offer by id, with Bambuddy's name where it gave one, besides the one
    * selected. */
   printers: Map<number, string | null>
+  /** #1755 — the name of the library file `query.file` names, once a print of it says. */
+  fileName?: string | null
 }
 
 /**
  * #310 — template, status, printer, date range and text filters over the print
  * history, and the Cards/List view: the catalogue's filter bar (#276, #278) for prints.
  */
-export function PrintFilterBar({ query, onChange, templates, printers }: Props) {
+export function PrintFilterBar({ query, onChange, templates, printers, fileName }: Props) {
   const [text, setText] = useState(query.q)
   const sent = useRef(query.q)
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined)
@@ -47,7 +49,9 @@ export function PrintFilterBar({ query, onChange, templates, printers }: Props) 
   // belongs to a query that no longer exists, so it is dropped rather than written over
   // the new URL, as the catalogue's filters do (#276). A change made here carries the
   // pending text in `q` first; see `commit`.
-  const others = [query.slug, query.status, query.printer, query.from, query.to, query.view].join('\u0000')
+  const others = [query.slug, query.status, query.printer, query.from, query.to, query.file, query.view].join(
+    '\u0000',
+  )
   const seenOthers = useRef(others)
   useEffect(() => {
     if (others === seenOthers.current) return
@@ -120,7 +124,8 @@ export function PrintFilterBar({ query, onChange, templates, printers }: Props) 
             Template
             <select
               value={query.slug}
-              onChange={(event) => commit({ slug: event.target.value })}
+              // A print is of a template's output or of a library file: one replaces the other.
+              onChange={(event) => commit({ slug: event.target.value, file: '' })}
               className="sb-field h-8 w-auto max-w-56 cursor-pointer"
             >
               <option value="">All templates</option>
@@ -131,6 +136,28 @@ export function PrintFilterBar({ query, onChange, templates, printers }: Props) 
               ))}
             </select>
           </label>
+        )}
+        {templateOptions && query.file && !query.slug && (
+          <span
+            role="group"
+            aria-label="Library file"
+            className="flex h-8 max-w-64 items-center gap-1 rounded-[6px] border border-line bg-surface pr-1 pl-2.5 text-ink"
+          >
+            <span className="text-muted">File</span>
+            <span className="truncate" title={fileName ?? undefined}>
+              {fileName ?? 'Bambuddy library file'}
+            </span>
+            <button
+              type="button"
+              aria-label="Show every file's prints"
+              onClick={() => commit({ file: '' })}
+              className="flex size-6 shrink-0 items-center justify-center rounded-[4px] text-muted hover:bg-surface-3 hover:text-ink"
+            >
+              <svg viewBox="0 0 16 16" className="size-3" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden>
+                <path d="M4 4l8 8M12 4l-8 8" />
+              </svg>
+            </button>
+          </span>
         )}
         <label className="flex items-center gap-1.5">
           Status

@@ -26,8 +26,9 @@ export const BRIDGE_PATH = '/api/v1/ai/bridge'
 
 /**
  * The largest frame a tab may send. The sockets share one server (main.ts), whose
- * `maxPayload` is the chat socket's larger cap for images (#1866, routes/chat.ts
- * CHAT_FRAME_MAX); a tab's frames stay under this one (frontend link.ts
+ * `maxPayload` is the chat socket's cap (routes/chat.ts CHAT_FRAME_MAX, the same
+ * 256 KiB since images are uploaded, #1941), checked here on its own so the two
+ * caps can differ again; a tab's frames stay under this one (frontend link.ts
  * `MAX_RESULT_BYTES`), and a larger one closes the socket, 1009 Message Too Big.
  */
 export const BRIDGE_FRAME_MAX = 256 * 1024

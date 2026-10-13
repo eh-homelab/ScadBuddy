@@ -1,15 +1,13 @@
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
-import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { connectDatabase, type Database } from '../src/db.js'
 import { SettingsStore } from '../src/credentials.js'
-import { NoUsableCredentialError } from '../src/harness/fallback.js'
+import { CONTINUE_PROMPT, NoUsableCredentialError } from '../src/harness/fallback.js'
 import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun } from '../src/harness/run.js'
-import { browserToolsGuide, SETTING_HEADLESS_BROWSER } from '../src/harness/headlessBrowser.js'
 import { HTTP_SERVER, HTTP_TOOL_NAME, SETTING_HTTP_REQUEST } from '../src/harness/httpRequest.js'
-import { sessionBrowserDir, sessionBrowserTmpDir, sessionWorkDir } from '../src/harness/stateDirs.js'
+import { sessionWorkDir } from '../src/harness/stateDirs.js'
 import {
+  BROWSER_TOOLS_GUIDE,
   listQuery,
   RESTARTING,
   SessionError,
@@ -54,12 +52,13 @@ describe.skipIf(!TEST_DATABASE_URL)(
   () => {
     let db: Database
     let schema: string
+    let url: string
     let drop: () => Promise<void>
     let stop: AbortController
     const others: Database[] = []
 
     beforeEach(async () => {
-      ;({ db, schema, drop } = await throwawayDatabase())
+      ;({ db, schema, url, drop } = await throwawayDatabase())
       expect(await db.ready()).toBe(true)
       stop = new AbortController()
     })
@@ -71,7 +70,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
 
     /** A second "replica": its own pool on the same schema. */
     function replica(): Database {
-      const other = connectDatabase(TEST_DATABASE_URL!, { searchPath: schema })
+      const other = connectDatabase(url, { searchPath: schema })
       others.push(other)
       return other
     }
@@ -196,6 +195,36 @@ describe.skipIf(!TEST_DATABASE_URL)(
       // Only the second turn's init left it out.
       expect(logged.filter((e) => e.code === 'plugin_unavailable').map((e) => e.message)).toEqual([
         "ScadBuddy's own plugin was not loaded by Claude Code: its skills and subagents are unavailable",
+      ])
+    })
+
+    it("says so in the session when one of the turn's in-process tool servers did not connect (#1255)", async () => {
+      // A server Claude Code cannot connect is only logged at debug level, and every
+      // tool on it is gone for the turn: the session must keep the evidence.
+      const paths = await tempPaths()
+      const scripted = scriptedRunner(() => ({ reply: 'ok' }))
+      const inits = [
+        [{ name: HTTP_SERVER, status: 'failed' }],
+        [{ name: HTTP_SERVER, status: 'connected' }],
+        [],
+      ]
+      const runner = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+        (async function* () {
+          yield { type: 'system', subtype: 'init', mcp_servers: inits.shift(), plugins: [] } as unknown as SDKMessage
+          yield* scripted.runner(run)
+        })()
+      const m = manager({ sql: db.sql, paths, run: runner, settings: new SettingsStore(db.sql), httpRequest: {} })
+      const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'hi' })
+      await turn!.done
+      await (await m.send(session.id, agentA, 'again')).done
+      await (await m.send(session.id, agentA, 'and again')).done
+      const logged = (
+        await db.sql<{ event: string }[]>`
+          SELECT event FROM ai_session_events WHERE session_id = ${session.id} ORDER BY seq`
+      ).map((e) => JSON.parse(e.event) as { type: string; code?: string; message?: string })
+      expect(logged.filter((e) => e.code === 'tools_unavailable').map((e) => e.message)).toEqual([
+        `the ${HTTP_SERVER} tools are not available in this turn: Claude Code reports their in-process MCP server as failed`,
+        `the ${HTTP_SERVER} tools are not available in this turn: Claude Code reports their in-process MCP server as missing`,
       ])
     })
 
@@ -517,6 +546,74 @@ describe.skipIf(!TEST_DATABASE_URL)(
       }
     })
 
+    it('audits one recall per user message when the turn falls back to another credential (#1896)', async () => {
+      const fake = await startFakeHindsight()
+      try {
+        fake.memories = ['The user prints in PETG.']
+        const paths = await tempPaths()
+        const hindsight: CheckedPlugin = {
+          plugin: { name: 'hindsight', url: `http://hindsight.invalid:${fake.port}/mcp/bank1/`, toolTiers: {}, disabledTools: [] },
+          address: '127.0.0.1',
+        }
+        const remotePlugins = (): Promise<PluginsForRun> =>
+          Promise.resolve({ plugins: [], problems: [], secrets: [], hindsight, release: () => {} })
+        const audit = new AuditLog({ sql: db.sql })
+        const pooled = (id: string, secret: string) => ({
+          id,
+          epoch: 0,
+          label: `credential ${id}`,
+          credential: { kind: 'anthropic_api_key' as const, secret },
+        })
+        const runs: HarnessRun[] = []
+        // Claude Code fires UserPromptSubmit for every query's prompt, the continuation's too;
+        // the first credential is refused after its init, so the second resumes.
+        const runner = (run: HarnessRun): AsyncIterable<SDKMessage> => {
+          runs.push(run)
+          const attempt = runs.length
+          const session_id = run.sessionId ?? run.resume ?? 'unknown'
+          return (async function* () {
+            const signal = new AbortController().signal
+            for (const matcher of run.memoryHooks?.UserPromptSubmit ?? []) {
+              await matcher.hooks[0]!(
+                { session_id, transcript_path: '/nonexistent', cwd: '/', hook_event_name: 'UserPromptSubmit', prompt: run.prompt as string },
+                undefined,
+                { signal },
+              )
+            }
+            yield { type: 'system', subtype: 'init', session_id, model: 'claude-sonnet-4-5', mcp_servers: [] } as unknown as SDKMessage
+            if (attempt === 1) {
+              yield { type: 'system', subtype: 'api_retry', attempt: 1, max_retries: 10, retry_delay_ms: 500, error_status: 401, error: 'authentication_failed' } as unknown as SDKMessage
+              return
+            }
+            yield { type: 'assistant', message: { content: [{ type: 'text', text: 'ok' }] }, parent_tool_use_id: null, session_id } as unknown as SDKMessage
+            yield { type: 'result', subtype: 'success', is_error: false, result: 'ok', num_turns: 1, total_cost_usd: 0.01, session_id } as unknown as SDKMessage
+          })()
+        }
+        const m = manager({
+          sql: db.sql,
+          paths,
+          run: runner,
+          remotePlugins,
+          audit,
+          memory: { hookConfig: { autoRetain: false } },
+          credentials: {
+            candidates: () => Promise.resolve([pooled('a', 'sk-ant-key-aaaa'), pooled('b', 'sk-ant-key-bbbb')]),
+            reporter: () => () => Promise.resolve(),
+          },
+          probe: () => Promise.resolve({ verdict: 'refused', reason: 'HTTP 401 again' }),
+        })
+        const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'Make a box' })
+        expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
+        expect(runs.map((r) => r.prompt)).toEqual(['Make a box', CONTINUE_PROMPT])
+        await expect.poll(async () => (await audit.list({ sessionId: session.id, kind: 'memory' })).entries.length).toBe(1)
+        const { entries } = await audit.list({ sessionId: session.id, kind: 'memory' })
+        expect(entries.map((e) => [e.action, e.turn_id])).toEqual([['recall', turn!.turnId]])
+        expect(fake.recalls()).toHaveLength(1)
+      } finally {
+        await fake.close()
+      }
+    })
+
     it('writes an audit row and a panel event per automatic recall and retain, a retain after the turn ended included', async () => {
       const fake = await startFakeHindsight()
       try {
@@ -634,47 +731,15 @@ describe.skipIf(!TEST_DATABASE_URL)(
       await expect(m2.send(session.id, agentA, 'three')).rejects.toMatchObject({ code: 'budget_exhausted' })
     })
 
-    it('gives a turn the headless browser only when the setting is on (#349, off by default)', async () => {
+    it('tells every turn which browser each browser_* set drives', async () => {
       const paths = await tempPaths()
-      const settings = new SettingsStore(db.sql)
-      // Stands in for the server writing a screenshot and Chromium its profile.
-      const { runner, runs } = scriptedRunner((run) => {
-        for (const dir of [run.headlessBrowser?.dir, run.headlessBrowser?.tmpDir]) {
-          if (!dir) continue
-          mkdirSync(path.join(dir, 'output'), { recursive: true })
-          writeFileSync(path.join(dir, 'output', 'page.png'), 'png')
-        }
-        return { reply: 'ok' }
-      })
-      const backendUrl = 'http://127.0.0.1:8000'
-      const m = manager({ sql: db.sql, paths, run: runner, settings, headlessBrowser: { backendUrl } })
-      const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'look' })
+      const { runner, runs } = scriptedRunner(() => ({ reply: 'ok' }))
+      const m = manager({ sql: db.sql, paths, run: runner })
+      const { turn } = await m.start(agentA, { origin: 'mcp', prompt: 'look' })
       await turn!.done
-      expect(runs[0]!.headlessBrowser).toBeUndefined()
-      // The prompt says which browser each browser_* set drives (a model called
-      // mcp__scadbuddy__browser_find in production, a name only the headless set has).
-      expect(runs[0]!.systemPromptAppend).toContain(browserToolsGuide(false))
-
-      await settings.set(SETTING_HEADLESS_BROWSER, true)
-      await (await m.send(session.id, agentA, 'look again')).done
-      expect(runs[1]!.systemPromptAppend).toContain(browserToolsGuide(true))
-      expect(runs[1]!.headlessBrowser).toEqual({
-        sessionId: session.id,
-        backendUrl,
-        dir: sessionBrowserDir(paths, session.id),
-        tmpDir: sessionBrowserTmpDir(session.id),
-      })
-      // Its directory is not the session's cwd, where named output files land.
-      expect(runs[1]!.headlessBrowser!.dir).not.toBe(runs[1]!.cwd)
-      // Both are removed when the turn ends (review of #518), so screenshots and
-      // profiles do not pile up turn after turn.
-      expect(existsSync(sessionBrowserDir(paths, session.id))).toBe(false)
-      expect(existsSync(sessionBrowserTmpDir(session.id))).toBe(false)
-
-      // Without the dependency (no backend URL wired), the setting alone does nothing.
-      const bare = manager({ sql: db.sql, paths, run: runner, settings })
-      await (await bare.send(session.id, agentA, 'once more')).done
-      expect(runs[2]!.headlessBrowser).toBeUndefined()
+      // A model called mcp__scadbuddy__browser_find in production, a name only a
+      // browser plugin's set (Playwright MCP) has.
+      expect(runs[0]!.systemPromptAppend).toContain(BROWSER_TOOLS_GUIDE)
     })
 
     it('gives a turn the http_request tool unless the setting is off (#827, on by default)', async () => {
@@ -726,8 +791,28 @@ describe.skipIf(!TEST_DATABASE_URL)(
         expect(snapshot).toEqual({
           v: 1,
           type: 'sessions.snapshot',
-          sessions: [{ sessionId: b.id, title: 'b', origin: 'mcp', owner: agentB, status: 'idle' }],
+          sessions: [
+            {
+              sessionId: b.id,
+              title: 'b',
+              origin: 'mcp',
+              owner: agentB,
+              status: 'idle',
+              // #795: the switcher's nesting, last activity and spend.
+              parentId: null,
+              updatedAt: expect.any(String),
+              costUsd: 0,
+              budgetUsd: 1,
+              // Plan 5d: the default (durable) ran classic, with no Temporal here.
+              mode: 'classic',
+              offer: null,
+            },
+          ],
         })
+        // #1284: an offer's target is named only as the viewer may see it.
+        await m.handoff(b.id, agentB, agentA)
+        const offered = (await m.snapshot(agentB)) as { sessions: { offer: unknown }[] }
+        expect(offered.sessions[0]!.offer).toEqual({ to: { kind: 'bearer', label: 'another MCP token' }, until: expect.any(String) })
       })
 
       it('moves ownership only explicitly: owner to the browser or by accepted offer, browser takes over, nobody else', async () => {

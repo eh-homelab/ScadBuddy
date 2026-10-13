@@ -24,6 +24,7 @@ describe('print history URL state (#310)', () => {
       from: '2026-09-01',
       to: '2026-09-30',
       q: 'nova',
+      file: '',
       view: 'list',
     })
     expect(
@@ -62,6 +63,20 @@ describe('print history URL state (#310)', () => {
       printer_id: 2,
       from: '2026-09-01',
     })
+  })
+
+  it('filters by one library file, which a template filter or tab leaves out (#1755)', () => {
+    const query = parsePrintsQuery(new URLSearchParams('file=89&status=failed'))
+    expect(query.file).toBe('89')
+    expect(toPrintsParams(query).toString()).toBe('status=failed&file=89')
+    expect(isFiltered({ ...DEFAULT_PRINTS_QUERY, file: '89' })).toBe(true)
+    expect(clearPrintFilters(query).file).toBe('')
+    expect(apiFilters(query)).toEqual({ status: 'failed', library_file_id: 89 })
+    // A print is of a template's output or of a library file, never both.
+    expect(apiFilters({ ...query, slug: 'other' })).toEqual({ slug: 'other', status: 'failed' })
+    expect(apiFilters(query, 'name-keychain')).toEqual({ slug: 'name-keychain', status: 'failed' })
+    expect(parsePrintsQuery(new URLSearchParams('file=0')).file).toBe('')
+    expect(parsePrintsQuery(new URLSearchParams('file=x1')).file).toBe('')
   })
 })
 

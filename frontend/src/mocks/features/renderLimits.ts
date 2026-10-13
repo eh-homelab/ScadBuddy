@@ -14,7 +14,7 @@ export const MAX_CONCURRENT = 64
 export const MAX_GLOBAL = 256
 export const MAX_PER_WINDOW = 10_000
 
-const DEFAULTS: RenderLimits = { per_principal: 4, global: 0, per_window: 0, overrides: [] }
+const DEFAULTS: RenderLimits = { per_principal: 4, global: 0, per_window: 30, overrides: [] }
 
 const state = { limits: structuredClone(DEFAULTS), writes: [] as RenderLimits[] }
 

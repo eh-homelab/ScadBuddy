@@ -141,8 +141,8 @@ async def test_a_page_can_be_limited_to_some_outputs(links: PrintLinkStore) -> N
     await links.record(OUT, link(18))
     await links.record(OTH, link(40))
 
-    assert [row.archive_id for row in await links.page(limit=10, output_ids=[OUTPUT])] == [18]
-    assert await links.page(limit=10, output_ids=[]) == []
+    assert [row.archive_id for row in await links.page(limit=10, subjects=[OUT])] == [18]
+    assert await links.page(limit=10, subjects=[]) == []
 
 
 async def test_one_archive_is_found_with_its_output(links: PrintLinkStore) -> None:
@@ -164,8 +164,8 @@ async def test_a_filtered_page_keeps_each_archive_with_the_output_that_saw_it_fi
     await links.record(OTH, link(35))
     await links.record(OTH, link(36))
 
-    assert [row.archive_id for row in await links.page(limit=10, output_ids=[OTHER])] == [36]
-    [owned] = await links.page(limit=10, output_ids=[OUTPUT])
+    assert [row.archive_id for row in await links.page(limit=10, subjects=[OTH])] == [36]
+    [owned] = await links.page(limit=10, subjects=[OUT])
     assert (owned.archive_id, owned.output_id) == (35, OUTPUT)
     found = await links.linked(35)
     assert found is not None and found.output_id == OUTPUT
@@ -219,7 +219,10 @@ async def test_a_library_file_and_an_output_share_one_link_shape(links: PrintLin
     assert (library.subject, library.output_id, library.library_file_id) == (LIBRARY.key, None, 89)
     assert [row.archive_id for row in await links.for_subject(LIBRARY)] == [18, 19]
     # A filter by outputs leaves every library file's out.
-    assert [row.archive_id for row in await links.page(limit=10, output_ids=[OUTPUT])] == [18]
+    assert [row.archive_id for row in await links.page(limit=10, subjects=[OUT])] == [18]
+    # #1755 (H4): and one by the library file leaves the outputs' out, the archive both
+    # name included: it is the output's.
+    assert [row.archive_id for row in await links.page(limit=10, subjects=[LIBRARY])] == [19]
 
 
 async def test_sends_are_recorded_per_subject_once_per_queue_item(links: PrintLinkStore) -> None:

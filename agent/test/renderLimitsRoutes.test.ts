@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import type { AuditContext } from '../src/audit/log.js'
 import { UI_ACTOR } from '../src/audit/writes.js'
 import { originPolicy } from '../src/http/origins.js'
-import type { SettingsRepo } from '../src/routes/headlessBrowser.js'
+import type { SettingsRepo } from '../src/routes/httpRequest.js'
 import { registerRenderLimitsRoutes, RENDER_LIMITS_PATH } from '../src/routes/renderLimits.js'
 import { RenderLimiter, SETTING_RENDER_LIMITS, settingsRenderLimits } from '../src/tools/renderLimits.js'
 
@@ -44,7 +44,7 @@ describe('the render limits setting', () => {
   it('reads the defaults until set, then what was stored', async () => {
     const { app, values } = setup()
     const get = async () => (await app.request(URL_, { headers: READ })).json()
-    expect(await get()).toEqual({ per_principal: 4, global: 0, per_window: 0, overrides: [] })
+    expect(await get()).toEqual({ per_principal: 4, global: 0, per_window: 30, overrides: [] })
     const res = await put(app, LIMITS)
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual(LIMITS)

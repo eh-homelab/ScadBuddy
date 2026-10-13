@@ -104,6 +104,30 @@ describe('PrintProgressPanel', () => {
     )
   })
 
+  it('names a plate by what it holds when its name is known (#986)', () => {
+    const plate = fixtures.queuedSliceProgress.copies_detail![0]!
+    render(
+      <PrintProgressPanel
+        progress={{
+          ...fixtures.queuedSliceProgress,
+          copies: 2,
+          copies_detail: [
+            { ...plate, plate_id: 1, queue_entry_id: 4470, stage: 'running' },
+            { ...plate, plate_id: 2 },
+          ],
+        }}
+        polling
+        plates={[
+          { index: 1, has_thumbnail: true, name: 'Base + Lid' },
+          { index: 2, has_thumbnail: true, name: null },
+        ]}
+      />,
+    )
+
+    expect(screen.getByTestId('print-progress-copy-0')).toHaveTextContent('Base + Lid on 3DP-31B-598')
+    expect(screen.getByTestId('print-progress-copy-1')).toHaveTextContent('Plate 2 on 3DP-31B-598')
+  })
+
   it('says it is slicing before the queue entry exists', () => {
     render(
       <PrintProgressPanel

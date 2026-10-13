@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import logging
 import os
 import socket
+import subprocess
 import threading
 import time
 import uuid
@@ -52,7 +54,7 @@ from scadbuddy.store.factory import StoreBundle
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.worker import (
     MAKE_CURRENT_BACKOFF,
-    MAKE_CURRENT_DEADLINE,
+    MAKE_CURRENT_ERROR_AFTER,
     MAKE_CURRENT_EVERY,
     _drain,
     _on_signal,
@@ -289,12 +291,53 @@ async def test_the_second_signal_stops_now() -> None:
     assert stop_now.is_set()
 
 
+def test_the_projects_queue_is_a_choice() -> None:
+    assert worker_module.parse_queue(["--queue", "projects"]) == "projects"
+
+
+async def test_the_projects_queue_runs_the_projects_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ran: list[str] = []
+
+    async def run(settings: Settings, **kwargs: Any) -> None:
+        ran.append("projects")
+
+    monkeypatch.setattr(worker_module, "run_projects_worker", run)
+    await worker_module._main(cast(Settings, None), "projects")
+    assert ran == ["projects"]
+
+
+async def test_the_projects_worker_refuses_to_start_without_a_key(tmp_path: Path) -> None:
+    settings = Settings(
+        data_dir=tmp_path,
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        secret_key_file=None,
+    )
+    with pytest.raises(worker_module.ProjectsKeyMissingError, match="SCADBUDDY_SECRET_KEY_FILE"):
+        await worker_module.run_projects_worker(settings, health_port=None)
+
+
+async def test_the_projects_worker_refuses_to_start_without_the_api_url(tmp_path: Path) -> None:
+    key = tmp_path / "kek"
+    key.write_text(base64.b64encode(b"\x07" * 32).decode())
+    settings = Settings(
+        data_dir=tmp_path,
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        secret_key_file=key,
+        api_internal_url=None,
+    )
+    with pytest.raises(worker_module.ApiUrlMissingError, match="--queue projects"):
+        await worker_module.run_projects_worker(settings, health_port=None)
+
+
 @pytest.mark.parametrize("queue", ["render", "bambuddy"])
 async def test_both_workers_are_handed_the_second_signal(
     queue: worker_module.Queue, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The print worker drains for up to ``PRINT_DRAIN_TIMEOUT``: a second signal cuts
-    that short too, not only the render worker's drain."""
+    """Both workers get the second signal, which cuts a drain short."""
     handed: dict[str, Any] = {}
 
     async def run(settings: Settings, **kwargs: Any) -> None:
@@ -351,12 +394,15 @@ async def test_drained_sees_a_running_pinned_workflow() -> None:
         ),
     ):
         # As the worker does: Temporal 1.28 takes the build only once it polls.
-        assert await make_current_until_polled(
-            lambda: make_current(client, namespace=client.namespace, build_id=build_id),
-            build_id=build_id,
-            backoff=(0.1,),
-            every=0.2,
-            deadline=30,
+        await asyncio.wait_for(
+            make_current_until_polled(
+                lambda: make_current(client, namespace=client.namespace, build_id=build_id),
+                build_id=build_id,
+                backoff=(0.1,),
+                every=0.2,
+                error_after=30,
+            ),
+            30,
         )
         handle = await client.start_workflow(
             _BlocksUntilReleased.run, id=f"blocks-{uuid.uuid4().hex}", task_queue=queue
@@ -386,12 +432,15 @@ async def test_is_current_names_the_deployments_current_build() -> None:
             ),
         ),
     ):
-        assert await make_current_until_polled(
-            lambda: make_current(client, namespace=client.namespace, build_id=build_id),
-            build_id=build_id,
-            backoff=MAKE_CURRENT_BACKOFF,
-            every=MAKE_CURRENT_EVERY,
-            deadline=MAKE_CURRENT_DEADLINE,
+        await asyncio.wait_for(
+            make_current_until_polled(
+                lambda: make_current(client, namespace=client.namespace, build_id=build_id),
+                build_id=build_id,
+                backoff=MAKE_CURRENT_BACKOFF,
+                every=MAKE_CURRENT_EVERY,
+                error_after=MAKE_CURRENT_ERROR_AFTER,
+            ),
+            MAKE_CURRENT_ERROR_AFTER,
         )
         assert await _is_current_answer(client, build_id)
         assert not await _is_current_answer(client, "other")
@@ -673,14 +722,13 @@ async def test_making_the_build_current_retries_until_the_server_takes_it(
             raise _not_found()
 
     with caplog.at_level(logging.INFO, logger="scadbuddy.worker"):
-        made = await asyncio.wait_for(
+        await asyncio.wait_for(
             make_current_until_polled(
-                set_current, build_id="b", backoff=(0.01, 0.01), every=0.01, deadline=5
+                set_current, build_id="b", backoff=(0.01, 0.01), every=0.01, error_after=5
             ),
             5,
         )
 
-    assert made
     assert calls == 3
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert [r.__dict__["attempt"] for r in warnings] == [1, 2]
@@ -688,6 +736,34 @@ async def test_making_the_build_current_retries_until_the_server_takes_it(
         "made this build current"
     ]
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+async def test_making_the_build_current_does_not_give_up(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Past ``error_after`` it logs errors and keeps trying, and still takes (#2341): a
+    worker that gave up left the deployment's current build with no poller."""
+    calls = 0
+
+    async def set_current() -> None:
+        nonlocal calls
+        calls += 1
+        if calls <= 20:
+            raise _not_found()
+
+    with caplog.at_level(logging.INFO, logger="scadbuddy.worker"):
+        await asyncio.wait_for(
+            make_current_until_polled(
+                set_current, build_id="b", backoff=(0.01,), every=0.01, error_after=0.05
+            ),
+            5,
+        )
+
+    assert calls == 21
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert errors
+    assert {r.getMessage() for r in errors} == {"could not make this build current yet"}
+    assert caplog.records[-1].getMessage() == "made this build current"
 
 
 @pytest.mark.requires_temporal
@@ -704,7 +780,7 @@ async def test_a_build_never_made_current_keeps_the_worker_polling(
     monkeypatch.setattr(worker_module, "make_current", refuses)
     monkeypatch.setattr(worker_module, "MAKE_CURRENT_BACKOFF", (0.01, 0.02))
     monkeypatch.setattr(worker_module, "MAKE_CURRENT_EVERY", 0.05)
-    monkeypatch.setattr(worker_module, "MAKE_CURRENT_DEADLINE", 0.3)
+    monkeypatch.setattr(worker_module, "MAKE_CURRENT_ERROR_AFTER", 0.3)
     settings, deps = _in_process_settings(tmp_path)
     stop = asyncio.Event()
 
@@ -719,19 +795,23 @@ async def test_a_build_never_made_current_keeps_the_worker_polling(
                     while not errors():
                         assert not polling.done(), polling.result()
                         await asyncio.sleep(0.02)
-                # Gave up, and the worker polls on: Temporal sees its poller.
+                # Still refused, and the worker polls on: Temporal sees its poller.
                 async with asyncio.timeout(10):
                     while not await _pollers(client, settings.temporal_task_queue_render):
                         await asyncio.sleep(0.1)
+                # And it keeps trying rather than giving up (#2341).
+                seen = attempts
+                async with asyncio.timeout(10):
+                    while attempts == seen:
+                        await asyncio.sleep(0.02)
                 assert not polling.done()
             finally:
                 stop.set()
                 await asyncio.wait_for(polling, 30)
 
     assert attempts >= 3
-    [error] = errors()
-    assert error.getMessage() == "could not make this build current; polling anyway"
-    assert error.__dict__["attempts"] == attempts
+    error = errors()[0]
+    assert error.getMessage() == "could not make this build current yet"
     assert "workflow not found" in error.__dict__["error"]
 
 
@@ -912,6 +992,9 @@ async def test_the_worker_exports_its_cache_size_and_whether_it_holds_the_full_k
         local, cast(ContentStore, SimpleNamespace(name="bambuddy")), max_bytes=0, min_age=0
     )
     (local.dir_for("k") / "m").write_bytes(b"12345")
+    (tmp_path / "scratch").mkdir()
+    (tmp_path / "scratch" / "left-over").write_bytes(b"x" * 100_000)
+    os.link(tmp_path / "scratch" / "left-over", tmp_path / "scratch" / "linked")
     store = StoreBundle(
         "bambuddy", cache, None, None, None, None, cast(RenderSettingsSource, _Source())
     )
@@ -935,16 +1018,83 @@ async def test_the_worker_exports_its_cache_size_and_whether_it_holds_the_full_k
     }
     assert samples["scadbuddy_worker_cache_bytes"] == 5
     assert samples["scadbuddy_store_render_key_fallback"] == 1
+    # The whole data directory, as allocated on disk: the piece cache and the scratch
+    # file beside it, which the cache gauge alone would miss (#1785).
+    # As du counts it: directories too, and the linked file once.
+    du = subprocess.run(
+        ["du", "-s", "-B1", str(tmp_path)], capture_output=True, text=True, check=True
+    )
+    allocated = int(du.stdout.split()[0])
+    assert samples["scadbuddy_render_data_bytes"] == allocated >= 100_000
+
+
+async def test_the_data_directory_is_measured_when_the_database_is_down(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The eviction gauge needs no database, so an outage does not freeze it (#1785)."""
+
+    async def down(_: StoreBundle) -> None:
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(worker_module, "store_health", down)
+    (tmp_path / "scratch").write_bytes(b"x" * 100_000)
+    metrics = Metrics()
+    store = cast(StoreBundle, SimpleNamespace())
+    with pytest.raises(OSError):
+        await worker_module._refresh_store_metrics(
+            metrics, store, worker_module._DataUsage(tmp_path)
+        )
+    measured = metrics.registry.get_sample_value("scadbuddy_render_data_bytes")
+    assert measured is not None and measured >= 100_000
+
+
+async def test_the_data_directory_is_walked_again_only_once_its_value_is_old(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2020: a scrape every 15-30 s does not walk all of /data each time."""
+    walks: list[Path] = []
+    real = worker_module._allocated_bytes
+
+    def counted(root: Path) -> int:
+        walks.append(root)
+        return real(root)
+
+    monkeypatch.setattr(worker_module, "_allocated_bytes", counted)
+    now = [1000.0]
+    data = worker_module._DataUsage(tmp_path, clock=lambda: now[0])
+    first = await data.read()
+    (tmp_path / "scratch").write_bytes(b"x" * 100_000)
+
+    now[0] += worker_module.DATA_USAGE_MAX_AGE - 1
+    assert await data.read() == first
+    assert len(walks) == 1
+
+    now[0] += 1
+    assert await data.read() >= first + 100_000
+    assert len(walks) == 2
+
+
+def test_a_symlinked_directory_counts_its_own_blocks_not_its_targets(tmp_path: Path) -> None:
+    """As du counts it, without -L (#2025)."""
+    root = tmp_path / "data"
+    root.mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "big").write_bytes(b"x" * 100_000)
+    (root / "link").symlink_to(elsewhere, target_is_directory=True)
+    du = subprocess.run(["du", "-s", "-B1", str(root)], capture_output=True, text=True, check=True)
+    assert worker_module._allocated_bytes(root) == int(du.stdout.split()[0])
 
 
 def test_a_refused_store_closes_the_projection_the_worker_opened(
-    settings: Settings, monkeypatch: pytest.MonkeyPatch
+    settings: Settings, pg_pool: PgPool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     opened: list[JobProjection] = []
 
     class Recording(JobProjection):
-        def open(self) -> None:
-            super().open()
+        def open(self, *, migrate_schema: bool = True) -> None:
+            assert not migrate_schema  # the worker never migrates (#601)
+            super().open(migrate_schema=migrate_schema)
             opened.append(self)
 
     def refuse(**_: object) -> NoReturn:
@@ -957,13 +1107,41 @@ def test_a_refused_store_closes_the_projection_the_worker_opened(
     assert len(opened) == 1 and opened[0].pool.closed
 
 
+async def test_a_worker_stopped_while_the_schema_is_behind_closes_and_returns(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#601: on an unmigrated schema the worker waits for the API rather than
+    migrating; a stop ends the wait, and what it opened is closed."""
+    opened: list[JobProjection] = []
+
+    class Recording(JobProjection):
+        def open(self, *, migrate_schema: bool = True) -> None:
+            super().open(migrate_schema=migrate_schema)
+            opened.append(self)
+
+    monkeypatch.setattr(worker_module, "JobProjection", Recording)
+    stop = asyncio.Event()
+    worker = asyncio.create_task(worker_module.run_worker(settings, stop=stop, health_port=None))
+    for _ in range(600):
+        if opened:
+            break
+        await asyncio.sleep(0.05)
+    assert not worker.done()
+    stop.set()
+    await asyncio.wait_for(worker, timeout=30)
+    assert len(opened) == 1 and opened[0].pool.closed
+    with psycopg.connect(settings.database_url) as conn:
+        ledger = conn.execute("SELECT to_regclass('scadbuddy_migrations')").fetchone()
+    assert ledger == (None,)
+
+
 async def test_the_worker_builds_its_deps_and_seeds_off_the_loop(
     settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """#674 gate: the seed copies trees, so it runs in a thread, as the API's does."""
     loops: list[asyncio.AbstractEventLoop | None] = []
 
-    def build(_settings: Settings) -> NoReturn:
+    def build(_settings: Settings, **_: object) -> NoReturn:
         try:
             loops.append(asyncio.get_running_loop())
         except RuntimeError:
@@ -977,7 +1155,7 @@ async def test_the_worker_builds_its_deps_and_seeds_off_the_loop(
 
 
 async def test_a_worker_on_an_empty_volume_seeds_the_images_libraries(
-    settings: Settings, tmp_path: Path
+    settings: Settings, pg_pool: PgPool, tmp_path: Path
 ) -> None:
     """Final review I1: as the API's boot does, so a BOSL2 render needs no network."""
     commit = "f47030c41d88d0676bca73be1c6b7ba58564f9dd"

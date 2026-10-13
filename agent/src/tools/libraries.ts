@@ -26,6 +26,60 @@ export function sameRepository(first: string, second: string): boolean {
   return bare(first) === bare(second)
 }
 
+/**
+ * A pin's answer, plus whether the model pinned `name` before it (`pinned_before`), which
+ * the ModelRecord cannot say: the session records a re-pin as one, not as a new library
+ * (#1307, sessions/touched.ts). Left out when the read before it was refused, so the pin
+ * itself is never held up by it.
+ */
+async function pinAnswer(ctx: ToolContext, slug: string, name: string, pin: () => Promise<unknown>) {
+  let before: { pinned_before?: boolean } = {}
+  try {
+    const { data } = await ctx.backend.GET('/api/v1/models/{slug}', { params: { path: { slug } }, signal: ctx.signal })
+    if (data) before = { pinned_before: (data.libraries ?? []).some((library) => library.name === name) }
+  } catch (err) {
+    // A read that failed outright (a network error) is left out like a refused one; a
+    // cancelled call is cancelled, and does not go on to pin (#2124).
+    if (ctx.signal?.aborted) throw err
+  }
+  const answer = await pin()
+  return json(answer !== null && typeof answer === 'object' ? { ...answer, ...before } : answer)
+}
+
+/**
+ * Refuse a `write` tool that would fetch from the URL a model's pin records when that
+ * URL is not the catalogue's repository for the name: the `outward` twin (`instead`)
+ * fetches it behind a human approval. The tiering is repin_library's, below.
+ */
+async function requireCataloguePin(ctx: ToolContext, slug: string, name: string, doing: string, instead: string) {
+  const { backend } = ctx
+  const [model, catalogue] = await Promise.all([
+    ok(backend.GET('/api/v1/models/{slug}', { params: { path: { slug } } }), `get model ${slug}`),
+    ok(backend.GET('/api/v1/libraries'), 'list libraries'),
+  ])
+  const pinned = (model.libraries ?? []).find((l) => l.name === name)
+  if (!pinned) throw new ToolError(`model ${slug} does not pin a library named "${name}"`)
+  const known = catalogue.find((entry) => entry.name === name)
+  if (!known || !sameRepository(pinned.url, known.url)) {
+    throw new ToolError(
+      `"${name}" is pinned from ${pinned.url}, not the catalogue's repository. ${doing} it fetches from ` +
+        `that URL, which needs a human approval: use ${instead}.`,
+    )
+  }
+}
+
+// The candidate check (#169, #1914) is a plain POST, not a command: it records nothing.
+function checkCandidate(ctx: ToolContext, slug: string, name: string, ref: string | undefined) {
+  return ok(
+    ctx.backend.POST('/api/v1/models/{slug}/libraries/{name}/check', {
+      params: { path: { slug, name } },
+      body: { ref: ref ?? null },
+      signal: ctx.signal,
+    }),
+    `check ${name} of ${slug} at ${ref ?? "the catalogue's ref"}`,
+  )
+}
+
 // The pin writes are commands (#1054): one key per call, and a clone past the backend's
 // deadline is followed to the model.
 function repin(ctx: ToolContext, slug: string, name: string, ref: string | undefined) {
@@ -41,14 +95,29 @@ function repin(ctx: ToolContext, slug: string, name: string, ref: string | undef
 export const libraryTools: Tool[] = [
   defineTool({
     name: 'list_libraries',
-    description: 'The OpenSCAD library catalogue (e.g. BOSL2): name, git URL and default ref.' + PAGED,
-    input: z.object({ ...pageInput }),
+    description:
+      'The OpenSCAD library catalogue (e.g. BOSL2, gridfinity-rebuilt-openscad): name, git URL, default ref, ' +
+      'description and tags. `q` keeps the libraries whose name, description or tags hold every word of it ' +
+      '(e.g. "gridfinity", "threads", "gears").' +
+      PAGED,
+    input: z.object({
+      q: z.string().max(200).optional().describe('Words each library must match, ignoring case'),
+      ...pageInput,
+    }),
     risk: 'read',
     source:
       'upstream OpenSCAD libraries fetched from third-party git repositories',
     routes: ['GET /api/v1/libraries'],
+    title: ({ q }) => (q ? `Search libraries → ${q}` : 'List libraries'),
     handler: async (args, { backend }) =>
-      json(page(await ok(backend.GET('/api/v1/libraries'), 'list libraries'), args, (l) => l.name, 'list_libraries')),
+      json(
+        page(
+          await ok(backend.GET('/api/v1/libraries', { params: { query: { q: args.q || undefined } } }), 'list libraries'),
+          args,
+          (l) => l.name,
+          'list_libraries',
+        ),
+      ),
   }),
 
   // Pinning is split by WHAT THE BACKEND FETCHES, because a tool's tier is static:
@@ -82,7 +151,7 @@ export const libraryTools: Tool[] = [
         .describe("Only the catalogue's own URL for this library is accepted here"),
     }),
     risk: 'write',
-    // Also reads GET /api/v1/libraries (list_libraries) when `url` is given.
+    // Also reads GET /api/v1/libraries (list_libraries) when `url` is given, and the model first.
     routes: ['PUT /api/v1/models/{slug}/libraries/{name}'],
     handler: async ({ slug, name, ref, url }, ctx) => {
       const { backend } = ctx
@@ -98,8 +167,8 @@ export const libraryTools: Tool[] = [
           )
         }
       }
-      return json(
-        await command(ctx, `pin ${name} to ${slug}`, (headers) =>
+      return pinAnswer(ctx, slug, name, () =>
+        command(ctx, `pin ${name} to ${slug}`, (headers) =>
           ctx.backend.PUT('/api/v1/models/{slug}/libraries/{name}', {
             params: { path: { slug, name } },
             // The catalogue's URL is the backend's default; not sending it keeps
@@ -130,8 +199,8 @@ export const libraryTools: Tool[] = [
     routes: ['PUT /api/v1/models/{slug}/libraries/{name}'],
     summarize: ({ slug, name, url, ref }) => `Clone ${url} at ${ref} and pin it to model "${slug}" as ${name}`,
     handler: async ({ slug, name, url, ref }, ctx) =>
-      json(
-        await command(ctx, `pin ${name} from ${url} to ${slug}`, (headers) =>
+      pinAnswer(ctx, slug, name, () =>
+        command(ctx, `pin ${name} from ${url} to ${slug}`, (headers) =>
           ctx.backend.PUT('/api/v1/models/{slug}/libraries/{name}', {
             params: { path: { slug, name } },
             body: { ref, url },
@@ -187,20 +256,7 @@ export const libraryTools: Tool[] = [
     // Also reads GET /models/{slug} (get_model) and GET /libraries (list_libraries).
     routes: ['PATCH /api/v1/models/{slug}/libraries/{name}'],
     handler: async ({ slug, name, ref }, ctx) => {
-      const { backend } = ctx
-      const [model, catalogue] = await Promise.all([
-        ok(backend.GET('/api/v1/models/{slug}', { params: { path: { slug } } }), `get model ${slug}`),
-        ok(backend.GET('/api/v1/libraries'), 'list libraries'),
-      ])
-      const pinned = (model.libraries ?? []).find((l) => l.name === name)
-      if (!pinned) throw new ToolError(`model ${slug} does not pin a library named "${name}"`)
-      const known = catalogue.find((entry) => entry.name === name)
-      if (!known || !sameRepository(pinned.url, known.url)) {
-        throw new ToolError(
-          `"${name}" is pinned from ${pinned.url}, not the catalogue's repository. Re-pinning it fetches from ` +
-            'that URL, which needs a human approval: use repin_library_from_pinned_url.',
-        )
-      }
+      await requireCataloguePin(ctx, slug, name, 'Re-pinning', 'repin_library_from_pinned_url')
       return json(await repin(ctx, slug, name, ref))
     },
   }),
@@ -216,6 +272,69 @@ export const libraryTools: Tool[] = [
     summarize: ({ slug, name, ref }) =>
       `Clone library ${name} of model "${slug}" again from the URL its pin records, at ${ref ?? 'the pinned ref'}`,
     handler: async ({ slug, name, ref }, ctx) => json(await repin(ctx, slug, name, ref)),
+  }),
+
+  // The library upgrade flow (#169; Settings > Libraries, LibraryUpgrade.tsx), for the
+  // agent (#1914): who pins a library, whether each would still parse at a candidate
+  // ref, then repin_library per model. The check clones the candidate from the URL the
+  // model's pin records, exactly as a re-pin does, so it is tiered as the re-pin is.
+  defineTool({
+    name: 'list_library_users',
+    description:
+      "The models (yours and built-in) whose current model.json pins a library, with each one's URL, ref and " +
+      'commit; nulls for an entry that is not a readable pin. Older revisions are not counted. The first step ' +
+      'of an upgrade: check_library_candidate for each, then repin_library.' +
+      PAGED,
+    input: z.object({ name: libraryName, ...pageInput }),
+    risk: 'read',
+    source: 'library pins recorded in model files, some fetched from third-party git repositories',
+    routes: ['GET /api/v1/libraries/{name}/users'],
+    handler: async (args, { backend }) =>
+      json(
+        page(
+          await ok(
+            backend.GET('/api/v1/libraries/{name}/users', { params: { path: { name: args.name } } }),
+            `list the users of ${args.name}`,
+          ),
+          args,
+          (u) => u.slug,
+          'list_library_users',
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'check_library_candidate',
+    description:
+      "Dry-run a re-pin: clone a model's catalogue library at `ref` (the catalogue's ref when omitted) and " +
+      "parse-check the model's saved source against it, with its other pins as they are. Records nothing: the " +
+      'pin and history are unchanged. Answers the parse verdict and the commit `ref` resolved to. For a library ' +
+      'pinned from a non-catalogue URL use check_library_candidate_from_pinned_url.',
+    input: z.object({ slug, name: libraryName, ref: z.string().optional().describe('A tag or branch') }),
+    risk: 'write',
+    // Also reads GET /models/{slug} (get_model) and GET /libraries (list_libraries).
+    routes: ['POST /api/v1/models/{slug}/libraries/{name}/check'],
+    handler: async ({ slug, name, ref }, ctx) => {
+      await requireCataloguePin(ctx, slug, name, 'Checking a candidate of', 'check_library_candidate_from_pinned_url')
+      return json(await checkCandidate(ctx, slug, name, ref))
+    },
+  }),
+
+  defineTool({
+    name: 'check_library_candidate_from_pinned_url',
+    description:
+      "Dry-run a re-pin of a model's library pinned from a non-catalogue URL (a fork, another repo): clone that " +
+      "URL at `ref` and parse-check the model's saved source against it. Records nothing. The backend clones " +
+      'that URL, so this needs a human approval.',
+    // Required: the backend refuses a non-catalogue URL with no ref, so a call without
+    // one could only come back a 422 after a human had approved it (#2098).
+    input: z.object({ slug, name: libraryName, ref: z.string().min(1).describe('A tag or branch') }),
+    risk: 'outward',
+    routes: ['POST /api/v1/models/{slug}/libraries/{name}/check'],
+    summarize: ({ slug, name, ref }) =>
+      `Clone library ${name} of model "${slug}" from the URL its pin records, at ${ref}, ` +
+      'and check the model parses against it',
+    handler: async ({ slug, name, ref }, ctx) => json(await checkCandidate(ctx, slug, name, ref)),
   }),
 
   defineTool({
@@ -327,6 +446,7 @@ export const libraryTools: Tool[] = [
     source:
       'font metadata from the Google Fonts catalogue on the web',
     routes: ['GET /api/v1/fonts/catalogue'],
+    title: ({ q }) => (q ? `Search fonts → ${q}` : 'Browse fonts'),
     handler: async ({ q, category, limit }, { backend }) =>
       json(await ok(backend.GET('/api/v1/fonts/catalogue', { params: { query: { q, category, limit } } }), 'search fonts')),
   }),

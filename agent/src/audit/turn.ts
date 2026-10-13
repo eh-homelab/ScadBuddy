@@ -1,7 +1,8 @@
 import type { ApprovalGate, ApprovalVerdict, RiskTier, TierResolver } from '../harness/permissions.js'
+import type { TurnOutcome } from '../sessions/manager.js'
 import type { ServerEvent } from '../sessions/protocol.js'
 import { unwrapUntrusted } from '../safety/untrusted.js'
-import { type AuditActor, type AuditLog, type AuditOutcome, safeDetail } from './log.js'
+import { type AuditActor, type AuditEntry, type AuditLog, type AuditOutcome, safeDetail } from './log.js'
 
 // The harness half of the audit log (#258): one `tool_call` row per tool call
 // a session turn makes. It watches the turn's panel events (sessions/
@@ -157,5 +158,43 @@ export class TurnAuditor {
       startedAt: call.startedAt,
       finishedAt: new Date(),
     })
+  }
+}
+
+/**
+ * A turn's `turn` row (#1922): how it ended and what it cost. Written once the
+ * turn has released its session (sessions/manager.ts `finish`).
+ *
+ *   action    the result's subtype (`success`, `error_max_turns`, ...),
+ *             `interrupted` or `failed`
+ *   outcome   ok for `success`; refused for a turn stopped by someone; error
+ *             otherwise
+ *   cost      `costUsd` is what the turn added to its session's own spend
+ *             (the session's after, less its before); `priced` is false when
+ *             no result came back, so Claude Code never priced it, and the
+ *             cost is then only `estimatedUsd`, ScadBuddy's price for the
+ *             request the turn was cut off in (sessions/unpricedSpend.ts)
+ */
+export function turnCostEntry(
+  turn: { sessionId: string; turnId: string; actor: AuditActor },
+  outcome: Exclude<TurnOutcome, { kind: 'lost_claim' }>,
+  cost: { costUsd: number; priced: boolean; estimatedUsd: number },
+  secrets: readonly string[] = [],
+): AuditEntry {
+  const action = outcome.kind === 'result' ? outcome.subtype : outcome.kind
+  const result: AuditOutcome =
+    outcome.kind === 'interrupted' ? 'refused' : outcome.kind === 'result' && outcome.subtype === 'success' ? 'ok' : 'error'
+  return {
+    kind: 'turn',
+    action,
+    surface: 'harness',
+    actor: turn.actor,
+    sessionId: turn.sessionId,
+    turnId: turn.turnId,
+    outcome: result,
+    ...(outcome.kind === 'failed' ? { detail: safeDetail(outcome.message, secrets) } : {}),
+    costUsd: cost.costUsd,
+    costPriced: cost.priced,
+    costEstimatedUsd: cost.estimatedUsd,
   }
 }

@@ -1,4 +1,5 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
@@ -11,6 +12,7 @@ import { SERVER_NAME } from '../src/tools/projections.js'
 import { harnessPrincipal } from '../src/auth/principal.js'
 import { z } from 'zod'
 import { defineTool, ERROR_DETAIL_SOURCE, json, type Risk, runToolWithOutcome } from '../src/tools/registry.js'
+import { RenderLimiter } from '../src/tools/renderLimits.js'
 import { BACKEND, services } from './helpers/mcp.js'
 
 // What a session touched (#931, src/sessions/touched.ts): the per-tool
@@ -19,6 +21,7 @@ import { BACKEND, services } from './helpers/mcp.js'
 
 const C1 = 'a'.repeat(40)
 const C2 = 'b'.repeat(40)
+const O5 = '5'.repeat(32)
 
 function result(data: unknown, tool = 'x') {
   // As the projection sees it: re-encoded as untrusted data (registry.ts runToolWithOutcome).
@@ -83,6 +86,32 @@ describe('extractors', () => {
     }
   })
 
+  // #1071: the backend's ModelRecord names the revision before it, whichever tool made it.
+  it("takes every revision's parent from the record's previous_version", () => {
+    const record = { slug: 'box', version: C2, previous_version: C1 }
+    const revision = { type: 'revision', id: C2, action: 'created', model: 'box', before: C1, after: C2 }
+    for (const name of ['write_source_file', 'delete_source_file', 'set_readme', 'delete_readme', 'set_model_thumbnail', 'delete_model_thumbnail', 'restore_version']) {
+      expect(touches(name, { slug: 'box', commit: 'c'.repeat(40) }, record)).toEqual([revision])
+    }
+    expect(touches('apply_patch', { slug: 'box', base: C1 }, record)).toEqual([revision])
+    expect(touches('update_from_upstream', { slug: 'box', action: 'merge' }, { model: record, taken: [] })).toEqual([revision])
+    expect(touches('pin_library', { slug: 'box', name: 'BOSL2' }, record)[0]).toEqual(revision)
+  })
+
+  // #2158: a call with a `base` was refused unless the model was at it, so its commit is base's child.
+  it("takes the call's own base over a previous_version that disagrees with it", () => {
+    const other = 'd'.repeat(40)
+    const record = { slug: 'box', version: C2, previous_version: other }
+    for (const name of ['apply_patch', 'update_source']) {
+      expect(touches(name, { slug: 'box', base: C1 }, record)[0]).toMatchObject({ before: C1, after: C2 })
+    }
+  })
+
+  it('keeps the full previous_version when a short base agrees with it', () => {
+    const record = { slug: 'box', version: C2, previous_version: C1 }
+    expect(touches('apply_patch', { slug: 'box', base: C1.slice(0, 7) }, record)[0]).toMatchObject({ before: C1 })
+  })
+
   it('records a revision tool with no new commit in its answer as a model change, never its slug as a revision', () => {
     expect(touches('update_source', { slug: 'box', base: C1 }, { slug: 'box' })).toEqual([
       { type: 'model', id: 'box', action: 'modified', model: 'box' },
@@ -115,6 +144,16 @@ describe('extractors', () => {
     ])
     expect(touches('delete_model', { slug: 'box' }, { deleted: 'box' }, 'outward')).toEqual([
       { type: 'model', id: 'box', action: 'deleted', model: 'box' },
+    ])
+  })
+
+  // #1071: a deleted output names its model, so a lookup by model finds it.
+  it('records a deleted output with the model its answer names', () => {
+    expect(touches('delete_output', { output_id: 'o1' }, { deleted: 'o1', slug: 'box' }, 'outward')).toEqual([
+      { type: 'output', id: 'o1', action: 'deleted', model: 'box' },
+    ])
+    expect(touches('delete_output', { output_id: 'o1' }, { deleted: 'o1' }, 'outward')).toEqual([
+      { type: 'output', id: 'o1', action: 'deleted', model: null },
     ])
   })
 
@@ -171,6 +210,21 @@ describe('extractors', () => {
     ])
   })
 
+  it('records a library file printed, filed or remembered by its subject (#1756)', () => {
+    expect(
+      touches('print_output', { library_file_id: 42 }, { id: 'r1', status: 'done', result: { queue_item_ids: [12] } }, 'outward'),
+    ).toEqual([
+      { type: 'print_run', id: 'r1', action: 'created', before: 'library:42' },
+      { type: 'print', id: '12', action: 'created', before: 'library:42' },
+    ])
+    expect(touches('file_output_under_project', { library_file_id: 42 }, { project_id: 9 }, 'outward')).toEqual([
+      { type: 'project', id: '9', action: 'modified', before: 'library:42' },
+    ])
+    expect(touches('remember_model_print_choices', { library_file_id: 42, tier: 'fine' }, {})).toEqual([
+      { type: 'setting', id: 'print_choices:library:42', action: 'modified', model: null },
+    ])
+  })
+
   it('records a fetched asset as an upload does', () => {
     expect(touches('fetch_asset', { slug: 'box', url: 'https://x.test/a.png' }, { id: 'f'.repeat(64), kind: 'image' }, 'outward')).toEqual([
       { type: 'asset', id: 'f'.repeat(64), action: 'created', model: 'box' },
@@ -179,13 +233,22 @@ describe('extractors', () => {
 
   it("records a library pin as the model's revision and the library, by name", () => {
     const record = { slug: 'box', version: C2 }
-    expect(touches('pin_library', { slug: 'box', name: 'BOSL2' }, record)).toEqual([
+    // A pin answers whether the model pinned that name before it (#1307): a re-pin is `modified`.
+    const fresh = { ...record, pinned_before: false }
+    expect(touches('pin_library', { slug: 'box', name: 'BOSL2' }, fresh)).toEqual([
       { type: 'revision', id: C2, action: 'created', model: 'box', before: null, after: C2 },
       { type: 'library', id: 'BOSL2', action: 'created', model: 'box' },
     ])
-    expect(touches('pin_library_from_url', { slug: 'box', name: 'lib', url: 'https://g.test/x.git', ref: 'v1' }, record, 'outward')[1]).toEqual(
+    expect(touches('pin_library_from_url', { slug: 'box', name: 'lib', url: 'https://g.test/x.git', ref: 'v1' }, fresh, 'outward')[1]).toEqual(
       { type: 'library', id: 'lib', action: 'created', model: 'box' },
     )
+    for (const name of ['pin_library', 'pin_library_from_url']) {
+      expect(touches(name, { slug: 'box', name: 'BOSL2' }, { ...record, pinned_before: true })[1], name).toEqual(
+        { type: 'library', id: 'BOSL2', action: 'modified', model: 'box' },
+      )
+      // An answer that cannot say is recorded as a change, as a Bambuddy file is.
+      expect(touches(name, { slug: 'box', name: 'BOSL2' }, record)[1], name).toEqual({ type: 'library', id: 'BOSL2', action: 'modified', model: 'box' })
+    }
     for (const name of ['repin_library', 'repin_library_from_pinned_url']) {
       expect(touches(name, { slug: 'box', name: 'BOSL2' }, record)[1], name).toEqual({ type: 'library', id: 'BOSL2', action: 'modified', model: 'box' })
     }
@@ -211,6 +274,10 @@ describe('extractors', () => {
     ])
     expect(touches('set_print_options', { scope: 'model', key: 'box', options: {} }, {}, 'outward')).toEqual([
       { type: 'setting', id: 'print_options:model:box', action: 'modified', model: 'box' },
+    ])
+    // #1754: a library file's own scope is not a model.
+    expect(touches('set_print_options', { scope: 'model', key: 'library:89', options: {} }, {}, 'outward')).toEqual([
+      { type: 'setting', id: 'print_options:model:library:89', action: 'modified', model: null },
     ])
     // A printer or model scope names its key; without one there is no setting to name.
     expect(touches('set_print_options', { scope: 'printer', options: {} }, {}, 'outward')).toEqual([])
@@ -295,6 +362,19 @@ describe('extractors', () => {
     expect(touches('browser_fill', {}, {})).toEqual([{ type: 'unclassified', id: null, action: 'modified' }])
   })
 
+  it('records the library files deleted and restored, never a skipped one (#2167)', () => {
+    const deleted = {
+      deleted: [{ id: 1, filename: 'a.3mf', trashed: true }],
+      skipped: [{ id: 2, filename: 'b.3mf', reason: 'not owned' }],
+    }
+    expect(touches('delete_library_files', { file_ids: [1, 2] }, deleted, 'outward')).toEqual([
+      { type: 'bambuddy_file', id: '1', action: 'deleted' },
+    ])
+    expect(touches('restore_library_files', { file_ids: [1] }, { restored: [1], skipped: [] }, 'outward')).toEqual([
+      { type: 'bambuddy_file', id: '1', action: 'created' },
+    ])
+  })
+
   it('leaves only the browser click and fill unclassified', () => {
     const open = ALL_TOOLS.filter((t) => t.risk !== 'read' && !EXTRACTORS[t.name] && !TOUCHES_NOTHING.has(t.name))
     expect(open.map((t) => t.name).sort()).toEqual(['browser_click', 'browser_fill'])
@@ -310,6 +390,15 @@ describe('extractors', () => {
     expect(failed('apply_patch', { slug: 'box', base: C1 }, { status: 'conflict', base: C1, current: C2 })).toEqual([])
     expect(failed('edit_file', { slug: 'box', base: C1 }, { status: 'conflict', base: C1, current: C2 })).toEqual([])
     expect(failed('set_print_options', { scope: 'global' }, {})).toEqual([])
+  })
+
+  it('records a failed print_output that may have queued as its run (#1017)', () => {
+    const failed = (answer: CallToolResult) =>
+      touchesOf({ name: 'print_output', risk: 'outward' }, { output_id: 'o1' }, { ...answer, isError: true }, false)
+    const run = { id: 'r1', status: 'failed', may_have_queued: true, error: { status: 504 }, result: null }
+    expect(failed(result(run, 'print_output'))).toEqual([{ type: 'print_run', id: 'r1', action: 'created', before: 'o1' }])
+    // A run that failed before it tried to queue answers plain text: nothing went out.
+    expect(failed({ content: [{ type: 'text', text: 'print o1 failed (HTTP 422): no spool' }] })).toEqual([])
   })
 
   it('records nothing it cannot name, rather than a row with no id', () => {
@@ -446,6 +535,59 @@ describe('the harness projection', () => {
     expect(touchesOf(seen[0]!.tool, seen[0]!.input, seen[0]!.result, seen[0]!.ok)).toEqual([
       { type: 'render_job', id: 'j9', action: 'created', model: 'box', after: null },
     ])
+  })
+
+  // #1072: once submitted, the job exists however the wait for it ends.
+  const submittedRender = (id: string) => [
+    http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json({ groups: [], parameters: [] })),
+    http.post(`${BACKEND}/api/v1/models/box/render`, () => HttpResponse.json({ job_id: id, status_url: `/api/v1/jobs/${id}` }, { status: 202 })),
+  ]
+  const renderCtx = (rows: unknown[], signal: AbortSignal, progress: (message?: string) => void = () => {}) => ({
+    ...services({
+      touched: { record: async (c: TouchedCall) => void rows.push(...touchesOf(c.tool, c.input, c.result, c.ok ?? true)) },
+    }),
+    principal: harnessPrincipal({ kind: 'browser', id: 'browser', label: 'You' }),
+    progress: async (_step: number, _total?: number, message?: string) => progress(message),
+    signal,
+    session: 'sess-7',
+    // Its own: a job handed back unsettled holds its slot past the call.
+    renderLimiter: new RenderLimiter(),
+  })
+
+  it('records a submitted render whose poll failed, and answers its job id', async () => {
+    backend.use(...submittedRender('j7'), http.get(`${BACKEND}/api/v1/jobs/j7`, () => HttpResponse.json({ detail: 'down' }, { status: 502 })))
+    const rows: unknown[] = []
+    const run = await runToolWithOutcome(ALL_TOOLS.find((t) => t.name === 'render_model')!, { slug: 'box' }, renderCtx(rows, new AbortController().signal))
+    expect(run.outcome).toBe('error')
+    expect(resultJson(run.result)).toMatchObject({ job_id: 'j7', status: null, error: expect.stringContaining('HTTP 502') })
+    expect(run.detail).toContain('down')
+    expect(rows).toEqual([{ type: 'render_job', id: 'j7', action: 'created', model: 'box', after: null }])
+  })
+
+  it('records a submitted render whose wait was interrupted, and answers its job id', async () => {
+    backend.use(...submittedRender('j6'), http.get(`${BACKEND}/api/v1/jobs/j6`, () => HttpResponse.json({ id: 'j6', slug: 'box', status: 'running', params: {} })))
+    const rows: unknown[] = []
+    const abort = new AbortController()
+    const ctx = renderCtx(rows, abort.signal, (message) => {
+      if (message?.startsWith('render queued')) abort.abort()
+    })
+    const run = await runToolWithOutcome(ALL_TOOLS.find((t) => t.name === 'render_model')!, { slug: 'box' }, ctx)
+    expect(run.outcome).toBe('error')
+    expect(resultJson(run.result)).toMatchObject({ job_id: 'j6', status: null, error: expect.stringMatching(/interrupted/) })
+    expect(rows).toEqual([{ type: 'render_job', id: 'j6', action: 'created', model: 'box', after: null }])
+  })
+
+  it("delete_output reads the output's model before deleting it, and answers it", async () => {
+    backend.use(
+      http.get(`${BACKEND}/api/v1/outputs/${O5}`, () => HttpResponse.json({ id: O5, slug: 'box' })),
+      http.delete(`${BACKEND}/api/v1/outputs/${O5}`, () => new HttpResponse(null, { status: 204 })),
+    )
+    const rows: unknown[] = []
+    // Approved at the harness's seam, as a session's outward call is.
+    const ctx = { ...renderCtx(rows, new AbortController().signal), gate: 'harness' as const }
+    const run = await runToolWithOutcome(ALL_TOOLS.find((t) => t.name === 'delete_output')!, { output_id: O5 }, ctx)
+    expect(resultJson(run.result)).toEqual({ deleted: O5, slug: 'box' })
+    expect(rows).toEqual([{ type: 'output', id: O5, action: 'deleted', model: 'box' }])
   })
 
   it('answers the call unchanged when the sink throws', async () => {

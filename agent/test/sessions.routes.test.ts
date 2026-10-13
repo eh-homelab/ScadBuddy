@@ -8,7 +8,7 @@ import type { SessionManager } from '../src/sessions/manager.js'
 import { expectPanelAccepts } from './support/frontendProtocol.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
-import { agentA, browser, type FakeTurn, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { agentA, agentB, browser, type FakeTurn, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 
 // /api/v1/ai/sessions (routes/sessions.ts) over a scripted runner: the routes'
 // own behaviour (guard, status codes, the SSE replay). The real SDK path is
@@ -92,6 +92,23 @@ describe.skipIf(skip !== undefined)(`session routes${skip ? ` (skipped: ${skip})
     expect(sent.status).toBe(202)
     await waitIdle(id)
     expect((await m.get(id, browser)).turns).toBe(2)
+  })
+
+  it("takes a new session's mode, says when the default fell back, and refuses an unknown one (plan 5d)", async () => {
+    const start = (body: unknown) =>
+      app.request('/api/v1/ai/sessions', { method: 'POST', headers: JSON_UI, body: JSON.stringify(body) })
+    // No Temporal here: the default (durable) runs classic and says so.
+    const fell = await start({ title: 'a' })
+    expect(fell.status).toBe(201)
+    expect(await fell.json()).toMatchObject({ session: { mode: 'classic' }, mode_fallback: expect.stringMatching(/durable sessions need Temporal/) })
+    const classic = await start({ title: 'b', mode: 'classic' })
+    expect(classic.status).toBe(201)
+    const body = (await classic.json()) as Record<string, unknown>
+    expect(body).toMatchObject({ session: { mode: 'classic' } })
+    expect(body).not.toHaveProperty('mode_fallback')
+    // Asked for, durable is never run as classic instead.
+    expect((await start({ title: 'c', mode: 'durable' })).status).toBe(503)
+    expect((await start({ title: 'd', mode: 'fast' })).status).toBe(400)
   })
 
   it('streams the event log as SSE from ?after= / Last-Event-ID', async () => {
@@ -329,6 +346,35 @@ describe.skipIf(skip !== undefined)(`session routes${skip ? ` (skipped: ${skip})
     const res = await app.request(`/api/v1/ai/sessions/${session.id}/handoff`, { method: 'POST', headers: UI })
     expect(res.status).toBe(200)
     expect(await res.json()).toMatchObject({ owner: { kind: 'browser', id: 'browser' } })
+  })
+
+  it("withdraws a session's handoff offer, which the panel's snapshot showed (#1284)", async () => {
+    const { session } = await m.start(browser, { origin: 'chat', title: 'mine' })
+    await waitIdle(session.id)
+    await m.handoff(session.id, browser, agentA)
+    const listed = (await m.snapshot(browser)) as { sessions: { sessionId: string; offer: unknown }[] }
+    expect(listed.sessions.find((s) => s.sessionId === session.id)?.offer).toMatchObject({
+      to: { kind: 'bearer', id: 'token:a' },
+      until: expect.any(String),
+    })
+
+    const cancel = () => app.request(`/api/v1/ai/sessions/${session.id}/handoff`, { method: 'DELETE', headers: UI })
+    const res = await cancel()
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ cancelled: true, session: { id: session.id, offer: null } })
+    expect((await m.get(session.id, browser)).offer).toBeNull()
+    // Nothing left to withdraw.
+    expect(await (await cancel()).json()).toMatchObject({ cancelled: false })
+  })
+
+  it("refuses to withdraw an offer on a session the browser user does not own (#1284)", async () => {
+    const { session } = await m.start(agentA, { origin: 'mcp', title: 'theirs' })
+    await waitIdle(session.id)
+    await m.handoff(session.id, agentA, agentB)
+    const res = await app.request(`/api/v1/ai/sessions/${session.id}/handoff`, { method: 'DELETE', headers: UI })
+    expect(res.status).toBe(403)
+    // The offer stands.
+    expect((await m.get(session.id, agentA)).offer).toMatchObject({ to: { kind: 'bearer', id: 'token:b' } })
   })
 
   it('answers 503 without sessions (no database)', async () => {

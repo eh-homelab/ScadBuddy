@@ -18,6 +18,10 @@ export type SessionStatus = (typeof SESSION_STATUSES)[number]
 
 export type Risk = 'read' | 'write' | 'outward'
 
+/** How a session runs (spec 2026-10-01 §6.1): in this service's harness, or as a DurableSession workflow. */
+export const SESSION_MODES = ['classic', 'durable'] as const
+export type SessionMode = (typeof SESSION_MODES)[number]
+
 /**
  * A principal (spec §8.1) as the protocol carries it; `label` is what the
  * "controlled by …" badge reads. Two owners are the same principal when kind
@@ -54,36 +58,120 @@ export type AttentionView =
    */
   | { reason: 'done'; summary: string }
 
+/** An image a tool returned, as the event names it (#782): `<sha256>.<ext>`, one of the session's blobs. */
+export type ImageRef = { name: string; mediaType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp' }
+
+/**
+ * An image the user sent with a turn, as `user.turn` names it (#2479): the full image
+ * and its preview, each one of the session's blobs. A turn logged before #2479 whose
+ * full image could not be stored names its preview only (that migration).
+ */
+export type SentImage = Partial<ImageRef> & { preview: { name: string; mediaType: 'image/png' | 'image/jpeg' | 'image/webp' } }
+
 export type SessionSummary = {
   sessionId: string
   title: string
   origin: Origin
   owner: Owner
   status: SessionStatus
+  /** The session switcher's nesting, last activity and spend (#795). */
+  parentId: string | null
+  updatedAt: string
+  costUsd: number
+  budgetUsd: number
+  /** Classic or durable (plan 5d), for the switcher's badge. */
+  mode: SessionMode
+  /** A live handoff offer (manager.ts `handoff`), for the switcher's "Offered to" badge (#1284). */
+  offer: { to: SeenOwner; until: string } | null
 }
 
 type V = { v: typeof PROTOCOL_VERSION }
 
+/**
+ * One tool call parked on a person (durable-agents spec §6.6), in the one shape both
+ * modes and both reads use. `id` is the `request_id` respond takes, opaque to clients:
+ * `approval:<uuid>`, `question:<uuid>` (a classic row) or
+ * `durable:<session id>:<workflow run id>:<tool_use_id>`.
+ */
+export type InputEntry = {
+  id: string
+  kind: 'approval' | 'answer'
+  session_id: string | null
+  tool: string
+  /** An approval's scrubbed summary; empty for an answer. Never the call's raw input. */
+  summary: string
+  input_hash: string | null
+  /** An answer's question or attention message, scrubbed; empty for an approval. */
+  prompt: string
+  /** Who asked for the approval; null for an answer (the session's agent). */
+  requested_by: Owner | null
+  /** Who may answer: the browser user, and for an approval also a grant holder. */
+  responders: ('browser' | 'grant')[]
+  created_at: string
+  /** When its timer fires; null for an entry with none (a `done` summary). */
+  expires_at: string | null
+  /** Set on an attention request (#815) only. */
+  attention?: { reason: string; on_timeout: string | null; summary?: string }
+}
+
+/** How a parked call ended (`ai_input_responses.outcome`). */
+export type InputOutcome = 'approved' | 'denied' | 'expired' | 'answered' | 'cancelled' | 'timed_out'
+
 export type ServerEvent = V &
   (
     | { type: 'sessions.snapshot'; sessions: SessionSummary[] }
-    /** `budgetUsd`: what the session may spend in all (#790); absent on sessions started before it. */
-    | { type: 'session.started'; sessionId: string; origin: Origin; owner: Owner; title?: string; budgetUsd?: number }
+    /**
+     * `budgetUsd`: what the session may spend in all (#790); absent on sessions started before it.
+     * `mode` (plan 5d): how it runs, absent before 5d (classic); `modeFallback`: why a session
+     * whose mode came from the default runs classic instead of durable,
+     * as the bare reason (each surface words it).
+     */
+    | {
+        type: 'session.started'
+        sessionId: string
+        origin: Origin
+        owner: Owner
+        title?: string
+        budgetUsd?: number
+        mode?: SessionMode
+        modeFallback?: string
+      }
     | { type: 'session.owner'; sessionId: string; owner: Owner }
-    /** `images`: previews of the images the user sent with the turn (#1866, images.ts); the model got the full ones. */
+    /**
+     * `images`: the images the user sent with the turn (#1866, images.ts), by name (#2479): the
+     * full image and its preview, stored with the session (blobs.ts) and served by the session
+     * route, as a tool result's are. Never their bytes.
+     */
     | {
         type: 'user.turn'
         sessionId: string
         turnId: string
         text: string
         author: Owner
-        images?: { mediaType: 'image/png' | 'image/jpeg' | 'image/webp'; data: string }[]
+        images?: SentImage[]
       }
     | { type: 'assistant.text.delta'; sessionId: string; messageId: string; delta: string }
     | { type: 'assistant.text.done'; sessionId: string; messageId: string }
-    /** `parent`: a subagent's call (#1108), the id of the session's `Agent` call that spawned it. */
-    | { type: 'tool.call'; sessionId: string; id: string; name: string; input: Record<string, unknown>; risk: Risk; parent?: string }
-    | { type: 'tool.result'; sessionId: string; id: string; ok: boolean; summary: string }
+    /**
+     * `parent`: a subagent's call (#1108), the id of the session's `Agent` call that spawned it.
+     * `title`: what the call does, in words (#782): the registry tool's own (tools/registry.ts
+     * `ToolSpec.title`); absent for a tool outside the registry, which the panel names itself.
+     */
+    | {
+        type: 'tool.call'
+        sessionId: string
+        id: string
+        name: string
+        input: Record<string, unknown>
+        risk: Risk
+        parent?: string
+        title?: string
+      }
+    /**
+     * `images`: the images the result carried (#782), each served by
+     * `GET /api/v1/ai/sessions/:id/blobs/:name` (sessions/blobs.ts); the bytes are never in the event.
+     */
+    | { type: 'tool.result'; sessionId: string; id: string; ok: boolean; summary: string; images?: ImageRef[] }
     /** `tool` is the tool.call id the approval gates; only outward calls wait (spec §8.2). */
     | { type: 'approval.required'; sessionId: string; id: string; tool: string; summary: string; risk: 'outward' }
     /**
@@ -132,10 +220,33 @@ export type ServerEvent = V &
         /** #815 §2: a `tab_disconnected` attention request ended because the session's tab is connected again. */
         reconnected?: true
       }
+    /**
+     * A call parked on a person, of any kind and in either mode (spec §6.6,
+     * "Notifications"): what notifications are driven by. Logged and announced on the
+     * bus beside the per-kind events the panel's cards use; never sent on the chat socket.
+     */
+    | { type: 'input.requested'; sessionId: string; entry: InputEntry }
+    /** The entry `id` ended: answered, decided, timed out or cancelled. */
+    | { type: 'input.resolved'; sessionId: string; id: string; kind: 'approval' | 'answer'; outcome: InputOutcome; reason?: string }
     | { type: 'session.status'; sessionId: string; status: SessionStatus }
     | { type: 'session.result'; sessionId: string; costUsd?: number; turns: number; budgetUsd?: number }
     /** The budget changed (a raise, #790), or a send was refused because it is spent. */
     | { type: 'session.budget'; sessionId: string; costUsd: number; budgetUsd: number }
+    /**
+     * #2329: someone changed a file in the session's workspace through its files
+     * route (routes/sessionFiles.ts): the panel's Files list reads again, and the
+     * feed says what arrived. `size`, `mediaType` and `sha256` are an upload's.
+     */
+    | {
+        type: 'workspace.file'
+        sessionId: string
+        path: string
+        change: 'uploaded' | 'deleted'
+        by: Owner
+        size?: number
+        mediaType?: string
+        sha256?: string
+      }
     /** `questionId`: the error refused the panel's answer to that question (#940), so its card is answerable again. */
     | { type: 'error'; sessionId?: string; code?: string; message: string; questionId?: string }
     /**

@@ -15,6 +15,16 @@
  * session is listed when one of its rows matches, a `model` by the row's model and any
  * other kind by its id, as agent `sessions/manager.ts` `listQuery` does. Its title is
  * what `setSessionResources` was given.
+ *
+ * #792 — a fork takes `up_to` (a reply's message id, #793), and `PATCH /sessions/:id`
+ * renames a session or marks it done (#795), on the open mock agent as the real routes
+ * do. `sessionWrites()` lists the forks and edits the panel sent, for tests.
+ *
+ * #1885 — `PATCH` also archives or unarchives (`archived`), and `GET /sessions?archived=true`
+ * lists the open mock agent's archived sessions, as the switcher's Archived view reads them.
+ *
+ * #1125 — `GET /sessions?status=running` lists `setRunningSessions(n)` running sessions (none
+ * by default), as the header's working indicator reads them; any other status lists none.
  */
 import { HttpResponse, http } from 'msw'
 import type { AiSessionView, ResourceRef, SessionLimits, SessionResource } from '../../api/types'
@@ -58,17 +68,42 @@ const state = {
   resources: new Map<string, SessionResource[]>(),
   /** The session each resource list belongs to, as the reverse lookup shows it. */
   views: new Map<string, AiSessionView>(),
+  /** #792 — every fork and edit, in order. */
+  sessionWrites: [] as SessionWrite[],
+  /** #1125 — how many sessions `?status=running` lists. */
+  running: 0,
+}
+
+/** A fork or an edit the panel sent: the path under `/api/v1/ai` and the JSON body. */
+export interface SessionWrite {
+  method: 'POST' | 'PATCH' | 'DELETE'
+  path: string
+  body: Record<string, unknown>
+}
+
+export function sessionWrites(): readonly SessionWrite[] {
+  return state.sessionWrites
 }
 
 export function reset(): void {
   state.limits = { ...DEFAULTS }
   state.writes = []
+  state.sessionWrites = []
+  state.running = 0
   state.resources = new Map([[EXTERNAL_SESSION_ID, [...EXTERNAL_RESOURCES]]])
   state.views = new Map([
     [EXTERNAL_SESSION_ID, view({ id: EXTERNAL_SESSION_ID, title: 'Tune the gridfinity bin', origin: 'mcp', turns: 1 })],
   ])
 }
 reset()
+
+/** #1125 — how many of the user's sessions have a turn under way. */
+export function setRunningSessions(n: number): void {
+  state.running = n
+}
+
+/** agent `sessions/protocol.ts` SESSION_STATUSES. */
+const STATUSES = ['running', 'waiting_input', 'waiting_approval', 'idle', 'done', 'failed']
 
 /** #931 — what `GET /sessions/:id/resources` answers for one session, oldest first. */
 export function setSessionResources(
@@ -143,6 +178,13 @@ export const handlers = [
     return HttpResponse.json(state.limits)
   }),
 
+  // #1288 — one session: a 404 for one that neither the open mock agent nor a test knows.
+  http.get(`${base}/sessions/:id`, ({ params }) => {
+    const id = String(params.id)
+    const known = state.views.get(id) ?? (mockAgentSessions()?.has(id) ? view({ id }) : undefined)
+    return known ? HttpResponse.json(known) : detail('session not found', 404)
+  }),
+
   http.get(`${base}/sessions/:id/resources`, ({ params }) => {
     const id = String(params.id)
     const resources = state.resources.get(id) ?? (mockAgentSessions()?.has(id) ? [] : undefined)
@@ -161,15 +203,104 @@ export const handlers = [
     return HttpResponse.json({ sessions })
   }),
 
-  http.post(`${base}/sessions/:id/fork`, ({ params }) => {
+  http.post(`${base}/sessions/:id/fork`, async ({ params, request }) => {
+    const raw = await request.text()
+    const body = (raw.trim() ? JSON.parse(raw) : {}) as Record<string, unknown>
+    state.sessionWrites.push({ method: 'POST', path: `/sessions/${String(params.id)}/fork`, body })
+    const extra = Object.keys(body).filter((k) => k !== 'title' && k !== 'up_to')
+    if (extra.length) return detail(`body: unrecognized key(s) ${extra.join(', ')}`, 400)
     const agent = mockAgentSessions()
     if (!agent) return detail('the assistant is not connected', 503)
-    const forked = agent.fork(String(params.id))
+    const forked = agent.fork(String(params.id), typeof body.up_to === 'string' ? body.up_to : undefined)
     if ('error' in forked) return detail(forked.error, forked.status)
     return HttpResponse.json(
       { session: view({ id: forked.id, title: forked.title, parent_id: forked.parentId, budget_usd: forked.budgetUsd }) },
       { status: 201 },
     )
+  }),
+
+  http.delete(`${base}/sessions/:id/handoff`, ({ params }) => {
+    const id = String(params.id)
+    state.sessionWrites.push({ method: 'DELETE', path: `/sessions/${id}/handoff`, body: {} })
+    const agent = mockAgentSessions()
+    if (!agent) return detail('the assistant is not connected', 503)
+    const answer = agent.cancelOffer(id)
+    if ('error' in answer) return detail(answer.error, answer.status)
+    return HttpResponse.json({ cancelled: answer.cancelled, session: view({ id, offer: null }) })
+  }),
+
+  http.patch(`${base}/sessions/:id`, async ({ params, request }) => {
+    const body = (await request.json()) as Record<string, unknown>
+    const id = String(params.id)
+    state.sessionWrites.push({ method: 'PATCH', path: `/sessions/${id}`, body })
+    const extra = Object.keys(body).filter((k) => k !== 'title' && k !== 'done' && k !== 'archived')
+    if (extra.length) return detail(`body: unrecognized key(s) ${extra.join(', ')}`, 400)
+    const title = typeof body.title === 'string' ? body.title.trim() : undefined
+    if (title === '' || (title?.length ?? 0) > 200) return detail('title: must be 1 to 200 characters', 400)
+    if (body.done !== undefined && body.done !== true) return detail('done: must be true', 400)
+    if (body.archived !== undefined && typeof body.archived !== 'boolean') return detail('archived: must be a boolean', 400)
+    if (title === undefined && body.done === undefined && body.archived === undefined) {
+      return detail('body: name a title, done: true, or archived', 400)
+    }
+    const agent = mockAgentSessions()
+    if (!agent) return detail('the assistant is not connected', 503)
+    const updated = agent.update(id, {
+      ...(title === undefined ? {} : { title }),
+      ...(body.done ? { done: true } : {}),
+      ...(typeof body.archived === 'boolean' ? { archived: body.archived } : {}),
+    })
+    if ('error' in updated) return detail(updated.error, updated.status)
+    return HttpResponse.json({
+      session: view({
+        id,
+        title: updated.title,
+        status: updated.status,
+        parent_id: updated.parentId,
+        cost_usd: updated.costUsd,
+        budget_usd: updated.budgetUsd,
+        updated_at: new Date().toISOString(),
+        archived: updated.archivedAt !== null,
+        archived_at: updated.archivedAt,
+      }),
+    })
+  }),
+
+  http.get(`${base}/sessions`, ({ request }) => {
+    const query = new URL(request.url).searchParams
+    const status = query.get('status')
+    if (status !== null) {
+      if (!STATUSES.includes(status)) return detail(`status must be one of ${STATUSES.join(', ')}`, 400)
+      const n = status === 'running' ? Math.min(state.running, Number(query.get('limit') ?? 50)) : 0
+      return HttpResponse.json({
+        sessions: Array.from({ length: n }, (_, i) =>
+          view({ id: `running-${i + 1}`, title: 'Working', status: 'running', running: true }),
+        ),
+      })
+    }
+    const archived = query.get('archived')
+    if (archived !== null && !['true', 'false', 'include'].includes(archived)) {
+      return detail('archived must be one of true, include, false', 400)
+    }
+    const agent = mockAgentSessions()
+    if (!agent) return detail('the assistant is not connected', 503)
+    // Only the archive view's read is modelled: the panel's main list is the socket's snapshot.
+    if (archived !== 'true') return detail('the mock lists only archived sessions (?archived=true)', 400)
+    return HttpResponse.json({
+      sessions: agent.archived().map((s) =>
+        view({
+          id: s.id,
+          title: s.title,
+          origin: s.origin,
+          status: s.status,
+          parent_id: s.parentId,
+          cost_usd: s.costUsd,
+          budget_usd: s.budgetUsd,
+          updated_at: s.archivedAt,
+          archived: true,
+          archived_at: s.archivedAt,
+        }),
+      ),
+    })
   }),
 
   http.post(`${base}/sessions/:id/budget`, async ({ params, request }) => {

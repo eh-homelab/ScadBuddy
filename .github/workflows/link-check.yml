@@ -1,0 +1,50 @@
+# Markdown links in docs/, README.md, CLAUDE.md and every SKILL.md must resolve
+# (#1926, from #259). Weekly and on demand only, never on a PR, so an external
+# site going down never blocks a merge; it is not a required check. A failure
+# opens (or leaves open) one issue. Fix the link, or exclude it in the args
+# below with a comment saying why.
+name: Link check
+
+on:
+  schedule:
+    - cron: "41 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  lychee:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      # v2.9.0, which runs lychee v0.24.2. --include-fragments also checks
+      # #anchors, in-repo ones included. 429 is a rate limit, not a dead link.
+      - name: lychee
+        id: lychee
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          args: >-
+            --no-progress
+            --include-fragments
+            --max-concurrency 16
+            --accept '100..=103,200..=299,429'
+            'docs/**/*.md' README.md CLAUDE.md '**/SKILL.md'
+          fail: true
+      - name: Open an issue
+        if: failure() && steps.lychee.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Link check: broken Markdown links"
+          if gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number' | grep -q .; then
+            echo "already open"; exit 0
+          fi
+          gh issue create --title "$title" --label documentation --body \
+            "The weekly link check (\`.github/workflows/link-check.yml\`) found broken links in \`docs/\`, \`README.md\`, \`CLAUDE.md\` or a \`SKILL.md\`: $RUN_URL (the job summary lists them). Fix each link, or exclude it in the workflow's lychee args with a comment giving the reason."

@@ -48,13 +48,14 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
   let script: (request: RecordedRequest) => Reply
   let db: Database
   let schema: string
+  let url: string
   let drop: () => Promise<void>
   let stop: AbortController
   const pools: Database[] = []
 
   beforeEach(async () => {
     fake = await startFakeAnthropic((r) => script(r))
-    ;({ db, schema, drop } = await throwawayDatabase())
+    ;({ db, schema, url, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     stop = new AbortController()
   })
@@ -69,7 +70,7 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
   async function replica(extra: Partial<SessionManagerDeps> = {}): Promise<SessionManager> {
     const paths = await tempPaths()
     await ensureStateDirs(paths)
-    const pool = connectDatabase(TEST_DATABASE_URL!, { searchPath: schema })
+    const pool = connectDatabase(url, { searchPath: schema })
     pools.push(pool)
     return manager({
       sql: pool.sql,
@@ -507,6 +508,40 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
       'session.status',
     ])
     // Three Claude Code runs; past vitest's 5 s default on a loaded machine.
+  }, 60_000)
+
+  it('forks from a reply (#793): the child keeps the turns through it, and the model sees only those', async () => {
+    script = (r) => {
+      const said = conversation(r)
+      return { text: said.includes('go left') ? 'went left' : said.includes('make it taller') ? 'taller now' : 'a box, 20 mm' }
+    }
+    const m = await replica()
+    const { session: parent, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box', title: 'box' })
+    await turn!.done
+    await (await m.send(parent.id, browser, 'make it taller')).done
+    const first = (await allEvents(m, parent.id)).map((e) => e.event).find((e) => e.type === 'assistant.text.done')
+    if (first?.type !== 'assistant.text.done') throw new Error('no first reply')
+
+    const child = await m.fork(parent.id, browser, { upTo: first.messageId })
+    const events = (await allEvents(m, child.id)).map((e) => e.event)
+    await expectPanelAccepts(events)
+    expect(events.map((e) => e.type)).toEqual([
+      'session.started',
+      'user.turn',
+      'assistant.text.delta',
+      'assistant.text.done',
+      'session.status',
+    ])
+    expect(events[3]).toMatchObject({ messageId: first.messageId })
+
+    await (await m.send(child.id, browser, 'go left')).done
+    const sent = conversation(fake.messageCalls().at(-1))
+    expect(sent).toContain('make a box')
+    expect(sent).toContain('a box, 20 mm')
+    expect(sent).toContain('go left')
+    expect(sent).not.toContain('make it taller')
+    expect(sent).not.toContain('taller now')
+    await expect(m.fork(parent.id, browser, { upTo: 'msg_nowhere:0' })).rejects.toMatchObject({ code: 'invalid' })
   }, 60_000)
 
   it('a fork’s first turn records only its own spend, not the parent’s again (#1648)', async () => {

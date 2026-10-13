@@ -17,6 +17,7 @@ import pytest
 from scadbuddy.bambuddy.extruders import (
     LEFT,
     RIGHT,
+    default_nozzles,
     extruder_of,
     high_flow_warning,
     high_flow_warnings,
@@ -296,12 +297,46 @@ def test_a_nozzle_of_the_other_flow_still_beats_another_size(
     assert slicer_nozzle_stats(status, _size("0.2")) == expected
 
 
+def test_both_sides_with_the_size_are_both_offered() -> None:
+    """#2181, queue item 268: both sides carry the chosen nozzle. Leaving the file's own
+    stats let a library file made for one extruder offer the slicer only the left, so
+    every colour went there; both sides are offered outright instead."""
+    status = _nozzles(("HS00", "0.2"), ("HS00", "0.2"))
+    assert slicer_nozzle_stats(status, _size("0.2")) == ["Standard#1", "Standard#1"]
+    high_flow = _nozzles(("HH01", "0.4"), ("HH01", "0.4"))
+    assert slicer_nozzle_stats(high_flow, _choose("0.4", "high_flow")) == [
+        "High Flow#1",
+        "High Flow#1",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("mounted", "nozzles", "expected"),
+    [
+        # Queue 268: a 0.4 High Flow on both sides, High Flow chosen.
+        (
+            (("HH00", "0.4"), ("HH01", "0.4")),
+            _choose("0.4", "high_flow"),
+            ["High Flow#1", "High Flow#1"],
+        ),
+        # The owner's case (a): a standard 0.2 on both sides.
+        ((("HS00", "0.2"), ("HS00", "0.2")), _size("0.2"), ["Standard#1", "Standard#1"]),
+    ],
+)
+def test_two_sides_of_the_chosen_nozzle_are_both_offered(
+    mounted: tuple[tuple[str, str], tuple[str, str]],
+    nozzles: list[NozzleChoice],
+    expected: list[str],
+) -> None:
+    """#2181: either side may print, so both are stated. Left as ``None``, a library
+    file kept its own stats, and one made for a single extruder offered the slicer one
+    side: queue 268 sliced both colours onto the left."""
+    assert slicer_nozzle_stats(_nozzles(*mounted), nozzles) == expected
+
+
 @pytest.mark.parametrize(
     ("status", "size"),
     [
-        # Both sides have it (the owner's case (a)): either may print, so the slicer
-        # keeps its own choice.
-        (_nozzles(("HS00", "0.2"), ("HS00", "0.2")), "0.2"),
         # Neither has it: stating no nozzle anywhere fails the slice, and the printer
         # may swap one in (#768), so the file is left as it was.
         (fts_status(), "0.6"),
@@ -442,3 +477,48 @@ def test_a_nozzle_with_no_type_code_is_no_flow_to_warn_of() -> None:
         "High Flow#1",
     ]
     assert high_flow_warnings(status, _choose("0.2", "high_flow")) == []
+
+
+def _flows_of(nozzles: list[NozzleChoice]) -> list[str]:
+    return [nozzle.flow for nozzle in nozzles]
+
+
+def _rack(*types: str) -> list[dict[str, Any]]:
+    """Spare 0.4s in the rack, of these type codes (slot ids past the two mounted)."""
+    return [
+        {"id": LEFT + 1 + index, "nozzle_type": kind, "nozzle_diameter": "0.4"}
+        for index, kind in enumerate(types)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("mounted", "rack", "flows"),
+    [
+        # The right (index 0) mounted High Flow: the right side defaults to it.
+        ([("HH01", "0.4"), ("HS01", "0.4")], [], ["standard", "high_flow"]),
+        # Both sides mounted High Flow.
+        ([("HH01", "0.4"), ("HH01", "0.4")], [], ["high_flow", "high_flow"]),
+        # High Flow of another size is not the default size's.
+        ([("HH01", "0.6"), ("HH01", "0.6")], [], ["standard", "standard"]),
+        # A High Flow spare of the size in the rack serves the right, the side it swaps onto.
+        ([("HS01", "0.4"), ("HS01", "0.4")], ["HH01"], ["standard", "high_flow"]),
+        # Standard everywhere: unchanged.
+        ([("HS01", "0.4"), ("HS01", "0.4")], ["HS01"], ["standard", "standard"]),
+    ],
+)
+def test_the_default_nozzles_are_high_flow_wherever_the_side_has_one(
+    mounted: list[tuple[str, str]], rack: list[str], flows: list[str]
+) -> None:
+    """#1895: the dialog and print_output open on High Flow on each side that can print
+    with a High Flow nozzle of the size; listed left first, as the dialog does."""
+    status = mapped_status(
+        nozzles=[{"nozzle_type": kind, "nozzle_diameter": size} for kind, size in mounted],
+        nozzle_rack=_rack(*rack),
+    )
+    defaults = default_nozzles(status)
+    assert [nozzle.size for nozzle in defaults] == ["0.4", "0.4"]
+    assert _flows_of(defaults) == flows
+
+
+def test_an_unreadable_status_defaults_to_standard() -> None:
+    assert _flows_of(default_nozzles(None)) == ["standard", "standard"]

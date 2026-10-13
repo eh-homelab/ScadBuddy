@@ -1,7 +1,6 @@
 import type { Context, Hono } from 'hono'
 import { streamSSE } from 'hono/streaming'
 import { z } from 'zod'
-import { AGENT_ACTOR_HEADER } from '../harness/headlessBrowser.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { MESSAGE_MAX } from '../sessions/clientProtocol.js'
 import {
@@ -10,7 +9,8 @@ import {
   SessionError,
   type SessionRecord,
 } from '../sessions/manager.js'
-import { type Owner, ownerSeenBy, SESSION_STATUSES, sameOwner, type SeenOwner } from '../sessions/protocol.js'
+import { type Owner, ownerSeenBy, SESSION_MODES, SESSION_STATUSES, sameOwner, type SeenOwner } from '../sessions/protocol.js'
+import { MESSAGE_ID_MAX } from '../sessions/forkPoint.js'
 import { ID_MAX, LOOKUP_TYPES, type LookupType, type ResourceRef } from '../sessions/touched.js'
 import { BROWSER_USER } from './approvals.js'
 import { jsonBodyLimit, type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
@@ -24,9 +24,12 @@ import { ready, type RouteModule } from './module.js'
 // same-origin GET shows it. Approvals are decided through
 // /api/v1/ai/approvals (routes/approvals.ts, #258).
 //
-//   GET  /api/v1/ai/sessions[?status=&limit=&resource_type=&resource_id=]
+//   GET  /api/v1/ai/sessions[?status=&limit=&resource_type=&resource_id=&archived=]
 //                                                 list, newest first; with both resource_*
-//                                                 only the sessions that touched it (#931)
+//                                                 only the sessions that touched it (#931);
+//                                                 archived ones only with `archived=true` (the
+//                                                 panel's archive view, #1885) or
+//                                                 `archived=include`, never by default
 //   GET  /api/v1/ai/resources/:type/:id/sessions[?status=&limit=]
 //                                                 {sessions}: the same list, of the sessions
 //                                                 whose tool calls touched that resource (#931,
@@ -39,6 +42,11 @@ import { ready, type RouteModule } from './module.js'
 //   GET  /api/v1/ai/sessions/:id/resources        {resources}: what its tool calls created,
 //                                                 changed or deleted, oldest first (#931,
 //                                                 sessions/touched.ts)
+//   GET  /api/v1/ai/sessions/:id/blobs/:name      an image one of its tool results carried (#782,
+//                                                 sessions/blobs.ts), or one the user sent, by the
+//                                                 name its tool.result or user.turn event gives;
+//                                                 404 for any other name. Never a path:
+//                                                 the name is looked up in ai_session_blobs
 //   POST /api/v1/ai/sessions/:id/messages         {text} → 202 {turn_id}; 409 while a turn runs
 //   GET  /api/v1/ai/sessions/:id/events           Server-Sent Events: the panel-protocol
 //                                                 events, replayed from `Last-Event-ID`
@@ -49,16 +57,32 @@ import { ready, type RouteModule } from './module.js'
 //                                                 (its `type` is in the JSON)
 //   POST /api/v1/ai/sessions/:id/interrupt        {interrupted}
 //   POST /api/v1/ai/sessions/:id/handoff          take the session over as the browser user
-//   POST /api/v1/ai/sessions/:id/fork             {title?} → 201 {session}: a new session with the
-//                                                 transcript so far and a fresh budget, owned by
-//                                                 the browser user; counted against the new-session
-//                                                 limit (429). The panel's "Continue in a new chat"
-//                                                 (#790). #793 adds `up_to`, the socket message and audit.
+//   DELETE /api/v1/ai/sessions/:id/handoff        → {cancelled, session}: withdraw the live handoff
+//                                                 offer of a session the browser user owns (#1284;
+//                                                 manager.ts `cancelHandoff`, as MCP's
+//                                                 sessions_cancel_handoff); 403 for anyone else's.
+//                                                 Nothing is ever offered *to* the browser user: a
+//                                                 handoff to it transfers at once, so the manager's
+//                                                 target-declines branch serves MCP callers only. `cancelled` is
+//                                                 false when there was none (it expired, or was accepted)
+//   PATCH /api/v1/ai/sessions/:id                 {title?, done?: true, archived?} → {session}: rename
+//                                                 it, mark it done (#795), or archive or unarchive it
+//                                                 (#1885; sessions/edits.ts). Owner-only (403); done is
+//                                                 refused while a turn runs and on a durable session,
+//                                                 and archiving while a turn runs or anything is parked
+//                                                 on the user (409). A send or a handoff to an archived
+//                                                 session is refused (409, `archived`)
+//   POST /api/v1/ai/sessions/:id/fork             {title?, up_to?} → 201 {session}: a new session with the
+//                                                 transcript so far, or (`up_to`, a reply's panel message
+//                                                 id, #793) through that reply, and a fresh budget,
+//                                                 owned by the browser user; counted against the
+//                                                 new-session limit (429); 409 with no transcript yet.
+//                                                 The panel's Fork, "Fork from here" and "Continue in
+//                                                 a new chat" (#790, #794). A `resource` audit row.
 //   POST /api/v1/ai/sessions/:id/budget           {add_usd} → {session}: adds to that session's
 //                                                 budget (#790). User-only and owner-only
-//                                                 (manager.ts raiseBudget): a request with the
-//                                                 headless browser's agent-actor marker is refused,
-//                                                 and no tool reaches it. Audited, refusals included.
+//                                                 (manager.ts raiseBudget): no tool reaches it.
+//                                                 Audited, refusals included.
 //
 // Error bodies are `{ detail }`, the backend's FastAPI shape; a SessionError's
 // status is used as it is (404, 403, 409, 429, 400).
@@ -83,12 +107,17 @@ export type SessionView = {
   offered_to_you: boolean
   status: SessionRecord['status']
   parent_id: string | null
+  /** Classic or durable (plan 5d), set when the session started. */
+  mode: SessionRecord['mode']
   turns: number
   cost_usd: number
   budget_usd: number
   running: boolean
   created_at: string
   updated_at: string
+  /** Archived by its owner (#1885): out of the panel's list, and read-only until unarchived. */
+  archived: boolean
+  archived_at: string | null
 }
 
 /**
@@ -107,21 +136,42 @@ export function sessionView(s: SessionRecord, viewer: Pick<Owner, 'kind' | 'id'>
     offered_to_you: s.offer !== null && sameOwner(viewer, s.offer.to),
     status: s.status,
     parent_id: s.parentId,
+    mode: s.mode,
     turns: s.turns,
     cost_usd: s.costUsd,
     budget_usd: s.budgetUsd,
     running: s.turnActive,
     created_at: s.createdAt,
     updated_at: s.updatedAt,
+    archived: s.archivedAt !== null,
+    archived_at: s.archivedAt,
   }
 }
 
 const StartBody = z.strictObject({
   title: z.string().max(200).optional(),
   prompt: z.string().min(1).max(MESSAGE_MAX).optional(),
+  /** Plan 5d: absent, the `session_mode` setting's, which falls back to classic when durable cannot run. */
+  mode: z.enum(SESSION_MODES).optional(),
 })
 const SendBody = z.strictObject({ text: z.string().min(1).max(MESSAGE_MAX) })
-const ForkBody = z.strictObject({ title: z.string().max(200).optional() })
+/** `up_to`: a reply's panel message id (`assistant.text.done`'s `messageId`), #793. */
+const ForkBody = z.strictObject({
+  title: z.string().max(200).optional(),
+  up_to: z.string().min(1).max(MESSAGE_ID_MAX).optional(),
+})
+const UpdateBody = z
+  .strictObject({
+    title: z.string().trim().min(1).max(200).optional(),
+    done: z.literal(true).optional(),
+    archived: z.boolean().optional(),
+  })
+  .refine((b) => b.title !== undefined || b.done !== undefined || b.archived !== undefined, {
+    message: 'name a title, done: true, or archived',
+  })
+
+/** `?archived=` on a list (#1885): `true` lists only archived sessions, `include` both, `false` (the default) none. */
+const ARCHIVED_QUERY = { true: 'only', include: 'include', false: 'exclude' } as const
 const BudgetBody = z.strictObject({ add_usd: z.number().min(0.01).max(MAX_SESSION_BUDGET_USD) })
 
 const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
@@ -213,7 +263,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (rawLimit !== undefined && (limit === undefined || limit < 1 || limit > LIST_LIMIT_MAX)) {
       return c.json({ detail: `limit must be an integer from 1 to ${LIST_LIMIT_MAX}` }, 400)
     }
+    const rawArchived = c.req.query('archived')
+    if (rawArchived !== undefined && !Object.hasOwn(ARCHIVED_QUERY, rawArchived)) {
+      return c.json({ detail: `archived must be one of ${Object.keys(ARCHIVED_QUERY).join(', ')}` }, 400)
+    }
     const list = await sessions.list(BROWSER_USER, {
+      ...(rawArchived ? { archived: ARCHIVED_QUERY[rawArchived as keyof typeof ARCHIVED_QUERY] } : {}),
       ...(status ? { status: status as SessionRecord['status'] } : {}),
       ...(limit ? { limit } : {}),
       ...(resource ? { resource } : {}),
@@ -254,12 +309,20 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     route('write', async (c, sessions) => {
       const body = await jsonBody(c, StartBody, {})
       if (!body.ok) return body.response
-      const { session, turn } = await sessions.start(BROWSER_USER, {
+      const { session, turn, modeFallback } = await sessions.start(BROWSER_USER, {
         origin: 'chat',
         ...(body.value.title ? { title: body.value.title } : {}),
         ...(body.value.prompt ? { prompt: body.value.prompt } : {}),
+        ...(body.value.mode ? { mode: body.value.mode } : {}),
       })
-      return c.json({ session: sessionView(session, BROWSER_USER), ...(turn ? { turn_id: turn.turnId } : {}) }, 201)
+      return c.json(
+        {
+          session: sessionView(session, BROWSER_USER),
+          ...(turn ? { turn_id: turn.turnId } : {}),
+          ...(modeFallback ? { mode_fallback: modeFallback } : {}),
+        },
+        201,
+      )
     }),
   )
 
@@ -271,6 +334,43 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   app.get(
     `${base}/:id/resources`,
     route('read', async (c, sessions) => c.json({ resources: await sessions.resources(idOf(c), BROWSER_USER) })),
+  )
+
+  app.get(
+    `${base}/:id/blobs/:name`,
+    route('read', async (c, sessions) => {
+      const blob = await sessions.blob(idOf(c), c.req.param('name') ?? '', BROWSER_USER)
+      return c.body(new Uint8Array(blob.bytes), 200, {
+        'Content-Type': blob.mediaType,
+        'X-Content-Type-Options': 'nosniff',
+        // An image, shown by an <img> on the UI's page: nothing in it may run,
+        // and no other site may embed it.
+        'Content-Security-Policy': "default-src 'none'; sandbox",
+        'Cross-Origin-Resource-Policy': 'same-origin',
+        'Content-Disposition': 'inline',
+        // The name is the bytes' hash: what it names never changes.
+        'Cache-Control': 'private, max-age=31536000, immutable',
+      })
+    }),
+  )
+
+  app.get(
+    `${base}/:id/http/:saved`,
+    route('read', async (c, sessions) => {
+      const { id: saved, meta, bytes } = await sessions.httpBody(idOf(c), c.req.param('saved') ?? '', BROWSER_USER)
+      // Untrusted bytes from whatever server answered (#1292). Plain text and JSON
+      // are shown as text; everything else, HTML and SVG included, only downloads.
+      // Nothing in either may run, and no other site may embed it.
+      const viewable = /^(text\/plain|application\/(?:[\w.+-]+\+)?json)\b/i.test(meta.content_type ?? '')
+      return c.body(new Uint8Array(bytes), 200, {
+        'Content-Type': viewable ? 'text/plain; charset=utf-8' : 'application/octet-stream',
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': "default-src 'none'; sandbox",
+        'Cross-Origin-Resource-Policy': 'same-origin',
+        'Content-Disposition': `${viewable ? 'inline' : 'attachment'}; filename="response-${saved.slice(0, 8)}.${viewable ? 'txt' : 'bin'}"`,
+        'Cache-Control': 'private, no-store',
+      })
+    }),
   )
 
   app.post(
@@ -300,6 +400,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     ),
   )
 
+  app.delete(
+    `${base}/:id/handoff`,
+    limit,
+    route('write', async (c, sessions) => {
+      const cancelled = await sessions.cancelHandoff(idOf(c), BROWSER_USER)
+      return c.json({ cancelled, session: sessionView(await sessions.get(idOf(c), BROWSER_USER), BROWSER_USER) })
+    }),
+  )
+
   app.post(
     `${base}/:id/fork`,
     limit,
@@ -308,13 +417,28 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       if (!body.ok) return body.response
       const child = await sessions.fork(idOf(c), BROWSER_USER, {
         ...(body.value.title ? { title: body.value.title } : {}),
+        ...(body.value.up_to === undefined ? {} : { upTo: body.value.up_to }),
+        audit: { surface: 'http', clientIp: deps.remoteAddress(c) },
         rateLimited: true,
-        // A budget of its own is the user's to give, like a raise (#823); the manager refuses it to the
-        // headless browser's marked request, whose fork shares the parent's.
+        // A budget of its own is the user's to give, like a raise (#823).
         freshBudget: true,
-        agentActor: c.req.header(AGENT_ACTOR_HEADER) !== undefined,
       })
       return c.json({ session: sessionView(child, BROWSER_USER) }, 201)
+    }),
+  )
+
+  app.patch(
+    `${base}/:id`,
+    limit,
+    route('write', async (c, sessions) => {
+      const body = await jsonBody(c, UpdateBody, undefined)
+      if (!body.ok) return body.response
+      const session = await sessions.edits.update(idOf(c), BROWSER_USER, {
+        ...(body.value.title === undefined ? {} : { title: body.value.title }),
+        ...(body.value.done ? { done: true as const } : {}),
+        ...(body.value.archived === undefined ? {} : { archived: body.value.archived }),
+      }, { surface: 'http', clientIp: deps.remoteAddress(c) })
+      return c.json({ session: sessionView(session, BROWSER_USER) })
     }),
   )
 
@@ -327,7 +451,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const session = await sessions.raiseBudget(idOf(c), BROWSER_USER, body.value.add_usd, {
         surface: 'http',
         clientIp: deps.remoteAddress(c),
-        agentActor: c.req.header(AGENT_ACTOR_HEADER) !== undefined,
       })
       return c.json({ session: sessionView(session, BROWSER_USER) })
     }),

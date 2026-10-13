@@ -25,6 +25,7 @@ from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.workflows.activities import WorkerDeps
 from scadbuddy.workflows.models import LoadRequest
 from scadbuddy.workflows.pipeline_activities import PipelineActivities
+from tests.support.media import MemoryMediaStore
 
 PIPELINE = "INPUTS_VERSION = 3\n\nasync def run(ctx, inputs):\n    return None\n"
 
@@ -96,7 +97,7 @@ def test_writing_model_json_keeps_a_malformed_pipeline(tmp_path: Path) -> None:
 
     paths = DataPaths(tmp_path / "data")
     paths.ensure()
-    catalogue = Catalogue(paths, wrapper_prefix=WRAPPER_PREFIX)
+    catalogue = Catalogue(paths, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX)
     bad = {"module": "../x.py", "api": 1}
     catalogue.create(
         "demo", "cube();\n", ModelMeta.model_validate({"name": "Demo", "pipeline": bad})

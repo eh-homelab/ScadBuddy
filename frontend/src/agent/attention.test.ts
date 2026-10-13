@@ -1,6 +1,7 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { setRunningSessions } from '../mocks/features/assistantSessions'
 import { setPendingAnswers, setPendingApprovals } from '../mocks/features/pendingInput'
 import { server } from '../mocks/server'
 import {
@@ -10,6 +11,8 @@ import {
   attentionDetail,
   attentionLabel,
   fetchPendingInput,
+  fetchRunning,
+  RUNNING_PATH,
   summaryLabel,
   totalOf,
   useAttention,
@@ -23,15 +26,15 @@ afterEach(() => {
 describe('fetchPendingInput', () => {
   it('counts what the agent lists as parked on the user, by kind', async () => {
     setPendingApprovals(2)
-    expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 0, attention: 0, summaries: 0 })
+    expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 0, attention: 0, summaries: 0, summariesTruncated: false })
     setPendingAnswers(1, 3)
-    expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 1, attention: 3, summaries: 0 })
+    expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 1, attention: 3, summaries: 0, summariesTruncated: false })
   })
 
   it('counts a done summary apart: it waits for nothing, so it is not in the waiting total', async () => {
     setPendingAnswers(1, 1, 2)
     const counts = await fetchPendingInput()
-    expect(counts).toEqual({ approvals: 0, questions: 1, attention: 1, summaries: 2 })
+    expect(counts).toEqual({ approvals: 0, questions: 1, attention: 1, summaries: 2, summariesTruncated: false })
     expect(totalOf(counts!)).toBe(2)
     expect(attentionLabel(totalOf(counts!))).toBe('2 waiting for you')
     expect(attentionDetail(counts)).toBe('1 question, 1 attention request')
@@ -57,6 +60,15 @@ describe('fetchPendingInput', () => {
     expect(summaryLabel(await fetchPendingInput())).toBe(`${APPROVALS_LIST_MAX}+ summaries`)
     server.use(http.get('/api/v1/ai/pending-input', () => HttpResponse.json({ entries: page, summaries_truncated: false })))
     expect(summaryLabel(await fetchPendingInput())).toBe(`${APPROVALS_LIST_MAX} summaries`)
+  })
+
+  it('does not count a durable entry past its timer: it waits on its worker, not on the user (spec §6.6)', async () => {
+    server.use(
+      http.get('/api/v1/ai/pending-input', () =>
+        HttpResponse.json({ entries: [{ kind: 'approval' }, { kind: 'approval', expiring: true }, { kind: 'answer', expiring: true }] }),
+      ),
+    )
+    expect(await fetchPendingInput()).toEqual({ approvals: 1, questions: 0, attention: 0, summaries: 0 })
   })
 
   it('counts an older replica\'s timed done row as waiting: its turn is parked on it', async () => {
@@ -100,7 +112,121 @@ describe('fetchPendingInput', () => {
   })
 })
 
+describe('fetchRunning (#1125)', () => {
+  it("says whether any of the user's sessions has a turn under way", async () => {
+    expect(await fetchRunning()).toBe(false)
+    setRunningSessions(2)
+    expect(await fetchRunning()).toBe(true)
+  })
+
+  it('asks for one running session, which is enough to say yes', () => {
+    const query = new URL(RUNNING_PATH, 'http://x').searchParams
+    expect(query.get('status')).toBe('running')
+    expect(query.get('limit')).toBe('1')
+  })
+
+  it('is unknown (null), not idle, when the agent cannot answer', async () => {
+    server.use(http.get('/api/v1/ai/sessions', () => HttpResponse.json({ detail: 'no database' }, { status: 503 })))
+    expect(await fetchRunning()).toBeNull()
+    server.use(http.get('/api/v1/ai/sessions', () => HttpResponse.text('<html></html>')))
+    expect(await fetchRunning()).toBeNull()
+    server.use(http.get('/api/v1/ai/sessions', () => HttpResponse.json({ running: true })))
+    expect(await fetchRunning()).toBeNull()
+  })
+
+  it('gives up on an agent that accepts and never answers', async () => {
+    server.use(http.get('/api/v1/ai/sessions', () => new Promise<never>(() => {})))
+    expect(await fetchRunning(20)).toBeNull()
+  })
+})
+
 describe('useAttention', () => {
+  it('says when a session is running, and keeps that through a failed read (#1125)', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const { result } = renderHook(() => useAttention(true))
+    await waitFor(() => expect(result.current.running).toBe(false))
+
+    setRunningSessions(1)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ATTENTION_POLL_MS)
+    })
+    await waitFor(() => expect(result.current.running).toBe(true))
+
+    server.use(http.get('/api/v1/ai/sessions', () => HttpResponse.json({ detail: 'down' }, { status: 503 })))
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ATTENTION_POLL_MS)
+    })
+    expect(result.current.running).toBe(true)
+  })
+
+  it('reads whether anything is running only while the assistant is on (#1125)', async () => {
+    const seen = vi.fn()
+    server.use(
+      http.get('/api/v1/ai/sessions', () => {
+        seen()
+        return HttpResponse.json({ sessions: [] })
+      }),
+    )
+    const { result, rerender } = renderHook(({ on }) => useAttention(on), { initialProps: { on: false } })
+    await act(async () => {})
+    expect(result.current.running).toBeNull()
+    expect(seen).not.toHaveBeenCalled()
+    rerender({ on: true })
+    await waitFor(() => expect(result.current.running).toBe(false))
+    rerender({ on: false })
+    expect(result.current.running).toBeNull()
+  })
+
+  it('shows the waiting count without waiting for a slow sessions list (#2192)', async () => {
+    let answer: (() => void) | undefined
+    setPendingApprovals(2)
+    server.use(
+      http.get('/api/v1/ai/sessions', async () => {
+        await new Promise<void>((resolve) => {
+          answer = resolve
+        })
+        return HttpResponse.json({ sessions: [{}] })
+      }),
+    )
+    const { result } = renderHook(() => useAttention(true))
+    await waitFor(() => expect(result.current.waiting).toBe(2))
+    expect(result.current.running).toBeNull()
+    act(() => answer?.())
+    await waitFor(() => expect(result.current.running).toBe(true))
+  })
+
+  it('does not bring "working" back from a read that answers after the assistant is off (#2192)', async () => {
+    let answer: (() => void) | undefined
+    server.use(
+      http.get('/api/v1/ai/sessions', async () => {
+        await new Promise<void>((resolve) => {
+          answer = resolve
+        })
+        return HttpResponse.json({ sessions: [{}] })
+      }),
+    )
+    // The late read's body, read: from there to its end is microtasks only, so one
+    // macrotask after it has settled the read, and the guard has run (#2214).
+    const reads: Promise<unknown>[] = []
+    const json = Response.prototype.json
+    const spy = vi.spyOn(Response.prototype, 'json').mockImplementation(function (this: Response) {
+      const read = json.call(this)
+      if (this.url.includes('/api/v1/ai/sessions')) reads.push(read)
+      return read
+    })
+    const { result, rerender } = renderHook(({ on }) => useAttention(on), { initialProps: { on: true } })
+    await waitFor(() => expect(answer).toBeDefined())
+    rerender({ on: false })
+    act(() => answer?.())
+    await waitFor(() => expect(reads).toHaveLength(1))
+    await act(async () => {
+      await reads[0]
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    spy.mockRestore()
+    expect(result.current.running).toBeNull()
+  })
+
   it('reads nothing while the assistant is off', async () => {
     const seen = vi.fn()
     server.use(

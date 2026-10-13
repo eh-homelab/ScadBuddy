@@ -7,7 +7,9 @@ import { QuestionError } from '../questions/service.js'
 import { contextFrom } from '../telemetry/trace.js'
 import type { TabHub } from '../bridge/hub.js'
 import type { OriginPolicy } from '../http/origins.js'
-import { type ClientMessage, parseClientFrame, renderPageContext } from '../sessions/clientProtocol.js'
+import { type AttachmentRef, AttachmentError, type AttachmentStore, type ResolvedAttachment } from '../attachments/store.js'
+import { type ClientMessage, isAnswerId, isSessionId, parseClientFrame, renderPageContext } from '../sessions/clientProtocol.js'
+import { checkedImages } from '../sessions/images.js'
 import { type SessionManager, SessionError } from '../sessions/manager.js'
 import { event, type Owner, type ServerEvent } from '../sessions/protocol.js'
 import { BROWSER_USER } from './approvals.js'
@@ -29,7 +31,10 @@ import { ready, type RouteModule } from './module.js'
 //                            /mcp or on another tab or replica, shows up live
 //   user.message           → SessionManager.start (no sessionId: a new `chat`
 //                            session) or .send; the page context rides along
-//                            for the model only (manager.ts SendOptions)
+//                            for the model only (manager.ts SendOptions); the
+//                            images it names by id (#1941) are read from the
+//                            attachment store first, and moved into the
+//                            session once its turn has started
 //   session.attach         → replay the session's event log from the start,
 //                            then follow it live (SessionManager.attach)
 //   question.answer        → QuestionService.answer (#940): the user's answer to
@@ -87,25 +92,20 @@ const DRAIN_POLL_MS = 20
 export const MAX_QUEUED_FRAMES = 32
 
 /**
- * The largest frame the socket takes (main.ts `maxPayload`): a message's images
- * (#1866, images.ts IMAGES_DATA_TOTAL_MAX of base64, and their previews) plus a
- * 32k-character message and its page context.
+ * The largest frame the socket takes (main.ts `maxPayload`): a 32k-character
+ * message and its page context. Images are not in frames: the panel uploads
+ * them (#1941, routes/attachments.ts) and a message names them by id. A larger
+ * frame closes the socket, 1009 Message Too Big; that is what a tab loaded
+ * before #1941 meets when it sends inline images larger than this. Smaller,
+ * they are refused with clientProtocol.ts `STALE_TAB_IMAGES` (#1959).
  */
-export const CHAT_FRAME_MAX = 9 * 1024 * 1024
-
-/**
- * Bytes of frames one connection may have waiting to be handled; past this a
- * frame is refused with `busy`, so image frames cannot hold MAX_QUEUED_FRAMES
- * times CHAT_FRAME_MAX in memory.
- */
-export const MAX_QUEUED_BYTES = 2 * CHAT_FRAME_MAX
+export const CHAT_FRAME_MAX = 256 * 1024
 
 export type ChatLimits = {
   highWater: number
   bufferMax: number
   drainStallMs: number
   maxQueued: number
-  maxQueuedBytes: number
 }
 
 export type ChatConnectionOptions = {
@@ -123,6 +123,8 @@ export type ChatConnectionOptions = {
   tabs?: Pick<TabHub, 'pairSession' | 'sessionHasTab'> | undefined
   /** The client's address, for the audit rows of what it does here (a question's answer, #1075). */
   clientIp?: string | undefined
+  /** The panel's uploaded images (#1941), which a `user.message` names by id; without it such a message is refused. */
+  attachments?: AttachmentStore | undefined
 }
 
 export type ChatRouteDeps = {
@@ -138,6 +140,8 @@ export type ChatRouteDeps = {
   snapshotMs?: number
   /** The browser bridge's tabs (#254, bridge/hub.ts). */
   tabs?: Pick<TabHub, 'pairSession' | 'sessionHasTab'> | undefined
+  /** The panel's uploaded images (#1941, attachments/store.ts). */
+  attachments?: AttachmentStore | undefined
 }
 
 const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
@@ -153,8 +157,8 @@ function refusedAnswer(raw: string): { sessionId: string; questionId: string } |
     const frame: unknown = JSON.parse(raw)
     if (typeof frame !== 'object' || frame === null) return {}
     const { type, sessionId, id } = frame as Record<string, unknown>
-    const named = (v: unknown): v is string => typeof v === 'string' && v.length > 0 && v.length <= 100
-    return type === 'question.answer' && named(sessionId) && named(id) ? { sessionId, questionId: id } : {}
+    // The schema's own bounds, so an echoed id is one it would take.
+    return type === 'question.answer' && isSessionId(sessionId) && isAnswerId(id) ? { sessionId, questionId: id } : {}
   } catch {
     return {}
   }
@@ -190,7 +194,6 @@ export class ChatConnection {
   private readonly follows = new Map<string, AbortController>()
   private queue: Promise<void> = Promise.resolve()
   private queued = 0
-  private queuedBytes = 0
   private closed = false
   private readonly snapshotMs: number
   private snapshotTimer: NodeJS.Timeout | undefined
@@ -205,6 +208,7 @@ export class ChatConnection {
   /** The tab this panel is in, once it said (`tab.bind`). */
   private tabId: string | undefined
   private readonly clientIp: string | undefined
+  private readonly attachments: AttachmentStore | undefined
 
   constructor(sessions: SessionManager, out: (e: ServerEvent) => void, options: ChatConnectionOptions = {}) {
     this.sessions = sessions
@@ -216,12 +220,12 @@ export class ChatConnection {
     this.overflow = options.overflow ?? (() => {})
     this.tabs = options.tabs
     this.clientIp = options.clientIp
+    this.attachments = options.attachments
     this.limits = {
       highWater: SEND_HIGH_WATER,
       bufferMax: SEND_BUFFER_MAX,
       drainStallMs: DRAIN_STALL_MS,
       maxQueued: MAX_QUEUED_FRAMES,
-      maxQueuedBytes: MAX_QUEUED_BYTES,
       ...options.limits,
     }
   }
@@ -299,8 +303,7 @@ export class ChatConnection {
     // The cap is checked before the frame is parsed, so a flood of frames is
     // refused with `busy` whether or not they parse: a malformed frame costs the
     // process a parse and a reply, and that is the work the cap bounds.
-    const bytes = typeof raw === 'string' ? raw.length : 0
-    if (this.queued >= this.limits.maxQueued || this.queuedBytes + bytes > this.limits.maxQueuedBytes) {
+    if (this.queued >= this.limits.maxQueued) {
       this.emit(
         event({
           type: 'error',
@@ -319,17 +322,19 @@ export class ChatConnection {
     const parsed = parseClientFrame(raw)
     if (!parsed.ok) {
       // Answered through the queue, so it counts against the cap like any other frame.
-      const error = parsed.error
-      const where = refusedAnswer(raw)
+      const { error, stale } = parsed
+      // A tab loaded before #1941 sends images inline (#1959): it is told to reload, in the session it wrote to.
+      const where = stale ?? refusedAnswer(raw)
+      const message = stale ? error : `ignored a malformed message: ${error}`
       return this.enqueue(async () => {
-        this.emit(event({ type: 'error', ...where, code: 'invalid', message: `ignored a malformed message: ${error}` }))
+        this.emit(event({ type: 'error', ...where, code: 'invalid', message }))
       })
     }
     const message = parsed.value
     // New sessions are rate-limited per owner by the manager (sessions/manager.ts
     // MAX_NEW_SESSIONS), not per connection, so reconnecting does not reset it;
     // a refusal comes back as an `error` frame with code `rate_limited`.
-    return this.enqueue(() => this.handle(message), { bytes })
+    return this.enqueue(() => this.handle(message))
   }
 
   close(): void {
@@ -344,13 +349,9 @@ export class ChatConnection {
     return [...this.follows.keys()]
   }
 
-  /**
-   * Runs `task` after everything queued before it. `counted` tasks (frames) take
-   * a `maxQueued` slot, and `bytes` of `maxQueuedBytes` until they are handled.
-   */
-  private enqueue(task: () => Promise<void>, { counted = true, bytes = 0 } = {}): Promise<void> {
+  /** Runs `task` after everything queued before it. `counted` tasks (frames) take a `maxQueued` slot. */
+  private enqueue(task: () => Promise<void>, { counted = true } = {}): Promise<void> {
     if (counted) this.queued += 1
-    this.queuedBytes += bytes
     const run = this.queue.then(async () => {
       try {
         if (this.closed) return
@@ -359,11 +360,41 @@ export class ChatConnection {
         this.emit(errorEvent(err, undefined, this.log))
       } finally {
         if (counted) this.queued -= 1
-        this.queuedBytes -= bytes
       }
     })
     this.queue = run
     return run
+  }
+
+  /** The attachments a message names, read for this connection's principal; undefined for none. */
+  private async resolveAttachments(images: AttachmentRef[] | undefined): Promise<ResolvedAttachment[] | undefined> {
+    if (!images) return undefined
+    if (!this.attachments) throw new SessionError('invalid', 'image uploads need the database: SCADBUDDY_DATABASE_URL is not set')
+    let resolved: ResolvedAttachment[]
+    try {
+      resolved = await this.attachments.resolve(this.principal, images)
+    } catch (err) {
+      if (err instanceof AttachmentError) throw new SessionError('invalid', err.message)
+      throw err
+    }
+    // Each upload was checked alone; together they must fit images.ts's caps too (the total).
+    const checked = checkedImages(resolved.map((a) => a.image))
+    // images.ts messages name fields and caps only: they never quote the bytes.
+    if (!checked.ok) throw new SessionError('invalid', `images: ${checked.error}`)
+    return resolved
+  }
+
+  /**
+   * Moves the attachments a started turn sent into its session (attachments/store.ts
+   * `claim`). The turn already has the bytes, so a failure here is logged, not the turn's.
+   */
+  private async claim(sessionId: string, attached: ResolvedAttachment[] | undefined): Promise<void> {
+    if (!attached?.length || !this.attachments) return
+    try {
+      await this.attachments.claim(sessionId, this.principal, attached)
+    } catch (err) {
+      this.log(`chat: session ${sessionId}: could not move its attachments: ${err instanceof Error ? err.message : String(err)}`)
+    }
   }
 
   private async handle(message: ClientMessage): Promise<void> {
@@ -372,20 +403,27 @@ export class ChatConnection {
       switch (message.type) {
         case 'user.message': {
           const context = renderPageContext(message.context)
-          const images = message.images ? { images: message.images } : {}
+          // Uploaded images (#1941) are read before anything starts, so one that is
+          // unknown, expired or another owner's refuses the message, not the turn.
+          const attached = await this.resolveAttachments(message.images)
+          const images = attached ? { images: attached.map((a) => a.image) } : {}
           // The turn is the browser's child when the frame names its span,
           // else a root (spec 2026-10-01 §4); a malformed one is ignored.
           const parent = contextFrom(message.traceparent)
           if (!message.sessionId) {
+            const mode = message.mode ? { mode: message.mode } : {}
             const { session } = await otelContext.with(parent, () =>
-              this.sessions.start(this.principal, { origin: 'chat', prompt: message.text, context, ...images }),
+              this.sessions.start(this.principal, { origin: 'chat', prompt: message.text, context, ...images, ...mode }),
             )
+            await this.claim(session.id, attached)
             this.pairTab(session.id)
             // From the start: session.started is what the panel adopts its new chat by.
             this.follow(session.id, 0)
             return
           }
           const id = message.sessionId
+          // Set at insert and never changed (spec §6.1).
+          if (message.mode) throw new SessionError('invalid', `session ${id} exists: its mode is set when it starts`)
           // Ownership first, every time (get() refuses another owner's session):
           // pairing this tab must never outrun the check that send() repeats.
           await this.sessions.get(id, this.principal)
@@ -395,14 +433,20 @@ export class ChatConnection {
           // Before the turn starts, so its first browser_* call already finds this tab.
           this.pairTab(id)
           await otelContext.with(parent, () => this.sessions.send(id, this.principal, message.text, { context, ...images }))
+          await this.claim(id, attached)
           return
         }
         case 'session.attach':
           // The panel clears the session's feed when it attaches (state.ts
           // `select`), so this is always a full replay, even when followed already.
           await this.sessions.get(message.sessionId, this.principal)
-          if (!this.tabs?.sessionHasTab(message.sessionId)) this.pairTab(message.sessionId)
           this.follow(message.sessionId, 0)
+          // Off the frame queue: asking another replica whether it holds the
+          // session's tab can wait out the relay's ack timeout when none does,
+          // and the socket's next frame must not wait for it.
+          void this.pairUnlessHeld(message.sessionId).catch((err: unknown) =>
+            this.log(`chat: pairing ${message.sessionId}: ${err instanceof Error ? err.message : String(err)}`),
+          )
           return
         case 'approval.decision':
           await this.sessions.approvals.decision(this.principal, message, { clientIp: this.clientIp })
@@ -435,6 +479,13 @@ export class ChatConnection {
     if (this.tabId !== undefined) this.tabs?.pairSession(sessionId, this.tabId)
   }
 
+  /** Pairs this tab with an attached session unless the session's tab is connected to some replica. */
+  private async pairUnlessHeld(sessionId: string): Promise<void> {
+    if (!this.tabs || (await this.tabs.sessionHasTab(sessionId))) return
+    if (this.closed) return // the socket went while the answer came
+    this.pairTab(sessionId)
+  }
+
   /**
    * (Re)starts following a session's log after `afterSeq`. A follow already
    * running for the session is aborted first, so a repeated attach replaces
@@ -463,6 +514,7 @@ export class ChatConnection {
           return
         }
         for await (const { event: e } of stream) {
+          if (!sentToPanel(e)) continue
           // Wait for the client to read what it has before sending more.
           if (!(await this.drained(controller.signal))) return
           this.emit(e)
@@ -474,6 +526,15 @@ export class ChatConnection {
       }
     })()
   }
+}
+
+/**
+ * Whether a logged event goes to the panel. `input.*` drive notifications (spec
+ * §6.6); the panel's cards keep their own events, and a bundle that predates these
+ * types would call each a protocol error.
+ */
+export function sentToPanel(e: ServerEvent): boolean {
+  return e.type !== 'input.requested' && e.type !== 'input.resolved'
 }
 
 export function registerChatRoute(app: Hono, deps: ChatRouteDeps): void {
@@ -508,6 +569,7 @@ export function registerChatRoute(app: Hono, deps: ChatRouteDeps): void {
             clientIp,
             ...(deps.snapshotMs === undefined ? {} : { snapshotMs: deps.snapshotMs }),
             ...(deps.tabs ? { tabs: deps.tabs } : {}),
+            ...(deps.attachments ? { attachments: deps.attachments } : {}),
             buffered: () => raw?.bufferedAmount ?? 0,
             // 1013 Try Again Later: the client is not reading what it is sent.
             overflow: () => ws.close(1013, 'client too slow'),
@@ -589,6 +651,7 @@ export const route: RouteModule = {
       upgradeWebSocket: deps.upgradeWebSocket,
       ...(deps.chatSnapshotMs === undefined ? {} : { snapshotMs: deps.chatSnapshotMs }),
       ...(deps.tabs ? { tabs: deps.tabs } : {}),
+      ...(deps.attachments ? { attachments: deps.attachments } : {}),
     })
   },
 }

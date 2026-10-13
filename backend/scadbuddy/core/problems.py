@@ -75,6 +75,9 @@ class ApiError(Exception):
         #: Response headers, e.g. a 503's Retry-After.
         self.headers = dict(headers or {})
         self.extensions = extensions
+        #: What an upstream service itself answered, for a caller that shows it (the
+        #: Settings connection test, #1542). Never part of the problem document.
+        self.upstream: BaseModel | None = None
 
 
 def problem_response(

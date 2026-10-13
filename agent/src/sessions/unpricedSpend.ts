@@ -11,6 +11,15 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 // endpoint still bills it. So the manager prices it here, from the stream it
 // already sees (`includePartialMessages`), and charges it to the session.
 //
+// Since SDK 0.3.295 Claude Code closes the stopped request itself: measured
+// against the fake endpoint (test/sessions.e2e.test.ts), after the user's
+// interrupt it emits a content_block_stop, a message_delta whose `stop_reason`
+// is null and whose usage repeats message_start's, and a message_stop, then an
+// `error_during_execution` result (terminal_reason `aborted_streaming`) whose
+// `total_cost_usd` is still 0. The endpoint's own message_delta always names a
+// stop reason, so a null one marks the request as cut off: its usage is not
+// taken, and the message_stop after it leaves the request open.
+//
 // A request the ENDPOINT cuts off is not charged. Measured on SDK 0.3.289
 // (test/sessions.e2e.test.ts, #1661): when a stream ends in an SSE `error`
 // event (e.g. `overloaded_error`) after message_start, Claude Code never
@@ -100,7 +109,7 @@ export function costOf(model: string | undefined, usage: Usage): number {
 
 const CHARS_PER_TOKEN = 4
 
-type Open = { model: string | undefined; usage: Usage; reportedOutput: boolean; chars: number }
+type Open = { model: string | undefined; usage: Usage; reportedOutput: boolean; chars: number; cutOff: boolean }
 
 /**
  * Watches a turn's SDK messages and prices the requests that started and never
@@ -118,7 +127,7 @@ export class UnpricedSpend {
       type: string
       message?: { model?: string; usage?: Usage }
       usage?: Usage
-      delta?: { text?: string; partial_json?: string; thinking?: string }
+      delta?: { text?: string; partial_json?: string; thinking?: string; stop_reason?: string | null }
     }
     switch (event.type) {
       case 'message_start':
@@ -128,6 +137,7 @@ export class UnpricedSpend {
           usage: { ...event.message?.usage },
           reportedOutput: false,
           chars: 0,
+          cutOff: false,
         })
         return
       case 'content_block_delta': {
@@ -138,7 +148,13 @@ export class UnpricedSpend {
       }
       case 'message_delta': {
         const open = this.#open.get(key)
-        if (!open || !event.usage) return
+        if (!open) return
+        // Claude Code's own close of a request the user stopped (SDK 0.3.295).
+        if (event.delta?.stop_reason === null) {
+          open.cutOff = true
+          return
+        }
+        if (!event.usage) return
         // message_delta's counts are cumulative for the request.
         for (const [k, v] of Object.entries(event.usage) as [keyof Usage, unknown][]) {
           if (typeof v === 'number') (open.usage as Record<string, unknown>)[k] = v
@@ -147,7 +163,7 @@ export class UnpricedSpend {
         return
       }
       case 'message_stop':
-        this.#open.delete(key)
+        if (!this.#open.get(key)?.cutOff) this.#open.delete(key)
         return
       default:
         return

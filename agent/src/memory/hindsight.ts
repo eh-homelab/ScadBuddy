@@ -77,6 +77,10 @@ import { redact } from '../secrets.js'
 //     the bank, the document id, the count, the timing and the outcome, never
 //     the query or a memory. A report is not awaited by the turn, and a
 //     failing one is logged like the hooks' other failures.
+//   - Recall runs once per hooks, that is per user message (#1896): a
+//     credential fallback resumes with a continuation prompt, which fires
+//     UserPromptSubmit again (harness/fallback.ts drops the hook there; the
+//     hook itself also answers a repeat from its first recall).
 //   - The PostToolUse matcher is anchored (`^(?:a|b)$`); upstream's bare
 //     alternation also matches tool names that merely contain one.
 //
@@ -508,10 +512,13 @@ export function createMemoryHooks(options: MemoryHooksOptions): MemoryHooks {
   const hooks: Partial<Record<HookEvent, HookCallbackMatcher[]>> = {}
 
   if (cfg.autoRecall) {
-    const recall: HookCallback = async (input, _toolUseId, { signal }): Promise<HookJSONOutput> => {
-      if (input.hook_event_name !== 'UserPromptSubmit') return {}
+    /** Answers the hook; `failed` marks a recall the bank did not answer, which is not reused. */
+    const recall = async (
+      input: { prompt: string },
+      signal: AbortSignal,
+    ): Promise<{ output: HookJSONOutput; failed?: true }> => {
       let query = input.prompt
-      if (!query) return {}
+      if (!query) return { output: {} }
       if (cfg.recallQuery !== '$prompt') query = cfg.recallQuery
       // The query leaves for the bank like a retain does, so it is redacted the same way.
       const body: RecallBody = { query: scrub(query), budget, max_tokens: maxTokens }
@@ -529,11 +536,11 @@ export function createMemoryHooks(options: MemoryHooksOptions): MemoryHooks {
         log(`hindsight: recall from bank ${client.bankId} failed (${why}); no memories were injected`)
         // Not awaited: the turn goes on while it is recorded.
         void report({ action: 'recall', outcome: timeout.aborted ? 'timeout' : 'error', reason: why, input: body.query, startedAt })
-        return {}
+        return { output: {}, failed: true }
       }
       const lines = results.slice(0, cfg.recallMaxResults).map((text, i) => `${i + 1}. ${text}`)
       void report({ action: 'recall', outcome: 'ok', count: lines.length, input: body.query, memories: lines, startedAt })
-      if (lines.length === 0) return {}
+      if (lines.length === 0) return { output: {} }
       // JSON leaves `<` and `>` as they are, so a memory holding "</hindsight_memories>"
       // could close the outer tag early; escaped, the envelope is still the same JSON.
       const memories = wrapUntrustedText(
@@ -544,14 +551,39 @@ export function createMemoryHooks(options: MemoryHooksOptions): MemoryHooks {
         .replaceAll('<', '\\u003c')
         .replaceAll('>', '\\u003e')
       return {
-        hookSpecificOutput: {
-          hookEventName: 'UserPromptSubmit',
-          additionalContext: `<hindsight_memories>${cfg.recallPrefix}${memories}\n</hindsight_memories>`,
+        output: {
+          hookSpecificOutput: {
+            hookEventName: 'UserPromptSubmit',
+            additionalContext: `<hindsight_memories>${cfg.recallPrefix}${memories}\n</hindsight_memories>`,
+          },
         },
       }
     }
+    // One recall per hooks, which serve one user message (#1896; the session
+    // manager builds them per turn). harness/fallback.ts already gives a
+    // resumed attempt no UserPromptSubmit hook; this is the backstop. The same
+    // prompt again is a rerun of the message in a fresh context (an attempt
+    // that never reached a transcript) and gets the same memories without
+    // asking the bank again; any other prompt continues the message, whose
+    // memories are already in context, and gets nothing. A recall that failed
+    // or timed out is not reused: a rerun of the message asks the bank again (#2144).
+    let recalled: { prompt: string; output: Promise<HookJSONOutput>; failed?: true } | undefined
+    const recallOnce: HookCallback = (input, _toolUseId, { signal }) => {
+      if (input.hook_event_name !== 'UserPromptSubmit') return Promise.resolve({})
+      if (recalled && recalled.prompt !== input.prompt) return Promise.resolve({})
+      if (recalled && !recalled.failed) return recalled.output
+      const mine: { prompt: string; output: Promise<HookJSONOutput>; failed?: true } = {
+        prompt: input.prompt,
+        output: recall(input, signal).then(({ output, failed }) => {
+          if (failed) mine.failed = true
+          return output
+        }),
+      }
+      recalled = mine
+      return mine.output
+    }
     // The SDK's own limit, a little past ours, in case the pinned request ignores its signal.
-    hooks.UserPromptSubmit = [{ hooks: [recall], timeout: Math.ceil(recallTimeoutMs / 1000) + 2 }]
+    hooks.UserPromptSubmit = [{ hooks: [recallOnce], timeout: Math.ceil(recallTimeoutMs / 1000) + 2 }]
   }
 
   if (cfg.autoRetain) {

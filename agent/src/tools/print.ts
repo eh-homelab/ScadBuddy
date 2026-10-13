@@ -1,17 +1,18 @@
 import { randomUUID } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
-import { command, reattach } from './command.js'
+import { ACCEPTING_MS, command, reattach } from './command.js'
 import { binary } from './binary.js'
 import { ok } from './call.js'
 import { outputId, slug } from './common.js'
-import { defineTool, image, json, type Tool, type ToolContext, ToolError } from './registry.js'
+import { defineTool, image, json, type Tool, type ToolContext, ToolError, toolErrorText } from './registry.js'
 import { page, PAGED, pageInput } from './pagination.js'
 
 // Bambuddy (issue #251, spec D8): ScadBuddy's own tools over its backend's
 // Bambuddy client, so the API key stays server-side and the backend's
 // scope-aware errors (backend/scadbuddy/bambuddy/errors.py) reach the agent
-// unchanged. Routes: backend/scadbuddy/api/printing.py and outputs.py.
+// unchanged. Routes: backend/scadbuddy/api/printing.py and outputs.py, and
+// library_print.py for a file already in Bambuddy's library (#1756).
 //
 // - Print flow, outward: anything that uploads to, creates in, or queues on
 //   Bambuddy goes through the approval gate (spec §8.2).
@@ -25,9 +26,9 @@ import { page, PAGED, pageInput } from './pagination.js'
 // - Farm context, read: printers and live status (get_print_targets in
 //   settings.ts), the print dialog's choices (get_print_choices), spools with
 //   per-slot remaining grams (get_print_filaments), print progress, and a
-//   printer's current camera frame (get_printer_camera, #796). The
-//   queue, the print archive and aggregate stats have no backend route yet, so
-//   they have no tool yet.
+//   printer's current camera frame (get_printer_camera, #796). The queue, the
+//   print archive, aggregate stats and the whole spool inventory are farm.ts
+//   (#1912).
 // - Printer control (pause/stop/lights/motion/G-code) is out of scope.
 
 const nullable = <T extends z.ZodType>(schema: T) => schema.nullable().optional()
@@ -41,6 +42,88 @@ const runId = z
 type PrintRun = Awaited<ReturnType<typeof getRun>>
 
 export { RUN_REATTEMPTS } from './command.js'
+
+// What a print is of (#1749, #1756): an output, or a file already in Bambuddy's library.
+// A library-file print is an ordinary print; only the 3MF it slices comes from elsewhere,
+// so every print tool takes either, and only the route differs.
+
+export const libraryFileId = z
+  .number()
+  .int()
+  .min(1)
+  .describe("A Bambuddy library file's `id` (list_library), in place of output_id")
+
+/** The two sources a print tool takes, exactly one of them per call. */
+export const sourceShape = { output_id: outputId.optional(), library_file_id: libraryFileId.optional() }
+
+export const ONE_SOURCE = 'name one source: output_id or library_file_id'
+
+/** A print tool's input: `shape` plus its source, refused at parse time unless it names exactly one. */
+export function withSource<S extends z.ZodRawShape>(shape: S) {
+  return z
+    .object({ ...sourceShape, ...shape })
+    .refine(
+      (o) => {
+        // `o` is generic over `shape`; only the two source fields matter here.
+        const { output_id, library_file_id } = o as { output_id?: unknown; library_file_id?: unknown }
+        return (output_id === undefined) !== (library_file_id === undefined)
+      },
+      { message: ONE_SOURCE },
+    )
+}
+
+export type Source = { kind: 'output'; id: string } | { kind: 'library'; id: number }
+
+export function sourceOf(args: { output_id?: string | undefined; library_file_id?: number | undefined }): Source {
+  if (args.library_file_id !== undefined) return { kind: 'library', id: args.library_file_id }
+  if (args.output_id !== undefined) return { kind: 'output', id: args.output_id }
+  throw new ToolError(ONE_SOURCE)
+}
+
+/** How a source is named in an approval line, a title or an error. */
+export function sourceName(args: { output_id?: string | undefined; library_file_id?: number | undefined }): string {
+  return args.library_file_id !== undefined ? `library file ${args.library_file_id}` : `output ${args.output_id ?? ''}`
+}
+
+type FilamentQuery = { printer_id?: number | undefined; plate_id?: number | undefined; all_plates?: boolean | undefined }
+
+function getChoices(ctx: ToolContext, source: Source, printer_id: number | undefined) {
+  const query = { printer_id }
+  return source.kind === 'library'
+    ? ok(
+        ctx.backend.GET('/api/v1/print/library/{file_id}/choices', { params: { path: { file_id: source.id }, query } }),
+        `get print choices for library file ${source.id}`,
+      )
+    : ok(
+        ctx.backend.GET('/api/v1/print/outputs/{output_id}/choices', { params: { path: { output_id: source.id }, query } }),
+        `get print choices for ${source.id}`,
+      )
+}
+
+/** The source's plates: for an output its 3MF's, for a library file what Bambuddy reads from it. */
+export function getPlates(ctx: Pick<ToolContext, 'backend'>, source: Source) {
+  return source.kind === 'library'
+    ? ok(
+        ctx.backend.GET('/api/v1/print/library/{file_id}/plates', { params: { path: { file_id: source.id } } }),
+        `get plates of library file ${source.id}`,
+      )
+    : ok(
+        ctx.backend.GET('/api/v1/outputs/{output_id}/plates', { params: { path: { output_id: source.id } } }),
+        `get plates of ${source.id}`,
+      )
+}
+
+function getFilaments(ctx: ToolContext, source: Source, query: FilamentQuery) {
+  return source.kind === 'library'
+    ? ok(
+        ctx.backend.GET('/api/v1/print/library/{file_id}/filaments', { params: { path: { file_id: source.id }, query } }),
+        `get filaments for library file ${source.id}`,
+      )
+    : ok(
+        ctx.backend.GET('/api/v1/print/outputs/{output_id}/filaments', { params: { path: { output_id: source.id }, query } }),
+        `get filaments for ${source.id}`,
+      )
+}
 
 async function getRun(ctx: ToolContext, id: string) {
   return ok(
@@ -79,17 +162,17 @@ async function waitForRun(ctx: ToolContext, run: PrintRun): Promise<PrintRun> {
 }
 
 /** A failed run is the tool's error, in the backend's own words; a running one says how to follow it. */
-function runOutcome(run: PrintRun) {
+function runOutcome(run: PrintRun, ctx: ToolContext) {
   if (run.status === 'failed') {
     const error = run.error
+    const failed = `print ${run.output_id} failed${error ? ` (HTTP ${error.status}): ${error.detail}` : ''}`
+    if (!run.may_have_queued) throw new ToolError(failed)
     // Failed after it had tried to queue: the print may be on Bambuddy's queue anyway, and
-    // another print_output call is a new print (its own request_id), so check first.
-    const queued = run.may_have_queued
-      ? " The print may still have been queued: check Bambuddy's queue before printing again."
-      : ''
-    throw new ToolError(
-      `print ${run.output_id} failed${error ? ` (HTTP ${error.status}): ${error.detail}` : ''}${queued}`,
-    )
+    // another print_output call is a new print (its own request_id), so check first. The
+    // answer is the run itself, so the session records it (#1017, sessions/touched.ts).
+    const note = "The print may still have been queued: check Bambuddy's queue before printing again."
+    ctx.report?.({ detail: `${failed}. ${note}` })
+    return { ...json({ ...run, note }), isError: true }
   }
   if (run.status === 'running') return json({ ...run, note: 'still slicing; poll get_print_run with this id' })
   return json(run)
@@ -133,7 +216,7 @@ const tier = z.enum(['fine', 'standard', 'draft'])
 type NozzleChoice = z.infer<typeof nozzleChoice>
 type SlotChoice = z.infer<typeof slotChoice>
 
-/** The dialog's own default: 0.4 mm standard on both sides (frontend PrintPicker `DEFAULT_NOZZLES`). */
+/** 0.4 mm standard on both sides, when the choices name no defaults (frontend `DEFAULT_NOZZLES`). */
 const DEFAULT_NOZZLES: NozzleChoice[] = [
   { size: '0.4', flow: 'standard' },
   { size: '0.4', flow: 'standard' },
@@ -162,37 +245,56 @@ export const printTools: Tool[] = [
   defineTool({
     name: 'get_print_choices',
     description:
-      'Everything the print dialog offers for an output, in one read: printers (and the one chosen), the ' +
-      'installed nozzles, quality tiers and Bambu processes per nozzle size, filament presets per size, plate ' +
-      "types with the one last printed on, the filament step (as get_print_filaments), and this model's " +
-      'remembered choices. What print_output fills omitted choices from.',
-    input: z.object({ output_id: outputId, printer_id: z.number().int().optional() }),
+      'Everything the print dialog offers for an output, or a Bambuddy library file (`library_file_id`), in ' +
+      'one read: printers (and the one chosen), the installed nozzles, quality tiers and Bambu processes per ' +
+      'nozzle size, filament presets per size, plate types with the one last printed on, the filament step ' +
+      "(as get_print_filaments), the model's (or the file's) remembered choices, and its plates by index and " +
+      'name (what each holds; `null` when nothing names it; empty, with `plates_error` saying why, when ' +
+      'they cannot be read: then report that rather than assume plate 1), which ' +
+      'print_output takes as `plate_id`. What ' +
+      'print_output fills omitted choices from.',
+    input: withSource({ printer_id: z.number().int().optional() }),
     risk: 'read',
     source:
       'Bambuddy data (printer, project, spool and archive names) that anyone with access to Bambuddy can write',
     // Printers, status and archives (Read Status); slicer presets and the 3MF's
     // filament requirements (Manage Library). backend/scadbuddy/bambuddy/choices.py.
     bambuddyScope: ['Read Status', 'Manage Library'],
-    routes: ['GET /api/v1/print/outputs/{output_id}/choices'],
-    handler: async ({ output_id, printer_id }, { backend }) =>
-      json(
-        await ok(
-          backend.GET('/api/v1/print/outputs/{output_id}/choices', {
-            params: { path: { output_id }, query: { printer_id } },
-          }),
-          `get print choices for ${output_id}`,
-        ),
-      ),
+    routes: [
+      'GET /api/v1/print/outputs/{output_id}/choices',
+      'GET /api/v1/print/library/{file_id}/choices',
+      'GET /api/v1/outputs/{output_id}/plates',
+      'GET /api/v1/print/library/{file_id}/plates',
+    ],
+    handler: async (args, ctx) => {
+      const source = sourceOf(args)
+      // #986 — a plate by what it holds, so the agent can say "the lid", not "plate 2". The plates
+      // are extra: an unreadable list is empty, as in the dialog, and never fails the choices. But
+      // it says why (#2107): "no plates" and "a missing Bambuddy scope" are not the same answer.
+      let platesError: string | undefined
+      const [choices, plates] = await Promise.all([
+        getChoices(ctx, source, args.printer_id),
+        getPlates(ctx, source).catch((err: unknown) => {
+          platesError = err instanceof ToolError ? toolErrorText(err, 'get_print_choices') : String(err)
+          console.warn(`get_print_choices: ${err instanceof Error ? err.message : String(err)}`)
+          return []
+        }),
+      ])
+      return json({
+        ...choices,
+        plates: plates.map(({ index, name }) => ({ index, name: name || null })),
+        ...(platesError === undefined ? {} : { plates_error: platesError }),
+      })
+    },
   }),
 
   defineTool({
     name: 'get_print_filaments',
     description:
       "Bambuddy's spool inventory joined to where each spool is loaded and, with `printer_id`, the " +
-      'remaining grams per slot and the mounted nozzles — plus what this output\'s plate (or, with ' +
-      '`all_plates`, every plate) needs and a suggested spool per slot.',
-    input: z.object({
-      output_id: outputId,
+      'remaining grams per slot and the mounted nozzles — plus what this output\'s (or library file\'s) plate ' +
+      '(or, with `all_plates`, every plate) needs and a suggested spool per slot.',
+    input: withSource({
       printer_id: z.number().int().optional(),
       plate_id: z.number().int().min(1).optional(),
       all_plates: z.boolean().optional(),
@@ -201,36 +303,36 @@ export const printTools: Tool[] = [
     source:
       'Bambuddy data (printer, project, spool and archive names) that anyone with access to Bambuddy can write',
     bambuddyScope: ['Read Status', 'Manage Library'],
-    routes: ['GET /api/v1/print/outputs/{output_id}/filaments'],
-    handler: async ({ output_id, printer_id, plate_id, all_plates }, { backend }) =>
-      json(
-        await ok(
-          backend.GET('/api/v1/print/outputs/{output_id}/filaments', {
-            params: { path: { output_id }, query: { printer_id, plate_id, all_plates } },
-          }),
-          `get filaments for ${output_id}`,
-        ),
-      ),
+    routes: ['GET /api/v1/print/outputs/{output_id}/filaments', 'GET /api/v1/print/library/{file_id}/filaments'],
+    handler: async ({ printer_id, plate_id, all_plates, ...source }, ctx) =>
+      json(await getFilaments(ctx, sourceOf(source), { printer_id, plate_id, all_plates })),
   }),
 
   defineTool({
     name: 'get_print_progress',
     description:
-      "How the last print of an output is going, per copy; null when it was never printed. Poll until " +
-      '`settled` is true.',
-    input: z.object({ output_id: outputId }),
+      'How the last print of an output, or of a Bambuddy library file (`library_file_id`), is going, per copy; ' +
+      'null when it was never printed. Poll until `settled` is true.',
+    input: withSource({}),
     risk: 'read',
     source:
       'Bambuddy data (printer, project, spool and archive names) that anyone with access to Bambuddy can write',
     bambuddyScope: ['Read Status', 'Manage Queue'],
-    routes: ['GET /api/v1/print/outputs/{output_id}/progress'],
-    handler: async ({ output_id }, { backend }) =>
-      json(
-        await ok(
-          backend.GET('/api/v1/print/outputs/{output_id}/progress', { params: { path: { output_id } } }),
-          `get print progress of ${output_id}`,
-        ),
-      ),
+    routes: ['GET /api/v1/print/outputs/{output_id}/progress', 'GET /api/v1/print/library/{file_id}/progress'],
+    handler: async (args, { backend }) => {
+      const source = sourceOf(args)
+      return json(
+        source.kind === 'library'
+          ? await ok(
+              backend.GET('/api/v1/print/library/{file_id}/progress', { params: { path: { file_id: source.id } } }),
+              `get print progress of library file ${source.id}`,
+            )
+          : await ok(
+              backend.GET('/api/v1/print/outputs/{output_id}/progress', { params: { path: { output_id: source.id } } }),
+              `get print progress of ${source.id}`,
+            ),
+      )
+    },
   }),
 
   defineTool({
@@ -283,46 +385,125 @@ export const printTools: Tool[] = [
     },
   }),
 
-  // ── write: preferences the print dialog remembers (ScadBuddy-local, re-settable) ──
   defineTool({
-    name: 'remember_model_print_choices',
+    name: 'list_library',
     description:
-      "Remember what a model's print dialog opens on next time: the printer, per-slot spools, nozzles, and " +
-      'the quality tier or named process. Replaces the model\'s entry whole: an omitted part is forgotten, ' +
-      'and passing nothing forgets them all (get_print_choices shows the current `model_choices`).',
-    input: z.object({
-      slug,
-      printer_id: z.number().int().nullable().optional(),
-      filament_plan: z.array(slotChoice).optional().describe('Only spools moved off the suggestion'),
-      nozzles: z.array(nozzleChoice).max(2).optional(),
-      tier: tier.nullable().optional(),
-      process_name: z.string().max(200).nullable().optional().describe('An Advanced-mode Bambu process, in place of a tier'),
-    }),
-    risk: 'write',
-    routes: ['PUT /api/v1/print/models/{slug}/choices'],
-    handler: async ({ slug, printer_id, filament_plan, nozzles, tier, process_name }, { backend }) =>
+      "Bambuddy's library, one folder at a time: the folder tree, and the files of `folder_id` (the top level " +
+      'without it). Without `all` only unsliced 3MFs, the files print_output takes as `library_file_id`; with ' +
+      'it every file, each flagged `printable`. A file ScadBuddy uploaded names its `output_id`.' +
+      PAGED,
+    input: z.object({ folder_id: z.number().int().optional(), all: z.boolean().optional(), ...pageInput }),
+    risk: 'read',
+    source: 'Bambuddy data (folder and file names) that anyone with access to Bambuddy can write',
+    bambuddyScope: ['Manage Library'],
+    routes: ['GET /api/v1/print/library'],
+    handler: async (args, { backend }) => {
+      const { files, ...listing } = await ok(
+        backend.GET('/api/v1/print/library', { params: { query: { folder_id: args.folder_id, all: args.all } } }),
+        'list the library',
+      )
+      const { items, ...rest } = page(files ?? [], args, (file) => String(file.id), 'list_library')
+      return json({ ...listing, files: items, ...rest })
+    },
+  }),
+
+  // #2167 — Bambuddy's library writes: a delete to its trash, and the restore that undoes it.
+  defineTool({
+    name: 'delete_library_files',
+    description:
+      "Delete files from Bambuddy's library (ids from list_library), moving them to Bambuddy's trash. A file " +
+      'linked from an external folder (`is_external`) is removed for good. Bambuddy may skip a file its API ' +
+      "key's user did not add: those are listed in `skipped`, not deleted. A file a print waiting in " +
+      "Bambuddy's queue names is refused. restore_library_files undoes a delete.",
+    input: z.object({ file_ids: z.array(libraryFileId).min(1).max(500) }),
+    risk: 'outward',
+    bambuddyScope: ['Manage Library'],
+    routes: ['POST /api/v1/print/library/delete'],
+    summarize: ({ file_ids }) =>
+      `Delete ${file_ids.length === 1 ? `library file ${file_ids[0]}` : `${file_ids.length} library files`} to Bambuddy's trash`,
+    handler: async ({ file_ids }, ctx) =>
       json(
-        await ok(
-          backend.PUT('/api/v1/print/models/{slug}/choices', {
-            params: { path: { slug } },
-            body: {
-              printer_id: printer_id ?? null,
-              filament_plan: filament_plan ?? [],
-              nozzles: nozzles ?? [],
-              tier: tier ?? null,
-              process_name: process_name ?? null,
-            },
-          }),
-          `remember choices for ${slug}`,
+        await command(ctx, 'delete library files', (headers) =>
+          ctx.backend.POST('/api/v1/print/library/delete', { body: { file_ids }, headers }),
         ),
       ),
   }),
 
   defineTool({
+    name: 'restore_library_files',
+    description:
+      "Restore deleted files from Bambuddy's trash, under their own ids: a delete_library_files undone. A file " +
+      'not in the trash (an external one, or one emptied from it) is listed in `skipped`.',
+    input: z.object({ file_ids: z.array(libraryFileId).min(1).max(500) }),
+    risk: 'outward',
+    bambuddyScope: ['Manage Library'],
+    routes: ['POST /api/v1/print/library/restore'],
+    summarize: ({ file_ids }) =>
+      `Restore ${file_ids.length === 1 ? `library file ${file_ids[0]}` : `${file_ids.length} library files`} from Bambuddy's trash`,
+    handler: async ({ file_ids }, ctx) =>
+      json(
+        await command(ctx, 'restore library files', (headers) =>
+          ctx.backend.POST('/api/v1/print/library/restore', { body: { file_ids }, headers }),
+        ),
+      ),
+  }),
+
+  // ── write: preferences the print dialog remembers (ScadBuddy-local, re-settable) ──
+  defineTool({
+    name: 'remember_model_print_choices',
+    description:
+      "Remember what a model's (or a Bambuddy library file's, `library_file_id`) print dialog opens on next " +
+      'time: the printer, per-slot spools, nozzles, and the quality tier or named process. Replaces the ' +
+      "entry whole: an omitted part is forgotten, and passing nothing forgets them all (get_print_choices " +
+      'shows the current `model_choices`).',
+    input: z
+      .object({
+        slug: slug.optional(),
+        library_file_id: libraryFileId.optional(),
+        printer_id: z.number().int().nullable().optional(),
+        filament_plan: z.array(slotChoice).optional().describe('Only spools moved off the suggestion'),
+        nozzles: z.array(nozzleChoice).max(2).optional(),
+        tier: tier.nullable().optional(),
+        process_name: z.string().max(200).nullable().optional().describe('An Advanced-mode Bambu process, in place of a tier'),
+      })
+      .refine((o) => (o.slug === undefined) !== (o.library_file_id === undefined), {
+        message: 'name one: slug or library_file_id',
+      }),
+    risk: 'write',
+    routes: ['PUT /api/v1/print/models/{slug}/choices', 'PUT /api/v1/print/library/{file_id}/choices'],
+    handler: async ({ slug, library_file_id, printer_id, filament_plan, nozzles, tier, process_name }, { backend }) => {
+      const body = {
+        printer_id: printer_id ?? null,
+        filament_plan: filament_plan ?? [],
+        nozzles: nozzles ?? [],
+        tier: tier ?? null,
+        process_name: process_name ?? null,
+      }
+      if (library_file_id !== undefined) {
+        return json(
+          await ok(
+            backend.PUT('/api/v1/print/library/{file_id}/choices', { params: { path: { file_id: library_file_id } }, body }),
+            `remember choices for library file ${library_file_id}`,
+          ),
+        )
+      }
+      if (slug === undefined) throw new ToolError('name one: slug or library_file_id')
+      return json(
+        await ok(
+          backend.PUT('/api/v1/print/models/{slug}/choices', { params: { path: { slug } }, body }),
+          `remember choices for ${slug}`,
+        ),
+      )
+    },
+  }),
+
+  defineTool({
     name: 'remember_last_project',
     description:
-      'Choose the Bambuddy project the Customize page and the print dialog open on (null for "No project"). ' +
-      'Generate files its 3MF there; list_print_projects shows the current `last_project_id`.',
+      'Choose `last_project_id` (null for "No project"): the project a print dialog with no project of its own ' +
+      '(a library file) opens on, and a run that names none is filed under. The Customize page opens on the ' +
+      "project remembered for the model and preset instead (get_remembered_choices' `model_projects`), or on no " +
+      'project. list_print_projects shows the current `last_project_id`.',
     input: z.object({ project_id: z.number().int().nullable() }),
     risk: 'write',
     routes: ['PUT /api/v1/print/projects/last'],
@@ -359,6 +540,7 @@ export const printTools: Tool[] = [
     risk: 'outward',
     bambuddyScope: ['Manage Library'],
     routes: ['POST /api/v1/outputs/{output_id}/send'],
+    title: ({ output_id }) => `Send output ${output_id} to Bambuddy`,
     summarize: ({ output_id }) => `Send output ${output_id} to Bambuddy's library`,
     handler: async ({ output_id }, ctx) =>
       json(
@@ -375,18 +557,20 @@ export const printTools: Tool[] = [
   defineTool({
     name: 'print_output',
     description:
-      'Print an output, spool-first: slice with presets the backend derives from the chosen spools, nozzles, ' +
-      'quality and plate, then queue it on one printer, behind one approval. Any choice left out is filled ' +
-      "the way the print dialog opens: the chosen printer, this model's remembered nozzles, tier or process " +
-      "and spools (else 0.4 mm standard, the Standard tier and the suggested spools), and the printer's " +
+      'Print an output, or a file already in Bambuddy\'s library (`library_file_id`, from list_library): the ' +
+      'same print, only the 3MF it slices comes from the library. Spool-first: slice with presets the backend ' +
+      'derives from the chosen spools, nozzles, quality and plate, then queue it on one printer, behind one ' +
+      'approval. Any choice left out is filled ' +
+      "the way the print dialog opens: the chosen printer, the model's (or file's) remembered nozzles, tier or " +
+      "process and spools (else 0.4 mm, High Flow on each side with a High Flow nozzle of that size and Standard " +
+      "elsewhere, the Standard tier and the suggested spools), and the printer's " +
       'preselected plate type. A choice the backend cannot resolve (mixed nozzle sizes, a slot with no ' +
       'spool or preset) is refused before anything is sliced. `project_id` files the print under a Bambuddy ' +
       'project: omit it for the remembered project (`last_project_id`), or pass null for "No project". ' +
       'The run slices and queues in the background: this waits for it and answers with the run and its ' +
       '`result` (warnings, queue item ids), or hands back the still-running run to poll with ' +
       'get_print_run. Then follow the print with get_print_progress.',
-    input: z.object({
-      output_id: outputId,
+    input: withSource({
       printer_id: z.number().int().optional(),
       copies: z.number().int().min(1).max(1000).optional(),
       plate_id: z.number().int().min(1).default(1),
@@ -413,16 +597,21 @@ export const printTools: Tool[] = [
     }),
     risk: 'outward',
     bambuddyScope: ['Read Status', 'Manage Library', 'Manage Queue'],
-    routes: ['POST /api/v1/print/outputs/{output_id}/run', 'GET /api/v1/print/runs/{run_id}'],
+    routes: [
+      'POST /api/v1/print/outputs/{output_id}/run',
+      'POST /api/v1/print/library/{file_id}/run',
+      'GET /api/v1/print/runs/{run_id}',
+    ],
+    title: (args) => `Print ${sourceName(args)}${args.copies && args.copies > 1 ? ` × ${args.copies}` : ''}`,
     summarize: (args) => {
-      const { output_id, printer_id, copies, plate_id, all_plates, nozzles, tier, process_name } = args
+      const { printer_id, copies, plate_id, all_plates, nozzles, tier, process_name } = args
       const defaulted =
         nozzles === undefined ||
         (tier === undefined && process_name === undefined) ||
         args.filament_plan === undefined ||
         args.bed_type === undefined
       return (
-        `Print output ${output_id}: ${copies ?? 1} cop${(copies ?? 1) === 1 ? 'y' : 'ies'} of ${
+        `Print ${sourceName(args)}: ${copies ?? 1} cop${(copies ?? 1) === 1 ? 'y' : 'ies'} of ${
           all_plates ? 'every plate' : `plate ${plate_id}`
         }` +
         `${nozzles?.[0] ? ` with a ${nozzles[0].size} mm nozzle` : ''}` +
@@ -431,9 +620,11 @@ export const printTools: Tool[] = [
         `${defaulted ? ' (other choices as the print dialog opens)' : ''}`
       )
     },
+    // Its own wait for the print run, after the backend has accepted it.
+    waitsMs: (_, ctx) => ACCEPTING_MS + ctx.renderWaitMs,
     handler: async (args, ctx) => {
       const { backend } = ctx
-      const path = { output_id: args.output_id }
+      const source = sourceOf(args)
       let { printer_id: printerId, nozzles: chosenNozzles, bed_type: bedType } = args
       let slots = args.filament_plan?.slots
       let chosenTier: z.infer<typeof tier> | null | undefined = args.tier
@@ -441,7 +632,7 @@ export const printTools: Tool[] = [
       if (processName !== undefined) chosenTier = null
       // Fill what was left out the way the dialog does (frontend PrintPicker
       // `seedDialog`, spool-first spec §7), from the one read the dialog opens
-      // on: GET /print/outputs/{id}/choices. /run takes no defaults of its own
+      // on: GET /print/{outputs|library}/{id}/choices. /run takes no defaults of its own
       // for nozzles, spools or plate, so an omitted choice must be made here.
       if (
         printerId === undefined ||
@@ -450,15 +641,16 @@ export const printTools: Tool[] = [
         slots === undefined ||
         (chosenTier === undefined && processName === undefined)
       ) {
-        const view = await ok(
-          backend.GET('/api/v1/print/outputs/{output_id}/choices', { params: { path, query: { printer_id: printerId } } }),
-          `get print choices for ${args.output_id}`,
-        )
+        const view = await getChoices(ctx, source, printerId)
         printerId ??= view.printer_id ?? undefined
         bedType ??= view.bed_type
         const last = view.model_choices
         const remembered = last?.nozzles ?? []
-        if (chosenNozzles === undefined) chosenNozzles = remembered.length > 0 ? remembered : DEFAULT_NOZZLES
+        // With nothing remembered, the printer's defaults: High Flow on each side that has
+        // a High Flow nozzle of the size (#1895).
+        const defaults = view.default_nozzles ?? []
+        if (chosenNozzles === undefined)
+          chosenNozzles = remembered.length > 0 ? remembered : defaults.length > 0 ? defaults : DEFAULT_NOZZLES
         if (chosenTier === undefined && processName === undefined) {
           // A remembered process belongs to the remembered nozzle size.
           processName = remembered.length > 0 && args.nozzles === undefined ? (last?.process_name ?? null) : null
@@ -470,16 +662,12 @@ export const printTools: Tool[] = [
           const filaments =
             args.plate_id === 1 && !args.all_plates
               ? view.filaments
-              : await ok(
-                  backend.GET('/api/v1/print/outputs/{output_id}/filaments', {
-                    params: {
-                      path,
-                      query: args.all_plates
-                        ? { printer_id: printerId, all_plates: true }
-                        : { printer_id: printerId, plate_id: args.plate_id },
-                    },
-                  }),
-                  `get filaments for ${args.output_id}`,
+              : await getFilaments(
+                  ctx,
+                  source,
+                  args.all_plates
+                    ? { printer_id: printerId, all_plates: true }
+                    : { printer_id: printerId, plate_id: args.plate_id },
                 )
           slots = seedPlan(filaments, last?.filament_plan ?? [])
         }
@@ -488,35 +676,44 @@ export const printTools: Tool[] = [
       // a new one rather than the last call's run. Every re-send below reuses it, so a
       // POST whose answer was lost re-attaches to its run instead of printing twice.
       const requestId = randomUUID()
+      const body = {
+        printer_id: printerId ?? null,
+        copies: args.copies ?? null,
+        plate_id: args.plate_id,
+        all_plates: args.all_plates,
+        filament_plan: { slots, force_colour_match: args.filament_plan?.force_colour_match ?? false },
+        choices: {
+          nozzles: chosenNozzles,
+          tier: chosenTier ?? null,
+          process_name: processName ?? null,
+          bed_type: bedType,
+          filament_overrides: args.filament_overrides ?? {},
+        },
+        // Omitted stays omitted (the remembered project); null is "No project" (#317).
+        ...(args.project_id === undefined ? {} : { project_id: args.project_id }),
+        options: args.options,
+        // The same for a library file as for an output (#907, #1756).
+        ...(args.print_sequence === undefined ? {} : { print_sequence: args.print_sequence }),
+        request_id: requestId,
+      }
       const started = await reattach(
-          ctx,
-          () => backend.POST('/api/v1/print/outputs/{output_id}/run', {
-            params: { path },
-            signal: ctx.signal,
-            body: {
-              printer_id: printerId ?? null,
-              copies: args.copies ?? null,
-              plate_id: args.plate_id,
-              all_plates: args.all_plates,
-              filament_plan: { slots, force_colour_match: args.filament_plan?.force_colour_match ?? false },
-              choices: {
-                nozzles: chosenNozzles,
-                tier: chosenTier ?? null,
-                process_name: processName ?? null,
-                bed_type: bedType,
-                filament_overrides: args.filament_overrides ?? {},
-              },
-              // Omitted stays omitted (the remembered project); null is "No project" (#317).
-              ...(args.project_id === undefined ? {} : { project_id: args.project_id }),
-              options: args.options,
-              ...(args.print_sequence === undefined ? {} : { print_sequence: args.print_sequence }),
-              request_id: requestId,
-            },
-          }),
-          `print ${args.output_id}`,
-          " The print may still have started: check Bambuddy's queue before printing again.",
-        )
-      return runOutcome(await waitForRun(ctx, started))
+        ctx,
+        () =>
+          source.kind === 'library'
+            ? backend.POST('/api/v1/print/library/{file_id}/run', {
+                params: { path: { file_id: source.id } },
+                signal: ctx.signal,
+                body,
+              })
+            : backend.POST('/api/v1/print/outputs/{output_id}/run', {
+                params: { path: { output_id: source.id } },
+                signal: ctx.signal,
+                body,
+              }),
+        `print ${sourceName(args)}`,
+        " The print may still have started: check Bambuddy's queue before printing again.",
+      )
+      return runOutcome(await waitForRun(ctx, started), ctx)
     },
   }),
 
@@ -588,27 +785,36 @@ export const printTools: Tool[] = [
   defineTool({
     name: 'file_output_under_project',
     description:
-      "File an output's queue entries (and any finished prints' archives) under a Bambuddy project.",
-    input: z.object({
-      output_id: outputId,
+      "File an output's, or a Bambuddy library file's (`library_file_id`), queue entries (and any finished " +
+      "prints' archives) under a Bambuddy project: the entries named, else those of its newest print.",
+    input: withSource({
       project_id: z.number().int().optional(),
       queue_item_ids: z.array(z.number().int()).default([]),
     }),
     risk: 'outward',
     bambuddyScope: ['Manage Projects'],
-    routes: ['POST /api/v1/print/outputs/{output_id}/project'],
-    summarize: ({ output_id, project_id }) =>
-      `File output ${output_id}'s prints under Bambuddy project ${project_id ?? '(its own)'}`,
-    handler: async ({ output_id, project_id, queue_item_ids }, ctx) =>
-      json(
-        await command(ctx, `file ${output_id} under a project`, (headers) =>
-          ctx.backend.POST('/api/v1/print/outputs/{output_id}/project', {
-            params: { path: { output_id } },
-            body: { ...(project_id === undefined ? {} : { project_id }), queue_item_ids },
-            headers,
-          }),
+    routes: ['POST /api/v1/print/outputs/{output_id}/project', 'POST /api/v1/print/library/{file_id}/project'],
+    summarize: (args) =>
+      `File ${sourceName(args)}'s prints under Bambuddy project ${args.project_id ?? '(its own)'}`,
+    handler: async ({ project_id, queue_item_ids, ...rest }, ctx) => {
+      const source = sourceOf(rest)
+      const body = { ...(project_id === undefined ? {} : { project_id }), queue_item_ids }
+      return json(
+        await command(ctx, `file ${sourceName(rest)} under a project`, (headers) =>
+          source.kind === 'library'
+            ? ctx.backend.POST('/api/v1/print/library/{file_id}/project', {
+                params: { path: { file_id: source.id } },
+                body,
+                headers,
+              })
+            : ctx.backend.POST('/api/v1/print/outputs/{output_id}/project', {
+                params: { path: { output_id: source.id } },
+                body,
+                headers,
+              }),
         ),
-      ),
+      )
+    },
   }),
 
 ]

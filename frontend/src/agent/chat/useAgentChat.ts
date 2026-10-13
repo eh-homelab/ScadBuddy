@@ -1,9 +1,16 @@
 import { useCallback, useEffect, useReducer, useRef } from 'react'
-import { clientMessage, parseServerEvent, type ClientMessage, type PageContext, type UserImage } from './protocol'
+import {
+  clientMessage,
+  parseServerEvent,
+  type AttachmentRef,
+  type ClientMessage,
+  type PageContext,
+  type SessionMode,
+} from './protocol'
 import { TAB_ID } from '../tabId'
 import { answerBody, decisionBody, respond, type RespondBody, type RespondError } from '../respond'
 import { messageTraceparent, traceAction } from '../../lib/traceAction'
-import { chatReducer, initialChatState, type ChatState } from './state'
+import { chatReducer, initialChatState, type ChatState, type SessionPatch } from './state'
 import type { ChatTransport, ChatTransportFactory } from './transport'
 
 /** The respond route acts as the browser user (agent `routes/approvals.ts` BROWSER_USER). */
@@ -23,6 +30,14 @@ function closed(err: RespondError): { closed?: string } {
 }
 
 /**
+ * The respond route's id for a card: a classic card's id is its row's, so it takes its
+ * store's prefix; a durable session's card already carries its whole request id
+ * (`durable:…`, agent src/gate/ids.ts).
+ */
+export const requestIdOf = (kind: 'approval' | 'question', id: string): string =>
+  id.startsWith('durable:') ? id : `${kind}:${id}`
+
+/**
  * A response as the user action `assistant.respond` (#1384): its POST is the span's
  * child, so it carries the span's `traceparent` as other API calls do, where the socket
  * frame it replaced carried `messageTraceparent()`.
@@ -38,8 +53,9 @@ const QUEUED_TAKE_OVER = 'The assistant is unreachable; your take-over will be s
 export interface AgentChat {
   state: ChatState
   /** Sends a user turn to the active session, or starts a new one. */
-  /** `images`: pasted, dropped or attached images for the model (#1866, `images.ts`). */
-  send: (text: string, context: PageContext, images?: UserImage[]) => void
+  /** `images`: pasted, dropped or attached images for the model, uploaded first (#1866, #1941). */
+  /** `mode` (plan 5d) applies only to a message that starts a new chat; absent, the agent's default. */
+  send: (text: string, context: PageContext, images?: AttachmentRef[], mode?: SessionMode) => void
   /** Answers an approval. Nothing outward proceeds until this is called (§8.2). */
   decide: (sessionId: string, approvalId: string, approve: boolean) => void
   /** #940 — answers the agent's question: one answer per question, in order. */
@@ -49,6 +65,8 @@ export interface AgentChat {
   takeOver: (sessionId: string) => void
   /** Open a session to watch it live; null starts a fresh chat on the next send. */
   select: (sessionId: string | null) => void
+  /** #792 — what a session route answered (a fork, a rename, done), shown at once. */
+  patch: (patch: SessionPatch) => void
 }
 
 /** Binds a transport to the stream reducer. One transport per mount. */
@@ -111,7 +129,7 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
     }
   }, [factory])
 
-  const send = useCallback((text: string, context: PageContext, images?: UserImage[]) => {
+  const send = useCallback((text: string, context: PageContext, images?: AttachmentRef[], mode?: SessionMode) => {
     const trimmed = text.trim()
     if (!trimmed || !transport.current) return
     const activeId = latest.current.activeId
@@ -120,7 +138,7 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
     const result = transport.current.send(
       clientMessage({
         type: 'user.message',
-        ...(activeId ? { sessionId: activeId } : {}),
+        ...(activeId ? { sessionId: activeId } : mode ? { mode } : {}),
         text: trimmed,
         context,
         ...(images?.length ? { images } : {}),
@@ -152,7 +170,7 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
     // Shown as `sent` until the server's approval.resolved confirms it; a refused one
     // goes back to pending, buttons live, with the agent's reason (#815).
     dispatch({ type: 'decided', sessionId, approvalId })
-    tracedRespond(`approval:${approvalId}`, decisionBody(approve))
+    tracedRespond(requestIdOf('approval', approvalId), decisionBody(approve))
       .then(
         (outcome) => dispatch({ type: 'responded', sessionId, id: approvalId, outcome, by: YOU }),
         (err: RespondError) =>
@@ -165,7 +183,7 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
     const item = claim(sessionId, 'question', questionId)
     if (item?.kind !== 'question') return
     dispatch({ type: 'answered', sessionId, questionId })
-    tracedRespond(`question:${questionId}`, answerBody(item.questions, answers, item.attention !== undefined))
+    tracedRespond(requestIdOf('question', questionId), answerBody(item.questions, answers, item.attention !== undefined))
       .then(
         (outcome) => dispatch({ type: 'responded', sessionId, id: questionId, outcome, answers, by: YOU }),
         (err: RespondError) =>
@@ -197,5 +215,7 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
     if (sessionId && live.current) transport.current?.send(clientMessage({ type: 'session.attach', sessionId }))
   }, [])
 
-  return { state, send, decide, answer, interrupt, takeOver, select }
+  const patch = useCallback((p: SessionPatch) => dispatch({ type: 'session-patched', patch: p }), [])
+
+  return { state, send, decide, answer, interrupt, takeOver, select, patch }
 }

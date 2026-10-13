@@ -23,6 +23,7 @@ from fastapi import status
 from pydantic import BaseModel
 
 from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.commits import upload_into
 from scadbuddy.bambuddy.errors import NOT_FOUND_PROBLEM, PLATE_FIT_PROBLEM, not_configured
 from scadbuddy.bambuddy.extruders import VOLUME_TYPE
 from scadbuddy.bambuddy.models import ExternalLink, LibraryFile, LibraryListRow
@@ -35,6 +36,7 @@ from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.render.bambu3mf import (
     PROJECT_SETTINGS_NAME,
     ArchiveTooLargeError,
+    FilamentMap,
     layout_of,
     replate_3mf,
     state_nozzles,
@@ -163,6 +165,9 @@ class Target:
     #: Each extruder's flow, in the slicer's order (#484). ``None`` — the send bar,
     #: which chooses none — states none, and the slicer slices Standard.
     nozzle_volume_type: tuple[str, ...] | None = None
+    #: ScadBuddy's filament→extruder map (#2166), written in Manual mode. ``None`` leaves
+    #: the file's own.
+    filament_map: FilamentMap | None = None
 
     @property
     def key(self) -> str:
@@ -185,6 +190,10 @@ class Target:
             # All Standard is what the slicer assumes without the key, so it keeps the key
             # it had, and a file recorded before #484 is still reused.
             key = f"{key}%{','.join(self.nozzle_volume_type)}"
+        if self.filament_map is not None:
+            # A file mapped to other sides must not be reused for this map.
+            extruders = ",".join(self.filament_map.extruders)
+            key = f"{key}>{extruders}:{','.join(self.filament_map.volumes)}"
         if self.colours is not None:
             # A file recoloured for other spools must not be reused for these.
             key = f"{key}{_RECOLORED}{','.join(self.colours)}"
@@ -203,6 +212,7 @@ class Target:
             self.nozzle_diameter,
             nozzle_stats=self.nozzle_stats,
             nozzle_volume_type=self.nozzle_volume_type,
+            filament_map=self.filament_map,
         ).key
 
 
@@ -215,6 +225,7 @@ async def target_for(
     colours: Sequence[str] | None = None,
     nozzle_stats: Sequence[str] | None = None,
     nozzle_volume_type: Sequence[str] | None = None,
+    filament_map: FilamentMap | None = None,
 ) -> Target:
     """The plate and nozzle the 3MF is laid out for.
 
@@ -233,10 +244,10 @@ async def target_for(
     printer_id = printer_id if printer_id is not None else settings.printer_id
     if printer_id is None:
         # Nothing to resolve against, so do not spend a round trip finding out.
-        return Target(_plate_for_model(None), nozzle_diameter, chosen, stats, flows)
+        return Target(_plate_for_model(None), nozzle_diameter, chosen, stats, flows, filament_map)
     printer = next((row for row in await client.printers() if row.id == printer_id), None)
     model = printer.model if printer is not None else None
-    return Target(_plate_for_model(model), nozzle_diameter, chosen, stats, flows)
+    return Target(_plate_for_model(model), nozzle_diameter, chosen, stats, flows, filament_map)
 
 
 def _plate_for_model(model: str | None) -> PlateGeometry:
@@ -271,6 +282,7 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
                 nozzle_stats=target.nozzle_stats,
                 nozzle_volume_type=target.nozzle_volume_type,
                 filament_colour=colours,
+                filament_map=target.filament_map,
             )
         except ArchiveTooLargeError:
             # layout_of has bounded it already, so this is a defence in depth: the file
@@ -284,6 +296,7 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
             nozzle_diameter=target.nozzle_diameter,
             nozzle_stats=target.nozzle_stats,
             nozzle_volume_type=target.nozzle_volume_type,
+            filament_map=target.filament_map,
         )
     except PlateFitError as error:
         raise ApiError(status.HTTP_409_CONFLICT, str(error), type_=PLATE_FIT_PROBLEM) from error
@@ -435,7 +448,9 @@ async def upload_copy(
             if project_stem is not None and folder is not None
             else printable.inbox_name
         )
-        uploaded = await client.upload_library_file(filename, payload, folder_id=folder)
+        # A project's folder `folder_for` made moments ago may not be committed yet
+        # (#2263): the upload waits for it rather than failing the file.
+        uploaded = await upload_into(client, filename, payload, folder_id=folder)
     await uploads.record(
         printable.key, LibraryCopy(id=uploaded.id, folder_id=folder, target_key=target.key)
     )
@@ -899,17 +914,21 @@ def request_scope(copies: int | None, options: PrintOptions) -> PrintOptions:
 
 
 def resolve_print_options(
-    settings: StoredSettings, slug: str | None, printer_id: int | None, request_scope: PrintOptions
+    settings: StoredSettings,
+    scope: str | None,
+    printer_id: int | None,
+    request_scope: PrintOptions,
 ) -> PrintOptions:
-    """global → per-printer → per-model → per-request, least specific first.
+    """global → per-printer → per-subject → per-request, least specific first.
 
     The print run's merge (#124). The send bar no longer queues (#312), so it resolves
-    none. A library file (#313) has no model, so its per-model layer is empty.
+    none. ``scope`` is the print's :func:`~scadbuddy.bambuddy.options.options_scope`: an
+    output's model, or a library file's own (#1754).
     """
     return resolve(
         settings.print_options,
         settings.printer_print_options.get(str(printer_id)) if printer_id is not None else None,
-        settings.model_print_options.get(slug) if slug is not None else None,
+        settings.model_print_options.get(scope) if scope is not None else None,
         request_scope,
     )
 

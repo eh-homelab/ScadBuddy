@@ -50,7 +50,12 @@ class Leaky:
         raise RuntimeError(leak(next(iter(serials))))
 
     async def record_picks(
-        self, queue_item_id: int, printer_id: int, picks: Sequence[PickedHotend]
+        self,
+        queue_item_id: int,
+        printer_id: int,
+        picks: Sequence[PickedHotend],
+        *,
+        copies: int = 1,
     ) -> int:
         raise RuntimeError(leak(picks[0].serial))
 
@@ -140,10 +145,15 @@ async def test_no_serial_reaches_a_log_record(caplog: pytest.LogCaptureFixture) 
         await save_picks(
             Leaky(), 1, [51], [PickedHotend(group_id=0, position=2, serial=INVENTED_SERIALS[2])]
         )
-        await record_settled("c" * 32, client=Archives(), links=Links(), store=Leaky())
+        await record_settled(
+            PrintSubject.output("c" * 32), client=Archives(), links=Links(), store=Leaky()
+        )
         assert (
             await record_settled(
-                "d" * 32, client=Archives(), links=Links(), store=UnreadablePicks()
+                PrintSubject.output("d" * 32),
+                client=Archives(),
+                links=Links(),
+                store=UnreadablePicks(),
             )
             == 0
         )

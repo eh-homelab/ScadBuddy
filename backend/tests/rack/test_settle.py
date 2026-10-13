@@ -46,6 +46,7 @@ from tests.rack.helpers import serial
 pytestmark = pytest.mark.requires_postgres
 
 OUTPUT = "c" * 32
+SUBJECT = PrintSubject.output(OUTPUT)
 AT = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
 A = serial(19)
 API = f"{BASE_URL}/api/v1"
@@ -97,7 +98,7 @@ async def store(pg_conninfo: str) -> AsyncIterator[RackUsageStore]:
 
 
 async def settle(store: RackUsageStore, links: Links, archives: Archives) -> int:
-    return await record_settled(OUTPUT, client=archives, links=links, store=store, now=lambda: AT)
+    return await record_settled(SUBJECT, client=archives, links=links, store=store, now=lambda: AT)
 
 
 async def test_each_linked_archive_of_a_picked_item_is_one_print(store: RackUsageStore) -> None:
@@ -206,10 +207,10 @@ async def test_an_unreadable_archive_is_logged_by_type_and_the_rest_are_written(
     [record] = [r for r in caplog.records if r.name == "scadbuddy.rack.usage"]
     assert record.getMessage() == RACK_SETTLE_FALLBACK
     assert (
-        getattr(record, "output_id", None),
+        getattr(record, "subject", None),
         getattr(record, "archive_id", None),
         getattr(record, "error", None),
-    ) == (OUTPUT, 101, "ApiError")
+    ) == (SUBJECT.key, 101, "ApiError")
     assert A not in repr(record.__dict__) and record.exc_info is None
 
 
@@ -224,7 +225,7 @@ async def test_a_settle_cut_off_names_the_archives_it_left_unrecorded(
     with caplog.at_level(logging.DEBUG):
         hook = asyncio.ensure_future(
             record_settled(
-                OUTPUT,
+                SUBJECT,
                 client=archives,
                 links=Links(link(101, 51), link(102, 51)),
                 store=store,
@@ -240,7 +241,7 @@ async def test_a_settle_cut_off_names_the_archives_it_left_unrecorded(
             await hook
 
     [record] = [r for r in caplog.records if r.getMessage() == RACK_SETTLE_CUT_OFF]
-    assert getattr(record, "output_id", None) == OUTPUT
+    assert getattr(record, "subject", None) == SUBJECT.key
     assert getattr(record, "archive_ids", None) == [101, 102]
     assert getattr(record, "stage", None) == "archives"
     assert A not in repr(record.__dict__) and record.exc_info is None
@@ -267,7 +268,7 @@ async def test_a_settle_cut_off_during_its_initial_reads_is_logged_too(
     links = HangingLinks()
     with caplog.at_level(logging.DEBUG):
         hook = asyncio.ensure_future(
-            record_settled(OUTPUT, client=Archives(), links=links, store=store, now=lambda: AT)
+            record_settled(SUBJECT, client=Archives(), links=links, store=store, now=lambda: AT)
         )
         await asyncio.wait_for(links.started.wait(), 5)
         hook.cancel()
@@ -275,7 +276,7 @@ async def test_a_settle_cut_off_during_its_initial_reads_is_logged_too(
             await hook
 
     [record] = [r for r in caplog.records if r.getMessage() == RACK_SETTLE_CUT_OFF]
-    assert getattr(record, "output_id", None) == OUTPUT
+    assert getattr(record, "subject", None) == SUBJECT.key
     assert getattr(record, "archive_ids", None) == []
     assert getattr(record, "stage", None) == "read"
     assert A not in repr(record.__dict__) and record.exc_info is None
@@ -291,7 +292,7 @@ async def test_an_archive_that_stalls_costs_only_itself(
     )
     with caplog.at_level(logging.DEBUG):
         written = await record_settled(
-            OUTPUT,
+            SUBJECT,
             client=archives,
             links=Links(link(101, 51), link(102, 51)),
             store=store,
@@ -351,7 +352,7 @@ async def test_unreadable_links_are_logged_by_type_and_nothing_is_written(
 ) -> None:
     with caplog.at_level(logging.DEBUG):
         written = await record_settled(
-            OUTPUT, client=Archives(), links=FailingLinks(), store=store, now=lambda: AT
+            SUBJECT, client=Archives(), links=FailingLinks(), store=store, now=lambda: AT
         )
     assert written == 0
     [record] = [r for r in caplog.records if r.name == "scadbuddy.rack.usage"]
@@ -440,7 +441,7 @@ async def test_the_hook_passes_its_read_timeout(store: RackUsageStore, pool: PgP
 
     hook = settle_hook(store, PrintLinkStore(pool), load)
     with respx.mock(base_url=BASE_URL, assert_all_called=False):
-        await hook(OutputMeta.model_construct(id=OUTPUT))
+        await hook(SUBJECT)
     assert asked == [SETTINGS_READ_TIMEOUT]
     assert SETTINGS_READ_TIMEOUT < SETTLE_TIMEOUT
 
@@ -456,10 +457,10 @@ async def test_a_failed_settings_read_says_the_settles_usage_was_dropped(
 
     hook = settle_hook(store, PrintLinkStore(pool), load)
     with caplog.at_level(logging.DEBUG), pytest.raises(psycopg.errors.QueryCanceled):
-        await hook(OutputMeta.model_construct(id=OUTPUT))
+        await hook(SUBJECT)
     [record] = [r for r in caplog.records if r.getMessage() == RACK_SETTLE_SETTINGS_DROPPED]
     assert record.levelno == logging.WARNING
-    assert (record.output_id, record.error) == (OUTPUT, "QueryCanceled")  # type: ignore[attr-defined]
+    assert (record.subject, record.error) == (SUBJECT.key, "QueryCanceled")  # type: ignore[attr-defined]
     assert "statement timeout" not in str(record.__dict__)
 
 
@@ -485,7 +486,7 @@ async def test_a_real_stuck_settings_read_gives_its_thread_back(
             holder.execute("LOCK TABLE settings IN ACCESS EXCLUSIVE MODE")
             started = time.monotonic()
             with pytest.raises(psycopg.errors.QueryCanceled):
-                await asyncio.wait_for(hook(OutputMeta.model_construct(id=OUTPUT)), timeout=30)
+                await asyncio.wait_for(hook(SUBJECT), timeout=30)
             elapsed = time.monotonic() - started
     finally:
         settings_store.close()

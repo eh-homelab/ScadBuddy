@@ -128,6 +128,10 @@ class ManifestObject(BaseModel):
     footprint: tuple[float, float]
     #: The part's colours, `#RRGGBB`, in its own slot order.
     colours: list[str]
+    #: Each colour's material (`filament_type`), where the source states one: a library
+    #: file's project settings do, a render does not. An arranged 3MF states them, so a
+    #: slicer does not guess one for a slot (a PLA keychain offered ABS).
+    materials: dict[str, str] = Field(default_factory=dict)
     #: Copies of this object in this output's layout.
     count: int = Field(ge=1)
     #: More than one: the part lays out its own plates (base spec §6.4) and is only
@@ -137,6 +141,8 @@ class ManifestObject(BaseModel):
     bom_piece: str | None = None
     #: The output an arranged object came from.
     source_output: str | None = None
+    #: The Bambuddy library file an arranged object was read from (#1863).
+    library_file_id: int | None = None
     notes: list[str] = Field(default_factory=list)
 
 

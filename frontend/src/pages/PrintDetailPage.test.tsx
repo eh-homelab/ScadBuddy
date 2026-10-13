@@ -126,6 +126,7 @@ describe('PrintDetailPage (#311)', () => {
           output_id: null,
           slug: null,
           library_file_id: 89,
+          library_file_name: null,
           output_name: 'Bambu Spool Lock',
           params_diff: null,
           provenance: null,
@@ -136,13 +137,45 @@ describe('PrintDetailPage (#311)', () => {
     )
     render(90)
     expect(await screen.findByRole('heading', { name: 'Bambu Spool Lock' })).toBeInTheDocument()
-    expect(screen.getByText('Bambuddy library file')).toBeInTheDocument()
+    // #1755 — with no name for the file (gone from Bambuddy), the breadcrumb says what it
+    // was, and still leads to every print of it.
+    expect(screen.getByRole('link', { name: 'Bambuddy library file' })).toHaveAttribute('href', '/prints?file=89')
     expect(screen.queryByRole('region', { name: 'Provenance' })).not.toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'Customize from this' })).not.toBeInTheDocument()
     expect(screen.queryByRole('region', { name: 'ScadBuddy render' })).not.toBeInTheDocument()
     const files = await section('Files')
     expect(within(files).getByText('Sliced file')).toBeInTheDocument()
     expect(within(files).queryByText('Parameters')).not.toBeInTheDocument()
+  })
+
+  it('shows a library print’s plate beside it and lists the library file (#1753)', async () => {
+    const base = prints.find((print) => print.archive_id === 35)!
+    const preview = '/api/v1/print/library/89/preview.glb?plate=2'
+    server.use(
+      http.get('/api/v1/prints/90', () =>
+        HttpResponse.json({
+          ...base,
+          archive_id: 90,
+          output_id: null,
+          slug: null,
+          library_file_id: 89,
+          output_name: 'Bambu Spool Lock',
+          params_diff: null,
+          provenance: null,
+          files: [
+            { kind: 'library_file', name: 'spool-lock.3mf', size: 1234, url: '/api/v1/print/library/89/file' },
+            { kind: 'preview_glb', name: 'spool-lock.glb', size: null, url: preview },
+            ...base.files.filter((file) => file.kind === 'sliced'),
+          ],
+          links: { ...base.links, customize_url: null },
+        }),
+      ),
+    )
+    render(90)
+    expect(await screen.findByTestId('preview')).toHaveAttribute('data-url', preview)
+    const files = await section('Files')
+    expect(within(files).getByText('Library file')).toBeInTheDocument()
+    expect(within(files).getByText('spool-lock.3mf')).toBeInTheDocument()
   })
 
   it('links the template', async () => {
@@ -159,6 +192,13 @@ describe('PrintDetailPage (#311)', () => {
     expect(within(gallery).getByTestId('play-badge-timelapse')).toBeInTheDocument()
     await user.click(within(gallery).getByRole('button', { name: 'Open Finish photo' }))
     await screen.findByRole('dialog', {}, { timeout: 3000 })
+  })
+
+  it('names the plate image by what the plate holds (#2055)', async () => {
+    render(35)
+    const gallery = await section('Gallery')
+    const slides = within(gallery).getAllByRole('group')
+    expect(within(slides.at(-1)!).getByRole('img')).toHaveAttribute('alt', 'Keychain as sliced')
   })
 
   it('leads the gallery with the finish photo, then the other photos', async () => {

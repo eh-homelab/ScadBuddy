@@ -57,7 +57,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
     let drop: () => Promise<void>
 
     beforeEach(async () => {
-      ;({ db, schema, drop } = await throwawayDatabase())
+      ;({ db, schema, drop } = await throwawayDatabase({ empty: true }))
     })
     afterEach(async () => {
       await drop()

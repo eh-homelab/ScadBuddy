@@ -80,6 +80,16 @@ def connect_lazily(address: str, namespace: str) -> Client:
     raise RuntimeError("a lazy Temporal connect suspended")
 
 
+def sandboxed_runner() -> SandboxedWorkflowRunner:
+    """Every worker's workflow sandbox: the render, ``bambuddy`` and ``library`` workers
+    (#2014). The client's tracing interceptor makes workflow spans inside it, and
+    OpenTelemetry's module state must be the process's, not a sandboxed copy.
+    tests/test_trace_scrub.py runs a workflow under this same runner (#1810)."""
+    return SandboxedWorkflowRunner(
+        restrictions=SandboxRestrictions.default.with_passthrough_modules("opentelemetry")
+    )
+
+
 def render_worker(
     client: Client,
     task_queue: str,
@@ -97,11 +107,7 @@ def render_worker(
         task_queue=task_queue,
         workflows=[TemplatePipeline, RenderPiece, RenderPreview, MigrateInputs],
         activities=[*activities.all(), *pipeline.all()],
-        # The interceptor's workflow spans run inside the sandbox; OpenTelemetry's
-        # module state must be the process's, not a sandboxed copy.
-        workflow_runner=SandboxedWorkflowRunner(
-            restrictions=SandboxRestrictions.default.with_passthrough_modules("opentelemetry")
-        ),
+        workflow_runner=sandboxed_runner(),
         max_concurrent_activities=max_concurrent_activities,
         graceful_shutdown_timeout=graceful_shutdown_timeout,
         deployment_config=WorkerDeploymentConfig(
@@ -122,10 +128,11 @@ def bambuddy_worker(
 ) -> Worker:
     """The ``bambuddy`` worker (#1052, #1053, spec 2026-10-01 §5.5): ``PrintRun``,
     ``Operation`` and ``FollowPrint`` (whose activity `follow_worker` serves).
-    With ``build_id`` (the ``scadbuddy-print`` Deployment, #1060) it is versioned like
-    the render worker: ``PrintRun`` and ``Operation`` are pinned to the build that started
-    them, and ``FollowPrint`` is AUTO_UPGRADE (`VersionedFollowPrint`), since it lasts as long
-    as the print.
+    With ``build_id`` (the ``scadbuddy-print`` Deployment, #1060) it is versioned, and
+    every workflow on it is AUTO_UPGRADE (`print_deployment`): each run moves to the
+    current build. Pinned runs were stranded by every deploy (#2066): the Deployment
+    rolls with ``Recreate``, so the old build is still current when its pod stops, it
+    stops without draining, and nothing serves the runs pinned to it.
     Without (in the API, dev and tests) it is unversioned. Either way a change that
     alters a workflow's commands is made with ``workflow.patched``, so a run started on
     the old code finishes on the new.
@@ -150,6 +157,7 @@ def bambuddy_worker(
             FollowPrint if build_id is None else VersionedFollowPrint,
         ],
         activities=activities,
+        workflow_runner=sandboxed_runner(),
         graceful_shutdown_timeout=graceful_shutdown_timeout,
         deployment_config=print_deployment(build_id),
     )
@@ -180,13 +188,14 @@ def follow_worker(
 
 
 def print_deployment(build_id: str | None) -> WorkerDeploymentConfig | None:
-    """``scadbuddy-print`` at ``build_id``, workflows pinned by default; None unversioned."""
+    """``scadbuddy-print`` at ``build_id``, workflows AUTO_UPGRADE by default (#2066);
+    None unversioned."""
     if build_id is None:
         return None
     return WorkerDeploymentConfig(
         version=WorkerDeploymentVersion(deployment_name=PRINT_DEPLOYMENT_NAME, build_id=build_id),
         use_worker_versioning=True,
-        default_versioning_behavior=VersioningBehavior.PINNED,
+        default_versioning_behavior=VersioningBehavior.AUTO_UPGRADE,
     )
 
 

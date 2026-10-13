@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import httpx
+import psycopg
 import pytest
 import respx
 from temporalio.exceptions import ApplicationError
@@ -22,12 +23,28 @@ from scadbuddy.bambuddy import follow as follow_module
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.follow import FollowActivities, Follower, FollowInput
 from scadbuddy.bambuddy.output_reader import LocalOutputs
-from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver, progress_for
+from scadbuddy.bambuddy.progress import (
+    QUEUE_PATH,
+    PrintProgress,
+    ProgressObserver,
+    from_failed_run,
+    progress_for,
+)
+from scadbuddy.bambuddy.runs import (
+    NewestFailed,
+    PrintRun,
+    PrintRunError,
+    PrintRunStore,
+    newest_failed_from,
+    newest_failure,
+)
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.events import Event, InProcessEventBus, PrintEvent
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import META_NAME, OutputMeta, OutputStore
+from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.render.glb import BoundingBox
 
 OUTPUT = "c" * 32
@@ -423,8 +440,8 @@ def test_a_settled_print_runs_each_settled_hook_once(paths: DataPaths) -> None:
     )
     heard: list[tuple[str, str]] = []
 
-    async def hook(meta: OutputMeta) -> None:
-        heard.append((meta.id, kinds(seen)[-1]))
+    async def hook(subject: PrintSubject) -> None:
+        heard.append((subject.id, kinds(seen)[-1]))
 
     follower.on_settled.append(hook)
     assert follow(follower) == "settled"
@@ -436,11 +453,11 @@ def test_a_failing_settled_hook_does_not_fail_the_follow(paths: DataPaths) -> No
     follower, _ = follower_for(paths, Script(progress("done", settled=True)))
     ran: list[str] = []
 
-    async def broken(meta: OutputMeta) -> None:
+    async def broken(subject: PrintSubject) -> None:
         raise RuntimeError("serial ABC123 leaked")
 
-    async def after(meta: OutputMeta) -> None:
-        ran.append(meta.id)
+    async def after(subject: PrintSubject) -> None:
+        ran.append(subject.id)
 
     follower.on_settled.extend([broken, after])
     assert follow(follower) == "settled"
@@ -457,7 +474,7 @@ def test_a_settled_hook_that_hangs_is_cut_off_and_the_print_still_settles(
         paths, Script(progress("done", settled=True, done=1)), settle_timeout=0.05
     )
 
-    async def hook(meta: OutputMeta) -> None:
+    async def hook(subject: PrintSubject) -> None:
         await asyncio.Event().wait()
 
     follower.on_settled.append(hook)
@@ -479,9 +496,9 @@ def test_the_activity_heartbeats_while_a_settled_hook_runs(
     follower, _ = follower_for(paths, Script(progress("done", settled=True)))
     finished: list[str] = []
 
-    async def hook(meta: OutputMeta) -> None:
+    async def hook(subject: PrintSubject) -> None:
         await asyncio.sleep(0.2)
-        finished.append(meta.id)
+        finished.append(subject.id)
 
     follower.on_settled.append(hook)
     env = ActivityEnvironment()
@@ -565,3 +582,181 @@ def test_running_follows_are_counted_and_a_full_worker_is_said(
     assert during == 1
     assert held() == 0
     assert any("every follow slot" in r.message for r in caplog.records)
+
+
+def test_a_library_print_is_followed_until_it_settles_and_runs_the_hooks(
+    paths: DataPaths,
+) -> None:
+    """#1073: a library file's print is read by its subject until it settles, then the
+    settle hooks run with that subject, as an output's do."""
+    read = Script(progress("queued"), progress("running"), progress("done", settled=True))
+    follower, _ = follower_for(paths, Script(None), read_library=read)
+    heard: list[str] = []
+
+    async def hook(subject: PrintSubject) -> None:
+        heard.append(subject.key)
+
+    follower.on_settled.append(hook)
+    ended = asyncio.run(asyncio.wait_for(follower.follow("library:89", NOW), 5))
+    assert ended == "settled"
+    assert read.reads == 3
+    assert heard == ["library:89"]
+
+
+def test_a_library_print_publishes_each_change_on_its_own_topic(paths: DataPaths) -> None:
+    """#1751: a library file's print is announced as an output's is, under its run
+    subject, so the dialog and the history follow it live."""
+    read = Script(progress("queued"), progress("queued"), progress("done", settled=True))
+    follower, seen = follower_for(paths, Script(None), read_library=read)
+    asyncio.run(asyncio.wait_for(follower.follow("library:89", NOW), 5))
+    events = [event for event in seen if isinstance(event, PrintEvent)]
+    assert [event.kind for event in events] == ["print.progress", "print.progress", "print.settled"]
+    assert {(event.output_id, event.slug) for event in events} == {("library:89", "library-89")}
+
+
+def test_a_library_print_bambuddy_no_longer_has_ends_the_follow(paths: DataPaths) -> None:
+    follower, seen = follower_for(
+        paths, Script(None), read_library=Script(ApiError(404, "queue item gone"))
+    )
+    assert asyncio.run(asyncio.wait_for(follower.follow("library:89", NOW), 5)) == "gone"
+    # The failure is announced, so an open dialog re-reads the route and shows it.
+    assert kinds(seen) == ["print.progress"]
+
+
+def test_without_a_library_reader_a_library_follow_ends_at_once(paths: DataPaths) -> None:
+    follower, _ = follower_for(paths, Script(None))
+    assert asyncio.run(asyncio.wait_for(follower.follow("library:89", NOW), 5)) == "gone"
+
+
+FAILED_RUN = from_failed_run("the slice failed", bambuddy_url="http://bambuddy.test/queue")
+
+
+def test_a_newer_runs_failure_is_published_not_the_older_print_it_follows(
+    paths: DataPaths,
+) -> None:
+    """#1837: a newer run of the output failed before queueing while this follow's older
+    print still moves. The route publishes that failure (``route: "run"``); the follow
+    publishes the same, so the two never alternate, yet still reads the older print to
+    its end, for the settled hooks."""
+    write_output(paths)
+    read = Script(progress("queued"), progress("running"), progress("done", settled=True))
+    asked: list[str] = []
+
+    async def newest_failed(run_subject: str) -> PrintProgress | None:
+        asked.append(run_subject)
+        return FAILED_RUN
+
+    follower, seen = follower_for(paths, read, newest_failed=newest_failed)
+    # The progress route already published the failure, through the same observer.
+    follower.observer.observe_subject(OUTPUT, "demo", FAILED_RUN)
+    seen.clear()
+    heard: list[str] = []
+
+    async def hook(subject: PrintSubject) -> None:
+        heard.append(subject.id)
+
+    follower.on_settled.append(hook)
+    assert follow(follower) == "settled"
+    assert read.reads == 3
+    assert asked == [OUTPUT] * 3
+    assert kinds(seen) == []  # nothing new to publish: no alternation
+    assert heard == [OUTPUT]  # the older print's settle still ran its hooks
+
+
+def test_without_a_newer_failure_the_follow_publishes_its_print(paths: DataPaths) -> None:
+    write_output(paths)
+    read = Script(progress("running"), progress("done", settled=True))
+
+    async def newest_failed(run_subject: str) -> PrintProgress | None:
+        return None
+
+    follower, seen = follower_for(paths, read, newest_failed=newest_failed)
+    assert follow(follower) == "settled"
+    assert kinds(seen) == ["print.progress", "print.progress", "print.settled"]
+
+
+def test_a_newest_failure_read_that_breaks_publishes_the_print_as_before(
+    paths: DataPaths, caplog: pytest.LogCaptureFixture
+) -> None:
+    write_output(paths)
+    read = Script(progress("running"), progress("done", settled=True))
+
+    async def newest_failed(run_subject: str) -> PrintProgress | None:
+        raise RuntimeError("a bug")
+
+    follower, seen = follower_for(paths, read, newest_failed=newest_failed)
+    with caplog.at_level(logging.ERROR):
+        assert follow(follower) == "settled"
+    assert kinds(seen) == ["print.progress", "print.progress", "print.settled"]
+    assert "the newest run's failure could not be read" in caplog.text
+
+
+class _Runs:
+    """`PrintRunStore` as `newest_failure` reads it."""
+
+    def __init__(self, latest: PrintRun | Exception | None) -> None:
+        self.latest = latest
+
+    async def latest_for_output(self, output_id: str) -> PrintRun | None:
+        if isinstance(self.latest, Exception):
+            raise self.latest
+        return self.latest
+
+
+def _run(status: str, *, may_have_queued: bool = False) -> PrintRun:
+    return PrintRun(
+        id="r" * 32,
+        subject=f"output:{OUTPUT}",
+        status=status,  # type: ignore[arg-type]
+        created_at=NOW,
+        error=PrintRunError(status=502, title="Bad Gateway", detail="the slice failed")
+        if status == "failed"
+        else None,
+        may_have_queued=may_have_queued,
+    )
+
+
+@pytest.mark.parametrize(
+    ("runs", "expected"),
+    [
+        (_Runs(_run("failed")), "the slice failed"),
+        (_Runs(_run("failed", may_have_queued=True)), None),  # its print says more
+        (_Runs(_run("succeeded")), None),
+        (_Runs(None), None),  # never run
+        (_Runs(psycopg.OperationalError("down")), None),  # unreachable database
+    ],
+    ids=["failed", "may-have-queued", "succeeded", "none", "unreachable"],
+)
+def test_newest_failure(runs: _Runs, expected: str | None) -> None:
+    assert asyncio.run(newest_failure(cast(PrintRunStore, runs), OUTPUT)) == expected
+
+
+def _newest_failed_of(newest_failed: NewestFailed) -> PrintProgress | None:
+    async def read() -> PrintProgress | None:
+        return await newest_failed(OUTPUT)
+
+    return asyncio.run(read())
+
+
+def test_newest_failed_from_links_the_queue_as_the_routes_do() -> None:
+    """#2015: the worker's and the API's follow build the failure's link from the stored
+    settings as the progress routes do from ``client.config.web_url(QUEUE_PATH)``: the
+    browser-facing URL, not the internal one."""
+    settings = StoredSettings(
+        bambuddy_url="http://bambuddy:8000",
+        bambuddy_api_key="bb_test",
+        bambuddy_web_urls="https://bambuddy.example",
+    )
+    newest_failed = newest_failed_from(cast(PrintRunStore, _Runs(_run("failed"))), lambda: settings)
+    failed = _newest_failed_of(newest_failed)
+    assert failed is not None
+    assert failed.bambuddy_url == "https://bambuddy.example/queue"
+    assert failed.bambuddy_url == BambuddyConfig.from_settings(settings).web_url(QUEUE_PATH)
+
+
+def test_newest_failed_from_reads_no_settings_without_a_failure() -> None:
+    def load() -> StoredSettings:
+        raise AssertionError("read the settings for nothing")
+
+    newest_failed = newest_failed_from(cast(PrintRunStore, _Runs(_run("succeeded"))), load)
+    assert _newest_failed_of(newest_failed) is None

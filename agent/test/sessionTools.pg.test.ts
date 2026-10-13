@@ -1,3 +1,5 @@
+import { AttachmentStore } from '../src/attachments/store.js'
+import { AuditLog } from '../src/audit/log.js'
 import { ResourceUpdatedNotificationSchema } from '@modelcontextprotocol/sdk/types.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ApprovalActions, ownerOf } from '../src/approvals/mcp.js'
@@ -16,6 +18,10 @@ import { InMemoryTokenStore } from './support/memoryTokens.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { collectUntil, type FakeTurn, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import type { HarnessRun } from '../src/harness/run.js'
+import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk'
+import { createBackendClient } from '../src/api/backend.js'
+import type { ToolServices } from '../src/tools/registry.js'
+import { BACKEND } from './helpers/mcp.js'
 
 // The `sessions_*` tools (#300) end to end: real /mcp clients with bearer
 // tokens, a real SessionManager on Postgres (with a scripted stand-in for the
@@ -52,11 +58,12 @@ describe.skipIf(!TEST_DATABASE_URL)(
   () => {
     let db: Database
     let schema: string
+    let url: string
     let drop: () => Promise<void>
     const closers: (() => Promise<void>)[] = []
 
     beforeEach(async () => {
-      ;({ db, schema, drop } = await throwawayDatabase())
+      ;({ db, schema, url, drop } = await throwawayDatabase())
       expect(await db.ready()).toBe(true)
     })
     afterEach(async () => {
@@ -65,14 +72,18 @@ describe.skipIf(!TEST_DATABASE_URL)(
     })
 
     async function listener(): Promise<PgEventListener> {
-      const l = new PgEventListener(TEST_DATABASE_URL!, { searchPath: schema, retryMinMs: 20, log: () => {} })
+      const l = new PgEventListener(url, { searchPath: schema, retryMinMs: 20, log: () => {} })
       l.start()
       closers.push(() => l.close())
       await l.ready()
       return l
     }
 
-    async function setup(turns: (run: HarnessRun) => FakeTurn = () => ({ reply: 'hello from the agent' })) {
+    async function setup(
+      turns: (run: HarnessRun) => FakeTurn = () => ({ reply: 'hello from the agent' }),
+      extra: Partial<ToolServices> = {},
+      options: { audit?: AuditLog } = {},
+    ) {
       const tokens = new InMemoryTokenStore()
       const publisher = new SessionEventPublisher(db.sql, { throttleMs: 10 })
       const { runner, runs } = scriptedRunner(turns)
@@ -84,6 +95,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         onAppend: publisher.onAppend,
         approvalGrants: approvalGrantCheck(tokens),
         currentTiers: liveTokenTiers(tokens),
+        ...(options.audit ? { audit: options.audit } : {}),
         mcpServers: (_session, turn) => {
           principals.push(turn)
           return {}
@@ -96,7 +108,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         hub.close()
         publisher.close()
       })
-      const svc = services({ sessions, pending: new ApprovalActions(sessions.approvals) })
+      const svc = services({ sessions, pending: new ApprovalActions(sessions.approvals), ...extra })
       const t = testApp({ tokens, services: svc, mcp: { resources: hub } })
       async function agent(tier: Tier, options: { approvalGrant?: boolean } = {}) {
         const { token, record } = await tokens.mint({ name: `agent ${tier}`, tier, ...options })
@@ -148,6 +160,142 @@ describe.skipIf(!TEST_DATABASE_URL)(
       )
       // Browser-owned turns use the browser's own tiers (no override).
       expect(principals.at(-1)).toEqual({})
+    })
+
+    it("starts a session with images by reference, given to the model with its first turn (#2477)", async () => {
+      const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4])
+      const OUT = 'a'.repeat(32)
+      const backend = createBackendClient(BACKEND, () =>
+        Promise.resolve(new Response(new Uint8Array(PNG), { headers: { 'content-type': 'image/png' } })),
+      )
+      const { agent, runs } = await setup(undefined, { backend })
+      const a = await agent('write')
+      const started = ok<{ turn: { finished: boolean } }>(
+        await a.call('sessions_start', { prompt: 'what is this?', images: [{ kind: 'output_thumbnail', output_id: OUT }], wait_seconds: 10 }),
+      )
+      expect(started.turn).toMatchObject({ finished: true })
+      const messages: SDKUserMessage[] = []
+      for await (const m of runs[0]!.prompt as AsyncIterable<SDKUserMessage>) messages.push(m)
+      const content = messages[0]!.message.content as { type: string }[]
+      expect(content.map((c) => c.type)).toEqual(['image', 'text'])
+      // Images need the prompt they go with.
+      expect(errorText(await a.call('sessions_start', { images: [{ kind: 'output_thumbnail', output_id: OUT }] }))).toMatch(/images/)
+    })
+
+    it('sends images by reference: fetched from the backend, given to the model before the text (#1894)', async () => {
+      const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4])
+      const OUT = 'a'.repeat(32)
+      const backend = createBackendClient(BACKEND, (request) => {
+        const path = new URL((request as Request).url).pathname
+        if (path === `/api/v1/outputs/${OUT}/thumbnail`) {
+          return Promise.resolve(new Response(new Uint8Array(PNG), { headers: { 'content-type': 'image/png' } }))
+        }
+        // Says it is a PNG; its bytes say otherwise.
+        return Promise.resolve(new Response('<svg/>', { headers: { 'content-type': 'image/png' } }))
+      })
+      const { agent, runs } = await setup(undefined, { backend })
+      const a = await agent('write')
+      const { session } = ok<{ session: { id: string } }>(await a.call('sessions_start', { title: 'pics' }))
+
+      const sent = ok<{ turn: { finished: boolean } }>(
+        await a.call('sessions_send', {
+          session_id: session.id,
+          text: 'what is this?',
+          images: [{ kind: 'output_thumbnail', output_id: OUT }],
+          wait_seconds: 10,
+        }),
+      )
+      expect(sent.turn).toMatchObject({ finished: true })
+      expect(runs).toHaveLength(1)
+      const messages: SDKUserMessage[] = []
+      for await (const m of runs[0]!.prompt as AsyncIterable<SDKUserMessage>) messages.push(m)
+      const content = messages[0]!.message.content as { type: string; source?: { data: string; media_type: string } }[]
+      expect(content.map((c) => c.type)).toEqual(['image', 'text'])
+      expect(content[0]!.source).toMatchObject({ media_type: 'image/png', data: PNG.toString('base64') })
+
+      // The MCP transcript shows the count, never the bytes.
+      const got = ok<{ transcript: Record<string, unknown>[] }>(await a.call('sessions_get', { session_id: session.id }))
+      expect(got.transcript).toContainEqual(expect.objectContaining({ type: 'user.turn', text: 'what is this?', images: 1 }))
+      expect(JSON.stringify(got)).not.toContain(PNG.toString('base64'))
+
+      // A reference whose bytes are not an image is refused, and no turn starts.
+      const refused = errorText(
+        await a.call('sessions_send', {
+          session_id: session.id,
+          text: 'and this?',
+          images: [{ kind: 'model_thumbnail', slug: 'keychain' }],
+        }),
+      )
+      expect(refused).toMatch(/images\[0\].*not a PNG, JPEG, GIF or WebP/)
+      expect(runs).toHaveLength(1)
+
+      // Inline bytes are not accepted at all.
+      expect(
+        errorText(
+          await a.call('sessions_send', {
+            session_id: session.id,
+            text: 'inline?',
+            images: [{ mediaType: 'image/png', data: PNG.toString('base64') }],
+          }),
+        ),
+      ).toMatch(/images/)
+      expect(runs).toHaveLength(1)
+    })
+
+    it('sends an attachment only its uploader owns, and moves it into the session (#1941)', async () => {
+      const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='
+      const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46, 0, 1]).toString('base64')
+      const store = new AttachmentStore(db.sql)
+      const { agent, runs } = await setup(undefined, { attachments: store })
+      const a = await agent('write')
+      const b = await agent('write')
+      const image = {
+        mediaType: 'image/png' as const,
+        bytes: Buffer.from(PNG, 'base64'),
+        preview: { mediaType: 'image/jpeg' as const, bytes: Buffer.from(JPEG, 'base64') },
+      }
+      const mine = await store.put(a.owner, image)
+      const theirs = await store.put(b.owner, image)
+      const browsers = await store.put(BROWSER_USER, image)
+      const { session } = ok<{ session: { id: string } }>(await a.call('sessions_start', { title: 'pics' }))
+
+      for (const id of [theirs.id, browsers.id]) {
+        const refused = errorText(
+          await a.call('sessions_send', { session_id: session.id, text: 'look', images: [{ kind: 'attachment', id }] }),
+        )
+        expect(refused).toMatch(/images\[0\].*unknown or has expired/)
+      }
+      expect(runs).toHaveLength(0)
+
+      const sent = ok<{ turn: { finished: boolean } }>(
+        await a.call('sessions_send', {
+          session_id: session.id,
+          text: 'look',
+          images: [{ kind: 'attachment', id: mine.id }],
+          wait_seconds: 10,
+        }),
+      )
+      expect(sent.turn).toMatchObject({ finished: true })
+      const messages: SDKUserMessage[] = []
+      for await (const m of runs[0]!.prompt as AsyncIterable<SDKUserMessage>) messages.push(m)
+      const content = messages[0]!.message.content as { type: string; source?: { data: string } }[]
+      expect(content[0]!.source).toMatchObject({ data: PNG })
+      const left = (await db.sql`SELECT id FROM ai_attachments`).map((r) => r.id as string).sort()
+      expect(left).toEqual([theirs.id, browsers.id].sort())
+      // The image and its preview (#2479).
+      expect(await db.sql`SELECT 1 FROM ai_session_blobs WHERE session_id = ${session.id}`).toHaveLength(2)
+    })
+
+    it("takes a new session's mode, and says when the default ran classic (plan 5d)", async () => {
+      const { agent } = await setup()
+      const a = await agent('write')
+      const fell = ok<{ session: { mode: string }; mode_fallback?: string }>(await a.call('sessions_start', { title: 'a' }))
+      expect(fell.session.mode).toBe('classic')
+      expect(fell.mode_fallback).toMatch(/durable sessions need Temporal/)
+      const classic = ok<Record<string, unknown>>(await a.call('sessions_start', { title: 'b', mode: 'classic' }))
+      expect(classic).toMatchObject({ session: { mode: 'classic' } })
+      expect(classic).not.toHaveProperty('mode_fallback')
+      expect(errorText(await a.call('sessions_start', { title: 'c', mode: 'durable' }))).toMatch(/Temporal/)
     })
 
     it("shows a caller only the sessions it may see; another agent's are 'no session'", async () => {
@@ -206,6 +354,30 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(child).toMatchObject({ parent_id: session.id, owner: { kind: 'bearer' } })
       const got = ok<{ transcript: Record<string, unknown>[] }>(await a.call('sessions_get', { session_id: child.id }))
       expect(got.transcript).toContainEqual(expect.objectContaining({ type: 'user.turn', text: 'first' }))
+      // #793: up_to names a reply by its message_id; one the session does not have is refused.
+      expect(errorText(await a.call('sessions_fork', { session_id: session.id, up_to: 'msg_nowhere:0' }))).toMatch(
+        /no finished reply msg_nowhere:0/,
+      )
+    })
+
+    it('records a fork made through sessions_fork as a resource row on the child (#2159)', async () => {
+      const audit = new AuditLog({ sql: db.sql })
+      const { agent, sessions } = await setup(undefined, {}, { audit })
+      const a = await agent('write')
+      const { session } = ok<{ session: { id: string } }>(
+        await a.call('sessions_start', { prompt: 'first', wait_seconds: 10 }),
+      )
+      await sessions.store.append({ projectKey: 'p', sessionId: session.id }, [{ type: 'user', uuid: 'u1', message: {} }])
+      const child = ok<{ id: string }>(await a.call('sessions_fork', { session_id: session.id }))
+      expect((await audit.list({ kind: 'resource', action: 'session_fork' })).entries).toEqual([
+        expect.objectContaining({
+          outcome: 'ok',
+          surface: 'mcp',
+          session_id: child.id,
+          actor: expect.objectContaining({ kind: 'bearer', id: a.principal.id }),
+          detail: `forked from ${session.id}`,
+        }),
+      ])
     })
 
     it('lets only a token with the approval grant decide, and never its own', async () => {
@@ -297,7 +469,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const pubA = new SessionEventPublisher(db.sql, { throttleMs: 10 })
       const { runner } = scriptedRunner(() => ({ reply: 'from replica A' }))
       const replicaA = manager({ sql: db.sql, paths, run: runner, pollMs: slow, onAppend: pubA.onAppend })
-      const other = connectDatabase(TEST_DATABASE_URL!, { searchPath: schema })
+      const other = connectDatabase(url, { searchPath: schema })
       const pubB = new SessionEventPublisher(other.sql, { throttleMs: 10 })
       const replicaB: SessionManager = manager({ sql: other.sql, paths, pollMs: slow, onAppend: pubB.onAppend })
       const bus = await listener()

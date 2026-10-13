@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import type { UpgradeWebSocket } from 'hono/ws'
 import { aiStatus, type AiStatus, type CredentialState } from './aiStatus.js'
 import type { AuditRepo } from './audit/log.js'
+import type { AttachmentStore } from './attachments/store.js'
 import { auditWrites, RefusalCoalescer } from './audit/writes.js'
 import type { CredentialRepo } from './credentials.js'
 import type { Resolver } from './http/egress.js'
@@ -78,6 +79,13 @@ export interface AppDeps {
   tabs?: TabHub | undefined
   /** The agent-tools worker's state (#1055, temporal/worker.ts); left out without SCADBUDDY_TEMPORAL_ADDRESS. */
   temporal?: (() => TemporalHealth) | undefined
+  /**
+   * The panel's image uploads (#1941, attachments/store.ts): POST
+   * /api/v1/ai/attachments stores them (routes/attachments.ts) and the chat
+   * socket resolves the ids a message names (routes/chat.ts). Undefined
+   * exactly when `sessions` is.
+   */
+  attachments?: AttachmentStore | undefined
 }
 
 /** Which credential requests are writes, by method (audit/writes.ts). */
@@ -103,6 +111,13 @@ function tokenVerb(method: string, path: string): string | undefined {
 /** A raise of one session's budget (routes/sessions.ts); no other session route is recorded here. */
 function budgetVerb(method: string, path: string): string | undefined {
   return method === 'POST' && /^\/api\/v1\/ai\/sessions\/[^/]+\/budget$/.test(path) ? 'session_budget_usd' : undefined
+}
+
+/** A fork of a session, or a rename or done (#792); successful ones are recorded by the manager (sessions/manager.ts fork, sessions/edits.ts). */
+function sessionWriteVerb(method: string, path: string): string | undefined {
+  if (method === 'POST' && /^\/api\/v1\/ai\/sessions\/[^/]+\/fork$/.test(path)) return 'session_fork'
+  if (method === 'PATCH' && /^\/api\/v1\/ai\/sessions\/[^/]+$/.test(path)) return 'session_update'
+  return undefined
 }
 
 /** Which plugin requests are writes; connection tests are not. */
@@ -186,6 +201,8 @@ export function createApp(deps: AppDeps): AgentApp {
     // Refused or failed raises of a session's budget (#790); a raise that
     // lands is recorded by the manager (sessions/manager.ts raiseBudget).
     app.use('/api/v1/ai/sessions/*', auditWrites({ ...writes, kind: 'settings', verb: budgetVerb, failuresOnly: true }))
+    // Refused or failed forks, renames and dones (#792).
+    app.use('/api/v1/ai/sessions/*', auditWrites({ ...writes, kind: 'resource', verb: sessionWriteVerb, failuresOnly: true }))
   }
 
   const shutdown = new AbortController()

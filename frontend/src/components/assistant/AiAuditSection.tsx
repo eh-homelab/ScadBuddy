@@ -12,6 +12,7 @@ import {
   saveAuditRetention,
 } from '../../agent/audit'
 import { useAiAvailability } from '../../agent/chat/availability'
+import { downloadBlob } from '../../lib/embed'
 import { useAsync } from '../../lib/useAsync'
 import { Button } from '../ui/Button'
 import { Spinner } from '../ui/Spinner'
@@ -40,6 +41,7 @@ const KIND_LABEL: Record<AuditKind, string> = {
   memory: 'Memory',
   http: 'HTTP requests',
   question: 'Questions',
+  turn: 'Turns',
 }
 
 const OUTCOME_LABEL: Record<AuditOutcome, string> = {
@@ -75,6 +77,8 @@ function describe(entry: AuditEntry): string {
       return `HTTP ${entry.action}`
     case 'question':
       return `Question ${entry.action}`
+    case 'turn':
+      return `Turn ${entry.action}`
     default:
       return `${KIND_LABEL[entry.kind]}: ${entry.action}`
   }
@@ -110,7 +114,8 @@ function memoryText(entry: AuditEntry): string | null {
 
 /**
  * An http row's summary (#827) in words: the agent stores `{method, scheme, host,
- * status?, size_bytes?, redirect?}` as JSON, never a path, a header or a body.
+ * status?, size_bytes?, redirect?, saved?}` as JSON, never a path, a header or a
+ * body (`saved` is the id of a saved body; see savedBodyUrl).
  */
 function httpText(entry: AuditEntry): string | null {
   let parts: string[] = []
@@ -127,7 +132,45 @@ function httpText(entry: AuditEntry): string | null {
   return parts.length ? parts.join(' · ') : null
 }
 
+const SAVED_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+/**
+ * #1292 — where a saved response body is served, for an http row whose response
+ * was too long (or binary) to return inline: the row names the id it was saved
+ * under, and the agent serves it from the session's directory
+ * (`GET /api/v1/ai/sessions/:id/http/:saved`). Null for any other row.
+ */
+function savedBodyUrl(entry: AuditEntry): string | null {
+  if (entry.kind !== 'http' || !entry.session_id) return null
+  let saved: unknown
+  try {
+    saved = (JSON.parse(entry.input_summary ?? '{}') as Record<string, unknown>).saved
+  } catch {
+    return null
+  }
+  if (typeof saved !== 'string' || !SAVED_ID.test(saved)) return null
+  return `/api/v1/ai/sessions/${encodeURIComponent(entry.session_id)}/http/${saved}`
+}
+
+const usd = (value: number) => `$${value.toFixed(4)}`
+
+/**
+ * A turn row's cost (#1922). A turn Claude Code never priced (no result came back)
+ * is flagged, with ScadBuddy's own estimate when it made one, never shown as a
+ * priced $0.
+ */
+function turnCost(entry: AuditEntry): string | null {
+  if (entry.kind !== 'turn' || entry.cost_usd === null) return null
+  const estimated = entry.cost_estimated_usd ?? 0
+  if (entry.cost_priced === false) {
+    return estimated > 0 ? `not priced by Claude Code · ~${usd(estimated)} estimated` : 'not priced by Claude Code'
+  }
+  return estimated > 0 ? `${usd(entry.cost_usd)} (incl. ~${usd(estimated)} estimated)` : usd(entry.cost_usd)
+}
+
 function AuditRow({ entry }: { entry: AuditEntry }) {
+  const cost = turnCost(entry)
+  const body = savedBodyUrl(entry)
   const text =
     entry.kind === 'memory'
       ? memoryText(entry)
@@ -150,13 +193,63 @@ function AuditRow({ entry }: { entry: AuditEntry }) {
         {entry.duration_ms !== null && <> · <span className="sb-num">{entry.duration_ms} ms</span></>}
         {entry.approval_id && <> · approval <span className="sb-num">{entry.approval_id.slice(0, 8)}</span></>}
         {entry.approved_by && <> · approved by {entry.approved_by.label}</>}
+        {cost && <> · <span className="sb-num">{cost}</span></>}
       </div>
       {text && (
         <p className="mt-0.5 truncate font-mono text-[12px] text-muted" title={text}>
           {text}
         </p>
       )}
+      {body && <SavedBody url={body} />}
     </li>
+  )
+}
+
+/**
+ * Downloads a saved response body (#1292) through lib/embed's `downloadBlob`: a plain
+ * link would start the download inside Bambuddy's sandboxed frame, which has no
+ * `allow-downloads`, and Chromium drops it without a word (#612).
+ */
+function SavedBody({ url }: { url: string }) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function load(): Promise<Blob> {
+    const res = await fetch(url)
+    if (res.status === 404) throw new Error("That body is no longer kept: only the session's 10 newest saved responses are.")
+    if (!res.ok) throw new Error(`The body could not be read (HTTP ${res.status}).`)
+    return res.blob()
+  }
+
+  async function download() {
+    setBusy(true)
+    setError(null)
+    try {
+      await downloadBlob(load, `http-response-${url.slice(url.lastIndexOf('/') + 1, url.lastIndexOf('/') + 9)}`)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'The body could not be downloaded.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="mt-0.5 text-[12px]">
+      <button
+        type="button"
+        onClick={() => void download()}
+        disabled={busy}
+        className="text-accent underline disabled:opacity-60"
+        title="The body is kept while the session's 10 newest saved responses include it."
+      >
+        Download body
+      </button>
+      {error && (
+        <span role="alert" className="ml-2 text-warn">
+          {error}
+        </span>
+      )}
+    </div>
   )
 }
 
@@ -233,8 +326,8 @@ function AuditLogView() {
       </h2>
       <div className="space-y-3 p-4">
         <p className="text-[12px] text-muted">
-          Every tool call the assistant or an MCP client made, every approval decision, and every
-          change to AI credentials, plugins, settings and MCP tokens. Inputs are shown scrubbed;
+          Every tool call the assistant or an MCP client made, what each assistant turn cost, every
+          approval decision, and every change to AI credentials, plugins, settings and MCP tokens. Inputs are shown scrubbed;
           secrets are never recorded.
         </p>
         <div className="flex flex-wrap items-end gap-3">

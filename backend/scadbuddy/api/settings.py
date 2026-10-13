@@ -1,15 +1,24 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import timedelta
 from typing import Any, Literal, Self
 
+import psycopg
 from fastapi import APIRouter, Response, status
 from fastapi.responses import JSONResponse
 from psycopg.conninfo import conninfo_to_dict
 from pydantic import BaseModel, Field, model_validator
 
-from scadbuddy.api.deps import AppState, SettingsStoreDep, StateDep, UploadsDep
+from scadbuddy.api.deps import (
+    AppState,
+    CatalogueDep,
+    PresetsDep,
+    SettingsStoreDep,
+    StateDep,
+    UploadsDep,
+)
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
     IdempotencyKey,
@@ -20,9 +29,14 @@ from scadbuddy.api.operations import (
 )
 from scadbuddy.api.runtime import apply_runtime, restart_required
 from scadbuddy.bambuddy.client import client_for
-from scadbuddy.bambuddy.errors import SCOPE_PROBLEM, Scope
+from scadbuddy.bambuddy.errors import SCOPE_PROBLEM, Scope, UpstreamAnswer
 from scadbuddy.bambuddy.models import Folder, Printer, RackAlgorithm
-from scadbuddy.bambuddy.options import BAMBUDDY_DEFAULTS, OptionScope, PrintOptions
+from scadbuddy.bambuddy.options import (
+    BAMBUDDY_DEFAULTS,
+    OptionScope,
+    PrintOptions,
+    is_options_scope,
+)
 from scadbuddy.bambuddy.send import SidebarLink
 from scadbuddy.bambuddy.uploads import ProjectTarget
 from scadbuddy.core.config import StoreBackend
@@ -34,9 +48,12 @@ from scadbuddy.core.settings import (
     Settings,
     env_var,
 )
+from scadbuddy.library.catalogue import Catalogue
+from scadbuddy.library.presets import PresetStore, TemplatePresetsUnreadableError
 from scadbuddy.library.settings_store import (
     DisplayUnit,
     ModelPrintChoices,
+    ModelProject,
     SettingSource,
     SettingsPatch,
     SettingsSnapshot,
@@ -50,6 +67,8 @@ from scadbuddy.workflows.commands import (
     TemporalUnavailableError,
     namespace_retention,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["settings"])
 
@@ -106,6 +125,11 @@ class SettingsView(BaseModel):
     #: The largest media upload (#274), in bytes, which the UI checks a file against
     #: before sending it.
     media_upload_max_bytes: int
+    #: What one read of a library 3MF may spend (#2087), each at most its ceiling.
+    read_max_objects: int
+    read_max_visits: int
+    read_max_triangles: int
+    read_max_paint_digits: int
 
     render_timeout: float
     template_activity_max_timeout: float
@@ -132,6 +156,7 @@ class SettingsView(BaseModel):
     fonts_catalogue_ttl: float
     event_log_retention_seconds: float
     event_log_retention_rows: int
+    flow_approval_timeout_seconds: int
     log_level: str
     #: The Temporal web UI, which Settings → Administration links to (#668).
     temporal_ui_url: str | None = None
@@ -177,7 +202,9 @@ class PrintOptionsUpdate(BaseModel):
     """
 
     scope: OptionScope
-    #: The printer id or model slug. Absent for the global scope, required otherwise.
+    #: The printer id, or for ``model`` the print's options scope (#1754): a model id,
+    #: or a library file's ``library:<file id>``. Absent for the global scope, required
+    #: otherwise.
     key: str | None = None
     options: PrintOptions
 
@@ -188,6 +215,13 @@ class PrintOptionsUpdate(BaseModel):
                 raise ValueError("the global scope takes no key")
         elif not self.key:
             raise ValueError(f"the {self.scope!r} scope needs a key")
+        # A forget passes for any key: one an older version stored still goes.
+        elif (
+            self.scope == "model" and not self.options.is_empty() and not is_options_scope(self.key)
+        ):
+            raise ValueError(
+                f"{self.key!r} is neither a model nor a library file ('library:<file id>')"
+            )
         return self
 
 
@@ -211,6 +245,9 @@ class ConnectionTest(BaseModel):
     detail: str
     printers: list[Printer] = Field(default_factory=list)
     scopes: list[ScopeCheck] = Field(default_factory=list)
+    #: On a failure, what Bambuddy itself answered (or why it never did), as it said it,
+    #: beside ``detail``'s sentence (#1542).
+    upstream: UpstreamAnswer | None = None
 
 
 class RememberedChoices(BaseModel):
@@ -227,6 +264,10 @@ class RememberedChoices(BaseModel):
     model_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
     #: Stringified Bambuddy project id -> the printer and nozzle it last printed on (#599).
     project_print_targets: dict[str, ProjectTarget] = Field(default_factory=dict)
+    #: A model id, or ``<model id>/<preset id>``, -> the project Generate last filed it
+    #: into (#1660). A preset's entry carries the preset's name now, so Settings needs
+    #: no read per model; one for a preset its model no longer lists is not here.
+    model_projects: dict[str, ModelProject] = Field(default_factory=dict)
 
 
 class BambuddyStatus(BaseModel):
@@ -387,8 +428,51 @@ async def put_settings(
     return _view(snapshot, state)
 
 
+def _current_model_projects(
+    settings: StoredSettings, catalogue: Catalogue, presets: PresetStore, store: SettingsStore
+) -> dict[str, ModelProject]:
+    """``model_projects`` as Settings lists it (#1660): each preset's entry named by the
+    preset's name now, and none for a preset its model no longer lists. A template's
+    preset dropped from ``model.json`` deletes nothing of ours, so its entry is
+    forgotten here instead. A model not in the catalogue, or whose presets cannot be
+    read (the database, or a ``model.json`` that is not valid), keeps its entries as
+    they are."""
+    names: dict[str, dict[str, str] | None] = {}
+    current: dict[str, ModelProject] = {}
+    for scope, project in settings.model_projects.items():
+        model_id, separator, preset_id = scope.partition("/")
+        if separator and model_id not in names:
+            try:
+                names[model_id] = (
+                    {preset.id: preset.name for preset in presets.presets(model_id, strict=True)}
+                    if catalogue.exists(model_id)
+                    else None
+                )
+            except (psycopg.Error, TemplatePresetsUnreadableError):
+                # Unreadable is not "lists none": a half-written model.json must not
+                # forget every template preset's entry for good.
+                logger.exception("could not read a model's presets", extra={"slug": model_id})
+                names[model_id] = None
+        listed = names.get(model_id) if separator else None
+        if listed is None:
+            current[scope] = project
+        elif preset_id in listed:
+            current[scope] = project.model_copy(update={"preset_name": listed[preset_id]})
+        else:
+            try:
+                store.forget_model_projects(model_id, preset_id)
+            except psycopg.Error:
+                logger.exception(
+                    "could not forget a gone preset's project",
+                    extra={"slug": model_id, "id": preset_id},
+                )
+    return current
+
+
 def _remembered(
-    settings: StoredSettings, project_targets: dict[int, ProjectTarget]
+    settings: StoredSettings,
+    project_targets: dict[int, ProjectTarget],
+    model_projects: dict[str, ModelProject] | None = None,
 ) -> RememberedChoices:
     return RememberedChoices(
         project_print_targets={str(pid): target for pid, target in project_targets.items()},
@@ -398,6 +482,7 @@ def _remembered(
         printer_print_options=settings.printer_print_options,
         model_print_options=settings.model_print_options,
         printer_rack_algorithms=settings.printer_rack_algorithms,
+        model_projects=settings.model_projects if model_projects is None else model_projects,
     )
 
 
@@ -407,14 +492,26 @@ def _remembered(
     response_model_exclude_none=True,
     summary="What the print dialog remembers",
 )
-async def get_remembered(store: SettingsStoreDep, uploads: UploadsDep) -> RememberedChoices:
+async def get_remembered(
+    store: SettingsStoreDep, uploads: UploadsDep, catalogue: CatalogueDep, presets: PresetsDep
+) -> RememberedChoices:
     """Each entry is forgotten through its own route: ``PUT /print/models/{slug}/choices``
-    with an empty body, ``PUT /print/printers/{id}/bed-type`` with a ``null`` plate,
+    with an empty body (a ``library:<file id>`` entry, #1754, through
+    ``PUT /print/library/{file_id}/choices``), ``PUT /print/printers/{id}/bed-type``
+    with a ``null`` plate,
     ``PUT /print/printers/{id}/rack-algorithm`` with a ``null`` algorithm,
+    ``PUT /print/models/{slug}/project`` with a ``null`` project,
     and ``PUT /settings/print-options`` with no options, so the browser never posts a
     whole map back; a project's printer and nozzle go through
-    ``DELETE /settings/remembered/projects/{project_id}``."""
-    return _remembered(store.load(), await uploads.project_targets())
+    ``DELETE /settings/remembered/projects/{project_id}``.
+
+    A ``model_projects`` entry for a preset its model no longer lists is forgotten as
+    this reads it (#1660)."""
+    settings = store.load()
+    model_projects = await asyncio.to_thread(
+        _current_model_projects, settings, catalogue, presets, store
+    )
+    return _remembered(settings, await uploads.project_targets(), model_projects)
 
 
 @router.delete(
@@ -484,7 +581,10 @@ async def test_settings(store: SettingsStoreDep) -> ConnectionTest:
         try:
             printers = await client.printers()
         except ApiError as error:
-            return ConnectionTest(ok=False, detail=error.detail, scopes=_all_failed(error))
+            upstream = error.upstream if isinstance(error.upstream, UpstreamAnswer) else None
+            return ConnectionTest(
+                ok=False, detail=error.detail, scopes=_all_failed(error), upstream=upstream
+            )
     scopes = [
         ScopeCheck(scope=scope, status="ok", required=required, detail=what)
         if scope == Scope.READ_STATUS
@@ -514,6 +614,7 @@ SCOPES: tuple[tuple[Scope, bool, str], ...] = (
     (Scope.MANAGE_QUEUE, True, "Queueing prints."),
     (Scope.MANAGE_PROJECTS, False, "Sending to a Bambuddy project."),
     (Scope.MANAGE_ARCHIVES, False, "Attaching photos and timelapses to a print."),
+    (Scope.MANAGE_INVENTORY, False, "Recording which spool is in a tray, when you confirm it."),
 )
 
 

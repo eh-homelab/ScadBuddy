@@ -209,7 +209,7 @@ def test_a_slow_save_answers_202_and_its_operation_ends_with_the_model(
 
 
 def _operation_ids(app: FastAPI, kind: str) -> list[str]:
-    pool = _state(app).components.get(OPERATIONS).store._require()
+    pool = _state(app).components.get(OPERATIONS).store._pool
     with pool.connection() as conn:
         rows = conn.execute(
             "SELECT id FROM operations WHERE kind = %s ORDER BY created_at", (kind,)

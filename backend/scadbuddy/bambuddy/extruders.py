@@ -46,7 +46,7 @@ from collections.abc import Sequence
 from typing import Literal
 
 from scadbuddy.bambuddy.filaments import FilamentOptions, FilamentWarning
-from scadbuddy.bambuddy.models import FlowType, NozzleChoice, PrinterStatus
+from scadbuddy.bambuddy.models import FlowType, NozzleChoice, NozzleSize, PrinterStatus
 
 RIGHT = 0
 LEFT = 1
@@ -153,6 +153,7 @@ def high_flow_warnings(
     *,
     rack_picked: bool = False,
     laid_out: bool = True,
+    sides: frozenset[int] | None = None,
 ) -> list[FilamentWarning]:
     """A warning for each side the slice may use whose mounted nozzle is of the chosen
     size but not of the flow sliced there (#723, #797, #484), never a refusal.
@@ -176,16 +177,19 @@ def high_flow_warnings(
     every 3MF the run lays out does, an output's or a library file's alike
     (``PrintSource.states_nozzles``, #1752). A file nothing can be stated into (sliced
     already, another slicer's) prints as it is: the slicer may use either side, and it
-    slices as Standard (:func:`_sliced_flows`)."""
+    slices as Standard (:func:`_sliced_flows`).
+
+    ``sides``: the sides ScadBuddy's nozzle plan uses (#2166), which the file offers in
+    place of :func:`_offer`'s."""
     if not nozzles:
         return []
     size = nozzles[0].size
     flows = _sliced_flows(nozzles, laid_out=laid_out)
-    offered = _offered_side(status, nozzles) if laid_out else None
+    offered = (sides or _offered_sides(status, nozzles)) if laid_out else None
     return [
         high_flow_warning(extruder, flows[extruder])
         for extruder in (RIGHT, LEFT)
-        if offered in (None, extruder)
+        if (offered is None or extruder in offered)
         and fitted_size(status, extruder) == size
         and _fitted_flow(status, extruder) not in (None, flows[extruder])
         and not (rack_picked and extruder == RACK_SIDE)
@@ -267,30 +271,73 @@ def _nozzles_on(status: PrinterStatus, extruder: int, size: str) -> list[bool]:
     return found
 
 
-def _offered_side(status: PrinterStatus | None, nozzles: Sequence[NozzleChoice]) -> int | None:
-    """The one side :func:`slicer_nozzle_stats` offers the slicer, or ``None`` when it
-    leaves the slicer to choose.
+def default_nozzles(status: PrinterStatus | None, size: NozzleSize = "0.4") -> list[NozzleChoice]:
+    """What the print dialog and ``print_output`` open on when the model remembers no
+    nozzles (#1895): ``size`` on both sides, High Flow on each side that can print with
+    a High Flow nozzle of that size (its mounted one or, on the rack side, a spare in
+    the rack, as :func:`_nozzles_on` counts them), else Standard. A printer whose status
+    cannot be read gets Standard, as before."""
+
+    def flow(extruder: int) -> FlowType:
+        if status is not None and any(_nozzles_on(status, extruder, size)):
+            return "high_flow"
+        return "standard"
+
+    # The dialog's order: the left extruder first (`_flows`).
+    return [NozzleChoice(size=size, flow=flow(LEFT)), NozzleChoice(size=size, flow=flow(RIGHT))]
+
+
+def _found(status: PrinterStatus, nozzles: Sequence[NozzleChoice]) -> dict[int, list[bool]]:
+    """Each side's nozzles of the chosen size, as :func:`_nozzles_on` counts them."""
+    size = nozzles[0].size
+    return {extruder: _nozzles_on(status, extruder, size) for extruder in (RIGHT, LEFT)}
+
+
+def _matching(found: dict[int, list[bool]], chosen: dict[int, FlowType]) -> set[int]:
+    """The sides with a nozzle of the flow chosen for them."""
+    return {e for e, flows in found.items() if (chosen[e] == "high_flow") in flows}
+
+
+#: :func:`_offer`'s answer when either side may print (#2181).
+BOTH: Literal["both"] = "both"
+
+
+def _offer(
+    status: PrinterStatus | None, nozzles: Sequence[NozzleChoice]
+) -> int | Literal["both"] | None:
+    """Which side :func:`slicer_nozzle_stats` offers the slicer: one side, :data:`BOTH`,
+    or ``None`` when it leaves the slicer to choose. The one place that decides it, so
+    the stats and :func:`_offered_side` cannot disagree (#2227).
 
     When both sides have a nozzle of the flow chosen for them and those flows differ,
     the High Flow side is offered. Left to choose, the slicer put a one-colour print on
     the Standard right every time, so a High Flow choice for the left changed nothing;
     offered only the left (["High Flow#1", "Standard#0"]) it sliced High Flow, at the
     filament's High Flow speed and retraction (live slices on Bambuddy, 2026-10-06,
-    #484). A multi-colour print then goes to that side alone, as #834 sends one."""
+    #484). A multi-colour print then goes to that side alone, as #834 sends one. When
+    those flows are the same, both are offered (#2181)."""
     if status is None or not two_nozzles(status):
         return None
-    size = nozzles[0].size
     chosen = _flows(nozzles)
-    found = {extruder: _nozzles_on(status, extruder, size) for extruder in (RIGHT, LEFT)}
-    matching = {e for e, flows in found.items() if (chosen[e] == "high_flow") in flows}
-    if len(matching) == 2 and chosen[LEFT] != chosen[RIGHT]:
-        return LEFT if chosen[LEFT] == "high_flow" else RIGHT
+    found = _found(status, nozzles)
+    matching = _matching(found, chosen)
+    if len(matching) == 2:
+        if chosen[LEFT] != chosen[RIGHT]:
+            return LEFT if chosen[LEFT] == "high_flow" else RIGHT
+        return BOTH
     for has in (matching, {e for e, flows in found.items() if flows}):
         if len(has) == 1:
             return has.pop()
         if has:
             return None
     return None
+
+
+def _offered_side(status: PrinterStatus | None, nozzles: Sequence[NozzleChoice]) -> int | None:
+    """The one side :func:`_offer` offers, or ``None`` when it offers both or leaves the
+    slicer to choose: either way the slice may use either side."""
+    offer = _offer(status, nozzles)
+    return offer if isinstance(offer, int) else None
 
 
 def slicer_nozzle_stats(
@@ -318,19 +365,22 @@ def slicer_nozzle_stats(
     count only and sliced Standard.
 
     When both sides have a nozzle of the flow chosen for them, and those flows differ,
-    the High Flow side is offered (:func:`_offered_side`). When both have it in the same
-    flow, or both have the size in neither's chosen flow, or neither side has the size,
-    or the status cannot be read, this is ``None`` and the file is left as it was: the
-    slicer keeps its own choice, and nothing is refused on the mounted nozzles (#768). A
-    side the printer reports no size for counts as not having it; only the other side
-    is then offered.
+    the High Flow side is offered (:func:`_offer`). When both have it in the same
+    flow, both are offered (#2181): left as it was, a library file made for one extruder
+    offered the slicer one side, and queue 268 sliced both colours onto the left. When
+    both have the size in neither's chosen flow, or neither side has the size, or the
+    status cannot be read, this is ``None`` and the file is left as it was: the slicer
+    keeps its own choice, and nothing is refused on the mounted nozzles (#768). A side
+    the printer reports no size for counts as not having it; only the other side is
+    then offered.
     """
-    offered = _offered_side(status, nozzles)
-    if offered is None:
+    offer = _offer(status, nozzles)
+    if offer is None:
         return None
     chosen = _flows(nozzles)
     return [
-        f"{VOLUME_TYPE[chosen[extruder]]}#{int(extruder == offered)}" for extruder in SLICER_ORDER
+        f"{VOLUME_TYPE[chosen[extruder]]}#{int(offer == BOTH or extruder == offer)}"
+        for extruder in SLICER_ORDER
     ]
 
 
@@ -345,3 +395,23 @@ def with_sides(options: FilamentOptions, status: PrinterStatus | None) -> Filame
         option.extruder = extruder_of(loaded.ams_id, loaded.tray_id, status)
         option.side = side_of(option.extruder)
     return options
+
+
+def _offered_sides(
+    status: PrinterStatus | None, nozzles: Sequence[NozzleChoice]
+) -> frozenset[int] | None:
+    """:func:`_offer` as a set of sides, for the nozzle plan (#2166): ``None`` when it
+    leaves the slicer to choose."""
+    offer = _offer(status, nozzles)
+    if offer is None:
+        return None
+    return frozenset({LEFT, RIGHT}) if offer == BOTH else frozenset({offer})
+
+
+def nozzle_stats_for(sides: frozenset[int], nozzles: Sequence[NozzleChoice]) -> list[str]:
+    """``extruder_nozzle_stats`` offering ``sides``, each side named by the flow chosen
+    for it, in the slicer's order: the nozzle plan's sides (#2166)."""
+    chosen = _flows(nozzles)
+    return [
+        f"{VOLUME_TYPE[chosen[extruder]]}#{int(extruder in sides)}" for extruder in SLICER_ORDER
+    ]

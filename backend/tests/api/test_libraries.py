@@ -66,7 +66,7 @@ from scadbuddy.library.scad import check_source
 from scadbuddy.main import sweep_library_checkouts
 from scadbuddy.workflows.commands import start_command
 from tests.api.conftest import set_fake_env
-from tests.conftest import make_library_upstream, open_pg_pool
+from tests.conftest import PgPool, make_library_upstream, open_pg_pool
 from tests.support.operations import press
 from tests.test_library_processes import _age
 
@@ -97,6 +97,8 @@ def libraries_app(app: FastAPI, upstream: tuple[str, dict[str, str]]) -> FastAPI
                 ref="v1",
                 licence="BSD-2-Clause",
                 homepage="https://example.invalid/bosl2",
+                description="Shapes and rounding",
+                tags=["rounding"],
             ),
         ),
         protocols=("file",),
@@ -138,8 +140,22 @@ def test_the_catalogue_lists_what_can_be_pinned(lib_client: TestClient) -> None:
             "ref": "v1",
             "licence": "BSD-2-Clause",
             "homepage": "https://example.invalid/bosl2",
+            "description": "Shapes and rounding",
+            "tags": ["rounding"],
         }
     ]
+
+
+def test_the_catalogue_can_be_searched(lib_client: TestClient) -> None:
+    def names(query: str) -> list[str]:
+        response = lib_client.get("/api/v1/libraries", params={"q": query})
+        assert response.status_code == 200, response.text
+        return [entry["name"] for entry in response.json()]
+
+    assert names("ROUND") == ["BOSL2"]
+    assert names("bosl2 shapes") == ["BOSL2"]
+    assert names("gridfinity") == []
+    assert lib_client.get("/api/v1/libraries", params={"q": "x" * 201}).status_code == 422
 
 
 def test_pinning_a_library_records_it_in_that_model_alone(
@@ -1483,7 +1499,11 @@ def test_the_sweep_keeps_a_checkout_a_live_edit_names(
     assert kept.is_dir()
 
 
-def test_boot_sweeps_checkouts_no_revision_pins(app: FastAPI, paths: DataPaths) -> None:
+def test_boot_sweeps_checkouts_no_revision_pins(
+    app: FastAPI, paths: DataPaths, pg_pool: PgPool
+) -> None:
+    # `pg_pool` migrates the schema: the history commits under its lock in Postgres
+    # (#2385), and this test commits before the app's own start would migrate.
     history: ModelHistory = getattr(app.state, STATE_ATTR).history
     pinned = {"name": "BOSL2", "url": "https://x.invalid/b.git", "ref": "v1", "commit": "a" * 40}
     paths.model_dir(SLUG).mkdir(parents=True)
@@ -1505,10 +1525,13 @@ def test_boot_sweeps_checkouts_no_revision_pins(app: FastAPI, paths: DataPaths) 
 
 
 def test_the_sweep_keeps_a_checkout_an_old_builtin_revision_pins(
-    app: FastAPI, paths: DataPaths
+    app: FastAPI, paths: DataPaths, pg_pool: PgPool
 ) -> None:
     """A built-in's model.json is two levels deep (`_builtin/<slug>/model.json`);
-    restoring its old revision must not need a checkout the sweep removed."""
+    restoring its old revision must not need a checkout the sweep removed.
+
+    `pg_pool` migrates the schema the history's lock needs (#2385): the app never
+    starts here."""
     state: AppState = getattr(app.state, STATE_ATTR)
     builtin = "builtin:gizmo"
     pinned = {"name": "BOSL2", "url": "https://x.invalid/b.git", "ref": "v1", "commit": "a" * 40}

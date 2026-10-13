@@ -81,8 +81,11 @@ export const settingsTools: Tool[] = [
     name: 'get_remembered_choices',
     description:
       'What the print dialog remembers (#322): per-model printer and spool choices, per-printer plates, ' +
-      'and the print options at each scope. Forget one with remember_model_print_choices, ' +
-      'remember_printer_bed_type or set_print_options.',
+      'the print options at each scope, and the project each model was last filed in (`model_projects`, keyed ' +
+      'by model id, or "<model id>/<preset id>" with a preset, #1660). A Bambuddy library file\'s entries are ' +
+      'keyed "library:<file id>" ' +
+      '(#1754). Forget one with remember_model_print_choices (a model\'s by `slug`, a library file\'s by ' +
+      '`library_file_id`, passing nothing else), remember_printer_bed_type or set_print_options.',
     input: z.object({}),
     risk: 'read',
     routes: ['GET /api/v1/settings/remembered'],
@@ -132,11 +135,14 @@ export const settingsTools: Tool[] = [
   defineTool({
     name: 'set_print_options',
     description:
-      'Remember print options for one scope (global, a printer, or a model). A settings write, so it needs a ' +
-      'human approval.',
+      'Remember print options for one scope (global, a printer, or what is printed: a model, or a Bambuddy ' +
+      'library file as scope "model" with key "library:<file id>"). A settings write, so it needs a human approval.',
     input: z.object({
       scope: z.enum(['global', 'printer', 'model']),
-      key: z.string().optional().describe('The printer id or model slug; omitted for global'),
+      key: z
+        .string()
+        .optional()
+        .describe('The printer id, the model slug, or "library:<file id>" for a library file; omitted for global'),
       options: printOptions,
     }),
     risk: 'outward',

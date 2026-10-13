@@ -15,7 +15,8 @@ import { redact } from '../secrets.js'
 import { describeApiFailure, type FailureEvidence, type ProbeVerdict } from '../harness/credentialErrors.js'
 import { carries, type CredentialSource, runWithFallback } from '../harness/fallback.js'
 import type { HarnessPaths } from '../harness/options.js'
-import type { TierResolver } from '../harness/permissions.js'
+import type { RiskTier, TierResolver } from '../harness/permissions.js'
+import type { BuiltInPolicy } from '../plugins/builtInTools.js'
 import {
   DEFAULT_MAX_BUDGET_USD,
   DEFAULT_MAX_TURNS,
@@ -23,18 +24,17 @@ import {
   type HarnessRun,
   runHarness,
 } from '../harness/run.js'
-import { browserTierOf, browserToolsGuide, GRANT_SERVER, SETTING_HEADLESS_BROWSER } from '../harness/headlessBrowser.js'
-import { headlessGrantServer } from '../harness/headlessGrants.js'
 import {
   HTTP_SERVER,
   type HttpLimits,
   httpRequestEnabled,
   httpRequestServer,
   httpTierOf,
+  type SavedMeta,
+  savedBody,
   SETTING_HTTP_REQUEST,
 } from '../harness/httpRequest.js'
 import type { Resolver } from '../http/egress.js'
-import { loadApprovedOrigins, rememberApprovedOrigin } from '../harness/browserOrigins.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
 import type { CheckedPlugin } from '../plugins/registry.js'
 import {
@@ -45,23 +45,17 @@ import {
   type MemoryHooksOptions,
   hindsightTarget,
 } from '../memory/hindsight.js'
-import type { PackagesForRun } from '../plugins/packages/install.js'
-import {
-  ensureSessionDir,
-  isUuid,
-  removeSessionBrowserDirs,
-  sessionBrowserDir,
-  sessionBrowserTmpDir,
-  sessionWorkDir,
-} from '../harness/stateDirs.js'
+import type { LoadedPackage, PackagesForRun } from '../plugins/packages/install.js'
+import { type PackageServers, withoutRemoteServers } from '../plugins/packages/mcp.js'
+import { ensureSessionDir, isUuid, sessionWorkDir } from '../harness/stateDirs.js'
 import { type ApprovalRecord, ApprovalService, type GrantCheck, type ResumeResult } from '../approvals/service.js'
 import { QuestionService } from '../questions/service.js'
 import { attentionCard, attentionSpec, BACK_REPLIES, DEFAULT_REPLIES, IM_BACK, parseAttention, timedOutText } from '../harness/attention.js'
 import { isQuestionTool, type QuestionGate } from '../harness/questions.js'
 import { SERVER_NAME } from '../tools/projections.js'
-import type { TabWait, WaitForTab } from '../tools/registry.js'
-import { type AuditContext, type AuditLog, safeDetail } from '../audit/log.js'
-import { TurnAuditor } from '../audit/turn.js'
+import type { FlowTurn, TabWait, WaitForTab } from '../tools/registry.js'
+import { type AuditContext, type AuditLog, type AuditSink, safeDetail } from '../audit/log.js'
+import { TurnAuditor, turnCostEntry } from '../audit/turn.js'
 import { UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
 import type { AppendHook } from './busEvents.js'
 import { EventLog, type LoggedEvent } from './eventLog.js'
@@ -73,15 +67,25 @@ import {
   ownerSeenBy,
   publicLabel,
   sameOwner,
+  type SentImage,
   type ServerEvent,
+  type SessionMode,
   type SessionStatus,
 } from './protocol.js'
-import { scrubForLog, SdkEventMapper, ShownCalls } from './sdkEvents.js'
+import { SessionBlobs, sentImageBlobs, type StoredBlob } from './blobs.js'
+import { SessionFiles } from '../workspace/store.js'
+import { SessionEdits } from './edits.js'
+import { blobNames, forkHistory, transcriptCut } from './forkPoint.js'
+import { scrubForLog, SdkEventMapper, ShownCalls, type TitleResolver } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
 import { UnpricedSpend } from './unpricedSpend.js'
-import { previewsOf, userPrompt, type UserImage } from './images.js'
+import { userPrompt, type UserImage } from './images.js'
 import { type ResourceRef, SessionResources, type TouchedRecord } from './touched.js'
 import { TurnTrace } from '../telemetry/turn.js'
+import { type DurableGate, DurableUnavailable } from '../gate/durable.js'
+import type { DurableTurns } from './durable.js'
+import { PendingProjection } from '../gate/projection.js'
+import { ownPluginEnabled } from '../plugins/packages/builtins.js'
 
 // The session manager (#300, spec §6): durable, shared sessions that a human
 // in the browser, an external agent over /mcp, or an internal flow can start,
@@ -158,6 +162,14 @@ import { TurnTrace } from '../telemetry/turn.js'
 export const SETTING_MODEL = 'model'
 export const SETTING_SESSION_MAX_TURNS = 'session_max_turns'
 export const SETTING_SESSION_BUDGET_USD = 'session_max_budget_usd'
+/** Which mode a new session runs in when its creator names none: `durable` unless it says `classic` (plan 5d Ruling 1). */
+export const SETTING_SESSION_MODE = 'session_mode'
+export { SESSION_MODES, type SessionMode } from './protocol.js'
+
+/** The stored `session_mode` as a mode: `classic` only when it says so (plan 5d Ruling 1, the owner's default). */
+export function sessionModeOf(stored: unknown): SessionMode {
+  return stored === 'classic' ? 'classic' : 'durable'
+}
 
 /** The largest session budget Settings takes, and the most a raise can take one session's budget to. */
 export const MAX_SESSION_BUDGET_USD = 100
@@ -246,8 +258,9 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
         // opened it may stop waiting first (#1341). The row keeps the opener's id.
         message:
           'I need your ScadBuddy tab, but it is not connected. Open ScadBuddy (or reload it) and open ' +
-          'this chat in the assistant panel. When it is back I re-check the page before going on; without it I carry ' +
-          'on with what needs no tab.',
+          "this chat in the assistant panel. A change that was waiting is not made on its own when the tab is back. " +
+          "Answer I'm back to have me try again; a reply of your own words ends my waits for the tab this turn, and " +
+          'without the tab I carry on with what needs no tab.',
         options: [IM_BACK, CARRY_ON],
         timeout_s: TAB_WAIT_S,
       })
@@ -277,12 +290,13 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
         },
       })
       if ('reconnected' in verdict && verdict.reconnected) {
-        // reconnected() runs on whichever replica saw the tab. Back on another one, it
-        // cannot be reached from here and nothing here will end a later wait but its
-        // timer (#1308), so the rest of the turn does not wait. A failed check does not latch.
+        // reconnected() runs on whichever replica saw the tab. isBack reaches a tab on
+        // another replica too (bridge/relay.ts, #1916); when it still finds none, nothing
+        // here will end a later wait but its timer (#1308), so the rest of the turn does
+        // not wait. A failed check does not latch.
         if (!(await isBack(turn).catch(() => true))) {
           gaveUp =
-            'The tab reconnected, but not to this agent replica, so it cannot be reached from here. Carry on ' +
+            'The tab reconnected, but it cannot be reached from this agent replica now. Carry on ' +
             'without the tab for the rest of this turn.'
         }
         return { back: true, why: 'reconnected' }
@@ -346,9 +360,14 @@ export type SessionErrorCode =
   | 'budget_exhausted'
   | 'closed'
   | 'invalid'
+  | 'no_transcript'
   | 'rate_limited'
+  /** A durable session's workflow cannot be reached, or this service has no Temporal or key for one. */
+  | 'unavailable'
+  /** The session is archived (#1885): read-only until it is unarchived. */
+  | 'archived'
 
-type SessionErrorStatus = 400 | 403 | 404 | 409 | 429
+type SessionErrorStatus = 400 | 403 | 404 | 409 | 429 | 503
 
 const STATUS_OF: Record<SessionErrorCode, SessionErrorStatus> = {
   not_found: 404,
@@ -357,7 +376,10 @@ const STATUS_OF: Record<SessionErrorCode, SessionErrorStatus> = {
   budget_exhausted: 409,
   closed: 409,
   invalid: 400,
+  no_transcript: 409,
   rate_limited: 429,
+  unavailable: 503,
+  archived: 409,
 }
 
 /**
@@ -383,6 +405,61 @@ export function memoryText(text: string, secrets: readonly (string | undefined)[
   return clean.length > MEMORY_TEXT_MAX ? `${clean.slice(0, MEMORY_TEXT_MAX)}… (${clean.length} characters)` : clean
 }
 
+/**
+ * One automatic recall or retain as the session records it: an audit row (never
+ * fails, audit/log.ts) and a `memory` panel event, both redacted. Classic turns
+ * (`SessionManager.memoryHooks`) and durable ones (temporal/memoryActivities.ts) alike.
+ */
+export async function recordMemoryActivity(
+  deps: { audit?: AuditSink | undefined; events: Pick<EventLog, 'append'> },
+  session: { id: string; owner: Owner },
+  turnId: string,
+  a: MemoryActivity,
+  secrets: readonly string[],
+): Promise<void> {
+    const id = session.id
+    const summary = {
+      bank: a.bank,
+      ...(a.documentId ? { document_id: a.documentId } : {}),
+      ...(a.count === undefined ? {} : { results: a.count }),
+      ...(a.tool ? { tool: a.tool } : {}),
+    }
+    const detail = a.reason ? { detail: safeDetail(a.reason, secrets) } : {}
+    await Promise.all([
+      deps.audit?.record({
+        kind: 'memory',
+        action: a.action,
+        surface: 'harness',
+        actor: session.owner,
+        sessionId: id,
+        turnId,
+        ...(a.toolUseId ? { toolUseId: a.toolUseId } : {}),
+        inputSummary: JSON.stringify(summary),
+        outcome: a.outcome === 'ok' ? 'ok' : 'error',
+        ...detail,
+        startedAt: a.startedAt,
+        finishedAt: a.finishedAt,
+      }),
+      deps.events.append(id, [
+        scrubForLog(
+          event({
+            type: 'memory',
+            sessionId: id,
+            turnId,
+            action: a.action,
+            bank: a.bank,
+            outcome: a.outcome,
+            ...(a.count === undefined ? {} : { count: a.count }),
+            ...detail,
+            ...(a.input === undefined ? {} : { input: memoryText(a.input, secrets) }),
+            ...(a.memories === undefined ? {} : { memories: a.memories.map((m) => memoryText(m, secrets)) }),
+          }),
+          secrets,
+        ),
+      ]),
+    ])
+}
+
 export class SessionError extends Error {
   override name = 'SessionError'
   readonly code: SessionErrorCode
@@ -395,6 +472,11 @@ export class SessionError extends Error {
     this.status = STATUS_OF[code]
     this.budget = budget
   }
+}
+
+/** What a send or a handoff to an archived session is refused with (#1885). */
+export function archivedError(id: string): SessionError {
+  return new SessionError('archived', `session ${id} is archived, so it is read-only; unarchive it to continue it, or fork it`)
 }
 
 /** A pending handoff (`handoff`): who may accept it, and until when. */
@@ -412,6 +494,8 @@ export type SessionRecord = {
   tags: string[]
   scope: Record<string, unknown>
   parentId: string | null
+  /** `classic` runs in this service's harness, `durable` as a DurableSession workflow; set at insert. */
+  mode: SessionMode
   maxTurns: number
   /** The budget this session spends from, shared with its forks and its parent's lineage (#823). */
   budgetUsd: number
@@ -424,6 +508,8 @@ export type SessionRecord = {
   turnActive: boolean
   createdAt: string
   updatedAt: string
+  /** When its owner archived it (#1885, edits.ts); null while it is not archived. */
+  archivedAt: string | null
 }
 
 /**
@@ -463,6 +549,14 @@ export type StartOptions = {
   images?: readonly UserImage[]
   /** With `prompt`: see SendOptions.tiers. */
   tiers?: readonly Tier[]
+  /** With `prompt`: see SendOptions.flow. */
+  flow?: FlowTurn
+  /**
+   * The session's mode. Named, it is kept or refused (`unavailable`). Omitted, the
+   * `session_mode` setting's applies, and a durable one this service cannot run now
+   * becomes classic, with the reason in `modeFallback` (plan 5d Ruling 2).
+   */
+  mode?: SessionMode
 }
 
 export type SendOptions = {
@@ -475,8 +569,8 @@ export type SendOptions = {
   context?: string
   /**
    * Images the user sent with the message (#1866, images.ts): the model gets
-   * them as image blocks before the text; the `user.turn` event shows their
-   * previews.
+   * them as image blocks before the text; the `user.turn` event names them and
+   * their previews, stored with the session first (#2479).
    */
   images?: readonly UserImage[]
   /**
@@ -486,6 +580,12 @@ export type SendOptions = {
    * `harnessPrincipal`: everything for the browser user, `read` otherwise).
    */
   tiers?: readonly Tier[]
+  /**
+   * The flow run and step that send this turn (#2481), set only by the sessions tools
+   * from a flow activity's own context (ToolContext.flowTurn): a durable turn carries
+   * it, so the run's grant may cover its calls. A classic turn ignores it.
+   */
+  flow?: FlowTurn
 }
 
 /** Who a turn's in-process tools act for, beyond the session's owner (SendOptions.tiers). */
@@ -497,6 +597,11 @@ export type ListFilter = {
   limit?: number
   /** Only sessions whose tool calls touched it (#931, touched.ts `ResourceRef`). */
   resource?: ResourceRef
+  /**
+   * Archived sessions (#1885): left out (`exclude`, the default, as the panel's list
+   * leaves them out), the only ones listed (`only`, the archive view), or both (`include`).
+   */
+  archived?: 'exclude' | 'only' | 'include'
 }
 
 /** Reads ai_settings; SettingsStore (credentials.ts) is one. */
@@ -518,13 +623,21 @@ export type SessionManagerDeps = {
   probe?: (credential: Credential, model: string | undefined) => Promise<ProbeVerdict>
   settings?: SettingsReader
   tierOf?: TierResolver
+  /** Each registry call's title for the panel (#782, tools/harness.ts `titleOf`). */
+  titleOf?: TitleResolver
   /** #251's registry: the in-process MCP servers a session's queries get. */
   mcpServers?: (
     session: SessionRecord,
     turn: TurnPrincipal,
     /** #815 §2: how a browser_* call that finds no tab waits for it; only in a session the browser user owns. */
-    extras?: { waitForTab?: WaitForTab; turnContext?: () => Context },
+    extras?: { waitForTab?: WaitForTab; turnContext?: () => Context; builtIn?: BuiltInPolicy; secrets?: () => readonly string[] },
   ) => Record<string, McpSdkServerConfigWithInstance>
+  /**
+   * Settings → Plugins' overrides of the built-in tools (#1953,
+   * plugins/builtInTools.ts `BuiltInTools.policy`): read once per turn, as the
+   * remote plugins are.
+   */
+  builtInTools?: () => Promise<BuiltInPolicy>
   pluginPaths?: string[]
   /** ScadBuddy's own plugin (harness/ownPlugin.ts, #896); its Skill and Agent tools come with it. */
   ownPlugin?: string
@@ -544,31 +657,17 @@ export type SessionManagerDeps = {
    */
   packagePlugins?: () => Promise<PackagesForRun>
   /**
+   * A turn's vetted packages' http MCP servers, registered with the loopback forwarder
+   * as remote plugins are (plugins/packages/mcp.ts `forwardPackageServers`, #2320).
+   */
+  packageServers?: (loaded: readonly LoadedPackage[]) => Promise<PackageServers>
+  /**
    * Automatic memory (memory/hindsight.ts): when a turn's remote plugins
    * include an enabled `hindsight` plugin, its prompt is recalled against and
    * its transcript retained to that plugin's bank. These are the hook knobs
    * (hooks.py `MemoryHookConfig` and friends); `false` turns it off.
    */
   memory?: Omit<MemoryHooksOptions, 'client' | 'secrets' | 'log' | 'sessionStore' | 'onActivity'> | false
-  /**
-   * The headless browser (#349, spec §5.3). A session's turns get it only when
-   * this is set AND the `headless_browser_enabled` setting is `true`; it is off
-   * by default. `backendUrl` is SCADBUDDY_BACKEND_URL, which serves the SPA;
-   * `publicUrl` and `uiOrigins` (SCADBUDDY_PUBLIC_URL, SCADBUDDY_ALLOWED_ORIGINS)
-   * are rewritten onto it; `browserAllowedOrigins`
-   * (SCADBUDDY_BROWSER_ALLOWED_ORIGINS) is what else a human may let it open,
-   * once per origin per session (harness/browserOrigins.ts, `ai_browser_origins`).
-   */
-  headlessBrowser?: {
-    backendUrl: string
-    publicUrl?: string
-    uiOrigins?: string
-    browserAllowedOrigins?: string
-    /** Tests only: a Chromium other than the pinned one. */
-    executablePath?: string
-    /** Whether Chromium's sandbox works here (harness/headlessSandbox.ts); asked once per turn. */
-    sandbox?: () => Promise<boolean>
-  }
   /**
    * The assistant's `http_request` tool (#827, harness/httpRequest.ts). A
    * session's turns get it when this is set and the `http_request_enabled`
@@ -580,6 +679,12 @@ export type SessionManagerDeps = {
     /** Tests only: smaller caps. */
     limits?: Partial<HttpLimits>
   }
+  /**
+   * The assistant's workspace (#2329, workspace/store.ts): where http_request's
+   * `save_to_workspace` writes, and what a fork copies. One over `sql` (caps from
+   * `settings`) when omitted.
+   */
+  workspace?: SessionFiles
   run?: QueryRunner
   /** Per-token approval grants (spec §6); nobody but the browser user may approve without one. */
   approvalGrants?: GrantCheck
@@ -635,6 +740,7 @@ type Row = {
   tags: string[]
   scope: Record<string, unknown>
   parent_id: string | null
+  mode: SessionMode
   max_turns: number
   budget_usd: number
   cost_usd: number
@@ -643,6 +749,7 @@ type Row = {
   turn_active: boolean
   created_at: Date
   updated_at: Date
+  archived_at: Date | null
 }
 
 /** A pending handoff offer, read as none once it has expired (the columns stay until the next change clears them). */
@@ -651,18 +758,18 @@ const LIVE_OFFER = 'pending_owner_until > now()'
 /** The session whose budget this one spends from: itself, or a fork's lineage root (#823). */
 const ROOT = 'coalesce(ai_sessions.budget_root_id, ai_sessions.id)'
 /** The budget a session spends from: its root's (20261006T0100Z_session_budget_root.sql). */
-const POOL_BUDGET = `coalesce((SELECT r.budget_usd FROM ai_sessions r WHERE r.id = ${ROOT}), ai_sessions.budget_usd)`
+export const POOL_BUDGET = `coalesce((SELECT r.budget_usd FROM ai_sessions r WHERE r.id = ${ROOT}), ai_sessions.budget_usd)`
 /** What every session spending from that budget has spent. Read at the statement's snapshot. */
-const POOL_COST = `(SELECT sum(m.cost_usd) FROM ai_sessions m WHERE coalesce(m.budget_root_id, m.id) = ${ROOT})`
+export const POOL_COST = `(SELECT sum(m.cost_usd) FROM ai_sessions m WHERE coalesce(m.budget_root_id, m.id) = ${ROOT})`
 
 const COLUMNS = `id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id,
   CASE WHEN ${LIVE_OFFER} THEN pending_owner_kind END AS offer_kind,
   CASE WHEN ${LIVE_OFFER} THEN pending_owner_id END AS offer_id,
   CASE WHEN ${LIVE_OFFER} THEN pending_owner_label END AS offer_label,
   CASE WHEN ${LIVE_OFFER} THEN pending_owner_until END AS offer_until,
-  status, title, tags, scope, parent_id, max_turns, ${POOL_BUDGET} AS budget_usd, cost_usd,
+  status, title, tags, scope, parent_id, mode, max_turns, ${POOL_BUDGET} AS budget_usd, cost_usd,
   ${POOL_COST} AS pool_cost_usd, turns,
-  (turn_id IS NOT NULL AND lease_until > now()) AS turn_active, created_at, updated_at`
+  (turn_id IS NOT NULL AND lease_until > now()) AS turn_active, created_at, updated_at, archived_at`
 
 function record(row: Row): SessionRecord {
   return {
@@ -679,6 +786,7 @@ function record(row: Row): SessionRecord {
     tags: row.tags,
     scope: row.scope,
     parentId: row.parent_id,
+    mode: row.mode,
     maxTurns: row.max_turns,
     budgetUsd: row.budget_usd,
     costUsd: row.pool_cost_usd,
@@ -687,6 +795,7 @@ function record(row: Row): SessionRecord {
     turnActive: row.turn_active,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
+    archivedAt: row.archived_at?.toISOString() ?? null,
   }
 }
 
@@ -698,6 +807,34 @@ function positive(value: unknown, fallback: number): number {
 
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
+}
+
+/**
+ * Which browser a `browser_*` tool drives, for the session's system prompt. ScadBuddy's
+ * bridge tools and a browser plugin's (Microsoft's Playwright MCP, added in Settings →
+ * Plugins) share bare names (`browser_snapshot`, `browser_click`), and a model that has
+ * seen one set calls the other's names on the wrong server: in production it called
+ * `mcp__scadbuddy__browser_find`, which only Playwright's set has.
+ */
+export const BROWSER_TOOLS_GUIDE = [
+  '<browser_tools>',
+  "The mcp__scadbuddy__browser_* tools drive the user's own open ScadBuddy tab, which they watch. Use only the names " +
+    'that server lists; it has no browser_find, browser_type or browser_select_option. To find something on the ' +
+    'page, call mcp__scadbuddy__browser_snapshot; to set a field or a select, mcp__scadbuddy__browser_fill (a ' +
+    "select takes an option's value or its label as the snapshot shows it).",
+  "browser_* tools of any other server (a plugin's, such as mcp__playwright__browser_*) drive a separate browser " +
+    "that the user cannot see and that never shows the user's tab. Use them only when the user has no tab attached " +
+    'or asks for that browser.',
+  '</browser_tools>',
+].join('\n')
+
+/**
+ * What every turn appends to Claude Code's own system prompt: the data/instruction
+ * boundary (#258, safety/untrusted.ts: only the user's messages are instructions, tool
+ * results are data), then which browser each browser_* tool drives.
+ */
+export function systemAppend(): string {
+  return `${UNTRUSTED_CONTENT_POLICY}\n\n${BROWSER_TOOLS_GUIDE}`
 }
 
 export const TITLE_MAX = 80
@@ -736,6 +873,8 @@ export function listQuery(principal: Owner, filter: ListFilter = {}): { text: st
     params.push(filter.origin)
     where.push(`origin = $${params.length}`)
   }
+  const archived = filter.archived ?? 'exclude'
+  if (archived !== 'include') where.push(archived === 'only' ? 'archived_at IS NOT NULL' : 'archived_at IS NULL')
   if (filter.resource) {
     // Served by ai_session_resources_model / _resource (20261001T1824Z_session_resources.sql).
     let match: string
@@ -777,6 +916,20 @@ export class SessionManager {
   readonly approvals: ApprovalService
   /** Questions the agent asks the user (#940); `questions.answer` is the panel's answer. */
   readonly questions: QuestionService
+  /** Durable sessions' parked calls as projected in ai_pending_input (spec §6.6). */
+  readonly projection: PendingProjection
+  /** Renaming a session and marking it done (#795, edits.ts). */
+  readonly edits: SessionEdits
+  /**
+   * A durable session's gate (its workflow's `pending_input`, `respond`, `cancel_input`,
+   * `interrupt`), when Temporal is configured; main.ts sets it.
+   */
+  durable: DurableGate | undefined
+  /**
+   * How a durable session's turns run (plan 5c PR 3), when Temporal and the secret key
+   * are both configured; main.ts sets it. Without it a durable session is refused.
+   */
+  durableTurns: DurableTurns | undefined
   private readonly deps: SessionManagerDeps
   private readonly run: QueryRunner
   private readonly leaseMs: number
@@ -787,11 +940,16 @@ export class SessionManager {
   private draining = false
   /** What sessions touched (#931), read by `resources`. */
   private readonly touched: SessionResources
+  /** The images tool results carried (#782), read by `blob`. */
+  private readonly blobs: SessionBlobs
+  private readonly files: SessionFiles
 
   constructor(deps: SessionManagerDeps) {
     this.deps = deps
     this.store = new PostgresSessionStore(deps.sql)
     this.touched = new SessionResources(deps.sql)
+    this.blobs = new SessionBlobs(deps.sql)
+    this.files = deps.workspace ?? new SessionFiles(deps.sql, { settings: deps.settings })
     this.events = new EventLog(deps.sql, {
       ...(deps.pollMs === undefined ? {} : { pollMs: deps.pollMs }),
       ...(deps.onAppend ? { onAppend: deps.onAppend } : {}),
@@ -804,6 +962,7 @@ export class SessionManager {
       ...(deps.approvalPollMs === undefined ? {} : { pollMs: deps.approvalPollMs }),
       ...(deps.audit ? { audit: deps.audit } : {}),
       ...(deps.approvalHashKey ? { hashKey: deps.approvalHashKey } : {}),
+      workspace: this.files,
       resume: (approval, by) => this.resumeApproved(approval, by),
     })
     this.questions = new QuestionService({
@@ -811,6 +970,15 @@ export class SessionManager {
       events: this.events,
       ...(deps.approvalPollMs === undefined ? {} : { pollMs: deps.approvalPollMs }),
       ...(deps.audit ? { audit: deps.audit } : {}),
+      ...(deps.settings ? { settings: deps.settings } : {}),
+    })
+    this.projection = new PendingProjection(deps.sql)
+    this.edits = new SessionEdits({
+      sql: deps.sql,
+      events: this.events,
+      get: (id, principal) => this.get(id, principal),
+      ...(deps.audit ? { audit: deps.audit } : {}),
+      endDurable: (id) => this.endDurable(id),
     })
     this.run = deps.run ?? runHarness
     this.leaseMs = deps.leaseMs ?? DEFAULT_LEASE_MS
@@ -840,6 +1008,31 @@ export class SessionManager {
     return this.touched.list(id)
   }
 
+  /**
+   * One of the images the session's tool results carried (#782, blobs.ts), by
+   * its name; not_found for a session the principal may not see, a name that is
+   * not a blob's, or one that is not this session's.
+   */
+  async blob(id: string, name: string, principal: Owner): Promise<StoredBlob> {
+    await this.get(id, principal)
+    const blob = await this.blobs.get(id, name)
+    if (!blob) throw new SessionError('not_found', `no image ${name} in session ${id}`)
+    return blob
+  }
+
+  /**
+   * A response body the session's http_request saved (#1292), by the id its
+   * audit row names; not_found for a session the principal may not see, or a
+   * body that is not (or no longer) in the session's directory on this replica.
+   */
+  /** `id` is the saved response's id as `savedBody` checked it: a UUID, safe in a header or a path. */
+  async httpBody(id: string, saved: string, principal: Owner): Promise<{ id: string; meta: SavedMeta; bytes: Buffer }> {
+    await this.get(id, principal)
+    const body = await savedBody(path.join(sessionWorkDir(this.deps.paths, id), 'http'), saved)
+    if (!body) throw new SessionError('not_found', `no saved response ${saved} in session ${id}`)
+    return { id: saved, ...body }
+  }
+
   /** Newest first. */
   async list(principal: Owner, filter: ListFilter = {}): Promise<SessionRecord[]> {
     const { text, params } = listQuery(principal, filter)
@@ -858,6 +1051,15 @@ export class SessionManager {
         origin: s.origin,
         owner: s.owner,
         status: s.status,
+        // The switcher's nesting, last activity and spend (#795).
+        parentId: s.parentId,
+        updatedAt: s.updatedAt,
+        costUsd: s.costUsd,
+        budgetUsd: s.budgetUsd,
+        mode: s.mode,
+        // #1284 — the switcher's "Offered to" badge and Cancel offer; an expired offer reads as
+        // none. Its target is named only as `principal` may see it, as the session routes do.
+        offer: s.offer ? { to: ownerSeenBy(principal, s.offer.to), until: s.offer.until } : null,
       })),
     })
   }
@@ -892,7 +1094,14 @@ export class SessionManager {
   private async insert(
     id: string,
     principal: Owner,
-    fields: { origin: Origin; title: string; tags: string[]; scope: Record<string, unknown>; parentId: string | null },
+    fields: {
+      origin: Origin
+      title: string
+      tags: string[]
+      scope: Record<string, unknown>
+      parentId: string | null
+      mode: SessionMode
+    },
     options: { rateLimited?: boolean; budgetOf?: SessionRecord } = {},
   ): Promise<SessionRecord> {
     const { maxTurns, budgetUsd: fresh } = await this.limits()
@@ -903,10 +1112,10 @@ export class SessionManager {
     const insert = async (sql: Sql) => {
       await sql`
         INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id,
-                                 status, title, tags, scope, parent_id, max_turns, budget_usd, budget_root_id)
+                                 status, title, tags, scope, parent_id, mode, max_turns, budget_usd, budget_root_id)
         VALUES (${id}, ${fields.origin}, ${principal.kind}, ${principal.id}, ${principal.label},
                 ${principal.kind}, ${principal.id}, 'idle', ${fields.title}, ${sql.array(fields.tags)},
-                ${sql.json(fields.scope as never)}, ${fields.parentId}, ${maxTurns}, ${budgetUsd},
+                ${sql.json(fields.scope as never)}, ${fields.parentId}, ${fields.mode}, ${maxTurns}, ${budgetUsd},
                 ${from ? sql`(SELECT coalesce(budget_root_id, id) FROM ai_sessions WHERE id = ${from.id})` : null})`
     }
     if (options.rateLimited) {
@@ -924,6 +1133,33 @@ export class SessionManager {
     return session
   }
 
+  /** The `session_mode` setting (sessionModeOf). */
+  private async modeSetting(): Promise<SessionMode> {
+    return sessionModeOf(await this.deps.settings?.get<unknown>(SETTING_SESSION_MODE))
+  }
+
+  /** Why a new durable session could not run now, or undefined when it could (plan 5d Ruling 2b). */
+  async durableUnready(): Promise<string | undefined> {
+    if (!this.durableTurns) {
+      return 'durable sessions need Temporal (SCADBUDDY_TEMPORAL_ADDRESS) and the secret key; this agent service has not got them'
+    }
+    return this.durableTurns.unready()
+  }
+
+  /**
+   * The mode a new session runs in (plan 5d Ruling 2). A durable session this service
+   * cannot run now (no Temporal, no key, no worker polling) is refused when the creator
+   * asked for it, and becomes classic, with the reason, when it came from the setting.
+   */
+  private async startMode(asked: SessionMode | undefined): Promise<{ mode: SessionMode; fallback?: string }> {
+    const mode = asked ?? (await this.modeSetting())
+    if (mode === 'classic') return { mode }
+    const why = await this.durableUnready()
+    if (why === undefined) return { mode }
+    if (asked) throw new SessionError('unavailable', why)
+    return { mode: 'classic', fallback: why }
+  }
+
   /** Throws `rate_limited` when `principal` has made MAX_NEW_SESSIONS in the window. */
   private async withinNewSessionLimit(principal: Owner, sql: Sql): Promise<void> {
     const { max, windowMs } = this.deps.newSessions ?? { max: MAX_NEW_SESSIONS, windowMs: NEW_SESSION_WINDOW_MS }
@@ -939,16 +1175,21 @@ export class SessionManager {
     }
   }
 
-  async start(principal: Owner, options: StartOptions): Promise<{ session: SessionRecord; turn?: Turn }> {
+  async start(
+    principal: Owner,
+    options: StartOptions,
+  ): Promise<{ session: SessionRecord; turn?: Turn; modeFallback?: string }> {
     const prompt = options.prompt?.trim()
     const id = randomUUID()
     const title = options.title?.trim() || (prompt ? titleFrom(prompt) : '')
+    const { mode, fallback } = await this.startMode(options.mode)
     const session = await this.insert(id, principal, {
       origin: options.origin,
       title,
       tags: options.tags ?? [],
       scope: options.scope ?? {},
       parentId: null,
+      mode,
     }, { rateLimited: true })
     await this.events.append(id, [
       event({
@@ -958,16 +1199,20 @@ export class SessionManager {
         owner: session.owner,
         title,
         budgetUsd: session.budgetUsd,
+        mode,
+        ...(fallback ? { modeFallback: fallback } : {}),
       }),
       event({ type: 'session.status', sessionId: id, status: 'idle' }),
     ])
-    if (!prompt) return { session }
+    const said = fallback ? { modeFallback: fallback } : {}
+    if (!prompt) return { session, ...said }
     const turn = await this.send(id, principal, prompt, {
       ...(options.context ? { context: options.context } : {}),
       ...(options.images?.length ? { images: options.images } : {}),
       ...(options.tiers ? { tiers: options.tiers } : {}),
+      ...(options.flow ? { flow: options.flow } : {}),
     })
-    return { session: await this.get(id, principal), turn }
+    return { session: await this.get(id, principal), turn, ...said }
   }
 
   /**
@@ -979,20 +1224,49 @@ export class SessionManager {
     if (!prompt) throw new SessionError('invalid', 'the message is empty')
     if (this.draining) throw new SessionError('busy', RESTARTING)
     const before = await this.get(id, principal)
+    // Never unarchived by a send (#1885): unarchiving is the owner's explicit PATCH.
+    if (before.archivedAt !== null) throw archivedError(id)
     const turnId = randomUUID()
+    if (before.mode === 'durable') {
+      const turn = await this.durableOrRefuse().send(before, {
+        turnId,
+        prompt,
+        text: options.context ? `${prompt}\n\n${options.context}` : prompt,
+        author: principal,
+        images: options.images ?? [],
+        systemAppend: systemAppend(),
+        ...(options.tiers ? { tiers: options.tiers } : {}),
+        ...(options.flow ? { flow: options.flow } : {}),
+      })
+      if (!turn) throw await this.whyNotClaimed(id, principal, before)
+      return turn
+    }
     const [claim] = await this.deps.sql.unsafe<(Row & { unpriced_cost_usd: number })[]>(
       `UPDATE ai_sessions
        SET status = 'running', turn_id = $2, lease_until = now() + ($5 * interval '1 millisecond'),
            interrupt_requested = false, updated_at = now()
-       WHERE id = $1 AND owner_kind = $3 AND owner_id = $4 AND status <> 'done' AND ${POOL_COST} < ${POOL_BUDGET}
-         AND (turn_id IS NULL OR lease_until <= now())
+       WHERE id = $1 AND owner_kind = $3 AND owner_id = $4 AND status <> 'done' AND archived_at IS NULL
+         AND ${POOL_COST} < ${POOL_BUDGET} AND (turn_id IS NULL OR lease_until <= now())
        RETURNING ${COLUMNS}, unpriced_cost_usd`,
       [id, turnId, principal.kind, principal.id, this.leaseMs],
     )
     if (!claim) throw await this.whyNotClaimed(id, principal, before)
+    // The images and their previews are stored once the claim proves the sender owns the
+    // session and may start a turn, so the turn's event can name them (#2479). A store
+    // that fails gives the claim back and refuses the message. (A durable send does the
+    // same under its own claim, durable.ts.)
+    let sent: SentImage[] | undefined
+    if (options.images?.length) {
+      try {
+        sent = await this.storeSentImages(id, options.images)
+      } catch (err) {
+        await this.releaseClaim(id, turnId)
+        throw err
+      }
+    }
     return this.startTurn(claimed(claim), turnId, prompt, principal, {
       ...(options.context ? { context: options.context } : {}),
-      ...(options.images?.length ? { images: options.images } : {}),
+      ...(options.images?.length && sent ? { images: options.images, sent } : {}),
       ...(options.tiers ? { tiers: options.tiers } : {}),
     })
   }
@@ -1015,13 +1289,13 @@ export class SessionManager {
       `UPDATE ai_sessions
        SET status = 'running', turn_id = $2, lease_until = now() + ($3 * interval '1 millisecond'),
            interrupt_requested = false, updated_at = now()
-       WHERE id = $1 AND status <> 'done' AND ${POOL_COST} < ${POOL_BUDGET}
+       WHERE id = $1 AND status <> 'done' AND archived_at IS NULL AND ${POOL_COST} < ${POOL_BUDGET}
          AND (turn_id IS NULL OR lease_until <= now())
        RETURNING ${COLUMNS}, unpriced_cost_usd`,
       [approval.sessionId, turnId, this.leaseMs],
     )
     if (!claim) {
-      return { resumed: false, reason: 'it is running another turn, is done, or has spent its budget' }
+      return { resumed: false, reason: 'it is running another turn, is done or archived, or has spent its budget' }
     }
     try {
       if (!(await this.approvals.bindResume(approval.id, turnId))) {
@@ -1056,6 +1330,28 @@ export class SessionManager {
     return tiers.length > 0 ? tiers : undefined
   }
 
+  /** The durable dispatch, or `unavailable` when this service has none (no Temporal or no key). */
+  private durableOrRefuse(): DurableTurns {
+    if (this.durableTurns) return this.durableTurns
+    throw new SessionError(
+      'unavailable',
+      'this session is durable, and this agent service has no Temporal or secret key to run it; try again once it has',
+    )
+  }
+
+  /** Tells a durable session's workflow it was marked done (#1056), or refuses `unavailable`. */
+  private async endDurable(id: string): Promise<void> {
+    if (!this.durable) {
+      throw new SessionError('unavailable', 'this session is durable, and this agent service has no Temporal to end it; try again once it has')
+    }
+    try {
+      await this.durable.end(id)
+    } catch (err) {
+      if (err instanceof DurableUnavailable) throw new SessionError('unavailable', err.message)
+      throw err
+    }
+  }
+
   /** Gives back a claim no turn ran on (a resume that could not start). */
   private async releaseClaim(id: string, turnId: string): Promise<void> {
     const released = await this.deps.sql`
@@ -1064,12 +1360,35 @@ export class SessionManager {
     if (released.count > 0) await this.events.append(id, [event({ type: 'session.status', sessionId: id, status: 'idle' })])
   }
 
+  /**
+   * Stores a turn's images and their previews with the session (blobs.ts), as a
+   * tool result's are, and answers what the `user.turn` event names them by
+   * (#2479): the panel loads both by name, from any tab.
+   */
+  private async storeSentImages(id: string, images: readonly UserImage[]): Promise<SentImage[]> {
+    const { blobs, sent } = sentImageBlobs(images)
+    try {
+      await this.blobs.put(id, blobs)
+    } catch (err) {
+      this.deps.stderr?.(`session ${id}: could not store a turn's images: ${err instanceof Error ? err.message : String(err)}\n`)
+      throw new SessionError('unavailable', `the images for session ${id} could not be stored; send it again in a moment`)
+    }
+    return sent
+  }
+
   private async startTurn(
     session: ClaimedSession,
     turnId: string,
     prompt: string,
     author: Owner,
-    options: { keepResumeTurn?: string; context?: string; images?: readonly UserImage[]; tiers?: readonly Tier[] } = {},
+    options: {
+      keepResumeTurn?: string
+      context?: string
+      images?: readonly UserImage[]
+      /** What the `user.turn` event names `images` by, stored already (`storeSentImages`). */
+      sent?: readonly SentImage[]
+      tiers?: readonly Tier[]
+    } = {},
   ): Promise<Turn> {
     const id = session.id
     // A new turn supersedes approvals left pending, or approved and unused,
@@ -1088,7 +1407,7 @@ export class SessionManager {
         turnId,
         text: prompt,
         author,
-        ...(options.images?.length ? { images: previewsOf(options.images) } : {}),
+        ...(options.sent?.length ? { images: [...options.sent] } : {}),
       }),
       event({ type: 'session.status', sessionId: id, status: 'running' }),
     ])
@@ -1119,6 +1438,7 @@ export class SessionManager {
       )
     }
     if (now.status === 'done') return new SessionError('closed', `session ${id} is done`)
+    if (now.archivedAt !== null) return archivedError(id)
     if (now.costUsd >= now.budgetUsd) {
       return new SessionError(
         'budget_exhausted',
@@ -1149,14 +1469,16 @@ export class SessionManager {
     // The http tools' tier depends on the method in their input (#827).
     const tierOf: TierResolver = (name, input) => httpTierOf(name, input) ?? registryTierOf(name, input)
     // Widened with the plugins' tiers once they are loaded below, so the
-    // panel shows a plugin tool at the tier the permission seam applies. The
-    // headless browser's tools are tiered too (spec §5.3, "Tiers").
-    let eventTierOf: TierResolver = (name, input) => browserTierOf(name) ?? tierOf(name, input)
+    // panel shows a plugin tool at the tier the permission seam applies.
+    // Settings → Plugins' raised tiers (#1953), once read below, over every tier shown.
+    let builtIn: BuiltInPolicy | undefined
+    const raised = (name: string, tier: RiskTier | undefined) => (tier === undefined || !builtIn ? tier : builtIn.tierOf(name, tier))
+    let eventTierOf: TierResolver = (name, input) => raised(name, tierOf(name, input))
     // AskUserQuestion and ask_user (#940) only ask the user: shown and audited as `read`, as the harness tiers them.
     const asksUser = session.owner.kind === 'browser'
     const shownTierOf: TierResolver = (name, input) =>
       asksUser && isQuestionTool(name) ? 'read' : eventTierOf(name, input)
-    const mapper = new SdkEventMapper(id, shownTierOf)
+    const mapper = new SdkEventMapper(id, shownTierOf, this.deps.titleOf)
     const shownCalls = new ShownCalls()
     // The turn's trace (spec 2026-10-01 §5.4, telemetry/turn.ts): a child of
     // whatever started it (the browser's traceparent from the chat frame, an
@@ -1225,7 +1547,19 @@ export class SessionManager {
       }
       const show = async (message: SDKMessage) => {
         await pluginCheck?.(message)
-        const events = mapper.map(message)
+        let events = mapper.map(message)
+        // A result's images are stored before the event that names them is
+        // logged (#782), so no watcher sees a name it cannot load. If they cannot
+        // be, the event goes without them: the call is still shown.
+        const images = mapper.takeImages()
+        if (images.length) {
+          try {
+            await this.blobs.put(id, images)
+          } catch (err) {
+            this.deps.stderr?.(`session ${id}: could not store a tool result's images: ${err instanceof Error ? err.message : String(err)}\n`)
+            events = events.map((e) => (e.type === 'tool.result' && e.images ? withoutImages(e) : e))
+          }
+        }
         const logged = log(events)
         shownCalls.logging(events, logged)
         await logged
@@ -1235,25 +1569,69 @@ export class SessionManager {
       }
       let forwarded: PluginsForRun | undefined
       let packages: PackagesForRun | undefined
+      let packageServers: PackageServers | undefined
       let pluginCheck: ((message: SDKMessage) => Promise<void>) | undefined
-      /** Whether this turn wrote headless-browser folders, removed when it ends. */
-      let browserDirs = false
+      /** The in-process MCP servers this turn gives Claude Code (`run.mcpServers`), for pluginCheck. */
+      let inProcessServers: string[] = []
       try {
         // The credentials first, and into `secrets` at once: whatever fails
         // after this point is redacted before it reaches the event log. Every
         // candidate's, since the turn may fall back to any of them.
         const candidates = await this.deps.credentials.candidates()
         secrets = candidates.map((c) => c.credential.secret)
+        builtIn = this.deps.builtInTools ? await this.deps.builtInTools() : undefined
         forwarded = this.deps.remotePlugins ? await this.deps.remotePlugins() : undefined
-        const remotePlugins = forwarded?.plugins ?? []
+        const remotePlugins = [...(forwarded?.plugins ?? [])]
         // Plugin header values (and their bare tokens) are redacted from the
         // event log like the credential. Claude Code never holds them (the
         // forwarder adds them), but a plugin could echo one in a tool result.
         secrets.push(...(forwarded?.secrets ?? []))
         const memory = forwarded?.hindsight ? this.memoryHooks(forwarded.hindsight, secrets, userText, { session, turnId }) : undefined
-        const ownPlugin = this.deps.ownPlugin
-        const pluginTiers = harnessTierOf({ remotePlugins, tierOf, ...(ownPlugin !== undefined ? { ownPlugin } : {}) })
-        eventTierOf = (name, input) => browserTierOf(name) ?? pluginTiers(name, input)
+        // Settings → plugin packages may switch it off (plugins/packages/builtins.ts).
+        const ownPlugin =
+          this.deps.ownPlugin !== undefined && (await ownPluginEnabled(this.deps.settings))
+            ? this.deps.ownPlugin
+            : undefined
+        packages = this.deps.packagePlugins ? await this.deps.packagePlugins() : undefined
+        // Each loaded directory's package, by the path Claude Code is handed (a stripped copy's too).
+        const packageNames = new Map<string, string>()
+        if (packages) {
+          // Loaded without their own http MCP servers, which come through the forwarder
+          // below: a query with strictMcpConfig off would start them itself (run.ts).
+          const loaded = packages
+          const problems = [...loaded.problems]
+          // A package that cannot be stripped is left out and said, as one that cannot be loaded.
+          const stripped = async (dir: string): Promise<string | undefined> => {
+            const pkg = loaded.loaded.find((p) => p.dir === dir)
+            if (!pkg) return dir
+            try {
+              const loadedDir = await withoutRemoteServers(dir, pkg.contentHash, path.join(this.deps.paths.stateDir, 'plugins-local'))
+              packageNames.set(loadedDir, pkg.name)
+              return loadedDir
+            } catch (err) {
+              problems.push(`plugin package ${pkg.name} was not loaded: ${(err as Error).message}`)
+              return undefined
+            }
+          }
+          const kept = async (dirs: readonly string[]) => (await Promise.all(dirs.map(stripped))).filter((d): d is string => d !== undefined)
+          packages = { ...loaded, paths: await kept(loaded.paths), allowedPaths: await kept(loaded.allowedPaths), problems }
+        }
+        // Every package's http MCP servers, through the forwarder like a remote
+        // plugin's (#2320); Claude Code loads the packages without them (above).
+        packageServers =
+          packages && this.deps.packageServers
+            ? await this.deps.packageServers(packages.loaded)
+            : undefined
+        remotePlugins.push(...(packageServers?.plugins ?? []))
+        secrets.push(...(packageServers?.secrets ?? []))
+        const pluginTiers = harnessTierOf({
+          remotePlugins,
+          tierOf,
+          ...(ownPlugin !== undefined ? { ownPlugin } : {}),
+          pluginPaths: [...(this.deps.pluginPaths ?? []), ...(packages?.paths ?? [])],
+          allowedPluginPaths: packages?.allowedPaths ?? [],
+        })
+        eventTierOf = (name, input) => raised(name, pluginTiers(name, input))
         // A plugin left out of this turn is said so in the session, not only in the log.
         const unavailable = (message: string) =>
           this.events.append(id, [
@@ -1263,8 +1641,7 @@ export class SessionManager {
           this.deps.stderr?.(`${problem}\n`)
           await unavailable(problem)
         }
-        packages = this.deps.packagePlugins ? await this.deps.packagePlugins() : undefined
-        for (const problem of packages?.problems ?? []) {
+        for (const problem of [...(packages?.problems ?? []), ...(packageServers?.problems ?? [])]) {
           this.deps.stderr?.(`${problem}\n`)
           await unavailable(problem)
         }
@@ -1281,7 +1658,25 @@ export class SessionManager {
           }
           for (const dir of [...(packages?.paths ?? []), ...allowedPluginPaths]) {
             if (!loaded.has(path.resolve(dir))) {
-              await unavailable(`plugin package ${path.basename(path.dirname(dir))} was not loaded by Claude Code`)
+              await unavailable(`plugin package ${packageNames.get(dir) ?? path.basename(path.dirname(dir))} was not loaded by Claude Code`)
+            }
+          }
+          // #1255: Claude Code drops an in-process server it cannot connect, and every
+          // tool on it, logging that at debug level only. Say so in the session.
+          for (const name of inProcessServers) {
+            const status = message.mcp_servers.find((s) => s.name === name)?.status
+            if (status !== 'connected') {
+              await this.events.append(id, [
+                scrubForLog(
+                  event({
+                    type: 'error',
+                    sessionId: id,
+                    code: 'tools_unavailable',
+                    message: `the ${name} tools are not available in this turn: Claude Code reports their in-process MCP server as ${status ?? 'missing'}`,
+                  }),
+                  secrets,
+                ),
+              ])
             }
           }
           for (const plugin of remotePlugins) {
@@ -1293,11 +1688,10 @@ export class SessionManager {
             }
           }
         }
-        const [cwd, resume, model, browserSetting, httpSetting] = await Promise.all([
+        const [cwd, resume, model, httpSetting] = await Promise.all([
           ensureSessionDir(this.deps.paths, id),
           this.store.exists(id),
           this.deps.settings?.get<string>(SETTING_MODEL),
-          this.deps.headlessBrowser ? this.deps.settings?.get<unknown>(SETTING_HEADLESS_BROWSER) : undefined,
           this.deps.httpRequest ? this.deps.settings?.get<unknown>(SETTING_HTTP_REQUEST) : undefined,
         ])
         // The http_request tool (#827): on unless the setting is `false`. Its
@@ -1307,6 +1701,8 @@ export class SessionManager {
           this.deps.httpRequest && httpRequestEnabled(httpSetting)
             ? httpRequestServer({
                 saveDir: path.join(cwd, 'http'),
+                // save_to_workspace (#2329): the body becomes one of the session's files.
+                workspace: { files: this.files, ref: { kind: 'session', sessionId: id } },
                 secrets: () => secrets,
                 audit: this.deps.audit,
                 actor: session.owner,
@@ -1317,7 +1713,6 @@ export class SessionManager {
                 ...(this.deps.httpRequest.limits ? { limits: this.deps.httpRequest.limits } : {}),
               })
             : undefined
-        const hb = this.deps.headlessBrowser
         const gate = this.approvals.gate({
           sessionId: id,
           turnId,
@@ -1332,34 +1727,6 @@ export class SessionManager {
               return call ? log([call]) : Promise.resolve()
             }),
         })
-        const sandbox =
-          this.deps.headlessBrowser?.sandbox && browserSetting === true
-            ? await this.deps.headlessBrowser.sandbox()
-            : false
-        const browser =
-          hb && browserSetting === true
-            ? {
-                ...(sandbox ? { sandbox: true } : {}),
-                sessionId: id,
-                backendUrl: hb.backendUrl,
-                ...(hb.publicUrl ? { publicUrl: hb.publicUrl } : {}),
-                ...(hb.uiOrigins ? { uiOrigins: hb.uiOrigins } : {}),
-                ...(hb.browserAllowedOrigins
-                  ? {
-                      browserAllowedOrigins: hb.browserAllowedOrigins,
-                      // Approved once per origin per session, in Postgres, so a
-                      // later turn (on any replica) does not ask again.
-                      approvedOrigins: await loadApprovedOrigins(sql, id),
-                      rememberOrigin: (origin: string, approvalId: string | undefined) =>
-                        rememberApprovedOrigin(sql, id, origin, approvalId),
-                    }
-                  : {}),
-                dir: sessionBrowserDir(this.deps.paths, id),
-                tmpDir: sessionBrowserTmpDir(id),
-                ...(hb.executablePath ? { executablePath: hb.executablePath } : {}),
-              }
-            : undefined
-        browserDirs = browser !== undefined
         // AskUserQuestion (#940): only the user in the panel answers, so only a
         // session the browser user owns is given the tool. Any other owner's turn
         // would wait on someone who is not asked.
@@ -1385,17 +1752,14 @@ export class SessionManager {
           maxBudgetUsd: Math.max(session.budgetUsd - session.costUsd, 0.000001),
           signal: controller.signal,
           tierOf,
+          ...(builtIn ? { builtInPolicy: builtIn } : {}),
           approvalGate: auditor ? auditor.gate(gate, (toolUseId) => this.approvals.idForToolUse(id, toolUseId)) : gate,
           ...(questionGate ? { questionGate } : {}),
-          // The data/instruction boundary (#258, safety/untrusted.ts): only the
-          // user's messages are instructions; tool results are data. Then which
-          // browser each browser_* tool drives.
-          systemPromptAppend: `${UNTRUSTED_CONTENT_POLICY}\n\n${browserToolsGuide(browser !== undefined)}`,
-          ...(browser ? { headlessBrowser: browser } : {}),
+          systemPromptAppend: systemAppend(),
           // First turn: the SDK session gets OUR id; later turns resume it.
           ...(resume ? { resume: id } : { sessionId: id }),
           ...(typeof model === 'string' && model ? { model } : {}),
-          ...(this.deps.mcpServers || browser || http
+          ...(this.deps.mcpServers || http
             ? {
                 mcpServers: {
                   ...(this.deps.mcpServers
@@ -1407,22 +1771,13 @@ export class SessionManager {
                             ? { waitForTab: waitForTab(questionGate, controller.signal, (questionId) => this.questions.reconnected(id, { questionId })) }
                             : {}),
                           turnContext: () => traced.context(),
+                          ...(builtIn ? { builtIn } : {}),
+                          // The turn's credentials and plugin tokens, which workspace_read redacts (#2329).
+                          secrets: () => secrets,
                         },
                       )
                     : {}),
                   ...(http ? { [HTTP_SERVER]: http } : {}),
-                  // The one way past the backend's agent-actor gate: a human
-                  // approves one exact outward request (harness/headlessGrants.ts).
-                  ...(browser
-                    ? {
-                        [GRANT_SERVER]: headlessGrantServer({
-                          sql,
-                          sessionId: id,
-                          turnId,
-                          hash: (tool, input) => this.approvals.hash(tool, input),
-                        }),
-                      }
-                    : {}),
                 },
               }
             : {}),
@@ -1434,6 +1789,7 @@ export class SessionManager {
           traceHooks: traced.hooks(),
           ...(this.deps.stderr ? { stderr: this.deps.stderr } : {}),
         }
+        inProcessServers = Object.keys(run.mcpServers ?? {})
         const turn = runWithFallback(run, {
           candidates,
           report: this.deps.credentials.reporter({ sessionId: id, turnId }),
@@ -1475,6 +1831,7 @@ export class SessionManager {
         }
       } finally {
         forwarded?.release()
+        packageServers?.release()
         packages?.release()
         local.settling = true
         clearInterval(renew)
@@ -1482,13 +1839,6 @@ export class SessionManager {
         await auditor?.finish(
           controller.signal.aborted ? abortMessage(controller.signal) : (failure ?? 'the turn ended first'),
         )
-        // The query has ended, and with it the playwright server and Chromium:
-        // its screenshots and profile go now, not when the volume fills.
-        if (browserDirs) {
-          await removeSessionBrowserDirs(this.deps.paths, id).catch((err: unknown) =>
-            this.deps.stderr?.(`cannot remove the headless-browser folders of session ${id}: ${String(err)}\n`),
-          )
-        }
       }
       // The loop has ended only after the SDK's last transcript append (measured:
       // `last-prompt` and `cost-state` entries arrive after the `result`
@@ -1568,47 +1918,7 @@ export class SessionManager {
     a: MemoryActivity,
     secrets: readonly string[],
   ): Promise<void> {
-    const id = session.id
-    const summary = {
-      bank: a.bank,
-      ...(a.documentId ? { document_id: a.documentId } : {}),
-      ...(a.count === undefined ? {} : { results: a.count }),
-      ...(a.tool ? { tool: a.tool } : {}),
-    }
-    const detail = a.reason ? { detail: safeDetail(a.reason, secrets) } : {}
-    await Promise.all([
-      this.deps.audit?.record({
-        kind: 'memory',
-        action: a.action,
-        surface: 'harness',
-        actor: session.owner,
-        sessionId: id,
-        turnId,
-        ...(a.toolUseId ? { toolUseId: a.toolUseId } : {}),
-        inputSummary: JSON.stringify(summary),
-        outcome: a.outcome === 'ok' ? 'ok' : 'error',
-        ...detail,
-        startedAt: a.startedAt,
-        finishedAt: a.finishedAt,
-      }),
-      this.events.append(id, [
-        scrubForLog(
-          event({
-            type: 'memory',
-            sessionId: id,
-            turnId,
-            action: a.action,
-            bank: a.bank,
-            outcome: a.outcome,
-            ...(a.count === undefined ? {} : { count: a.count }),
-            ...detail,
-            ...(a.input === undefined ? {} : { input: memoryText(a.input, secrets) }),
-            ...(a.memories === undefined ? {} : { memories: a.memories.map((m) => memoryText(m, secrets)) }),
-          }),
-          secrets,
-        ),
-      ]),
-    ])
+    await recordMemoryActivity({ audit: this.deps.audit, events: this.events }, session, turnId, a, secrets)
   }
 
   /**
@@ -1659,7 +1969,8 @@ export class SessionManager {
     // ends the turn with no model call. The tool never runs.
     // Approved-but-unused approvals end with the turn in every case,
     // including the one a resumed turn was bound to and did not use.
-    // A question never outlives its turn (questions/service.ts), shutdown or not.
+    // A question never outlives its turn (questions/service.ts), shutdown or not;
+    // a posted `done` summary does, and cancelPending leaves it pending.
     // Only this turn's: if its claim was lost, a newer turn's question is not ours to cancel.
     await this.questions.cancelPending(id, stopped ?? 'the turn ended', { refresh: false, turnId })
     const keepWaiting = stopped === SHUTTING_DOWN && (await this.approvals.hasPending(id))
@@ -1739,6 +2050,15 @@ export class SessionManager {
       WHERE id = ${id} AND turn_id = ${turnId}
       RETURNING id`
     if (!released) return { kind: 'lost_claim' }
+    // #1922: what the turn cost, as its own audit row (audit/turn.ts turnCostEntry).
+    await this.deps.audit?.record(
+      turnCostEntry(
+        { sessionId: id, turnId, actor: session.owner },
+        outcome,
+        { costUsd: costUsd - session.ownCostUsd, priced: result !== undefined, estimatedUsd: cutUsd },
+        secrets,
+      ),
+    )
     // Read again, not from `session`: the user may have raised the budget while the turn
     // ran, and a fork or the parent sharing it may have spent from it (#823). The meter
     // shows what the whole lineage has spent, which is what the budget is checked against.
@@ -1773,6 +2093,9 @@ export class SessionManager {
    */
   async interrupt(id: string, principal: Owner): Promise<boolean> {
     const session = await this.get(id, principal)
+    if (session.mode === 'durable') {
+      return this.durableOrRefuse().interrupt(session, `interrupted by ${publicLabel(principal)}`)
+    }
     const local = this.active.get(id)
     if (local) {
       // Accurate, not optimistic: a turn whose result is already in is
@@ -1815,6 +2138,7 @@ export class SessionManager {
    */
   async handoff(id: string, actor: Owner, to: Owner): Promise<SessionRecord> {
     const session = await this.get(id, actor)
+    if (session.archivedAt !== null) throw archivedError(id)
     const isOwner = sameOwner(actor, session.owner)
     if (sameOwner(actor, to)) {
       if (actor.kind === 'browser') return this.transfer(session, to)
@@ -1845,6 +2169,7 @@ export class SessionManager {
    */
   async acceptHandoff(id: string, actor: Owner): Promise<SessionRecord> {
     const session = await this.get(id, actor)
+    if (session.archivedAt !== null) throw archivedError(id)
     if (!session.offer || !sameOwner(actor, session.offer.to)) {
       throw new SessionError('invalid', `session ${id} is not offered to you`)
     }
@@ -1853,7 +2178,9 @@ export class SessionManager {
 
   /**
    * Ends the live offer of a session: its owner withdraws it, its target
-   * declines it. Resolves false when there was none.
+   * declines it. Resolves false when there was none. The browser user is only
+   * ever an owner here, since a handoff to it transfers at once and is never
+   * offered: declining by the target serves MCP principals (`sessions_cancel_handoff`).
    */
   async cancelHandoff(id: string, actor: Owner): Promise<boolean> {
     const session = await this.get(id, actor)
@@ -1889,6 +2216,8 @@ export class SessionManager {
   private async transfer(session: SessionRecord, to: Owner, options: { accepting?: boolean } = {}): Promise<SessionRecord> {
     const { id } = session
     if (sameOwner(session.owner, to) && session.owner.label === to.label && !session.offer) return session
+    // Refused before anything changes when this service cannot reach a durable session's workflow.
+    const durable = session.mode === 'durable' && !sameOwner(session.owner, to) ? this.durableOrRefuse() : undefined
     // Conditional on the owner read above (and, accepting, on the offer still
     // being the live one to `to`), so two concurrent handoffs cannot both apply.
     const offerStill = options.accepting
@@ -1913,6 +2242,10 @@ export class SessionManager {
       await this.announceOwner(id)
       return this.get(id, to)
     }
+    // A durable session's parked calls were asked for the previous owner's turn: ended
+    // only once the owner change above applied, with no lock held, best-effort (the
+    // interrupt Signal when cancel_input goes unanswered).
+    await durable?.handoff(session, `the session was handed off to ${publicLabel(to)}`)
     await this.events.append(id, [event({ type: 'session.owner', sessionId: id, owner: to })])
     await this.approvals.cancelPending(id, `the session was handed off to ${publicLabel(to)}`)
     await this.questions.cancelPending(id, `the session was handed off to ${publicLabel(to)}`)
@@ -1922,8 +2255,8 @@ export class SessionManager {
   /**
    * Announces a change to a session's offer as `session.owner` on the bus
    * (busEvents.ts), so a watcher of the session or of the list re-reads it. An
-   * offer is state on the session row, not a transcript event (the panel's
-   * protocol has none for it), so nothing is appended.
+   * offer is state on the session row, not a transcript event (the panel reads it
+   * from `sessions.snapshot`, #1284), so nothing is appended.
    */
   private async announceOwner(id: string): Promise<void> {
     const session = await this.row(id)
@@ -1939,22 +2272,45 @@ export class SessionManager {
    *
    * Only the browser user's "continue in a new chat" (`freshBudget`, the HTTP
    * route) gives the child a budget of its own. Like `raiseBudget`, that is
-   * enforced here: `freshBudget` from any other principal, or with the headless
-   * browser's agent-actor marker (`agentActor`), is ignored (#1447). Any other fork, `sessions_fork`
+   * enforced here: `freshBudget` from any other principal is ignored (#1447). Any other fork, `sessions_fork`
    * above all, spends from the parent's budget: nothing is copied or moved, the
    * child joins the parent's lineage (`budget_root_id`), and a turn in either
    * debits the one budget. Forking therefore never creates budget, and cannot
    * stand in for the user-only `raiseBudget` (#823).
+   *
+   * `upTo` (#793) is a reply's panel message id: the child keeps the conversation
+   * through that reply and nothing after it (forkPoint.ts). With `audit`, the fork
+   * is a `resource` row on the child (action `session_fork`).
    */
   async fork(
     id: string,
     principal: Owner,
-    options: { title?: string; origin?: Origin; rateLimited?: boolean; freshBudget?: boolean; agentActor?: boolean } = {},
+    options: {
+      title?: string
+      origin?: Origin
+      rateLimited?: boolean
+      freshBudget?: boolean
+      upTo?: string
+      audit?: Omit<AuditContext, 'actor'>
+    } = {},
   ): Promise<SessionRecord> {
-    const fresh = options.freshBudget === true && principal.kind === 'browser' && !options.agentActor
+    const startedAt = new Date()
+    const fresh = options.freshBudget === true && principal.kind === 'browser'
     const parent = await this.get(id, principal)
-    if (!(await this.store.exists(id))) {
-      throw new SessionError('invalid', `session ${id} has no transcript to fork yet; send it a turn first`)
+    if (parent.mode === 'durable') {
+      throw new SessionError(
+        'invalid',
+        `session ${id} is durable: its conversation is held by its workflow and cannot be forked; start a new chat instead`,
+      )
+    }
+    const transcript = await this.store.load({ projectKey: '', sessionId: id })
+    if (!transcript) {
+      throw new SessionError('no_transcript', `session ${id} has no transcript to fork yet; send it a turn first`)
+    }
+    const upToMessageId = options.upTo === undefined ? undefined : transcriptCut(transcript, options.upTo)
+    const history = await forkHistory(this.events, id, options.upTo)
+    if (!history || (options.upTo !== undefined && upToMessageId === undefined)) {
+      throw new SessionError('invalid', `session ${id} has no finished reply ${options.upTo} to fork from`)
     }
     // A fork of a spent lineage could not run a turn; say why now rather than at its first send.
     if (!fresh && parent.costUsd >= parent.budgetUsd) {
@@ -1974,6 +2330,7 @@ export class SessionManager {
       sessionStore: this.store,
       dir: sessionWorkDir(this.deps.paths, id),
       title,
+      ...(upToMessageId === undefined ? {} : { upToMessageId }),
     })
     const child = await this.insert(childId, principal, {
       origin: options.origin ?? parent.origin,
@@ -1981,26 +2338,15 @@ export class SessionManager {
       tags: parent.tags,
       scope: parent.scope,
       parentId: parent.id,
+      // A fork copies the SDK transcript, which only a classic session has.
+      mode: 'classic',
     }, { rateLimited: options.rateLimited ?? true, ...(fresh ? {} : { budgetOf: parent }) })
-    // The conversation so far, re-addressed to the child. Lifecycle events
-    // (status, owner, result) are the parent's own and are not copied.
-    const history: ServerEvent[] = []
-    for (let after = 0; ; ) {
-      const page = await this.events.read(id, after)
-      if (page.length === 0) break
-      after = page.at(-1)?.seq ?? after
-      for (const { event: e } of page) {
-        if (
-          e.type === 'user.turn' ||
-          e.type === 'assistant.text.delta' ||
-          e.type === 'assistant.text.done' ||
-          e.type === 'tool.call' ||
-          e.type === 'tool.result'
-        ) {
-          history.push({ ...e, sessionId: childId })
-        }
-      }
-    }
+    // The images the copied events name (#782, #2150), before the events that name them: the
+    // parent's others (a later turn's, past `upTo`) stay the parent's, so a fork chain does not
+    // copy every image of every ancestor.
+    await this.blobs.copy(id, childId, blobNames(history))
+    // Its workspace files (#2329), so the fork carries on with what the parent had.
+    await this.files.copy(id, childId)
     await this.events.append(childId, [
       event({
         type: 'session.started',
@@ -2009,10 +2355,28 @@ export class SessionManager {
         owner: child.owner,
         title,
         budgetUsd: child.budgetUsd,
+        mode: child.mode,
       }),
-      ...history,
+      // The conversation, re-addressed to the child.
+      ...history.map((e) => ({ ...e, sessionId: childId })),
       event({ type: 'session.status', sessionId: childId, status: 'idle' }),
     ])
+    // Recorded once the child is complete (#2159): a fork that failed after the insert has only
+    // the failures-only mount's `error` row (app.ts), never an `ok` one beside it.
+    if (options.audit) {
+      await this.deps.audit?.record({
+        kind: 'resource',
+        action: 'session_fork',
+        surface: options.audit.surface,
+        actor: principal,
+        clientIp: options.audit.clientIp,
+        sessionId: childId,
+        outcome: 'ok',
+        detail: `forked from ${id}${options.upTo === undefined ? '' : ` up to ${options.upTo}`}`,
+        startedAt,
+        finishedAt: new Date(),
+      })
+    }
     return child
   }
 
@@ -2021,10 +2385,7 @@ export class SessionManager {
    * fork its lineage's, which the parent and every other fork of it share
    * (#823). User-only and owner-only:
    * it spends money, so only the browser user may raise it, and only on a
-   * session it owns (take one over first). `agentActor` is set when the
-   * request carried the headless browser's agent-actor marker
-   * (harness/headlessBrowser.ts AGENT_ACTOR_HEADER), and is refused like any
-   * other principal. No tool calls this; the one caller is the HTTP route
+   * session it owns (take one over first). No tool calls this; the one caller is the HTTP route
    * (routes/sessions.ts). A raise is a `settings` audit row on the session
    * (action `session_budget_usd`); a refused or failed one is recorded by
    * app.ts's `auditWrites` from the route's status, like other refused writes.
@@ -2033,10 +2394,10 @@ export class SessionManager {
     id: string,
     principal: Owner,
     addUsd: number,
-    context: Omit<AuditContext, 'actor'> & { agentActor?: boolean },
+    context: Omit<AuditContext, 'actor'>,
   ): Promise<SessionRecord> {
     const startedAt = new Date()
-    if (context.agentActor || principal.kind !== 'browser') {
+    if (principal.kind !== 'browser') {
       throw new SessionError('forbidden', "only you can raise a chat's budget, in the ScadBuddy UI")
     }
     const add = cents(addUsd)
@@ -2192,4 +2553,10 @@ export class SessionManager {
     timer.unref()
     return () => clearInterval(timer)
   }
+}
+
+/** A tool.result without its images, for when they could not be stored (#782). */
+function withoutImages(e: Extract<ServerEvent, { type: 'tool.result' }>): ServerEvent {
+  const { images: _images, ...rest } = e
+  return rest
 }

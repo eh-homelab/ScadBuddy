@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { useLatest } from '../../lib/useLatest'
 import { api } from '../../api/client'
-import type { Output, PrintPage, PrintStage, PrintSummary } from '../../api/types'
+import type { Output, PrintPage, PrintProgress, PrintStage, PrintSummary } from '../../api/types'
 import {
   apiFilters,
   clearPrintFilters,
@@ -15,6 +15,7 @@ import {
   type PrintsQuery,
 } from '../../lib/printsQuery'
 import { timeAgo } from '../../lib/format'
+import { libraryOptionsScope } from '../../lib/printSource'
 import { useAsync } from '../../lib/useAsync'
 import { usePrintProgress } from '../../lib/usePrintProgress'
 import { MediaLightbox } from '../media/MediaLightbox'
@@ -152,7 +153,7 @@ export function PrintHistory({ fixedSlug }: { fixedSlug?: string }) {
     () => apiFilters(query, fixedSlug),
     // Each field on its own: `query` is rebuilt every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [fixedSlug, query.slug, query.status, query.printer, query.from, query.to, query.q],
+    [fixedSlug, query.slug, query.status, query.printer, query.from, query.to, query.q, query.file],
   )
   const pages = usePrintPages(filters)
   const templates = useAsync(() => (fixedSlug ? Promise.resolve([]) : api.listModels()), [fixedSlug], ['models'])
@@ -197,6 +198,12 @@ export function PrintHistory({ fixedSlug }: { fixedSlug?: string }) {
     [templates.data],
   )
   const filtered = isFiltered(query)
+  const fileName =
+    pages.items.find((print) => query.file !== '' && String(print.library_file_id) === query.file)
+      ?.library_file_name ?? null
+  // #1751 — one file's prints, and nothing else narrowing them: its Waiting row, as a template's.
+  const waitingFile =
+    query.file !== '' && !fixedSlug && !isFiltered({ ...query, file: '' }) ? Number(query.file) : null
 
   return (
     <>
@@ -204,6 +211,7 @@ export function PrintHistory({ fixedSlug }: { fixedSlug?: string }) {
         query={query}
         onChange={setQuery}
         printers={printers}
+        fileName={fileName}
         templates={
           fixedSlug ? undefined : (templates.data ?? []).map((model) => ({ slug: model.slug, name: model.name }))
         }
@@ -211,6 +219,9 @@ export function PrintHistory({ fixedSlug }: { fixedSlug?: string }) {
 
       {fixedSlug && !filtered && !pages.loading && !pages.error && (
         <Waiting slug={fixedSlug} prints={pages.items} complete={pages.next === null} />
+      )}
+      {waitingFile !== null && !pages.loading && !pages.error && (
+        <LibraryWaiting fileId={waitingFile} name={fileName} prints={pages.items} complete={pages.next === null} />
       )}
 
       {pages.loading && (
@@ -329,9 +340,13 @@ function MorePrints({
   )
 }
 
-/** The template a print was made from, or that it was a Bambuddy library file (#976). */
+/**
+ * The template a print was made from, or the Bambuddy library file it was (#976): by
+ * the file's name, while Bambuddy still has the file (#1755).
+ */
 function templateLabel(print: PrintSummary, names: Map<string, string>): string {
-  return print.slug === null ? 'Bambuddy library file' : (names.get(print.slug) ?? print.slug)
+  if (print.slug === null) return print.library_file_name ?? 'Bambuddy library file'
+  return names.get(print.slug) ?? print.slug
 }
 
 /**
@@ -352,8 +367,42 @@ function Waiting({ slug, prints, complete }: { slug: string; prints: PrintSummar
   return (
     <ul aria-label="Waiting for Bambuddy" className="mb-3 flex flex-col gap-2">
       {waiting.map((output) => (
-        <WaitingRow key={output.id} output={output} />
+        <OutputWaitingRow key={output.id} output={output} />
       ))}
+    </ul>
+  )
+}
+
+/**
+ * #1751 — a library file's newest print that no listed print came from yet, as an
+ * output's is above: its queue items are what the prints it made are linked by.
+ */
+function LibraryWaiting({
+  fileId,
+  name,
+  prints,
+  complete,
+}: {
+  fileId: number
+  name: string | null
+  prints: PrintSummary[]
+  /** Every page is loaded: the run's print may be on one that is not, until then. */
+  complete: boolean
+}) {
+  const subject = libraryOptionsScope(fileId)
+  const { progress } = usePrintProgress(subject, complete)
+  if (!complete || !progress) return null
+  const items = new Set(progress.copies_detail?.map((copy) => copy.queue_entry_id) ?? [])
+  if (progress.queue_item_id !== null && progress.queue_item_id !== undefined) items.add(progress.queue_item_id)
+  if (prints.some((print) => print.queue_item_id !== null && items.has(print.queue_item_id))) return null
+  // Done once its queue item went, it was looked for by its sliced file's hash (#1755): a
+  // print linked that way names no queue item, so it is taken as this run's.
+  if (progress.settled && progress.stage === 'done' && prints.some((print) => print.queue_item_id === null)) {
+    return null
+  }
+  return (
+    <ul aria-label="Waiting for Bambuddy" className="mb-3 flex flex-col gap-2">
+      <WaitingRow name={name ?? `Library file ${fileId}`} progress={progress} />
     </ul>
   )
 }
@@ -371,12 +420,25 @@ const SETTLED_LABEL: Partial<Record<PrintStage, string>> = {
  * to this output, so a spinner there would wait forever. #954 — it follows the print
  * live, as the progress panel does, so the row changes without a reload.
  */
-function WaitingRow({ output }: { output: Output }) {
+function OutputWaitingRow({ output }: { output: Output }) {
   const { progress } = usePrintProgress(output.id, true)
+  return <WaitingRow name={output.name ?? output.id.slice(0, 8)} progress={progress} generated={output.created_at} />
+}
+
+function WaitingRow({
+  name,
+  progress,
+  generated,
+}: {
+  name: string
+  progress: PrintProgress | null
+  /** When the output was made; a library file's print has no such time. */
+  generated?: string
+}) {
   const settled = progress?.settled ? progress : null
   return (
     <li className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-[6px] border border-dashed border-line-strong bg-surface px-3 py-2 text-[13px]">
-      <span className="text-ink">{output.name ?? output.id.slice(0, 8)}</span>
+      <span className="text-ink">{name}</span>
       {settled ? (
         settled.route === 'run' ? (
           // #1831 — the run failed in ScadBuddy, before Bambuddy had anything to show.
@@ -393,7 +455,7 @@ function WaitingRow({ output }: { output: Output }) {
           <Spinner /> Waiting for Bambuddy
         </span>
       )}
-      <span className="ml-auto text-[12px] text-faint">Generated {timeAgo(output.created_at)}</span>
+      {generated && <span className="ml-auto text-[12px] text-faint">Generated {timeAgo(generated)}</span>}
     </li>
   )
 }

@@ -11,16 +11,14 @@ reads the getters' annotations at runtime, and one of them names a local.
 """
 
 from collections.abc import Callable
-from typing import Annotated, Any
+from typing import Any
 
-from fastapi import Depends, status
+from fastapi import Depends
 
-from scadbuddy.api.deps import DATABASE_REQUIRED_PROBLEM, StateDep
+from scadbuddy.api.deps import StateDep
 from scadbuddy.core.components import Key
-from scadbuddy.core.problems import ApiError
 
 _getters: dict[Key[Any], Callable[..., Any]] = {}
-_required: dict[tuple[Key[Any], str], Callable[..., Any]] = {}
 
 
 def getter_for[T](key: Key[T]) -> Callable[..., T]:
@@ -36,28 +34,10 @@ def getter_for[T](key: Key[T]) -> Callable[..., T]:
     return _getters[key]
 
 
-def component_dep(key: Key[Any], required: str | None = None) -> Any:
-    """``Depends`` on ``key``'s getter. With ``required``, a ``None`` value answers a
-    503 ``deps.DATABASE_REQUIRED_PROBLEM`` with ``required`` as its detail; it reads
-    the same getter, so an override of that reaches this too.
+def component_dep(key: Key[Any]) -> Any:
+    """``Depends`` on ``key``'s getter.
 
     Not type-checked against ``key``: ``Annotated[int, component_dep(WORD)]`` passes
     mypy, since ``Annotated`` metadata is opaque to it. Name the key's own type in the
     alias beside the key."""
-    if required is None:
-        return Depends(getter_for(key))
-    if (key, required) not in _required:
-        plain = getter_for(key)
-
-        def require(value: Annotated[Any, Depends(plain)]) -> Any:
-            if value is None:
-                raise ApiError(
-                    status.HTTP_503_SERVICE_UNAVAILABLE,
-                    required,
-                    type_=DATABASE_REQUIRED_PROBLEM,
-                )
-            return value
-
-        require.__name__ = f"require_{key.name}"
-        _required[(key, required)] = require
-    return Depends(_required[(key, required)])
+    return Depends(getter_for(key))

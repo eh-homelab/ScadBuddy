@@ -29,6 +29,80 @@ export const VIEW_SIZE = z
   .optional()
   .describe('Edge of the square PNG in pixels (512 by default)')
 
+/**
+ * An explicit camera on top of a named view (#830), as the view routes take it
+ * (`view_camera` in backend/scadbuddy/api/jobs.py, ranges from render/thumbnail.py).
+ */
+export const CAMERA = {
+  azimuth: z
+    .number()
+    .min(-360)
+    .max(360)
+    .optional()
+    .describe(
+      'Degrees around +Z (Z is up, model mm) from the front: 0 stands at -Y looking +Y (front), 90 at +X ' +
+        '(right), 180 at +Y (back), -90 at -X (left); counter-clockwise seen from above. Left out, the ' +
+        "named view's (iso is about 28)",
+    ),
+  elevation: z
+    .number()
+    .min(-90)
+    .max(90)
+    .optional()
+    .describe("Degrees above the XY plane: 90 looks straight down, -90 straight up. Left out, the named view's (iso is about 49)"),
+  zoom: z
+    .number()
+    .min(1)
+    .max(64)
+    .optional()
+    .describe('Magnification of the fitted frame: 1 (default) shows the whole model around the target, 2 half its width'),
+  target: z
+    .object({ x: z.number().optional(), y: z.number().optional(), z: z.number().optional() })
+    .optional()
+    .describe("The point in model mm the view centres and zooms on; a coordinate left out is the bounding box centre's"),
+}
+
+export type Camera = {
+  azimuth?: number | undefined
+  elevation?: number | undefined
+  zoom?: number | undefined
+  target?: { x?: number | undefined; y?: number | undefined; z?: number | undefined } | undefined
+}
+
+/** A camera as the routes' query parameters, leaving out what was not given. */
+export function cameraQuery(camera: Camera): {
+  azimuth?: number
+  elevation?: number
+  zoom?: number
+  target_x?: number
+  target_y?: number
+  target_z?: number
+} {
+  const all = {
+    azimuth: camera.azimuth,
+    elevation: camera.elevation,
+    zoom: camera.zoom,
+    target_x: camera.target?.x,
+    target_y: camera.target?.y,
+    target_z: camera.target?.z,
+  }
+  return Object.fromEntries(Object.entries(all).filter(([, v]) => v !== undefined))
+}
+
+/** `path` with `query`'s defined values as its query string, for a resource link. */
+export function withQuery(path: string, query: Record<string, string | number | undefined>): string {
+  const search = new URLSearchParams()
+  for (const [key, value] of Object.entries(query)) if (value !== undefined) search.set(key, String(value))
+  const text = search.toString()
+  return text ? `${path}?${text}` : path
+}
+
+/** The camera as it was asked for, for a result to repeat; undefined when none was. */
+export function cameraOf(camera: Camera): Camera | undefined {
+  const asked = Object.fromEntries(Object.entries(camera).filter(([, v]) => v !== undefined))
+  return Object.keys(asked).length ? asked : undefined
+}
+
 export const paramValue =z.union([z.boolean(), z.number(), z.string()])
 
 // `catchall`, not `z.record`: the MCP server bundled in @anthropic-ai/claude-agent-sdk

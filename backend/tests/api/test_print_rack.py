@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 from collections.abc import Iterable, Sequence
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -15,6 +16,8 @@ import respx
 from fastapi.testclient import TestClient
 from google.protobuf import text_format
 from psycopg_pool import PoolTimeout
+from temporalio.client import Client
+from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.api.components import getter_for
 from scadbuddy.api.deps import STATE_ATTR
@@ -25,7 +28,7 @@ from scadbuddy.library import settings_store
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.rack.rank import Usage
-from scadbuddy.rack.usage import PickedHotend, RackUsageStore
+from scadbuddy.rack.usage import PickedHotend, PickedSpool, RackUsageStore
 from tests.api.test_print_filaments import prepared, queue_route, slice_routes
 from tests.api.test_print_library import (
     flow_copy_routes,
@@ -278,7 +281,12 @@ class BrokenUsage(RackUsageStore):
         return {}
 
     async def record_picks(
-        self, queue_item_id: int, printer_id: int, picks: Sequence[PickedHotend]
+        self,
+        queue_item_id: int,
+        printer_id: int,
+        picks: Sequence[PickedHotend],
+        *,
+        copies: int = 1,
     ) -> int:
         raise psycopg.OperationalError("the database went away")
 
@@ -321,6 +329,36 @@ def test_the_picks_are_recorded_against_the_queue_item(client: TestClient, model
     # Spec §5/§7: the result reports the picks sent, by position, never by serial.
     assert response.json()["rack_picks"] == [{"plate_id": 1, "group_id": 0, "position": 4}]
     assert serial(19) not in response.text
+    # #2170: and the group's spool, with the slicer's grams, for the hotend's history.
+    with rack_usage(client)._ready().connection() as conn:
+        spools = conn.execute(
+            "SELECT group_id, slot_id, grams FROM rack_nozzle_pick_spools WHERE queue_item_id = 51"
+        ).fetchall()
+    assert [(row["group_id"], row["slot_id"], float(row["grams"])) for row in spools] == [
+        (0, 1, 3.2)
+    ]
+
+
+@respx.mock
+def test_a_multi_copy_print_records_its_copies_on_the_pick(client: TestClient, model: str) -> None:
+    """#2134: copies are one queue item, so the pick carries how many, for Least used's
+    pending count."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    invented_rack_route()
+    grouped_requirements_route()
+    slice_routes()
+    queue_route()
+
+    response = run_print(
+        client,
+        output_id,
+        json={**body(nozzles=[{"size": "0.4"}], tier="standard"), "copies": 3},
+    )
+
+    assert response.status_code == 200, response.text
+    assert asyncio.run(rack_usage(client).usage([serial(19)]))[serial(19)].pending == 3
 
 
 @respx.mock
@@ -366,10 +404,27 @@ def test_no_serial_enters_the_runs_workflow_history(
     assert positions >= 1
 
 
+async def started(temporal: Client, workflow_id: str) -> None:
+    """Wait for ``workflow_id`` to exist, for up to 30 s."""
+    async with asyncio.timeout(30):
+        while True:
+            try:
+                await temporal.get_workflow_handle(workflow_id).describe()
+                return
+            except RPCError as error:
+                if error.status != RPCStatusCode.NOT_FOUND:
+                    raise
+            await asyncio.sleep(0.1)
+
+
 @respx.mock
-def test_a_library_run_sends_its_pick_but_records_none(client: TestClient) -> None:
-    """The watcher never settles a library print (its record and settle hook are keyed
-    by output id), so a pick row would never be credited."""
+def test_a_library_print_credits_its_hotend_like_an_outputs(
+    client: TestClient, pg_conninfo: str, workflow_reaper: WorkflowReaper
+) -> None:
+    """#1073: a library-file print is printed, followed and settled as an output's is,
+    so the hotend it picked is credited with the print's time. The run records its pick,
+    starts the file's `FollowPrint`, and the app's follower settles it through the rack's
+    hook, keyed by the print's subject."""
     configure(client)
     one_color(89)
     flow_copy_routes()
@@ -391,7 +446,43 @@ def test_a_library_run_sends_its_pick_but_records_none(client: TestClient) -> No
 
     assert response.status_code == 200, response.text
     assert json.loads(queued.calls.last.request.content)["nozzle_rack_choice"] == {"0": 4}
-    assert asyncio.run(rack_usage(client).picked_items([51])) == set()
+    assert asyncio.run(rack_usage(client).picked_items([51])) == {51}
+    # The run records its outcome before it starts the follow, so the follow may start
+    # just after the run reads as succeeded.
+    assert workflow_reaper.client is not None
+    workflow_reaper.run(started(workflow_reaper.client, "follow-print-library:89"))
+
+    respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                **recording("queue-item.json"),
+                "id": 51,
+                "status": "completed",
+                "archive_id": 101,
+            },
+        )
+    )
+    respx.get(f"{API}/archives/101").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": 101,
+                "status": "completed",
+                "actual_time_seconds": 75,
+                "filament_used_grams": 1.5,
+            },
+        )
+    )
+    follower = getattr(client.app.state, STATE_ATTR).print_follower  # type: ignore[attr-defined]
+    assert asyncio.run(follower.follow("library:89", follower.now(), read_now=True)) == "settled"
+
+    with psycopg.connect(pg_conninfo) as conn:
+        rows = conn.execute(
+            "SELECT archive_id, print_seconds, grams FROM rack_nozzle_prints"
+            " WHERE queue_item_id = 51"
+        ).fetchall()
+    assert rows == [(101, 75, 1.5)]
 
 
 def test_the_rack_feature_hooks_the_settle_write_into_the_follow(client: TestClient) -> None:
@@ -844,3 +935,107 @@ def test_a_sliced_library_run_with_high_flow_chosen_warns_of_the_high_flow_left(
     assert response.status_code == 200, response.text
     assert response.json()["rack_picks"]
     assert _high_flow_sides(response.json()["warnings"]) == {"left"}
+
+
+SETTLED = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
+
+
+@respx.mock
+def test_the_rack_usage_lists_each_hotend_with_its_serial_filament_and_spools(
+    client: TestClient,
+) -> None:
+    """#1298, #2170: Settings' Hotend usage table, by position, with each hotend's serial,
+    wear, current filament and the spools that ran through it."""
+    configure(client)
+    invented_rack_route()
+    store = rack_usage(client)
+    asyncio.run(store.seen(1, [serial(17)]))
+    blue = PickedSpool(
+        slot_id=1,
+        spool_id=7,
+        label="Bambu PLA Silk Blue",
+        material="PLA",
+        colour="#00629B",
+        grams=12.5,
+    )
+    asyncio.run(
+        store.record_picks(
+            51, 1, [PickedHotend(group_id=0, position=2, serial=serial(17), spools=[blue])]
+        )
+    )
+    asyncio.run(
+        store.record_prints(
+            archive_id=101, queue_item_id=51, settled_at=SETTLED, print_seconds=600, grams=12.5
+        )
+    )
+
+    response = client.get("/api/v1/print/printers/1/rack-usage")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["printer_id"] == 1
+    hotends = {hotend["position"]: hotend for hotend in body["hotends"]}
+    assert hotends[2]["prints"] == 1
+    assert hotends[2]["print_seconds"] == 600
+    assert hotends[2]["grams"] == 12.5
+    assert hotends[2]["pending"] == 0
+    assert hotends[2]["last_used_at"] == "2026-10-02T12:00:00Z"
+    assert hotends[2]["first_seen_at"] is not None
+    assert hotends[2]["serial"] == serial(17)
+    assert hotends[2]["wear"] == 128
+    assert (
+        hotends[2]["filament_id"],
+        hotends[2]["filament_name"],
+        hotends[2]["filament_material"],
+        hotends[2]["filament_colour"],
+    ) == ("GFA05", "Bambu PLA Silk", "PLA", "#00629B")
+    assert hotends[2]["spools"] == [
+        {
+            "spool_id": 7,
+            "label": "Bambu PLA Silk Blue",
+            "material": "PLA",
+            "colour": "#00629B",
+            "prints": 1,
+            "grams": 12.5,
+            "last_used_at": "2026-10-02T12:00:00Z",
+        }
+    ]
+    # Position 3's hotend has no filament loaded: 00000000 is no colour, not black.
+    assert hotends[3]["filament_id"] is None
+    assert hotends[3]["filament_colour"] is None
+    assert {hotends[position]["prints"] for position in hotends if position != 2} == {0}
+    assert all(hotend["spools"] == [] for p, hotend in hotends.items() if p != 2)
+    assert list(hotends) == sorted(hotends)
+
+
+@respx.mock
+def test_a_printer_with_no_rack_lists_no_hotends(client: TestClient) -> None:
+    """#2102: a printer whose status has an empty rack answers 200 and no hotends."""
+    configure(client)
+    rackless = invented_status()
+    rackless["nozzle_rack"] = []
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(200, json=rackless))
+
+    response = client.get("/api/v1/print/printers/1/rack-usage")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"printer_id": 1, "hotends": []}
+
+
+class UnreadableUsage(BrokenUsage):
+    async def usage(self, serials: Iterable[str]) -> dict[str, Usage]:
+        raise psycopg.OperationalError("the database went away")
+
+
+@respx.mock
+def test_the_rack_usage_is_503_when_the_database_cannot_be_read(client: TestClient) -> None:
+    client.app.dependency_overrides[getter_for(RACK_USAGE)] = UnreadableUsage  # type: ignore[attr-defined]
+    configure(client)
+    invented_rack_route()
+
+    response = client.get("/api/v1/print/printers/1/rack-usage")
+
+    assert response.status_code == 503, response.text
+    assert response.json()["type"] == DATABASE_UNAVAILABLE_PROBLEM
+    for invented in INVENTED_SERIALS:
+        assert invented not in response.text

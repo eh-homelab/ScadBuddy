@@ -6,7 +6,7 @@ plate image, which the render tests already cover -- so these pin when a preview
 made, kept, replaced and dropped, and that it never touches the model's history.
 
 The app runs on Postgres (`requires_postgres`), where the previews are rows in
-``model_previews`` (#454); without a database there are none.
+``model_previews`` (#454).
 """
 
 from __future__ import annotations

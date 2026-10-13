@@ -15,9 +15,12 @@ import {
   type ServerEvent,
 } from '../sessions/protocol.js'
 import { scrubForLog } from '../sessions/sdkEvents.js'
+import { approvalEntry, inputRequested, inputResolved } from '../gate/classic.js'
+import { isNotDoneSummary } from '../questions/waiting.js'
 import { type AuditOutcome, type AuditSink, type AuditSurface, SYSTEM_ACTOR } from '../audit/log.js'
 import { context as otelContext, type Span, SpanKind } from '@opentelemetry/api'
 import { contextFrom, linkTo, recordFailure, traceparentOf, tracer } from '../telemetry/trace.js'
+import { type SessionFiles, type WorkspaceRef, withWorkspaceSize } from '../workspace/store.js'
 
 // Approvals of outward tool calls (#258, spec §8.2: "Outward tools always need
 // a human approval in the ScadBuddy UI, in every auth mode"). Stored in
@@ -221,6 +224,8 @@ export type ApprovalServiceDeps = {
    * and void is recorded as an `approval` row.
    */
   audit?: AuditSink
+  /** The workspace (#2329): a workspace upload's size is read from it for the card (`withWorkspaceSize`). */
+  workspace?: SessionFiles
 }
 
 /** The input-hash key, derived from the key-encryption key (HKDF-SHA256, its own label). */
@@ -419,6 +424,8 @@ export type CreateApproval = {
   secrets?: readonly string[]
   /** The parked tool span's traceparent (ParkTrace.traceparent). */
   traceparent?: string
+  /** The workspace the call runs in (workspaceOf), for an upload's size; a session's own when omitted. */
+  workspace?: WorkspaceRef
 }
 
 export type DecideOptions = {
@@ -537,6 +544,31 @@ export class ApprovalService {
     }
   }
 
+  /** Whether a non-browser principal holds the per-token approval grant (spec §6). */
+  async holdsGrant(principal: Owner): Promise<boolean> {
+    return this.hasGrant(principal)
+  }
+
+  /**
+   * Every pending approval `principal` may see, oldest first: all of them for the
+   * browser user and grant holders; for anyone else, those of sessions it owns or
+   * started and its own session-less ones (MCP prepares).
+   */
+  async listVisiblePending(principal: Owner): Promise<ApprovalRecord[]> {
+    if (principal.kind === 'browser' || (await this.hasGrant(principal))) return this.list(principal, { pending: true })
+    await this.expireDue()
+    const rows = await this.deps.sql.unsafe<Row[]>(
+      `SELECT ${COLUMNS} FROM ai_approvals a
+       WHERE a.decision IS NULL AND (
+         (a.session_id IS NULL AND a.requested_by_kind = $1 AND a.requested_by_id = $2)
+         OR EXISTS (SELECT 1 FROM ai_sessions s WHERE s.id = a.session_id
+                    AND ((s.owner_kind = $1 AND s.owner_id = $2) OR (s.creator_kind = $1 AND s.creator_id = $2))))
+       ORDER BY a.created_at, a.id LIMIT 500`,
+      [principal.kind, principal.id],
+    )
+    return rows.map(record)
+  }
+
   private async hasGrant(principal: Owner): Promise<boolean> {
     return principal.kind !== 'browser' && this.deps.grants !== undefined && (await this.deps.grants(principal))
   }
@@ -643,10 +675,17 @@ export class ApprovalService {
     return row
   }
 
+  /** The row's and the card's summary of the call: its input with a workspace upload's size (never hashed). */
+  private async summary(request: Omit<CreateApproval, 'sessionId' | 'turnId'> & { sessionId?: string | null }): Promise<string> {
+    const ws = request.workspace ?? (request.sessionId ? { kind: 'session' as const, sessionId: request.sessionId } : undefined)
+    const shown = await withWorkspaceSize(this.deps.workspace, ws, request.input)
+    return summariseInput(request.tool, shown, request.secrets ?? [])
+  }
+
   /** Records a pending approval (and, in a session, emits `approval.required`). */
   async create(request: CreateApproval): Promise<ApprovalRecord> {
     const secrets = request.secrets ?? []
-    const summary = summariseInput(request.tool, request.input, secrets)
+    const summary = await this.summary(request)
     // The row and its `approval.required` commit together: a decision can only
     // see the row once it has committed, so its `approval.resolved` cannot be
     // logged before the event that asked for it.
@@ -665,6 +704,7 @@ export class ApprovalService {
           summary: cap(`${request.tool} ${summary}`, APPROVAL_SUMMARY_MAX),
           risk: 'outward',
         }),
+        inputRequested(created.sessionId, approvalEntry(created)),
       ]
       // Only the parked turn itself moves the session to waiting_approval.
       if (request.turnId !== null) {
@@ -734,7 +774,10 @@ export class ApprovalService {
             ...(by && (decision === 'approved' || decision === 'denied') ? { by } : {}),
             ...(reason && (decision === 'expired' || decision === 'cancelled') ? { reason } : {}),
           })
-          const events = [scrubForLog(resolved, [])]
+          const events = [
+            scrubForLog(resolved, []),
+            inputResolved(settled.sessionId, `approval:${id}`, 'approval', decision, decision === 'expired' || decision === 'cancelled' ? reason : null),
+          ]
           logged = { sessionId: settled.sessionId, events, seqs: await this.deps.events.append(settled.sessionId, events, tx) }
         }
         return settled
@@ -798,7 +841,7 @@ export class ApprovalService {
       UPDATE ai_sessions
       SET status = CASE
             WHEN EXISTS (SELECT 1 FROM ai_questions WHERE session_id = ${sessionId} AND outcome IS NULL
-                         AND (attention_reason IS DISTINCT FROM 'done' OR expires_at IS NOT NULL))
+                         AND ${isNotDoneSummary(this.deps.sql)})
               THEN 'waiting_input'
             WHEN turn_id IS NOT NULL AND lease_until > now() THEN 'running'
             ELSE 'idle'
@@ -1059,7 +1102,7 @@ export class ApprovalService {
     request: Omit<CreateApproval, 'sessionId' | 'turnId'>,
     bounds: { perPrincipal: number; total: number; evictReason: string },
   ): Promise<ApprovalRecord | undefined> {
-    const summary = summariseInput(request.tool, request.input, request.secrets ?? [])
+    const summary = await this.summary(request)
     const by = request.requestedBy
     // An eviction is a system cancellation: each evicted row gets its root
     // `agent.approval` span and `decision_traceparent` in this transaction, as

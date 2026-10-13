@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useMemo,
   useRef,
   useState,
   type ClipboardEvent,
@@ -13,25 +14,34 @@ import { useLocation } from 'react-router'
 import { bridge } from '../../agent/bridge'
 import {
   IMAGE_ACCEPT,
-  IMAGES_DATA_TOTAL_MAX,
+  IMAGES_BYTES_TOTAL_MAX,
   IMAGES_MAX,
   composerImages,
-  dataUrl,
   prepareImage,
+  type PreparedImage,
 } from '../../agent/chat/images'
 import { statusLabel } from '../../agent/chat/labels'
 import { pageContext, suggestedPrompts } from '../../agent/chat/pageContext'
-import { isDone, type UserImage } from '../../agent/chat/protocol'
-import { askedBy, isBusy, isOwnedByBrowser, type SessionState } from '../../agent/chat/state'
+import { isDone, type SessionMode } from '../../agent/chat/protocol'
+import { askedBy, isBusy, isOwnedByBrowser, type SessionPatch, type SessionState } from '../../agent/chat/state'
+import { feedBlocks, toolStatus } from '../../agent/chat/toolGroups'
 import type { ChatTransportFactory } from '../../agent/chat/transport'
 import { useAgentChat } from '../../agent/chat/useAgentChat'
 import { useSpeakReplies } from '../../agent/chat/voice'
 import { api, ApiError } from '../../api/client'
+import type { AiSessionEdit, AiSessionView } from '../../api/types'
 import { useAsync } from '../../lib/useAsync'
 import { Button } from '../ui/Button'
-import { OriginBadge, OwnerBadge } from './badges'
+import { DurableBadge, OriginBadge } from './badges'
+import { SessionModePicker } from './SessionModePicker'
 import { FeedItemView } from './FeedItemView'
+import { ToolGroup } from './ToolGroup'
 import { BudgetMeter, BudgetSpent, usd } from './SessionBudget'
+import { ArchivedSessions } from './ArchivedSessions'
+import { SessionSwitcher } from './SessionSwitcher'
+import { useSkillMenu } from './SkillMenu'
+import { SessionFiles } from './SessionFiles'
+import { SessionFlowRuns } from './SessionFlowRuns'
 import { SessionTouched } from './SessionTouched'
 import { useDictation, useSpokenReplies } from './useVoice'
 import { MicButton, SpeakRepliesToggle, VoiceDisclosure } from './VoiceControls'
@@ -47,6 +57,23 @@ function formatCost(amount: number): string {
 /** What a failed agent call says, for the budget card. */
 function reason(caught: unknown): Error {
   return new Error(caught instanceof ApiError ? caught.detail : 'The assistant service did not answer; try again.')
+}
+
+/** #792 — a session route's answer, as the panel's state keeps it. */
+function patchOf(view: AiSessionView): SessionPatch {
+  return {
+    id: view.id,
+    title: view.title,
+    status: view.status,
+    origin: view.origin,
+    parentId: view.parent_id,
+    updatedAt: view.updated_at,
+    costUsd: view.cost_usd,
+    budgetUsd: view.budget_usd,
+    ...(view.mode ? { mode: view.mode } : {}),
+    ...(view.archived === undefined ? {} : { archived: view.archived }),
+    ...(view.offer === undefined ? {} : { offer: view.offer }),
+  }
 }
 
 interface Props {
@@ -65,11 +92,30 @@ export interface OpenRequest {
   sessionId: string
 }
 
-/** #1866 — an image waiting in the composer to go with the next message. */
+/**
+ * #1866 — an image waiting in the composer to go with the next message: uploaded when it
+ * was attached (#1941), so the message sends `id`; `image` is kept for the caps and the
+ * thumbnail.
+ */
 interface Attached {
   key: number
   name: string
-  image: UserImage
+  image: PreparedImage
+  id: string
+}
+
+/**
+ * #2479 — an attached image's thumbnail, drawn from its preview blob by a blob URL (the
+ * page's CSP allows `blob:` images, inside Bambuddy's frame too), revoked when it goes.
+ */
+function AttachedThumb({ blob, alt }: { blob: Blob; alt: string }) {
+  const [url, setUrl] = useState<string>()
+  useEffect(() => {
+    const made = URL.createObjectURL(blob)
+    setUrl(made)
+    return () => URL.revokeObjectURL(made)
+  }, [blob])
+  return url ? <img src={url} alt={alt} className="h-14 w-14 rounded-[4px] border border-line object-cover" /> : null
 }
 
 /** The assistant panel's body: sessions, the stream and action feed, and the composer. */
@@ -88,20 +134,43 @@ function readAdvanced(): boolean {
   }
 }
 
+/** Plan 5d — the composer's last picked session mode, remembered per browser (spec §6.1). */
+export const SESSION_MODE_KEY = 'scadbuddy.assistant.mode'
+
+function readSessionMode(): SessionMode | '' {
+  try {
+    const stored = window.localStorage.getItem(SESSION_MODE_KEY)
+    return stored === 'classic' || stored === 'durable' ? stored : ''
+  } catch {
+    return ''
+  }
+}
+
 export function AssistantChat({ factory, onClose, focusKey, embedded = false, openRequest, onOpenHandled }: Props) {
   const chat = useAgentChat(factory)
   const { state } = chat
   const { pathname } = useLocation()
   const [draft, setDraft] = useState('')
   const [pickerOpen, setPickerOpen] = useState(false)
+  // #1885 — the picker lists the chats, or the archived ones.
+  const [pickerView, setPickerView] = useState<'chats' | 'archived'>('chats')
   const pageModel = pageContext(pathname).modelSlug ?? null
-  // The model the filter was turned on for: on another model's page it is off.
+  // The model the filter was turned on for. Every page starts unfiltered, a page left and
+  // come back to included (#1340).
   const [filteredModel, setFilteredModel] = useState<string | null>(null)
+  const [filterPage, setFilterPage] = useState(pageModel)
+  if (filterPage !== pageModel) {
+    setFilterPage(pageModel)
+    setFilteredModel(null)
+  }
   const filterBy = pageModel !== null && filteredModel === pageModel ? pageModel : null
-  // Read again each time the picker opens or the filter is turned on, so it is current.
+  const filtering = filterBy !== null && pickerOpen
+  // Read again each time the picker opens or the filter is turned on, and while it is open,
+  // on the model's changes and on every tool result the panel sees, so a session that
+  // changes the model meanwhile is listed (#1340).
   const touching = useAsync(
     async () =>
-      filterBy && pickerOpen
+      filtering
         ? new Set(
             (await api.listAiResourceSessions({ type: 'model', id: filterBy }, PICKER_FILTER_LIMIT)).sessions.map(
               (s) => s.id,
@@ -109,9 +178,26 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
           )
         : null,
     [filterBy, pickerOpen],
+    filtering ? [`model:${filterBy}`] : [],
   )
+  const toolResults = useMemo(
+    () =>
+      Object.values(state.sessions).reduce(
+        (count, s) => count + (s?.items.filter((item) => item.kind === 'tool' && item.result).length ?? 0),
+        0,
+      ),
+    [state.sessions],
+  )
+  const refreshTouching = touching.refresh
+  useEffect(() => {
+    if (filtering) refreshTouching()
+    // Only a new tool result re-reads; opening the picker or the filter reads through `touching`'s deps.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [toolResults])
   // #931 — the active session's "Touched" panel.
   const [touchedOpen, setTouchedOpen] = useState(false)
+  // #2329 — the active session's Files (its workspace).
+  const [filesOpen, setFilesOpen] = useState(false)
   const [advanced, setAdvanced] = useState(readAdvanced)
   function toggleAdvanced() {
     setAdvanced((was) => {
@@ -124,17 +210,35 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
       return next
     })
   }
+  // Plan 5d — the mode a new chat asks for; '' sends none, so the agent's default applies.
+  const [sessionMode, setSessionMode] = useState<SessionMode | ''>(readSessionMode)
+  function pickSessionMode(next: SessionMode | '') {
+    setSessionMode(next)
+    try {
+      if (next) window.localStorage.setItem(SESSION_MODE_KEY, next)
+      else window.localStorage.removeItem(SESSION_MODE_KEY)
+    } catch {
+      // Private mode or blocked storage: the choice still holds for this page.
+    }
+  }
   const composer = useRef<HTMLTextAreaElement>(null)
   const heading = useRef<HTMLHeadingElement>(null)
   const takeOverButton = useRef<HTMLButtonElement>(null)
   const feedEnd = useRef<HTMLDivElement>(null)
   const pickerId = useId()
   const touchedId = useId()
+  const filesId = useId()
   const voiceNoteId = useId()
+  const archivedNoteId = useId()
+  /** #1885 — a refused Unarchive, shown for that chat only. */
+  const [archiveError, setArchiveError] = useState<{ id: string; message: string } | null>(null)
 
   const active: SessionState | undefined = state.activeId ? state.sessions[state.activeId] : undefined
   const busy = isBusy(active) || state.awaitingStart
   const owned = !active || isOwnedByBrowser(active)
+  // #1885 — an archived chat is read-only: the composer is locked until it is unarchived.
+  const archived = active?.archived === true
+  const canSend = owned && !archived
   const streaming = active?.items.some((i) => i.kind === 'assistant' && !i.done) ?? false
   const pendingApproval = active?.items.some((i) => i.kind === 'approval' && i.state === 'pending') ?? false
   const pendingQuestion = active?.items.some((i) => i.kind === 'question' && i.state === 'pending' && !i.attention) ?? false
@@ -164,10 +268,14 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   }, [])
   const [preparing, setPreparing] = useState(0)
   const preparingNow = useRef(0)
+  /** #2119 — bytes of images still uploading, which count against the total like attached ones. */
+  const uploadingBytes = useRef(0)
   const nextKey = useRef(0)
   const [imageErrors, setImageErrors] = useState<string[]>([])
   const [dropping, setDropping] = useState(false)
   const filePicker = useRef<HTMLInputElement>(null)
+  // The long edge images are scaled to, from Settings; the default until it answers, or if it cannot.
+  const imageEdge = useAsync(() => api.getImageSettings(), []).data?.long_edge
   const addImages = async (files: File[]) => {
     if (files.length === 0) return
     const room = Math.max(0, IMAGES_MAX - attachedNow.current.length - preparingNow.current)
@@ -177,26 +285,45 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
       .map((file) => `At most ${IMAGES_MAX} images per message: ${file.name} was not added.`)
     preparingNow.current += taken.length
     setPreparing(preparingNow.current)
-    const results = await Promise.allSettled(taken.map((file) => prepareImage(file)))
-    preparingNow.current -= taken.length
-    setPreparing(preparingNow.current)
-    const added: Attached[] = []
-    let total = attachedNow.current.reduce((sum, a) => sum + a.image.data.length, 0)
+    const results = await Promise.allSettled(taken.map((file) => prepareImage(file, undefined, imageEdge)))
+    const ready: { name: string; image: PreparedImage }[] = []
+    let total = attachedNow.current.reduce((sum, a) => sum + a.image.blob.size, uploadingBytes.current)
     results.forEach((result, index) => {
       const name = taken[index]?.name ?? 'image'
       if (result.status === 'rejected') {
         errors.push(result.reason instanceof Error ? result.reason.message : `${name} could not be added.`)
-      } else if (total + result.value.data.length > IMAGES_DATA_TOTAL_MAX) {
+      } else if (total + result.value.blob.size > IMAGES_BYTES_TOTAL_MAX) {
         errors.push(`${name} was not added: this message's images would be too large together.`)
       } else {
-        total += result.value.data.length
-        added.push({ key: nextKey.current++, name, image: result.value })
+        total += result.value.blob.size
+        ready.push({ name, image: result.value })
+      }
+    })
+    // #2119 — held until the uploads settle, so an attach started meanwhile counts them.
+    const reserved = ready.reduce((sum, { image }) => sum + image.blob.size, 0)
+    uploadingBytes.current += reserved
+    // #1941 — each image goes to the agent now, and the message sends its id.
+    const uploads = await Promise.allSettled(ready.map(({ image }) => api.uploadAttachment(image)))
+    uploadingBytes.current -= reserved
+    preparingNow.current -= taken.length
+    setPreparing(preparingNow.current)
+    const added: Attached[] = []
+    uploads.forEach((upload, index) => {
+      const { name, image } = ready[index]!
+      if (upload.status === 'rejected') {
+        const why = upload.reason instanceof ApiError ? upload.reason.detail : 'the assistant service did not answer'
+        errors.push(`${name} could not be uploaded: ${why}`)
+      } else {
+        added.push({ key: nextKey.current++, name, image, id: upload.value.id })
       }
     })
     writeAttached([...attachedNow.current, ...added])
     setImageErrors(errors)
   }
   const removeImage = (key: number) => {
+    const removed = attachedNow.current.find((a) => a.key === key)
+    // Best effort: an upload left behind expires on its own.
+    if (removed) api.deleteAttachment(removed.id).catch(() => {})
     writeAttached(attachedNow.current.filter((a) => a.key !== key))
     setImageErrors([])
     composer.current?.focus()
@@ -212,19 +339,20 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   }
   const carriesFiles = (event: DragEvent) => Array.from(event.dataTransfer.types ?? []).includes('Files')
   const onComposerDragOver = (event: DragEvent<HTMLFormElement>) => {
-    if (!owned || !carriesFiles(event)) return
+    if (!canSend || !carriesFiles(event)) return
     event.preventDefault()
     setDropping(true)
   }
   const onComposerDrop = (event: DragEvent<HTMLFormElement>) => {
     setDropping(false)
-    if (!owned) return
+    if (!canSend) return
     const files = composerImages(event.dataTransfer)
     if (files.length === 0) return
     event.preventDefault()
     void addImages(files)
   }
   const focusComposer = useCallback(() => composer.current?.focus(), [])
+  const skillMenu = useSkillMenu({ draft, writeDraft, focus: focusComposer, enabled: canSend })
   const speakReplies = useSpeakReplies()
   const speech = useSpokenReplies(state.activeId, active?.items, speakReplies)
   const dictation = useDictation({
@@ -258,6 +386,14 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
       composer.current?.focus()
     }
   }, [owned])
+  // #1885 — the same once an Unarchive lands.
+  const unarchiving = useRef(false)
+  useEffect(() => {
+    if (canSend && unarchiving.current) {
+      unarchiving.current = false
+      composer.current?.focus()
+    }
+  }, [canSend])
 
   // Before the socket is open this only sets what is on screen; the connection attaches it.
   const { select } = chat
@@ -279,12 +415,17 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   }, [itemCount, lastText])
 
   const submit = (text: string) => {
-    if (!text.trim() || busy || !owned || preparingNow.current > 0) return
+    if (!text.trim() || busy || !canSend || preparingNow.current > 0) return
     dictation.cancel()
     speech.arm()
     const { tools, dialogs, page } = bridge.snapshot()
-    const images = attachedNow.current.map((a) => a.image)
-    chat.send(text, pageContext(pathname, { tools, dialogs, page }), images.length ? images : undefined)
+    const images = attachedNow.current.map((a) => ({ kind: 'attachment' as const, id: a.id }))
+    chat.send(
+      text,
+      pageContext(pathname, { tools, dialogs, page }),
+      images.length ? images : undefined,
+      sessionMode || undefined,
+    )
     writeDraft('')
     writeAttached([])
     setImageErrors([])
@@ -296,6 +437,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   }
 
   const onComposerKey = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (skillMenu.onKeyDown(event)) return
     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault()
       submit(draft)
@@ -305,16 +447,48 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
   const startNewChat = () => {
     chat.select(null)
     setPickerOpen(false)
+    setPickerView('chats')
     composer.current?.focus()
   }
 
-  // #790 — a chat that used its budget. Forking copies the transcript into a new
+  // #790, #794 — a fork copies the transcript (with `upTo`, through that reply) into a new
   // session with a fresh budget; the panel then shows that one (attach replays it).
+  // `draft` is the message a user-message fork puts back in the composer, to edit and send.
+  const openFork = async (id: string, options: { upTo?: string; draft?: string } = {}) => {
+    const { session } = await api.forkAiSession(id, options.upTo === undefined ? {} : { upTo: options.upTo })
+    chat.patch(patchOf(session))
+    chat.select(session.id)
+    // #2161: the message comes back to edit only into an empty composer; a draft the
+    // user is writing is theirs, and the fork must not throw it away.
+    if (options.draft !== undefined && draftNow.current.trim() === '') writeDraft(options.draft)
+    setPickerOpen(false)
+    focusSession()
+  }
   const continueInNewChat = async (id: string) => {
     try {
-      const { session } = await api.forkAiSession(id)
-      chat.select(session.id)
-      composer.current?.focus()
+      await openFork(id)
+    } catch (caught) {
+      throw reason(caught)
+    }
+  }
+  // #2161: kept with the session that failed to fork, so it is not shown on another.
+  const [forkError, setForkError] = useState<{ session: string; message: string } | null>(null)
+  const fork = (id: string, options: { upTo?: string; draft?: string } = {}) => {
+    setForkError(null)
+    openFork(id, options).catch((caught: unknown) => setForkError({ session: id, message: reason(caught).message }))
+  }
+  // #795 — rename and done answer with the session, shown at once; a refusal is the row's to show.
+  const updateSession = async (id: string, edit: AiSessionEdit) => {
+    try {
+      chat.patch(patchOf((await api.updateAiSession(id, edit)).session))
+    } catch (caught) {
+      throw reason(caught)
+    }
+  }
+  // #1284 — the answer carries the session as it now is, offer gone, ahead of the next list.
+  const cancelOffer = async (id: string) => {
+    try {
+      chat.patch(patchOf((await api.cancelAiSessionOffer(id)).session))
     } catch (caught) {
       throw reason(caught)
     }
@@ -328,8 +502,25 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
     }
   }
 
+  // #794 — what "Fork from here" forks up to: a finished reply itself; a user message,
+  // the last finished reply before it (none before the first message).
+  const forkPoints = new Map<string, { upTo: string; draft?: string }>()
+  let lastReply: string | undefined
+  for (const item of active?.items ?? []) {
+    if (item.kind === 'assistant' && item.done) {
+      lastReply = item.id
+      forkPoints.set(`assistant:${item.id}`, { upTo: item.id })
+    } else if (item.kind === 'user' && lastReply) {
+      forkPoints.set(`user:${item.id}`, { upTo: lastReply, draft: item.text })
+    }
+  }
+  const hasReply = lastReply !== undefined
+  const durable = active?.mode === 'durable'
+  const parent = active?.parentId ? state.sessions[active.parentId] : undefined
+
   const prompts = suggestedPrompts(pathname)
-  const sessions = state.order.map((id) => state.sessions[id]).filter((s): s is SessionState => !!s)
+  // #1885 — an archived chat is listed only in the Archived view, the open one included.
+  const sessions = state.order.map((id) => state.sessions[id]).filter((s): s is SessionState => !!s && !s.archived)
   // #931 — on a model's page, the picker can show only the sessions that changed that model.
   const touchingIds = filterBy ? touching.data : null
   const listed = touchingIds ? sessions.filter((s) => touchingIds.has(s.id)) : sessions
@@ -374,79 +565,97 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
 
       {pickerOpen && (
         <nav id={pickerId} aria-label="Sessions" className="shrink-0 border-b border-line bg-surface-2">
-          {pageModel && (
-            <label className="flex items-center gap-1.5 px-3 pt-2 text-[12px] text-muted">
-              <input
-                type="checkbox"
-                checked={filterBy !== null}
-                onChange={(event) => setFilteredModel(event.target.checked ? pageModel : null)}
-              />
-              Only sessions that changed {pageModel}
-            </label>
-          )}
-          {filterError ? (
-            <p role="alert" className="px-3 pt-1 text-[12px] text-warn">
-              {filterError instanceof ApiError ? filterError.detail : 'The assistant service did not answer.'} Showing
-              every session, unfiltered.
-            </p>
-          ) : null}
-          {touchingIds && touchingIds.size >= PICKER_FILTER_LIMIT ? (
-            <p className="px-3 pt-1 text-[11px] text-faint">
-              Checked against the {PICKER_FILTER_LIMIT} most recently updated sessions that changed {filterBy}.
-            </p>
-          ) : null}
-          {sessions.length === 0 ? (
-            <p className="px-3 py-2 text-[12.5px] text-muted">No sessions yet.</p>
-          ) : filterLoading ? (
-            <p role="status" className="px-3 py-2 text-[12.5px] text-muted">
-              Finding the sessions that changed {filterBy}…
-            </p>
-          ) : touchingIds && listed.length === 0 ? (
-            <p className="px-3 py-2 text-[12.5px] text-muted">
-              {touchingIds.size === 0
-                ? `No session changed ${filterBy}.`
-                : // The ones that did are older than the sessions this panel has loaded.
-                  `None of the loaded sessions changed ${filterBy}.`}
-            </p>
+          <div role="group" aria-label="Which chats" className="flex items-center gap-1 px-3 pt-2">
+            {(['chats', 'archived'] as const).map((view) => (
+              <Button
+                key={view}
+                variant="ghost"
+                size="sm"
+                aria-pressed={pickerView === view}
+                onClick={() => setPickerView(view)}
+              >
+                {view === 'chats' ? 'Chats' : 'Archived'}
+              </Button>
+            ))}
+          </div>
+          {pickerView === 'archived' ? (
+            <ArchivedSessions
+              onOpen={(session) => {
+                chat.patch(patchOf(session))
+                chat.select(session.id)
+                setPickerOpen(false)
+                focusSession()
+              }}
+              onUnarchive={(session) => updateSession(session.id, { archived: false })}
+              unarchived={(id) => state.sessions[id]?.archived === false}
+            />
           ) : (
-            <ul className="max-h-56 overflow-y-auto py-1">
-              {listed.map((s) => (
-                <li key={s.id}>
-                  <button
-                    type="button"
-                    aria-current={s.id === state.activeId ? 'true' : undefined}
-                    onClick={() => {
-                      chat.select(s.id)
-                      setPickerOpen(false)
-                      focusSession()
-                    }}
-                    className={`flex w-full flex-col gap-1 border-l-2 px-3 py-1.5 text-left hover:bg-surface-3 ${
-                      s.id === state.activeId ? 'border-accent bg-surface-3' : 'border-transparent'
-                    }`}
-                  >
-                    <span className="truncate text-[12.5px]">{s.title}</span>
-                    <span className="flex items-center gap-1.5">
-                      {s.id === state.activeId && (
-                        <span className="rounded-[4px] bg-accent/15 px-1 text-[10.5px] font-medium text-accent">Open</span>
-                      )}
-                      <OriginBadge origin={s.origin} />
-                      <OwnerBadge owner={s.owner} />
-                      <span className="text-[11px] text-faint">{statusLabel(s.status)}</span>
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ul>
+            <>
+              {pageModel && (
+                <label className="flex items-center gap-1.5 px-3 pt-2 text-[12px] text-muted">
+                  <input
+                    type="checkbox"
+                    checked={filterBy !== null}
+                    onChange={(event) => setFilteredModel(event.target.checked ? pageModel : null)}
+                  />
+                  Only sessions that changed {pageModel}
+                </label>
+              )}
+              {filterError ? (
+                <p role="alert" className="px-3 pt-1 text-[12px] text-warn">
+                  {filterError instanceof ApiError ? filterError.detail : 'The assistant service did not answer.'} Showing
+                  every session, unfiltered.
+                </p>
+              ) : null}
+              {touchingIds && touchingIds.size >= PICKER_FILTER_LIMIT ? (
+                <p className="px-3 pt-1 text-[11px] text-faint">
+                  Checked against the {PICKER_FILTER_LIMIT} most recently updated sessions that changed {filterBy}.
+                </p>
+              ) : null}
+              {sessions.length === 0 ? (
+                <p className="px-3 py-2 text-[12.5px] text-muted">No sessions yet.</p>
+              ) : filterLoading ? (
+                <p role="status" className="px-3 py-2 text-[12.5px] text-muted">
+                  Finding the sessions that changed {filterBy}…
+                </p>
+              ) : touchingIds && listed.length === 0 ? (
+                <p className="px-3 py-2 text-[12.5px] text-muted">
+                  {touchingIds.size === 0
+                    ? `No session changed ${filterBy}.`
+                    : // The ones that did are older than the sessions this panel has loaded.
+                      `None of the loaded sessions changed ${filterBy}.`}
+                </p>
+              ) : (
+                <SessionSwitcher
+                  sessions={listed}
+                  activeId={state.activeId}
+                  onOpen={(id) => {
+                    chat.select(id)
+                    setPickerOpen(false)
+                    focusSession()
+                  }}
+                  onRename={(id, title) => updateSession(id, { title })}
+                  onDone={(id) => updateSession(id, { done: true })}
+                  onArchive={(id) => updateSession(id, { archived: true })}
+                  onCancelOffer={cancelOffer}
+                />
+              )}
+            </>
           )}
         </nav>
       )}
 
       {active && (
-        <div className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-line px-3 py-1.5 text-[12px]">
-          <span className="min-w-0 flex-1 truncate font-medium" title={active.title}>
+        <div
+          className="flex shrink-0 flex-wrap items-center gap-1.5 border-b border-line px-3 py-1.5 text-[12px]"
+          data-testid="active-session-header"
+        >
+          <span className="min-w-0 flex-1 truncate font-medium" title={active.title} data-testid="active-session-title">
             {active.title}
           </span>
           <OriginBadge origin={active.origin} />
+          {durable && <DurableBadge />}
+          {archived && <span className="rounded-[4px] bg-surface-3 px-1 text-[10.5px] text-muted">Archived</span>}
           <span className="text-faint" data-testid="agent-status">
             {statusLabel(active.status)}
           </span>
@@ -466,6 +675,22 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
           <Button
             variant="ghost"
             size="sm"
+            disabled={!hasReply || durable}
+            title={
+              durable
+                ? 'A durable session cannot be forked: its conversation is held by its workflow'
+                : hasReply
+                  ? 'Copy this chat into a new one and continue there; this one stays as it is'
+                  : 'No reply to fork yet: wait for the assistant to answer'
+            }
+            data-agent-user-only=""
+            onClick={() => fork(active.id)}
+          >
+            Fork
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
             aria-expanded={touchedOpen}
             aria-controls={touchedOpen ? touchedId : undefined}
             title="What this session's tool calls created, changed or deleted"
@@ -473,7 +698,42 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
           >
             Touched
           </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            aria-expanded={filesOpen}
+            aria-controls={filesOpen ? filesId : undefined}
+            title="The files in this session's workspace: download them, or upload one for the assistant"
+            onClick={() => setFilesOpen((o) => !o)}
+          >
+            Files
+          </Button>
           <BudgetMeter session={active} />
+          {active.parentId && (
+            <div className="flex w-full items-center gap-1 text-[11.5px] text-muted">
+              <button
+                type="button"
+                className="truncate underline decoration-dotted underline-offset-2 hover:text-ink"
+                onClick={() => {
+                  chat.select(active.parentId!)
+                  focusSession()
+                }}
+              >
+                Forked from {parent?.title ?? 'an earlier chat'}
+              </button>
+            </div>
+          )}
+          {forkError?.session === active.id && (
+            <p role="alert" className="w-full text-warn">
+              The chat was not forked: {forkError.message}
+            </p>
+          )}
+          {active.modeFallback && (
+            // Plan 5d — the default asked for durable, and it could not run.
+            <p className="w-full text-[11.5px] text-muted" data-testid="session-mode-fallback">
+              Running as Classic, since durable sessions cannot start now: {active.modeFallback}
+            </p>
+          )}
           {!owned && (
             <div className="flex w-full items-center gap-2">
               <span className="text-muted">Controlled by {active.owner.label}</span>
@@ -509,6 +769,24 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
         </section>
       )}
 
+      {active && filesOpen && (
+        <section id={filesId} aria-label="This session's files" className="shrink-0 border-b border-line bg-surface-2">
+          {/* Read again when a tool call finishes or a file is uploaded or deleted. */}
+          <SessionFiles
+            key={active.id}
+            sessionId={active.id}
+            refreshKey={`${active.status}:${finishedTools}:${active.workspaceChanges ?? 0}`}
+            canWrite={canSend}
+            onInsert={(text) => {
+              const now = draftNow.current
+              writeDraft(now && !/\s$/.test(now) ? `${now} ${text}` : `${now}${text}`)
+            }}
+          />
+        </section>
+      )}
+
+      {active && <SessionFlowRuns key={active.id} sessionId={active.id} />}
+
       <div
         role="log"
         aria-label="Conversation"
@@ -521,23 +799,42 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
             {state.notice}
           </p>
         )}
-        {active?.items.map((item) => (
-          <FeedItemView
-            key={`${item.kind}-${item.id}`}
-            item={item}
-            advanced={advanced}
-            askedBy={item.kind === 'question' ? askedBy(active.items, item) : undefined}
-            onDecide={(approvalId, approve) => chat.decide(active.id, approvalId, approve)}
-            onAnswer={(questionId, answers) => chat.answer(active.id, questionId, answers)}
-          />
-        ))}
+        {active &&
+          feedBlocks(active.items).map((block) =>
+            block.kind === 'tools' ? (
+              // #782 — consecutive calls as one group; every other item keeps its own card.
+              <ToolGroup
+                key={`tools-${block.id}`}
+                calls={block.calls}
+                statuses={block.calls.map((call) => toolStatus(call, active.items, { settled: !busy }))}
+                sessionId={active.id}
+                advanced={advanced}
+              />
+            ) : (
+              <FeedItemView
+                key={`${block.item.kind}-${block.item.id}`}
+                item={block.item}
+                advanced={advanced}
+                sessionId={active.id}
+                askedBy={block.item.kind === 'question' ? askedBy(active.items, block.item) : undefined}
+                onForkHere={
+                  // A durable session refuses a fork (Ruling 7b), from any point.
+                  !durable && forkPoints.has(`${block.item.kind}:${block.item.id}`)
+                    ? () => fork(active.id, forkPoints.get(`${block.item.kind}:${block.item.id}`) ?? {})
+                    : undefined
+                }
+                onDecide={(approvalId, approve) => chat.decide(active.id, approvalId, approve)}
+                onAnswer={(questionId, answers) => chat.answer(active.id, questionId, answers)}
+              />
+            ),
+          )}
         {itemCount === 0 && !busy && advanced && (
           // #1488 — an empty chat has no feed for Advanced to change, so say what it will do.
           <p className="text-[12px] text-muted">
             Advanced: tool arguments, sources and memory details will be shown.
           </p>
         )}
-        {itemCount === 0 && !busy && prompts.length > 0 && owned && (
+        {itemCount === 0 && !busy && prompts.length > 0 && canSend && (
           <div>
             <p className="mb-2 text-[12px] text-muted">Try asking</p>
             <ul className="flex flex-col items-start gap-1.5">
@@ -588,7 +885,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
         onDragLeave={() => setDropping(false)}
         onDrop={onComposerDrop}
         data-agent-user-only=""
-        className={`shrink-0 border-t p-2.5 ${dropping ? 'border-accent bg-accent/5' : 'border-line'}`}
+        className={`relative shrink-0 border-t p-2.5 ${dropping ? 'border-accent bg-accent/5' : 'border-line'}`}
       >
         <label htmlFor="assistant-composer" className="sr-only">
           Message the assistant
@@ -597,11 +894,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
           <ul aria-label="Images to send" className="mb-1.5 flex flex-wrap gap-1.5">
             {attached.map((a) => (
               <li key={a.key} className="relative">
-                <img
-                  src={dataUrl(a.image.preview)}
-                  alt={a.name}
-                  className="h-14 w-14 rounded-[4px] border border-line object-cover"
-                />
+                <AttachedThumb blob={a.image.preview.blob} alt={a.name} />
                 <button
                   type="button"
                   aria-label={`Remove ${a.name}`}
@@ -615,6 +908,35 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
             ))}
           </ul>
         )}
+        {!active && <SessionModePicker value={sessionMode} onChange={pickSessionMode} />}
+        {active && archived && (
+          <div className="mb-1.5 flex flex-wrap items-center gap-2 text-[12px] text-muted">
+            <p id={archivedNoteId} className="min-w-0 flex-1">
+              This chat is archived, so it is read-only. Unarchive it to continue here, or Fork it.
+            </p>
+            {owned && (
+              <Button
+                size="sm"
+                data-agent-user-only=""
+                onClick={() => {
+                  setArchiveError(null)
+                  unarchiving.current = true
+                  updateSession(active.id, { archived: false }).catch((caught: unknown) => {
+                    unarchiving.current = false
+                    setArchiveError({ id: active.id, message: caught instanceof Error ? caught.message : String(caught) })
+                  })
+                }}
+              >
+                Unarchive
+              </Button>
+            )}
+            {archiveError?.id === active.id && (
+              <p role="alert" className="w-full text-warn">
+                {archiveError.message}
+              </p>
+            )}
+          </div>
+        )}
         <textarea
           id="assistant-composer"
           ref={composer}
@@ -623,12 +945,19 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
           onChange={(event) => writeDraft(event.target.value)}
           onKeyDown={onComposerKey}
           onPaste={onComposerPaste}
-          disabled={!owned}
+          {...skillMenu.inputProps}
+          {...(archived ? { 'aria-describedby': archivedNoteId } : {})}
+          disabled={!canSend}
           placeholder={
-            owned ? 'Ask about this page… (Enter to send, Shift+Enter for a new line)' : 'Take over to send messages'
+            archived
+              ? 'This chat is archived'
+              : owned
+                ? 'Ask about this page… (Enter to send, Shift+Enter for a new line)'
+                : 'Take over to send messages'
           }
           className="w-full resize-none rounded-[6px] border border-line bg-bg px-2.5 py-1.5 text-[13px] outline-none focus:border-line-strong disabled:opacity-50"
         />
+        {skillMenu.menu}
         {imageErrors.map((error) => (
           <p key={error} role="alert" className="mt-1 text-[12px] text-warn">
             {error}
@@ -677,14 +1006,14 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
           <Button
             size="sm"
             variant="ghost"
-            disabled={!owned || attached.length >= IMAGES_MAX}
+            disabled={!canSend || attached.length >= IMAGES_MAX}
             title={`Attach images (PNG, JPEG, GIF or WebP; up to ${IMAGES_MAX}). You can also paste or drop them here.`}
             onClick={() => filePicker.current?.click()}
           >
             Image
           </Button>
-          <MicButton dictation={dictation} disabled={!owned} embedded={embedded} describedBy={voiceNoteId} />
-          <Button type="submit" variant="primary" size="sm" disabled={!draft.trim() || busy || !owned || preparing > 0}>
+          <MicButton dictation={dictation} disabled={!canSend} embedded={embedded} describedBy={voiceNoteId} />
+          <Button type="submit" variant="primary" size="sm" disabled={!draft.trim() || busy || !canSend || preparing > 0}>
             Send
           </Button>
         </div>

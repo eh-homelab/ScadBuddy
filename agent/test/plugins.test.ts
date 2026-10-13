@@ -28,6 +28,15 @@ describe('plugin vetting (spec §8.6, "command hooks refused")', () => {
     ])
   })
 
+  it('refuses an event Claude Code does not know, inline in the manifest or in hooks/hooks.json', () => {
+    // #1809: inline manifest hooks take any key as an event, so `loaders` passed.
+    // Event names are case-sensitive; the known Stop and SessionStart pass.
+    expect(pluginProblems(fixture('unknown-hook-event'))).toEqual([
+      'hooks/hooks.json: "preToolUse" is not a Claude Code hook event',
+      'plugin.json hooks: "loaders" is not a Claude Code hook event',
+    ])
+  })
+
   it('refuses a hooks module, beside hooks or alone, in hooks/hooks.json or a file the manifest names', () => {
     // Claude Code 2.1.287 runs a hooks file's `modules` (JavaScript with
     // $.env, $.process and $.http) by default; its prompt hook alone is fine.

@@ -137,11 +137,43 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     await expect(m.approvals.decide(browser, approval.id, true)).rejects.toMatchObject({ code: 'expired' })
     const events = (await m.events.read(session.id, 0, 1000)).map((e) => e.event)
     await expectPanelAccepts(events)
-    expect(events.slice(-2)).toEqual([
+    expect(events.filter((e) => !e.type.startsWith('input.')).slice(-2)).toEqual([
       // Says it expired, not just that it was not approved (#979).
       { v: 1, type: 'approval.resolved', sessionId: session.id, id: approval.id, approved: false, decision: 'expired', reason: 'no decision before it expired' },
       { v: 1, type: 'session.status', sessionId: session.id, status: 'idle' },
     ])
+  })
+
+  // spec 2026-10-01 §6.6 Notifications: one input.requested and one input.resolved per entry, never the input.
+  it('logs input.requested after approval.required, and input.resolved after its decision', async () => {
+    const { session, approval } = await orphan(agentA, { job: 'box.3mf', password: 'hunter2-long-secret' })
+    await m.approvals.decide(browser, approval.id, false)
+    const events = (await m.events.read(session.id, 0, 1000)).map((e) => e.event)
+    const types = events.map((e) => e.type)
+    expect(types.indexOf('input.requested')).toBe(types.indexOf('approval.required') + 1)
+    expect(types.indexOf('input.resolved')).toBe(types.indexOf('approval.resolved') + 1)
+    expect(events.filter((e) => e.type.startsWith('input.'))).toEqual([
+      {
+        v: 1,
+        type: 'input.requested',
+        sessionId: session.id,
+        entry: {
+          id: `approval:${approval.id}`,
+          kind: 'approval',
+          session_id: session.id,
+          tool: 'mcp__stub__print',
+          summary: approval.inputSummary,
+          input_hash: approval.inputHash,
+          prompt: '',
+          requested_by: agentA,
+          responders: ['browser', 'grant'],
+          created_at: approval.createdAt,
+          expires_at: approval.expiresAt,
+        },
+      },
+      { v: 1, type: 'input.resolved', sessionId: session.id, id: `approval:${approval.id}`, kind: 'approval', outcome: 'denied' },
+    ])
+    expect(JSON.stringify(events)).not.toContain('hunter2-long-secret')
   })
 
   it('an approval decided just as it expires cannot be approved', async () => {

@@ -33,6 +33,7 @@ from typing import Any, Literal
 import anyio
 from pydantic import BaseModel, Field
 
+from scadbuddy.editor import nonet
 from scadbuddy.library.lsp import KILL_WAIT, frame, read_message, reap_later
 
 #: How long the whole exchange may take. openscad-lsp answers in milliseconds; this
@@ -91,8 +92,7 @@ async def lsp_diagnostics(
     sent, and ``root`` only decides where includes resolve.
     """
     process = await asyncio.create_subprocess_exec(
-        binary,
-        "--stdio",
+        *nonet.command(binary, "--stdio"),
         cwd=root,
         env=dict(env),
         stdin=asyncio.subprocess.PIPE,

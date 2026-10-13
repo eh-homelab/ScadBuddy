@@ -4,12 +4,14 @@ import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { runTool, type Tool, type ToolContext } from '../src/tools/registry.js'
 import {
+  MAX_QUEUED_PER_PRINCIPAL,
   RECHECK_MS,
   RENDER_LIMITS,
   RenderLimiter,
   type RenderLimits,
   renderLimitsFrom,
   renderLimitsSetting,
+  renderPrincipal,
 } from '../src/tools/renderLimits.js'
 import { BLANK_TEMPLATE } from '../src/tools/templates.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
@@ -230,6 +232,72 @@ describe('render limits', () => {
     ;(await limiter.acquire('p'))()
     const unbounded = new RenderLimiter(limits({ concurrent: 5 }))
     for (let i = 0; i < 50; i++) (await unbounded.acquire('p'))()
+  })
+
+  it('a burst cannot queue past the window cap: renders waiting count against it', async () => {
+    const limiter = new RenderLimiter(limits({ concurrent: 1, perWindow: 3, windowMs: 60_000 }))
+    const first = await limiter.acquire('p')
+    const queued = [limiter.acquire('p'), limiter.acquire('p')]
+    await expect(limiter.acquire('p')).rejects.toThrow(/3 renders in the last 1 min \(2 of them still waiting for a slot\)/)
+    expect(limiter.queued).toBe(2)
+    first()
+    ;(await queued[0]!)()
+    ;(await queued[1]!)()
+    // Three started in the window: the fourth is still refused once nothing waits.
+    await expect(limiter.acquire('p')).rejects.toThrow(/most allowed/)
+  })
+
+  it('a render waiting when the window cap is lowered is refused at its start, not started past it', async () => {
+    let current = limits({ concurrent: 1, windowMs: 60_000 })
+    const limiter = new RenderLimiter(async () => current)
+    const first = await limiter.acquire('p')
+    const waiting = limiter.acquire('p')
+    expect(await pending(waiting)).toBe(true)
+    current = limits({ concurrent: 1, perWindow: 1, windowMs: 60_000 })
+    first()
+    await expect(waiting).rejects.toThrow(/most allowed/)
+    expect(limiter.queued).toBe(0)
+  })
+
+  it('bounds how many of one principal\'s renders may wait', async () => {
+    const limiter = new RenderLimiter(limits({ concurrent: 1 }))
+    await limiter.acquire('p')
+    const waiting = Array.from({ length: MAX_QUEUED_PER_PRINCIPAL }, () => limiter.acquire('p'))
+    await expect(limiter.acquire('p')).rejects.toThrow(/already waiting for a slot, the most that may queue/)
+    expect(limiter.queued).toBe(MAX_QUEUED_PER_PRINCIPAL)
+    // Another principal still queues and runs.
+    ;(await limiter.acquire('q'))()
+    void Promise.allSettled(waiting)
+  })
+
+  it('anonymous MCP sessions share one count: a new session buys no new slots', async () => {
+    expect(renderPrincipal({ id: 'anonymous:s1', kind: 'anonymous' })).toBe('anonymous')
+    expect(renderPrincipal({ id: 'token:t1', kind: 'bearer' })).toBe('token:t1')
+    const schema = { groups: [], parameters: [] }
+    const id = 'f'.repeat(32)
+    let status = 'running'
+    const { client, seen } = backend((s) =>
+      s.path.endsWith('/schema')
+        ? Response.json(schema)
+        : s.path.endsWith('/render')
+          ? Response.json({ job_id: id }, { status: 202 })
+          : Response.json({ id, status, log_tail: [] }),
+    )
+    const limiter = new RenderLimiter(limits({ concurrent: 1, windowMs: 60_000, holdMs: 60_000 }))
+    const anonymous = (session: string) =>
+      ctx(client, {
+        renderLimiter: limiter,
+        renderWaitMs: 0,
+        pollIntervalMs: 1,
+        principal: { id: `anonymous:${session}`, kind: 'anonymous', tiers: tiersUpTo('write') },
+      })
+    expect(firstText(await runTool(tool('render_model'), { slug: 'plate' }, anonymous('s1')))).toMatchObject({ status: 'running' })
+    const second = runTool(tool('render_model'), { slug: 'plate' }, anonymous('s2'))
+    expect(await pending(second)).toBe(true)
+    expect(seen.filter((s) => s.path.endsWith('/render'))).toHaveLength(1)
+    expect(limiter.queued).toBe(1)
+    status = 'done'
+    expect((await second).isError).toBeFalsy()
   })
 
   it('keeps only the window\'s starts (#774)', async () => {

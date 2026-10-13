@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
@@ -18,14 +19,20 @@ from tests.api.conftest import wait_for_job
 from tests.support.operations import press
 
 
-def test_an_upload_store_without_a_database_keeps_the_last_gauges(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+def test_an_upload_store_outage_keeps_the_last_gauges(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Its usage is rows (#591): with no pool it cannot be read, which costs the
-    scrape nothing, as a store outage does not."""
+    """Its usage is rows (#591): a database that does not answer costs the scrape
+    nothing."""
     metrics = Metrics()
     metrics.assets_stored.set(7)
-    state = cast(AppState, SimpleNamespace(assets=AssetStore(tmp_path), metrics=metrics))
+    assets = AssetStore(tmp_path)
+
+    def down() -> None:
+        raise psycopg.OperationalError("down")
+
+    monkeypatch.setattr(assets, "usage", down)
+    state = cast(AppState, SimpleNamespace(assets=assets, metrics=metrics))
     refresh_asset_metrics(state)
     assert "scadbuddy_assets_stored 7.0" in metrics.exposition().decode()
     assert "could not read the upload store's usage" in caplog.text

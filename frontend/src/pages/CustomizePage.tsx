@@ -4,6 +4,7 @@ import { committed, touchAfterRender, waitFor } from '../agent/highlight'
 import { AgentToolError } from '../agent/types'
 import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
 import { api, ApiError } from '../api/client'
+import { missingFonts } from '../lib/fonts'
 import type { Output, Param, ParamValue, Plate } from '../api/types'
 import { ResourceSessions } from '../components/assistant/ResourceSessions'
 import { ActionBar, type ActionBarHandle } from '../components/ActionBar'
@@ -51,10 +52,12 @@ import { findParamRow } from '../template-ui/elements'
 import type { HostDeps } from '../template-ui/host'
 import { TemplateUi } from '../template-ui/TemplateUi'
 import type { GenerateResult, TemplateUiFailure, UiDeclaration } from '../template-ui/types'
-import { fitTargets, platesFitMessages, worstFit } from '../lib/plate'
+import { boundByPlate, fitTargets, platesFitMessages, worstFit } from '../lib/plate'
 import type { SnapshotOptions } from '../lib/snapshot'
+import { NEW_TAB } from '../lib/embed'
 import { useDisplayUnit } from '../lib/units'
 import { useSubscription } from '../lib/realtime'
+import { temporalWorkflowUrl } from '../lib/temporal'
 import { useAsync } from '../lib/useAsync'
 import { useDebounced } from '../lib/useDebounced'
 import { useFullscreen } from '../lib/useFullscreen'
@@ -82,6 +85,8 @@ function renderBusyText({ seconds, reason }: RenderBusy): string {
       return `ScadBuddy did not answer; this preview will be retried in ${seconds} s.`
     case 'queue-full':
       return `The render queue is full; this preview will be retried in ${seconds} s.`
+    case 'snapshot-pending':
+      return `Uploading this revision's source; retrying in ${seconds} s.`
   }
 }
 
@@ -278,6 +283,15 @@ export function CustomizePage() {
   useEffect(() => {
     if (presetElsewhere) setPresetElsewhere(null)
   }, [presetElsewhere])
+  /** #1660 — the preset the picker has selected, which the Project picker follows. */
+  const [presetInUse, setPresetInUse] = useState<{ id: string; name: string } | null>(null)
+  const onPresetSelected = useCallback(
+    (preset: { id: string; name: string } | null) =>
+      setPresetInUse((current) =>
+        current?.id === preset?.id && current?.name === preset?.name ? current : preset && { id: preset.id, name: preset.name },
+      ),
+    [],
+  )
   /** #350 — counts resets to the defaults, which leave no preset selected. */
   const [resets, setResets] = useState(0)
   const inputs = useMemo(() => joinInputs(values, extra), [values, extra])
@@ -335,7 +349,10 @@ export function CustomizePage() {
   const settled = debounced === values
   // #921 — a number outside its declared range is flagged on its field; the render
   // would only answer 422, so none is started and Generate waits until it is fixed.
-  const unrenderable = schema ? outOfRange(schema, values) : undefined
+  // #81 — a `// plate` parameter's range is what fits the plate in view. Only the form
+  // and this check see it: the page's other uses of `schema` key effects on it.
+  const formSchema = useMemo(() => (schema ? boundByPlate(schema, plate) : undefined), [schema, plate])
+  const unrenderable = formSchema ? outOfRange(formSchema, values) : undefined
   const invalid = unrenderable ? rangeProblem(unrenderable, values[unrenderable.name]) : null
   // Nothing to render until there is a seed; once there is, an empty one is a model
   // with no parameters, whose defaults still render (#941).
@@ -346,8 +363,18 @@ export function CustomizePage() {
     busy: renderBusy,
     retry: retryRender,
     settledFor,
+    jobFor,
     stage: renderStage,
   } = useRenderJob(slug, settled && seed && !invalid ? debounced : undefined, version, extra)
+  // One object per refusal, so a font field's install error answers this one only (#2215).
+  const fontRefusal = useMemo(() => missingFonts(renderError), [renderError])
+  // #1293 — a render still running or one that failed links to its workflow in the
+  // Temporal UI, when Settings knows where that is.
+  const settings = useAsync(() => api.getSettings(), []).data
+  const workflowUrl =
+    job?.status === 'pending' || job?.status === 'running' || job?.status === 'failed'
+      ? temporalWorkflowUrl(settings, job.workflow_id)
+      : null
   // #938 — the colours the latest finished render used and the values it ran with, kept
   // while the next one runs so the extruder labels do not fall back to a guess and back
   // on every change. Kept per model, so another model's render never labels this one's.
@@ -355,7 +382,9 @@ export function CustomizePage() {
     { slug: string; colors: string[]; params: ParamValues } | undefined
   >(undefined)
   const doneColors = job?.status === 'done' ? (job.colors ?? undefined) : undefined
-  const doneParams = settledFor ?? NOTHING
+  // The values `job` ran with (#1685): a submit that failed before making a job settles
+  // the new values but leaves the old job, whose colours are not theirs.
+  const doneParams = jobFor ?? NOTHING
   if (doneColors && (doneColors !== rendered?.colors || doneParams !== rendered.params))
     setRendered({ slug, colors: doneColors, params: doneParams })
   const renderedOutput = rendered?.slug === slug ? rendered : undefined
@@ -890,6 +919,7 @@ export function CustomizePage() {
       viewSize={viewSize}
       cameraView={cameraView}
       model={modelState.data}
+      preset={presetInUse}
       onModelChanged={modelState.setData}
       extra={extra}
       fit={fit}
@@ -921,6 +951,7 @@ export function CustomizePage() {
       pinned={version !== undefined}
       resetKey={resets}
       selected={presetElsewhere}
+      onSelected={onPresetSelected}
     />
   )
   const templateUi = customUi && (
@@ -1173,7 +1204,7 @@ export function CustomizePage() {
             </div>
           ) : (
             <ParameterPanel
-              schema={schema}
+              schema={formSchema ?? schema}
               slug={slug}
               version={version}
               values={values}
@@ -1183,6 +1214,11 @@ export function CustomizePage() {
               reveal={reveal}
               rendered={renderedOutput}
               growsWithPage={!full}
+              missingFonts={fontRefusal}
+              onFontInstalled={() => {
+                fontsState.reload()
+                retryRender()
+              }}
               toolbar={
                 <>
                   {full && <FlyoutHeader ref={flyoutClose} onClose={closeFlyout} />}
@@ -1199,6 +1235,7 @@ export function CustomizePage() {
                     pinned={version !== undefined}
                     resetKey={resets}
                     selected={presetElsewhere}
+                    onSelected={onPresetSelected}
                   />
                 </>
               }
@@ -1260,6 +1297,13 @@ export function CustomizePage() {
                   </Button>
                 </>
               )}
+            </p>
+          )}
+          {workflowUrl && (
+            <p data-testid="render-workflow" className="border-t border-line px-3 py-2 text-[12px] text-muted">
+              <a href={workflowUrl} {...NEW_TAB} className="text-accent underline">
+                Open workflow ↗
+              </a>
             </p>
           )}
           </div>

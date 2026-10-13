@@ -128,6 +128,18 @@ describe('event → resource mapping', () => {
     ])
   })
 
+  it("a library file's print touches the library progress resource, never an output URI (#1967)", () => {
+    for (const kind of ['print.progress', 'print.settled']) {
+      expect(affectedBy({ id: '1', kind, output_id: 'library:42', slug: 'library-42' }).uris, kind).toEqual([
+        'scadbuddy://print/library/42/progress',
+      ])
+    }
+    expect(affectedBy({ id: '1', kind: 'print.progress', output_id: 'library:x', slug: 's' }).uris).toEqual([])
+    expect(matchUri('scadbuddy://print/library/42/progress')?.def.tool).toBe('get_print_progress')
+    const def = RESOURCES.find((r) => r.template === 'scadbuddy://print/library/{file_id}/progress')!
+    expect(def.args?.({ file_id: '42' })).toEqual({ library_file_id: 42 })
+  })
+
   it("a session's events touch it, and the list only when it moves in it (#300)", () => {
     const session_id = '0e5a3c1e-1111-4222-8333-944455556666'
     const one = `scadbuddy://sessions/${session_id}`

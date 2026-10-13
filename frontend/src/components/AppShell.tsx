@@ -9,7 +9,15 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router'
-import { attentionCount, attentionDetail, attentionLabel, summaryLabel, useAttention, useAttentionTitle } from '../agent/attention'
+import {
+  attentionCount,
+  attentionDetail,
+  attentionLabel,
+  summaryLabel,
+  useAttention,
+  useAttentionTitle,
+  WORKING_LABEL,
+} from '../agent/attention'
 import { useAiAvailability } from '../agent/chat/availability'
 import {
   ASSISTANT_SHORTCUT_ARIA,
@@ -28,6 +36,7 @@ import { useLoadBambuddyLinks } from '../lib/bambuddyLinks'
 import { useLoadDisplayUnit } from '../lib/units'
 import { leaveFullscreen } from '../lib/useFullscreen'
 import { ModalCompanionContext, focusInto, topmostDialog } from '../lib/modal'
+import { useMediaQuery } from '../lib/useMediaQuery'
 
 // Split out: the panel, its protocol schemas (zod) and its renderer download only
 // when someone opens it, and never when AI is off.
@@ -39,6 +48,7 @@ const NAV = [
   { to: '/', label: 'Models', end: true },
   { to: '/prints', label: 'Prints', end: false },
   { to: '/library', label: 'Library', end: false },
+  { to: '/workflows', label: 'Workflows', end: false },
   { to: '/settings', label: 'Settings', end: false },
 ]
 
@@ -55,6 +65,9 @@ interface Props {
   /** Tests inject the browser bridge's link (null for none); the app makes its own. */
   tabLink?: TabLinkFactory | null
 }
+
+/** Where the assistant panel lies over the page rather than beside it: below `md`. */
+const PANEL_OVERLAYS_QUERY = '(max-width: 767.98px)'
 
 export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink }: Props) {
   const location = useLocation()
@@ -99,10 +112,17 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   const waitingDetail = attentionDetail(attention.counts)
   // A done summary waits for nothing, so it is shown beside the count, not in it.
   const summaries = summaryLabel(attention.counts)
-  const toggleLabel = [waitingLabel, summaries].filter(Boolean).join(', ')
+  // #1125 — a turn under way in any of the user's sessions, shown whether or not the
+  // panel is open. What waits on the user is the badge above, so this is the third
+  // state: idle shows neither.
+  const working = attention.running === true ? WORKING_LABEL : ''
+  const toggleLabel = [working, waitingLabel, summaries].filter(Boolean).join(', ')
   useAttentionTitle(attention.waiting, !embedded)
   const [focusKey, setFocusKey] = useState(0)
   const toggleButton = useRef<HTMLButtonElement>(null)
+  // #2013 — below `md` the panel lies over the page (the aside's classes), so a dialog
+  // has no room beside it and covers it.
+  const panelOverlays = useMediaQuery(PANEL_OVERLAYS_QUERY)
 
   const openPanel = useCallback(() => {
     setMounted(true)
@@ -154,10 +174,15 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
       else setFocusKey((k) => k + 1)
     } else if (open) {
       closePanel()
+    } else if (dialog && !besideDialog && panelOverlays) {
+      // #2013 — the dialog will still cover the panel: open it under the dialog, but
+      // leave the focus in the dialog rather than in a composer no one can see.
+      setMounted(true)
+      setOpen(true)
     } else {
       openPanel()
     }
-  }, [open, closePanel, openPanel, refreshAttention, panelElement])
+  }, [open, closePanel, openPanel, refreshAttention, panelElement, panelOverlays])
 
   useEffect(() => {
     if (!shown) return
@@ -226,6 +251,13 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
                 </span>
               )}
               {shown && (
+                // #1125 — its own region, so starting or finishing a turn does not
+                // announce the waiting count again.
+                <span data-testid="assistant-working-live" aria-live="polite" className="sr-only">
+                  {working && 'The assistant is working'}
+                </span>
+              )}
+              {shown && (
                 <button
                   ref={toggleButton}
                   type="button"
@@ -234,11 +266,22 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
                   aria-controls={mounted ? PANEL_ID : undefined}
                   aria-keyshortcuts={ASSISTANT_SHORTCUT_ARIA}
                   aria-label={toggleLabel ? `Assistant, ${toggleLabel}` : undefined}
-                  title={`Assistant (${ASSISTANT_SHORTCUT_LABEL})${toggleLabel ? `: ${[waitingLabel && `${waitingLabel} (${waitingDetail})`, summaries].filter(Boolean).join(', ')}` : ''}`}
-                  className={`inline-flex items-center gap-1.5 rounded-[6px] px-2.5 py-1 text-[13px] transition-colors ${
+                  title={`Assistant (${ASSISTANT_SHORTCUT_LABEL})${toggleLabel ? `: ${[working, waitingLabel && `${waitingLabel} (${waitingDetail})`, summaries].filter(Boolean).join(', ')}` : ''}`}
+                  // #1897 — above a dialog's overlay (ui/Dialog, z-50), so the assistant
+                  // opens beside a dialog that is already open, as the shortcut does. Only
+                  // where the panel can sit beside one (#2013): on a phone the dialog covers
+                  // the panel anyway, and a raised button would paint over the dialog.
+                  className={`${panelOverlays ? '' : 'relative z-[60] '}inline-flex items-center gap-1.5 rounded-[6px] px-2.5 py-1 text-[13px] transition-colors ${
                     open ? 'bg-surface-3 text-ink' : 'text-muted hover:bg-surface-2 hover:text-ink'
                   }`}
                 >
+                  {working && (
+                    <span
+                      data-testid="assistant-working"
+                      aria-hidden="true"
+                      className="size-2 rounded-full bg-accent motion-safe:animate-pulse"
+                    />
+                  )}
                   Assistant
                   {attention.waiting !== null && attention.waiting > 0 && (
                     <span

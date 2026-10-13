@@ -62,7 +62,6 @@ def media_kinds(state: AppState) -> list[OperationKind]:
 
     async def exists_check(request: dict[str, Any]) -> dict[str, Any]:
         require_model_exists(state.catalogue, request["slug"])
-        media_api.require_media_store(state.catalogue)
         return {}
 
     async def upload_check(request: dict[str, Any]) -> dict[str, Any]:

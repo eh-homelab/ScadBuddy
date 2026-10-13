@@ -14,6 +14,7 @@ import {
   validateRef,
 } from './source.js'
 import type { PackagePin, PackageRepo, PreparedPackage } from './store.js'
+import { builtInNamed } from './builtins.js'
 import { capProblems, type Endpoint, vetPackage } from './vet.js'
 
 // Installing a plugin package, and turning its pin back into a directory for a
@@ -50,6 +51,14 @@ export class PackageRefusedError extends Error {
     super(`the plugin package is refused: ${problems.join('; ')}`)
     this.problems = problems
   }
+}
+
+/**
+ * The package names a plugin that ships with the agent (builtins.ts): nothing to
+ * install, and not a refusal. Settings lists the built-in one instead.
+ */
+export class BuiltInPluginError extends Error {
+  override name = 'BuiltInPluginError'
 }
 
 export type InstallerOptions = {
@@ -210,6 +219,8 @@ export class PackageInstaller {
       throw err
     }
     const vetting = vetPackage(dest, fallbackName)
+    const builtIn = vetting.review && builtInNamed(vetting.review.name)
+    if (builtIn) throw new BuiltInPluginError(builtIn.installRefusal)
     const fatal = [...vetting.fatal, ...(await this.endpointProblems(vetting.endpoints))]
     // A fatal problem refuses the package outright, but the refusal names
     // every problem: the allowable ones are reasons too. Fatal first, so the
@@ -356,7 +367,19 @@ export class PackageInstaller {
     return next
   }
 
-  private async materialiseNow(pin: PackagePin): Promise<string> {
+  /**
+   * One file of `pin`, for review (#1029, routes/pluginPackages.ts): read from the
+   * copy that hashes to the pin, fetched again when it does not, but never vetted
+   * for loading, since a package the rules refuse is the one that most needs reading.
+   * `rel` must be a path in the pin's file list (the route checks). Runs in the
+   * package's queue, so a prune cannot remove the copy mid-read.
+   */
+  readFile(pin: PackagePin, rel: string): Promise<Buffer> {
+    return this.serial(pin.name, async () => readFile(path.join(await this.verifiedCopy(pin), rel)))
+  }
+
+  /** The cached directory of `pin` when every file hashes to it, else fetched again at the pinned commit. */
+  private async verifiedCopy(pin: PackagePin): Promise<string> {
     const dir = this.cacheDir(pin)
     if (!(await this.cacheMatches(dir, pin))) {
       await rm(dir, { recursive: true, force: true })
@@ -383,6 +406,11 @@ export class PackageInstaller {
         throw new PluginError(`the cached copy of ${pin.name} does not match its pin after fetching`, 502)
       }
     }
+    return dir
+  }
+
+  private async materialiseNow(pin: PackagePin): Promise<string> {
+    const dir = await this.verifiedCopy(pin)
     // Re-vetted at every load: the rules may be stricter than when it was
     // approved. A pin approved with `allow_refused` skips the allowable ones,
     // including any a later rule adds: the admin allowed this exact content.
@@ -423,6 +451,16 @@ export class PackageInstaller {
   }
 }
 
+export type LoadedPackage = {
+  name: string
+  contentHash: string
+  dir: string
+  /** Approved with `allow_refused`: loaded as it is. */
+  allowed: boolean
+  /** The Claude Code built-ins an allowed package names (vet.ts `builtin_tools`). */
+  builtinTools: string[]
+}
+
 export type PackagesForRun = {
   /** Packages that pass the rules, which the harness checks again (harness/plugins.ts). */
   paths: string[]
@@ -430,6 +468,8 @@ export type PackagesForRun = {
   allowedPaths: string[]
   /** The Claude Code built-ins the allowed packages name, for the turn's `tools` (run.ts `builtinTools`). */
   builtinTools: string[]
+  /** Each loaded package with its pin's hash, for a durable turn (temporal/turnPackages.ts). */
+  loaded: LoadedPackage[]
   problems: string[]
   /** Call when the turn has ended: its package directories may then be pruned. */
   release: () => void
@@ -449,7 +489,14 @@ export async function loadPackagesForRun(
   const builtinTools = new Set<string>()
   const problems: string[] = []
   const releases: (() => void)[] = []
+  const loaded: LoadedPackage[] = []
   for (const pin of await store.enabledPins()) {
+    // A package stored under a built-in's name before builtins.ts (a reserved name
+    // was allowable) would shadow the built-in: never loaded, only removable.
+    if (builtInNamed(pin.name)) {
+      problems.push(`plugin package ${pin.name} was not loaded: "${pin.name}" is built in; remove the installed package`)
+      continue
+    }
     try {
       const { dir, release, builtinTools: wanted } = await installer.acquire(pin)
       if (pin.allowRefused) {
@@ -458,6 +505,7 @@ export async function loadPackagesForRun(
       } else {
         paths.push(dir)
       }
+      loaded.push({ name: pin.name, contentHash: pin.contentHash, dir, allowed: pin.allowRefused === true, builtinTools: pin.allowRefused ? [...wanted] : [] })
       releases.push(release)
     } catch (err) {
       if (err instanceof PackageRefusedError) {
@@ -473,6 +521,7 @@ export async function loadPackagesForRun(
     paths,
     allowedPaths,
     builtinTools: [...builtinTools].sort(),
+    loaded,
     problems,
     release: () => releases.forEach((r) => r()),
   }

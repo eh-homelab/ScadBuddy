@@ -22,20 +22,33 @@ test.describe('assistant panel (#256)', () => {
     await expect(log.getByText('Make the name bigger and send two to Bambuddy')).toBeVisible()
     await expect(log.getByText(/so it reads from across the room/)).toBeVisible()
 
-    const write = panel.getByTestId('agent-tool').first()
-    await expect(write).toContainText('set_parameters')
+    // #782: the write and the render view are one group: the view's image shows with it closed.
+    const steps = panel.getByRole('button', { name: /2 steps/ })
+    await expect(steps).toHaveAttribute('aria-expanded', 'false')
+    const image = panel.getByRole('img', { name: 'Look at the render (iso)' })
+    await expect(image).toBeVisible()
+    expect(await image.evaluate((img) => (img as unknown as { naturalWidth: number }).naturalWidth)).toBe(192)
+    await steps.click()
+    const write = panel.getByTestId('agent-tool').filter({ hasText: 'Set text_size → 14 mm' })
     await expect(write).toContainText('write')
-    await expect(write).toContainText('Set text_size to 14 mm')
+    await expect(write).toContainText('Done')
     await write.getByText(/^Why\?/).click()
     await expect(write.getByRole('link', { name: 'OpenSCAD customizer parameters' })).toBeVisible()
+    // Arguments and the raw result are behind Details.
+    await expect(write.getByTestId('agent-tool-arguments')).toBeHidden()
+    await write.getByRole('button', { name: 'Details: Set text_size → 14 mm' }).click()
+    await expect(write.getByTestId('agent-tool-arguments')).toContainText('"text_size": 14')
+    await expect(write.getByTestId('agent-tool-result')).toContainText('Set text_size to 14 mm')
 
     const card = panel.getByRole('region', { name: 'Needs your approval' })
     await expect(card).toContainText('Send name-keychain to Bambuddy project "Keychains", 2 copies?')
     await expect(panel.getByTestId('agent-status')).toHaveText('Waiting for approval')
     await expect(panel.getByText('Queued 2 copies in the Keychains project.')).toHaveCount(0)
 
+    const send = panel.getByTestId('agent-tool').filter({ hasText: 'Print name-keychain × 2' })
+    await expect(send.getByTestId('agent-tool-status')).toHaveText('Waiting for approval')
     await card.getByRole('button', { name: 'Approve' }).click()
-    await expect(panel.getByText('Queued 2 copies in the Keychains project.')).toBeVisible()
+    await expect(send.getByTestId('agent-tool-status')).toHaveText('Done')
     await expect(log.getByText('Sent. Two copies are in the queue.')).toBeVisible()
     await expect(card).toContainText('Approved by You.')
     await expect(panel.getByTestId('agent-status')).toHaveText('Idle')
@@ -103,7 +116,7 @@ test.describe('assistant panel (#256)', () => {
     await expect(card).toContainText('outward')
     await expect(panel.getByTestId('agent-status')).toHaveText('Waiting for approval')
     // The outward call is shown, but no result for it exists while it waits.
-    const send = panel.getByTestId('agent-tool').filter({ hasText: 'print_output' })
+    const send = panel.getByTestId('agent-tool').filter({ hasText: 'Print name-keychain × 2' })
     await expect(send).toContainText('outward')
     await expect(panel.getByText('Denied: nothing was sent.')).toHaveCount(0)
 
@@ -111,7 +124,9 @@ test.describe('assistant panel (#256)', () => {
     await expect(card).toContainText('Denied by You.')
     await expect(card.getByRole('button', { name: 'Approve' })).toHaveCount(0)
     await expect(card.getByRole('button', { name: 'Deny' })).toHaveCount(0)
-    await expect(panel.getByText('Denied: nothing was sent.')).toBeVisible()
+    // The call reads as not run; its refusal result is the model's, not shown (#2149).
+    await expect(send.getByTestId('agent-tool-status')).toHaveText('Not run')
+    await expect(panel.getByText('Denied: nothing was sent.')).toHaveCount(0)
     const log = panel.getByRole('log', { name: 'Conversation' })
     await expect(log.getByText("OK, I didn't send it.")).toBeVisible()
     await expect(panel.getByTestId('agent-status')).toHaveText('Idle')
@@ -201,6 +216,40 @@ test.describe('assistant panel (#256)', () => {
     await touched.getByRole('group', { name: 'Revisions' }).getByRole('link', { name: /3f9c2a1/ }).click()
     await expect(page).toHaveURL(/\/m\/gridfinity-bin\?version=3f9c2a1b7d4e$/)
   })
+
+  // #792: fork from a reply by keyboard, the parent link, the fork nested under its
+  // parent in Sessions, and a rename.
+  test('forks a chat from a reply, nests the fork under it, and renames it', async ({ page }) => {
+    await page.goto('/m/name-keychain')
+    await page.getByRole('button', { name: 'Assistant' }).click()
+    const panel = page.getByRole('complementary', { name: 'Assistant' })
+    await panel.getByRole('button', { name: 'Sessions (1)' }).click()
+    await panel.getByRole('button', { name: /^Tune the gridfinity bin/ }).click()
+    const log = panel.getByRole('log', { name: 'Conversation' })
+    const reply = log.locator('[data-feed-item="assistant"]').filter({ hasText: 'Done: the bin is now 3 units' })
+
+    // Shown on hover, and to the keyboard when it has focus.
+    const forkHere = reply.getByRole('button', { name: 'Fork from here' })
+    await forkHere.focus()
+    await expect(forkHere).toHaveCSS('opacity', '1')
+    await page.keyboard.press('Enter')
+    await expect(panel.getByTestId('active-session-title')).toHaveText('Tune the gridfinity bin (fork)')
+    await expect(log.getByText('Done: the bin is now 3 units (21 mm) tall.')).toBeVisible()
+    await expect(panel.getByRole('textbox', { name: 'Message the assistant' })).toBeEnabled()
+
+    await panel.getByRole('button', { name: 'Sessions (2)' }).click()
+    const sessions = panel.getByRole('navigation', { name: 'Sessions' })
+    const forks = sessions.getByRole('list', { name: 'Forks of Tune the gridfinity bin' })
+    await forks.getByRole('button', { name: 'Rename Tune the gridfinity bin (fork)' }).click()
+    const title = sessions.getByRole('textbox', { name: 'Chat title' })
+    await title.fill('Bin, taller')
+    await title.press('Enter')
+    await expect(forks.getByRole('button', { name: /^Bin, taller/ })).toBeVisible()
+    await expect(panel.getByTestId('active-session-title')).toHaveText('Bin, taller')
+
+    await panel.getByRole('button', { name: 'Forked from Tune the gridfinity bin' }).click()
+    await expect(panel.getByTestId('active-session-title')).toHaveText('Tune the gridfinity bin')
+  })
 })
 
 test.describe('the assistant beside a dialog (#798)', () => {
@@ -236,6 +285,114 @@ test.describe('the assistant beside a dialog (#798)', () => {
     await composer.fill('Which spool is the grey one?')
     await expect(composer).toHaveValue('Which spool is the grey one?')
     await expect(dialog).toBeVisible()
+  })
+
+  // #1897 — a click on the toggle closed the dialog instead: the dialog's overlay covered
+  // it. The toggle is above the overlay now.
+  test('opens from its button while the Print dialog is open', async ({ page }) => {
+    await page.setViewportSize({ width: 1100, height: 800 })
+    await page.goto('/m/name-keychain')
+    await expect(page.getByTestId('generate')).toBeEnabled()
+    await page.getByTestId('generate').click()
+    await expect(page.getByTestId('print')).toBeEnabled()
+    await page.getByTestId('print').click()
+    const dialog = page.getByRole('dialog', { name: 'Print' })
+    await expect(dialog).toBeVisible()
+
+    // A real click: Playwright refuses one on a button the overlay covers, and a click
+    // on the overlay closes the dialog.
+    await page.getByRole('button', { name: 'Assistant' }).click()
+    const panel = page.getByRole('complementary', { name: 'Assistant' })
+    const composer = panel.getByRole('textbox', { name: 'Message the assistant' })
+    await expect(composer).toBeFocused()
+    await expect(dialog).toBeVisible()
+
+    // Then as when it was open first: side by side, and the chat takes typing.
+    const dialogBox = await dialog.boundingBox()
+    const panelBox = await panel.boundingBox()
+    if (!dialogBox || !panelBox) throw new Error('not laid out')
+    expect(dialogBox.x + dialogBox.width).toBeLessThanOrEqual(panelBox.x)
+    await composer.fill('Which spool is the grey one?')
+    await expect(composer).toHaveValue('Which spool is the grey one?')
+    await expect(dialog).toBeVisible()
+
+    // Clicked again beside the dialog, it brings the focus back to the chat rather than
+    // closing it (AppShell's `open && besideDialog`): the click itself took the focus.
+    await dialog.getByRole('button').first().focus()
+    await page.getByRole('button', { name: 'Assistant', exact: true }).click()
+    await expect(composer).toBeFocused()
+    await expect(panel).toBeVisible()
+    await expect(dialog).toBeVisible()
+  })
+})
+
+// #795 — a fork's row, with Rename and Done beside it, fits the panel at phone width.
+test.describe('the session switcher at 390 px (#795)', () => {
+  test.skip(!!process.env.E2E_BASE_URL, 'mock-agent-backed')
+  test.use({ viewport: { width: 390, height: 844 } })
+
+  test('keeps a fork row and its actions on screen', async ({ page }) => {
+    await page.goto('/m/name-keychain')
+    await page.getByRole('button', { name: 'Assistant' }).click()
+    const panel = page.getByRole('complementary', { name: 'Assistant' })
+    await panel.getByRole('button', { name: 'Sessions (1)' }).click()
+    await panel.getByRole('button', { name: /^Tune the gridfinity bin/ }).click()
+    await panel.getByRole('button', { name: 'Fork', exact: true }).click()
+    await expect(panel.getByTestId('active-session-title')).toHaveText('Tune the gridfinity bin (fork)')
+    await panel.getByRole('button', { name: 'Sessions (2)' }).click()
+
+    const sessions = panel.getByRole('navigation', { name: 'Sessions' })
+    for (const name of [
+      'Rename Tune the gridfinity bin (fork)',
+      'Mark Tune the gridfinity bin (fork) done',
+      'Archive Tune the gridfinity bin (fork)',
+    ]) {
+      const box = (await sessions.getByRole('button', { name }).boundingBox())!
+      expect(box.x + box.width, name).toBeLessThanOrEqual(390)
+    }
+    expect(await page.evaluate('document.documentElement.scrollWidth')).toBeLessThanOrEqual(390)
+  })
+
+  // #1885 — archive a chat, find it in Archived, open it read-only, and unarchive it.
+  test('archives a chat, lists it under Archived, opens it read-only and unarchives it', async ({ page }) => {
+    const OWN = 'Tune the gridfinity bin (fork)'
+    await page.goto('/m/name-keychain')
+    await page.getByRole('button', { name: 'Assistant' }).click()
+    const panel = page.getByRole('complementary', { name: 'Assistant' })
+    await panel.getByRole('button', { name: 'Sessions (1)' }).click()
+    await panel.getByRole('button', { name: /^Tune the gridfinity bin/ }).click()
+    await panel.getByRole('button', { name: 'Fork', exact: true }).click()
+    await expect(panel.getByTestId('active-session-title')).toHaveText(OWN)
+    await panel.getByRole('button', { name: 'Sessions (2)' }).click()
+    const sessions = panel.getByRole('navigation', { name: 'Sessions' })
+
+    await sessions.getByRole('button', { name: `Archive ${OWN}` }).click()
+    await expect(panel.getByRole('button', { name: 'Sessions (1)' })).toBeVisible()
+    await expect(sessions.getByRole('button', { name: `Rename ${OWN}` })).toHaveCount(0)
+    const composer = panel.getByRole('textbox', { name: 'Message the assistant' })
+    await expect(composer).toBeDisabled()
+
+    await panel.getByRole('button', { name: 'New chat' }).click()
+    await expect(composer).toBeEnabled()
+    await panel.getByRole('button', { name: 'Sessions (1)' }).click()
+    await sessions.getByRole('button', { name: 'Archived' }).click()
+    const archived = sessions.getByRole('list', { name: 'Archived chats' })
+    for (const name of [`Open ${OWN}`, `Unarchive ${OWN}`]) {
+      const box = (await archived.getByRole('button', { name }).boundingBox())!
+      expect(box.x + box.width, name).toBeLessThanOrEqual(390)
+    }
+    expect(await page.evaluate('document.documentElement.scrollWidth')).toBeLessThanOrEqual(390)
+
+    await archived.getByRole('button', { name: `Open ${OWN}` }).click()
+    await expect(panel.getByTestId('active-session-title')).toHaveText(OWN)
+    await expect(panel.getByRole('log', { name: 'Conversation' }).getByText('Done: the bin is now 3 units (21 mm) tall.')).toBeVisible()
+    await expect(composer).toBeDisabled()
+    await expect(panel.getByText(/This chat is archived, so it is read-only/)).toBeVisible()
+
+    await panel.getByRole('button', { name: 'Unarchive', exact: true }).click()
+    await expect(composer).toBeEnabled()
+    await expect(composer).toBeFocused()
+    await expect(panel.getByRole('button', { name: 'Sessions (2)' })).toBeVisible()
   })
 })
 

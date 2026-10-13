@@ -68,6 +68,13 @@ class SlicePlan(BaseModel):
     #: Accepted analyzer fixes are not consumed by a print yet (``api/analyzers.py``);
     #: when they are, an explicit fix goes over these.
     process_overrides: dict[str, str] = Field(default_factory=dict)
+    #: Slice the file as a whole (``plate: 0``) rather than by its plate number: set
+    #: for a library file of one plate (#2180). Naming a plate makes Bambuddy repaint
+    #: any slot it thinks that plate leaves unused, and it cannot see colour painted
+    #: inline on a mesh, so queue 268's two-colour file sliced in one colour. The
+    #: queue item still names the plate. Defaults off, so a plan in a workflow's
+    #: history from before it reads as before.
+    whole_file: bool = False
 
 
 async def slice_and_queue(
@@ -140,22 +147,45 @@ class SliceStarted(BaseModel):
     preset_key: str | None = None
 
 
+#: A finished slice of this copy with these presets, if one may be queued as it is:
+#: called with the copy's id and :attr:`SliceRequest.preset_key` (#2169).
+ReuseSlice = Callable[[int, str], Awaitable[int | None]]
+
+
 async def start_slice(
-    client: BambuddyClient, *, library_file_id: int, plan: SlicePlan, plate_id: int = 1
+    client: BambuddyClient,
+    *,
+    library_file_id: int,
+    plan: SlicePlan,
+    plate_id: int = 1,
+    reuse: ReuseSlice | None = None,
 ) -> SliceStarted:
     """``POST /library/files/{id}/slice``. Every call starts a **new** job, so the
-    workflow runs this once (spec 2026-10-01 §5.3, ``maximum_attempts = 1``)."""
-    request = SliceRequest(
+    workflow runs this once (spec 2026-10-01 §5.3, ``maximum_attempts = 1``).
+
+    ``reuse`` names a finished job of the same copy and presets, which the print
+    dialog's preview sliced (#2169): its job is answered instead, and nothing is
+    sliced again, so the slice the dialog showed is the one that prints."""
+    request = slice_request(plan, plate_id)
+    if reuse is not None:
+        job_id = await reuse(library_file_id, request.preset_key)
+        if job_id is not None:
+            return SliceStarted(job_id=job_id, preset_key=request.preset_key)
+    accepted = await client.slice(library_file_id, request)
+    return SliceStarted(job_id=accepted.job_id, preset_key=request.preset_key)
+
+
+def slice_request(plan: SlicePlan, plate_id: int) -> SliceRequest:
+    """What :func:`start_slice` posts for ``plan`` and ``plate_id``."""
+    return SliceRequest(
         printer_preset=plan.printer_preset,
         process_preset=plan.process_preset,
         filament_presets=plan.filament_presets,
         filament_colours=plan.filament_colours,
         bed_type=plan.bed_type,
-        plate=plate_id,
+        plate=0 if plan.whole_file else plate_id,
         process_overrides=plan.process_overrides or None,
     )
-    accepted = await client.slice(library_file_id, request)
-    return SliceStarted(job_id=accepted.job_id, preset_key=request.preset_key)
 
 
 async def wait_slice(client: BambuddyClient, job_id: int) -> int:

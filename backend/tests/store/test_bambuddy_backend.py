@@ -6,6 +6,7 @@ import asyncio
 import json
 from collections.abc import Awaitable, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
+from scadbuddy.bambuddy import commits
 from scadbuddy.bambuddy.client import BambuddyConfig
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
@@ -33,7 +35,7 @@ from scadbuddy.store.bambuddy import (
 )
 from scadbuddy.store.content import BlobMissingError, BlobScope
 from scadbuddy.store.index import Pool
-from tests.bambuddy.conftest import BASE_URL, recorded_schema, shaped
+from tests.bambuddy.conftest import BASE_URL, recorded_schema, recording, shaped
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 from tests.support.store import store_pool
 
@@ -44,6 +46,16 @@ SCOPE = BlobScope(slug="dollhouse-kit", title="Dollhouse Kit")
 #: How `store_folders` keys the configured Bambuddy (#1437 item 5): rows are recorded
 #: under the normalised URL, never the raw one.
 HERE = instance_key(BASE_URL)
+
+
+@pytest.fixture(autouse=True)
+def no_commit_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(commits, "COMMIT_WAITS", (0.0, 0.0, 0.0, 0.0))
+
+
+FOLDER_GONE = httpx.Response(404, json={"detail": "Folder not found"})
+#: `GET /library/folders/{id}`, the read-back of a folder an upload was refused into.
+ONE_FOLDER = rf"{API}/library/folders/\d+$"
 
 
 def target(key: str = "narrow") -> Callable[[], Awaitable[BambuddyTarget]]:
@@ -473,6 +485,8 @@ async def test_a_missing_download_is_blob_missing(pool: Pool) -> None:
 @respx.mock
 async def test_a_work_folder_deleted_in_bambuddy_is_made_again(pool: Pool) -> None:
     respx.get(f"{API}/library/folders").mock(return_value=inbox_tree())
+    # Really gone: the read-back never finds it, so it is made again.
+    respx.get(url__regex=ONE_FOLDER).mock(return_value=FOLDER_GONE)
     created = respx.post(f"{API}/library/folders/").mock(side_effect=create_folder)
     upload = respx.post(f"{API}/library/files").mock(
         side_effect=[
@@ -485,6 +499,62 @@ async def test_a_work_folder_deleted_in_bambuddy_is_made_again(pool: Pool) -> No
     await backend.upload("piece", b"a", name="a.zip", scope=SCOPE)
     assert await backend.upload("piece", b"b", name="b.zip", scope=SCOPE) == "2"
     assert created.call_count == 4 and upload.call_count == 3
+    await backend.aclose()
+
+
+@respx.mock
+async def test_an_upload_into_a_work_folder_not_yet_committed_waits_for_it(pool: Pool) -> None:
+    """#2263: Bambuddy answers a folder's create before committing it, so the first
+    upload into it is refused "Folder not found". That folder is waited for, not
+    forgotten and made a second time."""
+    respx.get(f"{API}/library/folders").mock(return_value=inbox_tree())
+    read = respx.get(url__regex=ONE_FOLDER).mock(
+        side_effect=[
+            FOLDER_GONE,
+            httpx.Response(200, json=folder_row(id=11, name="Work", parent_id=10)),
+        ]
+    )
+    created = respx.post(f"{API}/library/folders/").mock(side_effect=create_folder)
+    upload = respx.post(f"{API}/library/files").mock(
+        side_effect=[httpx.Response(404, json={"detail": "Folder not found"}), uploaded(7)]
+    )
+    backend = BambuddyContentBackend(target(), pool)
+    assert await backend.upload("piece", b"a", name="a.zip", scope=SCOPE) == "7"
+    assert created.call_count == 2  # one template folder and one Work, no duplicate
+    assert [c.request.url.params["folder_id"] for c in upload.calls] == ["11", "11"]
+    assert read.call_count == 2
+    await backend.aclose()
+
+
+@respx.mock
+async def test_work_made_under_a_template_folder_not_yet_committed_waits_for_it(
+    pool: Pool,
+) -> None:
+    """#2263: `Work/` is created at once under the template folder this find just made,
+    which Bambuddy may not have committed: "Parent folder not found" waits for the
+    parent rather than failing the upload into a forget that makes a second pair."""
+    respx.get(f"{API}/library/folders").mock(return_value=inbox_tree())
+    respx.get(f"{API}/library/folders/10").mock(
+        side_effect=[
+            FOLDER_GONE,
+            httpx.Response(200, json=folder_row(id=10, name="Dollhouse Kit", parent_id=INBOX)),
+        ]
+    )
+    parent_gone = httpx.Response(404, json={"detail": "Parent folder not found"})
+    attempts: list[dict[str, Any]] = []
+
+    async def create(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        attempts.append(body)
+        if body["name"] == "Work" and len(attempts) == 2:
+            return parent_gone
+        return await create_folder(request)
+
+    respx.post(f"{API}/library/folders/").mock(side_effect=create)
+    respx.post(f"{API}/library/files").mock(return_value=uploaded(8))
+    backend = BambuddyContentBackend(target(), pool)
+    assert await backend.upload("piece", b"a", name="a.zip", scope=SCOPE) == "8"
+    assert [a["name"] for a in attempts] == ["Dollhouse Kit", "Work", "Work"]
     await backend.aclose()
 
 
@@ -573,13 +643,16 @@ async def test_first_uploads_to_more_templates_than_connections_do_not_starve_th
 
 
 def _advisory_locks(conninfo: str, key: int) -> int:
-    """Held or awaited locks on `key` in the whole cluster: a bigint key is split into
-    `classid` (high half) and `objid` (low half)."""
+    """Held or awaited locks on `key` in this database: a bigint key is split into
+    `classid` (high half) and `objid` (low half). `pg_locks` covers the whole cluster,
+    and under pytest-xdist every worker has a database of its own taking the same
+    keys, so without the filter another worker's upload is counted here (#1987)."""
     unsigned = key & 0xFFFFFFFFFFFFFFFF
     with psycopg.connect(conninfo) as conn:
         row = conn.execute(
             "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory'"
-            " AND classid = %s AND objid = %s AND objsubid = 1",
+            " AND classid = %s AND objid = %s AND objsubid = 1"
+            " AND database = (SELECT oid FROM pg_database WHERE datname = current_database())",
             (unsigned >> 32, unsigned & 0xFFFFFFFF),
         ).fetchone()
     assert row is not None
@@ -617,6 +690,7 @@ async def test_a_work_folder_that_keeps_vanishing_is_made_again_once_not_looped(
     pool: Pool,
 ) -> None:
     respx.get(f"{API}/library/folders").mock(return_value=inbox_tree())
+    respx.get(url__regex=ONE_FOLDER).mock(return_value=FOLDER_GONE)
     created = respx.post(f"{API}/library/folders/").mock(side_effect=create_folder)
     gone = httpx.Response(404, json={"detail": "Folder not found"})
     upload = respx.post(f"{API}/library/files").mock(side_effect=[uploaded(1), gone, gone])
@@ -660,3 +734,124 @@ async def test_render_settings_are_cached_for_the_ttl_and_invalidate_rereads(
     key("c")
     source.invalidate()
     assert (await source.current()).api_key == "c"
+
+
+def work_folder(
+    pool: Pool, folder_id: int = 11, *, instance: str = HERE, slug: str = "dollhouse-kit"
+) -> None:
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO store_folders (instance, inbox_id, slug, role, folder_id)"
+            " VALUES (%s, %s, %s, 'work', %s)",
+            (instance, INBOX, slug, folder_id),
+        )
+
+
+def blob_row(pool: Pool, backend_id: str) -> None:
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO store_blobs (key, sha256, kind, backend, backend_id, size)"
+            " VALUES (%s, 'sha', 'piece', 'bambuddy', %s, 1)",
+            (f"piece:{backend_id}", backend_id),
+        )
+
+
+def listed(*files: tuple[int, str]) -> httpx.Response:
+    """``GET /library/files/?folder_id=``: a recorded row per file, with its id and
+    `created_at`."""
+    row = recording("library-files-folder.json")[0]
+    return httpx.Response(200, json=[{**row, "id": i, "created_at": at} for i, at in files])
+
+
+def file_in(file_id: int, folder_id: int = 11) -> respx.Route:
+    """``GET /library/files/{id}``: the file, in ``folder_id``, as the sweep re-reads it
+    right before its DELETE (#2115)."""
+    return respx.get(f"{API}/library/files/{file_id}").mock(
+        return_value=httpx.Response(
+            200, json=shaped("FileResponse", id=file_id, filename="p", folder_id=folder_id)
+        )
+    )
+
+
+OLD = "2026-10-01T00:00:00"
+FRESH = "2026-10-09T23:59:00"
+#: Between `OLD` and `FRESH`: what `sweep_unrecorded` treats as older than the grace.
+CUTOFF = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)
+
+
+@respx.mock
+async def test_an_old_work_file_no_row_names_is_deleted(pool: Pool) -> None:
+    """#701: a crash between the upload and the `store_blobs` row leaves the file."""
+    work_folder(pool)
+    respx.get(f"{API}/library/files/", params={"folder_id": "11"}).mock(
+        return_value=listed((600, OLD))
+    )
+    file_in(600)
+    delete = respx.delete(f"{API}/library/files/600").mock(
+        return_value=httpx.Response(200, json={})
+    )
+    backend = BambuddyContentBackend(target(), pool)
+    assert await backend.sweep_unrecorded(cutoff=CUTOFF) == ["600"]
+    assert delete.call_count == 1
+    await backend.aclose()
+
+
+@respx.mock
+async def test_a_fresh_unrecorded_file_and_a_recorded_one_are_kept(pool: Pool) -> None:
+    """A fresh one may be an upload whose row is about to be written."""
+    work_folder(pool)
+    blob_row(pool, "602")
+    respx.get(f"{API}/library/files/", params={"folder_id": "11"}).mock(
+        return_value=listed((601, FRESH), (602, OLD))
+    )
+    delete = respx.delete(url__regex=rf"{API}/library/files/\d+")
+    backend = BambuddyContentBackend(target(), pool)
+    assert await backend.sweep_unrecorded(cutoff=CUTOFF) == []
+    assert not delete.called
+    await backend.aclose()
+
+
+@respx.mock
+async def test_only_work_folders_of_the_configured_bambuddy_are_swept(pool: Pool) -> None:
+    work_folder(pool, 31, instance=instance_key("http://elsewhere.example:8000"))
+    listing = respx.get(f"{API}/library/files/")
+    backend = BambuddyContentBackend(target(), pool)
+    assert await backend.sweep_unrecorded(cutoff=CUTOFF) == []
+    assert not listing.called
+    await backend.aclose()
+
+
+@respx.mock
+async def test_a_work_folder_gone_from_bambuddy_is_skipped(pool: Pool) -> None:
+    work_folder(pool, 11)
+    work_folder(pool, 12, slug="bookshelf")
+    respx.get(f"{API}/library/files/", params={"folder_id": "11"}).mock(
+        return_value=httpx.Response(404, json={"detail": "gone"})
+    )
+    respx.get(f"{API}/library/files/", params={"folder_id": "12"}).mock(
+        return_value=listed((610, OLD))
+    )
+    file_in(610, 12)
+    respx.delete(f"{API}/library/files/610").mock(return_value=httpx.Response(404, json={}))
+    backend = BambuddyContentBackend(target(), pool)
+    assert await backend.sweep_unrecorded(cutoff=CUTOFF) == ["610"]
+    await backend.aclose()
+
+
+@respx.mock
+async def test_a_file_moved_out_of_work_after_the_listing_is_kept(pool: Pool) -> None:
+    """#2115: the listing can be many round trips old by the DELETE, so each file's
+    folder is read again first, as `remove` does (#1272)."""
+    work_folder(pool)
+    respx.get(f"{API}/library/files/", params={"folder_id": "11"}).mock(
+        return_value=listed((620, OLD), (621, OLD))
+    )
+    file_in(620, 99)  # moved out of Work/ in Bambuddy's UI since the listing
+    respx.get(f"{API}/library/files/621").mock(
+        return_value=httpx.Response(404, json={"detail": "gone"})
+    )
+    delete = respx.delete(url__regex=rf"{API}/library/files/\d+")
+    backend = BambuddyContentBackend(target(), pool)
+    assert await backend.sweep_unrecorded(cutoff=CUTOFF) == []
+    assert not delete.called
+    await backend.aclose()

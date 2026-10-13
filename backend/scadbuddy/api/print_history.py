@@ -17,7 +17,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
+import xml.etree.ElementTree as ET
+import zipfile
 from collections.abc import Awaitable, Sequence
 from datetime import UTC, date, datetime
 from pathlib import PurePosixPath
@@ -35,6 +38,7 @@ from scadbuddy.api.deps import (
     PathsDep,
     PrintLinksDep,
     SettingsStoreDep,
+    UploadsDep,
 )
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
@@ -47,14 +51,17 @@ from scadbuddy.api.prints import PHOTO_NAME, ArchiveIdPath
 from scadbuddy.bambuddy.archive_cache import ArchiveCache
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.component import ArchiveCacheDep
-from scadbuddy.bambuddy.linking import link_library_prints
+from scadbuddy.bambuddy.linking import link_library_prints, scan_library_by_hash
 from scadbuddy.bambuddy.models import (
     ArchiveDetail,
     ArchiveRun,
+    LibraryFile,
     PrinterMedia,
     TimelapseInfo,
 )
 from scadbuddy.bambuddy.print_links import LinkedPrint
+from scadbuddy.bambuddy.print_source import printable
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
@@ -73,8 +80,11 @@ from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.operations.store import OperationAccepted
+from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.runner import OpenSCADError
 from scadbuddy.render.schema import ParamValue
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/prints", tags=["prints"])
 
@@ -122,6 +132,12 @@ class PrintSummary(_Response):
     slug: str | None
     #: The Bambuddy library file printed, for a print of one (#976); else None.
     library_file_id: int | None
+    #: That file's name in Bambuddy's library now (#1755); None for an output's print,
+    #: and once the file is gone from Bambuddy or could not be read.
+    library_file_name: str | None
+    #: The queue item the print came from, when it was linked by it; None for one
+    #: found by its sliced file's hash (#1751: the history's Waiting row).
+    queue_item_id: int | None = None
     #: The output's name, or a library file's print's name in Bambuddy.
     output_name: str | None
     #: Bambuddy's (``completed``, ``failed``, ``printing``, …), or
@@ -170,7 +186,9 @@ class PrintProvenance(_Response):
 
 
 class PrintFile(_Response):
-    kind: Literal["output_3mf", "sliced", "source", "preview_glb"]
+    #: ``library_file`` is the Bambuddy library file a library print was made from
+    #: (#1753); ``preview_glb`` is the output's preview, or the library file's plate.
+    kind: Literal["output_3mf", "sliced", "source", "preview_glb", "library_file"]
     name: str
     size: int | None
     url: str
@@ -198,6 +216,9 @@ class PrintTimelapse(_Response):
 class PlateThumbnail(_Response):
     index: int
     url: str
+    #: What the plate holds (#2055, as #929 names a plate), read from what was printed: the
+    #: output's 3MF or the library file. ``None`` when nothing names it or it is unreadable.
+    name: str | None = None
 
 
 class PrintAttachment(_Response):
@@ -294,6 +315,7 @@ def _summary(
     meta: OutputMeta | None,
     archive: ArchiveDetail | None,
     params_diff: dict[str, ParamValue] | None,
+    file_name: str | None = None,
 ) -> PrintSummary:
     if meta is not None:
         name = meta.name
@@ -301,9 +323,11 @@ def _summary(
         name = (archive.print_name if archive is not None else None) or link.name
     return PrintSummary(
         archive_id=link.archive_id,
+        queue_item_id=link.queue_item_id,
         output_id=None if meta is None else meta.id,
         slug=None if meta is None else meta.slug,
         library_file_id=link.library_file_id,
+        library_file_name=file_name,
         output_name=name,
         status=DELETED_STATUS if archive is None else archive.status or UNKNOWN_STATUS,
         printer_id=(
@@ -444,7 +468,7 @@ def _matches(
                     json.dumps(output.params, sort_keys=True),
                 )
                 if output is not None
-                else (link.name or "",)
+                else (link.name or "", summary.library_file_name or "")
             ),
         )
         if not any(needle in text.casefold() for text in haystack):
@@ -471,6 +495,42 @@ async def _named(
     return [item.model_copy(update={"printer_name": names.get(item.archive_id)}) for item in items]
 
 
+class _LibraryFiles:
+    """The library files prints were made of, once per file per request (#1755). The
+    file names a print and lists its files, but the print is Bambuddy's archive: a
+    file Bambuddy no longer has, or a read that fails, is None, and the print is shown
+    without it."""
+
+    def __init__(self, cache: ArchiveCache, client: BambuddyClient) -> None:
+        self._cache = cache
+        self._client = client
+        self._known: dict[int, LibraryFile | None] = {}
+
+    async def read(self, file_ids: Sequence[int | None]) -> None:
+        """Read the files of a batch of prints at once, ahead of `file`."""
+        wanted = [i for i in dict.fromkeys(file_ids) if i is not None and i not in self._known]
+        await _bounded([self.file(file_id) for file_id in wanted], READ_CONCURRENCY)
+
+    async def file(self, file_id: int | None) -> LibraryFile | None:
+        if file_id is None:
+            return None
+        if file_id not in self._known:
+            try:
+                found = await self._cache.library_file(self._client, file_id)
+            except ApiError as error:
+                logger.warning(
+                    "could not read a printed library file",
+                    extra={"library_file_id": file_id, "status": error.status},
+                )
+                found = None
+            self._known[file_id] = found
+        return self._known[file_id]
+
+    async def name(self, file_id: int | None) -> str | None:
+        file = await self.file(file_id)
+        return file.filename if file is not None else None
+
+
 async def _bounded[T](calls: Sequence[Awaitable[T]], limit: int) -> list[T]:
     gate = asyncio.Semaphore(limit)
 
@@ -488,15 +548,19 @@ async def _bounded[T](calls: Sequence[Awaitable[T]], limit: int) -> list[T]:
     description=(
         "The Bambuddy archives ScadBuddy's outputs and the Bambuddy library files it "
         "printed produced, newest first, a page at a time. Filters: the template (`slug`, "
-        "which leaves out every library file's print), Bambuddy's `status` (or "
-        "`deleted_in_bambuddy`), `printer_id`, the day the print started (`from`, `to`, "
-        "inclusive) and `q`, matched against the output's and the print's names and "
-        f"the parameter values. One request examines at most {MAX_SCANNED} linked prints, "
-        "so a page can be short, even empty, and still carry a `next_cursor`."
+        "which leaves out every library file's print) or one Bambuddy library file "
+        "(`library_file_id`, which leaves out every output's; not both), Bambuddy's "
+        "`status` (or `deleted_in_bambuddy`), `printer_id`, the day the print started "
+        "(`from`, `to`, inclusive) and `q`, matched against the output's, the library "
+        "file's and the print's names and the parameter values. The first page of one "
+        "library file's history also looks for its reprints made inside Bambuddy. One "
+        f"request examines at most {MAX_SCANNED} linked prints, so a page can be short, "
+        "even empty, and still carry a `next_cursor`."
     ),
 )
 async def list_prints(
     links: PrintLinksDep,
+    uploads: UploadsDep,
     outputs: OutputsDep,
     store: SettingsStoreDep,
     cache: ArchiveCacheDep,
@@ -507,6 +571,7 @@ async def list_prints(
     slug: Annotated[
         str | None, Query(pattern=MODEL_ID_PATTERN, max_length=MAX_MODEL_ID_LENGTH)
     ] = None,
+    library_file_id: Annotated[int | None, Query(ge=1)] = None,
     print_status: Annotated[str | None, Query(alias="status", max_length=64)] = None,
     printer_id: int | None = None,
     date_from: Annotated[date | None, Query(alias="from")] = None,
@@ -515,12 +580,20 @@ async def list_prints(
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
     cursor: Annotated[str | None, Query(pattern=CURSOR_PATTERN)] = None,
 ) -> PrintPage:
-    if not links.available:
-        return PrintPage(items=[])
+    if slug is not None and library_file_id is not None:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "a print is of a template's output or of a library file: filter by one",
+        )
     filters = _Filters(
         status=print_status, printer_id=printer_id, date_from=date_from, date_to=date_to, q=q
     )
-    output_ids = await asyncio.to_thread(outputs.ids_for, slug) if slug is not None else None
+    subjects: list[PrintSubject] | None = None
+    if slug is not None:
+        output_ids = await asyncio.to_thread(outputs.ids_for, slug)
+        subjects = [PrintSubject.output(output_id) for output_id in output_ids]
+    elif library_file_id is not None:
+        subjects = [PrintSubject.library(library_file_id)]
     defaults = _Defaults(paths=paths, history=history, config=config, fetcher=fetcher)
     known: dict[str, _Output | None] = {}
     before = int(cursor) if cursor is not None else None
@@ -531,18 +604,24 @@ async def list_prints(
     scanned = 0
 
     async with client_for(store.load()) as client:
+        files = _LibraryFiles(cache, client)
         if cursor is None and slug is None:
             # Only the first page can show a print linked now, and a slug filter
             # leaves every library print out (#1663). The other filters can show
             # one, so they still link.
-            await link_library_prints(client, links)
+            await link_library_prints(client, links, uploads=uploads)
+            if library_file_id is not None:
+                # A reprint made inside Bambuddy has no queue item of ScadBuddy's; only
+                # its hash names it (#1755), as an output's progress read finds one.
+                await scan_library_by_hash(client, uploads, links, library_file_id)
         while True:
             wanted = min(limit, MAX_SCANNED - scanned)
-            batch = await links.page(limit=wanted, before=before, output_ids=output_ids)
+            batch = await links.page(limit=wanted, before=before, subjects=subjects)
             scanned += len(batch)
             archives = await _bounded(
                 [cache.archive(client, link.archive_id) for link in batch], READ_CONCURRENCY
             )
+            await files.read([link.library_file_id for link in batch])
             for index, (link, archive) in enumerate(zip(batch, archives, strict=True)):
                 before = link.archive_id
                 output = None
@@ -554,7 +633,13 @@ async def list_prints(
                     output = known[link.output_id]
                     if output is None:
                         continue  # The output went between its link and this read.
-                summary = _summary(link, output.meta if output else None, archive, None)
+                summary = _summary(
+                    link,
+                    output.meta if output else None,
+                    archive,
+                    None,
+                    await files.name(link.library_file_id),
+                )
                 if not _matches(filters, summary, link, archive, output):
                     continue
                 if output is not None:
@@ -569,7 +654,7 @@ async def list_prints(
                     # A further linked row, whether or not it will pass the filters:
                     # one row from Postgres, no Bambuddy read (#609 review).
                     more = index < len(batch) - 1 or bool(
-                        await links.page(limit=1, before=before, output_ids=output_ids)
+                        await links.page(limit=1, before=before, subjects=subjects)
                     )
                     return PrintPage(
                         items=await _named(cache, client, items, present),
@@ -578,7 +663,7 @@ async def list_prints(
             if len(batch) < wanted:
                 return PrintPage(items=await _named(cache, client, items, present))
             if scanned >= MAX_SCANNED:
-                more = bool(await links.page(limit=1, before=before, output_ids=output_ids))
+                more = bool(await links.page(limit=1, before=before, subjects=subjects))
                 return PrintPage(
                     items=await _named(cache, client, items, present),
                     next_cursor=str(before) if more else None,
@@ -586,7 +671,7 @@ async def list_prints(
 
 
 async def _require_print(links: PrintLinksDep, archive_id: int) -> LinkedPrint:
-    linked = await links.linked(archive_id) if links.available else None
+    linked = await links.linked(archive_id)
     if linked is None:
         raise ApiError(
             status.HTTP_404_NOT_FOUND,
@@ -596,9 +681,12 @@ async def _require_print(links: PrintLinksDep, archive_id: int) -> LinkedPrint:
 
 
 def _files(
-    outputs: OutputStore, meta: OutputMeta | None, archive: ArchiveDetail | None
+    outputs: OutputStore,
+    meta: OutputMeta | None,
+    archive: ArchiveDetail | None,
+    library: list[PrintFile],
 ) -> list[PrintFile]:
-    files = [] if meta is None else _output_files(outputs, meta)
+    files = library if meta is None else _output_files(outputs, meta)
     if archive is None:
         return files
     files.append(
@@ -616,6 +704,33 @@ def _files(
                 name=PurePosixPath(archive.source_3mf_path).name,
                 size=None,
                 url=_prints_url(archive.id, "files/source"),
+            )
+        )
+    return files
+
+
+def _library_files(
+    link: LinkedPrint, archive: ArchiveDetail | None, file: LibraryFile | None
+) -> list[PrintFile]:
+    """A library print's own files, as an output's print lists its 3MF and preview
+    (#1753): the library file it was made from, and a preview of the plate printed,
+    read from that file as a print of it reads it. None once the file is gone."""
+    file_id = link.library_file_id
+    if file_id is None or file is None:
+        return []
+    base = f"/api/v1/print/library/{file_id}"
+    files = [
+        PrintFile(kind="library_file", name=file.filename, size=file.file_size, url=f"{base}/file")
+    ]
+    if printable(file.file_type):
+        plate = (archive.plate_id if archive is not None else None) or link.plate_id or 1
+        stem = PurePosixPath(file.filename).stem or f"library-{file_id}"
+        files.append(
+            PrintFile(
+                kind="preview_glb",
+                name=f"{stem}.glb",
+                size=None,
+                url=f"{base}/preview.glb?plate={plate}",
             )
         )
     return files
@@ -676,6 +791,36 @@ async def _media(
             else []
         ),
     )
+
+
+def _output_plate_names(outputs: OutputStore, output_id: str) -> dict[int, str]:
+    try:
+        plates = plates_of(outputs.directory(output_id) / MODEL_NAME)
+    except (OSError, KeyError, ValueError, zipfile.BadZipFile, ET.ParseError):
+        return {}
+    return {plate.index: plate.name for plate in plates if plate.name}
+
+
+async def _plate_names(
+    link: LinkedPrint, outputs: OutputStore, client: BambuddyClient
+) -> dict[int, str]:
+    """#2055 — each plate's name, from what this print was of. Advisory: an unreadable
+    source names nothing, and the caption keeps the plate's number."""
+    if link.output_id is not None:
+        return await asyncio.to_thread(_output_plate_names, outputs, link.output_id)
+    if link.library_file_id is None:
+        return {}
+    try:
+        plates = await client.library_plates(link.library_file_id)
+    # The client maps transport failures to ApiError; a body that is not the expected
+    # shape is a ValueError (pydantic's ValidationError, or undecodable JSON).
+    except (ApiError, ValueError) as error:
+        logger.info(
+            "could not read a printed library file's plate names",
+            extra={"library_file_id": link.library_file_id, "error": type(error).__name__},
+        )
+        return {}
+    return {plate.index: plate.name for plate in plates.plates if plate.name}
 
 
 def _run(run: ArchiveRun, archive_grams: float | None) -> PrintedRun:
@@ -756,7 +901,8 @@ async def get_print(
     async with client_for(store.load()) as client:
         archive = await cache.archive(client, archive_id)
         diff = await defaults.diff(output) if output is not None else None
-        summary = _summary(link, meta, archive, diff)
+        file = await _LibraryFiles(cache, client).file(link.library_file_id)
+        summary = _summary(link, meta, archive, diff, file.filename if file else None)
         media = PrintMedia()
         runs: list[ArchiveRun] = []
         on_printer = None
@@ -765,10 +911,17 @@ async def get_print(
                 _media(cache, client, link, archive), cache.runs(client, archive_id)
             )
             runs = run_list.items
+            if media.plate_thumbnails:
+                names = await _plate_names(link, outputs, client)
+                media.plate_thumbnails = [
+                    thumbnail.model_copy(update={"name": names.get(thumbnail.index)})
+                    for thumbnail in media.plate_thumbnails
+                ]
             summary = summary.model_copy(update={"printer_name": _printer_name(runs)})
             if printer_media:
                 on_printer = await client.printer_media(archive_id)
-        files = await asyncio.to_thread(_files, outputs, meta, archive)
+        library = _library_files(link, archive, file) if meta is None else []
+        files = await asyncio.to_thread(_files, outputs, meta, archive, library)
         bambuddy_url = client.config.web_url(ARCHIVES_PAGE) if archive is not None else None
 
     return PrintDetail(

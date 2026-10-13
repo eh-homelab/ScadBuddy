@@ -57,16 +57,6 @@ describe('SettingsPage', () => {
     expect(key).toHaveAttribute('placeholder', expect.stringContaining('A key is stored'))
   })
 
-  it('offers the AI headless browser switch, off by default (#349)', async () => {
-    renderPage(<SettingsPage />)
-    // Waited for by its text, then found by role once: the switch comes after two rounds
-    // of requests, and a role query re-run on every change while the page loads costs
-    // ~0.4 s each in jsdom (getComputedStyle per element), which held the page past the
-    // wait (#1485).
-    await screen.findByText('Let AI sessions use ScadBuddy in a headless browser', {}, { timeout: 10_000 })
-    expect(screen.getByRole('checkbox', { name: 'Let AI sessions use ScadBuddy in a headless browser' })).not.toBeChecked()
-  })
-
   it('says when no key is stored yet', async () => {
     server.use(
       http.get('/api/v1/settings', () =>
@@ -100,6 +90,37 @@ describe('SettingsPage', () => {
 
     await user.click(bambuddyTest())
     expect(await findStatus("'Read Status' scope")).toBeInTheDocument()
+  })
+
+  it("shows what Bambuddy itself answered a failed test (#1542)", async () => {
+    server.use(
+      http.post('/api/v1/settings/test', () =>
+        HttpResponse.json({
+          ok: false,
+          detail: 'Bambuddy is limiting requests and refused to list the printers; it asks to wait 30 s',
+          printers: [],
+          upstream: { status: 429, retry_after: '30', detail: 'Too many requests for this API key', error: null },
+        }),
+      ),
+    )
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+
+    await user.click(bambuddyTest())
+    expect(await findStatus('limiting requests')).toBeInTheDocument()
+    const answered = screen.getByText('What Bambuddy answered').closest('details')!
+    expect(within(answered).getByText('429')).toBeInTheDocument()
+    expect(within(answered).getByText('30')).toBeInTheDocument()
+    expect(within(answered).getByText('Too many requests for this API key')).toBeInTheDocument()
+  })
+
+  it('shows no answer when the test passed', async () => {
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+
+    await user.click(bambuddyTest())
+    expect(await findStatus('3DP-31B-598')).toBeInTheDocument()
+    expect(screen.queryByText('What Bambuddy answered')).not.toBeInTheDocument()
   })
 
   it('offers the folders and printers Bambuddy reports, and no slicer pipeline', async () => {
@@ -376,7 +397,7 @@ describe('SettingsPage, live (#269)', () => {
     await seeded()
     await waitFor(() => expect(screen.getByTestId('ai-status')).toHaveAttribute('data-state', 'not_configured'))
     expect(screen.queryByRole('heading', { name: 'Plugin packages' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('heading', { name: 'Plugin endpoints' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Plugins' })).not.toBeInTheDocument()
     hidden.unmount()
 
     // The default handler answers as available.
@@ -384,7 +405,7 @@ describe('SettingsPage, live (#269)', () => {
     resetAiAvailability()
     renderPage(<SettingsPage />)
     expect(await screen.findByRole('heading', { name: 'Plugin packages' })).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: 'Plugin endpoints' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Plugins' })).toBeInTheDocument()
     expect(await screen.findByRole('listitem', { name: 'Plugin endpoint hindsight' })).toBeInTheDocument()
   })
 

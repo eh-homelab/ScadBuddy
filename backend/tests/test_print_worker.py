@@ -1,6 +1,6 @@
 """`python -m scadbuddy.worker --queue bambuddy` (#1060, spec 2026-10-01 §5.5): the
 ``scadbuddy-print`` worker, on Postgres and the API's internal routes only, versioned
-and drained like the render worker."""
+like the render worker, its workflows AUTO_UPGRADE."""
 
 from __future__ import annotations
 
@@ -21,7 +21,6 @@ from scadbuddy.bambuddy import output_reader
 from scadbuddy.core.settings import Settings
 from scadbuddy.operations.store import Operation
 from scadbuddy.worker import (
-    PRINT_UNPINNED,
     ApiUrlMissingError,
     build_print_deps,
     parse_queue,
@@ -61,29 +60,42 @@ def test_the_queue_flag_picks_the_worker() -> None:
         parse_queue(["--queue", "library"])
 
 
-def test_the_drain_skips_exactly_the_workflows_not_pinned(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``PRINT_UNPINNED`` names every workflow the versioned print worker registers that
-    is not PINNED, and only those (plan 1b Ruling 7)."""
+def test_no_print_workflow_is_pinned(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every workflow the versioned print worker registers is AUTO_UPGRADE, by its own
+    definition or by the worker's default (#2066): the Deployment rolls with
+    ``Recreate``, so a run pinned to the old build would have no poller once it stops."""
     registered: list[type] = []
+    defaults: list[VersioningBehavior] = []
 
-    def record(*_: Any, workflows: list[type], **__: Any) -> None:
+    def record(*_: Any, workflows: list[type], deployment_config: Any, **__: Any) -> None:
         registered.extend(workflows)
+        defaults.append(deployment_config.default_versioning_behavior)
 
     monkeypatch.setattr(client_module, "Worker", record)
     client_module.bambuddy_worker(None, "q", [], build_id="b")  # type: ignore[arg-type]
 
-    unpinned: list[str] = []
+    assert defaults == [VersioningBehavior.AUTO_UPGRADE]
+    assert registered
     for cls in registered:
-        defn = workflow._Definition.must_from_class(cls)
-        if defn.versioning_behavior not in (
-            VersioningBehavior.UNSPECIFIED,
-            VersioningBehavior.PINNED,
-        ):
-            assert defn.name is not None
-            unpinned.append(defn.name)
-    assert registered and sorted(unpinned) == sorted(PRINT_UNPINNED)
+        own = workflow._Definition.must_from_class(cls).versioning_behavior
+        assert own in (VersioningBehavior.UNSPECIFIED, VersioningBehavior.AUTO_UPGRADE), cls
+
+
+def test_the_print_worker_shares_the_apps_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2014: the client's tracing interceptor makes workflow spans in every worker's
+    sandbox, so the print worker passes OpenTelemetry through as the render worker
+    does. The follow worker runs no workflows."""
+    runners: list[Any] = []
+
+    def record(*_: Any, **kwargs: Any) -> None:
+        runners.append(kwargs.get("workflow_runner"))
+
+    monkeypatch.setattr(client_module, "Worker", record)
+    client_module.bambuddy_worker(None, "q", [])  # type: ignore[arg-type]
+    [runner] = runners
+    assert "opentelemetry" in runner.restrictions.passthrough_modules
 
 
 def test_the_print_worker_needs_the_apis_internal_url(tmp_path: Path) -> None:

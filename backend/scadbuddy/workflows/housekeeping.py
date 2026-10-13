@@ -43,7 +43,8 @@ from temporalio.client import (
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
 from temporalio.service import RPCError, RPCStatusCode
-from temporalio.worker import Worker
+from temporalio.worker import Worker, WorkflowRunner
+from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
 with workflow.unsafe.imports_passed_through():
     from scadbuddy.render.submit import DESCRIBE_BOUND, SETTLE_DESCRIBES
@@ -76,6 +77,18 @@ BACKFILL_SWEEP = "housekeeping_attach_backfills"
 REAP_SWEEP = "housekeeping_reap_output_holds"
 #: The `workflow.patched` id that adds `REAP_SWEEP` to a run (see the module docstring).
 REAP_PATCH = "housekeeping-reap-output-holds"
+#: #1057: end the flow runs whose execution closed without finishing them
+#: (`flows/sweep.py`). Behind its own patch, like `REAP_SWEEP`.
+FLOWS_SWEEP = "housekeeping_sweep_flow_runs"
+FLOWS_PATCH = "housekeeping-sweep-flow-runs"
+#: #2169: remove the print dialog's background slices no run queued
+#: (`bambuddy.preview.sweep_preview_slices`). Behind its own patch, like `REAP_SWEEP`.
+PREVIEWS_SWEEP = "housekeeping_sweep_preview_slices"
+PREVIEWS_PATCH = "housekeeping-sweep-preview-slices"
+#: #2289: pack the models repository (`ModelHistory.maintain`) once loose objects pile
+#: up, which git's own `gc --auto` lets reach thousands. Behind its own patch.
+GIT_SWEEP = "housekeeping_maintain_models_git"
+GIT_PATCH = "housekeeping-maintain-models-git"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
 SWEEPS = (
     "housekeeping_prune_jobs",
@@ -85,10 +98,14 @@ SWEEPS = (
     "housekeeping_sweep_claims",
     BACKFILL_SWEEP,
     REAP_SWEEP,
+    FLOWS_SWEEP,
+    PREVIEWS_SWEEP,
+    GIT_SWEEP,
 )
-#: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs, and request claims,
-#: which would otherwise pile up for good with the sweeps off (review 3c M1).
-PRUNE_SWEEPS = (SWEEPS[0], SWEEPS[4])
+#: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs, request claims and
+#: the dialog's background slices, which would otherwise pile up for good with the
+#: sweeps off (review 3c M1).
+PRUNE_SWEEPS = (SWEEPS[0], SWEEPS[4], PREVIEWS_SWEEP)
 #: An asset sweep converges with the store over Bambuddy, at length.
 SWEEP_TIMEOUT = timedelta(minutes=30)
 #: Every sweep heartbeats: a worker lost mid-sweep is noticed within this, not after
@@ -103,6 +120,12 @@ PRUNE_TIMEOUT = timedelta(seconds=2 * (1 + SETTLE_DESCRIBES) * DESCRIBE_BOUND) +
 )
 #: The claims sweep is one delete.
 CLAIMS_TIMEOUT = timedelta(minutes=2)
+#: A few Bambuddy reads and deletes per background slice past its grace.
+PREVIEWS_TIMEOUT = timedelta(minutes=5)
+#: `ModelHistory.maintain`'s `git gc` is bounded by `history.MAINTAIN_TIMEOUT` (10 min);
+#: this adds a margin for the count and the kill (#2342). Not imported: the sandbox runs
+#: this module, and `library.history` is not passed through.
+GIT_TIMEOUT = timedelta(minutes=12)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)
 
@@ -113,6 +136,10 @@ def sweep_timeout(sweep: str) -> timedelta:
         return PRUNE_TIMEOUT
     if sweep == PRUNE_SWEEPS[1]:
         return CLAIMS_TIMEOUT
+    if sweep == PREVIEWS_SWEEP:
+        return PREVIEWS_TIMEOUT
+    if sweep == GIT_SWEEP:
+        return GIT_TIMEOUT
     return SWEEP_TIMEOUT
 
 
@@ -131,6 +158,12 @@ class Housekeeping:
         for sweep in SWEEPS if sweeps is None else sweeps:
             # Added after runs that may still replay; one recorded before it skips it.
             if sweep == REAP_SWEEP and not workflow.patched(REAP_PATCH):
+                continue
+            if sweep == FLOWS_SWEEP and not workflow.patched(FLOWS_PATCH):
+                continue
+            if sweep == PREVIEWS_SWEEP and not workflow.patched(PREVIEWS_PATCH):
+                continue
+            if sweep == GIT_SWEEP and not workflow.patched(GIT_PATCH):
                 continue
             try:
                 await workflow.execute_activity(
@@ -152,6 +185,7 @@ def library_worker(
     activities: Sequence[Callable[..., Any]],
     *,
     workflows: Sequence[type] = (),
+    workflow_runner: WorkflowRunner | None = None,
     graceful_shutdown_timeout: timedelta = timedelta(seconds=30),
 ) -> Worker:
     """The ``library`` worker: ``Housekeeping`` and its sweeps, plus ``workflows`` (the
@@ -159,12 +193,15 @@ def library_worker(
     sweep ``graceful_shutdown_timeout`` to finish (review #1095b 5). A sweep longer
     than that (an asset sweep's converge) is then cancelled, and gets
     `main.SWEEP_SHUTDOWN_JOIN` more for its thread to return (#1708), so the lifespan
-    does not close the stores under it."""
+    does not close the stores under it. ``workflow_runner`` is the app's
+    `client.sandboxed_runner` (#2014), passed in: this module runs in the sandbox, so
+    it does not import the client's."""
     return Worker(
         client,
         task_queue=task_queue,
         workflows=[Housekeeping, *workflows],
         activities=activities,
+        workflow_runner=workflow_runner or SandboxedWorkflowRunner(),
         graceful_shutdown_timeout=graceful_shutdown_timeout,
     )
 

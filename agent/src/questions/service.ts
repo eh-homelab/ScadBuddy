@@ -3,8 +3,11 @@ import type { Sql, TransactionSql } from 'postgres'
 import { type AuditEntry, type AuditLog, type AuditSurface, safeDetail, SYSTEM_ACTOR } from '../audit/log.js'
 import { type AttentionReason, BACK_REPLIES, type OnTimeout } from '../harness/attention.js'
 import { ATTENTION_TOOL, parseQuestions, type QuestionGate, type QuestionRequest, type QuestionVerdict, type UserQuestion } from '../harness/questions.js'
+import type { SettingsReader } from '../approvals/service.js'
 import { isUuid } from '../harness/stateDirs.js'
 import { loadDoneSummary } from './doneSummary.js'
+import { isDoneSummary, isNotDoneSummary } from './waiting.js'
+import { inputRequested, inputResolved, questionEntry } from '../gate/classic.js'
 import { redact } from '../secrets.js'
 import type { EventLog } from '../sessions/eventLog.js'
 import {
@@ -32,8 +35,15 @@ import {
 // (interrupt, shutdown, failure, the reaper), its pending questions are
 // cancelled (`cancelPending`, from sessions/manager.ts). A question is asked
 // again by the next turn if the model still needs it; there is no orphan to
-// resume, unlike an approval. A question has no expiry of its own yet (spec
-// §6.6 adds `question_expiry_seconds`, which must cancel, never answer).
+// resume, unlike an approval.
+//
+// A QUESTION EXPIRES (durable-agents spec §6.6, Timeouts): at
+// `question_expiry_seconds` (ai_settings, default 3600, 10 to 86 400) after it is
+// asked, its parked call stops waiting and the row is CANCELLED, reason "nobody
+// answered in time", never answered; the model reads that nobody answered. An
+// orphan (its turn died without cancelling it) is cancelled by `expireDue`, which
+// main.ts runs beside the approval sweep. An answer after the timer is refused, even
+// before either has resolved the row.
 //
 // ATTENTION REQUESTS (#815, harness/attention.ts) are rows here too (`kind =
 // 'attention'`): the same gate, card, answer and cancellation. Two things are
@@ -60,6 +70,13 @@ import {
 // read can at most make it ASK, which is the model's call like any other.
 
 export const DEFAULT_QUESTION_POLL_MS = 1000
+/** ai_settings key: seconds a question waits for an answer before it is cancelled. */
+export const SETTING_QUESTION_EXPIRY_SECONDS = 'question_expiry_seconds'
+export const DEFAULT_QUESTION_EXPIRY_SECONDS = 3600
+export const MIN_QUESTION_EXPIRY_SECONDS = 10
+export const MAX_QUESTION_EXPIRY_SECONDS = 86_400
+/** Why a question's timer ended it. */
+export const QUESTION_EXPIRED_REASON = 'nobody answered in time'
 /**
  * The longest a wait sleeps between reads of its row (#1077). The poll doubles from
  * `pollMs` up to this: a question has no expiry, and one left open overnight at 1 s
@@ -83,6 +100,11 @@ export const ATTENTION_RATE_WINDOW_S = 600
  * model's own limit, which tab waits never use up.
  */
 export const TAB_WAIT_RATE_LIMIT = 10
+/**
+ * #1383: the most `done` summaries one turn posts. Outside the rate limit, so a
+ * model looping on done is bounded here, before each post scans the turn's touches.
+ */
+export const DONE_POSTS_PER_TURN = 3
 /** The advisory lock the rate limit's count and insert are taken under. */
 const ATTENTION_RATE_LOCK = 'scadbuddy:attention-rate'
 
@@ -105,6 +127,8 @@ export type QuestionServiceDeps = {
   pollMs?: number
   /** The AI audit log (#1075): one `question` row per answer. */
   audit?: Pick<AuditLog, 'record' | 'hash'>
+  /** ai_settings, for `question_expiry_seconds`. */
+  settings?: SettingsReader
 }
 
 /** What `gate()` needs to know about the turn it parks. */
@@ -274,14 +298,14 @@ export class QuestionService {
              q.created_at, q.expires_at
       FROM ai_questions q JOIN ai_sessions s ON s.id = q.session_id
       WHERE s.owner_kind = ${principal.kind} AND s.owner_id = ${principal.id}
-        AND q.outcome IS NULL AND (q.attention_reason IS DISTINCT FROM 'done' OR q.expires_at IS NOT NULL)
+        AND q.outcome IS NULL AND ${isNotDoneSummary(this.deps.sql, 'q')}
       ORDER BY q.created_at, q.id LIMIT ${PENDING_CAP}`
     const done = await this.deps.sql<Pending[]>`
       SELECT q.id, q.session_id, q.kind, q.tool, q.tool_use_id, q.questions, q.attention_reason, q.on_timeout, q.summary,
              q.created_at, q.expires_at
       FROM ai_questions q JOIN ai_sessions s ON s.id = q.session_id
       WHERE s.owner_kind = ${principal.kind} AND s.owner_id = ${principal.id}
-        AND q.outcome IS NULL AND q.attention_reason = 'done' AND q.expires_at IS NULL
+        AND q.outcome IS NULL AND ${isDoneSummary(this.deps.sql, 'q')}
       ORDER BY q.created_at DESC, q.id DESC LIMIT ${PENDING_CAP + 1}`
     const summariesTruncated = done.length > PENDING_CAP
     const questions = [...waiting, ...done.slice(0, PENDING_CAP)].map((r) => ({
@@ -318,10 +342,88 @@ export class QuestionService {
           updated_at = now()
       WHERE id = ${sessionId} AND status = 'waiting_input'
         AND NOT EXISTS (SELECT 1 FROM ai_questions WHERE session_id = ${sessionId} AND outcome IS NULL
-                        AND (attention_reason IS DISTINCT FROM 'done' OR expires_at IS NOT NULL))
+                        AND ${isNotDoneSummary(tx)})
       RETURNING status`
       return { value: undefined, events: row ? [event({ type: 'session.status', sessionId, status: row.status })] : [] }
     })
+  }
+
+  /** `question_expiry_seconds`, clamped as `approval_expiry_seconds` is. */
+  async expirySeconds(): Promise<number> {
+    const value = await this.deps.settings?.get<number>(SETTING_QUESTION_EXPIRY_SECONDS)
+    if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_QUESTION_EXPIRY_SECONDS
+    return Math.min(Math.max(Math.round(value), MIN_QUESTION_EXPIRY_SECONDS), MAX_QUESTION_EXPIRY_SECONDS)
+  }
+
+  /**
+   * A question's timer: cancels the question `id` if it is still pending and past its
+   * `expires_at` (one guarded UPDATE, so the parked call's timer and the sweep resolve
+   * it once). `timer`: the parked call's own timer, which fired by this process's clock;
+   * the row's `expires_at` is then not compared with the database's. Returns whether
+   * this call cancelled it.
+   */
+  private async expire(sessionId: string, id: string, options: { timer?: boolean } = {}): Promise<boolean> {
+    const timer = options.timer === true
+    const reason = QUESTION_EXPIRED_REASON
+    const rows = await this.atomically(sessionId, async (tx) => {
+      const expired = await tx<Resolved[]>`
+        UPDATE ai_questions SET outcome = 'cancelled', reason = ${reason}, resolved_at = now()
+        WHERE id = ${id} AND kind = 'question' AND outcome IS NULL AND (${timer} OR expires_at <= now())
+        RETURNING id, turn_id, tool, tool_use_id, created_at`
+      return {
+        value: expired,
+        events: expired.flatMap((r) => [
+          event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason }),
+          inputResolved(sessionId, `question:${r.id}`, 'answer', 'cancelled', reason),
+        ]),
+      }
+    })
+    if (rows.length === 0) return false
+    this.wake(id)
+    try {
+      await this.refreshStatus(sessionId)
+    } finally {
+      await this.audited(
+        rows.map((r) => ({
+          kind: 'question',
+          action: 'expired',
+          surface: 'system',
+          actor: SYSTEM_ACTOR,
+          sessionId,
+          turnId: r.turn_id,
+          toolUseId: r.tool_use_id,
+          tier: 'read',
+          outcome: 'refused',
+          detail: safeDetail(`${r.tool} question ${r.id}: ${reason}`),
+          startedAt: r.created_at,
+          finishedAt: new Date(),
+        })),
+      )
+    }
+    return true
+  }
+
+  /** Cancels every pending question past its `expires_at` (orphans whose turn died); returns how many. */
+  async expireDue(): Promise<number> {
+    const due = await this.deps.sql<{ id: string; session_id: string }[]>`
+      SELECT id, session_id FROM ai_questions
+      WHERE kind = 'question' AND outcome IS NULL AND expires_at <= now()
+      ORDER BY expires_at LIMIT 500`
+    let n = 0
+    for (const { id, session_id } of due) if (await this.expire(session_id, id)) n += 1
+    return n
+  }
+
+  /** Runs `expireDue` every `intervalMs` (once `ready` says the schema is there) until the returned function is called. */
+  startSweeper(intervalMs: number, options: { ready?: () => Promise<boolean>; onError?: (err: unknown) => void } = {}): () => void {
+    const ready = options.ready ?? (() => Promise.resolve(true))
+    const timer = setInterval(() => {
+      ready()
+        .then((ok) => (ok ? this.expireDue() : 0))
+        .catch(options.onError ?? (() => {}))
+    }, intervalMs)
+    timer.unref()
+    return () => clearInterval(timer)
   }
 
   /**
@@ -342,9 +444,15 @@ export class QuestionService {
     }
     const { sessionId, id, answers } = message
     if (!isUuid(id) || !isUuid(sessionId)) throw new QuestionError('not_found', `no question ${id} in this session`)
-    const [asked] = await this.deps.sql<{ questions: QuestionView[]; outcome: Row['outcome'] }[]>`
-      SELECT questions, outcome FROM ai_questions WHERE id = ${id} AND session_id = ${sessionId}`
+    const [asked] = await this.deps.sql<{ questions: QuestionView[]; outcome: Row['outcome']; expired: boolean }[]>`
+      SELECT questions, outcome, (kind = 'question' AND expires_at <= now()) IS TRUE AS expired
+      FROM ai_questions WHERE id = ${id} AND session_id = ${sessionId}`
     if (!asked) throw new QuestionError('not_found', `no question ${id} in this session`)
+    // Past its timer: never answered, even before the timer or the sweep has ended it.
+    if (asked.outcome === null && asked.expired) {
+      await this.expire(sessionId, id)
+      throw new QuestionError('conflict', `question ${id} is no longer waiting for an answer: ${QUESTION_EXPIRED_REASON}`)
+    }
     // #815 §2: the tab came back first, so "I'm back" already happened; not an error to the user who clicked it.
     // Any other reply (typed words, "Carry on") is a conflict: it would be dropped unread.
     const saysBack = answers.length === 1 && BACK_REPLIES.includes(answers[0]!)
@@ -359,9 +467,16 @@ export class QuestionService {
         SET outcome = 'answered', answers = ${tx.json(answers)}, resolved_at = now(),
             answered_by_kind = ${principal.kind}, answered_by_id = ${principal.id}, answered_by_label = ${principal.label}
         WHERE id = ${id} AND session_id = ${sessionId} AND outcome IS NULL
+          AND (kind <> 'question' OR expires_at IS NULL OR expires_at > now())
         RETURNING turn_id, tool, tool_use_id, created_at`
       return row
-        ? { value: row, events: [event({ type: 'question.resolved', sessionId, id, answered: true, answers, by: principal })] }
+        ? {
+            value: row,
+            events: [
+              event({ type: 'question.resolved', sessionId, id, answered: true, answers, by: principal }),
+              inputResolved(sessionId, `question:${id}`, 'answer', 'answered'),
+            ],
+          }
         : { value: undefined, events: [] }
     })
     if (!answered) {
@@ -420,11 +535,14 @@ export class QuestionService {
         WHERE session_id = ${sessionId} AND outcome IS NULL
           AND (${turnId}::uuid IS NULL OR turn_id = ${turnId}::uuid)
           AND (${questionId}::uuid IS NULL OR id = ${questionId}::uuid)
-          AND (${questionId}::uuid IS NOT NULL OR attention_reason IS DISTINCT FROM 'done' OR expires_at IS NOT NULL)
+          AND (${questionId}::uuid IS NOT NULL OR ${isNotDoneSummary(tx)})
         RETURNING id, turn_id, tool, tool_use_id, created_at`
       return {
         value: cancelled,
-        events: cancelled.map((r) => event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason })),
+        events: cancelled.flatMap((r) => [
+          event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason }),
+          inputResolved(sessionId, `question:${r.id}`, 'answer', 'cancelled', reason),
+        ]),
       }
     })
     if (rows.length === 0) return 0
@@ -476,9 +594,10 @@ export class QuestionService {
         RETURNING id, turn_id, tool, tool_use_id, created_at`
       return {
         value: resolved,
-        events: resolved.map((r) =>
+        events: resolved.flatMap((r) => [
           event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason, reconnected: true }),
-        ),
+          inputResolved(sessionId, `question:${r.id}`, 'answer', 'reconnected', reason),
+        ]),
       }
     })
     if (rows.length === 0) return 0
@@ -588,7 +707,13 @@ export class QuestionService {
         WHERE id = ${id} AND outcome IS NULL
         RETURNING id, turn_id, tool, tool_use_id, created_at`
       return row
-        ? { value: row, events: [event({ type: 'question.resolved', sessionId, id, answered: false, reason })] }
+        ? {
+            value: row,
+            events: [
+              event({ type: 'question.resolved', sessionId, id, answered: false, reason }),
+              inputResolved(sessionId, `question:${id}`, 'answer', 'timed_out', reason),
+            ],
+          }
         : { value: undefined, events: [] }
     })
     if (resolved) {
@@ -638,7 +763,14 @@ export class QuestionService {
       const { sessionId, turnId } = context
       const { attention } = request
       const startedAt = new Date()
-      const deadline = attention && attention.reason !== 'done' ? (until ?? performance.now() + attention.timeoutS * 1000) : undefined
+      // A question's own timer (spec §6.6), read before the row so the row and the wait agree.
+      const questionTtl = attention ? 0 : await this.expirySeconds()
+      const deadline =
+        attention && attention.reason !== 'done'
+          ? (until ?? performance.now() + attention.timeoutS * 1000)
+          : attention
+            ? undefined
+            : performance.now() + questionTtl * 1000
       const asked = await this.atomically(sessionId, async (tx) => {
         const none = { asked: false, superseded: [] as Resolved[], joined: undefined as string | undefined, limited: undefined as string | undefined }
         // Still this turn's, and still the user's: after a handoff mid-turn
@@ -649,6 +781,7 @@ export class QuestionService {
         const tail: ServerEvent[] = []
         let superseded: Resolved[] = []
         let expiresAt: Date | null = null
+        let createdAt: Date
         let summary: string | null = null
         const own = request.tool === ATTENTION_TOOL
         if (attention?.reason === 'tab_disconnected') {
@@ -668,7 +801,26 @@ export class QuestionService {
           // or the request was refused above), then one open request per reason.
           // The limit spans sessions and replicas, so its count and insert hold one
           // lock that does too (to commit), or two turns could each read 9 and insert.
-          await tx`SELECT pg_advisory_xact_lock(hashtextextended(${ATTENTION_RATE_LOCK}, 0))`
+          // A done summary is neither limited nor counted, so it does not take the lock:
+          // its scans of the turn's touches and away windows must not hold up every other
+          // session's attention post (#1383). It is capped per turn instead (DONE_POSTS_PER_TURN),
+          // a count the session row locked above serialises.
+          if (attention.reason === 'done') {
+            const [posted] = await tx<{ n: number }[]>`
+              SELECT count(*)::int AS n FROM ai_questions
+              WHERE session_id = ${sessionId} AND turn_id = ${turnId} AND kind = 'attention' AND attention_reason = 'done'`
+            if ((posted?.n ?? 0) >= DONE_POSTS_PER_TURN) {
+              return {
+                value: {
+                  ...none,
+                  limited: `The summary was not posted: this turn already posted ${DONE_POSTS_PER_TURN}, the most a turn may.`,
+                },
+                events: [],
+              }
+            }
+          } else {
+            await tx`SELECT pg_advisory_xact_lock(hashtextextended(${ATTENTION_RATE_LOCK}, 0))`
+          }
           // Only the model's own requests count against its limit: a browser_* call's
           // wait for its tab (sessions/manager.ts waitForTab) is ScadBuddy's, at most
           // TAB_WAITS_PER_TURN per turn and TAB_WAIT_RATE_LIMIT per window, and must not
@@ -678,7 +830,7 @@ export class QuestionService {
             const [recent] = await tx<{ n: number }[]>`
               SELECT count(*)::int AS n FROM ai_questions
               WHERE kind = 'attention' AND tool = ${ATTENTION_TOOL}
-                AND (attention_reason <> 'done' OR expires_at IS NOT NULL)
+                AND ${isNotDoneSummary(tx)}
                 AND created_at > now() - make_interval(secs => ${ATTENTION_RATE_WINDOW_S})`
             if ((recent?.n ?? 0) >= ATTENTION_RATE_LIMIT) {
               return {
@@ -726,29 +878,37 @@ export class QuestionService {
             RETURNING id, turn_id, tool, tool_use_id, created_at`
           for (const r of superseded) {
             tail.push(event({ type: 'question.resolved', sessionId, id: r.id, answered: false, reason: why }))
+            tail.push(inputResolved(sessionId, `question:${r.id}`, 'answer', 'cancelled', why))
           }
           if (attention.reason === 'done') {
             const done = await loadDoneSummary(tx, sessionId, turnId, context.turnStartedAt, context.secrets())
             summary = done.summary
-            await tx`
+            const [inserted] = await tx<{ created_at: Date }[]>`
               INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, summary,
                                         unattended)
               VALUES (${id}, ${sessionId}, ${turnId}, ${request.tool}, ${request.toolUseId}, ${tx.json(questions)},
-                      'attention', 'done', ${summary}, ${done.unattended})`
+                      'attention', 'done', ${summary}, ${done.unattended})
+              RETURNING created_at`
+            createdAt = inserted?.created_at ?? new Date()
           } else {
-            const [inserted] = await tx<{ expires_at: Date }[]>`
+            const [inserted] = await tx<{ created_at: Date; expires_at: Date }[]>`
               INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions,
                                         kind, attention_reason, on_timeout, expires_at)
               VALUES (${id}, ${sessionId}, ${turnId}, ${request.tool}, ${request.toolUseId}, ${tx.json(questions)},
                       'attention', ${attention.reason}, ${attention.onTimeout},
                       now() + make_interval(secs => ${until === undefined ? attention.timeoutS : Math.max(0, (until - performance.now()) / 1000)}))
-              RETURNING expires_at`
+              RETURNING created_at, expires_at`
             expiresAt = inserted?.expires_at ?? null
+            createdAt = inserted?.created_at ?? new Date()
           }
         } else {
-          await tx`
-            INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions)
-            VALUES (${id}, ${sessionId}, ${turnId}, ${request.tool}, ${request.toolUseId}, ${tx.json(questions)})`
+          const [inserted] = await tx<{ created_at: Date; expires_at: Date }[]>`
+            INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, expires_at)
+            VALUES (${id}, ${sessionId}, ${turnId}, ${request.tool}, ${request.toolUseId}, ${tx.json(questions)},
+                    now() + make_interval(secs => ${questionTtl}))
+            RETURNING created_at, expires_at`
+          createdAt = inserted?.created_at ?? new Date()
+          expiresAt = inserted?.expires_at ?? null
         }
         tail.push(
           event({
@@ -763,6 +923,20 @@ export class QuestionService {
                 ? { attention: { reason: attention.reason, onTimeout: attention.onTimeout, expiresAt: expiresAt.toISOString() } }
                 : {}),
           }),
+          inputRequested(
+            sessionId,
+            questionEntry({
+              id,
+              sessionId,
+              tool: request.tool,
+              questions,
+              attentionReason: attention?.reason ?? null,
+              onTimeout: attention && attention.reason !== 'done' ? attention.onTimeout : null,
+              summary,
+              createdAt: createdAt.toISOString(),
+              expiresAt: expiresAt?.toISOString() ?? null,
+            }),
+          ),
         )
         // A done summary waits for nobody: the session goes on as it was.
         if (attention?.reason === 'done') return { value: { ...none, asked: true, superseded }, events: tail }
@@ -848,6 +1022,12 @@ export class QuestionService {
           },
         ])
         return { id: waitsOn, session_id: sessionId, outcome: 'timed_out', answers: null, reason }
+      }
+      if (waited === 'due' && !attention) {
+        // The question's timer: cancelled, never answered (another resolution may have won).
+        await this.expire(sessionId, id, { timer: true })
+        waited = await this.row(id)
+        if (waited?.outcome === null) waited = undefined
       }
       const resolved = waited === 'due' && attention ? await timedOut(attention.onTimeout) : waited
       if (!resolved || resolved === 'due') {

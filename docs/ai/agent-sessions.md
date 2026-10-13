@@ -18,9 +18,9 @@ so the dot is an underscore.
 
 | Tool | Tier | What it does |
 |---|---|---|
-| `sessions_list` | `read` | Sessions the caller may see, newest first, those offered to it flagged `offered_to_you`; filter by `status`, `origin`, and `resource` (the sessions that touched it, §4.1) |
+| `sessions_list` | `read` | Sessions the caller may see, newest first, those offered to it flagged `offered_to_you`; filter by `status`, `origin`, and `resource` (the sessions that touched it, §4.1). Archived sessions are left out unless `archived` is `only` or `include`; each row has `archived` (#1885) |
 | `sessions_start` | `write` | A new session owned by the caller, with an optional first `prompt`, `title`, `tags` and `scope` (`model`, `output`, `job`) |
-| `sessions_send` | `write` | A user turn in a session the caller owns; refused while a turn runs |
+| `sessions_send` | `write` | A user turn in a session the caller owns, with optional `images` by reference (below); refused while a turn runs |
 | `sessions_get` | `read` | Status, owner, pending approvals, and the transcript after `after_seq` (streamed text joined per message), paged by `next_seq` |
 | `sessions_resources` | `read` | What the session's tool calls touched, oldest first (§4.1); `GET /api/v1/ai/sessions/:id/resources` answers the same to the UI |
 | `sessions_attach` | `read` | Waits up to `wait_seconds` (≤ 300) for events after `after_seq` and returns them once they pause; a progress notification per event |
@@ -36,6 +36,25 @@ so the dot is an underscore.
 answer once the turn has started; otherwise they wait for it, reporting progress every
 5 s, and say how it ended (`turn.finished`, `turn.result`). Either way they return
 `after_seq`, where the turn's events begin, for `sessions_get` or `sessions_attach`.
+
+`sessions_send` takes `images`, up to 4 references to images ScadBuddy already holds
+(#1894, [`agent/src/tools/imageRefs.ts`](../../agent/src/tools/imageRefs.ts)):
+`{ kind: 'output_thumbnail', output_id, plate? }`, `{ kind: 'output_view', output_id, view, size? }`,
+`{ kind: 'model_thumbnail', slug }`, `{ kind: 'model_media', slug, item_id }`,
+`{ kind: 'asset', slug, asset_id }` and `{ kind: 'print_thumbnail', archive_id, plate? }`.
+It never takes inline image data. The agent fetches each one from the backend before it
+starts the turn and checks it as it checks the panel's images (`sessions/images.ts`: PNG,
+JPEG, GIF or WebP by signature, 3.75 MiB each, 6 MiB together, the bytes the Messages API's
+5 MiB and 8 MiB of base64 hold). The model gets the
+images before the text. A refusal names the reference and the reason, and no turn starts.
+Because the call's input holds only the references, the event log's `tool.call`, the
+`/mcp` audit row and an approval summary record no image bytes, and the request stays far
+under `/mcp`'s 4 MiB body cap. A URL is not a kind: fetching one the caller chose is
+outward (spec §8.2). Bring a web image in with `fetch_asset` (approved, held to the
+Settings allowlist), then send it as an `asset`. The `user.turn` preview is the backend's
+own small copy (a view drawn at 128 px, a media item's thumbnail), or the image itself
+when it is a still of at most 48 KiB, or else a one-pixel grey placeholder. The turn names
+the image and its preview, each stored with the session, never their bytes (#2479).
 
 Tier choices (spec §8.1): starting, sending, forking, interrupting and handing off
 (offering, accepting, withdrawing or declining) change only ScadBuddy's own session state, so they are `write`. Deciding an approval is
@@ -60,7 +79,8 @@ request), and the manager's rules apply unchanged (spec §6):
   approvals. An offer is made whether or not `to` names a live token, so the answer
   never tells a caller which token ids are live; one nobody can accept lapses at its
   `until` (an hour), and the owner can withdraw it with `sessions_cancel_handoff`
-  (PR #715 review).
+  (PR #715 review), or the browser user with `DELETE /api/v1/ai/sessions/:id/handoff`
+  (the panel's "Cancel offer", #1284).
 - A turn a token sends runs its in-process tools with **that token's tiers**
   (`SendOptions.tiers` in `manager.ts`, `turnPrincipal()` in
   [`agent/src/tools/harness.ts`](../../agent/src/tools/harness.ts)). Without them a
@@ -99,8 +119,10 @@ spec §6 "Handoff": ownership moves "explicitly"). Now (`handoff()` in `manager.
   may read it with `sessions_get` before deciding. Reading is all an offer lets anyone
   push at another agent, and the transcript arrives in the untrusted-data envelope like
   any other.
+- **Shown** in the panel's session switcher as "Offered to …" (#1284): `sessions.snapshot`
+  carries each session's live offer, its target named as the viewer may see it.
 - **It ends** when the owner withdraws it or the target declines it
-  (`sessions_cancel_handoff`), after `HANDOFF_OFFER_TTL_MS` (one hour; an expired offer
+  (`sessions_cancel_handoff`, or `DELETE /api/v1/ai/sessions/:id/handoff` from the panel), after `HANDOFF_OFFER_TTL_MS` (one hour; an expired offer
   reads as none), or when the owner changes by any route, the browser's take-over
   included. One offer at a time: a new one replaces it.
 - **Announced** as `session.owner` on the bus (§4) when it is made, withdrawn or
@@ -136,7 +158,10 @@ per-token grant (§6), and never for its own calls or sessions."
   (`agent/src/db/migrations/20260929T0249Z_mcp_token_approval_grant.sql`), off for
   every token. Mint a token with it through `POST /api/v1/ai/mcp-tokens`
   (`{"name":…, "tier":"outward", "approval_grant":true}`,
-  [operating.md §4.1](operating.md#41-mcp-access-tokens)). Only an `outward` token can
+  [operating.md §4.1](operating.md#41-mcp-access-tokens)), or in Settings → "MCP access
+  tokens", whose checkbox shows only for Outward and is labelled with the grant's whole
+  scope, "This token can approve or deny any agent's outward action, in any session"
+  (#804); a token holding it carries an "Approves for any session" badge. Only an `outward` token can
   hold it: the route answers 400 otherwise, and the table's `CHECK` refuses it. It
   cannot be changed on an existing token; mint another.
 - **The check** is `approvalGrantCheck()` in
@@ -189,7 +214,8 @@ subscriptions re-read. The event log's one-second poll remains the fallback.
 ### 4.1 What a session touched (#931)
 
 Every ScadBuddy tool call a session makes that succeeds (and a `render_model` that
-fails, since its job was made all the same) is mapped to the resources it created,
+fails, since its job was made all the same, and a `print_output` whose run failed with
+`may_have_queued`, recorded as its `print_run` since a print may have gone out, #1017) is mapped to the resources it created,
 changed or deleted, one
 `ai_session_resources` row each (`agent/src/sessions/touched.ts`). A per-tool
 extractor reads the call's parsed input and its result: models, revisions (the new
@@ -217,8 +243,8 @@ itself (the call it ran is recorded). It is recorded in `runToolWithOutcome`
 (`agent/src/tools/registry.ts`) whenever the call carries a session, not in a
 projection, so the tool activities a durable session would run record the same way
 (proposed in PR #972,
-`docs/superpowers/specs/2026-10-01-durable-printing-agents-flows-design.md` §5.3, on
-branch `docs/durable-printing-agents-flows` until it merges). Rows go with their session. Calls
+`docs/superpowers/specs/2026-10-01-durable-printing-agents-flows-design.md` §5.3).
+Rows go with their session. Calls
 over `/mcp` outside a session record nothing. Revision commits already name their
 session in a git trailer (#252, `agent/src/tools/authorship.ts`).
 
@@ -251,15 +277,59 @@ output (`/edit/{id}`); picking a session opens it in the assistant panel
 `AssistantOpener`). It shows nothing when no session touched the resource, or the
 assistant is off. On a model's page the assistant panel's session picker offers
 **Only sessions that changed {slug}**, which narrows its list to the sessions the same
-route returns for that model, read again each time the picker opens.
+route returns for that model (`AssistantChat.tsx`, #1340):
+
+- **When it reads:** each time the picker opens or the box is ticked, and while both
+  stay so, again on the model's realtime changes (`model:<slug>`) and on every tool
+  result the panel sees, so a session that changes the model meanwhile is listed.
+- **While it loads:** the picker shows "Finding the sessions that changed {slug}…", not
+  the unfiltered list.
+- **When the agent cannot answer:** an alert gives its reason and the list is shown
+  unfiltered, saying so. Reopening the picker asks again.
+- **At the cap:** it asks for the route's maximum, 500 sessions, most recently updated
+  first. At 500 it says it checked only those; a session that changed the model and is
+  not among the panel's loaded sessions is not listed, and with none loaded it says
+  "None of the loaded sessions changed {slug}" rather than "No session".
+- **Per page:** the box starts unticked on every model page, the one just left included.
+
+### 4.2 Forks and the session switcher in the panel (#792)
+
+Design: `docs/superpowers/specs/2026-10-09-session-switcher-design.md`.
+
+- **Fork** in the open session's bar forks the whole chat
+  (`POST /api/v1/ai/sessions/:id/fork`) and opens the fork. It is disabled until the
+  chat has a reply. A fork's bar reads **Forked from {parent}**, which opens the
+  parent.
+- **Fork from here** on a reply forks up to that reply (`up_to`, the reply's message
+  id; the agent cuts both the SDK transcript and the copied events there,
+  `agent/src/sessions/forkPoint.ts`).
+- **Fork from here** on a user message forks up to the reply before it, and puts the
+  message back in the composer to edit and send. The first message has none.
+- **Budget:** every panel fork is the user's, so it gets a budget of its own. An
+  agent's `sessions_fork` shares its parent's (§1).
+- **Sessions** lists forks under their parent, with each session's status (Out of
+  budget included), spend and last activity, from `sessions.snapshot`'s `parentId`,
+  `updatedAt`, `costUsd` and `budgetUsd`. A fork whose parent is not listed stands on
+  its own, marked "fork".
+- **Rename** and **Done** (`PATCH /api/v1/ai/sessions/:id`,
+  `agent/src/sessions/edits.ts`) are offered on the user's own chats. Another
+  principal's chat is taken over first.
+- **Done ends a chat:** it takes no more messages, and Fork continues it. Done is
+  refused while a turn runs, and on a durable session.
+- **Archive** (#1885, the same `PATCH` with `archived`) puts one of the user's chats
+  away: it leaves **Sessions** (the snapshot leaves it out) for the **Archived** view,
+  which reads `GET /api/v1/ai/sessions?archived=true` and offers Open and Unarchive.
+  An archived chat is read-only: a send or a handoff is refused with `archived` (409),
+  its composer is locked with an Unarchive button, and Fork still continues it.
+  Archiving is refused while a turn runs or anything waits on the user; an undismissed
+  done summary is dismissed with it. The decisions are in the switcher spec's
+  "Archive (#1885)".
 
 ## 5. Not built yet
 
 - **Skills on start.** The issue's `sessions.start` takes an optional skill
   (`/scadbuddy:…`). Session queries load ScadBuddy's plugin and have the Skill tool
   (#896), so the model can use a skill, but `sessions.start` does not take one yet.
-- **Settings UI** for the grant: the route takes `approval_grant`, but Settings → "MCP
-  access tokens" has no checkbox for it yet.
 - **A2A** is deferred (spec §6).
 - **The rest of #931**: a backfill from `ai_audit`, and "restore to before this
   session".

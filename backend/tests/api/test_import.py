@@ -328,7 +328,7 @@ def test_an_imports_operation_names_the_host_never_the_url(client: TestClient) -
         client.post("/api/v1/models/import", json={"url": url}, headers=press()).status_code == 201
     )
     state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
-    with state.components.get(OPERATIONS).store._require().connection() as conn:
+    with state.components.get(OPERATIONS).store._pool.connection() as conn:
         rows = conn.execute("SELECT subject FROM operations WHERE kind = 'model_import'").fetchall()
     assert [row["subject"] for row in rows] == ["raw.githubusercontent.com"]
 
@@ -345,7 +345,7 @@ def test_an_import_never_records_the_urls_query(client: TestClient, paths: DataP
     assert created.json()["origin_url"] == RAW_URL
     assert "secret" not in paths.model_meta("gridfinity-bin").read_text("utf-8")
     state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
-    with state.components.get(OPERATIONS).store._require().connection() as conn:
+    with state.components.get(OPERATIONS).store._pool.connection() as conn:
         (row,) = conn.execute(
             "SELECT request::text AS request, result::text AS result, workflow_id"
             " FROM operations WHERE kind = 'model_import'"
@@ -382,7 +382,7 @@ def test_a_shown_url_keeps_scheme_host_port_and_path(url: str, shown: str) -> No
 def _import_records(client: TestClient) -> list[str]:
     """Every ``model_import`` operation's row and its workflow's history, as text."""
     state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
-    with state.components.get(OPERATIONS).store._require().connection() as conn:
+    with state.components.get(OPERATIONS).store._pool.connection() as conn:
         rows = conn.execute(
             "SELECT row_to_json(operations)::text AS row, workflow_id"
             " FROM operations WHERE kind = 'model_import'"

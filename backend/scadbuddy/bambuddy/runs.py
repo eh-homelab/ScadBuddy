@@ -33,6 +33,7 @@ import asyncio
 import hashlib
 import json
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from typing import Any, Literal, LiteralString, Protocol
 
@@ -42,9 +43,13 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field, computed_field, model_validator
 
+from scadbuddy.bambuddy.client import BambuddyConfig
 from scadbuddy.bambuddy.print_run import PrintRunRequest, PrintRunResult
+from scadbuddy.bambuddy.progress import QUEUE_PATH, PrintProgress, from_failed_run
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.events import Event, PrintRunEvent
+from scadbuddy.core.problems import DATABASE_ERRORS
+from scadbuddy.library.settings_store import StoredSettings
 
 logger = logging.getLogger(__name__)
 
@@ -171,11 +176,6 @@ def run_key(output_id: str, request: PrintRunRequest) -> str:
     return hashlib.sha256(f"{output_id}\n{canonical}".encode()).hexdigest()
 
 
-class DatabaseRequiredError(RuntimeError):
-    def __init__(self) -> None:
-        super().__init__("print runs need the database; set SCADBUDDY_DATABASE_URL (#401)")
-
-
 class TransactionalEvents(Protocol):
     """Publishes an event inside a caller's transaction (`PgNotifyEventBus`)."""
 
@@ -193,7 +193,7 @@ class PrintRunStore:
 
     def __init__(
         self,
-        pool: ConnectionPool[Connection[DictRow]] | None,
+        pool: ConnectionPool[Connection[DictRow]],
         *,
         events: TransactionalEvents | None = None,
         repeat_window: timedelta = REPEAT_WINDOW,
@@ -201,16 +201,6 @@ class PrintRunStore:
         self._pool = pool
         self.events = events
         self.repeat_window = repeat_window
-
-    @property
-    def available(self) -> bool:
-        """False without a database: the routes answer 503 before touching the store."""
-        return self._pool is not None
-
-    def _require(self) -> ConnectionPool[Connection[DictRow]]:
-        if self._pool is None:
-            raise DatabaseRequiredError
-        return self._pool
 
     async def find(self, key: str, *, has_request_id: bool) -> PrintRun | None:
         """The run a request with ``key`` repeats. With a ``request_id`` that is the key's
@@ -326,12 +316,12 @@ class PrintRunStore:
                 " ORDER BY created_at DESC LIMIT 1"
             )
             args = (key, self.repeat_window)
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             row = conn.execute(query, args).fetchone()
         return PrintRun.model_validate(row) if row else None
 
     def _latest_for_output(self, output_id: str) -> PrintRun | None:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             row = conn.execute(
                 f"SELECT {_COLUMNS} FROM print_runs WHERE output_id = %s"
                 " ORDER BY created_at DESC LIMIT 1",
@@ -342,7 +332,7 @@ class PrintRunStore:
     def _failed_before_queueing(self, output_ids: list[str]) -> set[str]:
         if not output_ids:
             return set()
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT output_id FROM ("
                 " SELECT DISTINCT ON (output_id) output_id, status, enqueue_attempted"
@@ -354,7 +344,7 @@ class PrintRunStore:
         return {row["output_id"] for row in rows}
 
     def _get(self, run_id: str) -> PrintRun | None:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             row = conn.execute(
                 f"SELECT {_COLUMNS} FROM print_runs WHERE id = %s", (run_id,)
             ).fetchone()
@@ -370,7 +360,7 @@ class PrintRunStore:
         workflow_run_id: str,
         retention: timedelta | None,
     ) -> PrintRun:
-        with self._require().connection() as conn, conn.transaction():
+        with self._pool.connection() as conn, conn.transaction():
             if retention is not None:
                 conn.execute("DELETE FROM print_runs WHERE finished_at < now() - %s", (retention,))
             row = conn.execute(
@@ -422,7 +412,7 @@ class PrintRunStore:
     ) -> PrintRun:
         """Fail a ``running`` run that matches ``where`` with ``assignments`` and announce
         it; any other is answered as it is."""
-        with self._require().connection() as conn, conn.transaction():
+        with self._pool.connection() as conn, conn.transaction():
             row = conn.execute(
                 f"UPDATE print_runs SET status = 'failed', finished_at = now(), {assignments}"
                 f" WHERE id = %s AND status = 'running' AND {where}"
@@ -441,7 +431,7 @@ class PrintRunStore:
         return PrintRun.model_validate(current)
 
     def _running_executions(self, older_than: timedelta) -> list[tuple[str, str, str]]:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT id, workflow_id, workflow_run_id FROM print_runs"
                 " WHERE status = 'running' AND workflow_id IS NOT NULL"
@@ -451,7 +441,7 @@ class PrintRunStore:
         return [(row["id"], row["workflow_id"], row["workflow_run_id"]) for row in rows]
 
     def _stale_pre_1052_runs(self) -> list[str]:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             rows = conn.execute(
                 f"SELECT id FROM print_runs WHERE status = 'running' AND {_PRE_1052_STALE}"
                 " ORDER BY created_at",
@@ -460,7 +450,7 @@ class PrintRunStore:
         return [row["id"] for row in rows]
 
     def _start_enqueue(self, run_id: str) -> None:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             conn.execute(
                 "UPDATE print_runs SET enqueue_attempted = true"
                 " WHERE id = %s AND status = 'running'",
@@ -477,7 +467,7 @@ class PrintRunStore:
         unqueued: bool = False,
     ) -> PrintRun:
         # Only a run still `running`: a retried end finds it ended and changes nothing.
-        with self._require().connection() as conn, conn.transaction():
+        with self._pool.connection() as conn, conn.transaction():
             row = conn.execute(
                 f"UPDATE print_runs SET status = %s, {column} = %s, finished_at = now(),"
                 " enqueue_attempted = enqueue_attempted AND NOT %s"
@@ -494,3 +484,41 @@ class PrintRunStore:
         if current is None:
             raise LookupError(f"there is no print run {run_id}")
         return PrintRun.model_validate(current)
+
+
+async def newest_failure(runs: PrintRunStore, run_subject: str) -> str | None:
+    """Why the newest run of ``run_subject`` (an output's id, or ``library:<file id>``,
+    #1751) failed, when it failed before it queued anything (#1049); else ``None``. A
+    run that may have queued recorded what it queued, so its print's own progress says
+    more. With a database that does not answer, there are no runs to read, and the
+    progress is read as it was before.
+
+    The one rule for what a subject's progress is: the progress routes and the print
+    follow both apply it, so the two never publish different progress for it (#1837)."""
+    try:
+        latest = await runs.latest_for_output(run_subject)
+    except DATABASE_ERRORS:
+        logger.warning("print runs unreadable; progress read without them")
+        return None
+    if latest is None or latest.status != "failed" or latest.may_have_queued:
+        return None
+    return latest.error.detail if latest.error is not None else None
+
+
+#: A run subject's newest-run failure, as the progress it shows (``Follower.newest_failed``).
+NewestFailed = Callable[[str], Awaitable[PrintProgress | None]]
+
+
+def newest_failed_from(runs: PrintRunStore, load: Callable[[], StoredSettings]) -> NewestFailed:
+    """``Follower.newest_failed`` over ``runs``: the progress the routes show for a
+    run subject whose newest run failed before queueing, else None."""
+
+    async def newest_failed(run_subject: str) -> PrintProgress | None:
+        detail = await newest_failure(runs, run_subject)
+        if detail is None:
+            return None
+        settings = await asyncio.to_thread(load)
+        url = BambuddyConfig.from_settings(settings).web_url(QUEUE_PATH)
+        return from_failed_run(detail, bambuddy_url=url)
+
+    return newest_failed

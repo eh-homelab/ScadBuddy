@@ -19,7 +19,7 @@ import { ToolError } from './registry.js'
 //     background, for at most `holdMs` (PR #752 review), and past that it is
 //     freed whether or not the job settled;
 //   - at most `perWindow` started in any `windowMs` (0: no bound), so an
-//     edit/render loop that never converges stops and says so. Off by default.
+//     edit/render loop that never converges stops and says so. 30 by default; 0 turns it off.
 //
 // The limits are settings (`ai_settings.render_limits`, routes/renderLimits.ts),
 // read through the source at every acquire and release and while anything
@@ -37,14 +37,14 @@ export type RenderLimits = {
   perWindow: number
   windowMs: number
   holdMs: number
-  /** `concurrent` for one principal, by its id (`token:<id>`, `oidc:<issuer>#<sub>`, `browser`). */
+  /** `concurrent` for one principal, by its id (`token:<id>`, `oidc:<issuer>#<sub>`, `browser`, `anonymous`). */
   overrides: Readonly<Record<string, number>>
 }
 
 export const RENDER_LIMITS: RenderLimits = {
   concurrent: 4,
   global: 0,
-  perWindow: 0,
+  perWindow: 30,
   windowMs: 10 * 60_000,
   holdMs: 30 * 60_000,
   overrides: {},
@@ -108,10 +108,25 @@ export function settingsRenderLimits(settings: { get<T>(key: string): Promise<T 
   return async () => renderLimitsFrom(await settings.get<unknown>(SETTING_RENDER_LIMITS))
 }
 
+/**
+ * The key a principal's renders are counted under. Anonymous MCP principals are
+ * one per MCP session (`anonymous:<session id>`), which a caller makes at will, so
+ * they share one count: opening another session must not buy another set of slots.
+ */
+export function renderPrincipal(principal: { id: string; kind: string }): string {
+  return principal.kind === 'anonymous' ? 'anonymous' : principal.id
+}
+
 /** How often the limits are re-read while a render waits, so a raised one starts it. */
 export const RECHECK_MS = 5_000
 
-type Waiter = { principal: string; grant: (release: () => void) => void }
+/**
+ * The most of one principal's renders that may wait at once: the queue is in
+ * memory, so a caller looping without awaiting must not grow it without end.
+ */
+export const MAX_QUEUED_PER_PRINCIPAL = 100
+
+type Waiter = { principal: string; grant: (release: () => void) => void; refuse: (err: Error) => void }
 
 export type AcquireOptions = {
   signal?: AbortSignal | undefined
@@ -149,7 +164,8 @@ export class RenderLimiter {
 
   /**
    * A slot for one of `principal`'s renders: at once when one is free, else when
-   * one frees up. Throws only past the window bound, or when `signal` aborts.
+   * one frees up. Throws past the window bound (renders waiting count against it),
+   * past MAX_QUEUED_PER_PRINCIPAL waiting, or when `signal` aborts.
    * Call the returned function when the render settles.
    */
   async acquire(principal: string, options: AcquireOptions = {}): Promise<() => void> {
@@ -157,11 +173,17 @@ export class RenderLimiter {
     const now = this.now()
     this.sweep(now)
     const recent = this.recent(principal, now)
-    if (limits.perWindow > 0 && recent.length >= limits.perWindow) {
-      const seconds = Math.ceil((recent[0]! + limits.windowMs - now) / 1000)
+    const own = this.waiting.filter((w) => w.principal === principal).length
+    // A render already waiting counts against the window as if it had started:
+    // otherwise a burst of calls all pass the check, queue, and each starts later
+    // past the bound.
+    if (limits.perWindow > 0 && recent.length + own >= limits.perWindow) {
+      throw this.windowRefusal(recent, own, limits, now)
+    }
+    if (own >= MAX_QUEUED_PER_PRINCIPAL) {
       throw new ToolError(
-        `not rendered: ${recent.length} renders in the last ${limits.windowMs / 60_000} min is ` +
-          `the most allowed. Try again in ${seconds}s, or stop and tell the user what is not converging.`,
+        `not rendered: ${own} of your renders are already waiting for a slot, the most that may queue. ` +
+          'Wait for some to finish (get_render_job), then try again.',
       )
     }
     options.signal?.throwIfAborted()
@@ -182,6 +204,10 @@ export class RenderLimiter {
         grant: (release) => {
           options.signal?.removeEventListener('abort', onAbort)
           resolve(release)
+        },
+        refuse: (err) => {
+          options.signal?.removeEventListener('abort', onAbort)
+          reject(err)
         },
       }
       options.signal?.addEventListener('abort', onAbort, { once: true })
@@ -209,6 +235,15 @@ export class RenderLimiter {
       console.warn(`render limits: could not read the settings, keeping the last: ${(err as Error).message}`)
     }
     return this.current
+  }
+
+  private windowRefusal(recent: number[], waiting: number, limits: RenderLimits, now: number): ToolError {
+    const seconds = Math.max(1, Math.ceil(((recent[0] ?? now) + limits.windowMs - now) / 1000))
+    const queued = waiting > 0 ? ` (${waiting} of them still waiting for a slot)` : ''
+    return new ToolError(
+      `not rendered: ${recent.length + waiting} renders in the last ${limits.windowMs / 60_000} min${queued} is ` +
+        `the most allowed. Try again in ${seconds}s, or stop and tell the user what is not converging.`,
+    )
   }
 
   private recent(principal: string, now: number): number[] {
@@ -252,6 +287,14 @@ export class RenderLimiter {
         const waiter = this.waiting[i]!
         if (this.free(waiter.principal, limits)) {
           this.waiting.splice(i, 1)
+          // The window is checked again at the start: it may have been lowered
+          // while this render waited.
+          const now = this.now()
+          const recent = this.recent(waiter.principal, now)
+          if (limits.perWindow > 0 && recent.length >= limits.perWindow) {
+            waiter.refuse(this.windowRefusal(recent, 0, limits, now))
+            continue
+          }
           waiter.grant(this.start(waiter.principal))
         } else {
           i += 1

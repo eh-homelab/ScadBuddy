@@ -33,6 +33,7 @@ import logging
 import os
 import re
 import secrets
+import threading
 import time
 import unicodedata
 import zipfile
@@ -313,7 +314,8 @@ def sniff(data: bytes) -> AssetKind:
 
 
 class AssetStoreUnavailableError(RuntimeError):
-    """The upload store's metadata lives in Postgres, and this store has no pool."""
+    """The upload store's metadata lives in Postgres, and this store has no pool: only
+    a template's pipeline check (`workflows/verify_pipeline.py`) builds one without."""
 
     def __init__(self) -> None:
         super().__init__(
@@ -557,7 +559,12 @@ class AssetStore:
         return max(stamps) if stamps else None
 
     def sweep(
-        self, referenced: Collection[str], *, grace: float, now: float | None = None
+        self,
+        referenced: Collection[str],
+        *,
+        grace: float,
+        now: float | None = None,
+        stop: threading.Event | None = None,
     ) -> list[str]:
         """Remove every asset not in ``referenced`` and last used more than ``grace``
         seconds before ``now``; answer the ids removed.
@@ -578,6 +585,8 @@ class AssetStore:
         its bytes go, and an upload of the same content waits until they have.
         Anything that cannot be removed -- a file error or a database error -- is
         logged and skipped, like the other sweeps, and the rest are still tried.
+        ``stop``, once set, ends the sweep before its next asset (#2140): the rest wait
+        for the next sweep.
         """
         pool = self._require()
         cutoff = (time.time() if now is None else now) - grace
@@ -595,7 +604,10 @@ class AssetStore:
         # read under the lock.
         candidates = sorted((stale | (blobs.keys() - owned)) - set(referenced))
         removed: list[str] = []
-        for asset_id in candidates:
+        for done, asset_id in enumerate(candidates):
+            if stop is not None and stop.is_set():
+                logger.info("asset sweep stopped early", extra={"left": len(candidates) - done})
+                break
             key = asset_lock_key(asset_id)
             try:
                 with pool.connection() as conn:

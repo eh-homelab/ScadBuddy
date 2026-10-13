@@ -31,6 +31,7 @@ from scadbuddy.main import create_app
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.workflows.housekeeping import schedule_id_for
 from tests.api.conftest import PNG_BYTES, set_plate_image, wait_for_job
+from tests.support.media import MemoryMediaStore
 from tests.support.operations import press
 from tests.support.temporal import WorkflowReaper
 
@@ -453,7 +454,7 @@ def test_a_sweep_failure_after_a_duplicate_is_not_the_duplicates_failure(
 def test_a_staging_the_sweep_cannot_read_does_not_keep_the_rest(
     paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    catalogue = Catalogue(paths, wrapper_prefix=WRAPPER_PREFIX)
+    catalogue = Catalogue(paths, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX)
     old = time.time() - DUPLICATE_STAGING_MAX_AGE - 60
     for name in ("a", "b"):
         staged = paths.cache / f"{DUPLICATE_STAGING_PREFIX}{name}"
@@ -602,7 +603,7 @@ def test_an_unreadable_base_fails_the_duplicate(
 
 
 def test_without_history_a_duplicate_copies_the_working_tree(paths: DataPaths) -> None:
-    catalogue = Catalogue(paths, wrapper_prefix=WRAPPER_PREFIX)
+    catalogue = Catalogue(paths, media_store=MemoryMediaStore(), wrapper_prefix=WRAPPER_PREFIX)
     catalogue.create(
         "keychain", SOURCE, ModelMeta(name="Keychain", tags=["t"]), thumbnail=THUMBNAIL
     )
@@ -785,7 +786,11 @@ def test_the_claim_sweep_leaves_a_model_whose_source_is_only_missing_from_disk(
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX)
     history.ensure_repo()
     catalogue = Catalogue(
-        paths, history, duplicate_staging_max_age=0, wrapper_prefix=WRAPPER_PREFIX
+        paths,
+        history,
+        duplicate_staging_max_age=0,
+        media_store=MemoryMediaStore(),
+        wrapper_prefix=WRAPPER_PREFIX,
     )
     catalogue.create("kept", SOURCE, ModelMeta(name="Kept"))
     paths.model_source("kept").unlink()

@@ -2,7 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
-import { api } from '../api/client'
+import { api, ApiError } from '../api/client'
 import type { LibraryEntry, Output } from '../api/types'
 import { fromFiles, fromOutputs } from '../lib/arrange'
 import * as fixtures from '../mocks/fixtures'
@@ -39,10 +39,15 @@ describe('ArrangeDialog: sources of any kind (#1864)', () => {
         onArranged={onArranged}
       />,
     )
-    // The clip arranges through the output it is a copy of; the wand is not ScadBuddy's.
+    // The clip arranges through the output it is a copy of; the wand, which ScadBuddy did
+    // not make, through the objects read from its 3MF (#1863).
     expect(await screen.findByLabelText('Copies of wall — Reagan')).toHaveValue(2)
     expect(screen.getByLabelText('Copies of bin — Bin')).toHaveValue(1)
-    expect(screen.getByText(`${wand.filename} was not made by ScadBuddy, so it cannot be arranged yet.`)).toBeVisible()
+    expect(await screen.findByLabelText(`Copies of Wand — ${wand.filename}`)).toHaveValue(1)
+    const star = screen.getByLabelText(`Copies of Star — ${wand.filename}`)
+    expect(star).toHaveValue(2)
+    await user.clear(star)
+    await user.type(star, '5')
     const filing = screen.getByLabelText('File under')
     expect(filing).toHaveValue('gridfinity-bin')
     await user.selectOptions(filing, 'name-keychain')
@@ -53,6 +58,8 @@ describe('ArrangeDialog: sources of any kind (#1864)', () => {
       objects: [
         { output_id: bin.id, part: 'piece-bin', count: 1 },
         { output_id: first.id, part: 'piece-wall', count: 2 },
+        { library_file_id: wand.id, part: 'lib1-67-0', count: 1 },
+        { library_file_id: wand.id, part: 'lib1-67-1', count: 5 },
       ],
     })
     expect(onArranged).toHaveBeenCalledWith(
@@ -67,7 +74,6 @@ describe('ArrangeDialog: sources of any kind (#1864)', () => {
     )
     renderPage(<ArrangeDialog open sources={fromFiles([gone])} onClose={vi.fn()} onArranged={vi.fn()} />)
     expect(await screen.findByText(/could not read what it made them from: .*: no such output\./)).toBeVisible()
-    expect(screen.queryByText(/not made by ScadBuddy/)).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Arrange' })).toBeDisabled()
   })
 
@@ -88,6 +94,34 @@ describe('ArrangeDialog: sources of any kind (#1864)', () => {
     rerender(dialog(false))
     rerender(dialog(true))
     expect(await screen.findByLabelText('Copies of wall — Reagan')).toBeVisible()
+  })
+
+  it('shows where one template and a library file are filed, and files them under another (#2284)', async () => {
+    const onArranged = vi.fn()
+    const { user } = renderPage(
+      <ArrangeDialog open sources={[...fromOutputs([first]), ...fromFiles([wand])]} onClose={vi.fn()} onArranged={onArranged} />,
+    )
+    expect(await screen.findByLabelText(`Copies of Wand — ${wand.filename}`)).toHaveValue(1)
+    const filing = await screen.findByLabelText('File under')
+    expect(filing).toHaveValue('name-keychain')
+    await waitFor(() => expect(within(filing).getAllByRole('option')).toHaveLength(fixtures.models.length))
+    expect(within(filing).getAllByRole('option')[0]).toHaveTextContent('Name Keychain')
+    await user.selectOptions(filing, 'gridfinity-bin')
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+    expect(lastArrangeRequest()).toMatchObject({ slug: 'gridfinity-bin' })
+    const binName = fixtures.models.find((m) => m.slug === 'gridfinity-bin')!.name
+    expect(onArranged).toHaveBeenCalledWith(
+      expect.objectContaining({
+        filedUnder: binName,
+        output: expect.objectContaining({
+          slug: 'gridfinity-bin',
+          arranged_from: [first.id, `library:${wand.id}`],
+          // The file's objects are no template's, wherever the result is filed.
+          manifest: expect.arrayContaining([expect.objectContaining({ library_file_id: wand.id, slug: '' })]),
+        }),
+      }),
+    )
   })
 
   it('lists an output once when its library file is added too', async () => {
@@ -113,9 +147,42 @@ describe('ArrangeDialog: sources of any kind (#1864)', () => {
     await user.selectOptions(await screen.findByLabelText('Library folder'), '1')
     await user.click(await screen.findByRole('checkbox', { name: /Clara's Wand/ }))
     await user.click(screen.getByRole('button', { name: 'Add (1)' }))
-    expect(
-      await screen.findByText("Clara's Wand.3mf was not made by ScadBuddy, so it cannot be arranged yet."),
-    ).toBeVisible()
+    expect(await screen.findByLabelText("Copies of Wand — Clara's Wand.3mf")).toBeVisible()
+  })
+
+  it('leaves out a library file whose objects cannot be read, saying why (#1863)', async () => {
+    const sliced = libraryFiles.find((f) => f.id === 104) as LibraryEntry
+    renderPage(
+      <ArrangeDialog open sources={[...fromOutputs([first]), ...fromFiles([sliced])]} onClose={vi.fn()} onArranged={vi.fn()} />,
+    )
+    expect(await screen.findByText(/^Left out: .*: it is sliced already/)).toHaveTextContent(sliced.filename)
+    expect(screen.getByRole('button', { name: 'Arrange' })).toBeEnabled()
+  })
+
+  it('files library files alone under any template picked (#1863)', async () => {
+    const onArranged = vi.fn()
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromFiles([wand])} onClose={vi.fn()} onArranged={onArranged} />,
+    )
+    expect(await screen.findByLabelText(`Copies of Wand — ${wand.filename}`)).toHaveValue(1)
+    const filing = await screen.findByLabelText('File under')
+    // #2284 — by name, not slug.
+    expect(within(filing).getAllByRole('option').map((o) => o.textContent)).toEqual(
+      fixtures.models.map((m) => m.name),
+    )
+    await user.selectOptions(filing, 'gridfinity-bin')
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+    expect(lastArrangeRequest()).toMatchObject({
+      slug: 'gridfinity-bin',
+      objects: [
+        { library_file_id: wand.id, part: 'lib1-67-0', count: 1 },
+        { library_file_id: wand.id, part: 'lib1-67-1', count: 2 },
+      ],
+    })
+    expect(onArranged).toHaveBeenCalledWith(
+      expect.objectContaining({ output: expect.objectContaining({ slug: 'gridfinity-bin' }) }),
+    )
   })
 })
 
@@ -135,11 +202,30 @@ describe('ArrangeDialog', () => {
     expect(onArranged).toHaveBeenCalledWith({
       output: expect.objectContaining({ arranged_from: [first.id] }),
       plates: 2,
+      filedUnder: 'Name Keychain',
     })
     expect(lastArrangeRequest()).toMatchObject({
       goal: 'by_colour',
       objects: [{ output_id: first.id, part: 'piece-wall', count: 5 }],
     })
+  })
+
+  it('passes no name, never a slug, when the model list cannot be read (#2541)', async () => {
+    let failed = false
+    server.use(
+      http.get('/api/v1/models', () => {
+        failed = true
+        return problem(503, 'Service Unavailable', 'down')
+      }),
+    )
+    const onArranged = vi.fn()
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={onArranged} />,
+    )
+    await waitFor(() => expect(failed).toBe(true))
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+    expect(onArranged.mock.calls[0]![0]).not.toHaveProperty('filedUnder')
   })
 
   it('says which outputs need a re-render', () => {
@@ -423,6 +509,108 @@ describe('ArrangeDialog', () => {
     await new Promise((resolve) => setTimeout(resolve, 1500))
     expect(save).not.toHaveBeenCalled()
     expect(onArranged).not.toHaveBeenCalled()
+  })
+
+  it('offers Try again after a failed save, which keeps the save key so one output is saved', async () => {
+    const save = vi
+      .spyOn(api, 'createOutput')
+      .mockRejectedValueOnce(
+        new ApiError({
+          type: 'https://scadbuddy.dev/problems/temporal-refused',
+          title: 'Refused',
+          status: 500,
+          detail: 'ScadBuddy could not start this; its server log says why.',
+          may_have_started: true,
+        }),
+      )
+      .mockResolvedValueOnce({ ...first, id: 'o-new' })
+    const onArranged = vi.fn()
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={onArranged} />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('its server log says why')
+    expect(screen.queryByText(/Temporal/)).toBeNull()
+    const arrange = vi.spyOn(api, 'arrangeOutputs')
+    arrange.mockClear()
+    await user.click(screen.getByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(onArranged).toHaveBeenCalled())
+    // Only the save is tried again: the same job, under the same key.
+    expect(arrange).not.toHaveBeenCalled()
+    const [failed, again] = save.mock.calls
+    expect(again![1]).toBe(failed![1])
+    expect(failed![5]).toBeTruthy()
+    expect(again![5]).toBe(failed![5])
+  })
+
+  it('offers no Try again for a request the server refused as it is', async () => {
+    vi.spyOn(api, 'createOutput').mockRejectedValueOnce(
+      new ApiError({ type: 'about:blank', title: 'Unprocessable', status: 422, detail: 'no such template' }),
+    )
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={vi.fn()} />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('no such template')
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull()
+  })
+
+  it('tries a save that definitely failed again under a new key, not the recorded failure', async () => {
+    const save = vi
+      .spyOn(api, 'createOutput')
+      .mockRejectedValueOnce(
+        new ApiError({ type: 'about:blank', title: 'Failed', status: 500, detail: 'ScadBuddy failed unexpectedly' }),
+      )
+      .mockResolvedValueOnce({ ...first, id: 'o-new' })
+    const onArranged = vi.fn()
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={onArranged} />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await screen.findByRole('alert')
+    const arrange = vi.spyOn(api, 'arrangeOutputs')
+    arrange.mockClear()
+    await user.click(screen.getByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(onArranged).toHaveBeenCalled())
+    // The same finished job, but a new key: the old one would replay the recorded 500.
+    expect(arrange).not.toHaveBeenCalled()
+    const [failed, again] = save.mock.calls
+    expect(again![1]).toBe(failed![1])
+    expect(again![5]).toBeTruthy()
+    expect(again![5]).not.toBe(failed![5])
+  })
+
+  it('arranges anew after the save of a finished arrange was refused', async () => {
+    vi.spyOn(api, 'createOutput')
+      .mockRejectedValueOnce(
+        new ApiError({ type: 'about:blank', title: 'Not Found', status: 404, detail: 'the result of job is gone' }),
+      )
+      .mockResolvedValueOnce({ ...first, id: 'o-new' })
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={vi.fn()} />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await screen.findByRole('alert')
+    const arrange = vi.spyOn(api, 'arrangeOutputs')
+    arrange.mockClear()
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await waitFor(() => expect(arrange).toHaveBeenCalledTimes(1))
+  })
+
+  it('saves a changed arrange under a new key', async () => {
+    const save = vi
+      .spyOn(api, 'createOutput')
+      .mockRejectedValueOnce(new Error('could not save'))
+      .mockResolvedValueOnce({ ...first, id: 'o-new' })
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={vi.fn()} />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await screen.findByRole('alert')
+    await user.type(screen.getByLabelText(/name/i), 'renamed')
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(2))
+    expect(save.mock.calls[1]![5]).not.toBe(save.mock.calls[0]![5])
   })
 
   it('acts on nothing when it is closed while the output is being saved', async () => {

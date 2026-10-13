@@ -92,6 +92,21 @@ def test_a_keyed_scope_needs_a_key_and_the_global_scope_refuses_one(client: Test
     assert client.put(ROUTE, json={"scope": "global", "key": "1", "options": {}}).status_code == 422
 
 
+def test_the_per_subject_scope_takes_a_model_or_a_library_file(client: TestClient) -> None:
+    """#1754: the ``model`` scope is the print's own subject's, a model id or a library
+    file's ``library:<file id>``; anything else would be stored where nothing reads it."""
+    for key in ("demo", "builtin:demo", "library:89"):
+        body = {"scope": "model", "key": key, "options": {"timelapse": True}}
+        assert client.put(ROUTE, json=body).status_code == 200, key
+    assert set(client.get(ROUTE).json()["models"]) == {"demo", "builtin:demo", "library:89"}
+    for key in ("library:", "library:x", "library:089", "output:" + "a" * 32, "Demo", "a b"):
+        body = {"scope": "model", "key": key, "options": {"timelapse": True}}
+        assert client.put(ROUTE, json=body).status_code == 422, key
+    # A forget is let through for any key, so one an older version stored can go.
+    forget = {"scope": "model", "key": "Demo", "options": {}}
+    assert client.put(ROUTE, json=forget).status_code == 200
+
+
 def test_a_misspelled_option_is_refused(client: TestClient) -> None:
     response = client.put(ROUTE, json={"scope": "global", "options": {"time_lapse": False}})
     assert response.status_code == 422

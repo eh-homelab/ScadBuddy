@@ -122,7 +122,11 @@ export function PreviewGallery({ slug, media, label, hidden, children }: Props) 
 function Thumbnail({ slide, onOpen }: { slide: Slide; onOpen: () => void }) {
   // The small copy, never the original: eight 4 MB photos are 32 MB of strip (#624).
   // Should it fail, the original image or the video's poster, then an empty tile (#1427).
-  const [failed, setFailed] = useState<string[]>([])
+  // #1698 — per read of the media: `slides` is rebuilt only when it is read again, so a
+  // URL that failed is tried once more then, never in a loop. Its key is not proven to
+  // change with the bytes (api/models.py), so a failure may not be for good.
+  const [failures, setFailures] = useState<{ slide: Slide; urls: string[] }>({ slide, urls: [] })
+  const failed = failures.slide === slide ? failures.urls : []
   const fallback = slide.kind === 'video' ? slide.poster : slide.src
   const src = [slide.thumbnail, fallback].find((url) => url && !failed.includes(url))
   return (
@@ -138,7 +142,9 @@ function Thumbnail({ slide, onOpen }: { slide: Slide; onOpen: () => void }) {
           alt=""
           loading="lazy"
           draggable={false}
-          onError={() => setFailed((urls) => [...urls, src])}
+          onError={() =>
+            setFailures((now) => ({ slide, urls: [...(now.slide === slide ? now.urls : []), src] }))
+          }
           className="h-full w-full object-cover"
         />
       ) : null}

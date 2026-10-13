@@ -7,9 +7,11 @@ import {
   assertEndpointAllowed,
   harnessToolName,
   headerSecretVariants,
+  loadEnabledPlugins,
   normalisePluginUrl,
   PluginError,
   pluginTierResolver,
+  type PluginSummary,
   type RemotePlugin,
   validateDisabledTools,
   validateHeaderName,
@@ -17,6 +19,8 @@ import {
   validateToolTiers,
 } from '../src/plugins/registry.js'
 import { describeTools } from '../src/plugins/testConnection.js'
+import { pluginView } from '../src/routes/plugins.js'
+import type { KekStatus } from '../src/secrets.js'
 
 // The registry's pure rules (#297): names, URLs, the endpoint egress check,
 // tool naming, tier defaults and overrides, the forwarder's tool policy, and
@@ -39,7 +43,8 @@ const forwardedMemory: HarnessPlugin = {
 }
 
 describe('plugin names', () => {
-  it.each(['memory', 'hindsight', 'my-memory', 'a1', 'x'.repeat(32)])('accepts %s', (name) => {
+  // `playwright` was reserved for the built-in headless browser; Microsoft's Playwright MCP is now added as one.
+  it.each(['memory', 'hindsight', 'playwright', 'my-memory', 'a1', 'x'.repeat(32)])('accepts %s', (name) => {
     expect(validatePluginName(name)).toBe(name)
   })
   it.each(['', 'a', 'Memory', '1mem', 'mem_ory', 'mem--ory', 'mem-', 'x'.repeat(33), 'mem.ory', 'mem ory'])(
@@ -48,12 +53,55 @@ describe('plugin names', () => {
       expect(() => validatePluginName(name)).toThrow(PluginError)
     },
   )
-  it.each(['scadbuddy', 'playwright', 'workspace', 'computer-use', 'claude-in-chrome', 'hearthbot', 'ide'])(
+  it.each([
+    'scadbuddy',
+    'workspace',
+    'computer-use',
+    'claude-in-chrome',
+    'claude-device',
+    'hearthbot',
+    'remote-devices',
+    'webagent',
+    'claude-code-remote',
+    'ide',
+  ])(
     'refuses the reserved server name %s',
     (name) => {
       expect(() => validatePluginName(name)).toThrow(/reserved/)
     },
   )
+})
+
+describe('stored plugins whose name Claude Code now reserves (#2127)', () => {
+  const stored = (name: string): RemotePlugin => ({ name, url: `https://${name}.example/mcp`, toolTiers: {}, disabledTools: [] })
+
+  it('are not handed to the harness, and say why', async () => {
+    const store = { enabled: () => Promise.resolve({ plugins: [stored('remote-devices'), stored('memory')], problems: [] }) }
+    const loaded = await loadEnabledPlugins(store, undefined, () => Promise.resolve(['203.0.113.10']))
+    expect(loaded.plugins.map((p) => p.plugin.name)).toEqual(['memory'])
+    expect(loaded.problems).toEqual([
+      expect.stringMatching(/plugin remote-devices was not loaded: its name "remote-devices" is reserved by Claude Code/),
+    ])
+  })
+
+  it('show the problem in Settings', () => {
+    const summary = (name: string): PluginSummary => ({
+      name,
+      kind: 'remote_mcp',
+      url: `https://${name}.example/mcp`,
+      enabled: true,
+      auth_header: null,
+      secret_last4: null,
+      tool_tiers: {},
+      disabled_tools: [],
+      created_at: '2026-10-01T00:00:00.000Z',
+      updated_at: '2026-10-01T00:00:00.000Z',
+      kekId: null,
+    })
+    const kek: KekStatus = { ok: false, reason: 'no key' }
+    expect(pluginView(summary('webagent'), kek).problem).toMatch(/"webagent" is reserved by Claude Code/)
+    expect(pluginView(summary('memory'), kek).problem).toBeNull()
+  })
 })
 
 describe('plugin URLs', () => {
@@ -86,9 +134,10 @@ describe('endpoint egress check (https unless loopback; no link-local or metadat
     ['6to4 of the metadata address', 'https://[2002:a9fe:a9fe::1]/mcp', []],
     ['IPv4-compatible metadata address', 'https://hs.example/mcp', ['::a9fe:a9fe']],
     ['Teredo embedding the metadata address', 'https://hs.example/mcp', ['2001:0:4136:e378:8000:63bf:5601:5601']],
-    ['plain http to a LAN host', 'http://10.1.2.3:8888/mcp/', ['10.1.2.3']],
     ['plain http to a public name', 'http://hs.example/mcp/', ['203.0.113.5']],
-    ['plain http to a name resolving to loopback AND LAN', 'http://mixed.example/mcp/', ['127.0.0.1', '10.0.0.5']],
+    ['plain http to a name resolving to private AND public', 'http://mixed.example/mcp/', ['10.0.0.5', '203.0.113.5']],
+    ['plain http to a public IPv6 literal', 'http://[2001:db8::1]/mcp/', []],
+    ['plain http to CGNAT space', 'http://100.64.0.1/mcp/', []],
   ])('refuses %s', async (_name, url, addresses) => {
     await expect(assertEndpointAllowed(url, resolveTo(addresses))).rejects.toThrow(EgressError)
   })
@@ -110,6 +159,11 @@ describe('endpoint egress check (https unless loopback; no link-local or metadat
     ['http to 127.0.0.1', 'http://127.0.0.1:8888/mcp/', []],
     ['http to [::1]', 'http://[::1]:8888/mcp/', []],
     ['http to localhost resolving to loopback', 'http://localhost:8888/mcp/', ['127.0.0.1', '::1']],
+    ['http to a LAN host', 'http://10.1.2.3:8888/mcp/', ['10.1.2.3']],
+    ['http to an in-cluster Service name', 'http://playwright-mcp.bambuddy:8931/mcp', ['10.43.12.34']],
+    ['http to 172.16/12 and 192.168/16', 'http://lan.example/mcp/', ['172.20.0.5', '192.168.1.9']],
+    ['http to a name resolving to loopback AND LAN', 'http://mixed.example/mcp/', ['127.0.0.1', '10.0.0.5']],
+    ['http to an IPv6 ULA', 'http://[fd12:3456::1]:8931/mcp', []],
   ])('allows %s, returning the checked addresses', async (_name, url, addresses) => {
     const checked = await assertEndpointAllowed(url, resolveTo(addresses))
     expect(checked.length).toBeGreaterThan(0)

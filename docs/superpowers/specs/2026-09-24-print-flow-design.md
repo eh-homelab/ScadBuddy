@@ -228,10 +228,13 @@ entry ids so History can deep-link each one.
 ## 7. Projects (#79)
 
 A project is Bambuddy's, and ScadBuddy keeps no second one. There is no ScadBuddy
-project entity, no model→project grouping and no project history view: which prints
-belong to a project is on the project's own page, and a second answer here would go
-stale. The only thing persisted is `last_project_id` — one integer, so the picker
-opens where it was left.
+project entity, no project membership and no project history view: which prints and
+files belong to a project is on the project's own page, and a second answer here would
+go stale. What is persisted is only defaults for the next filing: `last_project_id`
+(where a print dialog with no project of its own opens, and what a run that names none
+is filed under), and since #1660 `model_projects`, the project Generate last filed each
+model (and preset) into, which the Customize page's picker opens on and Generate asks
+before leaving. Both are remembered choices, forgettable in Settings.
 
 - **Create** → `POST /api/v1/projects/` then `POST /api/v1/library/folders/` with
   `project_id` set, which is the pairing Bambuddy's own UI makes.

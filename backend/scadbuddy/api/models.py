@@ -51,7 +51,6 @@ from scadbuddy.api.operations import (
     run_operation,
 )
 from scadbuddy.api.params import require_valid_presets
-from scadbuddy.bambuddy.uploads import DatabaseRequiredError
 from scadbuddy.core.config import Config
 from scadbuddy.core.events import EventBus, ModelEvent, SourceChanged, emit
 from scadbuddy.core.paths import DataPaths, is_builtin
@@ -257,9 +256,84 @@ def _parse_tags(raw: str | None) -> list[str] | None:
     return parsed
 
 
-@router.get("/models", response_model=list[ModelRecord], summary="List models")
-def list_models(catalogue: CatalogueDep) -> list[ModelRecord]:
-    return catalogue.list_models()
+#: Paging a list route in the backend (#843): `limit` and `after` (the key of the last
+#: item of the page before) pick a window of the route's own order, and only that
+#: window is built. Without either the route answers the whole list, as before. The
+#: whole list's length is in `X-Total-Count`. An `after` that is no longer listed is a
+#: 409: the item went away, and guessing where it stood could skip or repeat items.
+MAX_PAGE_LIMIT = 500
+TOTAL_COUNT_HEADER = "X-Total-Count"
+PageLimit = Annotated[
+    int | None,
+    Query(ge=1, le=MAX_PAGE_LIMIT, description="At most this many items; all when omitted"),
+]
+PageAfter = Annotated[
+    str | None,
+    Query(
+        min_length=1,
+        max_length=256,
+        description="Start after the item with this key (the last key of the page before)",
+    ),
+]
+PAGED_RESPONSES: dict[int | str, dict[str, Any]] = {
+    200: {
+        "headers": {
+            TOTAL_COUNT_HEADER: {
+                "description": "How many items the whole list holds",
+                "schema": {"type": "integer"},
+            }
+        }
+    },
+    409: {"description": "`after` names an item that is no longer listed"},
+}
+
+
+def page_window(keys: list[str], after: str | None, limit: int | None, what: str) -> slice:
+    """The slice of a listing whose keys are ``keys`` that `limit`/`after` ask for."""
+    start = 0
+    if after is not None:
+        try:
+            start = keys.index(after) + 1
+        except ValueError:
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                f"no {what} {after!r} is listed any more to page after; list again without `after`",
+            ) from None
+    return slice(start, None if limit is None else start + limit)
+
+
+@router.get(
+    "/models",
+    response_model=list[ModelRecord],
+    summary="List models",
+    responses=PAGED_RESPONSES,
+)
+def list_models(
+    catalogue: CatalogueDep,
+    response: Response,
+    limit: PageLimit = None,
+    after: PageAfter = None,
+) -> list[ModelRecord]:
+    """Mine, then the built-ins. `X-Total-Count` counts every template, one whose
+    ``model.json`` cannot be read (and so is left out of the list) too.
+
+    A page holds `limit` records whenever the list goes on past it: a model left out
+    of a window does not shorten the page, because the agent reads a short page as
+    the end of the list and would never list the models after it."""
+    slugs = catalogue.slugs()
+    response.headers[TOTAL_COUNT_HEADER] = str(len(slugs))
+    if limit is None and after is None:
+        return catalogue.list_models(slugs)
+    window = page_window(slugs, after, limit, "model")
+    if limit is None:
+        return catalogue.list_models(slugs[window])
+    records: list[ModelRecord] = []
+    start = window.start
+    while len(records) < limit and start < len(slugs):
+        chunk = slugs[start : start + limit - len(records)]
+        records.extend(catalogue.list_models(chunk))
+        start += len(chunk)
+    return records
 
 
 class PastedSource(BaseModel):
@@ -335,6 +409,20 @@ class SourcePatch(BaseModel):
 
 class ReadmeUpdate(BaseModel):
     content: str = Field(max_length=MAX_SOURCE_CHARS, description="The README, as Markdown text")
+    message: str | None = Field(
+        default=None,
+        max_length=MAX_SUBJECT,
+        description="What the revision is called in the history; a default when omitted",
+    )
+    base: str | None = Field(
+        default=None,
+        pattern=COMMIT_ID_PATTERN,
+        description=(
+            "The model's revision this README was made from (its `version` when it was "
+            "read). When given and the model has moved on since, 409 with the `current` "
+            "revision, writing nothing (#1067)"
+        ),
+    )
 
 
 class CheckRequest(BaseModel):
@@ -854,6 +942,15 @@ async def _create(
         )
     except ModelExistsError:
         raise ApiError(status.HTTP_409_CONFLICT, f"a model named {slug!r} already exists") from None
+    except GitError:
+        # The create was undone (`Catalogue.create`): nothing holds the slug, so the
+        # same request can simply be sent again (#2385).
+        logger.exception("could not record a new model", extra={"slug": slug})
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"{slug!r} was not created: its first revision could not be recorded."
+            " Nothing was kept; try again.",
+        ) from None
     if checked is not None and checked.schema is not None:
         # The check already derived it; storing it here is what stops the first
         # customizer open paying for the same subprocess again.
@@ -1257,13 +1354,13 @@ async def delete_template(slug: str, force: bool, state: AppState) -> None:
     if output_ids:
         try:
             await state.uploads.delete_outputs(output_ids)
-        except (DatabaseRequiredError, psycopg.Error):
+        except psycopg.Error:
             logger.exception(
                 "could not forget a deleted model's Bambuddy uploads", extra={"slug": slug}
             )
         try:
             await state.print_links.delete_outputs(output_ids)
-        except (DatabaseRequiredError, psycopg.Error):
+        except psycopg.Error:
             logger.exception("could not forget a deleted model's print links", extra={"slug": slug})
         # Their Parts go with them, or no sweep ever removes them (blob_refs, spec §7).
         # Best effort, like the records above: the model is gone either way. Each output
@@ -1276,6 +1373,11 @@ async def delete_template(slug: str, force: bool, state: AppState) -> None:
                     "could not release a deleted model's output Parts",
                     extra={"slug": slug, "id": output_id},
                 )
+    # And the projects it was filed into (#1660), or Settings keeps listing its id.
+    try:
+        await asyncio.to_thread(state.settings_store.forget_model_projects, slug)
+    except psycopg.Error:
+        logger.exception("could not forget a deleted model's projects", extra={"slug": slug})
     emit(state.events, ModelEvent(kind="model.deleted", slug=slug))
 
 
@@ -1829,8 +1931,12 @@ def get_readme(slug: SlugPath, catalogue: CatalogueDep) -> Response:
     "/models/{slug}/readme",
     response_model=ModelRecord,
     summary="Set a model's README",
-    description="Sets or replaces the README, as one revision in the model's history.",
-    responses=OPERATION_RESPONSES,
+    description=(
+        "Sets or replaces the README, as one revision in the model's history named by "
+        "`message`. With `base`, a 409 naming the `current` revision when the model has "
+        "moved on since, writing nothing (#1067)."
+    ),
+    responses={**OPERATION_RESPONSES, 409: {"description": "The model is no longer at `base`"}},
 )
 async def put_readme(
     slug: SlugPath,
@@ -1857,17 +1963,45 @@ async def put_readme(
         response,
         kind=ops.kinds["model_readme_put"],
         subject=slug,
-        request={"slug": slug, "content": claimed.name},
+        request={
+            "slug": slug,
+            "content": claimed.name,
+            "message": body.message,
+            "base": body.base,
+        },
         idempotency_key=idempotency_key,
         claimed=Claimed(claims, [claimed]),
     )
     return operation_answer(result, ModelRecord)
 
 
-async def readme_put_run(slug: str, content: str, state: AppState) -> ModelRecord:
-    """The ``model_readme_put`` operation's run (#1054)."""
+async def readme_put_run(
+    slug: str,
+    content: str,
+    state: AppState,
+    *,
+    message: str | None = None,
+    base: str | None = None,
+) -> ModelRecord:
+    """The ``model_readme_put`` operation's run (#1054). With ``base``, the write is
+    refused unless the model is still at it, checked under the history's lock (#1067)."""
     try:
-        record = await asyncio.to_thread(state.catalogue.write_readme, slug, content)
+        record = await asyncio.to_thread(
+            partial(
+                state.catalogue.write_readme,
+                slug,
+                content,
+                message=message,
+                expected_version=base,
+            )
+        )
+    except StaleVersionError as error:
+        raise stale_edit(slug, error.expected, error.current) from None
+    except GitUnavailableError:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "model history is unavailable, so the edit's base cannot be checked",
+        ) from None
     except ModelNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
     emit(state.events, ModelEvent(kind="model.updated", slug=slug))

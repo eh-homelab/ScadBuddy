@@ -18,17 +18,27 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import aclosing
 from dataclasses import dataclass, field
-from typing import Protocol
+from functools import partial
+from typing import BinaryIO, Protocol
 
 import psycopg
 from fastapi import status
 
 from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.concurrent import settled
 from scadbuddy.bambuddy.dispatch import QueueOutcome
 from scadbuddy.bambuddy.filaments import FilamentPlan, normalise_colour
-from scadbuddy.bambuddy.models import LibraryFile
+from scadbuddy.bambuddy.filaments3mf import (
+    LocalFilaments,
+    UnreadableFilamentsError,
+    read_filaments,
+)
+from scadbuddy.bambuddy.models import FilamentRequirements, LibraryFile
+from scadbuddy.bambuddy.nozzle_plan import NozzlePlan
+from scadbuddy.bambuddy.options import options_scope
 from scadbuddy.bambuddy.print_links import PrintLinkStore, PrintSend
 from scadbuddy.bambuddy.projects import folder_for
 from scadbuddy.bambuddy.send import (
@@ -43,7 +53,6 @@ from scadbuddy.bambuddy.send import (
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import (
     BambuddyUploadStore,
-    DatabaseRequiredError,
     ProjectTarget,
     SlicedCopy,
 )
@@ -51,7 +60,9 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import OutputFiles, OutputMeta, PlateSend, download_filename
 from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.render.bambu3mf import MAX_UNCOMPRESSED_BYTES, plates_of, stl_3mf
+from scadbuddy.render.bambu3mf import MAX_UNCOMPRESSED_BYTES, FilamentMap, plates_of, stl_3mf
+from scadbuddy.render.objects3mf import check_stl
+from scadbuddy.render.read_budget import ReadBudget
 
 logger = logging.getLogger(__name__)
 
@@ -86,8 +97,9 @@ class PrintSource(Protocol):
         ...
 
     @property
-    def options_slug(self) -> str | None:
-        """The model whose remembered print options apply (#88); ``None`` for none."""
+    def options_scope(self) -> str | None:
+        """What its remembered print options are kept under (#88, #1754): its subject's
+        :func:`~scadbuddy.bambuddy.options.options_scope`."""
         ...
 
     @property
@@ -97,6 +109,12 @@ class PrintSource(Protocol):
         ...
 
     async def plate_ids(self, client: BambuddyClient) -> list[int]: ...
+
+    @property
+    def slices_whole_file(self) -> bool:
+        """Whether its slice asks for the whole file rather than a plate
+        (:attr:`~scadbuddy.bambuddy.dispatch.SlicePlan.whole_file`, #2180)."""
+        ...
 
     async def fetch_3mf(self, client: BambuddyClient) -> bytes | None:
         """The 3MF to lay out and slice: the one thing that differs between an output
@@ -128,6 +146,8 @@ class PrintSource(Protocol):
         project_id: int | None,
         nozzle_stats: list[str] | None = None,
         nozzle_volume_type: list[str] | None = None,
+        filament_map: FilamentMap | None = None,
+        tray_colours: Mapping[int, str] | None = None,
     ) -> PrintFile: ...
 
     async def record(
@@ -137,11 +157,20 @@ class PrintSource(Protocol):
         outcome: QueueOutcome,
         project_id: int | None,
         sent: list[PlateSend],
+        *,
+        run_id: str | None = None,
     ) -> list[PlateSend]: ...
 
-    async def remember_project(self, project_id: int, *, printer_id: int, nozzle_size: str) -> None:
+    async def remember_project(
+        self,
+        project_id: int,
+        *,
+        printer_id: int,
+        nozzle_size: str,
+        nozzle_plan: NozzlePlan | None = None,
+    ) -> None:
         """After a print into a project: what the next Generate into it lays its file
-        out for (#317)."""
+        out for (#317), its nozzle plan too (#2166)."""
         ...
 
 
@@ -180,14 +209,21 @@ class _Fetched:
 
 
 async def _spool_colours(
-    client: BambuddyClient, colours: list[str], plan: FilamentPlan
+    client: BambuddyClient,
+    colours: list[str],
+    plan: FilamentPlan,
+    trays: Mapping[int, str] | None = None,
 ) -> list[str] | None:
     """One colour per filament of the file: the chosen spool's, or the file's own for a
     slot with no spool (#476). ``None`` when no spool is chosen at all, which leaves the
     file in its own colours."""
     if not plan.slots:
         return None
-    rgba = {spool.id: normalise_colour(spool.rgba) for spool in await client.spools()}
+    rgba: dict[int, str | None] = {
+        spool.id: normalise_colour(spool.rgba) for spool in await client.spools()
+    }
+    # A tray chosen for itself (#2164) prints in the tray's colour.
+    rgba.update(trays or {})
     return [
         rgba.get(plan.spool_for(index + 1) or 0) or colour for index, colour in enumerate(colours)
     ]
@@ -199,11 +235,12 @@ async def record_sends(
     plate_id: int,
     outcome: QueueOutcome,
     project_id: int | None,
+    run_id: str | None = None,
 ) -> None:
-    """Record one plate's queue items under ``subject`` (#1750), for either source. Best
-    effort: the plate is queued, and failing the run over its record would tell the user
-    it was not (#976)."""
-    if sends is None or not sends.available:
+    """Record one plate's queue items under ``subject`` (#1750), for either source, with
+    the run that queued them (#1751). Best effort: the plate is queued, and failing the
+    run over its record would tell the user it was not (#976)."""
+    if sends is None:
         return
     try:
         await sends.record_sends(
@@ -215,11 +252,12 @@ async def record_sends(
                     printer_id=outcome.printer_id,
                     project_id=project_id,
                     slice_job_id=outcome.slice_job_id,
+                    run_id=run_id,
                 )
                 for item in outcome.queue_item_ids
             ],
         )
-    except (psycopg.Error, DatabaseRequiredError) as exc:
+    except psycopg.Error as exc:
         logger.warning("could not record the sends of %s: %s", subject.key, type(exc).__name__)
 
 
@@ -299,6 +337,8 @@ class PrintPipeline:
         project_id: int | None,
         nozzle_stats: list[str] | None = None,
         nozzle_volume_type: list[str] | None = None,
+        filament_map: FilamentMap | None = None,
+        tray_colours: Mapping[int, str] | None = None,
     ) -> PrintFile:
         uploads, settings = PrintPipeline._stores(self)
         # A project's folder replaces the one from Settings for this send, which is what
@@ -320,9 +360,10 @@ class PrintPipeline:
             settings,
             printer_id=printer_id,
             nozzle_diameter=nozzle_size,
-            colours=await _spool_colours(client, list(self.colours), plan),
+            colours=await _spool_colours(client, list(self.colours), plan, tray_colours),
             nozzle_stats=nozzle_stats,
             nozzle_volume_type=nozzle_volume_type,
+            filament_map=filament_map,
         )
         file_id = await ensure_uploaded(
             client,
@@ -342,6 +383,8 @@ class PrintPipeline:
         outcome: QueueOutcome,
         project_id: int | None,
         sent: list[PlateSend],
+        *,
+        run_id: str | None = None,
     ) -> list[PlateSend]:
         """Record one plate's queue items as soon as it is queued; returns every plate
         so far.
@@ -374,15 +417,25 @@ class PrintPipeline:
                     project_id=project_id,
                     plates=sent,
                 )
-        await record_sends(self.sends, self.subject, plate_id, outcome, project_id)
+        await record_sends(self.sends, self.subject, plate_id, outcome, project_id, run_id)
         return sent
 
     async def remember_project(
-        self: _Fetching, project_id: int, *, printer_id: int, nozzle_size: str
+        self: _Fetching,
+        project_id: int,
+        *,
+        printer_id: int,
+        nozzle_size: str,
+        nozzle_plan: NozzlePlan | None = None,
     ) -> None:
         assert self.uploads is not None, "a source that remembers needs the uploads"
         await self.uploads.remember_project_target(
-            project_id, ProjectTarget(printer_id=printer_id, nozzle_diameter=nozzle_size)
+            project_id,
+            ProjectTarget(
+                printer_id=printer_id,
+                nozzle_diameter=nozzle_size,
+                nozzle_plan=nozzle_plan.model_dump() if nozzle_plan is not None else None,
+            ),
         )
 
 
@@ -404,12 +457,18 @@ class OutputSource(PrintPipeline):
         return list(self.meta.colors)
 
     @property
-    def options_slug(self) -> str | None:
-        return self.meta.slug
+    def options_scope(self) -> str | None:
+        return options_scope(self.subject, self.meta.slug)
 
     @property
     def inbox_name(self) -> str:
         return download_filename(self.meta)
+
+    @property
+    def slices_whole_file(self) -> bool:
+        """Never: only a library file is sliced whole (#2180); a render names its plate
+        as it always has."""
+        return False
 
     @property
     def origin_id(self) -> int | None:
@@ -432,9 +491,35 @@ SLICED_TYPE = "gcode.3mf"
 #: The color of the one filament of a file Bambuddy reads none from (an STL, a 3MF
 #: without slice metadata). ``normalise_colour`` reads it as unknown.
 UNKNOWN_COLOUR = ""
-#: A library file is untrusted; one larger than the archive cap could not be laid out
-#: anyway, so it is never held whole (a 3MF's compressed size is below its inflated one).
+#: A library file is untrusted; one larger than the archive cap could not be rewritten
+#: for the print anyway, so it is never held whole here, and prints as it is (a 3MF's
+#: compressed size is below its inflated one). Arrange and a library file's preview
+#: read one of any size (:meth:`LibrarySource.write_3mf`).
 MAX_DOWNLOAD_BYTES = MAX_UNCOMPRESSED_BYTES
+
+
+class SpoolFullError(Exception):
+    """A library file's download stopped: the volume it is spooled to is nearly full.
+    Not the file's fault, so never kept as its refusal."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "ScadBuddy's cache volume has too little free space to download it; free some"
+            " space, or give the volume more, and try again"
+        )
+
+
+class ReadOutOfMemoryError(Exception):
+    """A library file this process ran out of memory reading. With no triangle limit
+    (the default) nothing refuses a file for its size, so a huge one can; the file is
+    not at fault and a smaller budget or more memory would read it, so this is never
+    kept as its refusal."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "ScadBuddy ran out of memory reading it; set a triangle limit under Settings →"
+            " Projects & files (SCADBUDDY_READ_MAX_TRIANGLES) or give the server more memory"
+        )
 
 
 def printable(file_type: str | None) -> bool:
@@ -449,6 +534,33 @@ def _refusal(file: LibraryFile) -> str:
         f"ScadBuddy prints only 3MF and STL files from the library, and "
         f"{file.filename} is a {kind}."
     )
+
+
+#: Reads a library file's filament slots from the file itself (#2550):
+#: :func:`~scadbuddy.bambuddy.library_view.library_filaments`, bound to its cache.
+#: ``None`` for a file it cannot read them from.
+FilamentReader = Callable[[LibraryFile], Awaitable[LocalFilaments | None]]
+
+
+def given_filaments(local: LocalFilaments) -> FilamentReader:
+    """A :data:`FilamentReader` answering ``local``, read already (#2550)."""
+
+    async def read(file: LibraryFile) -> LocalFilaments | None:
+        return local
+
+    return read
+
+
+async def _requirements(
+    client: BambuddyClient, file: LibraryFile, read: FilamentReader | None
+) -> tuple[FilamentRequirements, LocalFilaments | None]:
+    """The whole file's slots: read from the file itself where ``read`` can, else
+    Bambuddy's ``filament-requirements``, which for a large unsliced 3MF can outlast the
+    request (#2550)."""
+    local = await read(file) if read is not None else None
+    if local is not None:
+        return local.for_plate(None), local
+    return await client.filament_requirements(file.id), None
 
 
 def _file_stem(filename: str) -> str:
@@ -468,10 +580,13 @@ class LibrarySource(PrintPipeline):
     file_id: int
     colours: list[str]
     plates: list[int]
-    options_slug: str | None = None
     #: The file's name and type, which name its copies and say whether it is an STL.
     filename: str = ""
     file_type: str = ""
+    #: The file's filament slots as read from the file itself, which the filament step
+    #: then reads too, rather than asking Bambuddy per plate (#2550). ``None`` when
+    #: they came from Bambuddy.
+    local: LocalFilaments | None = None
 
     @classmethod
     async def load(
@@ -482,28 +597,23 @@ class LibrarySource(PrintPipeline):
         uploads: BambuddyUploadStore | None = None,
         settings: StoredSettings | None = None,
         sends: PrintLinkStore | None = None,
+        filaments: FilamentReader | None = None,
+        read_own: bool = False,
     ) -> LibrarySource:
         """Read the file, its plates and its filaments. A file deleted in Bambuddy is
-        its 404; one the dialog cannot print is a 422 before anything else is read."""
+        its 404; one the dialog cannot print is a 422 before anything else is read. The
+        plates and filaments are read together (#2504). With ``filaments``, the slots
+        are read from the file itself, and Bambuddy is asked only for one it cannot
+        read (#2550). ``read_own`` reads them from the source's own download instead,
+        the one its print uploads (:meth:`fetch_3mf`): where there is no cache to read,
+        as in the print worker, which mounts no volume."""
         file = await client.library_file(file_id)
         if not printable(file.file_type):
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, _refusal(file))
-        plates = sorted(plate.index for plate in (await client.library_plates(file_id)).plates)
-        # Slots are 1-based; a slot Bambuddy numbers below 1 is not one the dialog can fill.
-        needs = [
-            need
-            for need in (await client.filament_requirements(file_id)).filaments
-            if need.slot_id >= 1
-        ]
-        colours = [UNKNOWN_COLOUR] * max((need.slot_id for need in needs), default=0)
-        for need in needs:
-            colours[need.slot_id - 1] = normalise_colour(need.color) or UNKNOWN_COLOUR
-        # No plate metadata is one plate, and no filaments is one of unknown color: a
-        # file laid out that way still has something on the bed to print.
-        return cls(
+        source = cls(
             file_id=file_id,
-            colours=colours or [UNKNOWN_COLOUR],
-            plates=plates or [1],
+            colours=[],
+            plates=[],
             filename=file.filename,
             file_type=(file.file_type or "").lower(),
             uploads=uploads,
@@ -511,14 +621,64 @@ class LibrarySource(PrintPipeline):
             sends=sends,
             stem=_file_stem(file.filename),
         )
+        if filaments is None and read_own:
+            filaments = partial(source._own_filaments, client)
+        layout, read = await asyncio.gather(
+            client.library_plates(file_id),
+            _requirements(client, file, filaments),
+            return_exceptions=True,
+        )
+        plates = sorted(plate.index for plate in settled(layout).plates)
+        requirements, local = settled(read)
+        # Slots are 1-based; a slot Bambuddy numbers below 1 is not one the dialog can fill.
+        needs = [need for need in requirements.filaments if need.slot_id >= 1]
+        colours = [UNKNOWN_COLOUR] * max((need.slot_id for need in needs), default=0)
+        for need in needs:
+            colours[need.slot_id - 1] = normalise_colour(need.color) or UNKNOWN_COLOUR
+        # No plate metadata is one plate, and no filaments is one of unknown color: a
+        # file laid out that way still has something on the bed to print.
+        source.colours = colours or [UNKNOWN_COLOUR]
+        source.plates = plates or [1]
+        source.local = local
+        return source
+
+    async def _own_filaments(
+        self, client: BambuddyClient, file: LibraryFile
+    ) -> LocalFilaments | None:
+        """The slots read from the bytes this source prints, downloaded once and kept for
+        the print (:meth:`PrintPipeline._fetch`); ``None`` for a file they cannot be read
+        from (an STL, one past :data:`MAX_DOWNLOAD_BYTES`, an unreadable 3MF)."""
+        if self.file_type != "3mf":
+            return None
+        payload = (await PrintPipeline._fetch(self, client)).payload
+        if payload is None:
+            return None
+        try:
+            return await asyncio.to_thread(read_filaments, io.BytesIO(payload))
+        except UnreadableFilamentsError as error:
+            logger.info(
+                "could not read the library file's filament slots; Bambuddy is asked instead",
+                extra={"library_file_id": file.id, "reason": str(error)},
+            )
+            return None
 
     @property
     def subject(self) -> PrintSubject:
         return PrintSubject.library(self.file_id)
 
     @property
+    def options_scope(self) -> str | None:
+        return options_scope(self.subject, None)
+
+    @property
     def print_settings(self) -> dict[str, str]:
         return {}
+
+    @property
+    def slices_whole_file(self) -> bool:
+        """A file of one plate (#2180). Plate 0 slices every plate, so a file with more
+        keeps naming the one chosen."""
+        return len(self.plates) == 1
 
     @property
     def inbox_name(self) -> str:
@@ -534,7 +694,7 @@ class LibrarySource(PrintPipeline):
 
     async def fetch_3mf(self, client: BambuddyClient) -> bytes | None:
         """The file's bytes, an STL wrapped in a 3MF of ScadBuddy's own (#1752)."""
-        payload = await self._download(client)
+        payload = await self.download(client)
         if payload is None or self.file_type != "stl":
             return payload
         try:
@@ -549,7 +709,54 @@ class LibrarySource(PrintPipeline):
             )
             return None
 
-    async def _download(self, client: BambuddyClient) -> bytes | None:
+    async def write_3mf(
+        self,
+        client: BambuddyClient,
+        out: BinaryIO,
+        budget: ReadBudget,
+        room: Callable[[], bool] = lambda: True,
+    ) -> bool:
+        """Write the 3MF :meth:`fetch_3mf` would answer into ``out``, whatever its size:
+        what Arrange and a library file's preview read, which spend ``budget`` rather
+        than refuse a file for being large, so only a chunk at a time is held here. An
+        STL is wrapped only within ``budget`` (:func:`check_stl`, raising
+        :class:`OverBudgetError`), since wrapping loads it whole: the STL and its 3MF are
+        then both in memory, a peak ``budget`` bounds. The download stops, as
+        :class:`SpoolFullError`, once ``room`` says the volume ``out`` is on is too full
+        to go on. ``False`` for an STL that holds no mesh."""
+        async with aclosing(client.download_library_file(self.file_id)) as chunks:
+            async for chunk in chunks:
+                if not await asyncio.to_thread(room):
+                    raise SpoolFullError
+                await asyncio.to_thread(out.write, chunk)
+        logger.info(
+            "spooled a library file",
+            extra={"library_file_id": self.file_id, "bytes": await asyncio.to_thread(out.tell)},
+        )
+        if self.file_type != "stl":
+            return True
+        await asyncio.to_thread(check_stl, out, budget)
+        try:
+            await asyncio.to_thread(self._wrap_stl, out)
+        except MemoryError:
+            # Not "holds no mesh": that would be kept as the file's refusal for good.
+            raise ReadOutOfMemoryError from None
+        except Exception as exc:
+            logger.warning(
+                "could not read the STL's mesh",
+                extra={"library_file_id": self.file_id, "error": type(exc).__name__},
+            )
+            return False
+        return True
+
+    def _wrap_stl(self, out: BinaryIO) -> None:
+        out.seek(0)
+        wrapped = stl_3mf(out.read(), model_name=_file_stem(self.filename) or "model")
+        out.seek(0)
+        out.truncate()
+        out.write(wrapped)
+
+    async def download(self, client: BambuddyClient) -> bytes | None:
         """The file's bytes, counted as they stream in; ``None`` past
         :data:`MAX_DOWNLOAD_BYTES`, the stream closed there and nothing kept."""
         data = bytearray()

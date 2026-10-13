@@ -3,6 +3,7 @@ import type { Sql } from 'postgres'
 import { inputHash, summariseInput } from '../approvals/service.js'
 import type { RiskTier } from '../harness/permissions.js'
 import { isUuid } from '../harness/stateDirs.js'
+import { RECORD_WAIT_MS, waitAtMost } from '../db/bounded.js'
 import { redact } from '../secrets.js'
 
 // The audit log of AI actions (#258; spec §8.3 "the audit log records the
@@ -43,6 +44,12 @@ import { redact } from '../secrets.js'
 //               tied to the call by `tool_use_id`, `input_hash` the keyed
 //               hash of the answers (never their text: an answer may be
 //               anything the user typed)
+//   turn        every session turn as it ends (#1922, audit/turn.ts
+//               turnCostEntry): action how it ended (the result's subtype,
+//               `interrupted` or `failed`), and what it cost: `cost_usd`,
+//               `cost_priced` (false when Claude Code never priced it) and
+//               `cost_estimated_usd`, the part ScadBuddy estimated. The only
+//               kind with the cost columns set
 //
 // NEVER A SECRET. `input_summary` is the approvals' summary
 // (approvals/service.ts summariseInput: sessions/sdkEvents.ts scrubForLog,
@@ -53,12 +60,14 @@ import { redact } from '../secrets.js'
 // the table); `detail` is redacted of the same secrets and capped.
 //
 // Recording never fails the action it records: a write that cannot be logged
-// is reported through `onError` (main.ts logs it) and the action goes on. The
+// is reported through `onError` (main.ts logs it) and the action goes on, and
+// one that has not landed after RECORD_WAIT_MS stops holding it up (db/bounded.ts,
+// #1076): the write carries on, and the wait that ran out is reported. The
 // alternative, refusing to act when the audit table is unwritable, would let a
 // database blip stop every session; the table is in the same database as
 // everything the actions touch, so an outage stops those too.
 
-export const AUDIT_KINDS = ['tool_call', 'resource', 'approval', 'credential', 'plugin', 'settings', 'token', 'memory', 'http', 'question'] as const
+export const AUDIT_KINDS = ['tool_call', 'resource', 'approval', 'credential', 'plugin', 'settings', 'token', 'memory', 'http', 'question', 'turn'] as const
 export type AuditKind = (typeof AUDIT_KINDS)[number]
 export const AUDIT_OUTCOMES = ['ok', 'error', 'refused', 'denied'] as const
 export type AuditOutcome = (typeof AUDIT_OUTCOMES)[number]
@@ -98,9 +107,22 @@ export type AuditEntry = {
   inputHash?: string | undefined
   inputSummary?: string | undefined
   approvalId?: string | null | undefined
+  /**
+   * A durable session's gate request id (`durable:…`, spec §6.6), on a durable
+   * approval's `approval` row and on the `tool_call` row of the call: an auditor
+   * joins them on it, and the tool_call row's approver is copied from
+   * ai_input_responses by it.
+   */
+  requestId?: string | undefined
   detail?: string | undefined
   startedAt?: Date | undefined
   finishedAt?: Date | undefined
+  /** A `turn` row's cost (#1922): what the turn added to its session's spend, in USD. */
+  costUsd?: number | undefined
+  /** A `turn` row's: whether Claude Code priced the turn (a result came back). */
+  costPriced?: boolean | undefined
+  /** A `turn` row's: the part of `costUsd` ScadBuddy estimated (the request a stopped turn was cut off in, #991). */
+  costEstimatedUsd?: number | undefined
 }
 
 /** Where entries go. Implementations never throw. */
@@ -133,6 +155,12 @@ export type AuditRecord = {
   started_at: string | null
   finished_at: string | null
   duration_ms: number | null
+  /** Set on `turn` rows only (#1922): what the turn cost, in USD. */
+  cost_usd: number | null
+  /** False when Claude Code never priced the turn: `cost_usd` is then ScadBuddy's estimate, or 0. */
+  cost_priced: boolean | null
+  /** The part of `cost_usd` ScadBuddy estimated itself. */
+  cost_estimated_usd: number | null
 }
 
 export type AuditFilter = {
@@ -199,6 +227,9 @@ type Row = {
   started_at: Date | null
   finished_at: Date | null
   duration_ms: number | null
+  cost_usd: number | null
+  cost_priced: boolean | null
+  cost_estimated_usd: number | null
 }
 
 function view(row: Row): AuditRecord {
@@ -226,6 +257,9 @@ function view(row: Row): AuditRecord {
     started_at: row.started_at?.toISOString() ?? null,
     finished_at: row.finished_at?.toISOString() ?? null,
     duration_ms: row.duration_ms,
+    cost_usd: row.cost_usd,
+    cost_priced: row.cost_priced,
+    cost_estimated_usd: row.cost_estimated_usd,
   }
 }
 
@@ -245,8 +279,10 @@ export type AuditLogDeps = {
    * hash equals its approval's. Random per process when omitted.
    */
   hashKey?: Buffer
-  /** A write that could not be recorded; nothing is thrown. */
+  /** A write that could not be recorded, or did not land within `waitMs`; nothing is thrown. */
   onError?: (err: unknown, entry: AuditEntry) => void
+  /** How long `record` waits for its row before it lets the action go on (db/bounded.ts). */
+  waitMs?: number
 }
 
 export class AuditLog implements AuditRepo {
@@ -268,7 +304,12 @@ export class AuditLog implements AuditRepo {
     return cap(summariseInput(tool, input, secrets), SUMMARY_MAX)
   }
 
+  /** Writes the row, waiting for it at most `waitMs` (#1076); never throws. */
   async record(entry: AuditEntry): Promise<void> {
+    await waitAtMost(this.insert(entry), this.deps.waitMs ?? RECORD_WAIT_MS, 'the audit row', (err) => this.deps.onError?.(err, entry))
+  }
+
+  private async insert(entry: AuditEntry): Promise<void> {
     const started = entry.startedAt ?? null
     const finished = entry.finishedAt ?? null
     const duration = started && finished ? Math.max(0, finished.getTime() - started.getTime()) : null
@@ -276,12 +317,18 @@ export class AuditLog implements AuditRepo {
     // A tool call that ran on an approval names who approved it, copied from
     // ai_approvals now (it goes with its session; this row stays).
     const approved = this.deps.sql`decision = 'approved' AND ${entry.kind === 'tool_call'}`
+    // A durable call has no ai_approvals row: its approver is the responder of its request's `approved` outcome.
+    const requestId = entry.requestId ?? null
+    const responder = this.deps.sql`
+      SELECT responder FROM ai_input_responses
+      WHERE request_id = ${entry.kind === 'tool_call' ? requestId : null} AND outcome = 'approved'`
     try {
       await this.deps.sql`
         INSERT INTO ai_audit (kind, action, surface, principal_kind, principal_id, principal_label, client_ip,
                               session_id, turn_id, tool_use_id, tier, input_hash, input_summary, approval_id,
-                              approved_by_kind, approved_by_id, approved_by_label,
-                              outcome, detail, started_at, finished_at, duration_ms)
+                              approved_by_kind, approved_by_id, approved_by_label, request_id,
+                              outcome, detail, started_at, finished_at, duration_ms,
+                              cost_usd, cost_priced, cost_estimated_usd)
         VALUES (${entry.kind}, ${cap(entry.action, 200)}, ${entry.surface}, ${cap(entry.actor.kind, 50)},
                 ${cap(entry.actor.id, 200)}, ${cap(entry.actor.label, 200)}, ${entry.clientIp ?? null},
                 ${entry.sessionId && isUuid(entry.sessionId) ? entry.sessionId : null},
@@ -289,11 +336,16 @@ export class AuditLog implements AuditRepo {
                 ${entry.toolUseId ?? null}, ${entry.tier ?? null}, ${entry.inputHash ?? null},
                 ${entry.inputSummary === undefined ? null : cap(entry.inputSummary, SUMMARY_MAX)},
                 ${approvalId},
-                (SELECT decided_by_kind FROM ai_approvals WHERE id = ${approvalId}::uuid AND ${approved}),
-                (SELECT decided_by_id FROM ai_approvals WHERE id = ${approvalId}::uuid AND ${approved}),
-                (SELECT decided_by_label FROM ai_approvals WHERE id = ${approvalId}::uuid AND ${approved}),
+                COALESCE((SELECT decided_by_kind FROM ai_approvals WHERE id = ${approvalId}::uuid AND ${approved}),
+                         (SELECT r.responder->>'kind' FROM (${responder}) r)),
+                COALESCE((SELECT decided_by_id FROM ai_approvals WHERE id = ${approvalId}::uuid AND ${approved}),
+                         (SELECT r.responder->>'id' FROM (${responder}) r)),
+                COALESCE((SELECT decided_by_label FROM ai_approvals WHERE id = ${approvalId}::uuid AND ${approved}),
+                         (SELECT r.responder->>'label' FROM (${responder}) r)),
+                ${requestId === null ? null : cap(requestId, 500)},
                 ${entry.outcome}, ${entry.detail === undefined ? null : cap(entry.detail, DETAIL_MAX)},
-                ${started}, ${finished}, ${duration})`
+                ${started}, ${finished}, ${duration},
+                ${usdOrNull(entry.costUsd)}, ${entry.costPriced ?? null}, ${usdOrNull(entry.costEstimatedUsd)})`
     } catch (err) {
       this.deps.onError?.(err, entry)
     }
@@ -321,7 +373,8 @@ export class AuditLog implements AuditRepo {
     const rows = await this.deps.sql.unsafe<Row[]>(
       `SELECT id::text AS id, at, kind, action, surface, principal_kind, principal_id, principal_label, client_ip,
               session_id, turn_id, tool_use_id, tier, input_hash, input_summary, approval_id, approved_by_kind,
-              approved_by_id, approved_by_label, outcome, detail, started_at, finished_at, duration_ms
+              approved_by_id, approved_by_label, outcome, detail, started_at, finished_at, duration_ms,
+              cost_usd, cost_priced, cost_estimated_usd
        FROM ai_audit ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
        ORDER BY ai_audit.id DESC LIMIT $${params.length}`,
       params,
@@ -373,6 +426,11 @@ export class AuditLog implements AuditRepo {
     timer.unref()
     return () => clearInterval(timer)
   }
+}
+
+/** A cost as stored: never below zero (a difference of float totals can come out an ulp under), null when unknown. */
+function usdOrNull(usd: number | undefined): number | null {
+  return usd === undefined || !Number.isFinite(usd) ? null : Math.max(usd, 0)
 }
 
 /** A detail string with the given secrets redacted and capped. */

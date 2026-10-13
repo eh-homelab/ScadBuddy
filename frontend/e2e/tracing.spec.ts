@@ -17,8 +17,8 @@ test.describe('tracing', () => {
   // so the test lifts it to see what the instrumentation would have put on one.
   test.use({ bypassCSP: true })
 
-  /** A `fetch` outside any action is a parentless CLIENT span: propagated, unsampled (spec §6). */
-  const TRACEPARENT = /^00-[0-9a-f]{32}-[0-9a-f]{16}-00$/
+  /** A `fetch` outside any action, not a poll, is a parentless CLIENT span: propagated, sampled (spec §6, #2187). */
+  const TRACEPARENT = /^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/
 
   interface RelayPost {
     url: string

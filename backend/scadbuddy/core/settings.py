@@ -27,6 +27,10 @@ from scadbuddy.core.config import (
     DEFAULT_MEDIA_UPLOAD_MAX_BYTES,
     DEFAULT_OPENSCAD,
     DEFAULT_OPENSCAD_LSP,
+    DEFAULT_READ_MAX_OBJECTS,
+    DEFAULT_READ_MAX_PAINT_DIGITS,
+    DEFAULT_READ_MAX_TRIANGLES,
+    DEFAULT_READ_MAX_VISITS,
     DEFAULT_REALTIME_SOCKETS,
     DEFAULT_RENDER_CONCURRENCY,
     DEFAULT_RENDER_LATENCY_SLO,
@@ -40,6 +44,9 @@ from scadbuddy.core.config import (
     DEFAULT_TEMPORAL_NAMESPACE,
     DEFAULT_TEMPORAL_TASK_QUEUE_RENDER,
     DEFAULT_WORKER_CACHE_MAX_BYTES,
+    READ_MAX_OBJECTS_CEILING,
+    READ_MAX_PAINT_DIGITS_CEILING,
+    READ_MAX_VISITS_CEILING,
     Config,
     StoreBackend,
 )
@@ -52,6 +59,21 @@ CONTAINER_FRONTEND_DIR = Path("/app/frontend/dist")
 
 # scadbuddy/core/settings.py -> scadbuddy -> backend -> repo root
 REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+#: The bounds of a flow approval timeout other than 0 (never), in seconds.
+MIN_APPROVAL_TIMEOUT_S = 10
+MAX_APPROVAL_TIMEOUT_S = 30 * 86_400
+
+
+def check_approval_timeout(value: int, name: str) -> int:
+    """0 (never), or a number of seconds within the bounds; refused, never clamped."""
+    if value != 0 and not MIN_APPROVAL_TIMEOUT_S <= value <= MAX_APPROVAL_TIMEOUT_S:
+        raise ValueError(
+            f"{name} must be 0 (never) or {MIN_APPROVAL_TIMEOUT_S} to"
+            f" {MAX_APPROVAL_TIMEOUT_S} seconds, not {value}"
+        )
+    return value
 
 
 class Settings(BaseSettings):
@@ -85,10 +107,22 @@ class Settings(BaseSettings):
     # The largest media upload (#274). Env-seeded like the rest (#322): Settings can
     # change it, and the upload gate reads the value in effect on every request.
     media_upload_max_bytes: int = Field(default=DEFAULT_MEDIA_UPLOAD_MAX_BYTES, gt=0)
+    # SCADBUDDY_READ_MAX_<BUDGET> (#2087): what one read of a library 3MF may spend
+    # (`render/read_budget.py`), each at most its ceiling; a request may override one
+    # for itself, never past the ceiling either.
+    read_max_objects: int = Field(
+        default=DEFAULT_READ_MAX_OBJECTS, gt=0, le=READ_MAX_OBJECTS_CEILING
+    )
+    read_max_visits: int = Field(default=DEFAULT_READ_MAX_VISITS, gt=0, le=READ_MAX_VISITS_CEILING)
+    # 0 is no limit, and there is no ceiling: an operator may set any limit or none.
+    read_max_triangles: int = Field(default=DEFAULT_READ_MAX_TRIANGLES, ge=0)
+    read_max_paint_digits: int = Field(
+        default=DEFAULT_READ_MAX_PAINT_DIGITS, gt=0, le=READ_MAX_PAINT_DIGITS_CEILING
+    )
 
     # SCADBUDDY_GOOGLE_FONTS_API_KEY. Unset is supported: the catalogue then comes
     # from the keyless fonts.google.com metadata instead of the Developer API.
-    google_fonts_api_key: str | None = None
+    google_fonts_api_key: str | None = Field(default=None, repr=False)
     fonts_catalogue_ttl: float = DEFAULT_FONTS_CATALOGUE_TTL
 
     seed_models_dir: Path | None = None
@@ -98,7 +132,7 @@ class Settings(BaseSettings):
     # Initial values for the stored settings (`library.settings_store`, in Postgres);
     # a value stored from the UI wins once written.
     bambuddy_url: str | None = None
-    bambuddy_api_key: str | None = None
+    bambuddy_api_key: str | None = Field(default=None, repr=False)
     # SCADBUDDY_BAMBUDDY_WEB_URLS: comma-separated URLs browsers reach Bambuddy at
     # (#775), when `bambuddy_url` is one only the server can (an in-cluster Service).
     # The first is where links point; the others are other hostnames of the same
@@ -108,7 +142,7 @@ class Settings(BaseSettings):
     # SCADBUDDY_BAMBUDDY_RENDER_API_KEY / SCADBUDDY_STORE_BACKEND seed the stored values
     # (`library.settings_store`, ENV_SEEDED), like `bambuddy_api_key`: a value saved in
     # Settings wins. Render workers read them from there (spec §9).
-    bambuddy_render_api_key: str | None = None
+    bambuddy_render_api_key: str | None = Field(default=None, repr=False)
     store_backend: StoreBackend = "local"
     # SCADBUDDY_STORE_MAX_TOTAL_BYTES / _MAX_COUNT: the store's caps (spec §6.2); a put
     # past either is refused unless the content is already stored. 0 is no limit.
@@ -161,6 +195,11 @@ class Settings(BaseSettings):
     # records (#455). Server-side only, like the Bambuddy key.
     database_url: str = Field(default="", validate_default=True)
     database_pool_size: int = DEFAULT_DATABASE_POOL_SIZE
+    # SCADBUDDY_SECRET_KEY_FILE: the key-encryption key the agent uses too (#602): 32
+    # random bytes, base64 (`openssl rand -base64 32`). With it the `SECRET_FIELDS` are
+    # sealed at rest (`core/secrets.py`); unset, they stay plaintext, with a warning at
+    # start. Every process that reads them (the API and both workers) needs the same file.
+    secret_key_file: Path | None = None
 
     @field_validator("database_url")
     @classmethod
@@ -202,6 +241,16 @@ class Settings(BaseSettings):
     # SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY: where the housekeeping Schedule's sweeps
     # run (#1054, spec 2026-10-01 §4.3, §4.4); this process serves it.
     temporal_task_queue_library: str = "library"
+    # SCADBUDDY_TEMPORAL_TASK_QUEUE_PROJECTS: where flow runs run (#1057, spec 2026-10-01
+    # §4.3), served by `python -m scadbuddy.worker --queue projects`.
+    temporal_task_queue_projects: str = "projects"
+    # SCADBUDDY_TEMPORAL_TASK_QUEUE_AGENT_TOOLS: where the agent service serves its tools
+    # as activities (#1055); a flow's `tool(...)` calls them there (#1057).
+    temporal_task_queue_agent_tools: str = "agent-tools"
+    # SCADBUDDY_FLOW_TOOLS_JSON: the agent's tool manifest (its `pnpm build` writes
+    # dist/tools.json; the image carries the same build's), which a flow's `tool(...)`
+    # reads names and tiers from. Unset, `tool(...)` refuses every name.
+    flow_tools_json: Path | None = None
     # SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES: upsert the Scadbuddy* Search Attributes
     # (spec 2026-10-01 §4.2). Off until the namespace has them registered: an upsert of
     # an unregistered attribute fails the workflow task.
@@ -214,9 +263,12 @@ class Settings(BaseSettings):
     # API process (#1060), as SCADBUDDY_TEMPORAL_WORKER_INPROCESS does with every queue,
     # for a deployment without the `scadbuddy-print` worker.
     temporal_print_worker_inprocess: bool = False
+    # SCADBUDDY_TEMPORAL_PROJECTS_WORKER_INPROCESS: serve the `projects` queue (flow
+    # runs, #1057) inside the API process, as the print flag does for `bambuddy`.
+    temporal_projects_worker_inprocess: bool = False
     # SCADBUDDY_API_INTERNAL_URL: the API's cluster-internal URL, which the print worker
-    # (`--queue bambuddy`) reads outputs through (#1060, spec 2026-10-01 §5.5). Only that
-    # worker reads it.
+    # (`--queue bambuddy`) reads outputs through (#1060, spec 2026-10-01 §5.5), and the
+    # projects worker calls for a flow's render, print and arrange (#1057).
     api_internal_url: str | None = None
     # SCADBUDDY_TEMPORAL_UI_URL: the Temporal web UI, which Settings → Administration
     # links to (#668). Empty (the default) shows no link.
@@ -254,6 +306,8 @@ class Settings(BaseSettings):
         "temporal_task_queue_render",
         "temporal_task_queue_bambuddy",
         "temporal_task_queue_library",
+        "temporal_task_queue_projects",
+        "temporal_task_queue_agent_tools",
     )
     @classmethod
     def _temporal_without_whitespace(cls, value: str, info: ValidationInfo) -> str:
@@ -279,6 +333,16 @@ class Settings(BaseSettings):
             name = f"SCADBUDDY_{(info.field_name or '').upper()}"
             raise ValueError(f"{name} must be at least 0, not {value}")
         return value
+
+    # SCADBUDDY_FLOW_APPROVAL_TIMEOUT_SECONDS (#1057): how long an outward host call of
+    # a flow run waits for a person's decision before it is denied. 0 is never. A flow
+    # may set its own, and a run may override both.
+    flow_approval_timeout_seconds: int = 0
+
+    @field_validator("flow_approval_timeout_seconds")
+    @classmethod
+    def _flow_approval_timeout_in_range(cls, value: int) -> int:
+        return check_approval_timeout(value, "SCADBUDDY_FLOW_APPROVAL_TIMEOUT_SECONDS")
 
     log_level: str = Field(default="INFO")
 
@@ -390,6 +454,10 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
             " credential."
         ),
         "database_pool_size": "Sizes the connection pool the settings are read through.",
+        "secret_key_file": (
+            "The key the stored API keys are encrypted with. A key kept in the database it"
+            " protects would protect nothing."
+        ),
         "allowed_origins": (
             "Which pages may open the realtime socket and make writes. Like the agent's"
             " trusted proxies, it"
@@ -438,13 +506,24 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
             "Whether this process runs a render worker at all, decided by how the deployment"
             " is laid out (one replica, or a separate worker Deployment)."
         ),
+        "temporal_task_queue_projects": (
+            "Paired with the Temporal address: the API starts flow runs on it, and the"
+            " worker that serves it must name the same queue."
+        ),
+        "temporal_task_queue_agent_tools": (
+            "Paired with the agent service's worker, which serves its tools on that queue."
+        ),
+        "flow_tools_json": ("A file the image carries, from the same build as the agent's tools."),
+        "temporal_projects_worker_inprocess": (
+            "A deployment choice: a one-process dev run serves flows itself."
+        ),
         "temporal_print_worker_inprocess": (
             "Whether this process serves the print queue itself, decided by whether the"
             " deployment runs the `scadbuddy-print` worker."
         ),
         "api_internal_url": (
-            "Where the print worker reaches the API inside the cluster: the deployment's"
-            " Service, read only by that worker."
+            "Where the print and projects workers reach the API inside the cluster: the"
+            " deployment's Service, read only by those workers."
         ),
         "revision": "A build stamp that /healthz reports, not a setting.",
         "version": "A build stamp that /healthz reports, not a setting.",
@@ -477,6 +556,11 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "default_plate": "live",
         # The upload gate asks for the value in effect on every request.
         "media_upload_max_bytes": "live",
+        # Read from the settings in effect by every read of a library 3MF (#2087).
+        "read_max_objects": "live",
+        "read_max_visits": "live",
+        "read_max_triangles": "live",
+        "read_max_paint_digits": "live",
         # Read from the queue's config by each job, poll or admission check.
         "render_timeout": "live",
         # Read from the config by every pipeline submit (spec 2026-09-27 §5.2).
@@ -504,6 +588,8 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "duplicate_staging_max_age": "live",
         "event_log_retention_seconds": "live",
         "event_log_retention_rows": "live",
+        # Read by every flow run's start.
+        "flow_approval_timeout_seconds": "live",
         # A key change swaps the client and refetches the catalogue.
         "google_fonts_api_key": "live",
         "fonts_catalogue_ttl": "live",

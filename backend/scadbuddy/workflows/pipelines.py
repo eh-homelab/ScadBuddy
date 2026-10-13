@@ -964,8 +964,8 @@ class TemplatePipeline:
                 finally:
                     self._waiting_on.remove(key)
                 return self._outcomes[key]
-            # A release while the start was in flight was dropped; the piece runs on
-            # (ABANDON), the job does not.
+            # A release or a workflow cancel while the start was in flight was dropped;
+            # the piece runs on (ABANDON), the job does not.
             self._raise_if_released()
             try:
                 return PieceOutcome(result=await child, piece_key=key)

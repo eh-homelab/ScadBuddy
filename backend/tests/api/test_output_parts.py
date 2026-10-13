@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import zipfile
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -16,9 +18,11 @@ from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.api.deps import STATE_ATTR, AppState, get_render
-from scadbuddy.library.outputs import OUTPUT_HOLDER, OutputStore
+from scadbuddy.library.outputs import OUTPUT_HOLDER, THUMBNAIL_NAME, OutputStore, _cover_from_3mf
+from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from scadbuddy.render.job_models import Job, JobNotFoundError
 from scadbuddy.store.refs import BlobRefs
+from scadbuddy.tools.export_openapi import export
 from scadbuddy.workflows.arrange import part_of
 from scadbuddy.workflows.models import ArrangeInputs, PackItem, PlateSize
 from tests.support.arrange import finished_job
@@ -245,6 +249,33 @@ def test_saving_an_arrange_job_records_its_sources_and_holds_its_parts(
     assert held(pool) == {(m.part, output_id) for m in written.manifest}
 
 
+@pytest.mark.parametrize("plates", [1, 3])
+def test_an_arranged_output_records_its_plates_and_a_cover(
+    client: TestClient, app: FastAPI, pool: Pool, tmp_path: Path, plates: int
+) -> None:
+    """#2281: the saved record says what the arrange job produced, its plates and a
+    cover, though no viewer captured one."""
+    _, job, written = asyncio.run(finished_job(tmp_path, job_id="arr-3", plates=plates))
+    assert job.result is not None and len(job.result.plates) == (plates if plates > 1 else 0)
+    inputs = ArrangeInputs(
+        items=[PackItem(part=part_of(written.manifest[0]), count=2 * plates)],
+        plate=PlateSize(key="default", width=256.0, depth=256.0),
+        sources=["a" * 32],
+    )
+    arranged = job.model_copy(update={"kind": "arrange", "inputs": inputs.model_dump(mode="json")})
+    answer_for(app, arranged)
+    output_id = save(client, "arr-3")
+    detail = client.get(f"/api/v1/outputs/{output_id}").json()
+    assert detail["has_thumbnail"] is True
+    cover = client.get(f"/api/v1/outputs/{output_id}/thumbnail")
+    assert cover.status_code == 200 and cover.content.startswith(b"\x89PNG")
+    recorded = [(p["index"], p["bbox_mm"], p["colors"]) for p in detail["layout_plates"]]
+    expected = [(p.index, p.bbox_mm.model_dump(mode="json"), p.colors) for p in job.result.plates]
+    assert recorded == expected
+    listed = client.get(f"/api/v1/outputs/{output_id}/plates").json()
+    assert len(listed) == plates and all(p["has_thumbnail"] for p in listed)
+
+
 def test_the_edit_link_of_an_arranged_output_says_it_was_arranged(
     client: TestClient, app: FastAPI, pool: Pool, tmp_path: Path
 ) -> None:
@@ -262,3 +293,54 @@ def test_the_edit_link_of_an_arranged_output_says_it_was_arranged(
     output_id = save(client, "arr-2")
     target = client.get(f"/api/v1/outputs/{output_id}/edit").json()
     assert target["arranged_from"] == sources
+
+
+def _3mf_with_cover(path: Path, cover: bytes) -> Path:
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(PLATE_THUMBNAIL, cover)
+    return path
+
+
+def test_the_cover_from_a_3mf_lands_whole_and_leaves_no_temporary(tmp_path: Path) -> None:
+    """#2556: the cover is written to a sibling and renamed into place."""
+    cover = b"\x89PNG" + bytes(range(256)) * 64
+    model = _3mf_with_cover(tmp_path / "model.3mf", cover)
+    directory = tmp_path / "out"
+    directory.mkdir()
+    _cover_from_3mf(model, directory / THUMBNAIL_NAME)
+    assert (directory / THUMBNAIL_NAME).read_bytes() == cover
+    assert [p.name for p in directory.iterdir()] == [THUMBNAIL_NAME]
+
+
+def test_a_cover_write_cut_short_leaves_no_thumbnail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2556: a write killed halfway never shows as a truncated ``thumbnail.png``, which
+    ``has_thumbnail`` would report and the UI would serve broken."""
+    model = _3mf_with_cover(tmp_path / "model.3mf", b"\x89PNG" + b"x" * 4096)
+    directory = tmp_path / "out"
+    directory.mkdir()
+    real_write = Path.write_bytes
+
+    def half_then_fail(self: Path, data: bytes) -> int:
+        real_write(self, data[: len(data) // 2])
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Path, "write_bytes", half_then_fail)
+    with pytest.raises(OSError, match="disk full"):
+        _cover_from_3mf(model, directory / THUMBNAIL_NAME)
+    assert not (directory / THUMBNAIL_NAME).exists()
+
+
+def test_layout_plates_is_documented_in_the_api(tmp_path: Path) -> None:
+    """#2557: nothing in the UI reads ``layout_plates`` yet, so the published schema says
+    what it is for and how it differs from ``plates``."""
+    schema = json.loads(export(tmp_path / "openapi.json").read_text(encoding="utf-8"))
+    carrying = {
+        name: body["properties"]["layout_plates"].get("description", "")
+        for name, body in schema["components"]["schemas"].items()
+        if "layout_plates" in body.get("properties", {})
+    }
+    assert "OutputDetail" in carrying
+    for description in carrying.values():
+        assert "without opening the 3MF" in description and "`plates`" in description

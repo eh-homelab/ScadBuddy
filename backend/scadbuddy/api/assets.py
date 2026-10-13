@@ -7,12 +7,11 @@ import asyncio
 from typing import Annotated
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, FastAPI, File, Path, Request, Response, UploadFile, status
+from fastapi import APIRouter, File, Path, Response, UploadFile, status
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from scadbuddy.api.deps import (
-    DATABASE_REQUIRED_PROBLEM,
     IMPORT_CONCURRENCY,
     AppState,
     AssetsDep,
@@ -37,7 +36,7 @@ from scadbuddy.api.operations import (
     run_operation,
 )
 from scadbuddy.api.versions import CommitQuery, require_history
-from scadbuddy.core.problems import ApiError, problem_response
+from scadbuddy.core.problems import ApiError
 from scadbuddy.library.asset_fetch import fetch_file, parse_fetch_url
 from scadbuddy.library.assets import (
     ASSET_ID_PATTERN,
@@ -49,7 +48,6 @@ from scadbuddy.library.assets import (
     AssetQuotaError,
     AssetRejectedError,
     AssetStore,
-    AssetStoreUnavailableError,
     AssetUsage,
     sample_files,
 )
@@ -93,23 +91,6 @@ CONTENT_HEADERS = {
 #: A sample lives in the template's directory, which an edit can change under the
 #: same URL, so it is revalidated rather than kept.
 SAMPLE_HEADERS = {**CONTENT_HEADERS, "Cache-Control": "no-cache"}
-
-
-def install_asset_handlers(app: FastAPI) -> None:
-    """The upload store without its database is a 503 naming what is missing, from
-    every route that reaches it (an upload, a render or preset naming one, the usage),
-    as the analyzer decisions' routes answer -- not the 500 an uncaught one would be.
-    The server does not start without a database (#401); this is the answer should
-    a store ever be built without one (#591)."""
-
-    @app.exception_handler(AssetStoreUnavailableError)
-    async def _unavailable(request: Request, exc: AssetStoreUnavailableError) -> JSONResponse:
-        return problem_response(
-            request,
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            str(exc),
-            type_=DATABASE_REQUIRED_PROBLEM,
-        )
 
 
 def _require_asset(store: AssetStore, asset_id: str) -> AssetMeta:

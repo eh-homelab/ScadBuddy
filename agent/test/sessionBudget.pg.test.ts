@@ -5,7 +5,6 @@ import { AuditLog, type AuditRecord } from '../src/audit/log.js'
 import { SettingsStore } from '../src/credentials.js'
 import type { Database } from '../src/db.js'
 import type { CredentialSource, PooledCredential } from '../src/harness/fallback.js'
-import { AGENT_ACTOR_HEADER } from '../src/harness/headlessBrowser.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
 import { SESSION_LIMITS_PATH } from '../src/routes/sessionLimits.js'
@@ -383,11 +382,8 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
       expect((await raise(session.id, { add_usd: 1 })).status).toBe(200)
     })
 
-    it('is user-only: the headless browser’s marker, an MCP principal and another origin are refused', async () => {
+    it('is user-only: an MCP principal and another origin are refused', async () => {
       const id = await spentSession()
-      const marked = await raise(id, { add_usd: 1 }, { ...JSON_UI, [AGENT_ACTOR_HEADER]: id })
-      expect(marked.status).toBe(403)
-      expect(((await marked.json()) as { detail: string }).detail).toContain('only you can raise')
       await expect(m.raiseBudget(id, agentA, 1, { surface: 'mcp' })).rejects.toMatchObject({ code: 'forbidden' })
       expect((await raise(id, { add_usd: 1 }, { ...JSON_UI, origin: 'https://evil.example' })).status).toBe(403)
       expect((await m.get(id, browser)).budgetUsd).toBe(1)
@@ -428,7 +424,7 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
   // #823: a fork is not a way round the user-only raise. A fork spends from its
   // parent's budget: nothing is copied or moved, and a turn in any session of the
   // lineage uses up the one budget. Only the panel's "continue in a new chat" (the
-  // route, without the headless browser's marker) gives the child a budget of its own.
+  // route) gives the child a budget of its own.
   describe('a fork that is not the user’s spends from the parent’s budget', () => {
     /** The scripted runner writes no SDK transcript; a fork needs one. */
     const transcript = (id: string) => m.store.append({ projectKey: 'p', sessionId: id }, [{ type: 'user', uuid: 'u1', message: {} }])
@@ -541,7 +537,7 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
       expect((await raise(parent, { add_usd: 0.5 })).status).toBe(200)
       expect(await m.get(child.id, browser)).toMatchObject({ budgetUsd: 2.5, costUsd: 0.4 })
       // Still user-only, on a fork as on any session.
-      expect((await raise(child.id, { add_usd: 1 }, { ...JSON_UI, [AGENT_ACTOR_HEADER]: child.id })).status).toBe(403)
+      await expect(m.raiseBudget(child.id, agentA, 1, { surface: 'mcp' })).rejects.toMatchObject({ code: 'forbidden' })
       expect((await m.get(parent, browser)).budgetUsd).toBe(2.5)
     })
 
@@ -559,15 +555,12 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
     })
 
     // #1447: the manager holds the user-only rule itself, as raiseBudget does, not just the route.
-    it('gives a budget of its own only to the browser user, without the agent-actor marker', async () => {
+    it('gives a budget of its own only to the browser user', async () => {
       const parent = await started(agentA)
       const asked = await m.fork(parent, agentA, { freshBudget: true })
       expect(asked).toMatchObject({ budgetUsd: 1, costUsd: 0.4 })
       expect(await spend(asked.id, agentA, 0.3)).toBeCloseTo(0.6, 9)
       expect((await m.get(parent, agentA)).costUsd).toBeCloseTo(0.7, 9)
-      const marked = await m.fork(parent, browser, { freshBudget: true, agentActor: true })
-      expect(marked).toMatchObject({ budgetUsd: 1 })
-      expect(marked.costUsd).toBeCloseTo(0.7, 9)
       // The user's own gets its own $1, nothing spent.
       expect(await m.fork(parent, browser, { freshBudget: true })).toMatchObject({ budgetUsd: 1, costUsd: 0 })
     })
@@ -593,10 +586,6 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
       const id = await spentSession()
       await transcript(id)
       await expect(m.fork(id, browser)).rejects.toMatchObject({ code: 'budget_exhausted' })
-      const marked = await fork(id, { ...UI, [AGENT_ACTOR_HEADER]: id })
-      expect(marked.status).toBe(409)
-      expect(((await marked.json()) as { detail: string }).detail).toContain('only you can continue it')
-
       const ui = await fork(id, UI)
       expect(ui.status).toBe(201)
       const own = ((await ui.json()) as { session: { id: string; budget_usd: number; cost_usd: number } }).session
@@ -612,7 +601,8 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
   describe('continuing a spent session in a new chat', () => {
     it('refuses a session with no transcript yet, and another origin', async () => {
       const { session } = await m.start(browser, { origin: 'chat' })
-      expect((await app.request(`/api/v1/ai/sessions/${session.id}/fork`, { method: 'POST', headers: UI })).status).toBe(400)
+      // 409, the session's state, not a bad request (#793).
+      expect((await app.request(`/api/v1/ai/sessions/${session.id}/fork`, { method: 'POST', headers: UI })).status).toBe(409)
       const id = await spentSession()
       const evil = await app.request(`/api/v1/ai/sessions/${id}/fork`, {
         method: 'POST',

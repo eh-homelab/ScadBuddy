@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from collections.abc import Mapping
@@ -24,6 +25,7 @@ from scadbuddy.render.jobs import SnapshotPendingError, SnapshotUnavailableError
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.submit import RenderService
 from scadbuddy.store.content import StoreFullError
+from scadbuddy.store.snapshots import SnapshotStore, snapshot_key
 from scadbuddy.workflows.commands import (
     CommandClosedError,
     CommandStillAcceptingError,
@@ -33,6 +35,7 @@ from scadbuddy.workflows.commands import (
 )
 from tests.api.conftest import FAIL_WIDTH, FAILED_WARNING, set_fake_env, wait_for_job
 from tests.support.operations import press
+from tests.support.store import local_content, store_pool
 
 
 def test_render_is_accepted_and_the_job_completes(
@@ -60,6 +63,8 @@ def test_render_is_accepted_and_the_job_completes(
     assert job["parts"][0]["extruder"] == 1
     assert job["log_tail"] == logged
     assert job["preview_url"] == f"/api/v1/jobs/{accepted['job_id']}/preview.glb"
+    # #1293: the workflow, for the customizer's link into the Temporal UI.
+    assert job["workflow_id"].startswith("render-")
 
 
 def test_render_with_no_params_uses_the_model_defaults(client: TestClient, model: str) -> None:
@@ -231,9 +236,9 @@ def _unreachable() -> TemporalUnavailableError:
         (_unreachable(), "Nothing was queued", False),
         # The rest may follow a start Temporal persisted: the same request follows it,
         # and `may_have_started` is what the clients re-send on (review #1066 (10) 4).
-        (TemporalUnavailableError("render-x"), "to follow it if it started", True),
+        (TemporalUnavailableError("render-x"), "a retry picks this request up", True),
         # Temporal answered, but could not take the start now: not "cannot reach".
-        (TemporalBusyError("render-x"), "could not start this render right now", True),
+        (TemporalBusyError("render-x"), "busy right now", True),
     ],
 )
 def test_a_render_temporal_cannot_take_now_is_a_503_to_send_again(
@@ -274,7 +279,7 @@ def test_a_render_temporal_refuses_is_a_500_no_retry_fixes(
     # same request again" is what the clients do on `may_have_started` (review #1066
     # (10) 3).
     assert response.json()["may_have_started"] is True
-    assert "to follow it if it started" in response.json()["detail"]
+    assert "a retry picks this request up" in response.json()["detail"]
     assert any(r.levelno == logging.ERROR and r.exc_info for r in caplog.records)
 
 
@@ -359,6 +364,63 @@ def test_a_render_whose_snapshot_is_still_uploading_is_a_coded_503(
     body = response.json()
     assert body["retry_after"] == 30
     assert body["code"] == "snapshot_pending"
+
+
+class _LastCommit:
+    """A history whose template is at ``revision``: all `SnapshotStore.pin` reads."""
+
+    available = True
+
+    def __init__(self, revision: str) -> None:
+        self.revision = revision
+
+    def last_commit(self, path: str) -> str:
+        return self.revision
+
+
+@pytest.mark.requires_postgres
+def test_a_render_pinned_through_a_real_snapshot_store_is_a_coded_503(
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    pg_conninfo: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#1430: the route's 503 end to end, `submit` → `pin` → a store still uploading,
+    rather than with `submit` patched to raise."""
+    revision = "5" * 40
+    export = paths.model_revision_dir(model, revision)
+    export.mkdir(parents=True)
+    (export / "model.scad").write_text("cube(5);")
+    with store_pool(pg_conninfo) as pool:
+        content = local_content(tmp_path / "remote", pool)
+        put = content.put
+        gate = asyncio.Event()
+
+        async def uploading(*args: object, **kwargs: object) -> object:
+            await gate.wait()
+            return await put(*args, **kwargs)  # type: ignore[arg-type]
+
+        content.put = uploading  # type: ignore[method-assign,assignment]
+        history: Any = _LastCommit(revision)
+        snapshots = SnapshotStore(content, paths, history=history, pin_timeout=0.1)
+        render = getattr(client.app.state, STATE_ATTR).render  # type: ignore[attr-defined]
+        monkeypatch.setattr(render, "snapshots", snapshots)
+
+        response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
+
+        assert response.status_code == 503, response.text
+        assert int(response.headers["retry-after"]) >= 1
+        assert response.json()["code"] == "snapshot_pending"
+
+        async def finish() -> None:
+            # The store the route left behind runs on the app's loop: let it end there.
+            gate.set()
+            await asyncio.gather(*list(snapshots._storing))
+
+        client.portal.call(finish)  # type: ignore[union-attr]
+        assert content.index.get(snapshot_key(model, revision)) is not None
 
 
 class _NoCommit:

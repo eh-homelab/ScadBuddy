@@ -14,12 +14,13 @@ Bambuddy library file (#976). The two kinds share both tables (#1750).
 - ``print_links``: each archive a subject's print produced. Two ways a link is found
   (``matched_by``): ``queue_item``, the queue item ScadBuddy created reports
   ``archive_id``; ``content_hash``, once the item is gone, an archive whose
-  ``content_hash`` equals a sliced file of the output's (`linking.link_by_hash`). A
-  library file's sends are linked once their item names an archive
-  (`linking.link_library_prints`). An archive two subjects name is the output's.
+  ``content_hash`` equals a sliced file of the subject's
+  (`linking.link_subject_by_hash`, a library file's since #1755). A library file's
+  sends are linked once their item names an archive (`linking.link_library_prints`).
+  An archive two subjects name is the output's.
 
 Both are created by ``*_print_subjects.sql``, from ``output_bambuddy_prints`` and
-``library_bambuddy_prints``.
+``library_bambuddy_prints``, which ``*_drop_legacy_print_links.sql`` (#1772) drops.
 """
 
 from __future__ import annotations
@@ -35,7 +36,6 @@ from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
 
 from scadbuddy.bambuddy.subject import PrintSubject
-from scadbuddy.bambuddy.uploads import DatabaseRequiredError
 
 MatchedBy = Literal["queue_item", "content_hash"]
 
@@ -70,6 +70,8 @@ class PrintSend(BaseModel):
     printer_id: int | None = None
     project_id: int | None = None
     slice_job_id: int | None = None
+    #: The print run that queued it (#1751); None for a send recorded before.
+    run_id: str | None = None
     #: When it was recorded; set by the database.
     first_seen: datetime | None = None
 
@@ -101,6 +103,30 @@ _UNLINKED = (
 )
 
 
+#: For sends recorded before their run was (#1073, #1751), how long before the newest
+#: one an older one still counts as the same run: such sends are told apart from an
+#: earlier run's only by when they were recorded.
+LEGACY_RUN_WINDOW = timedelta(hours=24)
+
+
+def _last_run(sends: list[PrintSend]) -> list[PrintSend]:
+    """``sends`` (in the order recorded) of the newest one's run; a newest send with no
+    ``run_id`` has those within `LEGACY_RUN_WINDOW` of it that have none either."""
+    if not sends:
+        return []
+    newest = sends[-1]
+    if newest.run_id is not None:
+        return [send for send in sends if send.run_id == newest.run_id]
+    legacy = [send for send in sends if send.run_id is None]
+    if newest.first_seen is None:
+        return legacy
+    return [
+        send
+        for send in legacy
+        if send.first_seen is None or newest.first_seen - send.first_seen <= LEGACY_RUN_WINDOW
+    ]
+
+
 def _linked_print(row: dict[str, Any]) -> LinkedPrint:
     subject = PrintSubject.parse(row["subject"])
     return LinkedPrint.model_validate(
@@ -115,18 +141,8 @@ class PrintLinkStore:
     `BambuddyUploadStore`: the progress read records links on every poll.
     """
 
-    def __init__(self, pool: ConnectionPool[Connection[DictRow]] | None) -> None:
+    def __init__(self, pool: ConnectionPool[Connection[DictRow]]) -> None:
         self._pool = pool
-
-    @property
-    def available(self) -> bool:
-        """Whether there is a database to record links in; without one they are skipped."""
-        return self._pool is not None
-
-    def _require(self) -> ConnectionPool[Connection[DictRow]]:
-        if self._pool is None:
-            raise DatabaseRequiredError
-        return self._pool
 
     async def record(self, subject: PrintSubject, link: PrintLink) -> None:
         """Record a link. A second sighting of the same archive changes nothing: the
@@ -152,13 +168,13 @@ class PrintLinkStore:
         *,
         limit: int,
         before: int | None = None,
-        output_ids: Sequence[str] | None = None,
+        subjects: Sequence[PrintSubject] | None = None,
     ) -> list[LinkedPrint]:
         """Up to ``limit`` linked archives below ``before``, newest archive first, each
-        once; only those of ``output_ids`` when it is given, which leaves out every
-        library file's. Bambuddy numbers archives as it creates them, so a higher id is
-        a later print."""
-        return await asyncio.to_thread(self._page, limit, before, output_ids)
+        once; only those ``subjects`` own when it is given (a template's outputs, or
+        one library file, #1755). Bambuddy numbers archives as it creates them, so a
+        higher id is a later print."""
+        return await asyncio.to_thread(self._page, limit, before, subjects)
 
     async def linked_queue_items(self, subject: PrintSubject) -> set[int]:
         """The queue items whose archive is already recorded, so a poll can skip them."""
@@ -182,6 +198,11 @@ class PrintLinkStore:
         """The subject's sends, in the order they were recorded."""
         return await asyncio.to_thread(self._sends_for, subject)
 
+    async def last_run(self, subject: PrintSubject) -> list[PrintSend]:
+        """The sends of the subject's newest run (#1751), as an output's last print is
+        its own run's plates: an earlier run, settled or not, is not among them."""
+        return _last_run(await self.sends_for(subject))
+
     async def pending_library(self, limit: int, *, max_age: timedelta) -> list[PendingLibraryPrint]:
         """The library files' queue items whose archive is not known yet and that are
         not gone, newest first, at most ``limit``. An item recorded more than
@@ -198,7 +219,7 @@ class PrintLinkStore:
         await asyncio.to_thread(self._library_gone, queue_item_id)
 
     def _record(self, subject: PrintSubject, link: PrintLink) -> None:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             conn.execute(
                 "INSERT INTO print_links"
                 " (subject, archive_id, queue_item_id, plate_id, printer_id, matched_by)"
@@ -215,7 +236,7 @@ class PrintLinkStore:
             )
 
     def _for_subject(self, subject: PrintSubject) -> list[PrintLink]:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT archive_id, matched_by, queue_item_id, plate_id, printer_id, first_seen"
                 " FROM print_links WHERE subject = %s"
@@ -231,7 +252,7 @@ class PrintLinkStore:
         # 3MF (`render/provenance.py`), so the same parameters rendered twice differ at
         # the source; whether the sliced file keeps that stamp is the #306 spike's to
         # confirm. If it does not, one output's prints can show under another's id.
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             row = conn.execute(
                 f"{_LINKED} WHERE archive_id = %s ORDER BY archive_id, {_OWNER_ORDER}",
                 (archive_id,),
@@ -239,14 +260,10 @@ class PrintLinkStore:
         return _linked_print(dict(row)) if row is not None else None
 
     def _page(
-        self, limit: int, before: int | None, output_ids: Sequence[str] | None
+        self, limit: int, before: int | None, only: Sequence[PrintSubject] | None
     ) -> list[LinkedPrint]:
-        subjects = (
-            [PrintSubject.output(output_id).key for output_id in output_ids]
-            if output_ids is not None
-            else None
-        )
-        with self._require().connection() as conn:
+        subjects = [subject.key for subject in only] if only is not None else None
+        with self._pool.connection() as conn:
             rows = conn.execute(
                 # Each archive's owner is chosen over all its rows first, as `_linked`
                 # does, and only then kept or dropped by subject: filtering first would
@@ -261,18 +278,19 @@ class PrintLinkStore:
         return [_linked_print(dict(row)) for row in rows]
 
     def _delete_subjects(self, keys: list[str]) -> None:
-        with self._require().connection() as conn, conn.transaction():
+        with self._pool.connection() as conn, conn.transaction():
             conn.execute("DELETE FROM print_links WHERE subject = ANY(%s)", (keys,))
             conn.execute("DELETE FROM print_sends WHERE subject = ANY(%s)", (keys,))
 
     def _record_sends(self, subject: PrintSubject, sends: list[PrintSend]) -> None:
         if not sends:
             return
-        with self._require().connection() as conn, conn.cursor() as cursor:
+        with self._pool.connection() as conn, conn.cursor() as cursor:
             cursor.executemany(
                 "INSERT INTO print_sends"
-                " (queue_item_id, subject, plate_id, printer_id, project_id, slice_job_id)"
-                " VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (queue_item_id) DO NOTHING",
+                " (queue_item_id, subject, plate_id, printer_id, project_id, slice_job_id,"
+                " run_id) VALUES (%s, %s, %s, %s, %s, %s, %s)"
+                " ON CONFLICT (queue_item_id) DO NOTHING",
                 [
                     (
                         send.queue_item_id,
@@ -281,23 +299,24 @@ class PrintLinkStore:
                         send.printer_id,
                         send.project_id,
                         send.slice_job_id,
+                        send.run_id,
                     )
                     for send in sends
                 ],
             )
 
     def _sends_for(self, subject: PrintSubject) -> list[PrintSend]:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             rows = conn.execute(
                 "SELECT queue_item_id, plate_id, printer_id, project_id, slice_job_id,"
-                " first_seen FROM print_sends WHERE subject = %s"
+                " run_id, first_seen FROM print_sends WHERE subject = %s"
                 " ORDER BY first_seen, queue_item_id",
                 (subject.key,),
             ).fetchall()
         return [PrintSend.model_validate(dict(row)) for row in rows]
 
     def _pending_library(self, limit: int, max_age: timedelta) -> list[PendingLibraryPrint]:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             conn.execute(
                 f"UPDATE print_sends SET gone = true WHERE {_UNLINKED} AND first_seen < now() - %s",
                 (max_age,),
@@ -317,7 +336,7 @@ class PrintLinkStore:
         return pending
 
     def _link_library(self, queue_item_id: int, archive_id: int, name: str | None) -> None:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             conn.execute(
                 "INSERT INTO print_links"
                 " (subject, archive_id, matched_by, queue_item_id, plate_id, printer_id, name)"
@@ -328,7 +347,7 @@ class PrintLinkStore:
             )
 
     def _library_gone(self, queue_item_id: int) -> None:
-        with self._require().connection() as conn:
+        with self._pool.connection() as conn:
             conn.execute(
                 f"UPDATE print_sends SET gone = true WHERE queue_item_id = %s AND {_UNLINKED}",
                 (queue_item_id,),

@@ -7,7 +7,9 @@ import { ALL_TOOLS } from '../src/tools/index.js'
 import { PendingActionStore } from '../src/tools/pending.js'
 import { ACCEPTING_MS, COMMAND_FOLLOW_MS } from '../src/tools/command.js'
 import { RUN_REATTEMPTS } from '../src/tools/print.js'
-import { runTool, type Tool, type ToolContext } from '../src/tools/registry.js'
+import { runTool, TOOL_DEADLINE_MS, type Tool, type ToolContext } from '../src/tools/registry.js'
+import { CALL_TIMEOUT_MS } from '../src/bridge/hub.js'
+import { TAB_WAIT_S } from '../src/sessions/manager.js'
 import { sameRepository } from '../src/tools/libraries.js'
 import { redact } from '../src/tools/settings.js'
 import { validateParams } from '../src/tools/validate.js'
@@ -55,6 +57,82 @@ const SCHEMA = {
 describe('print_output still-accepting budget (#1061)', () => {
   it('is the backend CLIENT_ACCEPTING (printing.py), as the frontend printRunPoll.acceptingMs is', () => {
     expect(ACCEPTING_MS).toBe(240_000)
+  })
+})
+
+describe('every call has a deadline (#1918)', () => {
+  it('answers a call whose backend never answers as timed out, and aborts its signal', async () => {
+    let release = () => {}
+    let aborted: AbortSignal | undefined
+    server.use(
+      // get_schema's request does not carry the call's signal: the deadline answers anyway.
+      http.get(`${BACKEND}/api/v1/models/:slug/schema`, () => new Promise<Response>((resolve) => {
+        release = () => resolve(HttpResponse.json({}))
+      })),
+    )
+    const t = tool('get_schema')
+    const slow: Tool = { ...t, execute: (args, c) => ((aborted = c.signal), t.execute(args, c)) }
+    try {
+      const result = await runTool(slow, { slug: 'cable-clip' }, ctx({ toolDeadlineMs: 50 }))
+      expect(result.isError).toBe(true)
+      expect(firstText(result)).toContain('get_schema did not answer within 0 s and was stopped')
+      expect(aborted?.aborted).toBe(true)
+    } finally {
+      release()
+    }
+  })
+
+  it('never tells the model a write that timed out did not happen', async () => {
+    let release = () => {}
+    server.use(
+      http.post(`${BACKEND}/api/v1/models/:slug/presets`, () => new Promise<Response>((resolve) => {
+        release = () => resolve(HttpResponse.json({}))
+      })),
+    )
+    try {
+      const result = await runTool(
+        tool('save_preset'),
+        { slug: 'cable-clip', name: 'p', params: {} },
+        ctx({ toolDeadlineMs: 50 }),
+      )
+      expect(result.isError).toBe(true)
+      expect(firstText(result)).toMatch(/It may still have taken effect: check whether it did before calling save_preset again\.$/)
+      expect(firstText(result)).not.toContain('was stopped')
+    } finally {
+      release()
+    }
+  })
+
+  it('answers a Stop at once, even from a handler that ignores its signal (#2099)', async () => {
+    let release = () => {}
+    const t = tool('get_schema')
+    const deaf: Tool = {
+      ...t,
+      execute: () => new Promise((resolve) => {
+        release = () => resolve({ content: [] })
+      }),
+    }
+    const stop = new AbortController()
+    setTimeout(() => stop.abort(), 10)
+    const started = Date.now()
+    try {
+      const result = await runTool(deaf, { slug: 'cable-clip' }, ctx({ signal: stop.signal, toolDeadlineMs: 60_000 }))
+      expect(result.isError).toBe(true)
+      expect(firstText(result)).toContain('the call was cancelled')
+      expect(Date.now() - started).toBeLessThan(5_000)
+    } finally {
+      release()
+    }
+  })
+
+  it('allows a tool its own designed wait on top', () => {
+    const c = ctx()
+    expect(tool('get_schema').deadlineMs({ slug: 'x' }, c)).toBe(TOOL_DEADLINE_MS)
+    expect(tool('render_model').deadlineMs({ slug: 'x' }, c)).toBe(ACCEPTING_MS + c.renderWaitMs + TOOL_DEADLINE_MS)
+    expect(tool('sessions_send').deadlineMs({ session_id: 's', text: 'hi', wait_seconds: 600 }, c)).toBe(
+      600_000 + TOOL_DEADLINE_MS,
+    )
+    expect(tool('browser_snapshot').deadlineMs({}, c)).toBe(2 * CALL_TIMEOUT_MS + TAB_WAIT_S * 1000 + TOOL_DEADLINE_MS)
   })
 })
 
@@ -456,9 +534,9 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       { slot_id: 2, spool_id: 11 },
     ],
   }
-  function choicesView(model_choices: Record<string, unknown> = {}) {
+  function choicesView(model_choices: Record<string, unknown> = {}, extra: Record<string, unknown> = {}) {
     return http.get(`${BACKEND}/api/v1/print/outputs/${OUT}/choices`, () =>
-      HttpResponse.json({ printer_id: 1, bed_type: 'Cool Plate', filaments: FILAMENTS, model_choices }),
+      HttpResponse.json({ printer_id: 1, bed_type: 'Cool Plate', filaments: FILAMENTS, model_choices, ...extra }),
     )
   }
   const RUN = 'fedcba9876543210fedcba9876543210'
@@ -718,6 +796,23 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     })
   })
 
+  it("fills omitted nozzles with the printer's High Flow defaults, and a remembered choice wins (#1895)", async () => {
+    const highFlow = [
+      { size: '0.4', flow: 'standard' },
+      { size: '0.4', flow: 'high_flow' },
+    ]
+    const defaulted: { body?: unknown } = {}
+    server.use(choicesView({}, { default_nozzles: highFlow }), ...capturedRun(defaulted))
+    await tool('print_output').execute({ output_id: OUT }, ctx())
+    expect(defaulted.body).toMatchObject({ choices: { nozzles: highFlow } })
+
+    const remembered: { body?: unknown } = {}
+    const standard = [{ size: '0.4', flow: 'standard' }]
+    server.use(choicesView({ nozzles: standard }, { default_nozzles: highFlow }), ...capturedRun(remembered))
+    await tool('print_output').execute({ output_id: OUT }, ctx())
+    expect(remembered.body).toMatchObject({ choices: { nozzles: standard } })
+  })
+
   it("prefers the model's remembered nozzles, process and in-stock spools", async () => {
     const run: { body?: unknown } = {}
     server.use(
@@ -796,7 +891,14 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     server.use(...capturedRun({}, { status: 'failed', error: failed, may_have_queued: true }))
     const result = await runTool({ ...tool('print_output'), gated: false }, CHOSEN, ctx())
     expect(result.isError).toBe(true)
-    expect(firstText(result)).toContain("may still have been queued: check Bambuddy's queue")
+    // The run's own answer (#1017), so the session records the run that may have queued.
+    expect(firstText(result)).toMatchObject({
+      id: RUN,
+      status: 'failed',
+      may_have_queued: true,
+      error: failed,
+      note: expect.stringContaining("may still have been queued: check Bambuddy's queue"),
+    })
   })
 
   it('hands back a run still slicing when the wait runs out', async () => {
@@ -893,14 +995,20 @@ describe('arrange (#1864)', () => {
     server.use(
       http.post(`${BACKEND}/api/v1/outputs/arrange`, () =>
         HttpResponse.json(
-          { title: 'Unprocessable', status: 422, detail: 'x', code: 'library_file_not_arrangeable', library_file_ids: [88] },
+          {
+            title: 'Unprocessable',
+            status: 422,
+            detail: '1 library file(s) cannot be arranged: clip.gcode.3mf: it is sliced already',
+            code: 'library_file_not_arrangeable',
+            library_file_ids: [88],
+          },
           { status: 422 },
         ),
       ),
     )
     const plain = await runTool(tool('arrange'), { objects: [{ library_file_id: 88 }] }, ctx())
     expect(plain.isError).toBe(true)
-    expect(JSON.stringify(plain.content)).toMatch(/88.*not made by ScadBuddy/)
+    expect(JSON.stringify(plain.content)).toMatch(/88 cannot be arranged.*sliced already.*Leave them out/)
   })
 
   it('refuses an object naming no source, or both, before any request', async () => {
@@ -999,6 +1107,7 @@ describe('tools that make the backend fetch a URL (exfiltration, not SSRF)', () 
     const puts: unknown[] = []
     server.use(
       http.get(`${BACKEND}/api/v1/libraries`, () => HttpResponse.json(CATALOGUE)),
+      http.get(`${BACKEND}/api/v1/models/box`, () => HttpResponse.json({ slug: 'box', libraries: [] })),
       http.put(`${BACKEND}/api/v1/models/box/libraries/BOSL2`, async ({ request }) => {
         puts.push(await request.json())
         return HttpResponse.json({ slug: 'box' })
@@ -1011,6 +1120,62 @@ describe('tools that make the backend fetch a URL (exfiltration, not SSRF)', () 
       { ref: null, url: null },
       { ref: 'v2.1.0', url: null },
     ])
+  })
+
+  it('a pin answers whether the model pinned that name before it, so a re-pin is not recorded as new (#1307)', async () => {
+    let libraries: { name: string }[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box`, () => HttpResponse.json({ slug: 'box', libraries })),
+      http.put(`${BACKEND}/api/v1/models/box/libraries/:name`, () => HttpResponse.json({ slug: 'box', version: 'c'.repeat(40) })),
+    )
+    const fromUrl = { slug: 'box', name: 'BOSL2', url: 'https://g.example/x.git', ref: 'v1' }
+    expect(firstText(await runTool(tool('pin_library'), { slug: 'box', name: 'BOSL2' }, ctx()))).toMatchObject({ slug: 'box', pinned_before: false })
+    expect(firstText(await runTool({ ...tool('pin_library_from_url'), gated: false }, fromUrl, ctx()))).toMatchObject({ pinned_before: false })
+    libraries = [{ name: 'MCAD' }, { name: 'BOSL2' }]
+    expect(firstText(await runTool(tool('pin_library'), { slug: 'box', name: 'BOSL2' }, ctx()))).toMatchObject({ pinned_before: true })
+    expect(firstText(await runTool({ ...tool('pin_library_from_url'), gated: false }, fromUrl, ctx()))).toMatchObject({ pinned_before: true })
+  })
+
+  it('a pin goes ahead when the read before it fails outright, and leaves pinned_before out (#2124)', async () => {
+    let put = false
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box`, () => HttpResponse.error()),
+      http.put(`${BACKEND}/api/v1/models/box/libraries/:name`, () => {
+        put = true
+        return HttpResponse.json({ slug: 'box', version: 'c'.repeat(40) })
+      }),
+    )
+    const result = await runTool(tool('pin_library'), { slug: 'box', name: 'BOSL2' }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(put).toBe(true)
+    expect(firstText(result)).not.toHaveProperty('pinned_before')
+  })
+
+  it('a pin cancelled while the read before it is in flight never pins (#2275)', async () => {
+    let put = false
+    let abort = () => {}
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box`, async () => {
+        abort()
+        await new Promise((resolve) => setTimeout(resolve, 50))
+        return HttpResponse.json({ slug: 'box', libraries: [] })
+      }),
+      http.put(`${BACKEND}/api/v1/models/box/libraries/:name`, () => {
+        put = true
+        return HttpResponse.json({ slug: 'box', version: 'c'.repeat(40) })
+      }),
+    )
+    const fromUrl = { slug: 'box', name: 'BOSL2', url: 'https://g.example/x.git', ref: 'v1' }
+    for (const [pin, args] of [
+      [tool('pin_library'), { slug: 'box', name: 'BOSL2' }],
+      [{ ...tool('pin_library_from_url'), gated: false }, fromUrl],
+    ] as const) {
+      const controller = new AbortController()
+      abort = () => controller.abort()
+      const result = await runTool(pin, args, ctx({ signal: controller.signal })).catch((err: unknown) => err)
+      expect(result instanceof Error || (result as { isError?: boolean }).isError).toBe(true)
+      expect(put).toBe(false)
+    }
   })
 
   it('pin_library refuses a non-catalogue URL and points to the outward tool', async () => {
@@ -1206,6 +1371,85 @@ describe("tools for #324's routes", () => {
   })
 })
 
+describe('library search and the upgrade flow (#1913, #1914)', () => {
+  const CATALOGUE = [{ name: 'BOSL2', url: 'https://github.com/BelfrySCAD/BOSL2', ref: 'v2.0.0', homepage: '', licence: '', description: '', tags: [] }]
+  const model = (url: string) => ({ slug: 'box', name: 'Box', libraries: [{ name: 'BOSL2', url, ref: 'main', commit: 'a'.repeat(40) }] })
+
+  it('list_libraries sends `q` to the backend, and its cursor belongs to that search', async () => {
+    const asked: (string | null)[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/libraries`, ({ request }) => {
+        asked.push(new URL(request.url).searchParams.get('q'))
+        return HttpResponse.json([{ ...CATALOGUE[0], name: 'a' }, { ...CATALOGUE[0], name: 'b' }])
+      }),
+    )
+    const first = firstText(await runTool(tool('list_libraries'), { q: 'gridfinity', limit: 1 }, ctx())) as { next_cursor: string }
+    expect(asked).toEqual(['gridfinity'])
+    const elsewhere = await runTool(tool('list_libraries'), { q: 'bosl', cursor: first.next_cursor }, ctx())
+    expect(elsewhere.isError).toBe(true)
+    expect(firstText(await runTool(tool('list_libraries'), {}, ctx()))).toMatchObject({ total: 2 })
+    expect(asked.at(-1)).toBeNull()
+  })
+
+  it("list_library_users is a read that pages a library's users by slug", async () => {
+    const users = [
+      { slug: 'box', url: CATALOGUE[0]!.url, ref: 'main', commit: 'a'.repeat(40) },
+      { slug: 'lid', url: null, ref: null, commit: null },
+    ]
+    server.use(http.get(`${BACKEND}/api/v1/libraries/BOSL2/users`, () => HttpResponse.json(users)))
+    expect(tool('list_library_users').risk).toBe('read')
+    const first = firstText(await runTool(tool('list_library_users'), { name: 'BOSL2', limit: 1 }, ctx())) as {
+      items: unknown[]
+      next_cursor: string
+      total: number
+    }
+    expect(first).toMatchObject({ items: [users[0]], total: 2 })
+    const second = firstText(await runTool(tool('list_library_users'), { name: 'BOSL2', cursor: first.next_cursor }, ctx()))
+    expect(second).toEqual({ items: [users[1]], next_cursor: null, total: 2 })
+  })
+
+  it('checks a catalogue-pinned candidate unattended, and refuses one pinned from another URL', async () => {
+    let pinnedFrom = CATALOGUE[0]!.url
+    let checked: unknown
+    const verdict = { ok: true, errors: [], warnings: [], ref: 'v2.1.0', commit: 'b'.repeat(40) }
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box`, () => HttpResponse.json(model(pinnedFrom))),
+      http.get(`${BACKEND}/api/v1/libraries`, () => HttpResponse.json(CATALOGUE)),
+      http.post(`${BACKEND}/api/v1/models/box/libraries/BOSL2/check`, async ({ request }) => {
+        checked = await request.json()
+        return HttpResponse.json(verdict)
+      }),
+    )
+    expect(tool('check_library_candidate').risk).toBe(tool('repin_library').risk)
+    expect(tool('check_library_candidate_from_pinned_url').risk).toBe(tool('repin_library_from_pinned_url').risk)
+
+    const result = await runTool(tool('check_library_candidate'), { slug: 'box', name: 'BOSL2', ref: 'v2.1.0' }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(firstText(result)).toEqual(verdict)
+    expect(checked).toEqual({ ref: 'v2.1.0' })
+
+    checked = undefined
+    pinnedFrom = 'https://attacker.example/BOSL2'
+    const refused = await runTool(tool('check_library_candidate'), { slug: 'box', name: 'BOSL2' }, ctx())
+    expect(refused.isError).toBe(true)
+    expect(firstText(refused)).toContain('check_library_candidate_from_pinned_url')
+    expect(checked).toBeUndefined()
+
+    expect(
+      firstText(await runTool(tool('check_library_candidate_from_pinned_url'), { slug: 'box', name: 'BOSL2', ref: 'v9' }, ctx())),
+    ).toMatchObject({ status: 'pending_approval' })
+    expect(checked).toBeUndefined()
+  })
+
+  it('refuses a pinned-URL check with no ref before it reaches the approval gate (#2098)', async () => {
+    // The backend refuses a non-catalogue URL without a ref; a human must not approve
+    // a call that can only come back a 422.
+    const result = await runTool(tool('check_library_candidate_from_pinned_url'), { slug: 'box', name: 'BOSL2' }, ctx())
+    expect(result.isError).toBe(true)
+    expect(firstText(result)).toContain('invalid arguments')
+  })
+})
+
 describe('base64 inputs', () => {
   it('refuses malformed base64 instead of uploading truncated bytes', async () => {
     const result = await runTool(tool('upload_asset'), { slug: 'box', filename: 'a.png', content_base64: 'iVBOR!!w0K' }, ctx())
@@ -1350,6 +1594,19 @@ describe('prints (#308)', () => {
       limit: '10',
       cursor: '35',
     })
+  })
+
+  it("lists one library file's prints (#1755)", async () => {
+    let query: URLSearchParams | undefined
+    server.use(
+      http.get(`${BACKEND}/api/v1/prints`, ({ request }) => {
+        query = new URL(request.url).searchParams
+        return HttpResponse.json({ items: [], next_cursor: null })
+      }),
+    )
+    const result = await runTool(tool('list_prints'), { library_file_id: 89 }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(Object.fromEntries(query!)).toEqual({ library_file_id: '89' })
   })
 
   it('gets one print, asking the printer only when told to', async () => {
@@ -2005,6 +2262,89 @@ describe('list_versions paging (#837)', () => {
       next_cursor: string
     }
     const other = await runTool(tool('list_versions'), { slug: 'lid', limit: 10, cursor: first.next_cursor }, ctx())
+    expect(other.isError).toBe(true)
+    expect(JSON.stringify(other.content)).toMatch(/another listing/)
+  })
+})
+
+describe('list_models and list_outputs page in the backend (#843)', () => {
+  const models = Array.from({ length: 60 }, (_, i) => ({ slug: `m${String(i).padStart(2, '0')}`, name: `Model ${i}` }))
+  const outputs = Array.from({ length: 30 }, (_, i) => ({ id: i.toString(16).padStart(32, '0'), slug: 'box' }))
+
+  /** The backend's `limit`/`after` window (api/models.py `page_window`), recording each query. */
+  function windowed<T>(items: () => T[], key: (item: T) => string, queries: URLSearchParams[]) {
+    return ({ request }: { request: Request }) => {
+      const query = new URL(request.url).searchParams
+      queries.push(query)
+      const all = items()
+      const after = query.get('after')
+      const start = after === null ? 0 : all.findIndex((item) => key(item) === after) + 1
+      if (after !== null && start === 0) {
+        return HttpResponse.json({ detail: `no item '${after}' is listed any more` }, { status: 409 })
+      }
+      const limit = query.get('limit')
+      const window = all.slice(start, limit === null ? undefined : start + Number(limit))
+      return HttpResponse.json(window, { headers: { 'X-Total-Count': String(all.length) } })
+    }
+  }
+
+  it('list_models asks for one page (and one more item) after the last key, never the whole catalogue', async () => {
+    const queries: URLSearchParams[] = []
+    server.use(http.get(`${BACKEND}/api/v1/models`, windowed(() => models, (m) => m.slug, queries)))
+    const first = firstText(await runTool(tool('list_models'), { limit: 25 }, ctx())) as {
+      items: { slug: string }[]
+      next_cursor: string
+      total: number | null
+    }
+    expect(first.items.map((m) => m.slug)).toEqual(models.slice(0, 25).map((m) => m.slug))
+    expect(first.total).toBe(60)
+    const second = firstText(await runTool(tool('list_models'), { limit: 25, cursor: first.next_cursor }, ctx())) as {
+      items: { slug: string }[]
+      next_cursor: string
+    }
+    const third = firstText(await runTool(tool('list_models'), { limit: 25, cursor: second.next_cursor }, ctx())) as {
+      items: { slug: string }[]
+      next_cursor: string | null
+    }
+    expect([...first.items, ...second.items, ...third.items].map((m) => m.slug)).toEqual(models.map((m) => m.slug))
+    expect(third.next_cursor).toBeNull()
+    expect(queries.map((q) => [q.get('limit'), q.get('after')])).toEqual([
+      ['26', null],
+      ['26', 'm24'],
+      ['26', 'm49'],
+    ])
+  })
+
+  it('list_models calls a cursor stale when the backend no longer lists its item', async () => {
+    let served = models
+    server.use(http.get(`${BACKEND}/api/v1/models`, windowed(() => served, (m) => m.slug, [])))
+    const first = firstText(await runTool(tool('list_models'), { limit: 10 }, ctx())) as { next_cursor: string }
+    served = models.filter((m) => m.slug !== 'm09')
+    const stale = await runTool(tool('list_models'), { limit: 10, cursor: first.next_cursor }, ctx())
+    expect(stale.isError).toBe(true)
+    expect(JSON.stringify(stale.content)).toMatch(/stale/)
+  })
+
+  it('list_outputs passes the window through for its model, and scopes the cursor to it', async () => {
+    const queries: URLSearchParams[] = []
+    server.use(http.get(`${BACKEND}/api/v1/models/:slug/outputs`, windowed(() => outputs, (o) => o.id, queries)))
+    const first = firstText(await runTool(tool('list_outputs'), { slug: 'box', limit: 20 }, ctx())) as {
+      items: { id: string }[]
+      next_cursor: string
+      total: number | null
+    }
+    expect(first.items).toHaveLength(20)
+    expect(first.total).toBe(30)
+    const second = firstText(
+      await runTool(tool('list_outputs'), { slug: 'box', limit: 20, cursor: first.next_cursor }, ctx()),
+    ) as { items: { id: string }[]; next_cursor: string | null }
+    expect(second.items.map((o) => o.id)).toEqual(outputs.slice(20).map((o) => o.id))
+    expect(second.next_cursor).toBeNull()
+    expect(queries.map((q) => [q.get('limit'), q.get('after')])).toEqual([
+      ['21', null],
+      ['21', outputs[19]!.id],
+    ])
+    const other = await runTool(tool('list_outputs'), { slug: 'lid', limit: 20, cursor: first.next_cursor }, ctx())
     expect(other.isError).toBe(true)
     expect(JSON.stringify(other.content)).toMatch(/another listing/)
   })

@@ -16,6 +16,7 @@ ParameterType = Literal[
     "number", "integer", "string", "boolean", "select", "color", "font", "slider", "file"
 ]
 ParamValue = bool | int | float | str
+PlateAxis = Literal["x", "y", "z"]
 
 HIDDEN_GROUP = "Hidden"
 GLOBAL_GROUP = "Global"
@@ -57,10 +58,21 @@ _RETIRED_RE = re.compile(
     re.MULTILINE,
 )
 
+#: `// plate width = x` on a line of its own (#81): a number parameter whose max is the
+#: selected printer's plate on that axis -- X and Y where every extruder reaches, Z the
+#: printable height -- so its widget's range shrinks to what fits. The declared range
+#: is served unchanged; the browser narrows it to the plate it has in view.
+_PLATE_RE = re.compile(
+    r"^[^\S\n]*//[^\S\n]*plate[^\S\n]+(?P<name>[A-Za-z_]\w*)[^\S\n]*=[^\S\n]*"
+    r"(?P<axis>[xyzXYZ])[^\S\n]*;?[^\S\n]*$",
+    re.MULTILINE,
+)
+
 #: Bumped when the derived schema changes shape for an UNCHANGED source, so a cache
 #: entry written by an older ScadBuddy is re-derived rather than served. 2: `file`.
 #: 3: `retired` (#432). 4: a select mixing text and numbers is all text (#356).
-SCHEMA_FORMAT = 4
+#: 5: `plate_max` (#81).
+SCHEMA_FORMAT = 5
 
 
 @dataclass(frozen=True)
@@ -94,6 +106,9 @@ class Parameter(BaseModel):
     #: A `select` parameter's retired values: accepted in a render or a preset, never
     #: offered (`// retired name = value`, #432).
     retired: list[ParamValue] = Field(default_factory=list)
+    #: A number's max follows the selected printer's plate on this axis
+    #: (`// plate name = x`, #81).
+    plate_max: PlateAxis | None = None
 
 
 class CustomizerSchema(BaseModel):
@@ -143,6 +158,11 @@ def find_retired(source: str) -> dict[str, list[ParamValue]]:
     return found
 
 
+def find_plate_bounds(source: str) -> dict[str, PlateAxis]:
+    axes: dict[str, PlateAxis] = {"x": "x", "y": "y", "z": "z"}
+    return {m["name"]: axes[m["axis"].lower()] for m in _PLATE_RE.finditer(source)}
+
+
 def _is_whole(value: Any) -> TypeGuard[int | float]:
     if not isinstance(value, int | float) or isinstance(value, bool):
         return False
@@ -182,10 +202,14 @@ def _resolve_type(raw: dict[str, Any], annotation: Annotation | None) -> Paramet
     return "number"
 
 
+_NUMERIC: tuple[ParameterType, ...] = ("number", "integer", "slider")
+
+
 def _normalise_parameter(
     raw: dict[str, Any],
     annotations: dict[str, Annotation],
     retired: dict[str, list[ParamValue]] | None = None,
+    plate_bounds: dict[str, PlateAxis] | None = None,
 ) -> Parameter:
     name = str(raw["name"])
     annotation = annotations.get(name)
@@ -223,16 +247,18 @@ def _normalise_parameter(
         options=options,
         accept=list(annotation.accept) if resolved == "file" and annotation else [],
         retired=selected_retired,
+        plate_max=(plate_bounds or {}).get(name) if resolved in _NUMERIC else None,
     )
 
 
 def build_schema(param_json: dict[str, Any], source: str) -> CustomizerSchema:
     annotations = find_annotations(source)
     retired = find_retired(source)
+    plate_bounds = find_plate_bounds(source)
     parameters: list[Parameter] = []
     groups: list[str] = []
     for raw in param_json.get("parameters", []):
-        parameter = _normalise_parameter(raw, annotations, retired)
+        parameter = _normalise_parameter(raw, annotations, retired, plate_bounds)
         if parameter.group == HIDDEN_GROUP:
             continue
         parameters.append(parameter)

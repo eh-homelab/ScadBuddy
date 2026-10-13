@@ -70,6 +70,22 @@ Added for #469 on 2026-09-28, over the ingress (a `GET`, no auth). AMS and nozzl
   AMS's inlet instead (`{"0":"B","1":"B","128":"A","2":"A"}`). Inlet A feeds the left
   extruder and B the right, and `nozzles[0]` is the right extruder, `nozzles[1]` the left.
 
+Added for #1912 on 2026-10-09, from the live Bambuddy **1.2.6b1** over the ingress (all
+`GET`, no auth). Nothing was redacted: neither body carries a serial, a tag or a user.
+
+| File | Source |
+|---|---|
+| `queue.json` | four rows of `GET /api/v1/queue/` (printing, pending, failed, completed) |
+| `archive-stats.json` | `GET /api/v1/archives/stats` |
+| `archives-full.json` | `GET /api/v1/archives/?limit=3`, the whole `ArchiveResponse` (an oversized `extra_data` nulled) |
+
+- **`GET /queue/` keeps finished items**: 222 rows on the day, five of them pending or
+  printing. It has no limit; `status` narrows it.
+- **Reading the queue and the stats needs only `can_read_status`** (`QUEUE_READ` and
+  `STATS_READ` in Bambuddy's `auth.py`); `can_queue` is for changing the queue.
+- An archive's `status` can be `archived`, beside `printing`, `completed`, `failed` and
+  `cancelled`.
+
 ## What the recordings settle
 
 - **`/api/v1/printers` 404s.** Only `/api/v1/printers/` exists. The design spec and the

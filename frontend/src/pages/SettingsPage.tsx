@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useLocation } from 'react-router'
 import { useAiAvailability } from '../agent/chat/availability'
 import { USER_ONLY } from '../agent/dom'
 import { committed, touchAfterRender } from '../agent/highlight'
@@ -11,10 +12,16 @@ import type { McpAuthMode } from '../api/mcpTokens'
 import { AiCredentialSection } from '../components/assistant/AiCredentialSection'
 import { AiStatusSection } from '../components/assistant/AiStatusSection'
 import { McpAuthSection } from '../components/McpAuthSection'
-import { HeadlessBrowserSetting } from '../components/HeadlessBrowserSetting'
 import { HttpRequestSetting } from '../components/HttpRequestSetting'
 import { RenderLimitsSetting } from '../components/RenderLimitsSetting'
+import { ImageSettingsSetting } from '../components/ImageSettingsSetting'
 import { SessionLimitsSetting } from '../components/SessionLimitsSetting'
+import { WorkspaceSettingsSetting } from '../components/WorkspaceSettingsSetting'
+import { SessionModeSetting } from '../components/SessionModeSetting'
+import { ModelSetting } from '../components/ModelSetting'
+import { PrinterCameraSetting } from '../components/PrinterCameraSetting'
+import { McpAuthBanner } from '../components/McpAuthBanner'
+import { mcpAuthChanged } from '../lib/mcpAuthChanges'
 import { McpOidcSettings } from '../components/McpOidcSettings'
 import { PluginPackagesPanel } from '../components/settings/PluginPackages'
 import { RemotePluginsPanel } from '../components/settings/RemotePlugins'
@@ -42,6 +49,7 @@ import {
   type FieldSpec,
   type SectionId,
 } from './settings/fields'
+import { HotendUsagePanel } from './settings/HotendUsagePanel'
 import { RememberedChoicesPanel } from './settings/RememberedChoicesPanel'
 import { editedSince, pendingFields, seedDraft, type Draft, type Edits, type Seed } from './settings/seed'
 import { useLeaveGuard } from '../lib/useLeaveGuard'
@@ -211,6 +219,15 @@ export function SettingsPage() {
     setDraft((current) => seedDraft(current, values, editedSince(since, edits.current)))
     setClearing((current) => current.filter((name) => !names.includes(name)))
   }, [settings])
+
+  // #1307 — a link to a section (`/settings#libraries`, the assistant's Touched list)
+  // opens Settings at it, once the sections are rendered.
+  const { hash } = useLocation()
+  const loaded = Boolean(settings)
+  useEffect(() => {
+    if (!loaded || hash.length < 2) return
+    document.getElementById(sectionId(hash))?.scrollIntoView?.({ block: 'start' })
+  }, [loaded, hash])
 
   const value = (name: FieldName): string => draft[name] ?? (settings ? baseline(settings, name) : '')
   const setField = (name: FieldName, next: string) => {
@@ -633,6 +650,9 @@ export function SettingsPage() {
           the server and never sent back to the browser.
         </p>
 
+        {/* #1921 — while /mcp takes calls without a token; re-read when the mode is saved below. */}
+        {ai.available && <McpAuthBanner className="mt-4" />}
+
         {changedElsewhere && (
           <div
             role="status"
@@ -691,7 +711,7 @@ export function SettingsPage() {
                 label="API key"
                 badge={badge('bambuddy_api_key')}
                 error={errors.bambuddy_api_key}
-                help="Needs Read Status, Manage Library and Manage Queue; Manage Projects for projects and Manage Archives for print photos."
+                help="Needs Read Status, Manage Library and Manage Queue; Manage Projects for projects, Manage Archives for print photos and Manage Inventory to record a tray's spool."
               >
                 <div className="flex gap-2">
                   <input
@@ -805,6 +825,7 @@ export function SettingsPage() {
                     </p>
                   )}
                 </div>
+                {test?.upstream && <UpstreamAnswerDetails answer={test.upstream} />}
                 {test && (test.scopes?.length ?? 0) > 0 && (
                   <ul aria-label="Scopes" className="space-y-1 text-[12px]">
                     {test.scopes?.map((check) => (
@@ -998,7 +1019,7 @@ export function SettingsPage() {
                 help={
                   projectsState.error
                     ? `Could not list the projects: ${projectsState.error instanceof ApiError ? projectsState.error.detail : 'no answer'}`
-                    : 'Where the project picker opens, and the project a send without one is filed under.'
+                    : "Where a library file's print opens its project picker, and the project a send without one is filed under. A model opens on the project it was last filed in."
                 }
               >
                 <select
@@ -1070,6 +1091,7 @@ export function SettingsPage() {
                   </p>
                 </div>
               )}
+              {runtimeRows('projects')}
             </>,
           )}
 
@@ -1154,9 +1176,10 @@ export function SettingsPage() {
           <Section
             id="remembered"
             title={sectionTitle('remembered')}
-            description="What the print dialog remembers per model and per printer. Forgetting one leaves the rest; the dialog then opens on its own defaults."
+            description="What the print dialog remembers per model and per printer. Forgetting one leaves the rest; the dialog then opens on its own defaults. A printer with a nozzle rack also lists each hotend: its serial, what it has loaded, what it has printed (which Least used ranks by) and every spool that ran through it."
           >
             <RememberedChoicesPanel targets={targetsState.data} projects={projectsState.data} />
+            <HotendUsagePanel targets={targetsState.data} />
           </Section>
 
           <Section id="assistant" title={sectionTitle('assistant')} description="Applied at once; not part of any saved section.">
@@ -1181,19 +1204,33 @@ export function SettingsPage() {
                 when on, the print and send tool can only open the dialog; you confirm it.
               </p>
             </div>
-            <HeadlessBrowserSetting />
             <HttpRequestSetting />
+            {/* #1911 — the camera tool's switch; hidden without the agent's database, like the switch above. */}
+            <PrinterCameraSetting />
+            {/* Saves on its own (#1917), beside the chat limits; hidden without the agent's database. */}
+            <ModelSetting />
             {/* Saves on its own (#790); hidden without the agent's database, like the switch above. */}
             <SessionLimitsSetting />
             {/* Saves on its own; read live by the agent, hidden without its database. */}
             <RenderLimitsSetting />
+            {/* Saves on its own; hidden without the agent's database, like the limits above. */}
+            <ImageSettingsSetting />
+            {/* #2329 — the workspace caps; saves on its own, hidden without the agent's database. */}
+            <WorkspaceSettingsSetting />
+            {/* Plan 5d — saves on its own; hidden without the agent's database, like the limits above. */}
+            <SessionModeSetting />
             {/* The agent service serves these routes, so they show only where the assistant
                 would (#251): when the agent answers /api/v1/ai/status as available
                 (useAiAvailability). */}
             {ai.available && (
               <>
-                <McpAuthSection onSaved={(setting) => setMcpAuthMode(setting.mode)} />
-                <McpTokensSection authMode={mcpAuthMode} />
+                <McpAuthSection
+                  onSaved={(setting) => {
+                    setMcpAuthMode(setting.mode)
+                    mcpAuthChanged()
+                  }}
+                />
+                <McpTokensSection authMode={mcpAuthMode} publicUrl={settings?.public_url} />
               </>
             )}
             {ai.available && (
@@ -1294,4 +1331,52 @@ export function SettingsPage() {
       </Dialog>
     </div>
   )
+}
+
+/** #1542 — what Bambuddy itself answered a failed connection test, as it said it. */
+function UpstreamAnswerDetails({ answer }: { answer: NonNullable<ConnectionTest['upstream']> }) {
+  return (
+    <details className="rounded-[6px] border border-line px-3 py-2 text-[12px]">
+      <summary className="cursor-pointer text-muted">What Bambuddy answered</summary>
+      <dl className="mt-2 space-y-1">
+        {answer.status != null && (
+          <div className="flex gap-2">
+            <dt className="text-muted">Status</dt>
+            <dd>{answer.status}</dd>
+          </div>
+        )}
+        {answer.retry_after != null && (
+          <div className="flex gap-2">
+            <dt className="text-muted">Retry-After</dt>
+            <dd>{answer.retry_after}</dd>
+          </div>
+        )}
+        {answer.detail != null && (
+          <div className="flex gap-2">
+            <dt className="text-muted">Its message</dt>
+            <dd className="break-all">{answer.detail}</dd>
+          </div>
+        )}
+        {answer.error != null && (
+          <div className="flex gap-2">
+            <dt className="text-muted">Error</dt>
+            <dd className="break-all">{answer.error}</dd>
+          </div>
+        )}
+      </dl>
+    </details>
+  )
+}
+
+/**
+ * The section a URL hash names. A malformed escape (a truncated or hand-edited link,
+ * `#%E0%A4%A`) makes `decodeURIComponent` throw, which inside the effect took the whole
+ * page down (#2113); the raw text is used instead, which simply matches no section.
+ */
+function sectionId(hash: string): string {
+  try {
+    return decodeURIComponent(hash.slice(1))
+  } catch {
+    return hash.slice(1)
+  }
 }
