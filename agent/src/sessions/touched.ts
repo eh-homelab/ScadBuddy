@@ -246,6 +246,8 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   delete_flow: () => [],
   // A run's grant (#2481) is the run's: its page shows who revoked it, and when.
   revoke_flow_grant: () => [],
+  // A starting session's answer to its run's call (#2482) is recorded on the call's hops.
+  escalation_respond: () => [],
   // Models.
   create_model: (_input, result) => modelCreated(result),
   import_model: (_input, result) => modelCreated(result),

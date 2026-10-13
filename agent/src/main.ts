@@ -358,6 +358,11 @@ const stopQuestionSweeper = sessions?.questions.startSweeper(APPROVAL_SWEEP_MS, 
   ...(database ? { ready: database.ready } : {}),
   onError: (err) => console.error('question expiry sweep failed:', (err as Error).message),
 })
+// A flow run's call whose hop at its starting session is over goes to the person (#2482).
+const stopEscalationSweeper = sessions?.escalations.startSweeper(APPROVAL_SWEEP_MS, {
+  ...(database ? { ready: database.ready } : {}),
+  onError: (err) => console.error('escalation hop sweep failed:', (err as Error).message),
+})
 // Now and every 30 s: sessions whose turn died without finishing (a SIGKILL,
 // or a restart that closed the pool under it) say so and stop claiming to run.
 const stopReaper = sessions?.startReaper(SESSION_REAP_MS, {
@@ -676,6 +681,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
 async function stop(): Promise<void> {
   stopSweeper?.()
   stopQuestionSweeper?.()
+  stopEscalationSweeper?.()
   stopOrphanSweep?.()
   stopDurableSweep?.()
   stopReaper?.()

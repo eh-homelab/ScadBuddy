@@ -16,7 +16,7 @@ import uuid
 from collections.abc import Callable, Coroutine
 from datetime import datetime, timedelta
 from typing import Any
-from urllib.parse import unquote
+from urllib.parse import quote
 
 import psycopg
 from psycopg import Connection
@@ -100,6 +100,21 @@ class HopMovedError(Exception):
 
 #: `approval_expiry_seconds` (the agent's Settings → Assistant) when it is not set.
 DEFAULT_APPROVAL_EXPIRY_S = 600
+
+
+def author_principal(owner_id: str) -> str:
+    """`owner_id` as the agent writes it in the author header (agent
+    `tools/authorship.ts` `principalHeader`): printable ASCII as it is, anything else
+    percent-encoded as UTF-8, at most 300 characters, a whole character at a time."""
+    out = ""
+    for c in owner_id:
+        encoded = c if 0x21 <= ord(c) <= 0x7E else quote(c, safe="", errors="replace")
+        if len(out) + len(encoded) > 300:
+            break
+        out += encoded
+    return out or "unknown"
+
+
 #: The agent's tiers, lowest first (agent `auth/principal.ts` `TIERS`).
 TIERS = ("read", "write", "outward")
 APPROVAL_EXPIRY_SETTING = "approval_expiry_seconds"
@@ -331,10 +346,10 @@ class FlowStore:
         return await asyncio.to_thread(self._get_proposal, request_id)
 
     async def parent_tiers(self, session: str, principal: str) -> list[str] | None:
-        """The tiers the starter session acts with now (#2482, spec §4.4): its owner's,
-        as the agent runs an escalation turn (`auth/principal.ts` `harnessPrincipal`,
-        a token's live tier). None when the session is gone or no longer the run
-        starter's (a handoff): it is no parent then."""
+        """The tiers the starter session acts with now (#2482, spec §4.4): the browser
+        user's all of them, a token's its live tier (the tiers the agent sends the
+        escalation turn with), anyone else's `read`. None when the session is gone,
+        archived, or no longer the run starter's (a handoff): it is no parent then."""
         return await asyncio.to_thread(self._parent_tiers, session, principal)
 
     async def approval_expiry_s(self) -> int:
@@ -767,10 +782,11 @@ class FlowStore:
         with self._pool.connection() as conn:
             try:
                 owner = conn.execute(
-                    "SELECT owner_kind, owner_id FROM ai_sessions WHERE id::text = %s",
+                    "SELECT owner_kind, owner_id FROM ai_sessions"
+                    " WHERE id::text = %s AND archived_at IS NULL",
                     (session,),
                 ).fetchone()
-                if owner is None or owner["owner_id"] != unquote(principal):
+                if owner is None or author_principal(str(owner["owner_id"])) != principal:
                     return None
                 if owner["owner_kind"] == "browser":
                     return list(TIERS)
