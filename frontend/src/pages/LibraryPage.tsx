@@ -19,6 +19,7 @@ import { TransferLibraryFilesDialog, type TransferMode } from '../components/lib
 import { PrintPicker } from '../components/PrintPicker'
 import { libraryPrintsPath } from '../components/prints/prints'
 import { Button } from '../components/ui/Button'
+import { Chevron } from '../components/ui/Chevron'
 import { Spinner } from '../components/ui/Spinner'
 import { arrangedNote, fromFiles, savedNote, type Arranged } from '../lib/arrange'
 import { traceAction } from '../lib/traceAction'
@@ -172,7 +173,10 @@ export function LibraryPage() {
     }
   }
 
+  // #2368 — below md the tree folds behind a picker, so the files come first on a phone.
+  const [foldersOpen, setFoldersOpen] = useState(false)
   function selectFolder(id: number | null) {
+    setFoldersOpen(false)
     const path = libraryPath(tree ?? [], id)
     if (path !== location.pathname || location.search !== '') navigate(path)
   }
@@ -283,7 +287,22 @@ export function LibraryPage() {
       <div className={`mx-auto flex max-w-6xl flex-col gap-6 p-4 md:flex-row md:p-6 ${deleted || done ? 'pb-44' : ''}`}>
         <nav aria-label="Library" className="w-full md:w-60 md:shrink-0">
           {tree ? (
-            <LibraryTree folders={tree} selected={folderId} onSelect={selectFolder} />
+            <>
+              <button
+                type="button"
+                aria-expanded={foldersOpen}
+                aria-controls="library-folders"
+                onClick={() => setFoldersOpen(!foldersOpen)}
+                className="flex min-h-9 w-full items-center gap-2 rounded-[6px] border border-line bg-surface px-3 text-left text-[13px] md:hidden"
+              >
+                <span className="text-muted">Folder:</span>
+                <span className="min-w-0 flex-1 truncate">{folderLabel(tree, folderId)}</span>
+                <Chevron open={foldersOpen} />
+              </button>
+              <div id="library-folders" className={`${foldersOpen ? 'mt-2' : 'hidden'} md:mt-0 md:block`}>
+                <LibraryTree folders={tree} selected={folderId} onSelect={selectFolder} />
+              </div>
+            </>
           ) : (
             <p className="flex items-center gap-2 text-[13px] text-muted">
               <Spinner /> Reading folders

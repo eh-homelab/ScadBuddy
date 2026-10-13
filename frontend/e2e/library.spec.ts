@@ -63,6 +63,31 @@ test.describe('library', () => {
     await expect(first).toContainText('110 kB')
   })
 
+  // #2368 — on a phone the tree folds behind a picker, so the files come first.
+  test('puts the files first at phone width, with the folders behind a picker', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto('/library')
+    const picker = page.getByRole('button', { name: /^Folder: Top level/ })
+    const tree = page.getByRole('tree', { name: 'Library folders' })
+    await expect(page.getByTestId('library-file-89')).toBeInViewport()
+    await expect(picker).toHaveAttribute('aria-expanded', 'false')
+    await expect(tree).toBeHidden()
+
+    await picker.click()
+    await expect(tree).toBeVisible()
+    await tree.getByRole('treeitem', { name: 'Spec' }).click()
+    await expect(page).toHaveURL(/\/library\/Spec$/)
+    await expect(tree).toBeHidden()
+    await expect(page.getByRole('button', { name: /^Folder: Spec/ })).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  test('shows the tree beside the files on a wide screen, with no picker', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await page.goto('/library')
+    await expect(page.getByRole('tree', { name: 'Library folders' })).toBeVisible()
+    await expect(page.getByRole('button', { name: /^Folder: / })).toBeHidden()
+  })
+
   // #2165 — the folders are a tree, and the URL follows the page.
   test('walks the folder tree by mouse and keyboard, with Back and Forward', async ({ page }) => {
     await page.goto('/library')
