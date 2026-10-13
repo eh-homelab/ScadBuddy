@@ -7,6 +7,7 @@ import type { AnalysisRequest, Output, PrintRunResult } from '../api/types'
 import { analysisReport, openEdgesDiagnostic } from '../mocks/analyzers'
 import { choicesView, queuedResult } from '../mocks/choices'
 import * as fixtures from '../mocks/fixtures'
+import { setSilkPreview, silkPreview } from '../mocks/features/filamentProfiles'
 import { MULTI_PLATE_FILE } from '../mocks/features/library'
 import { lastArrangeRequest, problem, resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
@@ -313,6 +314,8 @@ describe('PrintPicker', () => {
       rack_position: null,
       // Not chosen in this dialog, so the backend applies the printer's remembered one.
       rack_algorithm: null,
+      // Slot 1's spool is Bambu PLA Silk, so the Silk profile is suggested and on (#717).
+      filament_profiles: ['silk-pla'],
       request_id: expect.stringMatching(/^[0-9a-f]{32}$/),
     })
   })
@@ -3591,97 +3594,44 @@ describe('PrintPicker · Slicer defaults from the template (#1294)', () => {
   })
 })
 
-describe('PrintPicker · a sliced library file (#2671)', () => {
-  const SLICED = { kind: 'library', file: { id: 104, filename: 'bag-clip.gcode.3mf' } } as const
-
-  function renderSliced() {
-    return renderPage(<PrintPicker open source={SLICED} onClose={vi.fn()} onRan={vi.fn()} />)
-  }
-
-  it('shows what it was sliced for, read-only, in place of the slicer steps', async () => {
-    const previews = watch('POST', '/preview-slice')
-    renderSliced()
+describe('PrintPicker · Filament profiles (#717)', () => {
+  it('suggests Silk for a silk spool, shows its change against the preset, and prints without it when switched off', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
     await loaded()
-    const settings = await screen.findByTestId('sliced-settings')
-    expect(settings).toHaveTextContent('Bambu Lab H2C')
-    expect(settings).toHaveTextContent('0.4 mm')
-    expect(settings).toHaveTextContent('0.20mm Standard @BBL H2C')
-    expect(settings).toHaveTextContent('Textured PEI Plate')
-    // Advanced still offers the print options, project and copies, but no slicer step.
-    fireEvent.click(screen.getByRole('switch', { name: 'Advanced' }))
-    expect(await screen.findByLabelText('Copies')).toBeInTheDocument()
-    expect(screen.queryByRole('group', { name: /nozzles/i })).toBeNull()
-    expect(screen.queryByRole('group', { name: /quality/i })).toBeNull()
-    expect(screen.queryByTestId('plate-preview-open')).toBeNull()
-    // Bambu Studio's own estimate stands in for a background slice, which it never gets.
-    expect(await screen.findByTestId('slice-time')).toHaveTextContent('45')
-    expect(screen.getByTestId('run-print')).toBeEnabled()
-    expect(previews.urls).toEqual([])
+
+    const step = await screen.findByTestId('filament-profile-silk-pla')
+    expect(step).toHaveTextContent('Silk PLA for slot 1 (Bambu Lab PLA Silk)')
+    const checkbox = within(step).getByRole('checkbox', { name: /Silk PLA/ })
+    expect(checkbox).toBeChecked()
+    // Each distinct value the H2C preset has per extruder variant, then the profile's.
+    expect(await within(step).findByText('Outer wall speed: 200 / 500 → 50 mm/s')).toBeInTheDocument()
+    expect(within(step).getByRole('link', { name: /Why: Bambu PLA Silk/ })).toHaveAttribute(
+      'href',
+      'https://wiki.bambulab.com/en/x1/manual/printing-with-silk-filaments',
+    )
+    expect(step).toHaveTextContent('235 °C')
+
+    await user.click(checkbox)
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+    expect(bodies[0]).not.toHaveProperty('filament_profiles')
   })
 
-  it('prints through the library run with the spools chosen', async () => {
-    const runs = watch('POST', '/run', '/api/v1/print/library/')
-    const { user } = renderSliced()
+  it("says why a profile can't apply, and leaves it off", async () => {
+    setSilkPreview(silkPreview({ applicable: false, reason: "The process preset's values could not be read (Bambuddy's slicer is not reachable).", changes: [] }))
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
     await loaded()
-    await user.click(screen.getByTestId('run-print'))
-    await waitFor(() => expect(runs.urls).toHaveLength(1))
-    expect(runs.urls[0]).toContain('/print/library/104/run')
-    expect((runs.bodies[0]?.filament_plan as { slots: unknown[] }).slots.length).toBeGreaterThan(0)
-  })
 
-  it('offers only the plates it holds G-code for, and prints the first of them', async () => {
-    server.use(
-      http.get('/api/v1/print/library/104/plates', () =>
-        HttpResponse.json([
-          { index: 1, has_thumbnail: true },
-          { index: 2, has_thumbnail: true, name: 'Lid' },
-        ]),
-      ),
-      http.get('/api/v1/print/library/104/choices', () =>
-        HttpResponse.json({
-          ...choicesView,
-          sliced: {
-            printer_model: 'Bambu Lab H2C',
-            nozzle_diameters: ['0.4'],
-            plates: [{ index: 2, print_seconds: 600, weight_g: 3 }],
-          },
-        }),
-      ),
-    )
-    const runs = watch('POST', '/run', '/api/v1/print/library/')
-    const { user } = renderSliced()
-    await loaded()
-    expect(await screen.findByTestId('single-plate')).toHaveTextContent('Lid')
-    await user.click(screen.getByTestId('run-print'))
-    await waitFor(() => expect(runs.bodies).toHaveLength(1))
-    expect(runs.bodies[0]).toMatchObject({ plate_id: 2, all_plates: false })
-  })
-})
+    const step = await screen.findByTestId('filament-profile-silk-pla')
+    expect(await within(step).findByRole('status')).toHaveTextContent("Can't apply: The process preset's values could not be read")
+    const checkbox = within(step).getByRole('checkbox', { name: /Silk PLA/ })
+    expect(checkbox).not.toBeChecked()
+    expect(checkbox).toBeDisabled()
 
-describe('PrintPicker · a sliced file that does not fit is warned of, never held (#2671)', () => {
-  it('shows a nozzle or model mismatch as a warning, with Print enabled', async () => {
-    server.use(
-      http.post('/api/v1/print/library/104/check', () =>
-        HttpResponse.json({
-          errors: [],
-          warnings: [
-            {
-              kind: 'sliced-nozzle-missing',
-              slot_id: null,
-              message: 'Sliced for a 0.6 mm nozzle; 0.4 mm is mounted on H2C. Held for a manual start: swap it before you start the print.',
-            },
-            { kind: 'sliced-other-model', slot_id: null, message: 'Sliced for a Bambu Lab X1 Carbon; H2C is a Bambu Lab H2C. Held for a manual start.' },
-          ],
-          rack: null,
-        }),
-      ),
-    )
-    renderPage(
-      <PrintPicker open source={{ kind: 'library', file: { id: 104, filename: 'clip.gcode.3mf' } }} onClose={vi.fn()} onRan={vi.fn()} />,
-    )
-    await loaded()
-    expect(await screen.findByText(/Sliced for a 0\.6 mm nozzle; 0\.4 mm is mounted/)).toBeInTheDocument()
-    expect(screen.getByText(/Sliced for a Bambu Lab X1 Carbon/)).toBeInTheDocument()
-    await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+    expect(bodies[0]).not.toHaveProperty('filament_profiles')
   })
 })

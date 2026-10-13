@@ -1,5 +1,8 @@
 import type {
   InventoryView,
+  PrintChoices,
+  FilamentProfile,
+  ProfilePreview,
   AnalysisReport,
   AnalysisRun,
   AnalyzerDecision,
@@ -1457,6 +1460,16 @@ export const api = {
   /** #2351 — Bambuddy's spool inventory, each spool with where it is loaded. */
   getSpoolInventory: (includeArchived = false) =>
     request<InventoryView>(`/farm/inventory${includeArchived ? '?include_archived=true' : ''}`),
+
+  /** #717 — every filament profile, with what it changes and why. */
+  listFilamentProfiles: () => request<FilamentProfile[]>('/print/filament-profiles'),
+
+  /** #717 — each profile's changes against the process preset these choices resolve to. */
+  previewFilamentProfiles: (choices: PrintChoices, profiles: string[]) =>
+    request<ProfilePreview[]>('/print/filament-profiles/preview', {
+      method: 'POST',
+      body: JSON.stringify({ choices, profiles }),
+    }),
 
   /**
    * spec 2026-09-27 §3 — one read for the whole spool-first print dialog: printers,

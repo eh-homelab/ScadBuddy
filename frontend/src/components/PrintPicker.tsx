@@ -31,7 +31,8 @@ import { openExternal } from '../lib/embed'
 import { plateLabel } from '../lib/plate'
 import { resolvedColors } from '../lib/plateColors'
 import { checkPlan, slicedPlateSlots, withSlicedGrams } from '../lib/filaments'
-import { printChoicesOf, sliceOverrides } from '../lib/printChoices'
+import { useFilamentProfiles } from '../lib/filamentProfiles'
+import { printChoicesOf } from '../lib/printChoices'
 import { resolveOptions } from '../lib/printOptions'
 import {
   attachPrintToProject,
@@ -63,6 +64,7 @@ import { PlatePreviewDialog } from './print/PlatePreviewDialog'
 import { PlatesToPrint } from './print/PlatesToPrint'
 import { PlateStep } from './print/PlateStep'
 import { PresetOverrides } from './print/PresetOverrides'
+import { FilamentProfilesStep } from './print/FilamentProfilesStep'
 import { PrintSequenceStep } from './print/PrintSequenceStep'
 import { SlicerDefaults } from './print/SlicerDefaults'
 import { SlicedSettings } from './print/SlicedSettings'
@@ -405,6 +407,13 @@ export function PrintPicker({
     project?.onCreating?.(creating)
   }
 
+  // #717 — profiles the chosen spools match, each on unless switched off.
+  const filamentProfiles = useFilamentProfiles({
+    spools: filaments?.spools,
+    plan,
+    choices: printChoicesOf(selection),
+  })
+
   const runPrint = useRunPrint({
     source,
     choices,
@@ -416,6 +425,7 @@ export function PrintPicker({
     projectId,
     options,
     printSequence,
+    filamentProfiles: filamentProfiles.active,
     rackPosition,
     rackAlgorithm: chosenAlgorithm,
     onRan,
@@ -894,7 +904,9 @@ export function PrintPicker({
                       gramsStale={slicedForSlots !== null && previewSlice.stale}
                     />
                   )}
-                  {!sliced && <NozzlePlanLine plan={check.verdict?.nozzle_plan} stale={!check.current} />}
+                  <NozzlePlanLine plan={check.verdict?.nozzle_plan} stale={!check.current} />
+                  {/* #717: outside Advanced, since a suggested profile is on until switched off. */}
+                  <FilamentProfilesStep suggestions={filamentProfiles.suggestions} onToggle={filamentProfiles.toggle} />
                   {target && known && (
                     <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2">
                       <legend className="px-1 text-[13px] text-ink">Arrange</legend>

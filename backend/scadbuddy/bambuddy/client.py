@@ -54,6 +54,8 @@ from scadbuddy.bambuddy.models import (
     LocalPresetCatalogue,
     MoveResult,
     PresetCatalogue,
+    PresetRef,
+    PresetValues,
     Printer,
     PrinterMedia,
     PrinterStatus,
@@ -181,6 +183,7 @@ Operation = Literal[
     "slice.job.status",
     "slice.start",
     "slicer.local_presets",
+    "slicer.preset_values",
     "slicer.presets",
     "spools.assign",
     "spools.assignments",
@@ -457,6 +460,20 @@ class BambuddyClient:
         )
         # 1 MB of JSON: parsed off the event loop, which every other request shares (#2978).
         return await asyncio.to_thread(PresetCatalogue.model_validate_json, response.content)
+
+    async def preset_values(self, ref: PresetRef) -> PresetValues:
+        """``GET /slicer/preset-values`` — a process preset's effective values, flattened
+        by Bambuddy's slicer sidecar, so a change can be shown against the value it
+        replaces and written in the shape the preset stores it (#717)."""
+        response = await self._send(
+            "GET",
+            "/slicer/preset-values",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="slicer.preset_values",
+            what=f"read the values of process preset {ref.id}",
+            params={"source": ref.source, "id": ref.id, "slot": "process"},
+        )
+        return PresetValues.model_validate(response.json())
 
     async def local_presets(self) -> LocalPresetCatalogue:
         """``GET /api/v1/local-presets/`` — OrcaSlicer profiles imported into Bambuddy.

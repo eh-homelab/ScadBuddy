@@ -36,6 +36,8 @@ interface RunInput {
   options: PrintOptions
   /** #1862 — this print's sequence; `null` leaves it to the template and the process. */
   printSequence: PrintSequence | null
+  /** #717 — the filament profiles left on, by id. */
+  filamentProfiles?: string[]
   /** #836 — a hand-picked rack position, or `null` for Automatic. */
   rackPosition: number | null
   /** #836 — the rack algorithm chosen in this dialog; `null` uses the printer's remembered one. */
@@ -58,6 +60,9 @@ function printAttributes(source: PrintSource, body: PrintRunRequest): Attributes
   }
 }
 
+
+const NONE: string[] = []
+
 /**
  * The print dialog's one write, the source's run (`POST /print/outputs/{id}/run` or
  * `POST /print/library/{file_id}/run`, #313). A 422 is the resolver
@@ -76,11 +81,14 @@ export function useRunPrint({
   projectId,
   options,
   printSequence,
+  filamentProfiles = NONE,
   rackPosition,
   rackAlgorithm,
   onRan,
 }: RunInput) {
   const { nozzles, tier, processName, bedType, overrides, plate } = selection
+  // By value: the caller builds a new array each render.
+  const profilesKey = filamentProfiles.join(',')
   const [running, setRunning] = useState(false)
   /** A refused run, shown above Print. */
   const [runError, setRunError] = useState<string | null>(null)
@@ -115,6 +123,7 @@ export function useRunPrint({
     printerId,
     plate,
     printSequence,
+    profilesKey,
     rackPosition,
     rackAlgorithm,
   ])
@@ -170,7 +179,8 @@ export function useRunPrint({
         all_plates: plate === 'all',
         ...(projectId === undefined ? {} : { project_id: projectId }),
         options,
-        ...sliceOverrides(printSequence),
+        ...(printSequence === null ? {} : { print_sequence: printSequence }),
+        ...(filamentProfiles.length === 0 ? {} : { filament_profiles: filamentProfiles }),
         rack_position: rackPosition,
         rack_algorithm: rackAlgorithm,
         // One per press: the same choices printed again are a new print, while

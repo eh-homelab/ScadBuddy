@@ -317,6 +317,21 @@ export const printTools: Tool[] = [
   }),
 
   defineTool({
+    name: 'list_filament_profiles',
+    description:
+      'Filament profiles (#717): named process changes the print dialog suggests for a spool, e.g. Silk PLA\'s ' +
+      'slower outer wall. Each lists which spools it is for (`match`: the material, and a word in the spool\'s ' +
+      'subtype or slicer preset), the settings it changes, each with its cited sources, and advice it cannot ' +
+      'apply (`notes`). Apply one with print_output\'s `filament_profiles`, only when the user wants it.',
+    input: z.object({}),
+    risk: 'read',
+    source: 'ScadBuddy\'s built-in profiles, quoting the pages they cite',
+    routes: ['GET /api/v1/print/filament-profiles'],
+    handler: async (_, { backend }) =>
+      json(await ok(backend.GET('/api/v1/print/filament-profiles'), 'list the filament profiles')),
+  }),
+
+  defineTool({
     name: 'get_print_progress',
     description:
       'How the last print of an output, or of a Bambuddy library file (`library_file_id`), is going, per copy; ' +
@@ -810,6 +825,14 @@ export const printTools: Tool[] = [
         .enum(['by layer', 'by object'])
         .optional()
         .describe("'by object' finishes each object before the next starts; omit for the template's own"),
+      filament_profiles: z
+        .array(z.string().max(64))
+        .max(8)
+        .optional()
+        .describe(
+          'Filament profiles to apply, by id (list_filament_profiles), e.g. silk-pla for a silk PLA spool. ' +
+            'Never applied unless named here; a profile that cannot apply to this print refuses it, saying why.',
+        ),
     }),
     risk: 'outward',
     bambuddyScope: ['Read Status', 'Manage Library', 'Manage Queue'],
@@ -833,6 +856,7 @@ export const printTools: Tool[] = [
         `${nozzles?.[0] ? ` with a ${nozzles[0].size} mm nozzle` : ''}` +
         `${process_name ? `, process "${process_name}"` : tier ? `, ${tier} quality` : ''}` +
         `${printer_id !== undefined ? ` on printer ${printer_id}` : ''}` +
+        `${args.filament_profiles?.length ? `, with the ${args.filament_profiles.join(', ')} profile` : ''}` +
         `${defaulted ? ' (other choices as the print dialog opens)' : ''}`
       )
     },
@@ -910,6 +934,7 @@ export const printTools: Tool[] = [
         options: args.options,
         // The same for a library file as for an output (#907, #1756).
         ...(args.print_sequence === undefined ? {} : { print_sequence: args.print_sequence }),
+        ...(args.filament_profiles?.length ? { filament_profiles: args.filament_profiles } : {}),
         request_id: requestId,
       }
       const started = await reattach(
