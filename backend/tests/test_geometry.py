@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import math
 import shutil
+import time
 import zipfile
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -12,6 +13,7 @@ import trimesh
 from pydantic import TypeAdapter
 
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.meshmodel import section
 from scadbuddy.meshmodel.edits import Edit
 from scadbuddy.render import geometry
 from scadbuddy.render.bambu3mf import PlateParts, write_bambu_3mf, write_plates_3mf
@@ -502,3 +504,59 @@ def test_a_neck_too_thin_for_a_peg_suggests_no_joint() -> None:
 
 def test_an_open_split_part_is_not_sectioned() -> None:
     assert analyze_geometry([_part(carrot())], split={"#FF0000"}).weak_joints == []
+
+
+def test_thousands_of_islands_are_sectioned_quickly() -> None:
+    boxes = []
+    for i in range(3000):
+        box = trimesh.creation.box((1, 1, 1))
+        box.apply_translation(((i % 60) * 2.0, (i // 60) * 2.0, 0))
+        boxes.append(box)
+    many = trimesh.util.concatenate(boxes)
+    assert isinstance(many, trimesh.Trimesh)
+    part = _part(many)
+    welded = [geometry._welded(part.mesh)]
+    started = time.monotonic()
+    assert geometry.weak_joints([part], welded, [1], ()) == []
+    assert time.monotonic() - started < 3
+    assert analyze_geometry([part]).weak_joints == []
+
+
+def test_a_stack_of_necks_measures_no_more_than_the_attempt_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One piece (each carrot's tuft touches the next body), many weak runs."""
+    calls = []
+    real = section.measure
+
+    def counting(*args: Any, **kwargs: Any) -> Any:
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr("scadbuddy.render.geometry.measure", counting)
+    stack = revolved([(0, 0), *[p for k in range(30) for p in _stage(k * 45.0)], (0, 30 * 45.0)])
+    joints = analyze_geometry([_part(stack)]).weak_joints
+    assert 0 < len(joints) <= geometry.MAX_WEAK_JOINTS
+    assert len(calls) <= geometry.MAX_WEAK_ATTEMPTS
+
+
+def _stage(base: float) -> list[tuple[float, float]]:
+    return [
+        (10, base),
+        (10, base + 30),
+        (3, base + 30),
+        (3, base + 35),
+        (7, base + 35),
+        (7, base + 45),
+    ]
+
+
+def test_parts_match_points_refuses_are_not_joined(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise ValueError("too many points in one cell")
+
+    monkeypatch.setattr("scadbuddy.render.geometry.match_points", refuse)
+    body = revolved([(0, 0), (10, 0), (10, 30), (3, 30), (0, 30)])
+    leaves = revolved([(0, 30), (3, 30), (3, 35), (7, 35), (7, 45), (0, 45)])
+    analysis = analyze_geometry([_part(body, "#F08A24", 1), _part(leaves, "#3A7D2C", 2)])
+    assert [j.parts for j in analysis.weak_joints] == [[2]]  # the leaves alone, not the pair

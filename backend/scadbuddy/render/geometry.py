@@ -160,6 +160,9 @@ WEAK_MIN_VOLUME_MM3 = 1000.0
 #: The most layers a piece is cut into: a taller piece's layers are spread thinner.
 MAX_WEAK_LAYERS = 2000
 MAX_WEAK_JOINTS = 20
+#: Pieces examined (the largest by volume) and sections measured, per analysis.
+MAX_WEAK_PIECES = 64
+MAX_WEAK_ATTEMPTS = 4 * MAX_WEAK_JOINTS
 #: Two parts' islands are one piece where they share a vertex within this, mm.
 TOUCH_MM = 1e-3
 
@@ -593,13 +596,21 @@ def _pieces(
     welded: Sequence[tuple[FloatArray, IntArray]],
 ) -> list[tuple[list[int], FloatArray, IntArray]]:
     """The pieces the parts print as: each part's islands, joined where islands of two
-    parts share a vertex. Each is the indices of its parts, and its vertices and faces
-    (every member part's vertices, its own faces)."""
+    parts share a vertex. Each is the indices of its parts, and its own vertices and
+    faces, compacted. A part pair `match_points` refuses (too many distinct points in
+    a cell) is not joined: its islands stay pieces of their own."""
     labels = [_islands(len(vertices), faces) for vertices, faces in welded]
     nodes: dict[tuple[int, int], int] = {}
+    node_faces: list[IntArray] = []
     for part, ((_, faces), label) in enumerate(zip(welded, labels, strict=True)):
-        for island in np.unique(label[faces[:, 0]]).tolist() if len(faces) else []:
+        if len(faces) == 0:
+            continue
+        of_face = label[faces[:, 0]]
+        order = np.argsort(of_face, kind="stable")
+        islands, starts = np.unique(of_face[order], return_index=True)
+        for island, chunk in zip(islands.tolist(), np.split(order, starts[1:]), strict=True):
             nodes[(part, int(island))] = len(nodes)
+            node_faces.append(faces[chunk])
     parent = list(range(len(nodes)))
 
     def root(node: int) -> int:
@@ -609,7 +620,10 @@ def _pieces(
         return node
 
     for i, j in itertools.combinations(range(len(welded)), 2):
-        hit = match_points(welded[i][0], welded[j][0], TOUCH_MM)
+        try:
+            hit = match_points(welded[i][0], welded[j][0], TOUCH_MM)
+        except ValueError:
+            continue
         touching = np.flatnonzero(hit >= 0)
         pairs = set(
             zip(labels[i][hit[touching]].tolist(), labels[j][touching].tolist(), strict=True)
@@ -626,10 +640,10 @@ def _pieces(
         piece_faces: list[IntArray] = []
         offset = 0
         for part, island in members:
-            v, f = welded[part]
-            piece_vertices.append(v)
-            piece_faces.append(f[labels[part][f[:, 0]] == island] + offset)
-            offset += len(v)
+            used, compact = np.unique(node_faces[nodes[(part, island)]], return_inverse=True)
+            piece_vertices.append(welded[part][0][used])
+            piece_faces.append(compact.reshape(-1, 3) + offset)
+            offset += len(used)
         pieces.append(
             (
                 sorted({part for part, _ in members}),
@@ -675,16 +689,31 @@ def weak_joints(
 ) -> list[WeakJoint]:
     """Each piece's weak joints (see the module docstring), the narrowest for its
     neighbours first, at most :data:`MAX_WEAK_JOINTS`. Parts whose mesh is the open
-    split are left out: a section of an open mesh is not one."""
+    split are left out: a section of an open mesh is not one. A piece under
+    :data:`WEAK_MIN_VOLUME_MM3`, or too short to have a layer a window clear of both its
+    ends, cannot hold a joint and is skipped; at most :data:`MAX_WEAK_PIECES` are
+    examined, the largest first, and at most :data:`MAX_WEAK_ATTEMPTS` sections measured,
+    weakest first. A weak layer whose section is several loops (a row of pegs, a ring)
+    has its centroid outside the section and is dropped, like a cup's wall."""
     checked = [
         i
         for i, part in enumerate(parts)
         if part.colour not in split and not part.negative and len(welded[i][1])
     ]
-    found: list[WeakJoint] = []
+    candidates = []
     for members, vertices, faces in _pieces([welded[i] for i in checked]):
         corners = vertices[faces]
         low, high = float(corners[:, :, 2].min()), float(corners[:, :, 2].max())
+        if high - low < WEAK_WINDOW_MM + WEAK_LAYER_MM:
+            continue
+        volume = abs(_signed_volume(vertices, faces))
+        if volume >= WEAK_MIN_VOLUME_MM3:
+            candidates.append((volume, members, vertices, faces, corners, low, high))
+    candidates.sort(key=lambda c: c[0], reverse=True)
+
+    found: list[WeakJoint] = []
+    attempts = 0
+    for _, members, vertices, faces, corners, low, high in candidates[:MAX_WEAK_PIECES]:
         layer = max(WEAK_LAYER_MM, (high - low) / MAX_WEAK_LAYERS)
         count = int((high - low) / layer)
         if count < 1:
@@ -701,16 +730,24 @@ def weak_joints(
         )
         if len(weak) == 0:
             continue
-        mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
         used = corners.reshape(-1, 3)
         box = _box(used.min(axis=0), used.max(axis=0))
         extruders = [numbers[checked[m]] for m in members]
+        picks = []
         for run in np.split(weak, np.flatnonzero(np.diff(weak) * layer >= WEAK_WINDOW_MM) + 1):
             narrowest = float(areas[run].min())
             ties = run[areas[run] <= narrowest * (1 + 1e-6)]
-            at = int(ties[len(ties) // 2])
+            picks.append(int(ties[len(ties) // 2]))
+        picks.sort(key=lambda at: areas[at] / neighbour[at])
+        face_low, face_high = corners[:, :, 2].min(axis=1), corners[:, :, 2].max(axis=1)
+        for at in picks:
+            if len(found) >= MAX_WEAK_JOINTS or attempts >= MAX_WEAK_ATTEMPTS:
+                break
+            attempts += 1
             z = float(zs[at])
-            section = measure(mesh, (0.0, 0.0, z), (0.0, 0.0, 1.0))
+            straddling = faces[(face_low <= z) & (face_high >= z)]
+            near = trimesh.Trimesh(vertices=vertices, faces=straddling, process=False)
+            section = measure(near, (0.0, 0.0, z), (0.0, 0.0, 1.0))
             if section is None or not section.inside:
                 continue
             found.append(
