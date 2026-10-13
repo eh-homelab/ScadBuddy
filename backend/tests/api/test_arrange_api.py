@@ -172,9 +172,13 @@ class Arranger:
 
     def __init__(self) -> None:
         self.inputs: list[ArrangeInputs] = []
+        self.request_ids: list[str | None] = []
 
-    async def arrange(self, slug: str, inputs: ArrangeInputs) -> Job:
+    async def arrange(
+        self, slug: str, inputs: ArrangeInputs, *, request_id: str | None = None
+    ) -> Job:
         self.inputs.append(inputs)
+        self.request_ids.append(request_id)
         return Job(
             id="arr-1",
             slug=slug,
@@ -200,6 +204,23 @@ def test_with_no_printer_the_plate_falls_back_to_the_stored_default(
     assert response.json()["status"] == "pending"
     [inputs] = arranger.inputs
     assert inputs.plate_model == "H2C" and inputs.plate.key == "Bambu Lab H2C"
+
+
+def test_an_arrange_passes_its_idempotency_key_as_the_request_id(
+    client: TestClient, app: FastAPI, tmp_path: Path
+) -> None:
+    """#2280: a re-send while the start is still accepting keeps its key, so the
+    arrange's execution answers it as the same request."""
+    _, meta, written = asyncio.run(saved_output(tmp_path))
+    arranger = Arranger()
+    app.dependency_overrides[get_render] = lambda: arranger
+    response = client.post(
+        "/api/v1/outputs/arrange",
+        json={"objects": [{"output_id": meta.id, "part": written.manifest[0].part, "count": 1}]},
+        headers={"Idempotency-Key": "a" * 32},
+    )
+    assert response.status_code == 202, response.text
+    assert arranger.request_ids == ["a" * 32]
 
 
 def test_an_arrange_too_large_to_start_is_a_413_before_any_job(

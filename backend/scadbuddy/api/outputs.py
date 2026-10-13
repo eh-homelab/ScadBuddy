@@ -602,6 +602,7 @@ async def arrange_outputs(
     catalogue: CatalogueDep,
     state: StateDep,
     activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
+    idempotency_key: IdempotencyKey = None,
 ) -> JobStatus:
     body, plain = await resolve_library_files(uploads, outputs, body)
     stored = await asyncio.to_thread(store.load)
@@ -624,7 +625,9 @@ async def arrange_outputs(
         # Filed under any template (#2284), so it must be one.
         await asyncio.to_thread(require_model_exists, catalogue, slug)
     with submit_problems():
-        job = await render.arrange(slug, inputs)
+        # #2280: a re-send while the start is still accepting keeps its key, so it is the
+        # same request, answered with the first outcome.
+        job = await render.arrange(slug, inputs, request_id=idempotency_key)
     await attribute_request(activity.index, f"render:{job.id}")
     return _job_status(job, None)
 
@@ -652,6 +655,7 @@ async def backfill_output(
     fetcher: FetcherDep,
     fonts: FontsDep,
     activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
+    idempotency_key: IdempotencyKey = None,
 ) -> JobStatus:
     meta = await asyncio.to_thread(require_output, outputs, output_id)
     if await asyncio.to_thread(outputs.manifest, output_id):
@@ -710,6 +714,8 @@ async def backfill_output(
             fetcher,
             fonts,
             activity,
+            # #2280: as the render route's, so a re-send still accepting is one claim.
+            idempotency_key,
         )
     except ApiError as error:
         # Matched by its code, not its status: any other 409 passes through (#1849).

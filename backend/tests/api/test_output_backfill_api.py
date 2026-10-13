@@ -7,6 +7,7 @@ import time
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest import mock
 
 import pytest
 from fastapi import FastAPI
@@ -18,12 +19,15 @@ from psycopg_pool import ConnectionPool
 from scadbuddy.api import jobs as jobs_api
 from scadbuddy.api import outputs as outputs_api
 from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.api.operations import STILL_ACCEPTING_PROBLEM
 from scadbuddy.api.outputs import NEEDS_BACKFILL_PROBLEM
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library import backfill as backfill_module
 from scadbuddy.library.outputs import OUTPUT_HOLDER, BackfillState, OutputStore, release_parts
 from scadbuddy.render.job_models import Job
+from scadbuddy.render.submit import RenderService
 from scadbuddy.store.refs import BlobRefs
+from scadbuddy.workflows.commands import CommandStillAcceptingError
 from tests.api.conftest import wait_for_job
 from tests.support.operations import press
 from tests.support.store import store_pool
@@ -153,6 +157,25 @@ def test_an_arranged_output_is_a_422(client: TestClient, app: FastAPI, pool: Poo
     refused = client.post(f"/api/v1/outputs/{output_id}/backfill")
     assert refused.status_code == 422, refused.text
     assert "arranged" in refused.json()["detail"]
+
+
+def test_a_backfill_still_being_accepted_passes_its_key_and_queues_nothing(
+    client: TestClient, app: FastAPI, pool: Pool
+) -> None:
+    """#2280: the backfill's render is started with the request's Idempotency-Key, so the
+    client's re-send of a 503 still-accepting is the same claim, and a re-send that is
+    answered is the one that records the backfill."""
+    output_id = legacy_output(client, app)
+    slow = mock.AsyncMock(side_effect=CommandStillAcceptingError("render-x"))
+    with mock.patch.object(RenderService, "submit", slow):
+        response = client.post(
+            f"/api/v1/outputs/{output_id}/backfill", headers={"Idempotency-Key": "b" * 32}
+        )
+    assert response.status_code == 503, response.text
+    assert response.json()["type"] == STILL_ACCEPTING_PROBLEM
+    assert slow.await_args is not None
+    assert slow.await_args.kwargs["request_id"] == "b" * 32
+    assert _state(app).outputs.backfill(output_id) is None
 
 
 def test_an_unknown_output_is_a_404(client: TestClient) -> None:

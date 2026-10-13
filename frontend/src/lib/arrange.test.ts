@@ -1,6 +1,6 @@
 import { HttpResponse, http } from 'msw'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, api } from '../api/client'
+import { ApiError, api, printRunPoll, STILL_ACCEPTING } from '../api/client'
 import type { ArrangeRequest, Output } from '../api/types'
 import * as fixtures from '../mocks/fixtures'
 import { resetMockState } from '../mocks/handlers'
@@ -101,6 +101,31 @@ describe('runArrange follows its job over the socket (#1909)', () => {
 beforeEach(() => resetMockState())
 afterEach(() => vi.restoreAllMocks())
 
+describe('arrangeOutputs (#2280)', () => {
+  it('sends an arrange still being accepted again with the same key', async () => {
+    printRunPoll.intervalMs = 1
+    try {
+      const keys: (string | null)[] = []
+      server.use(
+        http.post('/api/v1/outputs/arrange', ({ request }) => {
+          keys.push(request.headers.get('Idempotency-Key'))
+          if (keys.length > 1) return undefined
+          return HttpResponse.json(
+            { type: STILL_ACCEPTING, title: 'Still accepting', status: 503, detail: 'Send it again to follow it.' },
+            { status: 503, headers: { 'Content-Type': 'application/problem+json' } },
+          )
+        }),
+      )
+      const job = await api.arrangeOutputs(body)
+      expect(job.id).toBeTruthy()
+      expect(keys).toHaveLength(2)
+      expect(keys[1]).toBe(keys[0])
+    } finally {
+      printRunPoll.intervalMs = 1000
+    }
+  })
+})
+
 describe('backfillOutputs (#902)', () => {
   it('follows each re-render over the socket, not on a timer (#1909)', async () => {
     // The fake client, so the mock render's own events do not reach this wait.
@@ -162,6 +187,32 @@ describe('backfillOutputs (#902)', () => {
     expect(ready[0]?.manifest).toHaveLength(1)
     // The first read after the job is done still shows the marker; the next has the objects.
     expect(reads.mock.calls.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('sends a re-render still being accepted again with the same key, and follows it (#2280)', async () => {
+    printRunPoll.intervalMs = 1
+    try {
+      const keys: (string | null)[] = []
+      let answered = 0
+      server.use(
+        http.post('/api/v1/outputs/:id/backfill', ({ request }) => {
+          keys.push(request.headers.get('Idempotency-Key'))
+          if (answered++ > 0) return undefined // the default handler queues it
+          return HttpResponse.json(
+            { type: STILL_ACCEPTING, title: 'Still accepting', status: 503, detail: 'Send it again to follow it.' },
+            { status: 503, headers: { 'Content-Type': 'application/problem+json' } },
+          )
+        }),
+      )
+      const { ready, failed } = await backfillOutputs([nova], { pollMs: 10 })
+      expect(failed).toEqual([])
+      expect(ready[0]?.manifest).toHaveLength(1)
+      expect(keys).toHaveLength(2)
+      expect(keys[0]).toBeTruthy()
+      expect(keys[1]).toBe(keys[0])
+    } finally {
+      printRunPoll.intervalMs = 1000
+    }
   })
 
   // #1007: only the "already records its objects" 409 means the output is ready.
