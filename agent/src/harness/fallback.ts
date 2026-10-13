@@ -373,7 +373,9 @@ export async function* runWithFallback(
             // SDK closes Claude Code's input and sends SIGTERM 2 s later
             // (sdk.mjs 0.3.283 and 0.3.287), so a retry or two may still go
             // out in that grace; they are refused like the first and cost
-            // nothing.
+            // nothing. On a warm process (sessions/warmTurn.ts) the abort
+            // lets the live process end on its own first, so the return()
+            // waits up to warm.ts DRAIN_MS before the next attempt.
             controller.abort(new Error(`the credential was refused (${evidence.message})`))
             break
           }

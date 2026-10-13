@@ -519,7 +519,13 @@ export class WarmSessions {
     return closed
   }
 
-  /** Waits, up to DRAIN_MS in all, for the process's stream to end (its stdin is closed) and then for its appends so far to land. */
+  /**
+   * Waits, up to DRAIN_MS in all, for the process's stream to end (its stdin is
+   * closed) and then for its appends so far to land. It reads the Query only
+   * once the turn that held the entry has left it (`drop` runs for an idle
+   * entry, or after the fallback returned the attempt's iterator): one reader
+   * at a time, so no turn's message is taken here.
+   */
   private async drain(slot: Slot): Promise<void> {
     let timer: ReturnType<typeof setTimeout> | undefined
     const deadline = new Promise<void>((resolve) => {
