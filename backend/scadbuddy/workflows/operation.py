@@ -10,7 +10,7 @@
    prelude's own queue first.
 
 Every kind is ``done`` (§4.2 step 4), the Update answering once the effect ended, except
-one that ``answer_running``: it answers with the record once it is written (#2462).
+one whose kind ``answers_running``: it answers with the record once it is written (#2462).
 """
 
 from __future__ import annotations

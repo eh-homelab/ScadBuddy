@@ -22,6 +22,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.workflows.commands import start_command
+from tests.api.conftest import follow_operation
 from tests.api.test_assets import _svg
 from tests.api.test_model_operations import _state, _workflow_ids
 from tests.conftest import MODEL_SLUG
@@ -77,10 +78,7 @@ def test_the_quota_refusal_keeps_usage_after_a_202(
     started = _upload(capped_client, _svg(2))
     assert started.status_code == 202, started.text
     op = started.json()
-    deadline = time.monotonic() + 60
-    while op["status"] == "running" and time.monotonic() < deadline:
-        time.sleep(0.2)
-        op = capped_client.get(f"/api/v1/operations/{op['id']}").json()
+    op = follow_operation(capped_client, op)
     assert op["status"] == "failed", op
     assert op["error"]["status"] == 413
     assert op["error"]["extensions"]["usage"]["max_count"] == 1

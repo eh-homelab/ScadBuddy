@@ -293,7 +293,9 @@ async def filament_options(
     """
     reading: asyncio.Future[PrinterStatus | None] | None
     if status is not None:
-        assert printer_id is not None, "a shared status read is some printer's"
+        # A contract, not a mypy hint: an assert would be gone under `python -O` (#2814).
+        if printer_id is None:
+            raise ValueError("a shared status read is some printer's: pass its printer_id")
         reading = status
     elif printer_id is not None:
         reading = asyncio.ensure_future(read_status(client, printer_id))

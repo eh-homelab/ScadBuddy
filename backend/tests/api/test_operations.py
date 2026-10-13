@@ -36,6 +36,7 @@ from scadbuddy.workflows.commands import (
     TemporalUnreachableError,
     start_command,
 )
+from tests.api.conftest import follow_operation
 from tests.support.operations import press
 
 #: Unique per run: the session's Temporal outlives each test's database schema.
@@ -161,12 +162,8 @@ def post(client: TestClient, body: dict[str, Any], key: str | None = None) -> An
 
 
 def follow(client: TestClient, op_id: str, timeout: float = 30) -> dict[str, Any]:
-    deadline = time.monotonic() + timeout
-    while True:
-        op: dict[str, Any] = client.get(f"/api/v1/operations/{op_id}").json()
-        if op["status"] != "running" or time.monotonic() > deadline:
-            return op
-        time.sleep(0.2)
+    op: dict[str, Any] = client.get(f"/api/v1/operations/{op_id}").json()
+    return follow_operation(client, op, timeout)
 
 
 def test_a_done_operation_answers_its_result(client: TestClient) -> None:
