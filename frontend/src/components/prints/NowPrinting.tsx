@@ -60,6 +60,14 @@ export function NowPrinting() {
     }
   }, [])
 
+  // #2752 review: a printer that drops out closes its camera for good; it does not
+  // reopen on its own when the printer comes back.
+  useEffect(() => {
+    if (watching !== null && printers !== null && !printers.some((printer) => printer.printer_id === watching)) {
+      setWatching(null)
+    }
+  }, [printers, watching])
+
   if (printers === null && error === null) return null
   if (printers !== null && printers.length === 0) return null
   return (
@@ -220,7 +228,11 @@ function CameraDialog({ printer, onClose }: { printer: PrinterNow | null; onClos
                 src={api.printerCameraStreamUrl(printer.printer_id)}
                 alt={`Live camera of ${printer.name}`}
                 className="w-full rounded-[6px] border border-line bg-surface-2"
-                onError={() => setLive(false)}
+                onError={() => {
+                  // A fresh snapshot each fallback: an old `?at=` may be a cached old frame.
+                  setAt(Date.now())
+                  setLive(false)
+                }}
               />
             ) : (
               <>

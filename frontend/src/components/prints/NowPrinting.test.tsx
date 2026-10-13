@@ -182,4 +182,48 @@ describe('NowPrinting (#977)', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Try live again' }))
     expect(within(dialog).getByRole('img', { name: 'Live camera of Workshop' })).toBeInTheDocument()
   })
+
+  it('takes a fresh snapshot on every fallback, never a cached one (#2752 review)', async () => {
+    const now = vi.spyOn(Date, 'now').mockReturnValue(1000)
+    const { user } = renderPage(<NowPrinting />)
+    await screen.findByTestId('printer-now-2')
+    await user.click(screen.getByRole('button', { name: 'Camera of Workshop' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Workshop camera' })
+    now.mockReturnValue(2000)
+    fireEvent.error(within(dialog).getByRole('img', { name: 'Live camera of Workshop' }))
+    expect(within(dialog).getByRole('img', { name: 'Camera snapshot of Workshop' })).toHaveAttribute(
+      'src',
+      '/api/v1/print/printers/2/camera?at=2000',
+    )
+
+    await user.click(within(dialog).getByRole('button', { name: 'Try live again' }))
+    now.mockReturnValue(3000)
+    fireEvent.error(within(dialog).getByRole('img', { name: 'Live camera of Workshop' }))
+    expect(within(dialog).getByRole('img', { name: 'Camera snapshot of Workshop' })).toHaveAttribute(
+      'src',
+      '/api/v1/print/printers/2/camera?at=3000',
+    )
+    now.mockRestore()
+  })
+
+  it('closes the camera of a printer that drops out, and does not reopen it when it is back (#2752 review)', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const { user } = renderPage(<NowPrinting />)
+    await screen.findByTestId('printer-now-2')
+    await user.click(screen.getByRole('button', { name: 'Camera of Workshop' }))
+    await screen.findByRole('dialog', { name: 'Workshop camera' })
+
+    setPrintersNow(PRINTERS_NOW.filter((printer) => printer.printer_id !== 2))
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(NOW_POLL_MS)
+    })
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Workshop camera' })).toBeNull())
+
+    setPrintersNow(PRINTERS_NOW)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(NOW_POLL_MS)
+    })
+    expect(await screen.findByTestId('printer-now-2')).toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: 'Workshop camera' })).toBeNull()
+  })
 })

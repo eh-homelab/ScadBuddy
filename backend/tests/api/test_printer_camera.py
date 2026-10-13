@@ -97,10 +97,12 @@ MJPEG = "multipart/x-mixed-replace; boundary=frame"
 
 
 class Frames(httpx.AsyncByteStream):
-    """Bambuddy's MJPEG stream: a few frames, and whether ScadBuddy closed it."""
+    """Bambuddy's MJPEG stream: a few frames, and whether ScadBuddy closed it. With
+    ``fail``, the read raises it after the frames, as a stalled camera does."""
 
-    def __init__(self, count: int = 3) -> None:
+    def __init__(self, count: int = 3, fail: Exception | None = None) -> None:
         self.count = count
+        self.fail = fail
         self.closed = False
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
@@ -111,6 +113,8 @@ class Frames(httpx.AsyncByteStream):
                 + str(index).encode()
                 + b"\r\n"
             )
+        if self.fail is not None:
+            raise self.fail
 
     async def aclose(self) -> None:
         self.closed = True
@@ -144,6 +148,29 @@ def test_the_live_stream_is_bambuddys_mjpeg_and_its_token_stays_server_side(
     # The viewer is gone, so Bambuddy's stream is closed; /camera/stop is never called
     # (respx refuses any route it does not mock).
     assert frames.closed
+
+
+@respx.mock
+def test_a_camera_that_stalls_mid_stream_ends_it_and_closes_bambuddys_stream(
+    client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#2752 review: the frames are read outside ``camera_stream``'s try, so a stall is
+    a raw ``httpx.ReadTimeout``. It ends the stream after the frames already sent, is
+    logged, and closes Bambuddy's stream, rather than escaping as an unhandled error."""
+    configure(client)
+    token_route()
+    frames = Frames(count=2, fail=httpx.ReadTimeout("camera stalled"))
+    respx.get(f"{API}/printers/7/camera/stream").mock(
+        return_value=httpx.Response(200, stream=frames, headers={"Content-Type": MJPEG})
+    )
+
+    with caplog.at_level("INFO", logger="scadbuddy.api.printing"):
+        response = client.get("/api/v1/print/printers/7/camera/stream")
+
+    assert response.status_code == 200
+    assert response.content.count(b"--frame") == 2
+    assert frames.closed
+    assert any(record.message == "camera stream ended" for record in caplog.records)
 
 
 @respx.mock

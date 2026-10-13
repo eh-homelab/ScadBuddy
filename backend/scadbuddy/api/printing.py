@@ -15,6 +15,7 @@ from contextlib import AsyncExitStack, suppress
 from datetime import datetime, timedelta
 from typing import Annotated, Any
 
+import httpx
 import psycopg
 from fastapi import APIRouter, Path, Query, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -585,14 +586,21 @@ async def stream_printer_camera(
         raise
 
     async def body() -> AsyncIterator[bytes]:
+        # The bytes are read outside `camera_stream`'s own try, so a stall or drop is a
+        # raw httpx error here. Handing it to the stack lets `camera_stream` fail its
+        # span and map it, as `api/prints.py` does (#1192).
         try:
             async for chunk in chunks:
                 yield chunk
-        except ApiError:
-            # A camera that stalls or drops mid-stream ends it; the viewer shows that.
-            logger.info("camera stream ended", extra={"printer_id": printer_id})
-        finally:
-            await stack.aclose()
+        except BaseException as error:
+            try:
+                await stack.__aexit__(type(error), error, error.__traceback__)
+            except (ApiError, httpx.HTTPError):
+                # A camera that stalls or drops mid-stream ends it; the viewer shows that.
+                logger.info("camera stream ended", extra={"printer_id": printer_id})
+                return
+            raise
+        await stack.aclose()
 
     return StreamingResponse(
         body(),
@@ -602,8 +610,10 @@ async def stream_printer_camera(
             "X-Content-Type-Options": "nosniff",
             "X-Accel-Buffering": "no",
         },
-        # A viewer that leaves mid-frame may never resume the generator; this closes
-        # Bambuddy's stream all the same (a second close is a no-op).
+        # Belt and braces for a response that ends without the generator closing the
+        # stack (a second close is a no-op). It is not the guarantee: on a disconnect
+        # mid-frame Starlette skips `background`, and Bambuddy's stream is closed when
+        # the abandoned generator is finalised, which runs its close.
         background=BackgroundTask(stack.aclose),
     )
 
