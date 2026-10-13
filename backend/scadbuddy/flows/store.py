@@ -35,11 +35,18 @@ from scadbuddy.flows.models import (
     Run,
     StoredDefinition,
 )
-from scadbuddy.workflows.flow_models import FlowRecord, FlowStep, FlowWaiting, ProjectionWrite
+from scadbuddy.workflows.flow_models import (
+    FlowRecord,
+    FlowStep,
+    FlowWaiting,
+    Hop,
+    HopRecord,
+    ProjectionWrite,
+)
 
 _DECISION = (
     "request_id, run_id, workflow_run_id, call_id, kind, outcome, response, responder,"
-    " input_hash, created_at"
+    " input_hash, hops, created_at"
 )
 _DEFINITION = "id, name, version, commit, script, approval_timeout_s, created_by, created_at"
 _GRANT = (
@@ -82,6 +89,16 @@ class GrantStateError(Exception):
     def __init__(self, grant: Grant, wanted: str) -> None:
         super().__init__(f"grant {grant.id} is {grant.status}; it cannot be {wanted}")
         self.grant = grant
+
+
+class HopMovedError(Exception):
+    """The parked call is no longer at the hop the decision was made for (#2482): the
+    starter session's hop ended, or a person decided it first."""
+
+
+#: `approval_expiry_seconds` (the agent's Settings → Assistant) when it is not set.
+DEFAULT_APPROVAL_EXPIRY_S = 600
+APPROVAL_EXPIRY_SETTING = "approval_expiry_seconds"
 
 
 class ResetBeforeFloorError(Exception):
@@ -271,11 +288,12 @@ class FlowStore:
 
     # -- decisions ---------------------------------------------------------------
 
-    async def record_decision(self, decision: Decision) -> bool:
+    async def record_decision(self, decision: Decision, *, at_hop: Hop | None = None) -> bool:
         """Record a person's answer before the harness is told. True when recorded, or
         when this same decision is there already (a retried run resends it); False when
-        another decision holds the request id."""
-        return await asyncio.to_thread(self._record_decision, decision)
+        another decision holds the request id. With `at_hop`, only while the call waits
+        at that hop, checked under the run's row lock: `HopMovedError` otherwise."""
+        return await asyncio.to_thread(self._record_decision, decision, at_hop)
 
     async def get_decision(self, request_id: str) -> Decision | None:
         return await asyncio.to_thread(self._get_decision, request_id)
@@ -287,6 +305,30 @@ class FlowStore:
         the agent checks the grant again as the call runs). True when recorded, or when it
         is there already; False otherwise."""
         return await asyncio.to_thread(self._record_grant_decision, decision)
+
+    # -- escalation (#2482) -------------------------------------------------------
+
+    async def move_hop(
+        self,
+        run_id: str,
+        call_id: str,
+        record: HopRecord,
+        *,
+        proposal: dict[str, Any] | None = None,
+    ) -> FlowWaiting | None:
+        """Move a parked approval from hop `parent` to `person`, recording `record` on
+        it, and keep a narrowed `proposal` beside it: under the run's row lock, so it
+        happens once. None when the call is not waiting at hop `parent`."""
+        return await asyncio.to_thread(self._move_hop, run_id, call_id, record, proposal)
+
+    async def get_proposal(self, request_id: str) -> tuple[dict[str, Any], str] | None:
+        """A parent's narrowed input for the call, and who proposed it."""
+        return await asyncio.to_thread(self._get_proposal, request_id)
+
+    async def approval_expiry_s(self) -> int:
+        """How long a parent hop lasts when the run never times out (spec §4.6): the
+        agent's `approval_expiry_seconds`, else its default."""
+        return await asyncio.to_thread(self._approval_expiry_s)
 
     async def delete_decision(self, request_id: str) -> None:
         """Undo a decision the harness refused: no `approved` row for a call it never ran."""
@@ -549,12 +591,24 @@ class FlowStore:
                 return None
         return None if row is None else row["value"]
 
-    def _record_decision(self, decision: Decision) -> bool:
-        with self._pool.connection() as conn:
+    def _record_decision(self, decision: Decision, at_hop: Hop | None = None) -> bool:
+        with self._pool.connection() as conn, conn.transaction():
+            if at_hop is not None:
+                locked = conn.execute(
+                    "SELECT waiting_on FROM workflow_runs WHERE id = %s FOR UPDATE",
+                    (decision.run_id,),
+                ).fetchone()
+                waiting = (
+                    [FlowWaiting.model_validate(w) for w in locked["waiting_on"]] if locked else []
+                )
+                if not any(
+                    w.call_id == decision.call_id and (w.hop or "person") == at_hop for w in waiting
+                ):
+                    raise HopMovedError(decision.request_id)
             row = conn.execute(
                 "INSERT INTO workflow_run_decisions (request_id, run_id, workflow_run_id,"
-                " call_id, kind, outcome, response, responder, input_hash)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                " call_id, kind, outcome, response, responder, input_hash, hops)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
                 " ON CONFLICT (request_id) DO NOTHING RETURNING request_id",
                 (
                     decision.request_id,
@@ -566,6 +620,7 @@ class FlowStore:
                     Jsonb(decision.response),
                     decision.responder,
                     decision.input_hash,
+                    _hops(decision.hops),
                 ),
             ).fetchone()
             if row is not None:
@@ -601,16 +656,20 @@ class FlowStore:
                 return False
             row = conn.execute(
                 "INSERT INTO workflow_run_decisions (request_id, run_id, workflow_run_id,"
-                " call_id, kind, outcome, response, responder, input_hash)"
-                " VALUES (%s, %s, %s, %s, 'approval', 'approved', '{}'::jsonb, %s, %s)"
+                " call_id, kind, outcome, response, responder, input_hash, hops)"
+                " VALUES (%s, %s, %s, %s, 'approval', 'approved', %s, %s, %s, %s)"
                 " ON CONFLICT (request_id) DO NOTHING RETURNING request_id",
                 (
                     decision.request_id,
                     decision.run_id,
                     decision.workflow_run_id,
                     decision.call_id,
+                    # A parent's narrowing (#2482): the narrowed input, which the gated
+                    # body runs only when it hashes to `input_hash`.
+                    Jsonb(decision.response),
                     decision.responder,
                     decision.input_hash,
+                    _hops(decision.hops),
                 ),
             ).fetchone()
             if row is not None:
@@ -623,6 +682,85 @@ class FlowStore:
             decision.responder,
             decision.input_hash,
         )
+
+    def _move_hop(
+        self,
+        run_id: str,
+        call_id: str,
+        record: HopRecord,
+        proposal: dict[str, Any] | None,
+    ) -> FlowWaiting | None:
+        with self._pool.connection() as conn, conn.transaction():
+            row = conn.execute(
+                f"SELECT {_RUN} FROM workflow_runs WHERE id = %s FOR UPDATE", (run_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            run = Run.model_validate(row)
+            index = next(
+                (
+                    i
+                    for i, w in enumerate(run.waiting_on)
+                    if w.call_id == call_id and w.kind == "approval" and w.hop == "parent"
+                ),
+                None,
+            )
+            if run.status in TERMINAL or index is None:
+                return None
+            entry = run.waiting_on[index]
+            moved = entry.model_copy(
+                update={
+                    "hop": "person",
+                    "hop_until": None,
+                    "proposed": entry.proposed or proposal is not None,
+                    "hops": [*entry.hops, record],
+                }
+            )
+            waiting = [*run.waiting_on]
+            waiting[index] = moved
+            if proposal is not None:
+                conn.execute(
+                    "INSERT INTO workflow_run_proposals (request_id, run_id, call_id, args,"
+                    " proposed_by) VALUES (%s, %s, %s, %s, %s)"
+                    " ON CONFLICT (request_id) DO UPDATE SET args = EXCLUDED.args,"
+                    " proposed_by = EXCLUDED.proposed_by, created_at = now()",
+                    (
+                        f"flow:{run.id}:{run.workflow_run_id}:{call_id}",
+                        run.id,
+                        call_id,
+                        Jsonb(proposal),
+                        record.actor,
+                    ),
+                )
+            updated = conn.execute(
+                "UPDATE workflow_runs SET waiting_on = %s, updated_at = now() WHERE id = %s"
+                f" RETURNING {_RUN}",
+                (Jsonb([w.model_dump(mode="json") for w in waiting]), run_id),
+            ).fetchone()
+            assert updated is not None
+            self._announce(conn, Run.model_validate(updated))
+        return moved
+
+    def _get_proposal(self, request_id: str) -> tuple[dict[str, Any], str] | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT args, proposed_by FROM workflow_run_proposals WHERE request_id = %s",
+                (request_id,),
+            ).fetchone()
+        return None if row is None else (row["args"], row["proposed_by"])
+
+    def _approval_expiry_s(self) -> int:
+        with self._pool.connection() as conn:
+            try:
+                row = conn.execute(
+                    "SELECT value FROM ai_settings WHERE key = %s", (APPROVAL_EXPIRY_SETTING,)
+                ).fetchone()
+            except psycopg.errors.UndefinedTable:
+                return DEFAULT_APPROVAL_EXPIRY_S
+        value = None if row is None else row["value"]
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+        return DEFAULT_APPROVAL_EXPIRY_S
 
     def _delete_decision(self, request_id: str) -> None:
         with self._pool.connection() as conn:
@@ -888,6 +1026,10 @@ class FlowStore:
             conn.execute("DELETE FROM flow_grants WHERE run_id = %s", (run_id,))
             cur = conn.execute("DELETE FROM workflow_runs WHERE id = %s", (run_id,))
         return cur.rowcount > 0
+
+
+def _hops(hops: list[HopRecord]) -> Jsonb:
+    return Jsonb([h.model_dump(mode="json") for h in hops])
 
 
 def _seq(step: Any) -> int:

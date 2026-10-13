@@ -43,9 +43,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from datetime import timedelta
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+import httpx
 from fastapi import status
 from temporal_agent_harness.harness.agent_client import (
     AgentClient,
@@ -62,10 +64,18 @@ from temporalio.service import RPCError, RPCStatusCode
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.secrets import open_bytes, seal_bytes
 from scadbuddy.flows.approval_hash import input_hash
+from scadbuddy.flows.grants import Inside, Outside, Verdict, match_grant
 from scadbuddy.flows.history import outward_since
 from scadbuddy.flows.models import TERMINAL, Decision, Run
-from scadbuddy.flows.store import FlowStore, ResetBeforeFloorError, ResetSupersededError
+from scadbuddy.flows.store import (
+    FlowStore,
+    HopMovedError,
+    ResetBeforeFloorError,
+    ResetSupersededError,
+)
 from scadbuddy.operations.kinds import KindsBuild, OperationKind
+from scadbuddy.workflows.flow_grants import FlowGrants, parked_call
+from scadbuddy.workflows.flow_models import Hop, HopAction, HopRecord
 from scadbuddy.workflows.payload_codec import PayloadKeys, dedup_iv
 
 if TYPE_CHECKING:
@@ -77,6 +87,11 @@ STALE_ENTRY = "https://scadbuddy.dev/problems/stale-entry"
 ALREADY_RESOLVED = "https://scadbuddy.dev/problems/already-resolved"
 RUN_CLOSED = "https://scadbuddy.dev/problems/flow-run-closed"
 FLOW_RESET = "flow_reset"
+#: The starter session's action on a call outside the run's grant (#2482).
+FLOW_ESCALATE = "flow_escalate"
+NOT_PARENT = "https://scadbuddy.dev/problems/flow-escalation-not-parent"
+WITH_PERSON = "https://scadbuddy.dev/problems/flow-escalation-with-person"
+NO_PROPOSAL = "https://scadbuddy.dev/problems/flow-escalation-no-proposal"
 RESET_POINT = "https://scadbuddy.dev/problems/flow-reset-point"
 RESET_CHANGED = "https://scadbuddy.dev/problems/flow-reset-changed"
 RESET_UNRECORDED = "https://scadbuddy.dev/problems/flow-reset-unrecorded"
@@ -127,6 +142,22 @@ def _resolved() -> ApiError:
     return ApiError(status.HTTP_409_CONFLICT, "That was answered already.", type_=ALREADY_RESOLVED)
 
 
+def _not_parent() -> ApiError:
+    return ApiError(
+        status.HTTP_403_FORBIDDEN,
+        "Only the session that started the run acts on its calls before the person does.",
+        type_=NOT_PARENT,
+    )
+
+
+def _with_person() -> ApiError:
+    return ApiError(
+        status.HTTP_409_CONFLICT,
+        "That call is with the person now: the starting session's turn at it is over.",
+        type_=WITH_PERSON,
+    )
+
+
 def _before_floor(floor: int) -> ApiError:
     return ApiError(
         status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -157,11 +188,17 @@ def _same(existing: Decision, kind: str, request: dict[str, Any], answer: str | 
 
 
 def flow_kinds(
-    store: FlowStore, keys: PayloadKeys | None, hash_key: bytes | None
+    store: FlowStore,
+    keys: PayloadKeys | None,
+    hash_key: bytes | None,
+    *,
+    api: Callable[[], httpx.AsyncClient | None] | None = None,
 ) -> list[OperationKind]:
     """The kinds over `store`, opening answers with `keys`; the `projects` worker serves
     them. `hash_key` makes an approval's input hash (`approval_hash.py`); None records
-    none, and the agent then runs no approved tool call."""
+    none, and the agent then runs no approved tool call. `api` makes a client on
+    ScadBuddy's own API, which a parent's narrowing is matched through (the grant's
+    facts, as `flow_grant_check` reads them); None, and every narrowing asks the person."""
 
     async def answer_of(request: dict[str, Any]) -> str:
         if "answer" in request:
@@ -200,12 +237,16 @@ def flow_kinds(
             answer = await answer_of(request) if kind == "answer" else None
             if not _same(existing, kind, request, answer):
                 raise _resolved()
-        elif not any(w.call_id == call_id and w.kind == kind for w in run.waiting_on):
+        entry = next((w for w in run.waiting_on if w.call_id == call_id and w.kind == kind), None)
+        if existing is None and entry is None:
             raise _stale()
         return {
             "request_id": rid,
             "workflow_id": run.workflow_id,
             "workflow_run_id": run.workflow_run_id,
+            # Where the entry waits and how it got there (#2482), for its decision's record.
+            "hop": (entry.hop if entry is not None else None) or "person",
+            "hops": [h.model_dump(mode="json") for h in entry.hops] if entry is not None else [],
         }
 
     async def record(request: dict[str, Any], checked: dict[str, Any], decision: Decision) -> None:
@@ -300,14 +341,34 @@ def flow_kinds(
         raise _stale()
 
     async def check_decide(request: dict[str, Any]) -> dict[str, Any]:
-        return await check("approval", request)
+        checked = await check("approval", request)
+        # The person approves a parent's narrowing as it was proposed (#2482): the
+        # proposal is the server's record, never the request's.
+        if (
+            request.get("proposal")
+            and request.get("approved")
+            and await store.get_proposal(str(checked["request_id"])) is None
+        ):
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                "That call carries no proposal to approve.",
+                type_=NO_PROPOSAL,
+            )
+        return checked
 
     async def run_decide(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         approved = bool(request["approved"])
         reason = request.get("reason")
         outcome, response = _wanted("approval", request)
         decision = _decision(request, checked, kind="approval", outcome=outcome, response=response)
-        if approved and await store.get_decision(decision.request_id) is None:
+        decision.hops = hops_of(checked, "approve" if approved else "deny", "browser")
+        if approved and request.get("proposal"):
+            # Bound to the narrowed input, which the gated body runs only when it
+            # hashes to this (`flow_decision`).
+            fn, tool, args, by = await proposed(checked, decision.call_id)
+            decision.response = {**response, "args": args, "narrowed_by": by}
+            decision.input_hash = hash_of(fn, tool, args)
+        elif approved and await store.get_decision(decision.request_id) is None:
             # Bound to the call as it waits now, which is what the person was shown; a
             # resend keeps the hash its first attempt recorded.
             decision.input_hash = await parked_hash(checked, decision.call_id)
@@ -329,6 +390,198 @@ def flow_kinds(
             if not await settle(checked, decision.request_id, err):
                 raise
         return {"run_id": decision.run_id, "call_id": decision.call_id, "outcome": decision.outcome}
+
+    def hops_of(checked: dict[str, Any], action: HopAction, actor: str) -> list[HopRecord]:
+        """The entry's way up, with this decision as its last step (spec §4.6)."""
+        held = [HopRecord.model_validate(h) for h in checked.get("hops") or []]
+        hop: Hop = "parent" if checked.get("hop") == "parent" else "person"
+        return [*held, HopRecord(hop=hop, action=action, actor=actor, at=datetime.now(UTC))]
+
+    def hash_of(fn: str, tool: str | None, args: dict[str, Any]) -> str | None:
+        """As the agent hashes the call it runs, and `flow_decision` the body's (#2318)."""
+        if hash_key is None:
+            return None
+        return input_hash(hash_key, tool if fn == "tool" and tool else fn, args)
+
+    async def parked_of(
+        checked: dict[str, Any], call_id: str
+    ) -> tuple[str, str | None, dict[str, Any]]:
+        """The call as the run parked it, from the harness: never from the request."""
+        client = AgentClient(activity.client(), str(checked["workflow_id"]))
+        for parked in await client.get_pending_approvals():
+            if parked.tool_id == call_id:
+                call = parked_call(parked.tool_name, parked.tool_input)
+                if call is None:
+                    raise ApiError(
+                        status.HTTP_422_UNPROCESSABLE_CONTENT,
+                        "That call cannot be narrowed: no grant names it.",
+                    )
+                return call
+        raise _stale()
+
+    async def proposed(
+        checked: dict[str, Any], call_id: str
+    ) -> tuple[str, str | None, dict[str, Any], str]:
+        """The parent's proposal for the call, with the call's function and tool."""
+        held = await store.get_proposal(str(checked["request_id"]))
+        if held is None:
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                "That call carries no proposal to approve.",
+                type_=NO_PROPOSAL,
+            )
+        fn, tool, _ = await parked_of(checked, call_id)
+        return fn, tool, held[0], held[1]
+
+    async def check_escalate(request: dict[str, Any]) -> dict[str, Any]:
+        """Spec 2026-10-11 §4.2: the caller is the run's starter session, read from the
+        run's own record (`started_by`), and the call waits at hop `parent`."""
+        run = await store.get_run(str(request["run_id"]))
+        if run is None:
+            raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.")
+        by = run.started_by
+        session, principal = request.get("session"), request.get("principal")
+        if (
+            by.get("kind") != "agent"
+            or not isinstance(by.get("session"), str)
+            or not isinstance(session, str)
+            or not session
+            or by.get("session") != session
+            or not isinstance(by.get("principal"), str)
+            or not isinstance(principal, str)
+            or not principal
+            or by.get("principal") != principal
+        ):
+            raise _not_parent()
+        if await store.get_decision(request_id(run, str(request["call_id"]))) is not None:
+            raise _resolved()
+        checked = await check("approval", request)
+        if checked["hop"] != "parent":
+            raise _with_person()
+        return checked
+
+    async def run_escalate(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        run_id, call_id = str(request["run_id"]), str(request["call_id"])
+        actor = f"session:{request['session']}"
+        action: HopAction = request["action"]
+        reason = request.get("reason")
+        now = datetime.now(UTC)
+        answer = {"run_id": run_id, "call_id": call_id}
+        if action == "pass_up":
+            record = HopRecord(hop="parent", action="pass_up", actor=actor, at=now)
+            if await store.move_hop(run_id, call_id, record) is None:
+                raise _with_person()
+            return {**answer, "outcome": "passed_up"}
+        if action == "deny":
+            decision = Decision(
+                request_id=str(checked["request_id"]),
+                run_id=run_id,
+                workflow_run_id=str(checked["workflow_run_id"]),
+                call_id=call_id,
+                kind="approval",
+                outcome="denied",
+                response={} if reason is None else {"reason": str(reason)},
+                responder=actor,
+                hops=hops_of(checked, "deny", actor),
+            )
+            try:
+                recorded = await store.record_decision(decision, at_hop="parent")
+            except HopMovedError:
+                raise _with_person() from None
+            if not recorded:
+                raise _resolved()
+            await send_approval(checked, decision, approved=False, reason=reason)
+            return {**answer, "outcome": "denied"}
+        return await narrow(request, checked, actor, answer)
+
+    async def narrow(
+        request: dict[str, Any], checked: dict[str, Any], actor: str, answer: dict[str, Any]
+    ) -> dict[str, Any]:
+        """A parent's narrowing (§4.2): the parked call's own function and tool with the
+        parent's input, matched by the run's grant like any call. Inside, it runs as the
+        grant approved it, with `narrowed_by`; outside, it goes up as a proposal."""
+        run_id, call_id = str(request["run_id"]), str(request["call_id"])
+        given = request.get("input")
+        if not isinstance(given, dict):
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "A narrowing names its input.")
+        fn, tool, parked = await parked_of(checked, call_id)
+        if fn == "tool":
+            narrowed: dict[str, Any] = given
+        elif "source" in given or "request" in given:
+            # The input is the call's request; its source stays the parked call's own.
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"A narrowed {fn} names its request only; its source is the call's own.",
+            )
+        else:
+            narrowed = {**{k: v for k, v in parked.items() if k == "source"}, "request": given}
+        verdict: Verdict = Outside(reason="no approval key")
+        client = None if api is None else api()
+        try:
+            if hash_key is not None:
+                grants = FlowGrants(store, client, hash_key)
+                verdict = await match_grant(
+                    store,
+                    grants.facts_of,
+                    lambda f, t, a: input_hash(hash_key, t if f == "tool" and t else f, a),
+                    run_id=run_id,
+                    request_id=str(checked["request_id"]),
+                    fn=fn,
+                    tool=tool,
+                    args=narrowed,
+                    now=datetime.now(UTC),
+                )
+        finally:
+            if client is not None:
+                await client.aclose()
+        now = datetime.now(UTC)
+        if isinstance(verdict, Inside):
+            decision = Decision(
+                request_id=str(checked["request_id"]),
+                run_id=run_id,
+                workflow_run_id=str(checked["workflow_run_id"]),
+                call_id=call_id,
+                kind="approval",
+                outcome="approved",
+                response={"args": verdict.args, "narrowed_by": actor},
+                responder=f"grant:{verdict.grant_id}",
+                input_hash=verdict.input_hash,
+                hops=hops_of(checked, "narrow", actor),
+            )
+            if await store.record_grant_decision(decision):
+                try:
+                    await send_approval(checked, decision, approved=True, reason=None)
+                except BaseException:
+                    await store.withdraw_grant_decision(decision.request_id)
+                    raise
+                return {**answer, "outcome": "approved"}
+            verdict = Outside(reason="the grant lapsed")
+        record = HopRecord(
+            hop="parent", action="narrow", actor=actor, at=now, reason=verdict.reason
+        )
+        if await store.move_hop(run_id, call_id, record, proposal=narrowed) is None:
+            raise _with_person()
+        return {**answer, "outcome": "with_person"}
+
+    async def send_approval(
+        checked: dict[str, Any], decision: Decision, *, approved: bool, reason: Any
+    ) -> None:
+        client = AgentClient(activity.client(), str(checked["workflow_id"]))
+        try:
+            await client.approve_tool(
+                decision.call_id,
+                approved=approved,
+                reason=None if reason is None else str(reason),
+                update_id=decision.request_id,
+            )
+        except ToolApprovalError as err:
+            await forget(decision.request_id)
+            if err.error_type == "ToolApprovalAlreadyResolved":
+                raise _resolved() from None
+            raise _stale() from None
+        except BaseException as err:
+            if not await settle(checked, decision.request_id, err):
+                raise
 
     async def check_reset(request: dict[str, Any]) -> dict[str, Any]:
         run = await store.get_run(str(request["run_id"]))
@@ -438,15 +691,28 @@ def flow_kinds(
         OperationKind(
             name=FLOW_RESET, check=check_reset, run=run_reset, run_attempts=3, queue="projects"
         ),
+        OperationKind(
+            name=FLOW_ESCALATE,
+            check=check_escalate,
+            run=run_escalate,
+            run_attempts=3,
+            queue="projects",
+        ),
     ]
 
 
 def _kinds(core: Core, components: Components) -> list[OperationKind]:
     from scadbuddy.flows.component import FLOWS
     from scadbuddy.flows.keys import approval_key
+    from scadbuddy.workflows.flow_routes import api_client
 
     flows = components.get(FLOWS)
-    return flow_kinds(flows.store, flows.keys, approval_key(core.settings))
+    return flow_kinds(
+        flows.store,
+        flows.keys,
+        approval_key(core.settings),
+        api=lambda: api_client(core.settings.api_internal_url),
+    )
 
 
 OPERATION_KINDS: KindsBuild = _kinds

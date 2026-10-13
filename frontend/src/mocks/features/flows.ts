@@ -116,7 +116,7 @@ function defaults(): FlowRun[] {
     run('run-ask', {
       status: 'waiting',
       steps: [step(1, 'render', 'succeeded'), step(2, 'wait_for_human', 'running', false)],
-      waiting_on: [{ call_id: 'call-2', kind: 'answer', fn: 'wait_for_human', prompt: 'Swap to pink?', since: at(2) }],
+      waiting_on: [{ call_id: 'call-2', kind: 'answer', fn: 'wait_for_human', prompt: 'Swap to pink?', since: at(2), proposed: false, hops: [] }],
       started_by: { kind: 'agent', principal: 'p', session: 'sess-1' },
       created_at: at(3),
     }),
@@ -126,7 +126,7 @@ function defaults(): FlowRun[] {
       version: 2,
       status: 'waiting',
       steps: [step(1, 'queue_print', 'running', false)],
-      waiting_on: [{ call_id: 'call-1', kind: 'approval', fn: 'queue_print', since: at(1) }],
+      waiting_on: [{ call_id: 'call-1', kind: 'approval', fn: 'queue_print', since: at(1), hop: 'person', proposed: false, hops: [] }],
       created_at: at(2),
     }),
     run('run-done', {
@@ -322,7 +322,18 @@ function view(id: string): FlowRunView | undefined {
   }
   const found = runs.find((r) => r.id === id)
   if (!found) return undefined
-  const pending: FlowPending[] = found.waiting_on.map(({ call_id, kind, fn, prompt, since }) => ({ call_id, kind, fn, prompt, since }))
+  const pending: FlowPending[] = found.waiting_on.map(({ call_id, kind, fn, prompt, since, hop, hop_until, reason, proposed, hops }) => ({
+    call_id,
+    kind,
+    fn,
+    prompt,
+    since,
+    hop,
+    hop_until,
+    reason,
+    proposed,
+    hops,
+  }))
   return {
     id,
     status: found.status,

@@ -452,16 +452,21 @@ its child sessions' parked calls from flow turns, and a requested grant.
     `approval_expiry_seconds`. `flow_grant_check`'s outside verdict carries it.
   - **A run timeout of 0 ("never")** still bounds the parent hop: it then lasts
     `approval_expiry_seconds` (default 600 s), so a starter session that never answers
-    cannot hold the person's queue back. The parent hop is ended by the sweep, not by a
-    workflow timer: with a run timeout of 0 **no workflow timer is armed at all**, so
-    nothing ever denies the call, at either hop, as today.
-- **Each owner sweeps its own entries.** The agent's existing 30 s sweep
-  (`APPROVAL_SWEEP_MS`, `gate/sweep.ts`) moves due child entries to `person`; the
-  backend's flow sweep (`flows/sweep.py`) moves due flow-own entries. Both write the
-  move as the `system` actor.
+    cannot hold the person's queue back. With a run timeout of 0 **no timer ever
+    denies the call**, at either hop, as today.
+- **Each owner moves its own entries.** The agent's existing 30 s sweep
+  (`APPROVAL_SWEEP_MS`, `gate/sweep.ts`) moves due child entries to `person`. A
+  flow-own entry is moved by its own run: `ProjectWorkflow` waits out the parent hop
+  with a timer and then runs `flow_hop_due`, which moves the entry in Postgres
+  (`FlowStore.move_hop`, once, unless the parent passed it up first) and denies
+  nothing; the person's timer, when the run has one, starts from there (#2482). The
+  backend's flow sweep runs with the daily housekeeping sweeps, too seldom for a hop of
+  minutes. Both write the move as the `system` actor.
 - **Every hop action is recorded on the entry**: a `hops` array of `{hop, action, actor,
-  at, proposal?, reason?}` in the entry's projection (`waiting_on[].hops`,
-  `ai_pending_input.hops`). When the entry resolves, its `hops` are copied into the
+  at, reason?}` in the entry's projection (`waiting_on[].hops`,
+  `ai_pending_input.hops`). A flow-own narrowing's input is kept beside it, in
+  `workflow_run_proposals`, so no read of the run returns it raw; the entry says only
+  that it is `proposed`. When the entry resolves, its `hops` are copied into the
   resolution record (`workflow_run_decisions.hops`, `ai_input_responses.hops`), beside
   the decision recorded where it is today (with `ai_audit` for a child). So a flow-own
   entry's and a child's history read alike on the run page, and no service writes the

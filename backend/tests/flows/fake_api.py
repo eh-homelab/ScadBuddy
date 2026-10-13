@@ -155,6 +155,7 @@ class Outward(Flows):
         tools_queue: str = "agent-tools",
         grant: GrantSpec | None = None,
         before: Callable[[str], Awaitable[None]] | None = None,
+        started_by: dict[str, Any] | None = None,
     ) -> str:
         """Start a run of `body`, with `grant` approved by the browser, and `before` run
         once the grant is in."""
@@ -177,7 +178,7 @@ class Outward(Flows):
                 definition_id=definition.id,
                 version=1,
                 name="t",
-                started_by={"kind": "browser"},
+                started_by=started_by or {"kind": "browser"},
                 approval_timeout_s=approval_timeout_s,
                 tools_queue=tools_queue,
                 tool_tiers=tiers(),

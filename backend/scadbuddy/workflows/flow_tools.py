@@ -24,12 +24,20 @@ with workflow.unsafe.imports_passed_through():
     from temporal_agent_harness.harness import agent
     from temporal_agent_harness.harness.agent_workflow import AgentWorkflowRunner
 
-    from scadbuddy.workflows.flow_entries import await_gated, run_callback, run_gated
+    from scadbuddy.workflows.flow_entries import (
+        await_escalated,
+        await_gated,
+        run_callback,
+        run_gated,
+    )
     from scadbuddy.workflows.flow_models import (
+        FLOW_DECISION,
         FLOW_GRANT_APPROVE,
         FLOW_GRANT_CHECK,
         FLOW_GRANT_WITHDRAW,
         GRANT_REFUSED,
+        DecisionAsk,
+        DecisionRead,
         GrantApproval,
         GrantApprove,
         GrantCheck,
@@ -107,6 +115,8 @@ class PrintOutcome(BaseModel):
     status: str
     may_have_queued: bool = False
     error: str | None = None
+    #: Who narrowed the print before it was approved (`session:<id>`, `browser`).
+    narrowed_by: str | None = None
 
 
 class ArrangeResult(BaseModel):
@@ -116,6 +126,8 @@ class ArrangeResult(BaseModel):
     status: str
     output_id: str | None = None
     error: str | None = None
+    #: Who narrowed the arrange before it was approved.
+    narrowed_by: str | None = None
 
 
 class Image(BaseModel):
@@ -302,11 +314,52 @@ async def _approved(call_id: str) -> None:
     )
 
 
+#: An approved body reads its decision, and runs a narrowed one's input (#2482): a run
+#: recorded before it replays without.
+FLOW_NARROWED_PATCH = "flow-narrowed-decision"
+
+
+class NarrowedInputError(Exception):
+    """The call was approved narrowed, but the narrowed input is not the one approved:
+    nothing runs."""
+
+
+async def _decided(call_id: str, fn: str, tool: str | None = None) -> DecisionRead:
+    """The call's decision as the body runs it (spec 2026-10-11 §4.2): a narrowed one's
+    input, bound to the decision's hash. A narrowed decision that does not hold runs
+    nothing, never the input the call was parked with."""
+    if not workflow.patched(FLOW_NARROWED_PATCH):
+        return DecisionRead()
+    read: DecisionRead = await workflow.execute_activity(
+        FLOW_DECISION,
+        DecisionAsk(call_id=call_id, fn=fn, tool=tool),
+        result_type=DecisionRead,
+        start_to_close_timeout=timedelta(seconds=10),
+        retry_policy=RetryPolicy(maximum_attempts=5),
+    )
+    if read.narrowed and read.args is None:
+        raise NarrowedInputError("the narrowed input is not the one that was approved")
+    return read
+
+
+def _print_path(source: dict[str, Any]) -> str:
+    output_id, file_id = source.get("output_id"), source.get("file_id")
+    if (output_id is None) == (file_id is None):
+        raise ValueError("source names one of output_id or file_id")
+    if file_id is not None:
+        return f"/api/v1/print/library/{int(file_id)}/run"
+    return f"/api/v1/print/outputs/{_segment(output_id, 'output id')}/run"
+
+
 @agent.tool_defn()
 async def approved_print(call: str, path: str, request: dict[str, Any]) -> PrintOutcome:
     """The print itself, run once a person approved it."""
     call_id = call
     await _approved(call_id)
+    read = await _decided(call_id, "queue_print")
+    if read.args is not None:
+        # Narrowed: what the decision approved, source and request alike.
+        path, request = _print_path(read.args["source"]), read.args["request"]
     owner: StepOwner = workflow.instance()
     body = {**request, "request_id": route_key(owner.run_id, workflow.info().run_id, call_id)}
     accepted = await _send(call_id, path, body, outward="queue_print")
@@ -319,6 +372,7 @@ async def approved_print(call: str, path: str, request: dict[str, Any]) -> Print
         status=run["status"],
         may_have_queued=bool(run.get("may_have_queued")),
         error=(run.get("error") or {}).get("detail"),
+        narrowed_by=read.narrowed_by,
     )
 
 
@@ -327,10 +381,18 @@ async def approved_arrange(call: str, request: dict[str, Any]) -> ArrangeResult:
     """The arrange itself, run once a person approved it, then saved as an output."""
     call_id = call
     await _approved(call_id)
+    read = await _decided(call_id, "arrange")
+    if read.args is not None:
+        request = read.args["request"]
     accepted = await _send(call_id, "/api/v1/outputs/arrange", request, outward="arrange")
     job_path = f"/api/v1/jobs/{_segment(accepted['id'], 'job id')}"
     job = await _follow(job_path, _JOB_SETTLED, timedelta(hours=2))
-    result = ArrangeResult(job_id=job["id"], status=job["status"], error=job.get("error"))
+    result = ArrangeResult(
+        job_id=job["id"],
+        status=job["status"],
+        error=job.get("error"),
+        narrowed_by=read.narrowed_by,
+    )
     if job["status"] == "done":
         name = request.get("name")
         result.output_id = await _save(
@@ -341,6 +403,9 @@ async def approved_arrange(call: str, request: dict[str, Any]) -> ArrangeResult:
 
 #: The run grant's check at the gate (#2481): a run recorded before it replays without.
 FLOW_GRANT_PATCH = "flow-grant-check"
+#: A call outside the grant waits at the starter session first, its timer covering both
+#: hops (#2482, spec §4.6).
+FLOW_ESCALATION_PATCH = "flow-escalation-timer"
 _GRANT_CHECK = timedelta(seconds=10)
 _GRANT_CHECK_RETRY = RetryPolicy(maximum_attempts=5)
 #: Retried while the call is not parked yet; past that, or on a refusal, a person is asked.
@@ -433,7 +498,35 @@ async def _gated(
                 lambda: owner.started(call_id),
                 call_id=call_id,
             )
-    async with step(fn, call_id, outward=True, waiting="approval"):
+    # Outside the grant (#2482, spec 2026-10-11 §4.1): to the starter session first when
+    # the run has one and its grant asks it, for `hop_s`, then to the person.
+    hop_s = 0
+    if (
+        verdict is not None
+        and verdict.verdict == "outside"
+        and verdict.parent_hop
+        and verdict.hop_s > 0
+        and workflow.patched(FLOW_ESCALATION_PATCH)
+    ):
+        hop_s = verdict.hop_s
+    async with step(
+        fn,
+        call_id,
+        outward=True,
+        waiting="approval",
+        hop="parent" if hop_s else "person",
+        hop_until=workflow.now() + timedelta(seconds=hop_s) if hop_s else None,
+        reason=verdict.reason if verdict is not None else None,
+    ):
+        if hop_s:
+            call = asyncio.ensure_future(runner.run_tool(call_id, tool, **kwargs))
+            return await await_escalated(
+                call,
+                hop_s,
+                owner.approval_timeout_s,
+                lambda: owner.started(call_id),
+                call_id=call_id,
+            )
         return await run_gated(
             runner.run_tool,
             tool,
@@ -451,13 +544,7 @@ async def queue_print(
     """Once a person approves it, slice and queue `source` ({"output_id": ...} or
     {"file_id": ...}) with `request`, the print dialog's body (`filament_plan`,
     `choices`, ...), and wait until the run settles."""
-    output_id, file_id = source.get("output_id"), source.get("file_id")
-    if (output_id is None) == (file_id is None):
-        raise ValueError("source names one of output_id or file_id")
-    if file_id is not None:
-        path = f"/api/v1/print/library/{int(file_id)}/run"
-    else:
-        path = f"/api/v1/print/outputs/{_segment(output_id, 'output id')}/run"
+    path = _print_path(source)
     call_id = str(workflow.uuid4())
     outcome: PrintOutcome = await _gated(
         "queue_print",
@@ -543,7 +630,12 @@ async def _call_tool(
 async def approved_tool(call: str, name: str, args: dict[str, Any]) -> ToolResult:
     """An outward agent tool, run once a person approved it, and at most once."""
     await _approved(call)
-    return await _call_tool(call, name, args, attempts=1)
+    read = await _decided(call, "tool", name)
+    result = await _call_tool(call, name, read.args if read.args is not None else args, attempts=1)
+    if read.narrowed_by is not None:
+        # As a narrowed child call's result says it (spec 2026-10-11 §4.2).
+        result.text = f"Ran narrowed by {read.narrowed_by}.\n{result.text}"
+    return result
 
 
 @agent.tool_defn()
