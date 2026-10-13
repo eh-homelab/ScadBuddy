@@ -28,7 +28,9 @@ jobs:
       #   npmjs.com and makerworld.com answer 403 to any client without a
       #   browser's cookies (bot protection), whatever the page;
       #   github.com/eh-homelab/clusters is a private repository, a 404 to an
-      #   unauthenticated request.
+      #   unauthenticated request;
+      #   *.internal.nullreference.io are the homelab's LAN-only hosts, which a
+      #   GitHub runner cannot reach (every one times out).
       - name: lychee
         id: lychee
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
@@ -41,6 +43,7 @@ jobs:
             --exclude '^https://www\.npmjs\.com/'
             --exclude '^https://makerworld\.com/'
             --exclude '^https://github\.com/eh-homelab/clusters'
+            --exclude '^https?://[^/]*\.internal\.nullreference\.io'
             'docs/**/*.md' README.md CLAUDE.md '**/SKILL.md'
           fail: true
       - name: Open an issue
