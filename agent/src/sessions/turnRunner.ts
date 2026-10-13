@@ -23,7 +23,7 @@ import { harnessTierOf, type HarnessRun } from '../harness/run.js'
 import { ensureSessionDir } from '../harness/stateDirs.js'
 import { createMemoryHooks, HindsightClient, hindsightTarget, type MemoryHooks } from '../memory/hindsight.js'
 import type { BuiltInPolicy } from '../plugins/builtInTools.js'
-import type { PluginsForRun } from '../plugins/forwarder.js'
+import type { PluginEndpoint, PluginsForRun } from '../plugins/forwarder.js'
 import { ownPluginEnabled } from '../plugins/packages/builtins.js'
 import type { PackagesForRun } from '../plugins/packages/install.js'
 import { type PackageServers, withoutRemoteServers } from '../plugins/packages/mcp.js'
@@ -43,7 +43,7 @@ import {
 import { event } from './protocol.js'
 import { scrubForLog } from './sdkEvents.js'
 import type { PostgresSessionStore } from './store.js'
-import { NO_TURN, slotHooks, type TurnSlot } from './turnSlot.js'
+import { NO_TURN, slotHooks, slotHttpContext, type TurnSlot } from './turnSlot.js'
 
 export type TurnRunnerDeps = Pick<
   SessionManagerDeps,
@@ -76,12 +76,19 @@ export type FingerprintParts = {
   credentialUpdatedAt: string
   model: string | null
   ownPlugin: boolean
-  plugins: { id: string; url: string; headerVersion: string }[]
+  /** Each plugin's configured endpoint, header version, tool tiers and disabled tools (forwarder.ts `pluginEndpoint`). */
+  plugins: PluginEndpoint[]
   packageHashes: string[]
+  /** The packages approved with `allow_refused`, loaded unchecked with their built-ins (#297). */
+  allowedPackageHashes: string[]
   tiers: string[] | null
   owner: string
   systemAppend: string
   disabledTools: string[]
+  /** Settings → Plugins' raised tiers (#1953), `<harness name>=<tier>`, sorted. */
+  raisedTiers: string[]
+  /** Whether the run has the http_request tool (#827). */
+  httpRequest: boolean
   builtinTools: string[]
 }
 
@@ -310,25 +317,22 @@ export class TurnRunner {
       // the turn's secrets except to refuse a request that carries one.
       const http =
         this.deps.httpRequest && httpRequestEnabled(httpSetting)
-          ? httpRequestServer({
-              saveDir: path.join(cwd, 'http'),
-              // save_to_workspace (#2329): the body becomes one of the session's files.
-              workspace: { files: this.deps.files, ref: { kind: 'session', sessionId: id } },
-              secrets: () => secrets,
-              audit: this.deps.audit,
-              actor: session.owner,
-              sessionId: id,
-              // The turn's id and abort signal, read as each request runs. With
-              // no turn the signal is already aborted: the request is never sent.
-              get turnId() {
-                return slot.current?.http?.turnId
-              },
-              get signal() {
-                return slot.current?.http?.signal ?? AbortSignal.abort(new Error(NO_TURN))
-              },
-              ...(this.deps.httpRequest.resolve ? { resolve: this.deps.httpRequest.resolve } : {}),
-              ...(this.deps.httpRequest.limits ? { limits: this.deps.httpRequest.limits } : {}),
-            })
+          ? httpRequestServer(
+              slotHttpContext(
+                {
+                  saveDir: path.join(cwd, 'http'),
+                  // save_to_workspace (#2329): the body becomes one of the session's files.
+                  workspace: { files: this.deps.files, ref: { kind: 'session', sessionId: id } },
+                  secrets: () => secrets,
+                  audit: this.deps.audit,
+                  actor: session.owner,
+                  sessionId: id,
+                  ...(this.deps.httpRequest.resolve ? { resolve: this.deps.httpRequest.resolve } : {}),
+                  ...(this.deps.httpRequest.limits ? { limits: this.deps.httpRequest.limits } : {}),
+                },
+                slot,
+              ),
+            )
           : undefined
       const run: AssembledTurn['run'] = {
         paths: this.deps.paths,
@@ -403,10 +407,14 @@ export class TurnRunner {
         // URL this assembly registered (forwarder.ts `pluginEndpoint`).
         plugins: [...(forwarded?.endpoints ?? []), ...(packageServers?.endpoints ?? [])],
         packageHashes: (packages?.loaded ?? []).map((p) => p.contentHash),
+        allowedPackageHashes: (packages?.loaded ?? []).filter((p) => p.allowed).map((p) => p.contentHash),
         tiers: principal.tiers ? [...principal.tiers] : null,
         owner: `${session.owner.kind}:${session.owner.id}`,
         systemAppend: run.systemPromptAppend ?? '',
-        disabledTools: [...(builtIn?.disallowed ?? []), ...remotePlugins.flatMap((p) => p.disabledTools)],
+        // Settings → Plugins' disabled built-ins; each plugin's own are in its `plugins` entry.
+        disabledTools: [...(builtIn?.disallowed ?? [])],
+        raisedTiers: [...(builtIn?.raised ?? [])],
+        httpRequest: http !== undefined,
         builtinTools: run.builtinTools ?? [],
       }
       return {

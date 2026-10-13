@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk'
 import { ROOT_CONTEXT } from '@opentelemetry/api'
-import type { ApprovalRequest } from '../../src/harness/permissions.js'
+import { SETTING_HTTP_REQUEST } from '../../src/harness/httpRequest.js'
+import type { ApprovalRequest, RiskTier } from '../../src/harness/permissions.js'
 import { builtInPolicy } from '../../src/plugins/builtInTools.js'
 import { forwardForRun, type PluginForwarder } from '../../src/plugins/forwarder.js'
 import type { ClaimedSession, TurnPrincipal } from '../../src/sessions/manager.js'
@@ -17,10 +18,24 @@ import { browser, tempPaths } from './sessions.js'
  * turn can be assembled with switched on: a browser-owned session (so a question
  * gate), the in-process registry and http servers, a remote plugin that is a
  * Hindsight bank (so memory hooks), plugin packages, an own plugin and a model.
- * `resume` says whether the session already has a transcript; `pluginUrl` is
- * the Hindsight plugin's configured endpoint.
+ * `options` change one input each (TurnRunnerTestOptions).
  */
-export async function turnRunnerForTest(options: { resume?: boolean; pluginUrl?: string } = {}) {
+export type TurnRunnerTestOptions = {
+  resume?: boolean
+  /** The Hindsight plugin's configured endpoint. */
+  pluginUrl?: string
+  /** The Hindsight plugin's tool tiers and disabled tools. */
+  pluginToolTiers?: Record<string, RiskTier>
+  pluginDisabledTools?: string[]
+  /** Settings → Plugins' raised tiers for ScadBuddy's own tools (#1953), by bare name. */
+  raisedTiers?: Record<string, RiskTier>
+  /** The stored http_request setting (#827); on when undefined. */
+  httpRequest?: boolean
+  /** Whether the loaded package was approved with `allow_refused`. */
+  allowRefused?: boolean
+}
+
+export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
   const paths = await tempPaths()
   const now = new Date().toISOString()
   const session: ClaimedSession = {
@@ -50,10 +65,21 @@ export async function turnRunnerForTest(options: { resume?: boolean; pluginUrl?:
   const runner = new TurnRunner({
     paths,
     credentials: fixedCredentials({ kind: 'anthropic_api_key', secret: 'sk-ant-test' }),
-    settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-test' : undefined) as T | undefined) },
+    settings: {
+      get: <T>(key: string) =>
+        Promise.resolve((key === 'model' ? 'claude-test' : key === SETTING_HTTP_REQUEST ? options.httpRequest : undefined) as T | undefined),
+    },
     tierOf: () => 'read',
     mcpServers: () => ({ scadbuddy: createSdkMcpServer({ name: 'scadbuddy', tools: [] }) }),
-    builtInTools: () => Promise.resolve(builtInPolicy([])),
+    builtInTools: () =>
+      Promise.resolve(
+        builtInPolicy([
+          {
+            set: { name: 'scadbuddy', tool_prefix: 'mcp__scadbuddy__', tools: [], switchable: false },
+            overrides: { tool_tiers: options.raisedTiers ?? {}, disabled_tools: [] },
+          },
+        ]),
+      ),
     pluginPaths: [],
     ownPlugin: '/plugins/own',
     // The real forwardForRun over a forwarder that, like the real one, gives
@@ -68,8 +94,8 @@ export async function turnRunnerForTest(options: { resume?: boolean; pluginUrl?:
                   name: 'hindsight',
                   url: options.pluginUrl ?? 'https://hindsight.example/mcp/bank/',
                   header: { name: 'Authorization', value: 'Bearer plugin-token' },
-                  toolTiers: {},
-                  disabledTools: [],
+                  toolTiers: options.pluginToolTiers ?? { recall: 'read' },
+                  disabledTools: options.pluginDisabledTools ?? [],
                 },
                 address: '192.0.2.1',
               },
@@ -80,7 +106,15 @@ export async function turnRunnerForTest(options: { resume?: boolean; pluginUrl?:
         ),
       ),
     packagePlugins: () =>
-      Promise.resolve({ paths: ['/plugins/a'], allowedPaths: ['/plugins/b'], builtinTools: ['Bash'], loaded: [], problems: [], release: () => {} }),
+      Promise.resolve({
+        paths: ['/plugins/a'],
+        allowedPaths: ['/plugins/b'],
+        builtinTools: ['Bash'],
+        // Not one of `paths`, so nothing is copied to strip its servers.
+        loaded: [{ name: 'c', contentHash: 'hash-c', dir: '/plugins/c', allowed: options.allowRefused ?? false, builtinTools: [] }],
+        problems: [],
+        release: () => {},
+      }),
     httpRequest: {},
     stderr: () => {},
     store: {

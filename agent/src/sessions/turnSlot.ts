@@ -5,13 +5,16 @@
 // so no callback in it may hold one turn's state. TurnRunner (turnRunner.ts)
 // assembles callbacks that read `slot.current` instead: the approval and
 // question gates, the memory and trace hooks, the in-process servers' turn
-// context and tab wait, and the http tool's turn id and abort signal. The
-// turn sets the slot before its prompt goes in and clears it after its
-// result. A callback that fires with no turn in the slot (a straggling hook
-// between turns) fails closed.
+// context and tab wait, and the http tool's turn id and abort signal. Today
+// each turn has its own query and its own slot, set before the query starts
+// and never cleared, so a hook fired after the result still reaches that
+// turn; when to clear a slot between the turns of one process is for Phase 2
+// (warm processes) to decide. A callback that fires with no turn in the slot
+// fails closed.
 
 import type { HookCallbackMatcher, HookEvent } from '@anthropic-ai/claude-agent-sdk'
 import type { TurnAuditor } from '../audit/turn.js'
+import type { HttpRequestContext } from '../harness/httpRequest.js'
 import type { ApprovalGate } from '../harness/permissions.js'
 import type { QuestionGate } from '../harness/questions.js'
 import type { MemoryHooks } from '../memory/hindsight.js'
@@ -62,6 +65,23 @@ export function createTurnSlot(): TurnSlot {
     },
   }
   return slot
+}
+
+/**
+ * The http tool's context (harness/httpRequest.ts): `fixed`, with the turn's
+ * id and abort signal read from the slot as each request runs. With no turn
+ * the signal is already aborted, so a request is never sent.
+ */
+export function slotHttpContext(fixed: Omit<HttpRequestContext, 'turnId' | 'signal'>, slot: TurnSlot): HttpRequestContext {
+  return {
+    ...fixed,
+    get turnId() {
+      return slot.current?.http?.turnId
+    },
+    get signal() {
+      return slot.current?.http?.signal ?? AbortSignal.abort(new Error(NO_TURN))
+    },
+  }
 }
 
 type Hooks = Partial<Record<HookEvent, HookCallbackMatcher[]>>

@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import type { ApprovalRequest } from '../src/harness/permissions.js'
-import { createTurnSlot } from '../src/sessions/turnSlot.js'
-import { TurnRunner } from '../src/sessions/turnRunner.js'
-import { turnRunnerForTest } from './support/turnRunner.js'
+import { ROOT_CONTEXT } from '@opentelemetry/api'
+import { createTurnSlot, slotHttpContext, type TurnContext } from '../src/sessions/turnSlot.js'
+import { type FingerprintParts, TurnRunner } from '../src/sessions/turnRunner.js'
+import { TurnTrace } from '../src/telemetry/turn.js'
+import { turnRunnerForTest, type TurnRunnerTestOptions } from './support/turnRunner.js'
 
 // TurnRunner (unified runtime plan, Task 1.2; spec 2026-10-13 §5.3): every
 // callback it assembles reads the current turn from the slot, so the options
@@ -14,6 +16,14 @@ const request = (toolUseId: string): ApprovalRequest => ({
   toolUseId,
   tier: 'outward',
   signal: new AbortController().signal,
+})
+
+const turnContext = (turnId: string): TurnContext => ({
+  turnId,
+  principal: {},
+  approvalGate: () => Promise.resolve({ approved: false, message: 'unused' }),
+  trace: new TurnTrace({ sessionId: 's', turnId, parent: ROOT_CONTEXT, tierOf: () => 'read' }),
+  signalInterrupt: () => {},
 })
 
 describe('TurnRunner', () => {
@@ -42,13 +52,58 @@ describe('TurnRunner', () => {
     expect(second.run.remotePlugins![0]!.url).not.toBe(first.run.remotePlugins![0]!.url)
     expect(second.fingerprintParts).toEqual(first.fingerprintParts)
     expect(first.fingerprintParts.plugins).toEqual([
-      { id: 'hindsight', url: 'https://hindsight.example/mcp/bank/', headerVersion: expect.stringMatching(/^[\w-]{43}$/) },
+      {
+        id: 'hindsight',
+        url: 'https://hindsight.example/mcp/bank/',
+        headerVersion: expect.stringMatching(/^[\w-]{43}$/),
+        toolTiers: ['recall=read'],
+        disabledTools: [],
+      },
     ])
 
     const moved = await turnRunnerForTest({ pluginUrl: 'https://hindsight.example/mcp/other/' })
     const elsewhere = await moved.runner.assemble(session, principal, createTurnSlot())
     expect(elsewhere.fingerprintParts).not.toEqual(first.fingerprintParts)
     expect(elsewhere.fingerprintParts.plugins[0]!.url).toBe('https://hindsight.example/mcp/other/')
+  })
+
+  // Each input fixed at spawn that changes what the process permits moves its
+  // own field, and nothing else does (spec §5.3, "Reuse rule").
+  it.each<[string, TurnRunnerTestOptions, keyof FingerprintParts]>([
+    ["a plugin's tool tiers", { pluginToolTiers: { recall: 'outward' } }, 'plugins'],
+    ["a plugin's disabled tools", { pluginDisabledTools: ['recall'] }, 'plugins'],
+    ['a raised built-in tier', { raisedTiers: { get_model: 'outward' } }, 'raisedTiers'],
+    ['the http_request setting', { httpRequest: false }, 'httpRequest'],
+    ["a package's allow_refused approval", { allowRefused: true }, 'allowedPackageHashes'],
+  ])('fingerprints %s', async (_what, changed, field) => {
+    const base = await turnRunnerForTest()
+    const before = await base.runner.assemble(base.session, base.principal, createTurnSlot())
+    const again = await base.runner.assemble(base.session, base.principal, createTurnSlot())
+    expect(again.fingerprintParts).toEqual(before.fingerprintParts)
+    const other = await turnRunnerForTest(changed)
+    const after = await other.runner.assemble(base.session, base.principal, createTurnSlot())
+    expect(after.fingerprintParts[field]).not.toEqual(before.fingerprintParts[field])
+    const { [field]: _a, ...restAfter } = after.fingerprintParts
+    const { [field]: _b, ...restBefore } = before.fingerprintParts
+    expect(restAfter).toEqual(restBefore)
+  })
+
+  it("gives the http tool the slot's turn id and signal as each request reads them, and an aborted signal between turns", () => {
+    const slot = createTurnSlot()
+    const context = slotHttpContext({ saveDir: '/tmp/http', secrets: () => [], actor: { kind: 'browser', id: 'browser', label: 'You' } }, slot)
+    expect(context.turnId).toBeUndefined()
+    expect(context.signal?.aborted).toBe(true)
+    expect((context.signal?.reason as Error).message).toBe('no turn is running')
+    const first = new AbortController()
+    slot.set({ ...turnContext('turn-1'), http: { turnId: 'turn-1', signal: first.signal } })
+    expect(context.turnId).toBe('turn-1')
+    expect(context.signal).toBe(first.signal)
+    const second = new AbortController()
+    slot.set({ ...turnContext('turn-2'), http: { turnId: 'turn-2', signal: second.signal } })
+    expect(context.turnId).toBe('turn-2')
+    expect(context.signal).toBe(second.signal)
+    slot.clear()
+    expect(context.signal?.aborted).toBe(true)
   })
 
   it('names every HarnessRun key either in the fingerprint or as per-turn', async () => {
