@@ -1333,7 +1333,7 @@ async def plan_run(
             )
             for plate_id, options, _, plan, reused in planned
         ],
-        warnings=warnings + hardware,
+        warnings=warnings + hardware + _reused_notes(planned),
         rack_algorithm=request.rack_algorithm or settings.rack_algorithm(printer_id),
         rack_position=request.rack_position,
         # A readable status with no rack (any printer but an H2C) has nothing to pick: no
@@ -1342,6 +1342,23 @@ async def plan_run(
         has_rack=printer_status is None or bool(rack_positions(printer_status.nozzle_rack)),
         nozzle_plan=nozzle_plan,
     )
+
+
+def _reused_notes(
+    planned: list[tuple[int, FilamentOptions, Resolved, SlicePlan, int | None]],
+) -> list[FilamentWarning]:
+    """Say which plates queue an earlier slice rather than slicing again (#2955): the
+    run's ``slice_job_id`` is ``None`` then, which would otherwise read as a slice
+    skipped by mistake."""
+    return [
+        FilamentWarning(
+            kind="slice-reused",
+            message=f"Plate {plate_id} queues ScadBuddy's earlier slice of the same choices;"
+            " nothing was sliced again.",
+        )
+        for plate_id, _, _, _, reused in planned
+        if reused is not None
+    ]
 
 
 def _filament_warnings(
@@ -1375,7 +1392,9 @@ async def _plan_sliced(
     """:func:`plan_run` for a sliced file (#2671): nothing is uploaded, resolved or
     sliced. Each plate queues the file itself, with the spools chosen for its slots as
     any print's are, and with the options remembered for it, held for a manual start
-    among them."""
+    among them. A file sliced for another model or a nozzle the printer lacks is held
+    for a manual start whatever was remembered (#2954): Bambuddy would otherwise start
+    it as soon as the printer is idle, before anyone read the warning."""
     printer_id = prepared.printer_id
     project_id = chosen_project(request, settings)
     profile = source.sliced_profile
@@ -1400,6 +1419,8 @@ async def _plan_sliced(
     print_options = resolve_print_options(
         settings, source.options_scope, printer_id, request_scope(request.copies, request.options)
     ).model_copy(update={"project_id": None})
+    if any(warning.kind in HELD_SLICED_KINDS for warning in prepared.warnings):
+        print_options = print_options.model_copy(update={"manual_start": True})
     copies = print_options.quantity or 1
     status = prepared.printer_status
     return PlannedRun(
@@ -1499,6 +1520,10 @@ def _mounted_diameters(status: PrinterStatus | None) -> set[str]:
     }
 
 
+HELD_SLICED_KINDS = frozenset({"sliced-other-model", "sliced-nozzle-missing"})
+"""Sliced-file warnings that hold the print for a manual start (#2954)."""
+
+
 def sliced_warnings(
     profile: SlicedProfile | None,
     printer: Printer,
@@ -1507,9 +1532,10 @@ def sliced_warnings(
 ) -> list[FilamentWarning]:
     """What to set right before a sliced file prints on ``printer`` (#2671): sliced for
     another model, or for a nozzle diameter the printer does not have. Never a refusal:
-    it is queued as it is, and the user swaps the nozzle, or picks another printer,
-    before starting it. Only a known mismatch warns: an unread profile, or a printer that
-    reports no model or no nozzles, says nothing."""
+    it is queued as it is, held for a manual start (:data:`HELD_SLICED_KINDS`), and the
+    user swaps the nozzle, or picks another printer, before starting it. Only a known
+    mismatch warns: an unread profile, or a printer that reports no model or no nozzles,
+    says nothing."""
     if profile is None:
         return []
     warnings: list[FilamentWarning] = []
@@ -1520,6 +1546,7 @@ def sliced_warnings(
                 kind="sliced-other-model",
                 message=(
                     f"Sliced for a {profile.printer_model}; {printer.name} is a {printer.model}."
+                    " Held for a manual start."
                 ),
             )
         )
@@ -1532,7 +1559,7 @@ def sliced_warnings(
                 message=(
                     f"Sliced for a {' and '.join(missing)} mm nozzle; "
                     f"{', '.join(sorted(mounted))} mm is mounted on {printer.name}."
-                    " Swap it before the print starts."
+                    " Held for a manual start: swap it before you start the print."
                 ),
             )
         )

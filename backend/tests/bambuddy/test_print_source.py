@@ -707,3 +707,26 @@ async def test_a_library_files_filament_step_reads_the_file_itself_until_a_copy_
     assert (read.id, read.own_colours) == (ORIGIN, None)
     assert already == read
     assert bambuddy.uploaded == [] and bambuddy.downloads == 0
+
+
+class _ManySlices(_Copies):
+    """Ten recorded slices of the copy, newest first, none of which Bambuddy still has."""
+
+    async def slices_of(self, output_id: str, library_file_id: int, preset_key: str) -> list[int]:
+        return list(range(100, 110))
+
+
+@respx.mock
+async def test_a_reprint_checks_only_the_newest_recorded_slices(bambuddy: BambuddyClient) -> None:
+    """#2955: each recorded slice is a GET, one after another, and rows of deleted slices
+    are kept, so a reprint checks only the newest few before slicing again."""
+    gone = respx.get(url__regex=rf"{API}/library/files/1\d\d$").mock(
+        return_value=httpx.Response(404, json={"detail": "File not found"})
+    )
+
+    reused = await _library(_ManySlices()).recorded_slice(bambuddy, 11, "key")
+
+    assert reused is None
+    assert [call.request.url.path.rsplit("/", 1)[-1] for call in gone.calls] == [
+        str(sliced_id) for sliced_id in range(100, 100 + print_source.MAX_RECORDED_SLICES)
+    ]

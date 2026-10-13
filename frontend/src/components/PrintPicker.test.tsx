@@ -3632,9 +3632,9 @@ describe('PrintPicker · a sliced file that does not fit is warned of, never hel
             {
               kind: 'sliced-nozzle-missing',
               slot_id: null,
-              message: 'Sliced for a 0.6 mm nozzle; 0.4 mm is mounted on H2C. Swap it before the print starts.',
+              message: 'Sliced for a 0.6 mm nozzle; 0.4 mm is mounted on H2C. Held for a manual start: swap it before you start the print.',
             },
-            { kind: 'sliced-other-model', slot_id: null, message: 'Sliced for a Bambu Lab X1 Carbon; H2C is a Bambu Lab H2C.' },
+            { kind: 'sliced-other-model', slot_id: null, message: 'Sliced for a Bambu Lab X1 Carbon; H2C is a Bambu Lab H2C. Held for a manual start.' },
           ],
           rack: null,
         }),

@@ -95,6 +95,8 @@ WarningKind = Literal[
     "sliced-other-model",
     "sliced-nozzle-missing",
     "sliced-plate-missing",
+    # ScadBuddy's own earlier slice of the same choices queued, nothing sliced (#2955).
+    "slice-reused",
 ]
 
 

@@ -207,6 +207,11 @@ class PrintSource(Protocol):
         ...
 
 
+MAX_RECORDED_SLICES = 3
+"""How many of ScadBuddy's recorded slices of a copy a print checks for one Bambuddy
+still has, newest first (#2955): past that it slices again."""
+
+
 class _Fetching(Protocol):
     """What :class:`PrintPipeline` needs of the source it is mixed into."""
 
@@ -354,9 +359,12 @@ class PrintPipeline:
     ) -> int | None:
         if self.uploads is None:
             return None
-        for sliced_id in await self.uploads.slices_of(
+        recorded = await self.uploads.slices_of(
             self.subject.run_subject, library_file_id, preset_key
-        ):
+        )
+        # Only the newest few: each is a GET, one after another, and rows of slices
+        # Bambuddy deleted since are never pruned (#2955).
+        for sliced_id in recorded[:MAX_RECORDED_SLICES]:
             try:
                 file = await client.library_file(sliced_id)
             except ApiError as error:

@@ -520,14 +520,15 @@ def test_a_sliced_files_choices_say_what_it_was_sliced_for(client: TestClient) -
 
 @respx.mock
 @pytest.mark.parametrize(
-    ("content", "plate_id", "kind", "warning", "queued_plate"),
+    ("content", "plate_id", "kind", "warning", "queued_plate", "held"),
     [
         pytest.param(
             sliced_3mf(printer_model="Bambu Lab X1 Carbon"),
             1,
             "sliced-other-model",
-            "Sliced for a Bambu Lab X1 Carbon; 3DP-31B-598 is a H2C.",
+            "Sliced for a Bambu Lab X1 Carbon; 3DP-31B-598 is a H2C. Held for a manual start.",
             1,
+            True,
             id="another-model",
         ),
         pytest.param(
@@ -535,8 +536,9 @@ def test_a_sliced_files_choices_say_what_it_was_sliced_for(client: TestClient) -
             1,
             "sliced-nozzle-missing",
             "Sliced for a 0.6 mm nozzle; 0.2, 0.4 mm is mounted on 3DP-31B-598."
-            " Swap it before the print starts.",
+            " Held for a manual start: swap it before you start the print.",
             1,
+            True,
             id="another-nozzle",
         ),
         pytest.param(
@@ -545,19 +547,36 @@ def test_a_sliced_files_choices_say_what_it_was_sliced_for(client: TestClient) -
             "sliced-plate-missing",
             "This file holds no plate 2, so plate 1 is queued instead.",
             1,
+            False,
             id="no-such-plate",
         ),
     ],
 )
 def test_a_sliced_file_that_does_not_fit_still_queues_with_a_warning(
-    client: TestClient, content: bytes, plate_id: int, kind: str, warning: str, queued_plate: int
+    client: TestClient,
+    content: bytes,
+    plate_id: int,
+    kind: str,
+    warning: str,
+    queued_plate: int,
+    held: bool,
 ) -> None:
     """#2671: a sliced file is never refused. A mismatch is a warning in the check and
-    on the run, so the user sets it right before starting the print."""
+    on the run, so the user sets it right before starting the print. #2954: one sliced
+    for another model or nozzle is held for a manual start even though the options
+    remembered for it say to start at once, so it cannot start before anyone reads the
+    warning."""
     configure(client)
     sliced_file(104, content)
     run_routes()
     queued = queue_route()
+    assert (
+        client.put(
+            "/api/v1/settings/print-options",
+            json={"scope": "model", "key": "library:104", "options": {"manual_start": False}},
+        ).status_code
+        == 200
+    )
 
     check = client.post(
         "/api/v1/print/library/104/check", json={**SLICED_RUN, "plate_id": plate_id}
@@ -570,7 +589,9 @@ def test_a_sliced_file_that_does_not_fit_still_queues_with_a_warning(
     assert run.status_code == 200, run.text
     assert any(w["kind"] == kind and w["message"] == warning for w in run.json()["warnings"])
     assert queued.call_count == 1
-    assert json.loads(queued.calls.last.request.content)["plate_id"] == queued_plate
+    sent = json.loads(queued.calls.last.request.content)
+    assert sent["plate_id"] == queued_plate
+    assert sent["manual_start"] is held
 
 
 @respx.mock
@@ -641,6 +662,17 @@ def test_a_second_print_of_the_same_choices_queues_scadbuddys_own_slice(
         77,
         77,
     ]
+    # #2955: said, so no slice job does not read as a slice skipped by mistake.
+    reused = [w for w in second.json()["warnings"] if w["kind"] == "slice-reused"]
+    assert reused == [
+        {
+            "kind": "slice-reused",
+            "slot_id": None,
+            "message": "Plate 1 queues ScadBuddy's earlier slice of the same choices;"
+            " nothing was sliced again.",
+        }
+    ]
+    assert not [w for w in first.json()["warnings"] if w["kind"] == "slice-reused"]
 
 
 @respx.mock
