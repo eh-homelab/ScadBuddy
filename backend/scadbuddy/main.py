@@ -36,6 +36,7 @@ from scadbuddy.api import (
     metrics,
     models,
     outputs,
+    print_attachments,
     telemetry,
 )
 from scadbuddy.api.compression import Compression
@@ -1320,6 +1321,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         media.MediaUpload,
         mesh_models.MeshUpload,
         library_print.LibraryFileUploadForm,
+        print_attachments.AttachmentUpload,
         outputs.NeedsBackfillProblem,
     )
 

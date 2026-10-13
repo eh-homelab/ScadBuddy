@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import datetime
 from typing import IO, Literal
 
@@ -42,6 +43,9 @@ AttachmentKind = Literal["photo", "video"]
 MEDIA_FOLDER = "Media"
 #: The image types Bambuddy's archive takes (``archives.py:3280`` at v1.2.5.6).
 ARCHIVE_PHOTO_TYPES = frozenset({"jpg", "jpeg", "png", "webp"})
+#: The names Bambuddy gives a photo (``uuid[:8] + ext``, or a finish photo's). Anything
+#: else is never kept: the name goes into the media proxy's path to Bambuddy.
+ARCHIVE_PHOTO_NAME = re.compile(r"^[A-Za-z0-9_-]+\.(jpg|jpeg|png|webp)$")
 #: The most attachments one print keeps: a page of them, not a library.
 MAX_ATTACHMENTS = 100
 
@@ -198,6 +202,11 @@ async def upload(
     photo: str | None = None
     if kind == "photo":
         answer = await client.upload_archive_photo(archive.id, filename, file)
+        if not ARCHIVE_PHOTO_NAME.fullmatch(answer.filename):
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                "Bambuddy named the photo in a way ScadBuddy does not take, so it was not kept",
+            )
         photo = answer.filename
         file.seek(0)
     folder_id = await media_folder(client, archive, inbox_folder_id)
@@ -236,3 +245,14 @@ async def _quietly_delete_photo(client: BambuddyClient, archive_id: int, photo: 
             "a photo's library copy failed, and so did taking it off the archive",
             extra={"archive_id": archive_id},
         )
+
+
+def file_path(attachment: Attachment) -> str:
+    """Where Bambuddy serves the attachment's bytes: its ``Media/`` copy, or for a photo
+    whose copy is gone, the archive's photo. Built only from an id or a checked name."""
+    if attachment.library_file_id is not None:
+        return f"/library/files/{int(attachment.library_file_id)}/download"
+    photo = attachment.archive_photo or ""
+    if not ARCHIVE_PHOTO_NAME.fullmatch(photo):
+        raise ApiError(status.HTTP_404_NOT_FOUND, "the attachment has no file Bambuddy can serve")
+    return f"/archives/{int(attachment.archive_id)}/photos/{photo}"

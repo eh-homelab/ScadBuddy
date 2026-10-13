@@ -38,7 +38,7 @@ from scadbuddy.api.operations import (
 )
 from scadbuddy.api.print_history import PrintAttachment, attachment_view
 from scadbuddy.api.prints import ArchiveIdPath, require_linked_archive
-from scadbuddy.bambuddy.attachments import Attachment
+from scadbuddy.bambuddy.attachments import Attachment, file_path
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import ModelRecord
@@ -309,11 +309,7 @@ async def _download(
     store: SettingsStoreDep, attachment: Attachment, to: FilePath
 ) -> tuple[str, int]:
     """The attachment's bytes, streamed from Bambuddy to ``to``: their sha256 and size."""
-    path = (
-        f"/library/files/{attachment.library_file_id}/download"
-        if attachment.library_file_id is not None
-        else f"/archives/{attachment.archive_id}/photos/{attachment.archive_photo}"
-    )
+    path = file_path(attachment)
     digest = hashlib.sha256()
     size = 0
     to.parent.mkdir(parents=True, exist_ok=True)

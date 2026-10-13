@@ -32,6 +32,7 @@ from scadbuddy.api.media import (
     THUMBNAIL_VERSION,
     _shrink,
 )
+from scadbuddy.bambuddy.attachments import file_path as attachment_file_path
 from scadbuddy.bambuddy.client import Operation, client_for
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.media import MAX_IMAGE_BYTES, content_type_of
@@ -349,11 +350,7 @@ async def get_attachment_file(
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"print {archive_id} has no attachment {attachment_id}"
         )
-    path = (
-        f"/library/files/{found.library_file_id}/download"
-        if found.library_file_id is not None
-        else f"/archives/{archive_id}/photos/{found.archive_photo}"
-    )
+    path = attachment_file_path(found)
     response = await _proxy(
         store, request, path, operation="media.attachment", what="show the attachment"
     )

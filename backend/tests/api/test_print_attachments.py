@@ -274,3 +274,24 @@ def test_promote_copies_an_attachment_into_the_template_gallery(
     assert gallery.content == PNG
     # The print keeps its attachment.
     assert client.get("/api/v1/prints/35").json()["attachment_count"] == 1
+
+
+@respx.mock
+def test_a_photo_name_bambuddy_answers_that_could_leave_its_folder_is_not_kept(
+    client: TestClient, model: str
+) -> None:
+    """The name goes into the proxy's path to Bambuddy, so only Bambuddy's own shape of
+    name is kept; anything else is refused before a row names it."""
+    linked(client, model)
+    bambuddy = Bambuddy(media_exists=True)
+    bambuddy.photo.mock(
+        return_value=httpx.Response(
+            200, json={"status": "ok", "filename": "../../library/files/1/download", "photos": []}
+        )
+    )
+
+    refused = attach(client, "p.png", PNG)
+
+    assert refused.status_code == 502, refused.text
+    assert not bambuddy.library.called
+    assert client.get("/api/v1/prints/35").json()["attachment_count"] == 0
