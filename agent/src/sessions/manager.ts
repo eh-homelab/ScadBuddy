@@ -13,16 +13,11 @@ import type { Tier } from '../auth/principal.js'
 import type { Credential } from '../credentials.js'
 import { redact } from '../secrets.js'
 import { describeApiFailure, type FailureEvidence, type ProbeVerdict } from '../harness/credentialErrors.js'
-import { carries, type CredentialSource, runWithFallback } from '../harness/fallback.js'
+import { type CredentialSource, runWithFallback } from '../harness/fallback.js'
 import type { HarnessPaths } from '../harness/options.js'
 import type { TierResolver } from '../harness/permissions.js'
 import type { BuiltInPolicy } from '../plugins/builtInTools.js'
-import {
-  DEFAULT_MAX_BUDGET_USD,
-  DEFAULT_MAX_TURNS,
-  type HarnessRun,
-  runHarness,
-} from '../harness/run.js'
+import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun } from '../harness/run.js'
 import { type HttpLimits, type SavedMeta, savedBody } from '../harness/httpRequest.js'
 import type { Resolver } from '../http/egress.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
@@ -68,7 +63,9 @@ import { type DurableGate, DurableUnavailable } from '../gate/durable.js'
 import type { DurableTurns } from './durable.js'
 import { PendingProjection } from '../gate/projection.js'
 import { type AssembledTurn, TurnAssemblyError, TurnRunner } from './turnRunner.js'
-import { createTurnSlot } from './turnSlot.js'
+import { type WarmEntry, type WarmQuery, WarmSessions, type WarmTurn } from './warm.js'
+import { notifyWarmEvict } from './warmEvict.js'
+import { continuationMemory, warmAttempts, type WarmTurnRun } from './warmTurn.js'
 
 // The session manager (#300, spec §6): durable, shared sessions that a human
 // in the browser, an external agent over /mcp, or an internal flow can start,
@@ -120,7 +117,17 @@ import { createTurnSlot } from './turnSlot.js'
 // and the session back to idle, since its own finish() never ran. The same
 // renewal reads `interrupt_requested`, which is how an interrupt reaches a turn
 // running on another replica. On SIGTERM, `stopTurns` drains: no new turn,
-// running ones may finish, the rest are aborted and waited for.
+// running ones may finish, the rest are aborted and waited for, and the warm
+// processes are closed.
+//
+// Processes (unified runtime spec 2026-10-13 §5.3). A classic session's turns
+// run on one warm Claude Code per replica (`warm`, warm.ts), a streaming-input
+// query that each turn pushes its prompt into (warmTurn.ts): a turn after the
+// first spawns nothing while the process still matches it (its fingerprint,
+// the transcript tail, the budget), and respawns from the transcript when not.
+// A turn's cost is the difference of its process's cumulative total (§6.6).
+// An interrupt is `query.interrupt()`; the process answers with its result and
+// stays. A fallback to another credential respawns (§6.7).
 //
 // Approvals (#258). Every turn's queries get `approvals.gate()`: an outward
 // call parks the turn in `waiting_approval` until a human decides
@@ -590,8 +597,46 @@ export type ListFilter = {
 /** Reads ai_settings; SettingsStore (credentials.ts) is one. */
 export type SettingsReader = { get<T>(key: string): Promise<T | undefined> }
 
-/** Runs one query; `runHarness` in production, a scripted stand-in in unit tests. */
+/**
+ * Starts one Claude Code process's query (the warm cache's spawn, warm.ts);
+ * `runHarness` in production, a scripted stand-in in unit tests. The stream
+ * serves every turn of the process: its `prompt` is the process's inbox.
+ */
 export type QueryRunner = (run: HarnessRun) => AsyncIterable<SDKMessage>
+
+/** A warm process per replica past which the least recently used idle one goes (spec 2026-10-13 §5.3, D3), until Task 2.5 reads Settings. */
+export const DEFAULT_WARM_MAX_ENTRIES = 8
+/** How long a warm process may sit idle (spec §5.3: the same 10 min as temporal/sessionClients.ts), until Task 2.5 reads Settings. */
+export const DEFAULT_WARM_IDLE_MS = 600_000
+
+const isWarmQuery = (stream: AsyncIterable<SDKMessage>): stream is WarmQuery =>
+  typeof (stream as Partial<WarmQuery>).interrupt === 'function' && typeof (stream as Partial<WarmQuery>).close === 'function'
+
+/**
+ * The cache's `start` over a QueryRunner: a stream with its own `interrupt`
+ * and `close` (the SDK's Query, as runHarness returns it) is used as it is; a
+ * plain one (a scripted stand-in) is given an abort signal, which `interrupt`
+ * and `close` abort, as the SDK's abort ends a query.
+ */
+function startedQuery(run: QueryRunner): (spawn: HarnessRun) => WarmQuery {
+  return (spawn) => {
+    const controller = new AbortController()
+    const started = run({ ...spawn, signal: controller.signal })
+    if (isWarmQuery(started)) return started
+    const iterator = started[Symbol.asyncIterator]()
+    return {
+      [Symbol.asyncIterator]: () => iterator,
+      interrupt: () => {
+        controller.abort(new Error('the turn was interrupted'))
+        return Promise.resolve(undefined)
+      },
+      close: () => {
+        controller.abort(new Error('the process was closed'))
+        void iterator.return?.().catch(() => {})
+      },
+    }
+  }
+}
 
 export type SessionManagerDeps = {
   sql: Sql
@@ -669,6 +714,12 @@ export type SessionManagerDeps = {
    */
   workspace?: SessionFiles
   run?: QueryRunner
+  /**
+   * The warm process cache's limits (warm.ts; spec 2026-10-13 §5.3),
+   * DEFAULT_WARM_MAX_ENTRIES and DEFAULT_WARM_IDLE_MS when omitted, and where
+   * it says why each process went.
+   */
+  warm?: { maxEntries?: number; idleMs?: number; log?: (message: string) => void }
   /** Per-token approval grants (spec §6); nobody but the browser user may approve without one. */
   approvalGrants?: GrantCheck
   /**
@@ -913,8 +964,14 @@ export class SessionManager {
    * are both configured; main.ts sets it. Without it a durable session is refused.
    */
   durableTurns: DurableTurns | undefined
+  /**
+   * This replica's warm Claude Code processes (warm.ts, spec 2026-10-13 §5.3):
+   * one per classic session, serving its turns until it no longer matches
+   * them, goes idle, or is evicted (a handoff, done, an archive, a credential,
+   * plugin or package change on any replica: warmEvict.ts; main.ts LISTENs).
+   */
+  readonly warm: WarmSessions
   private readonly deps: SessionManagerDeps
-  private readonly run: QueryRunner
   private readonly leaseMs: number
   private readonly renewMs: number
   /** Turns running in THIS process, by session id. */
@@ -958,15 +1015,22 @@ export class SessionManager {
       ...(deps.settings ? { settings: deps.settings } : {}),
     })
     this.projection = new PendingProjection(deps.sql)
+    this.warm = new WarmSessions({
+      sql: deps.sql,
+      maxEntries: deps.warm?.maxEntries ?? DEFAULT_WARM_MAX_ENTRIES,
+      idleMs: deps.warm?.idleMs ?? DEFAULT_WARM_IDLE_MS,
+      ...(deps.run ? { start: startedQuery(deps.run) } : {}),
+      ...(deps.warm?.log ? { log: deps.warm.log } : {}),
+    })
     this.edits = new SessionEdits({
       sql: deps.sql,
       events: this.events,
       get: (id, principal) => this.get(id, principal),
       ...(deps.audit ? { audit: deps.audit } : {}),
       endDurable: (id) => this.endDurable(id),
+      warm: this.warm,
     })
     this.runner = new TurnRunner({ ...deps, store: this.store, events: this.events, files: this.files })
-    this.run = deps.run ?? runHarness
     this.leaseMs = deps.leaseMs ?? DEFAULT_LEASE_MS
     this.renewMs = deps.renewMs ?? DEFAULT_RENEW_MS
   }
@@ -1451,7 +1515,11 @@ export class SessionManager {
     const { controller } = local
     const id = session.id
     const sql = this.deps.sql
-    /** The turn's options (TurnRunner), once assembled: the tiers below read them. */
+    /**
+     * The assembly whose process serves the turn (TurnRunner): the turn's own
+     * until the cache answers with a process spawned from another (warmTurn.ts),
+     * whose tiers, redactions and hooks are the turn's from then on.
+     */
     let turn: AssembledTurn | undefined
     const eventTierOf: TierResolver = (name, input) => turn?.eventTierOf(name, input)
     const shownTierOf: TierResolver = (name, input) => turn?.shownTierOf(name, input)
@@ -1471,9 +1539,11 @@ export class SessionManager {
     // finish() throws: segment 0 and its tool bindings never outlive the turn.
     let result: SDKResultMessage | undefined
     let outcome: TurnOutcome = { kind: 'failed', message: 'the turn could not finish' }
+    /** The warm entries the turn ran on (one per attempt): each one's slot is cleared once the turn has finished. */
+    const served: WarmEntry[] = []
     try {
       let lost = false
-      /** Redacted from everything this turn writes to the durable event log. */
+      /** Redacted from everything this turn writes to the durable event log: every assembly's secrets the turn ran with. */
       let secrets: readonly string[] = []
       // One audit row per tool call of this turn (#258, audit/turn.ts).
       const auditor = this.deps.audit
@@ -1544,13 +1614,12 @@ export class SessionManager {
       const flushErrors = async () => {
         for (const m of heldErrors.splice(0)) await show(m)
       }
-      // What the assembled options' callbacks read as the turn (turnSlot.ts).
-      // Each turn has its own query, so its own slot, never cleared: a hook
-      // Claude Code fires after the result (a late Stop retain) still reaches
-      // this turn, as the closures it replaced did.
-      const slot = createTurnSlot()
+      /** The turn's attempts on the session's warm process (warmTurn.ts). */
+      let attempts: WarmTurnRun | undefined
+      /** Whether the attempt about to start continues an earlier one with CONTINUE_PROMPT (fallback.ts): no recall again (#1896). */
+      let continuing = false
       try {
-        turn = await this.runner.assemble(session, principal, slot)
+        turn = await this.runner.assemble(session, principal)
         secrets = turn.secrets
         const gate = this.approvals.gate({
           sessionId: id,
@@ -1580,42 +1649,69 @@ export class SessionManager {
               turnStartedAt: new Date(session.updatedAt),
             })
           : undefined
-        const memory = turn.memory?.(userText, turnId)
-        slot.set({
-          turnId,
-          principal,
-          approvalGate: auditor ? auditor.gate(gate, (toolUseId) => this.approvals.idForToolUse(id, toolUseId)) : gate,
-          ...(questionGate
-            ? {
-                questionGate,
-                waitForTab: waitForTab(questionGate, controller.signal, (questionId) => this.questions.reconnected(id, { questionId })),
-              }
-            : {}),
-          ...(auditor ? { auditor } : {}),
+        const approvalGate = auditor ? auditor.gate(gate, (toolUseId) => this.approvals.idForToolUse(id, toolUseId)) : gate
+        // What the process's callbacks read as the turn (turnSlot.ts): set on
+        // the slot of the assembly its process was spawned from, at each
+        // acquire, before the prompt goes in. On a hit that is not this turn's
+        // own assembly: its secrets, tiers and hooks are the turn's from then on.
+        const onAcquired = ({ entry }: WarmTurn) => {
+          turn = entry.turn
+          secrets = [...new Set([...secrets, ...entry.turn.secrets])]
+          served.push(entry)
+          const memory = entry.turn.memory?.(userText, turnId)
+          entry.turn.slot.set({
+            turnId,
+            principal,
+            approvalGate,
+            ...(questionGate
+              ? {
+                  questionGate,
+                  waitForTab: waitForTab(questionGate, controller.signal, (questionId) => this.questions.reconnected(id, { questionId })),
+                }
+              : {}),
+            ...(auditor ? { auditor } : {}),
+            trace: traced,
+            http: { turnId, signal: controller.signal },
+            ...(memory ? { memory: continuing ? continuationMemory(memory) : memory } : {}),
+            signalInterrupt: () => controller.abort(new Error('the turn was interrupted')),
+          })
+        }
+        const warm = warmAttempts({
+          warm: this.warm,
+          sessionId: id,
+          first: turn,
+          assemble: () => this.runner.assemble(session, principal),
+          stop: controller.signal,
+          acquired: onAcquired,
           trace: traced,
-          http: { turnId, signal: controller.signal },
-          ...(memory ? { memory } : {}),
-          signalInterrupt: () => controller.abort(new Error('the turn was interrupted')),
         })
+        attempts = warm
         const resume = turn.run.resume !== undefined
-        const attempts = runWithFallback(
+        const stream = runWithFallback(
           { ...turn.run, prompt, signal: controller.signal },
           {
             candidates: turn.candidates,
             report: this.deps.credentials.reporter({ sessionId: id, turnId }),
-            // Each attempt's query starts inside the turn's span (runHarness starts it at once).
-            run: (attempt) => otelContext.with(traced.context(), () => this.run(attempt)),
+            // Each attempt runs on the session's warm process, acquired inside the turn's span.
+            run: (attempt) => otelContext.with(traced.context(), () => warm.run(attempt)),
             ...(this.deps.probe ? { probe: this.deps.probe } : {}),
             // A resumed query's total includes what the session spent before
             // (fallback.ts `Spend`), as far as Claude Code priced it (#991).
             ...(resume ? { priorCostUsd: session.ownCostUsd - session.unpricedCostUsd } : {}),
+            // The warm process is the session's own: a turn it serves after
+            // its first sees no init message, and a failed attempt still
+            // continues there (fallback.ts `session`).
+            session: id,
             onRefused: (evidence, judged) => {
               refused = { evidence, ...judged }
             },
-            onAttempt: () => unpriced.newAttempt(),
+            onAttempt: () => {
+              continuing = true
+              unpriced.newAttempt()
+            },
           },
         )
-        for await (const message of attempts) {
+        for await (const message of stream) {
           unpriced.observe(message)
           if (message.type === 'assistant' && message.error) {
             heldErrors.push(message)
@@ -1644,7 +1740,8 @@ export class SessionManager {
           traced.fail(cause)
         }
       } finally {
-        turn?.release()
+        // An assembly the cache never took (the turn ended before an acquire) is still ours to release.
+        attempts?.unused()?.release()
         local.settling = true
         clearInterval(renew)
         await renewing
@@ -1652,12 +1749,15 @@ export class SessionManager {
           controller.signal.aborted ? abortMessage(controller.signal) : (failure ?? 'the turn ended first'),
         )
       }
-      // The loop has ended only after the SDK's last transcript append (measured:
+      // The entry was settled on the result, after the SDK's last transcript
+      // append of the turn (warm.ts `settle` waits for the mirror; measured:
       // `last-prompt` and `cost-state` entries arrive after the `result`
       // message), so releasing the claim here means the next turn, on any
       // replica, resumes from a complete transcript.
       if (lost) {
         outcome = { kind: 'lost_claim' }
+        // Another turn owns the session now, wherever it runs: this process is not kept for it.
+        for (const entry of served) this.warm.abandon(entry, 'lost the turn claim')
         return outcome
       }
       const stopped = controller.signal.aborted ? abortMessage(controller.signal) : undefined
@@ -1670,6 +1770,7 @@ export class SessionManager {
         result && stopped === undefined ? refused : undefined,
         failure,
         secrets,
+        attempts?.spentUsd() ?? 0,
         // Only a turn that did not end on its own can be cut off mid-request;
         // one that did has every request priced in its result.
         stopped !== undefined || !result ? unpriced.usd() : 0,
@@ -1680,6 +1781,12 @@ export class SessionManager {
       throw err
     } finally {
       traced.finish(outcome, result)
+      // The turn has finished, its events written: a hook its process fires
+      // from now on finds no turn (turnSlot.ts). Only this turn's: the next
+      // one may already have claimed the session and set the slot for itself.
+      for (const entry of served) {
+        if (entry.turn.slot.current?.turnId === turnId) entry.turn.slot.clear()
+      }
     }
   }
 
@@ -1696,6 +1803,14 @@ export class SessionManager {
     refused: Refused | undefined,
     failure: string | undefined,
     secrets: readonly string[],
+    /**
+     * What the turn's attempts spent as their results priced it (warmTurn.ts
+     * `spentUsd`): each the difference of its process's cumulative
+     * `total_cost_usd` before and after (spec §6.6; warm.ts `turnCostUsd`), so
+     * a resumed process's carried history and the session's unpriced spend
+     * (#991), which no total holds, are neither counted again nor lost.
+     */
+    turnUsd: number,
     /** What the request the turn was cut off in used, which no result prices (#991, unpricedSpend.ts). */
     cutUsd: number,
   ): Promise<TurnOutcome> {
@@ -1703,20 +1818,7 @@ export class SessionManager {
     let status: SessionStatus
     let outcome: TurnOutcome
     const tail: ServerEvent[] = []
-    // `total_cost_usd` of a RESUMED query already includes the earlier
-    // turns: measured on SDK 0.3.283 and 0.3.287 (0.000105 after turn 1, 0.00021 after
-    // turn 2 of the same session; test/sessions.e2e.test.ts asserts it). The
-    // SDK restores it from the transcript's `cost-state` entry, which holds
-    // only what Claude Code priced: not the session's unpriced spend (#991),
-    // which is added back. If the restore ever fails the total comes back
-    // smaller than what it should have carried, and it is added instead.
-    // `priced` is taken back out of a float sum, so it can come out an ulp or
-    // two above the total the transcript holds ((0.1 + 0.2) - 0.2 > 0.1):
-    // compared with fallback.ts's tolerance (`carries`), as fallback.ts does.
-    // The session's own row, not the lineage's pool (#823): only its own turns are in its transcript.
-    const priced = session.ownCostUsd - session.unpricedCostUsd
-    const fromTotal = (total: number) =>
-      carries(total, priced) ? total + session.unpricedCostUsd : session.ownCostUsd + total
+    // The session's own row, not the lineage's pool (#823): only its own turns ran on its process.
     let costUsd = session.ownCostUsd
     let turns = session.turns
     // An approval still pending here belongs to a call that was waiting when
@@ -1746,14 +1848,14 @@ export class SessionManager {
       // `error_during_execution` (harness/run.ts stopFirst), or a result that
       // raced the stop. The turn reads interrupted either way (#1168); what it
       // spent before it stopped is still counted, the cut-off request too.
-      costUsd = fromTotal(result.total_cost_usd) + cutUsd
+      costUsd = session.ownCostUsd + turnUsd + cutUsd
       turns = session.turns + result.num_turns
       status = 'idle'
       tail.push(event({ type: 'session.result', sessionId: id, costUsd, turns }))
       tail.push(event({ type: 'error', sessionId: id, code: 'interrupted', message: 'the turn was interrupted' }))
       outcome = { kind: 'interrupted' }
     } else if (result) {
-      costUsd = fromTotal(result.total_cost_usd)
+      costUsd = session.ownCostUsd + turnUsd
       if (refused) {
         // Claude Code reports a refused request as a `success` result with
         // `is_error` set, and its "API Error: …" text as a synthetic reply
@@ -2011,6 +2113,11 @@ export class SessionManager {
     await this.events.append(id, [event({ type: 'session.owner', sessionId: id, owner: to })])
     await this.approvals.cancelPending(id, `the session was handed off to ${publicLabel(to)}`)
     await this.questions.cancelPending(id, `the session was handed off to ${publicLabel(to)}`)
+    // Its warm process was spawned for the previous owner (the owner is in the
+    // fingerprint, and its question gate is the browser user's): gone here and
+    // on every other replica (spec 2026-10-13 §5.3, warmEvict.ts).
+    this.warm.evict(id, 'handed off')
+    await notifyWarmEvict(this.deps.sql, id)
     return this.get(id, to)
   }
 
@@ -2247,9 +2354,13 @@ export class SessionManager {
     const within = (ms: number, work: Promise<unknown>) =>
       Promise.race([work, new Promise((resolve) => setTimeout(resolve, ms).unref())])
     await within(graceMs, ended())
-    if (this.active.size === 0) return
-    this.abortAll()
-    await within(abortWaitMs, ended())
+    if (this.active.size > 0) {
+      this.abortAll()
+      await within(abortWaitMs, ended())
+    }
+    // The warm processes go with the pod (spec 2026-10-13 §5.3 "shutdown"): the
+    // idle ones, and a stopped turn's that is still winding down past its wait.
+    await this.warm.close()
   }
 
   /**

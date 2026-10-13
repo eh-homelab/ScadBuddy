@@ -1,14 +1,20 @@
 import { fixedCredentials } from './support/fixedCredentials.js'
+import { spawn } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import { createApp } from '../src/app.js'
+import { CredentialStore } from '../src/credentials.js'
 import { connectDatabase, type Database } from '../src/db.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
+import { runHarness } from '../src/harness/run.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { originPolicy } from '../src/http/origins.js'
 import type { LoggedEvent } from '../src/sessions/eventLog.js'
 import type { SessionManager, SessionManagerDeps } from '../src/sessions/manager.js'
+import { kekFromBase64 } from '../src/secrets.js'
+import { evictOnNotify, WARM_EVICT_CHANNEL } from '../src/sessions/warmEvict.js'
 import {
   displayUpdates,
   type FakeAnthropic,
@@ -52,6 +58,7 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
   let drop: () => Promise<void>
   let stop: AbortController
   const pools: Database[] = []
+  const replicas: SessionManager[] = []
 
   beforeEach(async () => {
     fake = await startFakeAnthropic((r) => script(r))
@@ -61,6 +68,8 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
   })
   afterEach(async () => {
     stop.abort()
+    // Each replica's warm Claude Code processes (sessions/warm.ts), before the pool they mirror into.
+    await Promise.all(replicas.splice(0).map((m) => m.warm.close()))
     await fake.close()
     for (const pool of pools.splice(0)) await pool.close()
     await drop()
@@ -72,16 +81,36 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     await ensureStateDirs(paths)
     const pool = connectDatabase(url, { searchPath: schema })
     pools.push(pool)
-    return manager({
+    const m = manager({
       sql: pool.sql,
       paths,
       credentials: fixedCredentials({ kind: 'gateway', baseUrl: fake.url, secret: 'gw-sessions-test-token' }),
       settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : undefined) as T) },
       ...extra,
     })
+    replicas.push(m)
+    return m
   }
 
   const allEvents = async (m: SessionManager, id: string): Promise<LoggedEvent[]> => m.events.read(id, 0, 10_000)
+
+  /** Counts the Claude Code processes a replica spawns, through HarnessRun's `spawnClaudeCodeProcess` seam. */
+  function counting(): { spawned: () => number; deps: Partial<SessionManagerDeps> } {
+    let n = 0
+    return {
+      spawned: () => n,
+      deps: {
+        run: (run) =>
+          runHarness({
+            ...run,
+            spawnClaudeCodeProcess: (o) => {
+              n++
+              return spawn(o.command, o.args, { cwd: o.cwd, env: o.env, stdio: ['pipe', 'pipe', 'ignore'] })
+            },
+          }),
+      },
+    }
+  }
 
   it('resumes a session on another replica through the Postgres store, with its history', async () => {
     let n = 0
@@ -381,12 +410,12 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     ])
     expect(reports).toEqual(['a: ok'])
     expect(await m.get(session.id, browser)).toMatchObject({ status: 'idle', turns: 1 })
-    // The next turn is a new Claude Code process, which sends the field again,
-    // once: after the refusal it drops it for the rest of the process, so the
-    // two tool calls' follow-up requests go without it.
+    // The next turn runs on the same, warm Claude Code (spec 2026-10-13 §5.3),
+    // which dropped the field for the rest of its life after the refusal: the
+    // turn's three requests, the two tool calls' follow-ups among them, all go
+    // without it, and none is refused. (A fresh process would send it once more.)
     expect(await (await m.send(session.id, browser, 'and a lid')).done).toMatchObject({ kind: 'result', subtype: 'success' })
     expect(asked(fake.messageCalls().slice(2))).toEqual([
-      [`Bearer ${TOKEN_A}`, true],
       [`Bearer ${TOKEN_A}`, false],
       [`Bearer ${TOKEN_A}`, false],
       [`Bearer ${TOKEN_A}`, false],
@@ -745,5 +774,77 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
       'session.result',
       'session.status',
     ])
+  }, 60_000)
+
+  it('two sends in a row use one Claude Code process', async () => {
+    script = () => ({ text: 'OK' })
+    const count = counting()
+    const a = await replica(count.deps)
+    const { session } = await a.start(browser, { origin: 'chat' })
+    expect(await (await a.send(session.id, browser, 'one')).done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(await (await a.send(session.id, browser, 'two')).done).toMatchObject({ kind: 'result', subtype: 'success', turns: 2 })
+    expect(count.spawned()).toBe(1)
+    // The second turn's request carried the first: one conversation, not two.
+    const sent = conversation(fake.messageCalls().at(-1))
+    expect(sent).toContain('one')
+    expect(sent).toContain('two')
+    await a.stopTurns({ graceMs: 0, abortWaitMs: 1_000 })
+    expect(a.warm.size()).toBe(0)
+  }, 60_000)
+
+  it('cost per turn is the difference of total_cost_usd', async () => {
+    script = () => ({ text: 'OK' })
+    const count = counting()
+    const a = await replica(count.deps)
+    const { session } = await a.start(browser, { origin: 'chat' })
+    const first = await (await a.send(session.id, browser, 'one')).done
+    const second = await (await a.send(session.id, browser, 'two')).done
+    expect(count.spawned()).toBe(1)
+    expect(first).toMatchObject({ kind: 'result', costUsd: expect.closeTo(REPLY_COST_USD, 10) })
+    expect(second).toMatchObject({ kind: 'result', costUsd: expect.closeTo(2 * REPLY_COST_USD, 10) })
+    expect((await a.get(session.id, browser)).costUsd).toBeCloseTo(2 * REPLY_COST_USD, 10)
+  }, 60_000)
+
+  it('an interrupt keeps the process', async () => {
+    let hang = true
+    script = () => (hang ? { hang: true } : { text: 'OK' })
+    const count = counting()
+    const a = await replica(count.deps)
+    const { session } = await a.start(browser, { origin: 'chat' })
+    const turn = await a.send(session.id, browser, 'think forever')
+    for (let i = 0; i < 200 && fake.messageCalls().length === 0; i++) await new Promise((r) => setTimeout(r, 50))
+    expect(await a.interrupt(session.id, browser)).toBe(true)
+    expect(await turn.done).toEqual({ kind: 'interrupted' })
+    expect(a.warm.size()).toBe(1)
+    hang = false
+    expect(await (await a.send(session.id, browser, 'reply OK')).done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(count.spawned()).toBe(1)
+  }, 60_000)
+
+  it('handoff evicts', async () => {
+    script = () => ({ text: 'OK' })
+    const a = await replica()
+    const { session } = await a.start(agentA, { origin: 'mcp' })
+    await (await a.send(session.id, agentA, 'one')).done
+    expect(a.warm.size()).toBe(1)
+    await a.handoff(session.id, browser, browser)
+    expect(a.warm.size()).toBe(0)
+  }, 60_000)
+
+  it('a credential change evicts on every replica', async () => {
+    script = () => ({ text: 'OK' })
+    const a = await replica()
+    const b = await replica()
+    for (const [m, pool] of [[a, pools.at(-2)], [b, pools.at(-1)]] as const) {
+      await pool!.sql.listen(WARM_EVICT_CHANNEL, evictOnNotify(m.warm))
+    }
+    const one = await a.start(browser, { origin: 'chat' })
+    const two = await b.start(browser, { origin: 'chat' })
+    await (await a.send(one.session.id, browser, 'one')).done
+    await (await b.send(two.session.id, browser, 'two')).done
+    expect([a.warm.size(), b.warm.size()]).toEqual([1, 1])
+    const kek = kekFromBase64(randomBytes(32).toString('base64'))
+    await new CredentialStore(db.sql).put({ kind: 'gateway', base_url: fake.url, secret: 'gw-another-token' }, kek)
+    await expect.poll(() => [a.warm.size(), b.warm.size()]).toEqual([0, 0])
   }, 60_000)
 })

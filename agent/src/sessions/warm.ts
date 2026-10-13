@@ -15,7 +15,7 @@ import type { Sql } from 'postgres'
 import type { Credential } from '../credentials.js'
 import { carries } from '../harness/fallback.js'
 import { Inbox } from '../harness/inbox.js'
-import { runHarness } from '../harness/run.js'
+import { type HarnessRun, runHarness } from '../harness/run.js'
 import type { AssembledTurn, FingerprintParts } from './turnRunner.js'
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json }
@@ -50,10 +50,17 @@ export function fingerprint(parts: FingerprintParts): string {
 export type WarmOutcome = 'hit' | 'miss' | 'recycle'
 export type RecycleReason = 'fingerprint' | 'tail' | 'budget' | 'evicted'
 
+/**
+ * What the cache needs of a started query: its messages, `interrupt()` (a turn
+ * ends through it, spec §5.3) and `close()` (the process ends through it). The
+ * SDK's Query is one; sessions/manager.ts makes one of a scripted stand-in.
+ */
+export type WarmQuery = AsyncIterable<SDKMessage> & Pick<Query, 'interrupt' | 'close'>
+
 /** One warm Claude Code process: a streaming-input query and the assembly that spawned it (spec §5.3). */
 export type WarmEntry = {
   readonly sessionId: string
-  readonly query: Query
+  readonly query: WarmQuery
   /** What each turn pushes its user message into. */
   readonly inbox: Inbox
   /** The query's one iterator: a turn reads it up to its `result`. */
@@ -78,6 +85,8 @@ export type WarmSessionsDeps = {
   maxEntries: number
   /** `warm_idle_seconds`, in ms: an entry idle this long goes. */
   idleMs: number
+  /** Starts each process's query; `runHarness` (the real Claude Code) when omitted. */
+  start?: (run: HarnessRun) => WarmQuery
   now?: () => number
   log?: (message: string) => void
 }
@@ -183,6 +192,7 @@ export class WarmSessions {
   private readonly deps: WarmSessionsDeps
   private readonly now: () => number
   private readonly log: (message: string) => void
+  private readonly start: (run: HarnessRun) => WarmQuery
   /** By session, least recently used first. */
   private readonly slots = new Map<string, Slot>()
   /** A closed process's transcript appends still in flight, by session: the next spawn waits for them before it loads. */
@@ -194,6 +204,7 @@ export class WarmSessions {
     this.deps = deps
     this.now = deps.now ?? Date.now
     this.log = deps.log ?? (() => {})
+    this.start = deps.start ?? runHarness
   }
 
   /**
@@ -361,7 +372,7 @@ export class WarmSessions {
       : undefined
     const inbox = new Inbox()
     const { resume: _resume, sessionId: _sessionId, ...run } = turn.run
-    const query = runHarness({
+    const query = this.start({
       ...run,
       credential,
       prompt: inbox,
@@ -441,9 +452,28 @@ export class WarmSessions {
     }
     slot.entry.inbox.close()
     slot.entry.query.close()
-    slot.entry.turn.release()
+    try {
+      slot.entry.turn.release()
+    } catch (err) {
+      // A route or directory that would not go is the forwarder's or the
+      // package cache's to report; the process is closed and the entry gone.
+      this.log(`warm: releasing session ${id}'s assembly failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
     this.log(`warm: closed session ${id}'s process: ${reason}`)
   }
+}
+
+/**
+ * What a turn that ended with `result` cost on `entry`'s process: the
+ * process's total less what it stood at before the turn (`total_cost_usd` is
+ * cumulative per process, §2.2), taken before `settle` moves it. For the
+ * first result of a resumed process the baseline is the transcript's carried
+ * cost, unless the restore did not happen (`carries`, as `settle` judges it):
+ * then the total is the turn's own.
+ */
+export function turnCostUsd(entry: WarmEntry, result: SDKResultMessage): number {
+  const before = entry.lastTotalUsd
+  return carries(result.total_cost_usd, before) ? Math.max(result.total_cost_usd - before, 0) : result.total_cost_usd
 }
 
 /**

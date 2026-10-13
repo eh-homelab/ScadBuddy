@@ -8,6 +8,7 @@ import { userMessage } from '../../src/harness/inbox.js'
 import { ensureStateDirs } from '../../src/harness/stateDirs.js'
 import { PostgresSessionStore } from '../../src/sessions/store.js'
 import type { AssembledTurn, FingerprintParts } from '../../src/sessions/turnRunner.js'
+import { createTurnSlot } from '../../src/sessions/turnSlot.js'
 import { type WarmEntry, WarmSessions } from '../../src/sessions/warm.js'
 import { type FakeAnthropic, startFakeAnthropic } from './fakeAnthropic.js'
 import { tempPaths } from './sessions.js'
@@ -66,6 +67,7 @@ export async function warmHarness(db: Throwaway, options: WarmHarnessOptions = {
     httpRequest: false,
     builtinTools: [],
     recallMaxQueryChars: null,
+    transientRetries: null,
   }
   /** A turn's assembly, as TurnRunner.assemble gives it; `release` is a spy. */
   const assembled = (change: Partial<FingerprintParts> = {}): AssembledTurn => ({
@@ -82,6 +84,7 @@ export async function warmHarness(db: Throwaway, options: WarmHarnessOptions = {
     },
     candidates: [],
     fingerprintParts: { ...parts, ...change },
+    slot: createTurnSlot(),
     secrets: [],
     eventTierOf: () => undefined,
     shownTierOf: () => undefined,

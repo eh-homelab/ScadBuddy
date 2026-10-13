@@ -49,6 +49,8 @@ import { bindToolContext, recordFailure, spanContextFrom, tracer, traceparentOf,
 
 export const TURN_SPAN = 'agent.turn'
 export const RESUME_SPAN = 'agent.turn.resume'
+/** The warm cache's acquire for a turn (spec 2026-10-13 §5.3): `warm.outcome` is hit, miss or recycle, `warm.reason` why a recycle. */
+export const WARM_SPAN = 'agent.turn.spawn'
 
 export function toolSpanName(tool: string): string {
   return `agent.tool/${tool}`
@@ -129,6 +131,24 @@ export class TurnTrace implements GateTrace {
   /** The open segment's context: what the turn's own work runs under. */
   context(): Context {
     return trace.setSpan(ROOT_CONTEXT, this.#segment.span)
+  }
+
+  /**
+   * One `agent.turn.spawn` span under the open segment around the warm cache's
+   * acquire (sessions/warm.ts): its outcome and reason, or its failure's class.
+   */
+  async warm<T extends { outcome: string; reason?: string | undefined }>(acquire: () => Promise<T>): Promise<T> {
+    const span = tracer().startSpan(WARM_SPAN, { attributes: this.#ids() }, this.context())
+    try {
+      const acquired = await acquire()
+      span.setAttributes({ 'warm.outcome': acquired.outcome, ...(acquired.reason === undefined ? {} : { 'warm.reason': acquired.reason }) })
+      return acquired
+    } catch (err) {
+      recordFailure(span, err)
+      throw err
+    } finally {
+      span.end()
+    }
   }
 
   #startTool(toolUseId: string, name: string, parent: Context, attributes: Attributes = {}, links: Link[] = []): Span {

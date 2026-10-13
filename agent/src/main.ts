@@ -41,7 +41,8 @@ import { PostgresPairingStore } from './bridge/pairings.js'
 import { CHAT_FRAME_MAX, startHeartbeat } from './routes/chat.js'
 import { storedModel } from './routes/model.js'
 import { followSessionEvents, SessionEventPublisher } from './sessions/busEvents.js'
-import { resolveTabWaits, SessionManager, SETTING_MODEL } from './sessions/manager.js'
+import { DEFAULT_WARM_IDLE_MS, DEFAULT_WARM_MAX_ENTRIES, resolveTabWaits, SessionManager, SETTING_MODEL } from './sessions/manager.js'
+import { evictOnNotify, WARM_EVICT_CHANNEL } from './sessions/warmEvict.js'
 import { drainRetains } from './memory/hindsight.js'
 import { shutdown } from './shutdown.js'
 import { shutdownTelemetry, traceListener } from './telemetry/runtime.js'
@@ -330,8 +331,16 @@ const sessions =
         // Every usable credential in priority order, with fallback; disables,
         // cooldowns, recoveries and fallbacks are audited (#1093).
         credentials: new CredentialPool({ repo: credentials, kek, audit }),
+        // One warm Claude Code per classic session (unified runtime spec 2026-10-13
+        // §5.3, sessions/warm.ts): these are the spec's defaults until Task 2.5
+        // reads `warm_max_per_replica` and `warm_idle_seconds` from Settings.
+        warm: { maxEntries: DEFAULT_WARM_MAX_ENTRIES, idleMs: DEFAULT_WARM_IDLE_MS, log: (message) => console.log(message) },
       })
     : undefined
+// A credential, plugin or package change on any replica, and a session handed
+// off, marked done, archived or forgotten, evict warm processes everywhere
+// (sessions/warmEvict.ts): on the event bus's connection, like the relays above.
+if (sessions && events) events.listenAlso(WARM_EVICT_CHANNEL, evictOnNotify(sessions.warm))
 // MCP prepare/confirm on ai_approvals (approvals/mcp.ts); with no database,
 // the in-memory store above, whose actions are never confirmed.
 if (sessions) toolServices.pending = new ApprovalActions(sessions.approvals)

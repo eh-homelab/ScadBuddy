@@ -166,6 +166,13 @@ export type FallbackOptions = {
    * forgets the earlier attempts' unfinished requests then (unpricedSpend.ts, #1666).
    */
   onAttempt?: () => void
+  /**
+   * The SDK session every attempt runs in, when the caller fixes it: a warm
+   * process is the session's own (sessions/warm.ts, spec 2026-10-13 §5.3), and
+   * a turn it serves after its first sees no init message. A failed attempt
+   * is then continued there as one that reported an init is.
+   */
+  session?: string
 }
 
 /**
@@ -334,7 +341,7 @@ export async function* runWithFallback(
     /** The retry this attempt was stopped at. */
     let refused: FailureEvidence | undefined
     let progressed = false
-    let sessionSeen: string | undefined
+    let sessionSeen: string | undefined = options.session
     let model: string | undefined
     let thrown: unknown
     try {

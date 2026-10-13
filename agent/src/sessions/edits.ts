@@ -5,6 +5,8 @@ import { isDoneSummary } from '../questions/waiting.js'
 import type { EventLog } from './eventLog.js'
 import { SessionError, type SessionRecord } from './manager.js'
 import { event, type Owner, type ServerEvent, sameOwner } from './protocol.js'
+import type { WarmSessions } from './warm.js'
+import { notifyWarmEvict } from './warmEvict.js'
 
 // Renaming a session, marking it done (#795) and archiving it (#1885); PATCH
 // /api/v1/ai/sessions/:id, routes/sessions.ts. Design:
@@ -32,6 +34,8 @@ export type SessionEditsDeps = {
   audit?: AuditLog
   /** Ends a durable session's workflow (#1056); refuses when it cannot be told. */
   endDurable: (id: string) => Promise<void>
+  /** This replica's warm processes (warm.ts): a session marked done or archived loses its own. */
+  warm?: Pick<WarmSessions, 'evict'>
 }
 
 /** Why a `done` summary dismissed by an archive ended, on its card and its audit row. */
@@ -107,6 +111,8 @@ export class SessionEdits {
          WHERE id = ${id}`
       // Told inside the transaction: a workflow that cannot be told leaves the row as it was.
       if (done && before.mode !== 'classic' && before.was !== 'done') await this.deps.endDurable(id)
+      // Its warm process on every replica goes with it (spec 2026-10-13 §5.3, warmEvict.ts): sent on commit.
+      if ((done && before.was !== 'done') || (archive && !before.archived)) await notifyWarmEvict(tx, id)
       const events: ServerEvent[] = []
       if (done && before.was !== 'done') events.push(event({ type: 'session.status', sessionId: id, status: 'done' }))
       let gone: Dismissed[] = []
@@ -124,6 +130,7 @@ export class SessionEdits {
       return gone
     })
     if (logged) this.deps.events.committed(id, logged.events, logged.seqs)
+    if (done || archive) this.deps.warm?.evict(id, done ? 'marked done' : 'archived')
     if (context) {
       const changes = [
         ...(title === undefined ? [] : ['renamed']),

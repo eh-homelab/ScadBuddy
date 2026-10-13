@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
 import { type AuditContext, type AuditSink, SYSTEM_ACTOR } from './audit/log.js'
+import { notifyWarmEvict } from './sessions/warmEvict.js'
 import {
   type Envelope,
   type Kek,
@@ -445,6 +446,9 @@ export class CredentialStore implements CredentialRepo {
           kek_id = ${envelope.kekId}, last4 = ${tail}, updated_at = now(),
           status = 'active', cooldown_until = NULL, last_error = NULL, last_error_at = NULL, epoch = epoch + 1
         WHERE id = ${current.id}`
+      // Every warm Claude Code holds a credential in its env (spec 2026-10-13 §6.7): the
+      // caches are told on commit (sessions/warmEvict.ts), as by every write below.
+      await notifyWarmEvict(tx, '*')
       return await this.one(tx, current.id)
     })
   }
@@ -469,6 +473,7 @@ export class CredentialStore implements CredentialRepo {
       INSERT INTO ai_credentials (id, priority, kind, base_url, secret_sealed, dek_sealed, kek_id, last4)
       VALUES (${id}, (SELECT COALESCE(MAX(priority) + 1, 0) FROM ai_credentials), ${kind}, ${baseUrl},
               ${envelope.secretSealed}, ${envelope.dekSealed}, ${envelope.kekId}, ${tail})`
+    await notifyWarmEvict(tx, '*')
     return await this.one(tx, id)
   }
 
@@ -489,6 +494,7 @@ export class CredentialStore implements CredentialRepo {
         UPDATE ai_credentials c SET priority = n.rn - 1
         FROM (SELECT id, row_number() OVER (ORDER BY priority) AS rn FROM ai_credentials) n
         WHERE c.id = n.id AND c.priority <> n.rn - 1`
+      await notifyWarmEvict(tx, '*')
       return true
     })
   }
@@ -505,6 +511,7 @@ export class CredentialStore implements CredentialRepo {
         UPDATE ai_credentials c SET priority = v.ord - 1
         FROM unnest(${tx.array([...ids])}::text[]) WITH ORDINALITY AS v(id, ord)
         WHERE c.id = v.id`
+      await notifyWarmEvict(tx, '*')
       return await this.rows(tx)
     })
   }
@@ -514,7 +521,9 @@ export class CredentialStore implements CredentialRepo {
       UPDATE ai_credentials SET status = 'active', cooldown_until = NULL, last_error = NULL, last_error_at = NULL,
         epoch = epoch + 1
       WHERE id = ${id}`
-    return updated.count === 0 ? undefined : await this.get(id)
+    if (updated.count === 0) return undefined
+    await notifyWarmEvict(this.sql, '*')
+    return await this.get(id)
   }
 
   async record(id: string, epoch: number, event: CredentialEvent): Promise<CredentialTransition | undefined> {

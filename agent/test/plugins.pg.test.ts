@@ -349,7 +349,9 @@ describe.skipIf(!TEST_DATABASE_URL)(
         // Claude Code gets the forwarder's loopback URL, never the endpoint or the secret.
         expect(run?.remotePlugins?.[0]?.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/p\//)
         expect(JSON.stringify(run?.remotePlugins)).not.toContain(TOKEN)
-        // Released when the turn ended.
+        // Held while the process is warm (spec 2026-10-13 §5.3): released with it.
+        expect(forwarder.size).toBe(1)
+        m.warm.evict(session.id, 'the test')
         expect(forwarder.size).toBe(0)
 
         const logged = (
