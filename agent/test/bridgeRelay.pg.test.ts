@@ -251,6 +251,19 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser calls across replicas${TEST_DATABAS
     }
   })
 
+  it('writes a session tab only while it is still the one seen (#2271 review)', async () => {
+    const store = new PostgresSessionTabStore(db.sql)
+    const id = await chatSession()
+    expect(await store.setIf(id, 'tab-a', 'tab-x')).toBe(false) // no row: only an absent tab matches
+    expect(await store.get(id)).toBeUndefined()
+    expect(await store.setIf(id, 'tab-a', undefined)).toBe(true)
+    expect(await store.setIf(id, 'tab-b', undefined)).toBe(false) // a row now
+    expect(await store.setIf(id, 'tab-b', 'tab-x')).toBe(false)
+    expect(await store.get(id)).toBe('tab-a')
+    expect(await store.setIf(id, 'tab-b', 'tab-a')).toBe(true)
+    expect(await store.get(id)).toBe('tab-b')
+  })
+
   it('keeps a tab connected here local: nothing goes through the database', async () => {
     const t = await tab(a.hub, () => ({ ok: true, result: 1 }))
     a.hub.pairSession('s1', TAB)

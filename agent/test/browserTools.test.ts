@@ -322,7 +322,7 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     const chat = new ChatConnection(sessions, () => {}, { tabs: hub })
     await chat.receive(JSON.stringify({ v, type: 'tab.bind', tabId: TAB }))
     await chat.receive(JSON.stringify({ v, type: 'user.message', text: 'hi', context }))
-    expect(await hub.sessionHasTab('s-new')).toBe(true)
+    expect((await hub.sessionTab('s-new')).connected).toBe(true)
     expect((await hub.status({ principal: browser, sessionId: 's-new' })).attached).toBe(true)
 
     // Another tab's panel attaching to it does not steal it; sending from there does.
@@ -356,7 +356,7 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     here.pairSession('s-new', TAB)
     there.pairSession('s-new', OTHER_TAB)
     await new Promise((r) => setTimeout(r, 0))
-    expect(await here.sessionHasTab('s-new')).toBe(false)
+    expect((await here.sessionTab('s-new')).connected).toBe(false)
 
     const { sessions } = fakeSessions()
     const chat = new ChatConnection(sessions, () => {}, { tabs: here })
@@ -395,7 +395,7 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     await tab(here, TAB)
     rows.set('s-new', OTHER_TAB) // an older pairing, on a tab nobody holds now
     here.pairSession('s-new', TAB)
-    expect(await here.sessionHasTab('s-new')).toBe(true)
+    expect((await here.sessionTab('s-new')).connected).toBe(true)
     expect(await here.status({ principal: browser, sessionId: 's-new' })).toMatchObject({ attached: true, via: 'session' })
     expect(logged.join('\n')).toMatch(/session tab write failed/)
 
@@ -404,7 +404,7 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     here.pairSession('s-new', TAB)
     await tick()
     rows.set('s-new', OTHER_TAB) // another replica paired it since
-    expect(await here.sessionHasTab('s-new')).toBe(false)
+    expect((await here.sessionTab('s-new')).connected).toBe(false)
   })
 
   it("leaves a session alone when attached from another tab while another replica holds the session's tab", async () => {
@@ -413,7 +413,7 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     const here = new TabHub({ sessionTabs: store, relay })
     await tab(here, TAB)
     rows.set('s-new', OTHER_TAB) // paired on the replica that holds OTHER_TAB
-    expect(await here.sessionHasTab('s-new')).toBe(true)
+    expect((await here.sessionTab('s-new')).connected).toBe(true)
 
     const { sessions } = fakeSessions()
     const chat = new ChatConnection(sessions, () => {}, { tabs: here })
@@ -436,7 +436,7 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     const here = new TabHub({ sessionTabs: store, relay, log: (m) => logged.push(m) })
     await tab(here, TAB)
     rows.set('s-new', OTHER_TAB)
-    expect(await here.sessionHasTab('s-new')).toBe(false)
+    expect((await here.sessionTab('s-new')).connected).toBe(false)
     expect(logged.join('\n')).toMatch(/bridge insert failed/)
 
     const events: string[] = []
@@ -508,6 +508,49 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     b.close()
   })
 
+  it('compares and pairs in one write where the store can, so no pairing lands between (#2271 review)', async () => {
+    const { rows } = sharedRows()
+    const held: ((tabId: string | undefined) => void)[] = []
+    let reads = 0
+    const store: SessionTabStore = {
+      set: async (sessionId, tabId) => {
+        rows.set(sessionId, tabId)
+      },
+      // The attach's reads are held: the first is its check; a second would be a
+      // re-read before writing, the gap a compare-and-set closes.
+      get: async (sessionId) =>
+        ++reads <= 2 ? new Promise<string | undefined>((resolve) => held.push(resolve)) : rows.get(sessionId),
+      setIf: async (sessionId, tabId, seen) => {
+        if (rows.get(sessionId) !== seen) return false
+        rows.set(sessionId, tabId)
+        return true
+      },
+    }
+    const here = new TabHub({ sessionTabs: store })
+    const there = new TabHub({ sessionTabs: store })
+    await tab(here, TAB)
+    await tab(there, OTHER_TAB)
+    const { sessions } = fakeSessions()
+    const a = new ChatConnection(sessions, () => {}, { tabs: here })
+    const b = new ChatConnection(sessions, () => {}, { tabs: there })
+    await a.receive(JSON.stringify({ v, type: 'tab.bind', tabId: TAB }))
+    await b.receive(JSON.stringify({ v, type: 'tab.bind', tabId: OTHER_TAB }))
+
+    await a.receive(JSON.stringify({ v, type: 'session.attach', sessionId: 's-new' }))
+    await tick()
+    held.shift()!(undefined) // A's check: no tab yet
+    await tick()
+    // B pairs while A is between its check and its write.
+    await b.receive(JSON.stringify({ v, type: 'user.message', sessionId: 's-new', text: 'hi', context }))
+    await tick()
+    held.shift()?.(undefined) // a stale re-read, if A made one
+    await tick()
+    await tick()
+    expect(rows.get('s-new')).toBe(OTHER_TAB)
+    a.close()
+    b.close()
+  })
+
   it('pairs nothing when the socket closes while the check is out (#2271)', async () => {
     let answer!: (value: { tabId: string | undefined; connected: boolean }) => void
     const paired: string[] = []
@@ -535,7 +578,7 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     const { sessions } = fakeSessions()
     const chat = new ChatConnection(sessions, () => {}, { tabs: hub })
     await chat.receive(JSON.stringify({ v, type: 'user.message', text: 'hi', context }))
-    expect(await hub.sessionHasTab('s-new')).toBe(false)
+    expect((await hub.sessionTab('s-new')).connected).toBe(false)
     chat.close()
   })
 })
@@ -661,7 +704,7 @@ describe('waiting for the tab (#815)', () => {
     hub.pairSession('s1', TAB)
     await new Promise((r) => setTimeout(r, 0))
     expect(logged.join('\n')).toMatch(/db down/)
-    expect(await hub.sessionHasTab('s1')).toBe(true)
+    expect((await hub.sessionTab('s1')).connected).toBe(true)
   })
 
   it('waits on no tab, then runs a read call once the tab is back', async () => {

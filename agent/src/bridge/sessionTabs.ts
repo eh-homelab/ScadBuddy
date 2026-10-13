@@ -8,6 +8,12 @@ import type { Sql } from 'postgres'
 
 export interface SessionTabStore {
   set(sessionId: string, tabId: string): Promise<void>
+  /**
+   * `set`, only while the session's tab is still `seen` (no row, for undefined), in
+   * one statement: a pairing made between a read and this write is never lost (#2271).
+   * Whether it wrote. Optional: without it the hub compares, then writes.
+   */
+  setIf?(sessionId: string, tabId: string, seen: string | undefined): Promise<boolean>
   /** `signal` stops the read with the call it is for. */
   get(sessionId: string, signal?: AbortSignal): Promise<string | undefined>
 }
@@ -23,6 +29,18 @@ export class PostgresSessionTabStore implements SessionTabStore {
     await this.#sql`
       INSERT INTO ai_session_tabs (session_id, tab_id) VALUES (${sessionId}, ${tabId})
       ON CONFLICT (session_id) DO UPDATE SET tab_id = EXCLUDED.tab_id, paired_at = now()`
+  }
+
+  async setIf(sessionId: string, tabId: string, seen: string | undefined): Promise<boolean> {
+    const rows =
+      seen === undefined
+        ? await this.#sql`
+            INSERT INTO ai_session_tabs (session_id, tab_id) VALUES (${sessionId}, ${tabId})
+            ON CONFLICT (session_id) DO NOTHING RETURNING 1`
+        : await this.#sql`
+            UPDATE ai_session_tabs SET tab_id = ${tabId}, paired_at = now()
+            WHERE session_id = ${sessionId} AND tab_id = ${seen} RETURNING 1`
+    return rows.length > 0
   }
 
   async get(sessionId: string, signal?: AbortSignal): Promise<string | undefined> {
