@@ -5,11 +5,12 @@ import { PRINTERS_NOW, setPrintersNow } from '../../mocks/features/printersNow'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { resetBambuddyLinks, setBambuddyLinks } from '../../lib/bambuddyLinks'
+import type * as Embed from '../../lib/embed'
 import { NOW_POLL_MS, NowPrinting } from './NowPrinting'
 
 const frame = vi.hoisted(() => ({ embedded: false }))
 vi.mock('../../lib/embed', async (original) => ({
-  ...(await original<typeof import('../../lib/embed')>()),
+  ...(await original<typeof Embed>()),
   isEmbedded: () => frame.embedded,
 }))
 
