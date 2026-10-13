@@ -865,7 +865,10 @@ occurrence is given up after an hour busy). Bounds: 10 active tasks per session;
 recurring cron jobs expire after 7 days, as Claude Code's; one wakeup at a time, clamped
 to [60, 3600] s. Cron times are in the agent's timezone (`TZ`, UTC unless the
 deployment sets one), which every answer names. The panel lists a session's running tasks
-above the conversation and its owner cancels them (`routes/backgroundTasks.ts`).
+above the conversation and its owner cancels them (`routes/backgroundTasks.ts`). A
+task's workflow is `bgtask-<session id>-<task id>`, which both payload codecs seal under
+the session's data key; archiving the chat or marking it done ends its tasks, and
+`forgetSubject` ends them and terminates their workflows before it deletes the key.
 `Monitor`, `Workflow` and `PushNotification` are not provided yet, and the session says so. The
 Temporal plugin owns the engine's settings, so a durable turn cannot set
 `disableSkillShellExecution`, and skill shell injection follows Claude Code's default
