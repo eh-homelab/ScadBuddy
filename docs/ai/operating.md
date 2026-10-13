@@ -640,7 +640,7 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   (plan `2026-10-09-durable-phase-5d-mode.md`). Both modes get the same tools, plugins
   (a browser among them, as the `playwright` remote plugin, #2568), packages,
   `http_request`, Hindsight, subagents and settings (#2320, spec 2026-10-01 §6.3b), with
-  three differences: forking is classic-only; a durable subagent has ScadBuddy's own tools
+  two differences: a durable subagent has ScadBuddy's own tools
   only, through the agent's loopback server (`routes/subagentMcp.ts`), since the Temporal
   plugin refuses a subagent the turn's durable tools; and of the built-ins an
   `allow_refused` package names, a durable turn offers only `Bash` and `PowerShell`, each
@@ -715,7 +715,11 @@ its $1.00 budget.") and offers:
   into a new session with the current Settings budget, owned by the browser user, and
   the panel switches to it. It counts against the new-session limit (`429`). With
   `up_to` (a reply's panel message id, #793) it copies the conversation only through
-  that reply. Each fork, from this route or the `sessions_fork` tool, is a `resource`
+  that reply. A fork runs in its parent's mode: a durable parent's conversation is read
+  from its workflow (the `fork_point` Query) and the child's workflow starts with a copy,
+  sealed under the child's own key (#2688); its replies are matched to the transcript by
+  their text, and a parent whose turn is running forks at its last finished reply.
+  Each fork, from this route or the `sessions_fork` tool, is a `resource`
   audit row (action `session_fork`), written once the fork is complete; a rename or
   mark-done (`PATCH /api/v1/ai/sessions/:id`) is one with action `session_update`.
 - **Raise this chat's budget**: `POST /api/v1/ai/sessions/:id/budget` `{add_usd}`
