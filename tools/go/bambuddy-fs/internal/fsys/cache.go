@@ -124,8 +124,20 @@ func (n *file) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 		return nil, 0, syscall.EROFS
 	}
 	// While a write is pending, every handle reads and writes its contents.
-	if h := n.attach(write, false); h != nil {
+	if h, errno := n.attach(write, false); errno != 0 {
+		return nil, 0, errno
+	} else if h != nil {
 		return h, 0, 0
+	}
+	// A queued write is read from its local copy, unless it was sent meanwhile.
+	if e := n.entry(); e != nil {
+		fh, err := os.Open(e.contents())
+		if err == nil {
+			return &handle{f: fh}, 0, 0
+		}
+		if n.entry() == e {
+			return nil, 0, failed("open", err, "path", e.dir)
+		}
 	}
 	f := n.current()
 	if f.ID == 0 {

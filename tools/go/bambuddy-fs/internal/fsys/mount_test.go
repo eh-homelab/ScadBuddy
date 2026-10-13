@@ -38,6 +38,9 @@ func mountRoot(t *testing.T, lib Library, opts Options) (string, *dir) {
 	if opts.CacheDir == "" {
 		opts.CacheDir = t.TempDir()
 	}
+	if opts.StateDir == "" {
+		opts.StateDir = t.TempDir()
+	}
 	ttl := opts.TTL
 	root := NewRoot(lib, opts).(*dir)
 	server, err := fs.Mount(mnt, root, &fs.Options{EntryTimeout: &ttl, AttrTimeout: &ttl})

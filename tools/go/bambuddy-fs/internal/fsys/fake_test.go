@@ -29,8 +29,11 @@ type fakeLibrary struct {
 	folderDeleted map[int]bool
 	// busy files are refused by a delete, as a queued print's file is.
 	busy map[int]bool
-	// failUploads is how many uploads fail, with a 502, before they succeed.
+	// failUploads is how many uploads fail, with failStatus (else 502), before they
+	// succeed; while down is set every upload fails so.
 	failUploads int
+	failStatus  int
+	down        bool
 	// uploading, if set, is called at the start of each upload with its attempt number.
 	uploading func(attempt int)
 	attempts  int
@@ -63,6 +66,13 @@ func (l *fakeLibrary) file(id int, name string, folder int, data []byte) {
 	created := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 	l.files[id] = api.File{ID: id, Name: name, FolderID: folder, Size: int64(len(data)), Created: created}
 	l.data[id] = data
+}
+
+// setDown makes every upload fail, or none.
+func (l *fakeLibrary) setDown(down bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.down = down
 }
 
 func (l *fakeLibrary) remove(id int) {
@@ -124,9 +134,18 @@ func (l *fakeLibrary) Upload(_ context.Context, folderID int, name string, r io.
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.failUploads > 0 {
-		l.failUploads--
-		return api.File{}, &api.Error{Op: "upload", Status: http.StatusBadGateway}
+	if l.down || l.failUploads > 0 {
+		if !l.down {
+			l.failUploads--
+		}
+		status := l.failStatus
+		if status == 0 {
+			status = http.StatusBadGateway
+		}
+		return api.File{}, &api.Error{Op: "upload", Status: status}
+	}
+	if folderID != 0 && !slices.ContainsFunc(l.folders, func(f api.Folder) bool { return f.ID == folderID }) {
+		return api.File{}, &api.Error{Op: "upload", Status: http.StatusNotFound, Detail: "folder not found"}
 	}
 	l.uploads++
 	l.nextID++

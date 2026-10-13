@@ -40,7 +40,7 @@ func (d *dir) Create(ctx context.Context, name string, _, _ uint32, out *fuse.En
 		return nil, nil, 0, errno
 	}
 	n := &file{tree: d.tree, file: api.File{Name: name, FolderID: d.id, Created: time.Now().UTC()}}
-	w := n.attach(true, true)
+	w, _ := n.attach(true, true)
 	n.attr(&out.Attr)
 	// Ino 0: go-fuse numbers it until the upload gives the file an ID.
 	return d.NewInode(ctx, n, fs.StableAttr{Mode: syscall.S_IFREG}), w, 0, 0
@@ -67,7 +67,7 @@ func (d *dir) Unlink(ctx context.Context, name string) syscall.Errno {
 	if d.tree.opts.ReadOnly {
 		return syscall.EROFS
 	}
-	l, errno := d.tree.list(ctx, d.id)
+	l, errno := d.tree.view(ctx, d.id)
 	if errno != 0 {
 		return errno
 	}
@@ -76,7 +76,15 @@ func (d *dir) Unlink(ctx context.Context, name string) syscall.Errno {
 		if _, isDir := l.folders[name]; isDir {
 			return syscall.EISDIR
 		}
-		if child, _ := d.unsent(name); child != nil {
+		child, n := d.unsent(name)
+		e := l.queued[name]
+		if e == nil && n != nil {
+			e = n.entry()
+		}
+		if e != nil {
+			return d.tree.unqueue(ctx, e)
+		}
+		if child != nil {
 			// Never uploaded: its writer finds it unlinked and sends nothing.
 			return 0
 		}
@@ -88,6 +96,25 @@ func (d *dir) Unlink(ctx context.Context, name string) syscall.Errno {
 		return failed("unlink", err, "file", f.ID)
 	}
 	d.tree.cache.drop(f.ID)
+	return 0
+}
+
+// unqueue removes a queued write, and the stored file it replaces, which the write
+// had already emptied or overwritten.
+func (t *tree) unqueue(ctx context.Context, e *entry) syscall.Errno {
+	rec, ok := t.unsent.record(e)
+	if !ok {
+		return 0
+	}
+	if id := rec.Base.id(); id != 0 {
+		err := t.lib.DeleteFiles(ctx, id)
+		t.forgetAll()
+		if err != nil && api.Errno(err) != syscall.ENOENT {
+			return failed("unlink", err, "file", id)
+		}
+		t.cache.drop(id)
+	}
+	t.unsent.drop(e)
 	return 0
 }
 
@@ -118,7 +145,9 @@ func (d *dir) Rmdir(ctx context.Context, name string) syscall.Errno {
 }
 
 // Rename renames and/or moves a file or folder with one update. A name that is taken
-// is EEXIST: the library cannot replace an entry atomically.
+// is EEXIST: the library cannot replace an entry atomically. The one exception is a
+// write not sent yet moved onto a name only a queued save holds: the later save
+// supersedes the earlier, which is dropped (#2865).
 func (d *dir) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
 	if d.tree.opts.ReadOnly {
 		return syscall.EROFS
@@ -127,11 +156,18 @@ func (d *dir) Rename(ctx context.Context, name string, newParent fs.InodeEmbedde
 	if !ok || flags&fs.RENAME_EXCHANGE != 0 {
 		return syscall.ENOTSUP
 	}
-	l, errno := d.tree.list(ctx, d.id)
+	l, errno := d.tree.view(ctx, d.id)
 	if errno != 0 {
 		return errno
 	}
-	if errno := d.free(ctx, to, newName); errno != 0 {
+	var over *entry
+	if errno := d.free(ctx, to, newName); errno == syscall.EEXIST {
+		_, isDir := l.folders[name]
+		_, isFile := l.files[name]
+		if over = to.queuedAt(ctx, newName); over == nil || isDir || isFile {
+			return errno
+		}
+	} else if errno != 0 {
 		return errno
 	}
 	defer d.tree.forget(to.id)
@@ -161,14 +197,53 @@ func (d *dir) Rename(ctx context.Context, name string, newParent fs.InodeEmbedde
 		}
 		return 0
 	}
-	if _, n := d.unsent(name); n != nil {
-		// Not uploaded yet: it will be uploaded under its new name.
+	// Not uploaded yet: it will be uploaded under its new name.
+	_, n := d.unsent(name)
+	e := l.queued[name]
+	if e == nil && n != nil {
+		e = n.entry()
+	}
+	if n == nil && e == nil {
+		return syscall.ENOENT
+	}
+	if e != nil {
+		err := d.tree.unsent.update(e, func(r *record) { r.Name, r.FolderID = newName, to.id })
+		if err == nil {
+			err = d.tree.unsent.supersede(e)
+		}
+		if err != nil {
+			return errQueue(err, "path", e.dir)
+		}
+	} else if over != nil {
+		d.tree.unsent.drop(over)
+	}
+	if n != nil {
 		f := n.current()
 		f.Name, f.FolderID = newName, to.id
 		n.set(f)
-		return 0
 	}
-	return syscall.ENOENT
+	return 0
+}
+
+// queuedAt is the queued save that alone holds name in d, if one does.
+func (d *dir) queuedAt(ctx context.Context, name string) *entry {
+	v, errno := d.tree.view(ctx, d.id)
+	if errno != 0 {
+		return nil
+	}
+	if _, isDir := v.folders[name]; isDir {
+		return nil
+	}
+	if _, isFile := v.files[name]; isFile {
+		return nil
+	}
+	if e := v.queued[name]; e != nil {
+		return e
+	}
+	if _, n := d.unsent(name); n != nil {
+		return n.entry()
+	}
+	return nil
 }
 
 // changes is what a rename sends: within a folder always the name, and on a move the
@@ -183,15 +258,15 @@ func changes(name, newName string, from, to int) (*string, *int) {
 	return &newName, &to
 }
 
-// free is EEXIST if name is shown in in, or is a file being created there.
+// free is EEXIST if name is shown in in, or is a file being created or queued there.
 func (d *dir) free(ctx context.Context, in *dir, name string) syscall.Errno {
-	l, errno := d.tree.list(ctx, in.id)
+	l, errno := d.tree.view(ctx, in.id)
 	if errno != 0 {
 		return errno
 	}
 	_, isDir := l.folders[name]
 	_, isFile := l.files[name]
-	if child, _ := in.unsent(name); isDir || isFile || child != nil {
+	if child, _ := in.unsent(name); isDir || isFile || child != nil || l.queued[name] != nil {
 		return syscall.EEXIST
 	}
 	return 0

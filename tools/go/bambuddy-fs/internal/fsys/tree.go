@@ -7,6 +7,8 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"maps"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -33,17 +35,23 @@ type Library interface {
 var _ Library = (*api.Client)(nil)
 
 // Options are the mount's settings. All lists every file type, ReadOnly refuses every
-// write with EROFS, TTL is how long a folder's listing is kept, and CacheDir holds
-// downloaded contents and files being written.
+// write with EROFS, TTL is how long a folder's listing is kept, CacheDir holds
+// downloaded contents and files being written, and StateDir the writes whose upload
+// failed, under unsent/ (#2865).
 type Options struct {
-	All, ReadOnly bool
-	TTL           time.Duration
-	CacheDir      string
+	All, ReadOnly      bool
+	TTL                time.Duration
+	CacheDir, StateDir string
 }
 
-// NewRoot returns the root directory, the library's top level.
+// NewRoot returns the root directory, the library's top level, with the unsent writes
+// under opts.StateDir queued (RetryUnsent sends them).
 func NewRoot(lib Library, opts Options) fs.InodeEmbedder {
-	t := &tree{lib: lib, opts: opts, cache: newCache(opts.CacheDir), listings: map[int]listing{}}
+	t := &tree{
+		lib: lib, opts: opts, cache: newCache(opts.CacheDir), listings: map[int]listing{},
+		unsent: newQueue(filepath.Join(opts.StateDir, "unsent")),
+	}
+	t.unsent.load()
 	return &dir{tree: t}
 }
 
@@ -52,6 +60,8 @@ type tree struct {
 	lib   Library
 	opts  Options
 	cache *cache
+	// unsent is the writes whose upload failed (#2865).
+	unsent *queue
 
 	mu       sync.Mutex
 	listings map[int]listing
@@ -86,6 +96,46 @@ func (t *tree) list(ctx context.Context, folderID int) (listing, syscall.Errno) 
 	t.listings[folderID] = l
 	t.mu.Unlock()
 	return l, 0
+}
+
+// view is a folder as the mount shows it: its listing without the stored files that
+// queued writes replace, and the queued writes whose names no listed entry has, by
+// name. A queued write that names a listed entry stays queued but is not shown, so a
+// name never shows twice.
+type view struct {
+	listing
+	queued map[string]*entry
+}
+
+func (t *tree) view(ctx context.Context, folderID int) (view, syscall.Errno) {
+	l, errno := t.list(ctx, folderID)
+	if errno != 0 {
+		return view{}, errno
+	}
+	queued, replaced := t.unsent.in(folderID)
+	if len(replaced) > 0 {
+		l.files = maps.Clone(l.files)
+		maps.DeleteFunc(l.files, func(_ string, f api.File) bool { return replaced[f.ID] })
+	}
+	for name := range queued {
+		_, isDir := l.folders[name]
+		if _, isFile := l.files[name]; isDir || isFile {
+			delete(queued, name)
+		}
+	}
+	return view{listing: l, queued: queued}, 0
+}
+
+// listedCreated is a file's created_at in its folder's cached listing, or zero.
+func (t *tree) listedCreated(f api.File) time.Time {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, lf := range t.listings[f.FolderID].files {
+		if lf.ID == f.ID {
+			return lf.Created
+		}
+	}
+	return time.Time{}
 }
 
 // forget drops a folder's cached listing.
@@ -128,7 +178,7 @@ var (
 )
 
 func (d *dir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	l, errno := d.tree.list(ctx, d.id)
+	l, errno := d.tree.view(ctx, d.id)
 	if errno != 0 {
 		return nil, errno
 	}
@@ -146,24 +196,35 @@ func (d *dir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.
 		n.attr(&out.Attr)
 		return child, 0
 	}
+	if e := l.queued[name]; e != nil {
+		if rec, ok := d.tree.unsent.record(e); ok {
+			n := &file{tree: d.tree, file: api.File{Name: rec.Name, FolderID: rec.FolderID, Size: rec.Size, Created: rec.Created}, queued: e}
+			child := d.NewInode(ctx, n, fs.StableAttr{Mode: syscall.S_IFREG, Ino: queueIno(e.seq)})
+			if n, ok := child.Operations().(*file); ok {
+				n.bind(e)
+				n.attr(&out.Attr)
+			}
+			return child, 0
+		}
+	}
 	return nil, syscall.ENOENT
 }
 
 // unsent returns the child called name if it is a file created here and not uploaded
-// yet, which no listing has.
+// yet, which no listing has, or a queued write.
 func (d *dir) unsent(name string) (*fs.Inode, *file) {
 	child := d.GetChild(name)
 	if child == nil {
 		return nil, nil
 	}
-	if n, ok := child.Operations().(*file); ok && n.current().ID == 0 {
+	if n, ok := child.Operations().(*file); ok && (n.current().ID == 0 || n.entry() != nil) {
 		return child, n
 	}
 	return nil, nil
 }
 
 func (d *dir) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	l, errno := d.tree.list(ctx, d.id)
+	l, errno := d.tree.view(ctx, d.id)
 	if errno != 0 {
 		return nil, errno
 	}
@@ -174,9 +235,17 @@ func (d *dir) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	for name, f := range l.files {
 		entries = append(entries, fuse.DirEntry{Name: name, Mode: syscall.S_IFREG, Ino: fileIno(f.ID)})
 	}
+	for name, e := range l.queued {
+		ino := queueIno(e.seq)
+		if child, _ := d.unsent(name); child != nil {
+			ino = child.StableAttr().Ino
+		}
+		entries = append(entries, fuse.DirEntry{Name: name, Mode: syscall.S_IFREG, Ino: ino})
+	}
 	for name, child := range d.Children() {
-		if _, isListed := l.files[name]; !isListed {
-			if n, ok := child.Operations().(*file); ok && n.current().ID == 0 {
+		_, isListed := l.files[name]
+		if _, isQueued := l.queued[name]; !isListed && !isQueued {
+			if n, ok := child.Operations().(*file); ok && n.current().ID == 0 && n.entry() == nil {
 				entries = append(entries, fuse.DirEntry{Name: name, Mode: syscall.S_IFREG, Ino: child.StableAttr().Ino})
 			}
 		}
@@ -197,7 +266,8 @@ func (d *dir) attr(out *fuse.Attr) {
 
 // file is a library file. Its bytes, size and creation time never change for its ID:
 // a write uploads a new file under the same name (pending.upload). A file created here
-// has ID 0 until its first upload gives it one.
+// has ID 0 until its first upload gives it one. A queued write (#2865) is a file whose
+// entry is set, read from its local copy until it is sent.
 type file struct {
 	fs.Inode
 	tree *tree
@@ -206,6 +276,36 @@ type file struct {
 	file api.File
 	// pending is the file's write while handles are open on it; its size is the file's.
 	pending *pending
+	// queued is the file's unsent write, if its upload failed.
+	queued *entry
+}
+
+func (n *file) entry() *entry {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.queued
+}
+
+// bind makes the node the queued write e's, or no queued write's if e is nil.
+func (n *file) bind(e *entry) {
+	n.mu.Lock()
+	n.queued = e
+	n.mu.Unlock()
+	if e != nil {
+		n.tree.unsent.bind(e, n)
+	}
+}
+
+// notify has the kernel look the node's name up again, as a sent queued write's
+// inode number changes.
+func (n *file) notify() {
+	name, parent := n.Parent()
+	if parent == nil {
+		return
+	}
+	if errno := parent.NotifyEntry(name); errno != 0 && errno != syscall.ENOENT {
+		slog.Warn("entry invalidation failed", "name", name, "err", errno)
+	}
 }
 
 func (n *file) current() api.File {
@@ -232,7 +332,7 @@ func (n *file) Getattr(_ context.Context, _ fs.FileHandle, out *fuse.AttrOut) sy
 
 func (n *file) attr(out *fuse.Attr) {
 	n.mu.Lock()
-	f, p := n.file, n.pending
+	f, p, e := n.file, n.pending, n.queued
 	n.mu.Unlock()
 	out.Mode = syscall.S_IFREG | n.tree.mode(0o644)
 	// A link count of 0 means unlinked: link(2) would answer ENOENT.
@@ -240,6 +340,10 @@ func (n *file) attr(out *fuse.Attr) {
 	out.Size = uint64(f.Size)
 	if p != nil {
 		out.Size = uint64(p.size.Load())
+	} else if e != nil {
+		if rec, ok := n.tree.unsent.record(e); ok {
+			out.Size = uint64(rec.Size)
+		}
 	}
 	out.SetTimes(&f.Created, &f.Created, &f.Created)
 }

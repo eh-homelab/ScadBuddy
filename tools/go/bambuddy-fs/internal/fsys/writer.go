@@ -2,6 +2,7 @@ package fsys
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -17,7 +18,8 @@ import (
 
 // Writes (spec §8). Bambuddy has no in-place write, so a file is written to a temp
 // file under the cache directory and uploaded when it is closed, and writing over a
-// name uploads a new file and then deletes the old one.
+// name uploads a new file and then deletes the old one. A failed upload's file moves
+// to the unsent queue (unsent.go, #2865) and is written there from then on.
 
 // uploadTimeout bounds an upload, which runs detached from the request that started
 // it, so a signal that interrupts close(2) does not lose the file.
@@ -28,7 +30,8 @@ const uploadTimeout = 30 * time.Minute
 // once for what they wrote. The temp file is made at the first read, write or
 // truncate (or upload), and seeded with base's contents unless the file is new or
 // was truncated to nothing first. The upload goes under the node's name and folder,
-// which a rename changes.
+// which a rename changes. Once queued, the temp file is the queue entry's contents,
+// which the pending write holds (the retrier leaves it alone) until it ends.
 type pending struct {
 	node *file
 	size atomic.Int64
@@ -40,8 +43,10 @@ type pending struct {
 	// ID 0 is none.
 	base  api.File
 	tmp   *os.File
+	path  string
 	seed  bool
 	dirty bool
+	q     *entry
 }
 
 // pendingHandle is one open handle on a pending write.
@@ -60,21 +65,45 @@ var (
 
 // attach returns a handle on the file's pending write. A writer starts one if there is
 // none, and a created file's is uploaded even if nothing is written to it; a reader
-// only joins one, and gets nil without.
-func (n *file) attach(write, created bool) *pendingHandle {
+// only joins one, and gets nil without. A writer of a queued write holds its entry and
+// writes its contents in place.
+func (n *file) attach(write, created bool) (*pendingHandle, syscall.Errno) {
+	var held *entry
+	if e := n.entry(); write && e != nil && n.tree.unsent.hold(e) {
+		held = e
+	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	p := n.pending
 	if p == nil {
 		if !write {
-			return nil
+			return nil, 0
 		}
 		p = &pending{node: n, base: n.file, seed: !created, dirty: created}
 		p.size.Store(n.file.Size)
+		if held != nil && n.queued == held {
+			rec, _ := n.tree.unsent.record(held)
+			tmp, err := os.OpenFile(held.contents(), os.O_RDWR, 0)
+			if err != nil {
+				n.tree.unsent.unhold(held)
+				return nil, failed("open", err, "path", held.dir)
+			}
+			p.base, p.seed, p.q = api.File{ID: rec.Base.id()}, false, held
+			p.tmp, p.path = tmp, held.contents()
+			p.size.Store(rec.Size)
+			if st, err := tmp.Stat(); err == nil {
+				p.size.Store(st.Size())
+			}
+			held = nil
+		}
 		n.pending = p
 	}
+	if held != nil {
+		// The pending write already holds it, or the node is no longer its.
+		n.tree.unsent.unhold(held)
+	}
 	p.handles++
-	return &pendingHandle{p: p, write: write}
+	return &pendingHandle{p: p, write: write}, 0
 }
 
 // Setattr truncates a file open for writing and accepts times (timesOnly); anything
@@ -133,7 +162,7 @@ func (p *pending) ensure(ctx context.Context) syscall.Errno {
 		_ = os.Remove(tmp.Name())
 		return failed("write", err)
 	}
-	p.tmp, p.seed = tmp, false
+	p.tmp, p.path, p.seed = tmp, tmp.Name(), false
 	p.size.Store(st.Size())
 	return 0
 }
@@ -198,14 +227,16 @@ func (p *pending) truncate(ctx context.Context, size int64) syscall.Errno {
 	return 0
 }
 
-// Fsync does nothing: the contents are uploaded when the file is closed.
+// Fsync does nothing: the contents are uploaded when the file is closed, or queued
+// on disk, fsync'd, if that upload fails.
 func (h *pendingHandle) Fsync(context.Context, uint32) syscall.Errno { return 0 }
 
 // Flush uploads what was written since the last upload, by any handle. close(2) waits
 // for flush and returns its error, and not for release, which the kernel sends
 // without waiting, so the upload is here for the caller to learn its outcome. A flush
 // with nothing new (closing a duplicate descriptor, or a second handle's close) sends
-// nothing, and a reader's flush never uploads.
+// nothing, and a reader's flush never uploads. An upload that fails but is queued
+// (pending.queue) is a success.
 func (h *pendingHandle) Flush(ctx context.Context) syscall.Errno {
 	if !h.write {
 		return 0
@@ -217,9 +248,10 @@ func (h *pendingHandle) Flush(ctx context.Context) syscall.Errno {
 }
 
 // Release ends the handle. The last one uploads anything still unsent: what a failed
-// flush could not send (one more try), or what a mapping wrote after the last close.
-// If that fails too and no handle has opened meanwhile, the contents are lost and a
-// file never uploaded is dropped.
+// flush could neither send nor queue (one more try), or what a mapping wrote after the
+// last close. If that fails too, unqueued, and no handle has opened meanwhile, the
+// contents are lost and a file never uploaded is dropped. A queued write goes to the
+// retrier.
 func (h *pendingHandle) Release(ctx context.Context) syscall.Errno {
 	p, n, t := h.p, h.p.node, h.p.node.tree
 	if t.released != nil {
@@ -246,7 +278,7 @@ func (h *pendingHandle) Release(ctx context.Context) syscall.Errno {
 	if !ended {
 		return errno
 	}
-	if p.dirty {
+	if p.dirty && p.q == nil {
 		cur := n.current()
 		slog.Error("upload failed again; the written contents are lost", "folder", cur.FolderID, "name", cur.Name)
 		if cur.ID == 0 {
@@ -255,8 +287,13 @@ func (h *pendingHandle) Release(ctx context.Context) syscall.Errno {
 	}
 	if p.tmp != nil {
 		_ = p.tmp.Close()
-		_ = os.Remove(p.tmp.Name())
+		if p.q == nil {
+			_ = os.Remove(p.path)
+		}
 		p.tmp = nil
+	}
+	if p.q != nil {
+		t.unsent.unhold(p.q)
 	}
 	return errno
 }
@@ -299,23 +336,50 @@ func (p *pending) upload(ctx context.Context) syscall.Errno {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), uploadTimeout)
 	defer cancel()
 	cur, old := n.current(), p.base
-	got, err := t.lib.Upload(ctx, cur.FolderID, cur.Name, io.NewSectionReader(p.tmp, 0, p.size.Load()))
+	// A queued write is sent as the retrier sends it (tree.target).
+	sendAs, conflict := cur.Name, false
+	var err error
+	if p.q != nil {
+		rec, ok := t.unsent.record(p.q)
+		if !ok {
+			slog.Info("not uploaded: a later save superseded the queued one", "name", cur.Name)
+			p.dirty = false
+			return 0
+		}
+		sendAs, conflict, err = t.target(ctx, cur.FolderID, cur.Name, rec.Base, t.unsent.now())
+	}
+	var got api.File
+	if err == nil {
+		got, err = t.lib.Upload(ctx, cur.FolderID, sendAs, io.NewSectionReader(p.tmp, 0, p.size.Load()))
+	}
 	if err != nil {
-		return failed("upload", err, "folder", cur.FolderID, "name", cur.Name)
+		errno := failed("upload", err, "folder", cur.FolderID, "name", sendAs)
+		if !queueable(err) {
+			return errno
+		}
+		return p.queue(cur, err)
 	}
 	p.dirty = false
 	p.base = got
 	t.forget(cur.FolderID)
 	// The temp file becomes the new ID's cached contents; a later write seeds a new one.
-	if err := os.Rename(p.tmp.Name(), t.cache.path(got.ID)); err != nil {
-		slog.Warn("caching an upload failed", "file", got.ID, "err", err)
-		_ = os.Remove(p.tmp.Name())
+	if err := os.Rename(p.path, t.cache.path(got.ID)); err != nil {
+		if !errors.Is(err, syscall.EXDEV) {
+			slog.Warn("caching an upload failed", "file", got.ID, "err", err)
+		}
+		_ = os.Remove(p.path)
 	}
 	_ = p.tmp.Close()
 	p.tmp, p.seed = nil, true
+	if p.q != nil {
+		t.unsent.drop(p.q)
+		n.bind(nil)
+		p.q = nil
+		slog.Info("unsent write sent", "folder", cur.FolderID, "name", cur.Name, "file", got.ID)
+	}
 
 	var errno syscall.Errno
-	if old.ID != 0 {
+	if old.ID != 0 && !conflict {
 		if err := t.lib.DeleteFiles(ctx, old.ID); err != nil {
 			errno = failed("replace: the old file remains beside the new one", err, "old", old.ID, "new", got.ID)
 		} else {
@@ -329,4 +393,53 @@ func (p *pending) upload(ctx context.Context) syscall.Errno {
 		slog.Warn("entry invalidation failed", "name", name, "err", e)
 	}
 	return errno
+}
+
+// queue keeps contents whose upload failed for the retrier: the first failure moves
+// the temp file into the unsent queue, under the state directory, and a later one
+// updates its record. The caller holds p.mu.
+//
+// Once the contents are fsync'd there, the failure is answered with success: the bytes
+// are safe, and the retrier sends them under whatever name and folder they then have.
+// Answering EIO would have the app report a failed save, and perhaps delete what it
+// wrote, though nothing is lost. Only a failure to queue them is an error (#2865).
+func (p *pending) queue(cur api.File, cause error) syscall.Errno {
+	q := p.node.tree.unsent
+	now := q.now().UTC()
+	size := p.size.Load()
+	if p.q != nil {
+		if err := p.tmp.Sync(); err != nil {
+			return errQueue(err, "path", p.q.dir)
+		}
+		err := q.update(p.q, func(r *record) {
+			r.FolderID, r.Name, r.Size, r.SavedAt = cur.FolderID, cur.Name, size, q.now()
+			r.Attempts++
+			r.LastError, r.LastAttempt = cause.Error(), now
+		})
+		if err != nil {
+			return errQueue(err, "path", p.q.dir)
+		}
+		p.dirty = false
+		return 0
+	}
+	// The base is the stored file the write was opened on, with the created_at its
+	// listing gave, if that listing is still cached.
+	var b *base
+	if p.base.ID != 0 {
+		b = &base{ID: p.base.ID, Created: p.node.tree.listedCreated(p.base)}
+	}
+	rec := record{
+		FolderID: cur.FolderID, Name: cur.Name, Size: size, Created: now,
+		Attempts: 1, LastError: cause.Error(), LastAttempt: now, Base: b, SavedAt: q.now(),
+	}
+	e, f, err := q.add(p.tmp, p.path, size, rec)
+	if err != nil {
+		return errQueue(err, "folder", cur.FolderID, "name", cur.Name)
+	}
+	_ = p.tmp.Close()
+	p.tmp, p.path, p.q = f, e.contents(), e
+	p.node.bind(e)
+	p.dirty = false
+	slog.Warn("upload failed; the contents are kept and will be sent again", "path", e.dir, "folder", cur.FolderID, "name", cur.Name, "err", cause)
+	return 0
 }

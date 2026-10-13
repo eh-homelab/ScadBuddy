@@ -2,6 +2,7 @@ package fsys
 
 import (
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -603,13 +604,15 @@ func TestTwoHandlesOnAStoredFileReplaceItOnce(t *testing.T) {
 	})
 }
 
-func TestAFailedUploadIsRetriedOnRelease(t *testing.T) {
+// A refused upload (413 here) is not queued (#2865): its errno fails the close, and
+// release tries once more.
+func TestARefusedUploadIsRetriedOnRelease(t *testing.T) {
 	lib := newFakeLibrary()
-	lib.failUploads = 1
+	lib.failUploads, lib.failStatus = 1, http.StatusRequestEntityTooLarge
 	dir, released := releases(t, lib, Options{})
 	logs(t)
 	err := os.WriteFile(filepath.Join(dir, "a.3mf"), []byte("abc"), 0o644)
-	if !errors.Is(err, syscall.EIO) {
+	if !errors.Is(err, syscall.EFBIG) {
 		t.Fatalf("%v", err)
 	}
 	waitRelease(t, released)
@@ -620,13 +623,14 @@ func TestAFailedUploadIsRetriedOnRelease(t *testing.T) {
 	})
 }
 
-func TestAFileThatNeverUploadsIsDropped(t *testing.T) {
+func TestARefusedFileIsDropped(t *testing.T) {
 	lib := newFakeLibrary()
-	lib.failUploads = 2
-	dir, released := releases(t, lib, Options{})
+	lib.failUploads, lib.failStatus = 2, http.StatusRequestEntityTooLarge
+	state := t.TempDir()
+	dir, released := releases(t, lib, Options{StateDir: state})
 	log := logs(t)
 	path := filepath.Join(dir, "a.3mf")
-	if err := os.WriteFile(path, []byte("abc"), 0o644); !errors.Is(err, syscall.EIO) {
+	if err := os.WriteFile(path, []byte("abc"), 0o644); !errors.Is(err, syscall.EFBIG) {
 		t.Fatalf("%v", err)
 	}
 	waitRelease(t, released)
@@ -635,6 +639,9 @@ func TestAFileThatNeverUploadsIsDropped(t *testing.T) {
 	}
 	if got := log.String(); !strings.Contains(got, "lost") {
 		t.Fatalf("log: %q", got)
+	}
+	if queued, err := ListUnsent(state); err != nil || len(queued) != 0 {
+		t.Fatalf("queued %v %v", queued, err)
 	}
 }
 
@@ -738,8 +745,8 @@ func TestRenameOntoAFolderIsEEXIST(t *testing.T) {
 }
 
 func TestAHandleOpenedDuringTheLastRetryKeepsTheWrite(t *testing.T) {
-	// The flush and the release's retry fail; a handle opens during the retry. With
-	// the library back, its close uploads everything; without, its close fails.
+	// The flush and the release's retry are refused; a handle opens during the retry.
+	// With the library back, its close uploads everything; without, its close fails.
 	for _, fails := range []int{2, 4} {
 		lib := newFakeLibrary()
 		dir, released := releases(t, lib, Options{})
@@ -747,7 +754,7 @@ func TestAHandleOpenedDuringTheLastRetryKeepsTheWrite(t *testing.T) {
 		path := filepath.Join(dir, "a.3mf")
 		second := make(chan *os.File, 1)
 		lib.locked(func() {
-			lib.failUploads = fails
+			lib.failUploads, lib.failStatus = fails, http.StatusRequestEntityTooLarge
 			lib.uploading = func(attempt int) {
 				if attempt == 2 {
 					f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
@@ -758,7 +765,7 @@ func TestAHandleOpenedDuringTheLastRetryKeepsTheWrite(t *testing.T) {
 				}
 			}
 		})
-		if err := os.WriteFile(path, []byte("abc"), 0o644); !errors.Is(err, syscall.EIO) {
+		if err := os.WriteFile(path, []byte("abc"), 0o644); !errors.Is(err, syscall.EFBIG) {
 			t.Fatalf("fails %d: %v", fails, err)
 		}
 		waitRelease(t, released)
@@ -775,7 +782,7 @@ func TestAHandleOpenedDuringTheLastRetryKeepsTheWrite(t *testing.T) {
 			if fails == 2 && (err != nil || lib.uploads != 1 || string(lib.data[101]) != "abcXYZ") {
 				t.Fatalf("recovered: close %v uploads %d data %q", err, lib.uploads, lib.data)
 			}
-			if fails == 4 && (!errors.Is(err, syscall.EIO) || lib.uploads != 0) {
+			if fails == 4 && (!errors.Is(err, syscall.EFBIG) || lib.uploads != 0) {
 				t.Fatalf("still failing: close %v uploads %d", err, lib.uploads)
 			}
 		})
