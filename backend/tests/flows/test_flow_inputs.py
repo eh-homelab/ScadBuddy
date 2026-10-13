@@ -1,6 +1,7 @@
 """A flow's typed inputs (#2483): the schema's check, a run's values, and the script's
 type check against them."""
 
+import time
 import warnings
 from typing import Any
 
@@ -139,6 +140,43 @@ def test_a_pattern_needs_a_bounded_max_length(prop: dict[str, Any]) -> None:
         "properties": {"s": {"type": "string", "pattern": "^a+$", "maxLength": 64}},
     }
     assert schema_problems(bounded) == []
+
+
+SLOW = {"type": "string", "pattern": "^[a-z]+$", "maxLength": 64}
+
+
+@pytest.mark.parametrize(
+    ("schema", "values", "where"),
+    [
+        ({"type": "object", "properties": {"name": SLOW}}, {"name": "A" * 5000}, "name"),
+        (
+            {"type": "object", "properties": {"tags": {"type": "array", "items": SLOW}}},
+            {"tags": ["ok", "A" * 5000]},
+            "tags.1",
+        ),
+    ],
+)
+def test_an_over_long_patterned_value_is_refused_before_its_pattern_runs(
+    schema: dict[str, Any], values: dict[str, Any], where: str
+) -> None:
+    """#2661 review: maxLength is what bounds a pattern's work, and the validator runs
+    every keyword, so the length is checked first and the pattern never sees the value."""
+    with pytest.raises(InputsError) as err:
+        resolve_inputs(schema, values)
+    assert err.value.problems == [f"{where}: is longer than its maxLength of 64"]
+
+
+def test_a_backtracking_pattern_never_sees_a_long_value() -> None:
+    """27 characters against `^(a+)+$` take seconds of backtracking; refused on length,
+    they take none. (Longer would only make the old code hang rather than fail.)"""
+    schema = {
+        "type": "object",
+        "properties": {"name": {"type": "string", "pattern": "^(a+)+$", "maxLength": 16}},
+    }
+    started = time.monotonic()
+    with pytest.raises(InputsError):
+        resolve_inputs(schema, {"name": "a" * 26 + "!"})
+    assert time.monotonic() - started < 0.5
 
 
 def test_an_input_in_pydantics_protected_namespace_raises_no_warning() -> None:

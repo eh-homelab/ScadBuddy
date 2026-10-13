@@ -109,7 +109,8 @@ export function toInputs(
     const text = typeof raw === 'string' ? raw : ''
     if (text.trim() === '') {
       if (field.default != null && !field.enum && (field.type === 'string' || field.type === 'array')) {
-        inputs[field.name] = field.type === 'string' ? '' : []
+        // A string as typed: spaces someone entered are theirs, not a cleared field.
+        inputs[field.name] = field.type === 'string' ? text : []
       } else if (field.required && field.default === undefined) errors[field.name] = 'Required'
       continue
     }

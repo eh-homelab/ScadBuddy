@@ -170,6 +170,29 @@ def inputs_model(schema: dict[str, Any]) -> type[BaseModel]:
     return model
 
 
+def _too_long_for_pattern(properties: dict[str, Any], given: dict[str, Any]) -> list[str]:
+    """Each patterned string value longer than its maxLength (MAX_PATTERNED_LENGTH where a
+    schema stored before #2661 has none), named by where it is but never quoted."""
+    problems: list[str] = []
+    for name, prop in properties.items():
+        if not isinstance(prop, dict) or name not in given:
+            continue
+        value = given[name]
+        items = prop.get("items")
+        checks = [(name, prop, value)]
+        if isinstance(items, dict) and isinstance(value, list):
+            checks = [(f"{name}.{i}", items, item) for i, item in enumerate(value)]
+        for where, spec, one in checks:
+            if "pattern" not in spec or not isinstance(one, str):
+                continue
+            limit = spec.get("maxLength")
+            if not isinstance(limit, int) or isinstance(limit, bool):
+                limit = MAX_PATTERNED_LENGTH
+            if len(one) > limit:
+                problems.append(f"{where}: is longer than its maxLength of {limit}")
+    return problems
+
+
 def resolve_inputs(schema: dict[str, Any] | None, values: dict[str, Any] | None) -> dict[str, Any]:
     """A run's inputs: ``values`` with every default filled in and every input the run
     was not given set to None, checked against ``schema``. :class:`InputsError` when they
@@ -184,6 +207,11 @@ def resolve_inputs(schema: dict[str, Any] | None, values: dict[str, Any] | None)
         has, default = _default(prop)
         if name not in given and has:
             given[name] = copy.deepcopy(default)
+    # Before the validator: it evaluates every keyword, so `pattern` would still run on a
+    # value its `maxLength` refuses, and maxLength is what bounds the pattern's work (#2661).
+    too_long = _too_long_for_pattern(properties, given)
+    if too_long:
+        raise InputsError(too_long)
     checked = {**schema, "additionalProperties": False}
     validator = jsonschema.Draft202012Validator(checked)
     problems = [

@@ -73,6 +73,11 @@ describe('flow inputs (#2483)', () => {
     expect(toInputs(fields, values)).toEqual({ inputs: { note: '', tags: [] }, errors: {} })
   })
 
+  it('sends a string of only spaces over its default as typed, not emptied', () => {
+    const fields = inputFields({ type: 'object', properties: { note: { type: 'string', default: 'hello' } } })
+    expect(toInputs(fields, { note: '  ' })).toEqual({ inputs: { note: '  ' }, errors: {} })
+  })
+
   it('names each field that does not parse or is missing', () => {
     const fields = inputFields(SCHEMA)
     const values = { ...initialValues(fields), copies: '2.5', scale: 'big', plates: 'x' }
