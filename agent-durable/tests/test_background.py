@@ -119,6 +119,24 @@ async def test_stops_a_monitor_that_makes_too_many_events(
     assert result == {"end": {"outcome": "too_many"}, "events": 2}
 
 
+async def test_an_event_that_cannot_be_written_kills_the_command(
+    tmp_path: Any, signals: list[str]
+) -> None:
+    cmd = "echo $$ > pid; while true; do echo x; sleep 0.2; done"
+    acts = _activities(tmp_path, {"command": cmd, "timeoutMs": 20_000}, [])
+
+    async def append(task_id: str, text: str) -> bool:
+        raise ConnectionError("the database went away")
+
+    acts._append = append  # type: ignore[method-assign]
+    with pytest.raises(ConnectionError):
+        await asyncio.wait_for(acts.bg_monitor_command({"taskId": "ab12cd34"}), 10)
+    pid = int((tmp_path / "pid").read_text())
+    await asyncio.sleep(0.2)
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
 def test_a_line_without_a_newline_is_cut_not_held() -> None:
     lines = LineSplitter()
     for _ in range(100):

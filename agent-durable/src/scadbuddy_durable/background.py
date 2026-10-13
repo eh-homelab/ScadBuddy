@@ -227,7 +227,9 @@ class MonitorActivities:
                 else {"outcome": "exited", "code": None, "signal": signal.Signals(-code).name}
             )
             return {"end": end, "events": events}
-        except asyncio.CancelledError:
+        except BaseException:
+            # Cancelled, or an event that could not be written: the command never
+            # outlives the watch.
             kill()
             raise
         finally:
