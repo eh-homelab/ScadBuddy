@@ -796,8 +796,12 @@ def _attribute(tag: str, name: str) -> str | None:
     return match.group(1) if match else None
 
 
-def _vertex_bounds(archive: zipfile.ZipFile, names: Sequence[str]) -> np.ndarray:
-    """The ``(2, 3)`` box of the object files ``names``, read back out of an archive.
+def _plate_geometry(
+    archive: zipfile.ZipFile, names: Sequence[str]
+) -> tuple[np.ndarray, frozenset[int]]:
+    """The ``(2, 3)`` box of the object files ``names``, read back out of an archive,
+    and the filaments their painting uses (#1965): what a plate's tower counts beside
+    its parts' extruders (#2108), which ``model_settings.config`` does not state.
 
     The component transforms this writer emits are the identity, so the vertex
     extents *are* the assembly's extents; the build item carries the whole
@@ -806,15 +810,19 @@ def _vertex_bounds(archive: zipfile.ZipFile, names: Sequence[str]) -> np.ndarray
     """
     lows: list[np.ndarray] = []
     highs: list[np.ndarray] = []
+    painted: set[int] = set()
     for name in names:
         for mesh in parse_model(archive, name).meshes.values():
             points = mesh.vertices
             if points.size:
                 lows.append(points.min(axis=0))
                 highs.append(points.max(axis=0))
+            for code in set(mesh.paint or ()):
+                if code:
+                    painted.update(states(code))
     if not lows:
         raise ValueError("the 3MF has no object geometry to place")
-    return np.array([np.min(lows, axis=0), np.max(highs, axis=0)])
+    return np.array([np.min(lows, axis=0), np.max(highs, axis=0)]), frozenset(painted)
 
 
 @dataclass(frozen=True)
@@ -826,10 +834,10 @@ class LaidOutPlate:
     object_files: tuple[str, ...]
     #: Every build item's assembly on the plate (#956): one object per declared object,
     #: all moved by the plate's one offset. ``assembly_id`` is the first.
-    assembly_ids: tuple[str, ...] = ()
-    #: The distinct extruders its parts print with, where ``model_settings.config``
-    #: states them; ``None`` when it does not.
-    extruders: int | None = None
+    assembly_ids: tuple[str, ...]
+    #: The extruders its parts print with, where ``model_settings.config`` states them;
+    #: ``None`` when it does not. A painting's filaments are not among them.
+    extruders: frozenset[int] | None = None
 
 
 def laid_out_plates(archive: zipfile.ZipFile) -> list[LaidOutPlate]:
@@ -854,7 +862,7 @@ def laid_out_plates(archive: zipfile.ZipFile) -> list[LaidOutPlate]:
         raise ValueError("the 3MF has no build item to place")
 
     plates: list[tuple[int, tuple[str, ...]]] = []
-    extruders: dict[str, set[str]] = {}
+    extruders: dict[str, set[int]] = {}
     if MODEL_SETTINGS_NAME in names:
         config = ET.fromstring(archive.read(MODEL_SETTINGS_NAME))
         for obj in config.iter("object"):
@@ -863,7 +871,7 @@ def laid_out_plates(archive: zipfile.ZipFile) -> list[LaidOutPlate]:
                 for part in obj.findall("part")
                 if part.get("subtype", "normal_part") == "normal_part"
             }
-            extruders[obj.get("id", "")] = stated - {""}
+            extruders[obj.get("id", "")] = {int(e) for e in stated if e.isdigit()}
         for each in plate_settings(config):
             on_plate = tuple(object_id for object_id in each.object_ids if object_id in items)
             if on_plate:
@@ -879,7 +887,7 @@ def laid_out_plates(archive: zipfile.ZipFile) -> list[LaidOutPlate]:
             ids[0],
             tuple(path for object_id in ids for path in components.get(object_id, ())),
             ids,
-            len(set().union(*(extruders[i] for i in ids)))
+            frozenset().union(*(extruders[i] for i in ids))
             if all(i in extruders for i in ids)
             else None,
         )
@@ -927,8 +935,8 @@ def replate_3mf(
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         entries = [(info.filename, archive.read(info.filename)) for info in archive.infolist()]
         laid_out = laid_out_plates(archive)
-        bounds = {
-            each.assembly_id: _vertex_bounds(archive, each.object_files)
+        geometry = {
+            each.assembly_id: _plate_geometry(archive, each.object_files)
             for each in laid_out
             if each.object_files
         }
@@ -941,16 +949,18 @@ def replate_3mf(
     transforms: dict[str, str] = {}
     rotation = IDENTITY.rsplit(" ", 3)[0]
     for each in laid_out:
-        if each.assembly_id not in bounds:
+        if each.assembly_id not in geometry:
             continue
+        bounds, painted = geometry[each.assembly_id]
         try:
-            # A tower only for more than one filament. One object goes by its parts, as
+            # A tower only for more than one filament, a painting's counted as
+            # `PlateParts.tower` counts them (#2108). One object goes by its parts, as
             # it always has; several objects in one colour need none (#956).
             if len(each.assembly_ids) > 1 and each.extruders is not None:
-                tower = each.extruders > 1
+                tower = len(each.extruders | painted) > 1
             else:
                 tower = len(each.object_files) > 1
-            placement = place_on_plate(bounds[each.assembly_id], plate, tower=tower)
+            placement = place_on_plate(bounds, plate, tower=tower)
         except PlateFitError as error:
             if count == 1:
                 raise
@@ -958,7 +968,7 @@ def replate_3mf(
         placements.append(placement)
         offset = _plate_offset(placement, each.index, count, plate)
         moved = rotation + " " + " ".join(_number(v) for v in offset)
-        for assembly_id in each.assembly_ids or (each.assembly_id,):
+        for assembly_id in each.assembly_ids:
             transforms[assembly_id] = moved
 
     def _replaced(match: re.Match[str]) -> str:

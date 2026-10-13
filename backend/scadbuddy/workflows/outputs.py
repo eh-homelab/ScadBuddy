@@ -294,10 +294,10 @@ async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobRe
                 plate_parts += [*printed, *cut]
                 plate_extruders += [*extruders, *(extruders[0] for _ in cut)]
                 plate_objects += [number] * (len(printed) + len(cut))
-        if plate_parts:
-            plates.append(
-                PlateParts(tuple(plate_parts), tuple(plate_extruders), tuple(plate_objects))
-            )
+        if not plate_parts:
+            # Skipped, it would renumber every later plate against the layout.
+            raise _refuse(f"plate {index + 1} of the layout has nothing to print")
+        plates.append(PlateParts(tuple(plate_parts), tuple(plate_extruders), tuple(plate_objects)))
         for done in [key for key in layouts if last[key] == index]:
             del layouts[done]
     if not plates:

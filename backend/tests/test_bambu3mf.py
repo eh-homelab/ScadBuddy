@@ -1454,7 +1454,7 @@ def test_each_declared_object_is_its_own_build_item_on_its_plate(tmp_path: Path)
         [laid_out] = laid_out_plates(archive)
     assert len(settings.object_ids) == 2
     assert laid_out.assembly_ids == tuple(item.get("objectid") for item in items)
-    assert laid_out.extruders == 1
+    assert laid_out.extruders == frozenset({1})
     assert [entry.name for entry in plates_of(out)] == ["bins (object 1) + bins (object 2)"]
     # A reader of any 3MF (Arrange's) sees the two objects too.
     assert [obj.name for obj in read_objects(payload)] == ["bins (object 1)", "bins (object 2)"]
@@ -1493,3 +1493,23 @@ def test_objects_in_two_colours_still_get_a_prime_tower(tmp_path: Path) -> None:
     )
     moved = replate_3mf(out.read_bytes(), plate_for("Bambu Lab H2C"))
     assert "wipe_tower_x" in _settings_of_bytes(moved)
+
+
+@pytest.mark.parametrize(("painted_in", "tower"), [("#1F6FEB", True), ("#FF6AC1", False)])
+def test_re_placing_two_objects_keeps_the_tower_their_painting_needs(
+    tmp_path: Path, painted_in: str, tower: bool
+) -> None:
+    """#2874 review: two packed copies of a piece painted in a second filament. Their
+    parts state one extruder, and replate counted only those, so it dropped the tower
+    the painting needs. A painting in the filament they already use still needs none."""
+    left, right = _two_objects().parts
+    paint = Paint(("4",) * len(right.mesh.faces), (painted_in,))
+    painted = ColourPart(right.material_index, right.name, right.colour, right.mesh, paint=paint)
+    colours = ["#FF6AC1"] if painted_in == "#FF6AC1" else ["#FF6AC1", painted_in]
+    out = tmp_path / "painted-objects.3mf"
+    write_plates_3mf([PlateParts((left, painted), (1, 1), (1, 2))], colours, out, thumbnails=None)
+    assert ("wipe_tower_x" in _settings_of_bytes(out.read_bytes())) is tower
+
+    moved = replate_3mf(out.read_bytes(), plate_for("Bambu Lab H2C"))
+
+    assert ("wipe_tower_x" in _settings_of_bytes(moved)) is tower
