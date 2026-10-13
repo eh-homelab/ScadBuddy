@@ -122,11 +122,18 @@ it('activity_watch returns the last row read when aborted', async () => {
   expect(JSON.stringify(result.content)).toContain('running')
 })
 
-it('another principal’s row answers as a missing one', async () => {
-  server.use(http.get(`${BACKEND}/api/v1/activity/render%3Aa`, () =>
-    HttpResponse.json({ row: { id: 'render:a', principal: 'browser' }, children: [], links: [], detail: {} })))
-  const result = await runTool(tool('activity_get'), { activity_id: 'render:a' }, ctx({ principal: reader('token:t1') }))
-  expect(JSON.stringify(result.content)).toContain("no activity 'render:a'")
+it('another principal’s row answers exactly as a missing one', async () => {
+  server.use(
+    http.get(`${BACKEND}/api/v1/activity/render%3Aa`, () =>
+      HttpResponse.json({ row: { id: 'render:a', principal: 'browser' }, children: [], links: [], detail: {} })),
+    http.get(`${BACKEND}/api/v1/activity/render%3Anone`, () =>
+      HttpResponse.json({ title: 'Not Found', detail: "no activity 'render:none'" }, { status: 404 })),
+  )
+  const c = ctx({ principal: reader('token:t1') })
+  const theirs = await runTool(tool('activity_get'), { activity_id: 'render:a' }, c)
+  const missing = await runTool(tool('activity_get'), { activity_id: 'render:none' }, c)
+  expect(theirs.isError).toBe(true)
+  expect(JSON.stringify(theirs.content)).toBe(JSON.stringify(missing.content).replaceAll('render:none', 'render:a'))
 })
 
 it('activity_list takes an offset time and refuses a NUL', () => {

@@ -21,16 +21,22 @@ function pinned(ctx: ToolContext, asked: string | undefined): string | undefined
 }
 
 async function read(ctx: ToolContext, activity_id: string) {
-  const found = await ok(
-    ctx.backend.GET('/api/v1/activity/{activity_id}', { params: { path: { activity_id } } }),
-    `get activity ${activity_id}`,
-  )
-  if (hasTier(ctx.principal, 'outward')) return found
-  const mine = principalHeader(ctx.principal.id)
-  if (found.row.principal !== mine) {
-    // The backend's own answer for a missing row: another principal's row is not told apart from it.
-    throw new ToolError(`get activity ${activity_id} failed (HTTP 404)`, 404, `no activity '${activity_id}'`)
+  const outward = hasTier(ctx.principal, 'outward')
+  // One answer, written here, for a missing row and for another principal's: the
+  // backend's own 404 text is not passed on, so the two cannot be told apart.
+  const missing = () => new ToolError(`no activity ${activity_id}`, 404)
+  let found
+  try {
+    found = await ok(
+      ctx.backend.GET('/api/v1/activity/{activity_id}', { params: { path: { activity_id } } }),
+      `get activity ${activity_id}`,
+    )
+  } catch (err) {
+    throw !outward && err instanceof ToolError && err.status === 404 ? missing() : err
   }
+  if (outward) return found
+  const mine = principalHeader(ctx.principal.id)
+  if (found.row.principal !== mine) throw missing()
   return { ...found, children: found.children.filter((child) => child.principal === mine) }
 }
 
