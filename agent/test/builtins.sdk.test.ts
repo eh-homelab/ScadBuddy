@@ -1,4 +1,7 @@
 import { writeFileSync } from 'node:fs'
+import { mkdtemp } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { query } from '@anthropic-ai/claude-agent-sdk'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
@@ -36,11 +39,14 @@ describe('the built-ins a durable turn provides, on the bundled Claude Code', ()
     reply = () => ({ text: 'ok' })
     const names = Object.keys(BUILTINS)
     const from = fake.messageCalls().length
+    // A fresh HOME: what ~/.claude holds changes the schemas (CronCreate's `durable` reads
+    // "Has no effect" without a writable one), so CI and a developer's machine agree.
+    const home = await mkdtemp(path.join(os.tmpdir(), 'builtins-schemas-'))
     for await (const _ of query({
       prompt: 'go',
       // Only what the binary needs: a variable of the shell running the test (an
       // experimental feature's) would change the schemas it sends.
-      options: { tools: names, settingSources: [], cwd: '/tmp', maxTurns: 1, env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '/tmp', ANTHROPIC_BASE_URL: fake.url, ANTHROPIC_AUTH_TOKEN: TOKEN } },
+      options: { tools: names, settingSources: [], cwd: '/tmp', maxTurns: 1, env: { PATH: process.env.PATH ?? '', HOME: home, ANTHROPIC_BASE_URL: fake.url, ANTHROPIC_AUTH_TOKEN: TOKEN } },
     }))
       void _
     const sent = fake.messageCalls().slice(from).find((c) => c.body?.tools?.length)!.body!.tools!
