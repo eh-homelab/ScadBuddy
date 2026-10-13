@@ -53,6 +53,24 @@ describe('colour order', () => {
   })
 })
 
+// #2357 — a name is its hex for the extruders; a value that is no colour is never padded.
+describe('extrudersOf, by colour', () => {
+  it('shares an extruder between a name and its hex, and pads nothing', () => {
+    const schema: CustomizerSchema = {
+      parameters: ['a', 'b', 'c', 'd'].map((name) => ({ name, type: 'color', initial: '#000000', group: 'Colours' })),
+    }
+    const values = { a: 'red', b: '#FF0000', c: '#RREEDD', d: '#RR0000' }
+    expect(extrudersOf(schema, values)).toEqual(
+      new Map([
+        ['a', 1],
+        ['b', 1],
+        ['c', 2],
+        ['d', 3],
+      ]),
+    )
+  })
+})
+
 // #938 — once a render has said which colours it used, that decides the extruders.
 describe('extrudersIn', () => {
   const values = defaultValues(keychainSchema)
@@ -231,6 +249,11 @@ describe('rangeProblem (#921)', () => {
     expect(colourHex('red')).toBe('#FF0000')
     expect(colourHex('#abc')).toBe('#AABBCC')
     expect(colourHex('#RREEDD')).toBeNull()
+    // The renderer needs the `#`: a bare hex reads as an unknown name there.
+    for (const bare of ['FF0000', 'add', 'f00']) {
+      expect(colourHex(bare)).toBeNull()
+      expect(rangeProblem(colour, bare)).not.toBeNull()
+    }
     for (const inherited of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
       expect(colourHex(inherited)).toBeNull()
       expect(rangeProblem(colour, inherited)).not.toBeNull()

@@ -26,11 +26,19 @@ export function ColorWidget({
   // partial or wrong value is never padded into a colour ("red" was sent as "#RREEDD");
   // a colour name becomes its hex.
   const [draft, setDraft] = useState<string | null>(null)
+  // A value set from outside (a preset, a reset) replaces a half-typed draft, so a
+  // blur never commits the stale text over it.
+  const [shown, setShown] = useState(value)
+  if (shown !== value) {
+    setShown(value)
+    setDraft(null)
+  }
   const error = draft === null ? rangeProblem(param, value) : null
 
   function commit(text: string) {
     setDraft(null)
-    onChange(colourHex(text) ?? text.trim())
+    // Typed without its `#`, a hex is still taken as one; the value sent always has it.
+    onChange(colourHex(text) ?? colourHex(`#${text.trim()}`) ?? text.trim())
   }
 
   return (

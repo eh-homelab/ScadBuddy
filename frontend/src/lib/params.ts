@@ -60,7 +60,10 @@ export function extrudersOf(schema: CustomizerSchema, values: ParamValues): Map<
   const byColour = new Map<string, number>()
   const extruders = new Map<string, number>()
   for (const name of colorParamNames(schema)) {
-    const colour = normalizeHex(String(values[name] ?? ''))
+    // A name is its hex, as the backend resolves it; a value that is no colour is
+    // only itself, never padded into one.
+    const raw = String(values[name] ?? '')
+    const colour = colourHex(raw) ?? raw.trim()
     if (!byColour.has(colour)) byColour.set(colour, byColour.size + 1)
     extruders.set(name, byColour.get(colour)!)
   }
@@ -135,7 +138,8 @@ export type CheckedValue = { ok: true; value: ParamValue } | { ok: false; messag
 
 /** A plain decimal number, as a model writes one into a string (#948). */
 const NUMERIC = /^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i
-const HEX = /^#?([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i
+/** A hex colour as the renderer reads one (`colours.colour_hex`): the `#` is required. */
+const HEX = /^#([0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i
 /** An uploaded asset's id: the sha256 of its content (#204). */
 const ASSET_ID = /^[0-9a-f]{64}$/
 
@@ -150,7 +154,8 @@ export function textLength(value: string): number {
 /**
  * #2357 — a colour value as the `#RRGGBB` it renders as, or null when it is no colour:
  * a hex (`#RGB`, `#RGBA`, `#RRGGBB`, `#RRGGBBAA`, alpha dropped) or one of OpenSCAD's
- * colour names in any case (`red` is `#FF0000`), as the renderer reads them.
+ * colour names in any case (`red` is `#FF0000`), as the renderer reads them. A bare
+ * `FF0000` is no colour: the renderer reads it as an unknown name.
  */
 export function colourHex(value: string): string | null {
   const trimmed = value.trim()
@@ -233,10 +238,11 @@ export function checkParamValue(param: Param, value: ParamValue): CheckedValue {
           }
     }
     case 'color': {
-      const hex = typeof value === 'string' ? colourHex(value) : null
+      // As the field takes it: a hex typed without its `#` is sent with one.
+      const hex = typeof value === 'string' ? (colourHex(value) ?? colourHex(`#${value.trim()}`)) : null
       return hex !== null
         ? { ok: true, value: hex }
-        : { ok: false, message: `${label} takes a hex colour such as "#FF8800".` }
+        : { ok: false, message: `${label} takes a colour: a hex such as "#FF8800", or a name such as "red".` }
     }
     case 'file': {
       if (typeof value !== 'string') return { ok: false, message: `${label} takes a file name.` }
