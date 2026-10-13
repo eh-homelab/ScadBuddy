@@ -174,6 +174,9 @@ class ReadObject:
     count: int
     parts: list[ColourPart]
     notes: list[str] = field(default_factory=list)
+    #: The material (``filament_type``) the file states for each of the object's
+    #: colours; a colour the file states none for is absent.
+    materials: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -337,19 +340,40 @@ def _object_settings(config: ET.Element | None) -> dict[str, _ObjectSettings] | 
     return settings
 
 
-def _filament_colours(archive: _Archive) -> list[str]:
+def _project_settings(archive: _Archive) -> dict[str, object]:
     if PROJECT_SETTINGS_NAME not in archive.names:
-        return []
+        return {}
     try:
         settings = json.loads(
             _read_capped(archive.archive, PROJECT_SETTINGS_NAME, MAX_SETTINGS_BYTES)
         )
     except ValueError:
-        return []
-    colours = settings.get("filament_colour") if isinstance(settings, dict) else None
+        return {}
+    return settings if isinstance(settings, dict) else {}
+
+
+def _filament_colours(archive: _Archive) -> list[str]:
+    colours = _project_settings(archive).get("filament_colour")
     if not isinstance(colours, list):
         return []
     return [normalise_colour(c) if isinstance(c, str) and c else STL_COLOUR for c in colours]
+
+
+def _filament_materials(archive: _Archive) -> dict[str, str]:
+    """Each filament colour's ``filament_type``, as the project states it. An object is
+    read by colour, so two slots of one colour in different materials cannot be told
+    apart: that colour's material is unknown."""
+    types = _project_settings(archive).get("filament_type")
+    if not isinstance(types, list):
+        return {}
+    materials: dict[str, str] = {}
+    conflicting: set[str] = set()
+    for colour, material in zip(_filament_colours(archive), types, strict=False):
+        if not isinstance(material, str) or not material.strip():
+            continue
+        if materials.setdefault(colour, material.strip()) != material.strip():
+            conflicting.add(colour)
+    return {c: m for c, m in materials.items() if c not in conflicting}
 
 
 def _root_model_name(archive: _Archive) -> str:
@@ -818,6 +842,7 @@ def _read(archive: _Archive, budget: ReadBudget) -> list[ReadObject]:
         if len(groups) == budget.max_objects:
             raise OverBudgetError(budget.refusal("max_objects"))
         groups[key] = (matrix, 1)
+    materials = _filament_materials(archive)
     objects: list[ReadObject] = []
     for (path, object_id, _), (matrix, count) in groups.items():
         parts, notes = reader.item(path, object_id, matrix)
@@ -830,7 +855,21 @@ def _read(archive: _Archive, budget: ReadBudget) -> list[ReadObject]:
             or found[object_id].get("name")
             or f"Object {object_id}"
         )
-        objects.append(ReadObject(name=name, count=count, parts=parts, notes=notes))
+        used = {
+            colour
+            for part in parts
+            if not part.negative
+            for colour in [part.colour, *(part.paint.used() if part.paint is not None else [])]
+        }
+        objects.append(
+            ReadObject(
+                name=name,
+                count=count,
+                parts=parts,
+                notes=notes,
+                materials={c: m for c, m in materials.items() if c in used},
+            )
+        )
     if not objects:
         raise UnreadableObjectsError("the 3MF places no object with any geometry")
     return objects

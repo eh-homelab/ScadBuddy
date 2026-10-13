@@ -9,7 +9,7 @@ import tempfile
 import uuid
 import zipfile
 from array import array
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import IO, Any, Literal
@@ -351,14 +351,30 @@ def _cover_metadata(plate_index: int) -> str:
 #: ``--load-settings``/``--load-filaments``. Measured: placeholder ids, a
 #: deliberately wrong nozzle diameter (0.4 while slicing 0.2) and a wrong
 #: printable height all produce byte-identical results. So ScadBuddy states what
-#: it honestly knows and names itself for the rest, rather than inventing preset
-#: names that could be mistaken for real ones — it owns no slicer settings.
+#: it knows and names itself for the rest — it owns no slicer settings. What it
+#: knows includes the printer a file is laid out for, named as Bambu Studio names
+#: it (:func:`printer_preset`, #2639), since Bambuddy's slice dialog pre-picks the
+#: printer by that name; the process stays this placeholder, and marks the layout
+#: as ScadBuddy's (:func:`layout_of`).
 PRESET_PLACEHOLDER = "ScadBuddy"
 #: Only the arity-free presence of this option matters; 1 and 3 entries were both
 #: measured to slice identically on a two-extruder H2C. The print run replaces it
 #: with the nozzle it chose (#126): slicing never reads it, but a person deciding
 #: whether to start a print does.
 PLACEHOLDER_NOZZLE_DIAMETER = ["0.4"]
+
+
+def printer_preset(plate: PlateGeometry, nozzle: str) -> str:
+    """The printer preset a 3MF laid out for ``plate`` names, as Bambu Studio names
+    it (``"Bambu Lab A1 0.4 nozzle"``): Bambuddy's slice dialog pre-picks the printer
+    by this name, and with :data:`PRESET_PLACEHOLDER` it took the first printer it
+    lists. The fallback plate is no printer, so it keeps the placeholder.
+
+    Before a print chooses a nozzle, ``nozzle`` is the file's stated diameter,
+    0.4 as written: a printer fitted with another size is pre-picked at 0.4, as
+    Bambu Studio itself opens a new project, and the dialog lets that be changed.
+    A print renames it for the nozzle it chose (:func:`replate_3mf`)."""
+    return f"{plate.model} {nozzle} nozzle" if plate.model else PRESET_PLACEHOLDER
 
 
 def one_extruder_map(filaments: int) -> dict[str, str | list[str]]:
@@ -376,7 +392,10 @@ def one_extruder_map(filaments: int) -> dict[str, str | list[str]]:
 
 
 def project_settings(
-    colours: Sequence[str], placements: Sequence[Placement], plate: PlateGeometry
+    colours: Sequence[str],
+    placements: Sequence[Placement],
+    plate: PlateGeometry,
+    materials: Mapping[str, str] | None = None,
 ) -> str:
     """``Metadata/project_settings.config``, in Bambu Studio's own JSON shape.
 
@@ -393,16 +412,36 @@ def project_settings(
 
     ``colours`` is the one filament list every plate shares; ``placements`` has one
     entry per plate, in plate order (spec §6.4).
+
+    ``materials`` maps a colour to the material its source stated (an arranged library
+    file's ``filament_type``). ``filament_type`` is written only when every slot has
+    one: Bambuddy's slice dialog picks each slot's filament preset by it, and with none
+    it takes the first preset it lists, Bambu ABS, for a file whose sources were PLA. A
+    partial list is not written: a slot with ``""`` would get that same guess, and
+    what Bambu Studio makes of one was never measured.
+
+    Sources: the dialog's pick is ``pickFilamentForSlot`` in Bambuddy's
+    ``frontend/src/utils/slicePresetPicker.ts``, fed by the ``filament_type`` its
+    ``library.py`` reads from this file (read 2026-10-12 at maziggy/bambuddy main).
+    A Bambu Studio project states it beside ``filament_colour`` (Bambuddy's filament
+    requirements read both there, as :mod:`scadbuddy.bambuddy.filaments3mf` does), and
+    ScadBuddy copies the strings a library project stated. Not yet measured: a
+    ScadBuddy-written 3MF carrying it, sliced by Bambuddy's headless slicer.
     """
     settings: dict[str, str | list[str]] = {
         "filament_colour": list(colours),
         # Required-or-segfault; see above.
-        "printer_settings_id": PRESET_PLACEHOLDER,
+        "printer_settings_id": printer_preset(plate, PLACEHOLDER_NOZZLE_DIAMETER[0]),
+        # Also what marks the layout as ScadBuddy's (`layout_of`): ScadBuddy owns no
+        # process, and Bambu Studio names one when it saves the file.
         "print_settings_id": PRESET_PLACEHOLDER,
         "filament_settings_id": [PRESET_PLACEHOLDER for _ in colours],
         "nozzle_diameter": PLACEHOLDER_NOZZLE_DIAMETER,
         "printable_height": _number(plate.height),
     }
+    stated = [(materials or {}).get(colour.upper(), "") for colour in colours]
+    if stated and all(stated):
+        settings["filament_type"] = stated
     _set_towers(settings, [placement.tower for placement in placements])
     return json.dumps(settings, indent=4) + "\n"
 
@@ -591,6 +630,7 @@ def write_plates_3mf(
     thumbnails: Sequence[PlateThumbnails] | None,
     model_name: str = "model",
     plate: PlateGeometry = DEFAULT_PLATE,
+    materials: Mapping[str, str] | None = None,
 ) -> None:
     """Write a 3MF with one Bambu plate per entry of ``plates`` (spec §6.4).
 
@@ -640,7 +680,7 @@ def write_plates_3mf(
                 for index, part in zip(numbers, each.parts, strict=True)
             ),
             (MODEL_SETTINGS_NAME, model_settings(plates, model_name, covers=covers)),
-            (PROJECT_SETTINGS_NAME, project_settings(colours, placements, plate)),
+            (PROJECT_SETTINGS_NAME, project_settings(colours, placements, plate, materials)),
         )
     ]
     if thumbnails is not None:
@@ -842,6 +882,12 @@ def replate_3mf(
             # The plate changed, so restate its Z. The other keys the BBL loader
             # needs do not vary by printer and are already in the file.
             settings["printable_height"] = _number(plate.height)
+            # Named for this printer and the nozzle the file states, as the writer
+            # names it, so a re-placed file is the one written for this printer.
+            stated = next(iter(settings.get("nozzle_diameter") or []), None)
+            settings["printer_settings_id"] = printer_preset(
+                plate, nozzle_diameter or stated or PLACEHOLDER_NOZZLE_DIAMETER[0]
+            )
             if nozzle_diameter is not None:
                 settings["nozzle_diameter"] = [nozzle_diameter]
                 settings.update(one_extruder_map(len(settings.get("filament_colour", []))))
@@ -1210,7 +1256,8 @@ def layout_of(payload: bytes) -> Layout:
     """Who laid ``payload`` out, judged from its bytes alone, whatever they were
     obtained from (a render, or a file in Bambuddy's library).
 
-    ``scadbuddy``: its settings carry :data:`PRESET_PLACEHOLDER` and its plates read
+    ``scadbuddy``: its ``print_settings_id`` is :data:`PRESET_PLACEHOLDER` (its printer
+    is named since #2639; Bambu Studio names a process when it saves) and its plates read
     back as this writer lays them out, one assembly per plate. ``author``: any other
     file :func:`nozzles_statable` accepts, a project Bambu Studio (or ScadBuddy, before
     someone re-saved it there) laid out, whose placement and plates are the author's.
@@ -1222,7 +1269,7 @@ def layout_of(payload: bytes) -> Layout:
     try:
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
             settings = json.loads(_read_capped(archive, PROJECT_SETTINGS_NAME, MAX_SETTINGS_BYTES))
-            if settings.get("printer_settings_id") != PRESET_PLACEHOLDER:
+            if settings.get("print_settings_id") != PRESET_PLACEHOLDER:
                 return "author"
             if not all(each.object_files for each in laid_out_plates(archive)):
                 return "author"

@@ -162,6 +162,8 @@ def manifest_of(req: OutputRequest) -> list[ManifestObject]:
                 bbox=part.bbox,
                 footprint=(part.bbox.size[0], part.bbox.size[1]),
                 colours=list(part.colours),
+                # Kept, so arranging this output again still states them.
+                materials=dict(earlier.materials) if earlier else {},
                 count=counts[part.piece_key],
                 plates=part.plates,
                 bom_piece=named.get(part.piece_key) or (earlier.bom_piece if earlier else None),
@@ -194,6 +196,23 @@ def placement_matrix(box: BoundingBox, x: float, y: float, rot: float) -> np.nda
     )
     matrix: np.ndarray = move @ turn
     return matrix
+
+
+def _materials(req: OutputRequest) -> dict[str, str]:
+    """Each colour's material as the arranged objects' sources state it. Only a library
+    file states any. A render's colour has a material only when a library object
+    shares its slot, since one slot is one filament. A colour two sources
+    give different materials is unknown too: one slot prints both parts, and picking
+    either would slice the other in the wrong material. The writer then states none
+    (`project_settings`)."""
+    materials: dict[str, str] = {}
+    conflicting: set[str] = set()
+    for obj in req.provenance.values():
+        for colour, material in obj.materials.items():
+            key = colour.upper()
+            if materials.setdefault(key, material) != material:
+                conflicting.add(key)
+    return {c: m for c, m in materials.items() if c not in conflicting}
 
 
 async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobResult:
@@ -277,6 +296,7 @@ async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobRe
         thumbnails=thumbnails,
         model_name=req.slug.removeprefix(BUILTIN_PREFIX),
         plate=plate_for(req.plate_model),
+        materials=_materials(req),
     )
     await asyncio.to_thread(write_glb, list(plates[0].parts), work / PREVIEW_NAME)
     root = deps.paths.root

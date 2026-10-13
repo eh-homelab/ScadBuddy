@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,7 +15,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.outputs import OutputStore
 from scadbuddy.render.glb import BoundingBox
-from scadbuddy.render.job_models import BomEntry, Job, JobResult, OutputRecord
+from scadbuddy.render.job_models import BomEntry, Job, JobResult, ManifestObject, OutputRecord
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.template import Blob, Part
@@ -22,13 +23,16 @@ from scadbuddy.workflows.activities import RenderActivities, WorkerDeps, _scope
 from scadbuddy.workflows.arrange import arrange
 from scadbuddy.workflows.models import (
     Layout,
+    LayoutPlate,
     OutputRequest,
     PackItem,
     PackRequest,
     PieceRequest,
+    Placed,
     PlateSize,
     piece_key,
 )
+from scadbuddy.workflows.outputs import _materials, manifest_of
 from scadbuddy.workflows.packing import PackError, explicit_plate
 from scadbuddy.workflows.pipeline_activities import PipelineActivities
 from tests.support.openscad import install_fake_openscad
@@ -249,6 +253,113 @@ async def test_a_packed_output_writes_every_plate_bom_and_files(tmp_path: Path) 
     assert (paths.blobs / "output-j1-1" / "files" / "guide.svg").read_text() == "<svg/>"
     assert out.bom[0].count == 2
     assert _refs(deps) == [("output-j1-1", "job", "j1")]
+
+
+def _from_library(part: Part, materials: dict[str, str]) -> ManifestObject:
+    return ManifestObject(
+        part=part.piece_key,
+        file="keychain.3mf",
+        slug="",
+        revision=None,
+        bbox=part.bbox,
+        footprint=(part.bbox.size[0], part.bbox.size[1]),
+        colours=part.colours,
+        materials=materials,
+        count=1,
+        library_file_id=7,
+    )
+
+
+def test_an_arranged_output_keeps_its_objects_materials_for_the_next_arrange() -> None:
+    part = Part(
+        piece_key="lib3-a",
+        file="keychain.3mf",
+        bbox=BoundingBox(min=(0, 0, 0), max=(10, 10, 2), size=(10, 10, 2)),
+        colours=["#FF0000"],
+    )
+    req = OutputRequest(
+        job_id="j1",
+        index=0,
+        slug="demo",
+        layout=Layout(plates=[LayoutPlate(items=[Placed(piece_key="lib3-a", x=0, y=0)])]),
+        parts=[part],
+        name=None,
+        bom=[],
+        files={},
+        record=_record(["lib3-a"]),
+        provenance={"lib3-a": _from_library(part, {"#FF0000": "PLA"})},
+    )
+    [obj] = manifest_of(req)
+    assert obj.materials == {"#FF0000": "PLA"}
+
+
+def test_a_colour_two_sources_give_different_materials_is_unknown() -> None:
+    red = Part(
+        piece_key="lib3-a",
+        file="a.3mf",
+        bbox=BoundingBox(min=(0, 0, 0), max=(1, 1, 1), size=(1, 1, 1)),
+        colours=["#FF0000"],
+    )
+    other = red.model_copy(update={"piece_key": "lib3-b", "colours": ["#FF0000", "#00FF00"]})
+    req = OutputRequest(
+        job_id="j1",
+        index=0,
+        slug="demo",
+        layout=Layout(plates=[]),
+        parts=[red, other],
+        name=None,
+        bom=[],
+        files={},
+        record=_record([]),
+        provenance={
+            "lib3-a": _from_library(red, {"#ff0000": "PLA"}),
+            "lib3-b": _from_library(other, {"#FF0000": "PETG", "#00FF00": "PLA"}),
+        },
+    )
+    assert _materials(req) == {"#00FF00": "PLA"}
+
+
+async def _arranged_settings(
+    tmp_path: Path, materials: dict[str, str]
+) -> tuple[list[str], dict[str, object]]:
+    deps, paths = _deps(tmp_path)
+    part = await _render(deps, "model.scad", {"width": 12})
+    acts, env = PipelineActivities(deps), ActivityEnvironment()
+    # As Arrange packs: always plates, never the piece as rendered.
+    layout = await env.run(
+        acts.pack, PackRequest(items=[PackItem(part=part)], plate=PLATE, allow_own=False)
+    )
+    req = OutputRequest(
+        job_id="j1",
+        index=0,
+        slug="demo",
+        layout=layout,
+        parts=[part],
+        name=None,
+        bom=[],
+        files={},
+        record=_record([part.piece_key]),
+        provenance={part.piece_key: _from_library(part, materials)},
+    )
+    out = await env.run(acts.write_output, req)
+    with zipfile.ZipFile(paths.root / out.result.model_3mf) as archive:
+        settings = json.loads(archive.read("Metadata/project_settings.config"))
+    return [c.upper() for c in part.colours], settings
+
+
+async def test_an_arranged_output_states_the_materials_its_sources_state(tmp_path: Path) -> None:
+    """Arranged PLA reached Bambuddy's slice dialog with no material, which picked Bambu
+    ABS for every slot."""
+    deps, _ = _deps(tmp_path / "probe")
+    colours = (await _render(deps, "model.scad", {"width": 12})).colours
+    upper, settings = await _arranged_settings(tmp_path, {c.lower(): "PLA" for c in colours})
+    assert settings["filament_colour"] == upper
+    assert settings["filament_type"] == ["PLA"] * len(upper)
+
+
+async def test_an_arranged_output_of_unknown_material_states_none(tmp_path: Path) -> None:
+    _, settings = await _arranged_settings(tmp_path, {})
+    assert "filament_type" not in settings
 
 
 async def _write_file_named(tmp_path: Path, name: str) -> ApplicationError:
