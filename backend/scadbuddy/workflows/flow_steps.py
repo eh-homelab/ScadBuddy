@@ -8,13 +8,20 @@ so it is the workflow's state and replays with it.
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Literal, Protocol
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
 
-from scadbuddy.workflows.flow_models import FlowStep, FlowWaiting, ProjectionWrite, StepPolicy
+from scadbuddy.workflows.flow_models import (
+    FlowStep,
+    FlowWaiting,
+    Hop,
+    HopRecord,
+    ProjectionWrite,
+    StepPolicy,
+)
 
 FLOW_PROJECT = "flow_project"
 
@@ -71,6 +78,12 @@ class StepHandle:
             fn=self.step.fn,
             since=workflow.now(),
             history_length=workflow.info().get_current_history_length(),
+            hop="person" if kind == "approval" else None,
+            hops=(
+                [HopRecord(hop="person", action="parked", actor="flow", at=workflow.now())]
+                if kind == "approval"
+                else []
+            ),
         )
         await project(
             ProjectionWrite(
@@ -102,11 +115,15 @@ async def step(
     prompt: str | None = None,
     grant_id: str | None = None,
     policy: StepPolicy | None = None,
+    hop: Hop | None = None,
+    hop_until: datetime | None = None,
+    reason: str | None = None,
 ) -> AsyncIterator[StepHandle]:
     """Record a host call around its body: `running` on enter (and parked, with
     `waiting`; or let through by the run grant `grant_id`), `succeeded` or `failed` on
     exit. A failure records only the exception's type, never its message, and is
-    re-raised."""
+    re-raised. An approval parked outside the run's grant waits at `hop` (#2482): the
+    starter session until `hop_until`, or the person; `reason` says why it is outside."""
     owner: StepOwner = workflow.instance()
     info = workflow.info()
     started = FlowStep(
@@ -128,6 +145,14 @@ async def step(
             prompt=prompt,
             since=workflow.now(),
             history_length=started.history_length,
+            hop=hop,
+            hop_until=hop_until,
+            reason=reason,
+            hops=(
+                [HopRecord(hop=hop, action="parked", actor="flow", at=workflow.now())]
+                if hop is not None
+                else []
+            ),
         )
         if waiting is not None
         else None

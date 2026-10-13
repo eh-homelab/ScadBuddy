@@ -132,3 +132,34 @@ async def history_payloads(client: Client, workflow_id: str) -> bytes:
     codec = client.data_converter.payload_codec
     decoded = await codec.decode(found) if codec is not None else found
     return b"\n".join(p.data for p in decoded)
+
+
+#: The agent's tables a parent's tiers are read from (#2482), as far as the backend
+#: reads them; the agent's own migrations make them in a deployment.
+_AGENT_OWNERS = """
+CREATE TABLE IF NOT EXISTS ai_sessions (
+    id uuid PRIMARY KEY, owner_kind text NOT NULL, owner_id text NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ai_mcp_tokens (
+    id uuid PRIMARY KEY, tier text NOT NULL, expires_at timestamptz, revoked_at timestamptz
+);
+"""
+
+
+def parent_session(conn: Any, session: str, owner: str, tier: str = "outward") -> None:
+    """Session `session`, owned by `owner` (`browser`, or a `token:<id>` holding `tier`),
+    as the agent records it: whose tiers a parent acts with."""
+    conn.execute(_AGENT_OWNERS)
+    kind = "browser" if owner == "browser" else "bearer"
+    conn.execute(
+        "INSERT INTO ai_sessions (id, owner_kind, owner_id) VALUES (%s, %s, %s)"
+        " ON CONFLICT (id) DO UPDATE SET owner_kind = EXCLUDED.owner_kind,"
+        " owner_id = EXCLUDED.owner_id",
+        (session, kind, owner),
+    )
+    if owner.startswith("token:"):
+        conn.execute(
+            "INSERT INTO ai_mcp_tokens (id, tier) VALUES (%s, %s)"
+            " ON CONFLICT (id) DO UPDATE SET tier = EXCLUDED.tier",
+            (owner.removeprefix("token:"), tier),
+        )
