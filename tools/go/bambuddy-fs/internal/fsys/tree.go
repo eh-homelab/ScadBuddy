@@ -37,19 +37,20 @@ var _ Library = (*api.Client)(nil)
 
 // Options are the mount's settings. All lists every file type, ReadOnly refuses every
 // write with EROFS, TTL is how long a folder's listing is kept, CacheDir holds
-// downloaded contents and files being written, and StateDir the writes whose upload
-// failed, under unsent/ (#2865).
+// downloaded contents (at most CacheMax bytes of them, 0 no bound) and files being
+// written, and StateDir the writes whose upload failed, under unsent/ (#2865).
 type Options struct {
 	All, ReadOnly      bool
 	TTL                time.Duration
 	CacheDir, StateDir string
+	CacheMax           int64
 }
 
 // NewRoot returns the root directory, the library's top level, with the unsent writes
 // under opts.StateDir queued (RetryUnsent sends them).
 func NewRoot(lib Library, opts Options) fs.InodeEmbedder {
 	t := &tree{
-		lib: lib, opts: opts, cache: newCache(opts.CacheDir), listings: map[int]listing{}, uploaded: map[int]api.File{},
+		lib: lib, opts: opts, cache: newCache(opts.CacheDir, opts.CacheMax), listings: map[int]listing{}, uploaded: map[int]api.File{},
 		owner:    fuse.Owner{Uid: uint32(os.Getuid()), Gid: uint32(os.Getgid())},
 		pendings: map[*pending]bool{},
 		unsent:   newQueue(opts.StateDir),
@@ -300,7 +301,34 @@ var (
 	_ fs.NodeLookuper  = (*dir)(nil)
 	_ fs.NodeReaddirer = (*dir)(nil)
 	_ fs.NodeGetattrer = (*dir)(nil)
+	_ fs.NodeStatfser  = (*dir)(nil)
+	_ fs.NodeStatfser  = (*file)(nil)
 )
+
+func (d *dir) Statfs(_ context.Context, out *fuse.StatfsOut) syscall.Errno {
+	d.tree.statfs(out)
+	return 0
+}
+
+func (n *file) Statfs(_ context.Context, out *fuse.StatfsOut) syscall.Errno {
+	n.tree.statfs(out)
+	return 0
+}
+
+// statfs answers with the cache directory's filesystem, where every write is staged
+// before its upload, so its free space is what a copy in can use; a zeroed answer
+// would have Explorer and file managers refuse the copy as out of space. Without it
+// (the directory is gone), 1 TiB free. Names are up to 255 bytes, as Bambuddy's are.
+func (t *tree) statfs(out *fuse.StatfsOut) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(t.cache.dir, &st); err == nil {
+		out.FromStatfsT(&st)
+	} else {
+		const blocks = 1 << 40 / 4096
+		*out = fuse.StatfsOut{Bsize: 4096, Frsize: 4096, Blocks: blocks, Bfree: blocks, Bavail: blocks, Files: 1 << 20, Ffree: 1 << 20}
+	}
+	out.NameLen = 255
+}
 
 func (d *dir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (_ *fs.Inode, errno syscall.Errno) {
 	ctx, op := d.listing(ctx, "lookup")

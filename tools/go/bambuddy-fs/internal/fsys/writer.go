@@ -216,7 +216,7 @@ func (p *pending) seedInto(ctx context.Context, tmp *os.File) error {
 		return err
 	}
 	t := p.node.tree
-	src, err := t.cache.open(ctx, t.lib, p.base)
+	src, err := t.cache.open(ctx, t.lib, p.base, "")
 	if err != nil {
 		return err
 	}
@@ -479,6 +479,8 @@ func (p *pending) upload(ctx context.Context) syscall.Errno {
 			slog.Warn("caching an upload failed", "file", got.ID, "err", err)
 		}
 		_ = os.Remove(p.path)
+	} else {
+		t.cache.trim(got.ID)
 	}
 	_ = p.tmp.Close()
 	p.tmp, p.seed, p.base = nil, true, got

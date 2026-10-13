@@ -77,7 +77,7 @@ inside the container. With no arguments the image prints `mount --help`.
 ## Flags
 
 ```
-bambuddy-fs mount --api <url> [--ro] [--all] [--allow-other] [--attr-ttl 5s] [--cache-dir <dir>] [--state-dir <dir>] [--otel-endpoint <url>] [--no-telemetry] <mountpoint>
+bambuddy-fs mount --api <url> [--ro] [--all] [--allow-other] [--attr-ttl 5s] [--cache-dir <dir>] [--cache-max 2G] [--state-dir <dir>] [--otel-endpoint <url>] [--no-telemetry] <mountpoint>
 bambuddy-fs unsent [--state-dir <dir>]
 ```
 
@@ -89,6 +89,7 @@ bambuddy-fs unsent [--state-dir <dir>]
 | `--allow-other` | FUSE `allow_other`: other users and processes see the mount. |
 | `--attr-ttl` | How long listings are cached, and the kernel's entry and attribute timeout. Default `5s`. |
 | `--cache-dir` | Downloaded contents and files being written. Default `$XDG_CACHE_HOME/bambuddy-fs`, or `~/.cache/bambuddy-fs`. |
+| `--cache-max` | At most this much downloaded contents is kept in `--cache-dir`, the least recently read removed first: a number of bytes, or with `K`, `M`, `G` or `T` (binary; `2G`, `2GiB` and `2GB` are the same). `0` is no bound. Default `2G`. |
 | `--state-dir` | Writes whose upload failed, under `unsent/` (see "Unsent writes"). Default `$XDG_STATE_HOME/bambuddy-fs`, or `~/.local/state/bambuddy-fs`. |
 | `--otel-endpoint` | OTLP/HTTP collector base URL for traces and metrics (see "Telemetry"). |
 | `--no-telemetry` | Send no traces or metrics. `--no-tracing` is the same. |
@@ -118,9 +119,16 @@ write bits with `--ro`).
 
 ## Caching and uploads
 
-A file's bytes are immutable per ID, so contents are cached on disk under `--cache-dir`
-and the first read of an open file streams all of it. Listings are cached for
-`--attr-ttl`; every write invalidates its folder.
+A file's bytes are immutable per ID, so contents are cached on disk under `--cache-dir`.
+Opening a file downloads nothing; its first read fetches all of it, so a file manager
+that opens every file to sniff its type, or only `fstat`s it, costs no download. The
+downloaded contents are kept to `--cache-max` (default `2G`): past it, the least
+recently read are removed. Files being written are under the cache directory too but
+never count or go, and writes not sent yet are under `--state-dir`, not here. Listings
+are cached for `--attr-ttl`; every write invalidates its folder.
+
+`statfs` (`df`, a copy's free-space check) reports the cache directory's filesystem,
+where every write is staged before its upload, and names of up to 255 bytes.
 
 Writes go to a temporary file, and the upload runs when the descriptor is closed
 (`flush`). A close with nothing new to send uploads nothing. `fsync()` makes the
@@ -270,7 +278,7 @@ carry `job="bambuddy-fs"`, so `{job="bambuddy-fs"}` selects them (eh-homelab/clu
 Spans:
 
 - `fuse.<op>` (INTERNAL) for each FUSE operation that reaches ScadBuddy or does work:
-  a lookup or readdir that lists its folder, an open, read or write that downloads,
+  a lookup or readdir that lists its folder, a read or write that downloads,
   a flush or release that uploads, create, mkdir, rmdir, unlink, rename and a truncate.
   A lookup or getattr answered from the cache has none.
 - `scadbuddy.<operation>` (CLIENT) for each ScadBuddy API request (`list_library`,

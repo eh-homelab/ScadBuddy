@@ -9,9 +9,12 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -33,6 +36,7 @@ type config struct {
 	AllowOther bool
 	TTL        time.Duration
 	CacheDir   string
+	CacheMax   byteSize
 	StateDir   string
 	Mountpoint string
 	Telemetry  telemetry.Config
@@ -56,6 +60,8 @@ func newFlagSet(cfg *config) *flag.FlagSet {
 	set.BoolVar(&cfg.AllowOther, "allow-other", false, "let other users and processes see the mount (FUSE allow_other)")
 	set.DurationVar(&cfg.TTL, "attr-ttl", 5*time.Second, "how long listings and kernel entries and attributes are kept")
 	set.StringVar(&cfg.CacheDir, "cache-dir", defaultCacheDir(), "where downloaded contents and files being written are kept")
+	cfg.CacheMax = 2 << 30
+	set.Var(&cfg.CacheMax, "cache-max", "at most this much downloaded contents is kept, least recently used removed first, like 500M or 2G (0: no bound)")
 	stateDirFlag(set, cfg)
 	set.StringVar(&cfg.Telemetry.Endpoint, "otel-endpoint", "", "OTLP/HTTP collector base URL for traces and metrics (default $OTEL_EXPORTER_OTLP_ENDPOINT, else "+telemetry.DefaultEndpoint+")")
 	set.BoolVar(&cfg.Telemetry.Disabled, "no-telemetry", false, "send no traces or metrics")
@@ -65,6 +71,37 @@ func newFlagSet(cfg *config) *flag.FlagSet {
 
 func stateDirFlag(set *flag.FlagSet, cfg *config) {
 	set.StringVar(&cfg.StateDir, "state-dir", defaultStateDir(), "where writes whose upload failed are kept until they are sent")
+}
+
+// byteSize is a flag's size in bytes: a number with an optional binary suffix, K, M,
+// G or T, alone or followed by "iB" or "B" (2G = 2GiB = 2GB = 2 << 30).
+type byteSize int64
+
+func (b *byteSize) String() string {
+	for _, u := range []struct {
+		suffix string
+		shift  uint
+	}{{"T", 40}, {"G", 30}, {"M", 20}, {"K", 10}} {
+		if *b != 0 && *b%(1<<u.shift) == 0 {
+			return strconv.FormatInt(int64(*b)>>u.shift, 10) + u.suffix
+		}
+	}
+	return strconv.FormatInt(int64(*b), 10)
+}
+
+func (b *byteSize) Set(s string) error {
+	num := strings.TrimSuffix(strings.TrimSuffix(strings.ToUpper(strings.TrimSpace(s)), "B"), "I")
+	shift := 0
+	if i := strings.IndexAny(num, "KMGT"); i >= 0 && i == len(num)-1 {
+		shift = 10 * (strings.IndexByte("KMGT", num[i]) + 1)
+		num = num[:i]
+	}
+	n, err := strconv.ParseInt(num, 10, 64)
+	if err != nil || n < 0 || n > math.MaxInt64>>shift {
+		return fmt.Errorf("%q is not a size like 500M or 2G", s)
+	}
+	*b = byteSize(n << shift)
+	return nil
 }
 
 func defaultCacheDir() string { return xdgDir("XDG_CACHE_HOME", ".cache") }
@@ -207,7 +244,7 @@ func run(cfg config) int {
 	}
 	// Flushes, within 5 s, once the mount is gone and before the lock is released.
 	defer stopTelemetry()
-	root := fsys.NewRoot(lib, fsys.Options{All: cfg.All, ReadOnly: cfg.ReadOnly, TTL: cfg.TTL, CacheDir: cfg.CacheDir, StateDir: cfg.StateDir})
+	root := fsys.NewRoot(lib, fsys.Options{All: cfg.All, ReadOnly: cfg.ReadOnly, TTL: cfg.TTL, CacheDir: cfg.CacheDir, CacheMax: int64(cfg.CacheMax), StateDir: cfg.StateDir})
 	ttl := cfg.TTL
 	server, err := fs.Mount(cfg.Mountpoint, root, &fs.Options{
 		EntryTimeout: &ttl,

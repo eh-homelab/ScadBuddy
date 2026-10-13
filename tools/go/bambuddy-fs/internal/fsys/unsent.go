@@ -1013,8 +1013,8 @@ func (t *tree) sent(ctx context.Context, e *entry, sentAs record, got api.File, 
 	if !conflict {
 		t.deleteBases(ctx, rec.Bases, got.ID)
 	}
-	if err := os.MkdirAll(t.cache.dir, 0o700); err == nil {
-		_ = os.Rename(e.contents(), t.cache.path(got.ID))
+	if err := os.MkdirAll(t.cache.dir, 0o700); err == nil && os.Rename(e.contents(), t.cache.path(got.ID)) == nil {
+		t.cache.trim(got.ID)
 	}
 	if err := os.RemoveAll(e.dir); err != nil {
 		slog.Warn("removing a sent write's local copy failed", "path", e.dir, "err", err)

@@ -483,6 +483,27 @@ func TestTheMountingUserOwnsEverything(t *testing.T) {
 	}
 }
 
+func TestStatfsReportsTheCachesFreeSpace(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.file(10, "a.3mf", 0, nil)
+	cache := t.TempDir()
+	dir := mount(t, lib, Options{CacheDir: cache})
+	var want syscall.Statfs_t
+	if err := syscall.Statfs(cache, &want); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"", "a.3mf"} {
+		var st syscall.Statfs_t
+		if err := syscall.Statfs(filepath.Join(dir, name), &st); err != nil {
+			t.Fatal(err)
+		}
+		free := st.Bavail * uint64(st.Bsize)
+		if st.Namelen != 255 || st.Bavail == 0 || free < want.Bavail*uint64(want.Bsize)/2 {
+			t.Errorf("%q: namelen %d, %d bytes free; the cache has %d", name, st.Namelen, free, want.Bavail*uint64(want.Bsize))
+		}
+	}
+}
+
 func TestChmodIsENOTSUP(t *testing.T) {
 	lib := newFakeLibrary()
 	lib.file(10, "a.3mf", 0, nil)

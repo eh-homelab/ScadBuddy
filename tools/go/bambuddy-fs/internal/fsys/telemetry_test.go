@@ -95,7 +95,7 @@ func TestOperationsAreTracedWithoutNames(t *testing.T) {
 	}
 	eventually(t, "every span", func() bool {
 		n := spanNames(spans)
-		return n["fuse.mkdir"] == 1 && n["fuse.create"] == 1 && n["fuse.flush"] >= 1 && n["fuse.open"] == 1 &&
+		return n["fuse.mkdir"] == 1 && n["fuse.create"] == 1 && n["fuse.flush"] >= 1 && n["fuse.read"] == 1 &&
 			n["fuse.rename"] == 1 && n["fuse.unlink"] == 1 && n["fuse.rmdir"] == 1
 	})
 	for _, s := range spans.Ended() {
@@ -107,8 +107,8 @@ func TestOperationsAreTracedWithoutNames(t *testing.T) {
 				t.Fatalf("span %s records %s=%s", s.Name(), a.Key, a.Value.Emit())
 			}
 		}
-		if s.Name() == "fuse.open" && !hasAttr(s.Attributes(), "bambuddy_fs.file.id", "10") {
-			t.Fatalf("open attributes: %v", s.Attributes())
+		if s.Name() == "fuse.read" && !hasAttr(s.Attributes(), "bambuddy_fs.file.id", "10") {
+			t.Fatalf("read attributes: %v", s.Attributes())
 		}
 	}
 

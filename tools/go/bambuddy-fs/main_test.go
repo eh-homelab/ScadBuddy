@@ -38,6 +38,24 @@ func TestParseDefaultsAndAllowOther(t *testing.T) {
 	}
 }
 
+func TestParseCacheMax(t *testing.T) {
+	cfg, err := parse([]string{"mount", "--api", "http://h/api/v1", "/m"})
+	if err != nil || cfg.CacheMax != 2<<30 || cfg.CacheMax.String() != "2G" {
+		t.Fatalf("default: %d %v", cfg.CacheMax, err)
+	}
+	for arg, want := range map[string]byteSize{"500M": 500 << 20, "2GiB": 2 << 30, "1gb": 1 << 30, "4096": 4096, "0": 0, "3T": 3 << 40} {
+		cfg, err := parse([]string{"mount", "--api", "http://h/api/v1", "--cache-max", arg, "/m"})
+		if err != nil || cfg.CacheMax != want {
+			t.Errorf("%s: %d %v, want %d", arg, cfg.CacheMax, err, want)
+		}
+	}
+	for _, arg := range []string{"lots", "-1", "2X", "9999999T"} {
+		if _, err := parse([]string{"mount", "--api", "http://h/api/v1", "--cache-max", arg, "/m"}); err == nil {
+			t.Errorf("%s: accepted", arg)
+		}
+	}
+}
+
 func TestParseTelemetryFlags(t *testing.T) {
 	cfg, err := parse([]string{"mount", "--api", "http://h/api/v1", "/m"})
 	if err != nil || cfg.Telemetry.Endpoint != "" || cfg.Telemetry.Disabled {

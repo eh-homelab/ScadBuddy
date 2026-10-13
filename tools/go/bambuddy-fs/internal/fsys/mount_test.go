@@ -261,7 +261,7 @@ func TestACachedFileOfTheWrongSizeIsDownloadedAgain(t *testing.T) {
 	}
 }
 
-func TestA404OnOpenDropsTheEntry(t *testing.T) {
+func TestA404OnReadDropsTheEntry(t *testing.T) {
 	lib := newFakeLibrary()
 	lib.file(10, "a.3mf", 0, []byte("x"))
 	dir := mount(t, lib, Options{TTL: time.Minute})
@@ -274,12 +274,64 @@ func TestA404OnOpenDropsTheEntry(t *testing.T) {
 	// The listing and the kernel's entry are both still fresh, so only the download
 	// finds the file gone.
 	if _, err := os.ReadFile(path); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("open: %v", err)
+		t.Fatalf("read: %v", err)
 	}
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("stat after: %v", err)
 	}
-	if got := log.String(); !strings.Contains(got, "open failed") || !strings.Contains(got, "404") {
+	if got := log.String(); !strings.Contains(got, "read failed") || !strings.Contains(got, "404") {
 		t.Fatalf("log: %q", got)
+	}
+}
+
+func TestAnOpenThatOnlyLooksDownloadsNothing(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.file(10, "a.3mf", 0, []byte("0123456789"))
+	dir := mount(t, lib, Options{TTL: time.Minute})
+	f, err := os.Open(filepath.Join(dir, "a.3mf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if info, err := f.Stat(); err != nil || info.Size() != 10 {
+		t.Fatalf("%v %v", info, err)
+	}
+	_ = f.Close()
+	if _, downloads := lib.counts(); downloads != 0 {
+		t.Fatalf("downloaded %d times", downloads)
+	}
+}
+
+func TestTheCacheKeepsTheMostRecentlyUsedWithinItsBound(t *testing.T) {
+	lib := newFakeLibrary()
+	for i, name := range []string{"a.3mf", "b.3mf", "c.3mf"} {
+		lib.file(10+i, name, 0, bytes.Repeat([]byte{'x'}, 400))
+	}
+	cache := t.TempDir()
+	// A file being written and one being fetched are never trimmed.
+	for _, name := range []string{"write-123", "99.part"} {
+		if err := os.WriteFile(filepath.Join(cache, name), bytes.Repeat([]byte{'w'}, 1000), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dir := mount(t, lib, Options{TTL: time.Minute, CacheDir: cache, CacheMax: 1000})
+	read := func(name string) {
+		t.Helper()
+		if _, err := os.ReadFile(filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read("a.3mf")
+	read("b.3mf")
+	// As if a had been read again since: b is the least recently used when c comes in.
+	past := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(filepath.Join(cache, "11"), past, past); err != nil {
+		t.Fatal(err)
+	}
+	read("c.3mf")
+	for name, want := range map[string]bool{"10": true, "11": false, "12": true, "write-123": true, "99.part": true} {
+		if _, err := os.Stat(filepath.Join(cache, name)); (err == nil) != want {
+			t.Errorf("%s: kept %v, want %v", name, err == nil, want)
+		}
 	}
 }
