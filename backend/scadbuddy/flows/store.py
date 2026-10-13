@@ -27,7 +27,6 @@ from psycopg_pool import ConnectionPool
 from scadbuddy.bambuddy.runs import TransactionalEvents
 from scadbuddy.core.events import FlowRunEvent
 from scadbuddy.flows.grants import Consumption, Grant, GrantSpec, GrantStatus, GrantUse
-from scadbuddy.flows.manifest import OVERRIDES_SETTING
 from scadbuddy.flows.models import (
     RESULT_MAX,
     TERMINAL,
@@ -421,10 +420,6 @@ class FlowStore:
     async def delete_grant(self, run_id: str) -> None:
         await asyncio.to_thread(self._delete_grant, run_id)
 
-    async def tool_overrides(self) -> Any:
-        """Settings' raised tool tiers (the agent's `ai_settings` row), or None."""
-        return await asyncio.to_thread(self._tool_overrides)
-
     # -- implementation -----------------------------------------------------------
 
     def _insert_grant(
@@ -606,17 +601,6 @@ class FlowStore:
     def _delete_grant(self, run_id: str) -> None:
         with self._pool.connection() as conn:
             conn.execute("DELETE FROM flow_grants WHERE run_id = %s", (run_id,))
-
-    def _tool_overrides(self) -> Any:
-        with self._pool.connection() as conn:
-            try:
-                row = conn.execute(
-                    "SELECT value FROM ai_settings WHERE key = %s", (OVERRIDES_SETTING,)
-                ).fetchone()
-            except psycopg.errors.UndefinedTable:
-                # No agent service has migrated this database: no overrides.
-                return None
-        return None if row is None else row["value"]
 
     def _record_decision(self, decision: Decision, at_hop: Hop | None = None) -> bool:
         with self._pool.connection() as conn, conn.transaction():

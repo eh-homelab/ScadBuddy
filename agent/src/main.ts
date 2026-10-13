@@ -626,6 +626,8 @@ const app = createApp({
       return undefined
     }
   },
+  // The tools a flow may call at their tiers now, for the API beside it (#2704, routes/flowTools.ts): loopback only.
+  flowTools: { tools: ALL_TOOLS, services: toolServices },
   // A durable segment's subagents' ScadBuddy tools (#2320, routes/subagentMcp.ts): loopback only.
   ...(database && kek.ok
     ? {

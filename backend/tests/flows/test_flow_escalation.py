@@ -7,7 +7,7 @@ import asyncio
 import dataclasses
 import time
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -20,14 +20,13 @@ from temporalio.worker import Worker
 from scadbuddy.core.problems import ApiError
 from scadbuddy.flows.approval_hash import input_hash
 from scadbuddy.flows.grants import GrantSpec
-from scadbuddy.flows.manifest import use_manifest
 from scadbuddy.flows.models import Decision, Run
 from scadbuddy.flows.operations import FLOW_ESCALATE, flow_kinds, request_id
 from scadbuddy.workflows.flow_grants import FlowGrants
 from scadbuddy.workflows.flow_models import DecisionAsk, DecisionRead
 from tests.flows import test_agent_host_functions as host
 from tests.flows.fake_api import PLAN, FakeApi, Outward
-from tests.flows.flows_support import HASH_KEY, Keys, parent_session, script
+from tests.flows.flows_support import HASH_KEY, AgentTiers, Keys, parent_session, script
 from tests.flows.test_agent_host_functions import DURABLE, Sessions
 from tests.flows.test_grant_children import Child
 from tests.flows.test_grant_gate import api_client_of
@@ -244,20 +243,14 @@ class Tools:
         return [send_to_bambuddy]
 
 
-@pytest.fixture(autouse=True)
-def manifest() -> Iterator[None]:
-    use_manifest(
-        {"sessions_start": "write", "sessions_send": "write", "send_to_bambuddy": "outward"}
-    )
-    yield
-    use_manifest({})
-
-
 @pytest.fixture
 async def tools(outward: Outward) -> AsyncIterator[tuple[Tools, str]]:
     served = Tools()
     queue = f"agent-tools-{uuid.uuid4().hex[:8]}"
-    async with Worker(outward.client, task_queue=queue, activities=served.all()):
+    agent = AgentTiers({"send_to_bambuddy": "outward"})
+    async with Worker(
+        outward.client, task_queue=queue, activities=[*served.all(), agent.activity()]
+    ):
         yield served, queue
 
 

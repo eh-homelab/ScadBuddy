@@ -11,7 +11,6 @@ from collections.abc import Mapping
 from pydantic import BaseModel
 from temporal_agent_harness.harness.code_mode.stubs import render_host_interface
 
-from scadbuddy.flows.manifest import tiers
 from scadbuddy.workflows.flow_tools import SCRIPT_TOOLS
 
 
@@ -31,7 +30,7 @@ class HostType(BaseModel):
 
 
 class ManifestTool(BaseModel):
-    """A tool `tool(name, args)` may call, with its tier."""
+    """A tool `tool(name, args)` may call, with its tier as the agent resolves it now."""
 
     name: str
     tier: str
@@ -41,11 +40,14 @@ class HostInterface(BaseModel):
     functions: list[HostFunction]
     types: list[HostType]
     tools: list[ManifestTool]
+    #: Why `tools` is empty when the agent did not list its tools (#2704); None otherwise.
+    tools_unavailable: str | None = None
 
 
-def host_interface(tool_tiers: Mapping[str, str] | None = None) -> HostInterface:
-    """The host functions and types, and the manifest's tools at `tool_tiers` (the
-    manifest's own tiers when None)."""
+def host_interface(
+    tool_tiers: Mapping[str, str], *, tools_unavailable: str | None = None
+) -> HostInterface:
+    """The host functions and types, and the agent's tools at `tool_tiers`."""
     source = render_host_interface(SCRIPT_TOOLS)
     functions: list[HostFunction] = []
     types: list[HostType] = []
@@ -67,6 +69,7 @@ def host_interface(tool_tiers: Mapping[str, str] | None = None) -> HostInterface
             types.append(
                 HostType(name=node.name, source=ast.get_source_segment(source, node) or "")
             )
-    tiered = tiers() if tool_tiers is None else tool_tiers
-    tools = [ManifestTool(name=name, tier=tier) for name, tier in sorted(tiered.items())]
-    return HostInterface(functions=functions, types=types, tools=tools)
+    tools = [ManifestTool(name=name, tier=tier) for name, tier in sorted(tool_tiers.items())]
+    return HostInterface(
+        functions=functions, types=types, tools=tools, tools_unavailable=tools_unavailable
+    )
