@@ -31,6 +31,8 @@ class _ReadSource:
     """Just what the dialog reads of a source: library file 62, one plate."""
 
     colours: ClassVar[list[str]] = ["#FF0000"]
+    is_sliced = False  # #2671: a project to lay out, not a sliced file
+    sliced_profile = None
 
     async def file_to_read(self, client: BambuddyClient) -> ReadFile:
         return ReadFile(62)
