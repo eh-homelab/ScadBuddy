@@ -122,7 +122,8 @@ and answers it exactly as the POST would have.
 - The 202 body is `CommandAccepting`:
   - `status: "accepting"`
   - `workflow_id`, `update_id`
-  - `follow_url`, also sent as `Location`
+  - `follow_url`, also sent as `Location`. The follow is POST-only (§5.2), so a client
+    POSTs to it and never GETs `Location`, which answers 405.
   - `retry_after` (seconds), also sent as `Retry-After`
 
 ### 5.2 The follow: `POST /api/v1/commands/{workflow_id}/updates/{update_id}`
@@ -144,8 +145,11 @@ and answers it exactly as the POST would have.
   follows again at once after a "still waiting", with only its own small polling floor.
   It does not also wait `Retry-After`, which would wait twice per round. `Retry-After`
   is sent for HTTP's sake, and for a client that does not long-poll.
-- **`NOT_FOUND` (the Update or the execution):** 409, type
-  `https://scadbuddy.dev/problems/command-resend`. This happens when:
+- **The Update is not answerable:** 409, type
+  `https://scadbuddy.dev/problems/command-resend`. Every way a closing run can answer
+  maps here, not only `NOT_FOUND`: a `WorkflowUpdateFailedError` whose cause is
+  `CLOSING`, and a `RenderAnswer(closing=True)`, which carries no job, so an adapter
+  never turns it into a `RenderAccepted`. This happens when:
   - the Update was never durably admitted (an admitted Update lives in the server's
     registry, not in history, until the worker accepts it);
   - the run closed and rejected it (§2.3). The POST's own `_accepted` loop waits out a
@@ -153,7 +157,9 @@ and answers it exactly as the POST would have.
     do that, so it takes one extra round trip, the re-send, that a fast POST does not;
   - the execution is gone.
 
-  The client then sends the **original POST again with the same key**. That is exactly
+  The client then sends the **original POST again with the same key**: its own
+  `Idempotency-Key`, or, when the request carried none and the route made one (§5.1),
+  the 202's `update_id`. That is exactly
   today's re-send, and safe for the same reasons (§2.2–2.3). It is the only re-send left,
   and it is rare.
 - **The poll's own RPC fails:** `temporal_failure` maps it to the same 503s as the POST
@@ -170,6 +176,12 @@ and answers it exactly as the POST would have.
 | render (`render-…`) | `RenderAnswer` | `RenderAccepted` (job id, status url, inputs) | the supersede (`_supersede` of the job the request named), then the job |
 | print run (`print-…`) | the run record | `PrintRun` (what `followPrintRun` already polls) | none |
 | Operation (`op-…`) | `Operation` | the route's body, or `OperationAccepted` 202 | none |
+
+**Telling the two 202s apart.** An Operation's follow can answer 202 twice over: still
+waiting (`CommandAccepting`), or answered with the route's own `OperationAccepted`, to
+follow at `/operations/{id}`. The discriminator is `status`: `CommandAccepting`'s is
+always `"accepting"`, and an `Operation`'s is one of `running`, `succeeded` or `failed`,
+never `accepting`. A client checks it before it opts `command()` in (§6, step 3).
 
 A render's supersede ran after acceptance inside the POST. It now runs wherever the
 answer arrives: the POST when it was fast, the follow otherwise. The follow URL carries
