@@ -105,7 +105,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a background task's workfl
     answers = [{ result: 'busy' }]
     await (
       await env.client.workflow.start(BACKGROUND_WORKFLOW, {
-        workflowId: backgroundWorkflowId(t.id),
+        workflowId: backgroundWorkflowId(sessionId, t.id),
         taskQueue: TASK_QUEUE,
         args: [{ taskId: t.id, kind: 'monitor', retryMs: 200 }],
       })
