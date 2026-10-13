@@ -402,6 +402,7 @@ function LibraryWaiting({
   }
   return (
     <ul aria-label="Waiting for Bambuddy" className="mb-3 flex flex-col gap-2">
+      {/* Read on mount, unlike OutputWaitingRow: one row, not a list to read lazily (#1014). */}
       <WaitingRow name={name ?? `Library file ${fileId}`} progress={progress} />
     </ul>
   )

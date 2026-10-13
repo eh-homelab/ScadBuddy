@@ -518,12 +518,12 @@ describe('a sent output Bambuddy has forgotten (#898)', () => {
     const [first, second] = within(list).getAllByRole('listitem')
     expect(second).toHaveTextContent('Waiting for Bambuddy')
     const waited = () => read.filter((id) => id === acceptance.id || id === luna.id)
-    await new Promise((resolve) => setTimeout(resolve, 50))
     expect(waited()).toEqual([])
 
     intersect(first as HTMLElement)
     await waitFor(() => expect(waited()).toContain(acceptance.id))
-    // The row still out of view is not read.
+    // The row still out of view is not read. Both rows mounted in one pass, so a read on
+    // mount would have gone out before the one the intersection started: no timed wait.
     expect(waited()).not.toContain(luna.id)
     intersect(second as HTMLElement)
     await waitFor(() => expect(waited()).toContain(luna.id))

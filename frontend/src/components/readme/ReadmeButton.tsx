@@ -7,7 +7,9 @@ import { Spinner } from '../ui/Spinner'
 
 /**
  * #1074 — the template's README, rendered. Its relative images (`thumbnail.png`,
- * `images/…`) load from the template's own files through `Markdown`'s `base`.
+ * `images/…`) load from the template's own files through `Markdown`'s `base`. Those
+ * are the current revision's: the readme route takes no revision, so a README opened
+ * beside an older version still shows today's images.
  */
 export function ReadmeButton({ slug }: { slug: string }) {
   const [open, setOpen] = useState(false)
