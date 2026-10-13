@@ -47,6 +47,20 @@ const grantSpec = z
     "A proposed run grant: outward calls inside a rule's bounds would run without asking. An agent's grant is " +
       'only requested: it does nothing until the user approves it (maybe edited) on the run page.',
   )
+const inputsSchema = z
+  .record(z.string(), z.unknown())
+  .describe(
+    "The flow's typed inputs (#2483), a JSON Schema committed beside the script as inputs.json: " +
+      '{"type": "object", "properties": {...}, "required": [...]}, each property a string, integer, number, ' +
+      'boolean or array of one of them, with an optional `description`, `default` and its type\'s constraints ' +
+      '(a string or integer may be an `enum`). The script reads them with `inputs()`, typed by it.',
+  )
+const runInputs = z
+  .record(z.string(), z.unknown())
+  .describe(
+    "The run's inputs by name, as the flow's `inputs_schema` (get_flow) declares them; one left out takes " +
+      'its default. Refused (422 with `problems`) when they do not fit, or for a flow with no inputs schema.',
+  )
 const approvalTimeout = z
   .union([z.number().int().min(10).max(2_592_000), z.literal('never')])
   .describe('Seconds an outward host call waits for a person to approve it before it is denied, or "never"')
@@ -77,11 +91,14 @@ export const flowTools: Tool[] = [
       'compute for at most a second between host calls. It is type-checked first: a 422 lists `problems` by line. ' +
       'Registering an existing `name` adds its next version, one commit in its history (list_flow_versions), ' +
       'an unchanged script too; a version never changes. `approval_timeout` sets how long its runs wait for ' +
-      'approvals (omit for the global setting).',
+      'approvals (omit for the global setting). With `inputs_schema`, each run takes typed inputs, which the ' +
+      "script reads with `inputs()` (a TypedDict `FlowInputs`, defaults filled in); a 422 lists the schema's " +
+      'problems with `file` inputs.json.',
     input: z.object({
       name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/, 'lower-case letters, digits and dashes'),
       script: z.string().min(1).max(65_536),
       approval_timeout: approvalTimeout.optional(),
+      inputs_schema: inputsSchema.optional(),
     }),
     risk: 'write',
     routes: ['POST /api/v1/workflows'],
@@ -94,8 +111,9 @@ export const flowTools: Tool[] = [
     description:
       'Type-check a flow script as register_flow would, without registering it: no version, no commit. ' +
       'Answers {problems}, each with its 1-based `line` (null for the whole script) and `message`; empty when ' +
-      'register_flow would accept it.',
-    input: z.object({ script: z.string().min(1).max(65_536) }),
+      'register_flow would accept it. With `inputs_schema`, the schema is checked too (problems with `file` ' +
+      'inputs.json) and `inputs()` is typed by it.',
+    input: z.object({ script: z.string().min(1).max(65_536), inputs_schema: inputsSchema.optional() }),
     risk: 'read',
     routes: ['POST /api/v1/workflow-script/check'],
     handler: async (body, { backend }) =>
@@ -274,11 +292,17 @@ export const flowTools: Tool[] = [
       'get_flow_run. The script is checked again first (422 with `problems` if the host functions changed). ' +
       '`approval_timeout` overrides the flow\'s for this run. The run is recorded as started by this session. ' +
       '`grant` proposes what its outward calls may do without asking; it is requested, never approved, until ' +
-      'the user approves it on the run page. The run starts at once, and its outward calls wait meanwhile.',
-    input: z.object({ definition_id: definitionId, approval_timeout: approvalTimeout.optional(), grant: grantSpec.optional() }),
+      'the user approves it on the run page. The run starts at once, and its outward calls wait meanwhile. ' +
+      '`inputs` are the run\'s typed inputs, recorded on the run; a Reset replays the same ones.',
+    input: z.object({
+      definition_id: definitionId,
+      approval_timeout: approvalTimeout.optional(),
+      grant: grantSpec.optional(),
+      inputs: runInputs.optional(),
+    }),
     risk: 'write',
     routes: ['POST /api/v1/workflows/{definition_id}/runs'],
-    handler: async ({ definition_id, approval_timeout, grant }, ctx) => {
+    handler: async ({ definition_id, approval_timeout, grant, inputs }, ctx) => {
       // One key for this call, re-sent after an answer that never came, so a re-send reaches the same run.
       const headers = { 'Idempotency-Key': randomUUID().replaceAll('-', '') }
       const what = `start flow ${definition_id}`
@@ -288,11 +312,12 @@ export const flowTools: Tool[] = [
           ctx.backend.POST('/api/v1/workflows/{definition_id}/runs', {
             params: { path: { definition_id } },
             body:
-              approval_timeout === undefined && grant === undefined
+              approval_timeout === undefined && grant === undefined && inputs === undefined
                 ? null
                 : {
                     ...(approval_timeout === undefined ? {} : { approval_timeout }),
                     ...(grant === undefined ? {} : { grant }),
+                    ...(inputs === undefined ? {} : { inputs }),
                   },
             headers,
           }),
