@@ -109,8 +109,10 @@ is today. The others take the tiers their library-write peers have.
   2. runs the same queued-print check across every live file (any hit is a 409 before
      anything is deleted);
   3. refuses with 409, before anything is deleted, if Bambuddy's trash
-     (`GET /library/trash`) holds files whose `folder_id` is in the subtree, unless they
-     can be moved out of it (see below);
+     (`GET /library/trash`) holds files whose `folder_id` is in the subtree ("restore or
+     empty them first"). A trashed row cannot be moved out: in v1.2.5.5,
+     `PUT /library/files/{id}` loads only rows not in the trash and answers 404 for a
+     trashed one (`routes/library.py` L5092);
   4. moves each managed file to the top level (`folder_id: 0`), then deletes it as
      `/print/library/delete` does, to the trash. Undo then restores it at the top
      level, since its folder is gone. External files are deleted for good, as
@@ -123,11 +125,10 @@ is today. The others take the tiers their library-write peers have.
   Its result lists `deleted` (each with `trashed`), `skipped` and `folders` (the folders
   deleted), so the UI's Undo can restore the trashed files.
 
-  Measured from Bambuddy's source at the v1.2.5.5 tag (`backend/app/api/routes/library.py`
-  `delete_folder`, `LibraryFile.folder_id` `ondelete="CASCADE"`) by the PR #2798 final
-  review, 2026-10-13. Whether `PUT /library/files/{id}` accepts a trashed row decides
-  step 3: if it does, trashed files in the subtree are moved to the top level instead
-  of refusing.
+  Measured from Bambuddy's source at the v1.2.5.5 tag (`routes/library.py`
+  `delete_folder` and L5092; `routes/library_trash.py` L88-150; `LibraryFile.folder_id`
+  `ondelete="CASCADE"`) by the PR #2798 final review and its fix, 2026-10-13. `skipped`
+  may name a subfolder made after the check, as well as files.
 
 ## 6. Generated client (Kiota)
 
