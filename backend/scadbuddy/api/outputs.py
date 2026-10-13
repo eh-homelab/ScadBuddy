@@ -1082,6 +1082,38 @@ async def put_output_thumbnail(
     return _no_content(result)
 
 
+class RenameOutputRequest(BaseModel):
+    #: The output's new name; empty or null clears it, and History shows its short id.
+    name: str | None = Field(default=None, max_length=200)
+
+
+@router.patch(
+    "/outputs/{output_id}",
+    response_model=OutputDetail,
+    summary="Rename an output",
+    responses=OPERATION_RESPONSES,
+)
+async def rename_output(
+    output_id: OutputIdPath,
+    body: RenameOutputRequest,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> OutputDetail | JSONResponse:
+    """The ``output_rename`` operation (#2288): its check makes the 404, its run writes
+    the name and answers the output as it now reads."""
+    name = (body.name or "").strip() or None
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["output_rename"],
+        subject=output_id,
+        request={"output_id": output_id, "name": name},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, OutputDetail)
+
+
 @router.post(
     "/outputs/{output_id}/send",
     response_model=SendResult,

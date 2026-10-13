@@ -65,9 +65,22 @@ def test_output_writes_are_operations(client: TestClient, app: FastAPI, model: s
     )
     assert covered.status_code == 204, covered.text
     assert client.get(f"/api/v1/outputs/{output_id}/thumbnail").content == PNG_BYTES
+    # #2288 — named, then the name cleared: a blank one is no name.
+    renamed = client.patch(
+        f"/api/v1/outputs/{output_id}", json={"name": "  Zach blue  "}, headers=press()
+    )
+    assert renamed.status_code == 200, renamed.text
+    assert renamed.json()["name"] == "Zach blue"
+    assert client.get(f"/api/v1/outputs/{output_id}").json()["name"] == "Zach blue"
+    cleared = client.patch(f"/api/v1/outputs/{output_id}", json={"name": " "}, headers=press())
+    assert cleared.status_code == 200 and cleared.json()["name"] is None
+    assert (
+        client.patch(f"/api/v1/outputs/{'0' * 32}", json={"name": "x"}, headers=press()).status_code
+        == 404
+    )
     assert client.delete(f"/api/v1/outputs/{output_id}", headers=press()).status_code == 204
     assert client.get(f"/api/v1/outputs/{output_id}").status_code == 404
-    for kind in ("output_create", "output_thumbnail", "output_delete"):
+    for kind in ("output_create", "output_thumbnail", "output_rename", "output_delete"):
         assert _workflow_ids(app, kind), kind
 
 
