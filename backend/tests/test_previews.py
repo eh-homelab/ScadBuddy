@@ -40,7 +40,7 @@ from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.runner import OpenSCADError
 from scadbuddy.render.schema import CustomizerSchema, Parameter
 from scadbuddy.render.solids import WRAPPER_PREFIX
-from tests.conftest import write_openscad_3mf
+from tests.conftest import read_png, write_openscad_3mf
 from tests.support.media import MemoryMediaStore
 
 SLUG = "widget"
@@ -272,7 +272,7 @@ async def test_a_preview_is_the_plate_image_of_a_render_at_the_default_parameter
         out = args[3]
         assert isinstance(out, Path)
         write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
-        return mock.Mock(log_tail=[], missing_files=())
+        return mock.Mock(log_tail=[], missing_files=(), plates=None)
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
         return CustomizerSchema(parameters=[Parameter(name="width", type="number", initial=10)])
@@ -293,12 +293,48 @@ async def test_a_preview_is_the_plate_image_of_a_render_at_the_default_parameter
     assert sorted(entry.name for entry in paths.model_dir(SLUG).iterdir()) == ["model.scad"]
 
 
+async def test_a_multi_plate_templates_preview_is_its_first_plate(paths: DataPaths) -> None:
+    """#453: rendered at once, a template that echoes `plates = 2` draws both plates'
+    parts together; the catalogue shows plate 1, what its first plate prints."""
+    asked: list[list[str]] = []
+    tray = ("Color 1", "#0047BB00", trimesh.creation.box(extents=(20, 20, 4)))
+    lid = ("Color 2", "#FF000000", trimesh.creation.box(extents=(20, 20, 4)))
+    lid[2].apply_translation((40, 0, 0))
+
+    async def plated(*args: object, **kwargs: object) -> object:
+        defines = list(kwargs.get("extra_defines", ()))  # type: ignore[call-overload]
+        asked.append(defines)
+        out = args[3]
+        assert isinstance(out, Path)
+        write_openscad_3mf(out, [tray] if "$plate=1" in defines else [tray, lid])
+        return mock.Mock(log_tail=[], missing_files=(), plates=2)
+
+    async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
+        return CustomizerSchema()
+
+    with (
+        mock.patch.object(previews_module, "render_3mf", plated),
+        mock.patch.object(previews_module, "cached_schema", cached_schema),
+    ):
+        png = await render_preview(
+            SLUG, config=CONFIG, paths=paths, history=None, assets=AssetStore(paths.assets)
+        )
+
+    assert asked == [[], ["-D", "$plate=1"]]
+    image = read_png(png)
+    opaque = image[image[..., 3] > 0][:, :3].astype(int)
+    # Shaded blue, never red: the lid on plate 2 is not drawn.
+    assert (opaque[:, 2] > opaque[:, 0]).any()
+    assert not ((opaque[:, 0] > 150) & (opaque[:, 1] < 80) & (opaque[:, 2] < 80)).any()
+    assert not any(paths.preview_work.iterdir())
+
+
 async def test_a_default_render_with_no_geometry_is_a_failure(paths: DataPaths) -> None:
     async def nothing(*args: object, **kwargs: object) -> object:
         out = args[3]
         assert isinstance(out, Path)
         write_openscad_3mf(out, [])
-        return mock.Mock(log_tail=[], missing_files=())
+        return mock.Mock(log_tail=[], missing_files=(), plates=None)
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
         return CustomizerSchema()
@@ -445,7 +481,7 @@ async def test_a_preview_holds_a_lease_on_the_checkouts_it_renders_with(
         out = args[3]
         assert isinstance(out, Path)
         write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
-        return mock.Mock(log_tail=[], missing_files=())
+        return mock.Mock(log_tail=[], missing_files=(), plates=None)
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
         return CustomizerSchema()

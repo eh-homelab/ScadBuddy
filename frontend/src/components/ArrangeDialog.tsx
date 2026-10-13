@@ -17,6 +17,7 @@ import {
   type Arranged,
   type ArrangedJob,
 } from '../lib/arrange'
+import { traceAction } from '../lib/traceAction'
 import { AddFiles, AddFromModel } from './ArrangeSourcePicker'
 import { BackfillProgress, BackfillPrompt } from './BackfillPrompt'
 import { Button } from './ui/Button'
@@ -249,73 +250,88 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
     const controller = new AbortController()
     running.current = controller
     try {
-      let usable = outputs.filter((output) => !unusable.includes(output))
-      let skipped: string | undefined
-      if (stale.length > 0) {
-        const { ready, failed } = await backfillOutputs(stale, {
-          signal: controller.signal,
-          onProgress: (output, message) => setBackfill((shown) => ({ ...shown, [output.id]: message })),
-        })
-        setRefreshed((known) => ({ ...known, ...Object.fromEntries(ready.map((o) => [o.id, o])) }))
-        setFlagged((ids) => ids.filter((id) => !ready.some((o) => o.id === id)))
-        const why = backfillFailures(failed)
-        // Every output that can be arranged is, the ones that never needed a re-render too.
-        if (ready.length === 0 && usable.length === 0 && fileRows.length === 0) {
-          setFailures(`${why} Nothing was arranged.`)
-          return
-        }
-        // Said wherever this lands, History too: the arrange went ahead without them (#1007).
-        if (failed.length > 0) {
-          skipped = `${why} ${failed.length === 1 ? 'It was' : 'They were'} left out of the arrange.`
-        }
-        if (skipped) setFailures(skipped)
-        // In the dialog's order, each re-rendered output in its old one's place.
-        const before = usable
-        usable = outputs.flatMap((output) =>
-          before.includes(output) ? [output] : ready.filter((o) => o.id === output.id),
-        )
-      }
-      // The chosen template, unless every output of it was left out: then the first one's.
-      // With a library file in the mix, any template picked from every one (#1863, #2284).
-      const kept = templatesOf(usable)
-      const choices = anyTemplate ? [...new Set([...kept, ...templates])] : kept
-      const slug = filing && choices.includes(filing) ? filing : choices[0]
-      if (!slug) throw new Error('Nothing to arrange.')
-      const body: ArrangeRequest = {
-        objects: [
-          ...rowsOf(usable).map(({ output, object, key }) => ({
-            output_id: output.id,
-            part: object.part,
-            count: countOf(key, object.count),
-          })),
-          ...fileRows.map(({ file, object, key }) => ({
-            library_file_id: file.id,
-            part: object.part,
-            count: countOf(key, object.count),
-          })),
-        ],
-        goal,
-        name: name.trim() || null,
-        slug,
-      }
-      const signature = JSON.stringify(body)
-      if (attempt.current?.body !== signature) attempt.current = { key: newRequestId(), body: signature }
-      const current = attempt.current
-      const arranged = await runArrange(slug, body, {
-        onProgress: setProgress,
-        signal: controller.signal,
-        saveKey: current.key,
-        arranged: current.arranged,
-        onArranged: (job) => (current.arranged = job),
-      })
-      attempt.current = null
-      // Closed while the output was being saved: it is saved, a normal output in
-      // History, but this dialog no longer acts on it.
-      if (controller.signal.aborted) return
-      // Only a name the model list gave: a slug is not a name (#2541).
-      const filedUnder = models?.find((model) => model.slug === arranged.output.slug)?.name
-      const filed = filedUnder ? { ...arranged, filedUnder } : arranged
-      onArranged(skipped ? { ...filed, skipped } : filed)
+      // One action from the re-renders to the save (#2292): their starts and the save are
+      // its children; each job's follow is a poll, and stays out of it.
+      await traceAction(
+        'arrange',
+        {
+          'scadbuddy.outputs': outputs.length,
+          'scadbuddy.library_files': fileRows.length,
+          'scadbuddy.rerendered': stale.length,
+        },
+        async (within, span) => {
+          let usable = outputs.filter((output) => !unusable.includes(output))
+          let skipped: string | undefined
+          if (stale.length > 0) {
+            const { ready, failed } = await backfillOutputs(stale, {
+              signal: controller.signal,
+              within,
+              onProgress: (output, message) => setBackfill((shown) => ({ ...shown, [output.id]: message })),
+            })
+            setRefreshed((known) => ({ ...known, ...Object.fromEntries(ready.map((o) => [o.id, o])) }))
+            setFlagged((ids) => ids.filter((id) => !ready.some((o) => o.id === id)))
+            const why = backfillFailures(failed)
+            // Every output that can be arranged is, the ones that never needed a re-render too.
+            if (ready.length === 0 && usable.length === 0 && fileRows.length === 0) {
+              setFailures(`${why} Nothing was arranged.`)
+              return
+            }
+            // Said wherever this lands, History too: the arrange went ahead without them (#1007).
+            if (failed.length > 0) {
+              skipped = `${why} ${failed.length === 1 ? 'It was' : 'They were'} left out of the arrange.`
+            }
+            if (skipped) setFailures(skipped)
+            // In the dialog's order, each re-rendered output in its old one's place.
+            const before = usable
+            usable = outputs.flatMap((output) =>
+              before.includes(output) ? [output] : ready.filter((o) => o.id === output.id),
+            )
+          }
+          // The chosen template, unless every output of it was left out: then the first one's.
+          // With a library file in the mix, any template picked from every one (#1863, #2284).
+          const kept = templatesOf(usable)
+          const choices = anyTemplate ? [...new Set([...kept, ...templates])] : kept
+          const slug = filing && choices.includes(filing) ? filing : choices[0]
+          if (!slug) throw new Error('Nothing to arrange.')
+          const body: ArrangeRequest = {
+            objects: [
+              ...rowsOf(usable).map(({ output, object, key }) => ({
+                output_id: output.id,
+                part: object.part,
+                count: countOf(key, object.count),
+              })),
+              ...fileRows.map(({ file, object, key }) => ({
+                library_file_id: file.id,
+                part: object.part,
+                count: countOf(key, object.count),
+              })),
+            ],
+            goal,
+            name: name.trim() || null,
+            slug,
+          }
+          const signature = JSON.stringify(body)
+          if (attempt.current?.body !== signature) attempt.current = { key: newRequestId(), body: signature }
+          const current = attempt.current
+          const arranged = await runArrange(slug, body, {
+            onProgress: setProgress,
+            within,
+            signal: controller.signal,
+            saveKey: current.key,
+            arranged: current.arranged,
+            onArranged: (job) => (current.arranged = job),
+          })
+          attempt.current = null
+          // Closed while the output was being saved: it is saved, a normal output in
+          // History, but this dialog no longer acts on it.
+          if (controller.signal.aborted) return
+          // Only a name the model list gave: a slug is not a name (#2541).
+          const filedUnder = models?.find((model) => model.slug === arranged.output.slug)?.name
+          const filed = filedUnder ? { ...arranged, filedUnder } : arranged
+          span.setAttribute('scadbuddy.output_id', arranged.output.id)
+          onArranged(skipped ? { ...filed, skipped } : filed)
+        },
+      )
     } catch (cause) {
       if (controller.signal.aborted) return
       const ids = backfillIds(cause)

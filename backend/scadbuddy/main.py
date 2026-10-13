@@ -46,6 +46,7 @@ from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.errors import NOT_CONFIGURED_PROBLEM
 from scadbuddy.bambuddy.follow import FollowActivities
+from scadbuddy.bambuddy.lost_slices import sweep_lost_slices
 from scadbuddy.bambuddy.output_reader import LocalOutputs
 from scadbuddy.bambuddy.preview import sweep_preview_slices
 from scadbuddy.bambuddy.print_source import MAX_DOWNLOAD_BYTES
@@ -545,6 +546,8 @@ async def _sweep_preview_slices_logged(state: AppState) -> None:
     try:
         async with client_for(settings) as client:
             removed = await sweep_preview_slices(client, state.uploads)
+            # #2715: and what print runs' lost slice starts left, on the same tick.
+            lost = await sweep_lost_slices(client, state.uploads)
     except ApiError as error:
         if error.type == NOT_CONFIGURED_PROBLEM:
             logger.debug("no background-slice sweep: Bambuddy is not set up")
@@ -556,6 +559,8 @@ async def _sweep_preview_slices_logged(state: AppState) -> None:
         raise
     if removed:
         logger.info("removed unprinted background slices", extra={"count": removed})
+    if lost:
+        logger.info("removed the files of lost slice starts", extra={"count": lost})
 
 
 async def _maintain_models_git_logged(state: AppState) -> None:

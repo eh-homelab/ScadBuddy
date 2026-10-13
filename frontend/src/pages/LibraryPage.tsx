@@ -1,19 +1,31 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate, useSearchParams } from 'react-router'
 import { api, ApiError } from '../api/client'
-import type { LibraryDeleteResult, LibraryEntry, LibraryFolderView, LibraryListing } from '../api/types'
+import type {
+  LibraryCopyResult,
+  LibraryDeleteResult,
+  LibraryEntry,
+  LibraryFolderView,
+  LibraryListing,
+  LibraryMoveResult,
+  LibraryRenameResult,
+} from '../api/types'
 import { ArrangeDialog } from '../components/ArrangeDialog'
 import { ArrangedNext } from '../components/ArrangedNext'
 import { DeleteLibraryFilesDialog } from '../components/library/DeleteLibraryFilesDialog'
 import { LibraryTree } from '../components/library/LibraryTree'
+import { RenameLibraryFileDialog } from '../components/library/RenameLibraryFileDialog'
+import { TransferLibraryFilesDialog, type TransferMode } from '../components/library/TransferLibraryFilesDialog'
 import { PrintPicker } from '../components/PrintPicker'
 import { libraryPrintsPath } from '../components/prints/prints'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
 import { arrangedNote, fromFiles, savedNote, type Arranged } from '../lib/arrange'
+import { traceAction } from '../lib/traceAction'
 import { modelPath } from '../lib/deeplink'
 import { formatBytes } from '../lib/format'
 import { folderIdOf, folderSegments, libraryPath } from '../lib/libraryPath'
+import { folderLabel } from '../lib/libraryTransfer'
 
 /** #313 — remembered per viewer: whether the page lists every file type. */
 const ADVANCED_KEY = 'scadbuddy.library.advanced'
@@ -43,6 +55,12 @@ interface Deleted {
   error: string | null
 }
 
+/** #2670 — what the last copy, move or rename did. */
+type Done =
+  | { kind: 'move'; result: LibraryMoveResult; where: string }
+  | { kind: 'copy'; result: LibraryCopyResult; where: string }
+  | { kind: 'rename'; result: LibraryRenameResult }
+
 function plural(count: number, word: string): string {
   return `${count} ${word}${count === 1 ? '' : 's'}`
 }
@@ -59,6 +77,8 @@ function plural(count: number, word: string): string {
  * between them.
  * #2167 — Delete on a card, or Delete selected, moves files to Bambuddy's trash after a
  * confirmation; Undo restores them from it.
+ * #2670 — a card's actions menu (Rename, Copy to…, Move to…), or Copy and Move selected,
+ * reorganise the library through Bambuddy; a move says which project loses a file.
  */
 export function LibraryPage() {
   const location = useLocation()
@@ -87,6 +107,9 @@ export function LibraryPage() {
   const [arrangedSent, setArrangedSent] = useState(false)
   const [confirming, setConfirming] = useState<LibraryEntry[]>([])
   const [deleted, setDeleted] = useState<Deleted | null>(null)
+  const [transfer, setTransfer] = useState<{ mode: TransferMode; files: LibraryEntry[] } | null>(null)
+  const [renaming, setRenaming] = useState<LibraryEntry | null>(null)
+  const [done, setDone] = useState<Done | null>(null)
   const isPicked = (file: LibraryEntry) => picked.some((p) => p.id === file.id)
   const togglePicked = (file: LibraryEntry) =>
     setPicked((now) => (now.some((p) => p.id === file.id) ? now.filter((p) => p.id !== file.id) : [...now, file]))
@@ -172,10 +195,15 @@ export function LibraryPage() {
   }
 
   async function deleteFiles(files: LibraryEntry[]) {
-    const result = await api.deleteLibraryFiles(files.map((file) => file.id))
+    const ids = files.map((file) => file.id)
+    // Library actions are user actions in Tempo (#2292), each request its child.
+    const result = await traceAction('library_delete', { 'scadbuddy.library_files': ids.length }, () =>
+      api.deleteLibraryFiles(ids),
+    )
     const gone = new Set(result.deleted.map((file) => file.id))
     setConfirming([])
     setPicked((now) => now.filter((file) => !gone.has(file.id)))
+    setDone(null)
     setDeleted({ result, restoring: false, restored: null, error: null })
     if (fileParam !== null && gone.has(fileParam)) {
       const next = new URLSearchParams(search)
@@ -185,12 +213,41 @@ export function LibraryPage() {
     setReload((n) => n + 1)
   }
 
+  async function transferFiles(files: LibraryEntry[], folderId: number | null) {
+    if (!transfer) return
+    const where = folderLabel(tree ?? [], folderId)
+    if (transfer.mode === 'move') {
+      const result = await api.moveLibraryFiles(files.map((file) => file.id), folderId)
+      const moved = new Map(result.moved.map((file) => [file.id, file]))
+      // A ticked file keeps its tick where it went: its folder is what the next move reads.
+      setPicked((now) => now.map((file) => (moved.has(file.id) ? { ...file, folder_id: folderId } : file)))
+      setDone({ kind: 'move', result, where })
+    } else {
+      const result = await api.copyLibraryFiles(files.map((file) => file.id), folderId)
+      setDone({ kind: 'copy', result, where })
+    }
+    setTransfer(null)
+    setDeleted(null)
+    setReload((n) => n + 1)
+  }
+
+  async function renameFile(file: LibraryEntry, filename: string) {
+    const result = await api.renameLibraryFile(file.id, filename)
+    setPicked((now) => now.map((row) => (row.id === file.id ? { ...row, filename: result.filename } : row)))
+    setRenaming(null)
+    setDeleted(null)
+    setDone({ kind: 'rename', result })
+    setReload((n) => n + 1)
+  }
+
   async function undo() {
     if (!deleted) return
     const ids = deleted.result.deleted.filter((file) => file.trashed).map((file) => file.id)
     setDeleted({ ...deleted, restoring: true, error: null })
     try {
-      const answer = await api.restoreLibraryFiles(ids)
+      const answer = await traceAction('library_restore', { 'scadbuddy.library_files': ids.length }, () =>
+        api.restoreLibraryFiles(ids),
+      )
       setDeleted({ ...deleted, restoring: false, restored: answer.restored.length })
     } catch (cause) {
       setDeleted({
@@ -223,7 +280,7 @@ export function LibraryPage() {
 
   return (
     <div className="h-full overflow-y-auto">
-      <div className={`mx-auto flex max-w-6xl flex-col gap-6 p-4 md:flex-row md:p-6 ${deleted ? 'pb-44' : ''}`}>
+      <div className={`mx-auto flex max-w-6xl flex-col gap-6 p-4 md:flex-row md:p-6 ${deleted || done ? 'pb-44' : ''}`}>
         <nav aria-label="Library" className="w-full md:w-60 md:shrink-0">
           {tree ? (
             <LibraryTree folders={tree} selected={folderId} onSelect={selectFolder} />
@@ -246,6 +303,22 @@ export function LibraryPage() {
               }}
             >
               Arrange selected ({printable.length})
+            </Button>
+            <Button
+              size="sm"
+              data-testid="library-copy-selected"
+              disabled={picked.length === 0 || tree === null}
+              onClick={() => setTransfer({ mode: 'copy', files: picked })}
+            >
+              Copy selected ({picked.length})
+            </Button>
+            <Button
+              size="sm"
+              data-testid="library-move-selected"
+              disabled={picked.length === 0 || tree === null}
+              onClick={() => setTransfer({ mode: 'move', files: picked })}
+            >
+              Move selected ({picked.length})
             </Button>
             <Button
               size="sm"
@@ -392,15 +465,23 @@ export function LibraryPage() {
                     ) : (
                       <span />
                     )}
-                    <button
-                      type="button"
-                      data-testid={`library-delete-${file.id}`}
-                      aria-label={`Delete ${file.filename}`}
-                      onClick={() => setConfirming([file])}
-                      className="rounded px-1 text-muted hover:text-warn"
-                    >
-                      Delete
-                    </button>
+                    <span className="flex items-center gap-1">
+                      <FileActions
+                        file={file}
+                        disabled={tree === null}
+                        onRename={() => setRenaming(file)}
+                        onTransfer={(mode) => setTransfer({ mode, files: [file] })}
+                      />
+                      <button
+                        type="button"
+                        data-testid={`library-delete-${file.id}`}
+                        aria-label={`Delete ${file.filename}`}
+                        onClick={() => setConfirming([file])}
+                        className="rounded px-1 text-muted hover:text-warn"
+                      >
+                        Delete
+                      </button>
+                    </span>
                   </div>
                 </li>
               )
@@ -433,6 +514,15 @@ export function LibraryPage() {
         />
         <DeleteLibraryFilesDialog files={confirming} onClose={() => setConfirming([])} onConfirm={deleteFiles} />
         {deleted && <DeletedToast deleted={deleted} onUndo={() => void undo()} onDismiss={() => setDeleted(null)} />}
+        <TransferLibraryFilesDialog
+          mode={transfer?.mode ?? 'move'}
+          files={transfer?.files ?? []}
+          folders={tree ?? []}
+          onClose={() => setTransfer(null)}
+          onConfirm={transferFiles}
+        />
+        <RenameLibraryFileDialog file={renaming} onClose={() => setRenaming(null)} onConfirm={renameFile} />
+        {done && <DoneToast done={done} onDismiss={() => setDone(null)} />}
       </div>
     </div>
   )
@@ -490,6 +580,134 @@ function DeletedToast({
         <p role="alert" className="text-warn">
           {error}
         </p>
+      )}
+    </div>
+  )
+}
+
+/** #2670 — a card's Rename, Copy to… and Move to…, behind one small menu button. */
+function FileActions({
+  file,
+  disabled,
+  onRename,
+  onTransfer,
+}: {
+  file: LibraryEntry
+  disabled: boolean
+  onRename: () => void
+  onTransfer: (mode: TransferMode) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const menu = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const away = (event: MouseEvent) => {
+      if (!menu.current?.contains(event.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', away)
+    return () => document.removeEventListener('mousedown', away)
+  }, [open])
+
+  function pick(action: () => void) {
+    setOpen(false)
+    action()
+  }
+
+  const item = 'block w-full rounded px-2 py-1 text-left text-ink hover:bg-surface-3 focus-visible:bg-surface-3 outline-none'
+  return (
+    <div ref={menu} className="relative">
+      <button
+        type="button"
+        data-testid={`library-actions-${file.id}`}
+        aria-label={`More actions for ${file.filename}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        disabled={disabled}
+        onClick={() => setOpen((now) => !now)}
+        className="rounded px-1 text-muted hover:text-ink disabled:opacity-50"
+      >
+        ⋯
+      </button>
+      {open && (
+        <div
+          role="menu"
+          aria-label={`Actions for ${file.filename}`}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') setOpen(false)
+          }}
+          className="absolute right-0 bottom-full z-30 mb-1 w-36 rounded-[6px] border border-line-strong bg-surface-2 p-1 text-[13px] shadow-lg"
+        >
+          <button type="button" role="menuitem" className={item} onClick={() => pick(onRename)}>
+            Rename…
+          </button>
+          <button type="button" role="menuitem" className={item} onClick={() => pick(() => onTransfer('copy'))}>
+            Copy to…
+          </button>
+          <button type="button" role="menuitem" className={item} onClick={() => pick(() => onTransfer('move'))}>
+            Move to…
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** #2670 — what a copy, move or rename did, and what Bambuddy skipped. */
+function DoneToast({ done, onDismiss }: { done: Done; onDismiss: () => void }) {
+  let summary: string
+  let skipped: { id: number; filename?: string | null; reason: string }[] = []
+  const losses: string[] = []
+  if (done.kind === 'rename') {
+    summary = `Renamed ${done.result.previous} to ${done.result.filename}.`
+  } else if (done.kind === 'move') {
+    const { moved } = done.result
+    skipped = done.result.skipped
+    summary = moved.length > 0 ? `Moved ${plural(moved.length, 'file')} to ${done.where}.` : 'Nothing was moved.'
+    const byProject = new Map<number, { name: string; files: string[] }>()
+    for (const file of moved) {
+      if (!file.left_project) continue
+      const entry = byProject.get(file.left_project.id) ?? {
+        name: file.left_project.name ?? `project ${file.left_project.id}`,
+        files: [],
+      }
+      entry.files.push(file.filename)
+      byProject.set(file.left_project.id, entry)
+    }
+    for (const { name, files } of byProject.values()) losses.push(`The project ${name} no longer lists ${files.join(', ')}.`)
+  } else {
+    const { copied } = done.result
+    skipped = done.result.skipped
+    summary = copied.length > 0 ? `Copied ${plural(copied.length, 'file')} to ${done.where}.` : 'Nothing was copied.'
+  }
+  return (
+    <div
+      role="status"
+      data-testid="library-done"
+      className="fixed inset-x-4 bottom-4 z-40 mx-auto flex max-w-xl flex-col gap-1.5 rounded-[8px] border border-line-strong bg-surface-2 p-3 text-[13px] text-ink shadow-lg"
+    >
+      <div className="flex items-start gap-3">
+        <p className="min-w-0 flex-1">{summary}</p>
+        <button type="button" aria-label="Dismiss" onClick={onDismiss} className="px-1 text-muted hover:text-ink">
+          ×
+        </button>
+      </div>
+      {losses.map((line) => (
+        <p key={line} className="text-warn">
+          {line}
+        </p>
+      ))}
+      {skipped.length > 0 && (
+        <div data-testid="library-done-skipped">
+          <p className="text-warn">{done.kind === 'copy' ? 'Not copied:' : 'Not moved:'}</p>
+          <ul className="list-disc pl-5 text-[12px] break-words text-muted">
+            {skipped.map((file) => (
+              <li key={file.id}>
+                {file.filename ?? `#${file.id}`}: {file.reason}
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
     </div>
   )

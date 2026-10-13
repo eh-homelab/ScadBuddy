@@ -210,9 +210,9 @@ check 'a backend with no span literals is named as a problem' \
 
 good
 p=$(tempo_panel 'render.render')
-edit "(.panels[] | select(.id == $p) | .targets[0].query) = \"{resource.service.name=\\\"scadbuddy-worker\\\" && name=\\\"render.openscad\\\"}\""
+edit "(.panels[] | select(.id == $p) | .targets[0].query) = \"{resource.service.name=\\\"scadbuddy-render\\\" && name=\\\"render.openscad\\\"}\""
 check 'a span name the backend never emits fails' \
-  "1:$f: panel $p target A: scadbuddy-worker emits no span named \"render.openscad\"" \
+  "1:$f: panel $p target A: scadbuddy-render emits no span named \"render.openscad\"" \
   "$(run)"
 
 good
@@ -224,9 +224,9 @@ check 'a TraceQL query without a service filter fails' \
 
 good
 p=$(tempo_panel 'render.render')
-edit "(.panels[] | select(.id == $p) | .targets[0].query) = \"{resource.service.name=\\\"scadbuddy-render\\\"}\""
-check 'an unknown service.name fails' \
-  "1:$f: panel $p target A: \"scadbuddy-render\" is not a ScadBuddy service.name" \
+edit "(.panels[] | select(.id == $p) | .targets[0].query) = \"{resource.service.name=\\\"scadbuddy-worker\\\"}\""
+check "an unknown service.name fails, the workers' old shared one included (#2292)" \
+  "1:$f: panel $p target A: \"scadbuddy-worker\" is not a ScadBuddy service.name" \
   "$(run)"
 
 good
@@ -238,9 +238,9 @@ check 'a worker-only span named under scadbuddy-api fails' \
 
 good
 p=$(tempo_panel 'render.render')
-edit "(.panels[] | select(.id == $p) | .targets[0].query) = \"{resource.service.name=\\\"scadbuddy-worker\\\" && name=\\\"render.submit\\\"}\""
-check 'an API-only span named under scadbuddy-worker fails' \
-  "1:$f: panel $p target A: scadbuddy-worker emits no span named \"render.submit\"" \
+edit "(.panels[] | select(.id == $p) | .targets[0].query) = \"{resource.service.name=\\\"scadbuddy-render\\\" && name=\\\"render.submit\\\"}\""
+check 'an API-only span named under scadbuddy-render fails' \
+  "1:$f: panel $p target A: scadbuddy-render emits no span named \"render.submit\"" \
   "$(run)"
 
 good
@@ -265,14 +265,14 @@ check 'a TraceQL target on the Prometheus datasource fails' \
 
 good
 p=$(tempo_panel 'render.render')
-edit "(.panels[] | select(.id == $p) | .targets[0].query) = \"{resource.service.name=\\\"scadbuddy-worker\\\" && name=~\\\"render.*\\\"}\""
+edit "(.panels[] | select(.id == $p) | .targets[0].query) = \"{resource.service.name=\\\"scadbuddy-render\\\" && name=~\\\"render.*\\\"}\""
 check 'a span-name regex fails' \
   "1:$f: panel $p target A: match span names exactly (name=\"…\"), so this lint can check them" \
   "$(run)"
 
 good
 p=$(tempo_panel 'render.render')
-edit "(.panels[] | select(.id == $p) | .targets[0].query) = \"{resource.service.name=\\\"scadbuddy-worker\\\" && name!=\\\"render.renderr\\\"}\""
+edit "(.panels[] | select(.id == $p) | .targets[0].query) = \"{resource.service.name=\\\"scadbuddy-render\\\" && name!=\\\"render.renderr\\\"}\""
 check 'a span-name != fails' \
   "1:$f: panel $p target A: match span names exactly (name=\"…\"), so this lint can check them" \
   "$(run)"

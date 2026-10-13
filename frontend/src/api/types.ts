@@ -217,6 +217,9 @@ export type LibraryEntry = Schemas['LibraryEntry']
 export type LibraryFolderView = Schemas['LibraryFolderView']
 export type LibraryDeleteResult = Schemas['LibraryDeleteResult']
 export type LibraryRestoreResult = Schemas['LibraryRestoreResult']
+export type LibraryMoveResult = Schemas['LibraryMoveResult']
+export type LibraryCopyResult = Schemas['LibraryCopyResult']
+export type LibraryRenameResult = Schemas['LibraryRenameResult']
 /** #1863 — the objects Arrange reads from a library file ScadBuddy did not make. */
 export type LibraryFileObjects = Schemas['LibraryFileObjects']
 export type LibraryFileObject = Schemas['LibraryFileObject']
@@ -233,6 +236,7 @@ export type PrintProgress = Schemas['PrintProgress']
 export type PrintSummary = Schemas['PrintSummary']
 export type PrintPage = Schemas['PrintPage']
 export type PrintDetail = Schemas['PrintDetail']
+export type TimelapseFrames = Schemas['TimelapseFrames']
 /** #311 — the print detail page's two writes. */
 export type PrintAgain = Schemas['PrintAgain']
 export type PrinterMedia = Schemas['PrinterMedia']
@@ -384,6 +388,17 @@ export interface SessionModeSetting {
   mode: 'classic' | 'durable'
   durable_available: boolean
   durable_unavailable_reason?: string
+}
+
+/**
+ * Where a durable segment's subagents reach ScadBuddy's tools
+ * (`GET/PUT /api/v1/ai/settings/durable-subagents`, agent `src/routes/durableSubagents.ts`).
+ * `url` replaces agent-durable's own (null: the pod's loopback); `peers` are the addresses or
+ * CIDR ranges besides loopback the agent answers on that route (empty: loopback only).
+ */
+export interface DurableSubagentsSetting {
+  url: string | null
+  peers: string[]
 }
 
 /**

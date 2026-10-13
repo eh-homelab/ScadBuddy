@@ -24,7 +24,8 @@ export class DurableUnavailable extends Error {
 /** The workflow ID of a durable session (§6.2). */
 export const sessionWorkflowId = (sessionId: string): string => `session-${sessionId}`
 
-export type RespondArgs = { request_id: string; response: unknown; responder: Owner; role: Role }
+/** The responder: a principal, or for role `parent` the starting session (#2482). */
+export type RespondArgs = { request_id: string; response: unknown; responder: Omit<Owner, 'kind'> & { kind: Owner['kind'] | 'session' }; role: Role }
 export type RespondOutcome = { kind: 'approval' | 'answer'; outcome: InputOutcome }
 
 export type DurableGateOptions = {

@@ -278,11 +278,15 @@ describe('useAgentChat', () => {
     expect(question('q1')).toMatchObject({ state: 'sent' })
     act(() => result.current.answer('s1', 'q2', ["I'm here"]))
     await waitFor(() => expect(question('q2')).toMatchObject({ state: 'answered', answers: ["I'm here"] }))
-    expect(question('q1')).toMatchObject({ state: 'answered', answers: ['Blue', 'Lid, Base'], by: owner })
-    expect(posted).toEqual([
-      { id: 'question:q1', body: { kind: 'answer', answers: { 'Colour?': 'Blue', 'Parts?': 'Lid, Base' } } },
-      { id: 'question:q2', body: { kind: 'answer', choice: "I'm here" } },
-    ])
+    await waitFor(() => expect(question('q1')).toMatchObject({ state: 'answered', answers: ['Blue', 'Lid, Base'], by: owner }))
+    // Two requests in flight at once: the order they reach the server in is the network's.
+    expect(posted).toHaveLength(2)
+    expect(posted).toEqual(
+      expect.arrayContaining([
+        { id: 'question:q1', body: { kind: 'answer', answers: { 'Colour?': 'Blue', 'Parts?': 'Lid, Base' } } },
+        { id: 'question:q2', body: { kind: 'answer', choice: "I'm here" } },
+      ]),
+    )
     expect(t.chat()).toEqual([])
   })
 

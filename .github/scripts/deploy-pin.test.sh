@@ -36,6 +36,7 @@ export MANIFEST=applications/scadbuddy/scadbuddy.yaml
 export MANIFEST_WORKER=applications/scadbuddy/scadbuddy-render.yaml
 export MANIFEST_PRINT=applications/scadbuddy/scadbuddy-print.yaml
 export MANIFEST_PROJECTS=applications/scadbuddy/scadbuddy-projects.yaml
+export MANIFEST_AGENT_DURABLE=applications/scadbuddy/scadbuddy-agent-durable.yaml
 export KUSTOMIZATION=clusters/prod/scadbuddy/kustomization.yaml
 export DASHBOARD_RESOURCE=https://github.com/eh-homelab/ScadBuddy//deploy/grafana
 # What the step before it found: deploy/grafana exists at REVISION.
@@ -111,12 +112,14 @@ dashboard_line="  - $DASHBOARD_RESOURCE?ref="
 
 # `run <api-manifest> [worker-manifest] [print-manifest] [projects-manifest]`: a fresh repo, then the
 # step. Output lands in $work/log, and the manifests stay in $work/repo for the checks.
+# With $durable_manifest set, it is written as agent-durable's own Deployment.
 run() {
   rm -rf "$work/repo" && mkdir -p "$work/repo/applications/scadbuddy" "$work/repo/$(dirname "$KUSTOMIZATION")"
   printf '%s\n' "$1" > "$work/repo/$MANIFEST"
   [ $# -lt 2 ] || printf '%s\n' "$2" > "$work/repo/$MANIFEST_WORKER"
   [ $# -lt 3 ] || printf '%s\n' "$3" > "$work/repo/$MANIFEST_PRINT"
   [ $# -lt 4 ] || printf '%s\n' "$4" > "$work/repo/$MANIFEST_PROJECTS"
+  [ -z "${durable_manifest:-}" ] || printf '%s\n' "$durable_manifest" > "$work/repo/$MANIFEST_AGENT_DURABLE"
   [ -z "$overlay" ] || printf '%s\n' "$overlay" > "$work/repo/$KUSTOMIZATION"
   (cd "$work/repo" && git init -q)
   rerun
@@ -257,6 +260,38 @@ else
   grep -q 'expected exactly one agent-durable image line, found 2' "$work/log" \
     || fail "two durable lines: wrong error: $(grep '::error' "$work/log")"
 fi
+
+# 7g. In its own Deployment (scadbuddy-agent-durable.yaml), it is pinned there,
+#     and the file is among the changed ones.
+durable_manifest=$(printf '%s\n' '---' 'apiVersion: apps/v1' 'kind: Deployment' \
+  'metadata:' '  name: scadbuddy-agent-durable' 'spec:' '  template:' '    spec:' \
+  '      containers:' '        - name: agent-durable' "          image: $durable")
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  has_line "$pinned" "$MANIFEST" || fail "durable deployment: api image not pinned"
+  has_line "$durable_pinned" "$MANIFEST_AGENT_DURABLE" || fail "durable deployment: durable image not pinned"
+  grep -q '^durable=pinned$' "$work/out" || fail "durable deployment: durable output is not pinned"
+  grep -q "$MANIFEST_AGENT_DURABLE" "$work/out" || fail "durable deployment: not among the changed files"
+else
+  fail "durable deployment: step failed: $(grep '::error' "$work/log")"
+fi
+
+# 7h. Its own file AND a sidecar line in the API's manifest: a half-done move.
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent" "$durable")"; then
+  fail "durable in both: step passed, expected an error"
+else
+  grep -q 'it belongs in one of them' "$work/log" \
+    || fail "durable in both: wrong error: $(grep '::error' "$work/log")"
+fi
+
+# 7i. Its own file with no durable image line is an error, not "not run".
+durable_manifest=$(printf '%s\n' '---' 'kind: Deployment' 'metadata:' '  name: scadbuddy-agent-durable')
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  fail "empty durable deployment: step passed, expected an error"
+else
+  grep -q "has no image line for $AGENT_DURABLE_IMAGE" "$work/log" \
+    || fail "empty durable deployment: wrong error: $(grep '::error' "$work/log")"
+fi
+durable_manifest=
 
 # `dashboard_fails <name> <expected-error> <overlay-line>...`: the API and agent
 # beside an overlay carrying those lines; the step must fail with that error.

@@ -50,9 +50,11 @@ class LibraryCopy(BaseModel):
 
     Keyed by (``folder_id``, ``target_key``). The folder is what files it under a
     project, and the target is what it was laid out for, so a copy is reusable only
-    where both still hold. A copy in a project's folder is the user's record of what
-    that project printed and is never moved or deleted by ScadBuddy; only a copy in
-    the inbox (Settings' ``library_folder_id``) is ever replaced.
+    where both still hold. A copy in a project's folder that was printed from is the
+    user's record of what that project printed and is never moved or deleted by
+    ScadBuddy. One nothing printed from (Generate's guess at the printer) is replaced
+    by the copy a print of the same output puts beside it (#2476); a copy in the inbox
+    (Settings' ``library_folder_id``) is always replaced.
     """
 
     #: Bambuddy library file id of the unsliced 3MF.
@@ -63,6 +65,9 @@ class LibraryCopy(BaseModel):
     #: out for.
     target_key: str
     sliced: list[SlicedCopy] = Field(default_factory=list)
+    #: :func:`~scadbuddy.render.provenance.content_key` of what was uploaded, for a copy
+    #: in a project's folder (#2476); ``None`` elsewhere and before it was recorded.
+    content_key: str | None = None
 
 
 class PreviewSlice(BaseModel):
@@ -87,6 +92,15 @@ class PreviewSlice(BaseModel):
     printed: bool = False
     #: Its job no longer says what it did: kept only for the sweep.
     retired: bool = False
+
+
+class LostStart(BaseModel):
+    """A print run's slice start that got no answer (#2715), table
+    ``print_slice_starts``: Bambuddy may still have started its job."""
+
+    id: int
+    library_file_id: int
+    created_at: datetime
 
 
 class ProjectTarget(BaseModel):
@@ -148,6 +162,18 @@ class BambuddyUploadStore:
         """Record an upload, replacing the folder and target of one with the same id."""
         await asyncio.to_thread(self._record, output_id, copy)
 
+    async def same_content(
+        self, folder_id: int | None, target_key: str, content_key: str
+    ) -> list[tuple[str, LibraryCopy]]:
+        """Every recorded copy in ``folder_id``, laid out for ``target_key``, that holds
+        ``content_key`` (#2476), oldest first, with the output it is recorded under."""
+        return await asyncio.to_thread(self._same_content, folder_id, target_key, content_key)
+
+    async def shared(self, library_file_ids: Iterable[int], output_id: str) -> set[int]:
+        """Those of ``library_file_ids`` also recorded under an output other than
+        ``output_id``: a copy two identical outputs share (#2476)."""
+        return await asyncio.to_thread(self._shared, list(library_file_ids), output_id)
+
     async def recorded(self, library_file_ids: Iterable[int]) -> set[int]:
         """Those of ``library_file_ids`` that any output records as a copy (#1145)."""
         return await asyncio.to_thread(self._recorded, list(library_file_ids))
@@ -157,6 +183,26 @@ class BambuddyUploadStore:
         records (#1864): Arrange reads such a file's objects through that output. A file
         two outputs record is the later upload's."""
         return await asyncio.to_thread(self._outputs_for_files, list(library_file_ids))
+
+    async def relocate(self, library_file_ids: Iterable[int], folder_id: int | None) -> None:
+        """Record that a person moved these files into ``folder_id`` (#2670). Bambuddy
+        keeps a moved file's id, so its slices and everything else keyed by the id stay
+        right; only the folder its copy row names would be stale, and that folder is what
+        tells an inbox copy (which ScadBuddy replaces) from a project's (which it never
+        touches)."""
+        await asyncio.to_thread(self._relocate, list(library_file_ids), folder_id)
+
+    async def forget_files(self, library_file_ids: Iterable[int]) -> None:
+        """Stop recording these files as any output's copy, their slices with them
+        (#2670): a person moved them into the inbox, and a recorded copy there is one
+        ScadBuddy replaces and deletes. Unrecorded, each stays an ordinary library file
+        that ScadBuddy never deletes on its own; the next send uploads a copy of its own."""
+        await asyncio.to_thread(self._forget_files, list(library_file_ids))
+
+    async def recorded_as(self, library_file_id: int) -> list[tuple[str, str]]:
+        """Each ``(output_id, target_key)`` that records ``library_file_id`` as a copy:
+        what a byte-for-byte copy of it is a copy of too (#2670)."""
+        return await asyncio.to_thread(self._recorded_as, library_file_id)
 
     async def forget(self, output_id: str, library_file_id: int) -> None:
         """Drop one copy, and its slices, once the file has actually gone.
@@ -302,6 +348,70 @@ class BambuddyUploadStore:
         with self._pool.connection() as conn:
             conn.execute("DELETE FROM print_preview_slices WHERE id = %s", (row_id,))
 
+    async def record_slice_start(self, library_file_id: int, job_id: int | None) -> None:
+        """A print run started slice job ``job_id`` of the copy ``library_file_id``, or,
+        with ``None``, tried to and got no answer (#2715)."""
+        await asyncio.to_thread(self._record_slice_start, library_file_id, job_id)
+
+    async def lost_starts(self) -> list[LostStart]:
+        """The lost slice starts the sweep has not finished with, oldest first."""
+        return await asyncio.to_thread(self._lost_starts)
+
+    async def finish_lost_start(self, row_id: int) -> None:
+        await asyncio.to_thread(self._finish_lost_start, row_id)
+
+    async def slice_jobs_after(self, after: datetime, within: timedelta) -> list[int]:
+        """The slice jobs recorded in ``(after, after + within]``, by a run or by the
+        print dialog's background slices: Bambuddy's job ids next to a lost start's."""
+        return await asyncio.to_thread(self._slice_jobs_after, after, within)
+
+    async def slice_jobs_recorded(self, job_ids: Iterable[int], since: datetime) -> set[int]:
+        """Of ``job_ids``, the ones a run or a background slice recorded since ``since``:
+        their files are someone's. Ids restart with Bambuddy, hence ``since``."""
+        return await asyncio.to_thread(self._slice_jobs_recorded, list(job_ids), since)
+
+    def _record_slice_start(self, library_file_id: int, job_id: int | None) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO print_slice_starts (library_file_id, job_id) VALUES (%s, %s)",
+                (library_file_id, job_id),
+            )
+
+    def _lost_starts(self) -> list[LostStart]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT id, library_file_id, created_at FROM print_slice_starts"
+                " WHERE job_id IS NULL AND NOT swept ORDER BY created_at, id"
+            ).fetchall()
+        return [LostStart.model_validate(row) for row in rows]
+
+    def _finish_lost_start(self, row_id: int) -> None:
+        with self._pool.connection() as conn:
+            conn.execute("UPDATE print_slice_starts SET swept = true WHERE id = %s", (row_id,))
+
+    def _slice_jobs_after(self, after: datetime, within: timedelta) -> list[int]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT job_id FROM print_slice_starts WHERE job_id IS NOT NULL"
+                " AND created_at > %s AND created_at <= %s"
+                " UNION SELECT job_id FROM print_preview_slices"
+                " WHERE created_at > %s AND created_at <= %s ORDER BY job_id",
+                (after, after + within, after, after + within),
+            ).fetchall()
+        return [int(row["job_id"]) for row in rows]
+
+    def _slice_jobs_recorded(self, job_ids: list[int], since: datetime) -> set[int]:
+        if not job_ids:
+            return set()
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT job_id FROM print_slice_starts WHERE job_id = ANY(%s) AND created_at >= %s"
+                " UNION SELECT job_id FROM print_preview_slices"
+                " WHERE job_id = ANY(%s) AND created_at >= %s",
+                (job_ids, since, job_ids, since),
+            ).fetchall()
+        return {int(row["job_id"]) for row in rows}
+
     async def record_slice_hash(self, output_id: str, sliced_id: int, file_hash: str) -> None:
         """Keep the hash Bambuddy reports for one of the output's sliced files (#306)."""
         await asyncio.to_thread(self._record_slice_hash, output_id, sliced_id, file_hash)
@@ -430,7 +540,7 @@ class BambuddyUploadStore:
         found: dict[str, list[LibraryCopy]] = {output_id: [] for output_id in ids}
         with self._pool.connection() as conn:
             copies = conn.execute(
-                "SELECT output_id, library_file_id, folder_id, target_key"
+                "SELECT output_id, library_file_id, folder_id, target_key, content_key"
                 " FROM output_bambuddy_uploads WHERE output_id = ANY(%s)"
                 " ORDER BY created_at, library_file_id",
                 (ids,),
@@ -458,6 +568,7 @@ class BambuddyUploadStore:
                     folder_id=row["folder_id"],
                     target_key=row["target_key"],
                     sliced=sliced.get((row["output_id"], row["library_file_id"]), []),
+                    content_key=row["content_key"],
                 )
             )
         return found
@@ -466,11 +577,49 @@ class BambuddyUploadStore:
         with self._pool.connection() as conn:
             conn.execute(
                 "INSERT INTO output_bambuddy_uploads"
-                " (output_id, library_file_id, folder_id, target_key) VALUES (%s, %s, %s, %s)"
+                " (output_id, library_file_id, folder_id, target_key, content_key)"
+                " VALUES (%s, %s, %s, %s, %s)"
                 " ON CONFLICT (output_id, library_file_id) DO UPDATE"
-                " SET folder_id = EXCLUDED.folder_id, target_key = EXCLUDED.target_key",
-                (output_id, copy.id, copy.folder_id, copy.target_key),
+                " SET folder_id = EXCLUDED.folder_id, target_key = EXCLUDED.target_key,"
+                " content_key = COALESCE("
+                "EXCLUDED.content_key, output_bambuddy_uploads.content_key)",
+                (output_id, copy.id, copy.folder_id, copy.target_key, copy.content_key),
             )
+
+    def _same_content(
+        self, folder_id: int | None, target_key: str, content_key: str
+    ) -> list[tuple[str, LibraryCopy]]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT output_id, library_file_id, folder_id, target_key, content_key"
+                " FROM output_bambuddy_uploads"
+                " WHERE folder_id IS NOT DISTINCT FROM %s AND target_key = %s"
+                " AND content_key = %s ORDER BY created_at, library_file_id",
+                (folder_id, target_key, content_key),
+            ).fetchall()
+        return [
+            (
+                row["output_id"],
+                LibraryCopy(
+                    id=row["library_file_id"],
+                    folder_id=row["folder_id"],
+                    target_key=row["target_key"],
+                    content_key=row["content_key"],
+                ),
+            )
+            for row in rows
+        ]
+
+    def _shared(self, ids: list[int], output_id: str) -> set[int]:
+        if not ids:
+            return set()
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT library_file_id FROM output_bambuddy_uploads"
+                " WHERE library_file_id = ANY(%s) AND output_id <> %s",
+                (ids, output_id),
+            ).fetchall()
+        return {row["library_file_id"] for row in rows}
 
     def _recorded(self, ids: list[int]) -> set[int]:
         with self._pool.connection() as conn:
@@ -495,6 +644,32 @@ class BambuddyUploadStore:
                 (ids,),
             ).fetchall()
         return {row["library_file_id"]: row["output_id"] for row in rows}
+
+    def _relocate(self, ids: list[int], folder_id: int | None) -> None:
+        if not ids:
+            return
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE output_bambuddy_uploads SET folder_id = %s WHERE library_file_id = ANY(%s)",
+                (folder_id, ids),
+            )
+
+    def _forget_files(self, ids: list[int]) -> None:
+        if not ids:
+            return
+        with self._pool.connection() as conn:
+            conn.execute(
+                "DELETE FROM output_bambuddy_uploads WHERE library_file_id = ANY(%s)", (ids,)
+            )
+
+    def _recorded_as(self, library_file_id: int) -> list[tuple[str, str]]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT output_id, target_key FROM output_bambuddy_uploads"
+                " WHERE library_file_id = %s ORDER BY created_at, output_id",
+                (library_file_id,),
+            ).fetchall()
+        return [(row["output_id"], row["target_key"]) for row in rows]
 
     def _forget(self, output_id: str, library_file_id: int) -> None:
         with self._pool.connection() as conn:

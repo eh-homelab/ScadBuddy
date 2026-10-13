@@ -278,10 +278,12 @@ export function CustomizePage() {
    * #1457, #1484 — a preset the template UI just loaded or saved, for the picker. A
    * one-shot message: cleared once the picker has rendered it, so a later remount (the
    * form taking over from a failed UI) never brings it back over a pick made since.
+   * Only that message is cleared: one set after the render, before this effect ran (a
+   * load answered just after a save), is the next message, not a stale one.
    */
   const [presetElsewhere, setPresetElsewhere] = useState<SelectedElsewhere | null>(null)
   useEffect(() => {
-    if (presetElsewhere) setPresetElsewhere(null)
+    if (presetElsewhere) setPresetElsewhere((current) => (current === presetElsewhere ? null : current))
   }, [presetElsewhere])
   /** #1660 — the preset the picker has selected, which the Project picker follows. */
   const [presetInUse, setPresetInUse] = useState<{ id: string; name: string } | null>(null)
@@ -394,8 +396,26 @@ export function CustomizePage() {
 
   // A parameter change invalidates the saved output — Generate has to run again. So does
   // a UI-state-only change (#848): it starts no render, but the output records the old state.
+  // #2445 — an output reopened from History is already saved: once the render on screen is
+  // of its own values, UI state and revision, Download, Send and Print act on it, rather
+  // than waiting for a Generate that would only save a duplicate of it.
+  const reopenedOutput =
+    reopened?.source === 'record' ? outputsState.data?.find((o) => o.id === reopened.output_id) : undefined
+  const reopenedOnScreen =
+    reopenedOutput !== undefined &&
+    schema !== undefined &&
+    reopenedInputs !== null &&
+    upToDate &&
+    job?.status === 'done' &&
+    (job.model_version ?? null) === (reopenedOutput.model_version ?? null) &&
+    sameJson(job.params, { ...defaultValues(schema), ...reopenedOutput.params }) &&
+    sameJson(extra, reopenedInputs.extra)
   const output =
-    settled && !invalid && saved && saved.jobId === job?.id && sameJson(saved.extra, extra) ? saved.output : undefined
+    settled && !invalid && saved && saved.jobId === job?.id && sameJson(saved.extra, extra)
+      ? saved.output
+      : reopenedOnScreen
+        ? reopenedOutput
+        : undefined
 
   // #289 — a multi-plate render is checked plate by plate.
   const targets = useMemo(() => fitTargets(job), [job])

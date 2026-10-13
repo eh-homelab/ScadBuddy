@@ -36,6 +36,7 @@ import type {
   SessionLimits,
   BlankTemplate,
   SessionModeSetting,
+  DurableSubagentsSetting,
   SessionResource,
   ResourceRef,
   InstalledFamily,
@@ -43,8 +44,11 @@ import type {
   CatalogueLibrary,
   DependencyReport,
   LibraryFileObjects,
+  LibraryCopyResult,
   LibraryDeleteResult,
   LibraryListing,
+  LibraryMoveResult,
+  LibraryRenameResult,
   LibraryRestoreResult,
   LibraryPinRequest,
   InstalledLibrary,
@@ -77,6 +81,7 @@ import type {
   RackAlgorithm,
   PrintAgain,
   PrintDetail,
+  TimelapseFrames,
   PrintPage,
   PrintProgress,
   PrintCheck,
@@ -1274,6 +1279,12 @@ export const api = {
   getPrint: (archiveId: number, { printerMedia = false } = {}) =>
     request<PrintDetail>(`/prints/${archiveId}${printerMedia ? '?printer_media=1' : ''}`),
 
+  /**
+   * #2360 — a print's timelapse stills and Bambuddy's probe of it, read after the detail:
+   * Bambuddy makes them with ffmpeg, which can take tens of seconds.
+   */
+  getTimelapseFrames: (archiveId: number) => request<TimelapseFrames>(`/prints/${archiveId}/timelapse/frames`),
+
   /** #311 — "Print again": queues the archive on its printer (Bambuddy's reprint is gone). */
   reprint: (archiveId: number) => command<PrintAgain>(`/prints/${archiveId}/reprint`, { method: 'POST' }),
 
@@ -1565,6 +1576,27 @@ export const api = {
     command<LibraryRestoreResult>('/print/library/restore', {
       method: 'POST',
       body: JSON.stringify({ file_ids: fileIds }),
+    }),
+
+  /** #2670 — files into another folder (`null`, the top level), each under its own id. */
+  moveLibraryFiles: (fileIds: number[], folderId: number | null) =>
+    command<LibraryMoveResult>('/print/library/move', {
+      method: 'POST',
+      body: JSON.stringify({ file_ids: fileIds, folder_id: folderId }),
+    }),
+
+  /** #2670 — a copy of each file in a folder (`null`, the top level), each a new file. */
+  copyLibraryFiles: (fileIds: number[], folderId: number | null) =>
+    command<LibraryCopyResult>('/print/library/copy', {
+      method: 'POST',
+      body: JSON.stringify({ file_ids: fileIds, folder_id: folderId }),
+    }),
+
+  /** #2670 — a new name for a file, its extension kept. */
+  renameLibraryFile: (fileId: number, filename: string) =>
+    command<LibraryRenameResult>('/print/library/rename', {
+      method: 'POST',
+      body: JSON.stringify({ file_id: fileId, filename }),
     }),
 
   libraryThumbnailUrl: (fileId: number) => `${API_BASE}/print/library/${fileId}/thumbnail`,
@@ -1875,6 +1907,15 @@ export const api = {
     request<SessionModeSetting>('/ai/settings/session-mode', {
       method: 'PUT',
       body: JSON.stringify({ mode }),
+    }),
+
+  /** Where durable subagents reach ScadBuddy's tools, served by the agent service. */
+  getDurableSubagents: () => request<DurableSubagentsSetting>('/ai/settings/durable-subagents'),
+
+  putDurableSubagents: (setting: DurableSubagentsSetting) =>
+    request<DurableSubagentsSetting>('/ai/settings/durable-subagents', {
+      method: 'PUT',
+      body: JSON.stringify(setting),
     }),
 
   /**

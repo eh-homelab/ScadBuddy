@@ -7,17 +7,20 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import json
 import time
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 from session_support import (
     MANIFEST,
+    ME,
     Conn,
     Connect,
     StandInTools,
@@ -31,7 +34,7 @@ from session_support import (
     until,
 )
 from temporalio import activity
-from temporalio.claude_agent_sdk import ClaudeAgentPlugin, follow_agent
+from temporalio.claude_agent_sdk import AgentState, ClaudeAgentPlugin, follow_agent
 from temporalio.claude_agent_sdk.testing import Final, HistoryItem, ScriptedClaude, ToolCall
 from temporalio.client import (
     Client,
@@ -59,12 +62,16 @@ from scadbuddy_durable.secrets import kek_from_base64
 from scadbuddy_durable.session import tools
 from scadbuddy_durable.session.activities import SessionActivities
 from scadbuddy_durable.session.models import (
+    FORK_POINT_QUERY,
     SEGMENT_CONTEXT_QUERY,
     TOOLS_QUEUE,
     TURN_QUERY,
     FinishTurn,
+    ForkPoint,
+    ForkPointArgs,
     GateSettings,
     SegmentContext,
+    SessionStart,
 )
 from scadbuddy_durable.session.workflow import FOLLOW_DRAIN, DurableSession
 from scadbuddy_durable.worker import build_worker
@@ -483,7 +490,7 @@ async def test_the_handler_set_is_the_gates_and_the_plugins(
     queries = {q.name for q in definition.query_definitions}
     assert {"send_message", "respond", "cancel_input"} <= updates
     assert {"interrupt", "end"} <= signals
-    assert {"pending_input", "segment_context", "turn"} <= queries
+    assert {"pending_input", "segment_context", "turn", "fork_point"} <= queries
     ours = {
         "send_message",
         "respond",
@@ -493,6 +500,7 @@ async def test_the_handler_set_is_the_gates_and_the_plugins(
         "pending_input",
         "segment_context",
         "turn",
+        "fork_point",
     }
     others = (updates | signals | queries) - ours
     # Workflow Streams' and the plugin's own.
@@ -1162,3 +1170,61 @@ async def test_a_turn_whose_other_tools_cannot_be_listed_goes_on_with_its_own(
     assert types.count("tool.call") == 1
     assert harness.stand_in.ran == [("turn:notes__post", {"method": "GET", "body": "y"})]
     await _replays(harness, handle)
+
+
+async def _fork_point(handle: WorkflowHandle[Any, Any], limit: int) -> ForkPoint:
+    """Every page of ``fork_point``, as the agent service reads them (sessions/durable.ts)."""
+    first: ForkPoint = await handle.query(
+        FORK_POINT_QUERY, ForkPointArgs(start=0, limit=limit), result_type=ForkPoint
+    )
+    entries = list(first.entries)
+    while len(entries) < first.total:
+        page: ForkPoint = await handle.query(
+            FORK_POINT_QUERY, ForkPointArgs(start=len(entries), limit=limit), result_type=ForkPoint
+        )
+        assert page.total == first.total and page.entries
+        entries.extend(page.entries)
+    return dataclasses.replace(first, entries=entries)
+
+
+async def test_a_fork_starts_with_the_parents_conversation_and_goes_on_from_it(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#2688: ``fork_point`` serves the committed conversation a page at a time, and a
+    session started with it as its agent's state continues it: the model sees the
+    parent's tool call. The parent goes on unchanged."""
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "render it")
+    assert await settled(connect, sid) == "idle"
+    point = await _fork_point(handle, limit=1)  # one entry a page
+    assert point.busy is False
+    assert point.session_id and point.checkpoint
+    assert point.total == len(point.entries) >= 2
+    assert json.loads(point.entries[-1])["uuid"] == point.checkpoint
+
+    child = await insert_session(agent_db)
+    seed = AgentState(
+        session_id=point.session_id, checkpoint=point.checkpoint, conversation=point.entries
+    )
+    forked = await harness.client.start_workflow(
+        DurableSession.run,
+        SessionStart(session_id=child, creator=ME, owner=ME, agent=seed),
+        id=f"session-{child}",
+        task_queue=harness.queue,
+        execution_timeout=timedelta(minutes=10),
+    )
+    harness.handles.append(forked)
+    await send(forked, "and now?")
+    assert await settled(connect, child) == "idle"
+    texts = [
+        e["delta"] for e in await events(agent_db, child) if e["type"] == "assistant.text.delta"
+    ]
+    # The scripted model reports the last tool call it has seen: the parent's.
+    assert texts == ["render_preview: ok: rendered"]
+    grown = await _fork_point(forked, limit=1 << 20)
+    assert grown.entries[: point.total] == point.entries
+    assert grown.total > point.total
+    # Sealed under the child's own key: its history holds none of the parent's words.
+    raw = b"".join(e.SerializeToString() for e in (await forked.fetch_history()).events)
+    assert b"render it" not in raw
+    assert (await _fork_point(handle, limit=1 << 20)).entries == point.entries

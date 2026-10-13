@@ -19,6 +19,7 @@ import type {
   ParamPreset,
   Plate,
   PrintDetail,
+  TimelapseFrames,
   PrintProgress,
   PrintSummary,
   Settings,
@@ -1461,7 +1462,7 @@ function printOf(
     completed_at: '2026-09-27T05:56:53.660315',
     actual_time_seconds: 6437,
     filament_used_grams: 16.36,
-    cover: { kind: 'thumbnail', url: `${prints}/thumbnail` },
+    cover: { kind: 'thumbnail', url: `${prints}/thumbnail`, full_url: `${prints}/thumbnail` },
     has_timelapse: false,
     attachment_count: 0,
     params_diff: { name: output.params?.['name'] ?? '' },
@@ -1544,7 +1545,11 @@ export const prints: PrintDetail[] = [
   ),
   printOf(35, reagan, {
     status: 'completed',
-    cover: { kind: 'photo', url: `/api/v1/prints/35/photos/${FINISH_PHOTO}` },
+    cover: {
+      kind: 'photo',
+      url: `/api/v1/prints/35/photos/${FINISH_PHOTO}?size=card&v=1`,
+      full_url: `/api/v1/prints/35/photos/${FINISH_PHOTO}`,
+    },
     has_timelapse: true,
   }, {
     media: {
@@ -1552,8 +1557,8 @@ export const prints: PrintDetail[] = [
       photos: [],
       timelapse: {
         url: '/api/v1/prints/35/timelapse',
-        info: { duration: 5.208256, width: 1680, height: 1080, fps: 24, codec: 'h264', file_size: 2143595, has_audio: false },
-        poster_frames: [{ timestamp: 0, data_url: `data:image/png;base64,${MEDIA_PNG_BASE64}` }],
+        poster_url: '/api/v1/prints/35/timelapse/frames/0',
+        frames_url: '/api/v1/prints/35/timelapse/frames',
       },
       plate_thumbnails: [{ index: 1, url: '/api/v1/prints/35/plates/1/thumbnail', name: 'Keychain' }],
       attachments: [],
@@ -1565,6 +1570,14 @@ export const prints: PrintDetail[] = [
  * #311 — what each print's printer still holds (`printer_media`, plan A5): the failed
  * print 36 left a timelapse and a camera recording on the printer; the others nothing.
  */
+/** #2360 — each print's timelapse stills and probe, read after its detail. */
+export const timelapseFrames: Record<number, TimelapseFrames> = {
+  35: {
+    info: { duration: 5.208256, width: 1680, height: 1080, fps: 24, codec: 'h264', file_size: 2143595, has_audio: false },
+    frames: [{ timestamp: 0, url: '/api/v1/prints/35/timelapse/frames/0' }],
+  },
+}
+
 export const printerFiles: Record<number, NonNullable<PrintDetail['printer_media']>['remote_files']> = {
   36: [
     {

@@ -10,6 +10,18 @@ import { setDisplayUnit } from '../lib/units'
 import { renderPage } from '../test/utils'
 import { CustomizePage } from './CustomizePage'
 import { EditPage } from './EditPage'
+import type * as TraceAction from '../lib/traceAction'
+
+/** The user actions started, by name (#2292): `traceAction` itself, recorded. */
+const actions = vi.hoisted(() => [] as string[])
+vi.mock('../lib/traceAction', async (importOriginal) => {
+  const actual = await importOriginal<typeof TraceAction>()
+  const traceAction: typeof actual.traceAction = (name, attributes, run) => {
+    actions.push(name)
+    return actual.traceAction(name, attributes, run)
+  }
+  return { ...actual, traceAction }
+})
 import { HistoryPage } from './HistoryPage'
 import { libraryLabel, pinChange } from '../lib/libraryPins'
 
@@ -297,12 +309,31 @@ describe('HistoryPage', () => {
     expect(await screen.findByTestId('edit-route')).toHaveTextContent(':Nova')
   })
 
-  it('deletes an output', async () => {
+  it('asks before deleting an output, even one with no copies in Bambuddy (#2369)', async () => {
+    const deleted: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'DELETE') deleted.push(new URL(request.url).pathname)
+    })
     const { user } = render()
     await user.click(within(await row('Workshop')).getByRole('button', { name: /^Delete / }))
 
+    const dialog = await screen.findByRole('dialog', { name: 'Delete Workshop?' })
+    expect(dialog).toHaveTextContent('This cannot be undone.')
+    expect(within(dialog).queryByRole('list', { name: 'Library copies' })).not.toBeInTheDocument()
+    expect(deleted).toEqual([])
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    expect(within(await row('Workshop')).getByRole('button', { name: /^Delete / })).toBeInTheDocument()
+    expect(deleted).toEqual([])
+
+    await user.click(within(await row('Workshop')).getByRole('button', { name: /^Delete / }))
+    await user.click(
+      within(await screen.findByRole('dialog', { name: 'Delete Workshop?' })).getByRole('button', {
+        name: 'Delete output',
+      }),
+    )
     await waitFor(() => expect(screen.queryAllByText('Workshop')).toHaveLength(0))
     expect(screen.getByTestId('outputs').children).toHaveLength(2)
+    expect(actions).toContain('delete')
   })
 
   it('asks before deleting an output with copies in Bambuddy, and keeps project copies', async () => {
@@ -510,6 +541,8 @@ describe('HistoryPage', () => {
     await user.click(within(workshop).getByRole('checkbox', { name: 'Select Workshop' }))
     expect(screen.getByRole('button', { name: 'Arrange selected (1)' })).toBeEnabled()
     await user.click(within(workshop).getByRole('button', { name: 'Delete Workshop' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Delete Workshop?' })
+    await user.click(within(dialog).getByRole('button', { name: 'Delete output' }))
     await waitFor(() => expect(screen.queryAllByText('Workshop')).toHaveLength(0))
     expect(screen.getByRole('button', { name: 'Arrange selected (0)' })).toBeDisabled()
   })

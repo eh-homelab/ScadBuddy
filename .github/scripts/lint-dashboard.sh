@@ -36,8 +36,9 @@
 #     rejected, since this lint cannot check them. A span the code names at run
 #     time (a FastAPI server span, `bambuddy.<operation>`, `agent.tool/<name>`,
 #     Temporal's interceptor spans) is matched by its attributes instead, which
-#     this lint does not check. Emitted means, for
-#     scadbuddy-worker, `render.<RenderStage>` or a literal passed to
+#     this lint does not check. Emitted means, for a worker
+#     (scadbuddy-render, scadbuddy-print or scadbuddy-projects, each named for
+#     its Deployment, #2292), `render.<RenderStage>` or a literal passed to
 #     `span(`/`detached_span(` under backend/scadbuddy/render/ (not submit.py),
 #     workflows/ or worker.py; for scadbuddy-api, such a literal anywhere else
 #     in backend/scadbuddy (render/submit.py included: render.submit,
@@ -162,7 +163,7 @@ worker_names=$(
   } | sort -u
 )
 [ -n "$worker_names" ] \
-  || problem "backend/scadbuddy" "scadbuddy-worker has no RenderStage and passes no literal to span()/detached_span()"
+  || problem "backend/scadbuddy" "the workers have no RenderStage and passes no literal to span()/detached_span()"
 api_names=$(span_literals "${api_files[@]}" | sort -u)
 [ -n "$api_names" ] \
   || problem "backend/scadbuddy" "scadbuddy-api passes no literal to span()/detached_span()"
@@ -185,7 +186,8 @@ emitted() { # service name -> 0 when that service emits a span of that name
   local service=$1 name=$2 src probe
   case "$service" in
     scadbuddy-api) grep -qxF "$name" <<< "$api_names"$'\n'"$both_names"; return ;;
-    scadbuddy-worker) grep -qxF "$name" <<< "$worker_names"$'\n'"$both_names"; return ;;
+    scadbuddy-render | scadbuddy-print | scadbuddy-projects)
+      grep -qxF "$name" <<< "$worker_names"$'\n'"$both_names"; return ;;
     scadbuddy-agent) src="$root/agent/src" probe="$root/agent/src/telemetry/setup.ts" ;;
     scadbuddy-web) src="$root/frontend/src" probe="$root/frontend/src/lib/tracing.ts" ;;
   esac
@@ -302,7 +304,7 @@ lint_dashboard() { # repo-relative path of one dashboard
     bad=false
     for service in "${services[@]}"; do
       case "$service" in
-        scadbuddy-api | scadbuddy-worker | scadbuddy-agent | scadbuddy-web) ;;
+        scadbuddy-api | scadbuddy-render | scadbuddy-print | scadbuddy-projects | scadbuddy-agent | scadbuddy-web) ;;
         *) problem "$rel" "$where: \"$service\" is not a ScadBuddy service.name"; bad=true ;;
       esac
     done

@@ -9,6 +9,7 @@ import logging
 import os
 import socket
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -187,9 +188,9 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
         for line in metrics.splitlines()
         if line and not line.startswith("#")
     }
-    assert samples['scadbuddy_render_duration_seconds_count{outcome="done"}'] == 1
-    assert samples['scadbuddy_render_job_latency_seconds_count{outcome="done"}'] == 1
-    assert samples['scadbuddy_render_jobs_finished_total{outcome="done"}'] == 1
+    assert samples['scadbuddy_render_duration_seconds_count{kind="render",outcome="done"}'] == 1
+    assert samples['scadbuddy_render_job_latency_seconds_count{kind="render",outcome="done"}'] == 1
+    assert samples['scadbuddy_render_jobs_finished_total{kind="render",outcome="done"}'] == 1
     for stage in ("source", "render", "split", "solids", "thumbnail", "write"):
         assert samples[f'scadbuddy_render_stage_seconds_count{{stage="{stage}"}}'] == 1, stage
     assert f'revision="{build_id}"' in metrics
@@ -1171,3 +1172,35 @@ async def test_a_worker_on_an_empty_volume_seeds_the_images_libraries(
     finally:
         await store.aclose()
         deps.projection.close()
+
+
+@pytest.mark.parametrize(
+    ("queue", "service"),
+    [
+        ("render", "scadbuddy-render"),
+        ("bambuddy", "scadbuddy-print"),
+        ("projects", "scadbuddy-projects"),
+    ],
+)
+def test_each_worker_reports_under_its_deployments_name(
+    monkeypatch: pytest.MonkeyPatch, queue: str, service: str
+) -> None:
+    """#2292: the render and print workers were one ``scadbuddy-worker`` in Tempo."""
+    named: list[str] = []
+    monkeypatch.setattr(sys, "argv", ["scadbuddy.worker", "--queue", queue])
+    monkeypatch.setattr(worker_module, "configure_tracing", lambda name, **_: named.append(name))
+    monkeypatch.setattr(worker_module, "configure_logging", lambda level: None)
+    monkeypatch.setattr(
+        worker_module,
+        "Settings",
+        lambda: SimpleNamespace(log_level="INFO", version="v", revision="r"),
+    )
+
+    def ran(main: Any) -> None:
+        main.close()
+
+    monkeypatch.setattr(asyncio, "run", ran)
+
+    worker_module.main()
+
+    assert named == [service]

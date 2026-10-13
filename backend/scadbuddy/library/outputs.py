@@ -230,6 +230,11 @@ class OutputStore:
         #: which moves the catalogue's fallback cover, and with it whether the
         #: default-render preview is needed. Must not raise.
         self.on_change: Callable[[str], None] | None = None
+        #: #2755 — where each output's directory was last found. Finding one by id means
+        #: globbing every model's directory (~90 ms on the NAS share in production),
+        #: and a listing's details asked about ten times per output. A hit is checked
+        #: with one stat, so a moved or deleted output is looked for again.
+        self._dirs: dict[str, Path] = {}
 
     def _changed(self, slug: str) -> None:
         if self.on_change is None:
@@ -240,8 +245,13 @@ class OutputStore:
             logger.exception("an output change listener failed", extra={"slug": slug})
 
     def _find_dir(self, output_id: str) -> Path:
+        known = self._dirs.get(output_id)
+        if known is not None and (known / META_NAME).is_file():
+            return known
         for meta_path in self.paths.outputs.glob(f"*/{output_id}/{META_NAME}"):
+            self._dirs[output_id] = meta_path.parent
             return meta_path.parent
+        self._dirs.pop(output_id, None)
         raise OutputNotFoundError(output_id)
 
     def directory(self, output_id: str) -> Path:
@@ -311,10 +321,13 @@ class OutputStore:
         directory = self.paths.outputs / slug
         if not directory.is_dir():
             return []
-        metas = [
-            OutputMeta.model_validate_json(path.read_text(encoding="utf-8"))
-            for path in directory.glob(f"*/{META_NAME}")
-        ]
+        metas = []
+        for path in directory.glob(f"*/{META_NAME}"):
+            meta = OutputMeta.model_validate_json(path.read_text(encoding="utf-8"))
+            # Found by the listing's own glob: the details read next need no search.
+            if meta.id == path.parent.name:
+                self._dirs[meta.id] = path.parent
+            metas.append(meta)
         return sorted(self._with_last_prints(metas), key=lambda meta: meta.created_at, reverse=True)
 
     def ids_for(self, slug: str) -> list[str]:
@@ -340,11 +353,13 @@ class OutputStore:
         files_dir: Path | None = None,
         arranged_from: Sequence[str] = (),
         output_id: str | None = None,
+        print_settings: Mapping[str, str] | None = None,
     ) -> OutputMeta:
         """Save the job's output ``index`` (a pipeline job's `ctx.output`, §5.2), or its
         one result for a job without outputs. ``files_dir`` holds that output's extra
         files (the caller's ``dir_for(files_key) / "files"``). ``output_id`` lets a caller
-        that holds the output's Parts first name the output before it exists."""
+        that holds the output's Parts first name the output before it exists.
+        ``print_settings`` are the template's (#770), written into the saved 3MF."""
         if job.outputs and not 0 <= index < len(job.outputs):
             raise IndexError(index)
         chosen = job.outputs[index] if job.outputs else None
@@ -364,7 +379,6 @@ class OutputStore:
         # Every copy and write, or none: a failure part-way (a source gone from the
         # store, a full disk) leaves no half-written output behind to list.
         try:
-            shutil.copyfile(self.paths.root / result.model_3mf, directory / MODEL_NAME)
             shutil.copyfile(self.paths.root / result.preview_glb, directory / PREVIEW_NAME)
             (directory / PARAMS_NAME).write_text(
                 json.dumps(job.params, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -376,6 +390,8 @@ class OutputStore:
             # A job from before the hash existed has none to read back; the live tree is
             # then the closest thing to what it rendered.
             version = result.source_version or source_version(self.paths.model_dir(job.slug))
+            # Stamped as it is copied (#2755): one read of the job's 3MF and one write,
+            # not a copy and then a rewrite of the copy.
             stamp(
                 directory / MODEL_NAME,
                 Provenance(
@@ -385,6 +401,8 @@ class OutputStore:
                     params=dict(job.params),
                     edit_url=edit_url(public_url, output_id),
                 ),
+                print_settings,
+                source=self.paths.root / result.model_3mf,
             )
 
             if chosen is not None:

@@ -16,7 +16,6 @@ from temporal_agent_harness.harness.agent_client import AgentClient
 from temporal_agent_harness.harness.agent_protocol import AgentConfig
 
 from scadbuddy.flows.grants import GrantSpec
-from scadbuddy.flows.manifest import tiers
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.workflows.flow_activities import FlowActivities
@@ -156,9 +155,11 @@ class Outward(Flows):
         grant: GrantSpec | None = None,
         before: Callable[[str], Awaitable[None]] | None = None,
         started_by: dict[str, Any] | None = None,
+        tool_tiers: dict[str, str] | None = None,
     ) -> str:
         """Start a run of `body`, with `grant` approved by the browser, and `before` run
-        once the grant is in."""
+        once the grant is in. `tool_tiers` are the tiers the API read from the agent at the
+        start (none by default): each call asks the agent again (`AgentTiers`)."""
         definition = await define(self.store, "t")
         run_id = str(uuid.uuid4())
         if grant is not None:
@@ -181,7 +182,7 @@ class Outward(Flows):
                 started_by=started_by or {"kind": "browser"},
                 approval_timeout_s=approval_timeout_s,
                 tools_queue=tools_queue,
-                tool_tiers=tiers(),
+                tool_tiers=tool_tiers or {},
             ),
         )
         return run_id

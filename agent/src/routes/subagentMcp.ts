@@ -5,12 +5,13 @@ import type { Hono } from 'hono'
 import type { Sql } from 'postgres'
 import type { AuditLog } from '../audit/log.js'
 import type { Tier } from '../auth/principal.js'
-import { isLoopbackPeer } from '../http/origins.js'
+import { inBlockList, isLoopbackPeer } from '../http/origins.js'
 import type { Owner } from '../sessions/protocol.js'
 import { ownerDigest, type SubagentClaim, verifySubagentToken } from '../temporal/subagentToken.js'
 import { type SessionOwners, turnTiers } from '../temporal/toolActivities.js'
 import { turnPrincipal } from '../tools/harness.js'
 import { effectiveTool, errorResult, parsedOrRaw, runToolWithOutcome, type Tool, type ToolServices } from '../tools/registry.js'
+import { subagentPeers } from './durableSubagents.js'
 import type { RouteModule } from './module.js'
 
 // The ScadBuddy tools of a durable segment's subagents (#2320). The Temporal plugin
@@ -20,9 +21,10 @@ import type { RouteModule } from './module.js'
 // durable segment gives its Claude Code this loopback server under the same name: the
 // subagents' tool names, `mcp__scadbuddy__<tool>`, are a classic turn's.
 //
-// Who calls: only a loopback peer (the agent-durable container shares the pod's network;
-// the ingress is never loopback), with a token the segment runner minted for one session,
-// turn and owner (temporal/subagentToken.ts).
+// Who calls: a loopback peer (an agent-durable container in the pod), or a peer in the
+// ranges Settings names (durableSubagents.ts: an agent-durable Deployment of its own), never
+// through a proxy, and only with a token the segment runner minted for one session, turn
+// and owner (temporal/subagentToken.ts).
 //
 // Every call is decided as the main path decides a durable tool's (toolActivities.ts
 // `runAsActivity`), from the session as it is when the call runs, never from the token:
@@ -156,10 +158,13 @@ export const route: RouteModule = {
   register(app: Hono, deps) {
     const sub = deps.subagentMcp
     app.all(SUBAGENT_MCP_PATH, async (c) => {
-      // Never from the ingress: the agent-durable container on the pod's loopback only,
-      // and never through a proxy that names another client.
-      if (!sub || !isLoopbackPeer(deps.remoteAddress(c)) || c.req.header('x-forwarded-for') !== undefined) {
-        return c.json({ error: 'not found' }, 404)
+      // Never from the ingress: agent-durable on the pod's loopback or from a range
+      // Settings names, and never through a proxy that names another client.
+      if (!sub || c.req.header('x-forwarded-for') !== undefined) return c.json({ error: 'not found' }, 404)
+      const peer = deps.remoteAddress(c)
+      if (!isLoopbackPeer(peer)) {
+        const peers = await subagentPeers(deps.settings)
+        if (!peers || !inBlockList(peers, peer)) return c.json({ error: 'not found' }, 404)
       }
       const claim = verifySubagentToken(bearerOf(c.req.header('authorization')) ?? '', sub.keys())
       if (!claim || !(await callerOf(sub, claim))) return c.json({ error: TURN_OVER }, 401)

@@ -7,7 +7,7 @@ import {
 } from '@opentelemetry/sdk-trace-web'
 import { HttpResponse, delay, http } from 'msw'
 import { JsonTraceSerializer } from '@opentelemetry/otlp-transformer'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { server } from '../mocks/server'
 import {
   MAX_IN_FLIGHT_BYTES,
@@ -41,7 +41,6 @@ interface Seen {
   bodies: {
     spanNames: string[]
     bytes: number
-    keepalive: boolean
     contentType: string | null
     attributes: Record<string, unknown>[]
   }[]
@@ -71,7 +70,6 @@ function acceptingRelay(wait = 0): Seen {
       seen.bodies.push({
         spanNames: sent.map((x) => x.name),
         bytes,
-        keepalive: request.keepalive,
         contentType: request.headers.get('content-type'),
         attributes: sent.map((x) => Object.fromEntries(x.attributes.map((a) => [a.key, Object.values(a.value)[0]]))),
       })
@@ -132,13 +130,16 @@ describe('RelayExporter', () => {
 
   it('posts a batch as OTLP/JSON with keepalive, and reports success on 204', async () => {
     const seen = acceptingRelay()
+    // `keepalive` never reaches the wire, so msw's handler cannot see it: read it off the call.
+    const sent = vi.spyOn(globalThis, 'fetch')
+    onTestFinished(() => sent.mockRestore())
     const result = await exportOnce(new RelayExporter(), spans(3))
     expect(result.code).toBe(ExportResultCode.SUCCESS)
+    expect(sent).toHaveBeenCalledWith(RELAY_PATH, expect.objectContaining({ keepalive: true }))
     expect(seen.bodies).toEqual([
       {
         spanNames: ['span-0', 'span-1', 'span-2'],
         bytes: expect.any(Number),
-        keepalive: true,
         contentType: 'application/json',
         attributes: expect.any(Array),
       },

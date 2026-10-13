@@ -11,6 +11,7 @@ import { MULTI_PLATE_FILE } from '../mocks/features/library'
 import { lastArrangeRequest, problem, resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { normalizeHex } from '../lib/format'
+import { startTracing } from '../lib/tracing'
 import { renderPage } from '../test/utils'
 import { PrintPicker } from './PrintPicker'
 
@@ -490,6 +491,33 @@ describe('PrintPicker', () => {
     expect(sent?.filament_plan?.slots?.length).toBeGreaterThan(0)
     // The dialog now reads the new output: its plates are asked for by the new id.
     await screen.findByTestId('filament-slot-1')
+  })
+
+  it('re-arranges as one traced action, the save in the arrange’s trace (#2292)', async () => {
+    const seen: { method: string; path: string; traceparent: string | null }[] = []
+    const listen = ({ request }: { request: Request }) => {
+      seen.push({
+        method: request.method,
+        path: new URL(request.url).pathname,
+        traceparent: request.headers.get('traceparent'),
+      })
+    }
+    server.events.on('request:start', listen)
+    const stop = startTracing()
+    try {
+      const { user } = renderPicker()
+      await loaded()
+      await user.click(screen.getByRole('button', { name: 'Re-arrange for these spools' }))
+      expect(await screen.findByText('Arranged onto 1 plate.')).toBeInTheDocument()
+    } finally {
+      server.events.removeListener('request:start', listen)
+      await stop()
+    }
+    const arrange = seen.find((call) => call.method === 'POST' && call.path === '/api/v1/outputs/arrange')
+    const save = seen.find((call) => call.method === 'POST' && /^\/api\/v1\/models\/[^/]+\/outputs$/.test(call.path))
+    expect(arrange?.traceparent).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/)
+    // The save follows an await: it joins the arrange's trace only through the action.
+    expect(save?.traceparent?.split('-')[1]).toBe(arrange?.traceparent?.split('-')[1])
   })
 
   it('keeps the spools and settings a re-arrange was made for', async () => {
@@ -1496,6 +1524,83 @@ describe('PrintPicker · Options', () => {
     await user.click(screen.getByText('Options'))
     expect(await screen.findByLabelText('Quantity')).toHaveValue(3)
   })
+})
+
+describe('PrintPicker · grams from the background slice (#2365)', () => {
+  it('shows the slice’s grams per slot, and a spool short of them in Checks', async () => {
+    // An unsliced upload: the 3MF carries no grams, so only the slice can say.
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', () =>
+        HttpResponse.json({
+          ...choicesView,
+          filaments: {
+            ...choicesView.filaments,
+            slots: (choicesView.filaments.slots ?? []).map((slot) => ({ ...slot, used_grams: null })),
+          },
+        }),
+      ),
+    )
+    const { user } = renderPicker()
+    await loaded()
+    const slot = screen.getByTestId('filament-slot-1')
+    expect(within(slot).getByText('grams unknown until this is sliced')).toBeInTheDocument()
+
+    // The mock slice answers 3.3 g a slot.
+    expect(await within(slot).findByText('3.3 g for 1 copy', {}, { timeout: 8000 })).toBeInTheDocument()
+    expect(screen.queryByText(/this needs/)).toBeNull()
+
+    await showAdvanced()
+    await user.type(screen.getByLabelText('Copies'), '400')
+    expect(await within(slot).findByText('1320 g for 400 copies')).toBeInTheDocument()
+    const checks = screen.getByTestId('print-checks')
+    await waitFor(() => expect(within(checks).getAllByText(/this needs 1320 g\./).length).toBeGreaterThan(0))
+  }, 20000)
+
+  it("never shows another plate's slice grams on the plate chosen next (#2714 review)", async () => {
+    const unsliced = (slots: typeof choicesView.filaments.slots) =>
+      (slots ?? []).map((slot) => ({ ...slot, used_grams: null }))
+    let release = () => {}
+    const plateTwoSlice = { gate: new Promise<void>((resolve) => (release = resolve)), release: () => release() }
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: false },
+          { index: 2, has_thumbnail: false },
+        ]),
+      ),
+      http.get('/api/v1/print/outputs/:id/choices', () =>
+        HttpResponse.json({
+          ...choicesView,
+          filaments: { ...choicesView.filaments, slots: unsliced(choicesView.filaments.slots) },
+        }),
+      ),
+      http.get('/api/v1/print/outputs/:id/filaments', () =>
+        HttpResponse.json({ ...choicesView.filaments, slots: unsliced(choicesView.filaments.slots) }),
+      ),
+      // Plate 2's slice never finishes here, so plate 1's result stays, stale.
+      http.post('/api/v1/print/outputs/:id/preview-slice', async ({ request }) => {
+        const body = (await request.clone().json()) as { plate_id?: number }
+        if (body.plate_id === 2) await plateTwoSlice.gate
+        return undefined // on to the feature mock
+      }),
+    )
+    const { user } = renderPicker()
+    await loaded()
+    // Plate 1's slice: 3.3 g a slot.
+    expect(
+      await within(screen.getByTestId('filament-slot-1')).findByText('3.3 g for 1 copy', {}, { timeout: 8000 }),
+    ).toBeInTheDocument()
+
+    const plates = await screen.findByTestId('plate-choice')
+    await user.click(within(plates).getByRole('radio', { name: /Plate 2/ }))
+    await waitFor(() =>
+      expect(
+        within(screen.getByTestId('filament-slot-1')).getByText('grams unknown until this is sliced'),
+      ).toBeInTheDocument(),
+    )
+    expect(screen.queryByText(/3\.3 g for 1 copy/)).toBeNull()
+    plateTwoSlice.release()
+  }, 20000)
 })
 
 describe('PrintPicker · Print sequence (#1862)', () => {

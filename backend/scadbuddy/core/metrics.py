@@ -35,6 +35,10 @@ __all__ = [
 
 #: How a job settled; ``superseded`` was replaced by a newer render first.
 RenderOutcome = Literal["done", "failed", "superseded"]
+
+#: Which workflow a queue job runs, ``render.job_models.JobTableKind`` (spec 2026-09-27
+#: §7): spelled out here, not imported, so the metrics never load the render stack.
+RenderKind = Literal["render", "arrange"]
 RenderStage = Literal["source", "render", "split", "solids", "thumbnail", "write", "recolour"]
 #: What a `render_jobs` call that failed was doing: the per-scrape read of the
 #: queue gauges, a render's start (Temporal unavailable, or the start refused or
@@ -91,7 +95,8 @@ class Metrics:
         self.render_accept_pending = Counter(
             "scadbuddy_render_accept_pending",
             "Render requests answered 503 command-still-accepting: their job was not"
-            " answered in time, and the client sends the same request again.",
+            " answered in time, and the client sends the same request again; by kind.",
+            ["kind"],
             registry=r,
         )
         self.store_info = Gauge(
@@ -174,8 +179,13 @@ class Metrics:
         )
         # `kind` is "render" or "arrange" (spec 2026-09-27 §7): an arrange shares the
         # queue but is no render, so the render rate leaves it out.
-        for kind in ("render", "arrange"):
-            for counter in (self.render_submitted, self.render_coalesced, self.render_rejected):
+        for kind in get_args(RenderKind):
+            for counter in (
+                self.render_submitted,
+                self.render_coalesced,
+                self.render_rejected,
+                self.render_accept_pending,
+            ):
                 counter.labels(kind)
         self.render_retried = Counter(
             "scadbuddy_render_jobs_retried",
@@ -184,8 +194,8 @@ class Metrics:
         )
         self.render_finished = Counter(
             "scadbuddy_render_jobs_finished",
-            "Render jobs that left the queue, by outcome.",
-            ["outcome"],
+            "Render jobs that left the queue, by kind and outcome.",
+            ["kind", "outcome"],
             registry=r,
         )
         self.queue_depth = Gauge(
@@ -232,21 +242,22 @@ class Metrics:
         )
         self.queue_wait = Histogram(
             "scadbuddy_render_queue_wait_seconds",
-            "Time from submit until its workflow began the render.",
+            "Time from submit until its workflow began the render, by kind.",
+            ["kind"],
             buckets=RENDER_BUCKETS,
             registry=r,
         )
         self.render_duration = Histogram(
             "scadbuddy_render_duration_seconds",
-            "Time a worker spent on a job, by outcome.",
-            ["outcome"],
+            "Time a worker spent on a job, by kind and outcome.",
+            ["kind", "outcome"],
             buckets=RENDER_BUCKETS,
             registry=r,
         )
         self.job_latency = Histogram(
             "scadbuddy_render_job_latency_seconds",
-            "Time from submit to a settled job, by outcome: what the user waits for.",
-            ["outcome"],
+            "Time from submit to a settled job, by kind and outcome: what the user waits for.",
+            ["kind", "outcome"],
             buckets=RENDER_BUCKETS,
             registry=r,
         )
@@ -361,11 +372,14 @@ class Metrics:
 
         # Every series a dashboard or alert divides by exists from the first scrape,
         # at zero, rather than appearing with the first job to reach it.
-        for outcome in get_args(RenderOutcome):
-            self.render_finished.labels(outcome)
-            self.job_latency.labels(outcome)
-        for outcome in ("done", "failed"):
-            self.render_duration.labels(outcome)
+        # `kind` is the job's (spec 2026-09-27 §7), so Arrange is charted apart (#2294).
+        for kind in get_args(RenderKind):
+            self.queue_wait.labels(kind)
+            for outcome in get_args(RenderOutcome):
+                self.render_finished.labels(kind, outcome)
+                self.job_latency.labels(kind, outcome)
+            for outcome in ("done", "failed"):
+                self.render_duration.labels(kind, outcome)
         for stage in get_args(RenderStage):
             self.stage_duration.labels(stage)
         for operation in get_args(StoreOperation):

@@ -8,13 +8,14 @@ from collections.abc import Awaitable
 
 from pydantic import BaseModel, Field
 
-from scadbuddy.bambuddy.catalogue import PresetChoice, _Catalogue, _catalogue
+from scadbuddy.bambuddy.catalogue import PresetChoice, _Catalogue, cached_catalogue
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.concurrent import settled
 from scadbuddy.bambuddy.extruders import default_nozzles
 from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.hardware import (
     InstalledNozzle,
+    bed_type_labels,
     installed_nozzles,
     last_bed_type,
     nozzle_warning,
@@ -28,7 +29,7 @@ from scadbuddy.bambuddy.models import (
     PrinterStatus,
     RackAlgorithm,
 )
-from scadbuddy.bambuddy.print_run import BED_TYPES, filament_options, read_status
+from scadbuddy.bambuddy.print_run import filament_options, read_status
 from scadbuddy.bambuddy.print_source import OutputSource, PrintSource
 from scadbuddy.bambuddy.resolver import _SOURCE_ORDER, DEFAULT_BED, TIERS, Tier
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
@@ -36,10 +37,15 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import ModelPrintChoices, StoredSettings
 from scadbuddy.rack.usage import RackUsage, record_seen
+from scadbuddy.render.plate import bed_types_for
 
 logger = logging.getLogger(__name__)
 
 SIZES = ["0.2", "0.4", "0.6", "0.8"]
+
+#: How long the dialog waits on the printer's archives, which only preselect a plate
+#: (#2354): a stalled list costs the preselection, not the dialog a 504.
+ARCHIVES_BUDGET = 5.0
 
 #: Re-exported: the helpers moved to ``hardware`` so the run can use them without an
 #: import cycle through ``print_run``.
@@ -80,7 +86,11 @@ class ChoicesView(BaseModel):
     default_nozzles: list[NozzleChoice] = Field(default_factory=lambda: default_nozzles(None))
     tiers: dict[str, list[TierOption]] = Field(default_factory=dict)
     processes: dict[str, list[str]] = Field(default_factory=dict)
-    bed_types: list[str] = Field(default_factory=lambda: list(BED_TYPES))
+    #: The plates the chosen printer's model takes, by ``curr_bed_type`` (#2366); every
+    #: plate for a model the profiles do not know.
+    bed_types: list[str] = Field(default_factory=lambda: list(bed_types_for(None)))
+    #: The label Bambu Studio shows for each of ``bed_types``.
+    bed_type_labels: dict[str, str] = Field(default_factory=dict)
     last_bed_type: str | None = None
     bed_type: str = DEFAULT_BED
     filaments: FilamentOptions
@@ -123,19 +133,46 @@ async def choices_for(
     printer_id: int | None,
     rack: RackUsage | None = None,
 ) -> ChoicesView:
-    """The dialog's choices, read in two waves (#2504): ``source``, the printers and the
-    presets together, then everything that needs the chosen printer together, its
-    status read once. A failure surfaces as it did when the reads ran one by one:
-    the source's, then the printers', the presets' and the filament step's. So a
-    library file that is gone or unprintable still answers its 404 or 422, though the
-    printers and presets have been read beside it by then: a few wasted reads on a
-    rare path, for not waiting on the file every time."""
-    loaded, listed, presets = await asyncio.gather(
-        source, client.printers(), _catalogue(client), return_exceptions=True
-    )
+    """The dialog's choices, read in two waves (#2504): ``source`` and the printers
+    together, then everything that needs the chosen printer together, its status read
+    once. The preset catalogue is read beside both waves, never waited on before the
+    second (#2354), and kept between opens (#2361). A failure surfaces as it did when
+    the reads ran one by one: the source's, then the printers', the presets' and the
+    filament step's. So a library file that is gone or unprintable still answers its
+    404 or 422, though the printers have been read beside it by then: a few wasted
+    reads on a rare path, for not waiting on the file every time."""
+    presets = asyncio.ensure_future(cached_catalogue(client))
+    try:
+        return await _choices(
+            client,
+            source,
+            settings,
+            presets,
+            remembered=remembered,
+            printer_id=printer_id,
+            rack=rack,
+        )
+    finally:
+        # A failed source or printer list answers without the catalogue; a catalogue
+        # read that failed by then is the error nobody reached, not a lost one.
+        if presets.done() and not presets.cancelled():
+            presets.exception()
+        presets.cancel()
+
+
+async def _choices(
+    client: BambuddyClient,
+    source: Awaitable[PrintSource],
+    settings: StoredSettings,
+    presets: asyncio.Future[_Catalogue],
+    *,
+    remembered: ModelPrintChoices | None,
+    printer_id: int | None,
+    rack: RackUsage | None,
+) -> ChoicesView:
+    loaded, listed = await asyncio.gather(source, client.printers(), return_exceptions=True)
     ready = settled(loaded)
     printers = [row for row in settled(listed) if row.is_active]
-    catalogue = settled(presets)
     active = {row.id for row in printers}
 
     def still_active(candidate: int | None) -> int | None:
@@ -152,15 +189,21 @@ async def choices_for(
     status: PrinterStatus | None = None
     last: str | None = None
     if printer_id is None:
-        filaments = await filament_options(client, ready, printer_id=None)
+        read_presets, read = await asyncio.gather(
+            presets, filament_options(client, ready, printer_id=None), return_exceptions=True
+        )
+        catalogue = settled(read_presets)
+        filaments = settled(read)
     else:
         reading = asyncio.ensure_future(read_status(client, printer_id))
-        seen, plate, read = await asyncio.gather(
+        read_presets, seen, plate, read = await asyncio.gather(
+            presets,
             _record_seen(rack, printer_id, reading),
             _last_bed_type(client, printer_id),
             filament_options(client, ready, printer_id=printer_id, status=reading),
             return_exceptions=True,
         )
+        catalogue = settled(read_presets)
         settled(seen)
         last = settled(plate)
         filaments = settled(read)
@@ -180,9 +223,13 @@ async def choices_for(
         or (settings.printer_bed_types.get(str(printer_id)) if printer_id is not None else None)
         or DEFAULT_BED
     )
+    model = next((row.model for row in printers if row.id == printer_id), None)
+    bed_types = list(bed_types_for(model))
     return ChoicesView(
         printer_id=printer_id,
         printers=printers,
+        bed_types=bed_types,
+        bed_type_labels=bed_type_labels(bed_types),
         installed=installed_nozzles(status),
         default_nozzles=default_nozzles(status),
         tiers={
@@ -233,9 +280,12 @@ async def _record_seen(
 
 async def _last_bed_type(client: BambuddyClient, printer_id: int) -> str | None:
     """Advisory, like the run's plate warning: an archive list that cannot be read or
-    ordered preselects nothing rather than failing the dialog."""
+    ordered, or does not answer within :data:`ARCHIVES_BUDGET`, preselects nothing
+    rather than failing the dialog."""
     try:
-        return last_bed_type(await client.archives(printer_id=printer_id), printer_id=printer_id)
-    except (ApiError, ValueError):
+        async with asyncio.timeout(ARCHIVES_BUDGET):
+            archives = await client.archives(printer_id=printer_id)
+        return last_bed_type(archives, printer_id=printer_id)
+    except (ApiError, ValueError, TimeoutError):
         logger.info("archives unreadable; the plate falls back to the remembered one")
         return None

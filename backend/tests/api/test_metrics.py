@@ -55,10 +55,25 @@ def test_counters_alerts_read_with_increase_start_at_zero(client: TestClient) ->
     assert 'scadbuddy_render_jobs_rejected_total{kind="render"} 0.0' in text
     assert 'scadbuddy_render_jobs_rejected_total{kind="arrange"} 0.0' in text
     assert 'scadbuddy_render_store_errors_total{operation="read"} 0.0' in text
-    assert 'scadbuddy_render_jobs_finished_total{outcome="done"} 0.0' in text
+    # Every kind and outcome, so Arrange is charted apart from renders (#2294).
+    for kind in ("render", "arrange"):
+        for outcome in ("done", "failed", "superseded"):
+            finished = f'scadbuddy_render_jobs_finished_total{{kind="{kind}",outcome="{outcome}"}}'
+            assert f"{finished} 0.0" in text
+        assert f'scadbuddy_render_accept_pending_total{{kind="{kind}"}} 0.0' in text
+        assert f'scadbuddy_render_queue_wait_seconds_count{{kind="{kind}"}} 0.0' in text
+        for outcome in ("done", "failed"):
+            duration = (
+                f'scadbuddy_render_duration_seconds_count{{kind="{kind}",outcome="{outcome}"}}'
+            )
+            assert f"{duration} 0.0" in text
+            latency = (
+                f'scadbuddy_render_job_latency_seconds_count{{kind="{kind}",outcome="{outcome}"}}'
+            )
+            assert f"{latency} 0.0" in text
     # Only outcomes something emits: a series stuck at 0 reads as "never happens"
     # (review #1066 4.2).
-    assert 'scadbuddy_render_jobs_finished_total{outcome="cancelled"}' not in text
+    assert 'outcome="cancelled"' not in text
 
 
 def _metrics_once(client: TestClient, line: str) -> str:
@@ -80,7 +95,7 @@ def test_metrics_count_renders(client: TestClient, model: str) -> None:
     accepted = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
     wait_for_job(client, accepted.json()["job_id"])
 
-    done = 'scadbuddy_render_jobs_finished_total{outcome="done"} 1.0'
+    done = 'scadbuddy_render_jobs_finished_total{kind="render",outcome="done"} 1.0'
     text = _metrics_once(client, done)
     assert 'scadbuddy_render_jobs_submitted_total{kind="render"} 1.0' in text
     assert done in text

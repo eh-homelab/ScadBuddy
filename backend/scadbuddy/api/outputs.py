@@ -80,6 +80,7 @@ from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.bambuddy.send import SendRequest, SendResult
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
 from scadbuddy.core.problems import DATABASE_ERRORS, PROBLEM_MEDIA_TYPE, ApiError
+from scadbuddy.core.tracing import span
 from scadbuddy.library.history import COMMIT_ID_PATTERN
 from scadbuddy.library.outputs import (
     MODEL_NAME,
@@ -229,13 +230,15 @@ async def _details(
 ) -> list[OutputDetail]:
     copies = await uploads.for_outputs(meta.id for meta in metas)
     failed = await _failed_before_queueing(runs, metas)
-    # The thumbnail check and params read are file IO: off the event loop.
-    return await asyncio.to_thread(
-        lambda: [
-            detail(store, meta, copies[meta.id], failed_before_queueing=meta.id in failed)
-            for meta in metas
-        ]
-    )
+    # The thumbnail check and params read are file IO: off the event loop. A span of
+    # their own (#2755): on the NAS share they were most of a listing's time.
+    with span("output.details", attributes={"scadbuddy.outputs": len(metas)}):
+        return await asyncio.to_thread(
+            lambda: [
+                detail(store, meta, copies[meta.id], failed_before_queueing=meta.id in failed)
+                for meta in metas
+            ]
+        )
 
 
 @router.post(
@@ -854,16 +857,14 @@ def _no_content(result: dict[str, Any] | Operation) -> Response:
     responses={200: {"content": {THREE_MF_MEDIA_TYPE: {}}}},
     summary="Download the 3MF",
 )
-async def download_output(
-    output_id: OutputIdPath, outputs: OutputsDep, store: SettingsStoreDep, catalogue: CatalogueDep
-) -> Response:
+async def download_output(output_id: OutputIdPath, outputs: OutputsDep) -> Response:
     meta = require_output(outputs, output_id)
     path = outputs.directory(output_id) / MODEL_NAME
     if not path.is_file():
         raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF")
-    # For the default printer, on its real presets (#769), with the template's own
-    # print settings (#770).
-    return await download_3mf(path, meta, store.load(), catalogue.print_settings(meta.slug))
+    # The saved file as it is (#2652): its presets and print settings were written when
+    # it was saved.
+    return download_3mf(path, meta)
 
 
 @router.get(
