@@ -299,8 +299,9 @@ def _kinds(core: Core, components: Components) -> list[OperationKind]:
     (``media_operations.py``), its outputs (``output_operations.py``), the uploads
     for its file parameters (``asset_operations.py``), font installs
     (``font_operations.py``), preset writes (``preset_operations.py``) and deleting
-    and restoring Bambuddy library files (``library_file_operations.py``), and renaming,
-    moving and making folders (``library_write_operations.py``). Imported
+    and restoring Bambuddy library files (``library_file_operations.py``), and
+    uploading, renaming and moving library files and making, renaming, moving and
+    deleting folders (``library_write_operations.py``). Imported
     here, as they import this module. Their runs are the routes' former bodies, which
     take the whole ``AppState`` and read services the ``Core`` does not name, so any
     other core is refused here rather than failing inside an operation (review #1126 1.2)."""
