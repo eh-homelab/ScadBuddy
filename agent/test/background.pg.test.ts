@@ -23,7 +23,7 @@ import { agentA, browser, manager, scriptedRunner, tempPaths } from './support/s
 // that drives the activities is test/background.temporal.test.ts.
 
 const skip = TEST_DATABASE_URL ? undefined : `${TEST_DATABASE_URL_ENV} is not set`
-const NAMES = ['CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'TaskStop']
+const NAMES = ['CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'Monitor', 'TaskStop']
 const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-forwarded-proto': 'https' }
 const UI_READ = { host: 'scadbuddy.example', 'x-forwarded-proto': 'https', 'sec-fetch-site': 'same-origin' }
 const NOW = new Date('2026-10-13T08:00:30Z')
@@ -39,7 +39,7 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
   const started: string[] = []
   const cancelled: string[] = []
   const runner: TaskRunner = {
-    start: async (id) => void started.push(id),
+    start: async (t) => void started.push(t.id),
     cancel: async (id) => void cancelled.push(id),
   }
 
@@ -52,14 +52,15 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
     tasks = new BackgroundTasks({ store, runner })
     m = manager({ sql: db.sql, paths: await tempPaths(), run: scriptedRunner(() => ({ reply: 'ok' })).runner })
     sessionId = (await m.start(browser, { origin: 'chat' })).session.id
-    const context = () => ({ background: { tasks, sessionId, owner: browser, tz: 'UTC', now: () => NOW } }) as unknown as BuiltinContext
+    const context = () =>
+      ({ background: { tasks, sessionId, owner: browser, tz: 'UTC', now: () => NOW, commandQueue: 'agent-tools.pod-a' } }) as unknown as BuiltinContext
     client = await connectInProcess(() => builtinServer(NAMES, context))
   }, 60_000)
   afterEach(async () => {
     await client.close()
     m.abortAll()
     await drop()
-  })
+  }, 60_000)
 
   async function call(name: string, args: Record<string, unknown>): Promise<{ text: string; isError: boolean }> {
     const result = (await client.callTool({ name, arguments: args })) as { content: { text: string }[]; isError?: boolean }
@@ -118,6 +119,27 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
     expect((await call('ScheduleWakeup', { stop: true })).text).toMatch(/^Loop stopped — cancelled 1 pending wakeup\(s\);/)
     expect(await store.list(sessionId)).toEqual([])
     expect(await call('ScheduleWakeup', { delaySeconds: 60 })).toMatchObject({ isError: true })
+  })
+
+  it('starts a monitor where the session\'s Bash runs, in Claude Code\'s words', async () => {
+    const started_ = await call('Monitor', { description: 'errors in deploy.log', timeout_ms: 99_999_999, command: 'tail -f deploy.log | grep --line-buffered ERROR' })
+    expect(started_.text).toMatch(/^Monitor started \(task [0-9a-f]{8}, expires in 30m unless the source ends first; you get one notice at expiry/)
+    const id = idOf(started_.text)
+    expect(await store.get(id)).toMatchObject({
+      kind: 'monitor',
+      description: 'errors in deploy.log',
+      spec: { command: 'tail -f deploy.log | grep --line-buffered ERROR', queue: 'agent-tools.pod-a', timeoutMs: 1_800_000 },
+      expiresAt: new Date(NOW.getTime() + 1_800_000),
+    })
+    expect(await call('Monitor', { description: 'x', timeout_ms: 1000 })).toMatchObject({ isError: true, text: 'Give exactly one of command and ws.' })
+    expect(await call('Monitor', { description: 'x', timeout_ms: 1000, ws: { url: 'ws://127.0.0.1:9/' } })).toMatchObject({
+      isError: true,
+      text: expect.stringContaining('loopback'),
+    })
+    expect(JSON.parse((await call('TaskStop', { task_id: id })).text)).toMatchObject({
+      message: `Successfully stopped task: ${id} (tail -f deploy.log | grep --line-buffered ERROR)`,
+      task_type: 'monitor',
+    })
   })
 
   it('stops any task by its ID with TaskStop', async () => {

@@ -10,7 +10,7 @@ export const backgroundWorkflowId = (taskId: string) => `bgtask-${taskId}`
 
 /** What runs the tasks: Temporal in the service (temporal.ts), a stand-in in tests. */
 export type TaskRunner = {
-  start(taskId: string): Promise<void>
+  start(task: Pick<BackgroundTask, 'id' | 'kind'>): Promise<void>
   /** Cancels a task's workflow; one that is not running is left as it is. */
   cancel(taskId: string): Promise<void>
 }
@@ -28,7 +28,7 @@ export class BackgroundTasks {
     const row = await this.store.create(t)
     if (!row) return undefined
     try {
-      await this.#runner.start(row.id)
+      await this.#runner.start(row)
     } catch (err) {
       await this.store.finish(row.id, 'failed', `it could not be started: ${(err as Error).message}`)
       throw err

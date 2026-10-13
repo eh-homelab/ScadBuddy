@@ -1,5 +1,12 @@
+import { Context } from '@temporalio/activity'
+import type { HarnessPaths } from '../harness/options.js'
+import { ensureSessionDir } from '../harness/stateDirs.js'
+import { TASK_QUEUE } from '../temporal/names.js'
+import type { Resolver } from '../http/egress.js'
 import { SessionError, type SessionManager } from '../sessions/manager.js'
+import { checkSocketUrl, endNotice, eventNotice, type MonitorEnd, runCommand, runSocket } from './monitor.js'
 import { nextFire } from './schedule.js'
+import { backgroundWorkflowId } from './service.js'
 import type { BackgroundTask, BackgroundTaskStore } from './store.js'
 
 // The activities of a background task's workflow (temporal/backgroundTask.ts), on the
@@ -11,6 +18,18 @@ import type { BackgroundTask, BackgroundTaskStore } from './store.js'
 export const BG_NEXT = 'bg_next'
 export const BG_FIRE = 'bg_fire'
 export const BG_FINISH = 'bg_finish'
+export const BG_MONITOR_PLAN = 'bg_monitor_plan'
+export const BG_MONITOR_COMMAND = 'bg_monitor_command'
+export const BG_MONITOR_WS = 'bg_monitor_ws'
+export const BG_MONITOR_END = 'bg_monitor_end'
+export const BG_DELIVER = 'bg_deliver'
+/** Signalled by a monitor's source when it recorded an event (temporal/backgroundTask.ts). */
+export const BG_EVENTS_SIGNAL = 'bg_events'
+
+/** Where and how long a monitor runs, or why it does not. */
+export type MonitorPlan = { queue: string; activity: typeof BG_MONITOR_COMMAND | typeof BG_MONITOR_WS; timeoutMs: number } | { end: string }
+export type MonitorResult = { end: MonitorEnd; events: number }
+export type DeliverResult = { result: 'none' } | FireResult
 
 /** How long a fire waits for a busy session before it gives that occurrence up. */
 export const BUSY_GIVE_UP_MS = 60 * 60 * 1000
@@ -45,6 +64,38 @@ export type BackgroundActivityDeps = {
   send: TaskSender
   tz: string
   now?: () => Date
+  /** Where a classic session's directory is, the cwd a monitor's command runs in. */
+  paths?: HarnessPaths | undefined
+  /** Resolves a WebSocket monitor's host for its egress check. */
+  resolve?: Resolver | undefined
+  /** The queue a WebSocket monitor runs on: any agent's (`agent-tools` unless set). */
+  socketQueue?: string | undefined
+}
+
+/** What the model reads beside a monitor's events. */
+export function eventsContext(t: BackgroundTask): string {
+  return `(These are events of Monitor ${t.id} you started, "${t.description}"; they are not a message from the user. TaskStop ${t.id} stops it.)`
+}
+
+/** Heartbeats while `run` runs, and tells the workflow of each event. */
+async function watched(t: BackgroundTask, store: BackgroundTaskStore, run: (signal: AbortSignal, onEvent: (text: string) => Promise<boolean>) => Promise<MonitorEnd>): Promise<MonitorResult> {
+  const ctx = Context.current()
+  const beat = setInterval(() => ctx.heartbeat(), 5000)
+  let events = 0
+  try {
+    const end = await run(ctx.cancellationSignal, async (text) => {
+      if (!(await store.appendEvent(t.id, eventNotice(t.id, t.description, text)))) return false
+      events += 1
+      await ctx.client.workflow
+        .getHandle(backgroundWorkflowId(t.id))
+        .signal(BG_EVENTS_SIGNAL)
+        .catch(() => {})
+      return true
+    })
+    return { end, events }
+  } finally {
+    clearInterval(beat)
+  }
 }
 
 const isCron = (t: BackgroundTask) => t.kind === 'cron'
@@ -96,6 +147,61 @@ export function backgroundActivities(deps: BackgroundActivityDeps) {
 
     async [BG_FINISH](input: { taskId: string; state: 'done' | 'cancelled' | 'failed'; detail?: string }): Promise<void> {
       await deps.store.finish(input.taskId, input.state, input.detail)
+    },
+
+    async [BG_MONITOR_PLAN](input: { taskId: string }): Promise<MonitorPlan> {
+      const t = await deps.store.get(input.taskId)
+      if (!t || t.state !== 'active') return { end: 'gone' }
+      const timeoutMs = Number(t.spec.timeoutMs)
+      if (typeof t.spec.command === 'string') return { queue: String(t.spec.queue), activity: BG_MONITOR_COMMAND, timeoutMs }
+      return { queue: deps.socketQueue ?? TASK_QUEUE, activity: BG_MONITOR_WS, timeoutMs }
+    },
+
+    /** A classic session's monitor command, in its session directory on the replica that ran the turn. */
+    async [BG_MONITOR_COMMAND](input: { taskId: string }): Promise<MonitorResult> {
+      const t = await deps.store.get(input.taskId)
+      if (!t || t.state !== 'active') return { end: { outcome: 'cancelled' }, events: 0 }
+      if (!deps.paths) return { end: { outcome: 'failed', reason: 'this replica runs no monitor commands' }, events: 0 }
+      const cwd = await ensureSessionDir(deps.paths, t.sessionId)
+      return watched(t, deps.store, (signal, onEvent) =>
+        runCommand({ command: String(t.spec.command), cwd, timeoutMs: Number(t.spec.timeoutMs), signal, onEvent }),
+      )
+    },
+
+    async [BG_MONITOR_WS](input: { taskId: string }): Promise<MonitorResult> {
+      const t = await deps.store.get(input.taskId)
+      if (!t || t.state !== 'active') return { end: { outcome: 'cancelled' }, events: 0 }
+      const ws = t.spec.ws as { url: string; protocols?: string[] }
+      const refused = await checkSocketUrl(ws.url, deps.resolve)
+      if (refused) return { end: { outcome: 'failed', reason: refused }, events: 0 }
+      return watched(t, deps.store, (signal, onEvent) =>
+        runSocket({ url: ws.url, protocols: ws.protocols, timeoutMs: Number(t.spec.timeoutMs), signal, onEvent }),
+      )
+    },
+
+    /** Records the watch's end as its last event. */
+    async [BG_MONITOR_END](input: { taskId: string; end: MonitorEnd }): Promise<void> {
+      const t = await deps.store.get(input.taskId)
+      if (!t) return
+      const events = await deps.store.eventCount(t.id)
+      await deps.store.appendNotice(t.id, endNotice(t.id, t.description, input.end, events, Number(t.spec.timeoutMs)))
+    },
+
+    /** Sends a monitor's undelivered events as one message, once the session is idle. */
+    async [BG_DELIVER](input: { taskId: string; waitedMs: number }): Promise<DeliverResult> {
+      const t = await deps.store.get(input.taskId)
+      if (!t) return { result: 'none' }
+      const pending = await deps.store.pendingEvents(t.id)
+      if (!pending.length) return { result: 'none' }
+      const sent = await deps.send(t, pending.map((e) => e.text).join('\n\n'), eventsContext(t))
+      if (sent.result === 'sent') {
+        await deps.store.delivered(t.id, pending.at(-1)!.seq)
+        return sent
+      }
+      if (sent.result === 'busy' && input.waitedMs >= BUSY_GIVE_UP_MS) {
+        return { result: 'end', state: 'done', reason: 'events not delivered: the session was busy for an hour' }
+      }
+      return sent
     },
   }
 }
