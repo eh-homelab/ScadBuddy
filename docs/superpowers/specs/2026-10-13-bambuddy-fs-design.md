@@ -307,9 +307,15 @@ such as the host and other containers, see the files.
   of an open file streams the whole file into the cache, so readers get seekable
   random access.
 - **Writes.**
-  - `create`/`write` go to a temp file under the cache directory. On `release`
-    (`flush` alone does not, since editors flush repeatedly) the tool uploads it
-    with the folder ID.
+  - `create`/`write` go to a temp file under the cache directory. The upload runs
+    on `flush` (each `close()` of a descriptor) when writes are unsent, and returns its
+    error to `close()`. A flush with nothing new to send uploads nothing, so a file
+    written once uploads once however often it is flushed. `release` uploads only
+    what is still unsent.
+
+    Measured 2026-10-13 on WSL2's 6.6 kernel by the Task 8 implementer: `close()`
+    returns before FUSE's `release` runs, so an upload made only in `release` could
+    never report an error. That is why the upload runs on `flush`.
   - Writing over an existing name uploads the new file, then deletes the old one, so
     the path keeps its name but its ID changes. Bambuddy has no in-place replace.
   - `truncate` to 0 on a file being written is allowed.
