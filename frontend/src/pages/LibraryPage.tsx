@@ -333,7 +333,8 @@ export function LibraryPage() {
     scrolled.current = key
     card.scrollIntoView?.({ block: 'center' })
   }, [fileParam, listing])
-  // #2724 — `?project=` opens the folder linked to that project: its file list.
+  // #2724 — `?project=` opens the folder linked to that project: its file list. Bambuddy
+  // may link several; the first in the tree's order opens, and the page names the rest.
   const projectFolder = projectParam === null ? undefined : tree?.find((folder) => folder.project_id === projectParam)
   const projectMissing = projectParam !== null && tree !== null && projectFolder === undefined
   useEffect(() => {
@@ -346,6 +347,16 @@ export function LibraryPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectFolder?.id])
   const currentFolder = tree?.find((folder) => folder.id === folderId)
+  /** The project's other linked folders, beside the one open (#2757 review). */
+  const otherProjectFolders =
+    currentFolder?.project_id != null
+      ? (tree ?? []).filter((folder) => folder.project_id === currentFolder.project_id && folder.id !== currentFolder.id)
+      : []
+  function dismissProject() {
+    const next = new URLSearchParams(search)
+    next.delete('project')
+    setSearch(next, { replace: true })
+  }
   /** #2724 — every listed printable file of this folder, ticked at once. */
   const listedPrintable = files.filter((file) => file.printable)
   const unpicked = listedPrintable.filter((file) => !isPicked(file))
@@ -444,7 +455,8 @@ export function LibraryPage() {
               disabled={unpicked.length === 0}
               onClick={() => setPicked((now) => [...now, ...unpicked])}
             >
-              Select all ({listedPrintable.length})
+              {/* What it adds: this folder's unticked files, whatever is ticked elsewhere. */}
+              Select all in folder ({unpicked.length})
             </Button>
             {picked.length > 0 && (
               <Button size="sm" variant="ghost" onClick={() => setPicked([])}>
@@ -482,11 +494,33 @@ export function LibraryPage() {
             <p className="text-[13px] text-muted" data-testid="library-project">
               {`Project ${currentFolder.project_name ?? currentFolder.project_id}: this folder is its file list. `}
               Select all, then Print, to print them in one batch.
+              {otherProjectFolders.length > 0 && (
+                <>
+                  {' Also linked to it: '}
+                  {otherProjectFolders.map((folder, index) => (
+                    <span key={folder.id}>
+                      {index > 0 && ', '}
+                      <button
+                        type="button"
+                        className="text-accent underline"
+                        data-testid={`library-project-folder-${folder.id}`}
+                        onClick={() => tree && navigate(libraryPath(tree, folder.id))}
+                      >
+                        {folder.name}
+                      </button>
+                    </span>
+                  ))}
+                  .
+                </>
+              )}
             </p>
           )}
           {projectMissing && (
             <p role="alert" className="text-[13px] text-warn">
-              {`No library folder is linked to project ${projectParam}, so it has no files to list.`}
+              {`No library folder is linked to project ${projectParam}, so it has no files to list. `}
+              <button type="button" className="text-accent underline" onClick={dismissProject}>
+                Dismiss
+              </button>
             </p>
           )}
           {batchError && (

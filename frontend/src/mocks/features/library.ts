@@ -58,6 +58,8 @@ export const libraryFolders: LibraryFolderView[] = [
   { id: 13, name: 'Lamp', parent_id: null, depth: 0, file_count: 1, project_id: 7, project_name: 'Desk lamp' },
   // #2724 — the folder linked to a Bambuddy project: that project's file list.
   { id: 14, name: 'Raegan', parent_id: null, depth: 0, file_count: 3, project_id: 1, project_name: 'Reagan Keychain' },
+  // #2757 review — Bambuddy links a project to several folders; this is the second.
+  { id: 15, name: 'Raegan spares', parent_id: null, depth: 0, file_count: 0, project_id: 1, project_name: 'Reagan Keychain' },
   // #2165 — a name repeated under another folder, as the live library has it.
   { id: 10, name: 'Spec', parent_id: null, depth: 0, file_count: 0 },
   { id: 11, name: 'MakerWorld', parent_id: 10, depth: 1, file_count: 0 },

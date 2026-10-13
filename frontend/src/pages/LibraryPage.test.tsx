@@ -188,19 +188,31 @@ describe('LibraryPage', () => {
     await screen.findByTestId('library-file-140')
     await user.click(screen.getByRole('switch', { name: 'Advanced' }))
     await screen.findByTestId('library-file-142')
+    // It says what it adds: this folder's unticked files (#2757 review).
+    expect(screen.getByTestId('library-select-all')).toHaveTextContent('Select all in folder (3)')
     await user.click(screen.getByTestId('library-select-all'))
     expect(screen.getByTestId('library-print-selected')).toHaveTextContent('Print 3 files')
+    expect(screen.getByTestId('library-select-all')).toHaveTextContent('Select all in folder (0)')
   })
 
   it('opens a project on its linked folder, and says when it has none (#2724)', async () => {
-    renderPage(<LibraryPage />, { route: '/library?project=1' })
+    const batch = await api.createPrintBatch([{ library_file_id: 140, filename: 'keychain-reagan.3mf', sliced: false }])
+    const { user } = renderPage(<><LibraryPage /><Where /></>, { route: `/library?project=1&batch=${batch.id}` })
     expect(await screen.findByTestId('library-file-140')).toBeInTheDocument()
-    expect(screen.getByTestId('library-project')).toBeInTheDocument()
+    // The link is followed and dropped; the batch open beside it stays (#2757 review).
+    await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent(`/library/Raegan?batch=${batch.id}`))
+    // Bambuddy links it to a second folder too: named, and one click away.
+    expect(screen.getByTestId('library-project')).toHaveTextContent('Also linked to it: Raegan spares.')
+    await user.click(screen.getByTestId('library-project-folder-15'))
+    await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent('/library/Raegan%20spares'))
   })
 
-  it('says a project with no linked folder has no files to list (#2724)', async () => {
-    renderPage(<LibraryPage />, { route: '/library?project=99' })
+  it('says a project with no linked folder has no files to list, until dismissed (#2724)', async () => {
+    const { user } = renderPage(<><LibraryPage /><Where /></>, { route: '/library?project=99' })
     expect(await screen.findByRole('alert')).toHaveTextContent('No library folder is linked to project 99')
+    await user.click(screen.getByRole('button', { name: 'Dismiss' }))
+    expect(screen.queryByText(/No library folder is linked/)).toBeNull()
+    expect(screen.getByTestId('where')).not.toHaveTextContent('project=')
   })
 
   it('renders a folder of hundreds of files with lazy thumbnails', async () => {
