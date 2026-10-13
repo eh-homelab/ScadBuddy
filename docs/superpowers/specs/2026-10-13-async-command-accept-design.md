@@ -69,7 +69,7 @@ tools.
 
 **C. Follow the command's own Update by id (chosen).** Wait for the Update as today,
 but only briefly. Past that, answer **202 Accepted** with the workflow id and Update id.
-The client then follows `GET /commands/{workflow_id}/updates/{update_id}`, which
+The client then follows `POST /commands/{workflow_id}/updates/{update_id}`, which
 long-polls that same Update's outcome (`WorkflowHandle.get_update_handle(id).result()`)
 and answers it exactly as the POST would have.
 
@@ -122,7 +122,14 @@ and answers it exactly as the POST would have.
   - `follow_url`, also sent as `Location`
   - `retry_after` (seconds), also sent as `Retry-After`
 
-### 5.2 The follow: `GET /api/v1/commands/{workflow_id}/updates/{update_id}`
+### 5.2 The follow: `POST /api/v1/commands/{workflow_id}/updates/{update_id}`
+
+- **A POST, not a GET.** A render's follow makes its supersede (§5.3): it releases, and
+  may cancel, the job the request replaces. `api/cross_site.py` (#962) checks only unsafe
+  methods, on the basis that a GET changes nothing. As a GET, a page on another origin
+  could make a LAN user's browser fire the follow with an `<img src>`. As a POST it goes
+  through `CrossSiteGate` like the command it follows. Following again is still safe:
+  the Update's outcome is fixed, and the release is idempotent (§5.3).
 
 - **Long-poll.** It waits up to `FOLLOW_WAIT = 10 s` (below Envoy's 15 s route timeout,
   like every other bound here) on the Update handle's `result()`.
@@ -158,7 +165,14 @@ and answers it exactly as the POST would have.
 A render's supersede ran after acceptance inside the POST. It now runs wherever the
 answer arrives: the POST when it was fast, the follow otherwise. The follow URL carries
 the superseded job id as `?supersedes=<job id>`. The release is already idempotent, its
-Update id being `{request_id}:release:{job id}`. A followed render's `inputs` are the
+Update id being `{request_id}:release:{job id}`.
+
+The `supersedes` in the follow URL is whatever the client sends, so the follow checks it
+exactly as the POST does (`RenderService._superseded`). It releases only a job of the
+answered job's template, still `pending` or `running`, and not the answered job or its
+run. Anything else is left alone, as the POST leaves it.
+
+A followed render's `inputs` are the
 job's, which differ from the request's only when it joined another request's job. The
 web client reads only `job_id`.
 
