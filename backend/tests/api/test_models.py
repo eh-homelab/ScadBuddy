@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import threading
+import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
@@ -20,6 +21,7 @@ from fastapi.testclient import TestClient
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.api.models import MAX_SOURCE_CHARS
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.settings import Settings
 from scadbuddy.library.catalogue import Catalogue, ModelMeta
 from scadbuddy.library.history import GitError
 from scadbuddy.library.presets import PresetStore
@@ -712,6 +714,40 @@ def test_a_render_that_does_not_settle_once_cancelled_still_refuses_the_delete(
     job.state = "done"
     assert projection.finish(job)
     assert client.delete(f"/api/v1/models/{model}", headers=press()).status_code == 204
+
+
+def test_a_real_render_a_delete_cancels_settles_in_time_and_the_model_goes(
+    app: FastAPI,
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    settings: Settings,
+    tmp_path: Path,
+) -> None:
+    """#2387 on the app's own worker: the delete's `handle.cancel()` reaches a running
+    render, whose run settles its row `cancelled` within the delete's wait."""
+    started, release = tmp_path / "started", tmp_path / "release"
+    set_fake_env(
+        Path(settings.openscad).parent,
+        "FAKE_HOLD",
+        {"started": str(started), "release": str(release)},
+    )
+    try:
+        accepted = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
+        assert accepted.status_code == 202, accepted.text
+        deadline = time.monotonic() + 30
+        while not started.exists():
+            assert time.monotonic() < deadline, "the render never started"
+            time.sleep(0.05)
+
+        response = client.delete(f"/api/v1/models/{model}", headers=press())
+
+        assert response.status_code == 204, response.text
+        job = client.get(f"/api/v1/jobs/{accepted.json()['job_id']}").json()
+        assert job["status"] == "cancelled"
+        assert not paths.model_source(model).is_file()
+    finally:
+        release.touch()
 
 
 def test_unknown_model_routes_answer_with_problem_details(client: TestClient) -> None:

@@ -398,6 +398,21 @@ class JobProjection:
                 return None
             return self._release(conn, row, error=error)
 
+    def drop_claims(self, job_id: str, *, slug: str, error: str = CANCELLED_ERROR) -> Job | None:
+        """Cancel an unfinished row whatever claims it holds (#2387: its model is being
+        deleted). Returns the cancelled job, or None when it had already settled."""
+        with self._pool.connection() as conn, conn.transaction():
+            row = conn.execute(
+                "UPDATE render_jobs SET state = 'cancelled', claims = 0, finished_at = %s,"
+                " error = %s WHERE id = %s AND slug = %s AND state IN ('pending', 'running')"
+                " RETURNING *",
+                (now(), error, job_id, slug),
+            ).fetchone()
+            if row is None:
+                return None
+            self._announce(conn, row["id"], row["slug"], "job.superseded")
+        return _job(row)
+
     def fail_legacy_running(self) -> list[Job]:
         """At start-up: fail the rows a pre-Temporal release's queue left running (no
         workflow), which nothing will finish. Its pending rows are `fail_legacy`'s."""
