@@ -3013,7 +3013,7 @@ export const handlers = [
     const print = fixtures.prints.find((p) => String(p.archive_id) === params['archiveId'])
     if (!print) return problem(404, 'Not Found', `archive ${String(params['archiveId'])} is not a print of any ScadBuddy output`)
     // Read as text, not `formData()`: undici's parser refuses the body jsdom's XHR
-    // sends, which also arrives as an empty "blob". So the part's type decides here.
+    // sends. The part's type decides; a part sent with no name is named by it.
     const raw = await request.text()
     const type = /name="file";[^\r]*\r\nContent-Type: ([^\r]+)/.exec(raw)?.[1]
     if (type === undefined) return problem(422, 'Unprocessable Content', 'the upload has no `file` part')

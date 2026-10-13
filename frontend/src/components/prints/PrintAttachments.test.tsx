@@ -46,17 +46,16 @@ describe('a print’s own photos and videos (#309, #311)', () => {
       [35, 'desk.png'],
       [35, 'spin.mp4'],
     ])
-    // jsdom's XHR sends the parts without their names: the mock names them by type.
     const added = await within(section).findByRole('list', { name: 'Added photos and videos' })
     await waitFor(() => expect(within(added).getAllByRole('listitem')).toHaveLength(2))
-    expect(within(added).getByRole('img', { name: 'photo-1.png' })).toHaveAttribute(
+    expect(within(added).getByRole('img', { name: 'desk.png' })).toHaveAttribute(
       'src',
       '/api/v1/prints/35/attachments/1/file',
     )
-    expect(within(added).getByLabelText('video-2.mp4', { selector: 'video' })).toBeInTheDocument()
+    expect(within(added).getByLabelText('spin.mp4', { selector: 'video' })).toBeInTheDocument()
     const files = screen.getByRole('region', { name: 'Files' })
-    expect(within(files).getByRole('button', { name: 'Video, video-2.mp4, open' })).toBeInTheDocument()
-    expect(within(files).getByRole('button', { name: 'Photo, photo-1.png, open' })).toBeInTheDocument()
+    expect(within(files).getByRole('button', { name: 'Video, spin.mp4, open' })).toBeInTheDocument()
+    expect(within(files).getByRole('button', { name: 'Photo, desk.png, open' })).toBeInTheDocument()
     sent.mockRestore()
   })
 
@@ -65,7 +64,7 @@ describe('a print’s own photos and videos (#309, #311)', () => {
     const drop = within(await attachments()).getByTestId('attach-drop')
     const data = { files: [photo()], types: ['Files'] }
     drop.dispatchEvent(Object.assign(new Event('drop', { bubbles: true }), { dataTransfer: data }))
-    expect(await within(await attachments()).findByRole('img', { name: 'photo-1.png' })).toBeInTheDocument()
+    expect(await within(await attachments()).findByRole('img', { name: 'desk.png' })).toBeInTheDocument()
   })
 
   it('refuses a file over the upload limit before sending it, naming the limit', async () => {
@@ -91,9 +90,9 @@ describe('a print’s own photos and videos (#309, #311)', () => {
     const { user } = render()
     const section = await attachments()
     await user.upload(within(section).getByLabelText('Choose files'), photo())
-    const item = await within(section).findByRole('listitem', { name: 'photo-1.png' })
+    const item = await within(section).findByRole('listitem', { name: 'desk.png' })
 
-    await user.type(within(item).getByLabelText('Caption for photo-1.png'), 'On the desk')
+    await user.type(within(item).getByLabelText('Caption for desk.png'), 'On the desk')
     await user.click(within(item).getByRole('button', { name: 'Save' }))
     const captioned = await within(section).findByRole('listitem', { name: 'On the desk' })
 
