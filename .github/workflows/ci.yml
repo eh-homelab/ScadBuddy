@@ -230,8 +230,14 @@ jobs:
       # The templates' verify.sh scripts too (#229): they are what the `models`
       # job runs, and a word-splitting bug in one is a check that silently
       # asserts something other than what it says.
-      - name: shellcheck the CI scripts and the template verify scripts
-        run: shellcheck .github/scripts/*.sh models/*/verify.sh
+      #
+      # And the skills' scripts (#2572): shepherd.sh enqueues PRs and rewrites claim
+      # comments, so a quoting bug there acts on GitHub.
+      - name: shellcheck the CI scripts, the template verify scripts and the skills' scripts
+        run: shellcheck .github/scripts/*.sh models/*/verify.sh .claude/skills/*/*.sh
+
+      - name: Test the shepherd and its claim release
+        run: .claude/skills/shepherding-prs/shepherd.test.sh
 
       - name: Test the template selector
         run: .github/scripts/select-models.test.sh

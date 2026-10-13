@@ -18,9 +18,13 @@ done
 [ -n "$owner" ] && [ $# -eq 2 ] || { echo "usage: release-claim.sh --owner ID [--author LOGIN] [--repo R] PR ISSUE" >&2; exit 2; }
 pr=$1 iss=$2
 [ -n "$author" ] || author=$(gh api user -q .login)
-id=$(gh api "repos/$repo/issues/$iss/comments" --paginate \
-  --jq ".[]|select(.user.login==\"$author\")|select(.body|contains(\"claude-agent-owner: $owner\"))|select(.body|startswith(\"Working on this\"))|.id" | head -1)
-[ -n "$id" ] || { echo "no claim by $owner on #$iss"; exit 0; }
-case "$(gh api "repos/$repo/issues/comments/$id" --jq .body)" in *released*) echo "#$iss already released"; exit 0 ;; esac
+# Every claim of the owner's, oldest first, each with whether it is released already.
+claims=$(gh api "repos/$repo/issues/$iss/comments" --paginate \
+  --jq ".[]|select(.user.login==\"$author\")|select(.body|contains(\"claude-agent-owner: $owner\"))|select(.body|startswith(\"Working on this\"))|\"\\(.id) \\(.body|contains(\"released\"))\"")
+[ -n "$claims" ] || { echo "no claim by $owner on #$iss"; exit 0; }
+# The newest one not yet released: a session that released a claim and claimed the
+# issue again has both, and the old one must not hide the live one (#2571).
+id=$(awk '$2 == "false" { id = $1 } END { print id }' <<<"$claims")
+[ -n "$id" ] || { echo "#$iss already released"; exit 0; }
 gh api -X PATCH "repos/$repo/issues/comments/$id" \
   -f body="Working on this: #$pr (merged) released <!-- claude-agent-owner: $owner -->" --jq .html_url

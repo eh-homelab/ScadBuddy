@@ -173,7 +173,8 @@ cd frontend && pnpm exec msw init public --save   # --save, or it prompts and di
 ```
 
 Workflow/Dockerfile lint (the `lint` job): actionlint, hadolint with `.hadolint.yaml`,
-`shellcheck .github/scripts/*.sh models/*/verify.sh`, `lint-verify-labels.sh`,
+`shellcheck .github/scripts/*.sh models/*/verify.sh .claude/skills/*/*.sh`,
+`shepherd.test.sh`, `lint-verify-labels.sh`,
 `lint-dashboard.sh` (the Grafana dashboard, #988; it needs `KUSTOMIZE` pointing at
 kustomize v5.6.0, which the job downloads and checks by sha256 because ArgoCD's
 repo-server runs that version), `lint-base64-images.sh` (#2479: no image is built as

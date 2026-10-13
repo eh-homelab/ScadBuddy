@@ -51,12 +51,14 @@ override) from branches of the repo itself, and only rewrites that user's own
 claim comments: the marker is plain text anyone can paste.
 
 Run it in the background; its log is the status. Each pass it:
-- enqueues green, reviewed PRs (`gh pr merge --auto`; the merge queue rejects
-  `--squash`);
+- enqueues green, reviewed PRs with `gh pr merge --auto` and no merge strategy: the
+  queue's own setting picks it ("When targeting a branch that requires a merge
+  queue, no merge strategy is required", `gh pr merge --help`, gh 2.45);
 - releases the claims of merged PRs;
 - logs a failure or conflict once per head SHA and keeps going.
 
-Restart it when it stops after `--hours`.
+Restart it when it stops after `--hours`. Its first pass also releases the claims of
+PRs that merged while it was stopped (the last 50 merged PRs carrying the marker).
 
 ## When the log says FAILING or CONFLICTS
 

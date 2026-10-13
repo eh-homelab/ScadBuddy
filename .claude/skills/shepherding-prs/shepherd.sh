@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Shepherd a session's open PRs into the merge queue and release their issue claims.
 #
-#   bash shepherd.sh --owner session_01ABC [--repo eh-homelab/ScadBuddy] [--hours 4] [--every 180]
+#   bash shepherd.sh --owner session_01ABC [--repo eh-homelab/ScadBuddy] [--hours 4] [--every 180] [--once]
 #
 # Each pass: list open PRs whose body carries `claude-agent-owner: <owner>`, enqueue
 # (`gh pr merge --auto`) every one whose base is the default branch, checks are green
@@ -12,8 +12,9 @@
 # The marker is only text anyone can paste, so a PR is also required to be authored
 # by the authenticated gh user (or --author) and to come from a branch of the repo
 # itself, never a fork: otherwise anyone could get a PR enqueued by copying it.
+# `--once` runs a single pass and exits (shepherd.test.sh, or a sweep by hand).
 set -uo pipefail
-owner="" author="" repo="eh-homelab/ScadBuddy" hours=4 every=180
+owner="" author="" repo="eh-homelab/ScadBuddy" hours=4 every=180 once=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --owner) owner=$2; shift 2 ;;
@@ -21,6 +22,7 @@ while [ $# -gt 0 ]; do
     --author) author=$2; shift 2 ;;
     --hours) hours=$2; shift 2 ;;
     --every) every=$2; shift 2 ;;
+    --once) once=1; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -29,10 +31,17 @@ done
 here=$(cd "$(dirname "$0")" && pwd)
 default=$(gh repo view "$repo" --json defaultBranchRef -q .defaultBranchRef.name)
 declare -A tracked noted done_
+mine=".[]|select(.isCrossRepository|not)|select(.body|contains(\"claude-agent-owner: $owner\"))|.number"
+# PRs that merged while no shepherd ran (between --hours restarts): their claims are
+# released on the first pass, as an open PR's are when it merges (#2570).
+for pr in $(gh pr list -R "$repo" --state merged --limit 50 --author "$author" --json number,body,isCrossRepository \
+    -q "$mine" 2>/dev/null); do
+  tracked[$pr]=1
+done
 end=$(( $(date +%s) + hours * 3600 ))
 while [ "$(date +%s)" -lt "$end" ]; do
   for pr in $(gh pr list -R "$repo" --state open --limit 100 --author "$author" --json number,body,isCrossRepository \
-      -q ".[]|select(.isCrossRepository|not)|select(.body|contains(\"claude-agent-owner: $owner\"))|.number" 2>/dev/null); do
+      -q "$mine" 2>/dev/null); do
     tracked[$pr]=1
   done
   queued=" $(gh api graphql -f query="{repository(owner:\"${repo%/*}\",name:\"${repo#*/}\"){mergeQueue(branch:\"$default\"){entries(first:100){nodes{pullRequest{number}}}}}}" \
@@ -42,16 +51,21 @@ while [ "$(date +%s)" -lt "$end" ]; do
     j=$(gh pr view "$pr" -R "$repo" --json state,baseRefName,headRefOid,body,mergeStateStatus,statusCheckRollup 2>/dev/null) || continue
     state=$(jq -r .state <<<"$j") sha=$(jq -r .headRefOid <<<"$j")
     if [ "$state" = MERGED ]; then
-      done_[$pr]=1
+      # Done only once every claim is released: a release that failed is logged and
+      # tried again on the next pass (#2570).
+      released=1
       for iss in $(jq -r .body <<<"$j" | grep -oiE '(closes|fixes|resolves) #[0-9]+' | grep -oE '[0-9]+'); do
-        bash "$here/release-claim.sh" --repo "$repo" --owner "$owner" --author "$author" "$pr" "$iss" >/dev/null 2>&1
+        bash "$here/release-claim.sh" --repo "$repo" --owner "$owner" --author "$author" "$pr" "$iss" >/dev/null 2>&1 ||
+          { released=""; echo "$(date +%H:%M) release failed #$pr #$iss"; }
       done
-      echo "$(date +%H:%M) merged #$pr"; continue
+      [ -n "$released" ] && { done_[$pr]=1; echo "$(date +%H:%M) merged #$pr"; }
+      continue
     fi
     [ "$state" = OPEN ] || { done_[$pr]=1; echo "$(date +%H:%M) #$pr $state"; continue; }
     [ "$(jq -r .baseRefName <<<"$j")" = "$default" ] || continue
     review=$(jq -r '[.statusCheckRollup[]|select((.context//.name)=="claude-review")|(.state//.conclusion)]|join(",")' <<<"$j")
-    fail=$(jq -r '[.statusCheckRollup[]|select(.conclusion=="FAILURE" or .state=="FAILURE" or .state=="ERROR")|(.name//.context)]|join("|")' <<<"$j")
+    # Every conclusion that leaves a check failed, not only FAILURE (#2570).
+    fail=$(jq -r '[.statusCheckRollup[]|select((.conclusion as $c|["FAILURE","TIMED_OUT","CANCELLED","STARTUP_FAILURE","ACTION_REQUIRED"]|index($c)) or .state=="FAILURE" or .state=="ERROR")|(.name//.context)]|join("|")' <<<"$j")
     running=$(jq -r '[.statusCheckRollup[]|select(.status=="IN_PROGRESS" or .status=="QUEUED" or .state=="PENDING")]|length' <<<"$j")
     if [ -n "$fail" ] && [ "$running" = 0 ]; then
       [ "${noted[$pr]:-}" = "$sha" ] || { noted[$pr]=$sha; echo "$(date +%H:%M) FAILING #$pr ${sha:0:9} ($fail)"; }
@@ -65,6 +79,7 @@ while [ "$(date +%s)" -lt "$end" ]; do
       gh pr merge "$pr" -R "$repo" --auto >/dev/null 2>&1 && echo "$(date +%H:%M) enqueued #$pr"
     fi
   done
+  [ -n "$once" ] && exit 0
   sleep "$every"
 done
 echo "$(date +%H:%M) shepherd stopped after ${hours}h; restart it if PRs are still open"
