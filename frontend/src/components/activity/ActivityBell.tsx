@@ -152,7 +152,7 @@ export function ActivityBell() {
     if (!isOpen) return
     if (popover.current) focusInto(popover.current)
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') close(true)
+      if (event.key === 'Escape' && !event.defaultPrevented) close(true)
     }
     const onPointer = (event: MouseEvent) => {
       const target = event.target as Node

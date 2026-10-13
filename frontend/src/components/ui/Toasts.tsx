@@ -1,23 +1,23 @@
 import { useSyncExternalStore } from 'react'
 import { Link } from 'react-router'
-import { dismissToast, getToasts, holdToast, resumeToast, subscribeToasts } from '../../lib/toast'
+import { dismissToast, getToasts, holdToast, releaseToast, subscribeToasts } from '../../lib/toast'
 
 export function Toasts() {
   const shown = useSyncExternalStore(subscribeToasts, getToasts)
   return (
-    // No aria-live here: each toast is its own role=status, which is already a polite
-    // live region, so both would announce it twice.
+    // The one live region, always mounted so a toast added to it is announced; the toasts
+    // inside are plain, or each would be announced twice.
     <div
+      role="status"
       className="pointer-events-none fixed bottom-4 right-4 z-50 flex w-72 max-w-[calc(100vw-2rem)] flex-col gap-2"
     >
       {shown.map((one) => (
         <div
           key={one.id}
-          role="status"
-          onMouseEnter={() => holdToast(one.id)}
-          onMouseLeave={() => resumeToast(one.id)}
-          onFocus={() => holdToast(one.id)}
-          onBlur={() => resumeToast(one.id)}
+          onMouseEnter={() => holdToast(one.id, 'hover')}
+          onMouseLeave={() => releaseToast(one.id, 'hover')}
+          onFocus={() => holdToast(one.id, 'focus')}
+          onBlur={() => releaseToast(one.id, 'focus')}
           className="pointer-events-auto flex items-start gap-2 rounded-[6px] border border-line bg-surface px-3 py-2 text-[13px] shadow-lg"
         >
           {one.href ? (

@@ -14,21 +14,28 @@ function publish(next: readonly Toast[]): void {
   for (const listener of listeners) listener()
 }
 
-/** Holds a toast's timer while it is hovered or focused (WCAG 2.2.1); {@link resumeToast} restarts it. */
-export function holdToast(id: number): void {
+const holds = new Map<number, Set<'hover' | 'focus'>>()
+
+/** Holds a toast's timer while it is hovered or focused (WCAG 2.2.1); {@link releaseToast} restarts it once neither is. */
+export function holdToast(id: number, by: 'hover' | 'focus'): void {
+  holds.set(id, (holds.get(id) ?? new Set()).add(by))
   clearTimeout(timers.get(id))
   timers.delete(id)
 }
 
-export function resumeToast(id: number): void {
+export function releaseToast(id: number, by: 'hover' | 'focus'): void {
+  const held = holds.get(id)
+  held?.delete(by)
+  if (held && held.size > 0) return
   if (!toasts.some((one) => one.id === id)) return
-  holdToast(id)
+  clearTimeout(timers.get(id))
   timers.set(id, setTimeout(() => dismissToast(id), TOAST_MS))
 }
 
 export function dismissToast(id: number): void {
   clearTimeout(timers.get(id))
   timers.delete(id)
+  holds.delete(id)
   publish(toasts.filter((one) => one.id !== id))
 }
 
@@ -48,5 +55,6 @@ export function subscribeToasts(listener: () => void): () => void {
 export function clearToasts(): void {
   for (const timer of timers.values()) clearTimeout(timer)
   timers.clear()
+  holds.clear()
   publish([])
 }

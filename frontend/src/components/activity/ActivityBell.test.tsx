@@ -53,7 +53,7 @@ describe('ActivityBell', () => {
     await waitFor(() => expect(live.following()).toContain('activity'))
     seedActivity([finished('browser')])
     await live.signal('activity', 'activity.changed', { activity_id: 'render:x', principal: 'browser' })
-    expect(await screen.findByRole('status')).toHaveTextContent('Render box')
+    expect(await screen.findByText(/Render box: succeeded/)).toBeInTheDocument()
     expect(screen.getByTestId('activity-bell-count')).toHaveTextContent('1')
     await user.click(screen.getByRole('button', { name: /Activity, 1 finished/ }))
     expect(screen.getByTestId('activity-bell-count')).not.toBeVisible()
@@ -74,7 +74,7 @@ describe('ActivityBell', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(800)
     })
-    expect(screen.queryByRole('status')).toBeNull()
+    expect(screen.getByRole('status')).toBeEmptyDOMElement()
     expect(screen.getByTestId('activity-bell-count')).not.toBeVisible()
   })
 
@@ -90,7 +90,7 @@ describe('ActivityBell', () => {
     await waitFor(() => expect(live.following()).toContain('activity'))
     seedActivity([finished('token:t1')])
     await live.signal('activity', 'activity.changed', { activity_id: 'render:x', principal: 'token:t1' })
-    expect(await screen.findByRole('status')).toHaveTextContent('Render box')
+    expect(await screen.findByText(/Render box: succeeded/)).toBeInTheDocument()
   })
 
   const mount = () =>
@@ -142,7 +142,7 @@ describe('ActivityBell', () => {
     seedActivity([{ ...finished('browser'), finished_at: new Date(Date.now() - 30_000).toISOString() }])
     mount()
     await waitFor(() => expect(screen.getByTestId('activity-bell-count')).toHaveTextContent('1'))
-    expect(screen.queryByRole('status')).toBeNull()
+    expect(screen.getByRole('status')).toBeEmptyDOMElement()
   })
 
   it('works with localStorage blocked', async () => {
@@ -157,7 +157,7 @@ describe('ActivityBell', () => {
     await waitFor(() => expect(live.following()).toContain('activity'))
     seedActivity([finished('browser')])
     await live.signal('activity', 'activity.changed', { principal: 'browser' })
-    expect(await screen.findByRole('status')).toHaveTextContent('Render box')
+    expect(await screen.findByText(/Render box: succeeded/)).toBeInTheDocument()
     expect(screen.getByTestId('activity-bell-count')).toHaveTextContent('1')
   })
 
@@ -167,13 +167,30 @@ describe('ActivityBell', () => {
     await waitFor(() => expect(live.following()).toContain('activity'))
     seedActivity([finished('browser')])
     await live.signal('activity', 'activity.changed', { principal: 'browser' })
-    const shown = await screen.findByRole('status')
+    const shown = await screen.findByText(/Render box: succeeded/)
     await user.hover(shown)
     await advance(7000)
-    expect(screen.getByRole('status')).toBeInTheDocument()
+    expect(screen.getByText(/Render box: succeeded/)).toBeInTheDocument()
     await user.unhover(shown)
     await advance(6100)
-    expect(screen.queryByRole('status')).toBeNull()
+    expect(screen.getByRole('status')).toBeEmptyDOMElement()
+  })
+
+  it('keeps a toast while it is focused even after the pointer leaves', async () => {
+    const live = fakeRealtime()
+    const { user } = mount()
+    await waitFor(() => expect(live.following()).toContain('activity'))
+    seedActivity([finished('browser')])
+    await live.signal('activity', 'activity.changed', { principal: 'browser' })
+    const link = await screen.findByText(/Render box: succeeded/)
+    await user.hover(link)
+    await act(async () => link.focus())
+    await user.unhover(link)
+    await advance(7000)
+    expect(screen.getByText(/Render box: succeeded/)).toBeInTheDocument()
+    await act(async () => link.blur())
+    await advance(6100)
+    expect(screen.getByRole('status')).toBeEmptyDOMElement()
   })
 
   it('follows a list saved in Settings without a reload', async () => {
@@ -185,7 +202,7 @@ describe('ActivityBell', () => {
     await advance(50)
     seedActivity([finished('token:t1')])
     await live.signal('activity', 'activity.changed', { principal: 'token:t1' })
-    expect(await screen.findByRole('status')).toHaveTextContent('Render box')
+    expect(await screen.findByText(/Render box: succeeded/)).toBeInTheDocument()
   })
 
   it('closes the popover on Escape and outside clicks, and names it with aria-controls', async () => {
