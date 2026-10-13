@@ -105,6 +105,19 @@ export class EventLog {
   }
 
   /**
+   * The words of a turn's `user.turn` (the last one logged with that `turnId`), or
+   * undefined when none is. One keyed read, however long the session (#2419).
+   */
+  async userTurnText(sessionId: string, turnId: string): Promise<string | undefined> {
+    const [row] = await this.sql<{ event: string }[]>`
+      SELECT event FROM ai_session_events
+      WHERE session_id = ${sessionId} AND event::jsonb->>'type' = 'user.turn' AND event::jsonb->>'turnId' = ${turnId}
+      ORDER BY seq DESC LIMIT 1`
+    const turn = row ? (JSON.parse(row.event) as ServerEvent) : undefined
+    return turn?.type === 'user.turn' ? turn.text : undefined
+  }
+
+  /**
    * The last seq handed out for a session (0 when it has none), to follow it
    * from "now". `sessionId` must be a session's id (a UUID).
    */
