@@ -611,9 +611,13 @@ class BambuddyClient:
         offset: int = 0,
         date_from: date | None = None,
         date_to: date | None = None,
+        skip_invalid: bool = False,
     ) -> list[ArchiveDetail]:
         """:meth:`archives` with each row's outcome (#1912): the list route answers
-        the whole ``ArchiveResponse``, the same schema as :meth:`archive`."""
+        the whole ``ArchiveResponse``, the same schema as :meth:`archive`.
+
+        With ``skip_invalid``, a row that does not parse is logged and left out rather
+        than failing the read, for a caller that reads the rest singly anyway."""
         what = "list the archives"
         response = await self._list_archives(
             what,
@@ -624,7 +628,16 @@ class BambuddyClient:
             date_from=date_from,
             date_to=date_to,
         )
-        return [ArchiveDetail.model_validate(row) for row in self._rows(response, what=what)]
+        rows = self._rows(response, what=what)
+        if not skip_invalid:
+            return [ArchiveDetail.model_validate(row) for row in rows]
+        parsed: list[ArchiveDetail] = []
+        for row in rows:
+            try:
+                parsed.append(ArchiveDetail.model_validate(row))
+            except ValueError:
+                logger.info("an archive row did not parse; left out of the list read")
+        return parsed
 
     async def _list_archives(
         self,
