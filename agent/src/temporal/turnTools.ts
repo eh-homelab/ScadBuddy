@@ -419,7 +419,7 @@ async function turnCaller(deps: TurnToolsDeps, name: string, toolUseId: string):
       requestId: flowRequestId(flow, runId, toolUseId),
       // A token starter's run acts with what its token holds now, as toolActivities' flowCaller.
       tiers: owner.kind === 'browser' ? undefined : await deps.currentTiers?.(owner),
-      approved: (requestId) => flows.approved(requestId),
+      approved: (requestId, binding) => flows.approved(requestId, binding?.inputHash),
     }
   }
   const { session, owner, turnTiers: sent, turnId } = await durableSession(name, deps.sessions)
