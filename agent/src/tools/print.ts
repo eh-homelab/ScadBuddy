@@ -1048,6 +1048,8 @@ export const printTools: Tool[] = [
       const started = await reattachFollowing(
         ctx,
         () =>
+          // Only the preference, not `CommandHeaders`: a run keys on the body's
+          // `request_id`, never an `Idempotency-Key` (#3086).
           source.kind === 'library'
             ? backend.POST('/api/v1/print/library/{file_id}/run', {
                 params: { path: { file_id: source.id } },

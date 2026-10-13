@@ -2678,4 +2678,74 @@ describe('a command the backend answers 202 accepting (#2795)', () => {
     expect(follows).toBe(1)
     expect(performance.now() - began).toBeLessThan(1_000)
   })
+
+  const resend = () =>
+    HttpResponse.json(
+      { type: 'https://scadbuddy.dev/problems/command-resend', title: 'Conflict', status: 409, detail: 'send it again' },
+      { status: 409 },
+    )
+
+  it('re-sends a render the follow says command-resend with its key and preference (#3087)', async () => {
+    const sent: { key: string | null; prefer: string | null }[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(`${BACKEND}/api/v1/models/box/render`, ({ request }) => {
+        sent.push({ key: request.headers.get('Idempotency-Key'), prefer: request.headers.get('Prefer') })
+        return sent.length === 1
+          ? HttpResponse.json(
+              { status: 'accepting', workflow_id: 'render-x', update_id: 'k', follow_url: '/api/v1/commands/render-x/updates/k', retry_after: 0 },
+              { status: 202 },
+            )
+          : HttpResponse.json({ job_id: 'j', status_url: '' }, { status: 202 })
+      }),
+      http.post(`${BACKEND}/api/v1/commands/render-x/updates/k`, resend),
+      http.get(`${BACKEND}/api/v1/jobs/j`, () => HttpResponse.json({ id: 'j', slug: 'box', created_at: '', status: 'done' })),
+    )
+    const result = await runTool(tool('render_model'), { slug: 'box' }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(sent).toHaveLength(2)
+    expect(sent[0]?.key).toMatch(/^[0-9a-f]{32}$/)
+    expect(sent[1]).toEqual(sent[0])
+    expect(sent[1]?.prefer).toBe('respond-async')
+  })
+
+  it('re-sends an operation the follow says command-resend with its key and preference (#3087)', async () => {
+    const sent: { key: string | null; prefer: string | null }[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/outputs/${OUT}`, () => HttpResponse.json({ slug: 'box' })),
+      http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, ({ request }) => {
+        sent.push({ key: request.headers.get('Idempotency-Key'), prefer: request.headers.get('Prefer') })
+        return sent.length === 1
+          ? HttpResponse.json(
+              { status: 'accepting', workflow_id: 'op-delete_output-x', update_id: 'k', follow_url: '/api/v1/commands/op-delete_output-x/updates/k', retry_after: 0 },
+              { status: 202 },
+            )
+          : HttpResponse.json({ deleted: OUT })
+      }),
+      http.post(`${BACKEND}/api/v1/commands/op-delete_output-x/updates/k`, resend),
+    )
+    const result = await tool('delete_output').execute({ output_id: OUT }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(firstText(result)).toMatchObject({ deleted: OUT })
+    expect(sent).toHaveLength(2)
+    expect(sent[0]?.key).toMatch(/^[0-9a-f]{32}$/)
+    expect(sent[1]).toEqual(sent[0])
+    expect(sent[1]?.prefer).toBe('respond-async')
+  })
+
+  it("spends the same acceptingMs budget on 503 re-sends as on follows (#3086)", async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/outputs/${OUT}`, () => HttpResponse.json({ slug: 'box' })),
+      http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () =>
+        HttpResponse.json(
+          { type: 'https://scadbuddy.dev/problems/command-still-accepting', title: 'Service Unavailable', status: 503, detail: 'still checking' },
+          { status: 503 },
+        ),
+      ),
+    )
+    const began = performance.now()
+    const result = await runTool({ ...tool('delete_output'), gated: false }, { output_id: OUT }, ctx({ acceptingMs: 30 }))
+    expect(result.isError).toBe(true)
+    expect(performance.now() - began).toBeLessThan(2_000)
+  })
 })

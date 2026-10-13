@@ -76,7 +76,7 @@ export async function answered<T>(
     }
     if (unanswered(result)) {
       const accepting = stillAccepting(result)
-      if (accepting ? performance.now() - began >= ACCEPTING_MS : misses++ >= RUN_REATTEMPTS) {
+      if (accepting ? performance.now() - began >= (ctx.acceptingMs ?? ACCEPTING_MS) : misses++ >= RUN_REATTEMPTS) {
         throw new ToolError(`${what}: ScadBuddy did not answer (HTTP ${result.response.status}).${gaveUp}`)
       }
       // The backend's Retry-After paces a re-send it answered (review #1061 4a).
@@ -100,6 +100,7 @@ const COMMAND_RESEND = 'https://scadbuddy.dev/problems/command-resend'
 
 type CommandAccepting = components['schemas']['CommandAccepting']
 
+/** `retry_after` is ignored on purpose: the follow is itself a long-poll (spec §5.2's pacing). */
 function acceptingOf(result: FetchResult<unknown>): CommandAccepting | undefined {
   const body = result.data as { status?: unknown } | undefined
   return result.response.status === 202 && body?.status === 'accepting' ? (body as CommandAccepting) : undefined
