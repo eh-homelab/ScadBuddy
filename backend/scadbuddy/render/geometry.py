@@ -714,6 +714,8 @@ def weak_joints(
     found: list[WeakJoint] = []
     attempts = 0
     for _, members, vertices, faces, corners, low, high in candidates[:MAX_WEAK_PIECES]:
+        if len(found) >= MAX_WEAK_JOINTS or attempts >= MAX_WEAK_ATTEMPTS:
+            break
         layer = max(WEAK_LAYER_MM, (high - low) / MAX_WEAK_LAYERS)
         count = int((high - low) / layer)
         if count < 1:
