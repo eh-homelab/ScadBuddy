@@ -1211,6 +1211,8 @@ async def plan_run(
         plate_ids=plate_ids,
         fallback_colours=list(source.colours),
         inventory=inventory,
+        # The file's own slots when it was read (#2550, #2720): a plate's colours are the
+        # model's, not the run's recoloured copy's, as the dialog showed them. Intended.
         known=known_slots(source),
     )
     per_plate = [with_trays(options, printer_status, printer_id) for options in per_plate]

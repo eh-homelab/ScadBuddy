@@ -460,6 +460,8 @@ class OutputSource(PrintPipeline):
     #: The 3MF's filament slots, once :meth:`read_local` has read them (#2720).
     local: LocalFilaments | None = None
     _local_unreadable: bool = field(default=False, repr=False)
+    #: The output's 3MF, read once for every reader of it in a request (#2780 review).
+    _payload: bytes | None = field(default=None, repr=False)
 
     @property
     def subject(self) -> PrintSubject:
@@ -487,12 +489,19 @@ class OutputSource(PrintPipeline):
     def origin_id(self) -> int | None:
         return None
 
+    async def _own_3mf(self) -> bytes:
+        """The output's 3MF, read from the store once: its slots, plates, preview slice
+        and run all read the same file in one request."""
+        if self._payload is None:
+            self._payload = await read_3mf(self.store, self.meta)
+        return self._payload
+
     async def plate_ids(self, client: BambuddyClient) -> list[int]:
-        payload = await read_3mf(self.store, self.meta)
+        payload = await self._own_3mf()
         return [plate.index for plate in plates_of(io.BytesIO(payload))]
 
     async def fetch_3mf(self, client: BambuddyClient) -> bytes | None:
-        return await read_3mf(self.store, self.meta)
+        return await self._own_3mf()
 
     async def file_to_read(self, client: BambuddyClient) -> ReadFile:
         """The slots are the output's own 3MF's (#2720): reading them needs no copy in
@@ -511,7 +520,7 @@ class OutputSource(PrintPipeline):
     async def read_local(self) -> LocalFilaments | None:
         """The 3MF's slots, read once (:attr:`local`); ``None`` when unreadable."""
         if self.local is None and not self._local_unreadable:
-            payload = await read_3mf(self.store, self.meta)
+            payload = await self._own_3mf()
             try:
                 self.local = await asyncio.to_thread(read_filaments, io.BytesIO(payload))
             except UnreadableFilamentsError as error:

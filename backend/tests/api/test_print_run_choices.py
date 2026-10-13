@@ -897,6 +897,30 @@ def test_the_all_plates_filament_read_offers_every_plates_slots(
 
 
 @respx.mock
+def test_the_all_plates_filament_read_offers_every_plates_slots_from_the_outputs_own_3mf(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#2720: an output's slots are read per plate from its own 3MF, with nothing
+    uploaded to Bambuddy and none of its per-plate reads asked. The demo model is one
+    colour and ``add_plate``'s second plate is empty, so the file says slot 1 for every
+    plate; ``split_plates_routes`` would have answered slot 2 for plate 2 had it been asked."""
+    output_id = two_plate_output(client, model, paths)
+    uploaded = upload_route()
+    split_plates_routes()
+    hardware_routes()
+
+    one = client.get(f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1").json()
+    every = client.get(
+        f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1&all_plates=true"
+    ).json()
+
+    assert [slot["slot_id"] for slot in one["slots"]] == [1]
+    assert [slot["slot_id"] for slot in every["slots"]] == [1]
+    assert not uploaded.called
+    assert not [c for c in respx.calls if c.request.url.path.endswith("/filament-requirements")]
+
+
+@respx.mock
 def test_the_all_plates_filament_read_reads_the_spools_once(
     client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:

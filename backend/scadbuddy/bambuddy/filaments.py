@@ -44,6 +44,7 @@ import re
 from collections.abc import Callable, Sequence
 from typing import Literal
 
+from fastapi import status
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
@@ -57,6 +58,7 @@ from scadbuddy.bambuddy.models import (
     Spool,
     SpoolAssignment,
 )
+from scadbuddy.core.problems import ApiError
 
 logger = logging.getLogger(__name__)
 
@@ -836,7 +838,14 @@ async def _requirements(
     if known is not None:
         answer = known(plate_id)
     else:
-        assert library_file_id is not None, "slots not read locally are a library file's"
+        if library_file_id is None:
+            # Only a source that answered ReadFile(None) without reading its own slots
+            # reaches here; say so rather than fail on an assert.
+            raise ApiError(
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                f"plate {plate_id}'s slots were neither read from the file nor named by a"
+                " library file",
+            )
         answer = await client.filament_requirements(library_file_id, plate_id=plate_id)
     slots = [
         SlotNeed(
