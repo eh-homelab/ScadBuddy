@@ -368,11 +368,25 @@ def test_a_server_that_crashes_is_logged(
         with pytest.raises(WebSocketDisconnect):
             session.receive_json()
 
-    # 3 is the status the fake server exits with. 255 is what asyncio reports when
-    # something else in the process reaped the pid first ("exit status already
-    # read"), which happens here only under the test harness; see #1613 for the
-    # suspected stale-pid reap. Either way the crash must be logged as an exit.
-    assert re.search(r"openscad-lsp exited with status (3|255)\b", caplog.text)
+    # 3 is the status the fake server exits with, never asyncio's 255 for a pid
+    # something else reaped first (#1613, `test_kill_leaves_an_exited_servers_status_to_asyncio`).
+    assert re.search(r"openscad-lsp exited with status 3\b", caplog.text)
+
+
+async def test_kill_leaves_an_exited_servers_status_to_asyncio() -> None:
+    """#1613: a server that exited before asyncio's child watcher read it is killed
+    without being reaped, so asyncio still reads its own status. `process.kill()` reaped
+    it in `Popen.send_signal`'s poll, and asyncio then reported 255."""
+    process = await asyncio.create_subprocess_exec(sys.executable, "-c", "raise SystemExit(3)")
+    # Not yielding to the loop: the child is a zombie its watcher has not read yet.
+    stat = Path(f"/proc/{process.pid}/stat")
+    deadline = time.monotonic() + 10
+    while stat.read_text().rsplit(")", 1)[1].split()[0] != "Z":
+        assert time.monotonic() < deadline, "the child never exited"
+        time.sleep(0.01)
+    assert process.returncode is None
+    lsp.kill(process)
+    assert await process.wait() == 3
 
 
 @pytest.mark.parametrize(
