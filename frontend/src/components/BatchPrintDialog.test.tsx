@@ -171,7 +171,8 @@ describe('BatchPrintDialog (#2672)', () => {
     expect(screen.getByTestId('batch-row-0')).not.toHaveTextContent('⚠')
     expect(screen.getByTestId('batch-queue-all')).toHaveTextContent('Queue all (2)')
     await user.click(screen.getByTestId('batch-queue-all'))
-    expect(await screen.findByTestId('batch-outcome-0')).toHaveTextContent('Queued in Bambuddy.')
+    // The run is followed after Queue all answers: "Queueing…" until it is read.
+    await waitFor(() => expect(screen.getByTestId('batch-outcome-0')).toHaveTextContent('Queued in Bambuddy.'))
   })
 
   it("reports a refused file beside the queued ones, and one refusal stops nothing", async () => {
