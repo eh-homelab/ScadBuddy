@@ -87,6 +87,12 @@ export class EscalationError extends Error {
 
 const NOT_PARENT = 'only the session that started the run may answer for it here, while it still belongs to whoever started the run'
 const WITH_PERSON = 'that call is no longer with the starting session: the person decides it now'
+/**
+ * How long a deny's claim may hold its entry before the sweep hands it to the person
+ * (review #3018): far past the deny's own Update (`DurableGate`'s 5 s), so only a claim
+ * nothing will release is moved.
+ */
+export const CLAIM_LEASE_S = 300
 
 type Entry = {
   session_id: string
@@ -164,16 +170,21 @@ export class Escalations {
     // hop, so a deny racing the sweep (`moveDue`) or a pass up would otherwise resolve an
     // entry that is already the person's. `infinity` holds it at hop `parent` (the table
     // requires a `hop_until` there) where neither moves it; the deadline is put back if
-    // the deny does not land, and a passed one is then moved by the next sweep.
+    // the deny does not land, and a passed one is then moved by the next sweep. A claim
+    // no release ever ends (the process died, or the release threw) is the person's once
+    // it is older than `CLAIM_LEASE` (review #3018).
     const [claim] = await this.#deps.sql<{ hop_until: Date }[]>`
-      UPDATE ai_pending_input p SET hop_until = 'infinity'
+      UPDATE ai_pending_input p SET hop_until = 'infinity', hop_claimed_at = now()
       FROM (SELECT request_id, hop_until FROM ai_pending_input WHERE request_id = ${requestId} FOR UPDATE) old
       WHERE p.request_id = old.request_id AND p.hop = 'parent' AND p.parent_session = ${caller.session}::uuid
         AND p.hop_until > now() AND p.hop_until <> 'infinity'
       RETURNING old.hop_until`
     if (!claim) throw new EscalationError(409, WITH_PERSON)
+    // Safe on any outcome, an entry the workflow already resolved included: it writes
+    // only a row still holding this claim (`hop_until = 'infinity'`), so keep that in
+    // the WHERE (review #3018).
     const release = () => this.#deps.sql`
-      UPDATE ai_pending_input SET hop_until = ${claim.hop_until}
+      UPDATE ai_pending_input SET hop_until = ${claim.hop_until}, hop_claimed_at = NULL
       WHERE request_id = ${requestId} AND hop = 'parent' AND hop_until = 'infinity'`
     let out: RespondOutcome
     try {
@@ -193,12 +204,18 @@ export class Escalations {
     return { request_id: requestId, outcome: out.outcome === 'denied' ? 'denied' : 'with_person' }
   }
 
-  /** Entries whose parent hop is over go to the person (spec §4.6): never denied. */
+  /**
+   * Entries whose parent hop is over go to the person (spec §4.6): never denied. So does
+   * one a deny claimed more than `CLAIM_LEASE` ago and never released (review #3018).
+   */
   async moveDue(): Promise<number> {
     const moved = await this.#deps.sql`
       UPDATE ai_pending_input
-      SET hop = 'person', hop_until = NULL, hops = hops || ${this.#deps.sql.json([step('timeout', 'system')])}
-      WHERE hop = 'parent' AND hop_until <= now()
+      SET hop = 'person', hop_until = NULL, hop_claimed_at = NULL,
+          hops = hops || ${this.#deps.sql.json([step('timeout', 'system')])}
+      WHERE hop = 'parent'
+        AND (hop_until <= now()
+             OR (hop_until = 'infinity' AND hop_claimed_at <= now() - make_interval(secs => ${CLAIM_LEASE_S})))
       RETURNING request_id`
     return moved.length
   }

@@ -138,6 +138,27 @@ async def test_a_long_parent_hop_leaves_the_person_their_timeout(
     assert row["expires_s"] - row["hop_s"] == 60  # the person's own timeout
 
 
+async def test_a_timeout_at_the_cap_still_gives_the_parent_a_one_second_hop(
+    harness: base.Harness, agent_db: Conn, outside: Verdict
+) -> None:
+    """Review #3018: a timeout at ENTRY_MAX_S leaves the parent no room, and the floor
+    keeps a 1 s hop (the 30 s sweep then moves it up) rather than none or a negative one.
+    The total stays at the cap."""
+    outside.answer = {
+        **outside.answer,
+        "timeout_s": ENTRY_MAX_S,
+        "parent_hop": True,
+        "hop_s": 600,
+        "parent_session": PARENT,
+        "parent_principal": PRINCIPAL,
+    }
+    sid, handle = await harness.session(agent_db)
+    await send_flow(handle, "print it")
+    await base._parked(handle)
+    row = await _row(agent_db, sid)
+    assert (row["hop_s"], row["expires_s"]) == (1, ENTRY_MAX_S)
+
+
 async def test_with_no_parent_it_is_the_persons_at_once(
     harness: base.Harness, agent_db: Conn, outside: Verdict
 ) -> None:

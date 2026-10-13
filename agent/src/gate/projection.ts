@@ -85,7 +85,6 @@ export class PendingProjection {
     }))
   }
 
-  /** Whether the entry is a flow run's (`flow_run_id`): in its run's queue, the person's (#2482). */
   /** Which of `requestIds` are a flow run's (`inRun` for many, in one query, #2863). */
   async inRunOf(requestIds: readonly string[]): Promise<Set<string>> {
     if (requestIds.length === 0) return new Set()
@@ -94,6 +93,7 @@ export class PendingProjection {
     return new Set(rows.map((r) => r.request_id))
   }
 
+  /** Whether the entry is a flow run's (`flow_run_id`): in its run's queue, the person's (#2482). */
   async inRun(requestId: string): Promise<boolean> {
     const [row] = await this.#sql<{ n: number }[]>`
       SELECT 1 AS n FROM ai_pending_input WHERE request_id = ${requestId} AND flow_run_id IS NOT NULL`
