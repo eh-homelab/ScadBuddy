@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { api } from '../api/client'
+import type { Activity, ActivityFacets, ActivityPage as ActivityPageData } from '../api/types'
 import { ActivityDrawer } from '../components/activity/ActivityDrawer'
 import { ActivityFilters } from '../components/activity/ActivityFilters'
 import { ActivityTable } from '../components/activity/ActivityTable'
 import { sinceTime } from '../components/activity/labels'
 import { Button } from '../components/ui/Button'
 import { parseActivityQuery, toActivityParams, type ActivityQuery } from '../lib/activityQuery'
-import { getRealtime } from '../lib/realtime'
 import { useAsync } from '../lib/useAsync'
 
 const PAGE = 50
@@ -28,39 +28,50 @@ export function ActivityPage() {
   // How many rows to hold for this query. A live re-read asks for that many, so rows
   // already loaded stay current and a new row cannot open a gap before the next page.
   const want = useRef({ key, count: PAGE })
-  const facets = useAsync(() => api.activityFacets(sinceTime(query.since) || undefined), [query.since])
-  const list = useAsync(() => {
-    if (want.current.key !== key) want.current = { key, count: PAGE }
-    return api.listActivity(wire(query), { limit: want.current.count })
-  }, [key])
+  // Pages appended past the cap, by cursor. While any are held the list is not re-read
+  // (a new row would open a gap before them); the facets stay live.
+  const [older, setOlder] = useState<{ key: string; items: Activity[]; cursor: string | null } | null>(null)
+  const olderRef = useRef(older)
+  const dataRef = useRef<ActivityPageData | undefined>(undefined)
+  const gate = useRef<{ last: number; pending: Promise<ActivityFacets> | null }>({ last: 0, pending: null })
+
+  const facets = useAsync(
+    () => {
+      const read = () => api.activityFacets(sinceTime(query.since) || undefined)
+      const g = gate.current
+      const wait = g.last + FACETS_EVERY_MS - Date.now()
+      if (wait <= 0) {
+        g.last = Date.now()
+        return read()
+      }
+      g.pending ??= new Promise<ActivityFacets>((resolve, reject) => {
+        setTimeout(() => {
+          g.pending = null
+          g.last = Date.now()
+          read().then(resolve, reject)
+        }, wait)
+      })
+      return g.pending
+    },
+    [query.since],
+    ['activity'],
+  )
+  const list = useAsync(
+    () => {
+      if (olderRef.current?.key === key && dataRef.current) return Promise.resolve(dataRef.current)
+      if (want.current.key !== key) want.current = { key, count: PAGE }
+      return api.listActivity(wire(query), { limit: want.current.count })
+    },
+    [key],
+    ['activity'],
+  )
   const [loadingMore, setLoadingMore] = useState(false)
-  const [moreError, setMoreError] = useState<{ key: string; message: string }>()
+  const [moreFailed, setMoreFailed] = useState<string>()
   const [open, setOpen] = useState<string | null>(null)
 
-  const refreshList = list.refresh
-  const refreshFacets = facets.refresh
   useEffect(() => {
-    let last = 0
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const stop = getRealtime().subscribe('activity', () => {
-      refreshList()
-      const wait = last + FACETS_EVERY_MS - Date.now()
-      if (wait <= 0) {
-        last = Date.now()
-        refreshFacets()
-      } else if (timer === undefined) {
-        timer = setTimeout(() => {
-          timer = undefined
-          last = Date.now()
-          refreshFacets()
-        }, wait)
-      }
-    })
-    return () => {
-      stop()
-      clearTimeout(timer)
-    }
-  }, [refreshList, refreshFacets])
+    dataRef.current = list.data
+  }, [list.data])
 
   const onChange = useCallback(
     (next: ActivityQuery, options?: { typing?: boolean }) =>
@@ -68,24 +79,52 @@ export function ActivityPage() {
     [setParams],
   )
 
-  const items = list.data?.items ?? []
-  const hasMore = list.data?.next_cursor != null
-  const atCap = items.length >= MAX_LOADED
+  const held = older?.key === key ? older : null
+  const base = list.data?.items ?? []
+  const items = [...base, ...(held?.items ?? []).filter((i) => !base.some((b) => b.id === i.id))]
+  const hasMore = held ? held.cursor !== null : list.data?.next_cursor != null
+  const capped = base.length >= MAX_LOADED
 
   useEffect(() => {
     setLoadingMore(false)
   }, [list.data])
 
+  function keepOlder(next: typeof older) {
+    olderRef.current = next
+    setOlder(next)
+  }
+
   function loadMore() {
-    const previous = want.current.count
-    want.current = { key, count: Math.min(MAX_LOADED, items.length + PAGE) }
     setLoadingMore(true)
-    setMoreError(undefined)
-    list.refresh(undefined, () => {
-      want.current = { key, count: previous }
-      setLoadingMore(false)
-      setMoreError({ key, message: 'the read failed' })
-    })
+    setMoreFailed(undefined)
+    if (!capped) {
+      const previous = want.current.count
+      want.current = { key, count: Math.min(MAX_LOADED, base.length + PAGE) }
+      list.refresh(undefined, () => {
+        want.current = { key, count: previous }
+        setLoadingMore(false)
+        setMoreFailed(key)
+      })
+      return
+    }
+    const cursor = held ? held.cursor : (list.data?.next_cursor ?? null)
+    if (!cursor) return
+    api.listActivity(wire(query), { cursor, limit: PAGE }).then(
+      (page) => {
+        keepOlder({ key, items: [...(held?.items ?? []), ...page.items], cursor: page.next_cursor })
+        setLoadingMore(false)
+      },
+      () => {
+        setLoadingMore(false)
+        setMoreFailed(key)
+      },
+    )
+  }
+
+  function showLatest() {
+    want.current = { key, count: PAGE }
+    keepOlder(null)
+    list.refresh()
   }
 
   return (
@@ -103,20 +142,25 @@ export function ActivityPage() {
       ) : (
         <ActivityTable items={items} facets={facets.data} onOpen={setOpen} />
       )}
-      {moreError?.key === key && (
+      {moreFailed === key && (
         <p role="alert" className="text-[13px] text-warn">
-          Could not load more: {moreError.message}
+          Could not load more. Try again.
         </p>
       )}
-      {hasMore && !atCap && (
+      {held && (
+        <p className="flex items-center gap-2 text-[13px] text-muted">
+          Live updates paused, showing older activity.
+          <Button size="sm" variant="ghost" onClick={showLatest}>
+            Show latest
+          </Button>
+        </p>
+      )}
+      {hasMore && (
         <div>
           <Button variant="ghost" onClick={loadMore} disabled={loadingMore}>
             Load more
           </Button>
         </div>
-      )}
-      {hasMore && atCap && (
-        <p className="text-[13px] text-muted">Showing the latest {MAX_LOADED}. Narrow the filters to see older activity.</p>
       )}
       {open && <ActivityDrawer id={open} onClose={() => setOpen(null)} />}
     </div>

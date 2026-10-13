@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { isActivityFiltered, splitList, type ActivityQuery } from '../../lib/activityQuery'
+import { DEFAULT_ACTIVITY_QUERY, isActivityFiltered, splitList, type ActivityQuery } from '../../lib/activityQuery'
 import type { ActivityFacets } from '../../api/types'
 import { statusLabel } from '../prints/status'
 import { chipClass, principalLabel, SINCE_OPTIONS, toggleValue } from './labels'
@@ -129,7 +129,11 @@ export function ActivityFilters({ query, facets, onChange }: Props) {
           ))}
         </select>
         {isActivityFiltered(query) && (
-          <button type="button" className="text-[12px] text-muted hover:text-ink" onClick={() => onChange({ ...query, kind: '', status: '', principal: '', tool: '', subject: '', since: '', q: '', facets: {} })}>
+          <button
+            type="button"
+            className="text-[12px] text-muted hover:text-ink"
+            onClick={() => onChange(DEFAULT_ACTIVITY_QUERY)}
+          >
             Clear filters
           </button>
         )}

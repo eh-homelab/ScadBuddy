@@ -30,36 +30,36 @@ function duration(item: Activity): string {
 export function ActivityTable({ items, facets, onOpen }: Props) {
   return (
     <div className="overflow-x-auto">
-    <table className="w-full text-left text-[13px]" aria-label="Activity">
-      <thead className="text-[12px] text-muted">
-        <tr>
-          <th className="py-1 pr-3 font-normal">Status</th>
-          <th className="py-1 pr-3 font-normal">What</th>
-          <th className="py-1 pr-3 font-normal">Started by</th>
-          <th className="py-1 pr-3 font-normal">Started</th>
-          <th className="py-1 font-normal">Took</th>
-        </tr>
-      </thead>
-      <tbody>
-        {nested(items).map(({ item, child }) => (
-          <tr
-            key={item.id}
-            data-testid={`activity-row-${item.id}`}
-            className="border-t border-line align-top"
-          >
-            <td className="py-1.5 pr-3">{statusLabel(item.status)}</td>
-            <td className={`py-1.5 pr-3 break-words ${child ? 'pl-5' : ''}`}>
-              <button type="button" className="text-left hover:underline" onClick={() => onOpen?.(item.id)}>
-                {item.title}
-              </button>
-            </td>
-            <td className="max-w-40 break-all py-1.5 pr-3 text-muted">{principalLabel(item.principal, facets)}</td>
-            <td className="py-1.5 pr-3 text-muted">{item.created_at ? timeAgo(item.created_at) : ''}</td>
-            <td className="sb-num py-1.5 text-muted">{duration(item)}</td>
+      <table className="w-full text-left text-[13px]" aria-label="Activity">
+        <thead className="text-[12px] text-muted">
+          <tr>
+            <th className="py-1 pr-3 font-normal">Status</th>
+            <th className="py-1 pr-3 font-normal">What</th>
+            <th className="py-1 pr-3 font-normal">Started by</th>
+            <th className="py-1 pr-3 font-normal">Started</th>
+            <th className="py-1 font-normal">Took</th>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {nested(items).map(({ item, child }) => (
+            <tr
+              key={item.id}
+              data-testid={`activity-row-${item.id}`}
+              className="border-t border-line align-top"
+            >
+              <td className="py-1.5 pr-3">{statusLabel(item.status)}</td>
+              <td className={`py-1.5 pr-3 break-words ${child ? 'pl-5' : ''}`}>
+                <button type="button" className="text-left hover:underline" onClick={() => onOpen?.(item.id)}>
+                  {item.title}
+                </button>
+              </td>
+              <td className="max-w-40 break-all py-1.5 pr-3 text-muted">{principalLabel(item.principal, facets)}</td>
+              <td className="py-1.5 pr-3 text-muted">{item.created_at ? timeAgo(item.created_at) : ''}</td>
+              <td className="sb-num py-1.5 text-muted">{duration(item)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   )
 }

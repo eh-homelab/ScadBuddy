@@ -1,6 +1,9 @@
 import { screen, waitFor, within } from '@testing-library/react'
+import { HttpResponse, http } from 'msw'
 import { useLocation } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { api } from '../api/client'
+import { server } from '../mocks/server'
 import { fakeRealtime } from '../lib/realtime.fake'
 import { seedActivity } from '../mocks/features/activity'
 import { resetMockState } from '../mocks/handlers'
@@ -161,5 +164,53 @@ describe('ActivityPage', () => {
     const order = screen.getAllByTestId(/^activity-row-/).map((r) => r.getAttribute('data-testid'))
     expect(order).toEqual(['activity-row-other', 'activity-row-parent', 'activity-row-child'])
     expect(within(screen.getByTestId('activity-row-child')).getByText('Row child').closest('td')).toHaveClass('pl-5')
+  })
+
+  it('keeps the loaded rows when a Load more fails, and says to try again', async () => {
+    seedActivity(many(60))
+    const { user } = render()
+    await waitFor(() => expect(screen.getAllByTestId(/^activity-row-/)).toHaveLength(50))
+    server.use(http.get('/api/v1/activity', () => HttpResponse.json({ detail: 'down' }, { status: 500 })))
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    expect(await screen.findByText('Could not load more. Try again.')).toBeInTheDocument()
+    expect(screen.getAllByTestId(/^activity-row-/)).toHaveLength(50)
+    expect(screen.getByRole('button', { name: 'Load more' })).toBeEnabled()
+  })
+
+  it('pauses live updates past the cap, and Show latest brings them back', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const realtime = fakeRealtime()
+    seedActivity(many(260))
+    const { user } = render()
+    await waitFor(() => expect(screen.getAllByTestId(/^activity-row-/)).toHaveLength(50))
+    for (const n of [100, 150, 200]) {
+      await user.click(screen.getByRole('button', { name: 'Load more' }))
+      await waitFor(() => expect(screen.getAllByTestId(/^activity-row-/)).toHaveLength(n))
+    }
+    expect(screen.queryByText(/Live updates paused/)).toBeNull()
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    await waitFor(() => expect(screen.getAllByTestId(/^activity-row-/)).toHaveLength(250))
+    expect(screen.getByText(/Live updates paused, showing older activity/)).toBeInTheDocument()
+    seedActivity([activity('new', '2026-10-09T13:00:00Z'), ...many(260)])
+    await realtime.signal('activity', 'activity.changed', { activity_id: 'new' })
+    expect(screen.getAllByTestId(/^activity-row-/)).toHaveLength(250)
+    expect(screen.queryByTestId('activity-row-new')).toBeNull()
+    await user.click(screen.getByRole('button', { name: 'Show latest' }))
+    expect(await screen.findByTestId('activity-row-new')).toBeInTheDocument()
+    expect(screen.queryByText(/Live updates paused/)).toBeNull()
+  })
+
+  it('re-reads the facets at most once per throttle window', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    const realtime = fakeRealtime()
+    const facets = vi.spyOn(api, 'activityFacets')
+    render()
+    await screen.findAllByTestId(/^activity-row-/)
+    await vi.advanceTimersByTimeAsync(7000)
+    const before = facets.mock.calls.length
+    for (let i = 0; i < 3; i++) await realtime.signal('activity', 'activity.changed')
+    expect(facets.mock.calls.length).toBe(before + 1)
+    await vi.advanceTimersByTimeAsync(3500)
+    expect(facets.mock.calls.length).toBe(before + 2)
   })
 })
