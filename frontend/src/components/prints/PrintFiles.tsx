@@ -222,7 +222,7 @@ function FileView({ print, entry }: { print: PrintDetail; entry: Entry }) {
     case 'preview_glb':
       return <MeshView print={print} url={entry.url as string} />
     case 'output_3mf':
-      return <ModelView print={print} />
+      return <ModelView print={print} meshUrl={print.files.find((file) => file.kind === 'preview_glb')?.url ?? null} />
     case 'sliced':
     case 'source':
     case 'library_file':
@@ -271,7 +271,8 @@ function MeshView({ print, url }: { print: PrintDetail; url: string }) {
 }
 
 /** The editable 3MF: its mesh, the colours it uses, and each plate's image. */
-function ModelView({ print }: { print: PrintDetail }) {
+/** The editable 3MF: its mesh when ScadBuddy still has the preview, colours, and plates. */
+function ModelView({ print, meshUrl }: { print: PrintDetail; meshUrl: string | null }) {
   const id = print.output_id
   const plates = useAsync(async () => (id ? await api.getOutputPlates(id).catch(() => []) : []), [id])
   const output = useAsync(async () => (id ? await api.getOutput(id).catch(() => null) : null), [id])
@@ -279,7 +280,7 @@ function ModelView({ print }: { print: PrintDetail }) {
   const colours = output.data?.colors ?? []
   return (
     <div className="space-y-3">
-      <MeshView print={print} url={`/api/v1/outputs/${id}/preview.glb`} />
+      {meshUrl && <MeshView print={print} url={meshUrl} />}
       {colours.length > 0 && (
         <p className="flex items-center gap-2 text-[12px] text-muted">
           Colours

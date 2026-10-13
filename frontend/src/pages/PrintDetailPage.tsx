@@ -85,9 +85,6 @@ function gallerySlides(print: PrintDetail): Slide[] {
   return slides
 }
 
-/** Fetched as a blob and saved through `lib/embed`, so it works inside Bambuddy's iframe. */
-
-
 export function PrintDetailPage() {
   const { archiveId = '' } = useParams()
   // An id that is not one would be refused as malformed; it is not a print either way (#310).

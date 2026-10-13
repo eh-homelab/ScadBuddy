@@ -466,6 +466,52 @@ describe('PrintDetailPage (#311)', () => {
     expect(downloadBlob).not.toHaveBeenCalled()
   })
 
+  it('opens the editable 3MF: its mesh and colours, and its plates only when there are several (#894)', async () => {
+    const { user } = render(35)
+    const files = await section('Files')
+    const open = () => user.click(within(files).getByRole('button', { name: /^Editable model \(3MF\), .*, open$/ }))
+
+    await open()
+    let dialog = await screen.findByRole('dialog', { name: 'Editable model (3MF)' })
+    expect(await within(dialog).findByTestId('preview')).toHaveAttribute('data-url', `/api/v1/outputs/${REAGAN}/preview.glb`)
+    const colours = outputs[0]!.colors ?? []
+    expect(colours.length).toBeGreaterThan(0)
+    for (const colour of colours) expect(within(dialog).getByTitle(colour.toUpperCase())).toBeInTheDocument()
+    expect(within(dialog).queryByRole('list', { name: 'Plates' })).not.toBeInTheDocument()
+    await user.keyboard('{Escape}')
+
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: true },
+          { index: 2, has_thumbnail: true },
+        ]),
+      ),
+    )
+    await open()
+    dialog = await screen.findByRole('dialog', { name: 'Editable model (3MF)' })
+    const plates = await within(dialog).findByRole('list', { name: 'Plates' })
+    expect(within(plates).getAllByRole('img').map((img) => img.getAttribute('src'))).toEqual([
+      `/api/v1/outputs/${REAGAN}/plates/1/thumbnail`,
+      `/api/v1/outputs/${REAGAN}/plates/2/thumbnail`,
+    ])
+  })
+
+  it('opens the editable 3MF without a mesh when its 3D preview is gone', async () => {
+    const done = prints.find((print) => print.archive_id === 35)!
+    server.use(
+      http.get('/api/v1/prints/35', () =>
+        HttpResponse.json({ ...done, files: done.files.filter((file) => file.kind !== 'preview_glb') }),
+      ),
+    )
+    const { user } = render(35)
+    const files = await section('Files')
+    await user.click(within(files).getByRole('button', { name: /^Editable model \(3MF\), .*, open$/ }))
+    const dialog = await screen.findByRole('dialog', { name: 'Editable model (3MF)' })
+    await within(dialog).findByTitle((outputs[0]!.colors ?? [])[0]!.toUpperCase())
+    expect(within(dialog).queryByTestId('preview')).not.toBeInTheDocument()
+  })
+
   it('downloads the parameters as JSON', async () => {
     const { user } = render(35)
     const files = await section('Files')
