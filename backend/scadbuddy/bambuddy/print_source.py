@@ -135,7 +135,13 @@ class PrintSource(Protocol):
     ) -> int | None:
         """A slice ScadBuddy already made of copy ``library_file_id`` with these presets
         (:meth:`record`) that Bambuddy still has, newest first: queued in place of
-        slicing again (#2671). ``None`` when there is none."""
+        slicing again (#2671). ``None`` when there is none.
+
+        Matched on ``preset_key``, which leaves the filament colours out: a copy left
+        uncoloured is shared by prints of other spools, so a reused slice keeps the
+        colour metadata of the spools it was sliced for. That is #2169's trade-off for
+        the background slice too: colours change no toolpath, and the queue carries
+        the spools chosen now."""
         ...
 
     async def fetch_3mf(self, client: BambuddyClient) -> bytes | None:

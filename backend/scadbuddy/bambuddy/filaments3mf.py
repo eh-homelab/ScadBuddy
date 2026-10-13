@@ -89,8 +89,8 @@ class SlicedPlate(BaseModel):
 
 class SlicedProfile(BaseModel):
     """What a sliced file was sliced for (#2671), read from the file itself: none of it
-    can change without slicing again, so the print dialog shows it read-only and the
-    run refuses a printer it does not fit."""
+    can change without slicing again, so the print dialog shows it read-only, and the
+    run warns of a printer it does not fit rather than refusing it."""
 
     #: ``project_settings.config``'s ``printer_model`` ("Bambu Lab H2C").
     printer_model: str | None = None
