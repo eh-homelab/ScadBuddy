@@ -92,3 +92,29 @@ def test_a_tray_chosen_as_itself_is_loaded_and_counts_by_its_material() -> None:
     found = plan_warnings(tray_plan, (shelf, [loaded(2, 3)]), printer_id=1, status=status)
     assert [w.kind for w in found] == ["mixed-materials"]
     assert found[0].message.startswith("This print mixes TPU and PLA.")
+
+
+def test_a_spool_in_another_printer_is_named_as_the_picker_names_it() -> None:
+    """#2733 review: the check names the chosen printer, as the picker does."""
+    found = plan_warnings(
+        plan(4),
+        ([spool(4)], [loaded(4, 2, printer_id=2)]),
+        printer_id=1,
+        printer_name="3DP-31B-598",
+        status=None,
+    )
+    assert [w.kind for w in found] == ["not-loaded"]
+    assert "is loaded in printer 2, not in 3DP-31B-598" in found[0].message
+
+
+def test_a_spool_the_inventory_lacks_or_archived_says_nothing_here() -> None:
+    """#2733 review: a gone or archived spool is the run's refusal, by name; here it
+    neither reads as not loaded nor adds a material to mix."""
+    archived = spool(2, "TPU 95A").model_copy(update={"archived_at": "2026-10-01T00:00:00Z"})
+    found = plan_warnings(
+        plan(1, 2, 99),
+        ([spool(1), archived], [loaded(1, 0)]),
+        printer_id=1,
+        status=None,
+    )
+    assert found == []

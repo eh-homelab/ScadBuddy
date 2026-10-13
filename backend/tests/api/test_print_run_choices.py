@@ -1535,6 +1535,26 @@ def test_the_check_refuses_and_warns_about_no_mounted_nozzle(
     assert not upload.called
 
 
+@respx.mock
+def test_a_check_of_a_plan_with_no_slots_does_not_fail_on_the_inventory(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#2733 review: the spool warnings need the inventory only for a plan with slots, so
+    an empty plan's check does not fail when it cannot be read."""
+    output_id = two_colour_output(client, model, paths)
+    upload_route()
+    run_routes()
+    _status(**WIRED)
+    respx.get(f"{API}/inventory/spools").mock(return_value=httpx.Response(500))
+
+    check = client.post(
+        f"/api/v1/print/outputs/{output_id}/check",
+        json={**body(), "filament_plan": {"slots": []}},
+    )
+
+    assert check.status_code == 200, check.text
+
+
 def _check(client: TestClient, output_id: str, **choices: Any) -> httpx.Response:
     response: httpx.Response = client.post(
         f"/api/v1/print/outputs/{output_id}/check",

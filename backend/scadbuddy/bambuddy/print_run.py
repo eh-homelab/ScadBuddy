@@ -684,8 +684,9 @@ async def check_print(
         # and there is no nozzle plan, slots or rack side to judge before it.
         return PrintCheck(warnings=prepared.warnings)
     laid_out = await source.states_nozzles(client)
-    # One read of the inventory for the plan and the spool warnings (#2722).
-    inventory = await read_inventory(client)
+    # One read of the inventory for the plan and the spool warnings (#2722); none for a
+    # plan with no slots, which has neither.
+    inventory = await read_inventory(client) if request.filament_plan.slots else None
     nozzle_plan = (
         await plan_for(
             client,
@@ -752,11 +753,16 @@ async def check_print(
                     request.choices.bed_type, prepared.printer_model, prepared.printer_name
                 )
             ),
-            *plan_warnings(
-                request.filament_plan,
-                inventory,
-                printer_id=prepared.printer_id,
-                status=prepared.printer_status,
+            *(
+                plan_warnings(
+                    request.filament_plan,
+                    inventory,
+                    printer_id=prepared.printer_id,
+                    printer_name=prepared.printer_name,
+                    status=prepared.printer_status,
+                )
+                if inventory is not None
+                else []
             ),
         ],
         rack=rack_view,
@@ -806,13 +812,19 @@ def plan_warnings(
     inventory: Inventory,
     *,
     printer_id: int,
+    printer_name: str | None = None,
     status: PrinterStatus | None,
 ) -> list[FilamentWarning]:
     """What the chosen spools themselves say, for Checks (#2722): a spool not loaded in
-    this printer, as the picker says it under the slot, and a plan that mixes material
-    families. Mixing is planned for (each family gets a hotend of its own), so it is a
-    warning, never a refusal; but a TPU among PLA is more often a slip than a choice. A
-    tray chosen as itself is loaded by definition, and counts by its own material."""
+    this printer, in the picker's own words, and a plan that mixes material families.
+    Mixing is planned for (each family gets a hotend of its own), so it is a warning,
+    never a refusal; but a TPU among PLA is more often a slip than a choice. A tray
+    chosen as itself is loaded by definition, and counts by its own material. A spool
+    the inventory no longer has (gone, or archived) says nothing here: the run refuses
+    it by name.
+
+    The picker still says ``not-loaded`` under the slot. Checks saying it too is on
+    purpose: Checks is the list read before Print, so do not dedupe either away."""
     spools, assignments = inventory
     chosen = [slot for slot in plan.slots if tray_of_spool_id(slot.spool_id) is None]
     options = build_options(
@@ -820,7 +832,7 @@ def plan_warnings(
         spools=list(spools),
         assignments=list(assignments),
         requirements=[SlotNeed(slot_id=slot.slot_id) for slot in chosen],
-    ).model_copy(update={"printer_id": printer_id})
+    ).model_copy(update={"printer_id": printer_id, "printer_name": printer_name})
     found = [
         warning
         for warning in check(options, FilamentPlan(slots=chosen))
