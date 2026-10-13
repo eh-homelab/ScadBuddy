@@ -171,8 +171,9 @@ def inputs_model(schema: dict[str, Any]) -> type[BaseModel]:
 
 
 def _too_long_for_pattern(properties: dict[str, Any], given: dict[str, Any]) -> list[str]:
-    """Each patterned string value longer than its maxLength (MAX_PATTERNED_LENGTH where a
-    schema stored before #2661 has none), named by where it is but never quoted."""
+    """Each patterned string value longer than its maxLength, named by where it is but never
+    quoted. The limit is never above MAX_PATTERNED_LENGTH: a schema stored before #2661 may
+    have no maxLength, or one far larger, and either would let the pattern run on any value."""
     problems: list[str] = []
     for name, prop in properties.items():
         if not isinstance(prop, dict) or name not in given:
@@ -188,6 +189,7 @@ def _too_long_for_pattern(properties: dict[str, Any], given: dict[str, Any]) -> 
             limit = spec.get("maxLength")
             if not isinstance(limit, int) or isinstance(limit, bool):
                 limit = MAX_PATTERNED_LENGTH
+            limit = min(limit, MAX_PATTERNED_LENGTH)
             if len(one) > limit:
                 problems.append(f"{where}: is longer than its maxLength of {limit}")
     return problems

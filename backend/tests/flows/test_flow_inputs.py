@@ -7,7 +7,13 @@ from typing import Any
 
 import pytest
 
-from scadbuddy.flows.inputs import InputsError, inputs_model, resolve_inputs, schema_problems
+from scadbuddy.flows.inputs import (
+    MAX_PATTERNED_LENGTH,
+    InputsError,
+    inputs_model,
+    resolve_inputs,
+    schema_problems,
+)
 from scadbuddy.flows.typecheck import check_script
 
 SCHEMA: dict[str, Any] = {
@@ -177,6 +183,19 @@ def test_a_backtracking_pattern_never_sees_a_long_value() -> None:
     with pytest.raises(InputsError):
         resolve_inputs(schema, {"name": "a" * 26 + "!"})
     assert time.monotonic() - started < 0.5
+
+
+def test_a_stored_maxlength_above_the_cap_does_not_lift_it() -> None:
+    """A schema stored before #2661 may carry any maxLength: the pattern still never sees a
+    value longer than MAX_PATTERNED_LENGTH."""
+    schema = {
+        "type": "object",
+        "properties": {"name": {"type": "string", "pattern": "^a*$", "maxLength": 10**6}},
+    }
+    with pytest.raises(InputsError) as err:
+        resolve_inputs(schema, {"name": "a" * (MAX_PATTERNED_LENGTH + 1)})
+    assert err.value.problems == [f"name: is longer than its maxLength of {MAX_PATTERNED_LENGTH}"]
+    assert resolve_inputs(schema, {"name": "a" * MAX_PATTERNED_LENGTH})["name"]
 
 
 def test_an_input_in_pydantics_protected_namespace_raises_no_warning() -> None:
