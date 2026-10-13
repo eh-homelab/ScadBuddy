@@ -414,31 +414,6 @@ describe('library writes for the mount (#2686)', () => {
     expect(sent).toEqual({ name: 'Bits' })
   })
 
-  it('uploads a file as the multipart file with its folder', async () => {
-    let form: FormData | undefined
-    let key: string | null = null
-    server.use(
-      http.post(`${BACKEND}/api/v1/print/library/files`, async ({ request }) => {
-        key = request.headers.get('Idempotency-Key')
-        form = await request.formData()
-        return HttpResponse.json({ id: 11, filename: 'cube.3mf', folder_id: 3 }, { status: 201 })
-      }),
-    )
-    const bytes = Buffer.from('PK-not-really')
-    const result = firstText(
-      await tool('upload_library_file').execute(
-        { folder_id: 3, filename: 'cube.3mf', content_base64: bytes.toString('base64') },
-        ctx(),
-      ),
-    ) as { id: number }
-    expect(result.id).toBe(11)
-    expect(key).toBeTruthy()
-    expect(form!.get('folder_id')).toBe('3')
-    const file = form!.get('file') as File
-    expect(file.name).toBe('cube.3mf')
-    expect(Buffer.from(await file.arrayBuffer()).equals(bytes)).toBe(true)
-  })
-
   it('every one is outward, so a human approves it', () => {
     for (const name of ['upload_library_file', 'update_library_file', 'create_library_folder', 'update_library_folder', 'delete_library_folder']) {
       expect(tool(name).risk).toBe('outward')

@@ -7,7 +7,7 @@ import { ok } from './call.js'
 import { outputId, slug } from './common.js'
 import { defineTool, image, json, type Tool, type ToolContext, ToolError, toolErrorText } from './registry.js'
 import { page, PAGED, pageInput } from './pagination.js'
-import { binarySource, fromWorkspace, uploadInit, uploadName, withSent, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
+import { uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 
 // Bambuddy (issue #251, spec D8): ScadBuddy's own tools over its backend's
 // Bambuddy client, so the API key stays server-side and the backend's
@@ -453,44 +453,37 @@ export const printTools: Tool[] = [
   defineTool({
     name: 'upload_library_file',
     description:
-      "Upload a file into Bambuddy's library, at the top level or in `folder_id`. The library name is `filename`; " +
-      "with `workspace_path` it defaults to the workspace file's own name. Returns the file's id, name and folder." +
-      fromWorkspace('`content_base64`'),
+      "Upload a file from your workspace into Bambuddy's library, at the top level or in `folder_id`. Give " +
+      '`workspace_path` with its `workspace_sha256`; save a file there first with workspace_save, http_request ' +
+      '`save_to_workspace` or workspace_write. The library name is `filename`, by default the workspace file\'s own ' +
+      'name. Returns the file\'s id, name and folder.',
     input: z.object({
       folder_id: z.number().int().positive().optional().describe('A folder id from list_library; omitted is the top level'),
       filename: z.string().min(1).optional().describe('e.g. "cube.3mf"'),
-      content_base64: z.string().min(1).optional().describe("The file's bytes as base64"),
-      workspace_path: workspacePathInput.optional(),
-      workspace_sha256: workspaceShaInput.optional(),
+      workspace_path: workspacePathInput,
+      workspace_sha256: workspaceShaInput,
     }),
     risk: 'outward',
     bambuddyScope: ['Manage Library'],
     routes: ['POST /api/v1/print/library/files'],
     summarize: ({ filename, workspace_path, folder_id }) =>
-      `Upload ${filename ?? workspace_path ?? 'file'} to Bambuddy's library folder ${folder_id ?? 'top level'}`,
-    handler: async ({ folder_id, filename, content_base64, workspace_path, workspace_sha256 }, ctx) => {
-      const source = await binarySource(ctx, {
-        upload: 'upload_library_file',
-        base64: content_base64,
-        base64Name: 'content_base64',
-        path: workspace_path,
-        sha256: workspace_sha256,
-      })
-      const name = filename ?? ('info' in source ? uploadName(source.info.path) : undefined)
-      if (name === undefined) throw new ToolError('give `filename` with `content_base64`')
+      `Upload ${filename ?? workspace_path} to Bambuddy's library folder ${folder_id ?? 'top level'}`,
+    handler: async ({ folder_id, filename, workspace_path, workspace_sha256 }, ctx) => {
+      const info = await workspaceFile(ctx, { path: workspace_path, sha256: workspace_sha256 }, 'upload_library_file')
+      const name = filename ?? uploadName(info.path)
       const answer = await command(ctx, `upload ${name}`, (headers) =>
         ctx.backend.POST('/api/v1/print/library/files', {
           body: { file: name, folder_id: folder_id ?? null },
           ...uploadInit(
             ctx,
-            source,
+            { info },
             { name: 'file', filename: name, type: 'application/octet-stream' },
             headers,
             folder_id === undefined ? {} : { folder_id: String(folder_id) },
           ),
         }),
       )
-      return json(withSent(answer, 'info' in source ? source.info : undefined))
+      return json(withSent(answer, info))
     },
   }),
 
