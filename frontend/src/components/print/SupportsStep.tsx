@@ -54,7 +54,9 @@ export function SupportsStep({ value, onChange, templateSettings }: Props) {
               onChange({
                 enabled: true,
                 type: next,
-                on_build_plate_only: on?.on_build_plate_only ?? false,
+                // Starts at the template's, so switching type alone keeps it (#2835 review).
+                on_build_plate_only:
+                  on?.on_build_plate_only ?? templateSettings?.support_on_build_plate_only === '1',
                 ...(on?.threshold_angle == null ? {} : { threshold_angle: on.threshold_angle }),
               })
           }}

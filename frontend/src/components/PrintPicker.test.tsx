@@ -1857,6 +1857,19 @@ describe('PrintPicker · Supports (#1899)', () => {
     expect(screen.queryByLabelText('Threshold angle (°)')).toBeNull()
   })
 
+  it('starts On build plate only at the template’s, and keeps it when only the type changes', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker({ printSettings: { support_on_build_plate_only: '1' } })
+    await loaded()
+    await showAdvanced()
+
+    await user.selectOptions(screen.getByLabelText('Supports'), 'normal')
+    expect(screen.getByLabelText('On build plate only')).toBeChecked()
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toMatchObject({ supports: { enabled: true, type: 'normal', on_build_plate_only: true } })
+  })
+
   it('says what Default means for a template that declares supports, and strikes it when overridden', async () => {
     const { user } = renderPicker({
       printSettings: { enable_support: '1', support_type: 'tree(auto)', support_threshold_angle: '25' },
