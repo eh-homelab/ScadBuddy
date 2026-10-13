@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { blobNames, transcriptCut } from '../src/sessions/forkPoint.js'
+import { blobNames, DURABLE_TEXT_MAX, durableReplies, entriesThrough, transcriptCut } from '../src/sessions/forkPoint.js'
 import type { ServerEvent } from '../src/sessions/protocol.js'
 
 // Fork from a message (#793): the panel's assistant message id (`<API message id>:<block>`,
@@ -69,5 +69,60 @@ describe('blobNames (#2150)', () => {
     ] as ServerEvent[]
     expect(blobNames(events).sort()).toEqual([a, b, c, d])
     expect(blobNames([])).toEqual([])
+  })
+})
+
+describe('durableReplies (#2688)', () => {
+  const text = (messageId: string, delta: string): ServerEvent[] => [
+    { v: 1, type: 'assistant.text.delta', sessionId: 's', messageId, delta },
+    { v: 1, type: 'assistant.text.done', sessionId: 's', messageId },
+  ]
+
+  it('matches each logged reply to the transcript entry holding its text, in order', () => {
+    const events = [...text('durable-1', 'a box'), ...text('durable-4', 'first'), ...text('durable-5', 'second'), ...text('durable-9', 'taller box')]
+    expect([...durableReplies(transcript, events)]).toEqual([
+      ['durable-1', 'a2'],
+      ['durable-4', 'a4'],
+      ['durable-5', 'a5'],
+      ['durable-9', 'a6'],
+    ])
+  })
+
+  it("leaves out a reply that never committed (a retried attempt's, a stopped turn's), and a subagent's", () => {
+    const events = [
+      ...text('durable-1', 'a bo'), // a retried attempt's, superseded
+      ...text('durable-2', 'a box'),
+      ...text('durable-4', 'first'),
+      ...text('durable-5', 'second'),
+      ...text('durable-6', 'a subagent'),
+      ...text('durable-7', 'stopped before it committed'),
+      ...text('durable-9', 'taller box'),
+    ]
+    expect([...durableReplies(transcript, events)]).toEqual([
+      ['durable-2', 'a2'],
+      ['durable-4', 'a4'],
+      ['durable-5', 'a5'],
+      ['durable-9', 'a6'],
+    ])
+  })
+
+  it('skips an entry no event names, but never jumps to a text another entry also holds', () => {
+    const twice = [...transcript, user('u4', 'again'), assistant('a7', 'msg_5', { type: 'text', text: 'first' })]
+    // `a box` was never logged: `first` has two entries left, so it is not guessed at.
+    expect([...durableReplies(twice, [...text('durable-4', 'first'), ...text('durable-9', 'taller box')])]).toEqual([['durable-9', 'a6']])
+    expect([...durableReplies(transcript, text('durable-9', 'taller box'))]).toEqual([['durable-9', 'a6']])
+  })
+
+  it('matches a reply the log holds cut at the cap', () => {
+    const long = 'x'.repeat(DURABLE_TEXT_MAX + 10)
+    const entries = [user('u1', 'go'), assistant('a1', 'm', { type: 'text', text: long })]
+    expect([...durableReplies(entries, text('durable-1', long.slice(0, DURABLE_TEXT_MAX)))]).toEqual([['durable-1', 'a1']])
+    expect([...durableReplies(entries, text('durable-1', long.slice(0, DURABLE_TEXT_MAX - 1)))]).toEqual([])
+  })
+
+  it('entriesThrough cuts after the entry, and finds no sidechain or unknown one', () => {
+    expect(entriesThrough(transcript, 'a4')?.map((e) => e.uuid)).toEqual([undefined, 'u1', 'a1', 'a2', 'a3', 'u2', 'a4'])
+    expect(entriesThrough(transcript, 's1')).toBeUndefined()
+    expect(entriesThrough(transcript, 'nope')).toBeUndefined()
   })
 })

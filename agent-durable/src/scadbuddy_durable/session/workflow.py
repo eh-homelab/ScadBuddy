@@ -64,6 +64,7 @@ with workflow.unsafe.imports_passed_through():
     from scadbuddy_durable.session import tools as manifest
     from scadbuddy_durable.session.models import (
         BUDGET_EXHAUSTED,
+        FORK_POINT_QUERY,
         MAX_SEGMENTS,
         MESSAGE_MAX,
         PROJECTS_QUEUE,
@@ -76,6 +77,8 @@ with workflow.unsafe.imports_passed_through():
         FinishTurn,
         FlowTurn,
         FollowArgs,
+        ForkPoint,
+        ForkPointArgs,
         GateSettings,
         MemoryRecalled,
         MemoryTurn,
@@ -914,3 +917,22 @@ class DurableSession:
         if self._turn is not None:
             return self._turn.turn_id
         return self._message.turn_id if self._message is not None else None
+
+    @workflow.query(name=FORK_POINT_QUERY)
+    def fork_point(self, args: ForkPointArgs) -> ForkPoint:
+        """A page of the committed conversation, from ``args.start``, for a fork (#2688):
+        at least one entry, then as many as fit in ``args.limit`` characters."""
+        state = self._agent.state()
+        texts = state.conversation
+        start = max(0, args.start)
+        end, used = start, 0
+        while end < len(texts) and (end == start or used + len(texts[end]) <= args.limit):
+            used += len(texts[end])
+            end += 1
+        return ForkPoint(
+            session_id=state.session_id,
+            checkpoint=state.checkpoint,
+            busy=self._in_turn or self._agent.busy,
+            total=len(texts),
+            entries=texts[start:end],
+        )
