@@ -885,18 +885,12 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
 
     schedules = asyncio.create_task(set_up())
     ops = state.components.get(OPERATIONS)
-    # Flow triggers (#2484): their fires run here, beside the data volume; their
-    # Schedules are put right once, and their events are heard by every replica.
-    triggers = state.components.get(FLOW_TRIGGERS)
-    trigger_schedules = asyncio.create_task(
-        ensure_trigger_schedules_logged(client, queue, triggers.store, stop)
-    )
-    unlisten = listen_for_triggers(state.events, client, queue, triggers.store)
+    trigger_activities, stop_triggers = _flow_triggers(state, client, queue, stop)
     activities = [
         *_housekeeping_activities(state),
         *_preview_activities(state),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
-        *TriggerFires(triggers.store, lambda: triggers.flows, client, queue).all(),
+        *trigger_activities,
     ]
     try:
         while not stop.is_set():
@@ -913,8 +907,26 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
                     await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
     finally:
         schedules.cancel()
-        trigger_schedules.cancel()
+        await stop_triggers()
+
+
+def _flow_triggers(
+    state: AppState, client: Client, queue: str, stop: asyncio.Event
+) -> tuple[list[Callable[..., Any]], Callable[[], Coroutine[Any, Any, None]]]:
+    """Flow triggers (#2484) on the library worker: their fires run here, beside the data
+    volume; their Schedules are put right once; their events are heard by every replica.
+    The fire activities, and what stops the rest."""
+    triggers = state.components.get(FLOW_TRIGGERS)
+    schedules = asyncio.create_task(
+        ensure_trigger_schedules_logged(client, queue, triggers.store, stop)
+    )
+    unlisten = listen_for_triggers(state.events, client, queue, triggers.store)
+
+    async def stop_all() -> None:
+        schedules.cancel()
         await unlisten()
+
+    return TriggerFires(triggers.store, lambda: triggers.flows, client, queue).all(), stop_all
 
 
 def _kinds_on(ops: OperationCommands, queue: Queue) -> dict[str, OperationKind]:

@@ -802,11 +802,18 @@ run as well (Ruling 21).
 2. Reads the trigger. Gone or paused: the fire is `skipped`.
 3. If the flow is archived or deleted (#2485), the trigger is paused (row and Schedule),
    and the fire is `skipped`.
-4. With `overlap: skip`, if the trigger's previous run is still open, the fire is
-   `skipped`. An event trigger that started `MAX_EVENT_FIRES_PER_HOUR` (60) runs in the
-   last hour is `skipped`, so a flow that causes its own event cannot loop.
-5. Type-checks the pinned version and resolves the inputs, as a start does. A problem
+4. Type-checks the pinned version and resolves the inputs, as a start does. A problem
    makes the fire `failed`, with the reason, and starts nothing.
+5. **Admits** the fire in one transaction under the trigger's row lock
+   (`TriggerStore.admit`), counting every other fire already `admitted` or `started`,
+   so concurrent fires (a burst of events, a Schedule's catch-up) cannot all pass:
+   - with `overlap: skip`, another admitted fire's run still open (or, with no row yet,
+     admitted in the last 10 minutes) makes it `skipped` (`overlap`);
+   - an event trigger with `MAX_EVENT_FIRES_PER_HOUR` (60) fires admitted in the last
+     hour makes it `skipped` (`rate`), so a flow that causes its own event cannot loop;
+   - a trigger changed since step 4 read it makes it `skipped` (`changed`): nothing
+     starts on settings that were not the ones checked.
+   Admitted, it is marked `admitted`, which a retried activity takes up where it stopped.
 6. Starts the run with the same `start_execution` the route uses, with the id
    `uuid5(TRIGGER_NAMESPACE, "<trigger id>:<fire key>")`. Its namespace is its own, so
    no request's `Idempotency-Key` can reach it.
@@ -852,16 +859,30 @@ A triggered run has no person present, so:
     days.
   - At each fire while it is in force, the run gets its own run grant: `approved`, with
     `approved_by` `trigger-grant:<standing grant id>` and `standing_grant_id` naming it,
-    the same rules with fresh counters (each limit is per run), `ask_starter_session`
-    false, expiring at the earlier of the standing grant's expiry and 7 days after the
-    fire (§3.1's maximum). Everything in §3 applies to it unchanged.
+    the same rules, `ask_starter_session` false, expiring at the earlier of the
+    standing grant's expiry and 7 days after the fire (§3.1's maximum). It is seeded
+    only while the trigger is still what the fire checked (§12.2).
+  - **Its limits are spent across every run it seeds, never once per run.**
+    `FlowStore.consume_grant` locks the standing grant's row (before the run grant's,
+    the order a revocation takes) and checks each rule against the standing grant's
+    counters (`flow_trigger_grants.used`), which it spends with the run grant's own. So
+    N fires never multiply its prints, grams or calls by N. A standing grant not in force
+    (revoked, expired, back to `requested`) matches nothing, whatever its run grants say.
+    Everything else in §3 applies to the run grant unchanged.
+  - **An approval is bound to what the person saw.** A trigger's view carries `seen`, a
+    hash of the trigger (its version, inputs, kind, schedule or event, overlap, approval
+    timeout and `created_by`) and its live standing grant (its id, status, spec and
+    requester). Approving sends it back, and so does the browser's attach, which is an
+    approval; it is compared under the trigger's row lock, which every edit takes, and a
+    change since is 409 `flow-trigger-changed`. Without one it is 422.
   - **It is revocable** by the browser or the trigger's creator (by author header, which
     only takes authority away, §4.2). Once it is revoked or expired, later fires get no
     grant. Revoking it also revokes, in the same transaction, every run grant it seeded,
-    so their next outward calls wait (§3.5).
-  - **Any edit of the trigger revokes its standing grant** (Ruling 20): its version,
-    inputs, timing, overlap or approval timeout. A person approved the grant for what the
-    trigger was then.
+    so their next outward calls wait (§3.5). So does deleting the trigger.
+  - **Any edit of the trigger returns its standing grant to `requested`** (Ruling 20):
+    its version, inputs, timing, overlap or approval timeout. A person approved it for
+    what the trigger was then, and approves it again for what it is now. Runs already
+    started keep the run grants they were given.
   - A trigger has at most one live (requested, or approved and not revoked) standing
     grant. Attaching another while one is live is 409. One revoked, declined or expired
     may be replaced.
@@ -904,9 +925,11 @@ edits a trigger) carry `USER_ONLY`; #2653 tracks the server-side half.
     a person approved, with no person present.
 19. **(user) A standing grant expires at most 30 days after approval**, beyond a run
     grant's 7 days, so a weekly schedule is re-approved monthly rather than weekly. Each
-    fire's run grant still expires within 7 days of the fire, and each limit is per run.
-20. **(user) Any edit of a trigger revokes its standing grant.** Pausing and resuming do
-    not.
+    fire's run grant still expires within 7 days of the fire, and every limit is spent
+    across all the runs the standing grant seeds.
+20. **(user) Any edit of a trigger returns its standing grant to `requested`**, and the
+    person's approval names the state it saw. Runs already started keep their grants;
+    pausing and resuming change nothing.
 21. **Overlap is `skip` or `allow_all`.** A fire ends once its run has started, so
     Temporal's own policy sees only the fire, and the fire checks the previous run
     itself. Temporal's `BUFFER_*`, `CANCEL_OTHER` and `TERMINATE_OTHER` would need the

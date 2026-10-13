@@ -10,6 +10,7 @@ it (§12.4); approving or declining its standing grant is the browser's alone.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import UTC, datetime
@@ -39,7 +40,11 @@ from scadbuddy.flow_triggers.models import (
     TriggerUpdate,
     timeout_seconds,
 )
-from scadbuddy.flow_triggers.store import LiveGrantError, StandingGrantStateError
+from scadbuddy.flow_triggers.store import (
+    LiveGrantError,
+    StandingGrantStateError,
+    TriggerChangedError,
+)
 from scadbuddy.flows.definitions import ScriptMissingError
 from scadbuddy.flows.grants import GrantSpec, GrantStatus, validate_rules
 from scadbuddy.flows.inputs import InputsError, resolve_inputs
@@ -57,6 +62,7 @@ router = APIRouter(tags=["flows"])
 
 CREATOR_ONLY = "https://scadbuddy.dev/problems/flow-trigger-creator-only"
 TRIGGER_INVALID = "https://scadbuddy.dev/problems/flow-trigger-invalid"
+TRIGGER_CHANGED = "https://scadbuddy.dev/problems/flow-trigger-changed"
 TEMPORAL_DOWN = "https://scadbuddy.dev/problems/flow-trigger-schedule-unavailable"
 FIRES_SHOWN = 20
 
@@ -86,6 +92,9 @@ class TriggerView(Trigger):
     next_fires: list[datetime] = Field(default_factory=list)
     #: The newest fires first, each with its run's status.
     fires: list[Fire] = Field(default_factory=list)
+    #: A hash of what is shown of the trigger and its live standing grant: an approval
+    #: sends it back, and is refused when either changed since (§12.4).
+    seen: str = ""
 
 
 class ApproveStandingGrant(BaseModel):
@@ -95,6 +104,21 @@ class ApproveStandingGrant(BaseModel):
 
     #: The grant as approved, when the person edited the request. Omitted: as requested.
     spec: GrantSpec | None = None
+    #: The trigger's `seen` as the person was shown it: refused (409) when the trigger or
+    #: the grant changed since.
+    seen: str | None = Field(default=None, max_length=64)
+
+
+class AttachStandingGrant(BaseModel):
+    """A standing grant to attach to a trigger."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    spec: GrantSpec
+    #: The trigger's `seen` as the caller was shown it. The browser's attach is an
+    #: approval, so it needs one (409 when the trigger changed since); an agent's is only
+    #: a request, which a person approves later against what they see then.
+    seen: str | None = Field(default=None, max_length=64)
 
 
 def _who() -> dict[str, Any]:
@@ -236,6 +260,7 @@ async def _view(triggers: Triggers, trigger: Trigger) -> TriggerView:
         grant=_grant_view(await triggers.store.current_grant(trigger.id)),
         next_fires=upcoming,
         fires=await triggers.store.fires(trigger.id, FIRES_SHOWN),
+        seen=await asyncio.to_thread(triggers.store.live_hash, trigger),
     )
 
 
@@ -291,13 +316,14 @@ async def create_flow_trigger(body: TriggerCreate, triggers: TriggersDep) -> Tri
 @router.patch(
     "/flow-triggers/{trigger_id}",
     response_model=TriggerView,
-    summary="Change a flow trigger; its standing grant is revoked",
+    summary="Change a flow trigger; its standing grant goes back to requested",
 )
 async def update_flow_trigger(
     trigger_id: str, body: TriggerUpdate, triggers: TriggersDep
 ) -> TriggerView:
-    """Any change revokes the trigger's standing grant (Ruling 20): a person approved it
-    for what the trigger was. Its pause is kept."""
+    """Any change returns the trigger's standing grant to `requested` (Ruling 20): a person
+    approved it for what the trigger was. Runs already started keep their grants; its pause
+    is kept."""
     trigger = await _load(triggers, trigger_id)
     _creator_only(trigger)
     sent = body.model_fields_set
@@ -395,19 +421,24 @@ async def delete_flow_trigger(trigger_id: str, triggers: TriggersDep) -> Respons
     summary="Attach a standing grant to a flow trigger",
 )
 async def attach_flow_trigger_grant(
-    trigger_id: str, spec: GrantSpec, triggers: TriggersDep
+    trigger_id: str, body: AttachStandingGrant, triggers: TriggersDep
 ) -> StandingGrantView:
-    """From the browser it is approved as sent; from an agent it is only requested, until
-    a person approves it. At most 30 days. 409 while the trigger has a live one."""
+    """From the browser it is approved as sent, bound to the trigger as it was shown
+    (`seen`); from an agent it is only requested, until a person approves it. At most 30
+    days. 409 while the trigger has a live one, or when it changed since it was shown."""
     trigger = await _load(triggers, trigger_id)
     _creator_only(trigger)
-    await _check_grant(triggers, spec)
+    browser = current_author() is None
+    if browser and body.seen is None:
+        raise _unseen()
+    await _check_grant(triggers, body.spec)
     try:
         grant = await triggers.store.attach_grant(
             trigger_id,
-            spec,
-            "approved" if current_author() is None else "requested",
+            body.spec,
+            "approved" if browser else "requested",
             _who(),
+            body.seen if browser else None,
         )
     except LiveGrantError:
         raise ApiError(
@@ -415,9 +446,28 @@ async def attach_flow_trigger_grant(
             "This trigger has a grant already: revoke it first.",
             type_=GRANT_STATE,
         ) from None
+    except TriggerChangedError:
+        raise _changed() from None
     view = _grant_view(grant)
-    assert view is not None
+    if view is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, "No such trigger.")
     return view
+
+
+def _unseen() -> ApiError:
+    return ApiError(
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        "Say what was approved: send the trigger's `seen` as it was shown.",
+        type_=TRIGGER_INVALID,
+    )
+
+
+def _changed() -> ApiError:
+    return ApiError(
+        status.HTTP_409_CONFLICT,
+        "The trigger or its grant changed since it was shown. Look again before approving.",
+        type_=TRIGGER_CHANGED,
+    )
 
 
 def _no_grant() -> ApiError:
@@ -444,19 +494,24 @@ async def approve_flow_trigger_grant(
     triggers: TriggersDep,
     body: Annotated[ApproveStandingGrant | None, Body()] = None,
 ) -> StandingGrantView:
-    """Browser only: no agent approves a grant, its own or another's."""
+    """Browser only: no agent approves a grant, its own or another's. Bound to the
+    trigger and the grant as they were shown (`seen`): 409 when either changed since."""
     _browser_only()
     await _load(triggers, trigger_id)
+    if body is None or body.seen is None:
+        raise _unseen()
     current = await triggers.store.current_grant(trigger_id)
     if current is None:
         raise _no_grant()
-    spec = (body.spec if body is not None else None) or current.spec
+    spec = body.spec or current.spec
     if current.status == "requested" and current.revoked_at is None:
         await _check_grant(triggers, spec)
     try:
-        approved = await triggers.store.approve_grant(trigger_id, spec)
+        approved = await triggers.store.approve_grant(trigger_id, spec, body.seen)
     except StandingGrantStateError as err:
         raise _grant_state(err) from None
+    except TriggerChangedError:
+        raise _changed() from None
     view = _grant_view(approved)
     if view is None:
         raise _no_grant()

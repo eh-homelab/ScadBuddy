@@ -97,7 +97,7 @@ export const flowTriggerTools: Tool[] = [
     name: 'update_flow_trigger',
     description:
       'Change a trigger this principal made: its version, inputs, schedule or event, overlap or approval ' +
-      'timeout. Only what is sent changes. Any change revokes its standing grant: the user approves a new one.',
+      'timeout. Only what is sent changes. Any change returns its standing grant to requested: the user approves it again.',
     input: z.object({
       trigger_id: triggerId,
       definition_id: definitionId.optional(),
@@ -179,7 +179,7 @@ export const flowTriggerTools: Tool[] = [
     handler: async ({ trigger_id, grant }, { backend }) =>
       json(
         await ok(
-          backend.POST('/api/v1/flow-triggers/{trigger_id}/grant', { params: { path: { trigger_id } }, body: grant }),
+          backend.POST('/api/v1/flow-triggers/{trigger_id}/grant', { params: { path: { trigger_id } }, body: { spec: grant } }),
           `attach a grant to flow trigger ${trigger_id}`,
         ),
       ),

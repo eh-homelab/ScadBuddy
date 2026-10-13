@@ -41,6 +41,11 @@ async def test_a_library_worker_that_fails_while_running_is_started_again(
     monkeypatch.setattr(main, "PRINT_WORKER_RECONNECT", 0.01)
     monkeypatch.setattr(main, "ensure_schedules", no_schedules)
     monkeypatch.setattr(main, "_housekeeping_activities", lambda state: [])
+
+    async def no_triggers() -> None:
+        pass
+
+    monkeypatch.setattr(main, "_flow_triggers", lambda *args: ([], no_triggers))
     state = SimpleNamespace(
         settings=SimpleNamespace(temporal_task_queue_library="library"),
         temporal=object(),
@@ -144,6 +149,11 @@ async def test_a_paused_schedule_leaves_the_uploads_backfill_to_the_boot(
     monkeypatch.setattr(main, "ensure_schedules", schedules)
     monkeypatch.setattr(main, "ensure_preview_schedule", no_preview_schedule)
     monkeypatch.setattr(main, "_housekeeping_activities", lambda state: [])
+
+    async def no_triggers() -> None:
+        pass
+
+    monkeypatch.setattr(main, "_flow_triggers", lambda *args: ([], no_triggers))
     state = SimpleNamespace(
         settings=SimpleNamespace(temporal_task_queue_library="library"),
         temporal=object(),

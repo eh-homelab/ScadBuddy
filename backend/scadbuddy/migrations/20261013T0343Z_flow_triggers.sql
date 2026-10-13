@@ -43,6 +43,9 @@ CREATE TABLE flow_trigger_grants (
     revoked_by   text,
     revoked_at   timestamptz,
     expires_at   timestamptz,
+    -- Per rule index: {prints, filament_g, calls} across every run it seeded: its
+    -- limits are spent cumulatively, under its row lock (`FlowStore.consume_grant`).
+    used         jsonb NOT NULL DEFAULT '{}',
     created_at   timestamptz NOT NULL DEFAULT now()
 );
 
@@ -57,7 +60,7 @@ CREATE TABLE flow_trigger_fires (
     trigger_id text NOT NULL,
     fire_key   text NOT NULL,
     run_id     text NOT NULL,
-    outcome    text NOT NULL CHECK (outcome IN ('pending', 'started', 'skipped', 'failed')),
+    outcome    text NOT NULL CHECK (outcome IN ('pending', 'admitted', 'started', 'skipped', 'failed')),
     reason     text,
     event      jsonb,
     fired_at   timestamptz NOT NULL DEFAULT now(),

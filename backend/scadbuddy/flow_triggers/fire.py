@@ -14,13 +14,18 @@ import contextlib
 import logging
 import uuid
 from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 from temporalio import activity
 from temporalio.client import Client
 
-from scadbuddy.flow_triggers.models import MAX_EVENT_FIRES_PER_HOUR, FireOutcome, Trigger
+from scadbuddy.flow_triggers.models import (
+    MAX_EVENT_FIRES_PER_HOUR,
+    FireOutcome,
+    Trigger,
+    state_hash,
+)
 from scadbuddy.flow_triggers.store import TriggerStore
 from scadbuddy.flows.component import Flows
 from scadbuddy.flows.definitions import ScriptMissingError
@@ -98,7 +103,7 @@ class TriggerFires:
         claimed = await self.store.claim_fire(trigger_id, fire_key, run_id, event)
         if claimed is None:
             return "skipped"  # the trigger is gone
-        if claimed.outcome != "pending":
+        if claimed.outcome not in ("pending", "admitted"):
             return claimed.outcome  # a retry, or the same event heard twice
         outcome, reason = await self._decide(trigger_id, fire_key, run_id)
         await self.store.settle_fire(trigger_id, fire_key, outcome, reason)
@@ -125,14 +130,6 @@ class TriggerFires:
                 self.store, self.client, self.task_queue, trigger.name, reason, {"kind": "system"}
             )
             return "skipped", reason
-        if trigger.overlap == "skip" and await self.store.previous_run_open(trigger_id, fire_key):
-            return "skipped", "overlap"
-        if (
-            trigger.kind == "event"
-            and await self.store.started_since(trigger_id, timedelta(hours=1))
-            >= MAX_EVENT_FIRES_PER_HOUR
-        ):
-            return "skipped", "rate"
         if flows.client is None:
             return "failed", "flows are unavailable"
         if problems := await check_script(definition.script, definition.inputs_schema):
@@ -141,11 +138,19 @@ class TriggerFires:
             inputs = resolve_inputs(definition.inputs_schema, trigger.inputs)
         except InputsError as err:
             return "failed", "the inputs no longer fit: " + "; ".join(err.problems)
+        # What was checked above, which the admission and the grant are bound to: a
+        # trigger edited meanwhile starts nothing on its old settings.
+        checked = state_hash(trigger, None)
+        cap = MAX_EVENT_FIRES_PER_HOUR if trigger.kind == "event" else None
+        if (refused := await self.store.admit(trigger_id, fire_key, cap, checked)) is not None:
+            return "skipped", refused
         started_by = runs_as(trigger.created_by)
         if await execution_status(flows.client, run_id) is None:
             # No execution: a grant held for this run is an earlier attempt's.
             await flows.store.delete_grant(run_id)
-            await self.store.seed_run_grant(run_id, trigger_id, started_by, datetime.now(UTC))
+            await self.store.seed_run_grant(
+                run_id, trigger_id, started_by, datetime.now(UTC), checked
+            )
             await start_execution(
                 flows,
                 flows.client,

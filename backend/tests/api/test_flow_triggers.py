@@ -62,6 +62,23 @@ def view(client: TestClient, trigger_id: str) -> dict[str, Any]:
     return shown
 
 
+def attach(
+    client: TestClient, trigger_id: str, spec: dict[str, Any], headers: dict[str, str] | None = None
+) -> Any:
+    """Attach a standing grant, bound to the trigger as the caller last saw it."""
+    body = {"spec": spec, "seen": view(client, trigger_id)["seen"]}
+    return client.post(
+        f"/api/v1/flow-triggers/{trigger_id}/grant", json=body, headers=headers or {}
+    )
+
+
+def approve(client: TestClient, trigger_id: str, spec: dict[str, Any] | None = None) -> Any:
+    body: dict[str, Any] = {"seen": view(client, trigger_id)["seen"]}
+    if spec is not None:
+        body["spec"] = spec
+    return client.post(f"/api/v1/flow-triggers/{trigger_id}/grant/approve", json=body)
+
+
 def fire(reaper: WorkflowReaper, client: TestClient, trigger_id: str) -> dict[str, Any]:
     """Trigger the Schedule now, and the fire it made once it is decided."""
     before = len(view(client, trigger_id)["fires"])
@@ -76,7 +93,7 @@ def decided(client: TestClient, trigger_id: str, count: int, timeout: float = 30
     deadline = time.monotonic() + timeout
     while True:
         fires = view(client, trigger_id)["fires"]
-        if len(fires) >= count and all(f["outcome"] != "pending" for f in fires):
+        if len(fires) >= count and all(f["outcome"] not in ("pending", "admitted") for f in fires):
             newest: dict[str, Any] = fires[0]
             return newest
         if time.monotonic() > deadline:
@@ -206,9 +223,10 @@ def test_a_fire_under_an_approved_standing_grant_gets_a_run_grant_from_it(
 ) -> None:
     definition = register(client, WAITS)
     trigger = create(client, definition["id"])
-    attached = client.post(
-        f"/api/v1/flow-triggers/{trigger['id']}/grant",
-        json=grant({"fn": "queue_print", "printers": [3], "max_prints": 2}, days=20),
+    attached = attach(
+        client,
+        trigger["id"],
+        grant({"fn": "queue_print", "printers": [3], "max_prints": 2}, days=20),
     )
     assert attached.status_code == 200, attached.text
     standing = attached.json()
@@ -234,11 +252,7 @@ def test_an_agents_standing_grant_is_requested_and_only_the_browser_decides_it(
 ) -> None:
     definition = register(client, WAITS)
     trigger = create(client, definition["id"], AGENT, overlap="allow_all")
-    requested = client.post(
-        f"/api/v1/flow-triggers/{trigger['id']}/grant",
-        json=grant({"fn": "queue_print"}),
-        headers=AGENT,
-    )
+    requested = attach(client, trigger["id"], grant({"fn": "queue_print"}), AGENT)
     assert requested.status_code == 200, requested.text
     assert (requested.json()["status"], requested.json()["in_force"]) == ("requested", False)
     assert requested.json()["requested_by"] == {
@@ -255,10 +269,7 @@ def test_an_agents_standing_grant_is_requested_and_only_the_browser_decides_it(
         )
         assert refused.status_code == 403
         assert refused.json()["type"] == "https://scadbuddy.dev/problems/flow-grant-browser-only"
-    approved = client.post(
-        f"/api/v1/flow-triggers/{trigger['id']}/grant/approve",
-        json={"spec": grant({"fn": "queue_print", "max_prints": 1})},
-    )
+    approved = approve(client, trigger["id"], grant({"fn": "queue_print", "max_prints": 1}))
     assert approved.status_code == 200, approved.text
     assert approved.json()["status"] == "approved"
     assert approved.json()["spec"]["rules"][0]["max_prints"] == 1
@@ -270,19 +281,13 @@ def test_an_agents_standing_grant_is_requested_and_only_the_browser_decides_it(
 def test_a_standing_grant_expires_within_30_days(client: TestClient) -> None:
     definition = register(client, WAITS)
     trigger = create(client, definition["id"])
-    too_long = client.post(
-        f"/api/v1/flow-triggers/{trigger['id']}/grant", json=grant({"fn": "queue_print"}, days=31)
-    )
+    too_long = attach(client, trigger["id"], grant({"fn": "queue_print"}, days=31))
     assert too_long.status_code == 422
     assert too_long.json()["type"] == "https://scadbuddy.dev/problems/flow-grant-invalid"
-    ok = client.post(
-        f"/api/v1/flow-triggers/{trigger['id']}/grant", json=grant({"fn": "queue_print"}, days=29)
-    )
+    ok = attach(client, trigger["id"], grant({"fn": "queue_print"}, days=29))
     assert ok.status_code == 200, ok.text
     # One live standing grant per trigger.
-    second = client.post(
-        f"/api/v1/flow-triggers/{trigger['id']}/grant", json=grant({"fn": "queue_print"})
-    )
+    second = attach(client, trigger["id"], grant({"fn": "queue_print"}))
     assert second.status_code == 409
 
 
@@ -295,7 +300,7 @@ def test_another_principal_cannot_change_a_trigger(client: TestClient) -> None:
         ("PATCH", base, {"schedule": {"interval_s": 3600}}),
         ("POST", f"{base}/pause", None),
         ("POST", f"{base}/resume", None),
-        ("POST", f"{base}/grant", grant({"fn": "queue_print"})),
+        ("POST", f"{base}/grant", {"spec": grant({"fn": "queue_print"})}),
         ("POST", f"{base}/grant/revoke", None),
         ("DELETE", base, None),
     ]
@@ -314,10 +319,13 @@ def test_another_principal_cannot_change_a_trigger(client: TestClient) -> None:
 
 
 @pytest.mark.usefixtures("triggers")
-def test_an_edit_revokes_the_standing_grant(client: TestClient) -> None:
+def test_an_edit_returns_the_standing_grant_to_requested(
+    client: TestClient, workflow_reaper: WorkflowReaper
+) -> None:
     definition = register(client, WAITS)
-    trigger = create(client, definition["id"])
-    client.post(f"/api/v1/flow-triggers/{trigger['id']}/grant", json=grant({"fn": "queue_print"}))
+    trigger = create(client, definition["id"], overlap="allow_all")
+    assert attach(client, trigger["id"], grant({"fn": "queue_print"})).status_code == 200
+    fired = fire(workflow_reaper, client, trigger["id"])
     edited = client.patch(
         f"/api/v1/flow-triggers/{trigger['id']}", json={"schedule": {"interval_s": 7200}}
     )
@@ -325,15 +333,59 @@ def test_an_edit_revokes_the_standing_grant(client: TestClient) -> None:
     body = edited.json()
     assert body["schedule"]["interval_s"] == 7200
     assert body["updated_by"] == {"kind": "browser"}
-    assert body["grant"]["revoked_at"] is not None and body["grant"]["in_force"] is False
-    # A pause and a resume leave a new grant alone.
-    attached = client.post(
-        f"/api/v1/flow-triggers/{trigger['id']}/grant", json=grant({"fn": "queue_print"})
-    )
-    assert attached.status_code == 200, attached.text
+    assert (body["grant"]["status"], body["grant"]["in_force"]) == ("requested", False)
+    # A run already started keeps the grant it was given.
+    assert run_view(client, fired["run_id"])["grant"]["in_force"] is True
+    # The next fire gets none until a person approves it again.
+    later = fire(workflow_reaper, client, trigger["id"])
+    assert run_view(client, later["run_id"])["grant"] is None
+    assert approve(client, trigger["id"]).json()["in_force"] is True
+    # A pause and a resume leave it alone.
     client.post(f"/api/v1/flow-triggers/{trigger['id']}/pause")
     client.post(f"/api/v1/flow-triggers/{trigger['id']}/resume")
     assert view(client, trigger["id"])["grant"]["in_force"] is True
+
+
+@pytest.mark.usefixtures("triggers")
+def test_an_approval_is_bound_to_what_the_person_saw(client: TestClient) -> None:
+    definition = register(client, WAITS)
+    other = register(client, script("await wait_for_human('Other?', 600)"), name="other")
+    trigger = create(client, definition["id"], AGENT)
+    assert attach(client, trigger["id"], grant({"fn": "queue_print"}), AGENT).status_code == 200
+    seen = view(client, trigger["id"])["seen"]
+    for change in (
+        {"definition_id": other["id"]},
+        {"schedule": {"interval_s": 600}},
+        {"approval_timeout": 3600},
+    ):
+        # The creator changes the trigger between the person's look and their click.
+        assert (
+            client.patch(
+                f"/api/v1/flow-triggers/{trigger['id']}", json=change, headers=AGENT
+            ).status_code
+            == 200
+        )
+        stale = client.post(
+            f"/api/v1/flow-triggers/{trigger['id']}/grant/approve", json={"seen": seen}
+        )
+        assert stale.status_code == 409, stale.text
+        assert stale.json()["type"] == "https://scadbuddy.dev/problems/flow-trigger-changed"
+        seen = view(client, trigger["id"])["seen"]
+    # Nor may the approval come without saying what it saw.
+    blind = client.post(f"/api/v1/flow-triggers/{trigger['id']}/grant/approve", json={})
+    assert blind.status_code == 422
+    assert view(client, trigger["id"])["grant"]["status"] == "requested"
+    # A browser attach is approved as sent, so it is bound the same way.
+    browsers = create(client, definition["id"])
+    seen_browser = view(client, browsers["id"])["seen"]
+    client.patch(f"/api/v1/flow-triggers/{browsers['id']}", json={"schedule": {"interval_s": 600}})
+    refused = client.post(
+        f"/api/v1/flow-triggers/{browsers['id']}/grant",
+        json={"spec": grant({"fn": "queue_print"}), "seen": seen_browser},
+    )
+    assert refused.status_code == 409
+    # Seen as it is now, it is approved.
+    assert approve(client, trigger["id"]).status_code == 200
 
 
 @pytest.mark.usefixtures("triggers")
@@ -342,7 +394,7 @@ def test_revoking_the_standing_grant_revokes_the_run_grants_it_seeded(
 ) -> None:
     definition = register(client, WAITS)
     trigger = create(client, definition["id"], AGENT, overlap="allow_all")
-    client.post(f"/api/v1/flow-triggers/{trigger['id']}/grant", json=grant({"fn": "queue_print"}))
+    attach(client, trigger["id"], grant({"fn": "queue_print"}))
     fired = fire(workflow_reaper, client, trigger["id"])
     assert run_view(client, fired["run_id"])["grant"]["in_force"] is True
     # Its creator may revoke it: revoking only takes authority away.
@@ -453,7 +505,7 @@ def test_a_deleted_trigger_loses_its_schedule_and_its_grants(
 ) -> None:
     definition = register(client, WAITS)
     trigger = create(client, definition["id"])
-    client.post(f"/api/v1/flow-triggers/{trigger['id']}/grant", json=grant({"fn": "queue_print"}))
+    attach(client, trigger["id"], grant({"fn": "queue_print"}))
     fired = fire(workflow_reaper, client, trigger["id"])
     assert run_view(client, fired["run_id"])["grant"]["in_force"] is True
     assert client.delete(f"/api/v1/flow-triggers/{trigger['id']}").status_code == 204

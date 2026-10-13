@@ -6,6 +6,8 @@ a grant's status are the server's record, never something a request says (§12.1
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from datetime import datetime, timedelta
 from typing import Any, Literal
@@ -14,12 +16,13 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from scadbuddy.core.settings import check_approval_timeout
-from scadbuddy.flows.grants import GrantSpec, GrantStatus
+from scadbuddy.flows.grants import GrantSpec, GrantStatus, RuleUse
 
 EventKind = Literal["render.finished", "model.changed"]
 Overlap = Literal["skip", "allow_all"]
 TriggerKind = Literal["schedule", "event"]
-FireOutcome = Literal["pending", "started", "skipped", "failed"]
+#: `admitted`: past the overlap and the rate cap, its run not yet started.
+FireOutcome = Literal["pending", "admitted", "started", "skipped", "failed"]
 ApprovalTimeout = int | Literal["never"]
 
 #: A standing grant's longest life from its approval (Ruling 19).
@@ -130,8 +133,8 @@ class TriggerCreate(_Timing):
 
 
 class TriggerUpdate(_Timing):
-    """A change to a trigger: only what is sent changes. Any change revokes its standing
-    grant (Ruling 20)."""
+    """A change to a trigger: only what is sent changes. Any change returns its standing
+    grant to `requested` (Ruling 20)."""
 
     definition_id: str | None = Field(default=None, min_length=1, max_length=64)
     schedule: ScheduleTiming | None = None
@@ -186,6 +189,9 @@ class StandingGrant(BaseModel):
     revoked_at: datetime | None = None
     expires_at: datetime | None = None
     created_at: datetime
+    #: Per rule index: what it let through across every run it seeded. Its limits are
+    #: spent cumulatively, never once per run.
+    used: dict[str, RuleUse] = Field(default_factory=dict)
 
     def in_force(self, now: datetime) -> bool:
         return (
@@ -218,3 +224,32 @@ class RunTrigger(BaseModel):
     fired_at: datetime
     #: The event's facts, for an event trigger's fire.
     event: dict[str, Any] | None = None
+
+
+def state_hash(trigger: Trigger, grant: StandingGrant | None) -> str:
+    """What a person sees of a trigger and its live standing grant, as one hash. An
+    approval (or a browser's attach, which is one) names the hash it saw, and is refused
+    when the trigger or the grant has changed since (§12.4)."""
+    seen = {
+        "trigger": trigger.id,
+        "name": trigger.name,
+        "definition_id": trigger.definition_id,
+        "version": trigger.version,
+        "kind": trigger.kind,
+        "schedule": trigger.schedule.model_dump(mode="json") if trigger.schedule else None,
+        "event": trigger.event.model_dump(mode="json") if trigger.event else None,
+        "overlap": trigger.overlap,
+        "inputs": trigger.inputs,
+        "approval_timeout_s": trigger.approval_timeout_s,
+        "created_by": trigger.created_by,
+        "grant": None
+        if grant is None
+        else {
+            "id": grant.id,
+            "status": grant.status,
+            "spec": grant.spec.model_dump(mode="json", by_alias=True),
+            "requested_by": grant.requested_by,
+        },
+    }
+    canonical = json.dumps(seen, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()

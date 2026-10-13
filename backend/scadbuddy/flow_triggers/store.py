@@ -1,9 +1,12 @@
 """``flow_triggers``, their standing grants and their fires (#2484, spec 2026-10-11 §12).
 
 The routes write who made, changed or paused a trigger from the request's author, never
-from its body; a fire reads everything it acts on from here. Revoking a standing grant,
-by a person, its creator or an edit (Ruling 20), revokes the run grants it seeded in the
-same transaction, so their next outward calls wait (§3.5).
+from its body; a fire reads everything it acts on from here. Revoking a standing grant
+revokes the run grants it seeded in the same transaction, so their next outward calls wait
+(§3.5); an edit returns it to `requested` (Ruling 20) and leaves runs already started
+alone. Approving one is bound to the trigger as the person saw it (`state_hash`), checked
+under the trigger's row lock, which every edit takes too. A fire is admitted under the
+same lock, so concurrent fires keep to the trigger's overlap and rate cap.
 """
 
 from __future__ import annotations
@@ -26,6 +29,7 @@ from scadbuddy.flow_triggers.models import (
     FireOutcome,
     StandingGrant,
     Trigger,
+    state_hash,
 )
 from scadbuddy.flows.grants import MAX_EXPIRY, GrantSpec, GrantStatus
 from scadbuddy.flows.models import TERMINAL
@@ -38,7 +42,7 @@ _TRIGGER = (
 )
 _GRANT = (
     "id, trigger_id, status, spec, requested_by, approved_by, approved_at, revoked_by,"
-    " revoked_at, expires_at, created_at"
+    " revoked_at, expires_at, created_at, used"
 )
 #: The trigger's live grant first, else its newest.
 _CURRENT_GRANT = (
@@ -49,6 +53,7 @@ _CURRENT_GRANT = (
 #: A fire whose run has no row yet is taken for open only this long: a start that never
 #: wrote its row must not hold every later fire back.
 STARTING_GRACE = timedelta(minutes=10)
+_HOUR = timedelta(hours=1)
 #: What an edit may change: never who made it, nor its pause.
 _EDITABLE = frozenset(
     {
@@ -66,6 +71,10 @@ _EDITABLE = frozenset(
 
 class LiveGrantError(Exception):
     """The trigger has a live standing grant already: one at a time."""
+
+
+class TriggerChangedError(Exception):
+    """The trigger or its standing grant changed since the person saw it."""
 
 
 class StandingGrantStateError(Exception):
@@ -101,7 +110,8 @@ class TriggerStore:
     async def update(
         self, trigger_id: str, fields: dict[str, Any], by: dict[str, Any], revoked_by: str
     ) -> Trigger | None:
-        """Change `fields` and revoke the trigger's standing grant (Ruling 20)."""
+        """Change `fields` and return the trigger's standing grant to `requested` (Ruling
+        20); the run grants it seeded already are left as they are."""
         return await self._call(self._update, trigger_id, fields, by, revoked_by)
 
     async def set_paused(
@@ -123,31 +133,49 @@ class TriggerStore:
     # -- standing grants --------------------------------------------------------
 
     async def attach_grant(
-        self, trigger_id: str, spec: GrantSpec, status: GrantStatus, requested_by: dict[str, Any]
-    ) -> StandingGrant:
-        """A new standing grant, `approved` (by the browser) or `requested`;
-        `LiveGrantError` while another is live."""
-        return await self._call(self._attach_grant, trigger_id, spec, status, requested_by)
+        self,
+        trigger_id: str,
+        spec: GrantSpec,
+        status: GrantStatus,
+        requested_by: dict[str, Any],
+        seen: str | None = None,
+    ) -> StandingGrant | None:
+        """A new standing grant, `approved` (by the browser) or `requested`; None without
+        the trigger. `LiveGrantError` while another is live; `TriggerChangedError` when
+        `seen` is not the trigger's `state_hash` now."""
+        return await self._call(self._attach_grant, trigger_id, spec, status, requested_by, seen)
 
     async def current_grant(self, trigger_id: str) -> StandingGrant | None:
         return await self._call(self._current_grant, trigger_id)
 
-    async def approve_grant(self, trigger_id: str, spec: GrantSpec | None) -> StandingGrant | None:
-        return await self._call(self._decide_grant, trigger_id, spec, True)
+    async def approve_grant(
+        self, trigger_id: str, spec: GrantSpec | None, seen: str
+    ) -> StandingGrant | None:
+        """Approve the requested grant, as `spec` when given, only if `seen` is the
+        trigger's `state_hash` now (`TriggerChangedError`)."""
+        return await self._call(self._decide_grant, trigger_id, spec, True, seen)
 
     async def decline_grant(self, trigger_id: str) -> StandingGrant | None:
-        return await self._call(self._decide_grant, trigger_id, None, False)
+        return await self._call(self._decide_grant, trigger_id, None, False, None)
 
     async def revoke_grant(self, trigger_id: str, revoked_by: str) -> StandingGrant | None:
         return await self._call(self._revoke_grant, trigger_id, revoked_by)
 
     async def seed_run_grant(
-        self, run_id: str, trigger_id: str, requested_by: dict[str, Any], now: datetime
+        self,
+        run_id: str,
+        trigger_id: str,
+        requested_by: dict[str, Any],
+        now: datetime,
+        checked: str | None = None,
     ) -> str | None:
         """The run's own grant from the trigger's standing grant in force (§12.4), under
         that grant's lock so a revocation lands wholly before or after it. Its id, or None
-        with no standing grant in force."""
-        return await self._call(self._seed_run_grant, run_id, trigger_id, requested_by, now)
+        with no standing grant in force, or when the trigger is no longer the `checked`
+        one (`state_hash` without its grant): its grant was approved for something else."""
+        return await self._call(
+            self._seed_run_grant, run_id, trigger_id, requested_by, now, checked
+        )
 
     # -- fires --------------------------------------------------------------------
 
@@ -170,11 +198,16 @@ class TriggerStore:
     async def fire_of_run(self, run_id: str) -> tuple[Fire, Trigger | None] | None:
         return await self._call(self._fire_of_run, run_id)
 
-    async def previous_run_open(self, trigger_id: str, fire_key: str) -> bool:
-        return await self._call(self._previous_run_open, trigger_id, fire_key)
-
-    async def started_since(self, trigger_id: str, since: timedelta) -> int:
-        return await self._call(self._started_since, trigger_id, since)
+    async def admit(
+        self, trigger_id: str, fire_key: str, rate_cap: int | None, checked: str | None = None
+    ) -> str | None:
+        """Admit the pending fire under the trigger's row lock (§12.2): None when it may
+        start its run (marked `admitted`; one admitted already stays so), else why not:
+        `deleted`, `paused`, `overlap` (with `overlap: skip`, another admitted or started
+        fire's run is open) or `rate` (`rate_cap` fires admitted or started in the last
+        hour), or `changed` when the trigger is no longer the `checked` one
+        (`state_hash` without its grant)."""
+        return await self._call(self._admit, trigger_id, fire_key, rate_cap, checked)
 
     # -- implementation -------------------------------------------------------------
 
@@ -227,6 +260,7 @@ class TriggerStore:
         }
         sets = "".join(f", {column} = %({column})s" for column in columns)
         with self._pool.connection() as conn, conn.transaction():
+            # The row lock an approval checks what it saw under.
             row = conn.execute(
                 f"UPDATE flow_triggers SET updated_by = %(by)s, updated_at = now(){sets}"
                 f" WHERE id = %(id)s RETURNING {_TRIGGER}",
@@ -234,7 +268,14 @@ class TriggerStore:
             ).fetchone()
             if row is None:
                 return None
-            self._revoke_live(conn, trigger_id, revoked_by)
+            # Ruling 20: a person approves it again for what the trigger is now. Runs
+            # already started keep the grant they were given.
+            conn.execute(
+                "UPDATE flow_trigger_grants SET status = 'requested', approved_by = NULL,"
+                " approved_at = NULL, expires_at = NULL WHERE trigger_id = %s"
+                " AND status = 'approved' AND revoked_at IS NULL",
+                (trigger_id,),
+            )
         return Trigger.model_validate(row)
 
     def _set_paused(
@@ -266,6 +307,9 @@ class TriggerStore:
 
     def _delete(self, trigger_id: str, revoked_by: str) -> bool:
         with self._pool.connection() as conn, conn.transaction():
+            # The trigger first, as every other writer locks it: then its grants.
+            if self._locked_trigger(conn, trigger_id) is None:
+                return False
             self._revoke_live(conn, trigger_id, revoked_by)
             # The run grants it seeded, revoked above, keep naming it after the delete.
             deleted = conn.execute("DELETE FROM flow_triggers WHERE id = %s", (trigger_id,))
@@ -282,11 +326,23 @@ class TriggerStore:
         return [row["id"] for row in rows]
 
     def _attach_grant(
-        self, trigger_id: str, spec: GrantSpec, status: GrantStatus, requested_by: dict[str, Any]
-    ) -> StandingGrant:
+        self,
+        trigger_id: str,
+        spec: GrantSpec,
+        status: GrantStatus,
+        requested_by: dict[str, Any],
+        seen: str | None,
+    ) -> StandingGrant | None:
         approved = status == "approved"
         try:
-            with self._pool.connection() as conn:
+            with self._pool.connection() as conn, conn.transaction():
+                trigger = self._locked_trigger(conn, trigger_id)
+                if trigger is None:
+                    return None
+                if self._live_grant(conn, trigger_id) is not None:
+                    raise LiveGrantError(trigger_id)
+                if seen is not None and seen != state_hash(trigger, None):
+                    raise TriggerChangedError(trigger_id)
                 row = conn.execute(
                     "INSERT INTO flow_trigger_grants (id, trigger_id, status, spec, requested_by,"
                     " approved_by, approved_at, expires_at)"
@@ -308,21 +364,51 @@ class TriggerStore:
         assert row is not None
         return StandingGrant.model_validate(row)
 
+    def _locked_trigger(self, conn: Connection[DictRow], trigger_id: str) -> Trigger | None:
+        row = conn.execute(
+            f"SELECT {_TRIGGER} FROM flow_triggers WHERE id = %s FOR UPDATE", (trigger_id,)
+        ).fetchone()
+        return Trigger.model_validate(row) if row else None
+
+    def _live_grant(self, conn: Connection[DictRow], trigger_id: str) -> StandingGrant | None:
+        row = conn.execute(
+            f"SELECT {_GRANT} FROM flow_trigger_grants WHERE trigger_id = %s"
+            " AND status IN ('requested', 'approved') AND revoked_at IS NULL FOR UPDATE",
+            (trigger_id,),
+        ).fetchone()
+        return StandingGrant.model_validate(row) if row else None
+
+    def live_hash(self, trigger: Trigger) -> str:
+        """`state_hash` of the trigger with its live standing grant, as a view shows it."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                f"SELECT {_GRANT} FROM flow_trigger_grants WHERE trigger_id = %s"
+                " AND status IN ('requested', 'approved') AND revoked_at IS NULL",
+                (trigger.id,),
+            ).fetchone()
+        return state_hash(trigger, StandingGrant.model_validate(row) if row else None)
+
     def _current_grant(self, trigger_id: str) -> StandingGrant | None:
         with self._pool.connection() as conn:
             row = conn.execute(_CURRENT_GRANT, (trigger_id,)).fetchone()
         return StandingGrant.model_validate(row) if row else None
 
     def _decide_grant(
-        self, trigger_id: str, spec: GrantSpec | None, approve: bool
+        self, trigger_id: str, spec: GrantSpec | None, approve: bool, seen: str | None
     ) -> StandingGrant | None:
         with self._pool.connection() as conn, conn.transaction():
+            trigger = self._locked_trigger(conn, trigger_id)
+            if trigger is None:
+                return None
             row = conn.execute(_CURRENT_GRANT + " FOR UPDATE", (trigger_id,)).fetchone()
             if row is None:
                 return None
             grant = StandingGrant.model_validate(row)
             if grant.status != "requested" or grant.revoked_at is not None:
                 raise StandingGrantStateError(grant)
+            # Approving is bound to what the person saw (§12.4); declining only removes.
+            if approve and seen != state_hash(trigger, grant):
+                raise TriggerChangedError(trigger_id)
             final = spec or grant.spec
             row = conn.execute(
                 "UPDATE flow_trigger_grants SET status = %s, spec = %s,"
@@ -343,6 +429,8 @@ class TriggerStore:
 
     def _revoke_grant(self, trigger_id: str, revoked_by: str) -> StandingGrant | None:
         with self._pool.connection() as conn, conn.transaction():
+            if self._locked_trigger(conn, trigger_id) is None:
+                return None
             row = conn.execute(_CURRENT_GRANT + " FOR UPDATE", (trigger_id,)).fetchone()
             if row is None:
                 return None
@@ -379,9 +467,19 @@ class TriggerStore:
         )
 
     def _seed_run_grant(
-        self, run_id: str, trigger_id: str, requested_by: dict[str, Any], now: datetime
+        self,
+        run_id: str,
+        trigger_id: str,
+        requested_by: dict[str, Any],
+        now: datetime,
+        checked: str | None,
     ) -> str | None:
         with self._pool.connection() as conn, conn.transaction():
+            trigger = self._locked_trigger(conn, trigger_id)
+            if trigger is None:
+                return None
+            if checked is not None and checked != state_hash(trigger, None):
+                return None
             row = conn.execute(
                 f"SELECT {_GRANT} FROM flow_trigger_grants WHERE trigger_id = %s"
                 " AND status = 'approved' AND revoked_at IS NULL AND expires_at > %s"
@@ -463,27 +561,41 @@ class TriggerStore:
             return None
         return Fire.model_validate(row), self._get(row["trigger_id"])
 
-    def _previous_run_open(self, trigger_id: str, fire_key: str) -> bool:
-        with self._pool.connection() as conn:
-            row = conn.execute(
-                "SELECT f.fired_at, r.status FROM flow_trigger_fires f"
-                " LEFT JOIN workflow_runs r ON r.id = f.run_id"
-                " WHERE f.trigger_id = %s AND f.fire_key <> %s AND f.outcome = 'started'"
-                " ORDER BY f.fired_at DESC LIMIT 1",
+    def _admit(
+        self, trigger_id: str, fire_key: str, rate_cap: int | None, checked: str | None
+    ) -> str | None:
+        with self._pool.connection() as conn, conn.transaction():
+            trigger = self._locked_trigger(conn, trigger_id)
+            if trigger is None:
+                return "deleted"
+            fire = conn.execute(
+                "SELECT outcome FROM flow_trigger_fires WHERE trigger_id = %s AND fire_key = %s",
                 (trigger_id, fire_key),
             ).fetchone()
-            now = conn.execute("SELECT now() AS now").fetchone()
-        if row is None or now is None:
-            return False
-        if row["status"] is None:
-            return bool(now["now"] - row["fired_at"] < STARTING_GRACE)
-        return row["status"] not in TERMINAL
-
-    def _started_since(self, trigger_id: str, since: timedelta) -> int:
-        with self._pool.connection() as conn:
-            row = conn.execute(
-                "SELECT count(*) AS n FROM flow_trigger_fires WHERE trigger_id = %s"
-                " AND outcome = 'started' AND fired_at > now() - %s",
-                (trigger_id, since),
-            ).fetchone()
-        return int(row["n"]) if row else 0
+            if fire is not None and fire["outcome"] in ("admitted", "started"):
+                return None  # a retry of a fire admitted already
+            if trigger.paused:
+                return "paused"
+            if checked is not None and checked != state_hash(trigger, None):
+                return "changed"
+            others = conn.execute(
+                "SELECT f.fired_at, r.status, now() - f.fired_at AS age"
+                " FROM flow_trigger_fires f LEFT JOIN workflow_runs r ON r.id = f.run_id"
+                " WHERE f.trigger_id = %s AND f.fire_key <> %s"
+                " AND f.outcome IN ('admitted', 'started')",
+                (trigger_id, fire_key),
+            ).fetchall()
+            if trigger.overlap == "skip" and any(
+                (o["status"] is None and o["age"] < STARTING_GRACE)
+                or (o["status"] is not None and o["status"] not in TERMINAL)
+                for o in others
+            ):
+                return "overlap"
+            if rate_cap is not None and sum(o["age"] < _HOUR for o in others) >= rate_cap:
+                return "rate"
+            conn.execute(
+                "UPDATE flow_trigger_fires SET outcome = 'admitted'"
+                " WHERE trigger_id = %s AND fire_key = %s",
+                (trigger_id, fire_key),
+            )
+        return None

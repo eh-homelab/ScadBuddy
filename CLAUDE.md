@@ -274,7 +274,8 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   everything from the trigger's row (the Schedule carries the trigger id only) and runs
   as its creator, with a run grant only from a standing grant a person approved; never
   take an author or a grant status from a body. A trigger pins a version; any edit
-  revokes its standing grant.
+  returns its standing grant to requested, and an approval names the state it saw
+  (`seen`); a fire is admitted, and a standing grant spent, under row locks.
 - `backend/scadbuddy/operations/` — the `operations` record (`store.py`, the table
   `operations`), `kinds.py` (`OperationKind`: a kind's check, its effect, its
   attempts, and its queue) and `component.py` (`OPERATIONS`, `OperationsDep`). A
