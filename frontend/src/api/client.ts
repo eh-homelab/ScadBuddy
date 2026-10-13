@@ -598,11 +598,6 @@ export async function command<T>(
 }
 
 /**
- * A command's first answer to its end: the route's own body, or a 202's operation
- * followed through `GET /operations/{id}` to its result, or to the problem the route
- * would have answered.
- */
-/**
  * A multipart upload as a command (#1054). XHR rather than `fetch`, which reports no
  * upload progress; a video runs to a gigabyte. `onProgress` gets the fraction sent, 0
  * to 1. `form` builds the body afresh for each re-send.
@@ -647,6 +642,11 @@ function uploadForm<T>(path: string, form: () => FormData, onProgress?: (fractio
   return reattach(send, undefined, { bounded: true }).then((first) => followOperation<T>(first))
 }
 
+/**
+ * A command's first answer to its end: the route's own body, or a 202's operation
+ * followed through `GET /operations/{id}` to its result, or to the problem the route
+ * would have answered.
+ */
 async function followOperation<T>(
   first: { status: number; body: T | OperationAccepted },
   signal?: AbortSignal,

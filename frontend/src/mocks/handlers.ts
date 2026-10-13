@@ -3036,6 +3036,7 @@ export const handlers = [
       url: `/api/v1/prints/${print.archive_id}/attachments/${id}/file`,
       filename: file.name,
       size_bytes: file.size,
+      promoted_to: [],
       created_at: '2026-10-13T12:00:00Z',
     }
     state.printAttachments.set(print.archive_id, [...(state.printAttachments.get(print.archive_id) ?? []), added])
@@ -3072,6 +3073,10 @@ export const handlers = [
     const { slug } = (await request.json()) as { slug: string }
     const model = state.models.find((each) => each.slug === slug)
     if (!model) return problem(404, 'Not Found', `there is no template ${slug}`)
+    if (found.promoted_to.includes(slug)) {
+      return problem(409, 'Conflict', `this attachment is in ${slug}'s gallery already`)
+    }
+    found.promoted_to = [...found.promoted_to, slug]
     return HttpResponse.json(model)
   }),
 

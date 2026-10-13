@@ -1,4 +1,4 @@
-import { useState, type DragEvent } from 'react'
+import { useRef, useState, type DragEvent } from 'react'
 import { Link } from 'react-router'
 import { api } from '../../api/client'
 import type { PrintAttachment, PrintDetail } from '../../api/types'
@@ -8,7 +8,10 @@ import { modelPath } from '../../lib/deeplink'
 import { Button } from '../ui/Button'
 import { Spinner } from '../ui/Spinner'
 
-type Upload = { name: string; fraction: number }
+type Upload = { id: number; name: string; fraction: number }
+
+/** The server's caption limit (`MAX_CAPTION_CHARS`, `library/media.py`). */
+const MAX_CAPTION_CHARS = 1000
 
 /**
  * #309, #311 — photos and videos of the real finished object. Dropped, chosen, or taken
@@ -19,6 +22,7 @@ type Upload = { name: string; fraction: number }
 export function PrintAttachments({ print, onChanged }: { print: PrintDetail; onChanged: () => void }) {
   const limit = useUploadLimit()
   const [uploads, setUploads] = useState<Upload[]>([])
+  const nextUpload = useRef(0)
   const [errors, setErrors] = useState<string[]>([])
   const [over, setOver] = useState(false)
 
@@ -34,15 +38,17 @@ export function PrintAttachments({ print, onChanged }: { print: PrintDetail; onC
     }
     setErrors(problems)
     for (const file of fine) {
-      setUploads((now) => [...now, { name: file.name, fraction: 0 }])
+      // Its own id: a phone's camera names every capture alike (image.jpg).
+      const id = (nextUpload.current += 1)
+      setUploads((now) => [...now, { id, name: file.name, fraction: 0 }])
       try {
         await api.addPrintAttachment(print.archive_id, file, '', (fraction) =>
-          setUploads((now) => now.map((upload) => (upload.name === file.name ? { ...upload, fraction } : upload))),
+          setUploads((now) => now.map((upload) => (upload.id === id ? { ...upload, fraction } : upload))),
         )
       } catch (caught) {
         setErrors((now) => [...now, `${file.name}: ${failure(caught)}`])
       } finally {
-        setUploads((now) => now.filter((upload) => upload.name !== file.name))
+        setUploads((now) => now.filter((upload) => upload.id !== id))
       }
     }
     if (fine.length > 0) onChanged()
@@ -76,7 +82,7 @@ export function PrintAttachments({ print, onChanged }: { print: PrintDetail; onC
       {uploads.length > 0 && (
         <ul aria-label="Uploading" className="space-y-1 text-[12px] text-muted">
           {uploads.map((upload) => (
-            <li key={upload.name} className="flex items-center gap-2">
+            <li key={upload.id} className="flex items-center gap-2">
               <Spinner /> {upload.name}
               <progress max={1} value={upload.fraction} aria-label={`Uploading ${upload.name}`} className="flex-1" />
             </li>
@@ -149,7 +155,7 @@ function AttachmentItem({
   const [caption, setCaption] = useState(attachment.caption ?? '')
   const [busy, setBusy] = useState<'caption' | 'delete' | 'promote' | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [promoted, setPromoted] = useState(false)
+  const [promoted, setPromoted] = useState(print.slug !== null && attachment.promoted_to.includes(print.slug))
   const [confirming, setConfirming] = useState(false)
   const name = attachment.caption ?? attachment.filename
 
@@ -197,7 +203,7 @@ function AttachmentItem({
           onChange={(event) => setCaption(event.target.value)}
           aria-label={`Caption for ${attachment.filename}`}
           placeholder="Caption"
-          maxLength={500}
+          maxLength={MAX_CAPTION_CHARS}
           className="min-w-0 flex-1 rounded-[6px] border border-line bg-surface px-2 py-1 text-[13px]"
         />
         {changed && (
@@ -227,7 +233,7 @@ function AttachmentItem({
         )}
         {confirming ? (
           <>
-            <span className="ml-auto text-[12px] text-muted">Delete it from Bambuddy too?</span>
+            <span className="ml-auto text-[12px] text-muted">Delete it from ScadBuddy and Bambuddy?</span>
             <Button
               size="sm"
               variant="danger"
@@ -238,7 +244,7 @@ function AttachmentItem({
               Delete
             </Button>
             <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>
-              Keep
+              Cancel
             </Button>
           </>
         ) : (

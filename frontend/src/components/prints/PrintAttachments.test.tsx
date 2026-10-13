@@ -102,8 +102,66 @@ describe('a print’s own photos and videos (#309, #311)', () => {
     expect(within(captioned).getByRole('link', { name: 'See the gallery' })).toHaveAttribute('href', `/m/${done.slug}`)
 
     await user.click(within(captioned).getByRole('button', { name: 'Remove' }))
-    expect(within(captioned).getByText('Delete it from Bambuddy too?')).toBeInTheDocument()
+    expect(within(captioned).getByText('Delete it from ScadBuddy and Bambuddy?')).toBeInTheDocument()
+    expect(within(captioned).getByRole('button', { name: 'Cancel' })).toBeInTheDocument()
     await user.click(within(captioned).getByRole('button', { name: 'Delete' }))
     expect(await within(section).findByText('No photos or videos added yet.')).toBeInTheDocument()
+  })
+
+  it('keeps one progress row per upload, though a phone names every photo alike', async () => {
+    const pending: Array<() => void> = []
+    const sent = vi.spyOn(api, 'addPrintAttachment').mockImplementation(
+      () => new Promise((resolve) => pending.push(() => resolve(undefined as never))),
+    )
+    const { user } = render()
+    const section = await attachments()
+    const same = () => new File([new Uint8Array([0xff, 0xd8, 0xff])], 'image.jpg', { type: 'image/jpeg' })
+    await user.upload(within(section).getByLabelText('Choose files'), same())
+    await user.upload(within(section).getByLabelText('Take a photo'), same())
+    const uploading = await within(section).findByRole('list', { name: 'Uploading' })
+    await waitFor(() => expect(within(uploading).getAllByRole('listitem')).toHaveLength(2))
+    pending[0]!()
+    await waitFor(() => expect(within(uploading).getAllByRole('listitem')).toHaveLength(1))
+    pending[1]!()
+    await waitFor(() => expect(within(section).queryByRole('list', { name: 'Uploading' })).toBeNull())
+    sent.mockRestore()
+  })
+
+  it('takes a caption as long as the server does', async () => {
+    const { user } = render()
+    const section = await attachments()
+    await user.upload(within(section).getByLabelText('Choose files'), photo())
+    const item = await within(section).findByRole('listitem', { name: 'desk.png' })
+    expect(within(item).getByLabelText('Caption for desk.png')).toHaveAttribute('maxlength', '1000')
+  })
+
+  it('remembers a copy in the gallery after a reload, so it is not offered twice', async () => {
+    const done = prints.find((print) => print.archive_id === 35)!
+    server.use(
+      http.get('/api/v1/prints/35', () =>
+        HttpResponse.json({
+          ...done,
+          attachment_count: 1,
+          media: {
+            ...done.media,
+            attachments: [
+              {
+                id: 7,
+                kind: 'photo',
+                caption: null,
+                url: '/api/v1/prints/35/attachments/7/file',
+                filename: 'kept.png',
+                size_bytes: 10,
+                promoted_to: [done.slug!],
+                created_at: null,
+              },
+            ],
+          },
+        }),
+      ),
+    )
+    render()
+    const item = await within(await attachments()).findByRole('listitem', { name: 'kept.png' })
+    expect(within(item).getByRole('button', { name: 'Added to the gallery' })).toBeDisabled()
   })
 })

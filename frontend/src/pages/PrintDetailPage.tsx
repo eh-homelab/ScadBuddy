@@ -37,12 +37,12 @@ function clock(seconds: number): string {
   return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`
 }
 
-/** The print's photos, timelapse, plate image and attachments, in that order. */
 /** A video attachment's type, from the extension its bytes gave it (#309). */
 function videoType(filename: string): string {
   return filename.toLowerCase().endsWith('.webm') ? 'video/webm' : 'video/mp4'
 }
 
+/** The print's photos, timelapse, plate image and attachments, in that order. */
 function gallerySlides(print: PrintDetail): Slide[] {
   const { media } = print
   const slides: Slide[] = []
