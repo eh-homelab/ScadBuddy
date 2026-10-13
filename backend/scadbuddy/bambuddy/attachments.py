@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import weakref
 from datetime import datetime
 from typing import IO, Literal
 
@@ -156,6 +157,14 @@ class AttachmentStore:
             conn.execute("DELETE FROM print_attachments WHERE id = %s", (attachment_id,))
 
 
+#: One lock per project while its ``Media/`` is looked for and made, so two prints of a
+#: project attached at once make one folder, not two: their operations' subjects are
+#: per print. Held only while some upload needs it.
+_MEDIA_LOCKS: weakref.WeakValueDictionary[tuple[str, int], asyncio.Lock] = (
+    weakref.WeakValueDictionary()
+)
+
+
 async def media_folder(
     client: BambuddyClient, archive: ArchiveDetail, inbox_folder_id: int | None
 ) -> int | None:
@@ -164,24 +173,30 @@ async def media_folder(
     (or a project with no folder of its own yet, which an attachment does not make)."""
     if archive.project_id is None:
         return inbox_folder_id
-    folders = await client.folders_by_project(archive.project_id)
-    own = project_folder(folders)
-    if own is None:
-        return inbox_folder_id
-    media = next(
-        (
-            folder
-            for folder in folders
-            if folder.parent_id == own.id and folder.name == MEDIA_FOLDER
-        ),
-        None,
-    )
-    if media is not None:
-        return media.id
-    made = await client.create_folder(
-        FolderCreate(name=MEDIA_FOLDER, parent_id=own.id, project_id=archive.project_id)
-    )
-    return made.id
+    key = (client.config.base_url, archive.project_id)
+    lock = _MEDIA_LOCKS.get(key)
+    if lock is None:
+        lock = _MEDIA_LOCKS[key] = asyncio.Lock()
+    async with lock:
+        folders = await client.folders_by_project(archive.project_id)
+        own = project_folder(folders)
+        if own is None:
+            return inbox_folder_id
+        # The first, should a second have been made some other way.
+        media = min(
+            (
+                folder.id
+                for folder in folders
+                if folder.parent_id == own.id and folder.name == MEDIA_FOLDER
+            ),
+            default=None,
+        )
+        if media is not None:
+            return media
+        made = await client.create_folder(
+            FolderCreate(name=MEDIA_FOLDER, parent_id=own.id, project_id=archive.project_id)
+        )
+        return made.id
 
 
 async def upload(
