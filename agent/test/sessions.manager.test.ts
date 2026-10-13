@@ -20,7 +20,7 @@ import {
 import type { PluginsForRun } from '../src/plugins/forwarder.js'
 import type { CheckedPlugin } from '../src/plugins/registry.js'
 import { AuditLog } from '../src/audit/log.js'
-import { drainRetains } from '../src/memory/hindsight.js'
+import { drainRetains, SETTING_RECALL_MAX_QUERY_CHARS } from '../src/memory/hindsight.js'
 import { startFakeHindsight } from './support/fakeHindsight.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, agentB, browser, collectUntil, type FakeTurn, manager, scriptedRunner, tempPaths } from './support/sessions.js'
@@ -541,6 +541,41 @@ describe.skipIf(!TEST_DATABASE_URL)(
         const off = manager({ sql: db.sql, paths, run: runner, remotePlugins, memory: false })
         await (await off.send(session.id, agentA, 'once more')).done
         expect(runs[2]!.memoryHooks).toBeUndefined()
+      } finally {
+        await fake.close()
+      }
+    })
+
+    it('reads the recall query cap from Settings at each turn (memory_recall_max_query_chars)', async () => {
+      const fake = await startFakeHindsight()
+      try {
+        const paths = await tempPaths()
+        const { runner, runs } = scriptedRunner(() => ({ reply: 'ok' }))
+        const hindsight: CheckedPlugin = {
+          plugin: { name: 'hindsight', url: `http://hindsight.invalid:${fake.port}/mcp/b/`, toolTiers: {}, disabledTools: [] },
+          address: '127.0.0.1',
+        }
+        const remotePlugins = (): Promise<PluginsForRun> =>
+          Promise.resolve({ plugins: [], problems: [], secrets: [], hindsight, release: () => {} })
+        const settings = new SettingsStore(db.sql)
+        const m = manager({ sql: db.sql, paths, run: runner, remotePlugins, settings, memory: { hookConfig: { autoRetain: false } } })
+        const recallOf = async (i: number, sessionId: string) =>
+          runs[i]!.memoryHooks!.UserPromptSubmit![0]!.hooks[0]!(
+            { session_id: sessionId, transcript_path: '/x', cwd: '/', hook_event_name: 'UserPromptSubmit', prompt: runs[i]!.prompt as string },
+            undefined,
+            { signal: new AbortController().signal },
+          )
+        const long = 'a'.repeat(1000)
+        const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: long })
+        await turn!.done
+        await recallOf(0, session.id)
+        await settings.set(SETTING_RECALL_MAX_QUERY_CHARS, 12)
+        await (await m.send(session.id, agentA, long)).done
+        await recallOf(1, session.id)
+        await settings.set(SETTING_RECALL_MAX_QUERY_CHARS, 0)
+        await (await m.send(session.id, agentA, long)).done
+        await recallOf(2, session.id)
+        expect(fake.recalls().map((r) => (r.body as { query: string }).query.length)).toEqual([800, 12, 1000])
       } finally {
         await fake.close()
       }

@@ -354,3 +354,26 @@ async def test_running_out_of_memory_is_never_kept_as_the_files_refusal(
     monkeypatch.undo()
     [obj] = (await read_library_objects(bambuddy, 93, blobs=blobs, cache=cache)).objects
     assert obj.library_file_id == 93
+
+
+@respx.mock
+async def test_running_out_of_memory_reading_a_3mf_is_never_kept_either(
+    bambuddy: BambuddyClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 3MF's own read (#2501), not only an STL's wrap: refused as out of memory,
+    nothing kept, and the next read arranges the file."""
+    download = library_file(88, _project(tmp_path))
+
+    def out_of_memory(*_: object, **__: object) -> Any:
+        raise MemoryError
+
+    monkeypatch.setattr(library_objects, "read_objects", out_of_memory)
+    blobs, cache = LocalBlobStore(tmp_path / "blobs"), tmp_path / "cache"
+    with pytest.raises(NotArrangeableError, match="ran out of memory") as refused:
+        await read_library_objects(bambuddy, 88, blobs=blobs, cache=cache)
+    assert "SCADBUDDY_READ_MAX_TRIANGLES" in refused.value.reason
+    assert not [path for path in cache.rglob("*") if path.is_file()]
+    monkeypatch.undo()
+    [obj] = (await read_library_objects(bambuddy, 88, blobs=blobs, cache=cache)).objects
+    assert obj.library_file_id == 88
+    assert download.call_count == 2

@@ -28,6 +28,7 @@ import shutil
 import tempfile
 import uuid
 from collections.abc import AsyncIterator, Callable
+from functools import partial
 from pathlib import Path
 from typing import BinaryIO
 
@@ -244,6 +245,16 @@ def _hit(path: Path) -> None:
         os.utime(path)
 
 
+async def _off_thread[T](work: Callable[[], T], file: LibraryFile) -> T:
+    """``work`` on a thread, a :class:`MemoryError` refused as :func:`_read` refuses one
+    (#2501): the preview GLB and the analysis run after the read, and the user should
+    hear the same cause either way. Nothing is cached, so the next try reads again."""
+    try:
+        return await asyncio.to_thread(work)
+    except MemoryError:
+        raise NotViewableError(file, str(ReadOutOfMemoryError())) from None
+
+
 def _glb(read: PlateRead) -> bytes:
     with tempfile.TemporaryDirectory() as scratch:
         out = Path(scratch) / "preview.glb"
@@ -284,7 +295,8 @@ async def library_preview(
         else:
             await asyncio.to_thread(_hit, path)
             return cached
-    data = await asyncio.to_thread(_glb, await _read(client, cache, file, plate, budget))
+    read = await _read(client, cache, file, plate, budget)
+    data = await _off_thread(partial(_glb, read), file)
     if path is not None:
         await asyncio.to_thread(_store, path, data, MAX_CACHED)
     return data
@@ -311,7 +323,7 @@ async def library_geometry(
             await asyncio.to_thread(_hit, path)
             return cached
     read = await _read(client, cache, file, plate, budget)
-    analysis = await asyncio.to_thread(_analysis, read, plate)
+    analysis = await _off_thread(partial(_analysis, read, plate), file)
     if path is not None:
         data = (analysis.model_dump_json(indent=2) + "\n").encode("utf-8")
         await asyncio.to_thread(_store, path, data, MAX_CACHED)

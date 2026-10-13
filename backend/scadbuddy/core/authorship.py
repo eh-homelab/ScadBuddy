@@ -22,6 +22,16 @@ trusts its callers (§4.3), and a forged header can only mislabel a revision. Th
 bounded and must be printable, so a trailer cannot smuggle a second line into the
 commit; a malformed one is a 400 rather than quietly ignored.
 
+Flows read them too (spec 2026-10-11-flow-grants-and-git-design.md §4.2): the header
+names a run's starter (`workflow_runs.started_by`), the starter session that may deny,
+narrow or pass up the run's calls outside its grant (`POST /workflow-runs/{id}/
+escalations/{call}`, matched against `started_by`), and the starter that may revoke the
+run's grant. Still a label, not a credential: a forged one can at most deny a call,
+narrow it into the grant the person approved, pass it up, or revoke the grant, each of
+which only removes authority. Nothing that approves, creates or widens anything is
+reachable with the header; those routes need its absence (`api/flows.py`
+`_browser_only`).
+
 A context variable, not a parameter threaded through every catalogue write: the
 commits happen several calls below the routes, in threads (``asyncio.to_thread`` and
 Starlette's threadpool both run the call in a copy of the request's context,

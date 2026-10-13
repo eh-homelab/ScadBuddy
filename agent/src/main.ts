@@ -85,6 +85,7 @@ import { packageKinds } from './plugins/packages/operations.js'
 import { operationActivities } from './temporal/operationActivities.js'
 import { PendingActionStore } from './tools/pending.js'
 import type { ToolServices } from './tools/registry.js'
+import { RenderLimiter, settingsRenderLimits } from './tools/renderLimits.js'
 import { SessionFiles, WORKSPACE_SWEEP_MS } from './workspace/store.js'
 import { toolSwitches } from './tools/switches.js'
 
@@ -230,6 +231,8 @@ const toolServices: ToolServices = {
   pollIntervalMs: 1000,
   renderWaitMs: 10 * 60_000,
   publicBaseUrl: config.publicUrl,
+  // The render limits in Settings, read live (tools/renderLimits.ts).
+  ...(settings ? { renderLimiter: new RenderLimiter(settingsRenderLimits(settings)) } : {}),
   // The tools Settings can turn off (#1911): read from ai_settings at each call.
   switchedOff: toolSwitches(settings),
   // Settings → Plugins' raised tiers and disabled tools (#1953), read at each call.
@@ -553,6 +556,7 @@ const temporalWorker =
                 remotePlugins: durableRemotePlugins,
                 credentialSecrets: durableCredentialSecrets,
                 audit,
+                settings,
               })
             : {}),
           // A flow's agent(...) and ask_session(...) (#1057, 6g): beside the tools, never one.
