@@ -18,6 +18,14 @@ describe('webFetchRefusal', () => {
     expect(await webFetchRefusal('http://rebound.example/', toMetadata)).toMatch(/resolves to 169\.254\.169\.254/)
   })
 
+  it("refuses the pod's loopback, by name, literal or what a name resolves to", async () => {
+    expect(await webFetchRefusal('http://localhost:8081/', publicHost)).toMatch(/loopback/)
+    expect(await webFetchRefusal('http://127.0.0.1:9/', publicHost)).toMatch(/loopback/)
+    expect(await webFetchRefusal('http://[::1]/', publicHost)).toMatch(/loopback/)
+    expect(await webFetchRefusal('http://rebound.example/', async () => ['127.0.0.2'])).toMatch(/resolves to 127\.0\.0\.2/)
+    expect(await webFetchRefusal('http://rebound.example/', async () => ['::ffff:127.0.0.1'])).toMatch(/loopback/)
+  })
+
   it('refuses what is not a plain http(s) URL', async () => {
     expect(await webFetchRefusal('file:///etc/passwd', publicHost)).toMatch(/^WebFetch refused/)
     expect(await webFetchRefusal('https://user:pw@example.com/', publicHost)).toMatch(/^WebFetch refused/)

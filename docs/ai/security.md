@@ -707,9 +707,10 @@ A turn that loads an allowed pin also gets two more things:
   `builtinTools`). They are not ScadBuddy's tools, so a model's call to one is
   `outward`, and in a session it parks for a human. Claude Code's `WebFetch` fetches
   inside Claude Code, outside the agent's egress checks, so a `PreToolUse` hook
-  (`harness/webFetchEgress.ts`) runs `assertHostAllowed` on its URL first and denies a
-  call that fails, approved or not. Claude Code resolves the name again when it
-  connects, so a name re-pointed in between is not caught.
+  (`harness/webFetchEgress.ts`) runs `assertHostAllowed` on its URL first, refuses the
+  pod's loopback as well (the agent's own services), and denies a call that fails,
+  approved or not. Claude Code resolves the name again when it connects, so a name
+  re-pointed in between is not caught (#2681).
 - **Shell injection.** Skill shell injection is on (`disableSkillShellExecution`
   false). Only an allowed package can carry it, because the vetting refuses it
   everywhere else. Measured on Claude Code 2.1.287 (`test/pluginPackages.e2e.test.ts`):
