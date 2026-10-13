@@ -341,7 +341,7 @@ describe('print_output on a library file', () => {
         HttpResponse.json([{ id: 'silk-pla', name: 'Silk PLA', settings: [] }]),
       ),
     )
-    const t = tool('list_filament_profiles')
+    const t = tool('get_filament_profiles')
     expect(t.risk).toBe('read')
     const result = await t.execute({}, ctx())
     expect(firstText(result)).toEqual([{ id: 'silk-pla', name: 'Silk PLA', settings: [] }])

@@ -316,7 +316,7 @@ export const printTools: Tool[] = [
   }),
 
   defineTool({
-    name: 'list_filament_profiles',
+    name: 'get_filament_profiles',
     description:
       'Filament profiles (#717): named process changes the print dialog suggests for a spool, e.g. Silk PLA\'s ' +
       'slower outer wall. Each lists which spools it is for (`match`: the material, and a word in the spool\'s ' +
@@ -694,7 +694,7 @@ export const printTools: Tool[] = [
         .max(8)
         .optional()
         .describe(
-          'Filament profiles to apply, by id (list_filament_profiles), e.g. silk-pla for a silk PLA spool. ' +
+          'Filament profiles to apply, by id (get_filament_profiles), e.g. silk-pla for a silk PLA spool. ' +
             "Never applied unless named here. One that cannot apply to this print is skipped, never refused: " +
             "the run's warnings say so (profile-not-applied) and it prints with the preset as it is.",
         ),
