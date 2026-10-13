@@ -225,6 +225,8 @@ class DurableSession:
         # This turn's other tools (plugins, http_request; #2320):
         # offered from what turn_tools listed, replaced every turn.
         self._turn_tools: set[str] = set()
+        # Their tiers where fixed (TurnTool.tier), for follow_session's labels.
+        self._turn_tiers: dict[str, str] = {}
         # This turn's plugin packages (#2320), from turn_tools: the segment runner loads them.
         self._packages: list[TurnPackage] = []
         # The replica this session's pinned turn tools run on (#2581), from the last listing.
@@ -322,6 +324,9 @@ class DurableSession:
             self._turn_tools = manifest.offer_turn_tools(
                 self._agent._tools, self._tools, self._turn_tools, offered.tools
             )
+            self._turn_tiers = {
+                e.name: e.tier for e in offered.tools if e.name in self._turn_tools and e.tier
+            }
             self._packages = list(offered.packages)
             # The built-ins the allowed packages name, as a classic turn offers them; each
             # call is outward there, so here it runs as its own activity after a human
@@ -350,6 +355,7 @@ class DurableSession:
                 workflow_id=workflow.info().workflow_id,
                 prompted=prompt is not None,
                 since=self._turn.started_at if self._turn else None,
+                tiers=dict(self._turn_tiers),
             ),
             start_to_close_timeout=FOLLOW_TIMEOUT,
             heartbeat_timeout=FOLLOW_HEARTBEAT,
