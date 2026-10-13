@@ -69,7 +69,7 @@ export function PrintItem({ print, view, templateName, onOpenMedia }: Props) {
           ))}
         <Facts print={print} />
         {print.status === 'printing' && subject !== null && (
-          <PrintingNow subject={subject} named={print.printer_name !== null} />
+          <PrintingNow subject={subject} named={print.printer_name !== null || print.printer_id !== null} />
         )}
         <ParamsDiff diff={print.params_diff} />
       </div>
@@ -187,7 +187,7 @@ function PrintingNow({ subject, named }: { subject: string; named: boolean }) {
   const copy = copies.find((c) => c.stage === 'running') ?? copies[0]
   if (!copy) return null
   const text = copy.message ?? copy.waiting_reason
-  // The list names the archive's printer; the read's is only a fallback.
+  // The list names the archive's printer (#2363); the read's is only for a print with none.
   const printer = named ? null : copy.printer_name
   if (!printer && !text) return null
   return (
