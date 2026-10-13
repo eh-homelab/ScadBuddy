@@ -407,6 +407,11 @@ describe('ArrangeDialog', () => {
       }
       expect(arrange).not.toHaveBeenCalled()
       expect(onArranged).not.toHaveBeenCalled()
+      // #2286 — tried again from here, at once: no second question.
+      const backfill = vi.spyOn(api, 'backfillOutput')
+      await user.click(screen.getByRole('button', { name: 'Re-render again' }))
+      await waitFor(() => expect(backfill).toHaveBeenCalledWith(nova.id))
+      expect(screen.queryByRole('group', { name: 'Re-render first' })).not.toBeInTheDocument()
     })
 
     it('arranges the outputs that never needed a re-render when every re-render fails', async () => {
@@ -522,6 +527,52 @@ describe('ArrangeDialog', () => {
     const progress = await screen.findByText('Laying out the objects…')
     expect(progress).toHaveAttribute('aria-live', 'polite')
     expect(screen.getByRole('button', { name: 'Arrange' })).toHaveAttribute('aria-busy', 'true')
+  })
+
+  describe('controls (#2286)', () => {
+    it('has a Close button, a primary Arrange, and starts on the name', async () => {
+      const onClose = vi.fn()
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([first])} onClose={onClose} onArranged={vi.fn()} />,
+      )
+      const dialog = await screen.findByRole('dialog', { name: 'Arrange' })
+      expect(within(dialog).getByLabelText('Name')).toHaveFocus()
+      expect(within(dialog).getByRole('button', { name: 'Arrange' }).className).toContain('bg-accent')
+      await user.click(within(dialog).getByRole('button', { name: 'Close' }))
+      expect(onClose).toHaveBeenCalledOnce()
+    })
+
+    it('takes a row out with Remove, and leaves it out of the request', async () => {
+      const onArranged = vi.fn()
+      const bin: Output = {
+        ...first,
+        id: '8'.repeat(32),
+        name: 'Bin',
+        manifest: [{ ...first.manifest![0]!, part: 'piece-bin', bom_piece: 'bin', count: 1 }],
+      }
+      addMockOutput(bin)
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([first, bin])} onClose={vi.fn()} onArranged={onArranged} />,
+      )
+      const label = await screen.findByLabelText(/^Copies of .*Bin/)
+      const rowLabel = label.getAttribute('aria-label')!.replace(/^Copies of /, '')
+      await user.click(screen.getByRole('button', { name: `Remove ${rowLabel}` }))
+      expect(screen.queryByLabelText(`Copies of ${rowLabel}`)).not.toBeInTheDocument()
+      await user.click(screen.getByRole('button', { name: 'Arrange' }))
+      await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+      expect(lastArrangeRequest()?.objects.map((o) => o.output_id)).toEqual([first.id])
+    })
+
+    it('saves an unnamed arrange under the models it holds, shown as the placeholder', async () => {
+      const onArranged = vi.fn()
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={onArranged} />,
+      )
+      await waitFor(() => expect(screen.getByLabelText('Name')).toHaveAttribute('placeholder', 'Arrange of Name Keychain'))
+      await user.click(screen.getByRole('button', { name: 'Arrange' }))
+      await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+      expect(lastArrangeRequest()?.name).toBe('Arrange of Name Keychain')
+    })
   })
 
   it('says it is saving once the layout is done, and how long a stage has run (#2283)', async () => {

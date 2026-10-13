@@ -321,6 +321,14 @@ export function LibraryPage() {
             >
               Arrange selected ({printable.length})
             </Button>
+            {/* #2286 — a ticked file Arrange cannot take is said, not silently dropped. */}
+            {picked.length > printable.length && (
+              <span role="note" className="text-[12px] text-muted">
+                {`${picked.length - printable.length} selected ${
+                  picked.length - printable.length === 1 ? 'file' : 'files'
+                } can't be arranged: only unsliced 3MF and STL files can.`}
+              </span>
+            )}
             <Button
               size="sm"
               data-testid="library-copy-selected"

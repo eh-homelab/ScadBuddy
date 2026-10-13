@@ -91,7 +91,8 @@ describe('LibraryPage', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Arrange' }))
     const done = await screen.findByRole('status', { name: 'Arranged' })
     expect(done).toHaveTextContent('Arranged onto 2 plates.')
-    expect(done).toHaveTextContent("Saved in Name Keychain's history.")
+    // #2286 — unnamed, it is saved under a name made of what it holds.
+    expect(done).toHaveTextContent("Saved as Arrange of Name Keychain, Clara's Wand in Name Keychain's history.")
     expect(screen.getByRole('link', { name: 'Open in History' })).toHaveAttribute('href', '/m/name-keychain/history')
     expect(screen.getByRole('button', { name: 'Arrange selected (0)' })).toBeDisabled()
     // #2287 — it is not sent anywhere yet; Print opens the print dialog with the result.
@@ -123,6 +124,21 @@ describe('LibraryPage', () => {
     expect(screen.getByRole('button', { name: 'Arrange selected (0)' })).toBeDisabled()
     await user.click(screen.getAllByRole('checkbox', { name: /Select .*\.3mf$/ })[0] as HTMLElement)
     expect(screen.getByRole('button', { name: 'Arrange selected (1)' })).toBeEnabled()
+  })
+
+  it('says a ticked sliced file is left out of Arrange (#2286)', async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library' })
+    await screen.findByTestId('library-file-89')
+    await user.click(screen.getByRole('switch', { name: 'Advanced' }))
+    await user.click(
+      within(await screen.findByTestId('library-file-89')).getByRole('checkbox', { name: /^Select bag-clip/ }),
+    )
+    await user.click(within(await screen.findByTestId('library-file-104')).getByRole('checkbox'))
+    expect(screen.getByRole('button', { name: 'Arrange selected (1)' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Delete selected (2)' })).toBeEnabled()
+    expect(screen.getByRole('note')).toHaveTextContent(
+      "1 selected file can't be arranged: only unsliced 3MF and STL files can.",
+    )
   })
 
   it('renders a folder of hundreds of files with lazy thumbnails', async () => {

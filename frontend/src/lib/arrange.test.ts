@@ -339,6 +339,19 @@ describe('followUntil survives a failed read (#2125)', () => {
 })
 
 describe('backfillFailures (#1007)', () => {
+  it('says one reason once, naming every output it stopped (#2286)', () => {
+    const a = { id: 'a', name: 'A' }
+    const b = { id: 'b', name: 'B' }
+    const c = { id: 'c', name: 'C' }
+    expect(
+      backfillFailures([
+        { output: a, error: 'the template is gone' },
+        { output: b, error: 'the template is gone.' },
+        { output: c, error: 'no revision' },
+      ]),
+    ).toBe('A and B could not be re-rendered: the template is gone. C could not be re-rendered: no revision.')
+  })
+
   const ref = { id: 'o1', name: 'Nova' }
 
   it('names the button that tries again where it is shown', () => {

@@ -211,17 +211,25 @@ function shortReason(error: string): string {
 }
 
 /**
- * "A could not be re-rendered: why." for each failure, one sentence each. `retry` is the
- * button that tries again where this is shown: Arrange in its dialog, Re-arrange in Print.
+ * "A could not be re-rendered: why." One sentence per reason (#2286): outputs that failed
+ * for the same reason are named together, so three failures of one cause read as one.
+ * `retry` is the button that tries again where this is shown: Arrange in its dialog,
+ * Re-arrange in Print.
  */
 export function backfillFailures(failed: Backfilled['failed'], retry = 'Arrange'): string {
-  return failed
-    .map(({ output, error, running }) =>
-      running
-        ? `${output.name ?? output.id} is still re-rendering; try ${retry} again later.`
-        : `${output.name ?? output.id} could not be re-rendered: ${shortReason(error)}.`,
-    )
-    .join(' ')
+  const running = failed.filter((f) => f.running).map((f) => f.output)
+  const byReason = new Map<string, OutputRef[]>()
+  for (const { output, error, running: still } of failed) {
+    if (still) continue
+    const reason = shortReason(error)
+    byReason.set(reason, [...(byReason.get(reason) ?? []), output])
+  }
+  return [
+    ...(running.length > 0
+      ? [`${listNames(running)} ${running.length === 1 ? 'is' : 'are'} still re-rendering; try ${retry} again later.`]
+      : []),
+    ...[...byReason].map(([reason, outputs]) => `${listNames(outputs)} could not be re-rendered: ${reason}.`),
+  ].join(' ')
 }
 
 /** POST /outputs/{id}/backfill's 409 code: the output records its objects already. */
