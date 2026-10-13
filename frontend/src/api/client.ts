@@ -1,4 +1,5 @@
 import type {
+  InventoryView,
   AnalysisReport,
   AnalysisRun,
   AnalyzerDecision,
@@ -1381,6 +1382,10 @@ export const api = {
     const suffix = search.size > 0 ? `?${search}` : ''
     return request<FilamentOptions>(`/print/outputs/${seg(outputId)}/filaments${suffix}`)
   },
+
+  /** #2351 — Bambuddy's spool inventory, each spool with where it is loaded. */
+  getSpoolInventory: (includeArchived = false) =>
+    request<InventoryView>(`/farm/inventory${includeArchived ? '?include_archived=true' : ''}`),
 
   /**
    * spec 2026-09-27 §3 — one read for the whole spool-first print dialog: printers,
