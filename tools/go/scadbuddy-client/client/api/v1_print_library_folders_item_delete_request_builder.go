@@ -37,7 +37,7 @@ func NewV1PrintLibraryFoldersItemDeleteRequestBuilder(rawUrl string, requestAdap
 	return NewV1PrintLibraryFoldersItemDeleteRequestBuilderInternal(urlParams, requestAdapter)
 }
 
-// Post deletes the folder's files as “/delete“ does, then its folders, deepest first(#2686). A file a print waiting in Bambuddy's queue names is a 409 before anythingis deleted. A folder holding a file Bambuddy skipped, and its ancestors, are kept.
+// Post deletes the folder's files as “/delete“ does, then its folders, deepest first(#2686). A file a print waiting in Bambuddy's queue names is a 409 before anythingis deleted, as are files of the folder in Bambuddy's trash; a key without“library:delete_all“ (which sees only its own user's trash) is a 403. A folderholding a file Bambuddy skipped, and its ancestors, are kept.
 // returns a LibraryFolderDeleteResultable when successful
 // returns a V1PrintLibraryFoldersItemLibraryFolderDeleteResult428Error error when the service returns a 428 status code
 // returns a V1PrintLibraryFoldersItemLibraryFolderDeleteResult4XXError error when the service returns a 4XX status code
@@ -66,7 +66,7 @@ func (m *V1PrintLibraryFoldersItemDeleteRequestBuilder) Post(ctx context.Context
 	return res.(i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.LibraryFolderDeleteResultable), nil
 }
 
-// ToPostRequestInformation deletes the folder's files as “/delete“ does, then its folders, deepest first(#2686). A file a print waiting in Bambuddy's queue names is a 409 before anythingis deleted. A folder holding a file Bambuddy skipped, and its ancestors, are kept.
+// ToPostRequestInformation deletes the folder's files as “/delete“ does, then its folders, deepest first(#2686). A file a print waiting in Bambuddy's queue names is a 409 before anythingis deleted, as are files of the folder in Bambuddy's trash; a key without“library:delete_all“ (which sees only its own user's trash) is a 403. A folderholding a file Bambuddy skipped, and its ancestors, are kept.
 // returns a *RequestInformation when successful
 func (m *V1PrintLibraryFoldersItemDeleteRequestBuilder) ToPostRequestInformation(ctx context.Context, requestConfiguration *V1PrintLibraryFoldersItemDeleteRequestBuilderPostRequestConfiguration) (*i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestInformation, error) {
 	requestInfo := i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewRequestInformationWithMethodAndUrlTemplateAndPathParameters(i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.POST, m.BaseRequestBuilder.UrlTemplate, m.BaseRequestBuilder.PathParameters)
