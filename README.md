@@ -612,6 +612,18 @@ Agent-written flows run as `ProjectWorkflow`s on the `projects` task queue
   one commit each with its author and date; it is idempotent, and the log says how many.
 - **`tool`, `agent`, `ask_session`** run on the agent's `agent-tools` queue
   (`SCADBUDDY_TEMPORAL_TASK_QUEUE_AGENT_TOOLS`, read by the API when it starts a run).
+- **Tool tiers come from the agent** (#2704), as its own turns resolve them (the tool's
+  definition, Settings' raised tiers, disabled tools), never from a file in the image.
+  Each `tool(...)` call first asks the activity `flow_tool_tier` on `agent-tools`; the
+  answer can raise the tiers the run started with but never lower them. The API asks
+  the `agent` container in its own pod, `GET /internal/flows/tools` on
+  `SCADBUDDY_AGENT_INTERNAL_URL` (default `http://127.0.0.1:8081`; the agent answers
+  only a loopback peer, and the ingress never routes that path), when a run starts, a
+  grant is approved, and for the editor's tool list. If the agent does not answer, a
+  start or approval is refused (503), the editor lists no tools, and a `tool(...)` call
+  fails. Deploy the agent with this change before the API and the `projects` worker:
+  an older agent has neither the route nor `flow_tool_tier`, so every start would be
+  refused and every `tool(...)` call would fail.
 - **Memory:** `pydantic-monty` keeps a process-wide pool, so the worker's memory does
   not fall back after a large script; the homelab Deployment requests 256 Mi with a
   1 Gi limit (eh-homelab/clusters#2123).

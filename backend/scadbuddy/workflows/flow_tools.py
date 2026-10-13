@@ -181,6 +181,13 @@ TURN_TOOL_PREFIX = "turn:"
 TURN_TOOL_SEPARATOR = "__"
 #: tool(...) reaches the turn tools (#2320); runs recorded before refuse such a name.
 FLOW_TURN_TOOLS_PATCH = "flow-turn-tools-2320"
+#: The agent's own tools' tiers as the agent resolves them when the call is made
+#: (agent/src/temporal/flowTools.ts, #2704): runs recorded before take the run's start's.
+FLOW_TOOL_TIER = "flow_tool_tier"
+FLOW_LIVE_TIERS_PATCH = "flow-live-tiers-2704"
+#: Lowest first (agent/src/harness/permissions.ts RISK_TIERS).
+RISK_TIERS = ("read", "write", "outward")
+_TIER_TIMEOUT = timedelta(seconds=30)
 
 
 def _refusal(err: ActivityError) -> BaseException:
@@ -696,14 +703,51 @@ async def _turn_tool(name: str, args: dict[str, Any], runner: AgentWorkflowRunne
         )
 
 
+async def _live_tier(name: str, own: str | None) -> str:
+    """The tool's tier as the agent resolves it now (`effectiveTool`: its definition,
+    Settings' raised tiers, disabled tools), as its own turns do, and as its activity will
+    check the call again when it runs. The answer only raises: a tool the run started
+    with at a higher tier keeps it. One the agent does not have, or will not say, is
+    refused; nothing falls back to the tiers the run started with."""
+    owner: StepOwner = workflow.instance()
+    try:
+        tiered: dict[str, Any] = await workflow.execute_activity(
+            FLOW_TOOL_TIER,
+            {"tool": name},
+            task_queue=owner.tools_queue,
+            result_type=dict,
+            start_to_close_timeout=_TIER_TIMEOUT,
+            retry_policy=RetryPolicy(maximum_attempts=3, non_retryable_error_types=_TOOL_REFUSALS),
+        )
+    except ActivityError as err:
+        if isinstance(err.cause, ApplicationError) and err.cause.type in (
+            "ToolError",
+            "NotForFlows",
+        ):
+            raise ValueError(f"there is no tool {name!r}: {err.cause.message}") from None
+        if isinstance(err.cause, ApplicationError):
+            raise ToolFailedError(err.cause.message) from None
+        raise
+    tier = tiered.get("tier")
+    if tier not in RISK_TIERS:
+        raise ToolFailedError(f"the agent gave no tier for {name}")
+    if tiered.get("disabled") is True:
+        raise ValueError(f"{name} is disabled in Settings → Plugins")
+    if own in RISK_TIERS and RISK_TIERS.index(own) > RISK_TIERS.index(tier):
+        return own
+    return str(tier)
+
+
 async def _run_tool(name: str, args: dict[str, Any], runner: AgentWorkflowRunner) -> ToolResult:
     owner: StepOwner = workflow.instance()
     tier = owner.tool_tier(name)
-    if tier is None:
-        # Before #2320 an unknown name was refused here with no command: a run recorded
-        # then replays without the patch marker and is refused again.
-        if TURN_TOOL_SEPARATOR in name and workflow.patched(FLOW_TURN_TOOLS_PATCH):
-            return await _turn_tool(name, args, runner)
+    # Before #2320 an unknown name was refused here with no command: a run recorded then
+    # replays without the patch marker and is refused again.
+    if tier is None and TURN_TOOL_SEPARATOR in name and workflow.patched(FLOW_TURN_TOOLS_PATCH):
+        return await _turn_tool(name, args, runner)
+    if workflow.patched(FLOW_LIVE_TIERS_PATCH):
+        tier = await _live_tier(name, tier)
+    elif tier is None:
         raise ValueError(f"there is no tool {name!r}")
     call_id = str(workflow.uuid4())
     if tier == "outward":

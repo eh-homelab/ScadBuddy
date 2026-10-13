@@ -64,7 +64,9 @@ class FlowStart(BaseModel):
     approval_timeout_s: int = 0
     #: Where the agent serves the tools `tool(...)` calls.
     tools_queue: str = "agent-tools"
-    #: The agent's tools and their tiers when the run started (`flows/manifest.py`).
+    #: The agent's tools and their tiers as the agent resolved them when the run started
+    #: (#2704, `flows/agent_tools.py`); each call asks the agent again, whose answer only
+    #: raises them. A run from before #2704 took them from a file and asks nothing.
     tool_tiers: dict[str, str] = {}
     search_attributes: bool = False
     #: The commit of the version it runs, in `data/flows` (#2503); "" from a run started

@@ -40,6 +40,7 @@ from scadbuddy.core.authorship import current_author
 from scadbuddy.core.gitrepo import COMMIT_ID_PATTERN, GitError, RevisionNotFoundError
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import check_approval_timeout
+from scadbuddy.flows.agent_tools import AgentToolsUnavailableError
 from scadbuddy.flows.component import Flows, FlowsDep
 from scadbuddy.flows.definitions import (
     FlowHistoryUnavailableError,
@@ -59,7 +60,6 @@ from scadbuddy.flows.history import ResetPoints, ResetPreview, outward_since, re
 from scadbuddy.flows.images import BLOB_NAME, RunImage, open_image, run_images
 from scadbuddy.flows.inputs import InputsError, resolve_inputs
 from scadbuddy.flows.keys import approval_key
-from scadbuddy.flows.manifest import raise_tiers, tiers
 from scadbuddy.flows.models import (
     HOST_FN,
     TERMINAL,
@@ -543,8 +543,6 @@ async def start_flow_run(
         )
         if value is not None
     )
-    # As the agent will enforce them: Settings may have raised a tool to outward.
-    tool_tiers = raise_tiers(tiers(), await flows.store.tool_overrides())
     try:
         async with asyncio.timeout(COMMAND_ANSWER_DEADLINE.total_seconds()):
             # Started already, its row not yet written: the same run, nothing new.
@@ -554,6 +552,9 @@ async def start_flow_run(
                 return RunAnswer(
                     id=run_id, status="terminated" if closed else "starting", repeated=True
                 )
+            # As the agent will enforce them now (#2704): the run starts with them, and
+            # each call's own answer from the agent may only raise them.
+            tool_tiers = await agent_tool_tiers(flows)
             # Checked only once no repeat answered: a repeat answers its run, whatever
             # has become of the grant it was sent with since.
             if options.grant is not None:
@@ -1002,6 +1003,21 @@ async def escalate_flow_run(
     return operation_answer(result, Escalated)
 
 
+async def agent_tool_tiers(flows: Flows) -> dict[str, str]:
+    """The tools a flow may call at their tiers as the agent resolves them now (#2704,
+    `flows/agent_tools.py`): what a grant's tools are checked against. Refused when the
+    agent does not answer; nothing else says what its tools are."""
+    try:
+        return await flows.agent_tools.tool_tiers()
+    except AgentToolsUnavailableError as err:
+        logger.warning("the agent did not list its tools: %s", err)
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "ScadBuddy's assistant service did not say what its tools are. Try again shortly.",
+            headers={"Retry-After": "5"},
+        ) from None
+
+
 def _check_grant(spec: GrantSpec, tool_tiers: dict[str, str]) -> None:
     if problems := validate_spec(spec, tool_tiers=tool_tiers, now=datetime.now(UTC)):
         raise ApiError(
@@ -1065,7 +1081,7 @@ async def approve_flow_grant(
     # Only a grant still requested is checked: any other answers 409 from the store, which
     # says what is wrong with it better than its spec's problems would.
     if grant.status == "requested" and grant.revoked_at is None:
-        _check_grant(spec, raise_tiers(tiers(), await flows.store.tool_overrides()))
+        _check_grant(spec, await agent_tool_tiers(flows))
     try:
         approved = await flows.store.approve_grant(run_id, spec, approved_by="browser")
     except GrantStateError as err:
