@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Link, useParams } from 'react-router'
 import { api, ApiError } from '../api/client'
 import type { FlowPending, FlowRunView, FlowStep } from '../api/types'
+import { USER_ONLY } from '../agent/dom'
 import { FlowScript } from '../components/flows/FlowScript'
 import { ForgetRun } from '../components/flows/ForgetRun'
 import { GrantPanel } from '../components/flows/GrantPanel'
@@ -13,7 +14,9 @@ import {
   FLOW_STATUS_LABEL,
   flowPath,
   flowRunTopic,
+  hopActor,
   isStaleEntry,
+  proposalDiff,
   STALE_ENTRY_MESSAGE,
   waitingText,
 } from '../lib/flows'
@@ -220,6 +223,8 @@ function PendingCard({ entry, runId, respond }: CardProps) {
         </form>
       ) : (
         <div className="flex flex-col gap-2">
+          <Escalation entry={entry} />
+          {entry.proposed && <Proposal runId={runId} callId={entry.call_id} busy={busy} act={act} />}
           <input
             aria-label="Reason (optional)"
             value={text}
@@ -227,7 +232,8 @@ function PendingCard({ entry, runId, respond }: CardProps) {
             placeholder="Reason (optional)"
             className={FIELD}
           />
-          <div className="flex gap-2">
+          {/* A person's decision: the assistant may neither click nor read it (#2482). */}
+          <div className="flex gap-2" {...USER_ONLY}>
             <Button
               variant="primary"
               size="sm"
@@ -248,6 +254,88 @@ function PendingCard({ entry, runId, respond }: CardProps) {
         </div>
       )}
     </section>
+  )
+}
+
+/** #2482 — where a call outside the run's grant waits, why, and what happened to it on the way. */
+function Escalation({ entry }: { entry: FlowPending }) {
+  if (!entry.hop && !entry.reason) return null
+  return (
+    <div className="text-[12px] text-muted">
+      {entry.hop === 'parent' && entry.hop_until && (
+        <p>
+          With the session that started the run until {new Date(entry.hop_until).toLocaleTimeString()}; you may decide
+          it now.
+        </p>
+      )}
+      {entry.reason && <p>Outside the grant: {entry.reason}</p>}
+      {entry.proposed && <p>Narrowed by the starting session: approve it as proposed, or decide the call as it was made.</p>}
+      {entry.hops.length > 1 && (
+        <ol aria-label="Its way here" className="mt-1 list-inside list-decimal">
+          {entry.hops.map((h, i) => (
+            <li key={i}>
+              {h.action.replace('_', ' ')} by {hopActor(h.actor)} ({h.hop === 'parent' ? 'starting session' : 'you'})
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  )
+}
+
+interface ProposalProps {
+  runId: string
+  callId: string
+  busy: boolean
+  act: (send: () => Promise<unknown>) => Promise<void>
+}
+
+/**
+ * #2482 — a parent's proposal beside the call it narrows, field by field, and its
+ * approval, which names the hash of what was shown: a proposal changed since is
+ * refused. Both are the person's only (USER_ONLY): the assistant neither reads nor
+ * approves it.
+ */
+function Proposal({ runId, callId, busy, act }: ProposalProps) {
+  const proposal = useAsync(() => api.getFlowProposal(runId, callId), [runId, callId])
+  const data = proposal.data
+  return (
+    <div {...USER_ONLY} className="rounded-[6px] border border-line bg-bg p-2">
+      {proposal.error ? (
+        <p className="text-[12px] text-danger">Could not load the proposal: {proposal.error.message}</p>
+      ) : !data ? (
+        <p className="text-[12px] text-muted">Loading the proposal…</p>
+      ) : (
+        <>
+          <table aria-label="Proposed change" className="mb-2 w-full text-left text-[12px]">
+            <thead>
+              <tr>
+                <th className="pr-2 font-medium">Field</th>
+                <th className="pr-2 font-medium">As called</th>
+                <th className="font-medium">As proposed</th>
+              </tr>
+            </thead>
+            <tbody>
+              {proposalDiff(data.original, data.proposed).map((c) => (
+                <tr key={c.path}>
+                  <td className="pr-2 font-mono">{c.path}</td>
+                  <td className="pr-2 font-mono">{c.was}</td>
+                  <td className="font-mono">{c.now}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <Button
+            variant="primary"
+            size="sm"
+            disabled={busy}
+            onClick={() => void act(() => api.decideFlowRun(runId, callId, true, undefined, data.proposal_hash))}
+          >
+            Approve as proposed
+          </Button>
+        </>
+      )}
+    </div>
   )
 }
 

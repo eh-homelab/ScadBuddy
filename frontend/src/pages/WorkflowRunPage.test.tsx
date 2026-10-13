@@ -78,6 +78,40 @@ describe('WorkflowRunPage', () => {
     })
   })
 
+  // #2482 — a call outside the run's grant: where it waits, why, and its way up.
+  it('says a call waits at the starting session first, why it is outside the grant, and that you may decide now', async () => {
+    render('run-escalated')
+    const card = await screen.findByRole('region', { name: 'Waiting for approval: queue_print' })
+    expect(card).toHaveTextContent('With the session that started the run until')
+    expect(card).toHaveTextContent('Outside the grant: print limit reached')
+    expect(within(card).getByRole('button', { name: 'Approve' })).toBeInTheDocument()
+  })
+
+  it("shows a parent's proposal beside the call it narrows, and approves exactly what was shown", async () => {
+    const { user } = render('run-escalated')
+    const card = await screen.findByRole('region', { name: 'Waiting for approval: arrange' })
+    const proposal = await within(card).findByRole('table', { name: 'Proposed change' })
+    expect(within(proposal).getAllByRole('row').map((r) => r.textContent)).toEqual([
+      'FieldAs calledAs proposed',
+      'request.objects[0].count32',
+      'request.objects[1]{"output_id":"b"}(removed)',
+    ])
+    expect(card).toHaveTextContent('Narrowed by the starting session')
+    // A person's to see and to approve: the assistant can neither read nor click it.
+    expect(proposal.closest('[data-agent-user-only]')).not.toBeNull()
+    const approve = within(card).getByRole('button', { name: 'Approve as proposed' })
+    expect(approve.closest('[data-agent-user-only]')).not.toBeNull()
+    await user.click(approve)
+    await waitFor(() => expect(flowRequests()).toHaveLength(1))
+    expect(flowRequests()[0]?.body).toEqual({ call_id: 'call-narrowed', approved: true, proposal: true, proposal_hash: 'f'.repeat(64) })
+  })
+
+  it('keeps the approval of every outward call for the person', async () => {
+    render('run-print')
+    const approve = await screen.findByRole('button', { name: 'Approve' })
+    expect(approve.closest('[data-agent-user-only]')).not.toBeNull()
+  })
+
   it('denies with a reason', async () => {
     const { user } = render('run-print')
     await user.type(await screen.findByLabelText('Reason (optional)'), 'not today')

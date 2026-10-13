@@ -368,10 +368,17 @@ it off when approving the grant), an outside call goes there first.
   sends the starter session a turn, authored `system:escalation`, listing every entry of
   that session's runs at hop `parent` that was not yet delivered: run, step, tool, the
   scrubbed summary, the proposal, and for a child's call the child's reasoning (§4.5).
-  It sends only to an idle session. A session in a turn gets the batch when the turn
-  ends. A classic session gets it through `SessionManager.send`, a durable one through
-  `DurableTurns.send`. The turn runs at the owner's default tiers, as a browser turn
-  does (#2320).
+  It sends only to an idle session. A session in a turn gets the batch on a later
+  tick of the agent's 30 s sweep, once the turn has ended. It goes through
+  `SessionManager.send` (classic or durable), as the session's owner: the turn is the
+  owner's, and its text opens with ScadBuddy's own instruction, the calls' details
+  after it in the untrusted-data envelope (#2482; no separate `system:escalation`
+  author). The turn runs with the tiers the owner holds now: the browser user's all of
+  them, a token's its live tier (as the backend's `parent_tiers` reads it), anyone else
+  `read`, which cannot call `escalation_respond` (`write`), so such a session is
+  skipped. A child's entry records its delivery in `ai_pending_input.delivered_at`, a
+  run's own call in `ai_escalation_deliveries`, each claimed before the turn is sent and
+  released if it did not start.
 - **The answer** is one tool, `escalation_respond(request_id, action, input?, reason?)`,
   `write` tier, with `action` one of `deny`, `narrow`, `pass_up`. It dispatches on the
   id's prefix as the pending-input route does: `durable:` to the agent's
@@ -389,7 +396,8 @@ it off when approving the grant), an outside call goes there first.
   be its owner.
 - **Cost.** Each delivery is a turn of the starter session, paid from its budget
   (`budget_root_id`, #823). A session out of budget, archived, deleted, or whose owner
-  changed by handoff is skipped: its entries go to the person at once.
+  changed by handoff is skipped: a child's entries go to the person at once; a run's own
+  call waits out its hop (its run's timer is the only writer of `waiting_on`).
 - **A child that is the starter session.** A script may `ask_session` the very session
   that started the run. Its outside calls would escalate to itself in the middle of its
   own turn, and it receives escalations only when idle, so they would wait out the whole

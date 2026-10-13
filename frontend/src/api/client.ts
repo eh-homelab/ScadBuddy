@@ -89,6 +89,7 @@ import type {
   TrayAssigned,
   PrintRun,
   FlowDecided,
+  FlowProposal,
   FlowDefinition,
   FlowGrantSpec,
   FlowGrantView,
@@ -702,11 +703,21 @@ export const api = {
       body: JSON.stringify({ call_id: callId, answer }),
     }),
 
-  decideFlowRun: (id: string, callId: string, approved: boolean, reason?: string) =>
+  decideFlowRun: (id: string, callId: string, approved: boolean, reason?: string, proposalHash?: string) =>
     command<FlowDecided>(`/workflow-runs/${seg(id)}/decide`, {
       method: 'POST',
-      body: JSON.stringify({ call_id: callId, approved, ...(reason ? { reason } : {}) }),
+      body: JSON.stringify({
+        call_id: callId,
+        approved,
+        ...(reason ? { reason } : {}),
+        // #2482: approve a parent's proposal, exactly the one shown (its hash).
+        ...(proposalHash ? { proposal: true, proposal_hash: proposalHash } : {}),
+      }),
     }),
+
+  /** #2482 — a parent's proposal beside the call it narrows (the person's only). */
+  getFlowProposal: (id: string, callId: string) =>
+    request<FlowProposal>(`/workflow-runs/${seg(id)}/proposals/${seg(callId)}`),
 
   // #2350 — the Flows tab: every registered flow version, one with its script, and a
   // run started from it. #2487: its editor's Save, check, completion, diff and restore.
