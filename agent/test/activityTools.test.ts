@@ -4,7 +4,7 @@ import { afterAll, afterEach, beforeAll, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { principalHeader } from '../src/tools/authorship.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
-import { runTool, type Tool, type ToolContext } from '../src/tools/registry.js'
+import { runTool, TOOL_DEADLINE_MS, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { BACKEND, services } from './helpers/mcp.js'
 
 const server = setupServer()
@@ -105,4 +105,32 @@ it('activity_get leaves out another principal’s child rows for a read-tier cal
   const text = JSON.stringify(result.content)
   expect(text).toContain('render:b')
   expect(text).not.toContain('render:c')
+})
+
+it('activity_watch lets the deadline cover its wait', () => {
+  const deadline = tool('activity_watch').deadlineMs({ activity_id: 'render:a', wait_seconds: 600 }, ctx())
+  expect(deadline).toBe(600_000 + TOOL_DEADLINE_MS)
+})
+
+it('activity_watch returns the last row read when aborted', async () => {
+  server.use(http.get(`${BACKEND}/api/v1/activity/render%3Aa`, () =>
+    HttpResponse.json({ row: { id: 'render:a', principal: 'test', status: 'running' }, children: [], links: [], detail: {} })))
+  const abort = new AbortController()
+  setTimeout(() => abort.abort(), 30)
+  const result = await tool('activity_watch').execute({ activity_id: 'render:a', wait_seconds: 30 },
+    ctx({ pollIntervalMs: 1000, signal: abort.signal }))
+  expect(JSON.stringify(result.content)).toContain('running')
+})
+
+it('another principal’s row answers as a missing one', async () => {
+  server.use(http.get(`${BACKEND}/api/v1/activity/render%3Aa`, () =>
+    HttpResponse.json({ row: { id: 'render:a', principal: 'browser' }, children: [], links: [], detail: {} })))
+  const result = await runTool(tool('activity_get'), { activity_id: 'render:a' }, ctx({ principal: reader('token:t1') }))
+  expect(JSON.stringify(result.content)).toContain("no activity 'render:a'")
+})
+
+it('activity_list takes an offset time and refuses a NUL', () => {
+  const list = tool('activity_list')
+  expect(() => list.parse({ since: '2026-10-09T10:00:00+02:00' })).not.toThrow()
+  for (const field of ['kind', 'subject', 'cursor']) expect(() => list.parse({ [field]: 'a\0b' })).toThrow()
 })
