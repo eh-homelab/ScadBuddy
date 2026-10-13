@@ -897,6 +897,8 @@ def _credential() -> Credential:
 
 
 async def _segment(out: SegmentOutput, left: float) -> SegmentOutput:
+    # `_on_credentials` reads neither the connector nor the SegmentInput: the runner it
+    # builds is `_Answers`, which answers `out` whatever it is given. Both are None here.
     answers = _Answers(out)
     runner = ScadBuddyRunner(cast(Any, None), KEK, cwd="/tmp", make_runner=answers)
     settings = TurnSettings(long_edge=1568, model=None, own_plugin=False)
@@ -907,16 +909,21 @@ async def _segment(out: SegmentOutput, left: float) -> SegmentOutput:
     return got
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        "Reached maximum budget ($1.00)",
+        "Claude Code returned an error result: Reached maximum budget ($1.00) (exit code: 1)",
+    ],
+)
 @pytest.mark.parametrize(("cost", "charged"), [(0.25, 1.0), (0.0, 1.0), (1.5, 1.5)])
 async def test_a_segment_that_reached_its_cap_is_charged_at_least_what_was_left(
-    cost: float, charged: float
+    error: str, cost: float, charged: float
 ) -> None:
     """#2675: Claude Code stops once the cost reached the cap, so the segment is charged
     `max(cost_usd, left)`: what was left when its own report is lower, its report when
     higher. Either way the turn ends as the budget's."""
-    out = SegmentOutput(
-        session_id="s", is_error=True, error="Reached maximum budget ($1.00)", cost_usd=cost
-    )
+    out = SegmentOutput(session_id="s", is_error=True, error=error, cost_usd=cost)
     got = await _segment(out, left=1.0)
     assert got.error == BUDGET_EXHAUSTED
     assert got.cost_usd == pytest.approx(charged)
@@ -927,6 +934,8 @@ async def test_a_segment_that_reached_its_cap_is_charged_at_least_what_was_left(
     [
         "the tool said error_max_budget_usd somewhere in its output",
         "Quoting: Reached maximum budget is what it says",
+        "the user pasted: Reached maximum budget ($5.00) from an old log",
+        "Claude Code returned an error result: tool said Reached maximum budget ($2.00)",
     ],
 )
 async def test_an_error_that_only_quotes_the_budget_text_is_not_the_cap(text: str) -> None:

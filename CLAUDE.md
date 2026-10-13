@@ -137,7 +137,7 @@ them through a real durable session (`evals/durable.ts`: the Python worker, Temp
 agent-tools worker; skips without uv, Temporal or Postgres), and `pnpm evals` takes
 `SCADBUDDY_EVAL_MODE=classic|durable|both` (default both).
 
-Durable sessions (`agent-durable/`, Python 3.14, uv 0.9.0 or later, which `[tool.uv] required-version` enforces; the `agent-durable` CI job, #1056):
+Durable sessions (`agent-durable/`, Python 3.14; the `agent-durable` CI job, #1056):
 
 ```bash
 cd agent-durable
@@ -147,6 +147,8 @@ uv run --frozen mypy
 uv run --frozen pytest            # requires_postgres tests need SCADBUDDY_TEST_DATABASE_URL
 docker build --target agent-durable -t scadbuddy-agent-durable:dev .   # checks the bundled Claude Code
 ```
+
+It needs uv 0.9.0 or later, which `[tool.uv] required-version` enforces.
 
 `agent/test/fixtures/secret-vectors.json` is written by `agent/test/secretVectors.test.ts`
 (`UPDATE_SECRET_VECTORS=1`) and opened by `agent-durable/tests`: a change to

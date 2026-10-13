@@ -146,9 +146,14 @@ _FINAL = re.compile(
 )
 # Claude Code's own words when a segment reaches its max_budget_usd (the result's
 # subtype is error_max_budget_usd; its text is "Reached maximum budget ($N)"). Only those
-# words with the amount that follows: the rest of an error's text is the session's
-# content, and one that merely quotes the subtype or the words is not the cap (#2675).
-_BUDGET_REACHED = re.compile(r"Reached maximum budget \(\$")
+# words with the amount that follows, and only at the start: the SDK raises them as
+# "Claude Code returned an error result: Reached maximum budget ($N) (exit code: 1)"
+# (claude_agent_sdk _internal/query.py), the CLI's own errors first. The rest of an
+# error's text is the session's content, and one that quotes the subtype or the words,
+# even the whole phrase, is not the cap (#2675).
+_BUDGET_REACHED = re.compile(
+    r"(?:Claude Code returned an error result: )?Reached maximum budget \(\$"
+)
 # sessions/images.ts and routes/imageSettings.ts: what one message's images may be.
 IMAGES_MAX = 4
 IMAGE_BYTES_MAX = 5 * 1024 * 1024 * 3 // 4  # 5 MB of base64, the Messages API's limit
@@ -617,7 +622,7 @@ class ScadBuddyRunner:
             )
             try:
                 out = await runner.run(inp, attempt)
-                if out.is_error and out.error and _BUDGET_REACHED.search(out.error):
+                if out.is_error and out.error and _BUDGET_REACHED.match(out.error):
                     # The plugin answers a segment that reached its cap with the error's
                     # text only: no subtype, and no cost. Claude Code stops only once the
                     # cost reached the cap, so at least what was left was spent; charged
