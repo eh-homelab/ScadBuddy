@@ -1,4 +1,5 @@
 import type {
+  InventoryView,
   AnalysisReport,
   AnalysisRun,
   AnalyzerDecision,
@@ -84,6 +85,9 @@ import type {
   TimelapseFrames,
   PrintPage,
   PrintProgress,
+  PrintersNow,
+  QueueItem,
+  ArchiveStats,
   PrintCheck,
   PreviewStarted,
   SlicePreview,
@@ -1379,6 +1383,10 @@ export const api = {
     return request<FilamentOptions>(`/print/outputs/${seg(outputId)}/filaments${suffix}`)
   },
 
+  /** #2351 — Bambuddy's spool inventory, each spool with where it is loaded. */
+  getSpoolInventory: (includeArchived = false) =>
+    request<InventoryView>(`/farm/inventory${includeArchived ? '?include_archived=true' : ''}`),
+
   /**
    * spec 2026-09-27 §3 — one read for the whole spool-first print dialog: printers,
    * installed nozzles, quality tiers and processes per nozzle size, plates with the
@@ -1539,6 +1547,16 @@ export const api = {
    */
   getPrintProgress: (outputId: string) =>
     request<PrintProgress | null>(`/print/outputs/${seg(outputId)}/progress`),
+
+  /** #977 — every active printer's live state, whoever started its job. */
+  getPrintersNow: () => request<PrintersNow>('/print/printers/now'),
+
+  /** #2351 — Bambuddy's queue in its order; `status` narrows it (finished items stay in it). */
+  getPrintQueue: (status?: 'pending' | 'printing' | 'completed' | 'failed' | 'cancelled') =>
+    request<QueueItem[]>(`/farm/queue${status ? `?status=${status}` : ''}`),
+
+  /** #2351 — the farm's totals over every Bambuddy archive. */
+  getFarmStats: () => request<ArchiveStats>('/farm/stats'),
 
   /** #308 — the print history, newest first, a page at a time; `cursor` is the last
    * page's `next_cursor`. */
