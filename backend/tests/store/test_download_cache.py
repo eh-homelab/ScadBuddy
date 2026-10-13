@@ -213,6 +213,22 @@ async def test_a_blob_one_process_put_is_read_by_another_without_a_download(
 
 
 @pytest.mark.requires_postgres
+async def test_a_blob_put_from_a_file_is_kept_before_the_put_returns(
+    tmp_path: Path, pool: Pool
+) -> None:
+    """A packed piece is put from a staged file its caller closes once the put returns
+    (#503), so it is copied into the shared directory before then, not after."""
+    worker, _ = _process(tmp_path / "remote", tmp_path / "shared", pool)
+    api, api_backend = _process(tmp_path / "remote", tmp_path / "shared", pool)
+    data = os.urandom(3 << 20)
+    with (tmp_path / "staged").open("w+b") as staged:
+        staged.write(data)
+        ref = await worker.put("piece", staged, name="p", scope=SCOPE)
+    assert await api.read(ref) == data
+    assert api_backend.downloads == 0
+
+
+@pytest.mark.requires_postgres
 async def test_a_blob_downloaded_once_is_read_from_the_cache_after(
     tmp_path: Path, pool: Pool
 ) -> None:
