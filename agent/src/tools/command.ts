@@ -115,6 +115,10 @@ function resendOf(result: FetchResult<unknown>): boolean {
  * `POST /api/v1/commands/{workflow_id}/updates/{update_id}` (a long-poll) to the answer
  * the route would have given, for up to `ACCEPTING_MS` as the re-sends were. A follow
  * answered 409 `command-resend` sends the request again, with its key.
+ *
+ * The budget is checked before each follow and before each pause, so neither starts
+ * past it; a follow started just inside it can still outlast it by one server
+ * long-poll (`FOLLOW_WAIT`, ~10 s), as the request itself is not cut short (#3039).
  */
 export async function answeredFollowing<T>(
   ctx: ToolContext,
@@ -130,7 +134,13 @@ export async function answeredFollowing<T>(
     }
     // The follow is itself a long-poll, so the first goes at once; a repeat waits only
     // the polling floor, not `retry_after` on top of the server's wait (review #2849).
-    if (follows > 0) await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
+    // A pause that would end past the budget is not taken (#3039).
+    if (follows > 0) {
+      if (performance.now() - began + ctx.pollIntervalMs >= (ctx.acceptingMs ?? ACCEPTING_MS)) {
+        throw new ToolError(`${what}: ScadBuddy is still starting it.${gaveUp}`)
+      }
+      await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
+    }
     const { workflow_id, update_id } = accepting
     // The follow URL's query (a render's `supersedes`) rides along.
     const query = Object.fromEntries(new URL(accepting.follow_url, 'http://follow').searchParams)

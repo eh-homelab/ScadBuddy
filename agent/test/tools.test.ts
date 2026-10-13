@@ -2648,4 +2648,34 @@ describe('a command the backend answers 202 accepting (#2795)', () => {
     expect(firstText(result)).toContain('ScadBuddy is still starting it')
     expect(follows).toBeGreaterThan(0)
   })
+
+  it('takes no pause that would end past its budget (#3039)', async () => {
+    let follows = 0
+    server.use(
+      http.get(`${BACKEND}/api/v1/outputs/${OUT}`, () => HttpResponse.json({ slug: 'box' })),
+      http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () =>
+        HttpResponse.json(
+          { status: 'accepting', workflow_id: 'op-delete_output-x', update_id: 'k', follow_url: '/api/v1/commands/op-delete_output-x/updates/k', retry_after: 0 },
+          { status: 202 },
+        ),
+      ),
+      http.post(`${BACKEND}/api/v1/commands/op-delete_output-x/updates/k`, () => {
+        follows += 1
+        return HttpResponse.json(
+          { status: 'accepting', workflow_id: 'op-delete_output-x', update_id: 'k', follow_url: '/api/v1/commands/op-delete_output-x/updates/k', retry_after: 0 },
+          { status: 202 },
+        )
+      }),
+    )
+    const began = performance.now()
+    const result = await runTool(
+      { ...tool('delete_output'), gated: false },
+      { output_id: OUT },
+      ctx({ acceptingMs: 1_000, pollIntervalMs: 5_000 }),
+    )
+    expect(result.isError).toBe(true)
+    expect(firstText(result)).toContain('ScadBuddy is still starting it')
+    expect(follows).toBe(1)
+    expect(performance.now() - began).toBeLessThan(1_000)
+  })
 })
