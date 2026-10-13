@@ -36,6 +36,12 @@ import type {
  * The check here is a stand-in for the server's: a call to a name that is not a host
  * function, or `sleep` given a string, is a problem on its line.
  *
+ * #2483 — typed inputs: `coasters` declares an inputs schema (`COASTER_INPUTS`). A start
+ * checks its `inputs` as the backend does, roughly (required, a number's bounds, no
+ * unknown input; a 422 `flow-inputs` otherwise), fills in the defaults and records them
+ * on the run. A flow without a schema refuses any input. Save and the check take
+ * `inputs_schema`; one whose `type` is not `object` is a problem in `inputs.json`.
+ *
  * #2485 — a flow archived (`POST /workflows/names/{name}/archive`, `unarchive`) or deleted
  * (`DELETE /workflows/names/{name}`): hidden from `GET /workflows` unless `?archived=true`,
  * and its starts refused (409 `flow-archived`, `flow-deleted`). A new version brings a
@@ -79,8 +85,28 @@ function definition(id: string, name: string, version: number, script: string, m
   }
 }
 
+export const COASTER_INPUTS = {
+  type: 'object',
+  properties: {
+    slug: { type: 'string', title: 'Template', description: 'The template to render' },
+    copies: { type: 'integer', title: 'Copies', minimum: 1, maximum: 12, default: 2 },
+    colour: { type: 'string', title: 'Colour', enum: ['red', 'blue'], default: 'red' },
+    dry_run: { type: 'boolean', title: 'Dry run', default: false },
+    plates: { type: 'array', title: 'Plates', items: { type: 'integer' }, default: [1] },
+  },
+  required: ['slug'],
+}
+
+const COASTER_SCRIPT = `async def main():
+    i = await inputs()
+    for plate in i["plates"]:
+        await render(i["slug"], {"plate": plate, "colour": i["colour"]})
+    return i["copies"]
+`
+
 function defaultDefinitions(): FlowDefinition[] {
   return [
+    { ...definition('def-coasters', 'coasters', 1, COASTER_SCRIPT, 0), inputs_schema: COASTER_INPUTS },
     definition('def-swap', 'swap', 1, SWAP_SCRIPT, 0),
     definition('def-plates-1', 'plates', 1, 'async def main():\n    return 1\n', 0),
     {
@@ -134,6 +160,16 @@ function defaults(): FlowRun[] {
       steps: [step(1, 'render', 'succeeded'), step(2, 'queue_print', 'succeeded'), step(3, 'sleep', 'succeeded')],
       result: 'result: 7',
       created_at: at(1),
+    }),
+    // #2483: a run of a flow with inputs, recorded with its defaults filled in.
+    run('run-coasters', {
+      definition_id: 'def-coasters',
+      name: 'coasters',
+      status: 'succeeded',
+      steps: [step(1, 'render', 'succeeded')],
+      result: 'result: 2',
+      inputs: { slug: 'coaster', copies: 2, colour: 'red', dry_run: false, plates: [1] },
+      created_at: at(0),
     }),
   ]
 }
@@ -441,7 +477,58 @@ export const FLOW_HOST_FUNCTIONS: FlowHostInterface = {
   ],
 }
 
-const CALLABLE = new Set([...FLOW_HOST_FUNCTIONS.functions.map((f) => f.name), 'main', 'print', 'len', 'range'])
+const CALLABLE = new Set([
+  ...FLOW_HOST_FUNCTIONS.functions.map((f) => f.name),
+  'inputs',
+  'main',
+  'print',
+  'len',
+  'range',
+])
+
+/** The stand-in schema check: only that it is an object schema. */
+function checkInputsSchema(schema: unknown): FlowScriptProblem[] {
+  if (schema == null) return []
+  const type = (schema as Record<string, unknown>)['type']
+  return type === 'object' ? [] : [{ line: null, message: 'the top level must be {"type": "object"}', file: 'inputs.json' }]
+}
+
+type Prop = { type?: string; default?: unknown; minimum?: number; maximum?: number }
+
+/** The stand-in for `resolve_inputs`: the run's inputs with defaults filled in, or its problems. */
+function resolveInputs(
+  schema: FlowDefinition['inputs_schema'],
+  given: Record<string, unknown> | undefined,
+): { inputs: Record<string, unknown> | null; problems: string[] } {
+  if (!schema) {
+    return given && Object.keys(given).length > 0
+      ? { inputs: null, problems: ['this flow takes no inputs'] }
+      : { inputs: null, problems: [] }
+  }
+  const properties = (schema['properties'] ?? {}) as Record<string, Prop>
+  const required = (schema['required'] ?? []) as string[]
+  const values: Record<string, unknown> = { ...given }
+  const problems: string[] = []
+  for (const name of Object.keys(values)) {
+    if (!(name in properties)) problems.push(`inputs: Additional properties are not allowed ('${name}' was unexpected)`)
+  }
+  for (const [name, prop] of Object.entries(properties)) {
+    if (!(name in values) && 'default' in prop) values[name] = prop.default
+    if (!(name in values)) {
+      if (required.includes(name)) problems.push(`inputs: '${name}' is a required property`)
+      else values[name] = null
+      continue
+    }
+    const value = values[name]
+    if (typeof value === 'number' && prop.maximum !== undefined && value > prop.maximum) {
+      problems.push(`${name}: ${value} is greater than the maximum of ${prop.maximum}`)
+    }
+    if (typeof value === 'number' && prop.minimum !== undefined && value < prop.minimum) {
+      problems.push(`${name}: ${value} is less than the minimum of ${prop.minimum}`)
+    }
+  }
+  return problems.length > 0 ? { inputs: null, problems } : { inputs: values, problems }
+}
 
 /** The stand-in check: each line's calls to names nothing defines, and `sleep('…')`. */
 export function checkFlowScript(script: string): FlowScriptProblem[] {
@@ -469,11 +556,17 @@ function scriptProblems(problems: FlowScriptProblem[], detail: string) {
 }
 
 /** A new version of `name`, numbered after its last, as the git history numbers it. */
-function addVersion(name: string, script: string, approval: number | null): FlowDefinition {
+function addVersion(
+  name: string,
+  script: string,
+  approval: number | null,
+  inputsSchema: FlowDefinition['inputs_schema'] = null,
+): FlowDefinition {
   const version = (newestFirst(name)[0]?.version ?? 0) + 1
   const created: FlowDefinition = {
     ...definition(`def-${name}-${version}`, name, version, script, 40 + version),
     approval_timeout_s: approval,
+    inputs_schema: inputsSchema,
     created_by: { kind: 'browser' },
   }
   definitions = [...definitions, created]
@@ -581,15 +674,20 @@ export const handlers = [
     )
   }),
   http.post('/api/v1/workflows', async ({ request }) => {
-    const body = (await keep(request)) as { name: string; script: string; approval_timeout?: number | 'never' | null }
-    const problems = checkFlowScript(body.script)
+    const body = (await keep(request)) as {
+      name: string
+      script: string
+      approval_timeout?: number | 'never' | null
+      inputs_schema?: FlowDefinition['inputs_schema']
+    }
+    const problems = [...checkInputsSchema(body.inputs_schema), ...checkFlowScript(body.script)]
     if (problems.length > 0) return scriptProblems(problems, 'The script does not type-check.')
     const timeout = body.approval_timeout === 'never' ? 0 : (body.approval_timeout ?? null)
-    return HttpResponse.json(addVersion(body.name, body.script, timeout), { status: 201 })
+    return HttpResponse.json(addVersion(body.name, body.script, timeout, body.inputs_schema ?? null), { status: 201 })
   }),
   http.post('/api/v1/workflow-script/check', async ({ request }) => {
-    const { script } = (await request.json()) as { script: string }
-    return HttpResponse.json({ problems: checkFlowScript(script) })
+    const { script, inputs_schema } = (await request.json()) as { script: string; inputs_schema?: unknown }
+    return HttpResponse.json({ problems: [...checkInputsSchema(inputs_schema), ...checkFlowScript(script)] })
   }),
   http.get('/api/v1/workflow-script/host-functions', () => HttpResponse.json(FLOW_HOST_FUNCTIONS)),
   http.get('/api/v1/workflows/names/:name/versions/:commit/source', ({ params }) => {
@@ -604,7 +702,10 @@ export const handlers = [
     if (!found) return notFound('No such version of this flow.')
     const problems = checkFlowScript(found.script)
     if (problems.length > 0) return scriptProblems(problems, 'That version no longer type-checks.')
-    return HttpResponse.json(addVersion(found.name, found.script, found.approval_timeout_s ?? null), { status: 201 })
+    return HttpResponse.json(
+      addVersion(found.name, found.script, found.approval_timeout_s ?? null, found.inputs_schema ?? null),
+      { status: 201 },
+    )
   }),
   http.get('/api/v1/workflows/:id', ({ params }) => {
     const found = definitions.find((d) => d.id === params['id'])
@@ -618,12 +719,32 @@ export const handlers = [
       return conflict('flow-deleted', 'This flow was deleted. Restore one of its versions to run it.')
     }
     if (states.get(found.name)?.archived_at) return conflict('flow-archived', 'This flow is archived. Unarchive it to run it.')
+    const { inputs, problems } = resolveInputs(found.inputs_schema, body['inputs'] as Record<string, unknown> | undefined)
+    if (problems.length > 0) {
+      return HttpResponse.json(
+        {
+          type: 'https://scadbuddy.dev/problems/flow-inputs',
+          title: 'Unprocessable Content',
+          status: 422,
+          detail: `The run's inputs do not fit the flow's inputs schema: ${problems.join('; ')}`,
+          problems,
+        },
+        { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+      )
+    }
     started += 1
     const id = `run-new-${started}`
     const sent = (body['grant'] as FlowGrantSpec | undefined) ?? null
     if (sent) grants.set(id, grant(`grant-new-${started}`, { spec: sent, expires_at: sent.expires_at, approved_at: at(30), created_at: at(30) }))
     runs = [
-      run(id, { definition_id: found.id, name: found.name, version: found.version, status: 'running', created_at: at(30) }),
+      run(id, {
+        definition_id: found.id,
+        name: found.name,
+        version: found.version,
+        status: 'running',
+        created_at: at(30),
+        inputs,
+      }),
       ...runs,
     ]
     return HttpResponse.json({ id, status: 'starting', repeated: false }, { status: 202 })

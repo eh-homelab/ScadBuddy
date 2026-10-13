@@ -2,7 +2,8 @@ import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
 import { describe, expect, it } from 'vitest'
-import { blobUrl } from '../../agent/chat/protocol'
+import { blobUrl, type ServerEvent, ServerEventSchema } from '../../agent/chat/protocol'
+import { chatReducer, initialChatState } from '../../agent/chat/state'
 import type { ToolCall, ToolStatus } from '../../agent/chat/toolGroups'
 import { highlightJson, prettyJson } from '../../agent/chat/json'
 import { ToolGroup } from './ToolGroup'
@@ -177,6 +178,46 @@ describe('a group of calls', () => {
     expect(agent).toHaveTextContent('Subagent: Check the fit')
     expect(agent!.className).not.toContain('ml-4')
     expect(sub!.className).toContain('ml-4')
+  })
+})
+
+describe('a durable session’s call (#2478)', () => {
+  // The events agent-durable's follow_session logs (session/events.py): no title, the
+  // plugin's status as the summary, and the images by name only.
+  const logged = (images?: unknown) =>
+    [
+      { v: 1, sessionId: 'sess-1', type: 'tool.call', id: 'toolu_1', name: 'get_render_view', input: {}, risk: 'read' },
+      { v: 1, sessionId: 'sess-1', type: 'tool.result', id: 'toolu_1', ok: true, summary: 'done', ...(images ? { images } : {}) },
+    ].map((e) => ServerEventSchema.parse(e))
+
+  function shown(events: ServerEvent[]) {
+    const started = ServerEventSchema.parse({
+      v: 1,
+      type: 'session.started',
+      sessionId: 'sess-1',
+      origin: 'chat',
+      owner: { kind: 'browser', id: 'browser', label: 'You' },
+    })
+    const state = [{ type: 'started-new' } as const, ...[started, ...events].map((event) => ({ type: 'server', event }) as const)].reduce(
+      chatReducer,
+      initialChatState,
+    )
+    expect(state.sessions['sess-1']?.items).toHaveLength(1)
+    const calls = (state.sessions['sess-1']?.items ?? []).filter((i): i is ToolCall => i.kind === 'tool')
+    return group(calls, ['done'])
+  }
+
+  it('shows the images its result names, loaded from the session’s blob route', () => {
+    shown(logged([IMAGE]))
+    const img = screen.getByRole('img')
+    expect(img).toHaveAttribute('src', `/api/v1/ai/sessions/sess-1/blobs/${IMAGE.name}`)
+    expect(img.closest('a')).toHaveAttribute('href', blobUrl('sess-1', IMAGE.name))
+  })
+
+  it('shows a result logged without images as before', () => {
+    shown(logged())
+    expect(screen.getByTestId('agent-tool-status')).toHaveTextContent('Done')
+    expect(screen.queryByRole('img')).toBeNull()
   })
 })
 

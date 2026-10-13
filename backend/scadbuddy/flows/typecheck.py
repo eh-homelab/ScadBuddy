@@ -8,11 +8,13 @@ from __future__ import annotations
 import ast
 import logging
 import re
+from typing import Any, Literal
 
 import pydantic_monty
 from pydantic import BaseModel
 from temporal_agent_harness.harness import agent
 
+from scadbuddy.flows.inputs import INPUTS_FILE, schema_problems
 from scadbuddy.workflows.flow_tools import MAX_WAIT_S, MIN_WAIT_S, run_flow_tool
 
 log = logging.getLogger(__name__)
@@ -26,14 +28,23 @@ class ScriptProblem(BaseModel):
 
     line: int | None = None
     message: str
+    #: The file it is in: the script, or its inputs schema (#2483).
+    file: Literal["flow.py", "inputs.json"] = "flow.py"
 
 
-async def check_script(script: str) -> list[ScriptProblem]:
-    """Every problem with `script`; empty when it may run."""
+async def check_script(
+    script: str, inputs_schema: dict[str, Any] | None = None
+) -> list[ScriptProblem]:
+    """Every problem with `script` and, when the flow declares inputs, with its inputs
+    schema (#2483), against which `inputs()` is typed; empty when it may run."""
+    if inputs_schema is not None and (found := schema_problems(inputs_schema)):
+        return [ScriptProblem(message=message, file=INPUTS_FILE) for message in found]
     if len(script.encode()) > MAX_SCRIPT_BYTES:
         return [ScriptProblem(message="script is over 64 KiB")]
     try:
-        report = await agent.code_mode_type_check(run_flow_tool(), script)
+        report = await agent.code_mode_type_check(
+            run_flow_tool(inputs_schema=inputs_schema), script
+        )
     except pydantic_monty.MontyCrashedError:
         log.warning("the flow type checker crashed")
         return [ScriptProblem(message="the checker failed: try again")]

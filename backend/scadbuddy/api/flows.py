@@ -57,6 +57,7 @@ from scadbuddy.flows.grants import (
 )
 from scadbuddy.flows.history import ResetPoints, ResetPreview, outward_since, reset_points
 from scadbuddy.flows.images import BLOB_NAME, RunImage, open_image, run_images
+from scadbuddy.flows.inputs import InputsError, resolve_inputs
 from scadbuddy.flows.keys import approval_key
 from scadbuddy.flows.manifest import raise_tiers, tiers
 from scadbuddy.flows.models import (
@@ -100,6 +101,7 @@ SCRIPT_PROBLEMS = "https://scadbuddy.dev/problems/flow-script"
 SCRIPT_MISSING = "https://scadbuddy.dev/problems/flow-script-missing"
 FLOW_ARCHIVED = "https://scadbuddy.dev/problems/flow-archived"
 FLOW_DELETED = "https://scadbuddy.dev/problems/flow-deleted"
+FLOW_INPUTS = "https://scadbuddy.dev/problems/flow-inputs"
 NAME_PATTERN = r"^[a-z0-9][a-z0-9-]{0,62}$"
 BROWSER_ONLY = "https://scadbuddy.dev/problems/flow-browser-only"
 ENTRY_BROWSER_ONLY = "https://scadbuddy.dev/problems/flow-entry-browser-only"
@@ -131,6 +133,12 @@ class DefinitionCreate(BaseModel):
     #: Seconds an outward call of its runs waits for a decision, or "never". Omitted,
     #: the global setting applies.
     approval_timeout: ApprovalTimeout | None = None
+    #: Its typed inputs (#2483): a JSON Schema of `type: object` whose properties are
+    #: strings, integers, numbers, booleans or arrays of one of them, each with an
+    #: optional default and description. Committed as `inputs.json` beside the script;
+    #: the script reads them with `inputs()`, type-checked against it. Omitted, its runs
+    #: take no inputs.
+    inputs_schema: dict[str, Any] | None = None
 
     @field_validator("approval_timeout")
     @classmethod
@@ -148,6 +156,9 @@ class RunCreate(BaseModel):
     #: is approved as sent; from an agent it is only requested, until a person approves
     #: it on the run's page. At most 7 days.
     grant: GrantSpec | None = None
+    #: The run's inputs (#2483), by name, checked against the flow's inputs schema; an
+    #: input left out takes its default. A flow with no inputs schema takes none.
+    inputs: dict[str, Any] | None = None
 
     @field_validator("approval_timeout")
     @classmethod
@@ -291,7 +302,7 @@ def _script_problems(problems: list[ScriptProblem], detail: str) -> ApiError:
 async def register_flow(body: DefinitionCreate, flows: FlowsDep) -> Definition:
     if len(body.script.encode()) > MAX_SCRIPT_BYTES:
         raise ApiError(status.HTTP_413_CONTENT_TOO_LARGE, "The script is over 64 KiB.")
-    if problems := await check_script(body.script):
+    if problems := await check_script(body.script, body.inputs_schema):
         raise _script_problems(problems, "The script does not type-check.")
     with _versioned():
         return await flows.definitions.register(
@@ -299,6 +310,7 @@ async def register_flow(body: DefinitionCreate, flows: FlowsDep) -> Definition:
             body.script,
             _started_by(),
             approval_timeout_s=_seconds(body.approval_timeout),
+            inputs_schema=body.inputs_schema,
         )
 
 
@@ -406,7 +418,8 @@ async def restore_flow_version(name: NamePath, commit: CommitPath, flows: FlowsD
     registration is."""
     with _versioned():
         script = await flows.definitions.source(name, commit)
-    if problems := await check_script(script):
+        inputs_schema = await flows.definitions.inputs_schema(name, commit)
+    if problems := await check_script(script, inputs_schema):
         raise _script_problems(problems, "That version no longer type-checks.")
     with _versioned():
         return await flows.definitions.restore(name, commit, _started_by())
@@ -508,9 +521,18 @@ async def start_flow_run(
         return RunAnswer(id=existing.id, status=existing.status, repeated=True)
     _refuse_hidden(definition)
     client = _client(flows)
-    if problems := await check_script(definition.script):
+    if problems := await check_script(definition.script, definition.inputs_schema):
         raise _script_problems(problems, "The flow no longer type-checks.")
     options = body or RunCreate()
+    try:
+        inputs = resolve_inputs(definition.inputs_schema, options.inputs)
+    except InputsError as err:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "The run's inputs do not fit the flow's inputs schema: " + "; ".join(err.problems),
+            type_=FLOW_INPUTS,
+            problems=err.problems,
+        ) from None
     override = _seconds(options.approval_timeout)
     timeout = next(
         value
@@ -550,7 +572,11 @@ async def start_flow_run(
                 )
             await AgentClient(client, f"flow-{run_id}").start_and_submit_message(
                 "execute",
-                RunFlow(script=definition.script).model_dump(),
+                RunFlow(
+                    script=definition.script,
+                    inputs_schema=definition.inputs_schema,
+                    inputs=inputs if definition.inputs_schema is not None else None,
+                ).model_dump(exclude_none=True),
                 workflow_name=PROJECT_WORKFLOW,
                 task_queue=flows.queue,
                 start_config=AgentConfig(),

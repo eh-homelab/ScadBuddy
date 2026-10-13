@@ -24,6 +24,7 @@ with workflow.unsafe.imports_passed_through():
     from temporal_agent_harness.harness import agent
     from temporal_agent_harness.harness.agent_workflow import AgentWorkflowRunner
 
+    from scadbuddy.flows.inputs import inputs_model
     from scadbuddy.workflows.flow_entries import (
         await_escalated,
         await_gated,
@@ -994,8 +995,32 @@ _INNER = (human_answer, approved_print, approved_arrange, approved_tool, approve
 SCRIPT_TOOLS: list[Any] = [t for t in FLOW_TOOLS if t not in _INNER]
 
 
-def run_flow_tool(runner: AgentWorkflowRunner | None = None) -> Any:
-    """The Code Mode tool over the host functions a script may call. Outside a workflow
-    (the type check) no runner is injected."""
+def inputs_tool(schema: dict[str, Any], values: dict[str, Any] | None = None) -> Any:
+    """`inputs()` for a flow with an inputs schema (#2483): the run's values, typed as
+    the schema's `FlowInputs`. It reads the run's own message, so it records no step."""
+    model = inputs_model(schema)
+
+    async def _inputs() -> Any:
+        """This run's inputs, as the flow's inputs.json declares them, defaults filled
+        in. An input that is neither required nor has a default is None when the run
+        was not given it."""
+        return model.model_validate(values or {})
+
+    _inputs.__name__ = _inputs.__qualname__ = "inputs"
+    _inputs.__annotations__ = {"return": model}
+    return agent.tool_defn(inherently_safe=True)(_inputs)
+
+
+def run_flow_tool(
+    runner: AgentWorkflowRunner | None = None,
+    inputs_schema: dict[str, Any] | None = None,
+    inputs: dict[str, Any] | None = None,
+) -> Any:
+    """The Code Mode tool over the host functions a script may call, with `inputs()`
+    when the flow declares inputs. Outside a workflow (the type check) no runner is
+    injected."""
     injections = {"runner": runner} if runner is not None else None
-    return agent.code_mode_tool(SCRIPT_TOOLS, name="run_flow", injections=injections)
+    tools = SCRIPT_TOOLS
+    if inputs_schema is not None:
+        tools = [*SCRIPT_TOOLS, inputs_tool(inputs_schema, inputs)]
+    return agent.code_mode_tool(tools, name="run_flow", injections=injections)

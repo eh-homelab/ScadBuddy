@@ -205,7 +205,8 @@ def test_an_unreported_right_hand_nozzle_is_not_the_left_ones_size(
     response = client.get(f"/api/v1/outputs/{output_id}/model.3mf")
 
     assert response.status_code == 200
-    # No mounted size is known, so the presets stay placeholders; the plate still fits.
+    # No mounted size is known, so the process and filaments stay placeholders; the
+    # plate still fits.
     stored = _stored(paths, model, output_id)
     _assert_refitted_on_placeholders(response.content, stored, plate_for("H2C"))
 
@@ -257,12 +258,16 @@ def _item_transform(payload: bytes) -> str | None:
 
 
 def _assert_refitted_on_placeholders(content: bytes, stored: bytes, plate: PlateGeometry) -> None:
-    """Re-plated for the printer, with the preset names left as the file had them."""
+    """Re-plated for the printer and named for it at the nozzle the file states, as
+    Bambu Studio names a project's printer; the process and filaments stay placeholders."""
     assert content != stored
     assert _item_transform(content) == _item_transform(replate_3mf(stored, plate))
     settings = _project_settings(content)
-    assert settings["printer_settings_id"] == PRESET_PLACEHOLDER
+    assert settings["printer_settings_id"] == f"{plate.model} 0.4 nozzle"
     assert settings["print_settings_id"] == PRESET_PLACEHOLDER
+    assert settings["filament_settings_id"] == [PRESET_PLACEHOLDER] * len(
+        settings["filament_colour"]
+    )
     assert (
         settings["printable_height"]
         == _project_settings(replate_3mf(stored, plate))["printable_height"]

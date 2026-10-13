@@ -512,6 +512,7 @@ its child sessions' parked calls from flow turns, and a requested grant.
 - **`data/flows` is a git repository of its own.** Never inside `data/models`, never a
   `ModelHistory`: flows are not models. Layout: `<name>/flow.py`, one directory per flow
   name. No metadata file: the approval timeout is state, kept in Postgres (§6.2).
+  A flow's inputs schema is source, `<name>/inputs.json` in the same commit (§10).
 - **A shared git core.** `backend/scadbuddy/core/gitrepo.py` `GitRepo` holds the
   generic plumbing now in `library/history.py`: the hermetic `git_env()`
   (`GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` at `/dev/null`), identity from the
@@ -713,7 +714,45 @@ The plan's tasks carry the tests; these are what the spec requires to be shown:
   included, in order with its dates and
   maps every run; `ModelHistory`'s test suite passes unchanged on the shared core.
 
-## 10. Out of scope
+## 10. Amendment: typed inputs (#2483)
+
+Amends §6.1 and Ruling 16, and 10-01 §7.3–7.4 ("the script is the run's input").
+
+- **Declared in git.** A flow may declare typed inputs as a JSON Schema,
+  `<name>/inputs.json` beside `<name>/flow.py`, written in the version's one commit
+  (`FlowHistory.register(..., inputs=)`). A version without one has no file; a restore
+  brings back the file as it was at that commit. Ruling 16 still holds for state: the
+  schema is source, versioned with the script, while the approval timeout stays in
+  Postgres.
+- **A closed subset** (`flows/inputs.py`): the top level is `type: object` with
+  `properties`, `required` and at most `additionalProperties: false` (extra inputs are
+  always refused); each input is a `string`, `integer`, `number`, `boolean` or an
+  `array` of one of those, with `title`, `description`, `default` and its type's own
+  constraints, and a `string` or `integer` may be an `enum`. So each input has one
+  Python type and one form control. Names are `^[a-z][a-z0-9_]{0,63}$`, never a Python
+  keyword or a pydantic model attribute.
+- **Checked at registration** (and restore, and before each run): the schema against
+  the subset, each default against its input, then the script's Code Mode type check
+  with `inputs()` added to the host functions. `inputs()` returns `FlowInputs`, a
+  TypedDict rendered from the schema: an input that is required or has a default is
+  always present (a boolean without a default is false, as an unticked box sends it);
+  any other is `T | None`. A pattern is at most 256 characters, since every start runs
+  it. A flow without a schema has no `inputs()`.
+  `ScriptProblem.file` says whether a problem is in `flow.py` or `inputs.json`.
+- **Checked when a run starts**: `POST /workflows/{id}/runs` takes `inputs`, fills in
+  the defaults, validates them (422 `flow-inputs` with `problems`) and coerces them to
+  the script's types. A flow without a schema refuses any input.
+- **Recorded.** The values and the schema travel in the run's `execute` message
+  (`RunFlow.inputs`, `RunFlow.inputs_schema`), so they are sealed by the flow payload
+  codec with the rest of the run's history, and a Reset replays the run with its
+  original inputs and its own commit's types. The run's first activity copies the
+  values to `workflow_runs.inputs`, which the run page shows; nothing reads that copy
+  back into a run.
+- **Grants do not reference inputs.** §3.1's bound vocabulary is closed (no
+  expressions); a bound that named an input would be one. A grant's bounds stay
+  literal values a person approves.
+
+## 11. Out of scope
 
 - Grants for scheduled or event-started runs: #2484 builds on these grants.
 - Editing an approved grant in place, or widening one without a new approval.

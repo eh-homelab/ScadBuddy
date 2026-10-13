@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
+import zipfile
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -190,6 +192,39 @@ async def test_a_file_whose_pieces_were_swept_is_read_again(
     [again] = (await read_library_objects(bambuddy, 88, blobs=blobs, cache=cache)).objects
     assert len(parses) == 2 and again.part == obj.part
     assert (blobs.dir_for(obj.part) / LAYOUT_NAME).is_file()
+
+
+def _with_materials(payload: bytes, types: list[str]) -> bytes:
+    """``payload`` with ``filament_type`` in its project settings, as Bambu Studio
+    saves a project."""
+    source, out = zipfile.ZipFile(io.BytesIO(payload)), io.BytesIO()
+    with zipfile.ZipFile(out, "w") as target:
+        for name in source.namelist():
+            data = source.read(name)
+            if name == "Metadata/project_settings.config":
+                data = json.dumps(json.loads(data) | {"filament_type": types}).encode()
+            target.writestr(name, data)
+    return out.getvalue()
+
+
+@respx.mock
+async def test_a_list_kept_before_materials_were_read_is_read_again(
+    bambuddy: BambuddyClient, tmp_path: Path, parses: list[int]
+) -> None:
+    """A list kept without each colour's material would arrange a PLA file into slots
+    of no material, which Bambuddy's slice dialog fills with ABS."""
+    library_file(88, _with_materials(_project(tmp_path), ["PLA", "PETG"]))
+    blobs, cache = LocalBlobStore(tmp_path / "blobs"), tmp_path / "cache"
+    [obj] = (await read_library_objects(bambuddy, 88, blobs=blobs, cache=cache)).objects
+    assert obj.materials == {"#FF0000": "PLA", "#0000FF": "PETG"}
+    [kept] = (cache / library_objects.CACHE_DIRNAME).iterdir()
+    old = json.loads(kept.read_text())
+    old.pop("version")
+    for entry in old["objects"]:
+        entry.pop("materials")
+    kept.write_text(json.dumps(old))
+    [again] = (await read_library_objects(bambuddy, 88, blobs=blobs, cache=cache)).objects
+    assert len(parses) == 2 and again.materials == obj.materials
 
 
 @respx.mock

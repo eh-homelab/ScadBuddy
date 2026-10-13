@@ -6,11 +6,13 @@ generic defaults. So when Settings names a default printer, the download is re-p
 for it and names the presets the print dialog would slice with, from the same resolver
 (``resolver.resolve``) and the model's choices when they were remembered for that
 printer; otherwise the size mounted on its right-hand (main) extruder and the default
-tier. When that side reports no size, the presets stay placeholders: the left nozzle's
-size is never taken for it.
+tier. When that side reports no size, the process and filament presets stay
+placeholders: the left nozzle's size is never taken for it.
 
 A printer the resolver has no presets for, or a refusal (no spool for a color, no
-preset for the size), still gets the re-plated file, on the placeholders. Without a
+preset for the size), still gets the re-plated file, on the placeholders. Re-plating
+names the printer either way, at the nozzle the file states, as Bambu Studio names a
+project's printer (#2639). Without a
 default printer, with Bambuddy unreachable, or when the file does not fit the printer,
 the stored file keeps its plate and placeholders: a download never fails for want of
 either.

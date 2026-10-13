@@ -135,6 +135,8 @@ class FlowRecord(BaseModel):
     approval_timeout_s: int = 0
     #: The commit of the version it runs (#2503); "" from a run started before.
     commit: str = ""
+    #: Its inputs (#2483), as the run's message carries them; None without a schema.
+    inputs: dict[str, Any] | None = None
 
 
 class GrantCheck(BaseModel):

@@ -95,6 +95,10 @@ class LibraryObjects:
     objects: list[ManifestObject]
 
 
+#: Moves when what a kept read holds changes. 1: each object's colours' materials.
+KEPT_VERSION = 1
+
+
 class _Kept(BaseModel):
     """What one file hash reads as: its objects, or why it cannot be arranged."""
 
@@ -102,6 +106,9 @@ class _Kept(BaseModel):
     refused: str | None = None
     #: The budget a refusal was read within: one kept before #2087 had the defaults.
     budget: ReadBudget = ReadBudget()
+    #: What the objects were read with: one kept before :data:`KEPT_VERSION` lacks
+    #: what that version added (each colour's material), so it is read again.
+    version: int = 0
 
 
 def _digest(payload: BinaryIO) -> str:
@@ -175,6 +182,7 @@ async def read_library_objects(
     if (
         kept is not None
         and kept.refused is None
+        and kept.version >= KEPT_VERSION
         and all([await _stored(blobs, obj.part) for obj in kept.objects])
     ):
         # Another library file with the same bytes kept them: these are this file's.
@@ -228,13 +236,14 @@ async def read_library_objects(
                         ]
                     )
                 ),
+                materials=dict(obj.materials),
                 count=obj.count,
                 library_file_id=file_id,
                 notes=list(obj.notes),
             )
         )
     await publish_library_pieces(blobs, objects, read)
-    await _keep(path, _Kept(objects=objects))
+    await _keep(path, _Kept(objects=objects, version=KEPT_VERSION))
     return LibraryObjects(file_id, file.filename, objects)
 
 

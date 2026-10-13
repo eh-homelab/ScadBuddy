@@ -63,6 +63,9 @@ class Definition(DefinitionSummary):
     """A flow version: immutable."""
 
     script: str
+    #: Its typed inputs (#2483): a JSON Schema, `<name>/inputs.json` in its commit.
+    #: None for a flow that declares none: its runs take no inputs.
+    inputs_schema: dict[str, Any] | None = None
 
 
 class StoredDefinition(DefinitionSummary):
@@ -129,6 +132,9 @@ class Run(BaseModel):
     #: The commit of the version it ran (#2503); None for a run whose version was not
     #: imported into `data/flows` yet.
     commit: str | None = None
+    #: The inputs it started with (#2483), its flow's defaults filled in; None for a run
+    #: of a flow with no inputs schema. A Reset replays the ones in its history.
+    inputs: dict[str, Any] | None = None
     workflow_id: str
     workflow_run_id: str
     started_by: dict[str, Any]

@@ -26,6 +26,7 @@ from scadbuddy.render.bambu3mf import (
     PLATE_THUMBNAIL,
     PLATE_THUMBNAIL_SMALL,
     PLATE_TOP,
+    PRESET_PLACEHOLDER,
     PRODUCTION_NS,
     ArchiveTooLargeError,
     PlateParts,
@@ -39,6 +40,7 @@ from scadbuddy.render.bambu3mf import (
     plate_settings,
     plates_of,
     replate_3mf,
+    single_plate,
     state_nozzles,
     stl_3mf,
     write_bambu_3mf,
@@ -157,6 +159,46 @@ def test_project_settings_carry_the_prime_tower_corner(written: Path) -> None:
         settings = json.loads(archive.read("Metadata/project_settings.config"))
     assert settings["wipe_tower_x"] == ["98"]
     assert settings["wipe_tower_y"] == ["5"]
+
+
+def _settings_of(out: Path) -> dict[str, object]:
+    with zipfile.ZipFile(out) as archive:
+        settings: dict[str, object] = json.loads(archive.read("Metadata/project_settings.config"))
+    return settings
+
+
+def test_a_render_states_no_material(written: Path) -> None:
+    """ScadBuddy does not know what a render prints in: it names no material rather
+    than invent one."""
+    assert "filament_type" not in _settings_of(written)
+
+
+def test_materials_known_for_every_slot_are_stated_in_slot_order(tmp_path: Path) -> None:
+    """Bambuddy's slice dialog picks each slot's filament preset by ``filament_type``;
+    without one it picks Bambu ABS for an arranged PLA keychain."""
+    parts = _parts()
+    out = tmp_path / "arranged.3mf"
+    write_plates_3mf(
+        [single_plate(parts)],
+        [p.colour for p in parts],
+        out,
+        thumbnails=None,
+        materials={"#1F6FEB": "PETG", "#FF6AC1": "PLA", "#000000": "ABS"},
+    )
+    assert _settings_of(out)["filament_type"] == ["PLA", "PETG"]
+
+
+def test_a_slot_of_unknown_material_states_none_for_any_slot(tmp_path: Path) -> None:
+    parts = _parts()
+    out = tmp_path / "arranged.3mf"
+    write_plates_3mf(
+        [single_plate(parts)],
+        [p.colour for p in parts],
+        out,
+        thumbnails=None,
+        materials={"#FF6AC1": "PLA"},
+    )
+    assert "filament_type" not in _settings_of(out)
 
 
 def test_a_single_colour_model_gets_no_prime_tower(tmp_path: Path) -> None:
@@ -442,13 +484,43 @@ def test_an_archive_over_the_total_cap_is_not_statable(written: Path) -> None:
 
 def _saved_by_an_author(payload: bytes) -> bytes:
     """``payload`` as Bambu Studio saves a project: its settings name a real printer
-    preset rather than ScadBuddy's placeholder."""
+    and process preset rather than ScadBuddy's placeholder."""
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         settings = json.loads(archive.read("Metadata/project_settings.config"))
     settings["printer_settings_id"] = "Bambu Lab H2C 0.4 nozzle"
+    settings["print_settings_id"] = "0.20mm Standard @BBL H2C"
     return _with_entries(
         payload, {"Metadata/project_settings.config": json.dumps(settings).encode()}
     )
+
+
+def test_a_3mf_laid_out_for_a_printer_names_it_as_bambu_studio_does(tmp_path: Path) -> None:
+    """Bambuddy's slice dialog pre-picks the printer by this name; with ScadBuddy's
+    placeholder it took the first one it lists."""
+    out = _write(tmp_path / "a1.3mf", covers=False, plate=plate_for("A1"))
+    settings = _settings_of(out)
+    assert settings["printer_settings_id"] == "Bambu Lab A1 0.4 nozzle"
+    # Still ScadBuddy's own layout, to re-place for another printer.
+    assert layout_of(out.read_bytes()) == "scadbuddy"
+
+
+def test_re_placing_names_the_new_printer_and_nozzle(written: Path) -> None:
+    payload = written.read_bytes()
+    named = replate_3mf(payload, plate_for("H2C"), nozzle_diameter="0.2")
+    assert _settings_of_bytes(named)["printer_settings_id"] == "Bambu Lab H2C 0.2 nozzle"
+    # Moved to another printer: named for it, at the nozzle the file states.
+    moved = replate_3mf(named, plate_for("A1"))
+    assert _settings_of_bytes(moved)["printer_settings_id"] == "Bambu Lab A1 0.2 nozzle"
+    # The fallback plate is no printer.
+    assert _settings_of_bytes(replate_3mf(named, DEFAULT_PLATE))["printer_settings_id"] == (
+        PRESET_PLACEHOLDER
+    )
+
+
+def _settings_of_bytes(payload: bytes) -> dict[str, object]:
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        settings: dict[str, object] = json.loads(archive.read("Metadata/project_settings.config"))
+    return settings
 
 
 def test_a_3mf_is_laid_out_by_scadbuddy_by_its_author_or_as_it_is(written: Path) -> None:
