@@ -21,6 +21,7 @@ import { libraryPrintsPath } from '../components/prints/prints'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
 import { arrangedNote, fromFiles, savedNote, type Arranged } from '../lib/arrange'
+import { traceAction } from '../lib/traceAction'
 import { modelPath } from '../lib/deeplink'
 import { formatBytes } from '../lib/format'
 import { folderIdOf, folderSegments, libraryPath } from '../lib/libraryPath'
@@ -194,7 +195,11 @@ export function LibraryPage() {
   }
 
   async function deleteFiles(files: LibraryEntry[]) {
-    const result = await api.deleteLibraryFiles(files.map((file) => file.id))
+    const ids = files.map((file) => file.id)
+    // Library actions are user actions in Tempo (#2292), each request its child.
+    const result = await traceAction('library_delete', { 'scadbuddy.library_files': ids.length }, () =>
+      api.deleteLibraryFiles(ids),
+    )
     const gone = new Set(result.deleted.map((file) => file.id))
     setConfirming([])
     setPicked((now) => now.filter((file) => !gone.has(file.id)))
@@ -240,7 +245,9 @@ export function LibraryPage() {
     const ids = deleted.result.deleted.filter((file) => file.trashed).map((file) => file.id)
     setDeleted({ ...deleted, restoring: true, error: null })
     try {
-      const answer = await api.restoreLibraryFiles(ids)
+      const answer = await traceAction('library_restore', { 'scadbuddy.library_files': ids.length }, () =>
+        api.restoreLibraryFiles(ids),
+      )
       setDeleted({ ...deleted, restoring: false, restored: answer.restored.length })
     } catch (cause) {
       setDeleted({

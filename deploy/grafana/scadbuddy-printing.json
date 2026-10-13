@@ -208,7 +208,7 @@
           "refId": "A",
           "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
           "queryType": "traceql",
-          "query": "{resource.service.name=\"scadbuddy-worker\" && kind=client && span.scadbuddy.bambuddy.scope != nil} | select(span.scadbuddy.bambuddy.scope, span.http.request.method, span.http.response.status_code)",
+          "query": "{resource.service.name=\"scadbuddy-print\" && kind=client && span.scadbuddy.bambuddy.scope != nil} | select(span.scadbuddy.bambuddy.scope, span.http.request.method, span.http.response.status_code)",
           "limit": 20,
           "spss": 3,
           "tableType": "spans"
@@ -228,7 +228,7 @@
           "refId": "A",
           "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
           "queryType": "traceql",
-          "query": "{resource.service.name=\"scadbuddy-worker\" && kind=client && span.scadbuddy.bambuddy.scope != nil && status=error} | select(span.scadbuddy.bambuddy.scope, span.http.request.method, span.http.response.status_code)",
+          "query": "{resource.service.name=\"scadbuddy-print\" && kind=client && span.scadbuddy.bambuddy.scope != nil && status=error} | select(span.scadbuddy.bambuddy.scope, span.http.request.method, span.http.response.status_code)",
           "limit": 20,
           "spss": 3,
           "tableType": "spans"
