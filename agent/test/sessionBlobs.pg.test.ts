@@ -5,6 +5,7 @@ import { type AppDeps, createApp } from '../src/app.js'
 import type { Database } from '../src/db.js'
 import { originPolicy } from '../src/http/origins.js'
 import type { SessionManager } from '../src/sessions/manager.js'
+import { SessionBlobs, sessionImage } from '../src/sessions/blobs.js'
 import type { ServerEvent } from '../src/sessions/protocol.js'
 import { expectPanelAccepts } from './support/frontendProtocol.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
@@ -187,6 +188,30 @@ describe.skipIf(skip !== undefined)(`session images${skip ? ` (skipped: ${skip})
     await db.sql`DELETE FROM ai_sessions WHERE id = ${id}`
     expect(await db.sql`SELECT 1 FROM ai_session_blobs WHERE session_id = ${id}`).toHaveLength(0)
     expect((await get(`/api/v1/ai/sessions/${child.id}/blobs/${NAME}`)).status).toBe(200)
+  })
+
+  it('records which images a durable tool call produced, in order, and a retry replaces them (#2478)', async () => {
+    const { session } = await m.start(browser, { origin: 'chat' })
+    const blobs = new SessionBlobs(db.sql)
+    const one = sessionImage('image/png', Buffer.from(PNG, 'base64'))
+    const two = sessionImage('image/gif', Buffer.from('GIF89a-two'))
+    const produced = async (toolUseId: string) =>
+      (
+        await db.sql<{ name: string }[]>`
+          SELECT name FROM ai_session_tool_images WHERE session_id = ${session.id} AND tool_use_id = ${toolUseId} ORDER BY ord`
+      ).map((r) => r.name)
+    await blobs.put(session.id, [two, one], 'toolu_a')
+    await blobs.put(session.id, [one], 'toolu_b')
+    expect(await produced('toolu_a')).toEqual([two.name, one.name])
+    expect(await produced('toolu_b')).toEqual([one.name])
+    // The activity ran again: what it produced this time is what the call produced.
+    await blobs.put(session.id, [one], 'toolu_a')
+    expect(await produced('toolu_a')).toEqual([one.name])
+    // A put with no call (a user's image) records none.
+    await blobs.put(session.id, [two])
+    expect(await db.sql`SELECT 1 FROM ai_session_tool_images WHERE session_id = ${session.id}`).toHaveLength(2)
+    await db.sql`DELETE FROM ai_sessions WHERE id = ${session.id}`
+    expect(await db.sql`SELECT 1 FROM ai_session_tool_images WHERE session_id = ${session.id}`).toHaveLength(0)
   })
 
   it('copies into a fork only the images its copied events name (#2150)', async () => {

@@ -42,9 +42,14 @@ _ACTIVITY = timedelta(seconds=8)
 
 
 class RunFlow(BaseModel):
-    """A flow script to run once."""
+    """A flow script to run once, with its inputs (#2483). Both are in the run's history
+    (sealed, as every payload of the run is), so a Reset replays the same values."""
 
     script: str
+    #: The flow's inputs schema, which types `inputs()`; None for a flow with none.
+    inputs_schema: dict[str, Any] | None = None
+    #: The run's inputs, checked against the schema and its defaults filled in.
+    inputs: dict[str, Any] | None = None
 
 
 class FlowStart(BaseModel):
@@ -120,6 +125,8 @@ class ProjectWorkflow:
                 "this run has a script already", type="AlreadyExecuted", non_retryable=True
             )
         self._executed = True
+        if message.inputs_schema is not None:
+            self._flow = run_flow_tool(self._runner, message.inputs_schema, message.inputs)
         info = workflow.info()
         start = self._start
         await workflow.execute_activity(
@@ -134,6 +141,7 @@ class ProjectWorkflow:
                 started_by=start.started_by,
                 approval_timeout_s=start.approval_timeout_s,
                 commit=start.commit,
+                inputs=message.inputs if message.inputs_schema is not None else None,
             ),
             start_to_close_timeout=_ACTIVITY,
         )

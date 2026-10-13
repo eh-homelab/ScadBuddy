@@ -24,7 +24,7 @@ async def serve_health(
                 f"{head}Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode() + body
             )
             await writer.drain()
-        except (TimeoutError, ConnectionError):
+        except TimeoutError, ConnectionError:
             pass
         finally:
             writer.close()

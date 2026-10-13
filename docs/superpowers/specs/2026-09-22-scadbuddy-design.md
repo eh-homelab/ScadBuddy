@@ -858,11 +858,15 @@ Output mirrors the structure of the known-good MakerWorld file:
   five options the BambuStudio CLI dereferences without a null check —
   `printer_settings_id`, `print_settings_id`, `filament_settings_id`,
   `nozzle_diameter`, `printable_height` (#110, and see section 3).
-  We still do not embed real presets: the slicer pipeline supplies printer,
-  process and filament presets, and those five carry placeholders naming
-  ScadBuddy plus the plate height we do know. They are there because the file
-  cannot be read at all without them, not because we own slicer settings —
-  measured, none of their values reaches the G-code.
+  We still do not embed process or filament presets: the slicer pipeline
+  supplies them, and their ids carry placeholders naming ScadBuddy, plus the
+  plate height we do know. They are there because the file cannot be read at
+  all without them, not because we own slicer settings — measured, none of
+  their values reaches the G-code. Since #2639 a file laid out for a printer
+  names that printer in `printer_settings_id`, as Bambu Studio does
+  (`Bambu Lab A1 0.4 nozzle`), because Bambuddy's slice dialog pre-picks the
+  printer by it; the fallback plate keeps the placeholder. ScadBuddy's own
+  layout is recognised by `print_settings_id` still being the placeholder.
 - `Metadata/plate_1.png` (512x512) and `Metadata/plate_1_small.png` (128x128),
   plus `Metadata/top_1.png` and `Metadata/pick_1.png` — the plate cover images,
   named and sized exactly as Bambu Studio writes them (`bbs_3mf.hpp`). They are
