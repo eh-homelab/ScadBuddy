@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, suppress
@@ -18,7 +19,7 @@ from typing import Annotated, Any
 
 import httpx
 import psycopg
-from fastapi import APIRouter, Path, Query, Response, status
+from fastapi import APIRouter, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, Field
@@ -28,6 +29,7 @@ from temporalio.common import WorkflowIDReusePolicy
 from scadbuddy.activity.component import ACTIVITY, ActivityComponent
 from scadbuddy.activity.index import attribute_request
 from scadbuddy.api.components import component_dep
+from scadbuddy.api.accepting import accepting, prefers_async
 from scadbuddy.api.deps import (
     AppState,
     CatalogueDep,
@@ -111,6 +113,7 @@ from scadbuddy.workflows.commands import (
     COMMAND_ANSWER_DEADLINE,
     CONNECT_MARGIN_SECONDS,
     DESCRIBE_SECONDS,
+    FAST_ACCEPT,
     RETRY_AFTER_SECONDS,
     AlreadyClosedError,
     CommandClosedError,
@@ -119,6 +122,7 @@ from scadbuddy.workflows.commands import (
     TemporalRefusedError,
     TemporalUnavailableError,
     TemporalUnreachableError,
+    follow_update,
     start_command,
 )
 from scadbuddy.workflows.component import FollowsDep
@@ -694,10 +698,11 @@ async def post_run(
     output_id: OutputIdPath,
     body: PrintRunRequest,
     response: Response,
+    http: Request,
     outputs: OutputsDep,
     runs: PrintRunsDep,
     activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
-) -> PrintRun:
+) -> PrintRun | JSONResponse:
     """Derive every slicer preset from the chosen spools, nozzles, quality and plate
     (spec 2026-09-27 §4), slice, then queue on one printer. No pipeline is run.
 
@@ -723,11 +728,16 @@ async def post_run(
     one per deliberate Print gets a new print each time, and a retry of one press
     (same id) its run, for as long as the run's row is kept
     (``print_run_retention_seconds``).
+
+    With ``Prefer: respond-async``, a run no worker has picked up within a few seconds
+    answers **202** ``accepting`` instead of 503 ``command-still-accepting``: follow its
+    ``follow_url`` to this answer (spec 2026-10-13, #2793).
     """
     meta = require_output(outputs, output_id)
     return await accept_run(
         runs,
         response,
+        http=http,
         subject=PrintSubject.output(meta.id),
         slug=meta.slug,
         request=body,
@@ -756,7 +766,8 @@ async def accept_run(
     source: SourceSpec,
     activity: ActivityComponent,
     prepare: Callable[[SourceSpec], Awaitable[SourceSpec]] | None = None,
-) -> PrintRun:
+    http: Request | None = None,
+) -> PrintRun | JSONResponse:
     """The 202-and-follow model every print run shares (#470, #742), on Temporal
     (#1052, spec 2026-10-01 §5.1).
 
@@ -767,6 +778,9 @@ async def accept_run(
     (or attached to) with update-with-start, and its ``accepted`` Update answers with
     the new row (202), the run it repeats (200) or the refusal, raised as the problem it
     carries. ``prepare`` completes ``source`` for a run that is not a repeat (#2550).
+    ``http`` asking for ``Prefer: respond-async`` makes a start no worker has accepted
+    within `FAST_ACCEPT` a 202 to follow (spec 2026-10-13 §5.1, #2793); its Update id is
+    the request's ``request_id``, or a fresh one.
     """
     key = run_key(subject.run_subject, request)
     has_request_id = request.request_id is not None
@@ -787,6 +801,8 @@ async def accept_run(
         search_attributes=runs.search_attributes,
     )
     workflow_id = f"print-{key}"
+    respond_async = http is not None and prefers_async(http)
+    update_id = (request.request_id or uuid.uuid4().hex) if respond_async else None
 
     began = time.monotonic()
 
@@ -805,6 +821,7 @@ async def accept_run(
                 else WorkflowIDReusePolicy.ALLOW_DUPLICATE
             ),
             deadline=deadline,
+            update_id=update_id,
         )
 
     async def ended(answer: AcceptAnswer) -> bool:
@@ -817,7 +834,14 @@ async def accept_run(
         return stored is not None and stored.status != "running"
 
     try:
-        answer = await start()
+        try:
+            answer = await start(FAST_ACCEPT if respond_async else COMMAND_ANSWER_DEADLINE)
+        except CommandStillAcceptingError:
+            if http is None or update_id is None:
+                raise
+            # Followed by its Update rather than sent again (#2793). Only this first
+            # start: one that must start a new run past an ended one is sent again.
+            return accepting(http, workflow_id, update_id)
         if await ended(answer):
             # Our record no longer repeats this ended run: its window is over and the
             # execution is closing. Let it close, then this request starts its own.
@@ -859,23 +883,36 @@ async def accept_run(
             type_=STILL_ACCEPTING_PROBLEM,
             headers={"Retry-After": str(RETRY_AFTER_SECONDS)},
         ) from None
-    except TemporalRefusedError:
+    except (TemporalRefusedError, TemporalUnavailableError) as error:
+        raise _temporal_problem(error) from None
+    run = _answered(answer)
+    await attribute_request(activity.index, f"print_run:{run.id}")
+    if answer.repeated:
+        response.status_code = status.HTTP_200_OK
+    return run
+
+
+def _temporal_problem(error: TemporalRefusedError | TemporalUnavailableError) -> ApiError:
+    if isinstance(error, TemporalRefusedError):
         # A misconfiguration, not a blip (review #1061 (3) 3).
-        raise temporal_refused(
+        return temporal_refused(
             "to start a print run", TEMPORAL_REFUSED_DETAIL, may_have_started=True
-        ) from None
-    except TemporalUnavailableError as error:
-        if isinstance(error, TemporalUnreachableError):
-            detail = TEMPORAL_UNREACHABLE_DETAIL
-        elif isinstance(error, TemporalBusyError):
-            detail = TEMPORAL_BUSY_DETAIL
-        else:
-            detail = TEMPORAL_DOWN_DETAIL
-        raise temporal_unavailable(
-            "a print run",
-            detail,
-            may_have_started=not isinstance(error, TemporalUnreachableError),
-        ) from None
+        )
+    if isinstance(error, TemporalUnreachableError):
+        detail = TEMPORAL_UNREACHABLE_DETAIL
+    elif isinstance(error, TemporalBusyError):
+        detail = TEMPORAL_BUSY_DETAIL
+    else:
+        detail = TEMPORAL_DOWN_DETAIL
+    return temporal_unavailable(
+        "a print run",
+        detail,
+        may_have_started=not isinstance(error, TemporalUnreachableError),
+    )
+
+
+def _answered(answer: AcceptAnswer) -> PrintRun:
+    """The run the `accepted` Update answered, or its refusal raised as its problem."""
     if answer.refusal is not None:
         refusal = answer.refusal
         raise ApiError(
@@ -886,10 +923,18 @@ async def accept_run(
             **refusal.extensions,
         )
     assert answer.run is not None  # the Update answers one or the other
-    await attribute_request(activity.index, f"print_run:{answer.run.id}")
-    if answer.repeated:
-        response.status_code = status.HTTP_200_OK
     return answer.run.model_copy(update={"repeated": answer.repeated})
+
+
+async def follow_run(runs: PrintCommands, workflow_id: str, update_id: str) -> PrintRun:
+    """The run a print-run route answered 202 for (spec 2026-10-13 §5.3, #2793): its
+    `accepted` Update's outcome, answered as `accept_run` answers it. Still not answered,
+    `CommandStillAcceptingError`; not known, `CommandResendError`."""
+    try:
+        answer = await follow_update(runs.client, workflow_id, update_id, result_type=AcceptAnswer)
+    except (TemporalRefusedError, TemporalUnavailableError) as error:
+        raise _temporal_problem(error) from None
+    return _answered(answer)
 
 
 @router.get(

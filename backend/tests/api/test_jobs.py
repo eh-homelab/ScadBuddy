@@ -853,7 +853,7 @@ def test_following_a_full_queue_is_the_renders_own_refusal(client: TestClient) -
 def test_only_a_render_is_followed(client: TestClient) -> None:
     follow = mock.AsyncMock(return_value=_job())
     with mock.patch.object(RenderService, "follow", follow):
-        response = client.post("/api/v1/commands/print-abc/updates/k1")
+        response = client.post("/api/v1/commands/op-abc/updates/k1")
 
     assert response.status_code == 404
     follow.assert_not_awaited()

@@ -919,13 +919,14 @@ async def post_library_run(
     file_id: FileIdPath,
     body: PrintRunRequest,
     response: Response,
+    http: Request,
     runs: PrintRunsDep,
     activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
     store: SettingsStoreDep,
     paths: PathsDep,
     budget: ReadBudgetDep,
     downloads: DownloadsDep,
-) -> PrintRun:
+) -> PrintRun | JSONResponse:
     """As ``/print/outputs/{id}/run`` (202, then follow ``GET /print/runs/{id}``; a
     repeat of the same request is its run, #742), on the file as it stands in Bambuddy.
     A sliced file is queued as it is, with no slice (#2671), and never refused: one
@@ -942,6 +943,7 @@ async def post_library_run(
     return await accept_run(
         runs,
         response,
+        http=http,
         subject=PrintSubject.library(file_id),
         slug=library_slug(PrintSubject.library(file_id)),
         request=body,

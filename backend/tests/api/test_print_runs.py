@@ -38,6 +38,7 @@ from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, run_key
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
+from scadbuddy.workflows import commands as commands_module
 from scadbuddy.workflows.client import connect_lazily
 from scadbuddy.workflows.commands import (
     CommandClosedError,
@@ -56,6 +57,7 @@ from tests.api.test_print_run_choices import (
     run_routes,
 )
 from tests.api.test_send import died_after_the_upload, stored_files, upload_route
+from tests.bambuddy.conftest import recording
 from tests.support.temporal import WorkflowReaper, namespace_not_found_error
 from tests.test_bambu3mf import add_plate
 
@@ -1262,4 +1264,56 @@ def test_a_cancel_while_the_last_plate_is_queued_still_ends_succeeded(
     assert ended["status"] == "succeeded", ended
     assert ended["error"] is None
     assert ended["result"]["queue_item_ids"] == [51]
+    assert queued.call_count == 1
+
+
+@respx.mock
+def test_a_run_no_worker_has_accepted_yet_is_followed_to_its_run(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2793 (spec 2026-10-13): with `Prefer: respond-async` a run whose `accepted`
+    Update has not answered within `FAST_ACCEPT` is a 202 to follow, not a 503 to send
+    again; following that Update answers the run once it is recorded, and it prints
+    once. The check's printer read is held to keep the Update from answering."""
+    monkeypatch.setattr(printing_api, "FAST_ACCEPT", timedelta(seconds=1))
+    follow_defaults = commands_module.follow_update.__kwdefaults__
+    assert follow_defaults is not None
+    monkeypatch.setitem(follow_defaults, "wait", timedelta(seconds=1))
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    slice_routes()
+    queued = queue_route()
+    held = threading.Event()
+    printers = recording("printers.json")
+
+    async def held_printers(request: httpx.Request) -> httpx.Response:
+        while not held.is_set():
+            await asyncio.sleep(0.01)
+        return httpx.Response(200, json=printers)
+
+    respx.get(f"{API}/printers/").mock(side_effect=held_printers)
+    request_id = uuid.uuid4().hex
+    try:
+        posted = client.post(
+            f"/api/v1/print/outputs/{output_id}/run",
+            json={**body(), "request_id": request_id},
+            headers={"Prefer": "respond-async"},
+        )
+        assert posted.status_code == 202, posted.text
+        accepting = posted.json()
+        assert accepting["status"] == "accepting"
+        assert accepting["update_id"] == request_id
+        assert accepting["workflow_id"].startswith("print-")
+
+        still = client.get(accepting["follow_url"])
+        assert still.status_code == 202, still.text
+    finally:
+        held.set()
+    answered = client.get(accepting["follow_url"])
+
+    assert answered.status_code == 200, answered.text
+    run = answered.json()
+    assert run["status"] == "running" and run["repeated"] is False
+    assert follow_run(client, run["id"])["status"] == "succeeded"
     assert queued.call_count == 1

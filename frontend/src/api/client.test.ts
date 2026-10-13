@@ -597,6 +597,71 @@ describe('runPrint follows the run the server answers with 202 (#470)', () => {
     expect(mayHaveRun(error)).toBe(true)
     expect(posts).toBe(3)
   })
+
+  // #2793 — spec 2026-10-13: a run no worker has picked up is a 202 to follow, not a 503 to re-POST.
+  const runFollowUrl = '/api/v1/commands/print-x/updates/r1'
+  const runAccepting = () =>
+    HttpResponse.json(
+      { status: 'accepting', workflow_id: 'print-x', update_id: 'r1', follow_url: runFollowUrl, retry_after: 0 },
+      { status: 202 },
+    )
+
+  it('asks to follow, and follows a 202 accepting to its run without posting the print again (#2793)', async () => {
+    printRunPoll.intervalMs = 1
+    const result = { queue_item_ids: [7], warnings: [] }
+    let posts = 0
+    let prefer: string | null = null
+    let follows = 0
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', ({ request }) => {
+        posts += 1
+        prefer = request.headers.get('Prefer')
+        return runAccepting()
+      }),
+      http.get(runFollowUrl, () => {
+        follows += 1
+        return follows === 1 ? runAccepting() : HttpResponse.json(started)
+      }),
+      http.get('/api/v1/print/runs/run-1', () => HttpResponse.json({ ...started, status: 'succeeded', result })),
+    )
+
+    await expect(api.runPrint('out-1', body)).resolves.toEqual(result)
+    expect(prefer).toBe('respond-async')
+    expect(posts).toBe(1)
+    expect(follows).toBe(2)
+  })
+
+  it('posts the print again, the same request, when the follow says command-resend (#2793)', async () => {
+    printRunPoll.intervalMs = 1
+    const result = { queue_item_ids: [7], warnings: [] }
+    const sent: string[] = []
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', async ({ request }) => {
+        sent.push(await request.text())
+        return sent.length === 1 ? runAccepting() : HttpResponse.json(started, { status: 202 })
+      }),
+      http.get(runFollowUrl, () =>
+        HttpResponse.json({ type: COMMAND_RESEND, title: 'Conflict', status: 409, detail: 'send it again' }, { status: 409 }),
+      ),
+      http.get('/api/v1/print/runs/run-1', () => HttpResponse.json({ ...started, status: 'succeeded', result })),
+    )
+
+    await expect(api.runPrint('out-1', body)).resolves.toEqual(result)
+    expect(sent).toHaveLength(2)
+    expect(sent[1]).toBe(sent[0])
+  })
+
+  it('says a print it gave up following may have started (#2793)', async () => {
+    printRunPoll.intervalMs = 1
+    printRunPoll.acceptingMs = 20
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', () => runAccepting()),
+      http.get(runFollowUrl, () => runAccepting()),
+    )
+
+    const error = await api.runPrint('out-1', body).catch((caught: unknown) => caught)
+    expect(mayHaveRun(error)).toBe(true)
+  })
 })
 
 describe('newRequestId', () => {
