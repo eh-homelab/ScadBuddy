@@ -607,11 +607,35 @@ async function untilAccepted<T>(
   signal?: AbortSignal,
   within?: Within,
 ): Promise<T> {
+  const answer = await untilAnswered(
+    send,
+    (sent) => (isAccepting(sent) ? sent : undefined),
+    // A POST (#2782 review): a render's follow makes its supersede, a change the
+    // cross-site gate must see.
+    (url) => request<T | CommandAccepting>(url, { method: 'POST' }),
+    signal,
+    within,
+  )
+  return answer as T
+}
+
+/**
+ * `untilAccepted` over any answer shape: `pending` names the 202 `accepting` in an
+ * answer, if it is one, and `follow` reads its `follow_url` (#2794: an operation's answer
+ * keeps its status, since its own 202 is a different body).
+ */
+async function untilAnswered<A>(
+  send: () => Promise<A>,
+  pending: (answer: A) => CommandAccepting | undefined,
+  follow: (url: string) => Promise<A>,
+  signal?: AbortSignal,
+  within?: Within,
+): Promise<A> {
   const began = performance.now()
   let answer = await send()
   let last = false
   let followed = false
-  while (isAccepting(answer)) {
+  for (let accepting = pending(answer); accepting; accepting = pending(answer)) {
     // The last follow after an abort named no claim yet: the abort it is, so a caller
     // that keeps a superseded action quiet still can (review #2805).
     if (last) throw signal?.reason
@@ -637,17 +661,14 @@ async function untilAccepted<T>(
       last = true
     }
     followed = true
-    const url = answer.follow_url.startsWith(API_BASE) ? answer.follow_url.slice(API_BASE.length) : answer.follow_url
+    const url = accepting.follow_url.startsWith(API_BASE)
+      ? accepting.follow_url.slice(API_BASE.length)
+      : accepting.follow_url
     try {
-      // A POST (#2782 review): a render's follow makes its supersede, a change the
-      // cross-site gate must see.
       // `finish`, as the POST's own re-send has: a follow in flight when the signal aborts
       // may have made the supersede's release, so an unanswered one is sent once more to
       // learn what it claimed, never dropped (#3576).
-      answer = await reattach(() => request<T | CommandAccepting>(url, { method: 'POST' }), last ? undefined : signal, {
-        finish: true,
-        within,
-      })
+      answer = await reattach(() => follow(url), last ? undefined : signal, { finish: true, within })
     } catch (caught) {
       if (!(caught instanceof ApiError && caught.problem.type === COMMAND_RESEND)) throw caught
       answer = await send()
@@ -676,9 +697,21 @@ export async function command<T>(
   key: string = newRequestId(),
 ): Promise<T> {
   const signal = init.signal ?? undefined
-  const headers = { ...(init.headers as Record<string, string> | undefined), 'Idempotency-Key': key }
-  const first = await reattach(() => requestWithStatus<T | OperationAccepted>(path, { ...init, headers }), signal)
-  return followOperation<T>(first, signal, operations)
+  const headers: Record<string, string> = {
+    ...(init.headers as Record<string, string> | undefined),
+    'Idempotency-Key': key,
+    // #2794: the backend's operations answer a slow start 202 `accepting`, followed here;
+    // the agent's own (`/ai/operations`) do not.
+    ...(operations === '/operations' ? { Prefer: 'respond-async' } : {}),
+  }
+  type Answer = { status: number; body: T | OperationAccepted | CommandAccepting }
+  const first = await untilAnswered<Answer>(
+    () => reattach(() => requestWithStatus<T | OperationAccepted | CommandAccepting>(path, { ...init, headers }), signal),
+    (answer) => (answer.status === 202 && isAccepting(answer.body) ? answer.body : undefined),
+    (url) => requestWithStatus<T | OperationAccepted | CommandAccepting>(url, { method: 'POST' }),
+    signal,
+  )
+  return followOperation<T>(first as { status: number; body: T | OperationAccepted }, signal, operations)
 }
 
 /**

@@ -3,10 +3,11 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from typing import Literal
 from urllib.parse import urlencode
 
-from fastapi import Request, status
+from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -39,6 +40,38 @@ def prefers_async(request: Request) -> bool:
         preference.split(";")[0].split("=")[0].strip().lower() == RESPOND_ASYNC
         for preference in preferences
     )
+
+
+#: The request being answered, when it asked for ``Prefer: respond-async``: for a
+#: command answered deep in a shared helper (`run_operation`), which has no request.
+_respond_async: ContextVar[Request | None] = ContextVar("respond_async", default=None)
+
+
+async def note_preference(request: Request) -> None:
+    """An app-wide dependency (#2794): records whether this request follows a 202
+    itself, for `respond_async_request`. Set on every request, so none inherits another's."""
+    _respond_async.set(request if prefers_async(request) else None)
+
+
+def respond_async_request() -> Request | None:
+    """The request being answered, if it asked for ``Prefer: respond-async``."""
+    return _respond_async.get()
+
+
+class AcceptingAnswer(Exception):  # noqa: N818 - an answer, not an error
+    """Raised where a helper decides the route's answer is the 202 `accepting`: it
+    leaves the route as the 503 `command-still-accepting` it replaces did, so whatever
+    that unwound is unwound the same way."""
+
+    def __init__(self, response: JSONResponse) -> None:
+        super().__init__(response)
+        self.response = response
+
+
+def install_accepting_handler(app: FastAPI) -> None:
+    @app.exception_handler(AcceptingAnswer)
+    async def _accepting(request: Request, exc: AcceptingAnswer) -> JSONResponse:
+        return exc.response
 
 
 def accepting(

@@ -1076,6 +1076,68 @@ describe('command() sends a key and follows an operation (#1053)', () => {
     await call()
     expect(key).toMatch(/^[0-9a-f]{32}$/)
   })
+
+  // #2794 — spec 2026-10-13: a slow start is a 202 `accepting` to follow, not a 503 to re-send.
+  const opFollowUrl = '/api/v1/commands/op-reprint-x/updates/k'
+  const opAccepting = () =>
+    HttpResponse.json(
+      { status: 'accepting', workflow_id: 'op-reprint-x', update_id: 'k', follow_url: opFollowUrl, retry_after: 0 },
+      { status: 202 },
+    )
+
+  it('asks to follow, and follows a 202 accepting to the route body without sending again (#2794)', async () => {
+    printRunPoll.intervalMs = 1
+    let posts = 0
+    let prefer: string | null = null
+    let follows = 0
+    server.use(
+      http.post('/api/v1/prints/35/reprint', ({ request }) => {
+        posts += 1
+        prefer = request.headers.get('Prefer')
+        return opAccepting()
+      }),
+      http.get(opFollowUrl, () => {
+        follows += 1
+        return follows === 1 ? opAccepting() : HttpResponse.json(again)
+      }),
+    )
+
+    await expect(api.reprint(35)).resolves.toEqual(again)
+    expect(prefer).toBe('respond-async')
+    expect(posts).toBe(1)
+    expect(follows).toBe(2)
+  })
+
+  it('follows into the operation when the followed answer is its own 202 (#2794)', async () => {
+    printRunPoll.intervalMs = 1
+    server.use(
+      http.post('/api/v1/prints/35/reprint', () => opAccepting()),
+      http.get(opFollowUrl, () => HttpResponse.json({ ...operation, repeated: false }, { status: 202 })),
+      http.get('/api/v1/operations/op-1', () =>
+        HttpResponse.json({ ...operation, status: 'succeeded', result: again }),
+      ),
+    )
+
+    await expect(api.reprint(35)).resolves.toEqual(again)
+  })
+
+  it('sends again with its key when the follow says command-resend (#2794)', async () => {
+    printRunPoll.intervalMs = 1
+    const keys: (string | null)[] = []
+    server.use(
+      http.post('/api/v1/prints/35/reprint', ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return keys.length === 1 ? opAccepting() : HttpResponse.json(again, { status: 201 })
+      }),
+      http.get(opFollowUrl, () =>
+        HttpResponse.json({ type: COMMAND_RESEND, title: 'Conflict', status: 409, detail: 'send it again' }, { status: 409 }),
+      ),
+    )
+
+    await expect(api.reprint(35)).resolves.toEqual(again)
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).toBe(keys[0])
+  })
 })
 
 describe('library pins are commands (#1054)', () => {

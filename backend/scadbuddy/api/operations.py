@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Annotated, Any
@@ -27,6 +28,7 @@ from temporalio.client import WorkflowExecutionStatus
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.service import RPCError, RPCStatusCode
 
+from scadbuddy.api.accepting import AcceptingAnswer, accepting, respond_async_request
 from scadbuddy.api.deps import OperationIdPath
 from scadbuddy.core.authorship import current_author
 from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE, ApiError, Problem
@@ -36,6 +38,7 @@ from scadbuddy.operations.kinds import OperationKind, operation_key
 from scadbuddy.operations.store import Operation, OperationAccepted
 from scadbuddy.render.inputs import nul_at
 from scadbuddy.workflows.commands import (
+    FAST_ACCEPT,
     RETRY_AFTER_SECONDS,
     AlreadyClosedError,
     CommandClosedError,
@@ -44,6 +47,7 @@ from scadbuddy.workflows.commands import (
     TemporalRefusedError,
     TemporalUnavailableError,
     TemporalUnreachableError,
+    follow_update,
     start_command,
     temporal_failure,
 )
@@ -412,6 +416,11 @@ async def _run_operation(
     if recorded is not None:
         return _answer(recorded, response, repeated=True)
     workflow_id = f"op-{kind.name}-{key}"
+    # #2794: a client that follows a 202 itself waits only briefly for the Update, named
+    # by its key so the follow finds it.
+    http = respond_async_request()
+    # Only when asked: a test's kwdefault deadline then still governs the rest.
+    fast: dict[str, Any] = {"deadline": FAST_ACCEPT, "update_id": idempotency_key} if http else {}
     # A re-send can arrive before the first one's record is written: it follows that
     # operation, whatever the route's refusal would say now (review 1130 2).
     if before_start is not None and not await _running(ops, workflow_id):
@@ -441,6 +450,7 @@ async def _run_operation(
             update=ACCEPTED_UPDATE,
             result_type=OperationAnswer,
             reuse=WorkflowIDReusePolicy.ALLOW_DUPLICATE_FAILED_ONLY,
+            **fast,
         )
     except AlreadyClosedError:
         recorded = await ops.store.find(key)
@@ -457,23 +467,34 @@ async def _run_operation(
     except CommandStillAcceptingError:
         # A `done` kind past the deadline: the record may exist by now (§4.2 step 4).
         recorded = await ops.store.find(key)
-        if recorded is None:
-            raise still_accepting() from None
-        return _answer(recorded, response, repeated=False)
+        if recorded is not None:
+            return _answer(recorded, response, repeated=False)
+        if http is not None:
+            raise AcceptingAnswer(accepting(http, workflow_id, idempotency_key)) from None
+        raise still_accepting() from None
     except CommandClosedError:
         # Ended before it answered. A re-send reads whatever it recorded (the reconciler
         # ends a row it left running); with no record, the same request starts again.
         raise still_accepting() from None
-    except TemporalRefusedError:
-        raise temporal_refused(
+    except (TemporalRefusedError, TemporalUnavailableError) as error:
+        raise _temporal_problem(error) from None
+    return _outcome(answer, response)
+
+
+def _temporal_problem(error: TemporalRefusedError | TemporalUnavailableError) -> ApiError:
+    if isinstance(error, TemporalRefusedError):
+        return temporal_refused(
             "to start an operation", OPERATION_REFUSED_DETAIL, may_have_started=True
-        ) from None
-    except TemporalUnavailableError as error:
-        raise temporal_unavailable(
-            "an operation",
-            _unavailable_detail(error),
-            may_have_started=not isinstance(error, TemporalUnreachableError),
-        ) from None
+        )
+    return temporal_unavailable(
+        "an operation",
+        _unavailable_detail(error),
+        may_have_started=not isinstance(error, TemporalUnreachableError),
+    )
+
+
+def _outcome(answer: OperationAnswer, response: Response) -> dict[str, Any] | OperationAccepted:
+    """The route's answer for its `accepted` Update's: the operation's, or its refusal."""
     if answer.refusal is not None:
         refusal = answer.refusal
         raise _problem(
@@ -481,6 +502,35 @@ async def _run_operation(
         )
     assert answer.operation is not None  # the Update answers one or the other
     return _answer(answer.operation, response, repeated=answer.repeated)
+
+
+#: An operation's execution id (`_run_operation`): its kind, then its 64-hex key.
+_OPERATION_ID = re.compile(r"op-.+-(?P<key>[0-9a-f]{64})")
+
+
+async def follow_operation(
+    ops: OperationCommands, response: Response, workflow_id: str, update_id: str
+) -> dict[str, Any] | OperationAccepted:
+    """The answer an operation route gave 202 `accepting` for (spec 2026-10-13 §5.3,
+    #2794): its `accepted` Update's, as `_run_operation` answers it. A `done` kind's
+    Update can outlast the wait while its record says it is running: that is its 202 to
+    follow at ``GET /operations/{id}``, as the route answers it. Still nothing,
+    `CommandStillAcceptingError`; an Update not known, `CommandResendError`."""
+    matched = _OPERATION_ID.fullmatch(workflow_id)
+    if matched is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no command {workflow_id!r} to follow")
+    try:
+        answer = await follow_update(
+            ops.client, workflow_id, update_id, result_type=OperationAnswer
+        )
+    except CommandStillAcceptingError:
+        recorded = await ops.store.find(matched["key"])
+        if recorded is None:
+            raise
+        return _answer(recorded, response, repeated=False)
+    except (TemporalRefusedError, TemporalUnavailableError) as error:
+        raise _temporal_problem(error) from None
+    return _outcome(answer, response)
 
 
 def operation_answer[M: BaseModel](
