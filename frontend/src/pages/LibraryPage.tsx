@@ -23,20 +23,13 @@ import { Spinner } from '../components/ui/Spinner'
 import { arrangedNote, fromFiles, savedNote, type Arranged } from '../lib/arrange'
 import { traceAction } from '../lib/traceAction'
 import { modelPath } from '../lib/deeplink'
+import { useAdvanced } from '../lib/advanced'
 import { formatBytes } from '../lib/format'
 import { folderIdOf, folderSegments, libraryPath } from '../lib/libraryPath'
 import { folderLabel } from '../lib/libraryTransfer'
 
 /** #313 — remembered per viewer: whether the page lists every file type. */
 const ADVANCED_KEY = 'scadbuddy.library.advanced'
-
-function readAdvanced(): boolean {
-  try {
-    return window.localStorage.getItem(ADVANCED_KEY) === '1'
-  } catch {
-    return false
-  }
-}
 
 /** A query parameter as a file id, or null. */
 function idParam(value: string | null): number | null {
@@ -88,7 +81,7 @@ export function LibraryPage() {
   const fileParam = idParam(search.get('file'))
   const printParam = idParam(search.get('print'))
 
-  const [advanced, setAdvanced] = useState(readAdvanced)
+  const [advanced, toggleAdvanced] = useAdvanced(ADVANCED_KEY)
   const [tree, setTree] = useState<LibraryFolderView[] | null>(null)
   const [listing, setListing] = useState<LibraryListing | null>(null)
   // A print link to a file the listing on screen already holds (Print pressed on its
@@ -161,16 +154,6 @@ export function LibraryPage() {
     // `wanted` and `location.search` are read through `wantedKey` and when the answer lands.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wantedKey, missing, advanced, reload])
-
-  function toggleAdvanced() {
-    const next = !advanced
-    setAdvanced(next)
-    try {
-      window.localStorage.setItem(ADVANCED_KEY, next ? '1' : '0')
-    } catch {
-      // A browser that refuses storage still toggles for this visit.
-    }
-  }
 
   function selectFolder(id: number | null) {
     const path = libraryPath(tree ?? [], id)

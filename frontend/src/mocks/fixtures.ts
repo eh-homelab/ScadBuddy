@@ -938,6 +938,9 @@ export const settings: Settings = {
   last_project_id: null,
   render_timeout: 300,
   job_ttl: 3600,
+  activity_follow: null,
+  activity_ttl_seconds: null,
+  activity_repair_window_seconds: null,
   has_google_fonts_api_key: false,
   sources: {
     ...Object.fromEntries(Object.keys(settingsApplies).map((name) => [name, 'default' as const])),

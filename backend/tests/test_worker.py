@@ -1174,6 +1174,21 @@ async def test_a_worker_on_an_empty_volume_seeds_the_images_libraries(
         deps.projection.close()
 
 
+@pytest.mark.requires_postgres
+async def test_the_render_workers_projection_writes_activity(
+    settings: Settings, pg_pool: PgPool, tmp_path: Path
+) -> None:
+    """Without it a render's state changes on a worker are missing from activity until
+    the repair sweep."""
+    cfg = settings.model_copy(update={"data_dir": tmp_path / "worker-data"})
+    deps, store = worker_module.build_worker_deps(cfg)
+    try:
+        assert deps.projection.activity is not None
+    finally:
+        await store.aclose()
+        deps.projection.close()
+
+
 @pytest.mark.parametrize(
     ("queue", "service"),
     [

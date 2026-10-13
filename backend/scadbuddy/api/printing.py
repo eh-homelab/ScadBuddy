@@ -22,6 +22,9 @@ from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, Field
 from temporalio.common import WorkflowIDReusePolicy
 
+from scadbuddy.activity.component import ACTIVITY, ActivityComponent
+from scadbuddy.activity.index import attribute_request
+from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import (
     AppState,
     CatalogueDep,
@@ -573,6 +576,7 @@ async def post_run(
     response: Response,
     outputs: OutputsDep,
     runs: PrintRunsDep,
+    activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
 ) -> PrintRun:
     """Derive every slicer preset from the chosen spools, nozzles, quality and plate
     (spec 2026-09-27 §4), slice, then queue on one printer. No pipeline is run.
@@ -608,6 +612,7 @@ async def post_run(
         slug=meta.slug,
         request=body,
         source=SourceSpec(kind="output", output_id=meta.id),
+        activity=activity,
     )
 
 
@@ -629,6 +634,7 @@ async def accept_run(
     slug: str,
     request: PrintRunRequest,
     source: SourceSpec,
+    activity: ActivityComponent,
     prepare: Callable[[SourceSpec], Awaitable[SourceSpec]] | None = None,
 ) -> PrintRun:
     """The 202-and-follow model every print run shares (#470, #742), on Temporal
@@ -760,6 +766,7 @@ async def accept_run(
             **refusal.extensions,
         )
     assert answer.run is not None  # the Update answers one or the other
+    await attribute_request(activity.index, f"print_run:{answer.run.id}")
     if answer.repeated:
         response.status_code = status.HTTP_200_OK
     return answer.run.model_copy(update={"repeated": answer.repeated})

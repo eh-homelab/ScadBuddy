@@ -75,6 +75,7 @@ import { Client, Connection } from '@temporalio/client'
 import { fileURLToPath } from 'node:url'
 import { AgentCommands } from './operations/run.js'
 import { OperationStore } from './operations/store.js'
+import { activityKindsOf, upsertActivityKinds } from './activity/kinds.js'
 import { packageKinds } from './plugins/packages/operations.js'
 import { operationActivities } from './temporal/operationActivities.js'
 import { PendingActionStore } from './tools/pending.js'
@@ -386,6 +387,15 @@ if (config.temporalAddress && !database) console.error('agent-tools worker: not 
 if (temporal) Runtime.install({ shutdownSignals: [] })
 const operationStore = temporal ? new OperationStore(temporal.sql) : undefined
 const commandKinds = pluginPackages ? packageKinds({ packages: pluginPackages, installer: packageInstaller }) : []
+// The agent's activity kinds are its command kinds (spec 2026-10-09 §4), read by the backend.
+if (database && commandKinds.length > 0) {
+  void database
+    .ready()
+    .then(async (ok) => {
+      if (ok) await upsertActivityKinds(database.sql, activityKindsOf(commandKinds))
+    })
+    .catch((err: unknown) => console.error('activity kinds: could not record them:', (err as Error).message))
+}
 // Durable subjects' payloads are sealed per subject (spec §6.5): every client and worker
 // that encodes or decodes them carries the codec, which needs the KEK. Without one, a
 // session or flow payload is never sealed here, so no durable session is started (5c Ruling 13).
