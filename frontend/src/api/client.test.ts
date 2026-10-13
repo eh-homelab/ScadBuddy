@@ -1563,17 +1563,37 @@ describe('MEDIA_THUMBNAIL_VERSION (#1691)', () => {
       const hung = new Promise<void>((resolve) => {
         release = resolve
       })
+      let arrived!: () => void
+      const first = new Promise<void>((resolve) => {
+        arrived = resolve
+      })
       server.use(
         http.get('/api/v1/settings', async () => {
           reads += 1
           const n = reads
-          if (n === 1) await hung
+          if (n === 1) {
+            arrived()
+            await hung
+          }
           return HttpResponse.json({ display_unit: 'mm', n })
         }),
       )
+      // The order fetches reach the handler is not the order they were made in: msw runs
+      // undici over its sockets, and a pooled socket an earlier test left behind can
+      // send a later fetch first. The first fetch is held back here as such a socket
+      // would, so the test cannot pass by counting arrivals as calls.
+      const realFetch = globalThis.fetch
+      let fetches = 0
+      const fetched = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+        fetches += 1
+        if (fetches === 1) await new Promise((resolve) => setTimeout(resolve, 20))
+        return realFetch(input, init)
+      })
       const now = vi.spyOn(Date, 'now').mockReturnValue(1_000)
       try {
         const stuck = api.getSettings()
+        // The hung read must be the first to arrive before the next caller asks.
+        await first
         now.mockReturnValue(1_000 + SETTINGS_SHARE_MS - 1)
         const joined = api.getSettings()
         now.mockReturnValue(1_000 + SETTINGS_SHARE_MS)
@@ -1585,6 +1605,7 @@ describe('MEDIA_THUMBNAIL_VERSION (#1691)', () => {
       } finally {
         release()
         now.mockRestore()
+        fetched.mockRestore()
       }
     })
   })
