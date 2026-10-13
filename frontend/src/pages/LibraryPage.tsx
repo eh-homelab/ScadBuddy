@@ -26,6 +26,7 @@ import { modelPath } from '../lib/deeplink'
 import { formatBytes } from '../lib/format'
 import { folderIdOf, folderSegments, libraryPath } from '../lib/libraryPath'
 import { folderLabel } from '../lib/libraryTransfer'
+import { useMediaQuery } from '../lib/useMediaQuery'
 
 /** #313 — remembered per viewer: whether the page lists every file type. */
 const ADVANCED_KEY = 'scadbuddy.library.advanced'
@@ -80,6 +81,9 @@ function plural(count: number, word: string): string {
  * #2670 — a card's actions menu (Rename, Copy to…, Move to…), or Copy and Move selected,
  * reorganise the library through Bambuddy; a move says which project loses a file.
  */
+/** Below Tailwind's `md`, where the tree stacks above the files. */
+const NARROW_QUERY = '(max-width: 767.98px)'
+
 export function LibraryPage() {
   const location = useLocation()
   const navigate = useNavigate()
@@ -90,6 +94,9 @@ export function LibraryPage() {
 
   const [advanced, setAdvanced] = useState(readAdvanced)
   const [tree, setTree] = useState<LibraryFolderView[] | null>(null)
+  // #2368 — below md the tree is a collapsed disclosure, so the files come first.
+  const narrow = useMediaQuery(NARROW_QUERY)
+  const [foldersOpen, setFoldersOpen] = useState(false)
   const [listing, setListing] = useState<LibraryListing | null>(null)
   // A print link to a file the listing on screen already holds (Print pressed on its
   // card) finds nothing new: reading it again would empty the listing, closing and
@@ -282,7 +289,32 @@ export function LibraryPage() {
     <div className="h-full overflow-y-auto">
       <div className={`mx-auto flex max-w-6xl flex-col gap-6 p-4 md:flex-row md:p-6 ${deleted || done ? 'pb-44' : ''}`}>
         <nav aria-label="Library" className="w-full md:w-60 md:shrink-0">
-          {tree ? (
+          {tree && narrow ? (
+            <>
+              <button
+                type="button"
+                aria-expanded={foldersOpen}
+                aria-controls="library-folders"
+                onClick={() => setFoldersOpen((open) => !open)}
+                className="flex w-full items-center justify-between gap-2 rounded-md border border-line px-3 py-2 text-left text-[13px] text-ink"
+              >
+                <span className="min-w-0 truncate">Folder: {folderLabel(tree, folderId)}</span>
+                <span aria-hidden="true">{foldersOpen ? '▴' : '▾'}</span>
+              </button>
+              {foldersOpen && (
+                <div id="library-folders" className="mt-2">
+                  <LibraryTree
+                    folders={tree}
+                    selected={folderId}
+                    onSelect={(id) => {
+                      setFoldersOpen(false)
+                      selectFolder(id)
+                    }}
+                  />
+                </div>
+              )}
+            </>
+          ) : tree ? (
             <LibraryTree folders={tree} selected={folderId} onSelect={selectFolder} />
           ) : (
             <p className="flex items-center gap-2 text-[13px] text-muted">
