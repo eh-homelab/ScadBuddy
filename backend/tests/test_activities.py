@@ -9,6 +9,7 @@ import logging
 import shutil
 import threading
 import uuid
+import zipfile
 from collections.abc import Iterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -32,6 +33,7 @@ from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.library.assets import AssetStore, AssetUnavailableError, file_assets
 from scadbuddy.library.libraries import CheckoutGate, LibraryNotInstalledError
 from scadbuddy.render import jobs
+from scadbuddy.render.bambu3mf import TooManyTrianglesError
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import (
@@ -48,6 +50,7 @@ from scadbuddy.render.jobs import RAW_RENDER_NAME
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.runner import OpenSCADError, ProcessOutput
 from scadbuddy.render.schema import CustomizerSchema, Parameter
+from scadbuddy.render.split import MaterialSplitError
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.worker import make_current_until_polled
@@ -305,6 +308,38 @@ async def test_an_openscad_failure_is_a_non_retryable_application_error(tmp_path
     assert isinstance(failure, Failure)
     assert failure.error == raised.value.message
     assert failure.log_tail == ["ERROR: Parser error: syntax error"]
+
+
+@pytest.mark.parametrize(
+    ("stage", "error"),
+    [
+        ("render_solids", MaterialSplitError("mesh has no vertices")),
+        ("render_solids", zipfile.BadZipFile("File is not a zip file")),
+        ("finish_piece", TooManyTrianglesError("past 5000000 triangles", "triangles")),
+    ],
+)
+async def test_a_stage_that_fails_the_same_every_time_is_not_retried(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str, error: Exception
+) -> None:
+    """#604: a bad raw 3MF or an over-limit mesh fails the piece at once, rather than
+    after three attempts that each fail the same way."""
+    acts = RenderActivities(worker_deps(tmp_path, demo_paths(tmp_path)))
+    env = ActivityEnvironment()
+    req = piece_request()
+    prepared = await env.run(acts.prepare, req)
+    main = await env.run(acts.render_main, req, prepared)
+    if stage == "finish_piece":
+        await env.run(acts.render_solids, req, prepared, main)
+
+    async def fails(*_args: Any, **_kwargs: Any) -> Any:
+        raise error
+
+    monkeypatch.setattr(activities, f"{stage}_stage", fails)
+    with pytest.raises(ApplicationError) as raised:
+        await env.run(getattr(acts, stage), req, prepared, main)
+    assert raised.value.non_retryable
+    assert raised.value.type == type(error).__name__
+    assert raised.value.message == str(error)
 
 
 async def test_a_failed_preview_keeps_its_openscad_diagnostics(tmp_path: Path) -> None:

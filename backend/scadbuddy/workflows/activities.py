@@ -10,6 +10,8 @@ import logging
 import os
 import sys
 import uuid
+import xml.etree.ElementTree as ET
+import zipfile
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Executor
 from contextlib import AbstractContextManager
@@ -29,6 +31,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.assets import AssetStore, AssetUnavailableError, asset_ids_in
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate
+from scadbuddy.render.bambu3mf import ArchiveTooLargeError, TooManyTrianglesError
 from scadbuddy.render.geometry_cache import (
     mesh_geometry,
     recolour_piece,
@@ -50,9 +53,12 @@ from scadbuddy.render.jobs import (
     source_directory,
     timed_stage,
 )
+from scadbuddy.render.objects3mf import UnreadableObjectsError
+from scadbuddy.render.paint import PaintCodeError
 from scadbuddy.render.previews import PreviewFailedError, render_preview
 from scadbuddy.render.projection import JobProjection, LegacyPendingError, legacy_unrun
 from scadbuddy.render.runner import OpenSCADError, ProcessOutput, cached_schema, params_problem
+from scadbuddy.render.split import MaterialSplitError
 from scadbuddy.store import BlobRefs, BlobStore, PieceStateLostError
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.content import BlobScope, template_title
@@ -132,6 +138,26 @@ def _stage(metrics: Metrics | None) -> Callable[[RenderStage], AbstractContextMa
     if not activity.in_activity():
         return timed_stage(metrics)
     return timed_stage(metrics, attempt=activity.info().attempt, retried=_retried)
+
+
+#: What a piece's stages raise on a bad render that no retry changes: a raw 3MF that
+#: does not split or parse, a mesh past the 3MF's limits (#604). Retrying one only
+#: triples the time to the failure.
+DETERMINISTIC = (
+    MaterialSplitError,
+    PaintCodeError,
+    UnreadableObjectsError,
+    ArchiveTooLargeError,
+    TooManyTrianglesError,
+    zipfile.BadZipFile,
+    ET.ParseError,
+)
+
+
+def _deterministic(error: Exception) -> ApplicationError:
+    """Non-retryable, named by its own type: the workflow's failure says which stage
+    raised what (`pipelines._failure_of`)."""
+    return ApplicationError(str(error), type=type(error).__name__, non_retryable=True)
 
 
 def _failure(error: OpenSCADError) -> ApplicationError:
@@ -616,6 +642,8 @@ class RenderActivities:
             raise _failure(error) from None
         except AssetUnavailableError as error:
             raise _unavailable(error, missing) from None
+        except DETERMINISTIC as error:
+            raise _deterministic(error) from None
         # Against the sha this stage checked out, so a zombie attempt is refused.
         await _heartbeating(
             asyncio.create_task(
@@ -661,6 +689,8 @@ class RenderActivities:
                 )
         except OpenSCADError as error:
             raise _failure(error) from None
+        except DETERMINISTIC as error:
+            raise _deterministic(error) from None
         piece = PieceResult(result=result, log_tail=main.log_tail)
         # Last, and atomically: from here on the piece is answered by `cached_piece`.
         await asyncio.to_thread(_write_piece, work, piece)
