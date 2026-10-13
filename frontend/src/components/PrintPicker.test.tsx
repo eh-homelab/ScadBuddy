@@ -1853,8 +1853,15 @@ describe('PrintPicker · Supports (#1899)', () => {
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]?.['supports']).toEqual({ enabled: true, type: 'normal', on_build_plate_only: false })
 
+    // The typed value stays, with why it is not sent (#2837 review).
+    expect(screen.getByLabelText('Threshold angle (°)')).toHaveValue(95)
+    expect(screen.getByLabelText('Threshold angle (°)')).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByText(/A whole number of degrees from 0 to 90/)).toBeInTheDocument()
+
     await user.selectOptions(screen.getByLabelText('Supports'), 'off')
     expect(screen.queryByLabelText('Threshold angle (°)')).toBeNull()
+    await user.selectOptions(screen.getByLabelText('Supports'), 'tree')
+    expect(screen.getByLabelText('Threshold angle (°)')).toHaveValue(null)
   })
 
   it('starts On build plate only at the template’s, and keeps it when only the type changes', async () => {
@@ -1881,6 +1888,66 @@ describe('PrintPicker · Supports (#1899)', () => {
     expect(screen.getByText('25°')).toBeInTheDocument()
     await user.selectOptions(screen.getByLabelText('Supports'), 'off')
     expect(screen.getByText('25°').tagName).toBe('DEL')
+  })
+
+  it('strikes the template’s angle only once a print angle replaces it (#2837 review)', async () => {
+    const { user } = renderPicker({
+      printSettings: { enable_support: '1', support_type: 'tree(auto)', support_threshold_angle: '25' },
+    })
+    await loaded()
+    await showAdvanced()
+
+    await user.selectOptions(screen.getByLabelText('Supports'), 'normal')
+    expect(screen.getByText('25°').tagName).not.toBe('DEL')
+    await user.type(screen.getByLabelText('Threshold angle (°)'), '40')
+    expect(screen.getByText('25°').tagName).toBe('DEL')
+  })
+
+  it('sends nothing once set back to Default', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+
+    await user.selectOptions(screen.getByLabelText('Supports'), 'tree')
+    await user.selectOptions(screen.getByLabelText('Supports'), 'default')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).not.toHaveProperty('supports')
+  })
+
+  it('does not carry over to another output', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user, rerender } = renderPicker()
+    await loaded()
+    await showAdvanced()
+    await user.selectOptions(screen.getByLabelText('Supports'), 'off')
+
+    const second = fixtures.outputs[1] as Output
+    rerender(<PrintPicker open source={{ kind: 'output', output: second }} onClose={vi.fn()} onRan={vi.fn()} />)
+    await loaded()
+    if (!screen.queryByLabelText('Supports')) await showAdvanced()
+    expect(screen.getByLabelText('Supports')).toHaveValue('default')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).not.toHaveProperty('supports')
+  })
+
+  it('is not remembered: a reopened dialog is back on Default', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderReopenable()
+    await loaded()
+    await showAdvanced()
+    await user.selectOptions(screen.getByLabelText('Supports'), 'off')
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await user.click(screen.getByRole('button', { name: 'Reopen' }))
+    await loaded()
+    if (!screen.queryByLabelText('Supports')) await showAdvanced()
+    expect(screen.getByLabelText('Supports')).toHaveValue('default')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).not.toHaveProperty('supports')
   })
 })
 

@@ -68,7 +68,7 @@ import { PresetOverrides } from './print/PresetOverrides'
 import { FilamentProfilesStep } from './print/FilamentProfilesStep'
 import { PrintSequenceStep } from './print/PrintSequenceStep'
 import { SupportsStep } from './print/SupportsStep'
-import { SUPPORT_KEYS } from '../lib/supports'
+import { overriddenSupportKeys } from '../lib/supports'
 import { SlicerDefaults } from './print/SlicerDefaults'
 import { QualityStep } from './print/QualityStep'
 import { QueuedPanel } from './print/QueuedPanel'
@@ -1106,7 +1106,7 @@ export function PrintPicker({
                           settings={printSettings}
                           overridden={[
                             ...(printSequence !== null ? ['print_sequence'] : []),
-                            ...(supports !== null ? SUPPORT_KEYS : []),
+                            ...overriddenSupportKeys(supports),
                           ]}
                         />
                       )}

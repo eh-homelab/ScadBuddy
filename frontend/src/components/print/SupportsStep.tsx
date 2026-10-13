@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import type { SupportsChoice } from '../../api/types'
 
 type Props = {
@@ -36,6 +37,12 @@ function defaultLabel(settings: Record<string, string> | undefined): string {
 export function SupportsStep({ value, onChange, templateSettings }: Props) {
   const mode = modeOf(value)
   const on = value?.enabled === true ? value : null
+  // What was typed, kept even when it is not a whole 0–90, so the field explains itself
+  // rather than blanking (#2837 review); the choice carries only a valid angle.
+  const [angleText, setAngleText] = useState(on?.threshold_angle?.toString() ?? '')
+  const angleInvalid = angleText !== '' && on?.threshold_angle == null
+  // Default, No supports or a reset from outside starts the next choice's field empty.
+  if (on === null && angleText !== '') setAngleText('')
   return (
     <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2">
       <legend className="px-1 text-[13px] text-ink">Supports</legend>
@@ -82,9 +89,12 @@ export function SupportsStep({ value, onChange, templateSettings }: Props) {
               step={1}
               inputMode="numeric"
               placeholder={templateSettings?.support_threshold_angle ?? 'Preset'}
-              value={on.threshold_angle ?? ''}
+              value={angleText}
+              aria-invalid={angleInvalid}
+              aria-describedby={angleInvalid ? 'supports-angle-invalid' : undefined}
               onChange={(event) => {
                 const raw = event.target.value
+                setAngleText(raw)
                 const angle = Number(raw)
                 const { threshold_angle: _dropped, ...rest } = on
                 if (raw === '' || !Number.isInteger(angle) || angle < 0 || angle > 90) onChange(rest)
@@ -92,6 +102,12 @@ export function SupportsStep({ value, onChange, templateSettings }: Props) {
               }}
               className="sb-field w-24"
             />
+            {angleInvalid && (
+              <p id="supports-angle-invalid" className="text-[12px] text-warn">
+                A whole number of degrees from 0 to 90. Until then, the template&apos;s angle
+                is used, else the preset&apos;s.
+              </p>
+            )}
             <p className="text-[12px] text-muted">
               Overhangs steeper than this, from vertical, get supports. Empty uses the
               template&apos;s angle, else the preset&apos;s.
