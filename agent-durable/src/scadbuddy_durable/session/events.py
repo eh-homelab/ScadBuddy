@@ -122,6 +122,12 @@ async def with_images(
     plugin published the result. The event gets ``{name, mediaType}`` only; the panel
     loads the bytes from the session's blob route. A call that produced none (and every
     call before #2478) gets no ``images``.
+
+    Rollout (#2657): ``ai_session_tool_images`` is created by the agent service's
+    migrator (``agent/src/db/migrations/20261012T2016Z_session_tool_images.sql``), not
+    this one. A pod that reaches a ``tool.result`` before the agent has migrated fails
+    with ``UndefinedTable``, and the activity retries until the table is there; nothing
+    is logged without its images meanwhile.
     """
     out = []
     for event in translated:
