@@ -125,6 +125,8 @@ def output_kinds(state: AppState) -> list[OperationKind]:
                 )
             files_dir = blobs.dir_for(chosen.files_key) / "files"
         public_url = (await asyncio.to_thread(state.settings_store.load)).public_url
+        # Written into the saved 3MF, which a download then serves as it is (#2652).
+        print_settings = await asyncio.to_thread(state.catalogue.print_settings, job.slug)
         # The Parts outlive the job that rendered them: Arrange reads them later (§7).
         # They are held before the write, so a failed hold leaves nothing saved to retry
         # over; inside the `try`, so a hold that fails part way is released too.
@@ -145,6 +147,7 @@ def output_kinds(state: AppState) -> list[OperationKind]:
                 files_dir=files_dir,
                 arranged_from=sources,
                 output_id=output_id,
+                print_settings=print_settings,
             )
         except Exception as error:
             # Not on cancellation: the write's thread cannot be stopped and may still
