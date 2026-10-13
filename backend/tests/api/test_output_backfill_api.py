@@ -164,7 +164,9 @@ def test_a_backfill_still_being_accepted_passes_its_key_and_queues_nothing(
 ) -> None:
     """#2280: the backfill's render is started with the request's Idempotency-Key, so the
     client's re-send of a 503 still-accepting is the same claim, and a re-send that is
-    answered is the one that records the backfill."""
+    answered is the one that records the backfill. `submit` is patched, so this holds the
+    route's wiring only; that a re-send with the same key joins the first start is
+    `RenderService.submit`'s own tests'."""
     output_id = legacy_output(client, app)
     slow = mock.AsyncMock(side_effect=CommandStillAcceptingError("render-x"))
     with mock.patch.object(RenderService, "submit", slow):

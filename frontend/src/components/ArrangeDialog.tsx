@@ -73,6 +73,12 @@ function templatesOf(outputs: Output[]): string[] {
   return [...new Set(outputs.map((output) => output.slug))]
 }
 
+/** The outputs with at least one row not removed: an output whose every row was removed
+ * sends nothing, so its template is not one the arrange can be filed under. */
+function withRows(outputs: Output[], removed: string[]): Output[] {
+  return outputs.filter((output) => rowsOf([output]).some((row) => !removed.includes(row.key)))
+}
+
 /**
  * #314 — objects from several outputs onto shared plates (spec 2026-09-27 §7). Each
  * object of each source is a row with its copies; Arrange lays them out for the goal on
@@ -101,7 +107,9 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
   /** Outputs Arrange said need a re-render, though the list read showed objects. */
   const [flagged, setFlagged] = useState<string[]>([])
   const [filing, setFiling] = useState<string | null>(null)
-  /** #2286 — rows taken out of this arrange with their Remove button, by row key. */
+  /** #2286 — rows taken out of this arrange with their Remove button, by row key. Kept
+   * across a re-render (#902): a re-rendered output keeps its id and its parts, so a row
+   * removed before "Re-render again" stays out once the re-render returns. */
   const [removed, setRemoved] = useState<string[]>([])
 
   const keys = new Set<string>()
@@ -142,7 +150,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
   const unusable = outputs.filter((output) => needsBackfill(output) || flagged.includes(output.id))
   const rows = rowsOf(outputs.filter((output) => !unusable.includes(output))).filter((row) => !removed.includes(row.key))
   const fileRows = fileRowsOf(plain).filter((row) => !removed.includes(row.key))
-  const ownTemplates = templatesOf(outputs.filter((output) => !unusable.includes(output)))
+  const ownTemplates = templatesOf(withRows(outputs.filter((output) => !unusable.includes(output)), removed))
   // A library file ScadBuddy did not make belongs to no template: with one in the mix the
   // result may be filed under any template the user picks, its outputs' first (#2284).
   const anyTemplate = fileRows.length > 0
@@ -157,7 +165,11 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
    * answered: a slug is not a name (#2541).
    */
   const defaultName = arrangeName([
-    ...(models && models.length > 0 ? templatesOf(outputs).map((slug) => modelName(slug)) : []),
+    ...(models && models.length > 0
+      ? templatesOf(outputs.filter((o) => unusable.includes(o) || withRows([o], removed).length > 0)).map((slug) =>
+          modelName(slug),
+        )
+      : []),
     ...plain.map(({ file }) => stem(file.filename)),
   ])
   const [counts, setCounts] = useState<Record<string, number>>({})
@@ -338,7 +350,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
           }
           // The chosen template, unless every output of it was left out: then the first one's.
           // With a library file in the mix, any template picked from every one (#1863, #2284).
-          const kept = templatesOf(usable)
+          const kept = templatesOf(withRows(usable, removed))
           const choices = anyTemplate ? [...new Set([...kept, ...templates])] : kept
           const slug = filing && choices.includes(filing) ? filing : choices[0]
           if (!slug) throw new Error('Nothing to arrange.')

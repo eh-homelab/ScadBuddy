@@ -563,6 +563,35 @@ describe('ArrangeDialog', () => {
       expect(lastArrangeRequest()?.objects.map((o) => o.output_id)).toEqual([first.id])
     })
 
+    it('files under the other template once every row of the first is removed', async () => {
+      const onArranged = vi.fn()
+      const bin: Output = {
+        ...first,
+        id: '7'.repeat(32),
+        slug: 'gridfinity-bin',
+        name: 'Bin',
+        manifest: [{ ...first.manifest![0]!, part: 'piece-bin', slug: 'gridfinity-bin', bom_piece: 'bin', count: 1 }],
+      }
+      addMockOutput(bin)
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([first, bin])} onClose={vi.fn()} onArranged={onArranged} />,
+      )
+      await screen.findByLabelText('Copies of bin — Bin')
+      const firstName = first.name ?? first.id
+      for (const button of screen.getAllByRole('button', { name: new RegExp(` — ${firstName}$`) })) {
+        await user.click(button)
+      }
+      expect(screen.queryByLabelText(new RegExp(`^Copies of .* — ${firstName}$`))).not.toBeInTheDocument()
+      await user.click(screen.getByRole('button', { name: 'Arrange' }))
+      await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+      expect(lastArrangeRequest()).toMatchObject({
+        slug: 'gridfinity-bin',
+        objects: [{ output_id: bin.id, part: 'piece-bin', count: 1 }],
+        // Named for what it holds, not the template it no longer does.
+        name: `Arrange of ${fixtures.models.find((m) => m.slug === 'gridfinity-bin')!.name}`,
+      })
+    })
+
     it('saves an unnamed arrange under the models it holds, shown as the placeholder', async () => {
       const onArranged = vi.fn()
       const { user } = renderPage(
