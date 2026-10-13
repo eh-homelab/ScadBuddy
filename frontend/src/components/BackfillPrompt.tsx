@@ -38,7 +38,7 @@ export function BackfillProgress({ outputs, progress }: { outputs: OutputRef[]; 
     <ul aria-label="Re-render progress" aria-live="polite" className="flex flex-col gap-0.5 text-[12px] text-faint">
       {shown.map((o) => (
         <li key={o.id}>
-          {o.name ?? o.id}: {progress[o.id]}
+          {o.name ?? o.id.slice(0, 8)}: {progress[o.id]}
         </li>
       ))}
     </ul>

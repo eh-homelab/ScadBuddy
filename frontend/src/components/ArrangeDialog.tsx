@@ -17,6 +17,7 @@ import {
   type ArrangeSource,
   type Arranged,
   type ArrangedJob,
+  type OutputRef,
 } from '../lib/arrange'
 import { traceAction } from '../lib/traceAction'
 import { AddFiles, AddFromModel } from './ArrangeSourcePicker'
@@ -37,6 +38,31 @@ type Props = {
 function rowsOf(outputs: Output[]) {
   return outputs.flatMap((output) =>
     (output.manifest ?? []).map((object) => ({ output, object, key: `${output.id}:${object.part}` })),
+  )
+}
+
+/** #2285 — an output id's head, as History shows it: the whole 32 hex says nothing more. */
+function shortId(id: string): string {
+  return id.slice(0, 8)
+}
+
+/**
+ * #2285 — each object of `output` by name: its BOM piece, else the model it was rendered
+ * from (never the template's file, "model.scad" for nearly every one). Two objects that
+ * would read the same are numbered, so the rows can be told apart.
+ */
+function objectNames(output: Output, modelName: (slug: string) => string): Map<string, string> {
+  const objects = output.manifest ?? []
+  const base = objects.map((object) => object.bom_piece ?? modelName(object.slug))
+  const seen = new Map<string, number>()
+  return new Map(
+    objects.map((object, index) => {
+      const name = base[index]!
+      if (base.filter((b) => b === name).length < 2) return [object.part, name]
+      const n = (seen.get(name) ?? 0) + 1
+      seen.set(name, n)
+      return [object.part, `${name} ${n}`]
+    }),
   )
 }
 
@@ -143,6 +169,8 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
   /** #1863 — files whose objects could not be read from the 3MF, each with why. */
   const unreadable: string[] = []
   const behind: Output[] = []
+  /** #2285 — the file each output was added as: what the user picked it by. */
+  const viaFile = new Map<string, string>()
   for (const source of sources) {
     if (source.kind === 'output') {
       behind.push(source.output)
@@ -159,14 +187,20 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
     const output = named.get(id) ?? read[id]
     if (output === undefined) reading.push(source.file)
     else if ('error' in output) unread.push(`${source.file.filename}: ${output.error}`)
-    else behind.push(output)
+    else {
+      behind.push(output)
+      viaFile.set(output.id, source.file.filename)
+    }
   }
   // An output reached as itself and through its library file is arranged once.
   const outputs = [...new Map(behind.map((o) => [o.id, refreshed[o.id] ?? o])).values()]
-  const unusable = outputs.filter((output) => needsBackfill(output) || flagged.includes(output.id))
-  const rows = rowsOf(outputs.filter((output) => !unusable.includes(output))).filter((row) => !removed.includes(row.key))
+  /** Outputs with no objects to arrange until they are re-rendered (#902). */
+  const stale = outputs.filter((output) => needsBackfill(output) || flagged.includes(output.id))
+  /** #2285 — those still in this arrange: listed as rows of their own, with Remove. */
+  const unusable = stale.filter((output) => !removed.includes(`output:${output.id}`))
+  const rows = rowsOf(outputs.filter((output) => !stale.includes(output))).filter((row) => !removed.includes(row.key))
   const fileRows = fileRowsOf(plain).filter((row) => !removed.includes(row.key))
-  const ownTemplates = templatesOf(withRows(outputs.filter((output) => !unusable.includes(output)), removed))
+  const ownTemplates = templatesOf(withRows(outputs.filter((output) => !stale.includes(output)), removed))
   // A library file ScadBuddy did not make belongs to no template: with one in the mix the
   // result may be filed under any template the user picks, its outputs' first (#2284).
   const anyTemplate = fileRows.length > 0
@@ -175,6 +209,13 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
     : ownTemplates
   /** A template by its name, as "File under" says it (#2284); its slug until the list is read. */
   const modelName = (slug: string) => models?.find((model) => model.slug === slug)?.name ?? slug
+  /** #2285 — an output by its name, else the file it was added as, else its short id. */
+  const outputName = (output: Output) => output.name ?? viaFile.get(output.id) ?? shortId(output.id)
+  /** #2285 — an output as a note or a prompt names it: never by its raw 32-hex id. */
+  const refOf = (output: Output): OutputRef => ({
+    id: output.id,
+    name: output.name ?? viaFile.get(output.id) ?? `${modelName(output.slug)} ${shortId(output.id)}`,
+  })
   /**
    * #2286 — what an unnamed arrange is saved as: "Arrange of Lemon, Bag clip", by the
    * models and files it holds, rather than a hash-like id. Only once the model list has
@@ -323,6 +364,35 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
     setObjects((known) => Object.fromEntries(Object.entries(known).filter(([, value]) => !('error' in value))))
   }
 
+  /** #2285 — re-render one output from its row, without arranging yet. */
+  async function rerender(output: Output) {
+    setBusy(true)
+    setAsking(false)
+    setError(null)
+    setFailures(null)
+    const controller = new AbortController()
+    running.current = controller
+    try {
+      say(rerenderStage(1))
+      const { ready, failed } = await backfillOutputs([refOf(output)], {
+        signal: controller.signal,
+        onProgress: (ref, message) => setBackfill((shown) => ({ ...shown, [ref.id]: message })),
+      })
+      setRefreshed((known) => ({ ...known, ...Object.fromEntries(ready.map((o) => [o.id, o])) }))
+      setFlagged((ids) => ids.filter((id) => !ready.some((o) => o.id === id)))
+      if (failed.length > 0) setFailures(backfillFailures(failed))
+    } catch (cause) {
+      if (controller.signal.aborted) return
+      setError(cause instanceof ApiError ? cause.detail : (cause as Error).message)
+      setRetryable(false)
+    } finally {
+      if (running.current === controller) running.current = null
+      setBusy(false)
+      say(null)
+      setBackfill({})
+    }
+  }
+
   /** Arrange: first re-render `stale` (confirmed by the user), then arrange every output that can be. */
   async function submit(stale: Output[]) {
     setBusy(true)
@@ -342,11 +412,11 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
           'scadbuddy.rerendered': stale.length,
         },
         async (within, span) => {
-          let usable = outputs.filter((output) => !unusable.includes(output))
+          let usable = outputs.filter((output) => !stale.includes(output))
           let skipped: string | undefined
           if (stale.length > 0) {
             say(rerenderStage(stale.length))
-            const { ready, failed } = await backfillOutputs(stale, {
+            const { ready, failed } = await backfillOutputs(stale.map(refOf), {
               signal: controller.signal,
               within,
               onProgress: (output, message) => setBackfill((shown) => ({ ...shown, [output.id]: message })),
@@ -490,7 +560,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
       <div className="flex flex-col gap-3">
         {unusable.length > 0 && (
           <p role="status" className="text-[12px] text-muted">
-            {backfillNote(unusable)}
+            {backfillNote(unusable.map(refOf))}
           </p>
         )}
         {unreadable.length > 0 && (
@@ -515,7 +585,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
           {[
             ...rows.map(({ output, object, key }) => ({
               key,
-              label: `${object.bom_piece ?? object.file} — ${output.name ?? output.id}`,
+              label: `${objectNames(output, modelName).get(object.part)} — ${outputName(output)}`,
               count: object.count,
             })),
             ...fileRows.map(({ file, object, key }) => ({
@@ -547,6 +617,29 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
               </Button>
             </li>
           ))}
+          {/* #2285 — an output that needs a re-render is listed too, not only named in the note. */}
+          {unusable.map((output) => {
+            const label = `${modelName(output.slug)} — ${outputName(output)}`
+            return (
+              <li key={`output:${output.id}`} className="flex items-center justify-between gap-2 text-[13px]">
+                <span className="min-w-0 flex-1">
+                  {label} <span className="text-[12px] text-warn">needs a re-render</span>
+                </span>
+                <Button size="sm" aria-label={`Re-render ${label}`} disabled={busy} onClick={() => void rerender(output)}>
+                  Re-render
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  aria-label={`Remove ${label}`}
+                  disabled={busy}
+                  onClick={() => setRemoved((now) => [...now, `output:${output.id}`])}
+                >
+                  Remove
+                </Button>
+              </li>
+            )
+          })}
         </ul>
         {/* #2286 — a mis-clicked Remove is undone here, not by closing and starting over. */}
         {removed.length > 0 && (
@@ -632,7 +725,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
           onChange={(event) => setName(event.target.value)}
           className="sb-field"
         />
-        <BackfillProgress outputs={outputs} progress={backfill} />
+        <BackfillProgress outputs={outputs.map(refOf)} progress={backfill} />
         <p className="flex items-center gap-2 text-[12px] text-faint">
           {busy && <Spinner />}
           <span aria-live="polite">{progress}</span>
@@ -661,7 +754,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
           </Button>
         )}
         {asking && (
-          <BackfillPrompt outputs={unusable} onConfirm={() => void submit(unusable)} onCancel={() => setAsking(false)} />
+          <BackfillPrompt outputs={unusable.map(refOf)} onConfirm={() => void submit(unusable)} onCancel={() => setAsking(false)} />
         )}
       </div>
     </Dialog>

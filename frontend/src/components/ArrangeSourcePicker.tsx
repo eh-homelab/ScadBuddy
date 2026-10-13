@@ -1,6 +1,9 @@
 import { useEffect, useState } from 'react'
 import { api, ApiError } from '../api/client'
 import type { LibraryEntry, LibraryListing, ModelSummary, Output } from '../api/types'
+import { needsBackfill } from '../lib/arrange'
+import { formatBbox, timeAgo } from '../lib/format'
+import { useDisplayUnit } from '../lib/units'
 import { Button } from './ui/Button'
 import { Spinner } from './ui/Spinner'
 
@@ -128,10 +131,23 @@ export function AddFiles(props: Props<LibraryEntry>) {
   )
 }
 
+/** #2285 — models by name, one alphabetical run whatever case a name starts with. */
+function byName(models: ModelSummary[]): ModelSummary[] {
+  const name = (model: ModelSummary) => model.name ?? model.slug
+  return [...models].sort((a, b) => name(a).localeCompare(name(b), undefined, { sensitivity: 'base' }))
+}
+
 /** #1864 — Arrange's "Add from a model": a template, then any of its saved outputs. */
 export function AddFromModel(props: Props<Output>) {
   const [models, setModels] = useState<ModelSummary[] | null>(null)
   const [slug, setSlug] = useState('')
+  /** #2285 — narrows the model list, which runs to ~100 entries. */
+  const [search, setSearch] = useState('')
+  const unit = useDisplayUnit()
+  const wanted = search.trim().toLowerCase()
+  const shown = byName(models ?? []).filter(
+    (model) => !wanted || (model.name ?? model.slug).toLowerCase().includes(wanted) || model.slug === slug,
+  )
   const [outputs, setOutputs] = useState<Output[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   useEffect(() => {
@@ -160,11 +176,19 @@ export function AddFromModel(props: Props<Output>) {
   return (
     <fieldset className="flex flex-col gap-2 rounded-[6px] border border-line p-2">
       <legend className="px-1 text-[12px] text-muted">Add outputs of a model</legend>
+      <input
+        type="search"
+        aria-label="Find a model"
+        placeholder="Find a model"
+        value={search}
+        onChange={(event) => setSearch(event.target.value)}
+        className="sb-field"
+      />
       <select aria-label="Model" value={slug} onChange={(event) => setSlug(event.target.value)} className="sb-field">
         <option value="" disabled>
-          {models ? 'Choose a model' : 'Reading the models…'}
+          {models ? (shown.length > 0 ? 'Choose a model' : 'No model matches') : 'Reading the models…'}
         </option>
-        {(models ?? []).map((model) => (
+        {shown.map((model) => (
           <option key={model.slug} value={model.slug}>
             {model.name ?? model.slug}
           </option>
@@ -186,7 +210,15 @@ export function AddFromModel(props: Props<Output>) {
           key={slug}
           items={outputs}
           keyOf={(output) => output.id}
-          label={(output) => output.name ?? output.id.slice(0, 8)}
+          // #2285 — when and how big, so two outputs of one name can be told apart.
+          label={(output) =>
+            [
+              output.name ?? output.id.slice(0, 8),
+              timeAgo(output.created_at),
+              ...(output.bbox_mm ? [formatBbox(output.bbox_mm, unit)] : []),
+              ...(needsBackfill(output) ? ['needs a re-render'] : []),
+            ].join(' · ')
+          }
           what="saved outputs"
         />
       )}

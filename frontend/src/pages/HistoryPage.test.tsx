@@ -517,7 +517,7 @@ describe('HistoryPage', () => {
     await user.click(screen.getByRole('button', { name: 'Arrange selected (1)' }))
     await user.click(await screen.findByRole('button', { name: 'Add from a model' }))
     await user.selectOptions(await screen.findByLabelText('Model'), 'gridfinity-bin')
-    await user.click(await screen.findByRole('checkbox', { name: 'Bin' }))
+    await user.click(await screen.findByRole('checkbox', { name: /^Bin · / }))
     await user.click(screen.getByRole('button', { name: 'Add (1)' }))
     expect(await screen.findByLabelText('Copies of bin — Bin')).toBeVisible()
     await user.selectOptions(screen.getByLabelText('File under'), 'gridfinity-bin')
