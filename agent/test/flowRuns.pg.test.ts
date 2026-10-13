@@ -46,19 +46,35 @@ describe.skipIf(!TEST_DATABASE_URL)(`PgFlowRuns${TEST_DATABASE_URL ? '' : ` (set
     await t.db.sql`
       INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd)
       VALUES (${session}, 'mcp', 'bearer', 'token:a', 'Agent A', 'bearer', 'token:a', 'idle', 10, 1)`
-    expect(await flows.startedBy(await run({ kind: 'browser' }))).toEqual({ kind: 'browser', id: 'browser', label: 'You' })
-    expect(await flows.startedBy(await run({ kind: 'agent', principal: 'token:a', session }))).toEqual({
+    expect(await flows.startedBy(await run({ kind: 'browser' }), 'wr1')).toEqual({ kind: 'browser', id: 'browser', label: 'You' })
+    expect(await flows.startedBy(await run({ kind: 'agent', principal: 'token:a', session }), 'wr1')).toEqual({
       kind: 'bearer',
       id: 'token:a',
       label: 'Agent A',
     })
-    expect(await flows.startedBy(await run({ kind: 'agent', principal: 'oidc:https%3A%2F%2Fidp#u1', session: null }))).toEqual({
+    expect(await flows.startedBy(await run({ kind: 'agent', principal: 'oidc:https%3A%2F%2Fidp#u1', session: null }), 'wr1')).toEqual({
       kind: 'oidc',
       id: 'oidc:https://idp#u1',
       label: 'MCP OIDC oidc:https://idp#u1',
     })
-    expect(await flows.startedBy(await run({ kind: 'agent', principal: 'someone' }))).toBeUndefined()
-    expect(await flows.startedBy(randomUUID())).toBeUndefined()
+    expect(await flows.startedBy(await run({ kind: 'agent', principal: 'someone' }), 'wr1')).toBeUndefined()
+    expect(await flows.startedBy(randomUUID(), 'wr1')).toBeUndefined()
+  })
+
+  // #2258: a closed run lends its starter to no later flow-<id> execution, nor does an open
+  // one to an execution a Reset replaced.
+  it('names no starter once the run has closed, or for a superseded execution', async () => {
+    const id = await run({ kind: 'browser' })
+    expect(await flows.startedBy(id, 'wr1')).toEqual({ kind: 'browser', id: 'browser', label: 'You' })
+    await t.db.sql`UPDATE workflow_runs SET status = 'waiting' WHERE id = ${id}`
+    expect(await flows.startedBy(id, 'wr1')).toEqual({ kind: 'browser', id: 'browser', label: 'You' })
+    await t.db.sql`UPDATE workflow_runs SET superseded_run_ids = '{wr0}' WHERE id = ${id}`
+    expect(await flows.startedBy(id, 'wr0')).toBeUndefined()
+    expect(await flows.startedBy(id, 'wr1')).toEqual({ kind: 'browser', id: 'browser', label: 'You' })
+    for (const status of ['succeeded', 'failed', 'terminated']) {
+      await t.db.sql`UPDATE workflow_runs SET status = ${status} WHERE id = ${id}`
+      expect(await flows.startedBy(id, 'wr2'), status).toBeUndefined()
+    }
   })
 
   it("approves only a call whose decision is an approval that approved, for the same input", async () => {

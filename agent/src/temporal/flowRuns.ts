@@ -22,8 +22,13 @@ export function flowOf(workflowId?: string): string | undefined {
 
 /** Who started a flow run, and whether a person approved one of its calls. */
 export interface FlowRuns {
-  /** The run's starter as a session owner; undefined when there is no such run. */
-  startedBy(runId: string): Promise<Owner | undefined>
+  /**
+   * The run's starter as a session owner; undefined when there is no such run, when it
+   * has closed, or when `execution` (the calling workflow execution's run id) is one a
+   * Reset replaced (#2258): once its run is over, a new `flow-<id>` execution is lent
+   * nobody's identity.
+   */
+  startedBy(runId: string, execution: string): Promise<Owner | undefined>
   /**
    * Whether `workflow_run_decisions` approves the call `requestId`
    * (`flow:<run>:<workflow run>:<call>`) with this `inputHash`: the call's tool and input
@@ -65,8 +70,10 @@ export class PgFlowRuns implements FlowRuns {
     this.#sql = sql
   }
 
-  async startedBy(runId: string): Promise<Owner | undefined> {
-    const [row] = await this.#sql<{ started_by: StartedBy }[]>`SELECT started_by FROM workflow_runs WHERE id = ${runId}`
+  async startedBy(runId: string, execution: string): Promise<Owner | undefined> {
+    const [row] = await this.#sql<{ started_by: StartedBy }[]>`
+      SELECT started_by FROM workflow_runs
+      WHERE id = ${runId} AND status IN ('running', 'waiting') AND NOT (${execution} = ANY(superseded_run_ids))`
     if (!row) return undefined
     const by = row.started_by
     if (by.kind === 'browser') return { kind: 'browser', id: 'browser', label: 'You' }

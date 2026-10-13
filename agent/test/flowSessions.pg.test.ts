@@ -121,6 +121,18 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow session activities${TEST_DATABASE_URL 
     expect([err.type, err.nonRetryable, err.message]).toEqual([TURN_FAILED, true, 'the turn was interrupted'])
   })
 
+  // #2277: a session deleted mid-wait never logs its result; the step ends rather than wait out its timeout.
+  it('ends the wait, refused, when the session is deleted while its turn runs', async () => {
+    const sid = await session()
+    const owner = { kind: 'browser' as const, id: 'browser', label: 'You' }
+    await log.append(sid, [event({ type: 'user.turn', sessionId: sid, turnId: 't1', text: 'go', author: owner }), ...say(sid, 'm1', 'working')])
+    const waiting = turn(sid, 't1')
+    await new Promise((r) => setTimeout(r, 60))
+    await t.db.sql`DELETE FROM ai_sessions WHERE id = ${sid}`
+    const err = await failure(waiting)
+    expect([err.type, err.nonRetryable, err.message]).toEqual([SESSION_REFUSED, true, `session ${sid} is gone; its turn t1 will not finish`])
+  })
+
   it("lets a flow talk only to a durable session its starter owns", async () => {
     expect(await check(await session())).toEqual({ session_id: expect.any(String), mode: 'durable' })
     for (const sid of [await session({ mode: 'classic' }), await session({ owner: ['bearer', 'token:9'] }), randomUUID()]) {

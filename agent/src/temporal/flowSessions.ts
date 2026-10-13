@@ -37,12 +37,13 @@ function refused(message: string): ApplicationFailure {
 }
 
 async function allowed(deps: FlowSessionDeps, what: string, sessionId: unknown): Promise<string> {
-  const flow = flowOf(Context.current().info.workflowExecution?.workflowId)
+  const { workflowExecution } = Context.current().info
+  const flow = flowOf(workflowExecution?.workflowId)
   if (flow === undefined) throw ApplicationFailure.nonRetryable(`${what} serves only flow runs`, NOT_FOR_FLOWS)
   if (typeof sessionId !== 'string' || !/^[0-9a-f-]{36}$/.test(sessionId)) throw refused(`${what}: no session ${String(sessionId)}`)
   // A lookup that throws (the database is away) is left to the activity's retries.
-  const starter = deps.flows ? await deps.flows.startedBy(flow) : undefined
-  if (starter === undefined) throw ApplicationFailure.nonRetryable(`${what}: no flow run ${flow} is recorded`, UNKNOWN_FLOW)
+  const starter = deps.flows ? await deps.flows.startedBy(flow, workflowExecution?.runId ?? '') : undefined
+  if (starter === undefined) throw ApplicationFailure.nonRetryable(`${what}: no open flow run ${flow} is recorded for this execution`, UNKNOWN_FLOW)
   const [row] = await deps.sql<Row[]>`SELECT mode, owner_kind, owner_id FROM ai_sessions WHERE id::text = ${sessionId}`
   if (!row || !sameOwner(starter, { kind: row.owner_kind, id: row.owner_id })) {
     throw refused(`no session ${sessionId} of the person who started this run`)
@@ -51,18 +52,38 @@ async function allowed(deps: FlowSessionDeps, what: string, sessionId: unknown):
   return sessionId
 }
 
-/** The turn's events from its `user.turn` on, or undefined before it is logged. */
-async function turnEvents(sql: Sql, sessionId: string, turnId: string): Promise<ServerEvent[] | undefined> {
-  const [start] = await sql<{ seq: string }[]>`
-    SELECT seq FROM ai_session_events
-     WHERE session_id = ${sessionId} AND event::jsonb->>'type' = 'user.turn' AND event::jsonb->>'turnId' = ${turnId}`
-  if (!start) return undefined
-  const rows = await sql<{ event: string }[]>`
-    SELECT event FROM ai_session_events WHERE session_id = ${sessionId} AND seq > ${start.seq} ORDER BY seq`
-  return rows.map((r) => JSON.parse(r.event) as ServerEvent)
+/**
+ * The turn's events from its `user.turn` on, read a little at a time (#2277): the first
+ * poll that finds the `user.turn` remembers its seq, and every poll after reads only the
+ * rows past the last one read, so a long session costs no more to poll than a short one.
+ */
+function turnReader(sql: Sql, sessionId: string, turnId: string): () => Promise<ServerEvent[] | undefined> {
+  let after: string | undefined
+  const events: ServerEvent[] = []
+  return async () => {
+    if (after === undefined) {
+      const [start] = await sql<{ seq: string }[]>`
+        SELECT seq FROM ai_session_events
+         WHERE session_id = ${sessionId} AND event::jsonb->>'type' = 'user.turn' AND event::jsonb->>'turnId' = ${turnId}`
+      if (!start) return undefined
+      after = start.seq
+    }
+    const rows = await sql<{ seq: string; event: string }[]>`
+      SELECT seq, event FROM ai_session_events WHERE session_id = ${sessionId} AND seq > ${after} ORDER BY seq`
+    for (const r of rows) events.push(JSON.parse(r.event) as ServerEvent)
+    if (rows.length > 0) after = rows.at(-1)!.seq
+    return events
+  }
 }
 
-/** The answer once the turn ended (its `session.result`, written by every end), else undefined. */
+/**
+ * The answer once the turn ended (its `session.result`, written by every end), else undefined.
+ * Its text is the deltas logged before that result. A delta that `follow_session` was still
+ * writing when the session workflow gave up waiting for it (agent-durable session/workflow.py
+ * FOLLOW_DRAIN, 30 s, then the activity is cancelled) can land after the result and is not
+ * read (#2277): the answer then ends early. Waiting for the session to leave `running` would
+ * not close that, since a cancelled write may still commit after it.
+ */
 function settled(sessionId: string, turnId: string, events: readonly ServerEvent[]): TurnAnswer | undefined {
   let ended = -1
   for (let i = 0; i < events.length; i++) {
@@ -106,9 +127,14 @@ export function flowSessionActivities(deps: FlowSessionDeps): Record<string, (ar
       const sessionId = await allowed(deps, FLOW_SESSION_TURN, session_id)
       if (typeof turn_id !== 'string' || turn_id === '') throw refused(`${FLOW_SESSION_TURN} takes a turn_id`)
       const context = Context.current()
+      const read = turnReader(deps.sql, sessionId, turn_id)
       for (;;) {
         context.heartbeat()
-        const events = await turnEvents(deps.sql, sessionId, turn_id)
+        // #2277: a session deleted mid-wait never logs the result; without this the step
+        // would wait out the whole turn timeout (backend workflows/flow_tools.py).
+        const [here] = await deps.sql`SELECT 1 FROM ai_sessions WHERE id::text = ${sessionId}`
+        if (!here) throw refused(`session ${sessionId} is gone; its turn ${turn_id} will not finish`)
+        const events = await read()
         const answer = events && settled(sessionId, turn_id, events)
         if (answer) return answer
         await context.sleep(pollMs)
