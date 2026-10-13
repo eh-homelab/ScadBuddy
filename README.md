@@ -293,7 +293,8 @@ on shutdown.
   `task_queue`, `worker_inprocess`).
 - `GET /metrics` serves Prometheus metrics: render queue depth and oldest wait
   (read from the store in Postgres, so across replicas), wait time and latency
-  (`scadbuddy_render_job_latency_seconds`, by outcome), per-stage render time, whether
+  (`scadbuddy_render_job_latency_seconds`, by `kind` (`render` or `arrange`) and
+  outcome), per-stage render time, whether
   the jobs table can be read (`scadbuddy_render_store_up`), whether the process's
   `LISTEN` connection is up (`scadbuddy_render_queue_listener_connected`,
   `scadbuddy_render_queue_listener_reconnects_total`), the SLO targets, the upload store's files and bytes against its caps
