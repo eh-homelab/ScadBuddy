@@ -464,7 +464,10 @@ export class TabHub implements BrowserTabs {
   }
 
   async status(target: BrowserTarget, { signal }: { signal?: AbortSignal } = {}): Promise<BrowserStatus> {
-    const resolved = await this.#resolve(target, signal)
+    // An abort rejects as call()'s does (#1814), not with the signal's raw reason.
+    const resolved = await this.#resolve(target, signal).catch((err: unknown) => {
+      throw signal?.aborted ? abortError() : err
+    })
     if ('problem' in resolved) return { attached: false, reason: resolved.problem }
     let state: { route: string; live: string[] } = resolved.tab ?? { route: '', live: [] }
     if (!resolved.tab) {

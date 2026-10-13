@@ -38,6 +38,21 @@ describe('webFetchRefusal', () => {
     expect(await webFetchRefusal('https://user:pw@example.com/', publicHost)).toMatch(/^WebFetch refused/)
     expect(await webFetchRefusal(undefined, publicHost)).toMatch(/^WebFetch refused/)
   })
+
+  // #2758: not a string is "missing", never "[object Object]" read as a malformed URL.
+  it('says a url that is missing or not a string is that', async () => {
+    for (const url of [undefined, null, 42, { href: 'https://example.com/' }]) {
+      expect(await webFetchRefusal(url, publicHost), String(url)).toBe('WebFetch refused: url missing or not a string')
+    }
+  })
+
+  // #2758: literal hosts that only the address checks catch.
+  it('refuses an IPv4-mapped loopback literal and the unspecified addresses', async () => {
+    expect(await webFetchRefusal('http://[::ffff:127.0.0.1]/', publicHost)).toMatch(/^WebFetch refused/)
+    expect(await webFetchRefusal('http://[::ffff:7f00:1]/', publicHost)).toMatch(/^WebFetch refused/)
+    expect(await webFetchRefusal('http://0.0.0.0/', publicHost)).toMatch(/^WebFetch refused/)
+    expect(await webFetchRefusal('http://[::]/', publicHost)).toMatch(/^WebFetch refused/)
+  })
 })
 
 describe('webFetchEgressHook', () => {
@@ -53,5 +68,15 @@ describe('webFetchEgressHook', () => {
       hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: expect.stringMatching(/^WebFetch refused/) },
     })
     expect(await run('Read', { file_path: '/etc/passwd' })).toEqual({})
+  })
+
+  // #2758: a hook that denied every WebFetch would pass the case above.
+  it('lets a WebFetch of a public URL through', async () => {
+    const allowed = await webFetchEgressHook(publicHost).hooks[0]!(
+      { hook_event_name: 'PreToolUse', tool_name: 'WebFetch', tool_input: { url: 'https://example.com/page', prompt: 'p' }, tool_use_id: 't', session_id: 's', transcript_path: '', cwd: '' } as never,
+      't',
+      { signal: new AbortController().signal },
+    )
+    expect(allowed).toEqual({})
   })
 })

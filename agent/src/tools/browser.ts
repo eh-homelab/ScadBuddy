@@ -166,6 +166,9 @@ async function statusHere(ctx: ToolContext): Promise<BrowserStatus | undefined> 
     return await tabs(ctx).status(target(ctx), { signal: ctx.signal })
   } catch (err) {
     if (ctx.signal.aborted) throw err
+    // #1814: a pool that keeps failing re-checks shows in the logs. Only the error's
+    // name: its message can quote a connection string or a query (telemetry/scrub.ts).
+    console.warn(`browser tools: re-checking the tab after its wait failed (${err instanceof Error ? err.name : typeof err})`)
     return undefined
   }
 }
