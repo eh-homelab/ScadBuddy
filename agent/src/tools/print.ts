@@ -88,7 +88,7 @@ function supportsPhrase(
   if (supports === undefined) return ''
   if (!supports.enabled) return ', without supports'
   return (
-    `, with ${supports.type ?? 'tree'} supports` +
+    (supports.type === undefined ? ', with supports' : `, with ${supports.type} supports`) +
     `${supports.threshold_angle === undefined ? '' : ` at ${supports.threshold_angle}°`}` +
     `${supports.on_build_plate_only ? ' on the build plate only' : ''}`
   )
@@ -714,7 +714,7 @@ export const printTools: Tool[] = [
       supports: z
         .object({
           enabled: z.boolean(),
-          type: z.enum(['tree', 'normal']).optional().describe("'tree' (Bambu's default, best on an H2C) unless told otherwise"),
+          type: z.enum(['tree', 'normal']).optional().describe("'tree' (Bambu's default, best on an H2C); omit for the template's, else tree"),
           threshold_angle: z
             .number()
             .int()
@@ -835,13 +835,16 @@ export const printTools: Tool[] = [
         ...(args.supports === undefined
           ? {}
           : {
+              // Only what was asked for: a field left out keeps the template's (#2835 review).
               supports: {
                 enabled: args.supports.enabled,
-                type: args.supports.type ?? 'tree',
-                on_build_plate_only: args.supports.on_build_plate_only ?? false,
+                ...(args.supports.type === undefined ? {} : { type: args.supports.type }),
                 ...(args.supports.threshold_angle === undefined
                   ? {}
                   : { threshold_angle: args.supports.threshold_angle }),
+                ...(args.supports.on_build_plate_only === undefined
+                  ? {}
+                  : { on_build_plate_only: args.supports.on_build_plate_only }),
               },
             }),
         request_id: requestId,

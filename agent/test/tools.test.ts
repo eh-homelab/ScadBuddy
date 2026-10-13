@@ -617,15 +617,15 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     await t.execute({ ...args, supports: { enabled: false } }, ctx())
     server.use(...capturedRun(plain))
     await t.execute(args, ctx())
-    expect(chosen.body).toMatchObject({
-      supports: { enabled: true, type: 'tree', threshold_angle: 40, on_build_plate_only: false },
-    })
+    // Only what was asked for: the backend keeps the template's type and plate setting.
+    expect((chosen.body as { supports?: unknown }).supports).toEqual({ enabled: true, threshold_angle: 40 })
     expect(off.body).toMatchObject({ supports: { enabled: false } })
     expect(plain.body).not.toHaveProperty('supports')
     expect(t.summarize({ ...args, supports: { enabled: true, type: 'normal', threshold_angle: 40, on_build_plate_only: true } })).toContain(
       'with normal supports at 40° on the build plate only',
     )
     expect(t.summarize({ ...args, supports: { enabled: false } })).toContain('without supports')
+    expect(t.summarize({ ...args, supports: { enabled: true } })).toContain(', with supports')
   })
 
   it('sends a new request_id per call, so the same choices again are a new print (#470)', async () => {
