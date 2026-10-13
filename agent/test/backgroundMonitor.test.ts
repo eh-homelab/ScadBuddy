@@ -1,4 +1,4 @@
-import { mkdtemp, realpath } from 'node:fs/promises'
+import { mkdtemp, readFile, realpath } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -50,6 +50,20 @@ describe('a monitor command', () => {
     expect(await runCommand({ command: 'sleep 30', cwd, timeoutMs: 10_000, signal: abort.signal, onEvent: collect().onEvent })).toEqual({
       outcome: 'cancelled',
     })
+  }, 20_000)
+
+  it('ends failed, killing the command, when an event cannot be recorded', async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'monitor-'))
+    const end = await runCommand({
+      command: 'echo $$ > pid; while true; do echo x; sleep 0.2; done',
+      cwd,
+      timeoutMs: 10_000,
+      signal: new AbortController().signal,
+      onEvent: () => Promise.reject(new Error('the database went away')),
+    })
+    expect(end).toEqual({ outcome: 'failed', reason: 'an event could not be recorded: the database went away' })
+    const pid = Number((await readFile(path.join(cwd, 'pid'), 'utf8')).trim())
+    expect(() => process.kill(pid, 0)).toThrow()
   }, 20_000)
 })
 
