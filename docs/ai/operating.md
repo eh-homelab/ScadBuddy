@@ -337,9 +337,12 @@ confirmation; a form adds one last. The list is read again just after the earlie
 cooldown ends, since the status is worked out at read time. The `curl` below is the
 fallback when there is no UI.
 
-The routes without `/entries` are the single-credential routes from #1000: they act on
-the first credential by priority, for scripts written against them. The UI no longer
-uses them; the `/entries` and `/order` routes manage every credential (#1093).
+The routes without `/entries` are the single-credential routes from #1000. They act on
+the first credential by priority, for scripts written against them. They are
+**deprecated** (#2768): the UI no longer uses them, and every answer carries
+`Deprecation: true` and a `Link` header naming `/api/v1/ai/credentials/entries` as the
+successor. The `/entries` and `/order` routes manage every credential (#1093); use them
+in anything new.
 
 | Route | Guarded | What it does |
 |---|---|---|
@@ -366,10 +369,10 @@ the not-yet-migrated one has no `code`, and the section shows it with a Retry.
 Example, from a loopback shell on the pod (for instance through `kubectl port-forward`):
 
 ```bash
-curl -sS -X PUT http://localhost:8081/api/v1/ai/credentials \
+id=$(curl -sS -X POST http://localhost:8081/api/v1/ai/credentials/entries \
   -H 'Origin: http://localhost:8081' -H 'Content-Type: application/json' \
-  -d '{"kind":"anthropic_api_key","secret":"sk-ant-…"}'
-curl -sS -X POST http://localhost:8081/api/v1/ai/credentials/test -H 'Origin: http://localhost:8081'
+  -d '{"kind":"anthropic_api_key","secret":"sk-ant-…"}' | jq -r .id)
+curl -sS -X POST "http://localhost:8081/api/v1/ai/credentials/entries/$id/test" -H 'Origin: http://localhost:8081'
 ```
 
 This works because the loopback pair is always accepted from a loopback peer
