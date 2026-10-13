@@ -457,6 +457,32 @@ func TestWritableModes(t *testing.T) {
 	}
 }
 
+func TestTheMountingUserOwnsEverything(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.folder(4, "Top", 0)
+	lib.file(10, "a.3mf", 0, nil)
+	dir := mount(t, lib, Options{})
+	f, err := os.Create(filepath.Join(dir, "new.3mf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	for _, name := range []string{"", "Top", "a.3mf", "new.3mf"} {
+		path := filepath.Join(dir, name)
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		st := info.Sys().(*syscall.Stat_t)
+		if int(st.Uid) != os.Getuid() || int(st.Gid) != os.Getgid() {
+			t.Errorf("%q: owner %d:%d, want %d:%d", name, st.Uid, st.Gid, os.Getuid(), os.Getgid())
+		}
+		if err := syscall.Access(path, 2 /* W_OK */); err != nil {
+			t.Errorf("%q: access(W_OK): %v", name, err)
+		}
+	}
+}
+
 func TestChmodIsENOTSUP(t *testing.T) {
 	lib := newFakeLibrary()
 	lib.file(10, "a.3mf", 0, nil)

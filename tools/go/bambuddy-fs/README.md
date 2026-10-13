@@ -101,6 +101,8 @@ unknown command exits 2.
 A folder's contents show under their names. When several files in a folder share a
 name, the oldest shows as the plain name and the later ones as `<stem> (id <N>)<ext>`,
 so a path is stable for as long as its file exists. Times are Bambuddy's `created_at`.
+Everything is owned by the user who mounted it, files `0644` and folders `0755` (no
+write bits with `--ro`).
 
 ## Deletes
 

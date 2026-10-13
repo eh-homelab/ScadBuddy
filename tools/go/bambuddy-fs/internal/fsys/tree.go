@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -49,6 +50,7 @@ type Options struct {
 func NewRoot(lib Library, opts Options) fs.InodeEmbedder {
 	t := &tree{
 		lib: lib, opts: opts, cache: newCache(opts.CacheDir), listings: map[int]listing{}, uploaded: map[int]api.File{},
+		owner:    fuse.Owner{Uid: uint32(os.Getuid()), Gid: uint32(os.Getgid())},
 		pendings: map[*pending]bool{},
 		unsent:   newQueue(opts.StateDir),
 	}
@@ -67,6 +69,9 @@ type tree struct {
 	lib   Library
 	opts  Options
 	cache *cache
+	// owner is the mounting process's user and group, which own every entry: with
+	// root's, the mounting user's access(W_OK) would be refused.
+	owner fuse.Owner
 	// unsent is the writes whose upload failed (#2865).
 	unsent *queue
 
@@ -386,6 +391,7 @@ func (d *dir) Getattr(_ context.Context, _ fs.FileHandle, out *fuse.AttrOut) sys
 func (d *dir) attr(out *fuse.Attr) {
 	out.Mode = syscall.S_IFDIR | d.tree.mode(0o755)
 	out.Nlink = 1
+	out.Owner = d.tree.owner
 }
 
 // file is a library file. Its bytes, size and creation time never change for its ID:
@@ -459,6 +465,7 @@ func (n *file) attr(out *fuse.Attr) {
 	f, p, e := n.file, n.pending, n.queued
 	n.mu.Unlock()
 	out.Mode = syscall.S_IFREG | n.tree.mode(0o644)
+	out.Owner = n.tree.owner
 	// A link count of 0 means unlinked: link(2) would answer ENOENT.
 	out.Nlink = 1
 	out.Size = uint64(f.Size)
