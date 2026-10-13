@@ -7,7 +7,7 @@ import { warmHarness } from './support/warm.js'
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-/** A Postgres client whose next transcript-tail read waits until the test lets it go. */
+/** A Postgres client whose next transcript-tail read waits until the test lets it go (or fails it). */
 function gatedSql(real: Sql) {
   let gate: { reached: () => void; release: Promise<void> } | undefined
   const sql = ((strings: TemplateStringsArray, ...values: never[]) => {
@@ -22,9 +22,16 @@ function gatedSql(real: Sql) {
   const hold = () => {
     let reached!: () => void
     let release!: () => void
+    let fail!: (err: Error) => void
     const at = new Promise<void>((r) => (reached = r))
-    gate = { reached, release: new Promise<void>((r) => (release = r)) }
-    return { reached: at, release }
+    gate = {
+      reached,
+      release: new Promise<void>((resolve, reject) => {
+        release = resolve
+        fail = reject
+      }),
+    }
+    return { reached: at, release, fail }
   }
   return { sql, hold }
 }
@@ -128,6 +135,35 @@ describe.skipIf(skip !== undefined)(`WarmSessions' tail and budget rules${skip ?
     expect(h.spawns).toHaveLength(2)
     expect(first.release).toHaveBeenCalledTimes(1)
     expect(h.warm.size()).toBe(1)
+  }, 60_000)
+
+  it('lets go of an entry whose check failed', async () => {
+    const gated: { hold?: ReturnType<typeof gatedSql>['hold'] } = {}
+    h = await warmHarness(db, {
+      sql: (real) => {
+        const g = gatedSql(real)
+        gated.hold = g.hold
+        return g.sql
+      },
+    })
+    const id = h.newSession()
+    const first = h.assembled()
+    const one = await h.turn(id, first, 1)
+    await sleep(300)
+    const held = gated.hold!()
+    const second = h.assembled()
+    const acquiring = h.warm.acquire(id, second, h.credential(), 1 - one.result.total_cost_usd)
+    await held.reached
+    held.fail(new Error('connection lost'))
+    await expect(acquiring).rejects.toThrow('connection lost')
+    // The entry is closed and released; the refused turn's assembly stays the caller's.
+    expect(first.release).toHaveBeenCalledTimes(1)
+    expect(second.release).not.toHaveBeenCalled()
+    expect(h.warm.size()).toBe(0)
+    await h.spawns[0]?.exited
+    const next = await h.turn(id, h.assembled(), 1 - one.result.total_cost_usd)
+    expect(next.outcome).toBe('miss')
+    expect(next.result.subtype).toBe('success')
   }, 60_000)
 
   it('recycles when another write landed before one of its own', async () => {

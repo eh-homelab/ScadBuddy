@@ -185,6 +185,8 @@ export class WarmSessions {
   private readonly log: (message: string) => void
   /** By session, least recently used first. */
   private readonly slots = new Map<string, Slot>()
+  /** A closed process's transcript appends still in flight, by session: the next spawn waits for them before it loads. */
+  private readonly draining = new Map<string, MirroredTranscript>()
   /** Each session's acquire, one at a time: two would spawn two processes. */
   private readonly acquiring = new Map<string, Promise<unknown>>()
 
@@ -274,7 +276,15 @@ export class WarmSessions {
       // Held while it is checked: the idle timer, the cap and `evict` leave it be.
       slot.busy = true
       clearTimeout(slot.timer)
-      reason = await this.mismatch(slot, print, credential, remainingUsd)
+      try {
+        reason = await this.mismatch(slot, print, credential, remainingUsd)
+      } catch (err) {
+        // A failed check (the tail read) cannot vouch for the process, and the
+        // caller has no entry to settle or abandon: it goes now, or it would stay held.
+        slot.busy = false
+        this.drop(slot, `the check failed: ${err instanceof Error ? err.message : String(err)}`)
+        throw err
+      }
       // Closed meanwhile (shutdown): nothing to reuse or recycle.
       const gone = slot.closed || this.slots.get(sessionId) !== slot
       if (gone) reason = undefined
@@ -290,9 +300,9 @@ export class WarmSessions {
         slot.busy = false
         this.drop(slot, `recycled: ${reason}`)
       }
-      // Its last appends land before the new process loads the transcript.
-      await slot.mirror?.pending
     }
+    // A closed process's last appends (recycled, abandoned, evicted) land before the new one loads the transcript.
+    await this.draining.get(sessionId)?.pending
     const entry = await this.spawn(sessionId, turn, credential, remainingUsd, print)
     this.trim()
     return reason === undefined ? { entry, outcome: 'miss' } : { entry, outcome: 'recycle', reason }
@@ -416,6 +426,19 @@ export class WarmSessions {
     clearTimeout(slot.timer)
     const id = slot.entry.sessionId
     if (this.slots.get(id) === slot) this.slots.delete(id)
+    const mirror = slot.mirror
+    if (mirror) {
+      // Kept until its appends, those handed over after the close too, have landed.
+      this.draining.set(id, mirror)
+      const forget = () => {
+        const pending = mirror.pending
+        void pending.then(() => {
+          if (mirror.pending !== pending) forget()
+          else if (this.draining.get(id) === mirror) this.draining.delete(id)
+        })
+      }
+      forget()
+    }
     slot.entry.inbox.close()
     slot.entry.query.close()
     slot.entry.turn.release()
