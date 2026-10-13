@@ -156,6 +156,7 @@ function grant(id: string, fields: Partial<FlowGrantView>): FlowGrantView {
     created_at: at(0),
     in_force: true,
     uses: [],
+    released: [],
     ...fields,
   }
 }
