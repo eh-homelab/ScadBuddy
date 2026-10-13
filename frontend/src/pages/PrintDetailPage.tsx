@@ -6,7 +6,7 @@ import { MediaCarousel } from '../components/media/MediaCarousel'
 import { MediaLightbox } from '../components/media/MediaLightbox'
 import type { Slide } from '../components/media/slides'
 import { PrintAgainDialog } from '../components/PrintAgainDialog'
-import { libraryPrintsPath } from '../components/prints/prints'
+import { libraryPrintsPath, printerLabel } from '../components/prints/prints'
 import { DELETED_STATUS, statusLabel } from '../components/prints/status'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
@@ -449,7 +449,7 @@ function OutcomeSection({ print }: { print: PrintDetail }) {
         <Fact label="Failure" value={outcome.failure_reason} />
         <Fact
           label="Printer"
-          value={outcome.printer_name ?? print.printer_name ?? (outcome.printer_id !== null ? `#${outcome.printer_id}` : null)}
+          value={outcome.printer_name ?? print.printer_name ?? (outcome.printer_id !== null ? printerLabel(outcome.printer_id) : null)}
         />
         <Fact label="Started" value={formatWhen(print.started_at)} />
         <Fact label="Finished" value={formatWhen(print.completed_at)} />
