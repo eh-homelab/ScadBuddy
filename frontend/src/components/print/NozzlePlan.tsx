@@ -20,7 +20,16 @@ function flowWords(plan: NozzlePlan): string {
  * Inland Black → right · 0.4 High Flow". ScadBuddy plans it by material and states it in
  * the file; `stale` dims it while the plan for changed choices is read.
  */
-export function NozzlePlanLine({ plan, stale = false }: { plan: NozzlePlan | null | undefined; stale?: boolean }) {
+export function NozzlePlanLine({
+  plan,
+  stale = false,
+  sliced = false,
+}: {
+  plan: NozzlePlan | null | undefined
+  stale?: boolean
+  /** #2703 — the sides are the slice's (`asSliced`), not the plan's. */
+  sliced?: boolean
+}) {
   if (!plan || (plan.slots ?? []).length === 0) return null
   return (
     <p
@@ -28,7 +37,7 @@ export function NozzlePlanLine({ plan, stale = false }: { plan: NozzlePlan | nul
       data-testid="nozzle-plan"
       aria-busy={stale}
     >
-      <span className="text-muted">Nozzles:</span>
+      <span className="text-muted">{sliced ? 'Nozzles, as sliced:' : 'Nozzles:'}</span>
       {(plan.slots ?? []).map((slot) => (
         <span key={slot.slot_id} className="inline-flex items-center gap-1">
           <Swatch colour={slot.colour} size="sm" />

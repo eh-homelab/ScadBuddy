@@ -1721,6 +1721,44 @@ describe('PrintPicker · departures of a stale slice (#2702 review)', () => {
   }, 20000)
 })
 
+describe('PrintPicker · the nozzles as sliced (#2703)', () => {
+  it('shows the sides the slicer used once a slice of these choices lands', async () => {
+    // The H2C plans Mistletoe Green → right and Inland Black → left; this slicer swaps them.
+    server.use(
+      http.get('/api/v1/print/:kind/:id/preview-slices/:job', ({ params }) =>
+        HttpResponse.json({
+          job_id: Number(params['job']),
+          status: 'completed',
+          print_time_seconds: 2843,
+          filament_used_g: 15.5,
+          slots: [
+            { slot_id: 1, grams: 12.4, side: 'L' },
+            { slot_id: 2, grams: 3.1, side: 'R' },
+          ],
+          filament_changes: 1,
+        }),
+      ),
+    )
+    renderPage(
+      <PrintPicker
+        open
+        source={{ kind: 'library', file: { id: H2C_FILE, filename: H2C_FILENAME } }}
+        onClose={vi.fn()}
+        onRan={vi.fn()}
+      />,
+    )
+    const line = await screen.findByTestId('nozzle-plan')
+    expect(line).toHaveTextContent('Nozzles:Mistletoe Green → right')
+
+    await waitFor(() => expect(screen.getByTestId('nozzle-plan')).toHaveTextContent('Nozzles, as sliced:'), {
+      timeout: 8000,
+    })
+    expect(screen.getByTestId('nozzle-plan')).toHaveTextContent('Mistletoe Green → left')
+    expect(screen.getByTestId('nozzle-plan')).toHaveTextContent('Inland Black → right')
+    expect(screen.getByTestId('slice-departures')).toHaveTextContent('it groups filaments itself to cut purging')
+  }, 20000)
+})
+
 describe('PrintPicker · Print sequence (#1862)', () => {
   const LIBRARY = { kind: 'library', file: { id: 89, filename: 'bag-clip.3mf' } } as const
 

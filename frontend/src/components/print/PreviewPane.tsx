@@ -47,8 +47,12 @@ function sliceDepartures(
         )
       }
     } else if (got.side && got.side !== planned.side) {
+      // #2703: the slicer groups filaments itself to cut purging, and a Manual map,
+      // planned or chosen by hand, does not steer it.
       notes.push(
-        `The slicer put ${planned.name} (slot ${planned.slot_id}) on the ${SIDE[got.side]} nozzle, not the ${SIDE[planned.side]} as planned.`,
+        planned.by_hand
+          ? `The slicer put ${planned.name} (slot ${planned.slot_id}) on the ${SIDE[got.side]} nozzle, not the ${SIDE[planned.side]} you chose: it groups filaments itself to cut purging, so a side set by hand is not kept.`
+          : `The slicer put ${planned.name} (slot ${planned.slot_id}) on the ${SIDE[got.side]} nozzle, not the ${SIDE[planned.side]} as planned: it groups filaments itself to cut purging.`,
       )
     }
   }

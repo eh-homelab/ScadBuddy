@@ -45,6 +45,7 @@ import { useAsync } from '../lib/useAsync'
 import { CarryBox, useFilamentPlan } from '../lib/useFilamentPlan'
 import { usePrintCheck } from '../lib/usePrintCheck'
 import { usePreviewSlice } from '../lib/usePreviewSlice'
+import { asSliced } from '../lib/slicedSides'
 import { usePrintChoices } from '../lib/usePrintChoices'
 import { usePrintProgress } from '../lib/usePrintProgress'
 import { useRunPrint } from '../lib/useRunPrint'
@@ -635,6 +636,12 @@ export function PrintPicker({
       ? { ...checkRequest, plate_id: previewPlate, all_plates: false }
       : checkRequest
   const previewSlice = usePreviewSlice(source, sliceable && !sliced ? previewRequest : null)
+  // #2703 — the slicer groups filaments itself, so once a slice of these choices for the
+  // plate being printed has landed, its sides are the ones shown.
+  const slicedPlan =
+    plate !== 'all' && previewPlate === plate && !previewSlice.stale && check.current
+      ? asSliced(check.verdict?.nozzle_plan, previewSlice.result)
+      : null
   /** #2164 — filled trays Bambuddy has no spool for, and the ones answered "no". */
   const trays = useDeclinedTrays(printerId, filaments?.trays ?? [])
   // #836 — a hand pick the current check no longer offers (no rack this time, or the
@@ -894,7 +901,13 @@ export function PrintPicker({
                       gramsStale={slicedForSlots !== null && previewSlice.stale}
                     />
                   )}
-                  {!sliced && <NozzlePlanLine plan={check.verdict?.nozzle_plan} stale={!check.current} />}
+                  {!sliced && (
+                    <NozzlePlanLine
+                      plan={slicedPlan ?? check.verdict?.nozzle_plan}
+                      stale={!check.current}
+                      sliced={slicedPlan !== null}
+                    />
+                  )}
                   {target && known && (
                     <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2">
                       <legend className="px-1 text-[13px] text-ink">Arrange</legend>
