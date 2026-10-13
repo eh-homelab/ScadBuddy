@@ -946,3 +946,25 @@ async def test_an_error_that_only_quotes_the_budget_text_is_not_the_cap(text: st
     got = await _segment(out, left=1.0)
     assert got.error == text
     assert got.cost_usd == pytest.approx(0.1)
+
+
+async def test_an_error_that_names_max_budget_usd_fails_the_turn(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """#3094: only the runner's own BUDGET_EXHAUSTED ends a turn as the budget's. A
+    segment's error that merely names `max_budget_usd` (session content, or a plugin
+    complaining about its options) is the failure it is."""
+    await insert_gateway(agent_db, KEK, "http://127.0.0.1:9")
+    text = "the plugin refused ClaudeAgentSdkRunner(max_budget_usd=...)"
+    answers = _Answers(SegmentOutput(session_id="s", is_error=True, error=text))
+    runner = ScadBuddyRunner(connect, KEK, cwd=str(tmp_path), make_runner=answers)
+    async with running(temporal_env, connect, runner) as (client, queue):
+        sid = await insert_session(agent_db, budget=1.0)
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "hi")
+            assert await settled(connect, sid) == "failed"
+        finally:
+            await handle.terminate()
+    [error] = [e for e in await events(agent_db, sid) if e["type"] == "error"]
+    assert error["code"] == "turn_failed"
