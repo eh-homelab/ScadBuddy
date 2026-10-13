@@ -174,12 +174,19 @@ class PlateParts:
 
     parts: tuple[ColourPart, ...]
     extruders: tuple[int, ...]
+    #: The 1-based object each part belongs to (#956): a template's declared object, or
+    #: a packed copy. Empty means one object, every part in it.
+    objects: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.parts:
             raise ValueError("a plate needs at least one colour part")
         if len(self.parts) != len(self.extruders):
             raise ValueError("a plate needs one extruder per colour part")
+        if not self.objects:
+            object.__setattr__(self, "objects", (1,) * len(self.parts))
+        if len(self.objects) != len(self.parts):
+            raise ValueError("a plate needs one object number per colour part")
 
     @property
     def tower(self) -> bool:

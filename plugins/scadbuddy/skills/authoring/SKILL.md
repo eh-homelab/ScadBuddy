@@ -286,6 +286,34 @@ if (on_plate(2)) translate($plate == 2 ? [0, 0, 0] : beside) lid();
 - Keep the colour parameters the same on every plate: a colour is one extruder across
   the whole 3MF, in declaration order (main spec §6.4 and §7).
 
+### Objects a by-object print can tell apart
+
+Bambu's "by object" print sequence finishes each object before starting the next, which
+only means something when the 3MF has more than one object. A template that draws
+several separate things on one plate (a set of bins, tags, game pieces) declares them,
+in the same shape as plates (#956, `docs/superpowers/specs/2026-10-13-declared-objects-design.md`):
+
+```scad
+/* [Hidden] */
+$object = 0;                         // 0 = every object; ScadBuddy sets 1..N
+echo(objects = count);               // the object count, may follow the parameters
+function is_object(n) = $object == 0 || $object == n;
+
+for (i = [1 : count])
+  if (is_object(i)) translate([(i - 1) * pitch, 0, 0]) bin();
+```
+
+- `echo(objects = N)` exactly, as a top-level statement; absent or 1 is one object. At
+  most 16.
+- **Draw each object where it sits**, not at the origin: objects share the plate, and
+  their spacing is what lets the toolhead clear them. On the H2C a by-object print wants
+  about 49 mm between objects, and only one object taller than 47.4 mm (it prints
+  last); ScadBuddy warns, but never refuses.
+- With `echo(plates = N)` as well, ScadBuddy sets both: draw object *k* of plate *p*
+  when `$plate == p && $object == k`. An object may be on some plates only, but each
+  must be on one.
+- A pipeline template (`ctx.pack`) needs none of this: each packed copy is an object.
+
 ## 6. Fonts: installed family names only
 
 `text()` resolves a family through fontconfig inside the container, and **a
