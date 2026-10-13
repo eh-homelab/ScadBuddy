@@ -252,6 +252,12 @@ class Metrics:
             buckets=RENDER_BUCKETS,
             registry=r,
         )
+        self.project_retries = Counter(
+            "scadbuddy_render_project_retries_total",
+            "Retried writes of a render job's row (the `project` activity), which retries "
+            "without limit: a steady rise is a write that never lands (#857).",
+            registry=r,
+        )
         self.render_duration = Histogram(
             "scadbuddy_render_duration_seconds",
             "Time a worker spent on a job, by kind and outcome.",

@@ -334,6 +334,26 @@ def _observe_settled(metrics: Metrics, job: Job) -> None:
     )
 
 
+#: The attempt at which a still-failing ``project`` is logged: PROJECT_RETRY never gives
+#: up, so past here (some three minutes in) the write is likely failing for good (#857).
+PROJECT_RETRY_WARN_ATTEMPT = 12
+
+
+def _note_project_retry(metrics: Metrics | None, projection: Projection) -> None:
+    """Count a retried ``project`` and log one that keeps failing (#857)."""
+    attempt = activity.info().attempt if activity.in_activity() else 1
+    if attempt <= 1:
+        return
+    if metrics is not None:
+        metrics.project_retries.inc()
+    if attempt == PROJECT_RETRY_WARN_ATTEMPT or attempt % 100 == 0:
+        logger.warning(
+            "a render job's row has not been written after %d attempts",
+            attempt - 1,
+            extra={"job_id": projection.job_id, "state": projection.state},
+        )
+
+
 class RenderActivities:
     def __init__(self, deps: WorkerDeps) -> None:
         self.deps = deps
@@ -777,6 +797,7 @@ class RenderActivities:
         For ``running``, whether the row is still open: an older build's API commits
         the row before it starts the run, so a release may have settled it first, and
         the run then renders nothing (#603). Every other state answers True."""
+        _note_project_retry(self.deps.metrics, projection)
         p = self.deps.projection
         if projection.state == "running":
             started = await asyncio.to_thread(p.mark_started, projection.job_id)

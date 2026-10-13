@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import logging
 import shutil
 import threading
 import uuid
@@ -577,6 +578,35 @@ async def test_project_running_records_the_queue_wait_once(
         "scadbuddy_render_queue_wait_seconds_sum", {"kind": "render"}
     )
     assert waited is not None and 29 <= waited < 120
+
+
+@pytest.mark.requires_postgres
+async def test_a_retried_project_is_counted_and_a_long_failing_one_logged(
+    tmp_path: Path, projection: JobProjection, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#857: `project` retries without limit, so its retries are a metric to alert on
+    and one still failing after `PROJECT_RETRY_WARN_ATTEMPT` attempts is logged."""
+    metrics = Metrics()
+    deps = worker_deps(tmp_path, demo_paths(tmp_path), projection=projection)
+    acts = RenderActivities(replace(deps, metrics=metrics))
+    job = _submitted(projection)
+    write = Projection(job_id=job.id, slug="demo", state="running")
+
+    def at(attempt: int) -> ActivityEnvironment:
+        env = ActivityEnvironment()
+        env.info = replace(env.info, attempt=attempt)
+        return env
+
+    await at(1).run(acts.project, write)
+    sample = metrics.registry.get_sample_value
+    assert sample("scadbuddy_render_project_retries_total") == 0
+    await at(2).run(acts.project, write)
+    assert sample("scadbuddy_render_project_retries_total") == 1
+    assert "has not been written" not in caplog.text
+    with caplog.at_level(logging.WARNING):
+        await at(activities_module.PROJECT_RETRY_WARN_ATTEMPT).run(acts.project, write)
+    assert sample("scadbuddy_render_project_retries_total") == 2
+    assert "has not been written after 11 attempts" in caplog.text
 
 
 @pytest.mark.requires_postgres
