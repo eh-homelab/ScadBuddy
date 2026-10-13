@@ -1521,7 +1521,8 @@ expect true  go.work.sum
 expect true  vendor/modules.txt
 expect true  scripts/generate-go-client.sh
 expect true  .github/workflows/go-module-ci.yml
-expect true  Dockerfile
+expect true  tools/go/bambuddy-fs/Dockerfile
+expect false Dockerfile
 expect false backend/scadbuddy/api/library_print.py
 expect false README.md
 expect false toolsy/go.mod
@@ -1541,7 +1542,7 @@ Expected: FAIL (no such file).
 #!/usr/bin/env bash
 # Prints true when any changed path on stdin is Go's (spec 2026-10-13 §7).
 set -euo pipefail
-if grep -qE '^(go\.work(\.sum)?|vendor/|tools/go/|scripts/generate-go-client\.sh$|\.github/workflows/go-module-ci\.yml$|Dockerfile$)'; then
+if grep -qE '^(go\.work(\.sum)?|vendor/|tools/go/|scripts/generate-go-client\.sh$|\.github/workflows/go-module-ci\.yml$)'; then
   echo true
 else
   echo false
@@ -1722,9 +1723,8 @@ Add to `.github/dependabot.yml`, copying the uv entry's conventions:
         patterns: ["github.com/hanwen/go-fuse/*"]
 ```
 
-A Dependabot gomod bump does not run `go work vendor`, so the `go` job's drift check
-fails on it. Add one line to CLAUDE.md's Go block: such a PR needs `go work vendor`
-committed.
+A Dependabot gomod bump does not run `go work vendor` itself. Task 11's
+`vendor-autofix.yml` (from gooey) commits it.
 
 - [ ] **Step 8: Lint and run the script tests**
 
@@ -1745,27 +1745,38 @@ summary and the attribution footer. Watch CI. The `freshness` job should report
 "Up to date" for the Go client, and "Go modules" should run, because this PR touches
 `tools/go/**`.
 
-### Task 11: The container image
+### Task 11: The container image and vendor autofix (forge's and gooey's patterns)
 
 **Files:**
-- Modify: `Dockerfile`: new stages `bambuddy-fs-build` and `bambuddy-fs`, after
-  `agent-durable` and before `openscad-lsp`
-- Modify: `.github/workflows/build-image.yml`: a `bambuddy-fs` job, copied from the
-  `agent-durable` job (`:333-430`)
-- Modify: `.github/workflows/go-module-ci.yml`: image build and smoke steps
-- Modify: `tools/go/bambuddy-fs/README.md`: "Container image" section
+- Create:
+  - `tools/go/bambuddy-fs/Dockerfile`
+  - `.github/workflows/build-go-image.yml` (from forge's)
+  - `.github/workflows/vendor-autofix.yml` (from gooey's)
+- Modify:
+  - `.github/workflows/go-module-ci.yml`: gooey's gofmt step, plus image build and
+    smoke steps
+  - `.github/workflows/ci.yml:218-222`: hadolint also covers `tools/go/*/Dockerfile`
+  - `tools/go/bambuddy-fs/README.md`: a "Container image" section
 
 **Interfaces:**
 - Consumes: the workspace vendor tree (Task 5) and `main.go` (Task 9).
-- Produces: Dockerfile target `bambuddy-fs` and the image
-  `ghcr.io/eh-homelab/scadbuddy-bambuddy-fs`.
+- Produces: the image `ghcr.io/eh-homelab/scadbuddy-bambuddy-fs`.
 
-- [ ] **Step 1: Add the stages**
+Read spec §7.1 and §7.2 first. The sources to copy, from local checkouts:
+- `git -C ~/repos/WonderForgeLabs/forge show origin/main:.github/workflows/build-go-image.yml`
+- `git -C ~/repos/WonderForgeLabs/forge show origin/main:tools/go/envctl/Dockerfile`
+- `git -C ~/repos/WonderForgeLabs/gooey show origin/main:.github/workflows/vendor-autofix.yml`
+- `git -C ~/repos/WonderForgeLabs/gooey show origin/main:.github/workflows/ci.yml`
+  (the "gofmt" step, lines 88-112)
+
+- [ ] **Step 1: The Dockerfile**
 
 ```dockerfile
 # bambuddy-fs (#2686, spec 2026-10-13 §7.1): the library as a FUSE filesystem.
-# Cross-compiled on the build platform from the committed vendor tree; no network.
-FROM --platform=$BUILDPLATFORM golang:1.25.6-bookworm AS bambuddy-fs-build
+# Built with the repo root as context (it needs the workspace and the root vendor/):
+#   docker build -f tools/go/bambuddy-fs/Dockerfile .
+# Published by .github/workflows/build-go-image.yml as ghcr.io/eh-homelab/scadbuddy-bambuddy-fs.
+FROM --platform=$BUILDPLATFORM golang:1.25.6-bookworm AS build
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /src
@@ -1775,54 +1786,85 @@ COPY tools/go/ tools/go/
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH GOFLAGS=-mod=vendor \
     go build -trimpath -ldflags="-s -w" -o /out/bambuddy-fs ./tools/go/bambuddy-fs
 
-FROM debian:bookworm-slim AS bambuddy-fs
+# Not distroless: FUSE needs fusermount3, and mounting needs root in a container.
+FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends fuse3 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=bambuddy-fs-build /out/bambuddy-fs /usr/local/bin/bambuddy-fs
+COPY --from=build /out/bambuddy-fs /usr/local/bin/bambuddy-fs
 ENTRYPOINT ["bambuddy-fs"]
 CMD ["mount", "--help"]
 ```
 
-- The golang tag must equal `go.work`'s `toolchain` (Global Constraints).
-- `hadolint Dockerfile` must pass with `.hadolint.yaml`. For apt pins and `DL3008`,
-  follow the Dockerfile's existing practice, as the `agent` stage does.
-
-- [ ] **Step 2: Build and smoke it locally**
+- The golang tag must equal `go.work`'s `toolchain`.
+- `hadolint tools/go/bambuddy-fs/Dockerfile` must pass with `.hadolint.yaml`.
+- For apt pins and `DL3008`, follow the root Dockerfile's existing practice.
 
 Run:
 ```
-docker build --target bambuddy-fs -t scadbuddy-bambuddy-fs:dev .
+docker build -f tools/go/bambuddy-fs/Dockerfile -t scadbuddy-bambuddy-fs:dev .
 docker run --rm scadbuddy-bambuddy-fs:dev --help
-docker buildx build --platform linux/arm64 --target bambuddy-fs .
+docker buildx build --platform linux/arm64 -f tools/go/bambuddy-fs/Dockerfile .
 ```
-Expected:
-- `--help` prints the usage and exits 0. Make `main` exit 0 on `--help`.
-- The arm64 build succeeds. Go cross-compiles, so only the runtime stage's
-  `apt-get` runs under emulation.
+Expected: `--help` exits 0 (make `main` do so), and the arm64 build succeeds.
 
-- [ ] **Step 3: Smoke in the `go` job**
+- [ ] **Step 2: `build-go-image.yml`**
 
-In `go-module-ci.yml`, after the module loop, add two steps, both with
-`if: inputs.run == 'true'`:
-- `docker build --target bambuddy-fs -t bambuddy-fs:ci .`
-- `docker run --rm bambuddy-fs:ci --help`
+Copy forge's file, with these changes:
+- `runs-on: ubuntu-latest` everywhere; drop the runner-pool overflow step and its
+  sparse checkout.
+- **Triggers:** push to main with `paths: [tools/go/**, go.work, go.work.sum, vendor/**, .github/workflows/build-go-image.yml]`,
+  `tags: ["v*"]`, and `workflow_dispatch` with `commit_sha`.
+- **Discovery** stays the same: every `tools/go/*/main.go` needs a `Dockerfile`.
+- **Build:**
+  - `docker/setup-qemu-action` + `docker/setup-buildx-action`
+  - `docker/build-push-action` with `context: .`, `file: ${{ matrix.module }}/Dockerfile`,
+    `platforms: linux/amd64,linux/arm64`, `push: true`
+  - `cache-from: type=gha,scope=go-<name>`, `cache-to: type=gha,scope=go-<name>,mode=min`
+- **Tags:** `ghcr.io/eh-homelab/scadbuddy-<name>:sha-<sha>` and `:latest`, plus
+  `:<version>` (the tag without its `v`) on a `v*` tag.
+- `permissions: contents: read, packages: write`.
+- Pin action versions to the ones `build-image.yml` uses.
 
-- [ ] **Step 4: Publish in `build-image.yml`**
+- [ ] **Step 3: Lint and smoke in CI**
 
-Copy the `agent-durable` job as `bambuddy-fs`, with these changes:
-- `images: ghcr.io/eh-homelab/scadbuddy-bambuddy-fs`
-- `target: bambuddy-fs`
-- `platforms: linux/amd64,linux/arm64`
-- `cache-from: type=gha,scope=bambuddy-fs`
-- `cache-to: type=gha,scope=bambuddy-fs,mode=min`
-- the summary heading names the new package
+- **`go-module-ci.yml`.** Replace forge's per-module gofmt with gooey's whole-tree
+  gofmt step. Lower its "too few files" floor from 100 to 5, since this tree is
+  small. After the module loop, add:
 
-Update the file's header comment to list the fourth package, and note that it must be
-public like the others.
+```bash
+for d in tools/go/*/; do
+  [ -f "$d/main.go" ] || continue
+  name=$(basename "$d")
+  docker build -f "$d/Dockerfile" -t "go-$name:ci" .
+  docker run --rm "go-$name:ci" --help
+done
+```
+
+  All of these steps carry `if: inputs.run == 'true'`.
+- **`ci.yml` hadolint.** `hadolint/hadolint-action` takes one `dockerfile`. Add a
+  second step with `dockerfile: tools/go/bambuddy-fs/Dockerfile`, or switch to a
+  `recursive: true` run, if that keeps the root's config.
+
+- [ ] **Step 4: `vendor-autofix.yml`**
+
+Copy gooey's file, with these changes:
+- `runs-on: ubuntu-latest`
+- `actions/setup-go@v6` with `go-version-file: go.work`
+- the run step is `go work vendor && (cd tools/go/scadbuddy-client && GOWORK=off go mod vendor)`
+- `git add -A -- vendor tools/go/scadbuddy-client/vendor go.work.sum '*go.sum'`
+- **Push** with an app token from `actions/create-github-app-token@v3`
+  (`client-id: ${{ secrets.RUNNER_APP_ID }}`, `private-key: ${{ secrets.RUNNER_APP_PRIVATE_KEY }}`,
+  as `ci.yml:1437` does), passed to checkout's `token`. CI then re-runs on the
+  pushed head. Replace gooey's closing `::notice::` accordingly.
+
+Keep its `if: github.actor == 'dependabot[bot]' && head repo == this repo` guard, and
+its `pull_request_target` trigger with gooey's `paths`. It checks out the PR head by
+SHA and runs only `go`, so no PR code executes.
 
 - [ ] **Step 5: Lint and commit**
 
-Run `actionlint` and `hadolint Dockerfile`.
+Run `actionlint`, `hadolint tools/go/bambuddy-fs/Dockerfile` and
+`shellcheck .github/scripts/*.sh scripts/*.sh`.
 
-`git commit -m "build(bambuddy-fs): publish the mount as a container image (#2686)"`
+`git commit -m "build(bambuddy-fs): publish Go CLIs as images; gofmt annotations; vendor autofix (#2686)"`

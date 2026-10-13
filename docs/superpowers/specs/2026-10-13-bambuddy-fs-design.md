@@ -202,7 +202,7 @@ templates to verify"):
   queue's base.
 - It does the Go work only when that diff touches `go.work*`, `vendor/**`,
   `tools/go/**`, `scripts/generate-go-client.sh`,
-  `.github/workflows/go-module-ci.yml` or `Dockerfile`.
+  `.github/workflows/go-module-ci.yml`.
 - On push to main, on the schedule, or when the diff cannot be computed, it does the
   Go work every time.
 - Otherwise it writes "No Go changes" to the job summary and succeeds.
@@ -217,19 +217,39 @@ A spec change reaches the `go` job through the regen commit, which touches
 **Dependabot.** A `gomod` entry for both modules, grouping
 `github.com/microsoft/kiota-*` (forge's group) and `github.com/hanwen/go-fuse`.
 
-### 7.1 Container image
+### 7.1 Container image (forge's pattern)
 
-`bambuddy-fs` is also published as `ghcr.io/eh-homelab/scadbuddy-bambuddy-fs`, built
-from the root `Dockerfile` like the other images.
+`bambuddy-fs` is published as `ghcr.io/eh-homelab/scadbuddy-bambuddy-fs`. This copies
+forge's `build-go-image.yml` and per-module `tools/go/<m>/Dockerfile` (WonderForgeLabs/forge,
+`tools/go/envctl/Dockerfile`).
 
-**The `bambuddy-fs` target**
-- **Build stage:** `golang:<go.work toolchain>-bookworm`, on `--platform=$BUILDPLATFORM`.
-  It cross-compiles with `GOOS`/`GOARCH` from `TARGETOS`/`TARGETARCH`,
-  `CGO_ENABLED=0` and `-mod=vendor` from the committed workspace vendor tree, so the
-  build never reaches the network.
-- **Runtime:** `debian:bookworm-slim` with `fuse3` and `ca-certificates`.
-  `ENTRYPOINT ["bambuddy-fs"]`, default `CMD ["mount", "--help"]`. It runs as root:
-  mounting needs `CAP_SYS_ADMIN` and `/dev/fuse` in a container anyway.
+- **`.github/workflows/build-go-image.yml`**
+  - **Triggers:** push to main when `tools/go/**`, `go.work*`, `vendor/**` or the
+    workflow changes; `v*` tags; `workflow_dispatch` with a `commit_sha`.
+  - **Discovery.** A `discover` job finds every `tools/go/*/main.go`. It fails if
+    one has no `Dockerfile`: every Go CLI here publishes an image, as in forge.
+  - **Build.** A matrix job builds and pushes each image, named `scadbuddy-<dir>`.
+    Unlike forge's plain `docker build`, it uses buildx for
+    `linux/amd64,linux/arm64`, with the `type=gha` cache at
+    `scope=go-<dir>,mode=min`.
+  - **Tags:** `sha-<sha>` and `latest`, plus the version on a `v*` tag.
+  - **Runners:** `ubuntu-latest`. The package must be public, like the others.
+- **`tools/go/bambuddy-fs/Dockerfile`**
+  - **Context:** built with the repo root as context (`-f tools/go/bambuddy-fs/Dockerfile .`),
+    not the module directory as forge does. The mount depends on the workspace's
+    `scadbuddy-client` and on the root `vendor/`.
+  - **Build stage:** `golang:<go.work toolchain>-bookworm` on `--platform=$BUILDPLATFORM`.
+    It cross-compiles with `TARGETOS`/`TARGETARCH`, `CGO_ENABLED=0` and
+    `-mod=vendor`, so nothing is downloaded.
+  - **Runtime:** `debian:bookworm-slim` with `fuse3` and `ca-certificates`, unlike
+    forge's distroless. FUSE needs `fusermount3`, and the process runs as root,
+    since mounting needs `CAP_SYS_ADMIN` and `/dev/fuse` in a container anyway.
+  - **Entrypoint:** `ENTRYPOINT ["bambuddy-fs"]`.
+- **hadolint.** The lint job's hadolint step also covers `tools/go/*/Dockerfile`.
+- **CI.** The `go` job (§7) builds each module's image and runs `--help` whenever it
+  does the Go work. Its selector already matches `tools/go/**`.
+- **`.dockerignore`.** `tools/`, `go.work*` and `vendor/` must reach the build
+  context; nothing ignores them.
 
 **Running it**
 ```
@@ -238,23 +258,26 @@ docker run --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor:unconf
   mount --api http://scadbuddy/api/v1 --allow-other /mnt/bambuddy
 ```
 `--allow-other` (FUSE `allow_other`) lets processes other than the mounting one,
-such as the host and other containers, see the files. The README states it and the
-`rshared` propagation a sidecar needs.
+such as the host and other containers, see the files.
 
-**Publishing.** A `bambuddy-fs` job in `build-image.yml`, on push to main and `v*`
-tags as the others are:
-- `linux/amd64,linux/arm64`;
-- the `type=gha` cache with `scope=bambuddy-fs,mode=min`;
-- tags from `docker/metadata-action` like the agent's.
+### 7.2 Go lint and vendoring (gooey's pattern)
 
-The package must be public, as the header of `build-image.yml` says of the others.
+- **Lint is gofmt and `go vet`.** That is what forge and gooey run; neither uses
+  golangci-lint. The gofmt step is gooey's (WonderForgeLabs/gooey `ci.yml`, "gofmt"):
+  - it walks the tree, pruning dot-directories and `vendor`;
+  - it emits an `::error file=<f>::` annotation per unformatted file;
+  - it fails if the walk finds suspiciously few files, the sign of a broken prune.
+- **Vendor autofix for Dependabot.** A gomod bump changes a `require`, and with one
+  root `vendor/`, `go` then refuses with "inconsistent vendoring".
+  `.github/workflows/vendor-autofix.yml` is copied from gooey:
+  - it runs on `pull_request_target` from `dependabot[bot]` on this repo;
+  - it runs `go work vendor` (and `GOWORK=off go mod vendor` in the client module);
+  - it commits `build(deps): go work vendor` and pushes.
 
-**CI.** The `go` job (§7) also runs `docker build --target bambuddy-fs` and then
-`docker run --rm <image> --help` whenever it does the Go work. Its selector also
-matches `Dockerfile`, so a Dockerfile change rebuilds the image.
-
-**`.dockerignore`.** `tools/`, `go.work*` and `vendor/` must reach the build context;
-nothing ignores them.
+  It pushes with the `RUNNER_APP` token, not `GITHUB_TOKEN`, so CI re-runs on the new
+  head; gooey's note says a `GITHUB_TOKEN` push does not. It runs on `ubuntu-latest`.
+- **Vendor freshness** stays in the `go` job (forge's `go work vendor` drift check),
+  not gooey's separate `vendor-freshness.yml`. One gated job covers it.
 
 ## 8. Caching and consistency
 
