@@ -3,7 +3,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { WebSocketServer } from 'ws'
-import { checkSocketUrl, endNotice, eventNotice, monitorEnv, runCommand, runSocket, shortDuration } from '../src/background/monitor.js'
+import { checkSocketUrl, EVENT_CHARS, endNotice, eventNotice, lineSplitter, monitorEnv, pinnedLookup, runCommand, runSocket, shortDuration } from '../src/background/monitor.js'
 
 // A Monitor's sources (background/monitor.ts), as Claude Code's Monitor describes its own:
 // stdout lines batched within 200 ms, exit ends the watch with its code, expiry and too
@@ -87,4 +87,18 @@ it("writes events and the end as Claude Code's task notifications", () => {
   expect(endNotice('ab12cd34', 'ticks', { outcome: 'exited', code: 3 }, 4, 4000)).toContain('<summary>Monitor "ticks" stream ended</summary>\n<event>exit code 3 · 4 events</event>')
   expect(endNotice('ab12cd34', 'ticks', { outcome: 'expired' }, 1, 4000)).toContain('expired after 4s')
   expect(shortDuration(60_000)).toBe('1m')
+})
+
+it('cuts a line that never ends instead of holding it', () => {
+  const out: string[] = []
+  const lines = lineSplitter((l) => out.push(l))
+  for (let i = 0; i < 100; i++) lines.push('x'.repeat(1000))
+  lines.push('\nnext\n')
+  expect(out).toEqual([`${'x'.repeat(EVENT_CHARS)} […cut]`, 'next'])
+})
+
+it('connects a socket only to the addresses the check passed', async () => {
+  const lookup = pinnedLookup(['93.184.215.14'])
+  const one = await new Promise<string>((resolve) => lookup('rebound.example', {}, (_e, address) => resolve(address as string)))
+  expect(one).toBe('93.184.215.14')
 })
