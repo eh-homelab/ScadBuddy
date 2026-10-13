@@ -82,6 +82,8 @@ export type ParamPresetUpdate = Schemas['ParamPresetUpdate']
 export type ParamPresetDuplicate = Schemas['ParamPresetDuplicate']
 
 export type FontFamily = Schemas['FontFamily']
+/** #2358 — the characters of a text a font has no glyph for (`GET /fonts/glyphs`). */
+export type GlyphCoverage = Schemas['GlyphCoverage']
 export type FontCatalogue = Schemas['FontCatalogueView']
 export type CatalogueFont = Schemas['CatalogueEntry']
 export type FontVariant = Schemas['FontVariant']

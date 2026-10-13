@@ -424,3 +424,40 @@ def test_a_failed_publish_still_answers_the_install(
     response = client.post("/api/v1/fonts/install", json={"family": "Pacifico"}, headers=press())
     assert response.status_code == 200 and response.json()["family"] == "Pacifico"
     assert "could not publish an installed font family" in caplog.text
+
+
+# ── glyph coverage (#2358) ─────────────────────────────────────────────────────
+
+
+def test_the_glyph_route_names_what_the_font_lacks(
+    client: TestClient, fonts: FakeBackedService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import scadbuddy.library.fonts as library_fonts
+
+    asked: list[str] = []
+
+    def coverage(font: str, env: object) -> tuple[str, list[tuple[int, int]]]:
+        asked.append(font)
+        return "Lobster Two", [(0x20, 0x7E), (0xA0, 0xFF)]
+
+    monkeypatch.setattr(library_fonts, "font_coverage", coverage)
+    response = client.get(
+        "/api/v1/fonts/glyphs", params={"font": "Lobster Two:style=Bold", "text": "Zoë 😀"}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"font": "Lobster Two:style=Bold", "missing": ["😀"]}
+    assert asked == ["Lobster Two:style=Bold"]
+
+
+def test_the_glyph_route_bounds_what_it_is_asked(
+    client: TestClient, fonts: FakeBackedService
+) -> None:
+    assert (
+        client.get("/api/v1/fonts/glyphs", params={"font": "x", "text": "a" * 2001}).status_code
+        == 422
+    )
+    assert (
+        client.get("/api/v1/fonts/glyphs", params={"font": "x" * 201, "text": "a"}).status_code
+        == 422
+    )
+    assert client.get("/api/v1/fonts/glyphs", params={"text": "a"}).status_code == 422
