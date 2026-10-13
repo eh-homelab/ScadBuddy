@@ -514,7 +514,10 @@ async def test_each_pieces_meshes_are_let_go_after_its_last_plate(
         ``asyncio.to_thread``'s worker keeps its finished work item, whose future's
         result is the layout, until it gets the CPU back, and under a loaded CI runner
         the event loop resumes first. So wait, briefly, for it to go; one really held
-        stays alive past the wait and still fails."""
+        stays alive past the wait and still fails.
+
+        Only for checks that expect nothing held: one that expects a layout still held
+        would spend the whole 5 s here every time."""
         deadline = time.monotonic() + 5
         while True:
             gc.collect()
