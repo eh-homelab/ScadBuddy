@@ -58,6 +58,9 @@ from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.problems import ApiError, install_problem_handlers
 from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
+from scadbuddy.flow_triggers.component import FLOW_TRIGGERS
+from scadbuddy.flow_triggers.events import listen_for_triggers
+from scadbuddy.flow_triggers.fire import TriggerFires, ensure_trigger_schedules_logged
 from scadbuddy.flows.component import FLOWS
 from scadbuddy.flows.sweep import sweep_flow_runs, sweep_orphan_grants
 from scadbuddy.library.assets import referenced_asset_ids
@@ -92,6 +95,7 @@ from scadbuddy.workflows.client import (
     reconcile_lost_runs,
     sandboxed_runner,
 )
+from scadbuddy.workflows.flow_triggers import FlowTriggerFire
 from scadbuddy.workflows.follow import resume_followed
 from scadbuddy.workflows.housekeeping import (
     BACKFILL_SWEEP,
@@ -881,10 +885,18 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
 
     schedules = asyncio.create_task(set_up())
     ops = state.components.get(OPERATIONS)
+    # Flow triggers (#2484): their fires run here, beside the data volume; their
+    # Schedules are put right once, and their events are heard by every replica.
+    triggers = state.components.get(FLOW_TRIGGERS)
+    trigger_schedules = asyncio.create_task(
+        ensure_trigger_schedules_logged(client, queue, triggers.store, stop)
+    )
+    unlisten = listen_for_triggers(state.events, client, queue, triggers.store)
     activities = [
         *_housekeeping_activities(state),
         *_preview_activities(state),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
+        *TriggerFires(triggers.store, lambda: triggers.flows, client, queue).all(),
     ]
     try:
         while not stop.is_set():
@@ -892,7 +904,7 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
                 client,
                 queue,
                 activities,
-                workflows=[PreviewBackfill, OperationWorkflow],
+                workflows=[PreviewBackfill, OperationWorkflow, FlowTriggerFire],
                 workflow_runner=sandboxed_runner(),
                 graceful_shutdown_timeout=LIBRARY_GRACEFUL_SHUTDOWN,
             )
@@ -901,6 +913,8 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
                     await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
     finally:
         schedules.cancel()
+        trigger_schedules.cancel()
+        await unlisten()
 
 
 def _kinds_on(ops: OperationCommands, queue: Queue) -> dict[str, OperationKind]:

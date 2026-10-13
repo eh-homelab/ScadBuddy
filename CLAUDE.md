@@ -266,6 +266,15 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   sweep for runs whose execution closed). Routes `api/flows.py`. An outward call's
   approval timeout resolves from the run, its flow, then `flow_approval_timeout_seconds`
   (0 is never).
+- `backend/scadbuddy/flow_triggers/` — runs started on a schedule or an event (#2484,
+  spec 2026-10-11 §12): `store.py` (`flow_triggers`, their standing grants and fires),
+  `fire.py` (the `flow_trigger_fire` activity on the `library` queue), `events.py` (the
+  event bus to `FlowTriggerFire`, one per trigger and event); the workflow and the
+  Schedules are `workflows/flow_triggers.py`, routes `api/flow_triggers.py`. A fire reads
+  everything from the trigger's row (the Schedule carries the trigger id only) and runs
+  as its creator, with a run grant only from a standing grant a person approved; never
+  take an author or a grant status from a body. A trigger pins a version; any edit
+  revokes its standing grant.
 - `backend/scadbuddy/operations/` — the `operations` record (`store.py`, the table
   `operations`), `kinds.py` (`OperationKind`: a kind's check, its effect, its
   attempts, and its queue) and `component.py` (`OPERATIONS`, `OperationsDep`). A

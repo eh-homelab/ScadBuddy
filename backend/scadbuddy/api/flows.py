@@ -13,7 +13,7 @@ import logging
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
 import psycopg
@@ -25,7 +25,6 @@ from temporal_agent_harness.harness.agent_protocol import AgentConfig
 from temporalio.client import Client, WorkflowExecutionStatus, WorkflowUpdateFailedError
 from temporalio.service import RPCError, RPCStatusCode
 
-from scadbuddy.api.deps import StateDep
 from scadbuddy.api.operations import (
     KEY_REQUIRED_DETAIL,
     KEY_REQUIRED_PROBLEM,
@@ -39,6 +38,9 @@ from scadbuddy.core.authorship import current_author
 from scadbuddy.core.gitrepo import COMMIT_ID_PATTERN, GitError, RevisionNotFoundError
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import check_approval_timeout
+from scadbuddy.flow_triggers.component import Triggers, TriggersDep
+from scadbuddy.flow_triggers.fire import pause_for_flow
+from scadbuddy.flow_triggers.models import RunTrigger
 from scadbuddy.flows.component import Flows, FlowsDep
 from scadbuddy.flows.definitions import (
     FlowHistoryUnavailableError,
@@ -58,6 +60,7 @@ from scadbuddy.flows.history import ResetPoints, ResetPreview, outward_since, re
 from scadbuddy.flows.images import BLOB_NAME, RunImage, open_image, run_images
 from scadbuddy.flows.inputs import InputsError, resolve_inputs
 from scadbuddy.flows.keys import approval_key
+from scadbuddy.flows.launch import approval_timeout, execution_status, start_execution
 from scadbuddy.flows.manifest import raise_tiers, tiers
 from scadbuddy.flows.models import (
     HOST_FN,
@@ -78,7 +81,7 @@ from scadbuddy.workflows.commands import COMMAND_ANSWER_DEADLINE
 from scadbuddy.workflows.flow_grants import FlowGrants
 from scadbuddy.workflows.flow_routes import api_client
 from scadbuddy.workflows.payload_codec import SubjectForgottenError
-from scadbuddy.workflows.project import PROJECT_WORKFLOW, FlowStart, RunFlow
+from scadbuddy.workflows.project import FlowStart
 
 logger = logging.getLogger(__name__)
 
@@ -240,6 +243,8 @@ class RunView(BaseModel):
     images: list[RunImage] = []
     #: The run's grant (#2481); None for a run started without one.
     grant: GrantView | None = None
+    #: The trigger that started it (#2484); None for a run a request started.
+    trigger: RunTrigger | None = None
 
 
 def _started_by() -> dict[str, Any]:
@@ -411,11 +416,14 @@ async def restore_flow_version(name: NamePath, commit: CommitPath, flows: FlowsD
     response_model=FlowState,
     summary="Archive a flow (every version): hidden from the list, and never started",
 )
-async def archive_flow(name: NamePath, flows: FlowsDep) -> FlowState:
+async def archive_flow(name: NamePath, flows: FlowsDep, triggers: TriggersDep) -> FlowState:
     """Reversible (`unarchive`). Runs already started keep running; finished runs keep
-    their script. One archived already keeps who archived it and when."""
+    their script. One archived already keeps who archived it and when. Its triggers are
+    paused (#2484), and stay paused when it is unarchived."""
     with _versioned():
-        return await flows.definitions.archive(name, _started_by())
+        state = await flows.definitions.archive(name, _started_by())
+    await _pause_triggers(triggers, name, "flow archived")
+    return state
 
 
 @router.post(
@@ -433,14 +441,23 @@ async def unarchive_flow(name: NamePath, flows: FlowsDep) -> FlowState:
     response_model=FlowState,
     summary="Delete a flow: a commit removing its script; its history keeps every version",
 )
-async def delete_flow(name: NamePath, flows: FlowsDep) -> FlowState:
+async def delete_flow(name: NamePath, flows: FlowsDep, triggers: TriggersDep) -> FlowState:
     """One commit in `data/flows` removing `<name>/` (#2485). Its versions stay in the
     history and their records stay: runs in progress keep running the version they
     started with, finished runs still show the script they ran, and nothing new starts.
     Restoring one of its versions, or registering the name again, brings it back as its
-    next version. A flow deleted already is answered as it is."""
+    next version. A flow deleted already is answered as it is. Its triggers are paused
+    (#2484)."""
     with _versioned():
-        return await flows.definitions.delete(name, _started_by())
+        state = await flows.definitions.delete(name, _started_by())
+    await _pause_triggers(triggers, name, "flow deleted")
+    return state
+
+
+async def _pause_triggers(triggers: Triggers, name: str, reason: str) -> None:
+    await pause_for_flow(
+        triggers.store, triggers.client, triggers.task_queue, name, reason, _started_by()
+    )
 
 
 def _refuse_hidden(definition: Definition) -> None:
@@ -459,19 +476,6 @@ def _refuse_hidden(definition: Definition) -> None:
         )
 
 
-async def _execution(client: Client, run_id: str) -> WorkflowExecutionStatus | None:
-    """The run's execution's status; None when there is none."""
-    try:
-        described = await client.get_workflow_handle(f"flow-{run_id}").describe(
-            rpc_timeout=timedelta(seconds=_STATUS_SECONDS)
-        )
-    except RPCError as err:
-        if err.status == RPCStatusCode.NOT_FOUND:
-            return None
-        raise
-    return described.status
-
-
 @router.post(
     "/workflows/{definition_id}/runs",
     status_code=status.HTTP_202_ACCEPTED,
@@ -483,7 +487,6 @@ async def start_flow_run(
     definition_id: str,
     response: Response,
     flows: FlowsDep,
-    state: StateDep,
     key: IdempotencyKey = None,
     body: Annotated[RunCreate | None, Body()] = None,
 ) -> RunAnswer:
@@ -514,22 +517,13 @@ async def start_flow_run(
             type_=FLOW_INPUTS,
             problems=err.problems,
         ) from None
-    override = _seconds(options.approval_timeout)
-    timeout = next(
-        value
-        for value in (
-            override,
-            definition.approval_timeout_s,
-            state.settings.flow_approval_timeout_seconds,
-        )
-        if value is not None
-    )
+    timeout = approval_timeout(flows, definition, _seconds(options.approval_timeout))
     # As the agent will enforce them: Settings may have raised a tool to outward.
     tool_tiers = raise_tiers(tiers(), await flows.store.tool_overrides())
     try:
         async with asyncio.timeout(COMMAND_ANSWER_DEADLINE.total_seconds()):
             # Started already, its row not yet written: the same run, nothing new.
-            if (execution := await _execution(client, run_id)) is not None:
+            if (execution := await execution_status(client, run_id)) is not None:
                 response.status_code = status.HTTP_200_OK
                 closed = execution != WorkflowExecutionStatus.RUNNING
                 return RunAnswer(
@@ -551,29 +545,16 @@ async def start_flow_run(
                     status="approved" if current_author() is None else "requested",
                     requested_by=_started_by(),
                 )
-            await AgentClient(client, f"flow-{run_id}").start_and_submit_message(
-                "execute",
-                RunFlow(
-                    script=definition.script,
-                    inputs_schema=definition.inputs_schema,
-                    inputs=inputs if definition.inputs_schema is not None else None,
-                ).model_dump(exclude_none=True),
-                workflow_name=PROJECT_WORKFLOW,
-                task_queue=flows.queue,
-                start_config=AgentConfig(),
-                start_data=FlowStart(
-                    run_id=run_id,
-                    definition_id=definition.id,
-                    version=definition.version,
-                    name=definition.name,
-                    started_by=_started_by(),
-                    approval_timeout_s=timeout,
-                    tools_queue=flows.settings.temporal_task_queue_agent_tools,
-                    tool_tiers=tool_tiers,
-                    search_attributes=flows.search_attributes,
-                    commit=definition.commit or "",
-                ),
+            await start_execution(
+                flows,
+                client,
+                definition=definition,
+                run_id=run_id,
                 update_id=key,
+                started_by=_started_by(),
+                inputs=inputs,
+                approval_timeout_s=timeout,
+                tool_tiers=tool_tiers,
             )
     except TimeoutError:
         raise still_accepting() from None
@@ -606,7 +587,7 @@ async def list_flow_runs(
 async def _starting(client: Client, run_id: str) -> RunView | None:
     """A run whose row is not written yet, from its open execution's input. None
     without one: a closed execution with no row did nothing, or was deleted."""
-    if await _execution(client, run_id) != WorkflowExecutionStatus.RUNNING:
+    if await execution_status(client, run_id) != WorkflowExecutionStatus.RUNNING:
         return None
     handle = client.get_workflow_handle(f"flow-{run_id}")
     try:
@@ -664,7 +645,21 @@ async def _pending(client: Client, run: Run) -> tuple[list[PendingEntry], bool]:
 
 
 @router.get("/workflow-runs/{run_id}", response_model=RunView, summary="Get a flow run")
-async def get_flow_run(run_id: str, flows: FlowsDep) -> RunView:
+async def get_flow_run(run_id: str, flows: FlowsDep, triggers: TriggersDep) -> RunView:
+    view = await _run_view(run_id, flows)
+    if (fired := await triggers.store.fire_of_run(run_id)) is not None:
+        fire, trigger = fired
+        view.trigger = RunTrigger(
+            trigger_id=fire.trigger_id,
+            kind=trigger.kind if trigger is not None else ("event" if fire.event else "schedule"),
+            fire_key=fire.fire_key,
+            fired_at=fire.fired_at,
+            event=fire.event,
+        )
+    return view
+
+
+async def _run_view(run_id: str, flows: Flows) -> RunView:
     run = await flows.store.get_run(run_id)
     if run is None:
         if flows.client is None or (view := await _starting(flows.client, run_id)) is None:
@@ -745,7 +740,10 @@ async def delete_flow_run(run_id: str, flows: FlowsDep) -> Response:
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.") from None
     if flows.client is None or flows.connect is None:
         raise _unavailable()
-    if await flows.store.get_run(run_id) is None and await _execution(flows.client, run_id) is None:
+    if (
+        await flows.store.get_run(run_id) is None
+        and await execution_status(flows.client, run_id) is None
+    ):
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such flow run.")
     await forget_run(run_id, connect=flows.connect, client=flows.client, store=flows.store)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
