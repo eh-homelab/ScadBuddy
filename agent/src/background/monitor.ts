@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
-import { createInterface } from 'node:readline'
+import type { LookupFunction } from 'node:net'
+import WebSocket from 'ws'
 import { assertHostAllowed, embeddedIPv4, isLoopbackHost, type Resolver, systemResolver } from '../http/egress.js'
 
 // A Monitor's source, as Claude Code's (its tool description, 2.1.296): "Each stdout line
@@ -13,6 +14,44 @@ import { assertHostAllowed, embeddedIPv4, isLoopbackHost, type Resolver, systemR
 export const MONITOR_DEFAULT_MS = 300_000
 export const MONITOR_MAX_MS = 1_800_000
 export const BATCH_MS = 200
+/** One event's text at most: a longer line, or batch, is cut (store.ts EVENT_MAX_CHARS). */
+export const EVENT_CHARS = 8000
+
+/**
+ * Splits a stream into lines, never holding more than EVENT_CHARS of one: a longer line
+ * is cut there and the rest of it dropped, so a command that writes no newline cannot
+ * grow the service's memory.
+ */
+export function lineSplitter(onLine: (line: string) => void): { push(chunk: string): void; end(): void } {
+  let line = ''
+  let dropping = false
+  return {
+    push(chunk) {
+      let from = 0
+      for (;;) {
+        const nl = chunk.indexOf('\n', from)
+        const part = chunk.slice(from, nl < 0 ? undefined : nl)
+        if (!dropping) {
+          line += part
+          if (line.length > EVENT_CHARS) {
+            onLine(`${line.slice(0, EVENT_CHARS)} […cut]`)
+            line = ''
+            dropping = true
+          }
+        }
+        if (nl < 0) return
+        if (!dropping) onLine(line)
+        line = ''
+        dropping = false
+        from = nl + 1
+      }
+    },
+    end() {
+      if (line && !dropping) onLine(line)
+      line = ''
+    },
+  }
+}
 
 /** How a watch ended. */
 export type MonitorEnd =
@@ -42,6 +81,8 @@ export function runCommand(options: { command: string; cwd: string; timeoutMs: n
     const child = spawn('bash', ['-c', options.command], { cwd: options.cwd, env: monitorEnv(), detached: true, stdio: ['ignore', 'pipe', 'ignore'] })
     let ended: MonitorEnd | undefined
     let batch: string[] = []
+    let batchChars = 0
+    let dropped = 0
     let timer: NodeJS.Timeout | undefined
     let writing = Promise.resolve()
     const kill = (why: MonitorEnd) => {
@@ -55,16 +96,26 @@ export function runCommand(options: { command: string; cwd: string; timeoutMs: n
     const flush = () => {
       timer = undefined
       if (!batch.length) return
-      const text = batch.join('\n')
+      const text = batch.join('\n') + (dropped ? `\n[…${dropped} more line${dropped === 1 ? '' : 's'} in this batch cut]` : '')
       batch = []
+      batchChars = 0
+      dropped = 0
       writing = writing.then(async () => {
         if (!(await options.onEvent(text))) kill({ outcome: 'too_many' })
       })
     }
-    createInterface({ input: child.stdout }).on('line', (line) => {
-      batch.push(line)
+    const lines = lineSplitter((line) => {
+      // One batch is one event: past EVENT_CHARS its lines are counted, not kept.
+      if (batchChars + line.length > EVENT_CHARS) dropped += 1
+      else {
+        batch.push(line)
+        batchChars += line.length + 1
+      }
       timer ??= setTimeout(flush, BATCH_MS)
     })
+    child.stdout.setEncoding('utf8')
+    child.stdout.on('data', (chunk: string) => lines.push(chunk))
+    child.stdout.on('end', () => lines.end())
     const expiry = setTimeout(() => kill({ outcome: 'expired' }), options.timeoutMs)
     const onAbort = () => kill({ outcome: 'cancelled' })
     options.signal.addEventListener('abort', onAbort, { once: true })
@@ -79,8 +130,14 @@ export function runCommand(options: { command: string; cwd: string; timeoutMs: n
   })
 }
 
-/** The URL a WebSocket may open: ws(s) to an allowed host that is not this pod's loopback. */
+/** Why a WebSocket may not open `url` (ws(s) to an allowed host off this pod), or undefined. */
 export async function checkSocketUrl(url: string, resolve: Resolver = systemResolver): Promise<string | undefined> {
+  const checked = await socketAddresses(url, resolve)
+  return typeof checked === 'string' ? checked : undefined
+}
+
+/** The addresses a WebSocket to `url` may connect to, or why it may not. */
+export async function socketAddresses(url: string, resolve: Resolver = systemResolver): Promise<string[] | string> {
   let parsed: URL
   try {
     parsed = new URL(url)
@@ -94,19 +151,42 @@ export async function checkSocketUrl(url: string, resolve: Resolver = systemReso
     const addresses = await assertHostAllowed(parsed.href.replace(/^ws/, 'http'), resolve, 'ws.url', 'an allowed host')
     const loopback = addresses.find((a) => isLoopbackHost(embeddedIPv4(a) ?? a))
     if (loopback !== undefined) return `ws.url host ${parsed.hostname} resolves to ${loopback}, this pod's loopback`
+    return addresses
   } catch (err) {
     return (err as Error).message
   }
-  return undefined
 }
 
-/** Streams a WebSocket's frames until it closes, expires, makes too many events, or `signal` aborts. */
-export function runSocket(options: { url: string; protocols?: string[] | undefined; timeoutMs: number; signal: AbortSignal; onEvent: EventSink }): Promise<MonitorEnd> {
+/** A `lookup` that answers only with the addresses the egress check passed (DNS rebinding). */
+export function pinnedLookup(addresses: readonly string[]): LookupFunction {
+  return (_host, options, callback) => {
+    const all = addresses.map((address) => ({ address, family: address.includes(':') ? 6 : 4 }))
+    if ((options as { all?: boolean }).all) (callback as (e: null, a: typeof all) => void)(null, all)
+    else callback(null, all[0]!.address, all[0]!.family)
+  }
+}
+
+/**
+ * Streams a WebSocket's frames until it closes, expires, makes too many events, or
+ * `signal` aborts. It connects only to `addresses` (what checkSocketUrl passed), and
+ * follows no redirect.
+ */
+export function runSocket(options: {
+  url: string
+  protocols?: string[] | undefined
+  addresses?: readonly string[] | undefined
+  timeoutMs: number
+  signal: AbortSignal
+  onEvent: EventSink
+}): Promise<MonitorEnd> {
   return new Promise((resolve) => {
     let ended: MonitorEnd | undefined
     let writing = Promise.resolve()
-    const socket = new WebSocket(options.url, options.protocols)
-    socket.binaryType = 'arraybuffer'
+    const socket = new WebSocket(options.url, options.protocols, {
+      followRedirects: false,
+      maxPayload: 1024 * 1024,
+      ...(options.addresses?.length ? { lookup: pinnedLookup(options.addresses) } : {}),
+    })
     const stop = (why: MonitorEnd) => {
       ended ??= why
       socket.close()
@@ -114,19 +194,20 @@ export function runSocket(options: { url: string; protocols?: string[] | undefin
     const expiry = setTimeout(() => stop({ outcome: 'expired' }), options.timeoutMs)
     const onAbort = () => stop({ outcome: 'cancelled' })
     options.signal.addEventListener('abort', onAbort, { once: true })
-    socket.addEventListener('message', (event) => {
-      const text = typeof event.data === 'string' ? event.data : `[binary frame, ${(event.data as ArrayBuffer).byteLength} bytes]`
+    socket.on('message', (data: Buffer, isBinary: boolean) => {
+      const text = isBinary ? `[binary frame, ${data.byteLength} bytes]` : data.toString('utf8').slice(0, EVENT_CHARS)
       writing = writing.then(async () => {
         if (!(await options.onEvent(text))) stop({ outcome: 'too_many' })
       })
     })
-    socket.addEventListener('error', () => {
-      ended ??= { outcome: 'failed', reason: 'the WebSocket failed' }
+    socket.on('error', (err: Error) => {
+      ended ??= { outcome: 'failed', reason: `the WebSocket failed: ${err.message}` }
     })
-    socket.addEventListener('close', (event) => {
+    socket.on('close', (code: number, reason: Buffer) => {
       clearTimeout(expiry)
       options.signal.removeEventListener('abort', onAbort)
-      void writing.finally(() => resolve(ended ?? { outcome: 'closed', code: event.code, ...(event.reason ? { reason: event.reason } : {}) }))
+      const why = reason.toString('utf8')
+      void writing.finally(() => resolve(ended ?? { outcome: 'closed', code, ...(why ? { reason: why } : {}) }))
     })
   })
 }
