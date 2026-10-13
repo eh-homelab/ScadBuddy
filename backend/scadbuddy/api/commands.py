@@ -71,8 +71,10 @@ async def follow_command(
     """Waits up to `FOLLOW_WAIT` on the Update, then answers it as the route that answered
     202 would have: a render's job (`RenderAccepted`), a print's run (`PrintRun`), an
     operation's body or its 202 `OperationAccepted` to follow at ``/operations/{id}``,
-    or the refusal. A print run answers 200 here whether its own route would have said
-    202 (a new run) or 200 (a repeat); its ``repeated`` says which. ``supersedes`` is a
+    or the refusal. An answer is 200 whatever the route's own success status: a print
+    run's 202 (a new run) or 200 (a repeat), whose ``repeated`` says which; an
+    operation's 201, or 204 with no body, as the record keeps the body, not the status,
+    and a client that follows reads the body (review #2836). ``supersedes`` is a
     render's only (§5.3). The answer is attributed in Activity as the route attributes
     it, since that route answered 202 first and attributed nothing (#2805, #2834)."""
     if supersedes is not None and workflow_id.startswith((PRINT_PREFIX, OPERATION_PREFIX)):

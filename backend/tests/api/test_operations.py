@@ -476,9 +476,7 @@ def test_a_command_route_documents_its_temporal_problems(app: FastAPI) -> None:
 def short_waits(monkeypatch: pytest.MonkeyPatch) -> None:
     """#2794: a 1 s fast accept and a 1 s follow, so a 3 s check outlasts both."""
     monkeypatch.setattr(operations_api, "FAST_ACCEPT", timedelta(seconds=1))
-    follow_defaults = commands_module.follow_update.__kwdefaults__
-    assert follow_defaults is not None
-    monkeypatch.setitem(follow_defaults, "wait", timedelta(seconds=1))
+    monkeypatch.setattr(commands_module, "FOLLOW_WAIT", timedelta(seconds=1))
 
 
 @pytest.mark.usefixtures("short_waits")
@@ -531,3 +529,45 @@ def test_following_an_operation_temporal_does_not_know_is_a_resend(client: TestC
 def test_only_an_operations_own_id_is_followed(client: TestClient) -> None:
     response = client.post("/api/v1/commands/op-test-nothex/updates/k1")
     assert response.status_code == 404, response.text
+
+
+@pytest.mark.usefixtures("short_waits")
+def test_a_followed_done_kind_still_running_is_its_operation_to_follow(
+    client: TestClient,
+) -> None:
+    """Review #2836: a `done` kind whose Update outlasts the follow's wait while its
+    record says `running` answers its 202 `OperationAccepted`, which the client follows
+    at /operations/{id}, as the route answers it."""
+    started = client.post(
+        "/api/v1/test-op?kind=test_unhurried",
+        json={"delay": 6},
+        headers={"Idempotency-Key": uuid.uuid4().hex, "Prefer": "respond-async"},
+    )
+    assert started.status_code == 202, started.text
+    follow_url = started.json()["follow_url"]
+
+    answer = client.post(follow_url)
+    deadline = time.monotonic() + 60
+    while answer.status_code == 202 and answer.json().get("status") == "accepting":
+        assert time.monotonic() < deadline, answer.text
+        answer = client.post(follow_url)
+
+    assert answer.status_code == 202, answer.text
+    running = answer.json()
+    assert running["status"] == "running" and running["repeated"] is False
+    op = follow(client, running["id"], timeout=60)
+    assert op["status"] == "succeeded" and op["result"] == {"done": True, "n": 1}
+
+
+@pytest.mark.usefixtures("short_waits")
+def test_a_key_the_follow_url_cannot_carry_keeps_the_resend(client: TestClient) -> None:
+    """Review #2836: a key with a `/` cannot be a path segment of the follow URL, so it
+    is never offered the 202 (that was a 500 after the operation had started); it is
+    answered as without the preference."""
+    response = client.post(
+        "/api/v1/test-op?kind=test_unhurried",
+        json={},
+        headers={"Idempotency-Key": "a/b", "Prefer": "respond-async"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["done"] is True

@@ -418,7 +418,12 @@ async def _run_operation(
     workflow_id = f"op-{kind.name}-{key}"
     # #2794: a client that follows a 202 itself waits only briefly for the Update, named
     # by its key so the follow finds it.
-    http = respond_async_request()
+    # Only for a key that can sit in the follow URL's path (review #2836): `url_for` refuses
+    # a `/`, which would be a 500 after the operation had started. A key it cannot carry keeps the
+    # 503 re-send. Claims a 202 leaves held are not released on the follow path (it has no
+    # request's claims): the claims sweep (`sweep_claims`, main.py) releases them, as any
+    # claim whose request never came back.
+    http = respond_async_request() if _URL_SAFE_KEY.fullmatch(idempotency_key) else None
     # Only when asked: a test's kwdefault deadline then still governs the rest.
     fast: dict[str, Any] = {"deadline": FAST_ACCEPT, "update_id": idempotency_key} if http else {}
     # A re-send can arrive before the first one's record is written: it follows that
@@ -503,6 +508,9 @@ def _outcome(answer: OperationAnswer, response: Response) -> dict[str, Any] | Op
     assert answer.operation is not None  # the Update answers one or the other
     return _answer(answer.operation, response, repeated=answer.repeated)
 
+
+#: An `Idempotency-Key` the 202's follow URL can carry in its path.
+_URL_SAFE_KEY = re.compile(r"[A-Za-z0-9_.~-]+")
 
 #: An operation's execution id (`_run_operation`): its kind, then its 64-hex key.
 _OPERATION_ID = re.compile(r"op-.+-(?P<key>[0-9a-f]{64})")
