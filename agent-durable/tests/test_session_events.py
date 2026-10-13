@@ -322,8 +322,10 @@ async def test_a_tool_result_names_the_images_its_call_produced(
         "SELECT event FROM ai_session_events WHERE session_id = %s", (sid,)
     )
     logged = "".join(str(r[0]) for r in await cur.fetchall())
-    assert base64.b64encode(PNG).decode() not in logged
-    assert PNG.hex() not in logged
+    # Whole and in part: a truncated copy of the bytes is still a leak.
+    for encoded in (base64.b64encode(PNG).decode(), PNG.hex()):
+        assert encoded not in logged
+        assert encoded[:24] not in logged
 
 
 @pytest.mark.requires_postgres
