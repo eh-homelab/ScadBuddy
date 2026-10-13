@@ -541,6 +541,9 @@ describe('PrintPicker', () => {
       expect(within(screen.getByTestId('filament-slot-1')).getByTestId(`spool-${spool}`)).toBeChecked(),
     )
     expect(screen.getByLabelText('Process')).toHaveValue('0.24mm Standard @BBL H2C')
+    // The new output is checked again first; Print is disabled until it is, and a click
+    // on it then does nothing (seen under load: the run was never sent).
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled())
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await screen.findByTestId('queued-items')
     expect(bodies[0]).toMatchObject({
