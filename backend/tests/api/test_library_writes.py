@@ -212,3 +212,50 @@ def test_a_file_added_after_the_check_keeps_its_folder(client: TestClient) -> No
     assert [f["id"] for f in body["skipped"]] == [12]
     assert body["folders"] == []
     assert not gone.called
+
+
+@respx.mock
+def test_upload_into_a_folder_goes_by_claim(client: TestClient) -> None:
+    configure(client)
+    up = respx.post(f"{API}/library/files").mock(
+        return_value=httpx.Response(200, json={"id": 50, "filename": "box.3mf"})
+    )
+    payload = b"PK\x03\x04" + b"\x00" * 3_000_000
+    response = client.post(
+        "/api/v1/print/library/files",
+        files={"file": ("box.3mf", payload, "application/octet-stream")},
+        data={"folder_id": "3"},
+        headers=press(),
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {"id": 50, "filename": "box.3mf", "folder_id": 3}
+    sent = up.calls.last.request
+    assert sent.url.params["folder_id"] == "3"
+    assert payload in sent.content
+
+
+@respx.mock
+def test_a_repeated_upload_uploads_once(client: TestClient) -> None:
+    configure(client)
+    up = respx.post(f"{API}/library/files").mock(
+        return_value=httpx.Response(200, json={"id": 50, "filename": "box.3mf"})
+    )
+    key = press()
+    for _ in range(2):
+        response = client.post(
+            "/api/v1/print/library/files",
+            files={"file": ("box.3mf", b"PK\x03\x04data", "application/octet-stream")},
+            headers=key,
+        )
+        assert response.status_code == 200, response.text
+    assert up.call_count == 1
+
+
+def test_an_upload_needs_a_named_file(client: TestClient) -> None:
+    configure(client)
+    response = client.post(
+        "/api/v1/print/library/files",
+        files={"file": ("", b"x", "application/octet-stream")},
+        headers=press(),
+    )
+    assert response.status_code == 422

@@ -29,6 +29,7 @@ from scadbuddy.library.library_file_operations import (
     read_files,
     refuse_queued,
 )
+from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import OperationKind, waiting_on_bambuddy
 
 if TYPE_CHECKING:
@@ -50,6 +51,14 @@ class LibraryEntryUpdated(BaseModel):
     id: int
     filename: str
     folder_id: int | None = None
+
+
+class LibraryFileUpload(BaseModel):
+    """The kind's request: the file's bytes are held by claim (``operations/claims.py``)."""
+
+    claim: str = Field(pattern=r"^[0-9a-f]{64}$")
+    filename: Name
+    folder_id: int | None = Field(default=None, ge=1)
 
 
 class LibraryFolderCreate(BaseModel):
@@ -190,6 +199,31 @@ def library_write_kinds(state: Core) -> list[OperationKind]:
                 result.folders.append(node["id"])
         return result.model_dump(mode="json")
 
+    async def upload_check(request: dict[str, Any]) -> dict[str, Any]:
+        LibraryFileUpload.model_validate(request)
+        return {}
+
+    async def upload_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        body = LibraryFileUpload.model_validate(request)
+        try:
+            data = await asyncio.to_thread(ClaimStore(state.paths.claims).get, body.claim)
+        except LookupError:
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                # Not "send it again": a re-send with the same key replays this answer.
+                "this request's upload is no longer held; upload the file again",
+            ) from None
+        async with client_for(await settings()) as client:
+            made = await client.upload_library_file(
+                body.filename,
+                data,
+                folder_id=body.folder_id,
+                media_type="application/octet-stream",
+            )
+        return LibraryEntryUpdated(
+            id=made.id, filename=made.filename, folder_id=body.folder_id
+        ).model_dump(mode="json")
+
     def kind(name: str, check: Any, run: Any) -> OperationKind:
         return OperationKind(name, check, run, queue="library", where=WHERE)
 
@@ -198,4 +232,5 @@ def library_write_kinds(state: Core) -> list[OperationKind]:
         kind("library_folder_create", no_check, create_run),
         kind("library_folder_update", no_check, folder_update_run),
         kind("library_folder_delete", folder_delete_check, folder_delete_run),
+        kind("library_file_upload", upload_check, upload_run),
     ]

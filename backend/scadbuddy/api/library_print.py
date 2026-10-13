@@ -8,12 +8,13 @@ images are proxied so the API key never reaches the browser.
 
 from __future__ import annotations
 
+import asyncio
 from functools import partial
 from typing import Annotated
 
 from fastapi import APIRouter, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from scadbuddy.api.deps import (
     OutputsDep,
@@ -27,10 +28,13 @@ from scadbuddy.api.deps import (
     UploadsDep,
 )
 from scadbuddy.api.jobs import GLB_MEDIA_TYPE
+from scadbuddy.api.media import _receive
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
+    Claimed,
     IdempotencyKey,
     operation_answer,
+    recorded,
     run_operation,
 )
 from scadbuddy.api.outputs import OutputPlate, live_outputs_for_files, read_plain_files
@@ -74,6 +78,7 @@ from scadbuddy.library.library_write_operations import (
     LibraryFolderUpdate,
 )
 from scadbuddy.library.settings_store import ModelPrintChoices, SettingsStore
+from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.render.geometry import NoSuchPlateError
@@ -243,6 +248,93 @@ async def post_library_folder(
         idempotency_key=idempotency_key,
     )
     return operation_answer(result, LibraryFolder)
+
+
+class LibraryFileUploadForm(BaseModel):
+    """The multipart body of ``POST /print/library/files`` (schema only)."""
+
+    file: bytes = Field(description="The file; its filename is the library name")
+    folder_id: int | None = Field(default=None, description="The folder; absent is the top level")
+
+
+@router.post(
+    "/files",
+    response_model=LibraryEntryUpdated,
+    summary="Upload a file into a library folder",
+    responses=OPERATION_RESPONSES,
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "multipart/form-data": {
+                    "schema": {"$ref": "#/components/schemas/LibraryFileUploadForm"}
+                }
+            },
+        }
+    },
+)
+async def post_library_file(
+    request: Request,
+    response: Response,
+    ops: OperationsDep,
+    paths: PathsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> LibraryEntryUpdated | JSONResponse:
+    """Streams the ``file`` part to disk and uploads it through Bambuddy, to the folder
+    in ``folder_id`` or the top level; its filename is the library name. The body may be
+    as large as the library download cap (#2686)."""
+    received = await _receive(request, paths.cache, fields={"folder_id": 32})
+    try:
+        path = received.files.get("file")
+        if path is None or received.sizes["file"] == 0:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, "send the file as the `file` part"
+            )
+        filename = received.filenames["file"]
+        if not filename or "/" in filename or "\x00" in filename or len(filename) > 255:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "the file needs a name of at most 255 characters, without `/`",
+            )
+        try:
+            raw = received.fields.get("folder_id", bytearray()).decode("ascii").strip()
+            folder_id = int(raw) if raw else None
+        except ValueError:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, "`folder_id` is a folder's number"
+            ) from None
+        if folder_id is not None and folder_id < 1:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, "`folder_id` is a folder's number"
+            )
+        digest = received.hashes["file"].hexdigest()
+        body = {"claim": digest, "filename": filename, "folder_id": folder_id}
+        kind = ops.kinds["library_file_upload"]
+        claims = ClaimStore(paths.claims)
+        held: list[Held] = []
+        if (
+            await recorded(
+                ops,
+                kind=kind,
+                subject=LIBRARY_FILES_SUBJECT,
+                request=body,
+                idempotency_key=idempotency_key,
+            )
+            is None
+        ):
+            held.append(await asyncio.to_thread(claims.hold_file, path, digest))
+        result = await run_operation(
+            ops,
+            response,
+            kind=kind,
+            subject=LIBRARY_FILES_SUBJECT,
+            request=body,
+            idempotency_key=idempotency_key,
+            claimed=Claimed(claims, held),
+        )
+        return operation_answer(result, LibraryEntryUpdated)
+    finally:
+        received.discard()
 
 
 @router.patch(
