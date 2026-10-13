@@ -131,9 +131,10 @@ export async function sessionPendingInput(
     if (principal.kind === 'browser' || own) return { entries, summaries_truncated: false }
     // A grant holder that does not own the session sees its approvals only, as in the
     // aggregate, and none of a flow run's, which are the person's (#2482).
-    const visible: PendingInputEntry[] = []
-    for (const e of entries) if (e.kind === 'approval' && !(await sessions.projection.inRun(e.id))) visible.push(e)
-    return { entries: visible, summaries_truncated: false }
+    // One query for every entry, not one per approval (#2863).
+    const approvals = entries.filter((e) => e.kind === 'approval')
+    const inRun = await sessions.projection.inRunOf(approvals.map((e) => e.id))
+    return { entries: approvals.filter((e) => !inRun.has(e.id)), summaries_truncated: false }
   }
   return pendingInput(sessions, principal, { sessionId })
 }

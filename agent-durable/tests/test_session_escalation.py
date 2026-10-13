@@ -23,6 +23,7 @@ from test_session_flow_grant import RUN, send_flow
 
 from scadbuddy_durable.gate.names import RESPOND_UPDATE
 from scadbuddy_durable.session.models import PROJECTS_QUEUE
+from scadbuddy_durable.session.workflow import ENTRY_MAX_S
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
 
@@ -114,6 +115,27 @@ async def test_an_outside_call_waits_first_at_the_starter_session(
     assert [(h["hop"], h["action"], h["actor"]) for h in row["hops"]] == [
         ("parent", "parked", "flow")
     ]
+
+
+async def test_a_long_parent_hop_leaves_the_person_their_timeout(
+    harness: base.Harness, agent_db: Conn, outside: Verdict
+) -> None:
+    """#2862: a parent hop near the entry's cap was cut to ENTRY_MAX_S - 1, and the total
+    to ENTRY_MAX_S, so the person had about a second. The parent's hop is cut instead."""
+    outside.answer = {
+        **outside.answer,
+        "timeout_s": 60,
+        "parent_hop": True,
+        "hop_s": ENTRY_MAX_S,
+        "parent_session": PARENT,
+        "parent_principal": PRINCIPAL,
+    }
+    sid, handle = await harness.session(agent_db)
+    await send_flow(handle, "print it")
+    await base._parked(handle)
+    row = await _row(agent_db, sid)
+    assert (row["hop_s"], row["expires_s"]) == (ENTRY_MAX_S - 60, ENTRY_MAX_S)
+    assert row["expires_s"] - row["hop_s"] == 60  # the person's own timeout
 
 
 async def test_with_no_parent_it_is_the_persons_at_once(

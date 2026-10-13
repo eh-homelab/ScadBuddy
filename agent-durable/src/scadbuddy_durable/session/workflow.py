@@ -150,6 +150,8 @@ SESSION_FLOW_GRANT = "session-flow-grant"
 # A flow turn's call outside the grant (#2482): `on_outside="deny"` refuses it, and the
 # entry is the run's, with its hop and one timer for both hops.
 SESSION_FLOW_ESCALATION = "session-flow-escalation"
+#: A parent hop capped so the person's hop keeps the run's timeout (#2862).
+PERSON_KEEPS_TIMEOUT = "escalation-person-keeps-timeout"
 # An entry's timer at most (ai_pending_input's CHECK).
 ENTRY_MAX_S = 86_400
 # A session id, as ai_pending_input.parent_session holds it.
@@ -674,7 +676,13 @@ class DurableSession:
                 ):
                     # The starter session first, for its hop; then the person. One
                     # timer covers both (spec §4.6): the agent's sweep moves it up.
-                    hop_s = min(hop_s, ENTRY_MAX_S - 1)
+                    # Each hop has the run's timeout (spec §4.6): a long parent hop is
+                    # cut so the person keeps theirs, rather than the whole being cut to
+                    # ENTRY_MAX_S and the person left a second or so (#2862).
+                    if workflow.patched(PERSON_KEEPS_TIMEOUT):
+                        hop_s = max(1, min(hop_s, ENTRY_MAX_S - timeout))
+                    else:
+                        hop_s = min(hop_s, ENTRY_MAX_S - 1)
                     hop.update(
                         hop="parent",
                         hop_until=_iso(workflow.now() + timedelta(seconds=hop_s)),
