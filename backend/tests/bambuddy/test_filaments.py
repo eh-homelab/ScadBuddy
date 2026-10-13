@@ -404,16 +404,16 @@ async def test_several_plates_read_the_spools_and_printer_once(bambuddy: Bambudd
     assert (printer.call_count, remain.call_count) == (1, 1)
 
 
-# --- the failure path (#525): shared reads sequential, plates concurrent -----
+# --- the failure path (#525): shared reads first, then the plates and the printer ---
 
 
 @respx.mock
 async def test_an_early_spools_failure_raises_and_never_reaches_the_plates(
     bambuddy: BambuddyClient,
 ) -> None:
-    """The shared reads run sequentially and before the plates: a failing ``spools()``
-    raises immediately, and neither the rest of the shared reads nor any plate's
-    requirements are ever asked for."""
+    """The shared reads run before the plates: a failing ``spools()`` raises, and no
+    plate's requirements nor the printer are ever asked for. The assignments are read
+    beside the spools (#2354), so the spools' error is the one raised."""
     respx.get(f"{API}/inventory/spools").mock(
         return_value=httpx.Response(500, json={"detail": "spools-boom"})
     )
@@ -434,7 +434,7 @@ async def test_an_early_spools_failure_raises_and_never_reaches_the_plates(
         await gather_plate_options(bambuddy, library_file_id=62, printer_id=1, plate_ids=[1, 2, 3])
     assert "spools-boom" in excinfo.value.detail
 
-    assert not assignments.called
+    assert assignments.called
     assert not requirements.called
     assert not printer.called
     assert not remain.called
@@ -444,7 +444,8 @@ async def test_an_early_spools_failure_raises_and_never_reaches_the_plates(
 async def test_a_printer_failure_is_raised_after_the_plates_are_read(
     bambuddy: BambuddyClient,
 ) -> None:
-    """The printer is read after the plates, as the single-plate path always has."""
+    """The printer's failure is raised after the plates', as the single-plate path
+    always has, though both are read together now (#2354)."""
     respx.get(f"{API}/inventory/spools").mock(
         return_value=httpx.Response(200, json=recording("inventory-spools.json"))
     )
@@ -466,7 +467,7 @@ async def test_a_printer_failure_is_raised_after_the_plates_are_read(
     assert "printer-boom" in excinfo.value.detail
 
     assert requirements.call_count == 3
-    assert not remain.called
+    assert remain.called
 
 
 @respx.mock
@@ -493,7 +494,7 @@ async def test_a_plate_failure_beats_a_printer_failure(
     assert "plate-boom" in excinfo.value.detail
 
     assert requirements.called
-    assert not printer.called
+    assert printer.called
 
 
 @respx.mock
