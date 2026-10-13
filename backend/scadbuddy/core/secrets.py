@@ -116,6 +116,21 @@ def _open(key: bytes, sealed: bytes, context: str) -> bytes:
         raise SealError("sealed value failed authentication (wrong key, or altered)") from None
 
 
+def open_bytes(key: bytes, sealed: bytes, context: str) -> bytes:
+    """secrets.ts ``openBytes``: what ``seal_bytes`` (or the agent) sealed under ``key``."""
+    return _open(key, sealed, context)
+
+
+def seal_bytes(key: bytes, data: bytes, context: str, iv: bytes | None = None) -> bytes:
+    """secrets.ts ``sealBytes``, the current version: the payload codec's data keys and
+    payloads (``workflows/payload_codec.py``). ``iv`` is for the vectors only: a
+    repeated IV under one key breaks GCM."""
+    if iv is None:
+        return _seal(key, data, context, os.urandom)
+    fixed = iv
+    return _seal(key, data, context, lambda _n: fixed)
+
+
 def seal_secret(kek: Kek, plaintext: str, aad: str, random: RandomSource = os.urandom) -> Envelope:
     dek = random(KEK_BYTES)
     return Envelope(

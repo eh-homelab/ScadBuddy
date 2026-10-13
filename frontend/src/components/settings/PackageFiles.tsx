@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Markdown } from '../../agent/chat/Markdown'
 import { aiPlugins, type PackageFilesOf, type PackageReview } from '../../api/aiPlugins'
 import { formatBytes } from '../../lib/format'
-import { highlight, languageOf, type TokenKind } from '../../lib/highlight'
+import { highlight, languageOf, TOKEN_CLASS } from '../../lib/highlight'
 import { useAsync } from '../../lib/useAsync'
 import { Button } from '../ui/Button'
 import { Spinner } from '../ui/Spinner'
@@ -14,7 +14,8 @@ import { Spinner } from '../ui/Spinner'
  * a count of how many have been opened. Contents come from the agent
  * (`GET /api/v1/ai/plugin-packages/:name/file`), which reads only the files of the pin
  * under review (`of.pending`: the re-pin's). A binary file is a placeholder; a long one
- * is cut until "Show all". Markdown is shown raw (what the assistant reads) or rendered.
+ * is cut until "Show all", unless it is too large to send whole (#2151). Markdown is
+ * shown raw (what the assistant reads) or rendered.
  */
 export function PackageFiles({ review, of }: { review: PackageReview; of: PackageFilesOf }) {
   const [open, setOpen] = useState(false)
@@ -106,18 +107,6 @@ function FileBrowser({ review, of }: { review: PackageReview; of: PackageFilesOf
   )
 }
 
-const TOKEN_CLASS: Record<TokenKind, string | undefined> = {
-  plain: undefined,
-  comment: 'text-muted italic',
-  string: 'text-ok',
-  number: 'text-accent',
-  keyword: 'text-accent font-semibold',
-  key: 'text-accent',
-  heading: 'font-semibold',
-  meta: 'text-muted',
-  punct: 'text-muted',
-}
-
 const FRONTMATTER = /^---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/
 
 function FileViewer({
@@ -200,10 +189,13 @@ function FileViewer({
           <div className="mt-2 flex flex-wrap items-center gap-2 text-muted">
             <p>
               Showing the first {formatBytes(new TextEncoder().encode(content).length)} of {formatBytes(data.size)}.
+              {data.too_large && ' Too large to show whole.'}
             </p>
-            <Button size="sm" onClick={() => setFull(true)}>
-              Show all
-            </Button>
+            {!data.too_large && (
+              <Button size="sm" onClick={() => setFull(true)}>
+                Show all
+              </Button>
+            )}
           </div>
         )}
       </div>

@@ -4,7 +4,8 @@
 turn. It reads the workflow's live output with the plugin's ``follow_agent`` from
 ``ai_sessions.durable_offset``, translates each event into the panel's protocol
 (agent/src/sessions/protocol.ts), and appends the events and moves the offset in one
-transaction, so a retried or doubled subscriber writes each event once. It ends at
+transaction, so a retried or doubled subscriber writes each event once. A
+``tool.result`` names the images its call produced (``with_images``, #2478). It ends at
 the turn's last event (``done``, ``error``, ``cancelled``). The turn's result, its
 error and its final status are ``finish_turn``'s, written after this ends.
 
@@ -20,7 +21,7 @@ import json
 import re
 from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 import psycopg
@@ -111,6 +112,33 @@ def translate(
     return []
 
 
+async def with_images(
+    conn: psycopg.AsyncConnection[Any], session_id: str, translated: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """The events, each ``tool.result`` naming the images its call produced (#2478).
+
+    The agent-tools activity kept them in ``ai_session_blobs`` and recorded them under
+    the call's tool_use_id (``ai_session_tool_images``) before it returned, so before the
+    plugin published the result. The event gets ``{name, mediaType}`` only; the panel
+    loads the bytes from the session's blob route. A call that produced none (and every
+    call before #2478) gets no ``images``.
+    """
+    out = []
+    for event in translated:
+        if event.get("type") == "tool.result":
+            cur = await conn.execute(
+                "SELECT l.name, b.media_type FROM ai_session_tool_images l"
+                " JOIN ai_session_blobs b USING (session_id, name)"
+                " WHERE l.session_id = %s AND l.tool_use_id = %s ORDER BY l.ord",
+                (session_id, event["id"]),
+            )
+            images = [{"name": r[0], "mediaType": r[1]} for r in await cur.fetchall()]
+            if images:
+                event = {**event, "images": images}
+        out.append(event)
+    return out
+
+
 async def append_from(
     conn: psycopg.AsyncConnection[Any],
     session_id: str,
@@ -135,6 +163,14 @@ async def append_from(
             "UPDATE ai_sessions SET durable_offset = %s WHERE id = %s", (offset + 1, session_id)
         )
         return True
+
+
+def _before(event: Mapping[str, Any], since: str | None) -> bool:
+    """The event was published before ``since`` (both workflow.now(), ISO 8601)."""
+    at = event.get("at")
+    if since is None or not isinstance(at, str):
+        return False
+    return datetime.fromisoformat(at) < datetime.fromisoformat(since)
 
 
 class SessionEvents:
@@ -185,7 +221,9 @@ class SessionEvents:
                 await asyncio.sleep(FOLLOW_HEARTBEAT.total_seconds() / 3)
 
         # A turn with a prompt ends only after it: an earlier turn's end, left unread when
-        # its subscriber was cancelled, is written but does not end this one.
+        # its subscriber was cancelled, is written but does not end this one. A turn
+        # carried over by continue-as-new sent its prompt in an earlier run, so it tells
+        # an earlier turn's end by its time instead (#2123).
         own = not args.prompted
         beater = asyncio.create_task(beat())
         try:
@@ -194,9 +232,10 @@ class SessionEvents:
                 own = own or event.get("type") == "prompt"
                 translated = translate(args.session_id, event, tiers)
                 async with self._connect() as conn:
+                    translated = await with_images(conn, args.session_id, translated)
                     if await append_from(conn, args.session_id, at[0], translated):
                         written += len(translated)
-                if own and event.get("type") in LAST:
+                if own and event.get("type") in LAST and not _before(event, args.since):
                     return FollowResult(ended=str(event["type"]), events=written)
             return FollowResult(ended="closed", events=written)
         finally:

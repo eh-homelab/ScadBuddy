@@ -47,7 +47,16 @@ const NULLABLE = new Set([
 /** The settings the backend's `StoreNotReadyError` is decided from. */
 const STORE_READINESS = ['store_backend', 'bambuddy_url', 'library_folder_id']
 const AT_LEAST_ONE = new Set(['render_concurrency', 'check_concurrency', 'library_max_bytes'])
-const MORE_THAN_ZERO = new Set(['render_timeout', 'template_activity_max_timeout', 'job_ttl', 'media_upload_max_bytes'])
+const MORE_THAN_ZERO = new Set([
+  'render_timeout',
+  'template_activity_max_timeout',
+  'job_ttl',
+  'media_upload_max_bytes',
+  'read_max_objects',
+  'read_max_visits',
+  'read_max_triangles',
+  'read_max_paint_digits',
+])
 
 function envName(name: string): string {
   return `SCADBUDDY_${name.toUpperCase()}`
@@ -168,6 +177,7 @@ export const handlers = [
             ['Manage Queue', true, 'Queueing prints.'],
             ['Manage Projects', false, 'Sending to a Bambuddy project.'],
             ['Manage Archives', false, 'Attaching photos and timelapses to a print.'],
+            ['Manage Inventory', false, 'Recording which spool is in a tray, when you confirm it.'],
           ] as const
         ).map(([scope, required, what]) => ({
           scope,

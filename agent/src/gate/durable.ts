@@ -1,7 +1,7 @@
 import { type Client, WorkflowUpdateFailedError } from '@temporalio/client'
 import { ApplicationFailure, WorkflowNotFoundError } from '@temporalio/common'
 import type { InputOutcome, Owner } from '../sessions/protocol.js'
-import { CANCEL_INPUT_UPDATE, GATE_REFUSED, INTERRUPT_SIGNAL, PENDING_INPUT_QUERY, RESPOND_UPDATE } from './names.js'
+import { CANCEL_INPUT_UPDATE, END_SIGNAL, GATE_REFUSED, INTERRUPT_SIGNAL, PENDING_INPUT_QUERY, RESPOND_UPDATE } from './names.js'
 import type { PendingInputEntry } from './projection.js'
 import { REFUSALS, RespondRefusal, type RefusalCode, type Role } from './validate.js'
 
@@ -93,5 +93,18 @@ export class DurableGate {
   async interrupt(sessionId: string, reason: string): Promise<void> {
     const handle = this.#client.workflow.getHandle(sessionWorkflowId(sessionId))
     await this.#call(this.#timeoutMs, () => handle.signal<[{ reason: string }]>(INTERRUPT_SIGNAL, { reason }))
+  }
+
+  /**
+   * The session was marked done (#1056): its workflow completes once no turn runs. A
+   * workflow already gone has nothing left to end.
+   */
+  async end(sessionId: string): Promise<void> {
+    const handle = this.#client.workflow.getHandle(sessionWorkflowId(sessionId))
+    try {
+      await this.#call(this.#timeoutMs, () => handle.signal<[Record<string, never>]>(END_SIGNAL, {}))
+    } catch (err) {
+      if (!(err instanceof WorkflowNotFoundError)) throw err
+    }
   }
 }

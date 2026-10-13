@@ -108,22 +108,6 @@ function builtIns(): BuiltInPluginPackage[] {
       approved: true,
       enabled: true,
     },
-    {
-      name: 'playwright',
-      built_in: true,
-      source: { kind: 'built_in', path: 'agent/plugins/playwright' },
-      review: {
-        ...emptyReview,
-        name: 'playwright',
-        description: 'Browser automation and end-to-end testing MCP server by Microsoft.',
-        version: '0.0.83',
-        skills: [],
-        agents: [],
-        files: ['.claude-plugin/plugin.json', 'README.md'],
-      },
-      approved: true,
-      enabled: false,
-    },
   ]
 }
 
@@ -143,6 +127,7 @@ export function resetAiPluginMocks(): void {
     tool_prefix: 'mcp__hindsight__',
     auth: { header: 'Authorization', last4: '9f3a' },
     usable: true,
+    problem: null,
     tool_tiers: { recall: 'read' },
     disabled_tools: [],
     created_at: now(),
@@ -220,16 +205,33 @@ function toolsFor(plugin: RemotePlugin): PluginTest['tools'] {
   })
 }
 
+/** The remote plugins as the mock has them now; `GET /plugins` lists them after the built-ins (`features/builtInToolSets.ts`). */
+/** Gives a stored remote plugin a problem, as the agent reports a reserved name (#2127). */
+export function setRemotePluginProblem(name: string, problem: string | null): void {
+  const plugin = state.remote.get(name)
+  if (plugin) state.remote.set(name, { ...plugin, problem })
+}
+
+export function remotePluginList(): RemotePlugin[] {
+  return [...state.remote.values()]
+}
+
+/** ScadBuddy's own tool sets (#1953); their routes are `features/builtInToolSets.ts`. */
+const BUILT_IN_SETS = new Set(['scadbuddy'])
+
 export const aiPluginHandlers = [
-  // ---- remote MCP endpoints
-  http.get(`${base}/plugins`, () => HttpResponse.json([...state.remote.values()])),
+  // ---- remote MCP endpoints. A name that is no remote plugin falls through to
+  // features/builtInToolSets.ts, which answers for the built-ins and 404s the rest.
 
   http.post(`${base}/plugins`, async ({ request }) => {
     const body = (await request.json()) as RemotePluginCreate
     if (!/^[a-z][a-z0-9-]{0,30}[a-z0-9]$/.test(body.name)) {
       return detail(400, 'name must be 2–32 characters: lower-case letters, digits and single hyphens')
     }
-    if (!/^https:\/\//.test(body.url)) return detail(400, 'url must be https: plain http is allowed only to loopback')
+    if (!/^https:\/\//.test(body.url)) return detail(400, 'url must be https: plain http is allowed only to loopback or private addresses')
+    if (BUILT_IN_SETS.has(body.name)) {
+      return detail(409, `"${body.name}" is built in: it cannot be added: it ships with the agent`, { built_in: true })
+    }
     if (state.remote.has(body.name)) return detail(409, `a plugin named "${body.name}" already exists`)
     const plugin: RemotePlugin = {
       name: body.name,
@@ -239,6 +241,7 @@ export const aiPluginHandlers = [
       tool_prefix: `mcp__${body.name}__`,
       auth: body.secret ? { header: body.auth_header || 'Authorization', last4: body.secret.slice(-4) } : null,
       usable: true,
+      problem: null,
       tool_tiers: {},
       disabled_tools: [],
       created_at: now(),
@@ -250,7 +253,7 @@ export const aiPluginHandlers = [
 
   http.patch(`${base}/plugins/:name`, async ({ params, request }) => {
     const plugin = state.remote.get(String(params.name))
-    if (!plugin) return detail(404, `no plugin named "${String(params.name)}"`)
+    if (!plugin) return undefined
     const body = (await request.json()) as RemotePluginPatch
     const next: RemotePlugin = {
       ...plugin,
@@ -264,14 +267,14 @@ export const aiPluginHandlers = [
   }),
 
   http.delete(`${base}/plugins/:name`, ({ params }) => {
-    if (!state.remote.delete(String(params.name))) return detail(404, 'no such plugin')
+    if (!state.remote.delete(String(params.name))) return undefined
     return new HttpResponse(null, { status: 204 })
   }),
 
   http.post(`${base}/plugins/:name/test`, async ({ params }) => {
-    await delay(100)
     const plugin = state.remote.get(String(params.name))
-    if (!plugin) return detail(404, 'no such plugin')
+    if (!plugin) return undefined
+    await delay(100)
     const result: PluginTest = {
       ok: true,
       detail: 'connected; 3 tools',

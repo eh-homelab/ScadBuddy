@@ -8,6 +8,11 @@ import { useLatest } from './useLatest'
 
 export type Tier = NonNullable<PrintChoices['tier']>
 
+/** Both sides of one flow: what Simple mode's one flow choice can say (#2166). */
+export function oneFlow(nozzles: NozzleChoice[]): boolean {
+  return nozzles.every((nozzle) => nozzle.flow === nozzles[0]?.flow)
+}
+
 /** What the run sends of the choices made over the read (the spools aside). */
 export interface PrintSelection {
   nozzles: NozzleChoice[]
@@ -18,7 +23,11 @@ export interface PrintSelection {
   overrides: Record<string, PresetRef>
   /** #83 — the plate (or all of them) to print. */
   plate: number | 'all'
+  /** #2166, Advanced only — a slot printed on the side chosen by hand, by slot id. */
+  sides: Record<string, Side>
 }
+
+export type Side = 'L' | 'R'
 
 /**
  * The print dialog's one read, the source's choices read, for the chosen printer,
@@ -39,7 +48,20 @@ export function usePrintChoices(
 ) {
   const key = sourceKey(source)
   const latest = useLatest(source)
-  const [choices, setChoices] = useState<ChoicesView | null>(null)
+  /** The last read, with the source it was read for. */
+  const [read, setRead] = useState<{ key: string | undefined; view: ChoicesView } | null>(null)
+  /**
+   * #2186 — only the source's own read: the dialog stays mounted when it closes, so
+   * another file opened later would otherwise show the last one's slots, and be
+   * printable on them, until its own read lands. A re-arrange keeps the old output's
+   * on screen while the new one's is read.
+   *
+   * `carry` is a mutable box read here while rendering, which React does not track:
+   * every `carry.set` must come with a state change that re-renders (as each one in
+   * PrintPicker and useFilamentPlan does), or this keeps showing the old output's
+   * choices after the carry is cleared (#2250).
+   */
+  const choices = read && (read.key === key || carry?.get()) ? read.view : null
   /** The printer asked for; `null` lets the server open on the remembered one. */
   const [askedPrinter, setAskedPrinter] = useState<number | null>(null)
   const [nozzles, setNozzles] = useState<NozzleChoice[]>(DEFAULT_NOZZLES)
@@ -48,6 +70,7 @@ export function usePrintChoices(
   const [bedType, setBedType] = useState<string | null>(null)
   const [advanced, setAdvanced] = useState(false)
   const [overrides, setOverrides] = useState<Record<string, PresetRef>>({})
+  const [sides, setSides] = useState<Record<string, Side>>({})
   /** #83 — the output's plates, and the one (or all) to print. */
   const [plates, setPlates] = useState<OutputPlate[]>([])
   const [plate, setPlate] = useState<number | 'all'>(1)
@@ -86,9 +109,9 @@ export function usePrintChoices(
     setNozzles(nextNozzles)
     setTier(nextTier)
     setProcessName(nextProcess)
-    // A named process and per-side flow are Advanced choices; opening in Simple would
-    // send them unseen.
-    setAdvanced(nextProcess !== null || nextNozzles.some((n) => n.flow === 'high_flow'))
+    // A named process and a different flow per side are Advanced choices; opening in
+    // Simple would send them unseen. One flow for both is Simple's own choice (#2166).
+    setAdvanced(nextProcess !== null || !oneFlow(nextNozzles))
   }
   const reload = useCallback(() => {
     const current = latest.current
@@ -100,7 +123,7 @@ export function usePrintChoices(
       .getChoices(askedPrinter)
       .then((next) => {
         if (token !== attempt.current) return
-        setChoices(next)
+        setRead({ key: sourceKey(current), view: next })
         setChoicesRead(token)
         // The server already applied last archive → remembered → default.
         setBedType(next.bed_type)
@@ -113,15 +136,15 @@ export function usePrintChoices(
         } else if (defaulted.current) {
           const defaults = defaultsOf(next)
           setNozzles(defaults)
-          // Opened, never closed: Simple would send the High Flow unseen.
-          if (defaults.some((n) => n.flow === 'high_flow')) setAdvanced(true)
+          // Opened, never closed: Simple would send a flow per side unseen.
+          if (!oneFlow(defaults)) setAdvanced(true)
         }
       })
       .catch((cause: unknown) => {
         if (token !== attempt.current) return
         // A carry survives a failed read: a Retry of the same output still applies it.
         // A different output clears it (PrintPicker), and a stale read never lands here.
-        setChoices(null)
+        setRead(null)
         setLoadError(cause instanceof ApiError ? cause.detail : 'Could not read the print choices.')
       })
       .finally(() => {
@@ -141,6 +164,7 @@ export function usePrintChoices(
     // Except onto the output a re-arrange made, which keeps the dialog's choices.
     if (carry?.get()) return
     setOverrides({})
+    setSides({})
     seeded.current = false
   }, [resetKey, carry])
 
@@ -169,8 +193,25 @@ export function usePrintChoices(
     setProcessName(null)
     setAdvanced(false)
     setOverrides({})
+    setSides({})
     seeded.current = false
     defaulted.current = false
+  }
+
+  /** #2166 — Simple's one choice: High Flow or Standard, on both sides. */
+  function changeFlow(flow: NozzleChoice['flow']) {
+    defaulted.current = false
+    setNozzles((current) => current.map((nozzle) => ({ ...nozzle, flow })))
+  }
+
+  /** #2166, Advanced — print a slot on a side chosen by hand, or `null` to plan it. */
+  function setSide(slotId: number, side: Side | null) {
+    setSides((current) => {
+      const next = { ...current }
+      if (side) next[String(slotId)] = side
+      else delete next[String(slotId)]
+      return next
+    })
   }
 
   function changeNozzles(next: NozzleChoice[]) {
@@ -192,11 +233,13 @@ export function usePrintChoices(
   function toggleAdvanced() {
     if (advanced) {
       defaulted.current = false
-      // Back to Simple: a flow, named process or preset override would be sent unseen.
-      setNozzles((current) => current.map((nozzle) => ({ ...nozzle, flow: 'standard' })))
+      // Back to Simple: a flow per side, named process, preset override or side chosen
+      // by hand would be sent unseen. Simple's one flow is the first side's (#2166).
+      setNozzles((current) => current.map((nozzle) => ({ ...nozzle, flow: current[0]?.flow ?? 'standard' })))
       setProcessName(null)
       setTier((current) => current ?? 'standard')
       setOverrides({})
+      setSides({})
     }
     setAdvanced(!advanced)
   }
@@ -211,7 +254,7 @@ export function usePrintChoices(
     })
   }
 
-  const selection: PrintSelection = { nozzles, tier, processName, bedType, overrides, plate }
+  const selection: PrintSelection = { nozzles, tier, processName, bedType, overrides, plate, sides }
   return {
     sourceKey: resetKey,
     choices,
@@ -231,6 +274,8 @@ export function usePrintChoices(
     size,
     advanced,
     changeNozzles,
+    changeFlow,
+    setSide,
     changeQuality,
     setBedType,
     setOverride,

@@ -77,3 +77,21 @@ export async function forkHistory(events: Pick<EventLog, 'read'>, id: string, up
     }
   }
 }
+
+/**
+ * The blobs (blobs.ts) the events name: a tool result's images, and the images a user sent
+ * with a turn and their previews (#2479). What a fork copies into the child (#2150), and nothing else.
+ */
+export function blobNames(events: readonly ServerEvent[]): string[] {
+  const names = new Set<string>()
+  for (const e of events) {
+    if (e.type === 'tool.result') for (const image of e.images ?? []) names.add(image.name)
+    if (e.type === 'user.turn') {
+      for (const image of e.images ?? []) {
+        if (image.name !== undefined) names.add(image.name)
+        names.add(image.preview.name)
+      }
+    }
+  }
+  return [...names]
+}

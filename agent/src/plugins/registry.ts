@@ -1,6 +1,6 @@
 import type { Sql } from 'postgres'
 import { isLoopbackPeer } from '../http/origins.js'
-import { assertHostAllowed, EgressError, type Resolver, systemResolver } from '../http/egress.js'
+import { assertHostAllowed, EgressError, isPrivateAddress, type Resolver, systemResolver } from '../http/egress.js'
 import { RISK_TIERS, type RiskTier, type TierResolver } from '../harness/permissions.js'
 import { type Envelope, type Kek, last4, openSecret, rewrap, SealError, sealSecret } from '../secrets.js'
 
@@ -33,8 +33,10 @@ import { type Envelope, type Kek, last4, openSecret, rewrap, SealError, sealSecr
 //
 // TRANSPORT. Spec D5: "MCP: Streamable HTTP only, over HTTPS". So `type: 'http'`
 // only (the SDK's `'sse'` is the legacy HTTP+SSE transport D5 rejects), and the
-// URL is https unless every address it resolves to is loopback (spec §8.4's one
-// exception, "loopback, for local development and tests"). The host must also
+// URL is https unless every address it resolves to is loopback or private
+// (10/8, 172.16/12, 192.168/16, fc00::/7): an MCP server in the same cluster,
+// such as the Playwright MCP Service, or on the LAN, which never leaves the
+// private network. A public host still needs https. The host must also
 // pass the egress check (http/egress.ts: no link-local, no cloud metadata),
 // at save, at test, and each time a harness run loads the plugin.
 //
@@ -60,8 +62,7 @@ export const PLUGIN_NAME_RE = /^[a-z][a-z0-9-]{0,30}[a-z0-9]$/
 
 /**
  * Names a plugin may not take: the in-process ScadBuddy server (#251's
- * `mcp__scadbuddy__*`) and the headless browser plugin (#349), whose tools have
- * tiers of their own, plus the vendor names, plus the server names Claude Code
+ * `mcp__scadbuddy__*`), whose tools have tiers of their own, plus the vendor names, plus the server names Claude Code
  * treats specially and drops or never offers tools from. Read from the pinned
  * CLI (2.1.289, the native binary of @anthropic-ai/claude-agent-sdk-<platform>
  * 0.3.289): search the binary for the message `Cannot add MCP server "${e}":
@@ -76,7 +77,6 @@ export const PLUGIN_NAME_RE = /^[a-z][a-z0-9-]{0,30}[a-z0-9]$/
  */
 export const RESERVED_PLUGIN_NAMES: ReadonlySet<string> = new Set([
   'scadbuddy',
-  'playwright',
   'claude',
   'anthropic',
   'plugin',
@@ -234,6 +234,18 @@ export function validatePluginName(name: string): string {
 }
 
 /**
+ * Why a stored plugin cannot run under its name, or null (#2127). A row saved
+ * before its name joined `RESERVED_PLUGIN_NAMES` is still in the table, but
+ * Claude Code drops a server by that name without a word, so it is reported
+ * rather than handed to the harness.
+ */
+export function reservedNameProblem(name: string): string | null {
+  return RESERVED_PLUGIN_NAMES.has(name)
+    ? `its name "${name}" is reserved by Claude Code, which drops the server; delete it and register it again under another name`
+    : null
+}
+
+/**
  * Normalises an endpoint URL: http(s), no credentials, no query or fragment
  * (a token belongs in the sealed header, not in a URL stored in the clear), and
  * no `$` anywhere, so Claude Code's `${VAR}` expansion of MCP config values can
@@ -249,7 +261,7 @@ export function normalisePluginUrl(raw: string): string {
     throw new PluginError('url is not a valid URL', 400)
   }
   if (url.protocol !== 'https:' && url.protocol !== 'http:') {
-    throw new PluginError(`url must be https (or http to loopback), not ${url.protocol}//`, 400)
+    throw new PluginError(`url must be https (or http to a loopback or private address), not ${url.protocol}//`, 400)
   }
   if (url.username || url.password) {
     throw new PluginError('url must not carry credentials; use auth_header and secret', 400)
@@ -266,7 +278,7 @@ export function normalisePluginUrl(raw: string): string {
 /**
  * Spec §8.4 and the egress rule for a URL a secret is sent to: the host must
  * not be (or resolve to) link-local or cloud metadata, and plain http is
- * allowed only when every address the host resolves to is loopback. Resolves
+ * allowed only when every address the host resolves to is loopback or private. Resolves
  * to the checked addresses; the forwarder connects to the first of them and
  * does not resolve the name again.
  */
@@ -274,9 +286,9 @@ export async function assertEndpointAllowed(url: string, resolve: Resolver = sys
   const addresses = await assertHostAllowed(url, resolve, 'url', 'an MCP endpoint')
   const parsed = new URL(url)
   if (parsed.protocol === 'https:') return addresses
-  if (!addresses.every((a) => isLoopbackPeer(a))) {
+  if (!addresses.every((a) => isLoopbackPeer(a) || isPrivateAddress(a))) {
     throw new EgressError(
-      `url must be https: plain http is allowed only to loopback, and ${parsed.hostname} is not (spec §8.4)`,
+      `url must be https: plain http is allowed only to loopback or private addresses, and ${parsed.hostname} is not (spec §8.4)`,
     )
   }
   return addresses
@@ -443,8 +455,9 @@ export type LoadedPlugins = { plugins: CheckedPlugin[]; problems: string[] }
  * The enabled plugins for one harness run: opened, and each endpoint checked
  * again (egress + https, `assertEndpointAllowed`) since its name may resolve
  * differently now than at save. The address checked is the one the forwarder
- * connects to. A plugin that fails either is left out and named in
- * `problems`; the run goes ahead without it.
+ * connects to. A plugin that fails either, or whose name Claude Code now
+ * reserves (`reservedNameProblem`), is left out and named in `problems`; the
+ * run goes ahead without it.
  */
 export async function loadEnabledPlugins(
   store: Pick<PluginStore, 'enabled'>,
@@ -454,6 +467,11 @@ export async function loadEnabledPlugins(
   const { plugins, problems } = await store.enabled(kek)
   const allowed: CheckedPlugin[] = []
   for (const plugin of plugins) {
+    const reserved = reservedNameProblem(plugin.name)
+    if (reserved) {
+      problems.push(`plugin ${plugin.name} was not loaded: ${reserved}`)
+      continue
+    }
     try {
       const [address] = await assertEndpointAllowed(plugin.url, resolve)
       if (address === undefined) throw new EgressError(`url host of ${plugin.name} resolves to no address`)

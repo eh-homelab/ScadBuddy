@@ -14,29 +14,18 @@ import {
 import type { Credential } from '../credentials.js'
 import { buildQueryOptions, type HarnessPaths } from './options.js'
 import {
-  assertHeadlessPlugin,
-  browserInputGuard,
-  browserTierOf,
-  disallowedBrowserTools,
-  type HeadlessBrowserOptions,
-  materializeHeadlessBrowser,
-  originToApprove,
-} from './headlessBrowser.js'
-import {
   type ApprovalGate,
-  type ApprovalRequest,
-  type ApprovalVerdict,
-  decide,
   type DecisionListener,
-  type InputGuard,
   makeCanUseTool,
   makePreToolUseHook,
   type TierResolver,
 } from './permissions.js'
 import { OWN_PLUGIN_TOOLS, ownPluginTierOf } from './ownPlugin.js'
 import { ASK_USER_QUESTION, askThroughGate, isQuestionTool, QUESTION_SERVER, type QuestionGate, questionServer } from './questions.js'
-import { assertPluginAllowed } from './plugins.js'
+import { assertPluginAllowed, PluginRefusedError } from './plugins.js'
+import { declaresRemoteServers } from '../plugins/packages/mcp.js'
 import { type LineRedactor, lineRedactor } from './redactLines.js'
+import type { BuiltInPolicy } from '../plugins/builtInTools.js'
 import type { HarnessPlugin } from '../plugins/forwarder.js'
 import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/registry.js'
 
@@ -91,16 +80,11 @@ import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/regi
 //   - registered remote MCP plugins (#297, `remotePlugins`, via the loopback
 //     forwarder in src/plugins/forwarder.ts), as Streamable
 //     HTTP servers with their own tier maps (remotePluginOptions below);
-//   - the headless browser (#349, headlessBrowser.ts) when the session has it
-//     enabled: a per-session copy of the vendored `playwright` plugin, its
-//     tier map, its disallowed tools and its origin/file-name guard;
 //   - in-process memory hooks (memory/hindsight.ts): `UserPromptSubmit`,
 //     `Stop` and optionally `PostToolUse` callbacks that recall from and
 //     retain to the enabled `hindsight` plugin's bank. SDK callbacks, run in
 //     this process, so they are not the command hooks plugins.ts refuses;
-//     they sit beside the permission seam's `PreToolUse` hook;  
-//     a human's approval of an off-origin navigation also approves
-//     that origin for the session (browserOrigins.ts).
+//     they sit beside the permission seam's `PreToolUse` hook;
 //   - the AskUserQuestion built-in (#940, questions.ts) when the run has a
 //     question gate: the call is answered in `canUseTool`, where it parks
 //     until the user answers in the panel; and, for subagents, which Claude
@@ -159,8 +143,7 @@ export type HarnessRun = {
    * else. Measured on Claude Code 2.1.287 (test/pluginPackages.e2e.test.ts):
    * with Bash offered, the CLI runs an injection as it expands the skill and
    * asks neither canUseTool nor the PreToolUse hook, so the admin's approval
-   * of the pin is its only check; without Bash it refuses the command. The
-   * headless browser's `disallowedTools` still win.
+   * of the pin is its only check; without Bash it refuses the command.
    */
   builtinTools?: string[]
   /**
@@ -179,13 +162,14 @@ export type HarnessRun = {
    * disabled tools go in `disallowedTools`.
    */
   remotePlugins?: HarnessPlugin[]
-  /**
-   * The headless browser for this query (#349, spec §5.3). Only when the
-   * `headless_browser_enabled` setting is on; the session manager decides.
-   */
-  headlessBrowser?: HeadlessBrowserOptions
   /** Maps each tool to its risk tier; tools it does not know are `outward`. */
   tierOf?: TierResolver
+  /**
+   * Settings → Plugins' overrides of the built-in tools (#1953,
+   * plugins/builtInTools.ts): raised tiers, applied over every other tier
+   * here, and disabled tools, put in `disallowedTools`.
+   */
+  builtInPolicy?: BuiltInPolicy
   onDecision?: DecisionListener
   /**
    * Parks outward calls until a human decides (#258, src/approvals/). Without
@@ -302,29 +286,23 @@ export function remotePluginOptions(
   return { mcpServers, disallowedTools }
 }
 
+/** Whether the run loads any plugin with skills or agents: the own plugin or a package. */
+function loadsPlugins(run: Pick<HarnessRun, 'ownPlugin' | 'pluginPaths' | 'allowedPluginPaths'>): boolean {
+  return run.ownPlugin !== undefined || !!run.pluginPaths?.length || !!run.allowedPluginPaths?.length
+}
+
 /**
- * The tier resolver a run uses: the own plugin's Skill and Agent when it is
- * loaded, then its plugins' tiers, then `run.tierOf`.
+ * The tier resolver a run uses: Skill and Agent when any plugin is loaded,
+ * then its plugins' tiers, then `run.tierOf`.
  */
-export function harnessTierOf(run: Pick<HarnessRun, 'remotePlugins' | 'tierOf' | 'ownPlugin'>): TierResolver {
+export function harnessTierOf(
+  run: Pick<HarnessRun, 'remotePlugins' | 'tierOf' | 'ownPlugin' | 'pluginPaths' | 'allowedPluginPaths'>,
+): TierResolver {
   const given = run.tierOf ?? (() => undefined)
   const remote = run.remotePlugins?.length ? pluginTierResolver(run.remotePlugins) : undefined
   const base: TierResolver = remote ? (toolName, input) => remote(toolName) ?? given(toolName, input) : given
-  if (run.ownPlugin === undefined) return base
+  if (!loadsPlugins(run)) return base
   return (toolName, input) => ownPluginTierOf(toolName) ?? base(toolName, input)
-}
-
-/** `promise`'s value, or undefined once `signal` aborts first. */
-function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | undefined> {
-  if (signal.aborted) return Promise.resolve(undefined)
-  return new Promise((resolve) => {
-    const onAbort = () => resolve(undefined)
-    signal.addEventListener('abort', onAbort, { once: true })
-    void promise.then((value) => {
-      signal.removeEventListener('abort', onAbort)
-      resolve(value)
-    })
-  })
 }
 
 /** canUseTool with AskUserQuestion answered through the question gate (#940). */
@@ -388,68 +366,17 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
   }
   const remote = remotePluginOptions(run.remotePlugins ?? [], new Set(Object.keys(local)))
   let tierOf: TierResolver = ownTiers
-  let guard: InputGuard | undefined
-  let gate = run.approvalGate
-  let browserPlugin: string | undefined
-  if (run.headlessBrowser) {
-    const browser = materializeHeadlessBrowser(run.headlessBrowser)
-    const remember = run.headlessBrowser.rememberOrigin
-    assertHeadlessPlugin(browser.pluginDir)
-    browserPlugin = browser.pluginDir
-    tierOf = (name, input) => browserTierOf(name) ?? ownTiers(name, input)
-    guard = (name, input) => browserInputGuard(name, input, browser.origins, browser.approved)
-    const inner = gate
-    if (inner) {
-      // The approval of the first navigation to an origin approves the origin
-      // for the session: recorded durably first (a failure denies the call),
-      // then in the set the guard and the request guard read, before the
-      // navigation runs.
-      // Calls in flight for an origin already waiting on a human wait on
-      // that one decision instead of each asking: approved, they are decided
-      // again (and now allowed); refused, they are refused with it.
-      const asking = new Map<string, Promise<ApprovalVerdict>>()
-      const approveOrigin = async (request: ApprovalRequest): Promise<ApprovalVerdict> => {
-        const verdict = await inner(request)
-        if (!verdict.approved) return verdict
-        const origin = originToApprove(request.toolName, verdict.input, browser.origins, browser.approved)
-        if (origin !== undefined) {
-          await remember?.(origin, verdict.approvalId)
-          browser.approve(origin)
-        }
-        return verdict
-      }
-      gate = async (request) => {
-        const origin = originToApprove(request.toolName, request.input, browser.origins, browser.approved)
-        if (origin === undefined) return approveOrigin(request)
-        const pending = asking.get(origin)
-        if (pending === undefined) {
-          const own = approveOrigin(request)
-          asking.set(origin, own)
-          try {
-            return await own
-          } finally {
-            asking.delete(origin)
-          }
-        }
-        const first = await untilAborted(
-          pending.catch((err: unknown): ApprovalVerdict => ({
-            approved: false,
-            message: err instanceof Error ? err.message : String(err),
-          })),
-          request.signal,
-        )
-        if (first === undefined) return { approved: false, message: `The call stopped while ${origin} awaited approval.` }
-        if (browser.approved.has(origin)) {
-          const decision = decide(request.toolName, tierOf, request.input, guard)
-          if (decision.decision === 'allow') return { approved: true, input: decision.input ?? request.input }
-          return inner(request)
-        }
-        const why = first.approved ? '' : ` ${first.message}`
-        return { approved: false, message: `Opening ${origin} was not approved for this session.${why}` }
-      }
+  const gate = run.approvalGate
+  const policy = run.builtInPolicy
+  if (policy) {
+    // Last, so an override raises whatever tier the steps above resolved.
+    const resolved = tierOf
+    tierOf = (name, input) => {
+      const tier = resolved(name, input)
+      return tier === undefined ? undefined : policy.tierOf(name, tier)
     }
   }
-  const permission = makeCanUseTool(tierOf, run.onDecision, gate, guard)
+  const permission = makeCanUseTool(tierOf, run.onDecision, gate)
   const abort = new AbortController()
   const options: Options = {
     ...base,
@@ -469,7 +396,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
       mergeHooks(
         {
           PreToolUse: [
-            makePreToolUseHook(tierOf, run.onDecision, gate, guard),
+            makePreToolUseHook(tierOf, run.onDecision, gate),
             ...(questions ? [QUESTION_PROMPT_HOOK] : []),
           ],
         },
@@ -479,7 +406,8 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     ),
     permissionMode: 'default',
   }
-  if (remote.disallowedTools.length) options.disallowedTools = remote.disallowedTools
+  const disallowed = [...remote.disallowedTools, ...(policy?.disallowed ?? [])]
+  if (disallowed.length) options.disallowedTools = disallowed
   if (run.model !== undefined) options.model = run.model
   if (run.resume !== undefined) options.resume = run.resume
   if (run.sessionId !== undefined) options.sessionId = run.sessionId
@@ -504,34 +432,36 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
   for (const p of run.allowedPluginPaths ?? []) plugins.push({ type: 'local', path: path.resolve(p) })
   const builtins = [
     ...new Set([
-      ...(run.ownPlugin !== undefined ? OWN_PLUGIN_TOOLS : []),
+      // Every loaded plugin's skills and agents need these, not only the own plugin's:
+      // a package's stayed dark with the own plugin switched off (#2320).
+      ...(loadsPlugins(run) ? OWN_PLUGIN_TOOLS : []),
       ...(questions ? [ASK_USER_QUESTION] : []),
       ...(run.allowedPluginPaths?.length ? (run.builtinTools ?? []) : []),
     ]),
   ]
   if (builtins.length) options.tools = builtins
-  // Checked by assertHeadlessPlugin above instead: it is a stdio server, which
-  // assertPluginAllowed refuses, but one this module wrote and starts under `env -i`.
-  if (browserPlugin !== undefined) plugins.push({ type: 'local', path: browserPlugin })
   if (plugins.length) options.plugins = plugins
-  if (browserPlugin !== undefined) {
-    // "The `Bash` tool definition is removed from the request. Claude does not
-    // see the tool and cannot attempt it." (spec §3.1, permissions). Measured
-    // for a plugin server's tools too (test/headlessBrowser.e2e.test.ts).
-    options.disallowedTools = [...remote.disallowedTools, ...disallowedBrowserTools()]
-    // Measured on Claude Code 2.1.283 and 2.1.287: with `strictMcpConfig` a
-    // plugin's MCP servers are not started at all (the init message lists the
-    // plugin but no server). The option exists to ignore MCP configs from
-    // settings files, and `settingSources: []` already loads none: the e2e test
-    // plants a project `.mcp.json` in the session's cwd and asserts it is not
-    // started.
-    options.strictMcpConfig = false
-  }
-  // The same, so an allowed package's MCP servers (local ones too) start; and
-  // its skills' shell injection runs (see `builtinTools`).
+  // Measured on Claude Code 2.1.283 and 2.1.287: with `strictMcpConfig` a
+  // plugin's MCP servers are not started at all (the init message lists the
+  // plugin but no server). The option exists to ignore MCP configs from
+  // settings files, and `settingSources: []` already loads none. So it is off
+  // for an allowed package, whose MCP servers (local ones too) must start; and
+  // its skills' shell injection runs then (see `builtinTools`).
   if (run.allowedPluginPaths?.length) {
     options.strictMcpConfig = false
     options.settings = { ...(typeof options.settings === 'object' ? options.settings : {}), disableSkillShellExecution: false }
+  }
+  // With `strictMcpConfig` off, Claude Code starts the MCP servers a plugin declares
+  // and connects to an http one itself: around the forwarder (redirects, OAuth discovery,
+  // the name resolved again; plugins/forwarder.ts "WHY"). So no plugin loaded then may
+  // declare one: a package's are stripped from the copy it loads and forwarded instead
+  // (plugins/packages/mcp.ts `withoutRemoteServers`, #2320).
+  if (options.strictMcpConfig === false) {
+    for (const p of [...(run.ownPlugin !== undefined ? [run.ownPlugin] : []), ...(run.pluginPaths ?? []), ...(run.allowedPluginPaths ?? [])]) {
+      if (declaresRemoteServers(p)) {
+        throw new PluginRefusedError(p, ['declares an http MCP server, which Claude Code would reach without the forwarder'])
+      }
+    }
   }
   if (run.systemPromptAppend !== undefined) {
     options.systemPrompt = { type: 'preset', preset: 'claude_code', append: run.systemPromptAppend }

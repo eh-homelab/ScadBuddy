@@ -8,6 +8,7 @@ import { connectDatabase, type Database } from '../src/db.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import type { RiskTier } from '../src/harness/permissions.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
+import { STALE_TAB_IMAGES } from '../src/sessions/clientProtocol.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
 import { expectPanelAccepts, frontendChatReducer, frontendClientMessages } from './support/frontendProtocol.js'
@@ -38,7 +39,7 @@ const tiers: Record<string, RiskTier> = { mcp__stub__print: 'outward', mcp__stub
 type Frame = Record<string, unknown>
 
 const PNG_1X1 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64')
-const JPEG_HEAD = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46, 0, 1]).toString('base64')
+const JPEG_HEAD = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46, 0, 1])
 
 describe.skipIf(skip !== undefined)(`the chat socket against the real SDK${skip ? ` (skipped: ${skip})` : ''}`, () => {
   let fake: FakeAnthropic
@@ -178,12 +179,12 @@ describe.skipIf(skip !== undefined)(`the chat socket against the real SDK${skip 
   }, 90_000)
 
   /** Uploads an image as the panel does when it is attached (#1941). */
-  async function upload(live: LiveAgent, image: Record<string, unknown>): Promise<Response> {
-    return fetch(`${live.url}/api/v1/ai/attachments`, {
-      method: 'POST',
-      headers: { origin: live.origin, 'content-type': 'application/json' },
-      body: JSON.stringify(image),
-    })
+  /** The panel's upload (#2479): the image and its preview as typed file parts. */
+  async function upload(live: LiveAgent, image: Buffer, preview: Buffer): Promise<Response> {
+    const body = new FormData()
+    body.append('image', new Blob([new Uint8Array(image)], { type: 'image/png' }), 'image')
+    body.append('preview', new Blob([new Uint8Array(preview)], { type: 'image/jpeg' }), 'preview')
+    return fetch(`${live.url}/api/v1/ai/attachments`, { method: 'POST', headers: { origin: live.origin }, body })
   }
 
   it('sends uploaded images to the model as image blocks, and shows their previews in the transcript (#1866, #1941)', async () => {
@@ -195,11 +196,12 @@ describe.skipIf(skip !== undefined)(`the chat socket against the real SDK${skip 
     await panel.until(is('sessions.snapshot'))
 
     // A full image well past the chat socket's 256 KiB frame cap: a screenshot's size.
-    const png = Buffer.concat([PNG_1X1, Buffer.alloc(600 * 1024, 7)]).toString('base64')
-    const preview = { mediaType: 'image/jpeg', data: JPEG_HEAD }
-    const uploaded = await upload(agent, { mediaType: 'image/png', data: png, preview })
+    const png = Buffer.concat([PNG_1X1, Buffer.alloc(600 * 1024, 7)])
+    const uploaded = await upload(agent, png, JPEG_HEAD)
     expect(uploaded.status).toBe(201)
-    const { id } = (await uploaded.json()) as { id: string }
+    const { id, ...pointers } = (await uploaded.json()) as { id: string; name: string; mediaType: string; preview: unknown }
+    // The turn names the image and its preview as the upload did (#2479).
+    const sent = { name: pointers.name, mediaType: 'image/png', preview: pointers.preview }
     panel.send(
       clientMessage({
         type: 'user.message',
@@ -226,10 +228,11 @@ describe.skipIf(skip !== undefined)(`the chat socket against the real SDK${skip 
     expect(words).toBeGreaterThan(content.indexOf(images[0]!))
     expect(String(content[words]?.text)).toContain('<page_context>')
 
-    // The transcript shows the preview, never the full image.
+    // The transcript names the image and its preview, never their bytes (#2479).
     const turn = frames.find(is('user.turn'))
-    expect(turn).toMatchObject({ text: 'What is in this picture?', images: [preview] })
-    expect(JSON.stringify(frames)).not.toContain(png)
+    expect(turn).toMatchObject({ text: 'What is in this picture?', images: [sent] })
+    expect(JSON.stringify(frames)).not.toContain(png.toString('base64').slice(0, 40))
+    expect(JSON.stringify(frames)).not.toContain(JPEG_HEAD.toString('base64'))
     await expectPanelAccepts(frames)
 
     // A watcher that attaches later gets the same, from the log.
@@ -238,7 +241,7 @@ describe.skipIf(skip !== undefined)(`the chat socket against the real SDK${skip 
     await watcher.until(is('sessions.snapshot'))
     watcher.send(clientMessage({ type: 'session.attach', sessionId }))
     const replay = await watcher.until(is('session.result'))
-    expect(replay.find(is('user.turn'))).toMatchObject({ images: [preview] })
+    expect(replay.find(is('user.turn'))).toMatchObject({ images: [sent] })
 
     panel.close()
     watcher.close()
@@ -265,11 +268,11 @@ describe.skipIf(skip !== undefined)(`the chat socket against the real SDK${skip 
     panel.close()
   }, 30_000)
 
-  it('a tab from before #1941: small inline images still go, a frame past 256 KiB closes the socket (1009)', async () => {
-    script = () => ({ text: 'A pixel.' })
+  it('a tab from before #1941: inline images are refused with a reload, a frame past 256 KiB closes the socket (1009) (#1959)', async () => {
+    script = () => ({ text: 'should not run' })
     const m = await sessions()
     agent = await startLiveAgent(m, { attachments: new AttachmentStore(pools.at(-1)!.sql) })
-    const preview = { mediaType: 'image/jpeg', data: JPEG_HEAD }
+    const preview = { mediaType: 'image/jpeg', data: JPEG_HEAD.toString('base64') }
     // What the old panel sent: the image inline, its own frame (not the new panel's builder).
     const inline = (data: string) => ({
       v: 1,
@@ -281,8 +284,9 @@ describe.skipIf(skip !== undefined)(`the chat socket against the real SDK${skip 
     const panel = await openPanelSocket(agent)
     await panel.until(is('sessions.snapshot'))
     panel.send(inline(PNG_1X1.toString('base64')))
-    const frames = await panel.until(is('session.result'))
-    expect(frames.find(is('user.turn'))).toMatchObject({ images: [preview] })
+    const [refused] = (await panel.until(is('error'))).filter(is('error'))
+    expect(refused).toMatchObject({ code: 'invalid', message: STALE_TAB_IMAGES })
+    await expectPanelAccepts(panel.frames)
     panel.close()
 
     const big = new WebSocket(`${agent.url.replace(/^http/, 'ws')}/api/v1/ai/chat`, { headers: { origin: agent.origin } })
@@ -293,7 +297,7 @@ describe.skipIf(skip !== undefined)(`the chat socket against the real SDK${skip 
     const closed = new Promise<number>((resolve) => big.once('close', (code) => resolve(code)))
     big.send(JSON.stringify(inline(Buffer.concat([PNG_1X1, Buffer.alloc(300 * 1024, 7)]).toString('base64'))))
     expect(await closed).toBe(1009)
-    expect(fake.messageCalls()).toHaveLength(1)
+    expect(fake.messageCalls()).toHaveLength(0)
   }, 60_000)
 
   it('keeps the session picker current: a session started elsewhere appears without a reconnect', async () => {

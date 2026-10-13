@@ -33,8 +33,15 @@ export function sameRepository(first: string, second: string): boolean {
  * itself is never held up by it.
  */
 async function pinAnswer(ctx: ToolContext, slug: string, name: string, pin: () => Promise<unknown>) {
-  const { data } = await ctx.backend.GET('/api/v1/models/{slug}', { params: { path: { slug } }, signal: ctx.signal })
-  const before = data ? { pinned_before: (data.libraries ?? []).some((library) => library.name === name) } : {}
+  let before: { pinned_before?: boolean } = {}
+  try {
+    const { data } = await ctx.backend.GET('/api/v1/models/{slug}', { params: { path: { slug } }, signal: ctx.signal })
+    if (data) before = { pinned_before: (data.libraries ?? []).some((library) => library.name === name) }
+  } catch (err) {
+    // A read that failed outright (a network error) is left out like a refused one; a
+    // cancelled call is cancelled, and does not go on to pin (#2124).
+    if (ctx.signal?.aborted) throw err
+  }
   const answer = await pin()
   return json(answer !== null && typeof answer === 'object' ? { ...answer, ...before } : answer)
 }
@@ -319,11 +326,13 @@ export const libraryTools: Tool[] = [
       "Dry-run a re-pin of a model's library pinned from a non-catalogue URL (a fork, another repo): clone that " +
       "URL at `ref` and parse-check the model's saved source against it. Records nothing. The backend clones " +
       'that URL, so this needs a human approval.',
-    input: z.object({ slug, name: libraryName, ref: z.string().optional().describe('A tag or branch') }),
+    // Required: the backend refuses a non-catalogue URL with no ref, so a call without
+    // one could only come back a 422 after a human had approved it (#2098).
+    input: z.object({ slug, name: libraryName, ref: z.string().min(1).describe('A tag or branch') }),
     risk: 'outward',
     routes: ['POST /api/v1/models/{slug}/libraries/{name}/check'],
     summarize: ({ slug, name, ref }) =>
-      `Clone library ${name} of model "${slug}" from the URL its pin records, at ${ref ?? "the catalogue's ref"}, ` +
+      `Clone library ${name} of model "${slug}" from the URL its pin records, at ${ref}, ` +
       'and check the model parses against it',
     handler: async ({ slug, name, ref }, ctx) => json(await checkCandidate(ctx, slug, name, ref)),
   }),

@@ -19,6 +19,15 @@ export function modelPath(slug: string, page?: 'source' | 'versions' | 'history'
 }
 
 /**
+ * #1290 — the editor for one of a model's `.scad` files: `model.scad` is the model's
+ * own Edit source page, any other is that page with the file's name after it.
+ */
+export function sourceFilePath(slug: string, name: string): string {
+  const source = modelPath(slug, 'source')
+  return name === 'model.scad' ? source : `${source}/${encodeURIComponent(name)}`
+}
+
+/**
  * What `/edit/{id}` hands the customizer through router state, so one Edit click is
  * one `GET /outputs/{id}/edit`. Absent when the customizer is opened directly — a
  * pasted `/m/{slug}?from={id}`, or a reload — so the customizer still fetches.

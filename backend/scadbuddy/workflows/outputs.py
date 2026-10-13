@@ -8,6 +8,7 @@ import math
 import re
 import shutil
 from collections import Counter
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -161,6 +162,8 @@ def manifest_of(req: OutputRequest) -> list[ManifestObject]:
                 bbox=part.bbox,
                 footprint=(part.bbox.size[0], part.bbox.size[1]),
                 colours=list(part.colours),
+                # Kept, so arranging this output again still states them.
+                materials=dict(earlier.materials) if earlier else {},
                 count=counts[part.piece_key],
                 plates=part.plates,
                 bom_piece=named.get(part.piece_key) or (earlier.bom_piece if earlier else None),
@@ -195,6 +198,23 @@ def placement_matrix(box: BoundingBox, x: float, y: float, rot: float) -> np.nda
     return matrix
 
 
+def _materials(req: OutputRequest) -> dict[str, str]:
+    """Each colour's material as the arranged objects' sources state it. Only a library
+    file states any. A render's colour has a material only when a library object
+    shares its slot, since one slot is one filament. A colour two sources
+    give different materials is unknown too: one slot prints both parts, and picking
+    either would slice the other in the wrong material. The writer then states none
+    (`project_settings`)."""
+    materials: dict[str, str] = {}
+    conflicting: set[str] = set()
+    for obj in req.provenance.values():
+        for colour, material in obj.materials.items():
+            key = colour.upper()
+            if materials.setdefault(key, material) != material:
+                conflicting.add(key)
+    return {c: m for c, m in materials.items() if c not in conflicting}
+
+
 async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobResult:
     blobs = deps.blobs
     parts = {p.piece_key: p for p in req.parts}
@@ -205,6 +225,10 @@ async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobRe
     for plate in req.layout.plates:
         by_colour: dict[str, list[trimesh.Trimesh]] = {}
         names: dict[str, str] = {}
+        # Each painted copy is a part of its own: its faces are its painting's (#1965).
+        painted: list[ColourPart] = []
+        # Each copy's negative part, cut out of the plate's object by the slicer.
+        negatives: list[ColourPart] = []
         for placed in plate.items:
             if placed.piece_key not in parts:
                 raise _unknown_piece(placed.piece_key)
@@ -218,25 +242,48 @@ async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobRe
             for part in layouts[placed.piece_key].plates[0].parts:
                 mesh = part.mesh.copy()
                 mesh.apply_transform(matrix)
+                if part.negative:
+                    # Named no filament: it prints nothing.
+                    negatives.append(replace(part, mesh=mesh))
+                    continue
                 colour = part.colour.upper()
+                for used in [colour, *(part.paint.used() if part.paint is not None else [])]:
+                    if used.upper() not in colours:
+                        colours.append(used.upper())
+                if part.paint is not None:
+                    painted.append(
+                        ColourPart(colours.index(colour), part.name, colour, mesh, part.paint)
+                    )
+                    continue
                 by_colour.setdefault(colour, []).append(mesh)
                 names.setdefault(colour, part.name)
-                if colour not in colours:
-                    colours.append(colour)
         ordered = sorted(by_colour, key=colours.index)
-        plates.append(
-            PlateParts(
-                tuple(
-                    ColourPart(colours.index(c), names[c], c, _joined(by_colour[c]))
-                    for c in ordered
-                ),
-                tuple(colours.index(c) + 1 for c in ordered),
+        joined = [ColourPart(colours.index(c), names[c], c, _joined(by_colour[c])) for c in ordered]
+        printed = (*joined, *painted)
+        extruders = tuple(colours.index(part.colour) + 1 for part in printed)
+        # A negative part takes the plate's first extruder: the slicer needs one, and it
+        # prints nothing with it.
+        cut = (
+            tuple(
+                replace(part, material_index=extruders[0] - 1, colour=colours[extruders[0] - 1])
+                for part in negatives
             )
+            if printed
+            else ()
         )
+        plates.append(PlateParts((*printed, *cut), (*extruders, *(extruders[0] for _ in cut))))
     if not plates:
         raise _refuse("the layout has no plates")
     everything = [part for plate in plates for part in plate.parts]
-    layout = PlateLayout(plates, colours, [], bounding_box(everything), [])
+    # What the result reports (its parts, colours, plates) is what prints.
+    shown = [
+        PlateParts(
+            tuple(p for p in plate.parts if not p.negative),
+            tuple(e for p, e in zip(plate.parts, plate.extruders, strict=True) if not p.negative),
+        )
+        for plate in plates
+    ]
+    layout = PlateLayout(shown, colours, [], bounding_box(everything), [])
     thumbnails, warnings = await plates_thumbnails(
         [plate.parts for plate in plates], config=deps.config, executor=deps.thumbnail_executor
     )
@@ -249,6 +296,7 @@ async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobRe
         thumbnails=thumbnails,
         model_name=req.slug.removeprefix(BUILTIN_PREFIX),
         plate=plate_for(req.plate_model),
+        materials=_materials(req),
     )
     await asyncio.to_thread(write_glb, list(plates[0].parts), work / PREVIEW_NAME)
     root = deps.paths.root

@@ -26,8 +26,8 @@ import { type BambuddyScope, defineTool, json, type Risk, type Tool, type ToolCo
 // (frontend dom.ts `USER_ONLY`), so a human presses them, exactly as in the UI.
 //
 // Not here: the `screenshot()` fallback of #254, which PR #339 left out of the
-// tab on purpose. And not the headless browser (#349, harness/headlessBrowser.ts),
-// a separate Chromium that never sees the user's tab.
+// tab on purpose. And not a browser plugin's tools (Playwright MCP, added in
+// Settings → Plugins): a separate browser that never sees the user's tab.
 
 /** Where a tab's answer comes from, for the untrusted-data envelope (#258). */
 const SOURCE =
@@ -390,8 +390,15 @@ export const browserTools: Tool[] = [
       PREFIX +
       'in the customizer, save the settled render as an output (the Generate button). Needed before the print ' +
       'or send dialog can open. A result with superseded: true was saved, but the template UI state moved ' +
-      'while it saved, so it is not the output on screen: generate again once the inputs are settled.',
-    input: z.object({ timeout_ms: waitMs(120_000, 30_000) }),
+      "while it saved, so it is not the output on screen: generate again once the inputs are settled. It files " +
+      "the 3MF in the Project picker's project; when that is not the project this model (with the preset in " +
+      'use) was last filed in, it saves nothing and the error names both: call again with project_id set to ' +
+      'the one meant (null for no project; an id list_print_projects does not list is refused), which also ' +
+      'moves the picker there.',
+    input: z.object({
+      timeout_ms: waitMs(120_000, 30_000),
+      project_id: z.number().int().nullable().optional().describe('The project to file in, past the remembered-project check'),
+    }),
     risk: 'write',
   }),
   forwarded({

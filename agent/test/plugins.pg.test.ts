@@ -210,6 +210,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
           tool_prefix: 'mcp__hindsight__',
           auth: { header: 'Authorization', last4: TOKEN.slice(-4) },
           usable: true,
+          problem: null,
           tool_tiers: { recall: 'read' },
         })
 
@@ -274,7 +275,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
           status: 400,
           detail: expect.stringMatching(/resolves to 169\.254\.169\.254/) as unknown,
         })
-        expect(await refused('http://hs.example/mcp', ['10.0.0.5'])).toMatchObject({
+        expect(await refused('http://hs.example/mcp', ['203.0.113.5'])).toMatchObject({
           status: 400,
           detail: expect.stringMatching(/must be https/) as unknown,
         })

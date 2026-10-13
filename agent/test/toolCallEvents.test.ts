@@ -85,6 +85,14 @@ describe('tool.result images (#782)', () => {
     }
   })
 
+  it('drops only the shown image’s source line; a refused one beside it keeps its own (#2149)', () => {
+    const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"/>').toString('base64')
+    const mapper = new SdkEventMapper(S, () => 'read')
+    const r = resultOf(mapper.map(result([image(PNG), sourceLine('png'), image(svg, 'image/svg+xml'), sourceLine('svg')])))
+    expect(r.images).toHaveLength(1)
+    expect(r.summary).toMatch(/^\[image\]\n\[Image: source: [^\]]*\.svg\]$/)
+  })
+
   it(`keeps at most ${RESULT_IMAGES_MAX} images of one result`, () => {
     const mapper = new SdkEventMapper(S, () => 'read')
     // Distinct images: a PNG signature and a different byte each.

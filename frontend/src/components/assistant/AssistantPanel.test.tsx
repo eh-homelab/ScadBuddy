@@ -8,8 +8,9 @@ import type { ClientMessage } from '../../agent/chat/protocol'
 import { useFullscreen } from '../../lib/useFullscreen'
 import { EXTERNAL_SESSION_ID, createMockAgentTransport, type MockAgentTransport } from '../../mocks/agent'
 import { respondRequests, setPendingAnswers, setPendingApprovals } from '../../mocks/features/pendingInput'
-import { setSessionResources } from '../../mocks/features/assistantSessions'
+import { setRunningSessions, setSessionResources } from '../../mocks/features/assistantSessions'
 import { setMcpAuthMode } from '../../mocks/features/mcpTokens'
+import { seedSessionFile } from '../../mocks/features/sessionFiles'
 import { emitRealtime } from '../../mocks/realtime'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
@@ -309,7 +310,9 @@ describe('assistant panel', () => {
     const { user } = await openAndSend()
     await user.click(screen.getByRole('button', { name: 'Deny' }))
     expect(respondRequests()).toMatchObject([{ body: { kind: 'approval', decision: 'deny' } }])
-    await screen.findByText('Denied: nothing was sent.')
+    // The call reads as not run; the refusal its result carries is the model's, not shown (#2149).
+    await waitFor(() => expect(screen.getByTestId('agent-tool-status')).toHaveTextContent('Not run'))
+    expect(screen.queryByText('Denied: nothing was sent.')).not.toBeInTheDocument()
     expect(screen.queryByText('Queued 2 copies in the Keychains project.')).not.toBeInTheDocument()
   })
 
@@ -334,6 +337,36 @@ describe('assistant panel', () => {
     expect(screen.getByTestId('assistant-attention-live')).toBeEmptyDOMElement()
     expect(plain).toHaveAttribute('title', 'Assistant (Ctrl+`)')
     await waitFor(() => expect(document.title).toBe('ScadBuddy'))
+  })
+
+  it('shows a running session on the header button with the panel closed, apart from what waits (#1125)', async () => {
+    setRunningSessions(1)
+    const { user } = renderShell()
+    const button = await screen.findByRole('button', { name: 'Assistant, working' })
+    expect(button).toHaveAttribute('title', 'Assistant (Ctrl+`): working')
+    expect(within(button).getByTestId('assistant-working')).toBeInTheDocument()
+    expect(within(button).queryByTestId('assistant-attention')).not.toBeInTheDocument()
+    // Announced in its own region, so the waiting count is not read out again.
+    const live = screen.getByTestId('assistant-working-live')
+    expect(live).toHaveAttribute('aria-live', 'polite')
+    expect(live).toHaveTextContent('The assistant is working')
+    expect(screen.getByTestId('assistant-attention-live')).toBeEmptyDOMElement()
+
+    // Running and waiting at once (another session asked for an approval).
+    setPendingApprovals(1)
+    await user.click(button)
+    expect(await screen.findByRole('button', { name: 'Assistant, working, 1 waiting for you' })).toHaveAttribute(
+      'title',
+      'Assistant (Ctrl+`): working, 1 waiting for you (1 approval)',
+    )
+
+    // Idle: neither is shown. The click opened the panel, this one closes it.
+    setRunningSessions(0)
+    setPendingApprovals(0)
+    await user.click(screen.getByRole('button', { name: 'Assistant, working, 1 waiting for you' }))
+    const plain = await screen.findByRole('button', { name: 'Assistant' })
+    expect(within(plain).queryByTestId('assistant-working')).not.toBeInTheDocument()
+    expect(screen.getByTestId('assistant-working-live')).toBeEmptyDOMElement()
   })
 
   it('shows a done summary beside the badge, not in the waiting count or the tab title (#815)', async () => {
@@ -744,6 +777,54 @@ describe('assistant panel', () => {
     expect(await within(panel).findByRole('link', { name: /out-mid/ })).toHaveAttribute('href', '/edit/out-mid')
     // Read on the tool result alone: the session's status never moved.
     expect(screen.getByTestId('agent-status').textContent).toBe(status)
+  })
+
+  it("shows a session's Files, and reads them again when a file is uploaded (#2329)", async () => {
+    let inject: (frame: unknown) => void = () => {}
+    const spying = () => {
+      const inner = factory()
+      return {
+        ...inner,
+        connect: (h: Parameters<typeof inner.connect>[0]) => {
+          inject = (frame) => act(() => h.onFrame(frame as never))
+          inner.connect(h)
+        },
+      }
+    }
+    seedSessionFile(EXTERNAL_SESSION_ID, 'downloads/bin.3mf', new Uint8Array(10), 'model/3mf', { tool: 'workspace_save' })
+    const view = renderPage(
+      <Routes>
+        <Route element={<AppShell embedded={false} assistantTransport={spying} />}>
+          <Route path="*" element={<p>page</p>} />
+        </Route>
+      </Routes>,
+      { route: '/' },
+    )
+    await view.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    await view.user.click(await screen.findByRole('button', { name: 'Sessions (1)' }))
+    await view.user.click(screen.getByRole('button', { name: /Tune the gridfinity bin/ }))
+    await screen.findByText('Done: the bin is now 3 units (21 mm) tall.')
+
+    const files = screen.getByRole('button', { name: 'Files' })
+    expect(files).toHaveAttribute('aria-expanded', 'false')
+    await view.user.click(files)
+    const panel = screen.getByRole('region', { name: "This session's files" })
+    expect(await within(panel).findByText('downloads/bin.3mf')).toBeInTheDocument()
+    expect(within(panel).getByText(/by workspace_save/)).toBeInTheDocument()
+
+    seedSessionFile(EXTERNAL_SESSION_ID, 'uploads/new.stl', new Uint8Array(3), 'model/stl', { kind: 'upload' })
+    inject({
+      v: 1,
+      type: 'workspace.file',
+      sessionId: EXTERNAL_SESSION_ID,
+      path: 'uploads/new.stl',
+      change: 'uploaded',
+      by: { kind: 'browser', id: 'browser', label: 'You' },
+      size: 3,
+    })
+    expect(await within(panel).findByText('uploads/new.stl')).toBeInTheDocument()
+    // The feed notes it too (#2399).
+    expect(await screen.findByTestId('agent-file')).toHaveTextContent('You uploaded uploads/new.stl (3 B) to the workspace')
   })
 
   it('reports a malformed frame instead of rendering it', async () => {

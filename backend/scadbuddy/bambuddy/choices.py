@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import Awaitable
 
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.catalogue import PresetChoice, _Catalogue, _catalogue
 from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.concurrent import settled
 from scadbuddy.bambuddy.extruders import default_nozzles
 from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.hardware import (
@@ -25,7 +28,7 @@ from scadbuddy.bambuddy.models import (
     PrinterStatus,
     RackAlgorithm,
 )
-from scadbuddy.bambuddy.print_run import BED_TYPES, filament_options
+from scadbuddy.bambuddy.print_run import BED_TYPES, filament_options, read_status
 from scadbuddy.bambuddy.print_source import OutputSource, PrintSource
 from scadbuddy.bambuddy.resolver import _SOURCE_ORDER, DEFAULT_BED, TIERS, Tier
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
@@ -63,6 +66,8 @@ class FilamentPresetOption(BaseModel):
 
     ref: PresetRef
     name: str
+    #: The preset's material ("PLA"), so a slot is offered only presets of its own (#2166).
+    filament_type: str | None = None
 
 
 class ChoicesView(BaseModel):
@@ -103,7 +108,7 @@ def filament_presets_by_size(catalogue: _Catalogue) -> dict[str, list[FilamentPr
             ):
                 best[row.name] = row
         out[size] = [
-            FilamentPresetOption(ref=row.ref, name=row.name)
+            FilamentPresetOption(ref=row.ref, name=row.name, filament_type=row.filament_type)
             for row in sorted(best.values(), key=lambda row: row.name.lower())
         ]
     return out
@@ -111,14 +116,26 @@ def filament_presets_by_size(catalogue: _Catalogue) -> dict[str, list[FilamentPr
 
 async def choices_for(
     client: BambuddyClient,
-    source: PrintSource,
+    source: Awaitable[PrintSource],
     settings: StoredSettings,
     *,
     remembered: ModelPrintChoices | None,
     printer_id: int | None,
     rack: RackUsage | None = None,
 ) -> ChoicesView:
-    printers = [row for row in await client.printers() if row.is_active]
+    """The dialog's choices, read in two waves (#2504): ``source``, the printers and the
+    presets together, then everything that needs the chosen printer together, its
+    status read once. A failure surfaces as it did when the reads ran one by one:
+    the source's, then the printers', the presets' and the filament step's. So a
+    library file that is gone or unprintable still answers its 404 or 422, though the
+    printers and presets have been read beside it by then: a few wasted reads on a
+    rare path, for not waiting on the file every time."""
+    loaded, listed, presets = await asyncio.gather(
+        source, client.printers(), _catalogue(client), return_exceptions=True
+    )
+    ready = settled(loaded)
+    printers = [row for row in settled(listed) if row.is_active]
+    catalogue = settled(presets)
     active = {row.id for row in printers}
 
     def still_active(candidate: int | None) -> int | None:
@@ -134,21 +151,20 @@ async def choices_for(
     )
     status: PrinterStatus | None = None
     last: str | None = None
-    if printer_id is not None:
-        try:
-            status = await client.printer_status(printer_id)
-        except (ApiError, ValueError):
-            logger.info("printer status unreadable; offering every nozzle size unmarked")
-        await record_seen(rack, printer_id, status)
-        # Advisory, like the run's plate warning: an archive list that cannot be read or
-        # ordered preselects nothing rather than failing the dialog.
-        try:
-            last = last_bed_type(
-                await client.archives(printer_id=printer_id), printer_id=printer_id
-            )
-        except (ApiError, ValueError):
-            logger.info("archives unreadable; the plate falls back to the remembered one")
-    catalogue = await _catalogue(client)
+    if printer_id is None:
+        filaments = await filament_options(client, ready, printer_id=None)
+    else:
+        reading = asyncio.ensure_future(read_status(client, printer_id))
+        seen, plate, read = await asyncio.gather(
+            _record_seen(rack, printer_id, reading),
+            _last_bed_type(client, printer_id),
+            filament_options(client, ready, printer_id=printer_id, status=reading),
+            return_exceptions=True,
+        )
+        settled(seen)
+        last = settled(plate)
+        filaments = settled(read)
+        status = reading.result()
     processes = {
         size: sorted(
             {
@@ -164,7 +180,6 @@ async def choices_for(
         or (settings.printer_bed_types.get(str(printer_id)) if printer_id is not None else None)
         or DEFAULT_BED
     )
-    filaments = await filament_options(client, source, printer_id=printer_id)
     return ChoicesView(
         printer_id=printer_id,
         printers=printers,
@@ -196,9 +211,29 @@ async def choices_for_output(
 ) -> ChoicesView:
     return await choices_for(
         client,
-        OutputSource(store=store, meta=meta, uploads=uploads, settings=settings),
+        _given(OutputSource(store=store, meta=meta, uploads=uploads, settings=settings)),
         settings,
         remembered=settings.model_print_choices.get(meta.slug),
         printer_id=printer_id,
         rack=rack,
     )
+
+
+async def _given(source: PrintSource) -> PrintSource:
+    return source
+
+
+async def _record_seen(
+    rack: RackUsage | None, printer_id: int, status: Awaitable[PrinterStatus | None]
+) -> None:
+    await record_seen(rack, printer_id, await status)
+
+
+async def _last_bed_type(client: BambuddyClient, printer_id: int) -> str | None:
+    """Advisory, like the run's plate warning: an archive list that cannot be read or
+    ordered preselects nothing rather than failing the dialog."""
+    try:
+        return last_bed_type(await client.archives(printer_id=printer_id), printer_id=printer_id)
+    except (ApiError, ValueError):
+        logger.info("archives unreadable; the plate falls back to the remembered one")
+        return None

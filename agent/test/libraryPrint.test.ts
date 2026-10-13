@@ -114,6 +114,21 @@ describe('the library routes', () => {
     expect(firstText(await tool('get_print_choices').execute({ library_file_id: FILE }, ctx()))).toEqual({
       printer_id: 1,
       plates: [],
+      plates_error: expect.stringMatching(/get plates of library file .* failed \(HTTP 502\).*Bambuddy could not read the plates/s),
+    })
+  })
+
+  it("says why an output's plates could not be read, a missing scope included (#2107)", async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/print/outputs/${OUT}/choices`, () => HttpResponse.json({ printer_id: 1 })),
+      http.get(`${BACKEND}/api/v1/outputs/${OUT}/plates`, () =>
+        HttpResponse.json({ title: 'Forbidden', detail: 'the API key lacks the library:read scope' }, { status: 403 }),
+      ),
+    )
+    expect(firstText(await tool('get_print_choices').execute({ output_id: OUT }, ctx()))).toEqual({
+      printer_id: 1,
+      plates: [],
+      plates_error: expect.stringMatching(/get plates of .* failed \(HTTP 403\).*library:read scope/s),
     })
   })
 
@@ -312,5 +327,38 @@ describe('coverage (#1756)', () => {
     ]) {
       expect(left, route).not.toContain(route)
     }
+  })
+})
+
+describe('deleting library files (#2167)', () => {
+  it('is outward, sends the ids with an Idempotency-Key, and passes the skipped files on', async () => {
+    let sent: { body: unknown; key: string | null } | undefined
+    server.use(
+      http.post(`${BACKEND}/api/v1/print/library/delete`, async ({ request }) => {
+        sent = { body: await request.json(), key: request.headers.get('Idempotency-Key') }
+        return HttpResponse.json({
+          deleted: [{ id: 1, filename: 'a.3mf', trashed: true }],
+          skipped: [{ id: 2, filename: 'b.3mf', reason: "Bambuddy deletes only files its API key's user added" }],
+        })
+      }),
+    )
+    expect(tool('delete_library_files').risk).toBe('outward')
+    expect(tool('restore_library_files').risk).toBe('outward')
+    const result = firstText(await tool('delete_library_files').execute({ file_ids: [1, 2] }, ctx())) as {
+      deleted: unknown[]
+      skipped: { id: number }[]
+    }
+    expect(sent?.body).toEqual({ file_ids: [1, 2] })
+    expect(sent?.key).toBeTruthy()
+    expect(result.deleted).toHaveLength(1)
+    expect(result.skipped.map((file) => file.id)).toEqual([2])
+  })
+
+  it('restores from the trash', async () => {
+    server.use(
+      http.post(`${BACKEND}/api/v1/print/library/restore`, () => HttpResponse.json({ restored: [1], skipped: [] })),
+    )
+    const result = firstText(await tool('restore_library_files').execute({ file_ids: [1] }, ctx()))
+    expect(result).toEqual({ restored: [1], skipped: [] })
   })
 })

@@ -36,6 +36,7 @@ from scadbuddy.render.jobs import (
     prepare_source,
     render_main,
     render_solids_stage,
+    source_directory,
     timed_stage,
 )
 from scadbuddy.render.previews import PreviewFailedError, render_preview
@@ -360,7 +361,9 @@ class RenderActivities:
         if d.snapshots is None or revision is None:
             return
         found = await _heartbeating(asyncio.create_task(d.snapshots.materialize(slug, revision)))
-        if not found and (d.history is None or not d.history.available):
+        if found:
+            return
+        if d.history is None or not d.history.available:
             # Nothing to export it from here, and no retry will find it: fail now. The
             # next submit's `pin` (on the API, with git) stores it.
             raise ApplicationError(
@@ -368,6 +371,12 @@ class RenderActivities:
                 type=SnapshotUnavailableError.__name__,
                 non_retryable=True,
             )
+        # No snapshot, but git: export it from history, as `prepare_source` does, so the
+        # activities that call only this get the source too (#2130). The current
+        # revision is the live directory, which needs no export.
+        await _heartbeating(
+            asyncio.create_task(source_directory(slug, revision, paths=d.paths, history=d.history))
+        )
 
     async def sync_fonts(self, scad: Path | str, req: PieceRequest) -> None:
         """The fonts the template could name, from the store onto this worker. Only

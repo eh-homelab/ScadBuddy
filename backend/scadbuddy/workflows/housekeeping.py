@@ -78,6 +78,18 @@ BACKFILL_SWEEP = "housekeeping_attach_backfills"
 REAP_SWEEP = "housekeeping_reap_output_holds"
 #: The `workflow.patched` id that adds `REAP_SWEEP` to a run (see the module docstring).
 REAP_PATCH = "housekeeping-reap-output-holds"
+#: #1057: end the flow runs whose execution closed without finishing them
+#: (`flows/sweep.py`). Behind its own patch, like `REAP_SWEEP`.
+FLOWS_SWEEP = "housekeeping_sweep_flow_runs"
+FLOWS_PATCH = "housekeeping-sweep-flow-runs"
+#: #2169: remove the print dialog's background slices no run queued
+#: (`bambuddy.preview.sweep_preview_slices`). Behind its own patch, like `REAP_SWEEP`.
+PREVIEWS_SWEEP = "housekeeping_sweep_preview_slices"
+PREVIEWS_PATCH = "housekeeping-sweep-preview-slices"
+#: #2289: pack the models repository (`ModelHistory.maintain`) once loose objects pile
+#: up, which git's own `gc --auto` lets reach thousands. Behind its own patch.
+GIT_SWEEP = "housekeeping_maintain_models_git"
+GIT_PATCH = "housekeeping-maintain-models-git"
 #: Activity retention and repair (spec 2026-10-09 §6). Last: it reads what the sweeps
 #: before it settled.
 ACTIVITY_SWEEP = "housekeeping_activity"
@@ -92,12 +104,16 @@ SWEEPS = (
     "housekeeping_sweep_claims",
     BACKFILL_SWEEP,
     REAP_SWEEP,
+    FLOWS_SWEEP,
+    PREVIEWS_SWEEP,
+    GIT_SWEEP,
     ACTIVITY_SWEEP,
 )
-#: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs, and request claims,
-#: which would otherwise pile up for good with the sweeps off (review 3c M1); and the
-#: activity rows, which every start adds to (retention and repair, spec 2026-10-09 §6).
-PRUNE_SWEEPS = (SWEEPS[0], SWEEPS[4], ACTIVITY_SWEEP)
+#: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs, request claims and
+#: the dialog's background slices, which would otherwise pile up for good with the
+#: sweeps off (review 3c M1); and the activity rows, which every start adds to
+#: (retention and repair, spec 2026-10-09 §6).
+PRUNE_SWEEPS = (SWEEPS[0], SWEEPS[4], PREVIEWS_SWEEP, ACTIVITY_SWEEP)
 #: An asset sweep converges with the store over Bambuddy, at length.
 SWEEP_TIMEOUT = timedelta(minutes=30)
 #: Every sweep heartbeats: a worker lost mid-sweep is noticed within this, not after
@@ -112,6 +128,12 @@ PRUNE_TIMEOUT = timedelta(seconds=2 * (1 + SETTLE_DESCRIBES) * DESCRIBE_BOUND) +
 )
 #: The claims sweep is one delete.
 CLAIMS_TIMEOUT = timedelta(minutes=2)
+#: A few Bambuddy reads and deletes per background slice past its grace.
+PREVIEWS_TIMEOUT = timedelta(minutes=5)
+#: `ModelHistory.maintain`'s `git gc` is bounded by `history.MAINTAIN_TIMEOUT` (10 min);
+#: this adds a margin for the count and the kill (#2342). Not imported: the sandbox runs
+#: this module, and `library.history` is not passed through.
+GIT_TIMEOUT = timedelta(minutes=12)
 #: The activity sweep is a repair pass over four tables and one delete.
 ACTIVITY_TIMEOUT = timedelta(minutes=5)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
@@ -124,6 +146,10 @@ def sweep_timeout(sweep: str) -> timedelta:
         return PRUNE_TIMEOUT
     if sweep == PRUNE_SWEEPS[1]:
         return CLAIMS_TIMEOUT
+    if sweep == PREVIEWS_SWEEP:
+        return PREVIEWS_TIMEOUT
+    if sweep == GIT_SWEEP:
+        return GIT_TIMEOUT
     if sweep == ACTIVITY_SWEEP:
         return ACTIVITY_TIMEOUT
     return SWEEP_TIMEOUT
@@ -144,6 +170,12 @@ class Housekeeping:
         for sweep in SWEEPS if sweeps is None else sweeps:
             # Added after runs that may still replay; one recorded before it skips it.
             if sweep == REAP_SWEEP and not workflow.patched(REAP_PATCH):
+                continue
+            if sweep == FLOWS_SWEEP and not workflow.patched(FLOWS_PATCH):
+                continue
+            if sweep == PREVIEWS_SWEEP and not workflow.patched(PREVIEWS_PATCH):
+                continue
+            if sweep == GIT_SWEEP and not workflow.patched(GIT_PATCH):
                 continue
             if sweep == ACTIVITY_SWEEP and not workflow.patched(ACTIVITY_PATCH):
                 continue

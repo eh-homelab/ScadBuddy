@@ -1,7 +1,8 @@
 import type { SessionStoreEntry } from '@anthropic-ai/claude-agent-sdk'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
 import { AuditLog, type AuditRecord } from '../src/audit/log.js'
+import type { DurableGate } from '../src/gate/durable.js'
 import type { Database } from '../src/db.js'
 import { originPolicy } from '../src/http/origins.js'
 import type { SessionManager } from '../src/sessions/manager.js'
@@ -131,6 +132,16 @@ describe.skipIf(skip !== undefined)(`session edits${skip ? ` (skipped: ${skip})`
       ])
     })
 
+    it('records no ok row for a fork whose events could not be logged (#2159)', async () => {
+      const parent = await session(1)
+      const append = m.events.append.bind(m.events)
+      vi.spyOn(m.events, 'append').mockImplementation((id, events, ...rest) =>
+        events.some((e) => e.type === 'session.started') ? Promise.reject(new Error('log down')) : append(id, events, ...rest),
+      )
+      expect((await fork(parent)).status).toBeGreaterThanOrEqual(500)
+      expect((await resourceRows('session_fork')).map((r) => r.outcome)).toEqual(['error'])
+    })
+
     it('forks up to a reply: the child has the turns through it, and only those', async () => {
       const parent = await session(3)
       const res = await fork(parent, { up_to: 'msg_fake_2:0' })
@@ -199,6 +210,23 @@ describe.skipIf(skip !== undefined)(`session edits${skip ? ` (skipped: ${skip})`
       expect((await fork(id)).status).toBe(201)
     })
 
+    it('records a successful rename and done as resource rows on the session (#2159)', async () => {
+      const id = await session(1)
+      expect((await patch(id, { title: 'renamed' })).status).toBe(200)
+      expect((await patch(id, { done: true })).status).toBe(200)
+      const rows = await resourceRows('session_update')
+      expect(rows.map((r) => r.detail).sort()).toEqual(['marked done', 'renamed'])
+      for (const row of rows) {
+        expect(row).toMatchObject({
+          outcome: 'ok',
+          surface: 'http',
+          session_id: id,
+          client_ip: '10.0.0.7',
+          actor: expect.objectContaining({ kind: 'browser' }),
+        })
+      }
+    })
+
     it('refuses done while a turn runs, with 409', async () => {
       const id = await session(1)
       next = { hang: true }
@@ -209,11 +237,24 @@ describe.skipIf(skip !== undefined)(`session edits${skip ? ` (skipped: ${skip})`
       expect((await m.get(id, browser)).status).toBe('running')
     })
 
-    it('refuses done on a durable session, which its workflow ends (#1056)', async () => {
+    it('marks a durable session done and ends its workflow (#1056)', async () => {
       const id = await session(1)
       await db.sql`UPDATE ai_sessions SET mode = 'durable' WHERE id = ${id}`
-      expect((await patch(id, { done: true })).status).toBe(409)
+      const ended: string[] = []
+      m.durable = { end: (sid: string) => Promise.resolve(void ended.push(sid)) } as unknown as DurableGate
+      expect((await patch(id, { done: true })).status).toBe(200)
+      expect(ended).toEqual([id])
+      expect((await m.get(id, browser)).status).toBe('done')
       expect((await patch(id, { title: 'still renamable' })).status).toBe(200)
+      expect(ended).toEqual([id])
+    })
+
+    it('leaves a durable session as it was when its workflow cannot be told, with 503', async () => {
+      const id = await session(1)
+      await db.sql`UPDATE ai_sessions SET mode = 'durable' WHERE id = ${id}`
+      m.durable = undefined
+      expect((await patch(id, { done: true })).status).toBe(503)
+      expect((await m.get(id, browser)).status).not.toBe('done')
     })
 
     it("refuses another principal's session until it is taken over", async () => {

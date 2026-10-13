@@ -1,12 +1,15 @@
 import type { AttachmentStore } from '../attachments/store.js'
+import type { StoredBlob } from '../sessions/blobs.js'
 import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import type { BackendClient } from '../api/backend.js'
 import type { paths } from '../api/schema.js'
 import { hasTier, type Principal, type Tier } from '../auth/principal.js'
+import { raiseTier } from '../harness/permissions.js'
 import type { BrowserTabs } from '../bridge/hub.js'
 import type { SessionManager } from '../sessions/manager.js'
 import type { TouchedSink } from '../sessions/touched.js'
+import { type SessionFiles, workspaceOf } from '../workspace/store.js'
 import { DEFAULT_SOURCE, markUntrusted, wrapUntrustedText } from '../safety/untrusted.js'
 import { authored, authorHeaders } from './authorship.js'
 import { type OutwardActions, PendingStoreFullError } from './pending.js'
@@ -81,6 +84,18 @@ export type ToolServices = {
   sessions?: SessionManager | undefined
   /** Uploaded images `sessions_send` may name (#1941, attachments/store.ts); none without a database. */
   attachments?: AttachmentStore | undefined
+  /**
+   * The assistant's workspace (#2329, workspace/store.ts): the session's files, or
+   * the principal's own outside a session. The workspace_* tools refuse without it.
+   */
+  workspace?: SessionFiles | undefined
+  /**
+   * The secrets a tool must never hand the model (#2329): every saved Claude
+   * credential's (main.ts), and in a classic turn the turn's plugin tokens too
+   * (tools/harness.ts). workspace_read redacts them from text, as the event log
+   * is redacted of them (sessions/sdkEvents.ts `scrubForLog`).
+   */
+  secrets?: (() => Promise<readonly string[]>) | undefined
   /** The tabs the browser_* tools drive (bridge/hub.ts, #254); without it they answer "no browser attached". */
   browser?: BrowserTabs | undefined
   /**
@@ -93,10 +108,53 @@ export type ToolServices = {
   touched?: TouchedSink | undefined
   /** Tools Settings turned off (switches.ts, #1911): a call is refused before its handler runs. Every tool is on without it. */
   switchedOff?: SwitchedOff | undefined
+  /**
+   * Settings → Plugins' overrides of these tools (#1953, plugins/builtInTools.ts):
+   * a raised tier or a disabled tool, read at each call. Every tool runs at its
+   * own tier without it.
+   */
+  toolOverrides?: ToolOverrides | undefined
 }
+
+/** One tool's override: a tier at or above its own, and whether it is disabled. */
+export type ToolOverride = { tier?: Risk; disabled: boolean }
+
+export type ToolOverrides = {
+  of(tool: string): Promise<ToolOverride>
+  /** Every disabled tool's name, for a tool list (/mcp). */
+  disabled(): Promise<ReadonlySet<string>>
+}
+
+/** What a tool runs at now: its tier raised by any override, whether that gates it, and whether it is disabled. */
+export type EffectiveTool = { risk: Risk; gated: boolean; disabled: boolean }
+
+/**
+ * A tool's tier and gate with Settings' override applied (#1953). An override
+ * only raises, so a tool raised to `outward` is gated like any outward tool
+ * (`approval: 'none'` tools are outward already, so this never gates them).
+ */
+export async function effectiveTool(tool: Tool, services: Pick<ToolServices, 'toolOverrides'>): Promise<EffectiveTool> {
+  const override = await services.toolOverrides?.of(tool.name)
+  const risk = raiseTier(tool.risk, override?.tier)
+  return { risk, gated: tool.gated || (risk === 'outward' && tool.risk !== 'outward'), disabled: override?.disabled === true }
+}
+
+/** A flow run's own images (#2477, temporal/flowBlobs.ts): what a `flow_image` reference names. */
+export type FlowImages = { get(name: string): Promise<StoredBlob | undefined> }
+
+/** A flow run's step that sends a session's turn (#2481; agent-durable models.py `FlowTurn`). */
+export type FlowTurn = { run_id: string; call_id: string }
 
 export type ToolContext = ToolServices & {
   principal: Principal
+  /** In a flow run's call only: that run's images, by name. */
+  flowImages?: FlowImages | undefined
+  /**
+   * In a flow run's call only (#2481): the run and the call, from the activity's own
+   * context (`flow-<run>`, `tool-<call id>`), never from its input. A turn the call
+   * sends (sessions_start, sessions_send) carries it, so the run's grant may cover it.
+   */
+  flowTurn?: FlowTurn | undefined
   /** The assistant session a harness call runs in (#252: its commits name it; authorship.ts). */
   session?: string | undefined
   /** The harness call's tool_use id, when Claude Code sent one (`_meta`, projections.ts). */
@@ -119,6 +177,19 @@ export type ToolContext = ToolServices & {
    * (`needs_approval`, spec 2026-10-01 §6.4) has passed. Not prepared again either.
    */
   gate?: 'harness' | 'workflow'
+  /**
+   * Under `harness`: the tier the turn's permission seam applied to this tool.
+   * The seam reads Settings → Plugins once per turn (sessions/manager.ts), so a
+   * tool raised to `outward` since then was not parked, and is refused here
+   * rather than run unasked (#2100).
+   */
+  seamTier?: Risk
+  /**
+   * The tier and Settings state the caller already resolved for this call and checked
+   * it against (toolActivities.ts, #2088). Used as given, never read again, so the
+   * check and the run cannot see two different overrides.
+   */
+  effective?: EffectiveTool
   /**
    * What the handler itself knows about how the call went, for the audit row
    * (`ToolRun`): `confirm_action` reports the approval it ran on and the tool
@@ -434,18 +505,39 @@ async function runJudgedByResult(
   ctx: ToolContext,
   executed: () => Pick<Tool, 'name' | 'source'>,
 ): Promise<ToolRun> {
-  if (!hasTier(ctx.principal, tool.risk)) {
+  let effective: EffectiveTool
+  try {
+    effective = ctx.effective ?? (await effectiveTool(tool, ctx))
+  } catch {
+    // Fails closed: a database blip never runs a tool Settings disabled.
+    return refused(`${tool.name} is refused: its Settings → Plugins entry cannot be read`)
+  }
+  if (effective.disabled) {
+    return refused(`${tool.name} is disabled in Settings → Plugins; the user can turn it back on there`)
+  }
+  if (!hasTier(ctx.principal, effective.risk)) {
     return refused(
-      `${tool.name} needs the "${tool.risk}" tier; this caller has ${ctx.principal.tiers.join(', ') || 'none'}`,
+      `${tool.name} needs the "${effective.risk}" tier; this caller has ${ctx.principal.tiers.join(', ') || 'none'}`,
     )
   }
   const off = await ctx.switchedOff?.(tool.name)
   if (off) return refused(off)
+  if (ctx.gate === 'harness' && effective.risk === 'outward' && ctx.seamTier !== undefined && ctx.seamTier !== 'outward') {
+    return refused(
+      `${tool.name} was raised to "outward" during this turn, so it needs a human approval this turn did not ask for; ` +
+        'nothing was sent. It asks for one from the next turn.',
+    )
+  }
   try {
-    if (tool.gated && ctx.gate === undefined) {
+    if (effective.gated && ctx.gate === undefined) {
       // The prepare half of spec §8.2's prepare/confirm: record, do not act.
       const input = tool.parse(args)
-      const action = await ctx.pending.prepare(ctx.principal, { tool: tool.name, input, summary: tool.summarize(args) })
+      const action = await ctx.pending.prepare(ctx.principal, {
+        tool: tool.name,
+        input,
+        summary: tool.summarize(args),
+        workspace: workspaceOf(ctx),
+      })
       return {
         result: json({
           status: 'pending_approval',
@@ -501,32 +593,56 @@ async function runJudgedByResult(
 
 const TIMED_OUT = Symbol('timed out')
 
+/** How long a stopped call's handler has to answer before the Stop is answered for it (#2099). */
+const STOP_GRACE_MS = 1_000
+
 /**
  * `run`'s result, or `TIMED_OUT` once `ms` passes, when the signal it was given
- * is aborted. The deadline answers whether or not the handler heeds that
- * signal; one that does not is left to finish unobserved.
+ * is aborted, or an `AbortError` shortly after `outer` is (a user Stop). Both
+ * answer whether or not the handler heeds that signal; one that does not is
+ * left to finish unobserved.
  */
 async function withDeadline<T>(
   ms: number,
   outer: AbortSignal,
   run: (signal: AbortSignal) => Promise<T>,
 ): Promise<T | typeof TIMED_OUT> {
-  if (!Number.isFinite(ms)) return run(outer)
   const timer = new AbortController()
   let handle: ReturnType<typeof setTimeout> | undefined
-  const expired = new Promise<typeof TIMED_OUT>((resolve) => {
-    handle = setTimeout(() => {
-      // Settled before the abort, so the handler's own AbortError cannot win the race.
-      resolve(TIMED_OUT)
-      timer.abort()
-    }, ms)
-  })
+  const racers: Promise<T | typeof TIMED_OUT>[] = []
+  if (Number.isFinite(ms)) {
+    racers.push(
+      new Promise<typeof TIMED_OUT>((resolve) => {
+        handle = setTimeout(() => {
+          // Settled before the abort, so the handler's own AbortError cannot win the race.
+          resolve(TIMED_OUT)
+          timer.abort()
+        }, ms)
+      }),
+    )
+  }
+  // A Stop is answered for the handler only once it has had STOP_GRACE_MS to answer
+  // itself: one that heeds the signal can say what it had already done (a submitted
+  // render's job id), and that is worth more to the model than a bare cancel.
+  let grace: ReturnType<typeof setTimeout> | undefined
+  let stop = () => {}
+  racers.push(
+    new Promise<never>((_, reject) => {
+      stop = () => {
+        grace = setTimeout(() => reject(new DOMException('the call was cancelled', 'AbortError')), STOP_GRACE_MS)
+      }
+      if (outer.aborted) stop()
+      else outer.addEventListener('abort', stop, { once: true })
+    }),
+  )
   const running = run(AbortSignal.any([outer, timer.signal]))
   running.catch(() => {})
   try {
-    return await Promise.race([running, expired])
+    return await Promise.race([running, ...racers])
   } finally {
     clearTimeout(handle)
+    clearTimeout(grace)
+    outer.removeEventListener('abort', stop)
   }
 }
 

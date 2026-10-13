@@ -6,7 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from contextlib import AbstractAsyncContextManager
 from datetime import timedelta
 from typing import Any
@@ -14,6 +14,7 @@ from typing import Any
 import psycopg
 from temporalio import activity
 from temporalio.client import Client, WorkflowHandle, WorkflowUpdateFailedError
+from temporalio.common import RawValue
 from temporalio.exceptions import ApplicationError
 from temporalio.worker import Worker
 
@@ -101,12 +102,31 @@ async def settled(connect: Connect, sid: str, timeout: float = 60.0) -> str:
 class StandInTools:
     """agent-tools as the agent service serves it, played here: each call is recorded,
     an outward call runs only with its approval row (Ruling 10), an answer tool returns
-    its recorded response, and describe_call answers a fixed summary and hash."""
+    its recorded response, and describe_call answers a fixed summary and hash.
+    render_preview applies Settings → Plugins as toolActivities.ts does (#2088): disabled,
+    it is refused naming Settings; raised to outward, it runs only with its approval."""
 
     def __init__(self, connect: Connect) -> None:
         self._connect = connect
         self.ran: list[tuple[str, dict[str, Any]]] = []
         self.describe_refuses = False
+        # turn_tools' answer (agent temporal/turnTools.ts, #2320): none unless a test offers one.
+        self.turn_offered: list[dict[str, Any]] = []
+        self.turn_packages: list[dict[str, Any]] = []
+        # memory_recall's block (agent temporal/memoryActivities.ts, #2320), and each
+        # memory activity's (name, turn); memory_fails makes both fail.
+        self.memory_context: str | None = None
+        self.memory: list[tuple[str, str]] = []
+        self.memory_fails = False
+        self.tier_refuses = False
+        self.turn_tools_fails = False
+        # #2581: the replica queue turn_tools pins every offered tool to (the agent's
+        # hostQueue, set when its plugin clients are kept), and the queues turn_tools and
+        # turn_tools_close, and each turn tool's call, ran on.
+        self.host_queue: str | None = None
+        self.listed_on: list[str] = []
+        self.closed_on: list[str] = []
+        self.called_on: list[str] = []
 
     async def _response(self, tool: str) -> tuple[str, Any] | None:
         info = activity.info()
@@ -120,9 +140,30 @@ class StandInTools:
             row = await cur.fetchone()
         return None if row is None else (str(row[0]), row[1])
 
+    async def _overrides(self) -> tuple[dict[str, str], list[str]]:
+        async with self._connect() as conn:
+            cur = await conn.execute(
+                "SELECT value FROM ai_settings WHERE key = %s", (tools.OVERRIDES_SETTING,)
+            )
+            row = await cur.fetchone()
+        value = None if row is None else (json.loads(row[0]) if isinstance(row[0], str) else row[0])
+        return tools.sanitise_overrides(MANIFEST, value)
+
     def activities(self) -> list[Callable[..., Any]]:
         @activity.defn(name="render_preview")
         async def render_preview(args: dict[str, Any]) -> str:
+            tiers, disabled = await self._overrides()
+            if "render_preview" in disabled:
+                raise ApplicationError(
+                    "render_preview is disabled in Settings → Plugins; the user can turn it"
+                    " back on there",
+                    type="ToolError",
+                    non_retryable=True,
+                )
+            if tiers.get("render_preview") == "outward":
+                recorded = await self._response("render_preview")
+                if recorded is None or recorded[0] != "approved":
+                    raise ApplicationError("no approval", type="NotApproved", non_retryable=True)
             self.ran.append(("render_preview", args))
             return "rendered"
 
@@ -155,7 +196,73 @@ class StandInTools:
                 raise ApplicationError("no such session", type="UnknownSession", non_retryable=True)
             return {"summary": f"{args['tool']} call", "input_hash": "a" * 64}
 
-        return [render_preview, print_output, ask_user, wait_for_user, describe_call]
+        @activity.defn(name="turn_tools")
+        async def turn_tools() -> dict[str, Any]:
+            if self.turn_tools_fails:
+                raise ApplicationError("the agent is away", non_retryable=True)
+            self.listed_on.append(activity.info().task_queue)
+            pin = {"task_queue": self.host_queue} if self.host_queue else {}
+            return {
+                "tools": [{**t, **pin} for t in self.turn_offered],
+                "packages": self.turn_packages,
+            }
+
+        @activity.defn(name="turn_tools_close")
+        async def turn_tools_close() -> None:
+            self.closed_on.append(activity.info().task_queue)
+
+        # As httpRequest.ts httpTierOf tiers http_request: no method, a GET or a HEAD is
+        # read, anything else outward.
+        def tier(args: dict[str, Any]) -> str:
+            return "read" if args.get("method", "GET") in ("GET", "HEAD") else "outward"
+
+        @activity.defn(name="turn_tool_tier")
+        async def turn_tool_tier(args: dict[str, Any]) -> dict[str, str]:
+            if self.tier_refuses:
+                raise ApplicationError(
+                    "the plugin did not answer", type="ToolError", non_retryable=True
+                )
+            return {"tier": tier(args["input"])}
+
+        @activity.defn(name="memory_recall")
+        async def memory_recall(args: dict[str, Any]) -> dict[str, str | None]:
+            self.memory.append(("memory_recall", args["turn_id"]))
+            if self.memory_fails:
+                raise ApplicationError("hindsight is down")
+            return {"context": self.memory_context}
+
+        @activity.defn(name="memory_retain")
+        async def memory_retain(args: dict[str, Any]) -> None:
+            self.memory.append(("memory_retain", args["turn_id"]))
+            if self.memory_fails:
+                raise ApplicationError("hindsight is down")
+
+        @activity.defn(dynamic=True)
+        async def turn_tool(raw: Sequence[RawValue]) -> str:
+            name = activity.info().activity_type
+            assert name.startswith("turn:"), name
+            args = activity.payload_converter().from_payload(raw[0].payload, dict)
+            if tier(args) == "outward":
+                recorded = await self._response(name)
+                if recorded is None or recorded[0] != "approved":
+                    raise ApplicationError("no approval", type="NotApproved", non_retryable=True)
+            self.ran.append((name, args))
+            self.called_on.append(activity.info().task_queue)
+            return f"{name} did {args.get('method')}"
+
+        return [
+            render_preview,
+            print_output,
+            ask_user,
+            wait_for_user,
+            describe_call,
+            turn_tools,
+            turn_tools_close,
+            turn_tool_tier,
+            turn_tool,
+            memory_recall,
+            memory_retain,
+        ]
 
 
 def tools_worker(client: Client, stand_in: StandInTools) -> Worker:
@@ -175,18 +282,30 @@ async def start_session(
 
 
 async def send(
-    handle: WorkflowHandle[Any, Any], text: str, images: list[ImageRef] | None = None
+    handle: WorkflowHandle[Any, Any],
+    text: str,
+    images: list[ImageRef] | None = None,
+    system_append: str | None = None,
 ) -> SendAnswer:
     answer: SendAnswer = await handle.execute_update(
         SEND_MESSAGE_UPDATE,
-        Message(turn_id=str(uuid.uuid4()), text=text, author=ME, images=images or []),
+        Message(
+            turn_id=str(uuid.uuid4()),
+            text=text,
+            author=ME,
+            images=images or [],
+            system_append=system_append,
+        ),
         result_type=SendAnswer,
     )
     return answer
 
 
 async def send_next(
-    handle: WorkflowHandle[Any, Any], text: str, timeout: float = 30.0
+    handle: WorkflowHandle[Any, Any],
+    text: str,
+    timeout: float = 30.0,
+    system_append: str | None = None,
 ) -> SendAnswer:
     """`send` for the turn after one `settled` saw end. `finish_turn` writes the idle
     `settled` reads, and the workflow leaves the turn only once that activity's result
@@ -195,7 +314,7 @@ async def send_next(
     deadline = asyncio.get_running_loop().time() + timeout
     while True:
         try:
-            return await send(handle, text)
+            return await send(handle, text, system_append=system_append)
         except WorkflowUpdateFailedError as err:
             busy = isinstance(err.cause, ApplicationError) and err.cause.type == "busy"
             if not busy or asyncio.get_running_loop().time() > deadline:

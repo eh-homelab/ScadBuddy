@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import { describe, expect, it } from 'vitest'
 import { SETTING_HTTP_REQUEST } from '../src/harness/httpRequest.js'
 import { originPolicy } from '../src/http/origins.js'
-import type { SettingsRepo } from '../src/routes/headlessBrowser.js'
+import type { SettingsRepo } from '../src/routes/httpRequest.js'
 import { HTTP_REQUEST_SETTING_PATH, registerHttpRequestRoutes } from '../src/routes/httpRequest.js'
 
 // /api/v1/ai/settings/http-request (#827): the switch for the assistant's

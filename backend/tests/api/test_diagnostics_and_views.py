@@ -158,10 +158,22 @@ def test_a_job_view_takes_an_explicit_camera(
 
 @pytest.mark.parametrize(
     "params",
-    [{"elevation": 91}, {"azimuth": -361}, {"zoom": 0.5}, {"zoom": 65}],
+    [
+        {"elevation": 91},
+        {"azimuth": -361},
+        {"zoom": 0.5},
+        {"zoom": 65},
+        # #2153: refused at the boundary, never reaching the rasteriser.
+        {"azimuth": "nan"},
+        {"elevation": "inf"},
+        {"zoom": "nan"},
+        {"target_x": "inf"},
+        {"target_y": "-inf"},
+        {"target_z": "nan"},
+    ],
 )
 def test_a_camera_out_of_range_is_a_422(
-    client: TestClient, model: str, paths: DataPaths, params: dict[str, float]
+    client: TestClient, model: str, paths: DataPaths, params: dict[str, float | str]
 ) -> None:
     job_id = _render(client, model)
     _real_preview(client, job_id)

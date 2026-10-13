@@ -16,15 +16,52 @@ export type RiskTier = 'read' | 'write' | 'outward'
 export interface RemotePlugin {
   name: string
   kind: 'remote_mcp'
+  built_in?: false
   url: string
   enabled: boolean
   tool_prefix: string
   auth: { header: string; last4: string } | null
   usable: boolean
+  /** Why it is never handed to the harness (a name Claude Code now reserves, #2127), or null. */
+  problem: string | null
   tool_tiers: Record<string, RiskTier>
   disabled_tools: string[]
   created_at: string
   updated_at: string
+}
+
+/** One tool of a built-in set, with the tier ScadBuddy's code gives it: the least it can be set to. */
+export interface BuiltInTool {
+  name: string
+  harness_name: string
+  risk: RiskTier
+}
+
+/**
+ * ScadBuddy's own tool sets (#1953, agent/src/plugins/builtInTools.ts `BuiltInPluginView`), listed
+ * first in `/plugins`: a tier per tool that can only be raised, and disabled tools. They are never
+ * added, removed or tested (409 with `built_in: true`); `enabled` changes only where the set has a
+ * switch (`switchable`).
+ */
+export interface BuiltInToolSet {
+  name: string
+  kind: 'built_in'
+  built_in: true
+  enabled: boolean
+  switchable: boolean
+  tool_prefix: string
+  tools: BuiltInTool[]
+  /** Raised tiers only. */
+  tool_tiers: Record<string, RiskTier>
+  disabled_tools: string[]
+}
+
+export type ListedPlugin = BuiltInToolSet | RemotePlugin
+
+export interface BuiltInToolSetPatch {
+  enabled?: boolean
+  tool_tiers?: Record<string, RiskTier>
+  disabled_tools?: string[]
 }
 
 export interface RemotePluginCreate {
@@ -134,7 +171,7 @@ export function repinMoves(pkg: PluginPackage): boolean {
 
 /**
  * A plugin that ships with the agent (agent `plugins/packages/builtins.ts`): ScadBuddy's
- * own and the headless browser's. Listed first; it can be enabled or disabled, never
+ * own. Listed first; it can be enabled or disabled, never
  * removed, approved or re-pinned.
  */
 export interface BuiltInPluginPackage {
@@ -170,6 +207,8 @@ export interface PackageFileContent {
   binary: boolean
   media_type: string
   truncated: boolean
+  /** Too large to send whole (#2151): only the preview, so no "Show all". */
+  too_large: boolean
   content: string | null
 }
 
@@ -223,7 +262,9 @@ const seg = encodeURIComponent
 const json = (method: string, body: unknown): RequestInit => ({ method, body: JSON.stringify(body) })
 
 export const aiPlugins = {
-  listRemote: () => request<RemotePlugin[]>('/plugins'),
+  listPlugins: () => request<ListedPlugin[]>('/plugins'),
+  updateBuiltIn: (name: string, body: BuiltInToolSetPatch) =>
+    request<BuiltInToolSet>(`/plugins/${seg(name)}`, json('PATCH', body)),
   createRemote: (body: RemotePluginCreate) => request<RemotePlugin>('/plugins', json('POST', body)),
   updateRemote: (name: string, body: RemotePluginPatch) =>
     request<RemotePlugin>(`/plugins/${seg(name)}`, json('PATCH', body)),

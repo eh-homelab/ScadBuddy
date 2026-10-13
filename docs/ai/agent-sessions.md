@@ -18,7 +18,7 @@ so the dot is an underscore.
 
 | Tool | Tier | What it does |
 |---|---|---|
-| `sessions_list` | `read` | Sessions the caller may see, newest first, those offered to it flagged `offered_to_you`; filter by `status`, `origin`, and `resource` (the sessions that touched it, §4.1) |
+| `sessions_list` | `read` | Sessions the caller may see, newest first, those offered to it flagged `offered_to_you`; filter by `status`, `origin`, and `resource` (the sessions that touched it, §4.1). Archived sessions are left out unless `archived` is `only` or `include`; each row has `archived` (#1885) |
 | `sessions_start` | `write` | A new session owned by the caller, with an optional first `prompt`, `title`, `tags` and `scope` (`model`, `output`, `job`) |
 | `sessions_send` | `write` | A user turn in a session the caller owns, with optional `images` by reference (below); refused while a turn runs |
 | `sessions_get` | `read` | Status, owner, pending approvals, and the transcript after `after_seq` (streamed text joined per message), paged by `next_seq` |
@@ -44,7 +44,8 @@ answer once the turn has started; otherwise they wait for it, reporting progress
 `{ kind: 'asset', slug, asset_id }` and `{ kind: 'print_thumbnail', archive_id, plate? }`.
 It never takes inline image data. The agent fetches each one from the backend before it
 starts the turn and checks it as it checks the panel's images (`sessions/images.ts`: PNG,
-JPEG, GIF or WebP by signature, 5 MiB of base64 each, 8 MiB together). The model gets the
+JPEG, GIF or WebP by signature, 3.75 MiB each, 6 MiB together, the bytes the Messages API's
+5 MiB and 8 MiB of base64 hold). The model gets the
 images before the text. A refusal names the reference and the reason, and no turn starts.
 Because the call's input holds only the references, the event log's `tool.call`, the
 `/mcp` audit row and an approval summary record no image bytes, and the request stays far
@@ -52,7 +53,8 @@ under `/mcp`'s 4 MiB body cap. A URL is not a kind: fetching one the caller chos
 outward (spec §8.2). Bring a web image in with `fetch_asset` (approved, held to the
 Settings allowlist), then send it as an `asset`. The `user.turn` preview is the backend's
 own small copy (a view drawn at 128 px, a media item's thumbnail), or the image itself
-when it is a still of at most 64 KiB, or else a one-pixel grey placeholder.
+when it is a still of at most 48 KiB, or else a one-pixel grey placeholder. The turn names
+the image and its preview, each stored with the session, never their bytes (#2479).
 
 Tier choices (spec §8.1): starting, sending, forking, interrupting and handing off
 (offering, accepting, withdrawing or declining) change only ScadBuddy's own session state, so they are `write`. Deciding an approval is
@@ -77,7 +79,8 @@ request), and the manager's rules apply unchanged (spec §6):
   approvals. An offer is made whether or not `to` names a live token, so the answer
   never tells a caller which token ids are live; one nobody can accept lapses at its
   `until` (an hour), and the owner can withdraw it with `sessions_cancel_handoff`
-  (PR #715 review).
+  (PR #715 review), or the browser user with `DELETE /api/v1/ai/sessions/:id/handoff`
+  (the panel's "Cancel offer", #1284).
 - A turn a token sends runs its in-process tools with **that token's tiers**
   (`SendOptions.tiers` in `manager.ts`, `turnPrincipal()` in
   [`agent/src/tools/harness.ts`](../../agent/src/tools/harness.ts)). Without them a
@@ -116,8 +119,10 @@ spec §6 "Handoff": ownership moves "explicitly"). Now (`handoff()` in `manager.
   may read it with `sessions_get` before deciding. Reading is all an offer lets anyone
   push at another agent, and the transcript arrives in the untrusted-data envelope like
   any other.
+- **Shown** in the panel's session switcher as "Offered to …" (#1284): `sessions.snapshot`
+  carries each session's live offer, its target named as the viewer may see it.
 - **It ends** when the owner withdraws it or the target declines it
-  (`sessions_cancel_handoff`), after `HANDOFF_OFFER_TTL_MS` (one hour; an expired offer
+  (`sessions_cancel_handoff`, or `DELETE /api/v1/ai/sessions/:id/handoff` from the panel), after `HANDOFF_OFFER_TTL_MS` (one hour; an expired offer
   reads as none), or when the owner changes by any route, the browser's take-over
   included. One offer at a time: a new one replaces it.
 - **Announced** as `session.owner` on the bus (§4) when it is made, withdrawn or
@@ -311,6 +316,14 @@ Design: `docs/superpowers/specs/2026-10-09-session-switcher-design.md`.
   principal's chat is taken over first.
 - **Done ends a chat:** it takes no more messages, and Fork continues it. Done is
   refused while a turn runs, and on a durable session.
+- **Archive** (#1885, the same `PATCH` with `archived`) puts one of the user's chats
+  away: it leaves **Sessions** (the snapshot leaves it out) for the **Archived** view,
+  which reads `GET /api/v1/ai/sessions?archived=true` and offers Open and Unarchive.
+  An archived chat is read-only: a send or a handoff is refused with `archived` (409),
+  its composer is locked with an Unarchive button, and Fork still continues it.
+  Archiving is refused while a turn runs or anything waits on the user; an undismissed
+  done summary is dismissed with it. The decisions are in the switcher spec's
+  "Archive (#1885)".
 
 ## 5. Not built yet
 

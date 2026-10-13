@@ -9,6 +9,7 @@ import { AppShell } from '../AppShell'
 import type * as Images from '../../agent/chat/images'
 
 // #1866 — images pasted, dropped or attached in the assistant's composer.
+// #2479 — uploaded as bytes, shown from blob URLs, never base64.
 
 vi.mock('../../agent/chat/availability', () => ({ useAiAvailability: () => ({ available: true }) }))
 
@@ -26,14 +27,36 @@ vi.mock('../../agent/chat/images', async (importOriginal) => {
         ? Promise.reject(new Error(`${file.name} is not a PNG, JPEG, GIF or WebP image.`))
         : Promise.resolve({
             mediaType: 'image/png' as const,
-            data: btoa(file.name),
-            preview: { mediaType: 'image/jpeg' as const, data: btoa(`preview of ${file.name}`) },
+            // A `big` image is 3.5 MiB: two of them are past the 6 MiB total.
+            blob: new Blob([file.name.startsWith('big') ? new Uint8Array(3.5 * 1024 * 1024) : file.name], { type: 'image/png' }),
+            preview: { mediaType: 'image/jpeg' as const, blob: new Blob([`preview of ${file.name}`], { type: 'image/jpeg' }) },
           })
     },
   }
 })
 
 let agent: MockAgentTransport
+
+// jsdom has no blob URLs: each blob gets one of its own, and a revoke is recorded.
+const revoked: string[] = []
+// The upload is multipart (#2479): msw parses it with Node 24's undici, which asserts each
+// file part is Node's own `File`, so that is the global here (mocks/handlers.test.ts
+// `withNodeFile` says more), as it is for the browser worker and the real server.
+let NodeFile: typeof File
+beforeAll(async () => {
+  const builtin = 'node:buffer'
+  ;({ File: NodeFile } = (await import(/* @vite-ignore */ builtin)) as { File: typeof File })
+})
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
+beforeEach(() => {
+  vi.stubGlobal('File', NodeFile)
+  let n = 0
+  revoked.length = 0
+  URL.createObjectURL = vi.fn(() => `blob:thumb-${++n}`)
+  URL.revokeObjectURL = vi.fn((url: string) => void revoked.push(url))
+})
 const factory = () => {
   agent = createMockAgentTransport({ stepMs: 0 })
   return agent
@@ -86,20 +109,34 @@ describe('assistant images (#1866)', () => {
     expect(edges).toEqual([2000])
   })
 
-  it('takes a pasted image into the composer, uploads it, and sends its id with the message (#1941)', async () => {
-    const uploaded: unknown[] = []
+  it('takes a pasted image into the composer, uploads its bytes, and sends its id with the message (#1941, #2479)', async () => {
+    const uploaded: Promise<Record<string, unknown>>[] = []
     server.events.on('request:start', ({ request }) => {
       if (request.method === 'POST' && new URL(request.url).pathname === '/api/v1/ai/attachments') {
-        void request.clone().json().then((body) => uploaded.push(body))
+        uploaded.push(
+          (async () => {
+            const form = await request.clone().formData()
+            const part = async (name: string) => {
+              const file = form.get(name) as File
+              return { type: file.type, text: await file.text() }
+            }
+            return { contentType: request.headers.get('content-type'), image: await part('image'), preview: await part('preview') }
+          })(),
+        )
       }
     })
     const { view, box } = await openComposer()
     paste(box, [png()])
     const list = await screen.findByRole('list', { name: 'Images to send' })
-    expect(within(list).getByRole('img', { name: 'shot.png' })).toBeInTheDocument()
+    // The thumbnail is the preview's blob URL, never a data: URL.
+    expect((await within(list).findByRole('img', { name: 'shot.png' })).getAttribute('src')).toMatch(/^blob:/)
     server.events.removeAllListeners('request:start')
-    expect(uploaded).toEqual([
-      { mediaType: 'image/png', data: btoa('shot.png'), preview: { mediaType: 'image/jpeg', data: btoa('preview of shot.png') } },
+    expect(await Promise.all(uploaded)).toEqual([
+      {
+        contentType: expect.stringMatching(/^multipart\/form-data/),
+        image: { type: 'image/png', text: 'shot.png' },
+        preview: { type: 'image/jpeg', text: 'preview of shot.png' },
+      },
     ])
 
     await view.user.type(box, 'What is this?{Enter}')
@@ -109,14 +146,15 @@ describe('assistant images (#1866)', () => {
       images: [{ kind: 'attachment', id: expect.any(String) }],
     })
     // No image bytes in the socket's frame.
-    expect(JSON.stringify(sentMessages()[0])).not.toContain(btoa('shot.png'))
-    // Sent: the composer is empty again, and the transcript shows the preview.
+    expect(JSON.stringify(sentMessages()[0])).not.toContain('shot.png')
+    // Sent: the composer is empty again, its thumbnail's URL let go, and the transcript
+    // shows the preview the turn names, from the agent's store.
     expect(queued()).not.toBeInTheDocument()
+    expect(revoked).toEqual(['blob:thumb-1'])
     const sent = await screen.findByRole('list', { name: 'Images sent' })
-    expect(within(sent).getByRole('img', { name: 'Image 1 of 1' })).toHaveAttribute(
-      'src',
-      `data:image/jpeg;base64,${btoa('preview of shot.png')}`,
-    )
+    const preview = within(sent).getByRole('img', { name: 'Image 1 of 1' }).getAttribute('src') ?? ''
+    expect(preview).toMatch(/^\/api\/v1\/ai\/sessions\/[^/]+\/blobs\/[0-9a-f]{64}\.jpg$/)
+    expect(await (await fetch(new URL(preview, window.location.href))).text()).toBe('preview of shot.png')
   })
 
   it('says why an image could not be uploaded, and leaves it out (#1941)', async () => {
@@ -129,6 +167,32 @@ describe('assistant images (#1866)', () => {
     paste(box, [png()])
     expect(await screen.findByText('shot.png could not be uploaded: too many images waiting to be sent')).toBeInTheDocument()
     expect(queued()).not.toBeInTheDocument()
+  })
+
+  it('counts images still uploading against the total, so two attaches at once cannot pass it (#2119)', async () => {
+    let release = () => {}
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    let uploads = 0
+    server.use(
+      http.post('/api/v1/ai/attachments', async () => {
+        uploads += 1
+        await gate
+        return HttpResponse.json({ id: crypto.randomUUID() })
+      }),
+    )
+    const { box } = await openComposer()
+    paste(box, [png('big-1.png')])
+    await waitFor(() => expect(uploads).toBe(1))
+    // The first is still uploading: the second, which would pass the total
+    // on attached images alone, is refused.
+    paste(box, [png('big-2.png')])
+    expect(
+      await screen.findByText("big-2.png was not added: this message's images would be too large together."),
+    ).toBeInTheDocument()
+    release()
+    const list = await screen.findByRole('list', { name: 'Images to send' })
+    expect((await within(list).findAllByRole('img')).map((i) => i.getAttribute('alt'))).toEqual(['big-1.png'])
+    expect(uploads).toBe(1)
   })
 
   it('deletes the upload of an image removed before sending (#1941)', async () => {
@@ -188,7 +252,7 @@ describe('assistant images (#1866)', () => {
 
     paste(box, ['1', '2', '3', '4', '5'].map((n) => png(`${n}.png`)))
     expect(await screen.findByText('At most 4 images per message: 5.png was not added.')).toBeInTheDocument()
-    expect(within(queued()!).getAllByRole('img')).toHaveLength(4)
+    expect(await within(queued()!).findAllByRole('img')).toHaveLength(4)
   })
 
   it('asks for words to go with images, and sends nothing without them', async () => {

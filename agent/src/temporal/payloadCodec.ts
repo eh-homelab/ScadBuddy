@@ -1,5 +1,7 @@
 import type { Payload, PayloadCodec, SerializationContext } from '@temporalio/common'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 import type { Sql } from 'postgres'
 import { KEK_BYTES, type Kek, openBytes, type RandomSource, SealError, sealBytes } from '../secrets.js'
 
@@ -20,10 +22,26 @@ import { KEK_BYTES, type Kek, openBytes, type RandomSource, SealError, sealBytes
 // (`{"d": <data b64>, "m": {<key>: <value b64>}}`, keys sorted, no spaces), sealed
 // (secrets.ts format) under the subject's key in the context `payload:<subject>`. The
 // key is 32 random bytes sealed under the KEK in the context `dek:ai_payload_keys:<subject>`.
+//
+// A session's large payloads never enter history (#2243). agent-durable gives its
+// Temporal client External Storage (payload_store.py): a sealed session payload of
+// OFFLOAD_BYTES or more is a file on the data share, `<SCADBUDDY_PAYLOAD_DIR>/<subject>/
+// <sha256 of the sealed bytes>`, and history holds a Temporal ExternalStorageReference
+// to it (driver `scadbuddy-file`, claim `{subject, digest}`). The file is ciphertext
+// under the subject's key; forgetSubject deletes the key and then the directory. This codec reads those references (the tool calls this service
+// runs on agent-tools, the session's queries and updates it reads) and writes its own
+// large payloads the same way (a tool's result), so agent-durable's External Storage
+// reads them back. Flows' payloads stay inline: the backend's codec has no store.
 
 export const SUBJECT_ENCODING = 'binary/scadbuddy-subject'
 export const SUBJECT_METADATA = 'scadbuddy-subject'
 
+export const STORE_DRIVER = 'scadbuddy-file'
+/** Sealed bytes from which a session's payload is stored by reference (payload_store.OFFLOAD_BYTES). */
+export const OFFLOAD_BYTES = 128 * 1024
+const REFERENCE_TYPE = 'temporal.api.sdk.v1.ExternalStorageReference'
+const DIGEST = /^[0-9a-f]{64}$/
+const SESSION = /^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const SUBJECT = /^(session|flow)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
@@ -175,27 +193,123 @@ export class PgPayloadKeys implements PayloadKeys {
   }
 }
 
+/** Where a session's large sealed payloads are kept, by subject and digest. */
+export interface PayloadStore {
+  put(subject: string, digest: string, data: Uint8Array): Promise<void>
+  get(subject: string, digest: string): Promise<Uint8Array | undefined>
+}
+
+/** The data share's payload directory (payload_store.py FileStorageDriver), content-addressed. */
+export class FilePayloadStore implements PayloadStore {
+  readonly root: string
+
+  constructor(root: string) {
+    this.root = root
+  }
+
+  #path(subject: string, digest: string): string {
+    if (!SESSION.test(subject) || !DIGEST.test(digest)) throw new SealError("a stored payload's reference names no session or digest")
+    return join(this.root, subject, digest)
+  }
+
+  async put(subject: string, digest: string, data: Uint8Array): Promise<void> {
+    const path = this.#path(subject, digest)
+    if (await stat(path).then(() => true, () => false)) return // the same bytes are there already
+    await mkdir(join(this.root, subject), { recursive: true })
+    const staging = join(this.root, subject, `.${digest}.${randomUUID()}`)
+    await writeFile(staging, data)
+    await rename(staging, path)
+  }
+
+  async get(subject: string, digest: string): Promise<Uint8Array | undefined> {
+    try {
+      return new Uint8Array(await readFile(this.#path(subject, digest)))
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+      throw err
+    }
+  }
+
+  /** Removes everything stored for a subject (forgetSubject, after its key is gone). */
+  async forget(subject: string): Promise<void> {
+    if (!SESSION.test(subject)) return
+    await rm(join(this.root, subject), { recursive: true, force: true })
+  }
+}
+
+/** A Temporal reference to a stored payload, as External Storage writes it. */
+export function referencePayload(subject: string, digest: string): Payload {
+  return {
+    metadata: { encoding: encoder.encode('json/protobuf'), messageType: encoder.encode(REFERENCE_TYPE) },
+    data: encoder.encode(JSON.stringify({ claimData: { digest, subject }, driverName: STORE_DRIVER })),
+  }
+}
+
+/** The subject and digest a reference names; undefined for any other payload. */
+export function referenceOf(payload: Payload): { subject: string; digest: string } | undefined {
+  const metadata = payload.metadata ?? {}
+  if (!metadata.messageType || decoder.decode(metadata.messageType) !== REFERENCE_TYPE) return undefined
+  const ref = JSON.parse(decoder.decode(payload.data ?? new Uint8Array())) as {
+    driverName?: unknown
+    claimData?: { subject?: unknown; digest?: unknown }
+  }
+  const subject = ref.claimData?.subject
+  const digest = ref.claimData?.digest
+  if (ref.driverName !== STORE_DRIVER) throw new SealError(`a payload is stored by an unknown driver ${String(ref.driverName)}`)
+  if (typeof subject !== 'string' || !SESSION.test(subject) || typeof digest !== 'string' || !DIGEST.test(digest)) {
+    throw new SealError("a stored payload's reference names no session or digest")
+  }
+  return { subject, digest }
+}
+
 function workflowIdOf(context: SerializationContext | undefined): string | undefined {
   return context?.workflowId ?? undefined
 }
 
 export class SubjectPayloadCodec implements PayloadCodec {
   readonly #keys: PayloadKeys
+  readonly #store: PayloadStore | undefined
 
-  constructor(keys: PayloadKeys) {
+  /** With a `store`, a session's large payloads are kept there, by reference. */
+  constructor(keys: PayloadKeys, store?: PayloadStore) {
     this.#keys = keys
+    this.#store = store
   }
 
   async encode(payloads: Payload[], context?: SerializationContext): Promise<Payload[]> {
     const subject = subjectOf(workflowIdOf(context))
     if (subject === undefined) return payloads
     const key = await this.#keys.keyFor(subject, true)
-    return payloads.map((p) => (sealedSubject(p) === undefined ? sealPayload(key, subject, p) : p))
+    const store = SESSION.test(subject) ? this.#store : undefined
+    const out: Payload[] = []
+    for (const p of payloads) {
+      if (sealedSubject(p) !== undefined || referenceOf(p) !== undefined) {
+        out.push(p)
+        continue
+      }
+      const sealed = sealPayload(key, subject, p)
+      const data = sealed.data ?? new Uint8Array()
+      if (!store || data.length < OFFLOAD_BYTES) {
+        out.push(sealed)
+        continue
+      }
+      const digest = createHash('sha256').update(data).digest('hex')
+      await store.put(subject, digest, data)
+      out.push(referencePayload(subject, digest))
+    }
+    return out
   }
 
   async decode(payloads: Payload[]): Promise<Payload[]> {
     const out: Payload[] = []
-    for (const p of payloads) {
+    for (let p of payloads) {
+      const ref = referenceOf(p)
+      if (ref) {
+        if (!this.#store) throw new SealError(`a payload of ${ref.subject} is stored by reference, and no store is set`)
+        const data = await this.#store.get(ref.subject, ref.digest)
+        if (!data) throw new SubjectForgotten(`the stored payload ${ref.digest.slice(0, 12)} of ${ref.subject} is gone: forgotten?`)
+        p = { metadata: { encoding: encoder.encode(SUBJECT_ENCODING), [SUBJECT_METADATA]: encoder.encode(ref.subject) }, data }
+      }
       const subject = sealedSubject(p)
       if (subject === undefined) {
         out.push(p)

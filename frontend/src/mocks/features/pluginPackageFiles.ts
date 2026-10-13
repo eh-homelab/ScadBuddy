@@ -11,6 +11,7 @@ import type { PackageFile, PackageFileContent } from '../../api/aiPlugins'
 
 const base = '/api/v1/ai/plugin-packages'
 export const PREVIEW_CHARS = 64 * 1024
+export const FULL_MAX_BYTES = 1024 * 1024
 export const LONG_CHANGELOG = Array.from({ length: 4000 }, (_, i) => `- change ${i + 1}: tidy up`).join('\n') + '\n'
 
 export const GREETER_SKILL = [
@@ -85,13 +86,15 @@ export const handlers = [
     const body = filesOf(String(params.name), query.get('pending') === 'true')?.[path]
     if (body === undefined) return HttpResponse.json({ detail: `no file "${path}"` }, { status: 404 })
     const binary = typeof body !== 'string'
-    const truncated = !binary && query.get('full') !== 'true' && body.length > PREVIEW_CHARS
+    const tooLarge = !binary && sizeOf(body) > FULL_MAX_BYTES
+    const truncated = !binary && (query.get('full') !== 'true' || tooLarge) && body.length > PREVIEW_CHARS
     const answer: PackageFileContent = {
       path,
       size: sizeOf(body),
       binary,
       media_type: mediaType(path, binary),
       truncated,
+      too_large: tooLarge,
       content: binary ? null : truncated ? body.slice(0, PREVIEW_CHARS) : body,
     }
     return HttpResponse.json(answer)

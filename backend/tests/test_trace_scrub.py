@@ -17,6 +17,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import Link, SpanKind, Status, StatusCode
+from opentelemetry.util.types import AnyValue
 from temporalio import workflow
 from temporalio.client import WorkflowFailureError
 from temporalio.exceptions import ApplicationError
@@ -312,7 +313,7 @@ def test_no_captured_header_survives() -> None:
 def test_no_event_or_link_carries_what_a_span_may_not() -> None:
     # Review 3 of #1064: the rule covers every attribute that leaves the process, not
     # only the span's own and its exception events'.
-    leaky = {
+    leaky: dict[str, AnyValue] = {
         "http.url": f"http://h/api/v1/x?q={SENTINEL}",
         "url.query": f"q={SENTINEL}",
         "http.user_agent": SENTINEL,

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { USER_ONLY } from '../agent/dom'
 import { api, ApiError, nextRackAlgorithmVersion, rackAlgorithmSave } from '../api/client'
 import type {
@@ -27,6 +27,8 @@ import {
 } from '../lib/arrange'
 import { BackfillProgress, BackfillPrompt } from './BackfillPrompt'
 import { openExternal } from '../lib/embed'
+import { plateLabel } from '../lib/plate'
+import { resolvedColors } from '../lib/plateColors'
 import { printChoicesOf } from '../lib/printChoices'
 import { resolveOptions } from '../lib/printOptions'
 import {
@@ -40,6 +42,7 @@ import {
 import { useAsync } from '../lib/useAsync'
 import { CarryBox, useFilamentPlan } from '../lib/useFilamentPlan'
 import { usePrintCheck } from '../lib/usePrintCheck'
+import { usePreviewSlice } from '../lib/usePreviewSlice'
 import { usePrintChoices } from '../lib/usePrintChoices'
 import { usePrintProgress } from '../lib/usePrintProgress'
 import { useRunPrint } from '../lib/useRunPrint'
@@ -47,8 +50,14 @@ import { FilamentPicker } from './FilamentPicker'
 import { AdvancedSwitch } from './print/AdvancedSwitch'
 import { AnalyzerPanel } from './print/AnalyzerPanel'
 import { CopiesField } from './print/CopiesField'
+import { FlowChoice } from './print/FlowChoice'
+import { NozzlePlanLine, NozzlePlanStep } from './print/NozzlePlan'
 import { NozzleStep } from './print/NozzleStep'
+import { PreviewPane } from './print/PreviewPane'
+import { TrayQuestion } from './print/TrayQuestion'
+import { useDeclinedTrays } from '../lib/trays'
 import { PrintVerdict } from './print/PrintVerdict'
+import { PlatePreviewDialog } from './print/PlatePreviewDialog'
 import { PlatesToPrint } from './print/PlatesToPrint'
 import { PlateStep } from './print/PlateStep'
 import { PresetOverrides } from './print/PresetOverrides'
@@ -58,7 +67,7 @@ import { QualityStep } from './print/QualityStep'
 import { QueuedPanel } from './print/QueuedPanel'
 import { RackNozzleLine, RackNozzleStep } from './print/RackNozzle'
 import { PrintOptionsDisclosure } from './PrintOptionsDisclosure'
-import { type ProjectList, useProjectList } from '../lib/projects'
+import { breadcrumbs, type ProjectList, useProjectList } from '../lib/projects'
 import { ProjectPicker } from './ProjectPicker'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
@@ -86,7 +95,8 @@ import { bambuddyBase, bambuddyLink, webUrls } from '../lib/bambuddyLinks'
  *   Checks. The nozzles, quality, plate type, print options, project and copies are
  *   Advanced steps, and Simple sends what they open on: the size and tier this model
  *   last printed with (else 0.4 mm, Standard), the plate type the choices read chose, the
- *   remembered copies and the page's project, else the last one printed to. Advanced also adds the full process list,
+ *   remembered copies and the page's project, else the last one printed to; that project is
+ *   named in a "Filed under" line (#1660). Advanced also adds the full process list,
  *   per-side flow and a per-slot filament preset override.
  *
  * Around that it keeps what the send bar's print already had: the options disclosure
@@ -207,7 +217,7 @@ export function PrintPicker({
   const { choices, choicesRead, loading, loadError, printers, printerId, printer, selection, size } =
     picker
   const { nozzles, tier, processName, bedType, overrides, plate } = selection
-  const { filaments, plan, setPlan, planChanged, filamentError } = useFilamentPlan(
+  const { filaments, plan, setPlan, planChanged, filamentError, planReady, retryFilaments } = useFilamentPlan(
     source,
     choices,
     plate,
@@ -217,6 +227,12 @@ export function PrintPicker({
   // null until the user sets it, so a remembered quantity is not overridden by the
   // box's own starting value (#124).
   const [copies, setCopies] = useState<number | null>(null)
+  /** #1723 — the plate in 3D, over this dialog; every choice here stays as it is. */
+  const [previewOpen, setPreviewOpen] = useState(false)
+  const previewColors = useMemo(
+    () => resolvedColors(filaments?.slots ?? [], filaments?.spools ?? [], plan),
+    [filaments, plan],
+  )
   /** #145 — the remembered options, so the box can say what an unset Copies queues. */
   const [remembered, setRemembered] = useState<PrintOptionsState | null>(null)
   /** #88 — this print's overrides, all but `quantity`, which is `copies`. */
@@ -336,6 +352,25 @@ export function PrintPicker({
   // A page project without a shared list is read by its own picker, out of sight here.
   const projectKnown = project ? project.list?.choices !== null : ownProjects.choices !== null
   const projectId = pickedProject === null && !projectKnown ? undefined : pickedProject
+
+  /**
+   * #1660 — the project the print is filed under, named, for Simple mode: its picker is an
+   * Advanced step, so a project carried over from earlier would otherwise go unseen. None
+   * while the list is unread, when the server chooses (`projectId` undefined).
+   */
+  const shownProjects = (project ? project.list : ownProjects)?.choices?.projects
+  const projectPaths = useMemo(() => breadcrumbs(shownProjects ?? []), [shownProjects])
+  const filedUnderLabel =
+    projectId === undefined ? null : projectId === null ? 'No project' : (projectPaths.get(projectId) ?? `project ${projectId}`)
+  /** "(change)" opens Advanced, then puts the focus on the project step it shows. */
+  const focusProject = useRef(false)
+  useEffect(() => {
+    if (!picker.advanced || !focusProject.current) return
+    focusProject.current = false
+    const select = document.getElementById('print-project')
+    select?.scrollIntoView?.({ block: 'nearest' })
+    select?.focus()
+  }, [picker.advanced])
 
   /**
    * #710 review — a "Create project" in this dialog's own picker, tracked here (not just
@@ -539,6 +574,31 @@ export function PrintPicker({
         }
       : null
   const check = usePrintCheck(source, checkRequest)
+  /**
+   * #2169 — the choices on screen, sliced in the background once the check finds nothing
+   * the run would refuse. A run of the same choices queues that slice.
+   */
+  const sliceable = check.current && check.verdict !== null && (check.verdict.errors ?? []).length === 0
+  /**
+   * #2169 — the plate the docked pane shows: the one chosen to print, or one clicked to
+   * look at. "All plates" shows plate 1 until another is clicked.
+   */
+  const [clickedPlate, setClickedPlate] = useState<number | null>(null)
+  const previewPlate = clickedPlate ?? (plate === 'all' ? 1 : plate)
+  useEffect(() => {
+    setClickedPlate(null)
+  }, [plate, currentKey])
+  const multiPlate = picker.plates.length > 1
+  const previewLabel = plateLabel(picker.plates, previewPlate)
+  // The plate the pane shows, sliced on its own: the run's own slice of it when it is
+  // the plate chosen to print.
+  const previewRequest =
+    checkRequest && (allPlates || previewPlate !== plate)
+      ? { ...checkRequest, plate_id: previewPlate, all_plates: false }
+      : checkRequest
+  const previewSlice = usePreviewSlice(source, sliceable ? previewRequest : null)
+  /** #2164 — filled trays Bambuddy has no spool for, and the ones answered "no". */
+  const trays = useDeclinedTrays(printerId, filaments?.trays ?? [])
   // #836 — a hand pick the current check no longer offers (no rack this time, or the
   // position gone from its options) would be sent unseen, so it goes back to Automatic.
   // Only a current verdict decides: one still on its way keeps the pick.
@@ -598,6 +658,7 @@ export function PrintPicker({
             : 'Choose the spools. ScadBuddy picks the Bambu presets, then Bambuddy slices and queues it.'
       }
       onClose={close}
+      size={(choices || source) && !result && unanswered === null ? 'split' : 'md'}
       footer={
         result ? (
           <>
@@ -632,7 +693,14 @@ export function PrintPicker({
               // Held while the dialog's own project list loads, so a Simple-mode print
               // cannot go out before the last project has seeded it.
               disabled={
-                running || loading || !choices || refused || runRefuses || ownProjects.loading || projectCreating
+                running ||
+                loading ||
+                !choices ||
+                !planReady ||
+                refused ||
+                runRefuses ||
+                ownProjects.loading ||
+                projectCreating
               }
               data-testid="run-print"
               {...USER_ONLY}
@@ -683,118 +751,156 @@ export function PrintPicker({
             </div>
           )}
 
-          {choices && (
-            <div className="space-y-3">
-              <AdvancedSwitch
-                value={picker.advanced}
-                onToggle={picker.toggleAdvanced}
-                disabled={projectCreating}
-              />
-              {printers.length > 1 && (
-                <div>
-                  <label htmlFor="print-printer" className="block text-[13px]">
-                    Printer
-                  </label>
-                  <select
-                    id="print-printer"
-                    value={printerId === null ? '' : String(printerId)}
-                    onChange={(event) =>
-                      picker.askPrinter(
-                        event.target.value === '' ? null : Number(event.target.value),
-                      )
-                    }
-                    className="sb-field mt-1.5 cursor-pointer"
-                  >
-                    {printerId === null && <option value="">Choose a printer</option>}
-                    {printers.map((entry) => (
-                      <option key={entry.id} value={entry.id}>
-                        {entry.name}
-                        {entry.model ? ` (${entry.model})` : ''}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
-
-              {filamentError && (
-                <p className="text-[12px] text-warn" data-testid="filaments-unavailable">
-                  ScadBuddy could not read the filament inventory: {filamentError}
-                </p>
-              )}
-              {filaments && (
-                <FilamentPicker
-                  options={filaments}
-                  plan={plan}
-                  onChange={setPlan}
-                  copies={effectiveCopies}
-                />
-              )}
-              {target && known && (
-                <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2">
-                  <legend className="px-1 text-[13px] text-ink">Arrange</legend>
-                  {stale && <p className="mb-1.5 text-[12px] text-muted">{backfillNote([target])}</p>}
-                  <label htmlFor="arrange-for" className="text-[12px] text-muted">
-                    Arrange for
-                  </label>
-                  <select
-                    id="arrange-for"
-                    value={arrangeGoal}
-                    onChange={(event) => setArrangeGoal(event.target.value as ArrangeGoal)}
-                    className="sb-field mt-1.5"
-                  >
-                    {Object.entries(GOAL_LABELS)
-                      .filter(([value]) => value !== 'keep_together')
-                      .map(([value, text]) => (
-                        <option key={value} value={value}>
-                          {text}
-                        </option>
-                      ))}
-                  </select>
-                  <Button
-                    size="sm"
-                    className="mt-1.5"
-                    disabled={arranging || askBackfill}
-                    onClick={() => (stale ? setAskFor(target.id) : void rearrange(false))}
-                  >
-                    Re-arrange for these spools
-                  </Button>
-                  {askBackfill && (
-                    <div className="mt-1.5">
-                      <BackfillPrompt
-                        outputs={[target]}
-                        onConfirm={() => void rearrange(true)}
-                        onCancel={() => setAskFor(null)}
-                      />
+          {/* #2550 — the plates and the preview need only the source, so a choices read
+              that is slow or failed (its error and Retry above) never hides them. Only
+              the spool, printer and print controls wait for the choices. */}
+          {(choices || source) && (
+            <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(300px,380px)]">
+            <div className="min-w-0 space-y-3">
+              {choices && (
+                <>
+                  <AdvancedSwitch
+                    value={picker.advanced}
+                    onToggle={picker.toggleAdvanced}
+                    disabled={projectCreating}
+                  />
+                  {printers.length > 1 && (
+                    <div>
+                      <label htmlFor="print-printer" className="block text-[13px]">
+                        Printer
+                      </label>
+                      <select
+                        id="print-printer"
+                        value={printerId === null ? '' : String(printerId)}
+                        onChange={(event) =>
+                          picker.askPrinter(
+                            event.target.value === '' ? null : Number(event.target.value),
+                          )
+                        }
+                        className="sb-field mt-1.5 cursor-pointer"
+                      >
+                        {printerId === null && <option value="">Choose a printer</option>}
+                        {printers.map((entry) => (
+                          <option key={entry.id} value={entry.id}>
+                            {entry.name}
+                            {entry.model ? ` (${entry.model})` : ''}
+                          </option>
+                        ))}
+                      </select>
                     </div>
                   )}
-                  <BackfillProgress outputs={[target]} progress={backfillProgress} />
-                  {arrangeNote && (
-                    <p aria-live="polite" className="mt-1.5 text-[12px] text-muted">
-                      {arrangeNote}
-                    </p>
-                  )}
-                  {arrangeError && (
-                    <p role="alert" className="mt-1.5 text-[13px] text-warn">
-                      {arrangeError}
-                    </p>
-                  )}
-                </fieldset>
-              )}
 
-              {picker.advanced && filaments && (filaments.slots ?? []).length > 0 && (
-                <PresetOverrides
-                  size={size}
-                  slots={filaments.slots ?? []}
-                  presets={choices.filament_presets?.[size] ?? []}
-                  overrides={overrides}
-                  onChange={picker.setOverride}
-                />
+                  {filamentError && (
+                    <div className="flex items-center gap-3" data-testid="filaments-unavailable">
+                      <p className="text-[12px] text-warn">
+                        ScadBuddy could not read the filament inventory: {filamentError} Print is unavailable
+                        until it loads.
+                      </p>
+                      <Button size="sm" onClick={retryFilaments}>
+                        Retry
+                      </Button>
+                    </div>
+                  )}
+                  {!picker.advanced && (
+                    <FlowChoice value={nozzles[0]?.flow ?? 'standard'} onChange={picker.changeFlow} />
+                  )}
+                  {printerId !== null &&
+                    trays.open.map((tray) => (
+                      <TrayQuestion
+                        key={`${tray.ams_id}:${tray.tray_id}`}
+                        printerId={printerId}
+                        tray={tray}
+                        spools={filaments?.spools ?? []}
+                        onAssigned={picker.reload}
+                        onDecline={() => trays.decline(tray)}
+                      />
+                    ))}
+                  {filaments && (
+                    <FilamentPicker
+                      options={filaments}
+                      plan={plan}
+                      onChange={setPlan}
+                      copies={effectiveCopies}
+                      offeredTrays={trays.offered}
+                    />
+                  )}
+                  <NozzlePlanLine plan={check.verdict?.nozzle_plan} stale={!check.current} />
+                  {target && known && (
+                    <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2">
+                      <legend className="px-1 text-[13px] text-ink">Arrange</legend>
+                      {stale && <p className="mb-1.5 text-[12px] text-muted">{backfillNote([target])}</p>}
+                      <label htmlFor="arrange-for" className="text-[12px] text-muted">
+                        Arrange for
+                      </label>
+                      <select
+                        id="arrange-for"
+                        value={arrangeGoal}
+                        onChange={(event) => setArrangeGoal(event.target.value as ArrangeGoal)}
+                        className="sb-field mt-1.5"
+                      >
+                        {Object.entries(GOAL_LABELS)
+                          .filter(([value]) => value !== 'keep_together')
+                          .map(([value, text]) => (
+                            <option key={value} value={value}>
+                              {text}
+                            </option>
+                          ))}
+                      </select>
+                      <Button
+                        size="sm"
+                        className="mt-1.5"
+                        disabled={arranging || askBackfill}
+                        onClick={() => (stale ? setAskFor(target.id) : void rearrange(false))}
+                      >
+                        Re-arrange for these spools
+                      </Button>
+                      {askBackfill && (
+                        <div className="mt-1.5">
+                          <BackfillPrompt
+                            outputs={[target]}
+                            onConfirm={() => void rearrange(true)}
+                            onCancel={() => setAskFor(null)}
+                          />
+                        </div>
+                      )}
+                      <BackfillProgress outputs={[target]} progress={backfillProgress} />
+                      {arrangeNote && (
+                        <p aria-live="polite" className="mt-1.5 text-[12px] text-muted">
+                          {arrangeNote}
+                        </p>
+                      )}
+                      {arrangeError && (
+                        <p role="alert" className="mt-1.5 text-[13px] text-warn">
+                          {arrangeError}
+                        </p>
+                      )}
+                    </fieldset>
+                  )}
+
+                  {picker.advanced && filaments && (filaments.slots ?? []).length > 0 && (
+                    <PresetOverrides
+                      size={size}
+                      slots={filaments.slots ?? []}
+                      presets={choices.filament_presets?.[size] ?? []}
+                      overrides={overrides}
+                      onChange={picker.setOverride}
+                    />
+                  )}
+                </>
               )}
 
               {/* #986 — one plate has no choice to make, but its name still says what prints. */}
               {picker.plates.length === 1 && picker.plates[0]?.name && (
                 <p className="text-[13px]" data-testid="single-plate">
-                  <span className="text-muted">Plate:</span> {picker.plates[0].name}
+                  <span className="text-muted">Plate:</span>{' '}
+                  <button
+                    type="button"
+                    onClick={() => setClickedPlate(1)}
+                    className="underline decoration-dotted underline-offset-2 hover:text-accent"
+                    title="Show it in the preview"
+                  >
+                    {picker.plates[0].name}
+                  </button>
                 </p>
               )}
 
@@ -804,92 +910,168 @@ export function PrintPicker({
                   value={plate}
                   onChange={picker.setPlate}
                   thumbnailUrl={sourceApi(source).plateThumbnailUrl}
+                  previewed={previewPlate}
+                  onPreview={setClickedPlate}
                 />
               )}
 
-              {/* #768 — Simple mode sends these steps' defaults without showing them. */}
-              {picker.advanced && (
-                <>
-                  <NozzleStep
-                    sizes={choices.nozzle_sizes ?? []}
-                    installed={choices.installed ?? []}
-                    value={nozzles}
-                    onChange={picker.changeNozzles}
-                  />
-                  {check.verdict?.rack && (
-                    <RackNozzleStep
-                      rack={check.verdict.rack}
-                      algorithm={rackAlgorithm}
-                      position={rackPosition}
-                      algorithmUnsaved={algorithmUnsaved}
-                      onAlgorithm={changeRackAlgorithm}
-                      onPosition={setRackPosition}
-                    />
-                  )}
-                  <QualityStep
-                    size={size}
-                    tiers={choices.tiers?.[size] ?? []}
-                    processes={choices.processes?.[size] ?? []}
-                    tier={tier}
-                    processName={processName}
-                    onChange={picker.changeQuality}
-                  />
-                  {bedType !== null && (
-                    <PlateStep
-                      bedTypes={
-                        (choices.bed_types ?? []).includes(bedType)
-                          ? (choices.bed_types ?? [])
-                          : [bedType, ...(choices.bed_types ?? [])]
+              {source && (
+                <div>
+                  <Button size="sm" variant="ghost" onClick={() => setPreviewOpen(true)} data-testid="plate-preview-open">
+                    Preview in 3D
+                  </Button>
+                  {/* Mounted only while open, keyed by plate: each open starts on Colors,
+                      with no cut left over from another plate. */}
+                  {previewOpen && (
+                    <PlatePreviewDialog
+                      key={plate}
+                      open
+                      onClose={() => setPreviewOpen(false)}
+                      url={sourceApi(source).previewUrl(plate === 'all' ? 1 : plate)}
+                      label={
+                        // An output's preview is the whole output; a library file's, one
+                        // plate, the first when every plate prints.
+                        source.kind === 'output' && picker.plates.length > 1
+                          ? 'Every plate'
+                          : plate === 'all' && picker.plates.length > 1
+                            ? `${plateLabel(picker.plates, 1)} (first of ${picker.plates.length} plates)`
+                            : plateLabel(picker.plates, plate === 'all' ? 1 : plate)
                       }
-                      value={bedType}
-                      lastBedType={choices.last_bed_type ?? null}
-                      printerName={printer?.name ?? null}
-                      onChange={picker.setBedType}
+                      colors={previewColors}
                     />
                   )}
-
-                  <PrintSequenceStep value={printSequence} onChange={setPrintSequence} />
-
-                  {given?.kind === 'output' && <SlicerDefaults settings={printSettings} />}
-
-                  <PrintOptionsDisclosure
-                    subject={subject}
-                    printerId={printerId}
-                    value={copies === null ? options : { ...options, quantity: copies }}
-                    onChange={({ quantity, ...rest }) => {
-                      setCopies(quantity ?? null)
-                      setOptions(rest)
-                    }}
-                  />
-
-                  {/* #79 — a send to a project uploads into that project's folder. */}
-                  {project ? (
-                    <ProjectPicker
-                      value={project.value}
-                      onChange={project.onChange}
-                      list={project.list}
-                      disabled={project.disabled || projectCreating}
-                      onCreating={reportProjectCreating}
-                    />
-                  ) : (
-                    <ProjectPicker
-                      value={ownProjectId}
-                      onChange={setOwnProjectId}
-                      list={ownProjects}
-                      disabled={projectCreating}
-                      onCreating={reportProjectCreating}
-                    />
-                  )}
-
-                  <CopiesField value={copies} remembered={rememberedCopies} onChange={setCopies} />
-                </>
+                </div>
               )}
 
-              {/* The analyzers judge what the print slices: an output's 3MF, or a library
-                  file's, read as a print of it reads it (#1753). */}
-              <AnalyzerPanel target={analysisTarget} request={analysisRequest} allPlates={allPlates}>
-                {verdict}
-              </AnalyzerPanel>
+              {choices && (
+                <>
+                  {/* #1660 — Simple hides the project step, but not where the print is filed. */}
+                  {!picker.advanced && filedUnderLabel !== null && (
+                    <p className="text-[13px] text-muted" data-testid="print-filed-under">
+                      Filed under: <span className="text-ink">{filedUnderLabel}</span>{' '}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          focusProject.current = true
+                          picker.toggleAdvanced()
+                        }}
+                        disabled={projectCreating}
+                        className="underline decoration-dotted underline-offset-2 hover:text-ink"
+                        data-testid="print-filed-under-change"
+                      >
+                        (change)
+                      </button>
+                    </p>
+                  )}
+
+                  {/* #768 — Simple mode sends these steps' defaults without showing them. */}
+                  {picker.advanced && (
+                    <>
+                      <NozzleStep
+                        sizes={choices.nozzle_sizes ?? []}
+                        installed={choices.installed ?? []}
+                        value={nozzles}
+                        onChange={picker.changeNozzles}
+                      />
+                      <NozzlePlanStep plan={check.verdict?.nozzle_plan} sides={selection.sides} onSide={picker.setSide} />
+                      {check.verdict?.rack && (
+                        <RackNozzleStep
+                          rack={check.verdict.rack}
+                          algorithm={rackAlgorithm}
+                          position={rackPosition}
+                          algorithmUnsaved={algorithmUnsaved}
+                          onAlgorithm={changeRackAlgorithm}
+                          onPosition={setRackPosition}
+                        />
+                      )}
+                      <QualityStep
+                        size={size}
+                        tiers={choices.tiers?.[size] ?? []}
+                        processes={choices.processes?.[size] ?? []}
+                        tier={tier}
+                        processName={processName}
+                        onChange={picker.changeQuality}
+                      />
+                      {bedType !== null && (
+                        <PlateStep
+                          bedTypes={
+                            (choices.bed_types ?? []).includes(bedType)
+                              ? (choices.bed_types ?? [])
+                              : [bedType, ...(choices.bed_types ?? [])]
+                          }
+                          value={bedType}
+                          lastBedType={choices.last_bed_type ?? null}
+                          printerName={printer?.name ?? null}
+                          onChange={picker.setBedType}
+                        />
+                      )}
+
+                      <PrintSequenceStep value={printSequence} onChange={setPrintSequence} />
+
+                      {given?.kind === 'output' && (
+                        <SlicerDefaults
+                          settings={printSettings}
+                          overridden={printSequence !== null ? ['print_sequence'] : []}
+                        />
+                      )}
+
+                      <PrintOptionsDisclosure
+                        subject={subject}
+                        printerId={printerId}
+                        value={copies === null ? options : { ...options, quantity: copies }}
+                        onChange={({ quantity, ...rest }) => {
+                          setCopies(quantity ?? null)
+                          setOptions(rest)
+                        }}
+                      />
+
+                      {/* #79 — a send to a project uploads into that project's folder. */}
+                      {project ? (
+                        <ProjectPicker
+                          value={project.value}
+                          onChange={project.onChange}
+                          list={project.list}
+                          disabled={project.disabled || projectCreating}
+                          onCreating={reportProjectCreating}
+                        />
+                      ) : (
+                        <ProjectPicker
+                          value={ownProjectId}
+                          onChange={setOwnProjectId}
+                          list={ownProjects}
+                          disabled={projectCreating}
+                          onCreating={reportProjectCreating}
+                        />
+                      )}
+
+                      <CopiesField value={copies} remembered={rememberedCopies} onChange={setCopies} />
+                    </>
+                  )}
+
+                  {/* The analyzers judge what the print slices: an output's 3MF, or a library
+                      file's, read as a print of it reads it (#1753). */}
+                  <AnalyzerPanel target={analysisTarget} request={analysisRequest} allPlates={allPlates}>
+                    {verdict}
+                  </AnalyzerPanel>
+                </>
+              )}
+            </div>
+            <div className="min-w-0 lg:sticky lg:top-0 lg:self-start">
+              <PreviewPane
+                key={previewPlate}
+                url={source ? sourceApi(source).previewUrl(previewPlate, multiPlate) : null}
+                thumbnailUrl={source ? sourceApi(source).plateThumbnailUrl(previewPlate) : null}
+                label={multiPlate || picker.plates[0]?.name ? previewLabel : null}
+                slots={filaments?.slots ?? []}
+                spools={filaments?.spools ?? []}
+                plan={plan}
+                colors={previewColors}
+                slice={previewSlice.result}
+                stale={previewSlice.stale}
+                slicing={previewSlice.slicing}
+                sliceError={previewSlice.error}
+              />
+            </div>
             </div>
           )}
 

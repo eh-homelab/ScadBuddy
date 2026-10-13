@@ -7,10 +7,19 @@ import type { AnalysisRequest, Output, PrintRunResult } from '../api/types'
 import { analysisReport, openEdgesDiagnostic } from '../mocks/analyzers'
 import { choicesView, queuedResult } from '../mocks/choices'
 import * as fixtures from '../mocks/fixtures'
-import { lastArrangeRequest, resetMockState } from '../mocks/handlers'
+import { MULTI_PLATE_FILE } from '../mocks/features/library'
+import { lastArrangeRequest, problem, resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
+import { normalizeHex } from '../lib/format'
 import { renderPage } from '../test/utils'
 import { PrintPicker } from './PrintPicker'
+
+// #1723 — jsdom draws no WebGL: the preview's scene shows what it was asked to draw.
+vi.mock('./print/PlateScene', () => ({
+  PlateScene: ({ url, colors }: { url: string; colors: Map<string, string> }) => (
+    <div data-testid="plate-scene" data-url={url} data-colors={JSON.stringify([...colors])} />
+  ),
+}))
 
 const output = fixtures.outputs[0] as Output
 
@@ -60,6 +69,74 @@ async function loaded() {
   await screen.findByRole('switch', { name: 'Advanced' })
   await screen.findByTestId('filament-slot-1')
 }
+
+describe('PrintPicker · a choices read that fails (#2550)', () => {
+  it('still shows the preview, the plates and Preview in 3D, with the error and Retry', async () => {
+    server.use(
+      http.get('/api/v1/print/library/:id/choices', () =>
+        problem(
+          504,
+          'Gateway Timeout',
+          'could not reach Bambuddy to read the filament requirements of library file 67: ReadTimeout',
+        ),
+      ),
+    )
+    renderPage(
+      <PrintPicker
+        open
+        source={{ kind: 'library', file: { id: MULTI_PLATE_FILE, filename: 'two-plates.3mf' } }}
+        onClose={vi.fn()}
+        onRan={vi.fn()}
+      />,
+    )
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/ReadTimeout/)
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+    const pane = await screen.findByTestId('preview-pane')
+    // jsdom draws no WebGL, so the pane shows the plate's image in place of its mesh.
+    expect(within(pane).getByRole('img', { name: 'The plate' })).toHaveAttribute(
+      'src',
+      expect.stringContaining(`/print/library/${MULTI_PLATE_FILE}/plates/1/thumbnail`),
+    )
+    expect(await screen.findByTestId('plate-choice')).toBeInTheDocument()
+    expect(screen.getByTestId('plate-preview-open')).toBeInTheDocument()
+    // The spool, printer and print controls still wait for the choices.
+    expect(screen.queryByRole('switch', { name: 'Advanced' })).toBeNull()
+    expect(screen.queryByTestId('filament-slot-1')).toBeNull()
+    expect(screen.getByTestId('run-print')).toBeDisabled()
+  })
+})
+
+describe('PrintPicker · 3D preview (#1723)', () => {
+  it('shows the plate in the chosen spools over the dialog, and keeps every choice on close', async () => {
+    renderPicker()
+    await loaded()
+    const slot = screen.getByTestId('filament-slot-1')
+    fireEvent.click(screen.getByTestId('change-slot-1'))
+    const other = within(slot)
+      .getAllByRole('radio')
+      .find((radio) => !(radio as HTMLInputElement).checked)!
+    fireEvent.click(other)
+    const chosen = (other as HTMLInputElement).value
+    // The mock's own answer: what the dialog read its slots and spools from.
+    const options = await api.getFilaments(output.id, {})
+    const design = options.slots!.find((need) => need.slot_id === 1)!.colour!
+    const picked = options.spools!.find((row) => String(row.spool_id) === chosen)!.colour!
+
+    fireEvent.click(screen.getByTestId('plate-preview-open'))
+    const preview = await screen.findByRole('dialog', { name: /in 3D$/ })
+    const scene = within(preview).getByTestId('plate-scene')
+    expect(scene).toHaveAttribute('data-url', `/api/v1/outputs/${output.id}/preview.glb`)
+    // Slot 1's design colour now draws in the spool just chosen for it.
+    const colors = new Map(JSON.parse(scene.getAttribute('data-colors')!) as [string, string][])
+    expect(colors.get(normalizeHex(design))).toBe(normalizeHex(picked))
+
+    fireEvent.click(within(preview).getByRole('button', { name: 'Close' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: /in 3D$/ })).toBeNull())
+    expect(within(screen.getByTestId('filament-slot-1')).getByTestId(`spool-${chosen}`)).toBeChecked()
+    expect(screen.getByRole('dialog', { name: 'Print' })).toBeInTheDocument()
+  })
+})
 
 /** #768 — nozzles, quality, plate type, options, project and copies are Advanced steps. */
 async function showAdvanced() {
@@ -158,6 +235,7 @@ describe('PrintPicker', () => {
     await loaded()
     await showAdvanced()
     const slot = screen.getByTestId('filament-slot-2')
+    fireEvent.click(screen.getByTestId('change-slot-2'))
     // Spool 9 feeds the right extruder (the 0.2), spool 22 the left (the 0.4).
     expect(within(slot).getByTestId('spool-9')).toBeEnabled()
     fireEvent.click(screen.getByRole('radio', { name: /0\.2 mm/i }))
@@ -288,6 +366,47 @@ describe('PrintPicker', () => {
     expect(body.choices.filament_overrides).toEqual({})
   })
 
+  it('opens on another source without the last one’s spools while its choices are read (#2186)', async () => {
+    const first = fixtures.outputs[0] as Output
+    const second = fixtures.outputs[1] as Output
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', async ({ params }) => {
+        if (params.id === second.id) await held
+        return undefined
+      }),
+    )
+    // As the Library page holds it: no source while closed, a file's once Print is pressed.
+    function Library() {
+      const [shown, setShown] = useState<Output | null>(first)
+      return (
+        <>
+          <button onClick={() => setShown(second)}>Print the second</button>
+          <PrintPicker
+            open={shown !== null}
+            source={shown ? { kind: 'output', output: shown } : undefined}
+            onClose={() => setShown(null)}
+            onRan={vi.fn()}
+          />
+        </>
+      )
+    }
+    const { user } = renderPage(<Library />)
+    await loaded()
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await user.click(screen.getByRole('button', { name: 'Print the second' }))
+
+    expect(await screen.findByText('Reading the printer and the inventory')).toBeInTheDocument()
+    expect(screen.queryByTestId('filament-slot-1')).not.toBeInTheDocument()
+    expect(screen.queryByRole('switch', { name: 'Advanced' })).not.toBeInTheDocument()
+    expect(screen.getByTestId('run-print')).toBeDisabled()
+
+    release()
+    await loaded()
+    await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
+  })
+
   it('shows the run’s warnings once the print is queued', async () => {
     vi.spyOn(api, 'runPrint').mockResolvedValue({
       ...queuedResult,
@@ -378,6 +497,7 @@ describe('PrintPicker', () => {
     const { user } = renderPicker()
     await loaded()
     const slot1 = screen.getByTestId('filament-slot-1')
+    await user.click(screen.getByTestId('change-slot-1'))
     const other = within(slot1)
       .getAllByRole('radio')
       .find((radio) => !(radio as HTMLInputElement).checked) as HTMLInputElement
@@ -403,6 +523,9 @@ describe('PrintPicker', () => {
 
   /** Slot 1's checked spool, and one that is not. */
   function slot1Radios() {
+    if (screen.getByTestId('change-slot-1').getAttribute('aria-expanded') === 'false') {
+      fireEvent.click(screen.getByTestId('change-slot-1'))
+    }
     const radios = within(screen.getByTestId('filament-slot-1')).getAllByRole('radio') as HTMLInputElement[]
     return { checked: radios.find((radio) => radio.checked)!, other: radios.find((radio) => !radio.checked)! }
   }
@@ -875,7 +998,9 @@ describe('PrintPicker · Advanced and refusals (fix round 1)', () => {
     expect(toggle).toHaveAccessibleDescription(/nozzle, process/i)
   })
 
-  it('leaving Advanced resets both flows, the process and the slot presets', async () => {
+  // #2166 — Simple shows one flow for both sides, so leaving Advanced keeps the first
+  // side's, on screen; the process and slot presets it cannot show are reset.
+  it('leaving Advanced keeps one flow, shown in Simple, and resets the process and slot presets', async () => {
     const { bodies } = watch('POST', '/run')
     const { user } = renderPicker()
     await loaded()
@@ -886,14 +1011,15 @@ describe('PrintPicker · Advanced and refusals (fix round 1)', () => {
     await user.selectOptions(screen.getByLabelText('Process'), '0.24mm Standard @BBL H2C')
     await user.selectOptions(screen.getByLabelText('Preset for slot 1'), 'cloud:GFSB00_22')
     await user.click(screen.getByRole('switch', { name: /advanced/i }))
+    expect(screen.getByTestId('flow-high_flow')).toHaveAttribute('aria-checked', 'true')
 
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await screen.findByTestId('queued-items')
     expect(bodies[0]).toMatchObject({
       choices: {
         nozzles: [
-          { size: '0.4', flow: 'standard' },
-          { size: '0.4', flow: 'standard' },
+          { size: '0.4', flow: 'high_flow' },
+          { size: '0.4', flow: 'high_flow' },
         ],
         tier: 'standard',
         process_name: null,
@@ -1428,10 +1554,30 @@ describe('PrintPicker · Print sequence (#1862)', () => {
     await user.selectOptions(screen.getByLabelText('Print sequence'), 'by object')
 
     rerender(<PrintPicker open source={LIBRARY} onClose={vi.fn()} onRan={vi.fn()} />)
-    await waitFor(() => expect(screen.getByLabelText('Print sequence')).toHaveValue(''))
+    // The file's own read opens it as a fresh open does, in Simple (#2186).
+    await loaded()
+    await showAdvanced()
+    expect(screen.getByLabelText('Print sequence')).toHaveValue('')
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).not.toHaveProperty('print_sequence')
+  })
+
+  it('clears a refused run when the sequence changes (#2136)', async () => {
+    const refusal = 'By object is refused: the plate has a part taller than the gantry clearance.'
+    vi.spyOn(api, 'runPrint').mockRejectedValueOnce(new ApiError(422, refusal))
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+
+    await user.selectOptions(screen.getByLabelText('Print sequence'), 'by object')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    expect(await screen.findByText(refusal)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Print$/ })).toBeDisabled()
+
+    await user.selectOptions(screen.getByLabelText('Print sequence'), 'by layer')
+    expect(screen.queryByText(refusal)).toBeNull()
+    expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled()
   })
 
   it('is not remembered: a reopened dialog is back on Default', async () => {
@@ -1971,6 +2117,7 @@ describe('PrintPicker · Remembered choices', () => {
     await user.selectOptions(screen.getByLabelText('Printer'), '2')
     await waitFor(() => expect(screen.getByLabelText('Printer')).toHaveValue('2'))
     const slot = await screen.findByTestId('filament-slot-2')
+    await user.click(within(slot).getByTestId('change-slot-2'))
     await user.click(within(slot).getByTestId('spool-22'))
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await screen.findByTestId('queued-items')
@@ -2003,6 +2150,7 @@ describe('PrintPicker · Remembered choices', () => {
     const onRan = vi.fn()
     const { user } = renderPicker({ onRan })
     await loaded()
+    await user.click(screen.getByTestId('change-slot-2'))
     await user.click(within(screen.getByTestId('filament-slot-2')).getByTestId('spool-22'))
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
 
@@ -2089,6 +2237,38 @@ describe('PrintPicker · Superseded reads', () => {
 })
 
 describe('PrintPicker · Plates of a 3MF', () => {
+  // #2169 — a plate clicked loads into the docked preview pane; one chosen to print too.
+  it('shows the plate clicked, or the one chosen to print, in the preview pane', async () => {
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: true, name: 'Lid' },
+          { index: 2, has_thumbnail: true, name: 'Base' },
+        ]),
+      ),
+    )
+    const { user } = renderPicker()
+    await loaded()
+    const plates = await screen.findByTestId('plate-choice')
+    // The pane is remounted for each plate, so it is found afresh each time.
+    const label = () => within(screen.getByTestId('preview-pane')).getByTestId('preview-label')
+    expect(label()).toHaveTextContent('Showing Lid')
+
+    await user.click(within(plates).getByTestId('preview-plate-2'))
+    expect(label()).toHaveTextContent('Showing Base')
+    expect(within(screen.getByTestId('preview-pane')).getByRole('img', { name: 'The plate' })).toHaveAttribute(
+      'src',
+      expect.stringContaining('/plates/2/'),
+    )
+    // Looking at a plate does not choose it to print.
+    expect(within(plates).getByRole('radio', { name: /Lid/ })).toBeChecked()
+
+    await user.click(within(plates).getByRole('radio', { name: 'All plates' }))
+    expect(label()).toHaveTextContent('Showing Lid')
+    await user.click(within(plates).getByRole('radio', { name: /Base/ }))
+    expect(label()).toHaveTextContent('Showing Base')
+  })
+
   it('does not ask which plate of a one-plate output to print', async () => {
     renderPicker()
     await loaded()
@@ -2130,6 +2310,40 @@ describe('PrintPicker · Plates of a 3MF', () => {
     await screen.findByTestId('queued-items')
 
     expect(bodies[0]).toMatchObject({ plate_id: 2, all_plates: false })
+  })
+
+  // #2249: a failed read of another plate's filaments holds Print, says so, and retries.
+  it('holds Print after a failed filament read, says why, and reads again on Retry', async () => {
+    let fail = true
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: false },
+          { index: 2, has_thumbnail: true },
+        ]),
+      ),
+      http.get('/api/v1/print/outputs/:id/filaments', () =>
+        fail ? HttpResponse.json({ detail: 'Bambuddy is down.' }, { status: 503 }) : undefined,
+      ),
+    )
+    const reads = watch('GET', '/filaments')
+    const { user } = renderPicker()
+    await loaded()
+    await user.click(within(await screen.findByTestId('plate-choice')).getByRole('radio', { name: /Plate 2/ }))
+
+    const warning = await screen.findByTestId('filaments-unavailable')
+    expect(warning).toHaveTextContent(
+      'ScadBuddy could not read the filament inventory: Bambuddy is down. Print is unavailable until it loads.',
+    )
+    expect(screen.getByTestId('run-print')).toBeDisabled()
+
+    fail = false
+    const before = reads.urls.length
+    await user.click(within(warning).getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(reads.urls.length).toBe(before + 1))
+    expect(reads.urls.at(-1)).toContain('plate_id=2')
+    await waitFor(() => expect(screen.queryByTestId('filaments-unavailable')).toBeNull())
+    await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
   })
 
   it("names a one-plate output's plate, with nothing to choose (#986)", async () => {
@@ -2468,6 +2682,7 @@ describe('PrintPicker · A library file (#313)', () => {
     await loaded()
 
     // A changed spool, a plate, a preset override and an option, all for the output.
+    await user.click(screen.getByTestId('change-slot-2'))
     await user.click(within(screen.getByTestId('filament-slot-2')).getByTestId('spool-22'))
     await user.click(within(await screen.findByTestId('plate-choice')).getByRole('radio', { name: /Plate 2/ }))
     await user.click(screen.getByRole('switch', { name: /advanced/i }))
@@ -2536,7 +2751,7 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     await loaded()
     await showAdvanced()
     fireEvent.change(await screen.findByLabelText('Rack algorithm'), { target: { value: 'newest_first' } })
-    fireEvent.change(screen.getByLabelText('Rack nozzle position'), { target: { value: '2' } })
+    fireEvent.click(screen.getByTestId('rack-position-2'))
     await waitFor(() =>
       expect(checks.bodies.at(-1)).toMatchObject({ rack_position: 2, rack_algorithm: 'newest_first' }),
     )
@@ -2553,10 +2768,10 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     renderPicker()
     await loaded()
     await showAdvanced()
-    fireEvent.change(await screen.findByLabelText('Rack nozzle position'), { target: { value: '2' } })
-    expect(screen.getByLabelText('Rack nozzle position')).toHaveValue('2')
+    fireEvent.click(await screen.findByTestId('rack-position-2'))
+    expect(screen.getByTestId('rack-position-2')).toBeChecked()
     fireEvent.click(screen.getByRole('radio', { name: /0\.2 mm/i }))
-    await waitFor(() => expect(screen.getByLabelText('Rack nozzle position')).toHaveValue(''))
+    await waitFor(() => expect(screen.getByTestId('rack-position-auto')).toBeChecked())
   })
 
   it('keeps the rack step on screen when the hand pick is refused, and holds Print', async () => {
@@ -2573,12 +2788,12 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     renderPicker()
     await loaded()
     await showAdvanced()
-    fireEvent.change(await screen.findByLabelText('Rack nozzle position'), { target: { value: '2' } })
+    fireEvent.click(await screen.findByTestId('rack-position-2'))
     expect(await screen.findByText(/Rack position 2 holds/)).toBeInTheDocument()
     expect(screen.getByLabelText('Rack nozzle position')).toBeInTheDocument()
     expect(screen.getByTestId('run-print')).toBeDisabled()
 
-    fireEvent.change(screen.getByLabelText('Rack nozzle position'), { target: { value: '' } })
+    fireEvent.click(screen.getByTestId('rack-position-auto'))
     await waitFor(() => expect(screen.queryByText(/Rack position 2 holds/)).toBeNull())
     await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
   })
@@ -2597,7 +2812,7 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     renderPicker()
     await loaded()
     await showAdvanced()
-    fireEvent.change(await screen.findByLabelText('Rack nozzle position'), { target: { value: '2' } })
+    fireEvent.click(await screen.findByTestId('rack-position-2'))
     await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_position: 2 }))
     await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_position: null }))
     await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
@@ -2614,13 +2829,13 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     renderPicker()
     await loaded()
     await showAdvanced()
-    fireEvent.change(await screen.findByLabelText('Rack nozzle position'), { target: { value: '2' } })
+    fireEvent.click(await screen.findByTestId('rack-position-2'))
     await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_position: 2 }))
     options = rack.options.filter((option) => option.position !== 2)
     fireEvent.change(screen.getByLabelText('Rack algorithm'), { target: { value: 'oldest_first' } })
     await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_algorithm: 'oldest_first' }))
     await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_position: null }))
-    expect(screen.getByLabelText('Rack nozzle position')).toHaveValue('')
+    expect(screen.getByTestId('rack-position-auto')).toBeChecked()
   })
 
   it('says when the algorithm could not be remembered, and still prints with it', async () => {
@@ -2772,6 +2987,7 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     expect(select.value).toBe('least_used')
     // What the reopened dialog sets before the save lands must survive it.
     await user.selectOptions(screen.getByLabelText('Plate'), 'Engineering Plate')
+    fireEvent.click(screen.getByTestId('change-slot-2'))
     const spool = within(screen.getByTestId('filament-slot-2')).getByTestId('spool-22')
     fireEvent.click(spool)
     expect(spool).toBeChecked()
@@ -3019,7 +3235,7 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     renderPicker()
     await loaded()
     await showAdvanced()
-    fireEvent.change(await screen.findByLabelText('Rack nozzle position'), { target: { value: '2' } })
+    fireEvent.click(await screen.findByTestId('rack-position-2'))
     await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_position: 2 }))
     fireEvent.click(screen.getByRole('switch', { name: 'Advanced' }))
     await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ rack_position: null }))
@@ -3047,6 +3263,33 @@ describe('PrintPicker · Slicer defaults from the template (#1294)', () => {
     expect(within(list).getByText('ironing_type').nextElementSibling).toHaveTextContent('top')
     expect(within(list).queryByRole('textbox')).toBeNull()
     expect(within(list).queryByRole('combobox')).toBeNull()
+  })
+
+  // #2112: every key a template may set has a name; brim width has its unit.
+  it('names the brim width, in millimetres', async () => {
+    renderPicker({ printSettings: { brim_width: '5', brim_type: 'outer_only' } })
+    await loaded()
+    await showAdvanced()
+    const list = screen.getByRole('region', { name: 'Slicer defaults from this template' })
+    expect(within(list).getByText('Brim width').nextElementSibling).toHaveTextContent('5 mm')
+    expect(within(list).queryByText('brim_width')).toBeNull()
+  })
+
+  // #2112: a sequence picked in the step above replaces the template's, so the list says so.
+  it("marks the template's print sequence overridden once one is picked above", async () => {
+    const { user } = renderPicker({ printSettings: { print_sequence: 'by layer' } })
+    await loaded()
+    await showAdvanced()
+    const list = screen.getByRole('region', { name: 'Slicer defaults from this template' })
+    const value = () => within(list).getByText('Print sequence').nextElementSibling
+    expect(value()).toHaveTextContent(/^by layer$/)
+
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Print sequence' }), 'by object')
+    expect(value()).toHaveTextContent('by layer (overridden above)')
+    expect(value()?.querySelector('del')).toHaveTextContent('by layer')
+
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Print sequence' }), '')
+    expect(value()).toHaveTextContent(/^by layer$/)
   })
 
   it('shows nothing for a template with none', async () => {

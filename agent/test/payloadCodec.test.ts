@@ -1,10 +1,17 @@
 import type { Payload } from '@temporalio/common'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { inspect } from 'node:util'
 import { describe, expect, it } from 'vitest'
 import {
+  FilePayloadStore,
+  OFFLOAD_BYTES,
   openPayload,
+  type PayloadStore,
   PgPayloadKeys,
+  referenceOf,
+  referencePayload,
   payloadKeyContext,
   type PayloadKeys,
   sealPayload,
@@ -188,5 +195,82 @@ describe('SubjectPayloadCodec', () => {
     expect(subjectOf(SUBJECT)).toBe(SUBJECT)
     expect(subjectOf(SUBJECT.toUpperCase())).toBeUndefined()
     expect(subjectOf(undefined)).toBeUndefined()
+  })
+})
+
+// #2243: a session's large payloads are files on the data share, history holding a
+// Temporal ExternalStorageReference that agent-durable's External Storage also reads.
+class MemoryStore implements PayloadStore {
+  readonly rows = new Map<string, Uint8Array>()
+  async put(subject: string, digest: string, data: Uint8Array): Promise<void> {
+    if (!this.rows.has(`${subject}/${digest}`)) this.rows.set(`${subject}/${digest}`, data)
+  }
+  async get(subject: string, digest: string): Promise<Uint8Array | undefined> {
+    return this.rows.get(`${subject}/${digest}`)
+  }
+}
+
+describe('SubjectPayloadCodec with a store', () => {
+  const big: Payload = { metadata: { encoding: enc('json/plain') }, data: enc(`"${'z'.repeat(OFFLOAD_BYTES)}"`) }
+  const small: Payload = { metadata: { encoding: enc('json/plain') }, data: enc('"hi"') }
+  const ctx = (workflowId: string) => ({ type: 'workflow' as const, namespace: 'default', workflowId })
+
+  it("stores a session's large payload by reference, and reads it back", async () => {
+    const store = new MemoryStore()
+    const codec = new SubjectPayloadCodec(new FixedKeys(new Map()), store)
+    const [ref, inline] = await codec.encode([big, small], ctx(SUBJECT))
+    expect(referenceOf(ref!)).toEqual({ subject: SUBJECT, digest: expect.stringMatching(/^[0-9a-f]{64}$/) })
+    expect((ref!.data ?? new Uint8Array()).length).toBeLessThan(256)
+    expect(Buffer.from(ref!.data!).toString()).not.toContain('zzzz')
+    expect(new TextDecoder().decode(inline!.metadata!.encoding!)).toBe(SUBJECT_ENCODING)
+    expect(store.rows.size).toBe(1)
+    expect((await codec.decode([ref!, inline!])).map(view)).toEqual([view(big), view(small)])
+  })
+
+  it("keeps a flow's payloads inline, and refuses a reference it cannot read", async () => {
+    const store = new MemoryStore()
+    const keys = new FixedKeys(new Map())
+    const codec = new SubjectPayloadCodec(keys, store)
+    const [sealed] = await codec.encode([big], ctx('flow-0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f61'))
+    expect(new TextDecoder().decode(sealed!.metadata!.encoding!)).toBe(SUBJECT_ENCODING)
+    expect(store.rows.size).toBe(0)
+    const [ref] = await codec.encode([big], ctx(SUBJECT))
+    await expect(new SubjectPayloadCodec(keys).decode([ref!])).rejects.toThrow(/no store is set/)
+    store.rows.clear()
+    await expect(codec.decode([ref!])).rejects.toBeInstanceOf(SubjectForgotten)
+  })
+
+  it('reads the reference agent-durable writes', () => {
+    // agent-durable tests/test_payload_store.py reads this same payload with Temporal's External Storage.
+    const digest = 'ab'.repeat(32)
+    const python: Payload = {
+      metadata: { messageType: enc('temporal.api.sdk.v1.ExternalStorageReference'), encoding: enc('json/protobuf') },
+      data: enc(`{"claimData":{"digest":"${digest}","subject":"${SUBJECT}"},"driverName":"scadbuddy-file"}`),
+    }
+    expect(referenceOf(python)).toEqual({ subject: SUBJECT, digest })
+    expect(view(referencePayload(SUBJECT, digest))).toEqual(view(python))
+  })
+})
+
+describe('FilePayloadStore', () => {
+  it('keeps one file per sealed payload under its session, and forgets the session whole', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'payloads-'))
+    try {
+      const store = new FilePayloadStore(root)
+      const codec = new SubjectPayloadCodec(new FixedKeys(new Map()), store)
+      const big: Payload = { metadata: { encoding: enc('json/plain') }, data: enc(`"${'q'.repeat(OFFLOAD_BYTES)}"`) }
+      const [ref] = await codec.encode([big], { type: 'workflow', namespace: 'default', workflowId: SUBJECT })
+      const { digest } = referenceOf(ref!)!
+      expect(readdirSync(join(root, SUBJECT))).toEqual([digest])
+      const stored = readFileSync(join(root, SUBJECT, digest))
+      expect(stored.toString('latin1')).not.toContain('qqqq') // ciphertext, not the payload
+      expect(view((await codec.decode([ref!]))[0]!)).toEqual(view(big))
+      await expect(store.get(SUBJECT, '../../etc/passwd')).rejects.toThrow(/names no session/)
+      await store.forget(SUBJECT)
+      expect(existsSync(join(root, SUBJECT))).toBe(false)
+      await expect(codec.decode([ref!])).rejects.toBeInstanceOf(SubjectForgotten)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 })

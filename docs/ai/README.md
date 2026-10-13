@@ -18,7 +18,7 @@ Part of issue [#259](https://github.com/eh-homelab/ScadBuddy/issues/259) (docs h
 | [mcp-resources.md](mcp-resources.md) | MCP client authors, operators | The `scadbuddy://` resources on `/mcp`, subscriptions and their notifications, and the agent's LISTEN on the event bus (#264) |
 | [browser-bridge.md](browser-bridge.md) | Contributors | The browser tools (#254): the tab side, `data-agent-user-only`, the WebMCP opt-in, the agent's `browser_*` tools, the tab's socket, and pairing an agent with a tab (spec §8.5) |
 | [agent-sessions.md](agent-sessions.md) | MCP client authors, operators | Agent-to-agent control (#300): the `sessions_*` tools, the session resources, `session.*` events, and approvals under a per-token grant |
-| [headless-browser.md](headless-browser.md) | Contributors, reviewers | The headless Chromium for sessions with no tab (#349): the pinned Playwright plugin, its tiers and guards, the backend's agent-actor gate, and what was measured |
+| [headless-browser.md](headless-browser.md) | Operators, contributors | A browser for sessions with no tab: Microsoft's Playwright MCP added as a remote plugin (the built-in headless browser of #349 was removed), its suggested tiers, and how its browser state lives across calls |
 | [authoring.md](authoring.md) | Contributors, MCP client authors | The agent's model-authoring loop (#252): `apply_patch` and its conflict rule, `checkpoint`, and commits authored as the agent |
 | [dependencies.md](dependencies.md) | Contributors, MCP client authors | The library and font tools, include/use resolution, and the missing-font refusals (#253) |
 | [claude-plugin.md](claude-plugin.md) | Users of Claude Code | Installing the ScadBuddy Claude plugin from this repository's marketplace |
@@ -36,8 +36,13 @@ clients reach over `/mcp`, plus an in-app assistant. Both are in use:
   **MCP access tokens** (#251) and plugins show once the agent answers
   `GET /api/v1/ai/status` with `configured`, that is, with a credential saved
   (`useAiAvailability()` in
-  [`frontend/src/agent/chat/availability.ts`](../../frontend/src/agent/chat/availability.ts));
-  the panel talks over the agent's chat socket
+  [`frontend/src/agent/chat/availability.ts`](../../frontend/src/agent/chat/availability.ts)).
+  The panel is hidden even with a credential saved when that status also says
+  `chat: 'refused'`: the page was opened somewhere the chat socket's origin gate
+  refuses, such as a LAN address or plain HTTP rather than `SCADBUDDY_PUBLIC_URL`'s
+  origin over HTTPS. Open ScadBuddy at its public URL
+  ([operating.md §6](operating.md#6-origin-allowlist-and-trusted-proxies)). The panel
+  talks over the agent's chat socket
   ([`frontend/src/agent/chat/transport.ts`](../../frontend/src/agent/chat/transport.ts)).
 - `/mcp` serves the tool registry (#368). Sessions start from the panel's chat socket
   and the session routes (#527), and from other agents over `/mcp` through the
@@ -71,7 +76,7 @@ clients reach over `/mcp`, plus an in-app assistant. Both are in use:
 | [#339](https://github.com/eh-homelab/ScadBuddy/pull/339) | In-browser agent bridge: semantic tools, snapshot, user-only confirmations, WebMCP opt-in | `frontend/src/agent/` |
 | #254 (this PR's follow-up to #339) | The agent's `browser_*` tools over the tab's socket, in both projections, and pairing by code in Postgres (spec §5.2, §8.5) | `agent/src/tools/browser.ts`, `agent/src/bridge/`, `agent/src/routes/bridge.ts`, `frontend/src/agent/link.ts`, `frontend/src/components/PairingPrompt.tsx` |
 | [#340](https://github.com/eh-homelab/ScadBuddy/pull/340) | Assistant panel: chat stream, action feed, approvals, sessions (against the scripted mock agent) | `frontend/src/components/assistant/`, `frontend/src/agent/chat/` |
-| [#363](https://github.com/eh-homelab/ScadBuddy/pull/363) | Spec for the headless Playwright browser for the harness (spec §5.3, D11), since implemented under #349: see [headless-browser.md](headless-browser.md) | spec §5.3, §3.2 |
+| [#363](https://github.com/eh-homelab/ScadBuddy/pull/363) | Spec for the headless Playwright browser for the harness (spec §5.3, D11), implemented under #349 and since removed in favour of Playwright MCP as a plugin: see [headless-browser.md](headless-browser.md) | spec §5.3, §3.2 |
 
 Since merged, and documented in their own pages: [#501](https://github.com/eh-homelab/ScadBuddy/pull/501), MCP bearer tokens in Postgres (`ai_mcp_tokens`, [security.md](security.md) "MCP bearer tokens"), and [#504](https://github.com/eh-homelab/ScadBuddy/pull/504), MCP resources and subscriptions over the event bus ([mcp-resources.md](mcp-resources.md)).
 

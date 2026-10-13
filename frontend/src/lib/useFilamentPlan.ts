@@ -15,7 +15,11 @@ export interface Carry {
   ready: boolean
 }
 
-/** The dialog's one carry, held across renders; the hooks read and settle it. */
+/**
+ * The dialog's one carry, held across renders; the hooks read and settle it. It is not
+ * state: `usePrintChoices` reads it while rendering, so every `set` must come with a
+ * state change that re-renders (#2250).
+ */
 export class CarryBox {
   private value: Carry | null = null
   get(): Carry | null {
@@ -48,6 +52,11 @@ export function useFilamentPlan(
   const [filaments, setFilaments] = useState<FilamentOptions | null>(null)
   const [plan, setPlan] = useState<SlotChoice[]>([])
   const [filamentError, setFilamentError] = useState<string | null>(null)
+  /**
+   * #2186 — the choices `plan` was seeded from. The plan follows the choices one render
+   * late (it is set by the effect below), so for that render it is the last read's.
+   */
+  const [planFor, setPlanFor] = useState<ChoicesView | null>(null)
 
   // One plan applies to every plate, a slot being the same color-numbered project
   // filament on each (#180). "All plates" reads every plate's slots, so a slot only a
@@ -75,6 +84,11 @@ export function useFilamentPlan(
    * are that plate's own, and all plates' are their union, so those are read for it.
    */
   const filamentAttempt = useRef(0)
+  /**
+   * #2249 — bumped by Retry after a failed read. Print stays held while there is no plan
+   * for these choices (`planReady`): sending an empty one would print with no spools.
+   */
+  const [retries, setRetries] = useState(0)
   useEffect(() => {
     const token = (filamentAttempt.current += 1)
     setFilamentError(null)
@@ -82,10 +96,12 @@ export function useFilamentPlan(
     if (!choices || !current) {
       setFilaments(null)
       setPlan([])
+      setPlanFor(null)
       return
     }
     const seed = (next: FilamentOptions) => {
       setFilaments(next)
+      setPlanFor(choices)
       const carried = carry?.get()
       if (carried) {
         // A re-arrange: the plan it was made for, less any slot the new file lacks.
@@ -130,11 +146,12 @@ export function useFilamentPlan(
         if (token !== filamentAttempt.current) return
         setFilaments(null)
         setPlan([])
+        setPlanFor(null)
         setFilamentError(
           cause instanceof ApiError ? cause.detail : 'Could not read the filament inventory.',
         )
       })
-  }, [choices, key, latest, chosenPlate, allPlates, rememberedPlan, carry])
+  }, [choices, key, latest, chosenPlate, allPlates, rememberedPlan, carry, retries])
 
   const suggested = filaments?.suggested ?? []
   const planChanged =
@@ -144,5 +161,10 @@ export function useFilamentPlan(
         plan.find((entry) => entry.slot_id === choice.slot_id)?.spool_id !== choice.spool_id,
     )
 
-  return { filaments, plan, setPlan, planChanged, filamentError }
+  /** Whether `plan` was seeded from these choices, so it may be sent with them. */
+  const planReady = choices !== null && planFor === choices
+
+  const retryFilaments = () => setRetries((n) => n + 1)
+
+  return { filaments, plan, setPlan, planChanged, filamentError, planReady, retryFilaments }
 }

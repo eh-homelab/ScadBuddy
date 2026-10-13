@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from collections.abc import Iterable
 from datetime import datetime
 
@@ -94,12 +95,10 @@ class RemoteAssets:
             logger.exception("could not remove an unreadable upload's copy", extra={"key": key})
             await self.content.forget(key)
 
-    async def drop(self, ids: Iterable[str], *, cutoff: datetime) -> list[str]:
-        """Remove the store's copies of uploads swept from the volume, the ids dropped.
-        Only a copy not stored again since ``cutoff`` (the sweep's start): a re-upload
-        during the sweep bumps its `touched_at` and keeps it. Each copy is first marked
-        swept, so a failure (logged) leaves it for the next sweep's `reconcile`."""
-        ids = list(ids)
+    async def mark_swept(self, ids: Iterable[str], *, cutoff: datetime) -> None:
+        """Mark the store's copies of uploads swept from the volume, those not stored
+        again since ``cutoff``, so a later `reconcile` removes them. All a stopped sweep
+        does (#2140): the round trips of `drop` wait for the next sweep."""
         await asyncio.to_thread(
             self.content.index.mark,
             [asset_key(asset_id) for asset_id in ids],
@@ -107,6 +106,14 @@ class RemoteAssets:
             cutoff=cutoff,
             **{SWEPT: True},
         )
+
+    async def drop(self, ids: Iterable[str], *, cutoff: datetime) -> list[str]:
+        """Remove the store's copies of uploads swept from the volume, the ids dropped.
+        Only a copy not stored again since ``cutoff`` (the sweep's start): a re-upload
+        during the sweep bumps its `touched_at` and keeps it. Each copy is first marked
+        swept, so a failure (logged) leaves it for the next sweep's `reconcile`."""
+        ids = list(ids)
+        await self.mark_swept(ids, cutoff=cutoff)
         dropped: list[str] = []
         for asset_id in ids:
             try:
@@ -133,10 +140,14 @@ class RemoteAssets:
         ]
         return await self.drop(orphans, cutoff=cutoff)
 
-    async def backfill(self, store: AssetStore) -> int:
-        """Mirror every upload the store has no copy of on this backend."""
+    async def backfill(self, store: AssetStore, *, stop: threading.Event | None = None) -> int:
+        """Mirror every upload the store has no copy of on this backend. Once ``stop`` is
+        set it mirrors no further upload (#2128): the shutdown waits for the one in hand
+        rather than cancelling it with its thread still running."""
         done = 0
         for asset_id in await asyncio.to_thread(store.ids):
+            if stop is not None and stop.is_set():
+                break
             stat = await asyncio.to_thread(self.content.index.get, asset_key(asset_id))
             if stat is None or stat.ref.backend != self.content.name:
                 try:

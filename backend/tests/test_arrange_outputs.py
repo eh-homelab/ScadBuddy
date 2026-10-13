@@ -35,6 +35,7 @@ from scadbuddy.workflows.models import (
 from scadbuddy.workflows.outputs import manifest_of, placement_matrix
 from scadbuddy.workflows.pipeline_activities import PipelineActivities, pack_layout
 from tests.support.arrange import finished_job, saved_output
+from tests.test_objects3mf import at, bambu_project
 from tests.test_packing_and_outputs import _deps, _record, _render
 
 
@@ -296,3 +297,167 @@ async def test_a_library_files_object_is_placed_beside_a_rendered_part(tmp_path:
     with zipfile.ZipFile(paths.root / written.result.model_3mf) as archive:
         settings = json.loads(archive.read(PROJECT_SETTINGS_NAME))
     assert {"#FF0000", "#0000FF"} <= {c.upper() for c in settings["filament_colour"]}
+
+
+async def test_a_painted_library_object_keeps_its_painting_in_the_output(tmp_path: Path) -> None:
+    """#1965: a part painted in Bambu Studio is placed whole, its faces in their order,
+    and its painting renumbered to the output's filaments: here green moves from
+    extruder 2 to 1 and red, the part's own, from 1 to 3."""
+    deps, paths = _deps(tmp_path)
+    body = trimesh.creation.box(extents=(20, 10, 5))
+    payload = bambu_project(
+        items=[at(50, 50)],
+        parts={1: (body, "normal_part", 1)},
+        triangle_extra=' paint_color="8"',
+    )
+    read = read_objects(payload)
+    box = bounding_box(read[0].parts)
+    entry = ManifestObject(
+        part=piece_key("cd" * 32, 0),
+        file=read[0].name,
+        slug="demo",
+        revision=None,
+        bbox=box,
+        footprint=(box.size[0], box.size[1]),
+        colours=["#FF0000", "#00FF00"],
+        count=1,
+        library_file_id=89,
+    )
+    await publish_library_pieces(deps.blobs, [entry], read)
+    library = part_of(entry)
+    planned = ["#00FF00", "#0000AA", "#FF0000"]
+    req = OutputRequest(
+        job_id="j7",
+        index=0,
+        slug="demo",
+        layout=Layout(
+            plates=[LayoutPlate(items=[Placed(piece_key=library.piece_key, x=0, y=0, rot=90.0)])]
+        ),
+        parts=[library],
+        name=None,
+        bom=[],
+        files={},
+        record=_record([library.piece_key]),
+        provenance={entry.part: entry},
+        colours=planned,
+    )
+    written = await ActivityEnvironment().run(PipelineActivities(deps).write_output, req)
+    assert written.result.colors == planned
+    # Green prints only where the part is painted, and the print dialog still asks for it.
+    assert [(p.colour, p.extruder) for p in written.result.parts] == [
+        ("#00FF00", 1),
+        ("#FF0000", 3),
+    ]
+    model = paths.root / written.result.model_3mf
+    with zipfile.ZipFile(model) as archive:
+        objects = [n for n in archive.namelist() if n.startswith("3D/Objects/")]
+        [painted] = [n for n in objects if b"paint_color" in archive.read(n)]
+        text = archive.read(painted).decode()
+        settings = archive.read("Metadata/model_settings.config").decode()
+    assert text.count('paint_color="4"') == len(body.faces)
+    assert 'paint_color="8"' not in text
+    assert '<metadata key="extruder" value="3"/>' in settings
+    # The output reads back as it was painted: a red part painted green.
+    [again] = read_objects(model.read_bytes())
+    [part] = again.parts
+    assert part.colour == "#FF0000"
+    assert part.paint is not None and part.paint.used() == ["#00FF00"]
+
+
+async def test_a_negative_part_is_written_for_the_slicer_to_cut(tmp_path: Path) -> None:
+    """A library object's negative part goes into the output as Bambu Studio's
+    ``negative_part``, on no filament of its own, and nothing a person sees counts it:
+    the colours, the parts, the box and the mesh checks are the body's."""
+    from scadbuddy.render.geometry import analyze_3mf
+    from tests.test_objects3mf import _cut_project
+
+    deps, paths = _deps(tmp_path)
+    read = read_objects(_cut_project())
+    box = bounding_box(read[0].parts)
+    entry = ManifestObject(
+        part=piece_key("ef" * 32, 0),
+        file=read[0].name,
+        slug="demo",
+        revision=None,
+        bbox=box,
+        footprint=(box.size[0], box.size[1]),
+        colours=["#FF0000"],
+        count=1,
+        library_file_id=90,
+    )
+    await publish_library_pieces(deps.blobs, [entry], read)
+    library = part_of(entry)
+    req = OutputRequest(
+        job_id="j8",
+        index=0,
+        slug="demo",
+        layout=Layout(
+            plates=[LayoutPlate(items=[Placed(piece_key=library.piece_key, x=0, y=0, rot=0.0)])]
+        ),
+        parts=[library],
+        name=None,
+        bom=[],
+        files={},
+        record=_record([library.piece_key]),
+        provenance={entry.part: entry},
+    )
+    written = await ActivityEnvironment().run(PipelineActivities(deps).write_output, req)
+    assert written.result.colors == ["#FF0000"]
+    assert [p.colour for p in written.result.parts] == ["#FF0000"]
+    assert tuple(round(v, 3) for v in written.result.bbox_mm.size) == (20, 10, 5)
+    model = paths.root / written.result.model_3mf
+    with zipfile.ZipFile(model) as archive:
+        settings = archive.read("Metadata/model_settings.config").decode()
+    assert settings.count('subtype="negative_part"') == 1
+    assert settings.count('subtype="normal_part"') == 1
+    analysis = analyze_3mf(model)
+    assert len(analysis.parts) == 1
+    # Arranged again, the output still carries the cut.
+    [again] = read_objects(model.read_bytes())
+    assert [p.negative for p in again.parts] == [False, True]
+
+
+async def test_no_copy_is_packed_where_a_neighbours_negative_part_reaches(tmp_path: Path) -> None:
+    """An arranged plate is one object to the slicer, which cuts a negative part out of
+    all of it: a cut reaching past its body (x 15 to 35 on a 20 mm body) widens the
+    footprint, so the next copy is packed beyond it, not inside it."""
+    from scadbuddy.render.glb import footprint_box
+
+    deps, _ = _deps(tmp_path)
+    cutter = trimesh.creation.box(extents=(20, 4, 20))
+    cutter.apply_translation((25, 5, 2))
+    body = trimesh.creation.box(extents=(20, 10, 5))
+    body.apply_translation((10, 5, 2.5))
+    read = read_objects(
+        bambu_project(
+            items=[at(0, 0)],
+            parts={1: (body, "normal_part", None), 2: (cutter, "negative_part", 1)},
+        )
+    )
+    box = footprint_box(read[0].parts)
+    assert round(box.size[0], 3) == 35 and round(box.size[2], 3) == 5
+    entry = ManifestObject(
+        part=piece_key("ab" * 32, 0),
+        file=read[0].name,
+        slug="demo",
+        revision=None,
+        bbox=box,
+        footprint=(box.size[0], box.size[1]),
+        colours=["#FF0000"],
+        count=2,
+        library_file_id=91,
+    )
+    await publish_library_pieces(deps.blobs, [entry], read)
+    library = part_of(entry)
+    layout = pack_layout(
+        PackRequest(
+            items=[PackItem(part=library, count=2)],
+            plate=PlateSize(key="default", width=256.0, depth=256.0),
+            allow_own=False,
+        )
+    )
+    [plate] = layout.plates
+    first, second = plate.items
+    apart_x = abs(first.x - second.x) >= 35 and first.rot == second.rot == 0
+    apart_y = abs(first.y - second.y) >= min(box.size[1], box.size[0])
+    assert apart_x or apart_y

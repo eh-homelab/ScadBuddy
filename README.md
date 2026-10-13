@@ -219,6 +219,10 @@ on shutdown.
     write), once the hold is an hour old. It needs the same `Recreate` rollout. It
     releases nothing when it finds no output at all, so an unmounted data volume
     cannot hand every Part to the blob sweep.
+  - **This release adds a sweep**, `housekeeping_maintain_models_git` (#2289): it runs
+    `git gc` on `/data/models` once it holds 256 loose objects or 20 packs, since git's
+    own `gc --auto` waits for 6700 and every model listing walks the whole history. It
+    needs the same `Recreate` rollout. Its first run is the boot's.
   - Settings shows the usage under "Uploaded files"; so do
     `GET /api/v1/assets/usage` and the `scadbuddy_assets_*` metrics.
 - **Template media** (images and videos, in `/data/models/<slug>/media`):
@@ -228,6 +232,20 @@ on shutdown.
   The upload is streamed to the data volume, never held in memory. Images (and
   posters) are also capped at 10 MiB, since they are committed to the models'
   history; videos are not committed.
+- **Reading library 3MFs** (Arrange, and a library file's preview and print checks,
+  #2087): one read may spend at most `SCADBUDDY_READ_MAX_OBJECTS` distinct objects
+  (default 200, at most 2000), `SCADBUDDY_READ_MAX_VISITS` objects visited through
+  components (20000, at most 200000), `SCADBUDDY_READ_MAX_TRIANGLES` triangles
+  (5000000, at most 10000000) and `SCADBUDDY_READ_MAX_PAINT_DIGITS` digits of Bambu
+  Studio painting (20000000, at most 50000000). Settings can change each, at once
+  (Projects & files, Advanced). One request may override any of them: `read_budget`
+  in an arrange's or a print check's body, `?max_triangles=` and the like on
+  `GET /print/library/{id}/objects` and `/preview.glb`. The ceilings bound what the
+  API pod's memory holds, so neither a setting nor a request goes past them: a
+  `SCADBUDDY_READ_MAX_*` past its ceiling stops the backend at start, as any
+  out-of-bounds `SCADBUDDY_*` does, rather than being clamped. A file
+  past a budget is refused naming it; a refusal kept for a file hash is read again by
+  a request with a larger budget.
 - **Render queue.** By default every render request is accepted and runs on
   Temporal: the API records the job in `render_jobs` and starts its workflow, and
   the render worker renders `SCADBUDDY_RENDER_CONCURRENCY` at once. A preview
@@ -314,8 +332,9 @@ of the two is set. The agent reads the same variable for its own origin check
 ScadBuddy runs on the homelab cluster from
 [eh-homelab/clusters](https://github.com/eh-homelab/clusters)
 (`applications/scadbuddy/scadbuddy.yaml`, deployed by ArgoCD, the render
-worker's `applications/scadbuddy/scadbuddy-render.yaml`, and the print worker's
-`applications/scadbuddy/scadbuddy-print.yaml`). Those manifests pin the
+worker's `applications/scadbuddy/scadbuddy-render.yaml`, the print worker's
+`applications/scadbuddy/scadbuddy-print.yaml`, and the flow runs' worker's
+`applications/scadbuddy/scadbuddy-projects.yaml`). Those manifests pin the
 image **by digest**; this repo's workflows are what move the pin.
 Nothing here talks to the cluster.
 
@@ -328,6 +347,13 @@ and `SCADBUDDY_PUBLIC_URL`. Every hostname the UI is served under must be the
 public URL or listed in `SCADBUDDY_ALLOWED_ORIGINS`: from any other, browser writes
 are refused with a `403` and a `refused a ... from origin ...` log line (#962), and
 live updates are unavailable.
+
+Never mount a container-runtime socket (Docker, containerd, any CRI socket) or any
+other privileged Unix socket into the API container. The editor's language server,
+`openscad-lsp`, reads user-supplied source and is kept off the network by a seccomp
+filter (`backend/scadbuddy/editor/nonet.py`), but that filter still allows `AF_UNIX`:
+the process can connect to any filesystem socket the container can see, and a runtime
+socket would give it root on the node.
 
 A deploy that rolls the pod also migrates the database at startup
 (`backend/scadbuddy/migrations/`: `20260928T0630Z_events.sql` adds the `events`
@@ -366,8 +392,8 @@ Both call `deploy.reusable.yml`, which:
    another repo and whose PRs would not run clusters' own CI;
 2. rewrites the image line and the three `scadbuddy.eh-homelab.io/*`
    annotations (`version`, `revision`, `source`) in `scadbuddy.yaml`, and in
-   `scadbuddy-render.yaml` and `scadbuddy-print.yaml` (#547, #1060). All three
-   exist in clusters; the workflow still tolerates a missing worker manifest, noting
+   `scadbuddy-render.yaml`, `scadbuddy-print.yaml` and `scadbuddy-projects.yaml`
+   (#547, #1060, #1057). The workflow tolerates a missing worker manifest, noting
    its absence and pinning the rest, from before clusters added them. Each
    file must have exactly one such image line and one of each annotation, before
    and after the rewrite, or the deploy stops. In the same PR it moves the
@@ -410,14 +436,35 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   may mount it. A piece no job references any more is removed by the API's periodic
   upload sweep once it has gone `SCADBUDDY_JOB_TTL` untouched, the same retention as
   the jobs.
-- **Environment:** `SCADBUDDY_DATABASE_URL` (the same database: the worker writes
-  the `render_jobs` rows and their `job.*` events), `SCADBUDDY_TEMPORAL_ADDRESS`,
+- **Environment:** `SCADBUDDY_DATABASE_URL` (the same database, ideally as its own
+  role, below: the worker writes the `render_jobs` rows and their `job.*` events), `SCADBUDDY_TEMPORAL_ADDRESS`,
   `SCADBUDDY_TEMPORAL_NAMESPACE`, `SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER`,
   `SCADBUDDY_DATA_DIR`, and `SCADBUDDY_REVISION`, which is the worker's **build
   id** (the image stamps it). Keep the render settings (`SCADBUDDY_RENDER_TIMEOUT`,
   `SCADBUDDY_RENDER_CONCURRENCY`, `SCADBUDDY_SOLID_CONCURRENCY`) the same as the
   API's: the worker runs openscad under them, and the API derives the workflows'
   timeouts from the same values.
+- **Its own database role (#601).** The worker can, and in production should,
+  connect as a role of its own named exactly `scadbuddy_render`, so it never holds
+  the API's settings store (spec 2026-09-27 §9). Create the role with a password
+  (`CREATE ROLE scadbuddy_render LOGIN PASSWORD '…'`; on CNPG a `managed.roles`
+  entry) and point the worker's `SCADBUDDY_DATABASE_URL` at it; nothing else is set
+  up by hand. At every start the API grants that role exactly
+  `RENDER_GRANTS` (`backend/scadbuddy/render/worker_role.py`): `render_jobs`,
+  `events`, `blob_refs`, the blob index `store_blobs` and `store_folders`, `assets`,
+  the library leases (`library_leases`, `library_pin_holds`,
+  `library_install_slots`), the migrations ledger (read only) and the
+  `render_settings` view. It gets nothing on `settings`: the view shows only the
+  store's settings (backend, Bambuddy URL, library folder, render key), plus the full
+  Bambuddy key **only while no render key is saved** in Settings, the fallback
+  `/healthz` reports as `render_key_fallback`. Save a render key and the worker
+  cannot read the full key at all. A role created after the API started is granted
+  on the API's next start.
+- **The worker never migrates.** It waits at start, logging what it waits for,
+  until the API has applied every migration its build has and its role holds
+  `RENDER_GRANTS`; it serves `/healthz` only after that. In a rollout where the
+  worker comes up first, it starts once the API has. On the API's own role (the
+  same `SCADBUDDY_DATABASE_URL`) the grants are there already.
 - **Versioning:** workflows are pinned to the build that started them. At start
   the worker makes its own build the deployment's current version, so a new build
   receives new workflows once it is polling. It retries that for a minute after it
@@ -496,14 +543,14 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   URL and key as the API has them (they only seed a database never saved). Its build id
   is `SCADBUDDY_REVISION`, stamped in the image.
 - **Versioning:** the worker deployment `scadbuddy-print`, made current at start as the
-  render worker's is. `PrintRun` and `Operation` are pinned to the build that started
-  them; `FollowPrint` is AUTO_UPGRADE, since it lasts as long as the print, and moves to
-  the new build. Changes to any of them are still made with `workflow.patched`.
-- **Shutdown:** SIGTERM drains the build's pinned runs, as the render worker does, for at
-  most 1920 s (`REPEAT_WINDOW` 600 s, two slice timeouts of 600 s, and 120 s): a print run
-  stays open for `REPEAT_WINDOW` after it ends, so repeats of the same press find it. Set
-  `terminationGracePeriodSeconds` to **2000** and roll with `RollingUpdate`,
-  `maxSurge >= 1`.
+  render worker's is. Every workflow on it (`PrintRun`, `Operation`, `FollowPrint`) is
+  AUTO_UPGRADE: a run moves to each new build (#2066). They were pinned, and the
+  Deployment rolls with `Recreate`, so the old build was still current when its pod
+  stopped, it stopped without draining, and every run pinned to it waited forever.
+  So every change to them goes behind `workflow.patched`, and `tests/test_print_replay.py`
+  replays committed `PrintRun` histories to hold that.
+- **Shutdown:** SIGTERM does not drain: the next build takes the runs over. Activities
+  still in flight get the worker's graceful shutdown timeout.
 - **The API** serves the queue itself only with `SCADBUDDY_TEMPORAL_WORKER_INPROCESS`
   (dev, tests) or `SCADBUDDY_TEMPORAL_PRINT_WORKER_INPROCESS` (a deployment without the
   `scadbuddy-print` Deployment yet), unversioned, on its own volume. Either way the API
@@ -543,6 +590,38 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   so here, and where the API still serves the queue itself (unversioned) needs the same
   `Recreate` rollout.
 
+### Flow runs on the `projects` queue (#1057)
+
+Agent-written flows run as `ProjectWorkflow`s on the `projects` task queue
+(`SCADBUDDY_TEMPORAL_TASK_QUEUE_PROJECTS`), served by
+`python -m scadbuddy.worker --queue projects`, the Deployment `scadbuddy-projects` in
+`applications/scadbuddy/scadbuddy-projects.yaml`, same image.
+
+- **What it needs:** `SCADBUDDY_DATABASE_URL`, the KEK (`SCADBUDDY_SECRET_KEY_FILE`: a
+  flow's payloads are sealed per run, and the worker refuses to start without it),
+  `SCADBUDDY_TEMPORAL_ADDRESS`/`_NAMESPACE`, and `SCADBUDDY_API_INTERNAL_URL`: a flow's
+  `render`, `save_output`, `queue_print` and `arrange` call the API's own routes there
+  (`workflows/flow_routes.py`). No data volume
+  and no Bambuddy key: nothing outward runs in it. Health and metrics on 9090.
+- **Scripts are git** (#2503): each flow version is one commit in `/data/flows`
+  (`<name>/flow.py`), a repository of its own beside `/data/models` on the API's data
+  volume, on the same git code (`core/gitrepo.py`). Only the API reads it: a run's
+  script goes to the worker as the run's input. `workflow_definitions` keeps a row per
+  version naming its commit, and `workflow_runs` the commit each run ran. The first
+  start after the upgrade backfills the versions Postgres held (`flows/backfill.py`),
+  one commit each with its author and date; it is idempotent, and the log says how many.
+- **`tool`, `agent`, `ask_session`** run on the agent's `agent-tools` queue
+  (`SCADBUDDY_TEMPORAL_TASK_QUEUE_AGENT_TOOLS`, read by the API when it starts a run).
+- **Memory:** `pydantic-monty` keeps a process-wide pool, so the worker's memory does
+  not fall back after a large script; the homelab Deployment requests 256 Mi with a
+  1 Gi limit (eh-homelab/clusters#2123).
+- **Unversioned** (a flow may run for weeks): every change to `ProjectWorkflow`, its host
+  functions or the harness pin must replay `backend/tests/fixtures/project_workflow_histories/`,
+  or go behind `workflow.patched`. It stops without a drain; a run in flight resumes on
+  the next worker from its history.
+- **Without the Deployment**, `SCADBUDDY_TEMPORAL_PROJECTS_WORKER_INPROCESS=true` serves
+  the queue from the API; with neither, flow runs wait on the queue.
+
 ### Blob store and render workers (#426)
 
 Everything a render reads or writes (rendered pieces, template snapshots, uploaded SVGs
@@ -556,6 +635,9 @@ workers restart.
 - **`bambuddy`**: Bambuddy's library. Files go to `<Inbox folder>/<Template>/Work/`,
   and ScadBuddy deletes only inside a `Work/` folder of the inbox folder Settings
   names. Changing that folder leaves the previous one's `Work/` files for you to delete.
+  Any file in a ScadBuddy `Work/` folder that ScadBuddy did not upload, such as one
+  dropped there by hand, is deleted once it is older than `SCADBUDDY_JOB_TTL`: keep
+  your own files elsewhere.
   The same goes for the Bambuddy URL: folders are recorded per instance, so pointing
   ScadBuddy at another Bambuddy makes new folders there and never deletes by the old
   instance's folder ids (#683). Respelling the same URL (host case, a default port, a
@@ -700,8 +782,7 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_BACKEND_URL` (default
   `http://127.0.0.1:8080`), `SCADBUDDY_SECRET_KEY_FILE`,
   `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`, `SCADBUDDY_PUBLIC_URL`,
-  `SCADBUDDY_ALLOWED_ORIGINS`, `SCADBUDDY_AGENT_TRUSTED_PROXIES`,
-  `SCADBUDDY_BROWSER_ALLOWED_ORIGINS` and the backend's
+  `SCADBUDDY_ALLOWED_ORIGINS`, `SCADBUDDY_AGENT_TRUSTED_PROXIES` and the backend's
   `SCADBUDDY_TEMPORAL_ADDRESS`, `SCADBUDDY_TEMPORAL_NAMESPACE` and
   `SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES`, each described below. With no database
   URL it still runs and `/healthz` reports `"ai": "disabled (no database)"`.
@@ -777,17 +858,6 @@ the backend on `http://127.0.0.1:8080` (§4.3).
     peer, is accepted. This is what stops DNS rebinding: an attacker's page
     re-pointed at the agent sends its own name in both `Host` and `Origin`,
     which is not on the list.
-- **Where the headless browser may go** (`agent/src/harness/browserOrigins.ts`,
-  [`docs/ai/headless-browser.md`](docs/ai/headless-browser.md)). It opens ScadBuddy's
-  own origins as they are: `SCADBUDDY_PUBLIC_URL` (and the stored `public_url`
-  setting) and `SCADBUDDY_ALLOWED_ORIGINS`, through the ingress, so the agent pod
-  must reach at least one of them without an interactive login (#983). Only with
-  none configured does it open the backend (`SCADBUDDY_BACKEND_URL`) instead.
-  **`SCADBUDDY_BROWSER_ALLOWED_ORIGINS`**
-  (comma-separated origins, or `*` for any) lets it open other origins too, each only
-  after a human approves it once per session in the ScadBuddy UI. Unset, it opens
-  nothing else. `*` plus that approval is the intended setting for full use; it also
-  lets the model ask to open services on your LAN, so read the risks in that doc first.
 
   That is not authentication, and the human approval spec §8.2 asks for comes
   with #258.
@@ -803,19 +873,10 @@ the backend on `http://127.0.0.1:8080` (§4.3).
 - Plugins handed to the harness must not start processes of their own: command
   hooks, stdio MCP servers, LSP servers and monitors are refused
   (`agent/src/harness/plugins.ts`, spec §8.6), since they would inherit the
-  credential's environment. The one exception is the headless browser (#349,
-  [`docs/ai/headless-browser.md`](docs/ai/headless-browser.md)): the harness
-  writes that plugin itself and starts its server under `env -i`. It is off
-  until switched on in Settings ("AI headless browser", stored through
-  `PUT /api/v1/ai/settings/headless-browser`, guarded like the credential
-  writes), and the image carries its Chromium (about 600 MB of the image). The
-  backend refuses its outward requests unless a human approved that exact one
-  (`backend/scadbuddy/api/agent_actor.py`). A guard on every page refuses
-  any redirect off `SCADBUDDY_BACKEND_URL`'s origin, a proxy's included.
-  Chromium keeps its sandbox only where the pod's seccomp profile allows user
-  namespaces (not `RuntimeDefault`); otherwise the agent warns at the first
-  browser turn and runs it with `--no-sandbox`
-  ([`docs/ai/headless-browser.md`](docs/ai/headless-browser.md), "Sandbox").
+  credential's environment. The image carries no browser: a session that needs
+  one gets Microsoft's Playwright MCP server, deployed beside ScadBuddy and added
+  as a plugin endpoint below
+  ([`docs/ai/headless-browser.md`](docs/ai/headless-browser.md)).
 - **Plugin endpoints (#297)**: "provide an endpoint and we'll add it to the
   harness". A plugin is a remote MCP server, stored in Postgres (`ai_plugins`,
   no files) and managed through `/api/v1/ai/plugins` (below). The session
@@ -826,7 +887,8 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   plugin tool parks for approval like any other, #258). Sessions start from
   the assistant's chat socket and the session routes (next bullet). Rules (`agent/src/plugins/registry.ts`):
   - The URL must be `https://`; plain `http://` only when every address the
-    host resolves to is loopback. Link-local and cloud metadata hosts are
+    host resolves to is loopback or private (10/8, 172.16/12, 192.168/16,
+    fc00::/7), such as an in-cluster Service. Link-local and cloud metadata hosts are
     refused, including IPv6 forms that embed one (NAT64, 6to4, Teredo), as
     for gateway base URLs. It is checked at save, at test, and again each
     time a run loads the plugin. No query string, no credentials in the URL,
@@ -910,8 +972,8 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   | `POST …/{id}/messages`, `…/interrupt`, `…/handoff` | send a turn (`{text}`; `409` while one runs), stop it, take the session over |
   | `GET …/{id}/events` | Server-Sent Events: the session's panel events from `Last-Event-ID` (a reconnect) or else `?after=`, then live |
   | `PATCH …/{id}` | `{title?, done?: true}` → `{session}`: rename a session or mark it done (#795). Owner-only (`403`); done is refused while a turn runs and on a durable session (`409`) |
-  | `POST …/{id}/fork` | `{title?, up_to?}` → `201 {session}`: a new session with the transcript so far, or through the reply `up_to` names (an `assistant.text.done` event's `messageId`, #793), and a budget of its own (the panel's Fork, "Fork from here" and "Continue in a new chat", #790); counted like a start (`429`); `409` before the session has a transcript; audited. With the headless browser's agent-actor marker, or through the `sessions_fork` tool, the fork instead spends from the parent's budget: the parent and all its forks share one budget, and a spent one's fork is refused (`409`, #823) |
-  | `POST …/{id}/budget` | `{add_usd}` (0.01–100): adds to the budget that session spends from (shared with its forks and its parent, #823), up to $100 in all. User-only and owner-only, refused with the headless browser's agent-actor marker, audited (#790) |
+  | `POST …/{id}/fork` | `{title?, up_to?}` → `201 {session}`: a new session with the transcript so far, or through the reply `up_to` names (an `assistant.text.done` event's `messageId`, #793), and a budget of its own (the panel's Fork, "Fork from here" and "Continue in a new chat", #790); counted like a start (`429`); `409` before the session has a transcript; audited. Through the `sessions_fork` tool, the fork instead spends from the parent's budget: the parent and all its forks share one budget, and a spent one's fork is refused (`409`, #823) |
+  | `POST …/{id}/budget` | `{add_usd}` (0.01–100): adds to the budget that session spends from (shared with its forks and its parent, #823), up to $100 in all. User-only and owner-only, audited (#790) |
   | `GET/PUT /api/v1/ai/settings/session-limits` | `{budget_usd, max_turns}` (0.01–100 USD, 1–200 turns) for sessions started after a change; audited (#790) |
   | `GET/PUT /api/v1/ai/settings/printer-camera` | `{enabled}`: whether `get_printer_camera` may run (on by default); while off, every call to it is refused; audited (#1911) |
   | `GET/PUT /api/v1/ai/settings/model` | `{model}`: the Claude model (an alias such as `opus`, or a full id) every turn and the connection test use from the next one on, `null` for Claude Code's default; audited (#1917) |
@@ -932,8 +994,8 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   their tiers), plus enabled plugins. Every agent response carries
   `X-ScadBuddy-Service: agent`.
 - It runs as uid 10001 and writes only under `/var/lib/scadbuddy-agent`
-  (mount an `emptyDir` there) and `/tmp` (another `emptyDir`; Claude Code and
-  Chromium use it), so the root filesystem can be read-only
+  (mount an `emptyDir` there) and `/tmp` (another `emptyDir`; Claude Code
+  uses it), so the root filesystem can be read-only
   (spec §4.4; the CI smoke test runs it with `--read-only`). At start it
   recreates `claude/`, `work/` and `plugins/` in that volume, and it exits 1 with a
   message naming the directory if it cannot (`agent/src/harness/stateDirs.ts`).
@@ -951,6 +1013,56 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   deploy (the header of `build-image.yml` says when to drop it), and the new
   GHCR package needs the same one-time **public** visibility step as
   `scadbuddy` (see the header of `build-image.yml`).
+
+### The agent-durable sidecar (durable sessions, #1056)
+
+Durable chat sessions (spec 2026-10-01 §6) run on a third container in the
+ScadBuddy pod, `ghcr.io/eh-homelab/scadbuddy-agent-durable` (the Dockerfile's
+`--target agent-durable`, published by the `agent-durable` job in
+`build-image.yml` with the same tags). It runs the `agent` task queue's worker:
+`DurableSession` and the Claude Code segments. Each tool call is an activity on
+`agent-tools`, which the `agent` container serves. The plan with its rulings is
+`docs/superpowers/plans/2026-10-10-durable-phase-5e-deploy.md`.
+
+- It answers `GET /healthz` on `8082` and opens no other port. The body's
+  `worker` says `running`, `not configured` (a variable is missing), or
+  `failed to start`. It is always 200 while the process serves, so liveness is
+  the only probe it needs.
+- Set the same variables the agent has: `SCADBUDDY_DATABASE_URL`,
+  `SCADBUDDY_SECRET_KEY_FILE` (the agent's KEK mount; add
+  `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` during a rotation),
+  `SCADBUDDY_TEMPORAL_ADDRESS` and `SCADBUDDY_TEMPORAL_NAMESPACE`. The image
+  sets its own paths: `SCADBUDDY_DURABLE_TOOLS_JSON` (the agent's tool manifest
+  from the same build), `SCADBUDDY_DURABLE_SKILLS_DIR`,
+  `SCADBUDDY_DURABLE_AGENTS_DIR` (ScadBuddy's subagents) and
+  `SCADBUDDY_DURABLE_CWD=/srv/agent`.
+- A segment's subagents call ScadBuddy's tools on the agent container's loopback
+  MCP server, `SCADBUDDY_DURABLE_SUBAGENT_MCP_URL`, by default
+  `http://127.0.0.1:8081/internal/durable/subagent-mcp`: the `agent` container in
+  the same pod (it answers only a loopback peer). Set it if the agent listens
+  elsewhere, or to `off` to give the subagents no ScadBuddy tools. The path is
+  not under `/api/v1/ai/`, so the ingress never routes to it.
+- It runs as uid 10001 and writes only under `/srv/agent` (`HOME`, Claude
+  Code's config and its working directory) and `/tmp`, so mount an `emptyDir`
+  at each and keep the root filesystem read-only.
+- Set `SCADBUDDY_PAYLOAD_DIR` on it **and** on the `agent` container to one
+  directory on the data share, mounted at the same path in both (e.g. the
+  backend's NAS volume, `/data/payloads`). A session's Temporal payloads of
+  128 KiB or more (the conversation, the tool manifest, a large tool result)
+  are kept there as files, `<subject>/<sha256>`, ciphertext under the
+  session's own key, and history holds only a reference (#2243). Set it on
+  both or on neither: a reference one container writes, the other must read.
+  forgetSubject removes a session's directory after deleting its key. Unset,
+  payloads stay in history, and a turn whose conversation outgrows 2 MB fails.
+- Several replicas are safe: a session is one workflow, and any worker
+  continues it, because the conversation lives in the workflow (5c Ruling 1).
+- `deploy.reusable.yml` pins its line in `applications/scadbuddy/scadbuddy.yaml`
+  to the build's digest once clusters has one. A manifest without the line
+  deploys without it.
+- Until a worker polls `agent`, new chats fall back to classic and say why
+  (5d Ruling 2b).
+- The new GHCR package needs the one-time **public** visibility step
+  described above.
 
 ### Switching continuous deploy off
 
@@ -982,7 +1094,8 @@ deploy PR link into the release notes. There is no human step after
 - **What is pinned:** the annotations on the Deployments in
   `applications/scadbuddy/scadbuddy.yaml` and
   `applications/scadbuddy/scadbuddy-render.yaml` and
-  `applications/scadbuddy/scadbuddy-print.yaml`; one deploy pins all three to the
+  `applications/scadbuddy/scadbuddy-print.yaml` and
+  `applications/scadbuddy/scadbuddy-projects.yaml`; one deploy pins them all to the
   same digest.
 - **Which dashboard is live:** the `?ref=` on the `deploy/grafana` line of
   clusters' `clusters/prod/scadbuddy/kustomization.yaml`, which should equal the
@@ -1046,7 +1159,7 @@ but those same origins keeps only its origin, since that host has none of the ro
 No user agent and no `exception.message` is forwarded, wherever the page put it. Without an endpoint, or with `OTEL_TRACES_EXPORTER=none` or `OTEL_SDK_DISABLED=true`, it
 answers `204` with `X-ScadBuddy-Tracing: off` (the browser side, the page stopping its
 export, arrives with row 4 of #988). Its rate
-limits are per pod (100 batches at once and 20 a second overall; 20 and 2 a second per
+limits are per pod (1000 batches at once and 20 a second overall; 200 and 2 a second per
 client, an IPv6 client being its /64), so with more than one API replica the overall
 ceiling multiplies.
 **`SCADBUDDY_TRUSTED_PROXIES`** (comma-separated CIDRs, default empty) names the peers

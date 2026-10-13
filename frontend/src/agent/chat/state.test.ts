@@ -50,6 +50,15 @@ describe('the session switcher’s fields (#795)', () => {
     expect(forked.order).toEqual(['f9', 's1'])
     expect(forked.sessions.f9).toMatchObject({ title: 'fork', parentId: 's1', origin: 'chat', owner: you, status: 'idle', items: [] })
   })
+
+  it('#1885 — keeps an archive a list read before it left out, and drops it when a newer list has the chat again', () => {
+    const archived = run([{ type: 'session-patched', patch: { id: 'f1', archived: true, updatedAt: '2026-10-09T03:00:00Z' } }], run([listed()], started))
+    expect(archived.sessions.f1?.archived).toBe(true)
+    // Read before the archive landed: still listed, and older than what the panel knows.
+    expect(run([listed()], archived).sessions.f1?.archived).toBe(true)
+    // Unarchived elsewhere: listed again, and newer.
+    expect(run([listed({ updatedAt: '2026-10-09T04:00:00Z' })], archived).sessions.f1?.archived).toBe(false)
+  })
 })
 
 describe('chatReducer', () => {
@@ -260,7 +269,13 @@ describe('chatReducer', () => {
       sent,
     )
     expect(refused.sessions.s1?.items[0]).toMatchObject({ state: 'pending' })
-    expect(refused.sessions.s1?.items.at(-1)).toMatchObject({ kind: 'error', message: 'needs one answer each' })
+    expect(refused.sessions.s1?.items.at(-1)).toMatchObject({ kind: 'error', message: 'needs one answer each', about: 'q1' })
+    // …and, as the route's error is (#1359), it goes when the question resolves (#2133).
+    const refusedThenAnswered = run(
+      [server({ type: 'question.resolved', sessionId: 's1', id: 'q1', answered: true, answers: ['Approve'], by: you })],
+      refused,
+    )
+    expect(refusedThenAnswered.sessions.s1?.items).toEqual([expect.objectContaining({ kind: 'question', state: 'answered' })])
     // An unrelated error in the session leaves a sent answer alone.
     const unrelated = run([server({ type: 'error', sessionId: 's1', code: 'conflict', message: 'approval decided already' })], sent)
     expect(unrelated.sessions.s1?.items[0]).toMatchObject({ state: 'sent' })
@@ -545,5 +560,22 @@ describe('chatReducer', () => {
     expect(of('q2')).toBe('')
     expect(of('q3')).toBeUndefined()
     expect(of('q4')).toBeUndefined()
+  })
+})
+
+describe('workspace changes (#2329)', () => {
+  it('counts each workspace.file event, so the Files list reads again, and notes each in the feed (#2399)', () => {
+    const state = run(
+      [
+        server({ type: 'workspace.file', sessionId: 's1', path: 'uploads/a.stl', change: 'uploaded', by: you, size: 3 }),
+        server({ type: 'workspace.file', sessionId: 's1', path: 'uploads/a.stl', change: 'deleted', by: you }),
+      ],
+      started,
+    )
+    expect(state.sessions.s1?.workspaceChanges).toBe(2)
+    expect(state.sessions.s1?.items.slice(started.sessions.s1?.items.length)).toEqual([
+      { kind: 'file', id: expect.stringMatching(/^file-/), path: 'uploads/a.stl', change: 'uploaded', by: you, size: 3 },
+      { kind: 'file', id: expect.stringMatching(/^file-/), path: 'uploads/a.stl', change: 'deleted', by: you },
+    ])
   })
 })

@@ -28,6 +28,7 @@ import time
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -37,6 +38,13 @@ from psycopg import AsyncConnection
 from psycopg.rows import DictRow, dict_row
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
+from scadbuddy.bambuddy.commits import (
+    FOLDER_NOT_FOUND,
+    PARENT_FOLDER_NOT_FOUND,
+    refused,
+    upload_into,
+    visible,
+)
 from scadbuddy.bambuddy.errors import not_configured
 from scadbuddy.bambuddy.models import FolderCreate
 from scadbuddy.core.problems import ApiError
@@ -212,13 +220,15 @@ class BambuddyContentBackend:
         media = _MEDIA_TYPES.get(Path(name).suffix.lower(), "application/octet-stream")
         async with self._client() as (client, inbox):
             for attempt in (1, 2):
-                folder_id = await self._folder_for(client, inbox, scope)
                 try:
-                    uploaded = await client.upload_library_file(
-                        name, data, folder_id=folder_id, media_type=media
+                    folder_id = await self._folder_for(client, inbox, scope)
+                    # A folder made moments ago is waited for, not made again (#2263).
+                    uploaded = await upload_into(
+                        client, name, data, folder_id=folder_id, media_type=media
                     )
                 except ApiError as error:
-                    # The folder was deleted in Bambuddy's UI: forget it, make it again.
+                    # The folder (or its template folder) was deleted in Bambuddy's UI,
+                    # or never kept: forget it, make it again.
                     if error.status != 404 or attempt == 2:
                         raise
                     await asyncio.to_thread(self._forget, inbox, scope.slug or "")
@@ -269,6 +279,54 @@ class BambuddyContentBackend:
                 if error.status != 404:
                     raise
 
+    async def sweep_unrecorded(self, *, cutoff: datetime) -> list[str]:
+        """Delete the files in this Bambuddy's recorded `Work/` folders that no
+        `store_blobs` row names and that were added before ``cutoff`` (#701): an upload
+        whose process died before `ContentStore.put` wrote its row. A newer one may be
+        an upload whose row is about to be written, so it stays. Each file's folder is
+        read again right before its DELETE, as `remove` does (#1272): the listing can be
+        many round trips old by then, and a file moved out of `Work/` meanwhile is left
+        alone (#2115). Returns the deleted ids."""
+        removed: list[str] = []
+        async with self._client() as (client, inbox):
+            for folder_id in sorted(await asyncio.to_thread(self._work_folders, inbox)):
+                try:
+                    files = await client.library_listing(folder_id=folder_id)
+                except ApiError as error:
+                    if error.status == 404:  # deleted in Bambuddy's UI; made again on use
+                        continue
+                    raise
+                for file in files:
+                    added = file.created_at
+                    if added is None or added.replace(tzinfo=UTC) > cutoff:
+                        continue
+                    if await asyncio.to_thread(self._recorded_id, str(file.id)):
+                        continue
+                    try:
+                        still = await client.library_file(file.id)
+                    except ApiError as error:
+                        if error.status == 404:
+                            continue
+                        raise
+                    if still.folder_id != folder_id:
+                        continue
+                    try:
+                        await client.delete_library_file(file.id)
+                    except ApiError as error:
+                        if error.status != 404:
+                            raise
+                    removed.append(str(file.id))
+        return removed
+
+    def _recorded_id(self, backend_id: str) -> bool:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT EXISTS (SELECT 1 FROM store_blobs WHERE backend = %s AND backend_id = %s)"
+                " AS recorded",
+                (self.backend, backend_id),
+            ).fetchone()
+        return bool(row and row["recorded"])
+
     # --- folders -------------------------------------------------------------
 
     async def _folder_for(self, client: BambuddyClient, inbox: _Inbox, scope: BlobScope) -> int:
@@ -318,7 +376,18 @@ class BambuddyContentBackend:
             for folder in root.walk():
                 if folder.parent_id == parent_id and folder.name == name:
                     return folder.id
-        return (await client.create_folder(FolderCreate(name=name, parent_id=parent_id))).id
+        create = FolderCreate(name=name, parent_id=parent_id)
+        try:
+            return (await client.create_folder(create)).id
+        except ApiError as error:
+            # The parent is the template folder this find made a moment ago, and Bambuddy
+            # has not committed it yet (#2263): wait for it rather than failing the upload
+            # into a forget that would make a second one.
+            if not refused(error, PARENT_FOLDER_NOT_FOUND) or not await visible(
+                lambda: client.folder(parent_id), FOLDER_NOT_FOUND
+            ):
+                raise
+        return (await client.create_folder(create)).id
 
     @asynccontextmanager
     async def _locked(self, key: int) -> AsyncIterator[AsyncConnection[DictRow]]:

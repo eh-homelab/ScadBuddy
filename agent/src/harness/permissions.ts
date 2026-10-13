@@ -19,19 +19,15 @@ import type { CanUseTool, HookCallbackMatcher, PermissionResult } from '@anthrop
 // Without a gate (a bare harness run) needs_approval is a DENY whose message
 // says the action needs approval, so an outward tool can never run unattended.
 //
-// Before the tier, an optional InputGuard may judge a call by its arguments
-// (the headless browser's origins and file names, #349, headlessBrowser.ts
-// `browserInputGuard`). It may:
+// Before the tier, an optional InputGuard may judge a call by its arguments.
+// It may:
 //   - DENY it: that holds at every tier and is never parked for approval;
-//   - make it OUTWARD for this input, whatever the tool's own tier (a
-//     navigation to an allowed origin not yet approved in the session), so it
+//   - make it OUTWARD for this input, whatever the tool's own tier, so it
 //     parks for approval like any outward call;
-//   - REWRITE its input (an alias of the backend's origin onto the backend's):
-//     the call is then allowed at its tier and canUseTool hands the SDK the
-//     new input as `updatedInput`, which the tool runs with (sdk.d.ts,
-//     0.3.283 and 0.3.287, `PermissionResult`; measured for a plugin tool in
-//     test/headlessBrowser.e2e.test.ts). The hook passes such a call on
-//     without a verdict, as it does every allowed one.
+//   - REWRITE its input: the call is then allowed at its tier and canUseTool
+//     hands the SDK the new input as `updatedInput`, which the tool runs with
+//     (sdk.d.ts, 0.3.283 and 0.3.287, `PermissionResult`). The hook passes such
+//     a call on without a verdict, as it does every allowed one.
 //
 // It is enforced twice, as spec §8.2 asks ("the SDK permission callback and a
 // PreToolUse hook"):
@@ -52,6 +48,12 @@ import type { CanUseTool, HookCallbackMatcher, PermissionResult } from '@anthrop
 
 export const RISK_TIERS = ['read', 'write', 'outward'] as const
 export type RiskTier = (typeof RISK_TIERS)[number]
+
+/** The stricter of a tool's own tier and a Settings override (#1953: overrides only tighten). */
+export function raiseTier(tier: RiskTier, override: RiskTier | undefined): RiskTier {
+  if (override === undefined) return tier
+  return RISK_TIERS.indexOf(override) > RISK_TIERS.indexOf(tier) ? override : tier
+}
 
 /**
  * Maps a tool name as the SDK reports it (`mcp__{server}__{tool}` for MCP
@@ -76,10 +78,7 @@ export type GuardVerdict =
   /** Allowed at the tool's tier, run with this input instead. */
   | { input: Record<string, unknown> }
 
-/**
- * Judges a call by its INPUT (see the header). The headless browser's origin
- * and file-name checks (headlessBrowser.ts `browserInputGuard`, #349) are one.
- */
+/** Judges a call by its INPUT (see the header). */
 export type InputGuard = (toolName: string, input: unknown) => GuardVerdict | undefined
 
 export type ToolDecision =

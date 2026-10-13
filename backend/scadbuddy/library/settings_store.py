@@ -17,7 +17,7 @@ Three tables, all in ``migrations/20260928T0840Z_settings.sql``:
 
 ``library_print_choices`` (#313) held a library file's choices until #1754 copied them
 into ``model_print_choices`` (``migrations/20261009T0541Z_print_choices_by_subject.sql``);
-it is no longer read or written.
+#1963 dropped it.
 
 The print dialog writes a model's choices and its printer's plate back to back on
 every print, and FastAPI runs each on its own threadpool thread; each write is one
@@ -116,6 +116,7 @@ REMEMBERED_ROWS = (
     "model_print_options",
     "printer_rack_algorithms",
     "printer_rack_algorithm_versions",
+    "model_projects",
 )
 
 
@@ -191,6 +192,21 @@ class ModelPrintChoices(BaseModel):
         return [nozzles[0], nozzles[0].model_copy()] if len(nozzles) == 1 else nozzles
 
 
+class ModelProject(BaseModel):
+    """The project Generate last filed one model's output into, with one preset or none
+    (#1660). ``preset_name`` is the preset's name when it was remembered, for Settings
+    to show: the key holds only its id."""
+
+    project_id: int
+    preset_name: str | None = Field(default=None, max_length=200)
+
+
+def model_project_scope(model_id: str, preset_id: str | None) -> str:
+    """The ``model_projects`` key for a model and the preset in use (#1660). A model id
+    and a preset id never hold a ``/``, so the two cannot run together."""
+    return model_id if preset_id is None else f"{model_id}/{preset_id}"
+
+
 class StoredSettings(BambuddyIds):
     """Bambuddy connection details. The API key never leaves the server.
 
@@ -244,9 +260,14 @@ class StoredSettings(BambuddyIds):
 
     #: The Bambuddy project the last send went to (#79), and nothing more. A project
     #: is Bambuddy's grouping, not a second one kept here, so ScadBuddy remembers only
-    #: enough to open the picker where it was left rather than modelling which models
-    #: belong to which project — that question is Bambuddy's to answer.
+    #: defaults for the next filing (this, and ``model_projects`` below) rather than
+    #: modelling which prints belong to which project: that question is Bambuddy's.
     last_project_id: int | None = None
+    #: :func:`model_project_scope` -> the project Generate last filed it into (#1660), so
+    #: the picker moves there when the model or the preset is opened, and Generate asks
+    #: before filing it elsewhere. Set one key at a time
+    #: (:meth:`SettingsStore.set_model_project`).
+    model_projects: dict[str, ModelProject] = Field(default_factory=dict)
 
     # #88 — remembered print options, least to most specific. All three start empty, so
     # a ScadBuddy that has never been told otherwise queues with Bambuddy's own
@@ -271,6 +292,21 @@ class StoredSettings(BambuddyIds):
             return {}
         known = get_args(RackAlgorithm)
         return {key: algorithm for key, algorithm in value.items() if algorithm in known}
+
+    @field_validator("model_projects", mode="before")
+    @classmethod
+    def _readable_projects(cls, value: Any) -> Any:
+        """An entry this version cannot read is nothing remembered, not settings that
+        will not load."""
+        if not isinstance(value, dict):
+            return {}
+        kept: dict[str, ModelProject] = {}
+        for scope, project in value.items():
+            try:
+                kept[scope] = ModelProject.model_validate(project)
+            except ValidationError:
+                logger.warning("unreadable model project", extra={"scope": scope})
+        return kept
 
     @field_validator("model_print_choices", mode="before")
     @classmethod
@@ -385,11 +421,16 @@ class SettingsPatch(BaseModel):
     asset_sweep_interval: float | None = None
     duplicate_staging_max_age: float | None = None
     media_upload_max_bytes: int | None = None
+    read_max_objects: int | None = None
+    read_max_visits: int | None = None
+    read_max_triangles: int | None = None
+    read_max_paint_digits: int | None = None
     #: Write-only, like the Bambuddy key; ``""`` clears it.
     google_fonts_api_key: str | None = None
     fonts_catalogue_ttl: float | None = None
     event_log_retention_seconds: float | None = None
     event_log_retention_rows: int | None = None
+    flow_approval_timeout_seconds: int | None = None
     log_level: str | None = None
     temporal_ui_url: str | None = None
 
@@ -797,6 +838,37 @@ class SettingsStore:
                 _put(conn, "last_project_id", project_id)
         return self._written("last_project")
 
+    def set_model_project(
+        self, model_id: str, preset_id: str | None, project: ModelProject | None
+    ) -> StoredSettings:
+        """Remember the project one model (with one preset, or none) was filed into
+        (#1660); ``None`` forgets it."""
+        with self._pool.connection() as conn:
+            _put_entry(
+                conn,
+                "model_projects",
+                model_project_scope(model_id, preset_id),
+                None if project is None else project.model_dump(mode="json"),
+            )
+        return self._written("model_project")
+
+    def forget_model_projects(self, model_id: str, preset_id: str | None = None) -> None:
+        """Drop what a deleted preset was filed into or, with no ``preset_id``, every
+        entry for a deleted model (#1660), so Settings lists no id that is gone."""
+        with self._pool.connection() as conn:
+            if preset_id is not None:
+                _put_entry(conn, "model_projects", model_project_scope(model_id, preset_id), None)
+            else:
+                prefix = model_project_scope(model_id, "")
+                conn.execute(
+                    "UPDATE settings SET value = COALESCE("
+                    " (SELECT jsonb_object_agg(e.key, e.value) FROM jsonb_each(settings.value) AS e"
+                    "  WHERE e.key <> %s AND left(e.key, length(%s)) <> %s), '{}'::jsonb),"
+                    " updated_at = now() WHERE name = 'model_projects'",
+                    (model_id, prefix, prefix),
+                )
+        emit(self.events, SettingsChanged(section="model_project"))
+
     def save_print_options(
         self, scope: OptionScope, key: str | None, options: PrintOptions
     ) -> StoredSettings:
@@ -825,8 +897,8 @@ class SettingsStore:
 
     def forget_remembered(self) -> StoredSettings:
         """Forget every remembered choice (#322): the per-model and per-library-file
-        (#313) print-dialog choices, the per-printer plates, and the print options at
-        every scope. The settings themselves are left alone."""
+        (#313) print-dialog choices, the per-printer plates, the print options at every
+        scope, and each model's project (#1660). The settings themselves are left alone."""
         with self._pool.connection() as conn, conn.transaction():
             conn.execute("DELETE FROM model_print_choices")
             conn.execute("DELETE FROM printer_bed_types")
@@ -968,11 +1040,14 @@ class RenderStoreSettings(BaseModel):
 def load_render_store_settings(
     pool: ConnectionPool[Connection[DictRow]], defaults: Settings
 ) -> RenderStoreSettings:
-    """Read only `RENDER_FIELDS`: a worker holds no settings store (spec §9)."""
+    """Read only `RENDER_FIELDS`: a worker holds no settings store (spec §9). Through
+    the `render_settings` view, all of the settings the render worker's own role may
+    read (#601); the full key is in it only while no render key is stored."""
     kek = settings_kek(defaults.secret_key_file)
     with pool.connection() as conn:
         rows = conn.execute(
-            "SELECT name, value FROM settings WHERE name = ANY(%s)", (list(RENDER_FIELDS),)
+            "SELECT name, value FROM render_settings WHERE name = ANY(%s)",
+            (list(RENDER_FIELDS),),
         ).fetchall()
     values: dict[str, Any] = {
         name: getattr(defaults, name) for name in ENV_SEEDED if name in RENDER_FIELDS

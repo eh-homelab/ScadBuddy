@@ -91,18 +91,14 @@ ScadBuddy-Agent-Session: 6f1c…
 ```
 
 `list_versions` (`GET /api/v1/models/{slug}/versions`) reports them as
-`agent: {principal, session}` beside `author`. A request from the headless browser
-(#349) carries the agent-actor marker, whose value is the session id, so its commits
-are the agent's too. The commit's subject is the tool's `message`; the `authoring`
+`agent: {principal, session}` beside `author`. The commit's subject is the tool's `message`; the `authoring`
 skill asks the agent to put the user's instruction there (#252: "carrying the user's
 instruction as the message").
 
 The headers are labels, not authentication: the backend trusts its callers (spec
 §4.3), and a forged header can only mislabel a revision. Each value must be printable
 ASCII with no spaces (the principal at most 300 characters, the session
-`[A-Za-z0-9_-]{1,64}`), so a trailer is one line; anything else is a 400. The tools'
-header is deliberately not the agent-actor marker, which would make the backend refuse
-the outward routes a human has already approved.
+`[A-Za-z0-9_-]{1,64}`), so a trailer is one line; anything else is a 400.
 
 ## 4. `checkpoint`
 

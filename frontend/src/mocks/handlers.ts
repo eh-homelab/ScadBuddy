@@ -15,6 +15,8 @@ import type {
   FontFamily,
   Job,
   LastProject,
+  ModelProjectPut,
+  ModelProjects,
   CatalogueLibrary,
   InvalidLibraryEntry,
   ManifestObject,
@@ -56,6 +58,7 @@ import type {
   UpstreamStatus,
 } from '../api/types'
 import { editPath } from '../lib/deeplink'
+import { foldFamily } from '../lib/fonts'
 import { emitRealtime, realtimeHandler } from './realtime'
 import { features } from './features'
 import { mockRackCheck, mockRackPicks } from './features/rack'
@@ -76,6 +79,10 @@ import { UI_MODULES } from './templateUi'
 import { SLICED_REASON, mockLibraryObjects } from './libraryObjects'
 
 const base = '/api/v1'
+
+/** A 1×1 PNG, for the image routes whose pixels no test looks at. */
+const PLACEHOLDER_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII='
+const bytesOf = (base64: string) => Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
 
 /** `ModelPrintChoices()` on the backend: every field at its default. */
 export const NO_MODEL_CHOICES: Required<ModelPrintChoices> = {
@@ -118,8 +125,6 @@ const state = {
   /** Per-template presets, shipped (`template-*`) and saved. */
   presets: structuredClone(fixtures.presets) as Record<string, ParamPreset[]>,
   settings: structuredClone(fixtures.settings) as Settings,
-  /** #349 — the agent's headless-browser setting (`ai_settings`), off by default. */
-  headlessBrowser: false,
   printOptions: structuredClone(fixtures.printOptions) as PrintOptionsState,
   jobs: new Map<string, Job>(),
   /** spec 2026-09-27 §7 — what each arrange job was built from, read when it is saved. */
@@ -141,6 +146,8 @@ const state = {
   projects: [...fixtures.projectViews] as ProjectView[],
   /** #79 — per-model projects. No global fallback. */
   lastProjectId: null as number | null,
+  /** #1660 — the store's `model_projects`: `<slug>` or `<slug>/<preset id>` -> project. */
+  modelProjects: {} as Record<string, { project_id: number; preset_name?: string | null }>,
   fonts: [...fixtures.fonts] as FontFamily[],
   /** #90 — one git history per model, newest first. */
   versions: structuredClone(fixtures.versions) as Record<string, ModelVersion[]>,
@@ -288,7 +295,6 @@ export function resetMockState(): void {
   state.readmes = { 'name-keychain': fixtures.keychainReadme }
   state.presets = structuredClone(fixtures.presets)
   state.settings = structuredClone(fixtures.settings)
-  state.headlessBrowser = false
   state.printOptions = structuredClone(fixtures.printOptions)
   state.jobs.clear()
   state.arranged.clear()
@@ -300,6 +306,7 @@ export function resetMockState(): void {
   state.projectTargets = {}
   state.projects = fixtures.projectViews.map((p) => ({ ...p }))
   state.lastProjectId = null
+  state.modelProjects = {}
   state.fonts = fixtures.fonts.map((f) => ({ ...f }))
   state.versions = structuredClone(fixtures.versions)
   state.sourceAt = initialSourceAt()
@@ -395,7 +402,9 @@ export function setMockRemembered(remembered: {
   modelChoices?: Record<string, ModelPrintChoices>
   printerBedTypes?: Record<string, string>
   projectTargets?: Record<string, { printer_id: number; nozzle_diameter?: string }>
+  modelProjects?: Record<string, { project_id: number; preset_name?: string | null }>
 }): void {
+  if (remembered.modelProjects) state.modelProjects = structuredClone(remembered.modelProjects)
   if (remembered.modelChoices) state.modelChoices = structuredClone(remembered.modelChoices)
   if (remembered.printerBedTypes) state.printerBedTypes = { ...remembered.printerBedTypes }
   if (remembered.projectTargets) state.projectTargets = structuredClone(remembered.projectTargets)
@@ -417,6 +426,11 @@ export function setMockInvalidLibraries(slug: string, entries: InvalidLibraryEnt
 /** #169 — every model as the mock has it now, for a feature module (`features/`). */
 export function mockModels(): readonly ModelSummary[] {
   return state.models
+}
+
+/** #1290 — a model's `model.scad` as the mock has it now, for a feature module (`features/`). */
+export function mockSource(slug: string): string | undefined {
+  return state.sources[slug]
 }
 
 /** #169 — puts `model` in place of the one with its slug; answers it as the routes do. */
@@ -755,6 +769,18 @@ export function mockRemembered() {
     printer_print_options: structuredClone(state.printOptions.printers ?? {}),
     model_print_options: structuredClone(state.printOptions.models ?? {}),
     project_print_targets: structuredClone(state.projectTargets),
+    model_projects: structuredClone(state.modelProjects),
+  }
+}
+
+/** #1660 — `GET /print/models/{slug}/projects` from the store's `model_projects`. */
+function mockModelProjects(slug: string): ModelProjects {
+  return {
+    projects: Object.entries(state.modelProjects).flatMap(([key, project]): NonNullable<ModelProjects['projects']> => {
+      if (key === slug) return [{ preset_id: null, ...project }]
+      if (key.startsWith(`${slug}/`)) return [{ preset_id: key.slice(slug.length + 1), ...project }]
+      return []
+    }),
   }
 }
 
@@ -768,6 +794,7 @@ export function forgetMockRemembered(): void {
   state.modelChoices = {}
   state.printerBedTypes = {}
   state.projectTargets = {}
+  state.modelProjects = {}
   state.printOptions.global_options = {}
   state.printOptions.printers = {}
   state.printOptions.models = {}
@@ -2494,6 +2521,31 @@ export const handlers = [
       }
     }
 
+    // #1286 — `require_installed_fonts` (api/params.py): a `// font` value the caller
+    // chose that names a family not installed is refused, naming both.
+    const installedFamilies = new Set(state.fonts.map((font) => foldFamily(font.family)))
+    const unfontedParams: string[] = []
+    const unfontedFamilies: string[] = []
+    for (const param of schema.parameters ?? []) {
+      const value = renderParams[param.name]
+      if (param.type !== 'font' || typeof value !== 'string' || value === param.initial) continue
+      // The template's own options are its business, as on the server.
+      if ((param.options ?? []).some((option) => option.value === value)) continue
+      const families = (value.split(':style=')[0] ?? '').split(',').map((family) => family.trim()).filter(Boolean)
+      const missing = families.filter((family) => !installedFamilies.has(foldFamily(family)))
+      if (missing.length === 0) continue
+      unfontedParams.push(param.name)
+      for (const family of missing) if (!unfontedFamilies.includes(family)) unfontedFamilies.push(family)
+    }
+    if (unfontedParams.length > 0) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        `parameter '${unfontedParams[0]}' names font family '${unfontedFamilies[0]}', which is not installed`,
+        { parameters: unfontedParams, families: unfontedFamilies },
+      )
+    }
+
     const jobId = nextHexId()
     const inputs = withVersion({ ...(body.inputs ?? {}), params: renderParams })
     state.jobs.set(jobId, {
@@ -2657,7 +2709,8 @@ export const handlers = [
         'a result of library files alone is filed under a template: name one in slug',
       )
     }
-    if (slugs.length > 0 && body.slug != null && !slugs.includes(body.slug)) {
+    // #2284 — with a library file in the mix, any template.
+    if (slugs.length > 0 && library.length === 0 && body.slug != null && !slugs.includes(body.slug)) {
       return problem(
         422,
         'Unprocessable Content',
@@ -2679,7 +2732,8 @@ export const handlers = [
           manifest.push({
             part: entry.part,
             file: entry.name,
-            slug: filed,
+            // #2284 — a library file's objects are no template's, wherever it is filed.
+            slug: '',
             revision: null,
             bbox: { min: [0, 0, 0], max: [x, y, z], size: [x, y, z] },
             footprint: [x, y],
@@ -2715,7 +2769,7 @@ export const handlers = [
     }
     state.jobs.set(jobId, job)
     state.arranged.set(jobId, {
-      sources: chosen,
+      sources: [...chosen, ...new Set(library.map((o) => `library:${o.library_file_id}`))],
       manifest,
     })
     return HttpResponse.json(job, { status: 202 })
@@ -2737,6 +2791,23 @@ export const handlers = [
     const glb = keychainGlb(job.colors ?? ['#9AA4B2'], { x, y, z })
     return HttpResponse.arrayBuffer(glb.buffer.slice(0) as ArrayBuffer, {
       headers: { 'Content-Type': 'model/gltf-binary' },
+    })
+  }),
+
+  // #1289 — the per-colour breakdown: a placeholder image, with the legend in the
+  // route's headers as the backend sends it (a near-square grid, render/thumbnail.py).
+  http.get(`${base}/jobs/:id/colours.png`, ({ params }) => {
+    const job = state.jobs.get(String(params['id']))
+    if (!job || !job.bbox_mm) return problem(404, 'Preview not ready')
+    const colours = (job.colors ?? []).map((colour) => colour.toUpperCase())
+    if (colours.length === 0) return problem(404, 'The preview has no geometry')
+    if (colours.length > 16) return problem(422, `${colours.length} colours is more than a breakdown draws (16)`)
+    return HttpResponse.arrayBuffer(bytesOf(PLACEHOLDER_PNG).buffer as ArrayBuffer, {
+      headers: {
+        'Content-Type': 'image/png',
+        'X-ScadBuddy-Colours': colours.join(','),
+        'X-ScadBuddy-Colour-Columns': String(Math.ceil(Math.sqrt(colours.length))),
+      },
     })
   }),
 
@@ -3299,6 +3370,20 @@ export const handlers = [
     return HttpResponse.json({ project_id: state.lastProjectId } satisfies LastProject)
   }),
 
+  // #1660 — the project each model was last filed into, per preset.
+  http.get(`${base}/print/models/:slug/projects`, ({ params }) =>
+    HttpResponse.json(mockModelProjects(String(params['slug']))),
+  ),
+
+  http.put(`${base}/print/models/:slug/project`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    const body = (await request.json()) as ModelProjectPut
+    const key = body.preset_id ? `${slug}/${body.preset_id}` : slug
+    if (body.project_id === null || body.project_id === undefined) delete state.modelProjects[key]
+    else state.modelProjects[key] = { project_id: body.project_id, preset_name: body.preset_name ?? null }
+    return HttpResponse.json(mockModelProjects(slug))
+  }),
+
   // #317 — Generate with a project files the editable 3MF in its folder, once per
   // (folder, target): the same project again answers with the file already there.
   http.post(`${base}/outputs/:id/project-file`, async ({ params, request }) => {
@@ -3408,6 +3493,18 @@ export const handlers = [
 
   http.get(`${base}/libraries`, () => HttpResponse.json(state.libraries)),
 
+  // #1285 — a model whose includes all resolve; tests that need more override this.
+  http.post(`${base}/models/:slug/dependencies`, () =>
+    HttpResponse.json({
+      includes: [],
+      unresolved: 0,
+      fonts: [],
+      fonts_checked: true,
+      missing_checkouts: [],
+      truncated: false,
+    }),
+  ),
+
   // #93 — pins are per model: PUT clones at `ref` and pins it into this model alone.
   http.put(`${base}/models/:slug/libraries/:name`, async ({ params, request }) => {
     const slug = String(params['slug'])
@@ -3483,20 +3580,6 @@ export const handlers = [
     }
     state.models = state.models.map((m) => (m.slug === slug ? updated : m))
     return HttpResponse.json(view(updated))
-  }),
-
-  // #349 — served by the agent service, not the backend (agent/src/routes/headlessBrowser.ts).
-  http.get(`${base}/ai/settings/headless-browser`, () =>
-    HttpResponse.json({ enabled: state.headlessBrowser }),
-  ),
-
-  http.put(`${base}/ai/settings/headless-browser`, async ({ request }) => {
-    const body = (await request.json()) as { enabled?: unknown }
-    if (typeof body.enabled !== 'boolean') {
-      return HttpResponse.json({ detail: 'enabled: expected boolean' }, { status: 400 })
-    }
-    state.headlessBrowser = body.enabled
-    return HttpResponse.json({ enabled: state.headlessBrowser })
   }),
 
   // #81 — the server resolves Bambuddy's code or the profile name, else the default.

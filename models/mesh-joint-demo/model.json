@@ -1,0 +1,5 @@
+{
+  "name": "Mesh joint demo",
+  "description": "A mesh opened as a scene: cut at the neck, joined with a keyed peg and socket, the leaves laid on their side (#2146).",
+  "tags": ["mesh", "demo"]
+}

@@ -219,8 +219,10 @@ describe('scrubForLog', () => {
 
 describe('the agent’s protocol mirror', () => {
   const sample: ServerEvent[] = [
-    event({ type: 'sessions.snapshot', sessions: [{ sessionId: S, title: 't', origin: 'mcp', owner: { kind: 'bearer', id: 'token:a', label: 'A' }, status: 'idle', parentId: null, updatedAt: '2026-10-09T00:00:00.000Z', costUsd: 0.25, budgetUsd: 1 }] }),
+    event({ type: 'sessions.snapshot', sessions: [{ sessionId: S, title: 't', origin: 'mcp', owner: { kind: 'bearer', id: 'token:a', label: 'A' }, status: 'idle', parentId: null, updatedAt: '2026-10-09T00:00:00.000Z', costUsd: 0.25, budgetUsd: 1, mode: 'durable', offer: { to: { kind: 'browser', id: 'browser', label: 'You' }, until: '2026-10-09T01:00:00.000Z' } }] }),
     event({ type: 'session.started', sessionId: S, origin: 'chat', owner: { kind: 'browser', id: 'browser', label: 'You' }, title: '', budgetUsd: 1 }),
+    // Plan 5d: the mode, and why a default durable session ran classic.
+    event({ type: 'session.started', sessionId: S, origin: 'chat', owner: { kind: 'browser', id: 'browser', label: 'You' }, mode: 'classic', modeFallback: 'Temporal did not answer' }),
     event({ type: 'session.owner', sessionId: S, owner: { kind: 'browser', id: 'browser', label: 'You' } }),
     event({ type: 'user.turn', sessionId: S, turnId: 't', text: 'hi', author: { kind: 'flow', id: 'analyzer', label: 'Analyzer' } }),
     event({ type: 'assistant.text.delta', sessionId: S, messageId: 'm:0', delta: 'x' }),
@@ -257,6 +259,9 @@ describe('the agent’s protocol mirror', () => {
     event({ type: 'session.status', sessionId: S, status: 'waiting_approval' }),
     event({ type: 'session.result', sessionId: S, costUsd: 0.5, turns: 3, budgetUsd: 1 }),
     event({ type: 'session.budget', sessionId: S, costUsd: 1.02, budgetUsd: 2 }),
+    // #2329: a file uploaded into, or deleted from, the session's workspace.
+    event({ type: 'workspace.file', sessionId: S, path: 'uploads/part.stl', change: 'uploaded', by: { kind: 'browser', id: 'browser', label: 'You' }, size: 12, mediaType: 'model/stl', sha256: 'a'.repeat(64) }),
+    event({ type: 'workspace.file', sessionId: S, path: 'uploads/part.stl', change: 'deleted', by: { kind: 'browser', id: 'browser', label: 'You' } }),
     event({ type: 'error', sessionId: S, code: 'interrupted', message: 'the turn was interrupted' }),
     event({ type: 'error', sessionId: S, code: 'conflict', message: 'no longer waiting', questionId: 'q1' }),
     event({ type: 'memory', sessionId: S, turnId: S, action: 'recall', bank: 'b', outcome: 'ok', count: 3 }),

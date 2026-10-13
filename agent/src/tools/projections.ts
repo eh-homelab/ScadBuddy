@@ -1,12 +1,12 @@
 import { createSdkMcpServer, type McpSdkServerConfigWithInstance, tool as sdkTool } from '@anthropic-ai/claude-agent-sdk'
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { McpServer, type RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { type Context, context as otelContext, SpanStatusCode } from '@opentelemetry/api'
 import type { Principal } from '../auth/principal.js'
 import type { AuditLog } from '../audit/log.js'
 import { toolContextFor, withSpan } from '../telemetry/trace.js'
 import { MCP_UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
-import { errorResult, parsedOrRaw, type Progress, runTool, runToolWithOutcome, type Tool, type ToolRun, type ToolServices } from './registry.js'
+import { errorResult, parsedOrRaw, type Progress, type Risk, runTool, runToolWithOutcome, type Tool, type ToolRun, type ToolServices } from './registry.js'
 
 // The two projections of the registry (spec §5.1, D3). Both hand every call to
 // `runTool`, with the same names, descriptions, input shapes and annotations;
@@ -87,6 +87,8 @@ export function createHarnessServer(
   session?: string,
   /** The turn's open segment (telemetry/turn.ts TurnTrace.context): where a call with no bound span is traced. */
   turnContext?: () => Context,
+  /** The tier the turn's permission seam applies to each tool (registry.ts ToolContext.seamTier); its own by default. */
+  seamTierOf: (tool: Tool) => Risk = (tool) => tool.risk,
 ): McpSdkServerConfigWithInstance {
   const lookup = lookupIn(tools)
   return createSdkMcpServer({
@@ -121,6 +123,7 @@ export function createHarnessServer(
               signal: signalFrom(extra),
               lookup,
               gate: 'harness',
+              seamTier: seamTierOf(t),
             }),
           ),
         { annotations: t.annotations },
@@ -133,6 +136,20 @@ export function createHarnessServer(
 export function principalFrom(extra: unknown): Principal | undefined {
   const principal = (extra as ExtraLike | undefined)?.authInfo?.extra?.principal
   return principal as Principal | undefined
+}
+
+/** Each /mcp server's way to bring its tool list in line with Settings → Plugins (#1953). */
+const refreshers = new WeakMap<McpServer, () => Promise<void>>()
+
+/**
+ * Offers on `server` exactly the tools Settings → Plugins has not disabled
+ * (#1953), read now; /mcp calls it before each request, so a `tools/list`
+ * never shows a disabled tool. A change sends `notifications/tools/list_changed`.
+ * A read that fails leaves the list as it was: every call to a tool re-reads
+ * its override and is refused when it cannot be read (registry.ts).
+ */
+export async function refreshOfferedTools(server: McpServer): Promise<void> {
+  await refreshers.get(server)?.()
 }
 
 /**
@@ -153,8 +170,9 @@ export function createExternalServer(tools: readonly Tool[], services: ToolServi
         MCP_UNTRUSTED_CONTENT_POLICY,
     },
   )
+  const registered = new Map<string, RegisteredTool>()
   for (const t of tools) {
-    server.registerTool(
+    const handle = server.registerTool(
       t.name,
       { description: t.description, inputSchema: t.shape, annotations: t.annotations },
       async (args, extra): Promise<CallToolResult> => {
@@ -207,6 +225,25 @@ export function createExternalServer(tools: readonly Tool[], services: ToolServi
         return run.result
       },
     )
+    registered.set(t.name, handle)
+  }
+  const overrides = services.toolOverrides
+  if (overrides) {
+    refreshers.set(server, async () => {
+      let disabled: ReadonlySet<string>
+      try {
+        disabled = await overrides.disabled()
+      } catch {
+        return
+      }
+      for (const [name, handle] of registered) {
+        const on = !disabled.has(name)
+        if (handle.enabled !== on) {
+          if (on) handle.enable()
+          else handle.disable()
+        }
+      }
+    })
   }
   return server
 }

@@ -98,7 +98,9 @@ def test_the_filament_step_answers_with_the_inventory_and_a_suggestion(
     assert [slot["slot_id"] for slot in body["slots"]] == [1, 2]
     # Every spool in the inventory is offered, not only the loaded ones — that is the
     # whole point of #87's "inventory, not just what is loaded".
-    assert len(body["spools"]) == len(recording("inventory-spools.json"))
+    # Every spool, and each filled tray Bambuddy has no spool for, as itself (#2164).
+    spools = [spool for spool in body["spools"] if not spool.get("tray_only")]
+    assert len(spools) == len(recording("inventory-spools.json"))
     assert {choice["slot_id"] for choice in body["suggested"]} == {1, 2}
     loaded = [row for row in body["spools"] if row["loaded"]]
     # Where it is, as a label — not an address. No tray number is computed here.
@@ -152,6 +154,26 @@ def test_the_filament_step_shows_the_mounted_nozzles(client: TestClient, model: 
     assert "pipeline_nozzle_diameter" not in body
     assert not local.called
     assert not pipeline.called
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+def test_an_unreadable_status_opens_the_filament_step_with_no_nozzles(
+    client: TestClient, model: str
+) -> None:
+    """#2509 review: the filament step reads the status itself when no caller shares
+    one, alongside the spools; an offline printer still opens it, with no nozzles."""
+    output_id = prepared(client, model)
+    upload_route()
+    inventory_routes()
+    status = respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(503))
+
+    response = client.get(f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["nozzles"] == []
+    assert response.json()["slots"]
+    assert status.call_count == 1
 
 
 @pytest.mark.requires_postgres

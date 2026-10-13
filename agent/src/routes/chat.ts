@@ -7,15 +7,9 @@ import { QuestionError } from '../questions/service.js'
 import { contextFrom } from '../telemetry/trace.js'
 import type { TabHub } from '../bridge/hub.js'
 import type { OriginPolicy } from '../http/origins.js'
-import { AttachmentError, type AttachmentStore, type ResolvedAttachment } from '../attachments/store.js'
-import {
-  type ClientMessage,
-  isAttachmentRefs,
-  parseClientFrame,
-  renderPageContext,
-  type UserMessageImages,
-} from '../sessions/clientProtocol.js'
-import { type UserImage, UserImagesSchema } from '../sessions/images.js'
+import { type AttachmentRef, AttachmentError, type AttachmentStore, type ResolvedAttachment } from '../attachments/store.js'
+import { type ClientMessage, isAnswerId, isSessionId, parseClientFrame, renderPageContext } from '../sessions/clientProtocol.js'
+import { checkedImages } from '../sessions/images.js'
 import { type SessionManager, SessionError } from '../sessions/manager.js'
 import { event, type Owner, type ServerEvent } from '../sessions/protocol.js'
 import { BROWSER_USER } from './approvals.js'
@@ -102,7 +96,8 @@ export const MAX_QUEUED_FRAMES = 32
  * message and its page context. Images are not in frames: the panel uploads
  * them (#1941, routes/attachments.ts) and a message names them by id. A larger
  * frame closes the socket, 1009 Message Too Big; that is what a tab loaded
- * before #1941 meets when it sends inline images larger than this.
+ * before #1941 meets when it sends inline images larger than this. Smaller,
+ * they are refused with clientProtocol.ts `STALE_TAB_IMAGES` (#1959).
  */
 export const CHAT_FRAME_MAX = 256 * 1024
 
@@ -162,8 +157,8 @@ function refusedAnswer(raw: string): { sessionId: string; questionId: string } |
     const frame: unknown = JSON.parse(raw)
     if (typeof frame !== 'object' || frame === null) return {}
     const { type, sessionId, id } = frame as Record<string, unknown>
-    const named = (v: unknown): v is string => typeof v === 'string' && v.length > 0 && v.length <= 100
-    return type === 'question.answer' && named(sessionId) && named(id) ? { sessionId, questionId: id } : {}
+    // The schema's own bounds, so an echoed id is one it would take.
+    return type === 'question.answer' && isSessionId(sessionId) && isAnswerId(id) ? { sessionId, questionId: id } : {}
   } catch {
     return {}
   }
@@ -327,10 +322,12 @@ export class ChatConnection {
     const parsed = parseClientFrame(raw)
     if (!parsed.ok) {
       // Answered through the queue, so it counts against the cap like any other frame.
-      const error = parsed.error
-      const where = refusedAnswer(raw)
+      const { error, stale } = parsed
+      // A tab loaded before #1941 sends images inline (#1959): it is told to reload, in the session it wrote to.
+      const where = stale ?? refusedAnswer(raw)
+      const message = stale ? error : `ignored a malformed message: ${error}`
       return this.enqueue(async () => {
-        this.emit(event({ type: 'error', ...where, code: 'invalid', message: `ignored a malformed message: ${error}` }))
+        this.emit(event({ type: 'error', ...where, code: 'invalid', message }))
       })
     }
     const message = parsed.value
@@ -369,9 +366,9 @@ export class ChatConnection {
     return run
   }
 
-  /** The attachments a message names, read for this connection's principal; undefined for inline images or none. */
-  private async resolveAttachments(images: UserMessageImages): Promise<ResolvedAttachment[] | undefined> {
-    if (!images || !isAttachmentRefs(images)) return undefined
+  /** The attachments a message names, read for this connection's principal; undefined for none. */
+  private async resolveAttachments(images: AttachmentRef[] | undefined): Promise<ResolvedAttachment[] | undefined> {
+    if (!images) return undefined
     if (!this.attachments) throw new SessionError('invalid', 'image uploads need the database: SCADBUDDY_DATABASE_URL is not set')
     let resolved: ResolvedAttachment[]
     try {
@@ -381,11 +378,9 @@ export class ChatConnection {
       throw err
     }
     // Each upload was checked alone; together they must fit images.ts's caps too (the total).
-    const checked = UserImagesSchema.safeParse(resolved.map((a) => a.image))
-    if (!checked.success) {
-      // images.ts messages name fields and caps only: they never quote the bytes.
-      throw new SessionError('invalid', `images: ${checked.error.issues.map((i) => i.message).join('; ')}`)
-    }
+    const checked = checkedImages(resolved.map((a) => a.image))
+    // images.ts messages name fields and caps only: they never quote the bytes.
+    if (!checked.ok) throw new SessionError('invalid', `images: ${checked.error}`)
     return resolved
   }
 
@@ -411,14 +406,14 @@ export class ChatConnection {
           // Uploaded images (#1941) are read before anything starts, so one that is
           // unknown, expired or another owner's refuses the message, not the turn.
           const attached = await this.resolveAttachments(message.images)
-          const sent = attached ? attached.map((a) => a.image) : (message.images as UserImage[] | undefined)
-          const images = sent ? { images: sent } : {}
+          const images = attached ? { images: attached.map((a) => a.image) } : {}
           // The turn is the browser's child when the frame names its span,
           // else a root (spec 2026-10-01 §4); a malformed one is ignored.
           const parent = contextFrom(message.traceparent)
           if (!message.sessionId) {
+            const mode = message.mode ? { mode: message.mode } : {}
             const { session } = await otelContext.with(parent, () =>
-              this.sessions.start(this.principal, { origin: 'chat', prompt: message.text, context, ...images }),
+              this.sessions.start(this.principal, { origin: 'chat', prompt: message.text, context, ...images, ...mode }),
             )
             await this.claim(session.id, attached)
             this.pairTab(session.id)
@@ -427,6 +422,8 @@ export class ChatConnection {
             return
           }
           const id = message.sessionId
+          // Set at insert and never changed (spec §6.1).
+          if (message.mode) throw new SessionError('invalid', `session ${id} exists: its mode is set when it starts`)
           // Ownership first, every time (get() refuses another owner's session):
           // pairing this tab must never outrun the check that send() repeats.
           await this.sessions.get(id, this.principal)
@@ -443,8 +440,13 @@ export class ChatConnection {
           // The panel clears the session's feed when it attaches (state.ts
           // `select`), so this is always a full replay, even when followed already.
           await this.sessions.get(message.sessionId, this.principal)
-          if (!this.tabs?.sessionHasTab(message.sessionId)) this.pairTab(message.sessionId)
           this.follow(message.sessionId, 0)
+          // Off the frame queue: asking another replica whether it holds the
+          // session's tab can wait out the relay's ack timeout when none does,
+          // and the socket's next frame must not wait for it.
+          void this.pairUnlessHeld(message.sessionId).catch((err: unknown) =>
+            this.log(`chat: pairing ${message.sessionId}: ${err instanceof Error ? err.message : String(err)}`),
+          )
           return
         case 'approval.decision':
           await this.sessions.approvals.decision(this.principal, message, { clientIp: this.clientIp })
@@ -475,6 +477,13 @@ export class ChatConnection {
   /** Pairs `sessionId` with this panel's tab, once the panel has named it. */
   private pairTab(sessionId: string): void {
     if (this.tabId !== undefined) this.tabs?.pairSession(sessionId, this.tabId)
+  }
+
+  /** Pairs this tab with an attached session unless the session's tab is connected to some replica. */
+  private async pairUnlessHeld(sessionId: string): Promise<void> {
+    if (!this.tabs || (await this.tabs.sessionHasTab(sessionId))) return
+    if (this.closed) return // the socket went while the answer came
+    this.pairTab(sessionId)
   }
 
   /**

@@ -78,7 +78,7 @@ if [ -z "$issues" ]; then
 fi
 
 if [ "$issues" = "none" ]; then
-  echo "Summary posted; it reports no outstanding Blocking findings to file."
+  echo "Summary posted; it reports no outstanding findings to file."
   exit 0
 fi
 

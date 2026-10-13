@@ -312,7 +312,10 @@ keeps its `first_seen_at` and its print history, and the write updates
   so a pick stops counting `PENDING_PICK_MAX_AGE` (3 days) after it was made;
   a print still waiting or running past that stops counting until it settles.
   The dialog lists each position's open picks as "N queued". Oldest and
-  Newest first ignore them.
+  Newest first ignore them. A queue item of several copies (Bambuddy's
+  `quantity`) is one pick that settles a print row per copy, so the pick
+  records its `copies` and counts once for each copy without a print row yet
+  (#2134, `20261011T2300Z_rack_nozzle_pick_copies.sql`).
 - Until history builds up every count is 0, so color and then position decide. If
   the printer's `wear` ever reports real values, it replaces `print_seconds` as the
   key with no UI change.
@@ -561,6 +564,14 @@ so the trade is accepted.
 Serials go into the three `rack_nozzle_*` tables and nowhere else. They never appear
 in logs, in API errors, in the print dialog (which shows positions), in test
 fixtures (which use invented serials), or in commits.
+
+**Amended (#2170).** The owner asked to see each hotend's serial in Settings. So
+`GET /print/printers/{id}/rack-usage` answers it (`RackHotendUsage.serial`) and the
+Hotend usage panel shows it; that route and that panel are the only places it reaches
+the browser. Everything else above still holds: no serial in logs, API errors, `/check`
+or the print dialog, fixtures or commits (`test_no_serial_appears_anywhere_in_the_check_body` still holds
+the dialog to it). A hotend's spool history (`rack_nozzle_pick_spools`) starts with #2170: picks
+made before it have no spool rows, so their prints count but name no spool.
 
 **Decision (#1011).** The type-name-only rule is kept knowingly. A failure on these
 paths is logged with a fixed message naming the step, `type(exc).__name__` and the

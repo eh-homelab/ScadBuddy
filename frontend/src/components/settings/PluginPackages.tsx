@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState, type FormEvent, type ReactNode } from 'react'
+import { useMemo, useState, type FormEvent, type ReactNode } from 'react'
 import { USER_ONLY } from '../../agent/dom'
 import {
   aiPlugins,
@@ -16,7 +16,6 @@ import {
   type PluginPackage,
 } from '../../api/aiPlugins'
 import { safeHttpUrl } from '../../lib/safeUrl'
-import { announceHeadlessBrowser, useHeadlessBrowserChanges } from '../../lib/headlessBrowserSwitch'
 import { useAsync } from '../../lib/useAsync'
 import { Button } from '../ui/Button'
 import { Dialog } from '../ui/Dialog'
@@ -35,7 +34,7 @@ import { PackageFiles } from './PackageFiles'
  * command hook, a local MCP server, ...) is approved only with a second confirmation,
  * `allow_refused`, which loads it as it is.
  *
- * The plugins that ship with the agent (ScadBuddy's own, the headless browser) are
+ * The plugins that ship with the agent (ScadBuddy's own) are
  * listed first as "Built in": reviewable and switchable like any other, never removed
  * or re-pinned. An install that names one is answered "built in", not refused.
  *
@@ -449,9 +448,6 @@ function BuiltInParts({ review }: { review: PackageReview }) {
   )
 }
 
-/** The built-in whose switch is the headless-browser setting (agent plugins/packages/builtins.ts). */
-const BROWSER_PLUGIN = 'playwright'
-
 function BuiltInCard({ pkg, onChange }: { pkg: BuiltInPluginPackage; onChange: (pkg: ListedPackage) => void }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -462,7 +458,6 @@ function BuiltInCard({ pkg, onChange }: { pkg: BuiltInPluginPackage; onChange: (
     try {
       const saved = await aiPlugins.setPackageEnabled<BuiltInPluginPackage>(pkg.name, !pkg.enabled)
       onChange(saved)
-      if (saved.name === BROWSER_PLUGIN) announceHeadlessBrowser(saved.enabled)
     } catch (caught) {
       setError(message(caught))
     } finally {
@@ -712,14 +707,6 @@ export function PluginPackagesPanel() {
   const same = (a: ListedPackage, b: ListedPackage) => a.name === b.name && isBuiltIn(a) === isBuiltIn(b)
   const replace = (pkg: ListedPackage) =>
     state.setData(packages.some((p) => same(p, pkg)) ? packages.map((p) => (same(p, pkg) ? pkg : p)) : [...packages, pkg])
-  const { setData } = state
-  useHeadlessBrowserChanges(
-    useCallback(
-      (enabled: boolean) =>
-        setData(packages.map((p) => (isBuiltIn(p) && p.name === BROWSER_PLUGIN ? { ...p, enabled } : p))),
-      [setData, packages],
-    ),
-  )
 
   return (
     <section className="mt-4 rounded-[6px] border border-line bg-surface" aria-labelledby="plugin-packages-heading">
@@ -731,7 +718,7 @@ export function PluginPackagesPanel() {
           Claude plugins (skills, subagents, hooks and MCP servers) from a git repository or a marketplace, pinned to a
           commit. The assistant loads them from the next turn once approved and enabled. A plugin that runs commands
           loads only if you allow it when approving, and a plugin&rsquo;s own tools always ask before they act.
-          ScadBuddy&rsquo;s own plugin and the headless browser are built in: switch them here like any other.
+          ScadBuddy&rsquo;s own plugin is built in: switch it here like any other.
         </p>
         {state.loading && <Spinner />}
         {state.error && (

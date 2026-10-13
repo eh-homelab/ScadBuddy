@@ -18,18 +18,18 @@ describe('RackNozzleLine (#836)', () => {
   it('names the position, its size and flow, and the reason', () => {
     render(<RackNozzleLine rack={rack} algorithm="least_used" />)
     expect(screen.getByTestId('rack-nozzle-line')).toHaveTextContent(
-      'Rack nozzle: position 3 (0.4 Standard) — already loaded with this color',
+      'Right nozzle from the rack: position 3 (0.4 Standard) — already loaded with this color',
     )
   })
 
   it('names the pick without a dash when there is no reason', () => {
     render(<RackNozzleLine rack={{ ...rack, reason: null }} algorithm="least_used" />)
-    expect(screen.getByTestId('rack-nozzle-line').textContent).toBe('Rack nozzle: position 3 (0.4 Standard)')
+    expect(screen.getByTestId('rack-nozzle-line').textContent).toBe('Right nozzle from the rack: position 3 (0.4 Standard)')
   })
 
   it('says Bambuddy picks when the algorithm leaves it to Bambuddy', () => {
     render(<RackNozzleLine rack={{ ...rack, position: null, reason: null }} algorithm="bambuddy" />)
-    expect(screen.getByTestId('rack-nozzle-line')).toHaveTextContent('Rack nozzle: Bambuddy picks at dispatch')
+    expect(screen.getByTestId('rack-nozzle-line')).toHaveTextContent('Right nozzle from the rack: Bambuddy picks at dispatch')
   })
 
   it('says when Glow could not be checked', () => {
@@ -43,26 +43,35 @@ describe('RackNozzleLine (#836)', () => {
   })
 })
 
-describe('RackNozzleStep (#836)', () => {
-  it('changes the algorithm and picks a position by hand, or goes back to Automatic', () => {
+describe('RackNozzleStep (#836, #2166)', () => {
+  it('is one list, Automatic or a position by hand, with how Automatic ranks them', () => {
     const onAlgorithm = vi.fn()
     const onPosition = vi.fn()
     render(
       <RackNozzleStep rack={rack} algorithm="least_used" position={null} onAlgorithm={onAlgorithm} onPosition={onPosition} />,
     )
+    expect(screen.getByRole('radio', { name: 'Automatic' })).toBeChecked()
     fireEvent.change(screen.getByLabelText('Rack algorithm'), { target: { value: 'oldest_first' } })
     expect(onAlgorithm).toHaveBeenCalledWith('oldest_first')
-    fireEvent.change(screen.getByLabelText('Rack nozzle position'), { target: { value: '2' } })
+    fireEvent.click(screen.getByRole('radio', { name: /Position 2/ }))
     expect(onPosition).toHaveBeenLastCalledWith(2)
-    fireEvent.change(screen.getByLabelText('Rack nozzle position'), { target: { value: '' } })
-    expect(onPosition).toHaveBeenLastCalledWith(null)
-    expect(screen.getByRole('option', { name: /Position 2 · 0.4 Standard · material unknown · 4 prints/ })).toBeInTheDocument()
+  })
+
+  it('names each hotend by the filament it last ran, never by a hex', () => {
+    const ran: RackPickView = {
+      ...rack,
+      options: [{ ...two, filament_type: 'PLA', color_word: 'blue' }, three],
+    }
+    render(<RackNozzleStep rack={ran} algorithm="least_used" position={2} onAlgorithm={vi.fn()} onPosition={vi.fn()} />)
+    const step = screen.getByTestId('rack-step')
+    expect(step).toHaveTextContent('Position 2 · 0.4 Standard · last ran blue PLA')
+    expect(step.textContent).not.toMatch(/#00629B/i)
+    expect(screen.getByRole('radio', { name: /Position 2/ })).toBeChecked()
   })
 
   it('says how many prints are queued on a position but not settled (#1079)', () => {
     const queued: RackPickView = { ...rack, options: [{ ...two, pending: 2 }, three] }
     render(<RackNozzleStep rack={queued} algorithm="least_used" position={null} onAlgorithm={vi.fn()} onPosition={vi.fn()} />)
-    expect(screen.getByRole('option', { name: /Position 2 · .* · 4 prints · 2 queued/ })).toBeInTheDocument()
-    expect(screen.getByRole('option', { name: /Position 3/ }).textContent).not.toMatch(/queued/)
+    expect(screen.getByTestId('rack-step')).toHaveTextContent('4 prints · 2 queued')
   })
 })

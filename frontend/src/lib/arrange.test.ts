@@ -1,12 +1,20 @@
 import { HttpResponse, http } from 'msw'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { api } from '../api/client'
+import { ApiError, api } from '../api/client'
 import type { ArrangeRequest, Output } from '../api/types'
 import * as fixtures from '../mocks/fixtures'
 import { resetMockState } from '../mocks/handlers'
 import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
-import { backfillFailures, backfillOutputs, listNames, MAX_REASON_CHARS, runArrange } from './arrange'
+import {
+  arrangedSources,
+  backfillFailures,
+  backfillOutputs,
+  listNames,
+  MAX_REASON_CHARS,
+  runArrange,
+  savedNote,
+} from './arrange'
 import { getRealtime } from './realtime'
 import { followUntil } from './waitForJob'
 import { fakeRealtime } from './realtime.fake'
@@ -246,6 +254,39 @@ describe('followUntil reads once before its limit (#2038)', () => {
   })
 })
 
+describe('followUntil survives a failed read (#2125)', () => {
+  it('tries a failed read again and resolves when the next one answers', async () => {
+    fakeRealtime({ confirm: true })
+    const read = vi
+      .fn<() => Promise<string>>()
+      .mockRejectedValueOnce(new ApiError(502, 'Bad Gateway'))
+      .mockResolvedValue('ready')
+    await expect(
+      followUntil('outputs', {
+        read,
+        done: (value) => value === 'ready',
+        stillRunning: () => new Error('still running'),
+        pollMs: 10_000,
+      }),
+    ).resolves.toBe('ready')
+    expect(read).toHaveBeenCalledTimes(2)
+  })
+
+  it('rejects at once on a 404: the job is gone', async () => {
+    fakeRealtime({ confirm: true })
+    const read = vi.fn(() => Promise.reject(new ApiError(404, 'no such job')))
+    await expect(
+      followUntil('outputs', {
+        read,
+        done: () => false,
+        stillRunning: () => new Error('still running'),
+        pollMs: 10_000,
+      }),
+    ).rejects.toThrow('no such job')
+    expect(read).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('backfillFailures (#1007)', () => {
   const ref = { id: 'o1', name: 'Nova' }
 
@@ -264,6 +305,29 @@ describe('backfillFailures (#1007)', () => {
     expect(backfillFailures([{ output: ref, error: 'revision abc is gone.' }])).toBe(
       'Nova could not be re-rendered: revision abc is gone.',
     )
+  })
+})
+
+describe('where an arrange went (#2284)', () => {
+  const output = { ...(fixtures.outputs[0] as Output), slug: 'lemon', name: 'pw-arrange-test' }
+
+  it("names the result and the model it is filed under", () => {
+    expect(savedNote({ output, plates: 1, filedUnder: 'Lemon' })).toBe("Saved as pw-arrange-test in Lemon's history.")
+    expect(savedNote({ output: { ...output, name: null }, plates: 1, filedUnder: 'Lemon' })).toBe(
+      "Saved in Lemon's history.",
+    )
+  })
+
+  it('never names the model by its slug when its name is unknown (#2541)', () => {
+    expect(savedNote({ output, plates: 1 }, 'lemon')).toBe("Saved as pw-arrange-test in this model's history.")
+    expect(savedNote({ output, plates: 1 }, 'lime')).toBe("Saved as pw-arrange-test in its model's history.")
+    expect(savedNote({ output: { ...output, name: null }, plates: 1 })).toBe("Saved in its model's history.")
+  })
+
+  it('counts every source, library files too', () => {
+    expect(arrangedSources(['a', 'b', 'c', 'library:89'])).toBe('3 outputs and 1 library file')
+    expect(arrangedSources(['a'])).toBe('1 output')
+    expect(arrangedSources(['library:1', 'library:2'])).toBe('2 library files')
   })
 })
 

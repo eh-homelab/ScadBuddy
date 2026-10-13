@@ -13,12 +13,14 @@ const installed = [
 // radiogroup for both sides; only flow (Standard/High Flow) is per-side. Both steps are
 // Advanced-only (#768), so neither takes a mode.
 describe('NozzleStep', () => {
-  it('marks installed sizes and warns on one that is not', () => {
+  // #2166 — only the sizes the printer has, and the one chosen.
+  it('offers only installed sizes and warns on a chosen one that is not', () => {
     render(
       <NozzleStep sizes={['0.2', '0.4', '0.6', '0.8']} installed={installed}
         value={[{ size: '0.8', flow: 'standard' }, { size: '0.8', flow: 'standard' }]} onChange={vi.fn()} />,
     )
-    expect(screen.getByRole('radio', { name: /0\.2 mm.*installed/i })).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: /0\.2 mm/i })).toBeInTheDocument()
+    expect(screen.queryByRole('radio', { name: /0\.6 mm/i })).toBeNull()
     expect(screen.getByText(/No 0\.8 mm nozzle is installed/i)).toBeInTheDocument()
   })
 

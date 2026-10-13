@@ -45,7 +45,7 @@ def test_choices_offer_every_size_the_rack_and_the_last_plate(
     printers_route()
     inventory_routes()
     h2c_presets()
-    respx.get(f"{API}/printers/1/status").mock(
+    status_read = respx.get(f"{API}/printers/1/status").mock(
         return_value=httpx.Response(200, json=recording("printer-status-rack.json"))
     )
     respx.get(f"{API}/archives/").mock(
@@ -53,6 +53,9 @@ def test_choices_offer_every_size_the_rack_and_the_last_plate(
     )
 
     body = client.get(f"/api/v1/print/outputs/{output_id}/choices?printer_id=1").json()
+
+    # #2504: one read, shared by the rack and the filament step.
+    assert status_read.call_count == 1
 
     assert body["nozzle_sizes"] == ["0.2", "0.4", "0.6", "0.8"]
     assert {(n["size"], n["flow"]) for n in body["installed"]} >= {("0.2", "standard")}
@@ -157,8 +160,9 @@ def test_choices_list_the_filament_presets_each_nozzle_size_takes(
     assert len(names_02) == len(set(names_02))
     abs_02 = next(row for row in by_size["0.2"] if row["name"] == "Bambu ABS @BBL H2C 0.2 nozzle")
     assert abs_02["ref"] == {"source": "cloud", "id": "GFSB00_23"}
-    # Fix round 1 #7 — the dialog reads only the name and the ref.
-    assert {key for row in by_size["0.4"] for key in row} == {"ref", "name"}
+    # Fix round 1 #7 — the dialog reads only the name and the ref, and the material it
+    # filters the list by (#2164).
+    assert {key for row in by_size["0.4"] for key in row} == {"ref", "name", "filament_type"}
 
 
 @respx.mock

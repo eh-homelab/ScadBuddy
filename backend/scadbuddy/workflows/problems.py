@@ -17,6 +17,14 @@ OPERATION_UNEXPECTED_RUNNING_DETAIL = (
     "ScadBuddy failed unexpectedly while doing this, so it may have been done. "
     "Check Bambuddy before trying again; ScadBuddy's logs say what failed."
 )
+#: An operation's check that timed out as an activity (#2065): its own budget
+#: (``CHECK_BUDGET_SECONDS``) answers a slow check as a refusal, so this is the worker
+#: not answering at all, not the check being slow. Nothing was written.
+OPERATION_CHECK_TIMED_OUT = PrintRunError(
+    status=504,
+    title="Gateway Timeout",
+    detail="ScadBuddy's worker did not answer in time, so nothing was done. Try again.",
+)
 #: What an operation cancelled before its record answers: nothing was written or done.
 OPERATION_CANCELLED = PrintRunError(
     status=409,

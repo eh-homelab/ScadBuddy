@@ -11,10 +11,6 @@ itself per request:
 - ``X-ScadBuddy-Agent-Author-Session``: the assistant session the call ran in, when it
   ran in one (the harness; an ``/mcp`` call has none).
 
-A request from the agent's headless browser carries the agent-actor marker instead
-(``api/agent_actor.py``, #349), whose value is the session id: its commits are the
-agent's too.
-
 :class:`AgentAuthorship` reads these once per request into a context variable, and
 ``library/history.py`` reads that when it commits: such a commit is authored as
 :data:`AGENT_AUTHOR_NAME` (committed by ScadBuddy as always) with the principal and
@@ -51,8 +47,6 @@ from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE
 AUTHOR_HEADER = "x-scadbuddy-agent-author"
 AUTHOR_SESSION_HEADER = "x-scadbuddy-agent-author-session"
 TOOL_HEADER = "x-scadbuddy-agent-tool"
-#: The headless browser's marker (``api/agent_actor.py`` ``AGENT_ACTOR_HEADER``).
-ACTOR_HEADER = "x-scadbuddy-agent-session"
 
 AGENT_AUTHOR_NAME = "ScadBuddy agent"
 AGENT_AUTHOR_EMAIL = "agent@scadbuddy.localhost"
@@ -121,7 +115,7 @@ class InvalidAuthorError(ValueError):
 
 def author_from(headers: Headers) -> AgentAuthor | None:
     principal = headers.get(AUTHOR_HEADER)
-    session = headers.get(AUTHOR_SESSION_HEADER) or headers.get(ACTOR_HEADER)
+    session = headers.get(AUTHOR_SESSION_HEADER)
     tool = headers.get(TOOL_HEADER)
     if principal is None and session is None:
         return None  # a tool alone labels nothing

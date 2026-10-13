@@ -3,6 +3,7 @@ and the one pipeline both go through (#1752)."""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
@@ -105,6 +106,31 @@ async def test_a_library_file_is_its_plates_and_its_filaments(bambuddy: Bambuddy
     # Loading only reads: the file is downloaded when a print lays it out.
     assert {call.request.method for call in respx.calls} == {"GET"}
     assert not any(call.request.url.path.endswith("/download") for call in respx.calls)
+
+
+@respx.mock
+async def test_a_library_files_plates_and_filaments_are_read_together(
+    bambuddy: BambuddyClient,
+) -> None:
+    """#2504: the plates read answers only once the filaments read has started, so a
+    load that read them one after the other would time out here."""
+    _file(67, "3mf")
+    asked = asyncio.Event()
+
+    async def plates(request: httpx.Request) -> httpx.Response:
+        await asyncio.wait_for(asked.wait(), timeout=5)
+        return httpx.Response(200, json=recording("library-plates-multi.json"))
+
+    def requirements(request: httpx.Request) -> httpx.Response:
+        asked.set()
+        return httpx.Response(200, json=recording("filament-requirements.json"))
+
+    respx.get(f"{API}/library/files/67/plates").mock(side_effect=plates)
+    respx.get(f"{API}/library/files/67/filament-requirements").mock(side_effect=requirements)
+
+    source = await LibrarySource.load(bambuddy, 67)
+
+    assert await source.plate_ids(bambuddy) == [1, 2]
 
 
 @respx.mock
@@ -403,6 +429,7 @@ def _authors_3mf(tmp_path: Path) -> bytes:
             if name == PROJECT_SETTINGS_NAME:
                 settings = json.loads(data)
                 settings["printer_settings_id"] = "Bambu Lab H2C 0.4 nozzle"
+                settings["print_settings_id"] = "0.20mm Standard @BBL H2C"
                 data = json.dumps(settings).encode()
             archive.writestr(name, data)
     return buffer.getvalue()

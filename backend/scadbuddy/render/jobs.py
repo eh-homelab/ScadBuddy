@@ -6,8 +6,8 @@ import logging
 import os
 import secrets
 import shutil
-import threading
 import time
+import uuid
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Executor
 from contextlib import (
@@ -210,6 +210,7 @@ class PlateLayout:
                         "colour": part.colour,
                         "file": source.file,
                         "solid": source.solid,
+                        **({"negative": True} if part.negative else {}),
                     }
                     for part, source in zip(plate.parts, sources, strict=True)
                 ],
@@ -234,18 +235,29 @@ class PlateLayout:
         def part(entry: dict[str, Any]) -> tuple[ColourPart, PartSource]:
             source = PartSource(entry["file"], entry["solid"])
             if source.solid:
-                mesh = solid_mesh(work / source.file)
+                mesh, paint = solid_mesh(work / source.file), None
                 if mesh is None:
                     raise ValueError(f"{source.file} holds no solid")
             else:
                 if source.file not in splits:
                     splits[source.file] = split_by_material(work / source.file)
-                mesh = next(
-                    split.mesh
+                split = next(
+                    split
                     for split in splits[source.file]
                     if split.material_index == entry["material_index"]
                 )
-            return ColourPart(entry["material_index"], entry["name"], entry["colour"], mesh), source
+                mesh, paint = split.mesh, split.paint
+            return (
+                ColourPart(
+                    entry["material_index"],
+                    entry["name"],
+                    entry["colour"],
+                    mesh,
+                    paint,
+                    negative=bool(entry.get("negative", False)),
+                ),
+                source,
+            )
 
         plates: list[PlateParts] = []
         sources: list[tuple[PartSource, ...]] = []
@@ -388,14 +400,15 @@ async def plate_layout(
 def result_parts(layout: PlateLayout) -> list[PartInfo]:
     """One entry per extruder: the name the first plate to use it gives it, and whether
     every plate's part of that colour is a closed solid. A slot no plate uses (a planned
-    filament order keeps its place, §7) has no part to name and is left out."""
+    filament order keeps its place, §7) has no part to name and is left out. A painted
+    part names the filaments its painting uses too (#1965)."""
     infos: list[PartInfo] = []
     for extruder, colour in enumerate(layout.colours, start=1):
         parts = [
             part
             for plate in layout.plates
             for part, number in zip(plate.parts, plate.extruders, strict=True)
-            if number == extruder
+            if number == extruder or colour.upper() in _painted_colours(part)
         ]
         if not parts:
             continue
@@ -418,10 +431,23 @@ def result_plates(layout: PlateLayout) -> list[PlateInfo]:
         PlateInfo(
             index=index,
             bbox_mm=bounding_box(plate.parts),
-            colors=[layout.colours[extruder - 1] for extruder in plate.extruders],
+            colors=list(
+                dict.fromkeys(
+                    colour
+                    for part, extruder in zip(plate.parts, plate.extruders, strict=True)
+                    for colour in [
+                        layout.colours[extruder - 1],
+                        *(c for c in layout.colours if c.upper() in _painted_colours(part)),
+                    ]
+                )
+            ),
         )
         for index, plate in enumerate(layout.plates, start=1)
     ]
+
+
+def _painted_colours(part: ColourPart) -> set[str]:
+    return {c.upper() for c in part.paint.used()} if part.paint is not None else set()
 
 
 async def plate_thumbnails(
@@ -475,6 +501,8 @@ async def plates_thumbnails(
     documents: a multi-plate render (spec §6.4) is still one job to bound. All or
     none, as the 3MF writer takes them."""
     loop = asyncio.get_running_loop()
+    # Covers show what prints: a negative part is cut out.
+    plates = [[part for part in parts if not part.negative] for parts in plates]
     faces = sum(len(part.mesh.faces) for parts in plates for part in parts)
 
     def render_all() -> list[PlateThumbnails]:
@@ -701,10 +729,15 @@ def export_revision(history: ModelHistory, slug: str, version: str, directory: P
 
     Renders are debounced, so two of the same revision overlap routinely, and a
     reader that finds `model.scad` present while the other writer is still
-    extracting `model.json` would render against half a revision.
+    extracting `model.json` would render against half a revision. The staging name
+    is random, not the pid and thread: every API pod is pid 1 on the shared volume.
+
+    No staging directory is cleaned up before the export: a staging directory left by
+    a pod killed mid-export is removed by `prune_revision_exports`'s TTL sweep, which
+    covers the slug's directory. An up-front cleanup here would race other pods' live
+    staging directories.
     """
-    staging = directory.with_name(f"{directory.name}.{os.getpid()}.{threading.get_ident()}")
-    shutil.rmtree(staging, ignore_errors=True)
+    staging = directory.with_name(f"{directory.name}.{uuid.uuid4().hex}")
     try:
         history.export(model_path(slug), version, staging)
         directory.parent.mkdir(parents=True, exist_ok=True)

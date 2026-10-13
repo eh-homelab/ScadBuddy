@@ -2,12 +2,15 @@ import { useEffect, useRef, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router'
 import { ApiError, api } from '../api/client'
 import { DuplicateModelButton } from '../components/DuplicateModelButton'
+import { SourceDiff } from '../components/SourceDiff'
+import { SourceFileTabs } from '../components/SourceFileTabs'
 import { SourceWorkbench } from '../components/SourceWorkbench'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
 import { modelPath } from '../lib/deeplink'
 import { countConflicts } from '../lib/upstream'
 import { useSubscription } from '../lib/realtime'
+import { MAIN_SOURCE } from '../lib/sourceFiles'
 import { useAsync } from '../lib/useAsync'
 
 /** The read of the record a save's `base` comes from failed. */
@@ -84,6 +87,8 @@ export function EditSourcePage() {
   // "Keep editing" chose to save over it. A change this page has not shown is a 409,
   // which offers theirs the same way (#1054).
   const [theirs, setTheirs] = useState<{ source: string; version: string | undefined } | null>(null)
+  // #1287 — the two versions side by side, while the choice between them is open.
+  const [comparing, setComparing] = useState(false)
   const [base, setBase] = useState<string | undefined>()
   const loadedVersion = loaded.data?.version
   useEffect(() => {
@@ -114,11 +119,13 @@ export function EditSourcePage() {
     loaded.setData(theirs)
     setSource(theirs.source)
     setTheirs(null)
+    setComparing(false)
   }
   const keepMine = () => {
     if (theirs === null) return
     setBase(theirs.version)
     setTheirs(null)
+    setComparing(false)
   }
 
   async function save(force: boolean) {
@@ -196,21 +203,24 @@ export function EditSourcePage() {
       fields={
         <>
         {theirs !== null && (
-          <div
-            data-testid="changed-elsewhere"
-            role="status"
-            className="flex items-center gap-3 border-t border-line bg-accent/8 px-3 py-1.5 text-[12px]"
-          >
-            <span>
-              This source was changed elsewhere since you opened it. Load that version (your
-              edits here are discarded), or keep editing and save over it.
-            </span>
-            <Button size="sm" onClick={takeTheirs}>
-              Load their version
-            </Button>
-            <Button size="sm" variant="ghost" onClick={keepMine}>
-              Keep editing
-            </Button>
+          <div data-testid="changed-elsewhere">
+            {/* Only the banner row is live: the diff below it would be re-announced on every keystroke (#2194). */}
+            <div role="status" className="flex items-center gap-3 border-t border-line bg-accent/8 px-3 py-1.5 text-[12px]">
+              <span>
+                This source was changed elsewhere since you opened it. Load that version (your
+                edits here are discarded), or keep editing and save over it.
+              </span>
+              <Button size="sm" onClick={takeTheirs}>
+                Load their version
+              </Button>
+              <Button size="sm" variant="ghost" onClick={keepMine}>
+                Keep editing
+              </Button>
+              <Button size="sm" variant="ghost" aria-pressed={comparing} onClick={() => setComparing(!comparing)}>
+                {comparing ? 'Hide changes' : 'Compare'}
+              </Button>
+            </div>
+            {comparing && <SourceDiff original={theirs.source} modified={source} />}
           </div>
         )}
         {merging && (
@@ -231,6 +241,8 @@ export function EditSourcePage() {
                   'There is no update to resolve any more; this is the source as it is.'}
           </p>
         )}
+        {/* #1290 — the model's other .scad files; not while resolving an update. */}
+        {!merging && <SourceFileTabs slug={slug} current={MAIN_SOURCE} canEdit={model.data?.origin === 'mine'} />}
         </>
       }
       uri={`file:///models/${slug}/model.scad`}

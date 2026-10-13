@@ -29,7 +29,7 @@ from temporalio.worker import Worker
 
 from scadbuddy.activity.index import ActivityIndex
 from scadbuddy.bambuddy.archive_cache import ArchiveCache
-from scadbuddy.bambuddy.client import DEFAULT_SLICE_TIMEOUT, client_for
+from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.follow import FollowActivities, Follower
 from scadbuddy.bambuddy.operations import bambuddy_kinds_over
 from scadbuddy.bambuddy.output_reader import RemoteOutputs
@@ -40,7 +40,7 @@ from scadbuddy.bambuddy.progress import (
     library_progress,
     progress_for,
 )
-from scadbuddy.bambuddy.runs import REPEAT_WINDOW, PrintRunStore, newest_failed_from
+from scadbuddy.bambuddy.runs import PrintRunStore, newest_failed_from
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, INSTALL_CONCURRENCY, Config
@@ -51,6 +51,9 @@ from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
+from scadbuddy.flows.keys import approval_key, payload_keys
+from scadbuddy.flows.operations import flow_kinds
+from scadbuddy.flows.store import FlowStore
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import ModelHistory
@@ -71,6 +74,7 @@ from scadbuddy.render.jobs import prune_revision_exports
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from scadbuddy.render.worker_role import WorkerStoppedError, wait_until_ready
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.bambuddy import RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
@@ -87,11 +91,15 @@ from scadbuddy.workflows.client import (
     make_current,
     render_worker,
 )
-from scadbuddy.workflows.follow import FOLLOW_WORKFLOW
+from scadbuddy.workflows.flow_activities import FlowActivities
+from scadbuddy.workflows.flow_grants import FlowGrants
+from scadbuddy.workflows.flow_routes import FlowRoutes, api_client
+from scadbuddy.workflows.flows_client import connect_flows
 from scadbuddy.workflows.operation_activities import operation_activities
 from scadbuddy.workflows.pipeline_activities import PipelineActivities
 from scadbuddy.workflows.pipelines import TRANSFER
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
+from scadbuddy.workflows.projects_worker import projects_worker
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
@@ -106,13 +114,20 @@ DRAIN_POLL = 5.0
 DRAIN_CURRENT_GRACE = 30.0
 #: Making the build current, retried once the worker polls: Temporal 1.28 ignores
 #: `allow_no_pollers` and answers NOT_FOUND until the build's first poll reaches it.
-#: The waits between attempts, then every `MAKE_CURRENT_EVERY`, for `_DEADLINE` seconds.
+#: The waits between attempts, then every `MAKE_CURRENT_EVERY` until it takes or the
+#: worker stops: a worker that gave up left a deployment whose current build had no
+#: poller once the old pods went, and every render hung (#2341). After
+#: `MAKE_CURRENT_ERROR_AFTER` seconds each failure logs an error instead of a warning.
 MAKE_CURRENT_BACKOFF = (1.0, 2.0, 4.0)
 MAKE_CURRENT_EVERY = 5.0
-MAKE_CURRENT_DEADLINE = 60.0
+MAKE_CURRENT_ERROR_AFTER = 60.0
 
 
-def build_worker_deps(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
+def build_worker_deps(
+    settings: Settings, *, stopping: Callable[[], bool] = lambda: False
+) -> tuple[WorkerDeps, StoreBundle]:
+    """``stopping`` ends the wait for the API's schema and grants
+    (`WorkerStoppedError`)."""
     config = settings.to_config()
     paths = DataPaths(root=settings.data_dir)
     paths.ensure()
@@ -135,7 +150,9 @@ def build_worker_deps(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
     projection = JobProjection(
         settings.database_url, pool_size=settings.database_pool_size, events=events
     )
-    projection.open()
+    # Never migrated here (#601): the worker's own role may not, and in a rollout the
+    # API, which does, may not have started yet. Wait for it instead.
+    projection.open(migrate_schema=False)
     # The `project` activity writes `mark_started`/`finish` here: its state changes reach
     # activity in the same transaction, and NOTIFY on the API's listeners.
     projection.activity = ActivityIndex(projection.pool, events=events, metrics=metrics)
@@ -152,6 +169,7 @@ def build_worker_deps(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
         max_count=config.asset_max_count,
     )
     try:
+        wait_until_ready(projection.pool, stopping=stopping)
         source = RenderSettingsSource(projection.pool, settings)
         current = load_render_store_settings(projection.pool, settings)
         source.seed(current)
@@ -268,12 +286,13 @@ async def make_current_until_polled(
     build_id: str,
     backoff: Sequence[float],
     every: float,
-    deadline: float,
-) -> bool:
-    """Make the build current, retrying an `RPCError` until ``deadline`` seconds have
-    passed; False when it never took. Any other error propagates."""
+    error_after: float,
+) -> None:
+    """Make the build current, retrying an `RPCError` until it takes; cancel it to
+    stop. Failures past ``error_after`` seconds log at error level. Any other error
+    propagates."""
     loop = asyncio.get_running_loop()
-    give_up = loop.time() + deadline
+    escalate = loop.time() + error_after
     attempt = 0
     while True:
         attempt += 1
@@ -281,20 +300,15 @@ async def make_current_until_polled(
             await set_current()
         except RPCError as error:
             delay = backoff[attempt - 1] if attempt <= len(backoff) else every
-            logger.warning(
+            logger.log(
+                logging.ERROR if loop.time() >= escalate else logging.WARNING,
                 "could not make this build current yet",
                 extra={"build_id": build_id, "attempt": attempt, "error": str(error)},
             )
-            if loop.time() + delay > give_up:
-                logger.error(
-                    "could not make this build current; polling anyway",
-                    extra={"build_id": build_id, "attempts": attempt, "error": str(error)},
-                )
-                return False
             await asyncio.sleep(delay)
         else:
             logger.info("made this build current", extra={"build_id": build_id})
-            return True
+            return
 
 
 async def _poll(
@@ -393,7 +407,7 @@ async def _serve_versioned(
                 build_id=build_id,
                 backoff=MAKE_CURRENT_BACKOFF,
                 every=MAKE_CURRENT_EVERY,
-                deadline=MAKE_CURRENT_DEADLINE,
+                error_after=MAKE_CURRENT_ERROR_AFTER,
             )
         )
         stopped = asyncio.create_task(stop.wait())
@@ -632,8 +646,13 @@ async def run_worker(
 ) -> None:
     stop = stop or asyncio.Event()
     # Off the loop, as the API's boot seeds its libraries: the seed copies trees, and
-    # the rest opens the projection's pool and reads the store settings.
-    deps, store = await asyncio.to_thread(build_worker_deps, settings)
+    # the rest opens the projection's pool, waits for the API's schema and grants
+    # (#601), and reads the store settings. A stop meanwhile ends the wait.
+    try:
+        deps, store = await asyncio.to_thread(build_worker_deps, settings, stopping=stop.is_set)
+    except WorkerStoppedError:
+        logger.info("stopped before the database was ready for this worker")
+        return
     assert deps.metrics is not None and deps.thumbnail_executor is not None
     evicting = _start_housekeeping(deps, deps.config.asset_sweep_interval)
     try:
@@ -670,16 +689,6 @@ async def run_inprocess_worker(
     does not drain on stop: as the only worker it stays current, so new runs would hold
     the API's shutdown to the drain's bound."""
     await _poll(settings, deps, client, stop, drain=False)
-
-
-#: The longest a print run stays open (#1060): its plates' slices, then
-#: ``REPEAT_WINDOW`` on a timer. A stopping print worker drains its pinned runs for at
-#: most this; ``FollowPrint`` is AUTO_UPGRADE and never holds it.
-PRINT_DRAIN_TIMEOUT = (
-    REPEAT_WINDOW + 2 * timedelta(seconds=DEFAULT_SLICE_TIMEOUT)
-).total_seconds() + 120
-#: The workflow types the print worker's drain does not wait for (AUTO_UPGRADE).
-PRINT_UNPINNED = (FOLLOW_WORKFLOW,)
 
 
 @dataclass
@@ -802,7 +811,8 @@ async def run_print_worker(
     client: Client | None = None,
 ) -> None:
     """``python -m scadbuddy.worker --queue bambuddy``: the ``scadbuddy-print`` worker
-    (#1060), versioned and drained like the render worker, ``stop_now`` included."""
+    (#1060), versioned like the render worker but not drained: its workflows are
+    AUTO_UPGRADE (`print_deployment`, #2066), so the next build takes them over."""
     stop = stop or asyncio.Event()
     deps = await asyncio.to_thread(build_print_deps, settings)
     try:
@@ -828,8 +838,7 @@ async def run_print_worker(
                 stop,
                 build_id=build_id,
                 deployment_name=PRINT_DEPLOYMENT_NAME,
-                drain_timeout=PRINT_DRAIN_TIMEOUT,
-                ignore_types=PRINT_UNPINNED,
+                drain_timeout=None,
                 stop_now=stop_now,
             )
         finally:
@@ -840,7 +849,80 @@ async def run_print_worker(
         await deps.aclose()
 
 
-Queue = Literal["render", "bambuddy"]
+class ProjectsKeyMissingError(ValueError):
+    pass
+
+
+async def run_projects_worker(
+    settings: Settings,
+    *,
+    stop: asyncio.Event | None = None,
+    health_port: int | None = HEALTH_PORT,
+) -> None:
+    """``python -m scadbuddy.worker --queue projects``: flow runs (#1057, spec 2026-10-01
+    §4.3). Postgres and the KEK only: a flow's payloads are sealed per run, and it never
+    runs unsealed. Unversioned (plan 2026-10-09 Ruling 13), so it stops without a drain;
+    a run in flight resumes on the next worker from its history."""
+    stop = stop or asyncio.Event()
+    keys = payload_keys(settings)
+    if keys is None:
+        raise ProjectsKeyMissingError(
+            "SCADBUDDY_SECRET_KEY_FILE is required for --queue projects: a flow's payloads"
+            " are sealed under keys the KEK protects (spec 2026-10-01 §6.5)"
+        )
+    if settings.api_internal_url is None:
+        raise ApiUrlMissingError(
+            "SCADBUDDY_API_INTERNAL_URL is required for --queue projects: a flow's render,"
+            " print and arrange call the API's cluster-internal Service, e.g."
+            " http://scadbuddy:8080"
+        )
+    metrics = Metrics()
+    metrics.build_info.labels(settings.version, settings.revision).set(1)
+    events = PgNotifyEventBus(
+        settings.database_url, listener=PgListener(settings.database_url), metrics=metrics
+    )
+    settings_store = SettingsStore(settings, events=events)
+    await asyncio.to_thread(settings_store.open)
+    try:
+        await events.start()
+        client = await connect_flows(
+            settings.temporal_address, settings.temporal_namespace, keys[0]
+        )
+        store = FlowStore(settings_store.pool, events=events)
+        queue = settings.temporal_task_queue_projects
+        decisions = operation_activities(
+            OperationStore(settings_store.pool, events=events),
+            settings_store,
+            {kind.name: kind for kind in flow_kinds(store, keys[0], approval_key(settings))},
+        )
+        api = api_client(settings.api_internal_url)
+        routes = FlowRoutes(api)
+        grants = FlowGrants(store, api, approval_key(settings))
+        worker = projects_worker(
+            client,
+            queue,
+            [*FlowActivities(store).all(), *routes.all(), *grants.all(), *decisions],
+        )
+        server = (
+            _health_server(settings, metrics, None, health_port, queue)
+            if health_port is not None
+            else None
+        )
+        serving = asyncio.create_task(server.serve()) if server is not None else None
+        try:
+            async with worker:
+                await stop.wait()
+        finally:
+            if server is not None and serving is not None:
+                server.should_exit = True
+                await serving
+            await routes.aclose()
+    finally:
+        await events.aclose()
+        await asyncio.to_thread(settings_store.close)
+
+
+Queue = Literal["render", "bambuddy", "projects"]
 
 
 def _on_signal(stop: asyncio.Event, stop_now: asyncio.Event) -> Callable[[], None]:
@@ -862,6 +944,8 @@ async def _main(settings: Settings, queue: Queue = "render") -> None:
         loop.add_signal_handler(sig, _on_signal(stop, stop_now))
     if queue == "bambuddy":
         await run_print_worker(settings, stop=stop, stop_now=stop_now)
+    elif queue == "projects":
+        await run_projects_worker(settings, stop=stop)
     else:
         await run_worker(settings, stop=stop, stop_now=stop_now)
 
@@ -870,10 +954,10 @@ def parse_queue(argv: Sequence[str] | None = None) -> Queue:
     parser = argparse.ArgumentParser(prog="python -m scadbuddy.worker")
     parser.add_argument(
         "--queue",
-        choices=("render", "bambuddy"),
+        choices=("render", "bambuddy", "projects"),
         default="render",
         help="render: the render worker (scadbuddy-render); bambuddy: the print worker"
-        " (scadbuddy-print, #1060)",
+        " (scadbuddy-print, #1060); projects: flow runs (scadbuddy-projects, #1057)",
     )
     queue: Queue = parser.parse_args(argv).queue
     return queue

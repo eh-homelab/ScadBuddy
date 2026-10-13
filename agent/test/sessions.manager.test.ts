@@ -1,15 +1,13 @@
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
-import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { connectDatabase, type Database } from '../src/db.js'
 import { SettingsStore } from '../src/credentials.js'
 import { CONTINUE_PROMPT, NoUsableCredentialError } from '../src/harness/fallback.js'
 import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun } from '../src/harness/run.js'
-import { browserToolsGuide, SETTING_HEADLESS_BROWSER } from '../src/harness/headlessBrowser.js'
 import { HTTP_SERVER, HTTP_TOOL_NAME, SETTING_HTTP_REQUEST } from '../src/harness/httpRequest.js'
-import { sessionBrowserDir, sessionBrowserTmpDir, sessionWorkDir } from '../src/harness/stateDirs.js'
+import { sessionWorkDir } from '../src/harness/stateDirs.js'
 import {
+  BROWSER_TOOLS_GUIDE,
   listQuery,
   RESTARTING,
   SessionError,
@@ -733,98 +731,15 @@ describe.skipIf(!TEST_DATABASE_URL)(
       await expect(m2.send(session.id, agentA, 'three')).rejects.toMatchObject({ code: 'budget_exhausted' })
     })
 
-    it('gives a turn the headless browser only when the setting is on (#349, off by default)', async () => {
+    it('tells every turn which browser each browser_* set drives', async () => {
       const paths = await tempPaths()
-      const settings = new SettingsStore(db.sql)
-      // Stands in for the server writing a screenshot and Chromium its profile.
-      const { runner, runs } = scriptedRunner((run) => {
-        for (const dir of [run.headlessBrowser?.dir, run.headlessBrowser?.tmpDir]) {
-          if (!dir) continue
-          mkdirSync(path.join(dir, 'output'), { recursive: true })
-          writeFileSync(path.join(dir, 'output', 'page.png'), 'png')
-        }
-        return { reply: 'ok' }
-      })
-      const backendUrl = 'http://127.0.0.1:8000'
-      const m = manager({ sql: db.sql, paths, run: runner, settings, headlessBrowser: { backendUrl } })
-      const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'look' })
-      await turn!.done
-      expect(runs[0]!.headlessBrowser).toBeUndefined()
-      // The prompt says which browser each browser_* set drives (a model called
-      // mcp__scadbuddy__browser_find in production, a name only the headless set has).
-      expect(runs[0]!.systemPromptAppend).toContain(browserToolsGuide(false))
-
-      await settings.set(SETTING_HEADLESS_BROWSER, true)
-      await (await m.send(session.id, agentA, 'look again')).done
-      expect(runs[1]!.systemPromptAppend).toContain(browserToolsGuide(true))
-      expect(runs[1]!.headlessBrowser).toEqual({
-        sessionId: session.id,
-        backendUrl,
-        dir: sessionBrowserDir(paths, session.id),
-        tmpDir: sessionBrowserTmpDir(session.id),
-      })
-      // Its directory is not the session's cwd, where named output files land.
-      expect(runs[1]!.headlessBrowser!.dir).not.toBe(runs[1]!.cwd)
-      // Both are removed when the turn ends (review of #518), so screenshots and
-      // profiles do not pile up turn after turn.
-      expect(existsSync(sessionBrowserDir(paths, session.id))).toBe(false)
-      expect(existsSync(sessionBrowserTmpDir(session.id))).toBe(false)
-
-      // Without the dependency (no backend URL wired), the setting alone does nothing.
-      const bare = manager({ sql: db.sql, paths, run: runner, settings })
-      await (await bare.send(session.id, agentA, 'once more')).done
-      expect(runs[2]!.headlessBrowser).toBeUndefined()
-    })
-
-    it("reads the backend's public_url for each browser turn, and runs without it when the read fails (#983)", async () => {
-      const paths = await tempPaths()
-      const settings = new SettingsStore(db.sql)
-      await settings.set(SETTING_HEADLESS_BROWSER, true)
       const { runner, runs } = scriptedRunner(() => ({ reply: 'ok' }))
-      let live: () => Promise<string | undefined> = () => Promise.resolve('https://scadbuddy.internal.example')
-      const m = manager({
-        sql: db.sql,
-        paths,
-        run: runner,
-        settings,
-        headlessBrowser: { backendUrl: 'http://127.0.0.1:8000', livePublicUrl: () => live() },
-      })
-      const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'look' })
-      await turn!.done
-      expect(runs[0]!.headlessBrowser?.livePublicUrl).toBe('https://scadbuddy.internal.example')
-      live = () => Promise.reject(new Error('backend down'))
-      await (await m.send(session.id, agentA, 'again')).done
-      expect(runs[1]!.headlessBrowser).toBeDefined()
-      expect(runs[1]!.headlessBrowser?.livePublicUrl).toBeUndefined()
-    })
-
-    it("asks each of the turn's UI origins whether it answers without a login, and gives the turn the answers", async () => {
-      const paths = await tempPaths()
-      const settings = new SettingsStore(db.sql)
-      await settings.set(SETTING_HEADLESS_BROWSER, true)
-      const { runner, runs } = scriptedRunner(() => ({ reply: 'ok' }))
-      const asked: string[][] = []
-      const m = manager({
-        sql: db.sql,
-        paths,
-        run: runner,
-        settings,
-        headlessBrowser: {
-          backendUrl: 'http://127.0.0.1:8000',
-          publicUrl: 'https://scadbuddy.sso.example',
-          uiOrigins: 'https://scadbuddy.internal.example',
-          livePublicUrl: () => Promise.resolve('https://scadbuddy.live.example/'),
-          probe: (origins) => {
-            asked.push([...origins])
-            return Promise.resolve(Object.fromEntries(origins.map((o) => [o, { reach: 'ok' as const }])))
-          },
-        },
-      })
+      const m = manager({ sql: db.sql, paths, run: runner })
       const { turn } = await m.start(agentA, { origin: 'mcp', prompt: 'look' })
       await turn!.done
-      const ui = ['https://scadbuddy.live.example', 'https://scadbuddy.sso.example', 'https://scadbuddy.internal.example']
-      expect(asked).toEqual([ui])
-      expect(runs[0]!.headlessBrowser?.uiReach).toEqual(Object.fromEntries(ui.map((o) => [o, { reach: 'ok' }])))
+      // A model called mcp__scadbuddy__browser_find in production, a name only a
+      // browser plugin's set (Playwright MCP) has.
+      expect(runs[0]!.systemPromptAppend).toContain(BROWSER_TOOLS_GUIDE)
     })
 
     it('gives a turn the http_request tool unless the setting is off (#827, on by default)', async () => {
@@ -888,9 +803,16 @@ describe.skipIf(!TEST_DATABASE_URL)(
               updatedAt: expect.any(String),
               costUsd: 0,
               budgetUsd: 1,
+              // Plan 5d: the default (durable) ran classic, with no Temporal here.
+              mode: 'classic',
+              offer: null,
             },
           ],
         })
+        // #1284: an offer's target is named only as the viewer may see it.
+        await m.handoff(b.id, agentB, agentA)
+        const offered = (await m.snapshot(agentB)) as { sessions: { offer: unknown }[] }
+        expect(offered.sessions[0]!.offer).toEqual({ to: { kind: 'bearer', label: 'another MCP token' }, until: expect.any(String) })
       })
 
       it('moves ownership only explicitly: owner to the browser or by accepted offer, browser takes over, nobody else', async () => {

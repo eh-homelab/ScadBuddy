@@ -18,6 +18,7 @@ from scadbuddy.core.events import (
     BusResync,
     Event,
     EventBus,
+    FlowRunEvent,
     FontInstalled,
     InProcessEventBus,
     JobEvent,
@@ -65,6 +66,22 @@ def test_an_event_reaches_a_socket_following_its_topic(client: TestClient, bus: 
             "topics": [f"job:{JOB_ID}"],
             "data": {"job_id": JOB_ID, "slug": "demo"},
         }
+
+
+FLOW_RUN_ID = "0b0e2a0c-1111-4222-8333-444455556666"
+
+
+def test_a_flow_run_reaches_a_socket_following_the_runs(client: TestClient, bus: EventBus) -> None:
+    """#1057: the Workflows page follows `workflow-runs` and `workflow-run:<id>` with the
+    others in one frame, as a reconnect resubscribes them."""
+    with client.websocket_connect(WS) as ws:
+        subscribe(ws, "models", "workflow-runs", f"workflow-run:{FLOW_RUN_ID}")
+        bus.publish(FlowRunEvent(run_id=FLOW_RUN_ID, definition_id="d1", status="running"))
+        event = ws.receive_json()
+        assert (event["kind"], event["topics"]) == (
+            "flow_run.changed",
+            ["workflow-runs", f"workflow-run:{FLOW_RUN_ID}"],
+        )
 
 
 def test_only_followed_topics_are_sent(client: TestClient, bus: EventBus) -> None:
@@ -382,6 +399,7 @@ def test_every_topic_an_event_names_is_one_a_client_may_follow() -> None:
         LibraryRemoved(name="BOSL2", commits=[]),
         FontInstalled(family="DejaVu Sans"),
         SettingsChanged(section="connection"),
+        FlowRunEvent(run_id=FLOW_RUN_ID, definition_id="d1", status="running"),
     ]
     for event in events:
         for topic in realtime.topics_of(event):

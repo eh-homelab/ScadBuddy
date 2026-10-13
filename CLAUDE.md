@@ -31,6 +31,14 @@ points at a Postgres they can create schemas in, e.g.
 postgres:17` and `SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test`.
 Without it most of `tests/api` skips. CI runs them against a `postgres:17` service
 container. A `Settings` for an app that never starts uses `tests.conftest.UNUSED_DATABASE_URL`.
+Tests marked `requires_fixtures` (#2146) use the real MakerWorld 3MFs in
+`test-fixtures/makerworld/` (Git LFS, ~290 MB; `git lfs pull --include "test-fixtures/**"`;
+`manifest.json` says what each covers) and skip, naming every missing file, without
+them; with `SCADBUDDY_TEST_FIXTURES` set (a directory holding `makerworld/`, as CI sets
+it) they fail instead. CI's `lfs-fixtures` job pulls them once into the Actions cache
+and each shard mounts them at `/app/test-fixtures`. Add or change a fixture only on a
+branch of this repo: a fork's LFS objects live in the fork's store, which that job's
+`git lfs pull` cannot reach.
 Tests marked `requires_temporal` skip unless `SCADBUDDY_TEST_TEMPORAL_ADDRESS` names a
 running Temporal (e.g. `temporal server start-dev`) or a `temporal` CLI is on `PATH`
 (`SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` can point at one; the test image ships
@@ -115,7 +123,15 @@ only the Postgres tests.
 Evals (`agent/evals/`, `docs/ai/evals.md`): `test/evals.test.ts` replays each scenario
 against the fake endpoint in `pnpm test`; `pnpm evals` runs them live with the
 credential saved in Settings (or `SCADBUDDY_EVAL_ANTHROPIC_API_KEY`, CI only; the
-manual `ai-evals.yml` workflow) and skips cleanly without one.
+manual `ai-evals.yml` workflow) and skips cleanly without one. The render scenario
+runs live only against a real backend (`SCADBUDDY_EVAL_BACKEND_URL`, the image; it
+skips without one), and its render is checked `verify.sh`-style on the saved output's
+3MF; replies with suggestions are scored on their citations (`evals/citations.ts`,
+#1924).
+Every scenario runs in both session modes (#2320): `test/evals.durable.e2e.test.ts` replays
+them through a real durable session (`evals/durable.ts`: the Python worker, Temporal, the
+agent-tools worker; skips without uv, Temporal or Postgres), and `pnpm evals` takes
+`SCADBUDDY_EVAL_MODE=classic|durable|both` (default both).
 
 Durable sessions (`agent-durable/`, Python 3.12, uv; the `agent-durable` CI job, #1056):
 
@@ -156,7 +172,9 @@ Workflow/Dockerfile lint (the `lint` job): actionlint, hadolint with `.hadolint.
 `shellcheck .github/scripts/*.sh models/*/verify.sh`, `lint-verify-labels.sh`,
 `lint-dashboard.sh` (the Grafana dashboard, #988; it needs `KUSTOMIZE` pointing at
 kustomize v5.6.0, which the job downloads and checks by sha256 because ArgoCD's
-repo-server runs that version), and the `.github/scripts/*.test.sh` suites. Every
+repo-server runs that version), `lint-base64-images.sh` (#2479: no image is built as
+base64 in JSON or text outside its allowlisted Messages API boundaries; images move as
+blobs and `{name, mediaType}` pointers), and the `.github/scripts/*.test.sh` suites. Every
 `docker run` in a `verify.sh` must carry
 `--label "scadbuddy-verify=${SCADBUDDY_VERIFY_LABEL:-local}"` (Python:
 `"--label", "scadbuddy-verify=" + os.environ.get("SCADBUDDY_VERIFY_LABEL", "local")`) on
@@ -191,7 +209,11 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   workflow's first (local) activity inserts the row, identical requests join it as
   claims, and a supersede sends the old execution `release`, #1053), `projection.py` (`render_jobs` as a projection
   the workflow writes in place through the `project` activity), `pg_store.py` (the
-  backend's migrations). The legacy in-process queue, its file and Postgres stores
+  backend's migrations), `worker_role.py` (#601: `RENDER_GRANTS`, everything the
+  render worker's own role `scadbuddy_render` may touch, granted by the API at start;
+  a change to what the worker reads or writes changes it, and
+  `tests/test_render_worker_role.py` renders as that role; the worker never migrates
+  and reads settings only through the `render_settings` view). The legacy in-process queue, its file and Postgres stores
   and its `.renders/<key>` cache are gone (#546): the Temporal path's cache is the blob
   store's piece (`piece.json`), and nothing writes or prunes `models/<slug>/.renders/`
   any more (it stays hidden and git-ignored for volumes that still hold one).
@@ -217,6 +239,33 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   requests stay in-process (`render/previews.py` `PreviewScheduler`).
   Generic commands (#1053): `operation.py` (`OperationWorkflow`: check, insert, run,
   finish), `operation_activities.py`, `operation_models.py`; `problems.py` (`problem_of`).
+  Flows (#1057, plan `docs/superpowers/plans/2026-10-09-durable-phase-6-flows.md`):
+  `project.py` (`ProjectWorkflow`, a model-free temporal-agent-harness agent that runs
+  the script in Code Mode), `flow_tools.py` (the host functions, harness tools; no
+  `from __future__ import annotations`), `flow_steps.py` (each host call's step on the
+  row), `flow_entries.py` (a parked entry's timer, ended by the harness's own Update:
+  a callback answered `timed out`, an approval denied at the run's approval timeout),
+  `flow_routes.py` (`render`, `save_output`, `queue_print` and `arrange` call the API's
+  own routes at `SCADBUDDY_API_INTERNAL_URL` with a key per call; not `print`, which
+  Monty's builtin shadows); `tool(name, args)` takes a manifest tool, or a
+  `<server>__<tool>` turn tool (a remote plugin's, `scadbuddy_http__http_request`;
+  #2320, behind `patched("flow-turn-tools-2320")`) that the agent's `turn_tool_tier`
+  tiers and names the queue of, as the run's starter;
+  `flow_activities.py`, `flow_models.py`,
+  `projects_worker.py`, on the `projects` queue
+  (`SCADBUDDY_TEMPORAL_TASK_QUEUE_PROJECTS`), unversioned: a change must replay
+  `tests/fixtures/project_workflow_histories/`. A flow's payloads are sealed per run
+  (`payload_codec.py`, `flows_client.py`), so flows need `SCADBUDDY_SECRET_KEY_FILE`.
+- `backend/scadbuddy/flows/` — flow versions and runs (`store.py`: `workflow_definitions`,
+  `workflow_runs`, the latter written only by the run's workflow), `typecheck.py` (a
+  script's check at registration and at each start), `history.py` (a Reset's preview: the
+  outward sends past a point, by activity id), `component.py` (`FLOWS`; runs the
+  `projects` worker in-process with `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` or
+  `SCADBUDDY_TEMPORAL_PROJECTS_WORKER_INPROCESS`), `forget.py` (`DELETE
+  /workflow-runs/{id}`: key, then workflow, then row), `sweep.py` (the housekeeping
+  sweep for runs whose execution closed). Routes `api/flows.py`. An outward call's
+  approval timeout resolves from the run, its flow, then `flow_approval_timeout_seconds`
+  (0 is never).
 - `backend/scadbuddy/operations/` — the `operations` record (`store.py`, the table
   `operations`), `kinds.py` (`OperationKind`: a kind's check, its effect, its
   attempts, and its queue) and `component.py` (`OPERATIONS`, `OperationsDep`). A
@@ -283,7 +332,9 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   and `Operation` pinned, `FollowPrint` AUTO_UPGRADE (`VersionedFollowPrint`, since an
   unversioned worker refuses a versioning behavior). The API serves `bambuddy` itself,
   unversioned, only with `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` or
-  `SCADBUDDY_TEMPORAL_PRINT_WORKER_INPROCESS`.
+  `SCADBUDDY_TEMPORAL_PRINT_WORKER_INPROCESS`. `--queue projects`
+  (`run_projects_worker`, #1057) serves flow runs, unversioned: Postgres and the KEK
+  only, and it refuses to start without the KEK.
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes
   (`send.py`, `dispatch.py`, `print_run.py`, `filaments.py`, `projects.py`), scope-aware
   error mapping (`errors.py`). Everything on the `bambuddy` queue reads outputs through
@@ -293,6 +344,13 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   (`library/output_prints.py`), laid over an older `meta.json`'s. A kind may name a
   `prelude`, another kind run first on its own queue: `output_delete` (library) names
   `output_inbox_delete` (bambuddy).
+- `backend/scadbuddy/core/gitrepo.py` — `GitRepo`, the hermetic git core (#2503) under
+  model history (`library/history.py` `ModelHistory`) and flow scripts
+  (`flows/repository.py` `FlowHistory`: `data/flows/<name>/flow.py`, one commit per
+  version; `flows/backfill.py` is the start-time backfill and reconciler;
+  `flows/history.py` is the Reset preview, not git). Both repositories are shared by
+  every replica over NFS, so each writer holds a Postgres lock that carries the last HEAD
+  (`library/repo_lock.py`: `models_repo_head`, and `flows_coordinator`'s `flows_repo_head`).
 - `backend/scadbuddy/library/` — catalogue, outputs, git-backed model history
   (`history.py`), fonts (`fonts.py`, `googlefonts.py`), per-template presets
   (`presets.py`: saved ones in Postgres, the `saved_presets` table (#332), outside git so
@@ -417,7 +475,21 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     database) `src/temporal/worker.ts` runs one unversioned worker on `agent-tools`:
     every `ALL_TOOLS` entry as an activity under its name (`toolActivities.ts`,
     `runToolWithOutcome` with `gate: 'workflow'`, only for a `session-<id>` workflow whose
-    `ai_sessions.mode` is `durable`), and `AgentOperation` (`workflows.ts`, bundled by
+    `ai_sessions.mode` is `durable`, or a flow run's `flow-<id>` (`flowRuns.ts`, #1057: as the
+    run's starter, in no session; a gated call needs the backend's `workflow_run_decisions`
+    approval; no browser or answer tools)), a durable turn's other tools (#2320,
+    `turnTools.ts`, built by `turnServers.ts` as a classic turn builds them: remote plugins
+    through the forwarder and `http_request`): `turn_tools` lists them per turn as
+    `<server>__<tool>`, `turn_tool_tier` tiers a call from its input before it may park,
+    and each call is the worker's `default` activity `turn:<server>__<tool>`, which builds
+    the servers again and checks tier, principal and approval as it runs (a `flow-<id>`
+    workflow's call too: as the run's starter, approved only by `workflow_run_decisions`,
+    with no browser servers; a server whose
+    state lives on the pod, `http_request` and the browser, is `pinned`: its calls run on
+    `agent-tools.<hostname>`, which each agent also polls), a durable turn's automatic
+    Hindsight memory (`memoryActivities.ts`, `memory_recall` before the prompt and
+    `memory_retain` before `finish_turn`: the classic hooks of `memory/hindsight.ts`,
+    the transcript rebuilt from the event log; never failing the turn); and `AgentOperation` (`workflows.ts`, bundled by
     `pnpm build` into `dist/temporal/workflow-bundle.js`), the §4.2 command shape for
     the agent's commands, recorded in `ai_operations` (`src/operations/`). A change to
     `AgentOperation` goes behind `patched()`; `test/fixtures/agent_operation_histories/`
@@ -446,6 +518,23 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     the rows) is the one way a durable subject is deleted; operators run
     `node dist/forget-subject.js session-<uuid>`. A gated tool's activity runs only
     with an `approved` `ai_input_responses` row for its own request id.
+  - The workspace (#2329, `docs/ai/operating.md` §13): `src/workspace/store.ts`
+    `SessionFiles` over `ai_session_files`, keyed by `workspace` (`session:<id>`, gone
+    with its session, copied by a fork; or `principal:<kind>:<id>` outside a session,
+    swept 24 h after its last write) and a checked `path`; caps
+    `workspace_file_max_bytes`/`workspace_max_bytes`. Reached as
+    `ToolServices.workspace` (so in-process, `/mcp` and the durable activities alike),
+    with `workspaceOf(ctx)`; the `workspace_*` tools are `src/tools/workspace.ts`, and
+    `http_request`'s `save_to_workspace` gets the session's from `sessions/manager.ts`.
+    Never a file on the pod. Uploads take `workspace_path` + `workspace_sha256` instead of
+    inline content (`src/tools/workspaceUploads.ts`: binary streamed by
+    `SessionFiles.chunks` into the multipart route, text decoded as UTF-8).
+    The panel's Files (part 3) are `routes/sessionFiles.ts`
+    (list, download as an attachment, multipart upload, delete; the session routes'
+    guards, writes owner-only, each write a `workspace.file` event) and the caps' route
+    `routes/workspaceSettings.ts`; the frontend is `components/assistant/SessionFiles.tsx`
+    with msw `src/mocks/features/sessionFiles.ts` (component tests stub the upload:
+    jsdom's `File` cannot pass undici's multipart parser).
   - Plugins given to the harness are vetted by `src/harness/plugins.ts`: anything that
     starts a process (command hooks, stdio MCP servers, LSP servers, monitors) or runs
     plugin code in Claude Code (a hooks file's `modules`, on by default since Claude
@@ -473,7 +562,12 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     `<state dir>/plugins/` is only a cache, re-hashed before every load and
     re-fetched from the pin. Install stores the pin unapproved; approving needs the
     exact commit and hash. `vet.ts` adds rules on top of `harness/plugins.ts`. Tests
-    use local git repos (`test/support/gitRepo.ts`).
+    use local git repos (`test/support/gitRepo.ts`). A durable turn (#2320) gets them
+    from `<payload dir>/plugins/<content hash>/` (`temporal/turnPackages.ts`), which the
+    segment runner re-hashes (`agent-durable/.../session/package_hash.py`, the same hash
+    as `hash.ts`); their MCP servers are turn tools (http ones, in both modes, through the
+    forwarder: `plugins/packages/mcp.ts`), and only `Bash`/`PowerShell` of an
+    allowed package's built-ins are offered there (each parked for approval).
   - Tests never call Anthropic: `test/support/fakeAnthropic.ts` is a local Messages API
     (streaming SSE) that the real SDK and bundled CLI are pointed at as a gateway
     (`test/run.test.ts`). Postgres tests (`test/pg.test.ts`) skip unless
@@ -500,20 +594,31 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `activities.py` (`gate_settings`, `finish_turn`). Its tests start a dev server from
   `SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` and skip without one; `tests/fake_anthropic.py`
   is the Python fake endpoint the bundled Claude Code is pointed at.
+  A segment's subagents (#2320) get ScadBuddy's tools from the agent's loopback
+  `routes/subagentMcp.ts` (`/internal/durable/subagent-mcp`) as `mcp__scadbuddy__*`
+  (`session/subagents.py` mints the per-turn token from the KEK,
+  `temporal/subagentToken.ts` the same format); every call is resolved from the session
+  as it is then, and an outward one is refused to the main agent. The server is inline in
+  each subagent's definition (`load_agents`, `with_server`, from
+  `SCADBUDDY_DURABLE_AGENTS_DIR`, outside the plugin dir), so the main agent never has it.
   `scadbuddy_durable/gate/` is the gate's Python half (5b): ids, the `respond`
   validator (the same vectors), `build_entry`, and the `open_input` / `resolve_input`
   activities that write `ai_pending_input`, `ai_input_responses`, the session's events
   and the approval audit row (`store.py`, mirroring `eventLog.ts`). `codec.py` is the
   payload codec's Python half (`data_converter`, the same vectors).
 - `models/` — bundled example models (`models/<name>/verify.sh`).
-- `deploy/grafana/` — the ScadBuddy Grafana dashboard (#988, tracing spec §7): uid
-  `scadbuddy` (never change it), a `configMapGenerator` ConfigMap in
+- `deploy/grafana/` — the ScadBuddy Grafana dashboards (#988, tracing spec §7): the
+  overview `scadbuddy.json` (uid `scadbuddy`; never change it) and one `<name>.json` per
+  area (`scadbuddy-api`, `-web`, `-renders`, `-printing`, `-agent`), each with uid
+  `<name>` and its own `configMapGenerator` ConfigMap `<name>-dashboard` in
   `cattle-dashboards` for the rancher-monitoring sidecar, datasources only as the
-  `DS_PROMETHEUS`/`DS_TEMPO` variables. clusters will pull it in as a remote
+  `DS_PROMETHEUS`/`DS_TEMPO` variables. A new dashboard is a new file plus its
+  generator entry. clusters will pull them in as a remote
   resource pinned to a full SHA, once clusters#1596 Phase 5 adds the line, and
   `deploy.reusable.yml` moves that `ref` with the image.
   A query may read only series `core/metrics.py` declares and span names the
-  service emits (`lint-dashboard.sh` checks both).
+  service emits (`lint-dashboard.sh` checks both, in every file); a span named at run
+  time (a server span, `bambuddy.<op>`, Temporal's) is matched by attribute instead.
 - `plugins/scadbuddy/` — ScadBuddy's Claude plugin (#299): skills (`authoring`,
   `customize`, `print`), subagents, and a `.mcp.json` for external installs; listed by
   the root `.claude-plugin/marketplace.json`. Every skill cites its sources, which
@@ -545,9 +650,9 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
 
 ## Verified OpenSCAD facts (do not re-derive; re-measure if the base image moves)
 
-- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-10-05@sha256:…`
+- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-10-12@sha256:…`
   (tag plus index digest; the only stable release, 2021.01, has no Manifold). The
-  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.10.05). Bump
+  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.10.12). Bump
   deliberately: re-verify spec §3 against the new build, then change the tag,
   digest and `OPENSCAD_VERSION` in the same commit. The weekly `OpenSCAD Bump`
   workflow (`openscad-bump.yml`) opens that PR when a newer nightly exists; its CI
@@ -650,9 +755,11 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
 - `claude-review` is a merge gate: the review runs after CI and sorts its findings into
   `## Blocking` and `## Non-blocking`; a classifier passes only when every Blocking
   finding in the review for *this* commit is fixed or tracked in an open `pr-feedback`
-  issue for the PR. Non-blocking findings never gate and are never filed. Adding the
-  `claude-make-follow-up-issues` label to the PR files the outstanding Blocking ones as
-  `pr-feedback` issues automatically.
+  issue for the PR. Non-blocking findings never gate. A person adding the
+  `claude-make-follow-up-issues` label to the PR files every outstanding finding as
+  `pr-feedback` issues, Non-blocking ones in groups of their own titled `(non-blocking)`;
+  the label the review applies itself to a PR merged with Blocking findings outstanding
+  (a `Bot` sender) files the Blocking ones only.
 - When claude-code-action's workflow-validation guard skips the review (the PR's
   `claude-code-review.yml` differs from `main`'s), the gate passes **only if the PR
   itself edits that file**. A PR merely branched before `main` changed it fails closed

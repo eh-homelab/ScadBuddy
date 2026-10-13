@@ -1,8 +1,10 @@
 import { act, screen, waitFor, within } from '@testing-library/react'
 import { delay, HttpResponse, http } from 'msw'
 import { Route, Routes, useLocation, useParams } from 'react-router'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import type { Output } from '../api/types'
 import { bbox, keychainSchema, models, outputs } from '../mocks/fixtures'
+import { addMockOutput, problem } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { setDisplayUnit } from '../lib/units'
 import { renderPage } from '../test/utils'
@@ -55,13 +57,12 @@ describe('HistoryPage', () => {
     const item = await row('Reagan')
     const table = within(item).getByRole('table')
     expect(within(table).getAllByRole('row')[1]).toHaveTextContent('Wall81, 2')
-    const link = within(item).getByRole('link', { name: 'guide.svg' })
-    expect(link).toHaveAttribute('href', `/api/v1/outputs/${first.id}/files/guide.svg`)
-    expect(link).toHaveAttribute('download')
-    expect(link).not.toHaveAttribute('target')
+    // #2287 — a button through downloadBlob, not a plain link the frame would drop.
+    expect(within(item).getByRole('button', { name: 'guide.svg' })).toBeInTheDocument()
+    expect(within(item).queryByRole('link', { name: 'guide.svg' })).not.toBeInTheDocument()
   })
 
-  it('opens a pipeline output\'s file in a new tab when embedded, out of the sandbox', async () => {
+  it('downloads a pipeline output\'s file through the escape popup when embedded (#612, #2287)', async () => {
     const first = outputs[0]!
     server.use(
       http.get('/api/v1/models/name-keychain/outputs', () =>
@@ -71,12 +72,50 @@ describe('HistoryPage', () => {
     const top = window.top
     // Inside Bambuddy's iframe: its sandbox has no allow-downloads (CLAUDE.md).
     Object.defineProperty(window, 'top', { value: {}, configurable: true })
+    // A blocked popup: downloadBlob refuses rather than start a download the frame drops.
+    const open = vi.spyOn(window, 'open').mockReturnValue(null)
     try {
-      render()
-      const link = within(await row('Reagan')).getByRole('link', { name: 'guide.svg' })
-      expect(link).toHaveAttribute('target', '_blank')
-      expect(link).toHaveAttribute('rel', 'noopener')
+      const { user } = render()
+      await user.click(within(await row('Reagan')).getByRole('button', { name: 'guide.svg' }))
+      expect(open).toHaveBeenCalledWith('', '_blank')
+      expect(await screen.findByRole('alert')).toHaveTextContent('Allow pop-ups')
     } finally {
+      open.mockRestore()
+      Object.defineProperty(window, 'top', { value: top, configurable: true })
+    }
+  })
+
+  it("downloads a pipeline output's file into the escape popup, by its name, when embedded (#2546)", async () => {
+    const first = outputs[0]!
+    server.use(
+      http.get('/api/v1/models/name-keychain/outputs', () =>
+        HttpResponse.json([{ ...first, bom: [], files: ['guide.svg'] }]),
+      ),
+      http.get(`/api/v1/outputs/${first.id}/files/guide.svg`, () => HttpResponse.text('<svg/>')),
+    )
+    const top = window.top
+    Object.defineProperty(window, 'top', { value: {}, configurable: true })
+    const popup = document.implementation.createHTMLDocument('popup')
+    const open = vi.spyOn(window, 'open').mockReturnValue({ document: popup, close: vi.fn() } as unknown as Window)
+    const objectUrl = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:guide')
+    let clicked: HTMLAnchorElement | undefined
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      // eslint-disable-next-line @typescript-eslint/no-this-alias -- the spy's receiver is the anchor under test
+      clicked = this
+    })
+    try {
+      const { user } = render()
+      await user.click(within(await row('Reagan')).getByRole('button', { name: 'guide.svg' }))
+      expect(open).toHaveBeenCalledWith('', '_blank')
+      await waitFor(() => expect(clicked).toBeDefined())
+      expect(clicked?.ownerDocument).toBe(popup)
+      expect(clicked?.getAttribute('download')).toBe('guide.svg')
+      expect(clicked?.href).toBe('blob:guide')
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    } finally {
+      click.mockRestore()
+      objectUrl.mockRestore()
+      open.mockRestore()
       Object.defineProperty(window, 'top', { value: top, configurable: true })
     }
   })
@@ -207,6 +246,45 @@ describe('HistoryPage', () => {
     expect(within(plates).queryByText('queued #72')).not.toBeInTheDocument()
   })
 
+  // #2117: an unreadable plate list leaves each plate's number, and the row stands.
+  it('keeps the plate numbers when the plates cannot be read', async () => {
+    let read = false
+    server.use(
+      http.get('/api/v1/models/:slug/outputs', () =>
+        HttpResponse.json([
+          {
+            id: '9'.repeat(32),
+            slug: 'name-keychain',
+            name: 'Plates',
+            job_id: '8'.repeat(32),
+            created_at: '2026-09-22T10:00:00Z',
+            has_thumbnail: false,
+            params: {},
+            bbox_mm: bbox(10, 10, 10),
+            colors: ['#1B6CA8'],
+            queue_item_id: 72,
+            slice_job_id: 10,
+            plates: [
+              { plate_id: 1, queue_item_id: 71, slice_job_id: 9 },
+              { plate_id: 2, queue_item_id: 72, slice_job_id: 10 },
+            ],
+          },
+        ]),
+      ),
+      http.get('/api/v1/outputs/:id/plates', () => {
+        read = true
+        return HttpResponse.json({ detail: 'Bambuddy is down' }, { status: 500 })
+      }),
+    )
+    render()
+    const plates = await row('Plates')
+    await waitFor(() => expect(read).toBe(true))
+    expect(within(plates).getByRole('link', { name: 'Plate 1 queued #71' })).toBeInTheDocument()
+    expect(within(plates).getByRole('link', { name: 'Plate 2 queued #72' })).toBeInTheDocument()
+    expect(within(plates).getByRole('button', { name: /^Edit / })).toBeInTheDocument()
+    expect(screen.queryByText(/Bambuddy is down/)).not.toBeInTheDocument()
+  })
+
   it('edits an output through its deep link', async () => {
     const { user } = render()
     await user.click(within(await row('Nova')).getByRole('button', { name: /^Edit / }))
@@ -304,9 +382,12 @@ describe('HistoryPage', () => {
     expect(await screen.findByRole('heading', { name: 'Nothing generated yet' })).toBeInTheDocument()
   })
 
-  it('offers to send an output again', async () => {
+  it('offers to send an output, "again" only once it was sent (#2287)', async () => {
     const { user } = render()
-    await user.click(within(await row('Workshop')).getByRole('button', { name: /^Send again / }))
+    expect(within(await row('Reagan')).getByRole('button', { name: 'Send again Reagan' })).toBeInTheDocument()
+    const workshop = await row('Workshop')
+    expect(within(workshop).queryByRole('button', { name: /^Send again / })).not.toBeInTheDocument()
+    await user.click(within(workshop).getByRole('button', { name: 'Send Workshop' }))
 
     // #312: the send bar only uploads. There is no mode to choose any more.
     const dialog = await screen.findByRole('dialog', { name: 'Send to Bambuddy' })
@@ -328,6 +409,75 @@ describe('HistoryPage', () => {
     // The list reloads with the arranged output, and the selection is cleared.
     expect(await screen.findByText('Arranged from 1 output')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Arrange selected (0)' })).toBeDisabled()
+    // #2287 — the next step, right there: it has not been sent, and Print is the way on.
+    const next = screen.getByRole('group', { name: 'Next step' })
+    expect(next).toHaveTextContent('Not sent to Bambuddy yet')
+    expect(within(next).getByRole('button', { name: 'Download' })).toBeInTheDocument()
+    await user.click(within(next).getByRole('button', { name: 'Print' }))
+    expect(await screen.findByRole('dialog', { name: 'Print' })).toBeInTheDocument()
+  })
+
+  it('says the result was saved here, with no link to where it already is (#2542)', async () => {
+    const { user } = render()
+    await user.click(within(await row('Reagan')).getByRole('checkbox', { name: 'Select Reagan' }))
+    await user.click(screen.getByRole('button', { name: 'Arrange selected (1)' }))
+    await user.click(await screen.findByRole('button', { name: 'Arrange' }))
+    const note = await screen.findByRole('status', { name: 'Arranged' })
+    expect(note).toHaveTextContent(/in Name Keychain's history\.$/)
+    expect(within(note).queryByRole('link', { name: 'Open in History' })).not.toBeInTheDocument()
+  })
+
+  it("says \"this model's\" history, not its slug, when the model list cannot be read (#2541)", async () => {
+    let failed = false
+    server.use(
+      http.get('/api/v1/models', () => {
+        failed = true
+        return problem(503, 'Service Unavailable', 'down')
+      }),
+    )
+    const { user } = render()
+    await user.click(within(await row('Reagan')).getByRole('checkbox', { name: 'Select Reagan' }))
+    await user.click(screen.getByRole('button', { name: 'Arrange selected (1)' }))
+    await waitFor(() => expect(failed).toBe(true))
+    await user.click(await screen.findByRole('button', { name: 'Arrange' }))
+    const note = await screen.findByRole('status', { name: 'Arranged' })
+    expect(note).toHaveTextContent(/in this model's history\.$/)
+    expect(note).not.toHaveTextContent('name-keychain')
+  })
+
+  it('says which model the result was filed under, and links to its History (#2542)', async () => {
+    const first = outputs[0]!
+    const bin: Output = {
+      ...first,
+      id: '9'.repeat(32),
+      slug: 'gridfinity-bin',
+      name: 'Bin',
+      manifest: [{ ...first.manifest![0]!, part: 'piece-bin', slug: 'gridfinity-bin', bom_piece: 'bin', count: 1 }],
+    }
+    addMockOutput(bin)
+    const { user } = render()
+    await user.click(within(await row('Reagan')).getByRole('checkbox', { name: 'Select Reagan' }))
+    await user.click(screen.getByRole('button', { name: 'Arrange selected (1)' }))
+    await user.click(await screen.findByRole('button', { name: 'Add from a model' }))
+    await user.selectOptions(await screen.findByLabelText('Model'), 'gridfinity-bin')
+    await user.click(await screen.findByRole('checkbox', { name: 'Bin' }))
+    await user.click(screen.getByRole('button', { name: 'Add (1)' }))
+    expect(await screen.findByLabelText('Copies of bin — Bin')).toBeVisible()
+    await user.selectOptions(screen.getByLabelText('File under'), 'gridfinity-bin')
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    const note = await screen.findByRole('status', { name: 'Arranged' })
+    const binName = models.find((m) => m.slug === 'gridfinity-bin')!.name
+    expect(note).toHaveTextContent(`in ${binName}'s history.`)
+    expect(within(note).getByRole('link', { name: 'Open in History' })).toHaveAttribute(
+      'href',
+      '/m/gridfinity-bin/history',
+    )
+  })
+
+  it('offers Print on every output (#2287)', async () => {
+    const { user } = render()
+    await user.click(within(await row('Workshop')).getByRole('button', { name: 'Print Workshop' }))
+    expect(await screen.findByRole('dialog', { name: 'Print' })).toBeInTheDocument()
   })
 
   it('says which outputs could not be re-rendered after the dialog closes (#902)', async () => {
@@ -373,7 +523,12 @@ describe('HistoryPage', () => {
             id: 'f'.repeat(32),
             name: 'Batch',
             params: {},
-            arranged_from: ['a'.repeat(32), 'c'.repeat(32)],
+            arranged_from: ['a'.repeat(32), 'c'.repeat(32), 'library:89'],
+            // #2287 — an arrange's result, never sent anywhere.
+            library_files: [],
+            queue_item_id: null,
+            plates: [],
+            print_route: null,
           },
         ]),
       ),
@@ -381,8 +536,10 @@ describe('HistoryPage', () => {
     render()
     const batch = await row('Batch')
     expect(within(batch).queryByRole('button', { name: 'Edit Batch' })).not.toBeInTheDocument()
-    expect(within(batch).getByText('Arranged from 2 outputs')).toBeInTheDocument()
-    expect(within(batch).getByRole('button', { name: 'Send again Batch' })).toBeInTheDocument()
+    // #2284 — every source counted, library files too.
+    expect(within(batch).getByText('Arranged from 2 outputs and 1 library file')).toBeInTheDocument()
+    expect(within(batch).getByRole('button', { name: 'Print Batch' })).toBeInTheDocument()
+    expect(within(batch).getByRole('button', { name: 'Send Batch' })).toBeInTheDocument()
   })
 })
 
@@ -474,7 +631,20 @@ describe('HistoryPage · libraries an output was rendered with (#1296)', () => {
     const item = await row('Reagan')
     await waitFor(() =>
       expect(within(item).getByLabelText('Rendered with libraries')).toHaveTextContent(
-        'dotSCAD v3.3 · bb33edf(now dotSCAD v3.4 · c0ffee1)',
+        'dotSCAD v3.3 · bb33edf (now dotSCAD v3.4 · c0ffee1)',
+      ),
+    )
+  })
+
+  // #2109: the line is read (and copied) as text, so its parts need real separators.
+  it('separates a library from its warning and from the next library in the text', async () => {
+    const bosl = { name: 'BOSL2', ref: 'v2.0', url: 'https://github.com/BelfrySCAD/BOSL2', commit: 'aaaa1110123456789abcdef0123456789abcdef0' }
+    serve([dotscad, bosl], [{ ...dotscad, ref: 'v3.4', commit: 'c0ffee1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' }, bosl])
+    render()
+    const item = await row('Reagan')
+    await waitFor(() =>
+      expect(within(item).getByLabelText('Rendered with libraries').textContent).toBe(
+        'dotSCAD v3.3 · bb33edf (now dotSCAD v3.4 · c0ffee1), BOSL2 v2.0 · aaaa111',
       ),
     )
   })

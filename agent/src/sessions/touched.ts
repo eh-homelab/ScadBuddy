@@ -134,13 +134,20 @@ function field(value: unknown, key: string): unknown {
  * only where the call names it (`base`, which apply_patch requires and
  * update_source takes), else null. With no new commit in the answer the model
  * is recorded as changed, never its slug as a revision id.
+ *
+ * A call that names its `base` was refused (409) unless the model was at it, so
+ * the commit it made is `base`'s child. The record is read after the write and
+ * can already name another writer's commit (#2158), so a `previous_version` that
+ * is not `base` (or `base` spelled out: it may be a short id) loses to `base`.
  */
 function revision(input: Record<string, unknown>, result: unknown): Touch[] {
   const slug = str(field(result, 'slug')) ?? str(input.slug)
   const after = str(field(result, 'version'))
   if (!slug) return []
   if (!after) return [{ type: 'model', id: slug, action: 'modified', model: slug }]
-  const before = str(field(result, 'previous_version')) ?? str(input.base)
+  const previous = str(field(result, 'previous_version'))
+  const base = str(input.base)
+  const before = base !== null && !previous?.startsWith(base) ? base : previous
   return [{ type: 'revision', id: after, action: 'created', model: slug, before, after }]
 }
 
@@ -220,11 +227,26 @@ function setting(id: string | null, extra: Partial<Touch> = {}): Touch[] {
 
 /** Tool name → extractor. A name that is not a registered tool fails test/touched.test.ts. */
 export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
+  // Flows (#1057) touch no kind of resource here: a session's runs are found by
+  // list_flow_runs' `session`, and a run's own steps say what it did.
+  register_flow: () => [],
+  restore_flow_version: () => [],
+  start_flow_run: () => [],
+  reset_flow_run: () => [],
+  archive_flow: () => [],
+  unarchive_flow: () => [],
+  delete_flow: () => [],
+  // A run's grant (#2481) is the run's: its page shows who revoked it, and when.
+  revoke_flow_grant: () => [],
   // Models.
   create_model: (_input, result) => modelCreated(result),
   import_model: (_input, result) => modelCreated(result),
   create_from_template: (input, result) => modelCreated(result, input.from === 'blank' ? null : str(input.from)),
   duplicate_model: (input, result) => modelCreated(result, str(input.slug)),
+  create_model_from_mesh: (_input, result) => modelCreated(result),
+  // Scene edits and eject are revisions of the model.
+  edit_scene: revision,
+  eject_scene: revision,
   update_model_details: (input, result) => {
     const slug = str(input.slug)
     if (!slug) return []
@@ -254,6 +276,7 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   delete_readme: revision,
   set_model_thumbnail: revision,
   delete_model_thumbnail: revision,
+  add_model_media: revision,
   // Presets.
   save_preset: (input, result) => {
     const id = str(field(result, 'id'))
@@ -292,6 +315,10 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   save_output: (input, result) => output(result, str(input.slug)),
   // #1864: nothing is recorded until the arrange is saved; a still-running one is not.
   arrange: (_input, result) => output(field(result, 'output'), str(field(result, 'slug'))),
+  set_output_thumbnail: (input) => {
+    const id = str(input.output_id)
+    return id ? [{ type: 'output', id, action: 'modified', model: null }] : []
+  },
   // The answer names the output's model (#1071), read before it was deleted.
   delete_output: (input, result) => {
     const id = str(input.output_id)
@@ -336,6 +363,14 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
       model: scope === 'model' && !key?.startsWith('library:') ? key : null,
     })
   },
+  // #2167: only the files Bambuddy deleted or restored; a skipped one was not touched.
+  delete_library_files: (_input, result) =>
+    (Array.isArray(field(result, 'deleted')) ? (field(result, 'deleted') as unknown[]) : []).flatMap((file) => {
+      const id = bambuddyId(field(file, 'id'))
+      return id ? [{ type: 'bambuddy_file' as const, id, action: 'deleted' as const }] : []
+    }),
+  restore_library_files: (_input, result) =>
+    ids(field(result, 'restored')).map((id) => ({ type: 'bambuddy_file' as const, id, action: 'created' as const })),
   remember_model_print_choices: (input) => {
     const slug = str(input.slug)
     const file = bambuddyId(input.library_file_id)
@@ -426,6 +461,11 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   // checkout is a cache on the volume, swept at boot when nothing pins it.
   'check_library_candidate',
   'check_library_candidate_from_pinned_url',
+  // The session's own workspace (#2329): its files are the session's, listed by
+  // workspace_list (and the panel's Files tab), not ScadBuddy resources it touched.
+  'workspace_write',
+  'workspace_edit',
+  'workspace_delete',
   // The user's tab: these change only what the open page shows or holds unsaved (a
   // parameter, the editor, a Settings field, a dialog a human then confirms). What is
   // saved is saved by a tool that records it. browser_click and browser_fill are not

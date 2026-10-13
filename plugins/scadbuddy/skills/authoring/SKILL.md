@@ -161,8 +161,8 @@ A size in millimetres that can never usefully exceed the plate can say so on a
 comment line of its own, `// plate width = x` (or `y`, `z`). The customizer then
 caps that parameter's range at the selected printer's plate (main spec §6.1,
 "Printer-bound sizes"). A value past the cap is not rendered, so keep the
-default within the smallest plate you target (the default plate is 256 mm
-unless the Settings page sets one). Put the line somewhere other than directly above a
+default within the smallest plate you target (the default plate is 256 x 256 mm,
+250 mm high, unless the Settings page sets one). Put the line somewhere other than directly above a
 parameter, such as the end of the file. Judgement: OpenSCAD's customizer takes a
 comment directly above a parameter as that parameter's description.
 
@@ -202,6 +202,15 @@ The agent loop is in `docs/ai/authoring.md` (sections 1 to 4; issue #252):
   `response: "full"` only when the next edit needs the exact text. `glob` lists a
   model's files and `grep` searches one model or all of them
   (`agent/src/tools/files.ts`, issue #813).
+- A source, README or picture you got from elsewhere goes through your workspace
+  (#2329; `agent/src/tools/workspace.ts`, `agent/src/tools/workspaceUploads.ts`), not
+  through the conversation. Save it there (`http_request` with `save_to_workspace`, or
+  `workspace_save` for a ScadBuddy file), view it with `workspace_read` or fix it with `workspace_edit`, then send it
+  with `workspace_path` and the `workspace_sha256` you read it at, in place of the
+  inline content: `create_model` or `import_model` (a `.scad`), `write_file` or
+  `write_source_file`, `set_readme`, `set_model_thumbnail`, `add_model_media` (an image
+  or video for the gallery) or `set_output_thumbnail`. Text must be UTF-8. A file that
+  changed since you read it is refused; read it again and resend.
 - If `apply_patch` answers `conflict`, someone saved since you read it. Read the
   source again and rebuild the patch against `current`; don't force your old text
   over theirs (`docs/ai/authoring.md` section 2).
@@ -602,3 +611,86 @@ opens. If it raises, the user sees the raw inputs, read-only, with your error.
 `verify.sh`: list inputs cases in `pipeline/verify-inputs.json`, and run
 `python -m scadbuddy.workflows.verify_pipeline <template> --inputs …` in the
 `test` image, as `models/dollhouse-kit/verify.sh` does.
+
+## 14. Mesh models: editing a 3MF or STL as a scene
+
+A mesh model is a model whose source is a `scene.json` (objects, parts, ops, transforms)
+that compiles to its `model.scad`, which imports the mesh files under `meshes/`. Use it
+to cut, join, re-colour or lay flat a mesh you were given, instead of writing OpenSCAD
+for geometry you do not have. Nothing is written to Bambuddy. Sources: design
+`docs/superpowers/specs/2026-10-11-mesh-models-design.md` §3 (representation) and §5
+(editing); the tools `agent/src/tools/meshModels.ts`; the edits and their refusals
+`backend/scadbuddy/meshmodel/edits.py`; the routes `backend/scadbuddy/api/mesh_models.py`.
+
+Workflow:
+
+1. Open the mesh with `create_model_from_mesh`. Give exactly one source: a Bambuddy
+   `library_file_id` (from `list_library`), an `output_id`, or a 3MF/STL as
+   `content_base64` + `filename` (or `workspace_path` + `workspace_sha256` for a large
+   one). Each object in the file becomes a scene object.
+2. Read it with `get_scene`: object ids (`o1`, `o2`, ...), each object's colour parts
+   (`p1`, ...), its ops in order, and its transform (translate, rotate in degrees X then
+   Y then Z, scale). Look before you edit; ids and part names are not guessable.
+3. Edit with `edit_scene`. The edits apply in order, all or none, as one revision, so a
+   later edit may name an object an earlier one made (a split makes the half on the
+   normal's side the next id). Planes, points and `at` are world mm.
+4. Render, then inspect with `analyze_geometry` and the preview, and iterate. Undo with
+   `restore_version`; every `edit_scene` is one revision, so one restore undoes one call.
+
+Cutting a weak neck apart so it prints strong: `split_at_plane` with a `joint`, which adds
+a keyed peg to one half (`peg_on`: `above` or `below`) and a socket with `clearance` to the
+other, sized from the section at the plane. Then `lay_flat` the half that prints on its own
+with `normal: "largest_flat"`, which is usually the cut face. Pass `joint.key` `flat` or
+`hex` so the halves cannot spin; `none` is a round peg. Scale the object before you split
+it, not after.
+
+Printing one colour in place into another (the carrot's leaves into its body): a painted
+region is not a part, so it prints in the part's own colour (below). Anchor it with a
+coloured `add` instead: a `cylinder` in the leaves' colour, centred on the neck where the
+leaves meet the body, wider than the neck and a few mm tall, through it. An `add` with a
+`colour` takes its whole volume from every other colour, so no volume has two colours,
+and the green prints joined into the orange as one piece. An `add` without a `colour` is
+in the object's first colour and carves the others the same way. Keep it short enough to
+touch nothing else on the object, or it joins that too. Sources: the compiler
+`backend/scadbuddy/meshmodel/compile.py` (`_apply`); measured on a MakerWorld carrot in
+`backend/tests/test_mesh_models_fixtures.py`
+(`test_the_carrot_neck_anchored_in_green_prints_as_one_piece`: one piece, the two colours'
+volumes summing to the one-colour render's).
+
+Paint: a part painted in Bambu Studio keeps its paint codes beside its mesh, but nothing
+carries them into renders or prints yet (paint transfer is phase 3 of the design, §7):
+OpenSCAD's import drops paint, so each part renders and prints in its own colour.
+`get_scene`'s notes say so for each painted object. Source:
+`backend/scadbuddy/meshmodel/ingest.py`.
+
+What the backend refuses (a 422 from `edit_scene`, with the reason in the message; read it,
+do not retry the same edit):
+
+- A jointed split on a scaled object: the clearance would scale with it. Set the scale to 1
+  first (`transform`), or split without a joint. A parameter or later `transform` may not
+  rescale a jointed half either.
+- A jointed split where the section's centre lies outside the section (a ring): cut
+  elsewhere.
+- More than 16 cuts on one object.
+- A peg that does not fit the section: it needs `room >= diameter / 2 + clearance + 0.8`
+  mm, where `room` is the distance from the section's centre to its nearest edge and 0.8 mm
+  is two 0.4 mm walls. For `key: "hex"` the corners stand out past the flats, so it needs
+  `room >= (diameter / 2 + clearance) / cos(30 degrees) + 0.8` mm. The default key is `flat`
+  and the default diameter is `1.2 * room`. Cut where the neck is thicker, or give a smaller
+  `diameter` or `clearance`.
+
+An edit that would remove an exposed parameter (`unexpose`, or deleting its op or object) is
+refused with a 409 while a preset sets it. The model's own read-only presets (in
+`model.json`) cannot be overridden: the message reads "the model's own presets ... set ...;
+edit them first", so change those presets first. Saved presets can be: resend the edit with
+`drop_from_presets: true`, which removes the key from them in the same revision.
+
+`get_scene` reports `hand_edited`. When it is true, `model.scad` was changed directly (its
+sha256 no longer equals `scene.json`'s `generated_sha256`) and `edit_scene` answers 409.
+`eject_scene` ends scene editing: it deletes `scene.json`, leaves `model.scad` (which
+imports the meshes) as an ordinary template to change with `update_source`, and nothing
+turns it back into a scene except `restore_version`. Eject only when the user wants to edit
+the source; do not eject to get around a refusal above.
+
+The peg is checked once, when the split is made: an earlier op that later changes the
+section there is not re-checked, so render and look at the joint before you print.

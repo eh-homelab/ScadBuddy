@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Annotated, Any
 
-from fastapi import Depends, Path
+from fastapi import Depends, Path, Query
 from psycopg import Connection
 from starlette.requests import HTTPConnection
 from temporalio.client import Client
@@ -56,6 +56,8 @@ from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputMeta, OutputStore
 from scadbuddy.library.presets import PresetStore
 from scadbuddy.library.previews import PreviewStore
+from scadbuddy.library.repo_lock import PgRepoCoordinator
+from scadbuddy.library.repo_signal import ModelsHeadFollower
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.library.url_import import IMPORT_TIMEOUT, RESOLVER_THREADS
@@ -64,6 +66,12 @@ from scadbuddy.render.previews import (
     PreviewScheduler,
 )
 from scadbuddy.render.projection import JobProjection
+from scadbuddy.render.read_budget import (
+    CEILINGS,
+    ReadBudget,
+    ReadBudgetOverride,
+    budget_of,
+)
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.render.submit import RenderService
 from scadbuddy.store import BlobRefs, BlobStore
@@ -293,7 +301,14 @@ def build_state(settings: Settings) -> AppState:
 def _build_core(settings: Settings) -> AppState:
     config = settings.to_config()
     paths = DataPaths(root=settings.data_dir)
-    history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
+    # Every replica commits to the one repository on the share: the lock and the HEAD
+    # each writer leaves are in Postgres (#2385).
+    history = ModelHistory(
+        paths.models,
+        wrapper_prefix=WRAPPER_PREFIX,
+        timeout=config.git_timeout,
+        coordinator=PgRepoCoordinator(settings.database_url),
+    )
     metrics = Metrics()
     metrics.build_info.labels(settings.version, settings.revision).set(1)
     # Nothing connects here: the projection's pool opens in the lifespan, and the
@@ -301,6 +316,10 @@ def _build_core(settings: Settings) -> AppState:
     # pool (#454).
     projection = JobProjection(settings.database_url, pool_size=settings.database_pool_size)
     pool = projection.pool
+    # Registered on the shared listener before the bus (#2507): a commit's HEAD is
+    # refreshed here before the bus delivers the events the writer published after
+    # it, and a reconnect refreshes before subscribers are told to resync.
+    follower = ModelsHeadFollower(paths, history, projection.pg_listener)
     # One LISTEN connection per process: the bus shares the projection's.
     events = PgNotifyEventBus(
         settings.database_url,
@@ -346,6 +365,7 @@ def _build_core(settings: Settings) -> AppState:
         media_store=PostgresMediaStore(pool),
     )
     history.on_commit = announce_commits(events, catalogue)
+    follower.catalogue = catalogue
     # Lazy, so the API boots while Temporal is down: a render is then refused with
     # `temporal-unavailable` (#1053) until it is back.
     temporal = connect_lazily(settings.temporal_address, settings.temporal_namespace)
@@ -589,6 +609,27 @@ def get_fetcher(state: StateDep, libraries: LibrariesDep) -> CheckoutFetcher:
 
 
 FetcherDep = Annotated[CheckoutFetcher, Depends(get_fetcher)]
+
+
+def get_read_budget(
+    state: StateDep,
+    max_objects: Annotated[int | None, Query(gt=0, le=CEILINGS["max_objects"])] = None,
+    max_visits: Annotated[int | None, Query(gt=0, le=CEILINGS["max_visits"])] = None,
+    max_triangles: Annotated[int | None, Query(ge=0)] = None,
+    max_paint_digits: Annotated[int | None, Query(gt=0, le=CEILINGS["max_paint_digits"])] = None,
+) -> ReadBudget:
+    """What a GET's read of a library 3MF may spend (#2087): the settings in effect, then
+    any budget the query overrides, each at most its ceiling."""
+    override = ReadBudgetOverride(
+        max_objects=max_objects,
+        max_visits=max_visits,
+        max_triangles=max_triangles,
+        max_paint_digits=max_paint_digits,
+    )
+    return budget_of(state.settings, override)
+
+
+ReadBudgetDep = Annotated[ReadBudget, Depends(get_read_budget)]
 
 # A template id: a slug of mine, or `builtin:<slug>`.
 SlugPath = Annotated[str, Path(pattern=MODEL_ID_PATTERN, max_length=MAX_MODEL_ID_LENGTH)]

@@ -55,6 +55,10 @@ export type Risk = z.infer<typeof RiskSchema>
 export const OriginSchema = z.enum(['chat', 'mcp', 'analyzer', 'hook'])
 export type Origin = z.infer<typeof OriginSchema>
 
+/** Plan 5d — how a session runs: in the agent's harness, or as a durable Temporal workflow. */
+export const SessionModeSchema = z.enum(['classic', 'durable'])
+export type SessionMode = z.infer<typeof SessionModeSchema>
+
 /** §6 statuses. */
 export const SessionStatusSchema = z.enum([
   'running',
@@ -190,6 +194,13 @@ export const SessionSummarySchema = z.object({
   updatedAt: z.string().optional(),
   costUsd: z.number().nonnegative().optional(),
   budgetUsd: z.number().positive().optional(),
+  /** Plan 5d — how it runs; absent from an older agent (classic). */
+  mode: SessionModeSchema.optional(),
+  /**
+   * #1284 — a live handoff offer: to whom, until when. Absent from an older agent. The
+   * target's id is left out for a viewer that may not see it (agent `ownerSeenBy`).
+   */
+  offer: z.object({ to: OwnerSchema.partial({ id: true }), until: z.string() }).nullable().optional(),
 })
 export type SessionSummary = z.infer<typeof SessionSummarySchema>
 
@@ -211,22 +222,12 @@ export const PageContextSchema = z.object({
 export type PageContext = z.infer<typeof PageContextSchema>
 
 /**
- * #1866 — an image the user sends with a message: base64 for the model, and a small
- * preview the transcript shows (`user.turn`). The agent checks the bytes, the types and
- * the caps (agent `src/sessions/images.ts`); the composer stays under them (`images.ts`).
+ * #1866 — the types an image the user sends may be (the four the Messages API reads), and
+ * its preview's. The composer uploads both as bytes (`api.uploadAttachment`, #2479); the
+ * agent checks the bytes, the types and the caps (agent `src/sessions/images.ts`).
  */
 export const IMAGE_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'] as const
-export const ImagePreviewSchema = z.object({
-  mediaType: z.enum(['image/png', 'image/jpeg', 'image/webp']),
-  data: z.string().min(1),
-})
-export type ImagePreview = z.infer<typeof ImagePreviewSchema>
-export const UserImageSchema = z.object({
-  mediaType: z.enum(IMAGE_MEDIA_TYPES),
-  data: z.string().min(1),
-  preview: ImagePreviewSchema,
-})
-export type UserImage = z.infer<typeof UserImageSchema>
+export const PREVIEW_MEDIA_TYPES = ['image/png', 'image/jpeg', 'image/webp'] as const
 
 /**
  * #1941 — an image the composer uploaded when it was attached (agent `POST
@@ -246,11 +247,16 @@ export const ToolImageSchema = z.object({
 export type ToolImage = z.infer<typeof ToolImageSchema>
 
 /**
- * An image the user sent, as a `user.turn` shows it: its preview, and the name the agent
- * stored the full image under (agent `src/sessions/manager.ts` `sentImages`), absent on
- * turns logged before it and when the image could not be stored.
+ * An image the user sent, as a `user.turn` names it (#2479): the full image and its
+ * preview, each stored with the session (agent `src/sessions/blobs.ts` `sentImageBlobs`)
+ * and served by `blobUrl`. Never the bytes: a turn that carries them does not parse. A turn
+ * logged before #2479 whose full image could not be stored names its preview only.
  */
-export const SentImageSchema = ImagePreviewSchema.extend({ name: ToolImageSchema.shape.name.optional() })
+export const SentImageSchema = z.strictObject({
+  name: ToolImageSchema.shape.name.optional(),
+  mediaType: z.enum(IMAGE_MEDIA_TYPES).optional(),
+  preview: z.strictObject({ name: ToolImageSchema.shape.name, mediaType: z.enum(PREVIEW_MEDIA_TYPES) }),
+})
 export type SentImage = z.infer<typeof SentImageSchema>
 
 /**
@@ -283,6 +289,10 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     title: z.string().optional(),
     /** What the session may spend in all (#790); absent on sessions started before it. */
     budgetUsd: z.number().positive().optional(),
+    /** Plan 5d — how it runs; absent on sessions started before it (classic). */
+    mode: SessionModeSchema.optional(),
+    /** Plan 5d — why a session whose mode came from the default runs classic, not durable (the bare reason). */
+    modeFallback: z.string().optional(),
   }),
   z.object({ v, type: z.literal('session.owner'), sessionId, owner: OwnerSchema }),
   z.object({
@@ -415,6 +425,22 @@ export const ServerEventSchema = z.discriminatedUnion('type', [
     costUsd: z.number().nonnegative(),
     budgetUsd: z.number().positive(),
   }),
+  /**
+   * #2329 — a file was uploaded into, or deleted from, the session's workspace through
+   * its files route: the Files list reads again, and the feed notes it. `size`,
+   * `mediaType` and `sha256` are an upload's.
+   */
+  z.object({
+    v,
+    type: z.literal('workspace.file'),
+    sessionId,
+    path: z.string().min(1),
+    change: z.enum(['uploaded', 'deleted']),
+    by: OwnerSchema,
+    size: z.number().int().nonnegative().optional(),
+    mediaType: z.string().optional(),
+    sha256: z.string().optional(),
+  }),
   z.object({
     v,
     type: z.literal('error'),
@@ -462,6 +488,8 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     context: PageContextSchema,
     /** #1941 — uploaded images for the model, by id (#1866 sent them inline). */
     images: z.array(AttachmentRefSchema).min(1).optional(),
+    /** Plan 5d — a new chat's mode, from the composer's picker; absent, the agent's default applies. */
+    mode: SessionModeSchema.optional(),
     /**
      * Tracing spec 2026-10-01 §4: a socket carries no headers, so each turn's first
      * frame carries the W3C `traceparent` the agent's `agent.turn` continues. Absent

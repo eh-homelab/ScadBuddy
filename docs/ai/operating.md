@@ -93,10 +93,10 @@ What the ingress must do:
   therefore stay open under that default. The rule: both intervals must stay under
   the ingress's read and send timeouts. Lowering a timeout below 25 s, or raising
   either constant above it, closes idle assistant sockets and streams.
-- **Request bodies.** An image upload (`POST /api/v1/ai/attachments`, #1941) is JSON of
-  up to about 5.1 MiB (`ATTACHMENT_BODY_MAX`,
+- **Request bodies.** An image upload (`POST /api/v1/ai/attachments`, #1941) is a
+  multipart body of up to about 3.8 MiB (`ATTACHMENT_BODY_MAX`,
   [`agent/src/routes/attachments.ts`](../../agent/src/routes/attachments.ts)): one
-  image's base64 and its preview. ingress-nginx refuses bodies over its default
+  image's bytes and its preview's (#2479). ingress-nginx refuses bodies over its default
   `proxy-body-size` of 1m with 413, so the agent's paths need at least
   `nginx.ingress.kubernetes.io/proxy-body-size: 8m`
   ([ingress-nginx, custom max body size](https://kubernetes.github.io/ingress-nginx/user-guide/nginx-configuration/annotations/#custom-max-body-size)).
@@ -172,7 +172,6 @@ as unset (`present()`).
 | `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` | unset | `main.ts`, `loadKek()` | The old KEK during a rotation. See §3.3. |
 | `SCADBUDDY_PUBLIC_URL` | unset → loopback only | `originPolicy()` in [`agent/src/http/origins.ts`](../../agent/src/http/origins.ts) | The UI's public URL. This is the same variable the backend reads (`public_url` in `backend/scadbuddy/core/settings.py`). Its origin is the only non-loopback origin allowed to write. Must be `http(s)`. See §6. |
 | `SCADBUDDY_AGENT_TRUSTED_PROXIES` | unset → no proxy trusted | `parseCidrList()` in `origins.ts` | A comma-separated list of CIDRs or bare addresses whose `X-Forwarded-Proto`/`X-Forwarded-Host` are believed. A malformed entry is a `ConfigError` at start. See §6. |
-| `SCADBUDDY_BROWSER_ALLOWED_ORIGINS` | unset → ScadBuddy's own origins only | `parseBrowserAllowedOrigins()` in [`agent/src/harness/browserOrigins.ts`](../../agent/src/harness/browserOrigins.ts) | Origins beyond ScadBuddy's own (its public URL and `SCADBUDDY_ALLOWED_ORIGINS`, or the backend's when neither is set) that the headless browser may open, each only after a human approves it once per session: a comma-separated list of `http(s)` origins, or `*` for any. A path, a non-origin or `*` mixed with origins is a `ConfigError` at start. See [headless-browser.md](headless-browser.md), "Beyond the backend". |
 
 `main.ts` logs one line at start naming the backend URL, whether a database is
 configured, and where credential writes are accepted from.
@@ -197,8 +196,8 @@ configured, and any other value, `console` say, is off with one warning naming i
 `OTEL_RESOURCE_ATTRIBUTES`. `SCADBUDDY_VERSION` and `SCADBUDDY_REVISION` are stamped
 into the image by `build-image.yml` and become `service.version` and
 `scadbuddy.revision`. None of these reach the Claude Code subprocess, whose `env` is
-explicit (above). Only the backend client sends `traceparent`; plugins, `http_request`,
-the headless browser and Anthropic never get one. Design:
+explicit (above). Only the backend client sends `traceparent`; plugins, `http_request`
+and Anthropic never get one. Design:
 `docs/superpowers/specs/2026-10-01-distributed-tracing-design.md` §5.4.
 
 ## 3. The key-encryption key
@@ -433,13 +432,6 @@ curl -sS -X DELETE http://localhost:8081/api/v1/ai/mcp-tokens/<id> -H 'Origin: h
   unreachable database or backend is *reported*, not failed on, so a Postgres blip
   does not restart the container (comment in `createApp()`).
 - The body is `{ status: "ok", ai, database, backend, secret_key, credential }` (type `Health`).
-- With sessions, it also carries `browser_origins`: whether the latest browser turn's
-  probe found one of ScadBuddy's UI origins the headless browser reaches without a login
-  (`reachable`, `none reachable`, or `not checked` before a browser turn has run;
-  [headless-browser.md](headless-browser.md), "Beyond the backend"). Only that, since
-  `/healthz` is unauthenticated: which origin answered what (`ok`, `sign-in`,
-  `unreachable`, with the redirect's origin or the error) is logged as
-  `headless browser: <origin> answers …` whenever an origin's answer changes.
 - `ai` is `"enabled"` only when every prerequisite holds. Otherwise it names the
   **first** one missing, in the order an operator has to fix them (`aiStatus()`):
 
@@ -626,6 +618,24 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   standard-tier edge; 200 to 2576, the high-resolution tier's edge for Claude 4.7 and
   later), which Settings → Assistant images writes through
   `PUT /api/v1/ai/settings/images` ([`agent/src/routes/imageSettings.ts`](../../agent/src/routes/imageSettings.ts));
+  `session_mode`, the mode a new session gets when whoever starts it names none
+  (`durable` unless it says `classic`), which Settings → Assistant session mode writes
+  through `PUT /api/v1/ai/settings/session-mode`
+  ([`agent/src/routes/sessionMode.ts`](../../agent/src/routes/sessionMode.ts)). A
+  durable session needs Temporal, the KEK and an `agent-durable` worker polling the
+  `agent` queue; without them a session whose mode came from this default runs classic
+  and says why (`session.started` `modeFallback`, `mode_fallback` on `POST /sessions`
+  and `sessions_start`), while one that asked for `durable` is refused 503
+  (plan `2026-10-09-durable-phase-5d-mode.md`). Both modes get the same tools, plugins
+  (a browser among them, as the `playwright` remote plugin, #2568), packages,
+  `http_request`, Hindsight, subagents and settings (#2320, spec 2026-10-01 §6.3b), with
+  three differences: forking is classic-only; a durable subagent has ScadBuddy's own tools
+  only, through the agent's loopback server (`routes/subagentMcp.ts`), since the Temporal
+  plugin refuses a subagent the turn's durable tools; and of the built-ins an
+  `allow_refused` package names, a durable turn offers only `Bash` and `PowerShell`, each
+  parked for approval, and says which it left out (#2393). The worker check counts only a
+  poller Temporal saw in the last 70 s (it lists one for minutes after its worker has
+  gone), so an `agent-durable` that died counts for at most about that long;
   and `mcp_oidc`, the
   OIDC configuration for `/mcp` (#262; see [§6a](#6a-mcp-sign-in-with-oidc)), which
   `PUT /api/v1/ai/mcp/oidc` writes. `approval_expiry_seconds` has no route yet.
@@ -657,6 +667,13 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   [browser-bridge.md](browser-bridge.md#pairing-spec-85). Without a database only chat
   sessions reach a tab.
 
+- `ai_session_files`: the assistant's workspace (#2329,
+  `20261011T1502Z_session_files.sql`; [§13](#13-the-workspace-2329)): files keyed by
+  `workspace` (`session:<id>`, deleted with the session, or `principal:<kind>:<id>` for
+  an `/mcp` caller outside a session, swept 24 h after its last write) and `path`, with
+  the bytes, media type, sha256, size and `source`. `SessionFiles` in
+  [`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts).
+
 - `ai_plugin_packages`: installed Claude plugin packages (#297,
   `20260928T0750Z_plugin_packages.sql`): the source, the pinned commit, the content
   hash, the review, the approval and the enabled flag. See §9.
@@ -687,11 +704,12 @@ its $1.00 budget.") and offers:
   into a new session with the current Settings budget, owned by the browser user, and
   the panel switches to it. It counts against the new-session limit (`429`). With
   `up_to` (a reply's panel message id, #793) it copies the conversation only through
-  that reply. Each fork is a `resource` audit row (action `session_fork`).
+  that reply. Each fork, from this route or the `sessions_fork` tool, is a `resource`
+  audit row (action `session_fork`), written once the fork is complete; a rename or
+  mark-done (`PATCH /api/v1/ai/sessions/:id`) is one with action `session_update`.
 - **Raise this chat's budget**: `POST /api/v1/ai/sessions/:id/budget` `{add_usd}`
   (`SessionManager.raiseBudget`). Only the browser user, only on a session it owns
-  (take one over first), and never past $100. A request with the headless browser's
-  agent-actor marker (`X-ScadBuddy-Agent-Session`) is refused, no tool calls it, and
+  (take one over first), and never past $100. No tool calls it, and
   the panel's button carries `data-agent-user-only`, so the browser bridge cannot press
   it. A raise is a `settings` audit row with action `session_budget_usd` and the
   session id; refused and failed attempts are recorded from the route's status.
@@ -729,12 +747,12 @@ path" ([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)).
 - **Egress.** The pod needs outbound HTTPS to each git host it installs from. Fetches,
   and every URL a package declares, go through the same egress check as the gateway
   (see [security.md](security.md#plugin-packages)).
-- **Built-in plugins.** The two plugins in the image are listed first by
+- **Built-in plugins.** The plugin in the image is listed first by
   `GET /api/v1/ai/plugin-packages`, with `built_in: true`
   ([`agent/src/plugins/packages/builtins.ts`](../../agent/src/plugins/packages/builtins.ts)):
   `scadbuddy`, ScadBuddy's own plugin (on unless the `ai_settings` key
-  `scadbuddy_plugin_enabled` is `false`), and `playwright`, the headless browser (its
-  switch is `headless_browser_enabled`, [headless-browser.md](headless-browser.md)).
+  `scadbuddy_plugin_enabled` is `false`). A browser (Playwright MCP) is not built in
+  any more; it is added as a remote plugin ([headless-browser.md](headless-browser.md)).
   `PATCH` with `{ enabled }` sets that key; approve, re-pin and `DELETE` answer 409. An
   install whose package names one answers 409 with `built_in: true` instead of
   refusing it, and Settings shows that as a notice.
@@ -769,10 +787,61 @@ turn goes ahead without it. `main.ts` passes `loadPackagesForRun(…)` to the
 socket, `POST /api/v1/ai/sessions` or the `sessions_*` tools (the comment on `sessions`
 in `main.ts`).
 
+A vetted package's http MCP servers are reached the way a remote plugin is, through the
+loopback forwarder
+([`agent/src/plugins/packages/mcp.ts`](../../agent/src/plugins/packages/mcp.ts)
+`forwardPackageServers`, #2320). Each is registered as a plugin named
+`plugin_<package>_<server>`, the name Claude Code gives a plugin's server. The forwarder
+connects to the address the egress check passed, follows no redirect, starts no OAuth
+discovery, adds the declared header itself (one at most) and marks results untrusted.
+Before #2320, Claude Code started none of them, because `strictMcpConfig` was on. Their
+URL and their one header (at most one) are checked as a remote plugin's registration is
+(`normalisePluginUrl`, `validateHeaderName`, `validateSecret`), and `X-Forwarded-*` and
+`Proxy-*` are refused. Claude Code loads every package without its own http entries: a
+copy under `<state dir>/plugins-local/<hash>/` whose `.mcp.json` and manifest keep only
+local servers (`withoutRemoteServers`). A query that reads plugins' MCP configs (with
+`strictMcpConfig` off, for an allowed package) refuses any
+loaded plugin that still declares an http server (`harness/run.ts`). An allowed
+package's local servers still start as declared.
+
+**Durable sessions (#2320).** A durable turn's Claude Code runs in the `agent-durable`
+container, so the agent copies each loaded package to the payload volume both sidecars
+mount, `<SCADBUDDY_PAYLOAD_DIR>/plugins/<content hash>/`, once per hash, when the turn
+lists its tools (`turn_tools`,
+[`agent/src/temporal/turnPackages.ts`](../../agent/src/temporal/turnPackages.ts)). The
+segment runner hashes that copy again (`agent-durable/.../session/package_hash.py`, the
+same hash as `hash.ts`) and loads only a copy that matches the pin. Without
+`SCADBUDDY_PAYLOAD_DIR` a durable turn loads no package and says so in the session. A
+package's MCP servers run in the agent as turn tools, as a remote plugin's do. They are
+named `plugin_<package>_<server>` and are outward. http ones go through the same
+forwarder (above), and their forwarder URLs and headers are redacted like a plugin's. A
+local one runs only for a package approved with `allow_refused`, started in the
+package's folder with `PATH`, `HOME` and its declared `env`. Of the built-ins an allowed package names, only `Bash` and `PowerShell` can run as
+their own activities, and so wait for a human. A durable turn offers those two and parks
+each call for approval. It does not offer the others, and says so in the session. The
+Temporal plugin owns the engine's settings, so a durable turn cannot set
+`disableSkillShellExecution`, and skill shell injection follows Claude Code's default
+there. Only an allowed package can carry one (`vet.ts` refuses it everywhere else), and
+it runs only with `Bash` offered, as in a classic turn (run.ts `builtinTools`). This was
+not measured in a durable engine. Each listing touches the copies it shares, and each
+query the `plugins-local/` copy it loads; every replica removes, once an hour, the copies
+on the volume and its own `plugins-local/` copies that nothing has touched for 7 days,
+and copies left half-made for an hour (`sweepPackageCopies`, #2395; a copy is moved aside and checked again before it goes, so a turn sharing it at that moment keeps it). An enabled package
+is shared again at its next turn.
+
 Settings has an "Assistant plugins" area with two sections: "Plugin packages"
 ([`frontend/src/components/settings/PluginPackages.tsx`](../../frontend/src/components/settings/PluginPackages.tsx))
-and "Plugin endpoints", the remote MCP plugins of `/api/v1/ai/plugins`
-([`RemotePlugins.tsx`](../../frontend/src/components/settings/RemotePlugins.tsx)).
+and "Plugins", the list of `/api/v1/ai/plugins`
+([`RemotePlugins.tsx`](../../frontend/src/components/settings/RemotePlugins.tsx)): ScadBuddy's
+own tool set first (#1953, `built_in: true`; `scadbuddy` is every registry tool, from
+[`agent/src/plugins/builtInTools.ts`](../../agent/src/plugins/builtInTools.ts)), then the
+remote MCP plugins. A built-in tool's tier can be raised or the tool disabled, never lowered
+below the tier its code declares (a lower one answers 400); the overrides are the
+`ai_settings` key `builtin_tools.scadbuddy`, applied at the
+harness seam, on `/mcp` and in the durable `agent-tools` activities. The durable session
+workflow parks a call by the manifest's tier, so a tool raised to outward is not parked
+there: its activity finds no recorded approval and refuses it (NotApproved). Adding, removing,
+testing or re-pointing a built-in answers 409 with `built_in: true`.
 You install, review, approve and re-pin packages there. The approval dialog shows the
 full commit SHA and content hash, and you must tick a confirmation before it sends
 exactly those values. Every control that writes is user-only (`USER_ONLY`), so the
@@ -858,6 +927,27 @@ Upstream's knobs are kept as `MemoryHookConfig` (`DEFAULT_MEMORY_HOOK_CONFIG`). 
 ScadBuddy's own: `retainMode` is `'transcript'` (the default, above) or `'result'`,
 upstream's behaviour of retaining only the last result with no document id.
 
+**In a durable session** (#2320, superseding #825) the turn's Claude Code runs in
+`agent-durable`, which has none of ScadBuddy's hooks. So the agent builds the same hooks
+and calls them from two activities on `agent-tools`
+([`agent/src/temporal/memoryActivities.ts`](../../agent/src/temporal/memoryActivities.ts)),
+which the `DurableSession` workflow calls around each turn, behind the patch
+`memory-2320`:
+
+- `memory_recall` runs before the prompt is sent. It recalls against the user's words
+  in that turn's `user.turn` event, and returns the same `<hindsight_memories>` block.
+  The workflow appends that block to the prompt.
+- `memory_retain` runs after the turn's events are written and before `finish_turn`.
+  It runs the Stop hook over the session's transcript, rebuilt from its event log
+  (`transcriptOf`: user turns, the assistant's text, and the main agent's tool calls).
+  It upserts `conversation:<ScadBuddy session id>`.
+
+Each recall and retain gets the same audit row and `memory` event as in a classic
+turn. Neither is retried, and neither ever fails the turn: a failure is recorded and
+the turn goes on with no memories. Only the recalled block enters the workflow's history,
+sealed by the session's payload codec. Unlike a classic turn, the turn waits for its
+retain before it is marked done (up to the 15 s retain limit).
+
 ## 12. The HTTP request tool (#827)
 
 Session turns get an `http_request` tool ("curl"; `agent/src/harness/httpRequest.ts`)
@@ -875,6 +965,99 @@ so a change applies from the next turn.
 - Limits: 30 s per request by default (the model may ask for up to 120 s), 5
   redirects, 1 MiB inline and 20 MiB read. A longer or binary body is saved under the
   state volume, in `work/sessions/<id>/http/` (the 10 newest per session), so size
-  that volume for it.
+  that volume for it. A durable session's go to `durable-turns/<id>/http/` on the replica
+  whose `turn_tools` listed the turn: its `http_request` calls are pinned to that
+  replica's own queue for the turn, so a body saved in one turn may be on another pod in
+  the next, and `http_response_read` then answers that there is no such saved response
+  (#2497; save to the workspace to keep one across turns). They are removed with the
+  session by `forgetSubject` on its pod, and by every pod's hourly sweep once the
+  session's row is gone (a flow run's after 7 days; #2496).
 - Every request is listed in Settings → **AI activity** under **HTTP requests**, with
-  its method, host, status and size.
+  its method, host, status and size. A request whose body was saved has a **View /
+  download body** link (#1292): plain text and JSON open as text, anything else
+  downloads. It works while the body is among the session's 10 newest, on the replica
+  that saved it.
+
+## 13. The workspace (#2329)
+
+The assistant keeps files of its own in `ai_session_files`, in Postgres rather than on
+the pod's disk, so every replica, classic and durable sessions and `/mcp` see the same
+files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), tools in
+[`agent/src/tools/workspace.ts`](../../agent/src/tools/workspace.ts)).
+
+- A session's files go with the session (deleting it, or `forgetSubject`, deletes them);
+  a fork copies them. A call outside any session (an `/mcp` client, a flow run) uses its
+  principal's own workspace, whose files are swept 24 h after their last write (every
+  10 minutes, `WORKSPACE_SWEEP_MS`).
+- Caps: 25 MiB a file and 200 MiB a workspace by default, the `ai_settings` keys
+  `workspace_file_max_bytes` and `workspace_max_bytes` (bytes), which Settings →
+  Assistant workspace writes through `PUT /api/v1/ai/settings/workspace`
+  `{file_max_bytes, workspace_max_bytes}` (1 MiB to 100 MiB a file, 1 MiB to 2 GiB a
+  workspace, the file cap no larger; both in one transaction, each a `settings` audit row;
+  [`agent/src/routes/workspaceSettings.ts`](../../agent/src/routes/workspaceSettings.ts)).
+  Each is read at every write. Size the database for them.
+- Tools, with their tiers: `workspace_list` and `workspace_read` (read),
+  `workspace_write`, `workspace_edit` and `workspace_delete` (write), and
+  `workspace_save` (read: it saves an output's 3MF, a model's file, thumbnail or media,
+  a print's image, timelapse or file, or a Bambuddy library file into the workspace
+  through the backend's own routes, so the bytes never pass through the model).
+  `workspace_read` pages text as `read_file` does, returns an image as an image (a
+  durable session gets its name, to see it with `view_tool_images`, #2402), and only the
+  metadata of other binary files. `workspace_edit` is made against the sha256 the model read.
+- `http_request` takes `save_to_workspace: "<path>"` (classic and durable sessions, #2496): the whole body
+  becomes a workspace file instead of a saved body on the state volume (§12). A body cut
+  at the 20 MiB read cap, or one over the workspace caps, is not stored, and the result
+  says why.
+- Uploads send workspace files (#2329 part 2,
+  [`agent/src/tools/workspaceUploads.ts`](../../agent/src/tools/workspaceUploads.ts)):
+  `upload_asset`, `add_model_media`, `set_model_thumbnail`, `set_output_thumbnail`,
+  `create_model`, `import_model`, `write_source_file`, `write_file` and `set_readme` take
+  `workspace_path` with its `workspace_sha256` instead of their inline content (exactly
+  one of the two). The sha256 is the one the model read the file at; a file no longer at
+  it is refused, so an approval card and an audit row (the call's input) name the path
+  and the exact content, and never carry the bytes. Each tool keeps its tier
+  (`import_model` from a file is still `outward`). A binary file is streamed from
+  Postgres to the backend's multipart route a 1 MiB slice at a time
+  (`SessionFiles.chunks`; the column is stored uncompressed, `20261011T1521Z_session_files_streaming.sql`);
+  a text file is decoded as UTF-8 and refused when it is not text. Every upload, from
+  the workspace or inline, text or binary (a byte search), is refused when it contains
+  one of the agent's credentials (`ToolServices.secrets`, below): `workspace_read`
+  redacts them, and an upload would otherwise carry them into a README, a source file,
+  an asset or Bambuddy. The refusal names the upload, never the credential.
+- `workspace_read` redacts every saved Claude credential's secret from text (and, in a
+  classic turn, the turn's plugin tokens) before the model sees it
+  (`ToolServices.secrets`, `main.ts`).
+- Paths are at most four `/`-separated segments of `[A-Za-z0-9_][A-Za-z0-9_.-]*`, checked
+  by the store and by the table. No Claude Code built-in reaches the workspace.
+- The panel's **Files** (part 3,
+  [`agent/src/routes/sessionFiles.ts`](../../agent/src/routes/sessionFiles.ts)) is a
+  session's workspace over HTTP, for the browser user, guarded as the session routes
+  are: reads need a session it may see (`uiReadProblem`), writes the UI's origin
+  (`uiRequestProblem`) and a session it owns that is not archived (403, 409).
+  - `GET /api/v1/ai/sessions/:id/files`: `{files, usage: {files, bytes}, limits:
+    {file_max_bytes, workspace_max_bytes}}`, each file with its `path`, `media_type`,
+    `size`, `sha256`, `source` and times.
+  - `GET /api/v1/ai/sessions/:id/files/<path>`: the bytes, always
+    `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`, a sandboxing
+    CSP and `Cache-Control: private, no-store`. The stored media type is sent, except
+    HTML, SVG, XML and scripts, which go as `application/octet-stream`. The panel fetches
+    it and saves it through `downloadBlob`, or previews an image through a blob URL.
+  - `POST /api/v1/ai/sessions/:id/files`: multipart `file`, `path` and, to replace a
+    file, `expected_sha256` (the sha256 it has now) → `201 {file}` (`200` when it
+    replaced one). A path that exists without it, or with a stale one, is `409`; past
+    either cap, `413` (the body is capped at the file cap plus 64 KiB before it is read).
+    The file's `source` is `{kind: "upload", by: "browser", filename}`.
+  - `DELETE /api/v1/ai/sessions/:id/files/<path>[?expected_sha256=]`: `204`, `404` when
+    there is none, `409` on a stale sha256.
+
+  An upload or a delete is a `resource` audit row (`workspace_upload` or
+  `workspace_delete`, refusals included: a bad path, a cap, a stale sha256, and a
+  session the browser user does not own or that is archived) and appends a
+  `workspace.file` event (`path`, `change`, `by`, and an upload's `size`, `mediaType`
+  and `sha256`) to the session's log in the same transaction as the file, so the two
+  commit together: the panel's Files list reads again on it, and the feed shows it as a
+  line where it happened (#2399). An upload whose numbered
+  `uploads/<name>` was taken meanwhile reads the list again and takes the next number,
+  once. A running turn is not interrupted;
+  the panel adds `[workspace file <path>]` to the next message, and the model finds the
+  file with `workspace_list` / `workspace_read`.

@@ -1,5 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
+import { principalLabel } from '../agent/chat/labels'
+import { useAssistantOpener } from '../agent/chat/opener'
 import { api, ApiError } from '../api/client'
 import type { ModelVersion, VersionDiff } from '../api/types'
 import { UnifiedDiff } from '../components/UnifiedDiff'
@@ -320,6 +322,8 @@ function VersionRow({
         </span>
       </button>
 
+      {version.agent && <AgentAuthor agent={version.agent} short={version.short} />}
+
       <div className="mt-2 flex flex-wrap gap-2">
         {/* #975 — named after the revision, so a list of these buttons tells them apart. */}
         <Button size="sm" onClick={onCustomize} aria-label={`Customize this version, ${version.short}`}>
@@ -337,5 +341,73 @@ function VersionRow({
         )}
       </div>
     </li>
+  )
+}
+
+/**
+ * #1288 — who an agent-made revision ran for, and the chat it was made in: opening it
+ * shows that session in the assistant panel (`useAssistantOpener`, #931). The session is
+ * read first, so one that was deleted, or that the browser user cannot see (an MCP
+ * client's), says so here instead of opening the panel on nothing. Without the assistant,
+ * or with no session in the trailer (an `/mcp` call), the badge is only text.
+ */
+function AgentAuthor({ agent, short }: { agent: NonNullable<ModelVersion['agent']>; short: string }) {
+  const opener = useAssistantOpener()
+  const [problem, setProblem] = useState('')
+  const [opening, setOpening] = useState(false)
+  // A realtime refresh can replace the row while the session is read; the chat still
+  // opens, but nothing is set on a row that is gone.
+  const mounted = useRef(true)
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
+  const who = principalLabel(agent.principal)
+  const badge = 'rounded-[6px] bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted'
+  const session = agent.session
+
+  async function open(id: string) {
+    if (!opener) return
+    setProblem('')
+    setOpening(true)
+    try {
+      await api.getAiSession(id)
+      opener.openSession(id)
+    } catch (cause) {
+      if (!mounted.current) return
+      setProblem(
+        cause instanceof ApiError && cause.status === 404
+          ? 'That chat is gone, or is not one you can open.'
+          : 'Could not open that chat.',
+      )
+    } finally {
+      if (mounted.current) setOpening(false)
+    }
+  }
+
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-2">
+      {session && opener ? (
+        <button
+          type="button"
+          onClick={() => void open(session)}
+          disabled={opening}
+          title={agent.principal ?? undefined}
+          aria-label={`Agent, for ${who}: open the chat that made ${short}`}
+          className={`${badge} hover:bg-surface-3 hover:text-ink`}
+        >
+          Agent · {who} · open chat
+        </button>
+      ) : (
+        <span title={agent.principal ?? undefined} className={badge}>
+          Agent · {who}
+        </span>
+      )}
+      <span role="status" className="text-[11px] text-warn">
+        {problem}
+      </span>
+    </div>
   )
 }

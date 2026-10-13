@@ -307,6 +307,25 @@ jobs:
       - name: Test the plugin lint
         run: .github/scripts/lint-plugin.test.sh
 
+      # No image travels as base64 inside JSON or text (#2479): an image is a blob
+      # and moves as a pointer. This fails on new code in any package that builds
+      # base64 or a data: URL outside the allowlisted Messages API boundaries.
+      - name: Check that no image is built as base64
+        run: .github/scripts/lint-base64-images.sh
+
+      - name: Test the base64 image check
+        run: .github/scripts/lint-base64-images.test.sh
+
+      # The payload codec is kept in agent/, agent-durable/ and backend/; the
+      # backend's tests run in an image without agent/, so they read copies of the
+      # agent's vectors and key migration (plan 2026-10-09-durable-phase-6-flows.md
+      # Ruling 10). This fails when a copy, or one Python codec, drifts.
+      - name: Check the payload codec copies
+        run: .github/scripts/lint-codec-copies.sh
+
+      - name: Test the codec copy check
+        run: .github/scripts/lint-codec-copies.test.sh
+
       # The Claude Code hook (.claude/settings.json) that bumps a plugin's
       # version on its first change in a branch, then lints it (#896).
       - name: Test the plugin edit hook
@@ -351,7 +370,7 @@ jobs:
       # backend's spec with uv: the spec and the generated clients are not
       # committed (#492). Same pinned action as the `freshness` job.
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
@@ -470,12 +489,16 @@ jobs:
 
       # `pnpm gen:api`, which typecheck, test and build run first, exports the
       # backend's spec with uv: the spec and the generated clients are not
-      # committed (#492). Same pinned action as the `freshness` job.
+      # committed (#492). Same pinned action as the `freshness` job. The durable
+      # session's end-to-end test (test/durable.e2e.test.ts) runs agent-durable's
+      # worker with uv too.
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
-          cache-dependency-glob: backend/uv.lock
+          cache-dependency-glob: |
+            backend/uv.lock
+            agent-durable/uv.lock
 
       - name: Enable corepack
         run: corepack enable
@@ -488,14 +511,6 @@ jobs:
 
       - name: Typecheck
         run: pnpm typecheck
-
-      # The headless browser's tests (#349: test/headlessBrowser.server.test.ts
-      # and .e2e.test.ts) drive the pinned @playwright/mcp with a real Chromium
-      # and skip without one. The same build the Dockerfile's `agent` stage
-      # installs, through the pinned package, so it matches the pin.
-      - name: Install the headless browser's Chromium
-        # --with-deps runs apt through sudo itself when it is not root.
-        run: node node_modules/@playwright/mcp/cli.js install-browser --with-deps --only-shell chromium
 
       # The agent-tools worker's tests (#1055: test/*.temporal.test.ts,
       # test/temporal.worker.test.ts) start their own dev server from this CLI and
@@ -583,7 +598,7 @@ jobs:
     needs: layout
     if: ${{ needs.layout.outputs.agent_durable == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     services:
       postgres:
         image: postgres:17
@@ -606,7 +621,7 @@ jobs:
           fetch-depth: 1
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
           cache-dependency-glob: agent-durable/uv.lock
@@ -618,6 +633,14 @@ jobs:
       - name: Check the pin still resolves
         working-directory: .
         run: .github/scripts/agent-durable-pin.test.sh
+
+      # The same check on the backend's temporal-agent-harness pin (plan
+      # 2026-10-09-durable-phase-6-flows.md Ruling 1). It runs here only because
+      # this job already sets up uv on the runner; the backend's own jobs run in
+      # the image.
+      - name: Check the harness pin still resolves
+        working-directory: .
+        run: .github/scripts/harness-pin.test.sh
 
       - name: Install
         run: uv sync --frozen
@@ -661,6 +684,8 @@ jobs:
 
       - uses: docker/setup-buildx-action@v4
 
+      # The stage copies the agent's tool manifest from `agent-build` (5e), so
+      # it also reads `scope=agent`, whose mode=max index holds that chain.
       - name: Build the agent-durable image
         uses: docker/build-push-action@v7
         with:
@@ -668,7 +693,9 @@ jobs:
           target: agent-durable
           load: true
           tags: scadbuddy-agent-durable:ci
-          cache-from: type=gha,scope=agent-durable
+          cache-from: |
+            type=gha,scope=agent-durable
+            type=gha,scope=agent
           cache-to: type=gha,scope=agent-durable,mode=min
 
       - name: Start it and check /healthz
@@ -984,9 +1011,38 @@ jobs:
   # Each shard also counts what it selected and what the whole suite collects,
   # and `backend-pytest-split` checks the four counts add up to the whole, so no
   # test can fall between the shards unnoticed.
+  # The LFS fixtures, pulled once per change of them into the Actions cache the four
+  # shards restore from: a miss (a new fixture, or an eviction from the full cache)
+  # costs one ~290 MB pull of the LFS bandwidth quota, not four. A failure here
+  # skips the required backend-pytest, which CI Summary reports as a failure.
+  lfs-fixtures:
+    name: LFS fixtures
+    needs: layout
+    if: ${{ needs.layout.outputs.image == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      key: ${{ steps.lfs.outputs.key }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      # hashFiles() reads only the workspace, so the list's hash is taken here.
+      - name: List the LFS fixtures
+        id: lfs
+        run: echo "key=$(git lfs ls-files --long --include 'test-fixtures/**' | sha256sum | cut -c1-64)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v6
+        id: cache
+        with:
+          path: .git/lfs/objects
+          key: lfs-fixtures-${{ steps.lfs.outputs.key }}
+      - name: Fetch the LFS fixtures
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        run: git lfs pull --include "test-fixtures/**"
+
   backend-pytest:
     name: Backend pytest (${{ matrix.group }}/4)
-    needs: layout
+    needs: [layout, lfs-fixtures]
     if: ${{ needs.layout.outputs.image == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -1012,6 +1068,17 @@ jobs:
         with:
           fetch-depth: 1
 
+      # The real 3MFs under test-fixtures/ (Git LFS, ~290 MB, #2146), from the cache
+      # `lfs-fixtures` filled: no shard pulls from LFS itself. They are mounted into
+      # the test container below; no image carries them (.dockerignore).
+      - uses: actions/cache/restore@v6
+        with:
+          path: .git/lfs/objects
+          key: lfs-fixtures-${{ needs.lfs-fixtures.outputs.key }}
+          fail-on-cache-miss: true
+      - name: Check out the LFS fixtures
+        run: git lfs checkout
+
       - uses: docker/setup-buildx-action@v4
 
       - name: Build the test image
@@ -1029,6 +1096,7 @@ jobs:
         run: |
           set -euo pipefail
           line=$(docker run --rm -v "$PWD/backend/.test_durations:/app/backend/.test_durations:ro" \
+            -v "$PWD/test-fixtures:/app/test-fixtures:ro" \
             -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest \
             --collect-only -q --splits 4 --group ${{ matrix.group }} | grep -E '^[0-9]+/[0-9]+ tests collected')
           echo "$line"
@@ -1060,8 +1128,10 @@ jobs:
           mkdir -p results && chmod 777 results &&
           docker run --rm --network host --shm-size=1g
           -v "$PWD/backend/.test_durations:/app/backend/.test_durations:ro"
+          -v "$PWD/test-fixtures:/app/test-fixtures:ro"
           -v "$PWD/results:/results"
           -e SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
+          -e SCADBUDDY_TEST_FIXTURES=/app/test-fixtures
           -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest -n auto
           --splits 4 --group ${{ matrix.group }}
           --junitxml=/results/junit.xml --durations=20
@@ -1094,7 +1164,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: backend-pytest-count-*
           merge-multiple: true
@@ -1268,7 +1338,7 @@ jobs:
       # python3 the runner already has.
       - name: Set up uv
         if: ${{ steps.select.outputs.count != '0' }}
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@v10.3.0
 
       - name: Run the selected verify.sh scripts
         if: ${{ steps.select.outputs.count != '0' }}
@@ -1400,7 +1470,7 @@ jobs:
       # github-actions ecosystem bumps this line.
       - name: Set up uv
         if: ${{ steps.detect.outputs.backend == 'true' }}
-        uses: astral-sh/setup-uv@v10.2.0
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock

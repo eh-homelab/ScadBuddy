@@ -9,13 +9,12 @@ import { type AuditActor, type AuditSink, safeDetail } from '../audit/log.js'
 import { assertHostAllowed, assertHttpUrl, type Resolver, systemResolver } from '../http/egress.js'
 import { pinnedRequestOptions, requestFor } from '../http/pinned.js'
 import { markUntrusted } from '../safety/untrusted.js'
-import { AGENT_ACTOR_HEADER } from './headlessBrowser.js'
+import { type SessionFiles, WorkspaceError, type WorkspaceRef, workspacePath } from '../workspace/store.js'
 import type { RiskTier } from './permissions.js'
 
 // The assistant's `http_request` tool (#827): "curl" for a harness that runs
 // with `tools: []` (options.ts: no Bash, no WebFetch) and refuses plugins that
-// start a process (plugins.ts). An in-process SDK MCP server, like the
-// headless browser's grant tool (headlessGrants.ts), added to a session's
+// start a process (plugins.ts). An in-process SDK MCP server, added to a session's
 // turn when the `http_request_enabled` setting is not `false`
 // (routes/httpRequest.ts; on by default).
 //
@@ -39,8 +38,7 @@ import type { RiskTier } from './permissions.js'
 //     the request is built from the tool input alone, and Claude Code's
 //     environment, which holds the Claude credential (run.ts credentialEnv),
 //     never reaches this process's request code.
-//   - Never the agent-actor header (AGENT_ACTOR_HEADER): a request that names
-//     it is refused, as are the connection-level headers Node sets itself.
+//   - The connection-level headers Node sets itself are refused.
 //   - No request carries the turn's secrets (the Claude credential and the
 //     plugins' header tokens, the same list the event log is redacted of): a
 //     header value, the URL or the body that contains one is refused, so the
@@ -60,8 +58,15 @@ import type { RiskTier } from './permissions.js'
 //     human approved one URL.
 //   - Responses are untrusted data (safety/untrusted.ts): every result is
 //     wrapped in the `untrusted_data` envelope naming the URL's host.
+//   - `save_to_workspace: "<path>"` (#2329) stores the whole body as a file in
+//     the session's workspace (workspace/store.ts), under its caps, instead of
+//     on the pod's disk, so workspace_read reads it and an upload can send it.
+//     A body cut at SAVE_MAX_BYTES is not stored.
 //   - Every request (every hop) is an `http` audit row: method, scheme, host,
-//     status, size and timing. Never a path, a header or a body.
+//     status, size and timing, and on the hop that answered, the id its body
+//     was saved under, if it was (#1292: AI activity links to the body, served
+//     by GET /api/v1/ai/sessions/:id/http/:saved). Never a path, a header or a
+//     body.
 
 export const HTTP_SERVER = 'scadbuddy_http'
 export const HTTP_TOOL = 'http_request'
@@ -104,9 +109,8 @@ export function httpTierOf(toolName: string, input?: unknown): RiskTier | undefi
   return typeof method === 'string' && READ_METHODS.has(method) ? 'read' : 'outward'
 }
 
-/** Header names the model may not set: Node sets them from the request, or they are ScadBuddy's own. */
+/** Header names the model may not set: Node sets them from the request. */
 const FORBIDDEN_HEADERS: ReadonlySet<string> = new Set([
-  AGENT_ACTOR_HEADER.toLowerCase(),
   'host',
   'content-length',
   'transfer-encoding',
@@ -139,6 +143,15 @@ export const HttpRequestInput = {
     .max(MAX_TIMEOUT_MS)
     .optional()
     .describe(`Deadline for the whole request, redirects included (default ${DEFAULT_TIMEOUT_MS}, at most ${MAX_TIMEOUT_MS})`),
+  save_to_workspace: z
+    .string()
+    .min(1)
+    .max(512)
+    .optional()
+    .describe(
+      'Save the whole response body as this file in your workspace (e.g. "downloads/part.stl"), replacing any ' +
+        'file there; workspace_read reads it, and uploads can send it',
+    ),
 }
 // Defaults are applied here, not with zod's `.default()`: the MCP server
 // bundled in the SDK validated tool input without applying them (measured on
@@ -196,6 +209,8 @@ export type HttpRequestContext = {
   signal?: AbortSignal | undefined
   resolve?: Resolver
   limits?: Partial<HttpLimits>
+  /** Where `save_to_workspace` stores a body (#2329): the session's workspace. Refused without it. */
+  workspace?: { files: SessionFiles; ref: WorkspaceRef } | undefined
 }
 
 function contains(value: string, secrets: readonly string[]): boolean {
@@ -207,7 +222,6 @@ function contains(value: string, secrets: readonly string[]): boolean {
 export function requestProblem(args: HttpRequestArgs, secrets: readonly string[]): string | undefined {
   for (const [name, value] of Object.entries(args.headers ?? {})) {
     const lower = name.toLowerCase()
-    if (lower === AGENT_ACTOR_HEADER.toLowerCase()) return `the ${AGENT_ACTOR_HEADER} header is ScadBuddy's own and is never sent`
     if (FORBIDDEN_HEADERS.has(lower)) return `the ${name} header is set by the connection and cannot be given`
     if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name)) return `${JSON.stringify(name)} is not a valid header name`
     if (/[\r\n\0]/.test(value)) return `the ${name} header value contains a line break or NUL`
@@ -242,6 +256,16 @@ function textual(contentType: string | undefined, bytes: Buffer): boolean {
     )
   }
   return !bytes.subarray(0, 8192).includes(0)
+}
+
+/**
+ * Whether a final hop's body is saved for paging: when it has one and it does not
+ * fit inline, or is binary (never inlined).
+ */
+function savesBody(hop: Hop, limits: HttpLimits): boolean {
+  const contentType = typeof hop.headers['content-type'] === 'string' ? hop.headers['content-type'] : undefined
+  const fits = hop.bytes.length <= limits.inlineMaxBytes && hop.complete
+  return hop.bytes.length > 0 && !(fits && textual(contentType, hop.bytes))
 }
 
 /** `end` moved back so it does not split a UTF-8 sequence. */
@@ -325,10 +349,20 @@ type Outcome =
       hop: Hop
       /** Set when a redirect was returned instead of followed. */
       note?: string
+      /**
+       * Writes the last hop's audit row, naming `saved` when its body was saved
+       * under that id. Left to the caller so a row never names a body whose save
+       * failed (#2224).
+       */
+      audit: (saved?: string) => Promise<void>
     }
   | { ok: false; reason: string }
 
-/** Sends the request, following redirects within the limits; audits every hop. */
+/**
+ * Sends the request, following redirects within the limits; audits every hop but
+ * the last one of a completed exchange, whose row the caller writes with `audit`
+ * once it knows whether the body was saved (#1292, #2224).
+ */
 async function exchange(args: HttpRequestArgs, context: HttpRequestContext, callSignal?: AbortSignal): Promise<Outcome> {
   const limits = { ...DEFAULT_LIMITS, ...context.limits }
   const resolve = context.resolve ?? systemResolver
@@ -346,7 +380,10 @@ async function exchange(args: HttpRequestArgs, context: HttpRequestContext, call
   }
   for (let hop = 0; ; hop++) {
     const startedAt = new Date()
-    const audited = (outcome: 'ok' | 'error' | 'refused', extra: { status?: number; size?: number; detail?: string }) =>
+    const audited = (
+      outcome: 'ok' | 'error' | 'refused',
+      extra: { status?: number; size?: number; detail?: string; saved?: string },
+    ) =>
       context.audit?.record({
         kind: 'http',
         action: method,
@@ -362,6 +399,7 @@ async function exchange(args: HttpRequestArgs, context: HttpRequestContext, call
           ...(hop > 0 ? { redirect: hop } : {}),
           ...(extra.status !== undefined ? { status: extra.status } : {}),
           ...(extra.size !== undefined ? { size_bytes: extra.size } : {}),
+          ...(extra.saved !== undefined ? { saved: extra.saved } : {}),
         }),
         outcome,
         ...(extra.detail !== undefined ? { detail: safeDetail(extra.detail, context.secrets()) } : {}),
@@ -388,18 +426,23 @@ async function exchange(args: HttpRequestArgs, context: HttpRequestContext, call
       await audited('error', { detail: reason })
       return { ok: false, reason }
     }
-    await audited('ok', { status: result.status, size: result.bytes.length })
+    // The row of the hop whose body is the result names where that body was saved.
+    const last = async (saved?: string) => {
+      await audited('ok', { status: result.status, size: result.bytes.length, ...(saved !== undefined ? { saved } : {}) })
+    }
     const location = result.headers.location
     if (!isRedirect(result.status) || typeof location !== 'string') {
-      return { ok: true, url, redirects, hop: result }
+      return { ok: true, url, redirects, hop: result, audit: last }
     }
     if (redirects.length >= limits.maxRedirects) {
+      await audited('ok', { status: result.status, size: result.bytes.length })
       return { ok: false, reason: `more than ${limits.maxRedirects} redirects (last: ${url.href} → ${location})` }
     }
     let next: URL
     try {
       next = assertHttpUrl(new URL(location, url).href, 'redirect')
     } catch (err) {
+      await audited('ok', { status: result.status, size: result.bytes.length })
       return { ok: false, reason: (err as Error).message }
     }
     const crossOrigin = next.origin !== url.origin
@@ -410,9 +453,11 @@ async function exchange(args: HttpRequestArgs, context: HttpRequestContext, call
         url,
         redirects,
         hop: result,
+        audit: last,
         note: `not followed: a ${result.status} would re-send the approved ${method} to another origin (${next.origin})`,
       }
     }
+    await audited('ok', { status: result.status, size: result.bytes.length })
     if (toGet) {
       method = 'GET'
       body = undefined
@@ -427,11 +472,10 @@ async function exchange(args: HttpRequestArgs, context: HttpRequestContext, call
 }
 
 /** The ids of saved bodies are UUIDs; a file's name is `<id>.body`, its metadata `<id>.json`. */
-type SavedMeta = { content_type: string | null; size_bytes: number; complete: boolean; url: string }
+export type SavedMeta = { content_type: string | null; size_bytes: number; complete: boolean; url: string }
 
-async function save(dir: string, bytes: Buffer, meta: SavedMeta): Promise<string> {
+async function save(dir: string, id: string, bytes: Buffer, meta: SavedMeta): Promise<string> {
   await mkdir(dir, { recursive: true })
-  const id = randomUUID()
   await writeFile(path.join(dir, `${id}.body`), bytes, { mode: 0o600 })
   await writeFile(path.join(dir, `${id}.json`), JSON.stringify(meta), { mode: 0o600 })
   await prune(dir)
@@ -493,6 +537,17 @@ export async function runHttpRequest(
     })
     return text({ error: `Not sent: ${problem}.` }, true)
   }
+  // The workspace path is checked before anything is sent.
+  let target: string | undefined
+  if (args.save_to_workspace !== undefined) {
+    if (!context.workspace) return text({ error: 'Not sent: save_to_workspace needs a session workspace, which is not available here.' }, true)
+    if (args.method === 'HEAD') return text({ error: 'Not sent: a HEAD request has no body to save_to_workspace.' }, true)
+    try {
+      target = workspacePath(args.save_to_workspace)
+    } catch (err) {
+      return text({ error: `Not sent: ${(err as Error).message}.` }, true)
+    }
+  }
   const limits = { ...DEFAULT_LIMITS, ...context.limits }
   const outcome = await exchange(args, context, callSignal)
   if (!outcome.ok) return text({ error: `Not completed: ${outcome.reason}.` }, true)
@@ -500,16 +555,25 @@ export async function runHttpRequest(
   const contentType = typeof hop.headers['content-type'] === 'string' ? hop.headers['content-type'] : undefined
   const isText = textual(contentType, hop.bytes)
   const fits = hop.bytes.length <= limits.inlineMaxBytes && hop.complete
-  // Saved when it does not fit inline, or is binary (not inlined at all), so it can be paged.
-  const saved =
-    hop.bytes.length === 0 || (fits && isText)
-    ? undefined
-    : await save(context.saveDir, hop.bytes, {
+  const workspace = target === undefined ? undefined : await saveToWorkspace(context, target, hop, contentType, outcome.url)
+  // Saved when it does not fit inline, or is binary (not inlined at all), so it can be paged;
+  // not when the workspace holds it.
+  let saved: string | undefined
+  if (savesBody(hop, limits) && !(workspace && 'sha256' in workspace)) {
+    try {
+      saved = await save(context.saveDir, randomUUID(), hop.bytes, {
         content_type: contentType ?? null,
         size_bytes: hop.bytes.length,
         complete: hop.complete,
         url: outcome.url.href,
       })
+    } catch (err) {
+      // The request was made, so its row is still written, naming no body (#2224).
+      await outcome.audit()
+      throw err
+    }
+  }
+  await outcome.audit(saved)
   let inline: string | null = null
   if (isText) {
     const end = utf8Boundary(hop.bytes, Math.min(hop.bytes.length, limits.inlineMaxBytes))
@@ -527,7 +591,11 @@ export async function runHttpRequest(
     body_complete: hop.complete,
     body: args.method === 'HEAD' ? null : inline,
     ...(inline === null && hop.bytes.length > 0 ? { body_omitted: 'binary content; read it from `saved` as base64' } : {}),
+    ...(inline === null && hop.bytes.length > 0 && workspace && 'sha256' in workspace
+      ? { body_omitted: `binary content; it is in the workspace at ${workspace.path}` }
+      : {}),
     inline_truncated: inline !== null && !fits,
+    ...(workspace ? { workspace } : {}),
     saved: saved
       ? {
           id: saved,
@@ -538,6 +606,47 @@ export async function runHttpRequest(
       : null,
   }
   return text(result)
+}
+
+type WorkspaceSaved =
+  | { path: string; size_bytes: number; sha256: string; media_type: string; read_with: string }
+  | { path: string; error: string }
+
+/** The body as a workspace file (#2329); a refusal (cut body, caps) is reported, never thrown. */
+async function saveToWorkspace(
+  context: HttpRequestContext,
+  target: string,
+  hop: Hop,
+  contentType: string | undefined,
+  url: URL,
+): Promise<WorkspaceSaved> {
+  if (!hop.complete) return { path: target, error: `not saved: the body was cut at ${hop.bytes.length} bytes` }
+  try {
+    const info = await context.workspace!.files.write(context.workspace!.ref, target, hop.bytes, {
+      mediaType: contentType?.split(';')[0]?.trim() || undefined,
+      // The URL without its query, which can carry a token of the server's.
+      source: { tool: HTTP_TOOL, url: `${url.origin}${url.pathname}`, status: hop.status },
+    })
+    return { path: info.path, size_bytes: info.size, sha256: info.sha256, media_type: info.mediaType, read_with: 'workspace_read' }
+  } catch (err) {
+    if (err instanceof WorkspaceError) return { path: target, error: `not saved: ${err.message}` }
+    throw err
+  }
+}
+
+/**
+ * A saved body whole, with what was recorded about it, for the UI to download
+ * (#1292); undefined for anything that is not a saved response id, or one not in
+ * `dir` (pruned, or saved on another replica).
+ */
+export async function savedBody(dir: string, id: string): Promise<{ meta: SavedMeta; bytes: Buffer } | undefined> {
+  if (!SAVED_ID.test(id)) return undefined
+  try {
+    const meta = JSON.parse(await readFile(path.join(dir, `${id}.json`), 'utf8')) as SavedMeta
+    return { meta, bytes: await readFile(path.join(dir, `${id}.body`)) }
+  } catch {
+    return undefined
+  }
 }
 
 /** The `http_response_read` handler: one page of a saved body. NOT yet marked untrusted. */
@@ -596,6 +705,7 @@ export function httpRequestServer(context: HttpRequestContext): McpSdkServerConf
       'GET and HEAD run at once; POST, PUT, PATCH and DELETE wait for the user to approve that exact request. ' +
       'Only the headers you give are sent. Returns the status, the response headers and the body ' +
       `(up to ${INLINE_MAX_BYTES} bytes inline); a longer or binary body is saved and read with ${HTTP_READ_TOOL}. ` +
+      'With save_to_workspace the body is stored as a workspace file instead (workspace_read reads it). ' +
       `Follows up to ${MAX_REDIRECTS} redirects.`,
     HttpRequestInput,
     async (args, extra) => {
@@ -607,7 +717,8 @@ export function httpRequestServer(context: HttpRequestContext): McpSdkServerConf
   const read = tool(
     HTTP_READ_TOOL,
     `Read one page of a response body that ${HTTP_TOOL} saved (its \`saved.id\`), from a byte offset. ` +
-      'Text comes back as text, anything else as base64.',
+      'Text comes back as text, anything else as base64. A body saved in an earlier turn may be gone; ' +
+      `pass save_to_workspace to ${HTTP_TOOL} to keep one.`,
     HttpReadInput,
     async (args) => markUntrusted(await readSavedResponse(args, context), HTTP_READ_TOOL, 'a saved HTTP response body'),
     { annotations: { readOnlyHint: true } },

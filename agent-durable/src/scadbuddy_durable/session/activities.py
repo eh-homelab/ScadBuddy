@@ -1,5 +1,8 @@
 """DurableSession's own activities on the ``agent`` queue: a turn's settings and its end.
 
+``gate_settings`` reads the gate's timers and the tools' Settings → Plugins overrides
+(#2088), so the workflow parks by a tool's effective tier, not the manifest's.
+
 ``finish_turn`` writes what a classic turn's end writes (agent/src/sessions/manager.ts):
 ``session.result`` with the lineage's spend and budget, the error if the turn did not
 end well, and the final ``session.status``, in one transaction with the status. It
@@ -18,7 +21,8 @@ import psycopg
 from temporalio import activity
 
 from scadbuddy_durable.gate.store import PROTOCOL_VERSION, _append
-from scadbuddy_durable.session.models import FinishTurn, GateSettings
+from scadbuddy_durable.session import tools
+from scadbuddy_durable.session.models import MESSAGE_MAX, FinishTurn, GateSettings
 
 Connect = Callable[[], AbstractAsyncContextManager[psycopg.AsyncConnection[Any]]]
 
@@ -29,7 +33,6 @@ DEFAULT_APPROVAL_EXPIRY_S = 600
 DEFAULT_QUESTION_EXPIRY_S = 3600
 EXPIRY_MIN_S = 10
 EXPIRY_MAX_S = 86_400
-MESSAGE_MAX = 500
 _RUNNING = ("running", "waiting_approval", "waiting_input")
 
 
@@ -74,14 +77,19 @@ class SessionActivities:
         async with self._connect() as conn:
             cur = await conn.execute(
                 "SELECT key, value FROM ai_settings WHERE key = ANY(%s)",
-                ([APPROVAL_EXPIRY_KEY, QUESTION_EXPIRY_KEY],),
+                ([APPROVAL_EXPIRY_KEY, QUESTION_EXPIRY_KEY, tools.OVERRIDES_SETTING],),
             )
             values = {
                 k: (json.loads(v) if isinstance(v, str) else v) for k, v in await cur.fetchall()
             }
+        tiers, disabled = tools.sanitise_overrides(
+            tools.manifest(), values.get(tools.OVERRIDES_SETTING)
+        )
         return GateSettings(
             approval_expiry_s=_seconds(values.get(APPROVAL_EXPIRY_KEY), DEFAULT_APPROVAL_EXPIRY_S),
             question_expiry_s=_seconds(values.get(QUESTION_EXPIRY_KEY), DEFAULT_QUESTION_EXPIRY_S),
+            tool_tiers=tiers,
+            disabled_tools=disabled,
         )
 
     @activity.defn(name="finish_turn")
@@ -105,7 +113,8 @@ class SessionActivities:
             turns, budget, spent = int(row[0]), float(row[1]), float(row[2] or 0)
             events = turn_events(sid, args, spent=spent, budget=budget, turns=turns)
             await conn.execute(
-                "UPDATE ai_sessions SET status = %s, updated_at = now() WHERE id = %s",
+                "UPDATE ai_sessions SET status = %s, durable_turn_id = NULL, updated_at = now()"
+                " WHERE id = %s",
                 (events[-1]["status"], sid),
             )
             await _append(conn, sid, events)

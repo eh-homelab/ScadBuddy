@@ -9,8 +9,8 @@ import tempfile
 import uuid
 import zipfile
 from array import array
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import IO, Any, Literal
 from xml.etree import ElementTree as ET
@@ -19,6 +19,7 @@ from xml.sax.saxutils import escape, quoteattr
 import numpy as np
 import trimesh
 
+from scadbuddy.render.paint import MAX_CODE_DIGITS, states
 from scadbuddy.render.plate import (
     DEFAULT_PLATE,
     Placement,
@@ -27,7 +28,7 @@ from scadbuddy.render.plate import (
     centre_on_plate,
     place_on_plate,
 )
-from scadbuddy.render.split import ColourPart
+from scadbuddy.render.split import PAINT_ATTRIBUTE, ColourPart
 from scadbuddy.render.thumbnail import PlateThumbnails
 
 #: Bambu Studio reads ``Metadata/project_settings.config`` only when the root
@@ -133,8 +134,14 @@ def object_model(part: ColourPart, object_id: int) -> str:
         f'\n     <vertex x="{_number(v[0])}" y="{_number(v[1])}" z="{_number(v[2])}"/>'
         for v in part.mesh.vertices
     )
+    codes = part.paint.codes if part.paint is not None else ("",) * len(part.mesh.faces)
+    if len(codes) != len(part.mesh.faces):
+        raise ValueError(f"part {part.name!r} has paint for another number of faces")
     triangles = "".join(
-        f'\n     <triangle v1="{f[0]}" v2="{f[1]}" v3="{f[2]}"/>' for f in part.mesh.faces
+        f'\n     <triangle v1="{f[0]}" v2="{f[1]}" v3="{f[2]}"'
+        + (f' {PAINT_ATTRIBUTE}="{code}"' if code else "")
+        + "/>"
+        for f, code in zip(part.mesh.faces, codes, strict=True)
     )
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -152,8 +159,10 @@ def object_model(part: ColourPart, object_id: int) -> str:
 
 
 def model_bounds(parts: Sequence[ColourPart]) -> np.ndarray:
-    """The ``(2, 3)`` min/max box every part shares, in the meshes' coordinates."""
-    bounds = np.array([part.mesh.bounds for part in parts])
+    """The ``(2, 3)`` min/max box every part shares, in the meshes' coordinates: those
+    that print, since a negative part is cut out."""
+    printed = [part for part in parts if not part.negative] or list(parts)
+    bounds = np.array([part.mesh.bounds for part in printed])
     return np.array([bounds[:, 0, :].min(axis=0), bounds[:, 1, :].max(axis=0)])
 
 
@@ -176,8 +185,15 @@ class PlateParts:
     def tower(self) -> bool:
         """Whether this plate needs a prime tower: only when it uses more than one
         filament. One colour prints without one, so reserving room would refuse
-        plates that are perfectly printable."""
-        return len(set(self.extruders)) > 1
+        plates that are perfectly printable. A painted part prints with its painting's
+        filaments too (#1965), but a painting only in filaments the plate already uses
+        adds none (#2108). The painting must be numbered against the file's filament
+        list, as `write_plates_3mf` renumbers it before asking."""
+        used = set(self.extruders)
+        for part in self.parts:
+            if part.paint is not None:
+                used.update(state for code in part.paint.codes if code for state in states(code))
+        return len(used) > 1
 
 
 def single_plate(parts: Sequence[ColourPart]) -> PlateParts:
@@ -264,6 +280,11 @@ def root_model(
     )
 
 
+def _subtype(part: ColourPart) -> str:
+    """Bambu Studio's part subtype: a negative part is cut out of its object (#1863)."""
+    return "negative_part" if part.negative else "normal_part"
+
+
 def model_settings(plates: Sequence[PlateParts], model_name: str, *, covers: bool) -> str:
     total = sum(len(plate.parts) for plate in plates)
     objects: list[str] = []
@@ -273,7 +294,7 @@ def model_settings(plates: Sequence[PlateParts], model_name: str, *, covers: boo
     ):
         assembly_id = total + plate_index
         entries = "".join(
-            f'  <part id="{index}" subtype="normal_part">\n'
+            f'  <part id="{index}" subtype="{_subtype(part)}">\n'
             f'   <metadata key="name" value={quoteattr(part.name)}/>\n'
             f'   <metadata key="extruder" value="{extruder}"/>\n'
             "  </part>\n"
@@ -330,14 +351,30 @@ def _cover_metadata(plate_index: int) -> str:
 #: ``--load-settings``/``--load-filaments``. Measured: placeholder ids, a
 #: deliberately wrong nozzle diameter (0.4 while slicing 0.2) and a wrong
 #: printable height all produce byte-identical results. So ScadBuddy states what
-#: it honestly knows and names itself for the rest, rather than inventing preset
-#: names that could be mistaken for real ones — it owns no slicer settings.
+#: it knows and names itself for the rest — it owns no slicer settings. What it
+#: knows includes the printer a file is laid out for, named as Bambu Studio names
+#: it (:func:`printer_preset`, #2639), since Bambuddy's slice dialog pre-picks the
+#: printer by that name; the process stays this placeholder, and marks the layout
+#: as ScadBuddy's (:func:`layout_of`).
 PRESET_PLACEHOLDER = "ScadBuddy"
 #: Only the arity-free presence of this option matters; 1 and 3 entries were both
 #: measured to slice identically on a two-extruder H2C. The print run replaces it
 #: with the nozzle it chose (#126): slicing never reads it, but a person deciding
 #: whether to start a print does.
 PLACEHOLDER_NOZZLE_DIAMETER = ["0.4"]
+
+
+def printer_preset(plate: PlateGeometry, nozzle: str) -> str:
+    """The printer preset a 3MF laid out for ``plate`` names, as Bambu Studio names
+    it (``"Bambu Lab A1 0.4 nozzle"``): Bambuddy's slice dialog pre-picks the printer
+    by this name, and with :data:`PRESET_PLACEHOLDER` it took the first printer it
+    lists. The fallback plate is no printer, so it keeps the placeholder.
+
+    Before a print chooses a nozzle, ``nozzle`` is the file's stated diameter,
+    0.4 as written: a printer fitted with another size is pre-picked at 0.4, as
+    Bambu Studio itself opens a new project, and the dialog lets that be changed.
+    A print renames it for the nozzle it chose (:func:`replate_3mf`)."""
+    return f"{plate.model} {nozzle} nozzle" if plate.model else PRESET_PLACEHOLDER
 
 
 def one_extruder_map(filaments: int) -> dict[str, str | list[str]]:
@@ -355,7 +392,10 @@ def one_extruder_map(filaments: int) -> dict[str, str | list[str]]:
 
 
 def project_settings(
-    colours: Sequence[str], placements: Sequence[Placement], plate: PlateGeometry
+    colours: Sequence[str],
+    placements: Sequence[Placement],
+    plate: PlateGeometry,
+    materials: Mapping[str, str] | None = None,
 ) -> str:
     """``Metadata/project_settings.config``, in Bambu Studio's own JSON shape.
 
@@ -372,16 +412,36 @@ def project_settings(
 
     ``colours`` is the one filament list every plate shares; ``placements`` has one
     entry per plate, in plate order (spec §6.4).
+
+    ``materials`` maps a colour to the material its source stated (an arranged library
+    file's ``filament_type``). ``filament_type`` is written only when every slot has
+    one: Bambuddy's slice dialog picks each slot's filament preset by it, and with none
+    it takes the first preset it lists, Bambu ABS, for a file whose sources were PLA. A
+    partial list is not written: a slot with ``""`` would get that same guess, and
+    what Bambu Studio makes of one was never measured.
+
+    Sources: the dialog's pick is ``pickFilamentForSlot`` in Bambuddy's
+    ``frontend/src/utils/slicePresetPicker.ts``, fed by the ``filament_type`` its
+    ``library.py`` reads from this file (read 2026-10-12 at maziggy/bambuddy main).
+    A Bambu Studio project states it beside ``filament_colour`` (Bambuddy's filament
+    requirements read both there, as :mod:`scadbuddy.bambuddy.filaments3mf` does), and
+    ScadBuddy copies the strings a library project stated. Not yet measured: a
+    ScadBuddy-written 3MF carrying it, sliced by Bambuddy's headless slicer.
     """
     settings: dict[str, str | list[str]] = {
         "filament_colour": list(colours),
         # Required-or-segfault; see above.
-        "printer_settings_id": PRESET_PLACEHOLDER,
+        "printer_settings_id": printer_preset(plate, PLACEHOLDER_NOZZLE_DIAMETER[0]),
+        # Also what marks the layout as ScadBuddy's (`layout_of`): ScadBuddy owns no
+        # process, and Bambu Studio names one when it saves the file.
         "print_settings_id": PRESET_PLACEHOLDER,
         "filament_settings_id": [PRESET_PLACEHOLDER for _ in colours],
         "nozzle_diameter": PLACEHOLDER_NOZZLE_DIAMETER,
         "printable_height": _number(plate.height),
     }
+    stated = [(materials or {}).get(colour.upper(), "") for colour in colours]
+    if stated and all(stated):
+        settings["filament_type"] = stated
     _set_towers(settings, [placement.tower for placement in placements])
     return json.dumps(settings, indent=4) + "\n"
 
@@ -570,6 +630,7 @@ def write_plates_3mf(
     thumbnails: Sequence[PlateThumbnails] | None,
     model_name: str = "model",
     plate: PlateGeometry = DEFAULT_PLATE,
+    materials: Mapping[str, str] | None = None,
 ) -> None:
     """Write a 3MF with one Bambu plate per entry of ``plates`` (spec §6.4).
 
@@ -585,6 +646,20 @@ def write_plates_3mf(
         raise ValueError("cover images are all or nothing: one set per plate")
     if any(not 1 <= extruder <= len(colours) for each in plates for extruder in each.extruders):
         raise ValueError("every part's extruder must name one of the filament colours")
+    # A painted part's codes name extruders by its own numbering: renumber them into
+    # the file's one filament list, which is what the slicer reads them against (#1965).
+    plates = [
+        replace(
+            each,
+            parts=tuple(
+                replace(part, paint=part.paint.renumbered(colours))
+                if part.paint is not None
+                else part
+                for part in each.parts
+            ),
+        )
+        for each in plates
+    ]
     covers = thumbnails is not None
     placements = [_placement(model_bounds(each.parts), plate, tower=each.tower) for each in plates]
     offsets = [
@@ -605,7 +680,7 @@ def write_plates_3mf(
                 for index, part in zip(numbers, each.parts, strict=True)
             ),
             (MODEL_SETTINGS_NAME, model_settings(plates, model_name, covers=covers)),
-            (PROJECT_SETTINGS_NAME, project_settings(colours, placements, plate)),
+            (PROJECT_SETTINGS_NAME, project_settings(colours, placements, plate, materials)),
         )
     ]
     if thumbnails is not None:
@@ -729,6 +804,7 @@ def replate_3mf(
     nozzle_diameter: str | None = None,
     nozzle_stats: Sequence[str] | None = None,
     nozzle_volume_type: Sequence[str] | None = None,
+    filament_map: FilamentMap | None = None,
 ) -> bytes:
     """Return ``payload`` laid out for ``plate``.
 
@@ -806,28 +882,55 @@ def replate_3mf(
             # The plate changed, so restate its Z. The other keys the BBL loader
             # needs do not vary by printer and are already in the file.
             settings["printable_height"] = _number(plate.height)
+            # Named for this printer and the nozzle the file states, as the writer
+            # names it, so a re-placed file is the one written for this printer.
+            stated = next(iter(settings.get("nozzle_diameter") or []), None)
+            settings["printer_settings_id"] = printer_preset(
+                plate, nozzle_diameter or stated or PLACEHOLDER_NOZZLE_DIAMETER[0]
+            )
             if nozzle_diameter is not None:
                 settings["nozzle_diameter"] = [nozzle_diameter]
                 settings.update(one_extruder_map(len(settings.get("filament_colour", []))))
-            _state_nozzles(settings, nozzle_stats, nozzle_volume_type)
+            _state_nozzles(settings, nozzle_stats, nozzle_volume_type, filament_map)
             _set_towers(settings, [placement.tower for placement in placements])
             data = (json.dumps(settings, indent=4) + "\n").encode("utf-8")
         rewritten.append((name, data))
     return _zipped(rewritten)
 
 
+@dataclass(frozen=True)
+class FilamentMap:
+    """ScadBuddy's own filament→extruder map (#2166, ``bambuddy.nozzle_plan``): per
+    filament of the file, its extruder in the slicer's numbering ("1" the left on the
+    H2C) and its flow as ``NozzleVolumeType`` ("0" Standard, "1" High Flow)."""
+
+    extruders: tuple[str, ...]
+    volumes: tuple[str, ...]
+
+
 def _state_nozzles(
     settings: dict[str, Any],
     nozzle_stats: Sequence[str] | None,
     nozzle_volume_type: Sequence[str] | None,
+    filament_map: FilamentMap | None = None,
 ) -> None:
     """Write which extruders have the nozzle and each one's flow into ``settings``
-    (#834, #484); see :func:`replate_3mf`. ``None`` leaves a key as it is."""
+    (#834, #484); see :func:`replate_3mf`. ``None`` leaves a key as it is.
+
+    ``filament_map`` is written as ``filament_map`` under ``filament_map_mode``
+    "Manual", with ``filament_volume_map`` beside it (#2166): only when it names one
+    extruder per filament of the file, since the slicer indexes it by filament."""
     if nozzle_stats is not None:
         settings["extruder_nozzle_stats"] = list(nozzle_stats)
         settings["extruder_nozzle_stats_new"] = list(nozzle_stats)
     if nozzle_volume_type is not None:
         settings["nozzle_volume_type"] = list(nozzle_volume_type)
+    if filament_map is not None and len(filament_map.extruders) == len(
+        settings.get("filament_colour") or filament_map.extruders
+    ):
+        settings["filament_map"] = list(filament_map.extruders)
+        settings["filament_map_mode"] = "Manual"
+        settings["filament_volume_map"] = list(filament_map.volumes)
 
 
 #: Bambu Studio's full project_settings.config is ~80 KB; more is not one, but a zip bomb.
@@ -875,6 +978,16 @@ class ArchiveTooLargeError(ValueError):
     """An entry, or the whole 3MF, inflated past its cap."""
 
 
+class TooManyTrianglesError(ValueError):
+    """A model file holds more triangles, or more vertices than they could name, than
+    the parse was allowed (:func:`parse_model`'s ``max_triangles``); ``kind`` says
+    which."""
+
+    def __init__(self, message: str, kind: Literal["triangles", "vertices"]) -> None:
+        super().__init__(message)
+        self.kind = kind
+
+
 #: The chunk every untrusted entry is inflated in.
 _CHUNK = 1024 * 1024
 
@@ -901,8 +1014,9 @@ _TRIANGLES = f"{{{CORE_NS}}}triangles"
 #: Generous on purpose: far past any slicer's output, far below what memory notices.
 MAX_MESH_PIDS = 10_000
 _TRIANGLE = f"{{{CORE_NS}}}triangle"
-#: Per-triangle painting: Bambu Studio's, and PrusaSlicer's multi-material one.
-_PAINTED = ("paint_color", "{http://schemas.slic3r.org/3mf/2017/06}mmu_segmentation")
+#: PrusaSlicer's per-triangle multi-material painting; Bambu Studio's is
+#: `PAINT_ATTRIBUTE`.
+_PRUSA_PAINT = "{http://schemas.slic3r.org/3mf/2017/06}mmu_segmentation"
 
 
 @dataclass(frozen=True)
@@ -918,8 +1032,11 @@ class MeshArrays:
     pids: tuple[str, ...]
     #: Each triangle's ``p1``, or -1 when it has none.
     p1: np.ndarray
-    #: Whether any triangle carries per-triangle painting.
-    painted: bool
+    #: Each triangle's Bambu Studio ``paint_color`` (``""`` for one without), or None
+    #: when no triangle carries one (#1965).
+    paint: tuple[str, ...] | None
+    #: Whether any triangle carries PrusaSlicer's multi-material painting.
+    prusa_painted: bool
 
 
 @dataclass(frozen=True)
@@ -936,11 +1053,19 @@ class _MeshTarget:
     mesh's ``<vertex>`` and ``<triangle>`` elements, which go straight into arrays: an
     element costs some 500 bytes against the 30-odd of XML it is read from, so a model
     entry at the archive's cap would otherwise take gigabytes (#1949). Arrays cost
-    about what the XML does."""
+    about what the XML does.
 
-    def __init__(self) -> None:
+    With ``max_triangles`` and ``max_vertices``, the parse stops at the triangle or the
+    vertex past them, every mesh counted together: what bounds the arrays' memory,
+    whatever the entry's size."""
+
+    def __init__(self, max_triangles: int | None = None, max_vertices: int | None = None) -> None:
         self.builder = ET.TreeBuilder()
         self.meshes: dict[ET.Element, MeshArrays] = {}
+        self._max_triangles = max_triangles
+        self._max_vertices = max_vertices
+        self._triangles = 0
+        self._vertices = 0
         self._open: list[ET.Element] = []
         #: Depth inside an element read into the arrays, whose content is dropped.
         self._skipping = 0
@@ -952,7 +1077,8 @@ class _MeshTarget:
         self._pid = array("i")
         self._pids: dict[str, int] = {}
         self._p1 = array("q")
-        self._painted = False
+        self._paint: list[str] | None = None
+        self._prusa_painted = False
         #: The ``<vertices>`` and ``<triangles>`` blocks this mesh has had.
         self._blocks: set[str] = set()
 
@@ -964,11 +1090,23 @@ class _MeshTarget:
             self._skipping += 1
         elif tag == _VERTEX and self._within(_VERTICES):
             self._skipping = 1
+            self._vertices += 1
+            if self._max_vertices is not None and self._vertices > self._max_vertices:
+                raise TooManyTrianglesError(
+                    f"stores more than {self._max_vertices:,} vertices, three for every"
+                    " triangle allowed",
+                    "vertices",
+                )
             self._points.extend(
                 (float(attrs.get("x", 0)), float(attrs.get("y", 0)), float(attrs.get("z", 0)))
             )
         elif tag == _TRIANGLE and self._within(_TRIANGLES):
             self._skipping = 1
+            self._triangles += 1
+            if self._max_triangles is not None and self._triangles > self._max_triangles:
+                raise TooManyTrianglesError(
+                    f"stores more than {self._max_triangles:,} triangles", "triangles"
+                )
             self._faces.extend(
                 (int(attrs.get("v1", 0)), int(attrs.get("v2", 0)), int(attrs.get("v3", 0)))
             )
@@ -978,7 +1116,17 @@ class _MeshTarget:
             self._pid.append(-1 if pid is None else self._pids.setdefault(pid, len(self._pids)))
             p1 = attrs.get("p1")
             self._p1.append(-1 if p1 is None else int(p1 or 0))
-            self._painted = self._painted or any(attrs.get(name) for name in _PAINTED)
+            code = attrs.get(PAINT_ATTRIBUTE)
+            if code and len(code) > MAX_CODE_DIGITS:
+                raise ValueError(
+                    f"a triangle's {PAINT_ATTRIBUTE} is longer than {MAX_CODE_DIGITS} digits"
+                )
+            if code and self._paint is None:
+                # The faces before the first painted one are unpainted.
+                self._paint = [""] * (len(self._p1) - 1)
+            if self._paint is not None:
+                self._paint.append(code or "")
+            self._prusa_painted = self._prusa_painted or bool(attrs.get(_PRUSA_PAINT))
         else:
             if tag == _MESH:
                 if any(element.tag == _MESH for element in self._open):
@@ -1005,7 +1153,8 @@ class _MeshTarget:
                 pid=np.frombuffer(self._pid, dtype=np.int32),
                 pids=tuple(self._pids),
                 p1=np.frombuffer(self._p1, dtype=np.int64),
-                painted=self._painted,
+                paint=tuple(self._paint) if self._paint is not None else None,
+                prusa_painted=self._prusa_painted,
             )
             self._reset()
 
@@ -1018,18 +1167,25 @@ class _MeshTarget:
 
 
 def parse_model(
-    archive: zipfile.ZipFile, name: str, cap: int = MAX_UNCOMPRESSED_BYTES
+    archive: zipfile.ZipFile,
+    name: str,
+    cap: int | None = MAX_UNCOMPRESSED_BYTES,
+    *,
+    max_triangles: int | None = None,
+    max_vertices: int | None = None,
 ) -> ParsedModel:
-    """Model file ``name``, inflated in chunks and refused past ``cap``, parsed as it
-    inflates, its meshes read into arrays (`_MeshTarget`). ``ET.ParseError`` when it is
-    not XML, ``ValueError`` when a vertex or triangle is not numbers."""
-    target = _MeshTarget()
+    """Model file ``name``, inflated in chunks and refused past ``cap`` (``None``: no
+    cap), parsed as it inflates, its meshes read into arrays (`_MeshTarget`), refused
+    past ``max_triangles`` or ``max_vertices`` (:class:`TooManyTrianglesError`) when
+    given. ``ET.ParseError`` when it is not XML, ``ValueError`` when a vertex or triangle
+    is not numbers."""
+    target = _MeshTarget(max_triangles, max_vertices)
     parser = ET.XMLParser(target=target)
     read = 0
     with archive.open(name) as entry:
         while chunk := entry.read(_CHUNK):
             read += len(chunk)
-            if read > cap:
+            if cap is not None and read > cap:
                 raise ArchiveTooLargeError(f"{name} inflates past {cap} bytes")
             try:
                 parser.feed(chunk)
@@ -1046,6 +1202,7 @@ def state_nozzles(
     nozzle_stats: Sequence[str] | None = None,
     nozzle_volume_type: Sequence[str] | None = None,
     filament_colour: Sequence[str] | None = None,
+    filament_map: FilamentMap | None = None,
 ) -> bytes:
     """``payload`` stating the nozzles as :func:`replate_3mf` does, and the spools'
     ``filament_colour`` (#476), changed in nothing else: an author's file is printed
@@ -1068,7 +1225,7 @@ def state_nozzles(
             name = info.filename
             if name == PROJECT_SETTINGS_NAME:
                 settings = json.loads(_read_capped(archive, name, MAX_SETTINGS_BYTES))
-                _state_nozzles(settings, nozzle_stats, nozzle_volume_type)
+                _state_nozzles(settings, nozzle_stats, nozzle_volume_type, filament_map)
                 if filament_colour is not None and len(filament_colour) == len(
                     settings.get("filament_colour") or []
                 ):
@@ -1099,7 +1256,8 @@ def layout_of(payload: bytes) -> Layout:
     """Who laid ``payload`` out, judged from its bytes alone, whatever they were
     obtained from (a render, or a file in Bambuddy's library).
 
-    ``scadbuddy``: its settings carry :data:`PRESET_PLACEHOLDER` and its plates read
+    ``scadbuddy``: its ``print_settings_id`` is :data:`PRESET_PLACEHOLDER` (its printer
+    is named since #2639; Bambu Studio names a process when it saves) and its plates read
     back as this writer lays them out, one assembly per plate. ``author``: any other
     file :func:`nozzles_statable` accepts, a project Bambu Studio (or ScadBuddy, before
     someone re-saved it there) laid out, whose placement and plates are the author's.
@@ -1111,7 +1269,7 @@ def layout_of(payload: bytes) -> Layout:
     try:
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
             settings = json.loads(_read_capped(archive, PROJECT_SETTINGS_NAME, MAX_SETTINGS_BYTES))
-            if settings.get("printer_settings_id") != PRESET_PLACEHOLDER:
+            if settings.get("print_settings_id") != PRESET_PLACEHOLDER:
                 return "author"
             if not all(each.object_files for each in laid_out_plates(archive)):
                 return "author"

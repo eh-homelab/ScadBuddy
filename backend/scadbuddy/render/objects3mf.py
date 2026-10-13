@@ -10,16 +10,27 @@ project (ScadBuddy's own files and a wrapped STL among them) names each part's e
 in ``Metadata/model_settings.config``, and its colour is that filament's in
 ``project_settings.config``; any other 3MF colours triangles by its ``basematerials``.
 
-What cannot be read faithfully is refused (:class:`UnreadableObjectsError`) rather than
-guessed: a sliced file, a part painted in several colours, a negative part. Modifiers
-and support blockers or enforcers print nothing and are dropped, with a note.
+A part painted in several colours in Bambu Studio (``paint_color``, #1965) is one part
+of its own, its painting carried as it is (:class:`~scadbuddy.render.split.Paint`):
+where each colour falls on it is the slicer's to work out again, as it was for the file.
 
-The file is untrusted: the archive is bounded as the print path bounds it
-(:data:`~scadbuddy.render.bambu3mf.MAX_UNCOMPRESSED_BYTES`), every entry is read
-capped, and at most :data:`MAX_OBJECTS` distinct objects are read. Components may
-name one object many times, so what the file expands to is bounded too: at most
-:data:`MAX_VISITS` objects visited and :data:`MAX_TRIANGLES` triangles produced, however
-few bytes asked for them.
+What cannot be read faithfully is refused (:class:`UnreadableObjectsError`) rather than
+guessed: a sliced file, PrusaSlicer's painting, painting in a file with no Bambu Studio
+filaments for it to name, a painted part the file mirrors. Modifiers and support
+blockers or enforcers print nothing and are dropped, with a note. A negative part is
+carried with its object (``ColourPart.negative``) for the slicer to cut out, as it was
+for the file; a plate read for a preview or the mesh checks leaves it out.
+
+The file is untrusted, but its size alone is no reason to refuse it: every read spends
+against a :class:`~scadbuddy.render.read_budget.ReadBudget` (#2087), and that is what
+bounds it. Only the entries a read needs are inflated, each capped: the settings at
+their own small caps, the model files together at what the budget's triangles can take
+(:meth:`~scadbuddy.render.read_budget.ReadBudget.model_bytes`), their meshes stopped at
+its triangle count as they are parsed. Thumbnails and attachments are never read, so
+however large they are costs nothing. Past those, distinct objects and, since components
+may name one object many times, what the file expands to (objects visited, triangles
+produced, paint digits carried), however few bytes asked for them. Past any budget, the
+refusal names it and how to raise it.
 """
 
 from __future__ import annotations
@@ -31,6 +42,7 @@ import zipfile
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from typing import BinaryIO
 from xml.sax.saxutils import quoteattr
 
 import numpy as np
@@ -40,30 +52,36 @@ from scadbuddy.render.bambu3mf import (
     _GCODE,
     CORE_NS,
     MAX_SETTINGS_BYTES,
-    MAX_UNCOMPRESSED_BYTES,
     MODEL_RELATIONSHIP,
     MODEL_SETTINGS_NAME,
     PRODUCTION_NS,
     PROJECT_SETTINGS_NAME,
     ROOT_MODEL_NAME,
     STL_COLOUR,
+    ArchiveTooLargeError,
     MeshArrays,
     PlateParts,
+    TooManyTrianglesError,
     _read_capped,
     parse_model,
 )
 from scadbuddy.render.geometry import NoSuchPlateError
-from scadbuddy.render.glb import BoundingBox, bounding_box
+from scadbuddy.render.glb import BoundingBox, bounding_box, footprint_box
 from scadbuddy.render.jobs import LAYOUT_NAME, PartSource, PlateLayout
-from scadbuddy.render.split import ColourPart, normalise_colour
+from scadbuddy.render.paint import PaintCodeError, states
+from scadbuddy.render.read_budget import ReadBudget
+from scadbuddy.render.split import PAINT_ATTRIBUTE, ColourPart, Paint, normalise_colour
 
-#: The most distinct objects one file is read as: Arrange takes 200 objects a request.
-MAX_OBJECTS = 200
 #: The one mesh file a library piece keeps, every colour a material of it: the shape of
 #: a render's split 3MF, which `PlateLayout.load` reads.
 PIECE_MESH_NAME = "object.3mf"
 
 _CORE = f"{{{CORE_NS}}}"
+#: The 3MF Materials and Properties extension: per-triangle colours by ``colorgroup``,
+#: and the property groups (textures, mixes) Arrange cannot turn into a colour (#2147).
+MATERIAL_NS = "http://schemas.microsoft.com/3dmanufacturing/material/2015/02"
+_MATERIAL = f"{{{MATERIAL_NS}}}"
+_UNREAD_GROUPS = ("texture2dgroup", "compositematerials", "multiproperties")
 _PATH = f"{{{PRODUCTION_NS}}}path"
 _RELS = "_rels/.rels"
 _UNITS = {
@@ -78,16 +96,73 @@ _UNITS = {
 _DROPPED = {"modifier_part", "support_blocker", "support_enforcer"}
 #: A component chain deeper than this is not a file any slicer writes.
 _MAX_DEPTH = 8
-#: The most objects one read visits, components included: a few KB of components that
-#: each name the same object many times would otherwise expand without bound.
-MAX_VISITS = 20_000
-#: The most triangles one read produces, every instance of a mesh counted: about what a
-#: model file at the archive cap can hold, so a real file never reaches it.
-MAX_TRIANGLES = 5_000_000
 
 
 class UnreadableObjectsError(ValueError):
     """The file's objects cannot be read faithfully; the message says why."""
+
+
+class OverBudgetError(UnreadableObjectsError):
+    """A read refused past one of its budgets: the message names the budget, and
+    :func:`_opened` adds how large the file is, so what limits it can be told apart
+    from how big it is."""
+
+
+def _megabytes(size: int) -> str:
+    """``size`` as a person reads a file's size: bytes under a megabyte, else MB."""
+    return f"{size:,} bytes" if size < 1_000_000 else f"{size / 1_000_000:,.1f} MB"
+
+
+#: A binary STL: an 80-byte header, a triangle count, then 50 bytes per triangle.
+_STL_HEADER = 84
+_STL_TRIANGLE = 50
+#: What one triangle of an ASCII STL may take, generously: a facet's seven lines are
+#: some 250 bytes with six-digit exponents.
+_STL_ASCII_TRIANGLE = 512
+
+
+def check_stl(stl: BinaryIO, budget: ReadBudget) -> None:
+    """Refuse an STL past ``budget``'s triangles before anything loads it whole
+    (:class:`OverBudgetError`): a binary one by the count its header states (which its
+    size must match), an ASCII one by its size against what that many facets could
+    take. With no triangle limit, any STL is wrapped. Leaves ``stl`` at its start."""
+    limit = budget.limit("max_triangles")
+    if limit is None:
+        return
+    size = stl.seek(0, io.SEEK_END)
+    stl.seek(0)
+    head = stl.read(_STL_HEADER)
+    stl.seek(0)
+    count = int.from_bytes(head[80:84], "little") if len(head) == _STL_HEADER else -1
+    if count >= 0 and size == _STL_HEADER + _STL_TRIANGLE * count:
+        if count > limit:
+            raise OverBudgetError(
+                f"{budget.refusal('max_triangles', f'is an STL of {count:,} triangles')}"
+                f" (the file is {_megabytes(size)})"
+            )
+        return
+    allowed = _STL_ASCII_TRIANGLE * limit
+    if size > allowed:
+        raise OverBudgetError(
+            budget.refusal(
+                "max_triangles",
+                f"is a text STL of {_megabytes(size)}, past the {_megabytes(allowed)}"
+                " that many triangles could take",
+            )
+        )
+
+
+def _model_names(names: set[str]) -> list[str]:
+    return sorted(name for name in names if name.lower().endswith(".model"))
+
+
+#: One mesh as read: its colour, vertices, faces, and its painting when painted.
+type _Piece = tuple[str, np.ndarray, np.ndarray, Paint | None]
+
+
+def _check_faces(faces: np.ndarray, points: np.ndarray) -> None:
+    if faces.size and (faces.min() < 0 or faces.max() >= len(points)):
+        raise UnreadableObjectsError("a triangle names a vertex the mesh lacks")
 
 
 @dataclass(frozen=True)
@@ -99,6 +174,9 @@ class ReadObject:
     count: int
     parts: list[ColourPart]
     notes: list[str] = field(default_factory=list)
+    #: The material (``filament_type``) the file states for each of the object's
+    #: colours; a colour the file states none for is absent.
+    materials: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -115,11 +193,19 @@ class _ObjectSettings:
 
 
 class _Archive:
-    """The archive's model files, each parsed once and read within the archive's cap."""
+    """The archive's model files, each parsed once, all of them together within what
+    ``budget`` allows them: its :meth:`~ReadBudget.model_bytes` inflated and its
+    triangles stored."""
 
-    def __init__(self, archive: zipfile.ZipFile) -> None:
+    def __init__(self, archive: zipfile.ZipFile, budget: ReadBudget) -> None:
         self.archive = archive
+        self.budget = budget
         self.names = set(archive.namelist())
+        #: What the model files parsed so far inflated to, and the triangles and vertices
+        #: they store.
+        self.inflated = 0
+        self.stored = 0
+        self.vertices = 0
         self.models: dict[str, tuple[ET.Element, dict[str, ET.Element], float]] = {}
         #: Every parsed model's meshes, by ``<mesh>`` element.
         self.meshes: dict[ET.Element, MeshArrays] = {}
@@ -128,10 +214,41 @@ class _Archive:
         if name not in self.models:
             if name not in self.names:
                 raise UnreadableObjectsError(f"the 3MF names a model file it lacks ({name})")
+            allowed = self.budget.model_bytes()
+            limit = self.budget.limit("max_triangles")
             try:
-                parsed = parse_model(self.archive, name)
+                parsed = parse_model(
+                    self.archive,
+                    name,
+                    cap=None if allowed is None else allowed - self.inflated,
+                    max_triangles=None if limit is None else limit - self.stored,
+                    # Against the whole budget: a file may keep its vertices in one model
+                    # and its triangles in another.
+                    max_vertices=None if limit is None else 3 * limit - self.vertices,
+                )
             except ET.ParseError:
                 raise UnreadableObjectsError(f"{name} is not readable XML") from None
+            except TooManyTrianglesError as error:
+                # Said over the whole file, not the remainder this model was allowed.
+                past = (
+                    f"stores more than {3 * (limit or 0):,} vertices, three for every"
+                    " triangle allowed"
+                    if error.kind == "vertices"
+                    else f"stores more than {limit or 0:,} triangles"
+                )
+                raise OverBudgetError(self.budget.refusal("max_triangles", past)) from None
+            except ArchiveTooLargeError:
+                raise OverBudgetError(
+                    self.budget.refusal(
+                        "max_triangles",
+                        f"has model files that inflate past {_megabytes(allowed or 0)}, more"
+                        " than that many triangles could take",
+                    )
+                ) from None
+            # zipfile stops an entry at its declared size (a longer one fails its CRC).
+            self.inflated += self.archive.getinfo(name).file_size
+            self.stored += sum(len(arrays.faces) for arrays in parsed.meshes.values())
+            self.vertices += sum(len(arrays.vertices) for arrays in parsed.meshes.values())
             root = parsed.root
             self.meshes.update(parsed.meshes)
             resources = root.find(f"{_CORE}resources")
@@ -163,9 +280,21 @@ def _matrix(text: str | None) -> np.ndarray:
         raise UnreadableObjectsError(f"transform {text!r} is not 12 numbers") from None
     if len(values) != 12:
         raise UnreadableObjectsError(f"transform {text!r} is not 12 numbers")
+    # float() reads "nan" and "inf": finite vertices would come out of such a transform
+    # non-finite, past the vertex check, and reach the packer and the plate check.
+    if not np.isfinite(values).all():
+        raise UnreadableObjectsError(f"transform {text!r} is not finite numbers")
     matrix[:3, :3] = np.array(values[:9]).reshape(3, 3).T
     matrix[:3, 3] = values[9:]
     return matrix
+
+
+def _combine(outer: np.ndarray, inner: np.ndarray) -> np.ndarray:
+    """``outer @ inner``. Large finite transforms can overflow to inf here; that is
+    refused once the product reaches the vertices (`_Reader._mesh`), not warned about."""
+    with np.errstate(over="ignore", invalid="ignore"):
+        product: np.ndarray = outer @ inner
+    return product
 
 
 def _metadata(node: ET.Element) -> dict[str, str]:
@@ -211,19 +340,40 @@ def _object_settings(config: ET.Element | None) -> dict[str, _ObjectSettings] | 
     return settings
 
 
-def _filament_colours(archive: _Archive) -> list[str]:
+def _project_settings(archive: _Archive) -> dict[str, object]:
     if PROJECT_SETTINGS_NAME not in archive.names:
-        return []
+        return {}
     try:
         settings = json.loads(
             _read_capped(archive.archive, PROJECT_SETTINGS_NAME, MAX_SETTINGS_BYTES)
         )
     except ValueError:
-        return []
-    colours = settings.get("filament_colour") if isinstance(settings, dict) else None
+        return {}
+    return settings if isinstance(settings, dict) else {}
+
+
+def _filament_colours(archive: _Archive) -> list[str]:
+    colours = _project_settings(archive).get("filament_colour")
     if not isinstance(colours, list):
         return []
     return [normalise_colour(c) if isinstance(c, str) and c else STL_COLOUR for c in colours]
+
+
+def _filament_materials(archive: _Archive) -> dict[str, str]:
+    """Each filament colour's ``filament_type``, as the project states it. An object is
+    read by colour, so two slots of one colour in different materials cannot be told
+    apart: that colour's material is unknown."""
+    types = _project_settings(archive).get("filament_type")
+    if not isinstance(types, list):
+        return {}
+    materials: dict[str, str] = {}
+    conflicting: set[str] = set()
+    for colour, material in zip(_filament_colours(archive), types, strict=False):
+        if not isinstance(material, str) or not material.strip():
+            continue
+        if materials.setdefault(colour, material.strip()) != material.strip():
+            conflicting.add(colour)
+    return {c: m for c, m in materials.items() if c not in conflicting}
 
 
 def _root_model_name(archive: _Archive) -> str:
@@ -237,12 +387,32 @@ def _root_model_name(archive: _Archive) -> str:
 
 
 def _materials(root: ET.Element) -> dict[tuple[str, int], str]:
+    """Each (group id, index)'s colour: a ``basematerials`` base's, or a ``colorgroup``
+    colour's (#2147), which some tools colour triangles by instead."""
     resources = root.find(f"{_CORE}resources")
     found: dict[tuple[str, int], str] = {}
-    for group in resources.iter(f"{_CORE}basematerials") if resources is not None else []:
+    if resources is None:
+        return found
+    for group in resources.iter(f"{_CORE}basematerials"):
         for index, base in enumerate(group.findall(f"{_CORE}base")):
             found[(group.get("id", ""), index)] = normalise_colour(base.get("displaycolor"))
+    for group in resources.iter(f"{_MATERIAL}colorgroup"):
+        for index, colour in enumerate(group.findall(f"{_MATERIAL}color")):
+            found[(group.get("id", ""), index)] = normalise_colour(colour.get("color"))
     return found
+
+
+def _unread_groups(root: ET.Element) -> set[str]:
+    """The ids of the property groups whose colours Arrange cannot read: a texture, a
+    composite or a multi-property mix (#2147)."""
+    resources = root.find(f"{_CORE}resources")
+    if resources is None:
+        return set()
+    return {
+        group.get("id", "")
+        for kind in _UNREAD_GROUPS
+        for group in resources.iter(f"{_MATERIAL}{kind}")
+    }
 
 
 @dataclass
@@ -251,14 +421,25 @@ class _Reader:
     #: Bambu Studio's settings, when the file is a Bambu project.
     settings: dict[str, _ObjectSettings] | None
     filaments: list[str]
+    budget: ReadBudget = field(default_factory=ReadBudget)
     visits: int = 0
     triangles: int = 0
+    paint_digits: int = 0
+    #: Each painted mesh's extruders, decoded once however often it is placed: by the
+    #: codes tuple's id, the tuple kept so the id stays its own.
+    painted_states: dict[int, tuple[tuple[str, ...], set[int]]] = field(default_factory=dict)
 
-    def _spend(self, visits: int = 0, triangles: int = 0) -> None:
+    def _spend(self, visits: int = 0, triangles: int = 0, paint_digits: int = 0) -> None:
         self.visits += visits
         self.triangles += triangles
-        if self.visits > MAX_VISITS or self.triangles > MAX_TRIANGLES:
-            raise UnreadableObjectsError("the 3MF expands to too many objects or triangles to read")
+        self.paint_digits += paint_digits
+        if self.visits > self.budget.max_visits:
+            raise OverBudgetError(self.budget.refusal("max_visits"))
+        triangles_allowed = self.budget.limit("max_triangles")
+        if triangles_allowed is not None and self.triangles > triangles_allowed:
+            raise OverBudgetError(self.budget.refusal("max_triangles"))
+        if self.paint_digits > self.budget.max_paint_digits:
+            raise OverBudgetError(self.budget.refusal("max_paint_digits"))
 
     def colour_of(self, extruder: int) -> str:
         return self.filaments[extruder - 1] if extruder <= len(self.filaments) else STL_COLOUR
@@ -270,9 +451,10 @@ class _Reader:
         matrix: np.ndarray,
         extruder: int | None,
         depth: int = 0,
-    ) -> Iterator[tuple[str, np.ndarray, np.ndarray]]:
-        """(colour, vertices, faces) of every mesh the object is made of, transformed
-        by ``matrix``. ``extruder`` is the Bambu part's, which colours the whole mesh."""
+    ) -> Iterator[_Piece]:
+        """(colour, vertices, faces, painting) of every mesh the object is made of,
+        transformed by ``matrix``. ``extruder`` is the Bambu part's, which colours the
+        whole mesh but where it is painted."""
         if depth > _MAX_DEPTH:
             raise UnreadableObjectsError("the 3MF's components nest too deep")
         self._spend(visits=1)
@@ -283,7 +465,7 @@ class _Reader:
         mesh = obj.find(f"{_CORE}mesh")
         if mesh is not None:
             yield from self._mesh(
-                root, obj, mesh, matrix @ np.diag([scale, scale, scale, 1.0]), extruder
+                root, obj, mesh, _combine(matrix, np.diag([scale, scale, scale, 1.0])), extruder
             )
             return
         components = obj.find(f"{_CORE}components")
@@ -292,7 +474,7 @@ class _Reader:
             yield from self.meshes(
                 path,
                 component.get("objectid", ""),
-                matrix @ _matrix(component.get("transform")),
+                _combine(matrix, _matrix(component.get("transform"))),
                 extruder,
                 depth + 1,
             )
@@ -304,7 +486,7 @@ class _Reader:
         mesh: ET.Element,
         matrix: np.ndarray,
         extruder: int | None,
-    ) -> Iterator[tuple[str, np.ndarray, np.ndarray]]:
+    ) -> Iterator[_Piece]:
         arrays = self.archive.meshes[mesh]
         if (
             mesh.find(f"{_CORE}vertices") is None
@@ -313,17 +495,31 @@ class _Reader:
         ):
             return
         # The budget counts what the arrays already hold: it bounds the work below, not
-        # the parse. The archive's size cap (`MAX_UNCOMPRESSED_BYTES`) bounds that.
+        # the parse. The archive's model allowance (`_Archive`) bounds that.
         self._spend(triangles=len(arrays.faces))
         points = arrays.vertices
         if not np.isfinite(points).all():
             raise UnreadableObjectsError("a vertex of the 3MF is not a finite number")
-        points = (np.c_[points, np.ones(len(points))] @ matrix.T)[:, :3]
-        if arrays.painted:
+        with np.errstate(over="ignore", invalid="ignore"):
+            points = (np.c_[points, np.ones(len(points))] @ matrix.T)[:, :3]
+        # Every transform is finite on its own (`_matrix`), but the build item's, the
+        # nested components' and the unit's scale are multiplied together and then
+        # applied: a product of large finite numbers can overflow to inf. Every path to
+        # the packer and the plate check passes through here.
+        if not np.isfinite(points).all():
             raise UnreadableObjectsError(
-                f"object {obj.get('name') or obj.get('id')} is painted in several colours,"
-                " which Arrange cannot read"
+                "a transform of the 3MF places a vertex at a position that is not a finite number"
             )
+        name = obj.get("name") or obj.get("id")
+        if arrays.prusa_painted:
+            raise UnreadableObjectsError(
+                f"object {name} is painted in PrusaSlicer, which Arrange cannot read;"
+                " paint it in Bambu Studio, or split it into a part per colour"
+            )
+        mirrored = np.linalg.det(matrix[:3, :3]) < 0
+        if arrays.paint is not None:
+            yield self._painted(name, points, arrays.faces, arrays.paint, extruder, mirrored)
+            return
         buckets: dict[str, np.ndarray] = {}
         if extruder is not None:
             buckets[self.colour_of(extruder)] = arrays.faces
@@ -341,6 +537,14 @@ class _Reader:
                 axis=1,
             )
             unique, first, inverse = np.unique(keys, axis=0, return_index=True, return_inverse=True)
+            # Grey with no word would arrange the file as one colour and print it with the
+            # wrong filaments (#2147).
+            unread = _unread_groups(root)
+            if unread and any(pids[pid] in unread for pid, _ in unique):
+                raise UnreadableObjectsError(
+                    f"object {name} is coloured by a texture or a material mix, which Arrange"
+                    " cannot read; colour it with materials or a part per colour"
+                )
             by_key = [materials.get((pids[pid], int(p1)), STL_COLOUR) for pid, p1 in unique]
             # A dict, not list.index: a hostile file controls both counts.
             colours = {
@@ -355,11 +559,50 @@ class _Reader:
             for colour, index in colours.items():
                 start = ends[index - 1] if index else 0
                 buckets[colour] = arrays.faces[order[start : ends[index]]]
-        mirrored = np.linalg.det(matrix[:3, :3]) < 0
         for colour, array in buckets.items():
-            if array.size and (array.min() < 0 or array.max() >= len(points)):
-                raise UnreadableObjectsError("a triangle names a vertex the mesh lacks")
-            yield colour, points, array[:, ::-1] if mirrored else array
+            _check_faces(array, points)
+            yield colour, points, array[:, ::-1] if mirrored else array, None
+
+    def _painted(
+        self,
+        name: str | None,
+        points: np.ndarray,
+        faces: np.ndarray,
+        codes: tuple[str, ...],
+        extruder: int | None,
+        mirrored: bool,
+    ) -> _Piece:
+        """A painted mesh, whole: its own colour the part's extruder's, its painting
+        naming the file's filaments by extruder number (#1965)."""
+        if extruder is None or not self.filaments:
+            raise UnreadableObjectsError(
+                f"object {name} is painted, but the file names no Bambu Studio filaments"
+                " for its paint"
+            )
+        if mirrored:
+            # Reversing each face to keep it facing out would move its painting: the
+            # code places colour by the face's own corners, in their order.
+            raise UnreadableObjectsError(
+                f"object {name} is painted and mirrored, which Arrange cannot carry over"
+            )
+        _check_faces(faces, points)
+        # Charged on every placement, as its faces are: each copy carries its codes on.
+        self._spend(paint_digits=sum(map(len, codes)))
+        if id(codes) not in self.painted_states:
+            try:
+                found = {state for code in codes if code for state in states(code)}
+            except PaintCodeError as error:
+                raise UnreadableObjectsError(
+                    f"object {name}'s painting cannot be read: {error}"
+                ) from None
+            self.painted_states[id(codes)] = (codes, found)
+        used = self.painted_states[id(codes)][1]
+        if used and max(used) > len(self.filaments):
+            raise UnreadableObjectsError(
+                f"object {name} is painted with extruder {max(used)}, and the file has"
+                f" {len(self.filaments)} filaments"
+            )
+        return self.colour_of(extruder), points, faces, Paint(codes, tuple(self.filaments))
 
     def item(
         self, model: str, object_id: str, matrix: np.ndarray
@@ -374,13 +617,20 @@ class _Reader:
             )
         settings = self.settings.get(object_id) if self.settings is not None else None
         by_colour: dict[str, list[trimesh.Trimesh]] = {}
+        # A painted mesh stays a part of its own: its faces are its painting's (#1965).
+        painted: list[tuple[str, trimesh.Trimesh, Paint]] = []
+        # Negative parts, joined: what the slicer cuts out of this object.
+        negatives: list[trimesh.Trimesh] = []
         notes: list[str] = []
 
-        def add(pieces: Iterator[tuple[str, np.ndarray, np.ndarray]]) -> None:
-            for colour, points, faces in pieces:
+        def add(pieces: Iterator[_Piece]) -> None:
+            for colour, points, faces, paint in pieces:
                 part = trimesh.Trimesh(vertices=points, faces=faces, process=False)
                 part.remove_unreferenced_vertices()
-                by_colour.setdefault(colour, []).append(part)
+                if paint is not None:
+                    painted.append((colour, part, paint))
+                else:
+                    by_colour.setdefault(colour, []).append(part)
 
         components = obj.find(f"{_CORE}components")
         if settings is None or components is None:
@@ -391,10 +641,18 @@ class _Reader:
                 cid = component.get("objectid", "")
                 part = settings.parts.get(cid, _PartSettings(None, "normal_part"))
                 if part.subtype == "negative_part":
-                    raise UnreadableObjectsError(
-                        f"object {settings.name or object_id} has a negative part, which"
-                        " Arrange cannot cut out"
-                    )
+                    path = (component.get(_PATH) or "").lstrip("/") or model
+                    for _, points, faces, _ in self.meshes(
+                        path,
+                        cid,
+                        _combine(matrix, _matrix(component.get("transform"))),
+                        part.extruder or settings.extruder or 1,
+                    ):
+                        # Its painting, if any, is never printed: only its volume is.
+                        cut = trimesh.Trimesh(vertices=points, faces=faces, process=False)
+                        cut.remove_unreferenced_vertices()
+                        negatives.append(cut)
+                    continue
                 if part.subtype in _DROPPED:
                     note = f"a {part.subtype.replace('_', ' ')} was left out"
                     if note not in notes:
@@ -405,7 +663,7 @@ class _Reader:
                     self.meshes(
                         path,
                         cid,
-                        matrix @ _matrix(component.get("transform")),
+                        _combine(matrix, _matrix(component.get("transform"))),
                         part.extruder or settings.extruder or 1,
                     )
                 )
@@ -415,13 +673,27 @@ class _Reader:
             if not isinstance(joined, trimesh.Trimesh) or joined.is_empty:
                 continue
             parts.append(ColourPart(index, f"Color {index}", colour, joined))
+        for colour, mesh, paint in painted:
+            index = len(parts) + 1
+            parts.append(ColourPart(index, f"Color {index}", colour, mesh, paint))
+        cuts = [mesh for mesh in negatives if not mesh.is_empty]
+        if parts and cuts:
+            joined = cuts[0] if len(cuts) == 1 else trimesh.util.concatenate(cuts)
+            if isinstance(joined, trimesh.Trimesh):
+                index = len(parts) + 1
+                parts.append(
+                    ColourPart(index, "Negative part", parts[0].colour, joined, negative=True)
+                )
         return parts, notes
 
 
-def read_objects(payload: bytes) -> list[ReadObject]:
-    """Every object ``payload``'s build places, each with its count, in build order.
-    Raises :class:`UnreadableObjectsError` for a file whose objects cannot be read."""
-    return _opened(payload, _read)
+def read_objects(payload: bytes | BinaryIO, budget: ReadBudget | None = None) -> list[ReadObject]:
+    """Every object ``payload``'s build places, each with its count, in build order,
+    read within ``budget`` (the defaults when None). ``payload`` is the file's bytes, or
+    the file open for reading, for one too large to hold whole. Raises
+    :class:`UnreadableObjectsError` for a file whose objects cannot be read."""
+    spend = budget or ReadBudget()
+    return _opened(payload, spend, lambda archive: _read(archive, spend))
 
 
 @dataclass(frozen=True)
@@ -432,14 +704,17 @@ class PlateRead:
     plates: int
 
 
-def read_plate_parts(payload: bytes, plate: int = 1) -> PlateRead:
+def read_plate_parts(
+    payload: bytes | BinaryIO, plate: int = 1, budget: ReadBudget | None = None
+) -> PlateRead:
     """The parts of ``payload``'s plate ``plate``, one per colour in the order colours
     appear, placed where the file places them: what a library file's preview and mesh
     checks read, as an output's read its own 3MF (#1753). Plates are Bambu Studio's
     (``model_settings.config``); a file that lists none is one plate. Refused as
     :func:`read_objects` refuses; a plate the file lacks is
     :class:`~scadbuddy.render.geometry.NoSuchPlateError`."""
-    return _opened(payload, lambda archive: _read_plate(archive, plate))
+    spend = budget or ReadBudget()
+    return _opened(payload, spend, lambda archive: _read_plate(archive, plate, spend))
 
 
 def _plates(config: ET.Element | None) -> dict[int, set[tuple[str, int]]]:
@@ -458,11 +733,11 @@ def _plates(config: ET.Element | None) -> dict[int, set[tuple[str, int]]]:
     return plates
 
 
-def _read_plate(archive: _Archive, plate: int) -> PlateRead:
+def _read_plate(archive: _Archive, plate: int, budget: ReadBudget) -> PlateRead:
     model = _root_model_name(archive)
     items = _build_items(archive, model)
     config = _model_settings(archive)
-    reader = _Reader(archive, _object_settings(config), _filament_colours(archive))
+    reader = _Reader(archive, _object_settings(config), _filament_colours(archive), budget)
     plates = _plates(config)
     count = len(plates) or 1
     if (plates and plate not in plates) or (not plates and plate != 1):
@@ -478,6 +753,8 @@ def _read_plate(archive: _Archive, plate: int) -> PlateRead:
         path = (item.get(_PATH) or "").lstrip("/") or model
         parts, _ = reader.item(path, object_id, _matrix(item.get("transform")))
         for part in parts:
+            if part.negative:
+                continue  # cut out by the slicer: neither shown nor checked
             by_colour.setdefault(part.colour, []).append(part.mesh)
     found: list[ColourPart] = []
     for index, (colour, meshes) in enumerate(by_colour.items(), start=1):
@@ -489,18 +766,41 @@ def _read_plate(archive: _Archive, plate: int) -> PlateRead:
     return PlateRead(found, count)
 
 
-def _opened[T](payload: bytes, read: Callable[[_Archive], T]) -> T:
-    """``read`` over ``payload``'s archive, every way it can fail an
-    :class:`UnreadableObjectsError`."""
+def _opened[T](payload: bytes | BinaryIO, budget: ReadBudget, read: Callable[[_Archive], T]) -> T:
+    """``read`` over ``payload``'s archive, within ``budget``, every way it can fail an
+    :class:`UnreadableObjectsError`. The archive's size is not one: what it may cost is
+    what ``budget`` allows the entries a read inflates (:class:`_Archive`)."""
     try:
-        with zipfile.ZipFile(io.BytesIO(payload)) as zipped:
-            archive = _Archive(zipped)
-            infos = zipped.infolist()
-            if any(_GCODE.fullmatch(info.filename) for info in infos):
+        with zipfile.ZipFile(
+            io.BytesIO(payload) if isinstance(payload, bytes) else payload
+        ) as zipped:
+            archive = _Archive(zipped, budget)
+            if any(_GCODE.fullmatch(name) for name in archive.names):
                 raise UnreadableObjectsError("the file is sliced already; print it from Bambuddy")
-            if sum(info.file_size for info in infos) > MAX_UNCOMPRESSED_BYTES:
-                raise UnreadableObjectsError("the 3MF is too large to read")
-            return read(archive)
+            models = sum(zipped.getinfo(name).file_size for name in _model_names(archive.names))
+            allowed = budget.model_bytes()
+            try:
+                if allowed is not None and models > allowed:
+                    # Said before anything is inflated: the headers declare it.
+                    raise OverBudgetError(
+                        budget.refusal(
+                            "max_triangles",
+                            f"has model files that inflate to {_megabytes(models)}, past the"
+                            f" {_megabytes(allowed)} that many triangles could take",
+                        )
+                    )
+                return read(archive)
+            except OverBudgetError as error:
+                if isinstance(payload, bytes):
+                    size = len(payload)
+                else:
+                    at = payload.tell()
+                    size = payload.seek(0, io.SEEK_END)
+                    payload.seek(at)
+                raise OverBudgetError(
+                    f"{error} (the file is {_megabytes(size)}; its model files"
+                    f" {_megabytes(models)} once inflated)"
+                ) from None
     except zipfile.BadZipFile:
         raise UnreadableObjectsError("the file is not a 3MF archive") from None
     except (KeyError, ValueError) as error:
@@ -521,23 +821,28 @@ def _build_items(archive: _Archive, model: str) -> list[ET.Element]:
     ]
 
 
-def _read(archive: _Archive) -> list[ReadObject]:
+def _read(archive: _Archive, budget: ReadBudget) -> list[ReadObject]:
     model = _root_model_name(archive)
     items = _build_items(archive, model)
     reader = _Reader(
-        archive, _object_settings(_model_settings(archive)), _filament_colours(archive)
+        archive, _object_settings(_model_settings(archive)), _filament_colours(archive), budget
     )
     groups: dict[tuple[str, str, tuple[float, ...]], tuple[np.ndarray, int]] = {}
     for item in items:
         matrix = _matrix(item.get("transform"))
         path = (item.get(_PATH) or "").lstrip("/") or model
-        key = (path, item.get("objectid", ""), tuple(np.round(matrix[:3, :3], 6).ravel()))
+        # Rounding scales by 1e6, which overflows for a huge finite transform; such an
+        # item is refused when its vertices are placed (`_Reader._mesh`).
+        with np.errstate(over="ignore", invalid="ignore"):
+            rounded = tuple(np.round(matrix[:3, :3], 6).ravel())
+        key = (path, item.get("objectid", ""), rounded)
         if key in groups:
             groups[key] = (groups[key][0], groups[key][1] + 1)
             continue
-        if len(groups) == MAX_OBJECTS:
-            raise UnreadableObjectsError(f"the 3MF places more than {MAX_OBJECTS} distinct objects")
+        if len(groups) == budget.max_objects:
+            raise OverBudgetError(budget.refusal("max_objects"))
         groups[key] = (matrix, 1)
+    materials = _filament_materials(archive)
     objects: list[ReadObject] = []
     for (path, object_id, _), (matrix, count) in groups.items():
         parts, notes = reader.item(path, object_id, matrix)
@@ -550,7 +855,21 @@ def _read(archive: _Archive) -> list[ReadObject]:
             or found[object_id].get("name")
             or f"Object {object_id}"
         )
-        objects.append(ReadObject(name=name, count=count, parts=parts, notes=notes))
+        used = {
+            colour
+            for part in parts
+            if not part.negative
+            for colour in [part.colour, *(part.paint.used() if part.paint is not None else [])]
+        }
+        objects.append(
+            ReadObject(
+                name=name,
+                count=count,
+                parts=parts,
+                notes=notes,
+                materials={c: m for c, m in materials.items() if c in used},
+            )
+        )
     if not objects:
         raise UnreadableObjectsError("the 3MF places no object with any geometry")
     return objects
@@ -562,10 +881,17 @@ def _hex(colour: str) -> str:
 
 def piece_mesh(parts: list[ColourPart]) -> bytes:
     """The object's colours as one core 3MF, a material each: the shape of a render's
-    split 3MF, so `split_by_material` reads it back part by part."""
+    split 3MF, so `split_by_material` reads it back part by part. A painted part's
+    triangles keep their ``paint_color``, renumbered to name the materials: each colour
+    its painting uses that no part has is a material of no triangle, after the parts'."""
+    palette = [part.colour for part in parts]
+    for part in parts:
+        if part.paint is not None:
+            palette += [c for c in part.paint.used() if c.upper() not in map(str.upper, palette)]
     bases = "".join(
-        f"<base name={quoteattr(part.name)} displaycolor={quoteattr(_hex(part.colour))}/>"
-        for part in parts
+        f"<base name={quoteattr(parts[index].name if index < len(parts) else f'Paint {index + 1}')}"
+        f" displaycolor={quoteattr(_hex(colour))}/>"
+        for index, colour in enumerate(palette)
     )
     vertices: list[str] = []
     triangles: list[str] = []
@@ -574,9 +900,16 @@ def piece_mesh(parts: list[ColourPart]) -> bytes:
         vertices += [
             f'<vertex x="{v[0]!r}" y="{v[1]!r}" z="{v[2]!r}"/>' for v in part.mesh.vertices.tolist()
         ]
+        codes = (
+            part.paint.renumbered(palette).codes
+            if part.paint is not None
+            else ("",) * len(part.mesh.faces)
+        )
         triangles += [
-            f'<triangle v1="{a}" v2="{b}" v3="{c}" pid="1" p1="{index}"/>'
-            for a, b, c in (part.mesh.faces + offset).tolist()
+            f'<triangle v1="{a}" v2="{b}" v3="{c}" pid="1" p1="{index}"'
+            + (f' {PAINT_ATTRIBUTE}="{code}"' if code else "")
+            + "/>"
+            for (a, b, c), code in zip((part.mesh.faces + offset).tolist(), codes, strict=True)
         ]
         offset += len(part.mesh.vertices)
     model = (
@@ -594,9 +927,11 @@ def piece_mesh(parts: list[ColourPart]) -> bytes:
 
 def write_piece(directory: Path, obj: ReadObject) -> BoundingBox:
     """Write ``obj`` into ``directory`` as a piece `write_output` places: the mesh file,
-    then its ``layout.json`` (last, so a piece with a layout is whole). Returns its box."""
+    then its ``layout.json`` (last, so a piece with a layout is whole). Returns the box
+    it is packed by (:func:`~scadbuddy.render.glb.footprint_box`)."""
     parts = [
-        ColourPart(index, part.name, part.colour, part.mesh) for index, part in enumerate(obj.parts)
+        ColourPart(index, part.name, part.colour, part.mesh, part.paint, negative=part.negative)
+        for index, part in enumerate(obj.parts)
     ]
     (directory / PIECE_MESH_NAME).write_bytes(piece_mesh(parts))
     box = bounding_box(parts)
@@ -608,4 +943,4 @@ def write_piece(directory: Path, obj: ReadObject) -> BoundingBox:
         sources=[tuple(PartSource(str(PurePosixPath(PIECE_MESH_NAME))) for _ in parts)],
     )
     layout.save(directory / LAYOUT_NAME)
-    return box
+    return footprint_box(parts)

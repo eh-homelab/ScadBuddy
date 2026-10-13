@@ -16,15 +16,12 @@ import sys
 import sysconfig
 from collections.abc import Iterator, Mapping, Sequence
 from functools import lru_cache
-from typing import TYPE_CHECKING, Final
+from typing import Final
 
 from opentelemetry.sdk.trace import Event, ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from opentelemetry.trace import Link, SpanKind, Status
-
-if TYPE_CHECKING:
-    # tracing imports this module at run time; the alias is needed only by mypy.
-    from scadbuddy.core.tracing import AttributeValue
+from opentelemetry.util.types import AnyValue
 
 #: An exception group's margin (``  | ``, ``  + ``) in front of each of its lines.
 _MARGIN: Final = re.compile(r"^ *[|+] ?")
@@ -220,11 +217,11 @@ def _exception_type(events: Sequence[Event]) -> str | None:
 
 
 def _scrub_attributes(
-    attributes: Mapping[str, AttributeValue] | None, *, server: bool = False
-) -> dict[str, AttributeValue]:
+    attributes: Mapping[str, AnyValue] | None, *, server: bool = False
+) -> dict[str, AnyValue]:
     attributes = attributes or {}
     route = attributes.get("http.route")
-    kept: dict[str, AttributeValue] = {}
+    kept: dict[str, AnyValue] = {}
     for key, value in attributes.items():
         if key in DROPPED_ATTRIBUTES or key.startswith(HEADER_PREFIXES):
             continue

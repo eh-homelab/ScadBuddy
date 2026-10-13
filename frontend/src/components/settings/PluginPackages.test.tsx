@@ -1,8 +1,7 @@
-import { act, screen, waitFor, within } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { describe, expect, it } from 'vitest'
 import { isUserOnly } from '../../agent/dom'
-import { announceHeadlessBrowser } from '../../lib/headlessBrowserSwitch'
 import { BUILT_IN_ANSWER, seedStoredPackage, GREETER_V1, GREETER_V2, MOVED_URL, RESERVED_PROBLEMS, SHELL, SHELL_PROBLEMS } from '../../mocks/aiPlugins'
 import { GREETER_SKILL, LONG_CHANGELOG, PREVIEW_CHARS } from '../../mocks/features/pluginPackageFiles'
 import { server } from '../../mocks/server'
@@ -35,32 +34,23 @@ describe('PluginPackagesPanel', () => {
     expect(within(own).queryByRole('button', { name: 'Remove' })).not.toBeInTheDocument()
     expect(within(own).queryByLabelText('Re-pin to branch, tag or commit')).not.toBeInTheDocument()
 
-    const browser = screen.getByRole('listitem', { name: 'Built-in plugin playwright' })
-    const enable = within(browser).getByRole('button', { name: 'Enable' })
-    expect(isUserOnly(enable)).toBe(true)
-    await user.click(enable)
-    expect(await within(browser).findByText('Enabled')).toBeInTheDocument()
-    expect(within(browser).getByRole('button', { name: 'Disable' })).toBeInTheDocument()
+    const disable = within(own).getByRole('button', { name: 'Disable' })
+    expect(isUserOnly(disable)).toBe(true)
+    await user.click(disable)
+    expect(await within(own).findByText('Disabled')).toBeInTheDocument()
+    expect(within(own).getByRole('button', { name: 'Enable' })).toBeInTheDocument()
     // Built-ins are not installed packages.
     expect(screen.getByText('No plugin packages installed.')).toBeInTheDocument()
   })
 
-  it('follows the headless-browser setting changed in its own section', async () => {
-    renderPage(<PluginPackagesPanel />)
-    const browser = await screen.findByRole('listitem', { name: 'Built-in plugin playwright' })
-    expect(within(browser).getByText('Disabled')).toBeInTheDocument()
-    act(() => announceHeadlessBrowser(true))
-    expect(await within(browser).findByText('Enabled')).toBeInTheDocument()
-  })
-
   it('keeps a built-in and a package stored under its name apart', async () => {
-    seedStoredPackage('playwright')
+    seedStoredPackage('scadbuddy')
     const { user } = renderPage(<PluginPackagesPanel />)
-    const builtIn = await screen.findByRole('listitem', { name: 'Built-in plugin playwright' })
-    const stored = screen.getByRole('listitem', { name: 'Plugin package playwright' })
-    await user.click(within(builtIn).getByRole('button', { name: 'Enable' }))
-    expect(await within(builtIn).findByRole('button', { name: 'Disable' })).toBeInTheDocument()
-    expect(screen.getByRole('listitem', { name: 'Plugin package playwright' })).toBe(stored)
+    const builtIn = await screen.findByRole('listitem', { name: 'Built-in plugin scadbuddy' })
+    const stored = screen.getByRole('listitem', { name: 'Plugin package scadbuddy' })
+    await user.click(within(builtIn).getByRole('button', { name: 'Disable' }))
+    expect(await within(builtIn).findByRole('button', { name: 'Enable' })).toBeInTheDocument()
+    expect(screen.getByRole('listitem', { name: 'Plugin package scadbuddy' })).toBe(stored)
     // The stored copy never loads: no switch, no re-pin, only Remove.
     expect(within(stored).getByText('Not loaded')).toBeInTheDocument()
     expect(within(stored).queryByRole('button', { name: /Enable|Disable/ })).not.toBeInTheDocument()
@@ -68,8 +58,8 @@ describe('PluginPackagesPanel', () => {
 
     await user.click(within(stored).getByRole('button', { name: 'Remove' }))
     await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Remove package' }))
-    await waitFor(() => expect(screen.queryByRole('listitem', { name: 'Plugin package playwright' })).not.toBeInTheDocument())
-    expect(screen.getByRole('listitem', { name: 'Built-in plugin playwright' })).toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByRole('listitem', { name: 'Plugin package scadbuddy' })).not.toBeInTheDocument())
+    expect(screen.getByRole('listitem', { name: 'Built-in plugin scadbuddy' })).toBeInTheDocument()
   })
 
   it('answers an install of ScadBuddy\'s own plugin with a notice, not a refusal', async () => {
@@ -304,9 +294,6 @@ describe('PluginPackagesPanel', () => {
     expect(parts).toBeVisible()
     expect(parts).toHaveTextContent('Skills: /scadbuddy:authoring, /scadbuddy:customize, /scadbuddy:print')
     expect(parts).toHaveTextContent('Subagents: scadbuddy:model-author, scadbuddy:print-analyst')
-    // The browser has neither, so says nothing.
-    const browser = screen.getByRole('listitem', { name: 'Built-in plugin playwright' })
-    expect(within(browser).queryByLabelText('What playwright adds')).not.toBeInTheDocument()
   })
 
   it('opens each file to read, with its size, and steps through every file', async () => {
@@ -374,6 +361,33 @@ describe('PluginPackagesPanel', () => {
     expect(within(viewer).getByText(/Showing the first 66 kB of 91 kB\./)).toBeInTheDocument()
     await user.click(within(viewer).getByRole('button', { name: 'Show all' }))
     await waitFor(() => expect(within(viewer).getByTestId('file-content').textContent).toBe(LONG_CHANGELOG))
+    expect(within(viewer).queryByRole('button', { name: 'Show all' })).not.toBeInTheDocument()
+  })
+
+  it('offers no "Show all" for a file too large to send whole (#2151)', async () => {
+    const huge = 'y'.repeat(PREVIEW_CHARS)
+    server.use(
+      http.get('/api/v1/ai/plugin-packages/:name/file', () =>
+        HttpResponse.json({
+          path: 'CHANGELOG.txt',
+          size: 2 * 1024 * 1024,
+          binary: false,
+          media_type: 'text/plain',
+          truncated: true,
+          too_large: true,
+          content: huge,
+        }),
+      ),
+    )
+    const { user } = renderPage(<PluginPackagesPanel />)
+    await screen.findByText('No plugin packages installed.')
+    await install(user, 'https://git.example/greeter.git')
+    const card = await screen.findByRole('listitem', { name: 'Plugin package greeter' })
+    await openFiles(user, card)
+    await user.click(await within(card).findByRole('button', { name: 'CHANGELOG.txt' }))
+    const viewer = await within(card).findByRole('region', { name: 'greeter: CHANGELOG.txt' })
+    expect(await within(viewer).findByTestId('file-content')).toHaveTextContent(huge)
+    expect(within(viewer).getByText(/Too large to show whole\./)).toBeInTheDocument()
     expect(within(viewer).queryByRole('button', { name: 'Show all' })).not.toBeInTheDocument()
   })
 

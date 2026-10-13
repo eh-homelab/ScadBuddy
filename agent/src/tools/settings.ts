@@ -81,7 +81,9 @@ export const settingsTools: Tool[] = [
     name: 'get_remembered_choices',
     description:
       'What the print dialog remembers (#322): per-model printer and spool choices, per-printer plates, ' +
-      'and the print options at each scope. A Bambuddy library file\'s entries are keyed "library:<file id>" ' +
+      'the print options at each scope, and the project each model was last filed in (`model_projects`, keyed ' +
+      'by model id, or "<model id>/<preset id>" with a preset, #1660). A Bambuddy library file\'s entries are ' +
+      'keyed "library:<file id>" ' +
       '(#1754). Forget one with remember_model_print_choices (a model\'s by `slug`, a library file\'s by ' +
       '`library_file_id`, passing nothing else), remember_printer_bed_type or set_print_options.',
     input: z.object({}),

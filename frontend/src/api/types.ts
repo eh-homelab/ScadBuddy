@@ -9,7 +9,7 @@
  * `schema.d.ts` is not committed (#492): typecheck, test and build regenerate it
  * first, so after a backend change `tsc` points at whatever broke.
  */
-import type { Origin, SessionStatus } from '../agent/chat/protocol'
+import type { Origin, Owner, SessionStatus } from '../agent/chat/protocol'
 import type { components } from './schema'
 
 type Schemas = components['schemas']
@@ -33,6 +33,8 @@ export type ModelSummary = Schemas['ModelRecord']
 /** #274 — one image or video of a template, in its order; the first is the cover. */
 export type MediaView = Schemas['MediaView']
 export type SourceCheck = Schemas['SourceCheck']
+/** #1290 — one `.scad` file of a model's directory, `model.scad` (`main`) first. */
+export type SourceFile = Schemas['SourceFile']
 export type Diagnostic = Schemas['Diagnostic']
 
 export type PastedSource = Schemas['PastedSource']
@@ -87,6 +89,8 @@ export type InstalledFamily = Schemas['InstalledFamily']
 
 /** #93 — third-party OpenSCAD libraries: the curated catalogue, and each model's own pins. */
 export type CatalogueLibrary = Schemas['CatalogueLibrary']
+export type DependencyReport = Schemas['DependencyReport']
+export type IncludeTarget = Schemas['IncludeTarget']
 export type ModelLibrary = Schemas['ModelLibrary']
 /** #217 — a `libraries` entry in model.json that is not a pin, and why. */
 export type InvalidLibraryEntry = Schemas['InvalidLibraryEntry']
@@ -125,6 +129,39 @@ export type PrintCheck = Schemas['PrintCheck']
 export type PrintRun = Schemas['PrintRun']
 /** #1053 — a Bambuddy write as an operation: `GET /operations/{id}` reads it. */
 export type Operation = Schemas['Operation']
+
+// Flows (#1057, backend `api/flows.py`): a flow's runs and what they wait on.
+export type FlowRun = Schemas['Run']
+export type FlowRunView = Schemas['RunView']
+export type FlowRunStatus = FlowRunView['status']
+export type FlowPending = Schemas['PendingEntry']
+export type FlowStep = Schemas['FlowStep']
+export type FlowDecided = Schemas['Decided']
+/** #2350 — a registered flow version, with and without its script. */
+export type FlowDefinition = Schemas['Definition']
+export type FlowSummary = Schemas['DefinitionSummary']
+/** #2503 — one version of a flow's git history. */
+export type FlowVersion = Schemas['FlowVersion']
+/** #2485 — whether a flow is archived or deleted, and by whom. */
+export type FlowState = Schemas['FlowState']
+/** #2487 — the editor's Save body, its check, and what it completes. */
+export type FlowRegister = Schemas['DefinitionCreate']
+export type FlowScriptCheck = Schemas['ScriptCheckResult']
+/** A problem with a script or (#2483, `file` inputs.json) its inputs schema; `file` is flow.py when left out. */
+export type FlowScriptProblem = Omit<Schemas['ScriptProblem'], 'file'> & Partial<Pick<Schemas['ScriptProblem'], 'file'>>
+export type FlowHostInterface = Schemas['HostInterface']
+export type FlowRunStarted = Schemas['RunAnswer']
+/** #2483 — a run's options: its typed inputs (and its grant, #2481). */
+export type FlowRunOptions = Schemas['RunCreate']
+export type FlowResetPoints = Schemas['ResetPoints']
+export type FlowResetPreview = Schemas['ResetPreview']
+export type FlowReset = Schemas['Reset']
+/** #2481 — a run's grant: what its outward calls may do without asking, and what it let through. */
+export type FlowGrantSpec = Schemas['GrantSpec']
+export type FlowGrantRule = Schemas['GrantRule']
+export type FlowGrantArg = Schemas['ArgBound']
+export type FlowGrantView = Schemas['GrantView']
+export type FlowGrantUse = Schemas['GrantUseView']
 /** A route's 202: the operation to follow, `repeated` when an earlier press started it. */
 export type OperationAccepted = Schemas['OperationAccepted']
 
@@ -157,12 +194,19 @@ export type PrinterBedType = Schemas['PrinterBedType']
 /** #836 — the rack nozzle ScadBuddy would pick, its candidates, and what a run sent. */
 export type RackPickView = Schemas['RackPickView']
 export type RackOption = Schemas['RackOption']
+export type NozzlePlan = Schemas['NozzlePlan']
+export type PlannedSlot = Schemas['PlannedSlot']
+export type UnknownTray = Schemas['UnknownTray']
+export type PreviewStarted = Schemas['PreviewStarted']
+export type SlicePreview = Schemas['SlicePreview']
+export type TrayAssigned = Schemas['TrayAssigned']
 export type RackSentPick = Schemas['RackSentPick']
 export type RackAlgorithm = NonNullable<Schemas['ChoicesView']['rack_algorithm']>
 export type PrinterRackAlgorithm = Schemas['PrinterRackAlgorithm']
-/** #1298 — what each hotend on a printer's rack has printed; never a serial. */
+/** #1298, #2170 — each hotend on a printer's rack: its use, what it has loaded, and its serial (the one route that carries one, spec 2026-10-01 §7 amendment). */
 export type PrinterRackUsage = Schemas['PrinterRackUsage']
 export type RackHotendUsage = Schemas['RackHotendUsage']
+export type RackSpoolUse = Schemas['RackSpoolUse']
 /** #907, #1862 — Bambu's print sequence, a per-print process override. */
 export type PrintSequence = NonNullable<Schemas['PrintRunRequest']['print_sequence']>
 export type OutputPlate = Schemas['OutputPlate']
@@ -171,6 +215,8 @@ export type OutputPlate = Schemas['OutputPlate']
 export type LibraryListing = Schemas['LibraryListing']
 export type LibraryEntry = Schemas['LibraryEntry']
 export type LibraryFolderView = Schemas['LibraryFolderView']
+export type LibraryDeleteResult = Schemas['LibraryDeleteResult']
+export type LibraryRestoreResult = Schemas['LibraryRestoreResult']
 /** #1863 — the objects Arrange reads from a library file ScadBuddy did not make. */
 export type LibraryFileObjects = Schemas['LibraryFileObjects']
 export type LibraryFileObject = Schemas['LibraryFileObject']
@@ -204,6 +250,8 @@ export type ProjectRequest = Schemas['ProjectRequest']
 export type ProjectAttach = Schemas['ProjectAttach']
 export type ProjectFile = Schemas['ProjectFile']
 export type LastProject = Schemas['LastProject']
+export type ModelProjects = Schemas['ModelProjects']
+export type ModelProjectPut = Schemas['ModelProjectPut']
 export type AttachResult = Schemas['AttachResult']
 
 /** #81 — the build volume the preview draws and checks the model against. */
@@ -258,14 +306,6 @@ export interface Problem {
 }
 
 /**
- * The agent service's headless-browser setting (#349,
- * `GET/PUT /api/v1/ai/settings/headless-browser`). Off by default.
- */
-export interface HeadlessBrowserSetting {
-  enabled: boolean
-}
-
-/**
  * The agent service's switch for the assistant's `http_request` tool (#827,
  * `GET/PUT /api/v1/ai/settings/http-request`). On by default.
  */
@@ -292,6 +332,14 @@ export interface ModelSetting {
 }
 
 /**
+ * #1291 — the blank starter template (`GET /api/v1/ai/templates/blank`, agent
+ * `src/routes/templates.ts`), the source the agent's create_from_template writes.
+ */
+export interface BlankTemplate {
+  source: string
+}
+
+/**
  * #790 — what a new assistant session may spend in all (USD) and how many turns one
  * reply may take (`GET/PUT /api/v1/ai/settings/session-limits`, agent
  * `src/routes/sessionLimits.ts`). Applies to sessions started after a change.
@@ -299,6 +347,19 @@ export interface ModelSetting {
 export interface SessionLimits {
   budget_usd: number
   max_turns: number
+}
+
+/**
+ * Plan 5d — the mode a new assistant session gets when whoever starts it names none
+ * (`GET/PUT /api/v1/ai/settings/session-mode`, agent `src/routes/sessionMode.ts`).
+ * `durable_available` says whether a durable session could start now; when not, a
+ * session that got durable from this default runs classic and says why
+ * (`durable_unavailable_reason`). The PUT sends `mode` only.
+ */
+export interface SessionModeSetting {
+  mode: 'classic' | 'durable'
+  durable_available: boolean
+  durable_unavailable_reason?: string
 }
 
 /**
@@ -313,16 +374,52 @@ export interface ImageSettings {
 }
 
 /**
+ * #2329 — the caps on the assistant's workspace, in bytes (agent
+ * `routes/workspaceSettings.ts`), with the bounds the form may save.
+ */
+export interface WorkspaceSettings {
+  file_max_bytes: number
+  workspace_max_bytes: number
+  min: number
+  file_max: number
+  workspace_max: number
+}
+
+/** #2329 — one file in a session's workspace (agent `routes/sessionFiles.ts`). */
+export interface WorkspaceFile {
+  path: string
+  media_type: string
+  size: number
+  sha256: string
+  /** Where it came from: an upload (`kind: 'upload'`), or the tool and its ids, or a URL. */
+  source: Record<string, string | number | boolean | null> | null
+  created_at: string
+  updated_at: string
+}
+
+export interface WorkspaceFileList {
+  files: WorkspaceFile[]
+  usage: { files: number; bytes: number }
+  limits: { file_max_bytes: number; workspace_max_bytes: number }
+}
+
+/**
  * #1941 — an image the composer uploaded when it was attached (agent `POST
  * /api/v1/ai/attachments`, `src/routes/attachments.ts`): the id a message sends, and the
- * preview the transcript will show. Unsent, it expires after an hour.
+ * names the image and its preview take in the session (#2479: pointers, never bytes).
+ * Unsent, it expires after an hour.
  */
 export interface AttachmentView {
   id: string
-  preview: { mediaType: 'image/png' | 'image/jpeg' | 'image/webp'; data: string }
+  name: string
+  mediaType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp'
+  preview: { name: string; mediaType: 'image/png' | 'image/jpeg' | 'image/webp' }
 }
 
 /** One assistant session as the agent's HTTP routes answer it (agent `routes/sessions.ts` `SessionView`). */
+/** #795, #1885 — one edit `PATCH /api/v1/ai/sessions/:id` takes. */
+export type AiSessionEdit = { title: string } | { done: true } | { archived: boolean }
+
 export interface AiSessionView {
   id: string
   title: string
@@ -334,6 +431,13 @@ export interface AiSessionView {
   cost_usd: number
   budget_usd: number
   running: boolean
+  /** Plan 5d — absent from an older agent (classic). */
+  mode?: 'classic' | 'durable'
+  /** #1885 — archived by its owner: out of the panel's list, and read-only. Absent from an older agent. */
+  archived?: boolean
+  archived_at?: string | null
+  /** #1284 — a live handoff offer: to whom, until when. */
+  offer?: { to: Pick<Owner, 'kind' | 'label'> & { id?: string }; until: string } | null
 }
 
 /**

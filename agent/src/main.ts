@@ -1,6 +1,9 @@
 import { ATTACHMENT_SWEEP_MS, AttachmentStore } from './attachments/store.js'
 import { serve, upgradeWebSocket } from '@hono/node-server'
 import { WebSocketServer } from 'ws'
+import os from 'node:os'
+import path from 'node:path'
+import { event } from './sessions/protocol.js'
 import { getConnInfo } from '@hono/node-server/conninfo'
 import { backendReachable, createBackendClient } from './api/backend.js'
 import { createApp } from './app.js'
@@ -14,16 +17,15 @@ import { connectDatabase } from './db.js'
 import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js'
 import { PgEventListener } from './events/pgListener.js'
 import { DEFAULT_STATE_DIR, pluginCacheDir } from './harness/options.js'
-import { probeChromiumSandbox } from './harness/headlessSandbox.js'
-import { UiOriginProbe } from './harness/browserReach.js'
 import { OWN_PLUGIN_DIR } from './harness/ownPlugin.js'
-import { ensureStateDirs, StateDirError, sweepBrowserDirs } from './harness/stateDirs.js'
+import { ensureStateDirs, removeLegacyBrowserDir, StateDirError } from './harness/stateDirs.js'
 import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
 import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
 import { GitFetcher } from './plugins/packages/git.js'
 import { loadPackagesForRun, PackageInstaller } from './plugins/packages/install.js'
 import { PackageStore } from './plugins/packages/store.js'
+import { BuiltInTools } from './plugins/builtInTools.js'
 import { loadEnabledPlugins, PluginStore } from './plugins/registry.js'
 import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
@@ -33,6 +35,8 @@ import { AuditLog } from './audit/log.js'
 import { auditedTokenStore } from './audit/writes.js'
 import { TabHub } from './bridge/hub.js'
 import { PgTabRelay } from './bridge/relay.js'
+import { PostgresSessionTabStore } from './bridge/sessionTabs.js'
+import { PgMcpSessionRelay } from './mcp/sessionRelay.js'
 import { PostgresPairingStore } from './bridge/pairings.js'
 import { CHAT_FRAME_MAX, startHeartbeat } from './routes/chat.js'
 import { storedModel } from './routes/model.js'
@@ -44,12 +48,27 @@ import { shutdownTelemetry, traceListener } from './telemetry/runtime.js'
 import { harnessTools } from './tools/harness.js'
 import { SessionResources } from './sessions/touched.js'
 import { ALL_TOOLS } from './tools/index.js'
+import { PgFlowBlobs } from './temporal/flowBlobs.js'
+import { PgFlowRuns } from './temporal/flowRuns.js'
+import { flowSessionActivities } from './temporal/flowSessions.js'
 import { gateActivities, PgApprovalRecords, PgSessionOwners, toolActivities } from './temporal/toolActivities.js'
+import { TASK_QUEUE } from './temporal/names.js'
+import { memoryActivities } from './temporal/memoryActivities.js'
+import { SHARED_PACKAGES, sweepPackageCopies } from './temporal/turnPackages.js'
+import { forwardPackageServers } from './plugins/packages/mcp.js'
+import { subagentKey } from './temporal/subagentToken.js'
+import { pgRunning } from './routes/subagentMcp.js'
+import { DURABLE_TURNS_DIR, sweepTurnDirs, turnServers } from './temporal/turnServers.js'
+import { SessionClients } from './temporal/sessionClients.js'
+import { type ListedTools, turnToolActivities, turnToolActivity } from './temporal/turnTools.js'
 import { DURABLE_TOOLS } from './tools/manifest.js'
 import { PgAnswers } from './gate/answers.js'
 import { AgentWorker } from './temporal/worker.js'
-import { PgPayloadKeys, rewrapPayloadKeys, SubjectPayloadCodec } from './temporal/payloadCodec.js'
+import { FilePayloadStore, PgPayloadKeys, rewrapPayloadKeys, SubjectPayloadCodec } from './temporal/payloadCodec.js'
 import { DurableGate } from './gate/durable.js'
+import { SessionBlobs } from './sessions/blobs.js'
+import { DurableTurns } from './sessions/durable.js'
+import { DurableRunningSweep, durableDescriber } from './sessions/durableSweep.js'
 import { PendingInputSweep, temporalDescriber } from './gate/sweep.js'
 import { Runtime } from '@temporalio/worker'
 import { Client, Connection } from '@temporalio/client'
@@ -60,6 +79,7 @@ import { packageKinds } from './plugins/packages/operations.js'
 import { operationActivities } from './temporal/operationActivities.js'
 import { PendingActionStore } from './tools/pending.js'
 import type { ToolServices } from './tools/registry.js'
+import { SessionFiles, WORKSPACE_SWEEP_MS } from './workspace/store.js'
 import { toolSwitches } from './tools/switches.js'
 
 // Fixed rather than configurable: the listening port is part of the pod
@@ -89,8 +109,8 @@ try {
   console.error(err instanceof StateDirError ? err.message : err)
   process.exit(1)
 }
-// No turn runs here yet: headless-browser folders left now are from a crash.
-await sweepBrowserDirs({ stateDir: DEFAULT_STATE_DIR }).catch((err: unknown) =>
+// The removed built-in headless browser's folders, left on the volume by an older image.
+await removeLegacyBrowserDir({ stateDir: DEFAULT_STATE_DIR }).catch((err: unknown) =>
   console.error(`cannot remove leftover headless-browser folders: ${String(err)}`),
 )
 
@@ -170,6 +190,8 @@ const oidcRepo = settings
   : undefined
 const oidcProvider = new OidcProvider()
 const plugins = database ? new PluginStore(database.sql) : undefined
+// ScadBuddy's own tool sets as plugins (#1953): their overrides, in ai_settings.
+const builtInTools = new BuiltInTools(settings)
 // Plugin traffic (connection tests, and each session turn's enabled plugins)
 // goes through this loopback forwarder (plugins/forwarder.ts).
 const pluginForwarder = await PluginForwarder.start()
@@ -181,6 +203,9 @@ const events = config.databaseUrl ? new PgEventListener(config.databaseUrl) : un
 // browser_* calls for a tab connected to another replica (#1916, bridge/relay.ts),
 // on the listener's connection: made before start(), so its first LISTEN covers it.
 const tabRelay = database && events ? new PgTabRelay(database.sql, { listen: (c, f) => events.listenAlso(c, f) }) : undefined
+// /mcp requests for a session another replica holds (#2086, mcp/sessionRelay.ts),
+// on the same connection, for the same reason.
+const mcpRelay = database && events ? new PgMcpSessionRelay(database.sql, { listen: (c, f) => events.listenAlso(c, f) }) : undefined
 events?.start()
 const resources = new ResourceHub(events)
 const paths = { stateDir: DEFAULT_STATE_DIR }
@@ -201,11 +226,19 @@ const toolServices: ToolServices = {
   publicBaseUrl: config.publicUrl,
   // The tools Settings can turn off (#1911): read from ai_settings at each call.
   switchedOff: toolSwitches(settings),
+  // Settings → Plugins' raised tiers and disabled tools (#1953), read at each call.
+  toolOverrides: builtInTools.registryOverrides(),
 }
 // The browser bridge (#254, bridge/hub.ts): the tabs connected over
 // /api/v1/ai/bridge, which the browser_* tools drive; MCP clients pair with
 // one through `ai_browser_pairings` (spec §8.5).
-const tabs = new TabHub({ pairings: database ? new PostgresPairingStore(database.sql) : undefined, relay: tabRelay })
+const tabs = new TabHub({
+  pairings: database ? new PostgresPairingStore(database.sql) : undefined,
+  relay: tabRelay,
+  // A durable session's browser_* calls run on whichever replica took the
+  // activity, so the tab its chat socket paired is read from Postgres (#2086).
+  sessionTabs: database ? new PostgresSessionTabStore(database.sql) : undefined,
+})
 toolServices.browser = tabs
 // What each session touched (#931, sessions/touched.ts), from its tool calls.
 if (database) {
@@ -213,6 +246,24 @@ if (database) {
     console.error('session resources: could not record a call:', (err as Error).message),
   )
 }
+// The assistant's workspace (#2329, workspace/store.ts): a session's files, or an
+// /mcp caller's own outside a session, in ai_session_files. The workspace_* tools
+// and http_request's save_to_workspace write it; a principal's files are swept
+// 24 h after their last write.
+const workspace = database ? new SessionFiles(database.sql, { settings }) : undefined
+if (workspace) toolServices.workspace = workspace
+// What workspace_read redacts from text in every mode (classic, durable, /mcp):
+// each saved Claude credential's secret, read at the call (a classic turn adds its
+// plugin tokens, tools/harness.ts). None without the KEK, which opens them.
+if (credentials && kek.ok) {
+  const key = kek.kek
+  toolServices.secrets = async () =>
+    (await credentials.revealAll(key)).flatMap((row) => (row.credential ? [row.credential.secret] : []))
+}
+const stopWorkspaceSweep = workspace?.startSweeper(WORKSPACE_SWEEP_MS, {
+  ...(database ? { ready: database.ready } : {}),
+  onError: (err) => console.error('workspace sweep failed:', (err as Error).message),
+})
 // Plugin packages (#297): the pin is in Postgres (`ai_plugin_packages`); the
 // files under <state dir>/plugins are a cache, rebuilt from the pin and
 // verified against its content hash before each load (plugins/packages/).
@@ -224,28 +275,6 @@ const packageInstaller = new PackageInstaller({ fetcher: new GitFetcher(), cache
 // recorded in the audit log (#258), whichever of the two makes them.
 const tokens =
   database && audit ? auditedTokenStore(new PostgresTokenStore(database.sql), audit) : new FailClosedTokenStore()
-
-// Which of ScadBuddy's UI origins the headless browser reaches without a
-// login (harness/browserReach.ts): asked on each browser turn, each answer kept
-// 30 s; a changed answer is logged, and /healthz says only whether any is
-// reachable (`browser_origins`).
-const uiOriginProbe = new UiOriginProbe()
-
-// Whether the headless browser's Chromium can keep its sandbox in this pod
-// (harness/headlessSandbox.ts): probed once, on the first turn that uses the
-// browser, and said loudly either way.
-let sandboxProbe: Promise<boolean> | undefined
-const chromiumSandbox = (): Promise<boolean> =>
-  (sandboxProbe ??= probeChromiumSandbox().then((probe) => {
-    if (probe.available) console.log(`headless browser: Chromium runs with its sandbox (${probe.detail})`)
-    else {
-      console.warn(
-        `headless browser: Chromium's sandbox is unavailable here, so it runs with --no-sandbox (${probe.detail}); ` +
-          'allow user namespaces in the pod to enable it (docs/ai/headless-browser.md, "Sandbox")',
-      )
-    }
-    return probe.available
-  }))
 
 // `session.*` on the event bus (#300, sessions/busEvents.ts): every event-log
 // append is announced on `scadbuddy_events`, and this replica's LISTEN
@@ -265,6 +294,8 @@ const sessions =
         ...(settings ? { settings } : {}),
         // ScadBuddy's tools and their tiers (tools/harness.ts).
         ...harnessTools(toolServices),
+        // Settings → Plugins' overrides of the built-in tools (#1953), per turn.
+        builtInTools: () => builtInTools.policy(),
         // ScadBuddy's own plugin (#896, harness/ownPlugin.ts): its skills and
         // subagents, with the Skill and Agent tools they need.
         ownPlugin: OWN_PLUGIN_DIR,
@@ -287,34 +318,12 @@ const sessions =
           : {}),
         // Enabled plugin packages (#297), materialised from their pins, per turn.
         ...(pluginPackages ? { packagePlugins: () => loadPackagesForRun(pluginPackages, packageInstaller) } : {}),
-        // The headless browser (#349): on for a turn only when the
-        // `headless_browser_enabled` setting is true (routes/headlessBrowser.ts).
-        // It opens ScadBuddy's own origins as they are (#983): the public URL
-        // (the variable, and the backend's stored setting read each turn) and
-        // SCADBUDDY_ALLOWED_ORIGINS, or the backend when none is configured;
-        // SCADBUDDY_BROWSER_ALLOWED_ORIGINS names what else a human may let it
-        // open (harness/browserOrigins.ts).
-        headlessBrowser: {
-          backendUrl: config.backendUrl,
-          livePublicUrl: async () => {
-            try {
-              const { data, response } = await backend.GET('/api/v1/settings')
-              if (!data) console.warn(`headless browser: GET /api/v1/settings answered ${response.status}; the stored public_url is left out this turn`)
-              return data?.public_url ?? undefined
-            } catch (err) {
-              console.warn(`headless browser: could not read the stored public_url, left out this turn: ${String(err)}`)
-              return undefined
-            }
-          },
-          ...(config.publicUrl ? { publicUrl: config.publicUrl } : {}),
-          ...(config.allowedOrigins ? { uiOrigins: config.allowedOrigins } : {}),
-          ...(config.browserAllowedOrigins ? { browserAllowedOrigins: config.browserAllowedOrigins } : {}),
-          sandbox: chromiumSandbox,
-          probe: (origins) => uiOriginProbe.probe(origins),
-        },
+        packageServers: (loaded) => forwardPackageServers(loaded, pluginForwarder),
         // The http_request tool (#827): on for a turn unless the
         // `http_request_enabled` setting is false (routes/httpRequest.ts).
         httpRequest: {},
+        // The workspace http_request's save_to_workspace writes, and a fork copies (#2329).
+        ...(workspace ? { workspace } : {}),
         // Every usable credential in priority order, with fallback; disables,
         // cooldowns, recoveries and fallbacks are audited (#1093).
         credentials: new CredentialPool({ repo: credentials, kek, audit }),
@@ -376,7 +385,9 @@ const payloadKeys =
   temporal && kek.ok
     ? new PgPayloadKeys(temporal.sql, kek.kek, { previous: previousKek?.ok ? previousKek.kek : undefined })
     : undefined
-const dataConverter = payloadKeys ? { payloadCodecs: [new SubjectPayloadCodec(payloadKeys)] } : undefined
+// A session's large payloads are files on the data share, by reference (#2243).
+const payloadStore = config.payloadDir ? new FilePayloadStore(config.payloadDir) : undefined
+const dataConverter = payloadKeys ? { payloadCodecs: [new SubjectPayloadCodec(payloadKeys, payloadStore)] } : undefined
 if (temporal && !payloadKeys) {
   console.warn('agent-tools worker: no secret key, so durable payloads cannot be sealed; no durable session is started')
 }
@@ -384,8 +395,89 @@ if (temporal && !payloadKeys) {
 const workerDataConverter = dataConverter
   ? { ...dataConverter, failureConverterPath: fileURLToPath(new URL('./temporal/failureConverter.js', import.meta.url)) }
   : undefined
+// Package copies no turn has used for a week (#2395): the shared ones on the payload
+// volume, and this pod's own copies without their http servers. Every hour.
+{
+  const roots = [path.join(paths.stateDir, 'plugins-local'), ...(config.payloadDir ? [path.join(config.payloadDir, SHARED_PACKAGES)] : [])]
+  const sweep = () =>
+    void Promise.all(roots.map((root) => sweepPackageCopies(root))).catch((err: unknown) =>
+      console.error('package copy sweep failed:', (err as Error).message),
+    )
+  sweep()
+  setInterval(sweep, 3600_000).unref()
+}
+// Each replica's saved http bodies of durable sessions gone since (#2496), every hour.
+if (database) {
+  const sweepRoot = path.join(paths.stateDir, DURABLE_TURNS_DIR)
+  const sweep = () =>
+    void sweepTurnDirs(sweepRoot, database.sql).catch((err: unknown) =>
+      console.error('durable http body sweep failed:', (err as Error).message),
+    )
+  sweep()
+  setInterval(sweep, 3600_000).unref()
+}
+// What a durable turn offers beside ScadBuddy's own tools (#2320): the servers a
+// classic turn would hand Claude Code, built again for every listing and call. One whose
+// state lives on this pod (http_request's saved bodies) runs its calls on this replica's
+// own queue, HOST_QUEUE, served by `hostWorker` below.
+const HOST_QUEUE = `${TASK_QUEUE}.${os.hostname()}`
+// The enabled remote plugins and every usable credential's secret, as a classic turn
+// reads them, for a durable turn's tools and its automatic memory.
+const durableRemotePlugins = plugins
+  ? async () => forwardForRun(await loadEnabledPlugins(plugins, kek.ok ? kek.kek : undefined), pluginForwarder)
+  : undefined
+const durableCredentialSecrets = async () => {
+  if (!credentials) return []
+  const pool = new CredentialPool({ repo: credentials, kek, audit })
+  return (await pool.candidates().catch(() => [])).map((c) => c.credential.secret)
+}
+// A durable session's MCP client on each remote plugin, kept on the replica its calls
+// are pinned to (#2581): a stateful plugin (Playwright MCP) keeps its page between calls.
+const turnClients = new SessionClients<ListedTools>()
+const turnToolDeps = temporal
+  ? {
+      sessions: new PgSessionOwners(temporal.sql),
+      // A flow's tool(name, ...) reaches the same tools, as the run's starter (#2320).
+      flows: new PgFlowRuns(temporal.sql),
+      servers: turnServers({
+        ...(durableRemotePlugins ? { remotePlugins: durableRemotePlugins } : {}),
+        ...(settings ? { settings } : {}),
+        credentialSecrets: durableCredentialSecrets,
+        // This pod's own disk, as a classic turn's: the calls are pinned here (hostQueue).
+        httpRequest: { saveRoot: path.join(paths.stateDir, DURABLE_TURNS_DIR), audit, ...(workspace ? { files: workspace } : {}) },
+        // Shared with agent-durable on the payload volume, which its runner loads them from.
+        ...(pluginPackages
+          ? {
+              packages: {
+                load: () => loadPackagesForRun(pluginPackages, packageInstaller),
+                root: config.payloadDir ? path.join(config.payloadDir, SHARED_PACKAGES) : undefined,
+                localRoot: path.join(paths.stateDir, 'plugins-local'),
+                forward: (loaded) => forwardPackageServers(loaded, pluginForwarder),
+              },
+            }
+          : {}),
+      }),
+      hostQueue: HOST_QUEUE,
+      clients: turnClients,
+      approvals: new PgApprovalRecords(temporal.sql),
+      audit,
+      currentTiers: liveTokenTiers(tokens),
+      blobs: new SessionBlobs(temporal.sql),
+      ...(sessions
+        ? {
+            report: async (session: string, problems: readonly string[]) => {
+              await sessions.events.append(
+                session,
+                problems.map((message) => event({ type: 'error', sessionId: session, code: 'plugin_unavailable', message })),
+              )
+            },
+          }
+        : {}),
+    }
+  : undefined
+
 const temporalWorker =
-  temporal && operationStore
+  temporal && operationStore && turnToolDeps
     ? AgentWorker.start({
         address: temporal.address,
         namespace: config.temporalNamespace,
@@ -394,10 +486,33 @@ const temporalWorker =
             services: toolServices,
             sessions: new PgSessionOwners(temporal.sql),
             approvals: new PgApprovalRecords(temporal.sql),
+            flows: new PgFlowRuns(temporal.sql),
             audit,
             answers: new PgAnswers(temporal.sql),
+            currentTiers: liveTokenTiers(tokens),
+            // A result's images, for the durable segment's view_tool_images (#2320).
+            blobs: new SessionBlobs(temporal.sql),
+            // A flow call's images, sealed under its run's payload key (#2477).
+            ...(payloadKeys ? { flowBlobs: new PgFlowBlobs(temporal.sql, payloadKeys) } : {}),
           }),
-          ...gateActivities({ audit, sessions: new PgSessionOwners(temporal.sql) }),
+          ...gateActivities({ audit, sessions: new PgSessionOwners(temporal.sql), workspace }),
+          // A durable turn's plugin and http_request tools (#2320): listed per turn, and
+          // each call the `default` activity `turn:<server>__<tool>`.
+          ...turnToolActivities(turnToolDeps),
+          default: turnToolActivity(turnToolDeps),
+          // A durable turn's automatic Hindsight memory (#2320): recall at its start,
+          // retain at its end, as a classic turn's memory hooks do.
+          ...(sessions && durableRemotePlugins
+            ? memoryActivities({
+                sessions: new PgSessionOwners(temporal.sql),
+                events: sessions.events,
+                remotePlugins: durableRemotePlugins,
+                credentialSecrets: durableCredentialSecrets,
+                audit,
+              })
+            : {}),
+          // A flow's agent(...) and ask_session(...) (#1057, 6g): beside the tools, never one.
+          ...flowSessionActivities({ sql: temporal.sql, flows: new PgFlowRuns(temporal.sql) }),
           ...operationActivities(commandKinds, operationStore),
         },
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
@@ -405,6 +520,18 @@ const temporalWorker =
         workflows: {
           workflowBundle: { codePath: fileURLToPath(new URL('./temporal/workflow-bundle.js', import.meta.url)) },
         },
+      })
+    : undefined
+// This replica's own queue: a pinned turn tool's calls (#2320). Its tools die with the
+// pod; a call scheduled after that fails at its schedule-to-close timeout.
+const hostWorker =
+  temporal && operationStore && turnToolDeps
+    ? AgentWorker.start({
+        address: temporal.address,
+        namespace: config.temporalNamespace,
+        taskQueue: HOST_QUEUE,
+        activities: { ...turnToolActivities(turnToolDeps), default: turnToolActivity(turnToolDeps) },
+        ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
       })
     : undefined
 // Routes start commands, and reach durable sessions' gates, through a lazy client: a
@@ -418,6 +545,23 @@ const temporalClient = temporal
   : undefined
 // A durable session's pending_input Query, respond and cancel_input Updates (spec §6.6).
 if (sessions && temporalClient) sessions.durable = new DurableGate(temporalClient)
+// A durable session's turns (plan 5c PR 3): only with the codec, so a session's
+// payloads are never sent to Temporal unsealed; without it a durable start is refused.
+if (sessions && temporalClient && payloadKeys && database) {
+  sessions.durableTurns = new DurableTurns({ client: temporalClient, sql: database.sql, events: sessions.events })
+}
+// Every 30 s, beside the lease reaper: durable sessions left `running` whose workflow
+// has ended or never started (#2001); a durable turn takes no lease.
+const stopDurableSweep =
+  sessions && temporalClient && database
+    ? new DurableRunningSweep({ sql: database.sql, events: sessions.events, describe: durableDescriber(temporalClient) }).start(
+        SESSION_REAP_MS,
+        {
+          ready: database.ready,
+          onError: (err) => console.error('durable running sweep failed:', (err as Error).message),
+        },
+      )
+    : undefined
 // Every 30 s: ai_pending_input rows whose workflow run ended without resolving them.
 const stopOrphanSweep =
   sessions && temporalClient
@@ -459,11 +603,12 @@ const app = createApp({
   origins: originPolicy(config.publicUrl, config.trustedProxies, config.allowedOrigins),
   ...(sessions ? { approvals: sessions.approvals, sessions } : {}),
   ...(attachments ? { attachments } : {}),
+  // The panel's Files (#2329, routes/sessionFiles.ts).
+  ...(workspace ? { workspace } : {}),
   ...(audit ? { audit } : {}),
   upgradeWebSocket,
   tabs,
   ...(temporalWorker ? { temporal: () => temporalWorker.state() } : {}),
-  ...(sessions ? { browserReach: () => uiOriginProbe.summary() } : {}),
   commands,
   remoteAddress: (c) => {
     try {
@@ -472,6 +617,20 @@ const app = createApp({
       return undefined
     }
   },
+  // A durable segment's subagents' ScadBuddy tools (#2320, routes/subagentMcp.ts): loopback only.
+  ...(database && kek.ok
+    ? {
+        subagentMcp: {
+          sessions: new PgSessionOwners(database.sql),
+          running: pgRunning(database.sql),
+          currentTiers: liveTokenTiers(tokens),
+          keys: () => [subagentKey(kek.kek), ...(previousKek?.ok ? [subagentKey(previousKek.kek)] : [])],
+          tools: ALL_TOOLS,
+          services: toolServices,
+          ...(audit ? { audit } : {}),
+        },
+      }
+    : {}),
   mcp: {
     tools: ALL_TOOLS,
     resources,
@@ -484,6 +643,7 @@ const app = createApp({
     authSettings,
     oidc: oidcProvider,
     publicUrl: config.publicUrl,
+    relay: mcpRelay,
   },
   mcpOidc: { repo: oidcRepo, provider: oidcProvider, publicUrl: config.publicUrl },
 })
@@ -513,9 +673,11 @@ async function stop(): Promise<void> {
   stopSweeper?.()
   stopQuestionSweeper?.()
   stopOrphanSweep?.()
+  stopDurableSweep?.()
   stopReaper?.()
   stopRetention?.()
   stopAttachmentSweep?.()
+  stopWorkspaceSweep?.()
   // Running turns first, while the panel's socket, the paired tab and the pool
   // are all still up: no new turn starts, running ones may finish, the rest are
   // aborted and record that they were (SessionManager.stopTurns). Aborted
@@ -525,8 +687,11 @@ async function stop(): Promise<void> {
   // and at 15 s it stops regardless: inside the turns' 17 s budget.
   await Promise.all([
     temporalWorker?.stop(),
+    hostWorker?.stop(),
     sessions?.stopTurns({ graceMs: TURN_DRAIN_MS, abortWaitMs: TURN_ABORT_WAIT_MS }),
   ])
+  // Kept plugin MCP sessions end with their DELETE while the forwarder still routes it.
+  await turnClients.closeAll()
   stopSessionWake?.()
   stopHeartbeat()
   tabs.close()

@@ -1,7 +1,13 @@
 import { useState } from 'react'
 import { USER_ONLY } from '../../agent/dom'
 import { api, ApiError } from '../../api/client'
-import type { BambuddyTargets, ModelPrintChoices, PrintOptions, ProjectChoices, RememberedChoices } from '../../api/types'
+import type {
+  BambuddyTargets,
+  ModelPrintChoices,
+  PrintOptions,
+  ProjectChoices,
+  RememberedChoices,
+} from '../../api/types'
 import { ALGORITHM_LABELS } from '../../components/print/rackLabels'
 import { Button } from '../../components/ui/Button'
 import { Spinner } from '../../components/ui/Spinner'
@@ -109,6 +115,24 @@ export function RememberedChoicesPanel({
           .filter(Boolean)
           .join(' · '),
         forget: () => api.forgetRememberedProject(projectId),
+      })
+    }
+    for (const [scope, entry] of Object.entries(remembered.model_projects ?? {})) {
+      // #1660: `<model id>` with no preset, `<model id>/<preset id>` with one. The
+      // server names a preset by its name now (one read for every model, not one
+      // `listPresets` each), and drops an entry for a preset its model no longer lists.
+      const slash = scope.indexOf('/')
+      const modelId = slash < 0 ? scope : scope.slice(0, slash)
+      const presetId = slash < 0 ? null : scope.slice(slash + 1)
+      rows.push({
+        key: `model-project:${scope}`,
+        kind: 'Project',
+        subject:
+          presetId === null
+            ? modelId
+            : `${modelId} · ${entry.preset_name ?? presetId}`,
+        value: projectName(String(entry.project_id)),
+        forget: () => api.putModelProject(modelId, { preset_id: presetId, project_id: null }),
       })
     }
     if (!isEmptyOptions(remembered.print_options)) {

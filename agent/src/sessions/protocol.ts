@@ -18,6 +18,10 @@ export type SessionStatus = (typeof SESSION_STATUSES)[number]
 
 export type Risk = 'read' | 'write' | 'outward'
 
+/** How a session runs (spec 2026-10-01 §6.1): in this service's harness, or as a DurableSession workflow. */
+export const SESSION_MODES = ['classic', 'durable'] as const
+export type SessionMode = (typeof SESSION_MODES)[number]
+
 /**
  * A principal (spec §8.1) as the protocol carries it; `label` is what the
  * "controlled by …" badge reads. Two owners are the same principal when kind
@@ -57,6 +61,13 @@ export type AttentionView =
 /** An image a tool returned, as the event names it (#782): `<sha256>.<ext>`, one of the session's blobs. */
 export type ImageRef = { name: string; mediaType: 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp' }
 
+/**
+ * An image the user sent with a turn, as `user.turn` names it (#2479): the full image
+ * and its preview, each one of the session's blobs. A turn logged before #2479 whose
+ * full image could not be stored names its preview only (that migration).
+ */
+export type SentImage = Partial<ImageRef> & { preview: { name: string; mediaType: 'image/png' | 'image/jpeg' | 'image/webp' } }
+
 export type SessionSummary = {
   sessionId: string
   title: string
@@ -68,6 +79,10 @@ export type SessionSummary = {
   updatedAt: string
   costUsd: number
   budgetUsd: number
+  /** Classic or durable (plan 5d), for the switcher's badge. */
+  mode: SessionMode
+  /** A live handoff offer (manager.ts `handoff`), for the switcher's "Offered to" badge (#1284). */
+  offer: { to: SeenOwner; until: string } | null
 }
 
 type V = { v: typeof PROTOCOL_VERSION }
@@ -105,13 +120,27 @@ export type InputOutcome = 'approved' | 'denied' | 'expired' | 'answered' | 'can
 export type ServerEvent = V &
   (
     | { type: 'sessions.snapshot'; sessions: SessionSummary[] }
-    /** `budgetUsd`: what the session may spend in all (#790); absent on sessions started before it. */
-    | { type: 'session.started'; sessionId: string; origin: Origin; owner: Owner; title?: string; budgetUsd?: number }
+    /**
+     * `budgetUsd`: what the session may spend in all (#790); absent on sessions started before it.
+     * `mode` (plan 5d): how it runs, absent before 5d (classic); `modeFallback`: why a session
+     * whose mode came from the default runs classic instead of durable,
+     * as the bare reason (each surface words it).
+     */
+    | {
+        type: 'session.started'
+        sessionId: string
+        origin: Origin
+        owner: Owner
+        title?: string
+        budgetUsd?: number
+        mode?: SessionMode
+        modeFallback?: string
+      }
     | { type: 'session.owner'; sessionId: string; owner: Owner }
     /**
-     * `images`: previews of the images the user sent with the turn (#1866, images.ts); the model got the full ones.
-     * `name`: the full image, stored with the session (blobs.ts) and served by the session route, as a
-     * tool result's are; absent on turns logged before it, and when the image could not be stored.
+     * `images`: the images the user sent with the turn (#1866, images.ts), by name (#2479): the
+     * full image and its preview, stored with the session (blobs.ts) and served by the session
+     * route, as a tool result's are. Never their bytes.
      */
     | {
         type: 'user.turn'
@@ -119,7 +148,7 @@ export type ServerEvent = V &
         turnId: string
         text: string
         author: Owner
-        images?: { mediaType: 'image/png' | 'image/jpeg' | 'image/webp'; data: string; name?: string }[]
+        images?: SentImage[]
       }
     | { type: 'assistant.text.delta'; sessionId: string; messageId: string; delta: string }
     | { type: 'assistant.text.done'; sessionId: string; messageId: string }
@@ -203,6 +232,21 @@ export type ServerEvent = V &
     | { type: 'session.result'; sessionId: string; costUsd?: number; turns: number; budgetUsd?: number }
     /** The budget changed (a raise, #790), or a send was refused because it is spent. */
     | { type: 'session.budget'; sessionId: string; costUsd: number; budgetUsd: number }
+    /**
+     * #2329: someone changed a file in the session's workspace through its files
+     * route (routes/sessionFiles.ts): the panel's Files list reads again, and the
+     * feed says what arrived. `size`, `mediaType` and `sha256` are an upload's.
+     */
+    | {
+        type: 'workspace.file'
+        sessionId: string
+        path: string
+        change: 'uploaded' | 'deleted'
+        by: Owner
+        size?: number
+        mediaType?: string
+        sha256?: string
+      }
     /** `questionId`: the error refused the panel's answer to that question (#940), so its card is answerable again. */
     | { type: 'error'; sessionId?: string; code?: string; message: string; questionId?: string }
     /**

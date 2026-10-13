@@ -18,21 +18,29 @@ import type {
   FilamentOptions,
   FontCatalogue,
   FontFamily,
-  HeadlessBrowserSetting,
   HttpRequestSetting,
   ModelSetting,
   PrinterCameraSetting,
   ImageSettings,
+  WorkspaceFile,
+  WorkspaceFileList,
+  WorkspaceSettings,
   AttachmentView,
+  AiSessionEdit,
   AiSessionView,
   SessionLimits,
+  BlankTemplate,
+  SessionModeSetting,
   SessionResource,
   ResourceRef,
   InstalledFamily,
   Job,
   CatalogueLibrary,
+  DependencyReport,
   LibraryFileObjects,
+  LibraryDeleteResult,
   LibraryListing,
+  LibraryRestoreResult,
   LibraryPinRequest,
   InstalledLibrary,
   LibraryCheck,
@@ -43,6 +51,8 @@ import type {
   MigrateResult,
   ModelPatch,
   LastProject,
+  ModelProjectPut,
+  ModelProjects,
   ModelPrintChoices,
   ModelSummary,
   ModelVersion,
@@ -65,7 +75,27 @@ import type {
   PrintPage,
   PrintProgress,
   PrintCheck,
+  PreviewStarted,
+  SlicePreview,
+  TrayAssigned,
   PrintRun,
+  FlowDecided,
+  FlowDefinition,
+  FlowGrantSpec,
+  FlowGrantView,
+  FlowHostInterface,
+  FlowRegister,
+  FlowRunOptions,
+  FlowScriptCheck,
+  FlowReset,
+  FlowResetPoints,
+  FlowResetPreview,
+  FlowRun,
+  FlowRunStarted,
+  FlowRunView,
+  FlowState,
+  FlowSummary,
+  FlowVersion,
   Operation,
   OperationAccepted,
   PrintRunRequest,
@@ -87,6 +117,7 @@ import type {
   SettingsUpdate,
   SidebarLink,
   SourceCheck,
+  SourceFile,
   StoreUsage,
   UpstreamMerge,
   UpstreamStatus,
@@ -127,6 +158,13 @@ export type ThumbnailKeyed = Pick<
   ModelSummary,
   'slug' | 'version' | 'thumbnail_source' | 'thumbnail_output_id' | 'thumbnail_preview_id'
 >
+
+/** #1289 — `GET /jobs/{id}/colours.png`: tile `i` shows where `colours[i]` goes. */
+export interface ColourBreakdown {
+  image: Blob
+  colours: string[]
+  columns: number
+}
 
 /** The optional parts of a model upload besides its source (#179). */
 export interface UploadExtras {
@@ -369,6 +407,10 @@ function bambuddyUnanswered(problem: Problem): boolean {
 
 const seg = encodeURIComponent
 
+/** #2329 — a workspace file's route, each path segment encoded (under `API_BASE`). */
+const sessionFilePath = (id: string, path: string) =>
+  `/ai/sessions/${seg(id)}/files/${path.split('/').map(seg).join('/')}`
+
 /**
  * How often `runPrint` reads a running print run (#470), how many times it tries a
  * request no ScadBuddy answer described again before giving up, and how long it keeps
@@ -522,9 +564,15 @@ export async function command<T>(
   init: RequestInit = {},
   /** Where the operation is followed: the backend's, or the agent's own (`/ai/operations`, #1055). */
   operations = '/operations',
+  /**
+   * The press's key. A caller offering "Try again" after a failure passes the failed
+   * attempt's, so the retry follows a start that may have happened rather than doing it
+   * a second time; a new press gets a new one.
+   */
+  key: string = newRequestId(),
 ): Promise<T> {
   const signal = init.signal ?? undefined
-  const headers = { ...(init.headers as Record<string, string> | undefined), 'Idempotency-Key': newRequestId() }
+  const headers = { ...(init.headers as Record<string, string> | undefined), 'Idempotency-Key': key }
   const first = await reattach(() => requestWithStatus<T | OperationAccepted>(path, { ...init, headers }), signal)
   return followOperation<T>(first, signal, operations)
 }
@@ -624,6 +672,120 @@ async function followPrintRun(
 }
 
 export const api = {
+  // Flows (#1057): runs, and a person's answers and approvals for them. An answer or
+  // a decision is an operation, keyed per call (`command`); a stale one is a 409
+  // `stale-entry`.
+  listFlowRuns: (query: { session?: string; definition_id?: string } = {}) => {
+    const params = new URLSearchParams()
+    if (query.session) params.set('session', query.session)
+    if (query.definition_id) params.set('definition_id', query.definition_id)
+    const search = params.toString()
+    return request<FlowRun[]>(`/workflow-runs${search ? `?${search}` : ''}`)
+  },
+
+  getFlowRun: (id: string) => request<FlowRunView>(`/workflow-runs/${seg(id)}`),
+  /** #2477: one of a run's images, from its blob route. */
+  flowRunImageUrl: (id: string, name: string) => `${API_BASE}/workflow-runs/${seg(id)}/images/${seg(name)}`,
+
+  answerFlowRun: (id: string, callId: string, answer: string) =>
+    command<FlowDecided>(`/workflow-runs/${seg(id)}/answer`, {
+      method: 'POST',
+      body: JSON.stringify({ call_id: callId, answer }),
+    }),
+
+  decideFlowRun: (id: string, callId: string, approved: boolean, reason?: string) =>
+    command<FlowDecided>(`/workflow-runs/${seg(id)}/decide`, {
+      method: 'POST',
+      body: JSON.stringify({ call_id: callId, approved, ...(reason ? { reason } : {}) }),
+    }),
+
+  // #2350 — the Flows tab: every registered flow version, one with its script, and a
+  // run started from it. #2487: its editor's Save, check, completion, diff and restore.
+  // #2485: archived and deleted flows too with `archived`.
+  listFlows: ({ archived = false }: { archived?: boolean } = {}) =>
+    request<FlowSummary[]>(`/workflows${archived ? '?archived=true' : ''}`),
+
+  /** #2485 — archive a flow (every version): hidden, and never started until unarchived. */
+  archiveFlow: (name: string) => request<FlowState>(`/workflows/names/${seg(name)}/archive`, { method: 'POST' }),
+  unarchiveFlow: (name: string) => request<FlowState>(`/workflows/names/${seg(name)}/unarchive`, { method: 'POST' }),
+  /** #2485 — a commit removing the flow's script; its history keeps every version, and a restore brings it back. */
+  deleteFlow: (name: string) => request<FlowState>(`/workflows/names/${seg(name)}`, { method: 'DELETE' }),
+
+  /**
+   * One flow's versions, newest first: the one place the page reads them from, its git
+   * history (#2503). `GET /workflows` lists only each name's newest version.
+   */
+  listFlowVersions: (name: string) => request<FlowVersion[]>(`/workflows/names/${seg(name)}/versions`),
+
+  getFlow: (id: string) => request<FlowDefinition>(`/workflows/${seg(id)}`),
+
+  /** #2487 — the editor's Save: a new version (a commit), never an edit. A 422 lists `problems`. */
+  registerFlow: (body: FlowRegister) =>
+    request<FlowDefinition>('/workflows', { method: 'POST', body: JSON.stringify(body) }),
+
+  /** The check a registration runs, storing nothing; with the inputs schema it would be saved with (#2483). */
+  checkFlowScript: (script: string, signal?: AbortSignal, inputsSchema?: Record<string, unknown> | null) =>
+    request<FlowScriptCheck>('/workflow-script/check', {
+      method: 'POST',
+      body: JSON.stringify(inputsSchema ? { script, inputs_schema: inputsSchema } : { script }),
+      signal,
+    }),
+
+  /** What the editor completes: the host functions the check uses, and the manifest's tools. */
+  getFlowHostFunctions: () => request<FlowHostInterface>('/workflow-script/host-functions'),
+
+  getFlowVersionSource: (name: string, commit: string) =>
+    requestText(`/workflows/names/${seg(name)}/versions/${seg(commit)}/source`),
+
+  /** A new version with the script at `commit`: a new commit, type-checked first. */
+  restoreFlowVersion: (name: string, commit: string) =>
+    request<FlowDefinition>(`/workflows/names/${seg(name)}/versions/${seg(commit)}/restore`, { method: 'POST' }),
+
+  /**
+   * A start is keyed per press: a re-send after an answer that never arrived reaches the same run.
+   * `options.grant` (#2481) is approved as sent; `options.inputs` (#2483) are the run's typed
+   * inputs, and a 422 `flow-inputs` lists the ones that do not fit.
+   */
+  startFlowRun: (id: string, key: string = newRequestId(), options: FlowRunOptions = {}) =>
+    reattach(() =>
+      request<FlowRunStarted>(`/workflows/${seg(id)}/runs`, {
+        method: 'POST',
+        headers: { 'Idempotency-Key': key },
+        body: JSON.stringify(options),
+      }),
+    ),
+
+  // #2481 — a run's grant: a person approves a requested one (as asked, or edited),
+  // declines it, or revokes one. Each is final; a second answers 409 `flow-grant-state`.
+  approveFlowGrant: (id: string, spec?: FlowGrantSpec) =>
+    request<FlowGrantView>(`/workflow-runs/${seg(id)}/grant/approve`, {
+      method: 'POST',
+      body: JSON.stringify(spec ? { spec } : {}),
+    }),
+  declineFlowGrant: (id: string) =>
+    request<FlowGrantView>(`/workflow-runs/${seg(id)}/grant/decline`, { method: 'POST' }),
+  revokeFlowGrant: (id: string) =>
+    request<FlowGrantView>(`/workflow-runs/${seg(id)}/grant/revoke`, { method: 'POST' }),
+
+  /** Forgets a run: its payload key, its workflow (stopped if open) and its row. */
+  deleteFlowRun: (id: string) => request<void>(`/workflow-runs/${seg(id)}`, { method: 'DELETE' }),
+
+  getFlowResetPoints: (id: string) => request<FlowResetPoints>(`/workflow-runs/${seg(id)}/reset-points`),
+
+  previewFlowReset: (id: string, eventId: number) =>
+    request<FlowResetPreview>(`/workflow-runs/${seg(id)}/reset-preview?event_id=${eventId}`),
+
+  /** Pinned to the preview the person saw: a 409 `flow-reset-changed` carries the new one. */
+  resetFlowRun: (id: string, preview: Pick<FlowResetPreview, 'event_id' | 'as_of_event_id' | 'workflow_run_id'>) =>
+    command<FlowReset>(`/workflow-runs/${seg(id)}/reset`, {
+      method: 'POST',
+      body: JSON.stringify({
+        event_id: preview.event_id,
+        as_of_event_id: preview.as_of_event_id,
+        workflow_run_id: preview.workflow_run_id,
+      }),
+    }),
+
   listModels: () => request<ModelSummary[]>('/models'),
 
   getModel: (slug: string) => request<ModelSummary>(`/models/${seg(slug)}`),
@@ -776,6 +938,24 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ source, force, message: null }),
     }),
+
+  /** #1290 — the model's `.scad` files, `model.scad` first (`GET /models/{slug}/files`). */
+  listSourceFiles: (slug: string) => request<SourceFile[]>(`/models/${seg(slug)}/files`),
+
+  /**
+   * #1290 — writes a `.scad` file beside `model.scad` as one revision. With `base`, a
+   * 409 naming the `current` revision when the model has moved on since, writing
+   * nothing. `model.scad` itself is written with `replaceSource`.
+   */
+  writeSourceFile: (slug: string, name: string, content: string, base?: string) =>
+    command<ModelSummary>(`/models/${seg(slug)}/files/${seg(name)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ content, message: null, base: base ?? null }),
+    }),
+
+  /** #1290 — removes a `.scad` file beside `model.scad` as one revision. */
+  deleteSourceFile: (slug: string, name: string) =>
+    command<ModelSummary>(`/models/${seg(slug)}/files/${seg(name)}`, { method: 'DELETE' }),
 
 
   /**
@@ -1003,6 +1183,24 @@ export const api = {
 
   previewUrl: (jobId: string) => `${API_BASE}/jobs/${seg(jobId)}/preview.glb`,
 
+  /**
+   * #1289 — the job drawn once per colour (`GET /jobs/{id}/colours.png`): the grid, and
+   * its tiles' colours row by row with the grid's width, from the route's own headers.
+   */
+  getJobColours: async (jobId: string, view: string, signal?: AbortSignal): Promise<ColourBreakdown> => {
+    const response = await send(`${API_BASE}/jobs/${seg(jobId)}/colours.png?view=${encodeURIComponent(view)}`, {
+      headers: { Accept: 'image/png' },
+      ...(signal ? { signal } : {}),
+    })
+    if (!response.ok) throw new ApiError(await readProblem(response))
+    const colours = (response.headers.get('X-ScadBuddy-Colours') ?? '').split(',').filter(Boolean)
+    const columns = Number(response.headers.get('X-ScadBuddy-Colour-Columns'))
+    if (colours.length === 0 || !Number.isInteger(columns) || columns < 1) {
+      throw new ApiError({ title: 'The colour breakdown came without its legend', status: response.status })
+    }
+    return { image: await response.blob(), colours, columns }
+  },
+
   /** A file under a template's `ui/` (spec 2026-09-27 §4.1): pinned by revision when there is one. */
   uiFileUrl: (slug: string, version: string | undefined, path: string) =>
     `${API_BASE}/models/${seg(slug)}${version ? `/versions/${seg(version)}` : ''}/ui/${path
@@ -1018,17 +1216,25 @@ export const api = {
   backfillOutput: (outputId: string) =>
     request<Job>(`/outputs/${seg(outputId)}/backfill`, { method: 'POST' }),
 
-  /** `index` picks one of a pipeline job's outputs (spec 2026-09-27 §5.2); the first by default. */
-  createOutput: (slug: string, jobId: string, name?: string, inputs?: JsonObject, index?: number) =>
-    command<Output>(`/models/${seg(slug)}/outputs`, {
-      method: 'POST',
-      body: JSON.stringify({
-        job_id: jobId,
-        name: name ?? null,
-        ...(inputs ? { inputs } : {}),
-        ...(index !== undefined ? { index } : {}),
-      }),
-    }),
+  /**
+   * `index` picks one of a pipeline job's outputs (spec 2026-09-27 §5.2); the first by
+   * default. `key` is a retried press's (`command`), so the retry saves one output.
+   */
+  createOutput: (slug: string, jobId: string, name?: string, inputs?: JsonObject, index?: number, key?: string) =>
+    command<Output>(
+      `/models/${seg(slug)}/outputs`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          job_id: jobId,
+          name: name ?? null,
+          ...(inputs ? { inputs } : {}),
+          ...(index !== undefined ? { index } : {}),
+        }),
+      },
+      undefined,
+      key,
+    ),
 
   /** Saved inputs brought up to the template's `INPUTS_VERSION` (spec 2026-09-27 §8.2). */
   migrateInputs: (slug: string, inputs: JsonObject, version?: string) =>
@@ -1080,6 +1286,11 @@ export const api = {
 
   outputPlateThumbnailUrl: (id: string, index: number) =>
     `${API_BASE}/outputs/${seg(id)}/plates/${index}/thumbnail`,
+
+  /** #1723 — the output's preview mesh, every part in its colour. */
+  /** The output's preview mesh, or with `plate` that one plate of its 3MF (#2169). */
+  outputPreviewGlbUrl: (id: string, plate?: number) =>
+    `${API_BASE}/outputs/${seg(id)}/preview.glb${plate === undefined ? '' : `?plate=${plate}`}`,
 
   sendOutput: (id: string, body: SendRequest) =>
     command<SendResult>(`/outputs/${seg(id)}/send`, { method: 'POST', body: JSON.stringify(body) }),
@@ -1184,6 +1395,34 @@ export const api = {
     }),
 
   /**
+   * #2169 — slice the dialog's choices in the background, through the run's own path,
+   * without queueing; follow it with `getPreviewSlice`.
+   */
+  previewSlice: (outputId: string, body: PrintRunRequest) =>
+    command<PreviewStarted>(`/print/outputs/${seg(outputId)}/preview-slice`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  /** #2169 — how an output's background slice stands, and what it came to once finished. */
+  getPreviewSlice: (outputId: string, jobId: number) =>
+    request<SlicePreview>(`/print/outputs/${seg(outputId)}/preview-slices/${jobId}`),
+
+  /** #2169 — as `getPreviewSlice`, for a library file's. */
+  getLibraryPreviewSlice: (fileId: number, jobId: number) =>
+    request<SlicePreview>(`/print/library/${fileId}/preview-slices/${jobId}`),
+
+  /**
+   * #2164 — record in Bambuddy which spool is in a tray it had no spool for. Sent only
+   * on the person's own "yes".
+   */
+  assignTraySpool: (printerId: number, amsId: number, trayId: number, spoolId: number) =>
+    command<TrayAssigned>(`/print/printers/${printerId}/trays/${amsId}/${trayId}/spool`, {
+      method: 'POST',
+      body: JSON.stringify({ spool_id: spoolId }),
+    }),
+
+  /**
    * #284 — judge an output against the request the print dialog would send. Reads only:
    * nothing is uploaded, sliced or queued (`post_run`, backend/scadbuddy/api/analyzers.py).
    */
@@ -1207,9 +1446,9 @@ export const api = {
 
   /**
    * #79 — Bambuddy's projects, each with the library folder that belongs to it, plus
-   * the one the last send went to so the picker opens where it was left. ScadBuddy
-   * models no relationship between a model and a project: which prints belong to a
-   * project is on the project's own page.
+   * the one the last send went to. ScadBuddy keeps no project membership: which prints
+   * belong to a project is on the project's own page. What it remembers per model is
+   * only the default the Customize page's picker opens on (#1660).
    */
   getProjects: () => request<ProjectChoices>('/print/projects'),
 
@@ -1226,6 +1465,16 @@ export const api = {
     request<LastProject>('/print/projects/last', {
       method: 'PUT',
       body: JSON.stringify({ project_id: projectId } satisfies LastProject),
+    }),
+
+  /** #1660 — the project this model was last filed into, per preset it was generated with. */
+  getModelProjects: (slug: string) => request<ModelProjects>(`/print/models/${seg(slug)}/projects`),
+
+  /** #1660 — remember the project Generate filed this model into; a `null` project forgets it. */
+  putModelProject: (slug: string, body: ModelProjectPut) =>
+    request<ModelProjects>(`/print/models/${seg(slug)}/project`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
     }),
 
   /**
@@ -1269,18 +1518,38 @@ export const api = {
   },
 
   /** #313 — Bambuddy's folder tree and one folder's files; `all` adds sliced files and STLs. */
-  listLibrary: (query: { folderId: number | null; all: boolean }) => {
+  /** `fileId` in place of `folderId` lists the folder that file is in (#2165). */
+  listLibrary: (query: { folderId: number | null; all: boolean; fileId?: number }) => {
     const search = new URLSearchParams()
     if (query.folderId !== null) search.set('folder_id', String(query.folderId))
+    else if (query.fileId !== undefined) search.set('file_id', String(query.fileId))
     if (query.all) search.set('all', 'true')
     const suffix = search.size > 0 ? `?${search}` : ''
     return request<LibraryListing>(`/print/library${suffix}`)
   },
 
+  /** #2167 — files to Bambuddy's trash; the ones it skipped come back in `skipped`. */
+  deleteLibraryFiles: (fileIds: number[]) =>
+    command<LibraryDeleteResult>('/print/library/delete', {
+      method: 'POST',
+      body: JSON.stringify({ file_ids: fileIds }),
+    }),
+
+  /** #2167 — a delete's Undo: the files back from Bambuddy's trash. */
+  restoreLibraryFiles: (fileIds: number[]) =>
+    command<LibraryRestoreResult>('/print/library/restore', {
+      method: 'POST',
+      body: JSON.stringify({ file_ids: fileIds }),
+    }),
+
   libraryThumbnailUrl: (fileId: number) => `${API_BASE}/print/library/${fileId}/thumbnail`,
 
   libraryPlateThumbnailUrl: (fileId: number, index: number) =>
     `${API_BASE}/print/library/${fileId}/plates/${index}/thumbnail`,
+
+  /** #1723 — one plate of the library file as a preview mesh (#1753). */
+  libraryPreviewGlbUrl: (fileId: number, plate: number) =>
+    `${API_BASE}/print/library/${fileId}/preview.glb?plate=${plate}`,
 
   getLibraryPlates: (fileId: number) => request<OutputPlate[]>(`/print/library/${fileId}/plates`),
 
@@ -1326,6 +1595,13 @@ export const api = {
 
   checkLibraryPrint: (fileId: number, body: PrintRunRequest) =>
     request<PrintCheck>(`/print/library/${fileId}/check`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  /** #2169 — slice the dialog's choices for a library file in the background. */
+  previewLibrarySlice: (fileId: number, body: PrintRunRequest) =>
+    command<PreviewStarted>(`/print/library/${fileId}/preview-slice`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),
@@ -1416,6 +1692,14 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  /**
+   * #1285 — what each `include`/`use` of the saved source resolves to, a library that
+   * would provide each unresolved one, and the `font = "…"` families not installed.
+   * Read-only; nothing is cloned.
+   */
+  checkDependencies: (slug: string) =>
+    request<DependencyReport>(`/models/${seg(slug)}/dependencies`, { method: 'POST' }),
+
   /** With `index` (#217), only the invalid entry at that position of `libraries`. */
   unpinModelLibrary: (slug: string, name: string, index?: number) =>
     command<ModelSummary>(
@@ -1479,19 +1763,6 @@ export const api = {
     command<SidebarLink>('/settings/register-sidebar', { method: 'POST' }),
 
   /**
-   * The AI agent's headless browser (#349), served by the agent service under
-   * `/api/v1/ai/*`. Fails (404 or 503) when there is no agent or no AI database.
-   */
-  getHeadlessBrowserSetting: () =>
-    request<HeadlessBrowserSetting>('/ai/settings/headless-browser'),
-
-  putHeadlessBrowserSetting: (enabled: boolean) =>
-    request<HeadlessBrowserSetting>('/ai/settings/headless-browser', {
-      method: 'PUT',
-      body: JSON.stringify({ enabled }),
-    }),
-
-  /**
    * The assistant's `http_request` tool (#827), served by the agent service. On by
    * default. Fails (404 or 503) when there is no agent or no AI database.
    */
@@ -1503,9 +1774,17 @@ export const api = {
       body: JSON.stringify({ enabled }),
     }),
 
-  /** #1941 — uploads an image the user attached in the assistant panel; its message then sends the id. */
-  uploadAttachment: (image: { mediaType: string; data: string; preview: { mediaType: string; data: string } }) =>
-    request<AttachmentView>('/ai/attachments', { method: 'POST', body: JSON.stringify(image) }),
+  /**
+   * #1941 — uploads an image the user attached in the assistant panel; its message then
+   * sends the id. #2479 — as bytes: the image and its preview are two file parts, each
+   * typed, never base64 in JSON.
+   */
+  uploadAttachment: (image: { mediaType: string; blob: Blob; preview: { mediaType: string; blob: Blob } }) => {
+    const body = new FormData()
+    body.append('image', new Blob([image.blob], { type: image.mediaType }), 'image')
+    body.append('preview', new Blob([image.preview.blob], { type: image.preview.mediaType }), 'preview')
+    return request<AttachmentView>('/ai/attachments', { method: 'POST', body })
+  },
 
   /** #1941 — deletes an upload the user removed from the composer before sending it. */
   deleteAttachment: (id: string) =>
@@ -1518,6 +1797,50 @@ export const api = {
     request<ImageSettings>('/ai/settings/images', {
       method: 'PUT',
       body: JSON.stringify({ long_edge: longEdge }),
+    }),
+
+  /** #2329 — the caps on the assistant's workspace (bytes), served by the agent service. */
+  getWorkspaceSettings: () => request<WorkspaceSettings>('/ai/settings/workspace'),
+
+  putWorkspaceSettings: (caps: { file_max_bytes: number; workspace_max_bytes: number }) =>
+    request<WorkspaceSettings>('/ai/settings/workspace', { method: 'PUT', body: JSON.stringify(caps) }),
+
+  /** #2329 — the files in a session's workspace, with its usage and caps. */
+  listAiSessionFiles: (id: string) => request<WorkspaceFileList>(`/ai/sessions/${seg(id)}/files`),
+
+  /**
+   * #2329 — one workspace file's bytes. The route always answers as an attachment, so
+   * the panel fetches it and hands the blob to `downloadBlob` or an object URL.
+   */
+  getAiSessionFile: async (id: string, path: string): Promise<Blob> => {
+    const response = await send(`${API_BASE}${sessionFilePath(id, path)}`)
+    if (!response.ok) throw new ApiError(await readProblem(response))
+    return await response.blob()
+  },
+
+  /**
+   * #2329 — uploads a file into a session's workspace at `path`. A path that exists is
+   * refused (409) unless `expectedSha256` is the sha256 it has now.
+   */
+  uploadAiSessionFile: (id: string, file: File, path: string, expectedSha256?: string) => {
+    const body = new FormData()
+    body.set('file', file)
+    body.set('path', path)
+    if (expectedSha256 !== undefined) body.set('expected_sha256', expectedSha256)
+    return request<{ file: WorkspaceFile }>(`/ai/sessions/${seg(id)}/files`, { method: 'POST', body })
+  },
+
+  /** #2329 — deletes one file from a session's workspace. */
+  deleteAiSessionFile: (id: string, path: string) =>
+    request<void>(sessionFilePath(id, path), { method: 'DELETE' }),
+
+  /** Plan 5d — the mode new assistant sessions get by default, served by the agent service. */
+  getSessionMode: () => request<SessionModeSetting>('/ai/settings/session-mode'),
+
+  putSessionMode: (mode: SessionModeSetting['mode']) =>
+    request<SessionModeSetting>('/ai/settings/session-mode', {
+      method: 'PUT',
+      body: JSON.stringify({ mode }),
     }),
 
   /**
@@ -1541,6 +1864,9 @@ export const api = {
       body: JSON.stringify({ model }),
     }),
 
+  /** #1291 — New model's "Start from blank template", served by the agent service. */
+  getBlankTemplate: () => request<BlankTemplate>('/ai/templates/blank'),
+
   /** #790 — the budget and turn limit new assistant sessions get, served by the agent service. */
   getSessionLimits: () => request<SessionLimits>('/ai/settings/session-limits'),
 
@@ -1561,12 +1887,16 @@ export const api = {
       ...(options.upTo === undefined ? {} : { body: JSON.stringify({ up_to: options.upTo }) }),
     }),
 
-  /** #795 — renames a session, or marks it done; only the session's owner can. */
-  updateAiSession: (id: string, edit: { title: string } | { done: true }) =>
+  /** #795, #1885 — renames a session, marks it done, or archives or unarchives it; only the session's owner can. */
+  updateAiSession: (id: string, edit: AiSessionEdit) =>
     request<{ session: AiSessionView }>(`/ai/sessions/${encodeURIComponent(id)}`, {
       method: 'PATCH',
       body: JSON.stringify(edit),
     }),
+
+  /** #1885 — the archived sessions, newest first: the switcher's Archived view. */
+  listArchivedAiSessions: (limit: number) =>
+    request<{ sessions: AiSessionView[] }>(`/ai/sessions?archived=true&limit=${limit}`),
 
   /** #790 — adds to one session's budget; only the user can (it spends money). */
   raiseAiSessionBudget: (id: string, addUsd: number) =>
@@ -1574,6 +1904,15 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ add_usd: addUsd }),
     }),
+
+  /** #1284 — withdraws the session's live handoff offer; `cancelled` is false when there was none. */
+  cancelAiSessionOffer: (id: string) =>
+    request<{ cancelled: boolean; session: AiSessionView }>(`/ai/sessions/${encodeURIComponent(id)}/handoff`, {
+      method: 'DELETE',
+    }),
+
+  /** #1288 — one session, as the browser user sees it; 404 when it is gone or not theirs to show. */
+  getAiSession: (id: string) => request<AiSessionView>(`/ai/sessions/${encodeURIComponent(id)}`),
 
   /** #931 — what a session's tool calls created, changed or deleted, oldest first. */
   listAiSessionResources: (id: string) =>

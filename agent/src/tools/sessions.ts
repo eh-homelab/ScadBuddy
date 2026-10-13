@@ -13,7 +13,7 @@ import type { LoggedEvent } from '../sessions/eventLog.js'
 import { MESSAGE_ID_MAX } from '../sessions/forkPoint.js'
 import { SessionError, type SessionManager, type Turn, type TurnOutcome } from '../sessions/manager.js'
 import { ID_MAX, LOOKUP_TYPES } from '../sessions/touched.js'
-import { type Origin, ORIGINS, type Owner, ownerSeenBy, SESSION_STATUSES, type SeenOwner } from '../sessions/protocol.js'
+import { type Origin, ORIGINS, type Owner, ownerSeenBy, SESSION_MODES, SESSION_STATUSES, type SeenOwner } from '../sessions/protocol.js'
 import { IMAGE_REFS_DESCRIPTION, ImageRefsSchema, resolveSendImages } from './imageRefs.js'
 import { defineTool, json, type Tool, type ToolContext, ToolError } from './registry.js'
 
@@ -329,9 +329,15 @@ export const sessionTools: Tool[] = [
     description:
       'List the agent sessions this caller may see (its own, those it started, and those offered to it, flagged ' +
       'offered_to_you), newest first: id, title, origin, owner ("controlled by"), any pending handoff offer, ' +
-      'status, turns and cost. With `resource`, only the sessions whose tool calls touched it (sessions_resources).',
+      'status, turns and cost. With `resource`, only the sessions whose tool calls touched it (sessions_resources). ' +
+      'Archived sessions (put away by the user, read-only: a send or handoff is refused, a fork is not) are left out ' +
+      'unless `archived` asks for them; each row says whether it is archived.',
     input: z.object({
       status: z.enum(SESSION_STATUSES).optional(),
+      archived: z
+        .enum(['only', 'include'])
+        .optional()
+        .describe('Archived sessions: `only` lists just them, `include` lists them with the rest. Omitted, they are left out.'),
       origin: z.enum(ORIGINS).optional(),
       limit: z.number().int().min(1).max(MAX_EVENTS).default(50),
       resource: z
@@ -344,10 +350,11 @@ export const sessionTools: Tool[] = [
     }),
     risk: 'read',
     routes: [],
-    handler: async ({ status, origin, limit, resource }, ctx) => {
+    handler: async ({ status, archived, origin, limit, resource }, ctx) => {
       const sessions = await refusals(() =>
         manager(ctx).list(ownerOf(ctx.principal), {
           ...(status ? { status } : {}),
+          ...(archived ? { archived } : {}),
           ...(origin ? { origin } : {}),
           ...(resource ? { resource } : {}),
           limit,
@@ -363,9 +370,13 @@ export const sessionTools: Tool[] = [
       "Start a ScadBuddy agent session owned by this caller, optionally with its first message. The session's " +
       "tools run with this caller's tiers; an outward action waits for a decision: a human's in the ScadBuddy UI, " +
       'or sessions_approve/sessions_deny from a token holding the approval grant. ' +
-      'Returns the session and, with a prompt, the turn; read the reply with sessions_get or sessions_attach.',
+      'Returns the session and, with a prompt, the turn; read the reply with sessions_get or sessions_attach. ' +
+      '`mode` picks classic or durable; omitted, the default in ScadBuddy Settings applies, and `mode_fallback` ' +
+      'says why a default durable session runs classic.',
     input: z.object({
       prompt: z.string().min(1).max(MESSAGE_MAX).optional().describe('The first user message.'),
+      // #2477: references only, as sessions_send's, sent with the prompt.
+      images: ImageRefsSchema.optional().describe(`With \`prompt\`: ${IMAGE_REFS_DESCRIPTION}`),
       title: z.string().max(200).optional(),
       tags: z.array(z.string().min(1).max(50)).max(10).optional(),
       scope: z
@@ -376,28 +387,56 @@ export const sessionTools: Tool[] = [
         })
         .optional()
         .describe('What the session is about (spec §6 "scope"), recorded with it.'),
+      mode: z
+        .enum(SESSION_MODES)
+        .optional()
+        .describe(
+          'classic runs in the agent service; durable runs as a Temporal workflow that survives restarts. ' +
+            'Asked for, durable is refused when it cannot run now; omitted, the default applies.',
+        ),
       wait_seconds: waitSeconds,
     }),
     risk: 'write',
     routes: [],
     source: TRANSCRIPT_SOURCE,
-    summarize: ({ title, prompt }) => `start a session${title ? ` "${title}"` : ''}${prompt ? ' with a prompt' : ''}`,
+    summarize: ({ title, prompt, images }) =>
+      `start a session${title ? ` "${title}"` : ''}${prompt ? ' with a prompt' : ''}${images ? ` and ${images.length} image${images.length === 1 ? '' : 's'}` : ''}`,
     waitsMs: ({ wait_seconds }) => wait_seconds * 1000,
-    handler: async ({ prompt, title, tags, scope, wait_seconds }, ctx) => {
+    handler: async ({ prompt, images, title, tags, scope, mode, wait_seconds }, ctx) => {
       const sessions = manager(ctx)
-      const { session, turn } = await refusals(() =>
+      if (images && prompt === undefined) throw new ToolError('images are sent with a prompt: give the prompt too', 400)
+      const owner = ownerOf(ctx.principal)
+      const attachments = ctx.attachments ? { store: ctx.attachments, owner } : undefined
+      const resolved = images ? await resolveSendImages(images, ctx.backend, attachments, ctx.flowImages) : undefined
+      const { session, turn, modeFallback } = await refusals(() =>
         sessions.start(ownerOf(ctx.principal), {
           origin: originOf(ctx.principal),
           ...(title === undefined ? {} : { title }),
           ...(tags === undefined ? {} : { tags }),
           ...(scope === undefined ? {} : { scope }),
+          ...(mode === undefined ? {} : { mode }),
           ...(prompt === undefined ? {} : { prompt, tiers: ctx.principal.tiers }),
+          ...(resolved ? { images: resolved.images } : {}),
+          // A flow run's call (#2481): its turn is the run's, so the run's grant may cover it.
+          ...(prompt !== undefined && ctx.flowTurn ? { flow: ctx.flowTurn } : {}),
         }),
       )
-      if (!turn) return json({ session: sessionView(session, viewerOf(ctx)) })
+      if (resolved?.attached.length) {
+        await ctx.attachments?.claim(session.id, owner, resolved.attached).catch((err: unknown) => {
+          console.error(`sessions_start: session ${session.id}: could not move its attachments: ${err instanceof Error ? err.message : String(err)}`)
+        })
+      }
+      const fellBack = modeFallback ? { mode_fallback: modeFallback } : {}
+      if (!turn) return json({ session: sessionView(session, viewerOf(ctx)), ...fellBack })
       const outcome = await waitFor(turn, wait_seconds, ctx)
       const now = await refusals(() => sessions.get(session.id, ownerOf(ctx.principal)))
-      return json({ session: sessionView(now, viewerOf(ctx)), turn_id: turn.turnId, turn: outcomeView(outcome), after_seq: 0 })
+      return json({
+        session: sessionView(now, viewerOf(ctx)),
+        turn_id: turn.turnId,
+        turn: outcomeView(outcome),
+        after_seq: 0,
+        ...fellBack,
+      })
     },
   }),
 
@@ -434,9 +473,13 @@ export const sessionTools: Tool[] = [
       // Resolved after the session check, so a caller cannot use an unknown session to probe images.
       // An `attachment` resolves only for the principal that uploaded it (#1941).
       const attachments = ctx.attachments ? { store: ctx.attachments, owner } : undefined
-      const resolved = images ? await resolveSendImages(images, ctx.backend, attachments) : undefined
+      const resolved = images ? await resolveSendImages(images, ctx.backend, attachments, ctx.flowImages) : undefined
       const turn = await refusals(() =>
-        sessions.send(session_id, owner, text, { tiers: ctx.principal.tiers, ...(resolved ? { images: resolved.images } : {}) }),
+        sessions.send(session_id, owner, text, {
+          tiers: ctx.principal.tiers,
+          ...(resolved ? { images: resolved.images } : {}),
+          ...(ctx.flowTurn ? { flow: ctx.flowTurn } : {}),
+        }),
       )
       // The turn has the bytes; the uploads move into the session (attachments/store.ts `claim`).
       // A failed move is not the send's: the turn runs, and the staging rows expire.
@@ -563,6 +606,9 @@ export const sessionTools: Tool[] = [
         manager(ctx).fork(session_id, ownerOf(ctx.principal), {
           ...(title === undefined ? {} : { title }),
           ...(up_to === undefined ? {} : { upTo: up_to }),
+          // Recorded like the HTTP route's fork (#2159): a harness call (in-process or a
+          // durable activity) as `harness`, anything else as `mcp`.
+          audit: { surface: ctx.gate === undefined ? 'mcp' : 'harness', clientIp: ctx.principal.clientIp },
         }),
       )
       return json(sessionView(child, viewerOf(ctx)))

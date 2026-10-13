@@ -182,6 +182,17 @@ class OperationEvent(BaseEvent):
     subject: str
 
 
+class FlowRunEvent(BaseEvent):
+    """A flow run (#1057, spec 2026-10-01 §7.3) started, moved or ended: re-read
+    ``GET /workflow-runs/{run_id}``. Published on ``workflow-runs`` and
+    ``workflow-run:<run id>``."""
+
+    kind: Literal["flow_run.changed"] = "flow_run.changed"
+    run_id: str
+    definition_id: str
+    status: str
+
+
 class ActivityEvent(BaseEvent):
     """An activity row changed (spec 2026-10-09): re-read ``GET /activity/{id}``."""
 
@@ -235,6 +246,7 @@ SettingsSection = Literal[
     "printer_bed_type",
     "printer_rack_algorithm",
     "last_project",
+    "model_project",
     "remembered",
 ]
 
@@ -313,6 +325,7 @@ Event = Annotated[
     | PrintEvent
     | PrintRunEvent
     | OperationEvent
+    | FlowRunEvent
     | ActivityEvent
     | AgentOperationEvent
     | LibraryChanged

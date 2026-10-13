@@ -4,6 +4,7 @@ import { committed, touchAfterRender, waitFor } from '../agent/highlight'
 import { AgentToolError } from '../agent/types'
 import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
 import { api, ApiError } from '../api/client'
+import { missingFonts } from '../lib/fonts'
 import type { Output, Param, ParamValue, Plate } from '../api/types'
 import { ResourceSessions } from '../components/assistant/ResourceSessions'
 import { ActionBar, type ActionBarHandle } from '../components/ActionBar'
@@ -282,6 +283,15 @@ export function CustomizePage() {
   useEffect(() => {
     if (presetElsewhere) setPresetElsewhere(null)
   }, [presetElsewhere])
+  /** #1660 — the preset the picker has selected, which the Project picker follows. */
+  const [presetInUse, setPresetInUse] = useState<{ id: string; name: string } | null>(null)
+  const onPresetSelected = useCallback(
+    (preset: { id: string; name: string } | null) =>
+      setPresetInUse((current) =>
+        current?.id === preset?.id && current?.name === preset?.name ? current : preset && { id: preset.id, name: preset.name },
+      ),
+    [],
+  )
   /** #350 — counts resets to the defaults, which leave no preset selected. */
   const [resets, setResets] = useState(0)
   const inputs = useMemo(() => joinInputs(values, extra), [values, extra])
@@ -356,6 +366,8 @@ export function CustomizePage() {
     jobFor,
     stage: renderStage,
   } = useRenderJob(slug, settled && seed && !invalid ? debounced : undefined, version, extra)
+  // One object per refusal, so a font field's install error answers this one only (#2215).
+  const fontRefusal = useMemo(() => missingFonts(renderError), [renderError])
   // #1293 — a render still running or one that failed links to its workflow in the
   // Temporal UI, when Settings knows where that is.
   const settings = useAsync(() => api.getSettings(), []).data
@@ -907,6 +919,7 @@ export function CustomizePage() {
       viewSize={viewSize}
       cameraView={cameraView}
       model={modelState.data}
+      preset={presetInUse}
       onModelChanged={modelState.setData}
       extra={extra}
       fit={fit}
@@ -938,6 +951,7 @@ export function CustomizePage() {
       pinned={version !== undefined}
       resetKey={resets}
       selected={presetElsewhere}
+      onSelected={onPresetSelected}
     />
   )
   const templateUi = customUi && (
@@ -1200,6 +1214,11 @@ export function CustomizePage() {
               reveal={reveal}
               rendered={renderedOutput}
               growsWithPage={!full}
+              missingFonts={fontRefusal}
+              onFontInstalled={() => {
+                fontsState.reload()
+                retryRender()
+              }}
               toolbar={
                 <>
                   {full && <FlyoutHeader ref={flyoutClose} onClose={closeFlyout} />}
@@ -1216,6 +1235,7 @@ export function CustomizePage() {
                     pinned={version !== undefined}
                     resetKey={resets}
                     selected={presetElsewhere}
+                    onSelected={onPresetSelected}
                   />
                 </>
               }

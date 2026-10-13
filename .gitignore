@@ -223,3 +223,6 @@ __marimo__/
 backend/openapi.json
 frontend/src/api/schema.d.ts
 agent/src/api/schema.d.ts
+
+# Playwright MCP session output
+.playwright-mcp/

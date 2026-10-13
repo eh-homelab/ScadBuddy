@@ -101,6 +101,7 @@ Operation = Literal[
     "external_links.list",
     "external_links.update",
     "library.annotate",
+    "library.bulk_delete",
     "library.delete",
     "library.download",
     "library.filament_requirements",
@@ -109,10 +110,12 @@ Operation = Literal[
     "library.folders.by_project",
     "library.folders.create",
     "library.folders.list",
+    "library.folders.read",
     "library.listing",
     "library.plate_thumbnail",
     "library.plates",
     "library.thumbnail",
+    "library.trash.restore",
     "library.upload",
     "media.download",
     "media.photo",
@@ -140,6 +143,7 @@ Operation = Literal[
     "slice.start",
     "slicer.local_presets",
     "slicer.presets",
+    "spools.assign",
     "spools.assignments",
     "spools.filament_presets",
     "spools.list",
@@ -426,6 +430,28 @@ class BambuddyClient:
             params={"printer_id": printer_id} if printer_id is not None else None,
         )
         return [SpoolAssignment.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def assign_spool(
+        self, *, spool_id: int, printer_id: int, ams_id: int, tray_id: int
+    ) -> SpoolAssignment:
+        """``POST /api/v1/inventory/assignments``: record that ``spool_id`` is in the
+        tray (#2164). Only on a person's confirmation in the print dialog. Bambuddy also
+        configures the tray over MQTT from the spool, as its own Assign does."""
+        what = f"assign spool {spool_id} to printer {printer_id}'s tray"
+        response = await self._send(
+            "POST",
+            "/inventory/assignments",
+            scope=Scope.MANAGE_INVENTORY,
+            operation="spools.assign",
+            what=what,
+            json={
+                "spool_id": spool_id,
+                "printer_id": printer_id,
+                "ams_id": ams_id,
+                "tray_id": tray_id,
+            },
+        )
+        return SpoolAssignment.model_validate(response.json())
 
     async def inventory_remain(self, printer_id: int) -> InventoryRemain:
         """Per-loaded-slot remaining grams, flat tray id and feeding extruder."""
@@ -714,6 +740,18 @@ class BambuddyClient:
         )
         return [Folder.model_validate(row) for row in self._rows(response, what=what)]
 
+    async def folder(self, folder_id: int) -> Folder:
+        """``GET /api/v1/library/folders/{id}`` — one folder, 404 "Folder not found" when
+        Bambuddy cannot see it (#2263)."""
+        response = await self._send(
+            "GET",
+            f"/library/folders/{folder_id}",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="library.folders.read",
+            what=f"read library folder {folder_id}",
+        )
+        return Folder.model_validate(response.json())
+
     async def create_folder(self, folder: FolderCreate) -> Folder:
         """``POST /api/v1/library/folders/`` — the trailing slash is the write route."""
         response = await self._send(
@@ -852,13 +890,55 @@ class BambuddyClient:
         )
         return LibraryFile.model_validate(response.json())
 
-    async def delete_library_file(self, file_id: int) -> None:
-        await self._send(
+    async def delete_library_file(self, file_id: int) -> bool:
+        """``DELETE /library/files/{id}``: moves the file to Bambuddy's trash, and says
+        so as ``trashed``. An external file skips the trash (``trashed: false``): its
+        record is dropped for good (Bambuddy's ``openapi.json``, read 2026-10-10, #2167)."""
+        response = await self._send(
             "DELETE",
             f"/library/files/{file_id}",
             scope=Scope.MANAGE_LIBRARY,
             operation="library.delete",
             what=f"delete library file {file_id}",
+        )
+        try:
+            body = response.json()
+        except ValueError:
+            return True
+        return not (isinstance(body, dict) and body.get("trashed") is False)
+
+    async def bulk_delete_library_files(self, file_ids: list[int]) -> int:
+        """``POST /library/bulk-delete`` (``BulkDeleteRequest``): each file to the trash,
+        as :meth:`delete_library_file` does. Bambuddy skips a file the key's user does
+        not own (without ``*_all``) and answers only how many it deleted
+        (``BulkDeleteResponse.deleted_files``), so the caller reads which it skipped."""
+        what = f"delete {len(file_ids)} library files"
+        response = await self._send(
+            "POST",
+            "/library/bulk-delete",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="library.bulk_delete",
+            what=what,
+            json={"file_ids": file_ids, "folder_ids": []},
+        )
+        body = response.json()
+        deleted = body.get("deleted_files") if isinstance(body, dict) else None
+        if not isinstance(deleted, int):
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Bambuddy did not say how many files it deleted when asked to {what}",
+            )
+        return deleted
+
+    async def restore_library_file(self, file_id: int) -> None:
+        """``POST /library/trash/{id}/restore``: a trashed file back where it was. A file
+        not in the trash (an external one, or one already purged) is the 404."""
+        await self._send(
+            "POST",
+            f"/library/trash/{file_id}/restore",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="library.trash.restore",
+            what=f"restore library file {file_id} from Bambuddy's trash",
         )
 
     # --- slice ---------------------------------------------------------------

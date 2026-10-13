@@ -26,6 +26,7 @@ from scadbuddy.render.bambu3mf import (
     PLATE_THUMBNAIL,
     PLATE_THUMBNAIL_SMALL,
     PLATE_TOP,
+    PRESET_PLACEHOLDER,
     PRODUCTION_NS,
     ArchiveTooLargeError,
     PlateParts,
@@ -39,6 +40,7 @@ from scadbuddy.render.bambu3mf import (
     plate_settings,
     plates_of,
     replate_3mf,
+    single_plate,
     state_nozzles,
     stl_3mf,
     write_bambu_3mf,
@@ -47,7 +49,7 @@ from scadbuddy.render.bambu3mf import (
 from scadbuddy.render.geometry import parts_from_3mf
 from scadbuddy.render.jobs import MAX_PLATES
 from scadbuddy.render.plate import DEFAULT_PLATE, PlateFitError, PlateGeometry, plate_for
-from scadbuddy.render.split import ColourPart
+from scadbuddy.render.split import ColourPart, Paint
 from scadbuddy.render.thumbnail import (
     PLATE_PNG_SIZE,
     PLATE_SMALL_PNG_SIZE,
@@ -157,6 +159,46 @@ def test_project_settings_carry_the_prime_tower_corner(written: Path) -> None:
         settings = json.loads(archive.read("Metadata/project_settings.config"))
     assert settings["wipe_tower_x"] == ["98"]
     assert settings["wipe_tower_y"] == ["5"]
+
+
+def _settings_of(out: Path) -> dict[str, object]:
+    with zipfile.ZipFile(out) as archive:
+        settings: dict[str, object] = json.loads(archive.read("Metadata/project_settings.config"))
+    return settings
+
+
+def test_a_render_states_no_material(written: Path) -> None:
+    """ScadBuddy does not know what a render prints in: it names no material rather
+    than invent one."""
+    assert "filament_type" not in _settings_of(written)
+
+
+def test_materials_known_for_every_slot_are_stated_in_slot_order(tmp_path: Path) -> None:
+    """Bambuddy's slice dialog picks each slot's filament preset by ``filament_type``;
+    without one it picks Bambu ABS for an arranged PLA keychain."""
+    parts = _parts()
+    out = tmp_path / "arranged.3mf"
+    write_plates_3mf(
+        [single_plate(parts)],
+        [p.colour for p in parts],
+        out,
+        thumbnails=None,
+        materials={"#1F6FEB": "PETG", "#FF6AC1": "PLA", "#000000": "ABS"},
+    )
+    assert _settings_of(out)["filament_type"] == ["PLA", "PETG"]
+
+
+def test_a_slot_of_unknown_material_states_none_for_any_slot(tmp_path: Path) -> None:
+    parts = _parts()
+    out = tmp_path / "arranged.3mf"
+    write_plates_3mf(
+        [single_plate(parts)],
+        [p.colour for p in parts],
+        out,
+        thumbnails=None,
+        materials={"#FF6AC1": "PLA"},
+    )
+    assert "filament_type" not in _settings_of(out)
 
 
 def test_a_single_colour_model_gets_no_prime_tower(tmp_path: Path) -> None:
@@ -442,13 +484,43 @@ def test_an_archive_over_the_total_cap_is_not_statable(written: Path) -> None:
 
 def _saved_by_an_author(payload: bytes) -> bytes:
     """``payload`` as Bambu Studio saves a project: its settings name a real printer
-    preset rather than ScadBuddy's placeholder."""
+    and process preset rather than ScadBuddy's placeholder."""
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         settings = json.loads(archive.read("Metadata/project_settings.config"))
     settings["printer_settings_id"] = "Bambu Lab H2C 0.4 nozzle"
+    settings["print_settings_id"] = "0.20mm Standard @BBL H2C"
     return _with_entries(
         payload, {"Metadata/project_settings.config": json.dumps(settings).encode()}
     )
+
+
+def test_a_3mf_laid_out_for_a_printer_names_it_as_bambu_studio_does(tmp_path: Path) -> None:
+    """Bambuddy's slice dialog pre-picks the printer by this name; with ScadBuddy's
+    placeholder it took the first one it lists."""
+    out = _write(tmp_path / "a1.3mf", covers=False, plate=plate_for("A1"))
+    settings = _settings_of(out)
+    assert settings["printer_settings_id"] == "Bambu Lab A1 0.4 nozzle"
+    # Still ScadBuddy's own layout, to re-place for another printer.
+    assert layout_of(out.read_bytes()) == "scadbuddy"
+
+
+def test_re_placing_names_the_new_printer_and_nozzle(written: Path) -> None:
+    payload = written.read_bytes()
+    named = replate_3mf(payload, plate_for("H2C"), nozzle_diameter="0.2")
+    assert _settings_of_bytes(named)["printer_settings_id"] == "Bambu Lab H2C 0.2 nozzle"
+    # Moved to another printer: named for it, at the nozzle the file states.
+    moved = replate_3mf(named, plate_for("A1"))
+    assert _settings_of_bytes(moved)["printer_settings_id"] == "Bambu Lab A1 0.2 nozzle"
+    # The fallback plate is no printer.
+    assert _settings_of_bytes(replate_3mf(named, DEFAULT_PLATE))["printer_settings_id"] == (
+        PRESET_PLACEHOLDER
+    )
+
+
+def _settings_of_bytes(payload: bytes) -> dict[str, object]:
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        settings: dict[str, object] = json.loads(archive.read("Metadata/project_settings.config"))
+    return settings
 
 
 def test_a_3mf_is_laid_out_by_scadbuddy_by_its_author_or_as_it_is(written: Path) -> None:
@@ -1154,21 +1226,48 @@ def test_a_model_file_s_meshes_are_read_into_arrays_and_left_out_of_the_tree() -
     assert mesh.faces.tolist() == [[0, 1, 2], [2, 1, 0], [0, 2, 1]]
     assert [mesh.pids[i] if i >= 0 else None for i in mesh.pid] == [None, "5", "7"]
     assert mesh.p1.tolist() == [-1, 1, -1]
-    assert not mesh.painted
+    assert mesh.paint is None and not mesh.prusa_painted
 
 
-@pytest.mark.parametrize("attribute", ['paint_color="8"', 'mmu_segmentation="4"'])
-def test_a_painted_triangle_marks_its_mesh(attribute: str) -> None:
-    namespace = 'xmlns:s="http://schemas.slic3r.org/3mf/2017/06" '
-    attribute = attribute if attribute.startswith("paint") else f"{namespace}s:{attribute}"
+def test_a_painted_mesh_keeps_each_triangles_paint_code() -> None:
+    # The first triangle is unpainted: a mesh's codes start once one is painted (#1965).
     archive = _model_zip(
-        '<object id="1"><mesh><vertices><vertex x="0" y="0" z="0"/></vertices>'
-        f'<triangles><triangle v1="0" v2="0" v3="0" {attribute}/></triangles></mesh></object>'
+        '<object id="1"><mesh><vertices><vertex x="0" y="0" z="0"/></vertices><triangles>'
+        '<triangle v1="0" v2="0" v3="0"/><triangle v1="0" v2="0" v3="0" paint_color="8"/>'
+        '<triangle v1="0" v2="0" v3="0"/></triangles></mesh></object>'
     )
 
     (mesh,) = parse_model(archive, "3D/3dmodel.model").meshes.values()
 
-    assert mesh.painted
+    assert mesh.paint == ("", "8", "") and not mesh.prusa_painted
+
+
+def test_a_paint_code_past_its_cap_is_refused_as_it_is_parsed() -> None:
+    # The archive cap bounds a code's bytes, not what decoding one costs: refused while
+    # parsing, before any decode sees it (#1965).
+    from scadbuddy.render.paint import MAX_CODE_DIGITS
+
+    archive = _model_zip(
+        '<object id="1"><mesh><vertices><vertex x="0" y="0" z="0"/></vertices><triangles>'
+        f'<triangle v1="0" v2="0" v3="0" paint_color="{"4" * (MAX_CODE_DIGITS + 1)}"/>'
+        "</triangles></mesh></object>"
+    )
+
+    with pytest.raises(ValueError, match="paint_color"):
+        parse_model(archive, "3D/3dmodel.model")
+
+
+def test_prusaslicer_painting_marks_its_mesh() -> None:
+    archive = _model_zip(
+        '<object id="1"><mesh><vertices><vertex x="0" y="0" z="0"/></vertices>'
+        '<triangles><triangle v1="0" v2="0" v3="0"'
+        ' xmlns:s="http://schemas.slic3r.org/3mf/2017/06" s:mmu_segmentation="4"/>'
+        "</triangles></mesh></object>"
+    )
+
+    (mesh,) = parse_model(archive, "3D/3dmodel.model").meshes.values()
+
+    assert mesh.prusa_painted and mesh.paint is None
 
 
 def test_a_model_file_past_its_cap_is_refused_whatever_its_header_says() -> None:
@@ -1292,3 +1391,26 @@ def test_a_mesh_inside_a_mesh_is_refused() -> None:
 
     with pytest.raises(ValueError, match="inside another"):
         parse_model(archive, "3D/3dmodel.model")
+
+
+@pytest.mark.parametrize(
+    ("painted_in", "tower"),
+    [
+        pytest.param(LID, False, id="its-own-filament"),
+        pytest.param("#FF6AC1", True, id="another-filament"),
+    ],
+)
+def test_a_painting_needs_a_tower_only_in_a_filament_the_plate_does_not_use(
+    tmp_path: Path, painted_in: str, tower: bool
+) -> None:
+    """#2108: one part, painted all over (state 1 is whole-triangle ``4``) in its own
+    filament, uses one filament and needs no tower; in another, it uses two."""
+    mesh = trimesh.creation.box(extents=(20, 20, 4))
+    paint = Paint(("4",) * len(mesh.faces), (painted_in,))
+    part = ColourPart(1, "Lid", LID, mesh, paint=paint)
+    colours = [LID] if painted_in == LID else [LID, painted_in]
+    out = tmp_path / "painted.3mf"
+    write_plates_3mf([PlateParts((part,), (1,))], colours, out, thumbnails=None)
+    with zipfile.ZipFile(out) as archive:
+        settings = json.loads(archive.read("Metadata/project_settings.config"))
+    assert ("wipe_tower_x" in settings) is tower

@@ -7,24 +7,24 @@ import asyncio
 import contextlib
 import uuid
 from collections.abc import AsyncIterator, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 from temporalio import activity
 from temporalio.api.enums.v1 import EventType
 from temporalio.client import Client, WorkflowFailureError
-from temporalio.common import WorkflowIDReusePolicy
+from temporalio.common import RetryPolicy, WorkflowIDReusePolicy
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
-from temporalio.worker import Worker
+from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
 from scadbuddy.bambuddy.errors import SCOPE_PROBLEM, UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.runs import PrintRunError
 from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.kinds import CHECK_ON_BAMBUDDY, OperationKind, waiting_on_bambuddy
 from scadbuddy.operations.store import Operation
-from scadbuddy.workflows import operation_activities
+from scadbuddy.workflows import operation, operation_activities
 from scadbuddy.workflows.commands import start_command
 from scadbuddy.workflows.operation import OperationWorkflow
 from scadbuddy.workflows.operation_activities import _kind_activities
@@ -40,6 +40,7 @@ from scadbuddy.workflows.print_models import FAILED, REFUSED
 from scadbuddy.workflows.problems import (
     OPERATION_CANCELLED,
     OPERATION_CANCELLED_RUNNING,
+    OPERATION_CHECK_TIMED_OUT,
     OPERATION_UNEXPECTED_DETAIL,
     OPERATION_UNEXPECTED_RUNNING_DETAIL,
     problem_of,
@@ -328,6 +329,35 @@ async def test_a_cancel_during_the_check_answers_the_update_before_the_execution
         assert fake.calls == ["check"]
     finally:
         fake.check_gate.set()
+
+
+async def test_a_check_no_attempt_of_which_answered_is_a_timeout_not_an_unexpected_failure(
+    client: Client, fake: Fake, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2065: a check whose every attempt hit the activity's own timeout answers a 504
+    that says nothing was done, not "failed unexpectedly". Unsandboxed, so the shorter
+    timeout patched here is the one the workflow reads."""
+    monkeypatch.setattr(operation, "CHECK_TIMEOUT", timedelta(seconds=1))
+    monkeypatch.setattr(operation, "READ_RETRY", RetryPolicy(maximum_attempts=2))
+    fake.check_gate = asyncio.Event()
+    queue = f"op-{uuid.uuid4().hex[:8]}"
+    arg = op_input()
+    try:
+        async with Worker(
+            client,
+            task_queue=queue,
+            workflows=[OperationWorkflow],
+            activities=fake.all(),
+            workflow_runner=UnsandboxedWorkflowRunner(),
+        ):
+            answer = await start(client, queue, arg)
+            assert answer.operation is None
+            assert answer.refusal == OPERATION_CHECK_TIMED_OUT
+            with pytest.raises(WorkflowFailureError):
+                await ended(client, arg)
+    finally:
+        fake.check_gate.set()
+    assert fake.calls == ["check", "check"]
 
 
 async def test_a_cancel_during_the_insert_still_records_and_ends_the_operation(

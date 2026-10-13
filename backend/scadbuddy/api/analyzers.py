@@ -59,6 +59,7 @@ from scadbuddy.api.deps import (
     OutputsDep,
     PathsDep,
     SettingsStoreDep,
+    StateDep,
     UploadsDep,
 )
 from scadbuddy.api.models import require_model_exists
@@ -72,6 +73,7 @@ from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputMeta, OutputStore, require_output
 from scadbuddy.library.settings_store import ModelPrintChoices, SettingsStore, StoredSettings
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
+from scadbuddy.render.read_budget import ReadBudget, budget_of
 from scadbuddy.render.schema import ParamValue
 
 logger = logging.getLogger(__name__)
@@ -297,6 +299,7 @@ async def _context(
     store: SettingsStore,
     uploads: BambuddyUploadStore,
     paths: DataPaths,
+    budget: ReadBudget,
 ) -> AnalysisContext:
     slug, params, meta = await asyncio.to_thread(_subject, target, outputs, catalogue)
     settings = store.load()
@@ -318,6 +321,7 @@ async def _context(
         remembered=remembered,
         library_subject=target.library_file_id,
         cache=paths.cache,
+        budget=budget,
     )
 
 
@@ -415,6 +419,7 @@ async def post_run(
     decisions: DecisionsDep,
     check: ParamsCheckDep,
     paths: PathsDep,
+    state: StateDep,
 ) -> AnalysisReport:
     """Judge an output or a configuration against the print request it would go out
     with (the spool-first base, #335: printer, filament plan, nozzles, quality, plate).
@@ -432,7 +437,10 @@ async def post_run(
     ``decisions_available`` is false and ``decisions_reason`` says why.
     """
     await check(body.target)
-    context = await _context(body.target, body.request, outputs, catalogue, store, uploads, paths)
+    budget = budget_of(state.settings, body.request.read_budget)
+    context = await _context(
+        body.target, body.request, outputs, catalogue, store, uploads, paths, budget
+    )
     try:
         stored = await asyncio.to_thread(decisions.list, scopes=context.scopes())
     except DATABASE_ERRORS as error:
@@ -458,12 +466,16 @@ async def post_preview(
     store: SettingsStoreDep,
     check: ParamsCheckDep,
     paths: PathsDep,
+    state: StateDep,
 ) -> FixPreview:
     """The fix's whole diff, where each line would land, whether it can be applied yet,
     and the fingerprint an apply confirms against (diff, scope, subject and base).
     Changes nothing."""
     await check(body.target)
-    context = await _context(body.target, body.request, outputs, catalogue, store, uploads, paths)
+    budget = budget_of(state.settings, body.request.read_budget)
+    context = await _context(
+        body.target, body.request, outputs, catalogue, store, uploads, paths, budget
+    )
     diagnostic, fix = _find_fix(context, body)
     scope = _fix_scope(context, diagnostic, body.scope)
     blockers = fix.blockers
@@ -491,6 +503,7 @@ async def post_apply(
     events: EventsDep,
     check: ParamsCheckDep,
     paths: PathsDep,
+    state: StateDep,
 ) -> Decision:
     """Record the fix as accepted at ``scope``: its diff joins the effective diff
     (``accepted_changes``) of every later run in that scope while the diff is unchanged.
@@ -507,7 +520,10 @@ async def post_apply(
     items in ``to_verify``); no ``confirm: true`` (428, ``confirmation-required``).
     """
     await check(body.target)
-    context = await _context(body.target, body.request, outputs, catalogue, store, uploads, paths)
+    budget = budget_of(state.settings, body.request.read_budget)
+    context = await _context(
+        body.target, body.request, outputs, catalogue, store, uploads, paths, budget
+    )
     diagnostic, fix = _find_fix(context, body)
     scope = _fix_scope(context, diagnostic, body.scope)
     if _fingerprint(context, diagnostic, fix, scope) != body.fingerprint:

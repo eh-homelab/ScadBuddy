@@ -14,7 +14,7 @@ import pytest
 from scadbuddy.bambuddy.models import NozzleChoice, SlotChoice
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import ModelPrintChoices, SettingsStore
-from scadbuddy.render.pg_store import MIGRATIONS_DIR
+from scadbuddy.render.pg_store import MIGRATIONS, MIGRATIONS_DIR, migrate
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS
 
 pytestmark = pytest.mark.requires_postgres
@@ -118,13 +118,14 @@ def _rows(conn: psycopg.Connection[Any]) -> list[Any]:
     ).fetchall()
 
 
-def test_the_migration_moves_every_library_row_and_is_idempotent(
-    store: SettingsStore, pg_conninfo: str
-) -> None:
+def test_the_migration_moves_every_library_row_and_is_idempotent(pg_conninfo: str) -> None:
     """Every ``library_print_choices`` row lands under ``library:<file id>`` with its
     choices and time; applying the migration again changes nothing; a model's row is
-    left alone; and on a key already present the newer row wins."""
+    left alone; and on a key already present the newer row wins. The table itself is
+    dropped by a later migration (#1963), so this stops just before the copy."""
+    copy = next(i for i, m in enumerate(MIGRATIONS) if m.id == MIGRATION.stem)
     with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[:copy])
         conn.execute(
             "INSERT INTO model_print_choices (model_id, choices, updated_at) VALUES"
             """ ('demo', '{"printer_id": 1}', '2026-01-01'),"""
@@ -143,8 +144,13 @@ def test_the_migration_moves_every_library_row_and_is_idempotent(
         once = _rows(conn)
         conn.execute(sql)
         assert _rows(conn) == once
-        # The old table keeps its rows, for an image rolled back past #1754.
+        # The old table keeps its rows until #1963's migration drops it.
         assert conn.execute("SELECT count(*) FROM library_print_choices").fetchone() == (4,)
+        migrate(conn)
+        assert _rows(conn) == once
+        assert conn.execute(
+            "SELECT to_regclass('library_print_choices') IS NULL",
+        ).fetchone() == (True,)
 
     assert [(key, choices) for key, choices, _ in once] == [
         ("demo", {"printer_id": 1}),

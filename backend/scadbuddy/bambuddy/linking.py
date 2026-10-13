@@ -64,6 +64,10 @@ LIBRARY_LINK_LIMIT = 50
 LIBRARY_LINK_CONCURRENCY = 8
 #: How many library files one call scans by hash at once (#1755).
 LIBRARY_SCAN_CONCURRENCY = 2
+#: How many library files one call scans by hash at most. Each scan can page
+#: `MAX_ARCHIVE_PAGES` archive pages, and the prints list waits for them; an item past
+#: this is left pending, so the next call reads it again and scans its file (#2120).
+LIBRARY_SCANS_PER_CALL = 4
 #: How long after it was recorded a library file's queue item is read at most. An
 #: item that never settles (one waiting on a printer that was removed, or skipped and
 #: never resumed) would otherwise cost a read on every list and hold a slot in
@@ -287,7 +291,9 @@ async def link_library_prints(
     failure, a database one included, is logged and leaves the item to the next call
     (#1662). With ``uploads``, an item that 404s has its file scanned by hash, as an
     output's gone item does (#1755), once: the item is gone, so a scan that fails here
-    is tried again only by the file's progress read or its own history.
+    is tried again only by the file's progress read or its own history. At most
+    `LIBRARY_SCANS_PER_CALL` files are scanned per call; a gone item whose file is past
+    that is not marked gone, so a later call reads it again and scans then (#2120).
     """
     try:
         pending = await links.pending_library(LIBRARY_LINK_LIMIT, max_age=LIBRARY_LINK_BACKSTOP)
@@ -297,19 +303,26 @@ async def link_library_prints(
     gate = asyncio.Semaphore(LIBRARY_LINK_CONCURRENCY)
     # Each scan pages Bambuddy's archive list: many items gone at once scan a few at a time.
     scans = asyncio.Semaphore(LIBRARY_SCAN_CONCURRENCY)
+    # The files this call scans; claimed before an await, so the cap holds under gather.
+    scanned: set[int] = set()
 
     async def link(queue_item_id: int, file_id: int) -> None:
-        if await read(queue_item_id) and uploads is not None:
+        if await read(queue_item_id, file_id) and uploads is not None:
             async with scans:
                 await scan_library_by_hash(client, uploads, links, file_id)
 
-    async def read(queue_item_id: int) -> bool:
+    async def read(queue_item_id: int, file_id: int) -> bool:
         """Link or settle one item; True when Bambuddy no longer has it."""
         async with gate:
             try:
                 item = await client.queue_item(queue_item_id)
             except ApiError as error:
                 if error.status == status.HTTP_404_NOT_FOUND:
+                    if uploads is not None and file_id not in scanned:
+                        if len(scanned) >= LIBRARY_SCANS_PER_CALL:
+                            # Left pending: the next call reads it again and scans.
+                            return False
+                        scanned.add(file_id)
                     await links.library_gone(queue_item_id)
                     return True
                 logger.warning(

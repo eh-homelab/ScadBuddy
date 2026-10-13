@@ -4,6 +4,7 @@ import asyncio
 import importlib
 import logging
 import pkgutil
+import threading
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
@@ -22,25 +23,45 @@ import scadbuddy.api
 from scadbuddy import __version__
 from scadbuddy.activity.component import ACTIVITY
 from scadbuddy.activity.index import ACTIVITY_REPAIR_WINDOW_DEFAULT, ACTIVITY_TTL_DEFAULT
-from scadbuddy.api import health, libraries, media, metrics, models, outputs, telemetry
-from scadbuddy.api.agent_actor import AgentActorGate, postgres_grants
+from scadbuddy.api import (
+    health,
+    libraries,
+    media,
+    mesh_models,
+    metrics,
+    models,
+    outputs,
+    telemetry,
+)
 from scadbuddy.api.compression import Compression
 from scadbuddy.api.cross_site import CrossSiteGate
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state
-from scadbuddy.api.limits import BODY_LIMITS, MEDIA_UPLOAD_PATH, BodySizeGate, RouteLimit
+from scadbuddy.api.limits import (
+    BODY_LIMITS,
+    MEDIA_UPLOAD_PATH,
+    MESH_UPLOAD_PATH,
+    BodySizeGate,
+    RouteLimit,
+)
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
+from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.errors import NOT_CONFIGURED_PROBLEM
 from scadbuddy.bambuddy.follow import FollowActivities
 from scadbuddy.bambuddy.output_reader import LocalOutputs
+from scadbuddy.bambuddy.preview import sweep_preview_slices
+from scadbuddy.bambuddy.print_source import MAX_DOWNLOAD_BYTES
 from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.core.authorship import AgentAuthorship
 from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.metrics import HttpMetrics
 from scadbuddy.core.paths import BUILTIN_DIR, MODEL_META_NAME
 from scadbuddy.core.pg_events import PgNotifyEventBus
-from scadbuddy.core.problems import install_problem_handlers
+from scadbuddy.core.problems import ApiError, install_problem_handlers
 from scadbuddy.core.settings import Settings
 from scadbuddy.core.tracing import configure_tracing
+from scadbuddy.flows.component import FLOWS
+from scadbuddy.flows.sweep import sweep_flow_runs, sweep_orphan_grants
 from scadbuddy.library.assets import referenced_asset_ids
 from scadbuddy.library.backfill import attach_backfills, attach_job_backfills, follow_backfills
 from scadbuddy.library.history import GitError
@@ -56,9 +77,10 @@ from scadbuddy.rack.component import RACK_USAGE
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
 from scadbuddy.render.previews import PreviewUnrunError
 from scadbuddy.render.runner import probe_openscad_version
+from scadbuddy.render.worker_role import grant_at_start
 from scadbuddy.store import sweep_blobs
 from scadbuddy.store.assets import RemoteAssets
-from scadbuddy.store.bambuddy import RenderSettingsSource
+from scadbuddy.store.bambuddy import BambuddyContentBackend, RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.content import sweep_content
 from scadbuddy.store.factory import build_store
@@ -76,7 +98,10 @@ from scadbuddy.workflows.follow import resume_followed
 from scadbuddy.workflows.housekeeping import (
     ACTIVITY_SWEEP,
     BACKFILL_SWEEP,
+    FLOWS_SWEEP,
+    GIT_SWEEP,
     HEARTBEAT_TIMEOUT,
+    PREVIEWS_SWEEP,
     REAP_SWEEP,
     SWEEPS,
     ensure_schedules,
@@ -170,18 +195,19 @@ async def _close_quietly(state: AppState) -> None:
             logger.exception("could not release what a failed start opened")
 
 
-def sweep_assets(state: AppState) -> list[str]:
+def sweep_assets(state: AppState, stop: threading.Event | None = None) -> list[str]:
     """Remove the uploads nothing references or has used for the grace (#296).
 
     The references are read first -- every job in the projection, then every
     saved preset, output and template (`referenced_asset_ids`) -- and any failure to read
     them raises before anything is removed. What is referenced after that is kept by
     its last use, which the sweep re-checks under the store's lock per asset.
+    ``stop``, once set, ends it before its next asset (#2140).
     """
     jobs = state.render.store.list_jobs()
     params = [job.params for job in jobs] + state.presets.saved_params()
     referenced = referenced_asset_ids(state.paths, params)
-    removed = state.assets.sweep(referenced, grace=state.config.asset_sweep_grace)
+    removed = state.assets.sweep(referenced, grace=state.config.asset_sweep_grace, stop=stop)
     state.metrics.assets_swept.inc(len(removed))
     if removed:
         logger.info("removed unused uploads", extra={"count": len(removed)})
@@ -247,20 +273,28 @@ async def drop_swept_assets(state: AppState, removed: list[str], *, cutoff: date
         await remote.drop(removed, cutoff=cutoff)
 
 
-async def _sweep_assets_logged(state: AppState) -> None:
+async def _sweep_assets_logged(state: AppState, stop: threading.Event | None = None) -> None:
     # Best effort: a store or volume error skips this sweep (removing nothing it could
     # not prove unused) and the next one retries. Only the Schedule's sweep runs it, so
     # a failure is logged and fails its activity, which reports it.
     try:
         remote = _remote_assets(state)
         cutoff = await remote.clock() if remote is not None else None
-        removed = await asyncio.to_thread(sweep_assets, state)
-        if remote is not None and cutoff is not None:
-            await drop_swept_assets(state, removed, cutoff=cutoff)
-            # What an earlier drop failed to remove, and what the store lost (a copy an
-            # `ensure` dropped, a race with a delete): both converge here, per sweep.
-            await remote.reconcile(state.assets, cutoff=cutoff)
-            await remote.backfill(state.assets)
+        removed = await asyncio.to_thread(sweep_assets, state, stop)
+        if remote is None or cutoff is None:
+            return
+        if stop is not None and stop.is_set():
+            # Stopped (#2140): only mark what it removed, which no later sweep could
+            # find otherwise -- `reconcile` retries marked copies, never a diff against
+            # the volume. The next sweep's reconcile removes them.
+            if removed:
+                await remote.mark_swept(removed, cutoff=cutoff)
+            return
+        await drop_swept_assets(state, removed, cutoff=cutoff)
+        # What an earlier drop failed to remove, and what the store lost (a copy an
+        # `ensure` dropped, a race with a delete): both converge here, per sweep.
+        await remote.reconcile(state.assets, cutoff=cutoff)
+        await remote.backfill(state.assets)
     except Exception:
         logger.exception("could not sweep unused uploads")
         raise
@@ -288,11 +322,21 @@ async def _sweep_blobs_logged(state: AppState) -> None:
                 sweep_blobs, state.blobs, state.refs, grace=state.config.job_ttl
             )
         else:
-            removed = await sweep_content(
-                state.store.content, state.refs, grace=state.config.job_ttl
-            )
-            if isinstance(state.store.blobs, CachedBlobStore):
-                await asyncio.to_thread(state.store.blobs.evict)
+            try:
+                removed = await sweep_content(
+                    state.store.content, state.refs, grace=state.config.job_ttl
+                )
+                backend = state.store.content.backend
+                if isinstance(backend, BambuddyContentBackend):
+                    # #701: an upload whose process died before its row was written.
+                    cutoff = datetime.now(UTC) - timedelta(seconds=state.config.job_ttl)
+                    removed += await backend.sweep_unrecorded(cutoff=cutoff)
+            finally:
+                # Both steps above need Bambuddy (a stale blob's release is a round
+                # trip too): one that is down must not stop the local cache being
+                # trimmed, or it grows for as long as Bambuddy stays down (#2115).
+                if isinstance(state.store.blobs, CachedBlobStore):
+                    await asyncio.to_thread(state.store.blobs.evict)
     except Exception:
         logger.exception("could not sweep unreferenced blobs")
         raise
@@ -300,18 +344,22 @@ async def _sweep_blobs_logged(state: AppState) -> None:
         logger.info("removed unreferenced blobs", extra={"count": len(removed)})
 
 
-async def _backfill_store_logged(state: AppState, *, uploads: bool, fonts: bool = True) -> None:
+async def _backfill_store_logged(
+    state: AppState, *, uploads: bool, fonts: bool = True, stop: threading.Event | None = None
+) -> None:
     """The boot's mirror of what predates the store, in the background and best effort:
     an unreachable Bambuddy never holds up or fails the start. Uploads only when the
     housekeeping Schedule's sweep does not backfill them: `SCADBUDDY_ASSET_SWEEP_INTERVAL`
     0, or the Schedule paused (`_run_library_worker`, review #1095 2). Fonts on every
-    boot: nothing else mirrors a family installed before."""
+    boot: nothing else mirrors a family installed before. ``stop`` ends it after the item
+    in hand (`_join_background`)."""
     try:
         if uploads and state.store.remote_assets is not None:
-            mirrored = await state.store.remote_assets.backfill(state.assets)
+            mirrored = await state.store.remote_assets.backfill(state.assets, stop=stop)
             logger.info("mirrored uploads", extra={"count": mirrored})
         if fonts and state.store.fonts is not None:
-            logger.info("mirrored fonts", extra={"count": await state.store.fonts.backfill()})
+            count = await state.store.fonts.backfill(stop=stop)
+            logger.info("mirrored fonts", extra={"count": count})
     except Exception:
         logger.exception("could not mirror what predates the blob store; the next boot retries")
 
@@ -325,17 +373,47 @@ HEARTBEAT_EVERY = HEARTBEAT_TIMEOUT.total_seconds() / 4
 SWEEP_SHUTDOWN_JOIN = 10.0
 
 
-async def _heartbeating[T](work: Coroutine[Any, Any, T]) -> T:
+#: How long the shutdown waits for the boot's backfills to stop (#2128): each runs its
+#: work in threads, which a cancel would leave running on the pool and the stores the
+#: lifespan closes next.
+BACKGROUND_SHUTDOWN_JOIN = 10.0
+
+
+async def _join_background(stop: threading.Event, *tasks: asyncio.Task[Any] | None) -> None:
+    """Stop the boot's backfills (#2128): set ``stop``, which each checks between items,
+    and wait up to `BACKGROUND_SHUTDOWN_JOIN` for them to end by themselves, as
+    `follow_backfills`' remover waits for its attaches (#1759). One still running past
+    that is cancelled and logged; its thread may then outlive the pool."""
+    stop.set()
+    running = {task for task in tasks if task is not None}
+    if not running:
+        return
+    _, late = await asyncio.wait(running, timeout=BACKGROUND_SHUTDOWN_JOIN)
+    for task in late:
+        logger.warning(
+            "a boot backfill was still running at shutdown; cancelled it",
+            extra={"task": task.get_name()},
+        )
+        task.cancel()
+    for task in running:
+        with suppress(asyncio.CancelledError):
+            await task
+
+
+async def _heartbeating[T](work: Coroutine[Any, Any, T], stop: threading.Event | None = None) -> T:
     """Run ``work`` in the current activity, heartbeating until it ends (review #1095
     2): a worker lost mid-sweep is then noticed within the heartbeat timeout. One the
     worker's stop cancels first gets `SWEEP_SHUTDOWN_JOIN` to end by itself (#1708),
-    so its thread is not left running while the lifespan closes its stores."""
+    so its thread is not left running while the lifespan closes its stores; ``stop``
+    is set first, asking a sweep that checks it to end early (#2140)."""
     running = asyncio.create_task(work)
     try:
         while not (await asyncio.wait({running}, timeout=HEARTBEAT_EVERY))[0]:
             activity.heartbeat()
     except asyncio.CancelledError:
         if activity.is_worker_shutdown():
+            if stop is not None:
+                stop.set()
             await _join_at_shutdown(running)
         raise
     finally:
@@ -368,7 +446,11 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
 
     @activity.defn(name=SWEEPS[1])
     async def sweep_assets() -> None:
-        await _heartbeating(_sweep_assets_logged(state))
+        # Its own stop, per run (#2140): one a worker's shutdown sets ends this run only,
+        # never the sweeps of the worker `_run_library_worker` starts after it. A sweep
+        # added here that runs a thread passes its own the same way.
+        stop = threading.Event()
+        await _heartbeating(_sweep_assets_logged(state, stop), stop)
 
     @activity.defn(name=SWEEPS[2])
     async def sweep_blobs() -> None:
@@ -394,6 +476,18 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         # A scan of every output's directory can be slow on a network volume: heartbeat.
         await _heartbeating(_reap_output_holds_logged(state))
 
+    @activity.defn(name=FLOWS_SWEEP)
+    async def sweep_flow_runs() -> None:
+        await _heartbeating(_sweep_flow_runs_logged(state))
+
+    @activity.defn(name=PREVIEWS_SWEEP)
+    async def sweep_preview_slices() -> None:
+        await _heartbeating(_sweep_preview_slices_logged(state))
+
+    @activity.defn(name=GIT_SWEEP)
+    async def maintain_models_git() -> None:
+        await _heartbeating(_maintain_models_git_logged(state))
+
     @activity.defn(name=ACTIVITY_SWEEP)
     async def sweep_activity() -> None:
         await _heartbeating(_sweep_activity_logged(state))
@@ -406,6 +500,9 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         sweep_claims,
         sweep_backfills,
         reap_output_holds,
+        sweep_flow_runs,
+        sweep_preview_slices,
+        maintain_models_git,
         sweep_activity,
     ]
 
@@ -455,6 +552,59 @@ async def _sweep_claims_logged(state: AppState) -> None:
         raise
 
 
+async def _sweep_flow_runs_logged(state: AppState) -> None:
+    flows = state.components.get(FLOWS)
+    if flows.client is None:
+        logger.debug("no flow-run sweep: flows are unavailable without the secret key file")
+        return
+    # Each its own: one failing never starves the other (review of #2643).
+    failed: Exception | None = None
+    try:
+        ended = await sweep_flow_runs(flows.store, flows.client)
+        if ended:
+            logger.info("ended flow runs whose execution closed", extra={"count": len(ended)})
+    except Exception as err:
+        logger.exception("could not sweep flow runs")
+        failed = err
+    try:
+        orphans = await sweep_orphan_grants(flows.store, flows.client)
+        if orphans:
+            logger.info("deleted grants whose run never started", extra={"count": len(orphans)})
+    except Exception as err:
+        logger.exception("could not sweep the grants of runs that never started")
+        failed = failed or err
+    if failed is not None:
+        raise failed
+
+
+async def _sweep_preview_slices_logged(state: AppState) -> None:
+    settings = await asyncio.to_thread(state.settings_store.load)
+    try:
+        async with client_for(settings) as client:
+            removed = await sweep_preview_slices(client, state.uploads)
+    except ApiError as error:
+        if error.type == NOT_CONFIGURED_PROBLEM:
+            logger.debug("no background-slice sweep: Bambuddy is not set up")
+            return
+        logger.exception("could not sweep the print dialog's background slices")
+        raise
+    except Exception:
+        logger.exception("could not sweep the print dialog's background slices")
+        raise
+    if removed:
+        logger.info("removed unprinted background slices", extra={"count": removed})
+
+
+async def _maintain_models_git_logged(state: AppState) -> None:
+    try:
+        packed = await asyncio.to_thread(state.history.maintain)
+    except Exception:
+        logger.exception("could not pack the models repository")
+        raise
+    if packed:
+        logger.info("packed the models repository")
+
+
 async def _reap_output_holds_logged(state: AppState) -> None:
     try:
         await asyncio.to_thread(reap_orphan_holds, state.refs, state.outputs)
@@ -463,12 +613,19 @@ async def _reap_output_holds_logged(state: AppState) -> None:
         raise
 
 
-async def _attach_backfills_logged(state: AppState, *, reraise: bool = True) -> None:
+async def _attach_backfills_logged(
+    state: AppState, *, reraise: bool = True, stop: threading.Event | None = None
+) -> None:
     """#902's backstop pass. The Schedule's sweep (``reraise``) fails its activity on an
-    error; the boot's pass only logs it."""
+    error; the boot's pass only logs it, and is ended by ``stop`` (`_join_background`)."""
     try:
         await asyncio.to_thread(
-            attach_backfills, state.outputs, state.refs, state.render.store.read, state.events
+            attach_backfills,
+            state.outputs,
+            state.refs,
+            state.render.store.read,
+            state.events,
+            stop,
         )
     except Exception:
         logger.exception("could not attach the finished output re-renders")
@@ -896,6 +1053,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # First: without its database ScadBuddy has no settings, so it does not start.
     # It also brings the schema up to date, before the projection opens.
     await asyncio.to_thread(state.settings_store.open)
+    # The render worker's own role, if the deployment made one, gets what this
+    # build's worker touches (#601); the worker waits for it.
+    await asyncio.to_thread(grant_at_start, state.settings_store.pool)
     # Then what the UI saved (#322), before anything below is sized or started from it.
     snapshot = await asyncio.to_thread(state.settings_store.snapshot)
     apply_runtime(state, snapshot.runtime, booting=True)
@@ -958,6 +1118,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     unfollow = follow_changes(state)
     unfollow_backfills: Callable[[], Coroutine[Any, Any, None]] | None = None
     attach_now: asyncio.Task[None] | None = None
+    stop_background = threading.Event()
     components = AsyncExitStack()
     worker: tuple[asyncio.Task[None], WorkerDeps] | None = None
     stop = asyncio.Event()
@@ -990,7 +1151,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         # And once now, whatever the Schedule: a re-render that settled while no replica
         # was listening (the sweeps' interval 0, or the Schedule paused).
-        attach_now = asyncio.create_task(_attach_backfills_logged(state, reraise=False))
+        attach_now = asyncio.create_task(
+            _attach_backfills_logged(state, reraise=False, stop=stop_background),
+            name="attach backfills",
+        )
         # Print runs (#1052): the `scadbuddy-print` worker serves the `bambuddy` queue,
         # or this process does when told to (#1060); the upkeep is this process's.
         if serves_print_queue(state.settings):
@@ -1002,7 +1166,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         library = asyncio.create_task(_run_library_worker(state, stop_library))
         if state.store.content is not None:
             backfill = asyncio.create_task(
-                _backfill_store_logged(state, uploads=state.config.asset_sweep_interval == 0)
+                _backfill_store_logged(
+                    state,
+                    uploads=state.config.asset_sweep_interval == 0,
+                    stop=stop_background,
+                ),
+                name="store backfill",
             )
         # The per-change requests. The pass over every model is the preview
         # backfill's Schedule (#1054), triggered once the library worker connects.
@@ -1028,11 +1197,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await _stop_queue_worker(library, "library", LIBRARY_WORKER_STOP_TIMEOUT)
         if unfollow_backfills is not None:
             await unfollow_backfills()
-        for background in (backfill, attach_now):
-            if background is not None:
-                background.cancel()
-                with suppress(asyncio.CancelledError):
-                    await background
+        await _join_background(stop_background, backfill, attach_now)
         stop_printing.set()
         await _stop_queue_worker(printing, "print")
         await _stop_queue_worker(upkeep, "print upkeep")
@@ -1044,7 +1209,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await asyncio.to_thread(state.projection.close)
         await asyncio.to_thread(state.presets.close)
         await state.events.aclose()
-        await app.state.agent_grants.aclose()
         await state.store.aclose()
         await asyncio.to_thread(state.settings_store.close)
 
@@ -1074,14 +1238,8 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     install_problem_handlers(app)
     libraries.install_library_handlers(app)
     models.install_model_handlers(app)
-    # The agent's headless browser may not make outward requests (#349, AI spec §5.3):
-    # refused on the method, path and marker header alone, before any body is read.
-    grants = postgres_grants(app_settings.database_url)
-    # Closed by the lifespan, after everything else has stopped.
-    app.state.agent_grants = grants
-    # Inside the gate: a commit made for the agent is authored as the agent (#252).
+    # A commit made for the agent is authored as the agent (#252).
     app.add_middleware(AgentAuthorship)
-    app.add_middleware(AgentActorGate, grants=grants)
     # Outside everything that reads a body, so an oversized one is refused on its
     # headers rather than buffered.
     app.add_middleware(
@@ -1095,6 +1253,13 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                 lambda: state.settings.media_upload_max_bytes,
                 "a media upload",
                 "the upload limit in Settings, seeded by SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES",
+            ),
+            RouteLimit(
+                "POST",
+                MESH_UPLOAD_PATH,
+                MAX_DOWNLOAD_BYTES + 64 * 1024,  # the file plus the form's framing
+                "a mesh upload",
+                "the library download cap (bambuddy/print_source.py MAX_DOWNLOAD_BYTES)",
             ),
             # The browser trace relay's 256 KiB (spec 2026-10-01 §5.2).
             telemetry.RELAY_ROUTE_LIMIT,
@@ -1118,7 +1283,13 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     # The browser trace relay: at the root like the two above, before the SPA's mount.
     app.include_router(telemetry.router)
     app.include_router(_api_router())
-    _name_in_openapi(app, models.PastedSource, media.MediaUpload, outputs.NeedsBackfillProblem)
+    _name_in_openapi(
+        app,
+        models.PastedSource,
+        media.MediaUpload,
+        mesh_models.MeshUpload,
+        outputs.NeedsBackfillProblem,
+    )
 
     # Last, so every API route above wins the match; unknown paths fall back to index.html.
     frontend = app_settings.resolve_frontend_dir()

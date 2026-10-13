@@ -176,6 +176,7 @@ stored on ScadBuddy's server and is never sent to the browser.
    | **Read Status** | listing printers, spools and AMS slots for the print picker and **Test connection** |
    | **Manage Projects** | only if you use the project picker |
    | **Manage Archives** | uploading and deleting print photos, and pulling a timelapse off the printer |
+   | **Manage Inventory** | only to record which spool is in a tray, when the print dialog asks and you answer yes |
 
 2. Open **Settings** in ScadBuddy. Under **Connection**, enter the **Bambuddy URL**
    and the **API key**, then press **Test connection**.
@@ -189,7 +190,9 @@ stored on ScadBuddy's server and is never sent to the browser.
    upload out for that printer's plate, and the print picker opens on it.
 5. Under **Projects & files**, choose the **Inbox folder, for sends without a
    project**, where a 3MF sent without a project goes. **Default project** is where
-   the project picker opens, and the project a send without one is filed under.
+   the print dialog's project picker opens for a library file, and the project a send
+   without one is filed under. The Customize page does not use it: it opens on the
+   project remembered for the model (see [Customizing](#customizing)).
 
 Each section has its own **Save** and **Discard changes**: save every section you
 changed before leaving the page.
@@ -228,10 +231,31 @@ Changing a parameter starts a real render. The preview *is* the render (debounce
 so it shows exactly what the 3MF will contain, with the bounding box in mm. Then:
 
 - **Generate** saves the current render as an output, with its parameters and a
-  thumbnail. When the bottom bar's **Project** picker has a project selected (it opens
-  on the last one you chose), Generate also uploads the 3MF into that project's folder
-  in Bambuddy. Deleting the output later never deletes that copy: it is the project's
-  record. Choose **No project** to only save the output.
+  thumbnail. When the bottom bar's **Project** picker has a project selected,
+  Generate also uploads the 3MF into that project's folder in Bambuddy. Deleting the
+  output later never deletes that copy: it is the project's record. Choose **No
+  project** to only save the output.
+
+  **Which project the picker opens on.** Each time Generate files an output, ScadBuddy
+  remembers that project for the model and the preset in use (or the model alone, with
+  no preset loaded). Opening the model or loading a preset moves the picker to the
+  project remembered for that preset, else to the one remembered for the model with no
+  preset. With neither, it opens on **No project**: a project chosen on another model
+  is never carried over, so an unrelated model is not filed into it by accident.
+
+  **Generate asks before filing elsewhere.** When the picker is on a project other
+  than the one this model and preset were last filed in, Generate asks first: "*Fish*
+  was last filed in **Critters › Fish**. File this in **Critters › Snake**?" **File
+  in** files it there and makes that the remembered project; **Use** files it in the
+  remembered one and moves the picker there; **Cancel** saves nothing. Nothing is asked
+  when nothing is remembered for the preset yet, when they match, or with **No
+  project**. The picker is locked while Generate files and while the question is open.
+
+  These are only defaults for the next filing. Which outputs and prints a project holds
+  is on the project's own page in Bambuddy; ScadBuddy keeps no second list of it. Each
+  remembered project is listed in **Settings → Remembered choices** as "Project" with
+  its own **Forget**, and **Forget all** clears them. Deleting a model or a saved preset
+  forgets its entries too.
 - **Download 3MF** downloads that output. When the template declares default slicer
   settings (`print_settings` in its `model.json`, such as the name keychain's prime
   tower), the file carries them, and Bambu Studio shows them as changes to the system
@@ -305,7 +329,10 @@ Top to bottom, the dialog is:
   Filament, so a color only a later plate uses gets a spool too.
 - **Print options** — Bambuddy's own queue-item options (manual start, waiting for
   filament, and the rest), remembered per print, per printer or per model as before.
-- **Project** — file the print under a Bambuddy project.
+- **Project** — file the print under a Bambuddy project. Opened from the Customize page
+  it is the page's own picker. In Simple mode the step is hidden, but a "Filed under:
+  *project* (change)" line names where the print goes; **change** switches to Advanced
+  and puts the focus on the project picker.
 - **Copies** — leave the field blank to use the remembered quantity, shown beside it.
 - **Print** — slices, then queues through Bambuddy; the panel then follows the run to
   completion.
@@ -357,8 +384,14 @@ project, the same as an output's.
   volume. You can diff two revisions, **Customize this version** (render an old
   revision without restoring it), or **Restore this version** (restoring adds a new
   commit and never rewrites history).
-- **Edit source** opens the model's source in the editor. Saving it creates a new
-  revision.
+- **Edit source** opens the model's source in the editor. Saving it creates a
+  new revision. The row above the editor lists the model's `.scad` files:
+  `model.scad`, which every render opens, and any files beside it that it can
+  `include` or `use`. Open one to edit it on its own page, where **Save file**
+  and **Delete file** are each a revision too. **New file** adds one (`.scad` is
+  added to the name if you leave it off). If the model changed elsewhere since
+  you opened a file, saving it is refused and you can reload the file or keep
+  editing and save over it.
 
 ![Versions](images/versions.png)
 
@@ -396,9 +429,8 @@ move them), and one that is rate limited is skipped until its limit resets. The 
 encrypted on the server and never sent back to the browser.
 
 The same section sets **Assistant chat limits** (each new chat's budget in USD and its
-turns per reply), **Assistant images**, and two switches that are off by default:
-**AI headless browser** ([below](#the-headless-browser)) and **AI HTTP requests** (GET
-and HEAD run at once; anything else waits for your approval). **AI activity** is the
+turns per reply), **Assistant images**, and **AI HTTP requests** (GET and HEAD run at
+once; anything else waits for your approval). **AI activity** is the
 log of what the assistant did.
 
 ### The assistant panel
@@ -409,6 +441,10 @@ the page you are on, so "make the text bigger" on a model's page means that mode
 
 - Type and press **Enter** (Shift+Enter for a new line). **Image** attaches up to four
   PNG, JPEG, GIF or WebP pictures; pasting or dropping them works too.
+- Type **/** at the start of a message to list the skills the assistant loads
+  (ScadBuddy's own `/scadbuddy:authoring`, `customize` and `print`, and those of enabled
+  plugin packages). Keep typing to filter; **Up**/**Down** move, **Enter** or **Tab**
+  puts the skill in the message, **Esc** closes the list. Nothing is sent until you send it.
 - The microphone is **Voice input** (press to talk and again to stop, or hold it), and
   **Read replies aloud** speaks the answers. Inside Bambuddy's frame, voice needs
   ScadBuddy open in a tab of its own.
@@ -462,7 +498,10 @@ recorded that turn doing; **Dismiss** clears it.
 
 All of these count on the **Assistant** button's badge (its tooltip breaks the count
 down), and the browser tab's title starts with the count, so you can leave the panel
-closed and still see that something is waiting for you.
+closed and still see that something is waiting for you. While any of your chats (or a
+Claude client's session) is working on a turn, a pulsing dot shows on the button too, so
+it says at a glance whether the assistant is idle, working, or waiting for you. It is
+read every 15 seconds and whenever you open or close the panel.
 
 Some buttons only you can press, whatever the assistant is allowed: Print, Send,
 Delete, Settings' **Save**, the approval and question cards, Fork, Take over, and every
@@ -535,21 +574,51 @@ code works once, for 5 minutes. The pairing lasts until you press **Disconnect**
 hours pass, or the tab reloads
 ([browser-bridge.md](ai/browser-bridge.md#pairing-spec-85)).
 
-### The headless browser
+### The assistant's workspace
 
-A session with no tab of yours (one started over MCP, say) can still look at
-ScadBuddy's pages in a headless browser inside the agent container, once you tick
-**AI headless browser** (off by default). It opens only ScadBuddy itself, unless the
-operator allows more sites, and each of those waits for your approval once per
-session. Anything it would send, print or delete waits as an ordinary approval card,
-and it can never change Settings ([headless-browser.md](ai/headless-browser.md)).
+The assistant has a workspace of its own for files: a session's files stay with it
+(and are deleted with it), and a fork starts with a copy. It can save a ScadBuddy file
+there (an output's 3MF, a model's file or picture, a print's photo or timelapse, a
+Bambuddy library file), download one from the web into it, and read, write, edit and
+delete its files, so a file it fetched does not have to pass through the conversation.
+It sends a workspace file on by
+name to any upload (an asset, a picture or video for the gallery, a thumbnail, a
+model's source, a README), and an approval it asks for names the file and its sha256.
+A file holds at most 25 MB and a session's workspace 200 MB. An MCP client working
+outside any session gets a workspace of its own whose files are deleted a day after
+they were last written ([operating.md §13](ai/operating.md#13-the-workspace-2329)).
+
+**Files** in a session's bar shows that session's workspace: each file's path, size,
+type, where it came from (uploaded by you, a web address, or the tool that saved it)
+and when it last changed.
+
+- **Download** saves a file; it works inside Bambuddy's frame too, through the same
+  popup as the 3MF download. A PNG, JPEG, GIF or WebP also has **Preview**, shown in the
+  panel. HTML and SVG files only ever download.
+- **Upload**, or a file dropped on the list, puts a file in the workspace under
+  `uploads/` (a name already there gets `-2`, `-3`, …) and adds
+  `[workspace file uploads/<name>]` to your message, so the assistant knows to look.
+  The assistant reads it with its workspace tools; no file passes through the chat.
+- **Delete** asks once more, then removes the file for the assistant too.
+
+Uploads and deletes are for your own chats that are not archived; anyone's chat can be
+listed and downloaded. Settings → **Assistant workspace** sets the caps (25 MiB a file
+and 200 MiB a chat by default), and they apply to uploads as to the assistant's own
+files ([operating.md §13](ai/operating.md#13-the-workspace-2329)).
+
+### A browser for the assistant
+
+A session with no tab of yours (one started over MCP, say) can drive a browser of its
+own when an admin adds Microsoft's Playwright MCP server as a plugin named
+`playwright` (**Plugins** below). Its tools ask before every call until their tiers
+are set ([headless-browser.md](ai/headless-browser.md)).
 
 ### Plugins
 
 **Settings → Assistant → Assistant plugins** adds to what the assistant can do
 ([operating.md §9](ai/operating.md#9-plugin-packages-297),
-[security.md](ai/security.md#plugin-packages)). ScadBuddy's own plugin and the headless
-browser are built in, each with **Enable**/**Disable**.
+[security.md](ai/security.md#plugin-packages)). ScadBuddy's own plugin is built in, with
+**Enable**/**Disable**.
 
 - **Plugin packages** (skills, agents and hooks). Give a **Git repository** or a
   **Marketplace entry** and press **Fetch and review**. Nothing loads yet: the package
@@ -559,7 +628,12 @@ browser are built in, each with **Enable**/**Disable**.
   listed; the only way past is to approve loading the package as it is, which runs its
   code with the assistant service's own access. A newer commit is **Fetch re-pin**,
   approved the same way.
-- **Plugin endpoints** (remote MCP servers). Give a **Name**, the **MCP endpoint URL**
+- **Plugins**. ScadBuddy's own tools come first, marked **Built in**: `scadbuddy` (the
+  assistant's ScadBuddy tools). **Review tools**
+  lists each one with its tier and **Disable**. A tier can only be raised above the one
+  ScadBuddy gives the tool (raise it to outward and it asks first), never lowered, and a
+  built-in is never removed. Every setting here applies to classic and durable chats
+  alike. Then the plugin endpoints (remote MCP servers): give a **Name**, the **MCP endpoint URL**
   and, if it needs one, an auth header, and press **Add endpoint**. It starts disabled:
   **Test connection** lists its tools, each with a tier (outward, which asks first, by
   default) and **Hide**. Press **Save tool settings**, then **Enable**. Claude never

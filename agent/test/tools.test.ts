@@ -103,6 +103,28 @@ describe('every call has a deadline (#1918)', () => {
     }
   })
 
+  it('answers a Stop at once, even from a handler that ignores its signal (#2099)', async () => {
+    let release = () => {}
+    const t = tool('get_schema')
+    const deaf: Tool = {
+      ...t,
+      execute: () => new Promise((resolve) => {
+        release = () => resolve({ content: [] })
+      }),
+    }
+    const stop = new AbortController()
+    setTimeout(() => stop.abort(), 10)
+    const started = Date.now()
+    try {
+      const result = await runTool(deaf, { slug: 'cable-clip' }, ctx({ signal: stop.signal, toolDeadlineMs: 60_000 }))
+      expect(result.isError).toBe(true)
+      expect(firstText(result)).toContain('the call was cancelled')
+      expect(Date.now() - started).toBeLessThan(5_000)
+    } finally {
+      release()
+    }
+  })
+
   it('allows a tool its own designed wait on top', () => {
     const c = ctx()
     expect(tool('get_schema').deadlineMs({ slug: 'x' }, c)).toBe(TOOL_DEADLINE_MS)
@@ -1114,6 +1136,48 @@ describe('tools that make the backend fetch a URL (exfiltration, not SSRF)', () 
     expect(firstText(await runTool({ ...tool('pin_library_from_url'), gated: false }, fromUrl, ctx()))).toMatchObject({ pinned_before: true })
   })
 
+  it('a pin goes ahead when the read before it fails outright, and leaves pinned_before out (#2124)', async () => {
+    let put = false
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box`, () => HttpResponse.error()),
+      http.put(`${BACKEND}/api/v1/models/box/libraries/:name`, () => {
+        put = true
+        return HttpResponse.json({ slug: 'box', version: 'c'.repeat(40) })
+      }),
+    )
+    const result = await runTool(tool('pin_library'), { slug: 'box', name: 'BOSL2' }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(put).toBe(true)
+    expect(firstText(result)).not.toHaveProperty('pinned_before')
+  })
+
+  it('a pin cancelled while the read before it is in flight never pins (#2275)', async () => {
+    let put = false
+    let abort = () => {}
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box`, async () => {
+        abort()
+        await new Promise((resolve) => setTimeout(resolve, 50))
+        return HttpResponse.json({ slug: 'box', libraries: [] })
+      }),
+      http.put(`${BACKEND}/api/v1/models/box/libraries/:name`, () => {
+        put = true
+        return HttpResponse.json({ slug: 'box', version: 'c'.repeat(40) })
+      }),
+    )
+    const fromUrl = { slug: 'box', name: 'BOSL2', url: 'https://g.example/x.git', ref: 'v1' }
+    for (const [pin, args] of [
+      [tool('pin_library'), { slug: 'box', name: 'BOSL2' }],
+      [{ ...tool('pin_library_from_url'), gated: false }, fromUrl],
+    ] as const) {
+      const controller = new AbortController()
+      abort = () => controller.abort()
+      const result = await runTool(pin, args, ctx({ signal: controller.signal })).catch((err: unknown) => err)
+      expect(result instanceof Error || (result as { isError?: boolean }).isError).toBe(true)
+      expect(put).toBe(false)
+    }
+  })
+
   it('pin_library refuses a non-catalogue URL and points to the outward tool', async () => {
     let put = false
     server.use(
@@ -1375,6 +1439,14 @@ describe('library search and the upgrade flow (#1913, #1914)', () => {
       firstText(await runTool(tool('check_library_candidate_from_pinned_url'), { slug: 'box', name: 'BOSL2', ref: 'v9' }, ctx())),
     ).toMatchObject({ status: 'pending_approval' })
     expect(checked).toBeUndefined()
+  })
+
+  it('refuses a pinned-URL check with no ref before it reaches the approval gate (#2098)', async () => {
+    // The backend refuses a non-catalogue URL without a ref; a human must not approve
+    // a call that can only come back a 422.
+    const result = await runTool(tool('check_library_candidate_from_pinned_url'), { slug: 'box', name: 'BOSL2' }, ctx())
+    expect(result.isError).toBe(true)
+    expect(firstText(result)).toContain('invalid arguments')
   })
 })
 

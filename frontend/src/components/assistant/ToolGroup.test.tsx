@@ -2,7 +2,8 @@ import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router'
 import { describe, expect, it } from 'vitest'
-import { blobUrl } from '../../agent/chat/protocol'
+import { blobUrl, type ServerEvent, ServerEventSchema } from '../../agent/chat/protocol'
+import { chatReducer, initialChatState } from '../../agent/chat/state'
 import type { ToolCall, ToolStatus } from '../../agent/chat/toolGroups'
 import { highlightJson, prettyJson } from '../../agent/chat/json'
 import { ToolGroup } from './ToolGroup'
@@ -68,6 +69,29 @@ describe('a single call', () => {
     group([call('t1', { result: { ok: false, summary: 'width must be at most 200', sources: [] } })], ['failed'])
     expect(screen.getByTestId('agent-tool')).toHaveTextContent('width must be at most 200')
     expect(screen.getByTestId('agent-tool-status')).toHaveTextContent('Failed')
+  })
+
+  // #2149: a refused or stopped call's result is Claude Code's note to the model.
+  it.each(['not_run', 'stopped'] as const)('shows no result message when the call is %s', (status) => {
+    const note = "The user doesn't want to proceed with this tool use. The tool use was rejected."
+    group([call('t1', { result: { ok: false, summary: note, sources: [] } })], [status])
+    expect(screen.getByTestId('agent-tool')).not.toHaveTextContent('want to proceed')
+  })
+
+  // #2149: the first call stays mounted, Details open, when a second joins its group.
+  it('keeps a call’s open Details when a second call joins it', async () => {
+    const first = call('t1', { title: 'Render cable-clip' })
+    const { user, rerender } = group([first], ['running'])
+    await user.click(screen.getByRole('button', { name: 'Details: Render cable-clip' }))
+    expect(screen.getByTestId('agent-tool-details')).toBeVisible()
+
+    rerender(
+      <MemoryRouter>
+        <ToolGroup calls={[first, call('t2', { title: 'Render lid' })]} statuses={['running', 'running']} sessionId="sess-1" advanced={false} />
+      </MemoryRouter>,
+    )
+    expect(screen.getByTestId('agent-tool-group')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Details: Render cable-clip' })).toHaveAttribute('aria-expanded', 'true')
   })
 
   it.each([
@@ -154,6 +178,46 @@ describe('a group of calls', () => {
     expect(agent).toHaveTextContent('Subagent: Check the fit')
     expect(agent!.className).not.toContain('ml-4')
     expect(sub!.className).toContain('ml-4')
+  })
+})
+
+describe('a durable session’s call (#2478)', () => {
+  // The events agent-durable's follow_session logs (session/events.py): no title, the
+  // plugin's status as the summary, and the images by name only.
+  const logged = (images?: unknown) =>
+    [
+      { v: 1, sessionId: 'sess-1', type: 'tool.call', id: 'toolu_1', name: 'get_render_view', input: {}, risk: 'read' },
+      { v: 1, sessionId: 'sess-1', type: 'tool.result', id: 'toolu_1', ok: true, summary: 'done', ...(images ? { images } : {}) },
+    ].map((e) => ServerEventSchema.parse(e))
+
+  function shown(events: ServerEvent[]) {
+    const started = ServerEventSchema.parse({
+      v: 1,
+      type: 'session.started',
+      sessionId: 'sess-1',
+      origin: 'chat',
+      owner: { kind: 'browser', id: 'browser', label: 'You' },
+    })
+    const state = [{ type: 'started-new' } as const, ...[started, ...events].map((event) => ({ type: 'server', event }) as const)].reduce(
+      chatReducer,
+      initialChatState,
+    )
+    expect(state.sessions['sess-1']?.items).toHaveLength(1)
+    const calls = (state.sessions['sess-1']?.items ?? []).filter((i): i is ToolCall => i.kind === 'tool')
+    return group(calls, ['done'])
+  }
+
+  it('shows the images its result names, loaded from the session’s blob route', () => {
+    shown(logged([IMAGE]))
+    const img = screen.getByRole('img')
+    expect(img).toHaveAttribute('src', `/api/v1/ai/sessions/sess-1/blobs/${IMAGE.name}`)
+    expect(img.closest('a')).toHaveAttribute('href', blobUrl('sess-1', IMAGE.name))
+  })
+
+  it('shows a result logged without images as before', () => {
+    shown(logged())
+    expect(screen.getByTestId('agent-tool-status')).toHaveTextContent('Done')
+    expect(screen.queryByRole('img')).toBeNull()
   })
 })
 

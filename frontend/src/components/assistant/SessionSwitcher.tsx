@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
 import { statusLabel } from '../../agent/chat/labels'
-import { isOwnedByBrowser, type SessionState } from '../../agent/chat/state'
+import { type HandoffOffer, isOwnedByBrowser, type SessionState } from '../../agent/chat/state'
 import { timeAgo } from '../../lib/format'
 import { Button } from '../ui/Button'
-import { OriginBadge, OwnerBadge } from './badges'
+import { OfferBadge, OriginBadge, OwnerBadge } from './badges'
 import { usd } from './SessionBudget'
 
 // #795 — the panel's session list: forks under their parent, each with its status,
-// spend and last activity; the user's own chats can be renamed and marked done.
-// Design: docs/superpowers/specs/2026-10-09-session-switcher-design.md §7, §8.
+// spend and last activity; the user's own chats can be renamed, marked done and
+// archived (#1885). Design: docs/superpowers/specs/2026-10-09-session-switcher-design.md §7, §8.
 
 interface Props {
   /** The sessions to list, in the panel's order (newest first). */
@@ -18,6 +18,10 @@ interface Props {
   /** Resolve once the agent took it; reject with what to show beside the row. */
   onRename: (id: string, title: string) => Promise<void>
   onDone: (id: string) => Promise<void>
+  /** #1885 — puts the chat away: out of this list, read-only, until it is unarchived. */
+  onArchive: (id: string) => Promise<void>
+  /** #1284 — withdraws the chat's pending handoff offer. */
+  onCancelOffer: (id: string) => Promise<void>
 }
 
 const RUNNING: ReadonlySet<SessionState['status']> = new Set(['running', 'waiting_approval', 'waiting_input'])
@@ -54,15 +58,33 @@ function grouped(sessions: SessionState[]): { root: SessionState; forks: Session
   })
 }
 
-export function SessionSwitcher({ sessions, activeId, onOpen, onRename, onDone }: Props) {
+export function SessionSwitcher({ sessions, activeId, onOpen, onRename, onDone, onArchive, onCancelOffer }: Props) {
   return (
     <ul className="max-h-56 overflow-y-auto py-1">
       {grouped(sessions).map(({ root, forks }) => (
-        <SessionRow key={root.id} session={root} activeId={activeId} onOpen={onOpen} onRename={onRename} onDone={onDone}>
+        <SessionRow
+          key={root.id}
+          session={root}
+          activeId={activeId}
+          onOpen={onOpen}
+          onRename={onRename}
+          onDone={onDone}
+          onArchive={onArchive}
+          onCancelOffer={onCancelOffer}
+        >
           {forks.length > 0 && (
             <ul aria-label={`Forks of ${root.title}`} className="ml-3 border-l border-line">
               {forks.map((fork) => (
-                <SessionRow key={fork.id} session={fork} activeId={activeId} onOpen={onOpen} onRename={onRename} onDone={onDone} />
+                <SessionRow
+                  key={fork.id}
+                  session={fork}
+                  activeId={activeId}
+                  onOpen={onOpen}
+                  onRename={onRename}
+                  onDone={onDone}
+                  onArchive={onArchive}
+                  onCancelOffer={onCancelOffer}
+                />
               ))}
             </ul>
           )}
@@ -72,12 +94,45 @@ export function SessionSwitcher({ sessions, activeId, onOpen, onRename, onDone }
   )
 }
 
+/**
+ * #1284 — the offer while it is live. A snapshot carries it until the agent next
+ * sends one, which can be after `until` has passed; so a timer drops it once it
+ * lapses, and the row renders again then. An `until` that does not parse is left
+ * to the agent to judge.
+ *
+ * `until` is on the agent's clock and is compared with the browser's, which is
+ * trusted: a browser running ahead hides the offer (and its Cancel offer) that much
+ * early (#2252). Only the display is affected. The agent judges the offer on its own
+ * clock (`cancelHandoff`), and a snapshot carries no server time to correct for skew.
+ */
+function useLiveOffer(offer: HandoffOffer | null | undefined): HandoffOffer | null {
+  const until = offer ? Date.parse(offer.until) : Number.NaN
+  const [lapsed, setLapsed] = useState<number | null>(null)
+  useEffect(() => {
+    if (!Number.isFinite(until)) return
+    let timer: ReturnType<typeof setTimeout>
+    // Armed again until the clock reads `until`: setTimeout's delay is a 32-bit int,
+    // and a timer can run while the clock still reads short of it (it fired early, or
+    // the clock stepped back), which would otherwise leave the offer showing for good.
+    const arm = () => {
+      const left = until - Date.now()
+      if (left <= 0) setLapsed(until)
+      else timer = setTimeout(arm, Math.min(left, 2 ** 31 - 1))
+    }
+    arm()
+    return () => clearTimeout(timer)
+  }, [until])
+  return offer && lapsed !== until ? offer : null
+}
+
 function SessionRow({
   session: s,
   activeId,
   onOpen,
   onRename,
   onDone,
+  onArchive,
+  onCancelOffer,
   children,
 }: Omit<Props, 'sessions'> & { session: SessionState; children?: ReactNode }) {
   const [editing, setEditing] = useState(false)
@@ -94,8 +149,11 @@ function SessionRow({
     }
   }, [editing])
   const open = s.id === activeId
+  const offer = useLiveOffer(s.offer)
   const mine = isOwnedByBrowser(s)
   const canFinish = mine && s.status !== 'done' && !RUNNING.has(s.status)
+  // The agent refuses an archive while a turn runs or anything waits on the user (409).
+  const canArchive = mine && !RUNNING.has(s.status)
 
   const stopEditing = () => {
     refocus.current = true
@@ -129,10 +187,10 @@ function SessionRow({
     stopEditing()
   }
 
-  const finish = async () => {
+  const act = async (action: (id: string) => Promise<void>) => {
     setError(null)
     try {
-      await onDone(s.id)
+      await action(s.id)
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught))
     }
@@ -155,6 +213,7 @@ function SessionRow({
             {s.parentId && <span className="text-[10.5px] text-faint">fork</span>}
             <OriginBadge origin={s.origin} />
             <OwnerBadge owner={s.owner} />
+            {offer && <OfferBadge offer={offer} />}
             <span className="text-[11px] text-faint">{outOfBudget(s) ? 'Out of budget' : statusLabel(s.status)}</span>
             {s.budget && (
               <span className="text-[11px] text-faint">
@@ -191,9 +250,33 @@ function SessionRow({
                 aria-label={`Mark ${s.title} done`}
                 title="End this chat: it takes no more messages, and Fork still continues it"
                 data-agent-user-only=""
-                onClick={() => void finish()}
+                onClick={() => void act(onDone)}
               >
                 Done
+              </Button>
+            )}
+            {offer && (
+              <Button
+                variant="ghost"
+                size="sm"
+                aria-label={`Cancel the offer of ${s.title}`}
+                title="Withdraw the handoff offer: the chat stays yours"
+                data-agent-user-only=""
+                onClick={() => void act(onCancelOffer)}
+              >
+                Cancel offer
+              </Button>
+            )}
+            {canArchive && (
+              <Button
+                variant="ghost"
+                size="sm"
+                aria-label={`Archive ${s.title}`}
+                title="Put this chat away: it leaves this list for Archived, read-only, until you unarchive it"
+                data-agent-user-only=""
+                onClick={() => void act(onArchive)}
+              >
+                Archive
               </Button>
             )}
           </span>

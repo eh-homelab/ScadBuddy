@@ -7,13 +7,11 @@ tools, the tab's socket to the agent, and pairing) is the follow-up PR for #254.
 [`docs/superpowers/specs/2026-09-27-ai-integration-design.md`](../superpowers/specs/2026-09-27-ai-integration-design.md).
 The code is in [`frontend/src/agent/`](../../frontend/src/agent/).
 
-Sessions that have **no** user tab use a different tool: a headless Chromium in the
-agent container, driven through the Playwright plugin (#349,
-[headless-browser.md](headless-browser.md)). The two do not overlap: the headless
-browser loads ScadBuddy's UI on its own and never sees the user's tab, and the bridge
-stays the only way to act in that tab. The headless browser does not honour
-`data-agent-user-only` (it clicks like a user would); what it cannot do is complete an
-outward request, which the backend refuses for it (`AgentActorGate`).
+Sessions that have **no** user tab can use a different tool: Microsoft's Playwright
+MCP server added as a remote plugin ([headless-browser.md](headless-browser.md)). The
+two do not overlap: that browser never sees the user's tab, and the bridge stays the
+only way to act in that tab. It does not honour `data-agent-user-only` (it clicks like
+a user would).
 
 > **Status.** The bridge has three callers: the agent service, over the tab's socket
 > (below, [The agent's side](#the-agents-side-browser_-tools)); WebMCP, which is opt-in
@@ -234,8 +232,8 @@ tools, so the two lists stay equal (`test/projections.test.ts`).
   [`link.ts`](../../frontend/src/agent/link.ts)), because the agent's tab socket takes
   frames up to 256 KiB (`routes/bridge.ts` `BRIDGE_FRAME_MAX`).
 - **Not here:** `screenshot()`, which PR #339 left out of the tab on purpose; and the
-  headless browser (#349, [headless-browser.md](headless-browser.md)), a separate
-  Chromium whose Playwright tools are `mcp__plugin_playwright_playwright__browser_*`.
+  Playwright MCP plugin ([headless-browser.md](headless-browser.md)), a separate
+  browser whose tools are `mcp__playwright__browser_*`.
 
 ## The tab's socket
 
@@ -317,9 +315,16 @@ agent needs a pairing token that the user accepts **in the tab**, in every auth 
 
 ## Replicas
 
-The tabs are held by the process their socket reached. A turn runs where its chat socket
-started it, and `/mcp` sessions are already per replica (`mcp/http.ts`), so the tab a
-call is for may be connected to another replica. Then the call goes there through
+The tabs are held by the process their socket reached. A classic turn runs where its chat
+socket started it, a durable session's tool call on whichever replica's `agent-tools`
+worker took the activity, and an `/mcp` call on the replica holding its session
+([mcp-resources.md](mcp-resources.md#sessions-across-replicas-2086)), so the tab a
+call is for may be connected to another replica. A chat session's tab is therefore kept
+in Postgres as well as in the hub (`ai_session_tabs`,
+[`bridge/sessionTabs.ts`](../../agent/src/bridge/sessionTabs.ts), #2086): a call that runs
+where the session's messages never arrived reads it there. The row is written on every
+message the user sends and is what every replica uses; a replica's own copy answers only
+when there is no row or it cannot be read. Then the call goes there through
 Postgres (#1916, [`bridge/relay.ts`](../../agent/src/bridge/relay.ts)):
 
 ```mermaid
@@ -341,13 +346,19 @@ sequenceDiagram
 - **Bodies are rows** in `ai_bridge_messages`, inserted in the transaction that sends
   the NOTIFY, because a NOTIFY payload is capped at 8000 bytes and a tab's result can be
   200 000. Taking a row with `DELETE … RETURNING` runs a call once even when a reconnect
-  leaves the tab id briefly on two replicas. Rows nobody took are swept after 10 minutes.
+  leaves the tab id briefly on two replicas. So a forwarded call's arguments and the
+  tab's result, page snapshots included, are written to Postgres. A row nobody took
+  stays there until a sweep finds it more than 10 minutes old, and a replica sweeps only
+  when it next forwards something, so such a row can outlive those 10 minutes.
 - **The channel is `scadbuddy_bridge`**, LISTENed on the event bus's connection
   (`events/pgListener.ts` `listenAlso`), not `scadbuddy_events`: the backend logs every
   payload on that one it cannot decode.
 - **No replica holds the tab:** nobody acks within 3 s (`ACK_TIMEOUT_MS`), and the call
   answers the usual "the paired ScadBuddy tab is not connected". The ack is what tells
-  that apart from a slow tab.
+  that apart from a slow tab. Before answering, the caller withdraws its request row;
+  when the row is already gone, a replica took it and its ack is late or was lost, so
+  the caller waits for the answer as if acked rather than report a tab that may be
+  running the call as not connected.
 - **Timeouts:** the replica holding the tab applies the call's own timeout and answers
   `no_answer`, as for a local call; the caller gives up on that replica after the timeout
   plus 3 s. `browser_status` asks the same way for the tab's route and live tools.

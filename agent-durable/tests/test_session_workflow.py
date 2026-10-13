@@ -8,9 +8,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import time
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -29,6 +31,7 @@ from session_support import (
     until,
 )
 from temporalio import activity
+from temporalio.claude_agent_sdk import ClaudeAgentPlugin, follow_agent
 from temporalio.claude_agent_sdk.testing import Final, HistoryItem, ScriptedClaude, ToolCall
 from temporalio.client import (
     Client,
@@ -38,21 +41,32 @@ from temporalio.client import (
 )
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
-from temporalio.worker import Worker
+from temporalio.worker import Replayer, Worker
+from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
 
 from scadbuddy_durable.codec import PgPayloadKeys, data_converter
 from scadbuddy_durable.gate.activities import GateActivities
 from scadbuddy_durable.gate.names import (
     CANCEL_INPUT_UPDATE,
+    END_SIGNAL,
     INTERRUPT_SIGNAL,
     PENDING_INPUT_QUERY,
     RESPOND_UPDATE,
 )
-from scadbuddy_durable.gate.store import ResolveInput
+from scadbuddy_durable.gate.store import OpenInput, ResolveInput
+from scadbuddy_durable.payload_store import OFFLOAD_BYTES, external_storage
 from scadbuddy_durable.secrets import kek_from_base64
 from scadbuddy_durable.session import tools
 from scadbuddy_durable.session.activities import SessionActivities
-from scadbuddy_durable.session.models import FinishTurn, GateSettings
+from scadbuddy_durable.session.models import (
+    SEGMENT_CONTEXT_QUERY,
+    TOOLS_QUEUE,
+    TURN_QUERY,
+    FinishTurn,
+    GateSettings,
+    SegmentContext,
+)
+from scadbuddy_durable.session.workflow import FOLLOW_DRAIN, DurableSession
 from scadbuddy_durable.worker import build_worker
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
@@ -85,6 +99,9 @@ def policy(prompt: str, history: list[HistoryItem]) -> ToolCall | Final:
         ("ask badly", ("ask_user", {"questions": "red?"})),
         ("wait for me", ("wait_for_user", WAIT)),
         ("render it", ("render_preview", {"model": "m"})),
+        ("get it", ("notes__post", {"method": "GET", "body": "y"})),
+        ("post it", ("notes__post", {"method": "POST", "body": "x"})),
+        ("run it", ("Bash", {"command": "make notes"})),
     ):
         if prompt.startswith(name):
             return ToolCall(*args)
@@ -99,6 +116,7 @@ class Harness:
     queue: str
     agent: Worker
     handles: list[WorkflowHandle[Any, Any]]
+    payload_dir: Path = Path()
     session_activities: SessionActivities | None = None
     gate_activities: GateActivities | None = None
 
@@ -121,17 +139,19 @@ class Harness:
 
 
 @pytest.fixture
-async def harness(temporal_env: WorkflowEnvironment, connect: Connect) -> AsyncIterator[Harness]:
+async def harness(
+    temporal_env: WorkflowEnvironment, connect: Connect, tmp_path: Path
+) -> AsyncIterator[Harness]:
     tools.use_manifest(MANIFEST)
     keys = PgPayloadKeys(connect, KEK)
     client = await Client.connect(
         temporal_env.client.service_client.config.target_host,
         namespace=temporal_env.client.namespace,
-        data_converter=data_converter(keys),
+        data_converter=data_converter(keys, external_storage(tmp_path)),
     )
     stand_in = StandInTools(connect)
     queue = f"agent-{uuid.uuid4().hex[:8]}"
-    h = Harness(client, connect, stand_in, queue, None, [])  # type: ignore[arg-type]
+    h = Harness(client, connect, stand_in, queue, None, [], payload_dir=tmp_path)  # type: ignore[arg-type]
     agent = h.restart_agent()
     async with tools_worker(client, stand_in):
         task = asyncio.create_task(agent.run())
@@ -212,6 +232,27 @@ async def test_history_holds_no_plaintext(
     raw = b"".join(e.SerializeToString() for e in history.events)
     assert b"red bracket" not in raw
     assert b"binary/scadbuddy-subject" in raw
+
+
+async def test_a_large_turn_crosses_history_as_references(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#2243: the message, the segment's input and its answer, the stream and the turn's
+    events all carry the text, and none of history's events does."""
+    sid, handle = await harness.session(agent_db)
+    text = "a long brief " + "z" * (OFFLOAD_BYTES * 4)
+    await send(handle, text)
+    assert await settled(connect, sid) == "idle"
+    deltas = [
+        e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"
+    ]
+    [delta] = deltas  # the panel's delta is cut to 32 KiB; the answer was whole
+    assert delta.startswith("you said: a long brief zzzz")
+    history = await handle.fetch_history()
+    # Nothing at the threshold or over it is inline: the message alone is four times it.
+    assert max(e.ByteSize() for e in history.events) < OFFLOAD_BYTES + 4096
+    assert b"zzzz" not in b"".join(e.SerializeToString() for e in history.events)
+    assert any((harness.payload_dir / f"session-{sid}").iterdir())
 
 
 async def test_an_approved_call_runs_once_and_is_reported(
@@ -368,6 +409,24 @@ async def test_a_busy_session_refuses_a_second_message(
     await settled(connect, sid)
 
 
+async def test_the_turn_query_names_the_turn_the_workflow_holds(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#2078: the agent's sweep gives back a kept claim when the workflow holds no turn."""
+    sid, handle = await harness.session(agent_db)
+    assert await handle.query(TURN_QUERY) is None
+    answer = await send(handle, "print it")
+    await _parked(handle)
+    assert await handle.query(TURN_QUERY) == answer.turn_id
+    await handle.execute_update(CANCEL_INPUT_UPDATE, {"reason": "done"})
+    assert await settled(connect, sid) == "idle"
+    await until(lambda: _turn_is(handle, None))
+
+
+async def _turn_is(handle: WorkflowHandle[Any, Any], turn_id: str | None) -> bool:
+    return bool(await handle.query(TURN_QUERY) == turn_id)
+
+
 async def test_interrupt_ends_the_turn_even_while_the_worker_is_down(
     harness: Harness, agent_db: Conn, connect: Connect
 ) -> None:
@@ -388,6 +447,29 @@ async def test_interrupt_ends_the_turn_even_while_the_worker_is_down(
     assert harness.stand_in.ran == []
 
 
+async def test_end_completes_an_idle_session(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#1056: a session marked done ends its workflow."""
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "hi")
+    await settled(connect, sid)
+    await handle.signal(END_SIGNAL, {})
+    await asyncio.wait_for(handle.result(), 30)
+
+
+async def test_end_during_a_turn_completes_the_session_after_it(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "print it")
+    await _parked(handle)
+    await handle.signal(END_SIGNAL, {})
+    await handle.execute_update(CANCEL_INPUT_UPDATE, {"reason": "done"})
+    assert await settled(connect, sid) == "idle"
+    await asyncio.wait_for(handle.result(), 30)
+
+
 async def test_the_handler_set_is_the_gates_and_the_plugins(
     harness: Harness, agent_db: Conn, connect: Connect
 ) -> None:
@@ -400,15 +482,17 @@ async def test_the_handler_set_is_the_gates_and_the_plugins(
     signals = {s.name for s in definition.signal_definitions}
     queries = {q.name for q in definition.query_definitions}
     assert {"send_message", "respond", "cancel_input"} <= updates
-    assert "interrupt" in signals
-    assert {"pending_input", "segment_context"} <= queries
+    assert {"interrupt", "end"} <= signals
+    assert {"pending_input", "segment_context", "turn"} <= queries
     ours = {
         "send_message",
         "respond",
         "cancel_input",
         "interrupt",
+        "end",
         "pending_input",
         "segment_context",
+        "turn",
     }
     others = (updates | signals | queries) - ours
     # Workflow Streams' and the plugin's own.
@@ -580,11 +664,16 @@ async def test_an_interrupt_as_a_turn_starts_stops_it(
         await handle.signal(INTERRUPT_SIGNAL, {"reason": "stop"})
         await asyncio.sleep(1)
         held.release.set()
+        started = time.monotonic()
         assert await settled(connect, sid) == "idle"
+        # #2123: a run cancelled before its first step publishes nothing, so the turn
+        # must not wait out FOLLOW_DRAIN for an end that never comes.
+        assert time.monotonic() - started < FOLLOW_DRAIN.total_seconds() / 2
     log = await events(agent_db, sid)
     assert [e["code"] for e in log if e["type"] == "error"] == ["interrupted"]
     assert not any(e["type"] == "approval.required" for e in log)
     assert harness.stand_in.ran == []
+    await _replays(harness, handle)
 
 
 class SlowCancel(GateActivities):
@@ -626,3 +715,450 @@ async def test_a_stop_survives_a_database_outage_while_it_cancels_a_parked_call(
         assert await settled(connect, sid) == "idle"
     log = await events(agent_db, sid)
     assert [e["code"] for e in log if e["type"] == "error"] == ["interrupted"]
+
+
+class SlowOpen(GateActivities):
+    """open_input writes its row, then its result is slow to reach the workflow."""
+
+    def __init__(self, connect: Connect) -> None:
+        super().__init__(connect)
+        self.written = asyncio.Event()
+        self.release = asyncio.Event()
+
+    @activity.defn(name="open_input")
+    async def open_input(self, args: OpenInput) -> bool:
+        opened = await super().open_input(args)
+        self.written.set()
+        await self.release.wait()
+        return opened
+
+
+async def test_a_respond_as_soon_as_the_row_is_written_is_taken(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """A respond read from ai_pending_input before open_input's result reached the
+    workflow was refused stale (flowSessions.e2e on #2582's CI). It now waits for the
+    open, then resolves the call."""
+    await harness.agent.shutdown()
+    gate = SlowOpen(connect)
+    harness.gate_activities = gate
+    async with harness.restart_agent():
+        sid, handle = await harness.session(agent_db)
+        await send(handle, "print it")
+        await asyncio.wait_for(gate.written.wait(), 60)
+        cur = await agent_db.execute(
+            "SELECT request_id FROM ai_pending_input WHERE session_id = %s", (sid,)
+        )
+        [(request_id,)] = await cur.fetchall()
+        answer = asyncio.create_task(
+            handle.execute_update(
+                RESPOND_UPDATE,
+                _respond({"id": request_id}, {"kind": "approval", "decision": "deny"}),
+            )
+        )
+        await asyncio.sleep(1)
+        # Taken, and waiting for the open: no response was written before the row's open ended.
+        assert not answer.done()
+        gate.release.set()
+        assert await answer == {"kind": "approval", "outcome": "denied"}
+        assert await settled(connect, sid) == "idle"
+    assert harness.stand_in.ran == []
+    resolved = [e for e in await events(agent_db, sid) if e["type"] == "input.resolved"]
+    assert [e["outcome"] for e in resolved] == ["denied"]
+
+
+class Outage(GateActivities):
+    """Postgres out for one resolve outcome: every attempt fails until the test lets it go."""
+
+    def __init__(self, connect: Connect, outcome: str) -> None:
+        super().__init__(connect)
+        self.outcome = outcome
+        self.tried = asyncio.Event()
+        self.release = asyncio.Event()
+
+    @activity.defn(name="resolve_input")
+    async def resolve_input(self, args: ResolveInput) -> bool:
+        if args.outcome == self.outcome and not self.release.is_set():
+            self.tried.set()
+            raise RuntimeError("database unreachable")
+        return await super().resolve_input(args)
+
+
+async def _open_rows(conn: Conn, sid: str) -> int:
+    cur = await conn.execute("SELECT count(*) FROM ai_pending_input WHERE session_id = %s", (sid,))
+    row = await cur.fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+async def test_a_stop_stops_the_run_while_the_database_is_down(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#2123: Stop waited for the parked call's cancel to be written before it cancelled
+    the run, so with Postgres down the agent kept running until it was back."""
+    outage = Outage(connect, "cancelled")
+    await harness.agent.shutdown()
+    harness.gate_activities = outage
+    async with harness.restart_agent():
+        sid, handle = await harness.session(agent_db)
+        await send(handle, "print it")
+        await _parked(handle)
+        await handle.signal(INTERRUPT_SIGNAL, {"reason": "stop"})
+
+        async def stopped() -> bool:
+            async for event in follow_agent(harness.client, handle.id):
+                if event["type"] == "cancelled":
+                    return True
+            return False
+
+        # The run stops while the cancel cannot be written; the turn's end then retries it.
+        assert await asyncio.wait_for(stopped(), 20)
+        await asyncio.wait_for(outage.tried.wait(), 30)
+        outage.release.set()
+        assert await settled(connect, sid, timeout=120) == "idle"
+    log = await events(agent_db, sid)
+    assert [e["code"] for e in log if e["type"] == "error"] == ["interrupted"]
+    resolved = [e for e in log if e["type"] == "input.resolved"]
+    assert [(e["outcome"], e.get("reason")) for e in resolved] == [
+        ("cancelled", "the turn was interrupted")
+    ]
+    assert await _open_rows(agent_db, sid) == 0
+    assert harness.stand_in.ran == []
+    await _replays(harness, handle)
+
+
+async def test_an_expiry_in_flight_as_the_turn_ends_is_still_written(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#2123: the turn's end skipped an entry whose timer had fired and then cancelled
+    its park, and with it the expiry's resolve_input, so the row stayed pending."""
+    outage = Outage(connect, "expired")
+    await _setting(agent_db, "approval_expiry_seconds", 10)
+    await harness.agent.shutdown()
+    harness.gate_activities = outage
+    async with harness.restart_agent():
+        sid, handle = await harness.session(agent_db)
+        await send(handle, "print it")
+        await _parked(handle)
+        await asyncio.wait_for(outage.tried.wait(), 60)
+        await handle.signal(INTERRUPT_SIGNAL, {"reason": "stop"})
+        await asyncio.sleep(3)
+        outage.release.set()
+        assert await settled(connect, sid, timeout=120) == "idle"
+
+        async def closed() -> bool:
+            return await _open_rows(agent_db, sid) == 0
+
+        await until(closed, timeout=60)
+    log = await events(agent_db, sid)
+    resolved = [e for e in log if e["type"] == "input.resolved"]
+    assert [e["outcome"] for e in resolved] == ["expired"]
+    assert harness.stand_in.ran == []
+    await _replays(harness, handle)
+
+
+# ---- Settings → Plugins overrides (#2088) ----
+
+
+async def _overrides(conn: Conn, tool_tiers: dict[str, str], disabled: list[str]) -> None:
+    await conn.execute(
+        "INSERT INTO ai_settings (key, value) VALUES (%s, %s)"
+        " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        (
+            tools.OVERRIDES_SETTING,
+            json.dumps({"tool_tiers": tool_tiers, "disabled_tools": disabled}),
+        ),
+    )
+
+
+async def _replays(harness: Harness, handle: WorkflowHandle[Any, Any]) -> None:
+    """The history replays on this code: the gates came from recorded results only."""
+    history = await handle.fetch_history()
+    await Replayer(
+        workflows=[DurableSession],
+        plugins=[ClaudeAgentPlugin(ScriptedClaude(policy))],
+        data_converter=harness.client.data_converter,
+        workflow_runner=SandboxedWorkflowRunner(
+            restrictions=SandboxRestrictions.default.with_passthrough_modules(
+                "scadbuddy_durable.session.tools"
+            )
+        ),
+    ).replay_workflow(history)
+
+
+async def test_a_tool_raised_to_outward_parks_and_runs_once_approved(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    await _overrides(agent_db, {"render_preview": "outward"}, [])
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "render it")
+    [entry] = await _parked(handle)
+    assert entry["kind"] == "approval"
+    assert entry["summary"] == "render_preview call"
+    assert harness.stand_in.ran == []
+    result = await handle.execute_update(
+        RESPOND_UPDATE, _respond(entry, {"kind": "approval", "decision": "approve"})
+    )
+    assert result == {"kind": "approval", "outcome": "approved"}
+    assert await settled(connect, sid) == "idle"
+    assert [r[0] for r in harness.stand_in.ran] == ["render_preview"]
+    texts = [e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"]
+    assert texts == ["render_preview: ok: rendered"]
+    log = await events(agent_db, sid)
+    assert _types(log).count("approval.required") == 1
+    await _replays(harness, handle)
+
+
+async def test_an_override_never_lowers_a_tool_below_its_own_tier(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """TIGHTEN ONLY (builtInTools.ts): an outward tool set to read still parks."""
+    await _overrides(agent_db, {"print_output": "read"}, [])
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "print it")
+    [entry] = await _parked(handle)
+    assert entry["kind"] == "approval"
+    await handle.execute_update(
+        RESPOND_UPDATE, _respond(entry, {"kind": "approval", "decision": "deny"})
+    )
+    assert await settled(connect, sid) == "idle"
+    assert harness.stand_in.ran == []
+
+
+async def test_a_disabled_tool_is_refused_naming_settings_and_never_parks(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    # Raised as well: a disabled tool is refused as disabled, never parked for approval.
+    await _overrides(agent_db, {"render_preview": "outward"}, ["render_preview"])
+    sid, handle = await harness.session(agent_db)
+    before = await handle.query(SEGMENT_CONTEXT_QUERY, result_type=SegmentContext)
+    assert before.disabled_tools == []  # no turn has read the settings yet
+    await send(handle, "render it")
+    assert await settled(connect, sid) == "idle"
+    assert harness.stand_in.ran == []
+    log = await events(agent_db, sid)
+    assert "approval.required" not in _types(log)
+    texts = [e["delta"] for e in log if e["type"] == "assistant.text.delta"]
+    assert len(texts) == 1
+    assert texts[0].startswith("render_preview: error")
+    assert "disabled in Settings → Plugins" in texts[0]
+    # What the segment runner reads, to leave the tool undeclared.
+    context = await handle.query(SEGMENT_CONTEXT_QUERY, result_type=SegmentContext)
+    assert context.disabled_tools == ["render_preview"]
+    await _replays(harness, handle)
+
+
+class OlderSettings(SessionActivities):
+    """gate_settings as a worker before #2088 answered it: the timers alone."""
+
+    @activity.defn(name="gate_settings")
+    async def gate_settings(self) -> dict[str, int]:  # type: ignore[override]
+        return {"approval_expiry_s": 600, "question_expiry_s": 3600}
+
+
+async def test_a_turn_an_older_worker_started_parks_by_the_manifest_and_replays(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """A history whose gate_settings result has no overrides keeps its old commands: the
+    raised call runs unparked (and is refused, as before #2088), and replays here."""
+    await harness.agent.shutdown()
+    harness.session_activities = OlderSettings(connect)
+    await _overrides(agent_db, {"render_preview": "outward"}, [])
+    async with harness.restart_agent():
+        sid, handle = await harness.session(agent_db)
+        await send(handle, "render it")
+        assert await settled(connect, sid) == "idle"
+    log = await events(agent_db, sid)
+    assert "approval.required" not in _types(log)
+    texts = [e["delta"] for e in log if e["type"] == "assistant.text.delta"]
+    assert texts and texts[0].startswith("render_preview: error")
+    await _replays(harness, handle)
+
+
+NOTES_POST = {
+    "name": "notes__post",
+    "description": "posts a note",
+    "input_schema": {
+        "type": "object",
+        "properties": {"method": {"type": "string"}, "body": {"type": "string"}},
+    },
+    "may_park": True,
+}
+
+
+async def test_a_turn_tool_whose_call_is_read_runs_without_parking(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#2320: a plugin's or http_request's tool is offered as a durable tool, and a call
+    the agent tiers read (an http GET) goes straight through, as in a classic turn."""
+    harness.stand_in.turn_offered = [NOTES_POST]
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "get it")
+    assert await settled(connect, sid) == "idle"
+    assert harness.stand_in.ran == [("turn:notes__post", {"method": "GET", "body": "y"})]
+    log = await events(agent_db, sid)
+    assert "approval.required" not in _types(log)
+    texts = [e["delta"] for e in log if e["type"] == "assistant.text.delta"]
+    assert texts == ["notes__post: ok: turn:notes__post did GET"]
+    await _replays(harness, handle)
+
+
+async def test_an_outward_turn_tool_call_parks_and_runs_once_approved(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    harness.stand_in.turn_offered = [NOTES_POST]
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "post it")
+    [entry] = await _parked(handle)
+    assert entry["kind"] == "approval"
+    assert harness.stand_in.ran == []
+    await handle.execute_update(
+        RESPOND_UPDATE, _respond(entry, {"kind": "approval", "decision": "approve"})
+    )
+    assert await settled(connect, sid) == "idle"
+    assert harness.stand_in.ran == [("turn:notes__post", {"method": "POST", "body": "x"})]
+    await _replays(harness, handle)
+
+
+NOTES_PACKAGE = {
+    "name": "notes",
+    "dir": "a" * 64,
+    "content_hash": "sha256:" + "a" * 64,
+    "allowed": True,
+    "builtin_tools": ["Bash"],
+}
+
+
+async def test_a_package_built_in_parks_runs_once_approved_and_the_runner_gets_the_package(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#2320: an allowed package's Bash, outward in a classic turn, runs here as its own
+    activity once a human approved the call; the segment runner is told the package."""
+    harness.stand_in.turn_packages = [NOTES_PACKAGE]
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "run it")
+    [entry] = await _parked(handle)
+    assert (entry["kind"], entry["tool"]) == ("approval", "Bash")
+    context = await handle.query(SEGMENT_CONTEXT_QUERY, result_type=SegmentContext)
+    assert [(p.name, p.dir, p.allowed) for p in context.packages] == [("notes", "a" * 64, True)]
+    await handle.execute_update(
+        RESPOND_UPDATE, _respond(entry, {"kind": "approval", "decision": "approve"})
+    )
+    assert await settled(connect, sid) == "idle"
+    texts = [e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"]
+    assert len(texts) == 1 and texts[0].startswith("Bash: ok"), texts
+    await _replays(harness, handle)
+
+
+async def test_a_turn_recalls_memories_into_its_prompt_and_retains_before_it_ends(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#2320: Hindsight's block follows the prompt as a classic turn's recall hook adds
+    it, and the transcript is retained before the turn is written."""
+    harness.stand_in.memory_context = "<hindsight_memories>1. red</hindsight_memories>"
+    sid, handle = await harness.session(agent_db)
+    answer = await send(handle, "hello there")
+    assert await settled(connect, sid) == "idle"
+    texts = [e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"]
+    assert texts == ["you said: hello there\n\n<hindsight_memories>1. red</hindsight_memories>"]
+    assert harness.stand_in.memory == [
+        ("memory_recall", answer.turn_id),
+        ("memory_retain", answer.turn_id),
+    ]
+    await _replays(harness, handle)
+
+
+async def test_a_failed_recall_or_retain_never_fails_the_turn(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    harness.stand_in.memory_fails = True
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "hello there")
+    assert await settled(connect, sid) == "idle"
+    texts = [e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"]
+    assert texts == ["you said: hello there"]
+    assert [name for name, _ in harness.stand_in.memory] == ["memory_recall", "memory_retain"]
+    await _replays(harness, handle)
+
+
+async def test_a_session_stays_on_the_replica_its_plugin_calls_are_pinned_to(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#2581: the replica that holds the session's plugin MCP clients lists its next turn
+    too, so the pin (and a browser's page) outlives the turn; the session's end closes
+    them there."""
+    host = f"agent-tools.pod-{uuid.uuid4().hex[:6]}"
+    harness.stand_in.turn_offered = [NOTES_POST]
+    harness.stand_in.host_queue = host
+    async with Worker(harness.client, task_queue=host, activities=harness.stand_in.activities()):
+        sid, handle = await harness.session(agent_db)
+        await send(handle, "get it")
+        assert await settled(connect, sid) == "idle"
+        await agent_db.execute("UPDATE ai_sessions SET status = 'running' WHERE id = %s", (sid,))
+        await send_next(handle, "hello there")
+        assert await settled(connect, sid) == "idle"
+        await handle.signal(END_SIGNAL, {})
+        await asyncio.wait_for(handle.result(), 30)
+    assert harness.stand_in.called_on == [host]
+    assert harness.stand_in.listed_on == [TOOLS_QUEUE, host]
+    assert harness.stand_in.closed_on == [host]
+    await _replays(harness, handle)
+
+
+async def test_a_session_whose_replica_is_gone_lists_its_next_turn_anywhere(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#2581: a pinned replica that does not pick the listing up is gone: the turn is
+    listed on agent-tools (its plugins start new sessions there), and goes on."""
+    harness.stand_in.turn_offered = [NOTES_POST]
+    harness.stand_in.host_queue = f"agent-tools.gone-{uuid.uuid4().hex[:6]}"
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "hello there")
+    assert await settled(connect, sid) == "idle"
+    harness.stand_in.host_queue = None
+    await agent_db.execute("UPDATE ai_sessions SET status = 'running' WHERE id = %s", (sid,))
+    await send_next(handle, "get it")
+    assert await settled(connect, sid, timeout=60) == "idle"
+    assert harness.stand_in.listed_on == [TOOLS_QUEUE, TOOLS_QUEUE]
+    assert harness.stand_in.ran == [("turn:notes__post", {"method": "GET", "body": "y"})]
+    await handle.signal(END_SIGNAL, {})
+    await asyncio.wait_for(handle.result(), 30)
+    # Nothing was pinned last: nothing to close.
+    assert harness.stand_in.closed_on == []
+    await _replays(harness, handle)
+
+
+async def test_a_turn_tool_call_the_agent_cannot_tier_parks(
+    harness: Harness, agent_db: Conn
+) -> None:
+    """Fail toward asking: a may_park tool whose turn_tool_tier fails is asked about, never
+    let through to be refused as unapproved without the user seeing it."""
+    harness.stand_in.turn_offered = [NOTES_POST]
+    harness.stand_in.tier_refuses = True
+    _, handle = await harness.session(agent_db)
+    await send(handle, "get it")
+    [entry] = await _parked(handle)
+    assert entry["kind"] == "approval"
+    assert harness.stand_in.ran == []
+    await _replays(harness, handle)
+
+
+async def test_a_turn_whose_other_tools_cannot_be_listed_goes_on_with_its_own(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """A failed turn_tools never fails the session: the turn runs with the manifest's tools
+    and offers none of last turn's others, as a classic turn reports the plugin and goes on."""
+    harness.stand_in.turn_offered = [NOTES_POST]
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "get it")
+    assert await settled(connect, sid) == "idle"
+    harness.stand_in.turn_tools_fails = True
+    await agent_db.execute("UPDATE ai_sessions SET status = 'running' WHERE id = %s", (sid,))
+    await send_next(handle, "hello there")
+    assert await settled(connect, sid) == "idle"
+    # The second turn ran to its result, offered no turn tool, and called none.
+    types = _types(await events(agent_db, sid))
+    assert types.count("session.result") == 2
+    assert types.count("tool.call") == 1
+    assert harness.stand_in.ran == [("turn:notes__post", {"method": "GET", "body": "y"})]
+    await _replays(harness, handle)

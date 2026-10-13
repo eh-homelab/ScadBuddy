@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
 from collections.abc import AsyncIterator
 from typing import cast
 
 import psycopg
 import pytest
-from session_support import Conn, events, insert_session
+from session_support import MANIFEST, Conn, events, insert_session
 from temporalio.client import Client
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
 from scadbuddy_durable.session import events as events_module
+from scadbuddy_durable.session import tools
 from scadbuddy_durable.session.activities import SessionActivities
 from scadbuddy_durable.session.events import (
     INPUT_MAX,
@@ -79,10 +83,17 @@ async def test_an_offset_is_written_once(agent_db: Conn) -> None:
 @pytest.mark.requires_postgres
 async def test_finish_turn_writes_once(agent_db: Conn, connect: object) -> None:
     sid = await insert_session(agent_db, budget=2.0)
-    await agent_db.execute("UPDATE ai_sessions SET cost_usd = 0.5, turns = 3 WHERE id = %s", (sid,))
+    await agent_db.execute(
+        "UPDATE ai_sessions SET cost_usd = 0.5, turns = 3, durable_turn_id = gen_random_uuid()"
+        " WHERE id = %s",
+        (sid,),
+    )
     acts = SessionActivities(connect)  # type: ignore[arg-type]
     args = FinishTurn(session_id=sid, turn_id="t", outcome="failed", message="it broke")
     assert await acts.finish_turn(args)
+    # The turn is over: it is no longer the session's running turn (#2320).
+    cur = await agent_db.execute("SELECT durable_turn_id FROM ai_sessions WHERE id = %s", (sid,))
+    assert await cur.fetchone() == (None,)
     assert not await acts.finish_turn(args)  # a retry writes nothing twice
     log = await events(agent_db, sid)
     assert [e["type"] for e in log] == ["session.result", "error", "session.status"]
@@ -102,6 +113,31 @@ async def test_gate_settings_are_read_and_clamped(agent_db: Conn, connect: objec
     )
     clamped = await acts.gate_settings()
     assert (clamped.approval_expiry_s, clamped.question_expiry_s) == (10, 86_400)
+
+
+@pytest.mark.requires_postgres
+async def test_gate_settings_read_the_tools_overrides_sanitised(
+    agent_db: Conn, connect: object
+) -> None:
+    tools.use_manifest(MANIFEST)
+    acts = SessionActivities(connect)  # type: ignore[arg-type]
+    none = await acts.gate_settings()
+    assert (none.tool_tiers, none.disabled_tools) == ({}, [])
+    await agent_db.execute(
+        "INSERT INTO ai_settings (key, value) VALUES (%s, %s)",
+        (
+            tools.OVERRIDES_SETTING,
+            json.dumps(
+                {
+                    "tool_tiers": {"render_preview": "outward", "print_output": "read"},
+                    "disabled_tools": ["print_output", "gone"],
+                }
+            ),
+        ),
+    )
+    read = await acts.gate_settings()
+    assert read.tool_tiers == {"render_preview": "outward"}
+    assert read.disabled_tools == ["print_output"]
 
 
 def test_the_worker_names_what_it_misses_and_never_shows_the_database_url() -> None:
@@ -200,3 +236,90 @@ async def test_a_turn_ends_on_its_own_end_not_the_last_turns(
         "assistant.text.delta",
         "assistant.text.done",
     ]
+
+
+@pytest.mark.requires_postgres
+async def test_a_carried_over_turn_ends_on_its_own_end_not_an_earlier_turns(
+    agent_db: Conn, connect: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2123: a turn handed over by continue-as-new has no prompt in this run, so an
+    earlier turn's unread end is told apart by its time."""
+    sid = await insert_session(agent_db)
+    since = "2026-10-11T12:00:00+00:00"
+    stream = [
+        {"type": "cancelled", "at": "2026-10-11T11:59:58+00:00", "offset": 0},
+        {"type": "text", "text": "hello", "at": "2026-10-11T12:00:03+00:00", "offset": 1},
+        {"type": "done", "result": "hello", "at": "2026-10-11T12:00:04+00:00", "offset": 2},
+    ]
+
+    async def follow(*_: object, **__: object) -> AsyncIterator[dict[str, object]]:
+        for e in stream:
+            yield dict(e)
+
+    monkeypatch.setattr(events_module, "follow_agent", follow)
+    env = ActivityEnvironment(client=cast(Client, object()))
+    acts = SessionEvents(connect)  # type: ignore[arg-type]
+    result = await env.run(
+        acts.follow_session,
+        FollowArgs(session_id=sid, workflow_id=f"session-{sid}", since=since),
+    )
+    assert result.ended == "done"
+    assert [e["type"] for e in await events(agent_db, sid)] == [
+        "assistant.text.delta",
+        "assistant.text.done",
+    ]
+
+
+PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+)
+
+
+@pytest.mark.requires_postgres
+async def test_a_tool_result_names_the_images_its_call_produced(
+    agent_db: Conn, connect: object, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2478: the agent-tools activity kept the call's images (ai_session_blobs) and
+    recorded them under its tool_use_id; the tool.result names them, never holds them."""
+    sid = await insert_session(agent_db)
+    name = f"{hashlib.sha256(PNG).hexdigest()}.png"
+    await agent_db.execute(
+        "INSERT INTO ai_session_blobs (session_id, name, media_type, data)"
+        " VALUES (%s, %s, 'image/png', %s)",
+        (sid, name, PNG),
+    )
+    await agent_db.execute(
+        "INSERT INTO ai_session_tool_images (session_id, tool_use_id, ord, name)"
+        " VALUES (%s, 'toolu_img', 0, %s)",
+        (sid, name),
+    )
+    stream = [
+        {"type": "prompt", "text": "show me", "offset": 0},
+        {"type": "tool_call", "id": "toolu_img", "name": "render_preview", "offset": 1},
+        {"type": "tool_result", "id": "toolu_img", "status": "done", "offset": 2},
+        # A call that produced none, as every event before #2478 was.
+        {"type": "tool_call", "id": "toolu_txt", "name": "render_preview", "offset": 3},
+        {"type": "tool_result", "id": "toolu_txt", "status": "done", "offset": 4},
+        {"type": "done", "result": "ok", "offset": 5},
+    ]
+
+    async def follow(*_: object, **__: object) -> AsyncIterator[dict[str, object]]:
+        for e in stream:
+            yield dict(e)
+
+    monkeypatch.setattr(events_module, "follow_agent", follow)
+    env = ActivityEnvironment(client=cast(Client, object()))
+    acts = SessionEvents(connect)  # type: ignore[arg-type]
+    await env.run(
+        acts.follow_session,
+        FollowArgs(session_id=sid, workflow_id=f"session-{sid}", prompted=True),
+    )
+    results = [e for e in await events(agent_db, sid) if e["type"] == "tool.result"]
+    assert results[0]["images"] == [{"name": name, "mediaType": "image/png"}]
+    assert "images" not in results[1]
+    cur = await agent_db.execute(
+        "SELECT event FROM ai_session_events WHERE session_id = %s", (sid,)
+    )
+    logged = "".join(str(r[0]) for r in await cur.fetchall())
+    assert base64.b64encode(PNG).decode()[:24] not in logged
+    assert PNG.hex()[:24] not in logged

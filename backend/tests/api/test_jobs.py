@@ -236,9 +236,9 @@ def _unreachable() -> TemporalUnavailableError:
         (_unreachable(), "Nothing was queued", False),
         # The rest may follow a start Temporal persisted: the same request follows it,
         # and `may_have_started` is what the clients re-send on (review #1066 (10) 4).
-        (TemporalUnavailableError("render-x"), "to follow it if it started", True),
+        (TemporalUnavailableError("render-x"), "a retry picks this request up", True),
         # Temporal answered, but could not take the start now: not "cannot reach".
-        (TemporalBusyError("render-x"), "could not start this render right now", True),
+        (TemporalBusyError("render-x"), "busy right now", True),
     ],
 )
 def test_a_render_temporal_cannot_take_now_is_a_503_to_send_again(
@@ -279,7 +279,7 @@ def test_a_render_temporal_refuses_is_a_500_no_retry_fixes(
     # same request again" is what the clients do on `may_have_started` (review #1066
     # (10) 3).
     assert response.json()["may_have_started"] is True
-    assert "to follow it if it started" in response.json()["detail"]
+    assert "a retry picks this request up" in response.json()["detail"]
     assert any(r.levelno == logging.ERROR and r.exc_info for r in caplog.records)
 
 
