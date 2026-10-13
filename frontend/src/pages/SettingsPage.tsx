@@ -18,6 +18,7 @@ import { ImageSettingsSetting } from '../components/ImageSettingsSetting'
 import { SessionLimitsSetting } from '../components/SessionLimitsSetting'
 import { WorkspaceSettingsSetting } from '../components/WorkspaceSettingsSetting'
 import { SessionModeSetting } from '../components/SessionModeSetting'
+import { DurableSubagentsSetting } from '../components/DurableSubagentsSetting'
 import { ModelSetting } from '../components/ModelSetting'
 import { PrinterCameraSetting } from '../components/PrinterCameraSetting'
 import { McpAuthBanner } from '../components/McpAuthBanner'
@@ -1219,6 +1220,7 @@ export function SettingsPage() {
             <WorkspaceSettingsSetting />
             {/* Plan 5d — saves on its own; hidden without the agent's database, like the limits above. */}
             <SessionModeSetting />
+            <DurableSubagentsSetting />
             {/* The agent service serves these routes, so they show only where the assistant
                 would (#251): when the agent answers /api/v1/ai/status as available
                 (useAiAvailability). */}

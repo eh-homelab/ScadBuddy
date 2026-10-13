@@ -32,6 +32,7 @@ import type {
   SessionLimits,
   BlankTemplate,
   SessionModeSetting,
+  DurableSubagentsSetting,
   SessionResource,
   ResourceRef,
   InstalledFamily,
@@ -1842,6 +1843,15 @@ export const api = {
     request<SessionModeSetting>('/ai/settings/session-mode', {
       method: 'PUT',
       body: JSON.stringify({ mode }),
+    }),
+
+  /** Where durable subagents reach ScadBuddy's tools, served by the agent service. */
+  getDurableSubagents: () => request<DurableSubagentsSetting>('/ai/settings/durable-subagents'),
+
+  putDurableSubagents: (setting: DurableSubagentsSetting) =>
+    request<DurableSubagentsSetting>('/ai/settings/durable-subagents', {
+      method: 'PUT',
+      body: JSON.stringify(setting),
     }),
 
   /**

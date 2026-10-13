@@ -107,7 +107,26 @@ async def test_a_segment_gives_its_subagents_the_loopback_server_for_its_turn(
     parts = token.split(".")
     assert parts[:4] == ["sbsub", sid, turn, subagents.owner_digest("browser", "browser")]
     assert extra["allowed_tools"] == ["mcp__scadbuddy_images__view_user_images", "mcp__scadbuddy"]
-    # Off, or no definitions: no subagents.
+    # Settings names another URL (agent-durable outside the agent's pod): it replaces the
+    # worker's own, read at each segment; a value the agent could not have stored does not.
+    for stored, expected in (
+        (
+            '{"url": "http://agent.svc:8081/internal/durable/subagent-mcp", "peers": []}',
+            "http://agent.svc:8081/internal/durable/subagent-mcp",
+        ),
+        ('{"url": null, "peers": []}', "http://127.0.0.1:1/x"),
+        ('"nonsense"', "http://127.0.0.1:1/x"),
+    ):
+        await agent_db.execute(
+            "INSERT INTO ai_settings (key, value) VALUES ('durable_subagents', %s::jsonb)"
+            " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+            (stored,),
+        )
+        again: dict[str, Any] = {}
+        await runner._subagent_tools(sid, again)
+        [server] = again["agents"]["model-author"].mcpServers
+        assert server["scadbuddy"]["url"] == expected
+    # Off, or no definitions: no subagents, whatever Settings names.
     for off_runner in (
         ScadBuddyRunner(connect, kek, cwd=str(tmp_path), agents_dir=str(AGENTS)),
         ScadBuddyRunner(connect, kek, cwd=str(tmp_path), subagent_url="http://127.0.0.1:1/x"),

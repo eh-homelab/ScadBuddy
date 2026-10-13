@@ -145,6 +145,9 @@ MIN_LONG_EDGE, MAX_LONG_EDGE = 200, 2576
 # plugin's switch (on unless stored false).
 MODEL_KEY = "model"
 OWN_PLUGIN_KEY = "scadbuddy_plugin_enabled"
+# agent/src/routes/durableSubagents.ts SETTING_DURABLE_SUBAGENTS: `{url, peers}`; a string
+# `url` replaces the worker's own subagent URL (an agent-durable outside the agent's pod).
+SUBAGENTS_KEY = "durable_subagents"
 IMAGE_TOO_LARGE = "input too large: "
 # agent/src/temporal/turnPackages.ts sharedName: a package's folder on the shared volume.
 _SHARED_NAME = re.compile(r"[0-9a-f]{64}")
@@ -497,8 +500,9 @@ class ScadBuddyRunner:
         )
 
     async def _subagent_tools(self, session: str, extra: dict[str, Any]) -> None:
-        """ScadBuddy's subagents (#2320, subagents.py), each with the agent's loopback
-        server inline and a token for this session's running turn and owner."""
+        """ScadBuddy's subagents (#2320, subagents.py), each with the agent's subagent
+        server inline (the URL Settings names, else this worker's) and a token for this
+        session's running turn and owner."""
         if self._subagent_url is None or self._agents_dir is None:
             return
         async with self._connect() as conn:
@@ -508,12 +512,20 @@ class ScadBuddyRunner:
                 (session,),
             )
             row = await cur.fetchone()
+            cur = await conn.execute(
+                "SELECT value FROM ai_settings WHERE key = %s", (SUBAGENTS_KEY,)
+            )
+            setting = await cur.fetchone()
         if row is None or row[2] is None:
             return
+        stored = setting[0] if setting else None
+        url = stored.get("url") if isinstance(stored, dict) else None
+        if not isinstance(url, str) or not url:
+            url = self._subagent_url
         if self._agents is None:
             self._agents = subagents.load_agents(self._agents_dir)
         token = subagents.token_for(self._kek, session, str(row[2]), row[0], row[1])
-        extra["agents"] = subagents.with_server(self._agents, self._subagent_url, token)
+        extra["agents"] = subagents.with_server(self._agents, url, token)
         # Pre-approved for the subagents that have the server; the main agent has none.
         extra["allowed_tools"] = [*extra.get("allowed_tools", []), f"mcp__{subagents.SERVER}"]
 
