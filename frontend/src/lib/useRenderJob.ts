@@ -142,6 +142,39 @@ export function canRetry(error: unknown): boolean {
   return type === TEMPORAL_UNAVAILABLE || type === STILL_ACCEPTING || type === UNANSWERED || type === OFFLINE
 }
 
+/**
+ * #2464 — a render that could not be submitted (a 503 while the server restarts, no
+ * answer at all) is tried again on its own, at once when the browser comes back online,
+ * so a deploy mid-edit does not leave the page on the previous render for good. At most
+ * RENDER_AUTO_RETRIES tries in a row; the count starts over once a render goes through,
+ * and for new values (`values`), which the server may take where it refused the old.
+ */
+export function useRenderAutoRetry(error: unknown, rendering: boolean, retry: () => void, values: unknown): void {
+  const tries = useRef(0)
+  useEffect(() => {
+    tries.current = 0
+  }, [values])
+  useEffect(() => {
+    if (!error || !canRetry(error)) {
+      // Counted down only once a render has gone through; a retry in flight keeps it.
+      if (!rendering) tries.current = 0
+      return
+    }
+    if (tries.current >= RENDER_AUTO_RETRIES) return
+    const wait = Math.min(RENDER_AUTO_RETRY_MS * 2 ** tries.current, RENDER_AUTO_RETRY_MAX_MS)
+    const again = () => {
+      tries.current += 1
+      retry()
+    }
+    const timer = setTimeout(again, wait)
+    window.addEventListener('online', again)
+    return () => {
+      clearTimeout(timer)
+      window.removeEventListener('online', again)
+    }
+  }, [error, rendering, retry])
+}
+
 /** The problem `code` of a 503 whose template snapshot is still uploading (#1422). */
 export const SNAPSHOT_PENDING_CODE = 'snapshot_pending'
 

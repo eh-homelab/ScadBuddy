@@ -536,6 +536,23 @@ describe('CustomizePage with a template UI', () => {
     expect(saved).toEqual([saved[0], 'Zed'])
   }, 30_000)
 
+  // A template UI may show no field called "Text size": the bar says what is wrong instead.
+  it("says why Generate is off in the value's own words, not as a field to fix", async () => {
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (_root: ShadowRoot, given: Host) => {
+        host = given
+      },
+    }))
+    open(UI_DEMO_SLUG)
+    await waitFor(() => expect(host).toBeDefined(), { timeout: 5000 })
+    const params = host!.inputs.get()['params'] as Record<string, unknown>
+    host!.inputs.set({ ...host!.inputs.get(), params: { ...params, text_size: 500 } })
+    const blocked = await screen.findByTestId('generate-blocked', {}, { timeout: 5000 })
+    expect(blocked).toHaveTextContent(/^Text size /)
+    expect(blocked).not.toHaveTextContent(/^Fix /)
+  }, 20_000)
+
   it('host.generate() does not call a current output superseded', async () => {
     let host: Host | undefined
     setUiModuleLoader(async () => ({

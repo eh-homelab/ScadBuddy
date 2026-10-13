@@ -62,15 +62,12 @@ import { useAsync } from '../lib/useAsync'
 import { useDebounced } from '../lib/useDebounced'
 import { useFullscreen } from '../lib/useFullscreen'
 import {
-  RENDER_AUTO_RETRIES,
-  RENDER_AUTO_RETRY_MAX_MS,
-  RENDER_AUTO_RETRY_MS,
   RENDER_DEBOUNCE_MS,
   type RenderBusy,
+  useRenderAutoRetry,
   useRenderJob,
   canRetry,
 } from '../lib/useRenderJob'
-
 
 /** One shared empty map, so "nothing yet" keeps a stable identity across renders. */
 const NOTHING: ParamValues = Object.freeze({})
@@ -377,29 +374,7 @@ export function CustomizePage() {
     jobFor,
     stage: renderStage,
   } = useRenderJob(slug, settled && seed && !invalid ? debounced : undefined, version, extra)
-  const autoRetries = useRef(0)
-  // #2464 — a render that could not be submitted (a 503 while the server restarts, no
-  // answer at all) is tried again on its own, sooner when the browser comes back online,
-  // so a deploy mid-edit does not leave the page on the previous render for good.
-  useEffect(() => {
-    if (!renderError || !canRetry(renderError)) {
-      // Counted down only once a render has gone through; a retry in flight keeps it.
-      if (!rendering) autoRetries.current = 0
-      return
-    }
-    if (autoRetries.current >= RENDER_AUTO_RETRIES) return
-    const wait = Math.min(RENDER_AUTO_RETRY_MS * 2 ** autoRetries.current, RENDER_AUTO_RETRY_MAX_MS)
-    const again = () => {
-      autoRetries.current += 1
-      retryRender()
-    }
-    const timer = setTimeout(again, wait)
-    window.addEventListener('online', again)
-    return () => {
-      clearTimeout(timer)
-      window.removeEventListener('online', again)
-    }
-  }, [renderError, rendering, retryRender])
+  useRenderAutoRetry(renderError, rendering, retryRender, debounced)
   // One object per refusal, so a font field's install error answers this one only (#2215).
   const fontRefusal = useMemo(() => missingFonts(renderError), [renderError])
   // #1293 — a render still running or one that failed links to its workflow in the
@@ -972,7 +947,10 @@ export function CustomizePage() {
       job={job}
       rendering={rendering || !settled}
       upToDate={current}
-      blockedReason={unrenderable ? `Fix ${unrenderable.caption || unrenderable.name} first` : undefined}
+      // A template UI may show no field by that name: its problem is said as it stands.
+      blockedReason={
+        unrenderable ? (customUi ? (invalid ?? undefined) : `Fix ${unrenderable.caption || unrenderable.name} first`) : undefined
+      }
       output={output}
       capture={capture}
       captureImage={captureImage}
