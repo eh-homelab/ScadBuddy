@@ -23,6 +23,8 @@ export interface ProfileSuggestion {
   slots: { slot_id: number; spool: SpoolOption }[]
   /** Its changes against this print's process preset; null until read, or unreadable. */
   preview: ProfilePreview | null
+  /** The preview request failed: the change was not checked against this print. */
+  unchecked: boolean
   /** Left on: sent with the print. */
   on: boolean
 }
@@ -43,6 +45,7 @@ export function useFilamentProfiles({
 }) {
   const [profiles, setProfiles] = useState<FilamentProfile[]>([])
   const [previews, setPreviews] = useState<Record<string, ProfilePreview>>({})
+  const [previewFailed, setPreviewFailed] = useState(false)
   const [off, setOff] = useState<ReadonlySet<string>>(new Set())
 
   useEffect(() => {
@@ -74,9 +77,10 @@ export function useFilamentProfiles({
     if (previewKey === null || choices === null) return
     let live = true
     setPreviews({})
+    setPreviewFailed(false)
     api.previewFilamentProfiles(choices, ids).then(
       (shown) => live && setPreviews(Object.fromEntries(shown.map((preview) => [preview.profile.id, preview]))),
-      () => {},
+      () => live && setPreviewFailed(true),
     )
     return () => {
       live = false
@@ -87,7 +91,13 @@ export function useFilamentProfiles({
 
   const suggestions: ProfileSuggestion[] = matched.map(({ profile, slots }) => {
     const preview = previews[profile.id] ?? null
-    return { profile, slots, preview, on: !off.has(profile.id) && preview?.applicable !== false }
+    return {
+      profile,
+      slots,
+      preview,
+      unchecked: preview === null && previewFailed,
+      on: !off.has(profile.id) && preview?.applicable !== false,
+    }
   })
 
   return {

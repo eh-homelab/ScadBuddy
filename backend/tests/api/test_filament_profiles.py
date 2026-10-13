@@ -182,3 +182,73 @@ def test_a_profile_that_cannot_apply_is_skipped_with_a_warning_and_the_print_goe
     assert response.status_code == 200, response.text
     assert expected in response.json()["warnings"]
     assert "process_overrides" not in json.loads(sliced.calls.last.request.content)
+
+
+@respx.mock
+def test_a_bambuddy_error_reading_the_values_skips_the_profile_and_the_print_goes_ahead(
+    client: TestClient, model: str
+) -> None:
+    """#2804 review: the route answering an HTTP error (not ``resolved: false``) skips
+    the profile too. A print with Silk on, which it is by default, is never refused for
+    a failure the user has no reason to tie to the profile."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    respx.get(f"{API}/slicer/preset-values").mock(
+        return_value=httpx.Response(500, json={"detail": "sidecar exploded"})
+    )
+    sliced = slice_routes()
+    queue_route()
+    request = {**body(), "filament_profiles": ["silk-pla"]}
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=request)
+    response = run_print(client, output_id, json=request)
+
+    assert check.status_code == 200, check.text
+    assert check.json()["errors"] == []
+    (warning,) = [w for w in check.json()["warnings"] if w["kind"] == "profile-not-applied"]
+    assert warning["message"].startswith(
+        "Silk PLA profile not applied: couldn't read the preset's outer wall speed ("
+    )
+    assert warning["message"].endswith("). The print uses the preset as it is.")
+    assert response.status_code == 200, response.text
+    assert warning in response.json()["warnings"]
+    assert "process_overrides" not in json.loads(sliced.calls.last.request.content)
+
+
+@respx.mock
+def test_an_empty_stored_list_counts_as_the_preset_not_having_the_setting(
+    client: TestClient,
+) -> None:
+    """An empty list has no per-variant shape to copy: sending ``[]`` would change
+    nothing and the dialog would claim it had."""
+    configure(client)
+    h2c_presets()
+    preset_values({"outer_wall_speed": []})
+
+    (silk,) = client.post(
+        "/api/v1/print/filament-profiles/preview",
+        json={"choices": {"nozzles": [{"size": "0.2"}], "tier": "fine"}, "profiles": ["silk-pla"]},
+    ).json()
+
+    assert silk["applicable"] is False
+    assert silk["reason"] == "the preset has no outer wall speed (outer_wall_speed)"
+    assert silk["changes"] == []
+
+
+@respx.mock
+def test_the_presets_values_are_read_once_for_every_profile(client: TestClient) -> None:
+    configure(client)
+    h2c_presets()
+    values = preset_values()
+
+    shown = client.post(
+        "/api/v1/print/filament-profiles/preview",
+        json={
+            "choices": {"nozzles": [{"size": "0.2"}], "tier": "fine"},
+            "profiles": ["silk-pla", "silk-pla"],
+        },
+    ).json()
+
+    assert [entry["applicable"] for entry in shown] == [True, True]
+    assert values.call_count == 1

@@ -1735,10 +1735,16 @@ describe('PrintPicker · Filament profiles (#717)', () => {
     expect(checkbox).toBeChecked()
     // Each distinct value the H2C preset has per extruder variant, then the profile's.
     expect(await within(step).findByText('Outer wall speed: 200 / 500 → 50 mm/s')).toBeInTheDocument()
-    expect(within(step).getByRole('link', { name: /Why: Bambu PLA Silk/ })).toHaveAttribute(
+    // Every page cited, once, with each passage it is cited for (#2804 review).
+    const wiki = within(step).getByRole('link', { name: /Why: Bambu PLA Silk/ })
+    expect(wiki).toHaveAttribute('href', 'https://wiki.bambulab.com/en/x1/manual/printing-with-silk-filaments')
+    expect(wiki.getAttribute('title')).toContain('Try 50 mm/s first.')
+    expect(wiki.getAttribute('title')).toContain('235℃')
+    expect(within(step).getByRole('link', { name: /Why: Bambu Studio PrintConfig\.cpp/ })).toHaveAttribute(
       'href',
-      'https://wiki.bambulab.com/en/x1/manual/printing-with-silk-filaments',
+      expect.stringContaining('PrintConfig.cpp'),
     )
+    expect(within(step).getAllByRole('link')).toHaveLength(2)
     expect(step).toHaveTextContent('235 °C')
 
     await user.click(checkbox)
@@ -1764,6 +1770,37 @@ describe('PrintPicker · Filament profiles (#717)', () => {
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await screen.findByTestId('queued-items')
     expect(bodies[0]).not.toHaveProperty('filament_profiles')
+  })
+})
+
+describe('PrintPicker · Filament profiles, checked and unchecked (#2804 review)', () => {
+  it('sends the profiles left on with the check, so Checks can say one will not apply', async () => {
+    const checks = watch('POST', '/check')
+    const { user } = renderPicker()
+    await loaded()
+    const step = await screen.findByTestId('filament-profile-silk-pla')
+    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ filament_profiles: ['silk-pla'] }))
+
+    await user.click(within(step).getByRole('checkbox', { name: /Silk PLA/ }))
+    await waitFor(() => expect(checks.bodies.at(-1)).not.toHaveProperty('filament_profiles'))
+  })
+
+  it("says the change wasn't checked when the preview can't be read", async () => {
+    server.use(
+      http.post('/api/v1/print/filament-profiles/preview', () =>
+        HttpResponse.json({ detail: 'Bambuddy is unreachable' }, { status: 502 }),
+      ),
+    )
+    renderPicker()
+    await loaded()
+
+    const step = await screen.findByTestId('filament-profile-silk-pla')
+    expect(
+      await within(step).findByText(/Couldn't read the preset, so this wasn't checked against this print/),
+    ).toBeInTheDocument()
+    // No "current →" claim it never read; the profile stays on, and the run reports it.
+    expect(within(step).getByText('Outer wall speed: → 50 mm/s')).toBeInTheDocument()
+    expect(within(step).getByRole('checkbox', { name: /Silk PLA/ })).toBeChecked()
   })
 })
 

@@ -10,6 +10,18 @@ function current(change: Change): string | null {
   return values.join(' / ')
 }
 
+/** Every page the profile cites, for its settings and its notes: one link a page, with
+ * each passage quoted from it. */
+function sourcesOf(profile: ProfileSuggestion['profile']): { url: string; title: string; quotes: string[] }[] {
+  const pages = new Map<string, { url: string; title: string; quotes: string[] }>()
+  for (const source of [...profile.settings, ...(profile.notes ?? [])].flatMap((entry) => entry.sources ?? [])) {
+    const page = pages.get(source.url) ?? { url: source.url, title: source.title, quotes: [] }
+    if (!page.quotes.includes(source.quote)) page.quotes.push(source.quote)
+    pages.set(source.url, page)
+  }
+  return [...pages.values()]
+}
+
 function slotsOf(suggestion: ProfileSuggestion): string {
   return suggestion.slots
     .map(({ slot_id, spool }) => `slot ${slot_id} (${[spool.brand, spool.material, spool.subtype].filter(Boolean).join(' ')})`)
@@ -38,7 +50,7 @@ export function FilamentProfilesStep({
           const { profile, preview } = suggestion
           const id = `filament-profile-${profile.id}`
           const unapplicable = preview?.applicable === false
-          const source = profile.settings[0]?.sources?.[0]
+          const sources = sourcesOf(profile)
           return (
             <li key={profile.id} className="text-[12px]" data-testid={id}>
               <label htmlFor={id} className="flex items-start gap-2 text-ink">
@@ -63,7 +75,7 @@ export function FilamentProfilesStep({
               ) : (
                 <ul className="sb-num mt-0.5 ml-5 text-ink" aria-label={`${profile.name} changes`}>
                   {(preview?.changes?.length ? preview.changes : profile.settings).map((change) => {
-                    const from = 'current' in change ? current(change) : null
+                    const from = 'current' in change && !suggestion.unchecked ? current(change) : null
                     return (
                       <li key={change.key}>
                         {change.label}: {from !== null ? `${from} → ` : '→ '}
@@ -74,22 +86,29 @@ export function FilamentProfilesStep({
                   })}
                 </ul>
               )}
+              {suggestion.unchecked && (
+                <p className="mt-0.5 ml-5 text-muted">
+                  Couldn't read the preset, so this wasn't checked against this print. If it can't apply, the print
+                  goes ahead without it and says so.
+                </p>
+              )}
               {(profile.notes ?? []).map((note) => (
                 <p key={note.text} className="mt-0.5 ml-5 text-muted">
                   {note.text}
                 </p>
               ))}
-              {source && (
+              {sources.map((source) => (
                 <a
+                  key={source.url}
                   href={source.url}
                   target="_blank"
                   rel="noreferrer"
-                  title={`“${source.quote}”`}
-                  className="mt-0.5 ml-5 inline-block text-accent hover:underline"
+                  title={source.quotes.map((quote) => `“${quote}”`).join('\n')}
+                  className="mt-0.5 ml-5 block text-accent hover:underline"
                 >
                   Why: {source.title}
                 </a>
-              )}
+              ))}
             </li>
           )
         })}
