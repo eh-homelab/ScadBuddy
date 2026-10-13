@@ -19,6 +19,8 @@ from scadbuddy_durable.background import (
     monitor_env,
 )
 
+SESSION = "0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f60"
+
 
 def test_the_command_gets_a_shells_environment_only() -> None:
     env = {
@@ -52,7 +54,7 @@ class _Client:
         self._sent = sent
 
     def get_workflow_handle(self, wid: str) -> _Handle:
-        assert wid == "bgtask-ab12cd34"
+        assert wid == f"bgtask-{SESSION}-ab12cd34"
         return _Handle(self._sent)
 
 
@@ -62,7 +64,7 @@ def _activities(
     acts = MonitorActivities(lambda: None, str(tmp_path))  # type: ignore[arg-type,return-value]
 
     async def task(task_id: str) -> dict[str, Any] | None:
-        return {"description": "ticks", "spec": spec}
+        return {"description": "ticks", "spec": spec, "session_id": SESSION}
 
     async def append(task_id: str, text: str) -> bool:
         if len(events) >= cap:
