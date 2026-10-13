@@ -9,6 +9,7 @@ import {
   SLOW_REF,
   UNCHECKED_REF,
   setMockLibraryPin,
+  setMockUnusedCheckouts,
 } from '../../mocks/features/libraryUpgrade'
 import { mockModels, problem, replaceMockModel, setMockInvalidLibraries } from '../../mocks/handlers'
 import { emitRealtime } from '../../mocks/realtime'
@@ -393,5 +394,35 @@ describe('LibraryUpgrade', () => {
     expect(within(builtin).queryByRole('checkbox')).toBeNull()
     await user.click(within(builtin).getByRole('button', { name: 'Check' }))
     expect(await within(builtin).findByTestId('library-check')).toHaveTextContent('Parses at v2.0.761')
+  })
+
+  // #2770: a checkout no live pin reads can be removed; a pinned one is not offered.
+  it('lists the checkouts no model uses, and removes one by its commit', async () => {
+    const stale = { name: 'BOSL2', commit: 'deadbeef'.repeat(5), used_by: [] }
+    setMockUnusedCheckouts([stale])
+    const sent: string[] = []
+    const record = ({ request }: { request: Request }) => {
+      if (request.method === 'DELETE') sent.push(new URL(request.url).pathname + new URL(request.url).search)
+    }
+    server.events.on('request:start', record)
+    onTestFinished(() => server.events.removeListener('request:start', record))
+    const { user } = renderPage(<LibraryUpgrade />)
+    const list = await screen.findByRole('list', { name: 'Checkouts no model uses' })
+    expect(within(list).getAllByRole('listitem').map((item) => item.getAttribute('aria-label'))).toEqual(['BOSL2 deadbee'])
+    await user.click(within(list).getByRole('button', { name: 'Remove BOSL2 deadbee' }))
+    await waitFor(() => expect(screen.queryByRole('list', { name: 'Checkouts no model uses' })).toBeNull())
+    expect(sent).toEqual([`/api/v1/libraries/BOSL2?commit=${stale.commit}`])
+  })
+
+  it("says why a removal was refused, and keeps the row", async () => {
+    setMockUnusedCheckouts([{ name: 'BOSL2', commit: 'deadbeef'.repeat(5), used_by: [] }])
+    server.use(
+      http.delete('/api/v1/libraries/:name', () => problem(409, 'Conflict', 'a running render reads BOSL2 deadbeef: job j1')),
+    )
+    const { user } = renderPage(<LibraryUpgrade />)
+    const list = await screen.findByRole('list', { name: 'Checkouts no model uses' })
+    await user.click(within(list).getByRole('button', { name: 'Remove BOSL2 deadbee' }))
+    expect(await within(list).findByRole('alert')).toHaveTextContent('a running render reads BOSL2 deadbeef: job j1')
+    expect(within(list).getByRole('listitem', { name: 'BOSL2 deadbee' })).toBeInTheDocument()
   })
 })

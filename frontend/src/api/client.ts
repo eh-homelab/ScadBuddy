@@ -1745,6 +1745,10 @@ export const api = {
   /** #169 — library checkouts on the volume, with the models whose live pins read each. */
   listInstalledLibraries: () => request<InstalledLibrary[]>('/libraries/installed'),
 
+  /** #2770 — removes one checkout from the volume; a 409 while any live pin or running render reads it. */
+  removeLibraryCheckout: (name: string, commit: string) =>
+    command<void>(`/libraries/${seg(name)}?commit=${encodeURIComponent(commit)}`, { method: 'DELETE' }),
+
   /** #169 — every model whose live model.json pins `name`; nulls for an unreadable entry. */
   listLibraryUsers: (name: string) => request<LibraryUser[]>(`/libraries/${seg(name)}/users`),
 
