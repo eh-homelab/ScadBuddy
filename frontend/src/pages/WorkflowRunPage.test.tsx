@@ -199,7 +199,8 @@ describe('WorkflowRunPage, #2350', () => {
     expect(within(dialog).getByRole('list', { name: 'Outward calls sent again' })).toHaveTextContent('#2 queue_print')
     expect(flowRequests()).toEqual([])
     await user.click(within(dialog).getByRole('button', { name: 'Reset run' }))
-    expect(await screen.findByText('Reset. The run continues from that point.')).toBeInTheDocument()
+    // The run's reload re-renders the panel, so the first node with the note may be replaced.
+    await waitFor(() => expect(screen.getByText('Reset. The run continues from that point.')).toBeInTheDocument())
     expect(flowRequests()).toEqual([
       {
         path: '/api/v1/workflow-runs/run-done/reset',

@@ -278,10 +278,12 @@ export function CustomizePage() {
    * #1457, #1484 — a preset the template UI just loaded or saved, for the picker. A
    * one-shot message: cleared once the picker has rendered it, so a later remount (the
    * form taking over from a failed UI) never brings it back over a pick made since.
+   * Only that message is cleared: one set after the render, before this effect ran (a
+   * load answered just after a save), is the next message, not a stale one.
    */
   const [presetElsewhere, setPresetElsewhere] = useState<SelectedElsewhere | null>(null)
   useEffect(() => {
-    if (presetElsewhere) setPresetElsewhere(null)
+    if (presetElsewhere) setPresetElsewhere((current) => (current === presetElsewhere ? null : current))
   }, [presetElsewhere])
   /** #1660 — the preset the picker has selected, which the Project picker follows. */
   const [presetInUse, setPresetInUse] = useState<{ id: string; name: string } | null>(null)

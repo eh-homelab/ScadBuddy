@@ -28,7 +28,7 @@ describe('LibraryPage', () => {
     const { user } = renderPage(<LibraryPage />, { route: '/library' })
     const arrange = await screen.findByRole('button', { name: 'Arrange selected (0)' })
     expect(arrange).toBeDisabled()
-    await user.click(within(screen.getByTestId('library-file-89')).getByRole('checkbox', { name: /^Select bag-clip/ }))
+    await user.click(within(await screen.findByTestId('library-file-89')).getByRole('checkbox', { name: /^Select bag-clip/ }))
     // Picks are kept across folders: one file here, one in MakerWorld.
     await user.click(screen.getByTestId('library-folder-1'))
     await user.click(await screen.findByRole('checkbox', { name: "Select Clara's Wand.3mf" }))

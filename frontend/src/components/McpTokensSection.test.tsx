@@ -222,7 +222,7 @@ describe('McpTokensSection', () => {
     expect(revoke).toHaveBeenCalledWith('6f1c2b1e-0d5c-4c7e-9a51-3b2f0b6f1a01')
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Revoke Claude Desktop' })).toBeNull())
-    expect(screen.getAllByTestId('mcp-token')[0]).toHaveTextContent(/Revoked \d{4}-\d{2}-\d{2}/)
+    expect((await screen.findAllByTestId('mcp-token'))[0]).toHaveTextContent(/Revoked \d{4}-\d{2}-\d{2}/)
   })
 
   it('keeps the dialog open with the reason when a revoke fails', async () => {
