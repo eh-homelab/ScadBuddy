@@ -3353,6 +3353,10 @@ describe('PrintPicker · rack nozzle (#836)', () => {
     server.use(http.post('/api/v1/print/outputs/:id/check', () => HttpResponse.json({ errors: [], warnings: [], rack })))
     const runs = watch('POST', '/run')
     const checks = watch('POST', '/check')
+    let answered = 0
+    server.events.on('response:mocked', ({ request }) => {
+      if (request.method === 'POST' && /\/print\/outputs\/[^/]+\/run$/.test(new URL(request.url).pathname)) answered += 1
+    })
     renderPicker()
     await loaded()
     await showAdvanced()
@@ -3365,6 +3369,7 @@ describe('PrintPicker · rack nozzle (#836)', () => {
 
     await waitFor(() => expect(runs.bodies.length).toBe(1))
     expect(runs.bodies[0]).toMatchObject({ rack_position: null })
+    await waitFor(() => expect(answered).toBe(1))
   })
 })
 
