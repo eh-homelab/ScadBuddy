@@ -4,21 +4,26 @@ the deadline, and ``GET /operations/{id}``."""
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import dataclasses
+import importlib
 import time
 import uuid
 from collections.abc import Iterator
 from datetime import timedelta
 from functools import partial
+from pathlib import Path
 from typing import Any
 
 import psycopg
 import pytest
 from fastapi import APIRouter, FastAPI, Response
 from fastapi.testclient import TestClient
+from pydantic import BaseModel
 from temporalio import activity
 
+import scadbuddy
 from scadbuddy.api import operations as operations_api
 from scadbuddy.api.accepting import COMMAND_RESEND_PROBLEM
 from scadbuddy.api.deps import STATE_ATTR, AppState
@@ -511,7 +516,7 @@ def test_an_operation_still_accepting_answers_202_to_a_client_that_follows(
 
 
 @pytest.mark.usefixtures("short_waits")
-def test_without_the_preference_an_operation_still_accepting_is_the_503(
+def test_without_the_preference_an_operation_under_the_deadline_answers_its_body(
     client: TestClient,
 ) -> None:
     """Every client that does not follow a 202 keeps the re-send it knows (§5.1)."""
@@ -571,3 +576,39 @@ def test_a_key_the_follow_url_cannot_carry_keeps_the_resend(client: TestClient) 
     )
     assert response.status_code == 200, response.text
     assert response.json()["done"] is True
+
+
+def _answer_models() -> list[type[BaseModel]]:
+    """Every model a route hands `operation_answer`, read from the routes' source."""
+    found: dict[str, type[BaseModel]] = {}
+    for path in sorted((Path(scadbuddy.__file__).parent / "api").glob("*.py")):
+        module = importlib.import_module(f"scadbuddy.api.{path.stem}")
+        for node in ast.walk(ast.parse(path.read_text())):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "operation_answer"
+                and len(node.args) == 2
+                and isinstance(node.args[1], ast.Name)
+            ):
+                model = getattr(module, node.args[1].id)
+                found[f"{model.__module__}.{model.__qualname__}"] = model
+    return list(found.values())
+
+
+def test_every_operation_answer_model_serialises_as_its_stored_result() -> None:
+    """Review #2836 (#3038): a follow sends an operation's stored ``result`` as it is,
+    where the route sends ``Model.model_validate(result)``. A kind's run stores the
+    model's ``model_dump(mode="json")`` (`OperationKind.run`), so an ``exclude`` field is
+    absent from both; the two still differ for a model that renames, computes or
+    re-serialises a field, so one that starts to is caught here rather than answering a
+    follow differently from the route."""
+    models = _answer_models()
+    assert len(models) > 10, models  # the scan found the routes
+    for model in models:
+        assert not model.model_computed_fields, model
+        assert not model.__pydantic_decorators__.field_serializers, model
+        assert not model.__pydantic_decorators__.model_serializers, model
+        for name, field in model.model_fields.items():
+            assert field.alias in (None, name), (model, name)
+            assert field.serialization_alias in (None, name), (model, name)

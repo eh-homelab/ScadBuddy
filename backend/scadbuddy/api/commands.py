@@ -41,8 +41,12 @@ UpdateIdPath = Annotated[str, Path(max_length=128)]
     summary="Follow a command answered 202",
     responses={
         status.HTTP_202_ACCEPTED: {
-            "model": CommandAccepting,
-            "description": "still accepting: follow again after `Retry-After` seconds",
+            "model": CommandAccepting | OperationAccepted,
+            "description": (
+                "`CommandAccepting` (`status: accepting`): still accepting, follow again."
+                " `OperationAccepted` (an operation's `status`, never `accepting`): the"
+                " operation answered and is still running; follow GET /operations/{id}"
+            ),
         },
         status.HTTP_404_NOT_FOUND: {"description": "not a command this route follows"},
         status.HTTP_422_UNPROCESSABLE_CONTENT: {
@@ -74,9 +78,11 @@ async def follow_command(
     or the refusal. An answer is 200 whatever the route's own success status: a print
     run's 202 (a new run) or 200 (a repeat), whose ``repeated`` says which; an
     operation's 201, or 204 with no body, as the record keeps the body, not the status,
-    and a client that follows reads the body (review #2836). ``supersedes`` is a
-    render's only (§5.3). The answer is attributed in Activity as the route attributes
-    it, since that route answered 202 first and attributed nothing (#2805, #2834)."""
+    and a client that follows reads the body (review #2836). An operation's body is its
+    stored result as it is, which its kind's run stores as the route model's dump
+    (`OperationKind.run`, #3038). ``supersedes`` is a render's only (§5.3). The
+    answer is attributed in Activity as the route attributes it, since that route
+    answered 202 first (#2834)."""
     if supersedes is not None and workflow_id.startswith((PRINT_PREFIX, OPERATION_PREFIX)):
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT, "only a render's follow supersedes a job"
