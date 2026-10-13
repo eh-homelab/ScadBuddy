@@ -34,6 +34,7 @@ from scadbuddy.api.media import (
 )
 from scadbuddy.bambuddy.client import Operation, client_for
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.media import MAX_IMAGE_BYTES
 from scadbuddy.library.settings_store import SettingsStore
 
 #: What the proxy answers: Bambuddy's bytes, whole (200) or a range of them (206).
@@ -199,9 +200,10 @@ class _CardPhotos:
 
 async def _card_photo(
     store: SettingsStore, request: Request, archive_id: int, filename: str
-) -> tuple[bytes, str]:
+) -> tuple[bytes, str] | None:
     """The photo shrunk to a card's cover, as a WebP no larger than `CARD_SIDE` (#2355),
-    made once per photo; the photo as it is when it cannot be decoded. Decodes share
+    made once per photo; the photo as it is when it cannot be decoded, and None when it is
+    over `MAX_IMAGE_BYTES`. Decodes share
     the catalogue thumbnails' limit (`MAX_CONCURRENT_THUMBNAILS`)."""
     state = request.app.state
     cache: _CardPhotos | None = getattr(state, "print_card_photos", None)
@@ -221,7 +223,16 @@ async def _card_photo(
             operation="media.photo",
             what="show the photo",
         ) as upstream:
-            original = await upstream.aread()
+            # Read at most `MAX_IMAGE_BYTES`: a larger body is not shrunk here, it is
+            # streamed whole by the caller, so no photo is ever held in memory past it.
+            chunks: list[bytes] = []
+            read = 0
+            async for chunk in upstream.aiter_bytes():
+                read += len(chunk)
+                if read > MAX_IMAGE_BYTES:
+                    return None
+                chunks.append(chunk)
+            original = b"".join(chunks)
             content_type = upstream.headers.get("content-type", "application/octet-stream")
     async with decodes:
         if (kept := cache.get(key)) is not None:
@@ -245,8 +256,9 @@ async def get_photo(
     ] = None,
     v: Annotated[int | None, Query(description="The thumbnail version asked for")] = None,
 ) -> Response:
-    if size == "card":
-        body, media_type = await _card_photo(store, request, archive_id, filename)
+    card = await _card_photo(store, request, archive_id, filename) if size == "card" else None
+    if card is not None:
+        body, media_type = card
         cache = IMMUTABLE_CACHE_CONTROL if v == THUMBNAIL_VERSION else LEGACY_CACHE_CONTROL
         headers = {"Cache-Control": cache, "x-content-type-options": "nosniff"}
         if request.method == "HEAD":

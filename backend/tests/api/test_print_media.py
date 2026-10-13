@@ -378,3 +378,23 @@ def test_a_card_cover_of_a_missing_photo_is_a_404(client: TestClient) -> None:
     response = client.get(f"/api/v1/prints/35/photos/{PHOTO}", params={"size": "card", "v": 1})
 
     assert response.status_code == 404
+
+
+@respx.mock
+def test_a_photo_too_large_to_shrink_is_streamed_whole(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A card read stops at the image cap: a larger photo is never held whole in memory."""
+    configure(client)
+    original = _jpeg()
+    monkeypatch.setattr("scadbuddy.api.prints.MAX_IMAGE_BYTES", len(original) - 1)
+    route = respx.get(f"{API}/archives/35/photos/{PHOTO}").mock(
+        return_value=httpx.Response(200, content=original, headers={"Content-Type": "image/jpeg"})
+    )
+
+    response = client.get(f"/api/v1/prints/35/photos/{PHOTO}", params={"size": "card", "v": 1})
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/jpeg"
+    assert response.content == original
+    assert route.call_count == 2, "the capped read, then the stream"
