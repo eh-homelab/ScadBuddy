@@ -19,8 +19,8 @@ from temporalio.client import WorkflowUpdateFailedError
 
 from scadbuddy.activity.component import ACTIVITY, ActivityComponent
 from scadbuddy.activity.index import attribute_request
-from scadbuddy.api.components import component_dep
 from scadbuddy.api.accepting import accepting, prefers_async
+from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import (
     HEX_ID_PATTERN,
     AssetsDep,
