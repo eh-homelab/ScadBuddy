@@ -3,6 +3,7 @@ package fsys
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"syscall"
 	"time"
 
@@ -85,8 +86,15 @@ func (d *dir) Unlink(ctx context.Context, name string) syscall.Errno {
 			return d.tree.unqueue(ctx, e)
 		}
 		if child != nil {
-			// Never uploaded: its writer finds it unlinked and sends nothing.
-			return 0
+			// Never uploaded: its writer finds it unlinked and sends nothing. What a
+			// rename landed it on goes with it.
+			n.mu.Lock()
+			var shadowed []base
+			if n.pending != nil {
+				shadowed = slices.Clone(n.pending.shadowed)
+			}
+			n.mu.Unlock()
+			return d.tree.deleteBases(ctx, shadowed, 0)
 		}
 		return syscall.ENOENT
 	}
@@ -96,23 +104,21 @@ func (d *dir) Unlink(ctx context.Context, name string) syscall.Errno {
 		return failed("unlink", err, "file", f.ID)
 	}
 	d.tree.cache.drop(f.ID)
+	d.tree.unremember(f.ID)
 	return 0
 }
 
-// unqueue removes a queued write, and the stored file it replaces, which the write
-// had already emptied or overwritten.
+// unqueue removes a queued write, and the stored files it replaces that are still in
+// place, which the write had already overwritten.
 func (t *tree) unqueue(ctx context.Context, e *entry) syscall.Errno {
 	rec, ok := t.unsent.record(e)
 	if !ok {
 		return 0
 	}
-	if id := rec.Base.id(); id != 0 {
-		err := t.lib.DeleteFiles(ctx, id)
-		t.forgetAll()
-		if err != nil && api.Errno(err) != syscall.ENOENT {
-			return failed("unlink", err, "file", id)
-		}
-		t.cache.drop(id)
+	errno := t.deleteBases(ctx, rec.Bases, 0)
+	t.forgetAll()
+	if errno != 0 {
+		return errno
 	}
 	t.unsent.drop(e)
 	return 0
@@ -144,10 +150,15 @@ func (d *dir) Rmdir(ctx context.Context, name string) syscall.Errno {
 	return 0
 }
 
-// Rename renames and/or moves a file or folder with one update. A name that is taken
-// is EEXIST: the library cannot replace an entry atomically. The one exception is a
-// write not sent yet moved onto a name only a queued save holds: the later save
-// supersedes the earlier, which is dropped (#2865).
+// Rename renames and/or moves a file or folder with one update. Over an existing file
+// it replaces it, as rename(2) does, though the library cannot do so atomically: a
+// stored file renamed over another takes the name and then the other is deleted (if
+// that fails, both remain and the answer is EIO); a write not sent yet takes the name
+// at once, shadowing what it lands on, and replaces it when it is sent (see
+// record.Bases); a queued save it lands on is superseded once its own bytes are
+// durable. RENAME_NOREPLACE over anything, a folder over a folder, and anything over
+// a file still being written are EEXIST; a file over a folder is EISDIR, a folder
+// over a file ENOTDIR.
 func (d *dir) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
 	if d.tree.opts.ReadOnly {
 		return syscall.EROFS
@@ -156,94 +167,175 @@ func (d *dir) Rename(ctx context.Context, name string, newParent fs.InodeEmbedde
 	if !ok || flags&fs.RENAME_EXCHANGE != 0 {
 		return syscall.ENOTSUP
 	}
-	l, errno := d.tree.view(ctx, d.id)
+	src, errno := d.tree.view(ctx, d.id)
 	if errno != 0 {
 		return errno
 	}
-	var over *entry
-	if errno := d.free(ctx, to, newName); errno == syscall.EEXIST {
-		_, isDir := l.folders[name]
-		_, isFile := l.files[name]
-		if over = to.queuedAt(ctx, newName); over == nil || isDir || isFile {
-			return errno
-		}
-	} else if errno != 0 {
+	dst, errno := d.tree.view(ctx, to.id)
+	if errno != 0 {
 		return errno
+	}
+	_, dstDir := dst.folders[newName]
+	dstFile, dstIsFile := dst.files[newName]
+	dstQ := dst.queued[newName]
+	dstBusy := false
+	if _, n := to.unsent(newName); n != nil && !dstIsFile {
+		if e := n.entry(); e != nil && dstQ == nil {
+			dstQ = e
+		} else if e == nil && dstQ == nil {
+			dstBusy = true
+		}
+	}
+	if (dstDir || dstIsFile || dstQ != nil || dstBusy) && (flags&renameNoReplace != 0 || dstBusy) {
+		return syscall.EEXIST
 	}
 	defer d.tree.forget(to.id)
 	defer d.tree.forget(d.id)
 
-	if f, ok := l.folders[name]; ok {
+	if f, ok := src.folders[name]; ok {
+		switch {
+		case dstDir:
+			return syscall.EEXIST
+		case dstIsFile || dstQ != nil:
+			return syscall.ENOTDIR
+		}
 		newName, parent := changes(f.Name, newName, d.id, to.id)
 		if _, err := d.tree.lib.UpdateFolder(ctx, f.ID, newName, parent); err != nil {
 			return failed("rename folder", err, "folder", f.ID)
 		}
 		return 0
 	}
-	if f, ok := l.files[name]; ok {
-		newName, folder := changes(f.Name, newName, d.id, to.id)
-		got, err := d.tree.lib.UpdateFile(ctx, f.ID, newName, folder)
-		if err != nil {
-			return failed("rename", err, "file", f.ID)
-		}
-		if child := d.GetChild(name); child != nil {
-			if n, ok := child.Operations().(*file); ok {
-				// The answer has no size or times: keep the file's.
-				if cur := n.current(); cur.ID == f.ID {
-					cur.Name, cur.FolderID = got.Name, got.FolderID
-					n.set(cur)
-				}
+	srcFile, srcIsFile := src.files[name]
+	_, srcN := d.unsent(name)
+	srcE := src.queued[name]
+	if srcE == nil && srcN != nil {
+		srcE = srcN.entry()
+	}
+	switch {
+	case !srcIsFile && srcN == nil && srcE == nil:
+		return syscall.ENOENT
+	case dstDir:
+		return syscall.EISDIR
+	case srcIsFile:
+		return d.renameStored(ctx, name, srcFile, to, newName, dstFile, dstIsFile, dstQ)
+	}
+	return d.renameUnsent(ctx, srcN, srcE, to, newName, dstFile, dstIsFile, dstQ)
+}
+
+// renameNoReplace is renameat2's RENAME_NOREPLACE.
+const renameNoReplace = 0x1
+
+// renameStored renames a stored file f, then deletes what it replaced: a stored file
+// t, or a queued save q and the stored files that save replaced.
+func (d *dir) renameStored(ctx context.Context, name string, f api.File, to *dir, newName string, t api.File, isFile bool, q *entry) syscall.Errno {
+	newN, folder := changes(f.Name, newName, d.id, to.id)
+	got, err := d.tree.lib.UpdateFile(ctx, f.ID, newN, folder)
+	if err != nil {
+		return failed("rename", err, "file", f.ID)
+	}
+	d.tree.moved(f.ID, got.Name, got.FolderID)
+	if child := d.GetChild(name); child != nil {
+		if n, ok := child.Operations().(*file); ok {
+			// The answer has no size or times: keep the file's.
+			if cur := n.current(); cur.ID == f.ID {
+				cur.Name, cur.FolderID = got.Name, got.FolderID
+				n.set(cur)
 			}
 		}
-		return 0
 	}
-	// Not uploaded yet: it will be uploaded under its new name.
-	_, n := d.unsent(name)
-	e := l.queued[name]
-	if e == nil && n != nil {
-		e = n.entry()
-	}
-	if n == nil && e == nil {
-		return syscall.ENOENT
-	}
-	if e != nil {
-		err := d.tree.unsent.update(e, func(r *record) { r.Name, r.FolderID = newName, to.id })
-		if err == nil {
-			err = d.tree.unsent.supersede(e)
+	switch {
+	case isFile:
+		if err := d.tree.lib.DeleteFiles(ctx, t.ID); err != nil {
+			slog.Error("rename: the renamed file has the name, but the file it replaces remains beside it", "file", f.ID, "replaced", t.ID, "err", err)
+			return syscall.EIO
 		}
-		if err != nil {
-			return errQueue(err, "path", e.dir)
+		d.tree.cache.drop(t.ID)
+		d.tree.unremember(t.ID)
+	case q != nil:
+		rec, ok := d.tree.unsent.record(q)
+		d.tree.unsent.drop(q)
+		if ok {
+			if errno := d.tree.deleteBases(ctx, rec.Bases, f.ID); errno != 0 {
+				return syscall.EIO
+			}
 		}
-	} else if over != nil {
-		d.tree.unsent.drop(over)
-	}
-	if n != nil {
-		f := n.current()
-		f.Name, f.FolderID = newName, to.id
-		n.set(f)
 	}
 	return 0
 }
 
-// queuedAt is the queued save that alone holds name in d, if one does.
-func (d *dir) queuedAt(ctx context.Context, name string) *entry {
-	v, errno := d.tree.view(ctx, d.id)
-	if errno != 0 {
-		return nil
+// renameUnsent renames a write not sent yet: queued (e), still being written (n), or
+// both (a queued save being written again). What it lands on becomes its base: a
+// stored file t, or a queued save q's bases, q being superseded at once by a queued
+// save and, by one still being written, once that is durable.
+func (d *dir) renameUnsent(ctx context.Context, n *file, e *entry, to *dir, newName string, t api.File, isFile bool, q *entry) syscall.Errno {
+	uq := d.tree.unsent
+	var shadow []base
+	if isFile {
+		shadow = []base{baseOf(t, t.Created)}
 	}
-	if _, isDir := v.folders[name]; isDir {
-		return nil
+	add := slices.Clone(shadow)
+	if q == e {
+		q = nil
 	}
-	if _, isFile := v.files[name]; isFile {
-		return nil
+	if q != nil && e == nil && !uq.hold(q) {
+		// Sent meanwhile: its file now has the name.
+		q = nil
+		d.tree.forget(to.id)
+		v, errno := d.tree.view(ctx, to.id)
+		if errno != 0 {
+			return errno
+		}
+		if t, ok := v.files[newName]; ok {
+			shadow = []base{baseOf(t, t.Created)}
+			add = slices.Clone(shadow)
+		}
 	}
-	if e := v.queued[name]; e != nil {
-		return e
+	if q != nil {
+		rec, _ := uq.record(q)
+		add = union(add, rec.Bases...)
 	}
-	if _, n := d.unsent(name); n != nil {
-		return n.entry()
+	if e != nil {
+		err := uq.update(e, func(r *record) {
+			r.Name, r.FolderID = newName, to.id
+			r.Bases = union(r.Bases, add...)
+		})
+		if err == nil && q != nil {
+			err = uq.supersede(e, q)
+		} else if err == nil {
+			err = uq.supersede(e)
+		}
+		if err != nil {
+			return errQueue(err, "path", e.dir)
+		}
 	}
-	return nil
+	if n == nil {
+		return 0
+	}
+	n.mu.Lock()
+	p := n.pending
+	if p != nil {
+		p.bases = union(p.bases, add...)
+		if e == nil {
+			p.shadowed = append(p.shadowed, shadow...)
+			if q != nil {
+				p.over = append(p.over, q)
+			}
+		}
+	}
+	n.mu.Unlock()
+	if e == nil {
+		if p == nil {
+			if q != nil {
+				uq.unhold(q)
+			}
+			return syscall.ENOENT
+		}
+		uq.shadow(shadow, 1)
+	}
+	f := n.current()
+	f.Name, f.FolderID = newName, to.id
+	n.set(f)
+	return 0
 }
 
 // changes is what a rename sends: within a folder always the name, and on a move the

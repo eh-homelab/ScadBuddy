@@ -5,11 +5,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/eh-homelab/ScadBuddy/tools/go/bambuddy-fs/internal/api"
 )
@@ -195,15 +197,93 @@ func TestAReplaceWhoseOldFileIsKeptFailsTheClose(t *testing.T) {
 	}
 }
 
-func TestRenameOntoAnExistingNameIsEEXIST(t *testing.T) {
+func TestRenameOverAStoredFileReplacesIt(t *testing.T) {
 	lib := newFakeLibrary()
-	lib.file(10, "a.3mf", 0, nil)
-	lib.file(11, "b.3mf", 0, nil)
+	lib.file(10, "a.3mf", 0, []byte("a"))
+	lib.file(11, "b.3mf", 0, []byte("b"))
 	dir := mount(t, lib, Options{})
-	err := os.Rename(filepath.Join(dir, "a.3mf"), filepath.Join(dir, "b.3mf"))
-	if !errors.Is(err, syscall.EEXIST) {
+	if err := os.Rename(filepath.Join(dir, "a.3mf"), filepath.Join(dir, "b.3mf")); err != nil {
+		t.Fatal(err)
+	}
+	if !libraryHas(lib, map[string]string{"0/b.3mf": "a"}) {
+		lib.locked(func() { t.Fatalf("%+v", lib.files) })
+	}
+	lib.locked(func() {
+		if !lib.deleted[11] || lib.files[10].Name != "b.3mf" {
+			t.Fatalf("%+v %v", lib.files, lib.deleted)
+		}
+	})
+	if got := names(t, dir); !slices.Equal(got, []string{"b.3mf"}) {
+		t.Fatalf("%v", got)
+	}
+	if data, err := os.ReadFile(filepath.Join(dir, "b.3mf")); err != nil || string(data) != "a" {
+		t.Fatalf("%q %v", data, err)
+	}
+}
+
+func TestARenameWhoseReplacedFileCannotBeDeletedIsEIO(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.file(10, "a.3mf", 0, []byte("a"))
+	lib.file(11, "b.3mf", 0, []byte("b"))
+	lib.busy[11] = true
+	dir := mount(t, lib, Options{})
+	log := logs(t)
+	if err := os.Rename(filepath.Join(dir, "a.3mf"), filepath.Join(dir, "b.3mf")); !errors.Is(err, syscall.EIO) {
 		t.Fatalf("%v", err)
 	}
+	if !strings.Contains(log.String(), "replaced=11") || !strings.Contains(log.String(), "file=10") {
+		t.Fatalf("log: %q", log.String())
+	}
+	lib.locked(func() {
+		if len(lib.files) != 2 || lib.files[10].Name != "b.3mf" {
+			t.Fatalf("%+v", lib.files)
+		}
+	})
+}
+
+// renameat2 is renameat2(2) with flags, on the architectures the tests run on.
+func renameat2(t *testing.T, from, to string, flags uintptr) error {
+	t.Helper()
+	nr := map[string]uintptr{"amd64": 316, "arm64": 276}[runtime.GOARCH]
+	if nr == 0 {
+		t.Skip("renameat2 number unknown on " + runtime.GOARCH)
+	}
+	f, err := syscall.BytePtrFromString(from)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, err := syscall.BytePtrFromString(to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const atFDCWD = ^uintptr(99) // -100
+	_, _, errno := syscall.Syscall6(nr, atFDCWD, uintptr(unsafe.Pointer(f)), atFDCWD, uintptr(unsafe.Pointer(g)), flags, 0)
+	if errno != 0 {
+		return errno
+	}
+	return nil
+}
+
+func TestRenameNoReplaceAndOverAFolder(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.folder(4, "Top", 0)
+	lib.file(10, "a.3mf", 0, []byte("a"))
+	lib.file(11, "b.3mf", 0, []byte("b"))
+	dir := mount(t, lib, Options{})
+	if err := renameat2(t, filepath.Join(dir, "a.3mf"), filepath.Join(dir, "b.3mf"), renameNoReplace); !errors.Is(err, syscall.EEXIST) {
+		t.Fatalf("noreplace: %v", err)
+	}
+	if err := syscall.Rename(filepath.Join(dir, "a.3mf"), filepath.Join(dir, "Top")); !errors.Is(err, syscall.EISDIR) {
+		t.Fatalf("file over a folder: %v", err)
+	}
+	if err := syscall.Rename(filepath.Join(dir, "Top"), filepath.Join(dir, "a.3mf")); !errors.Is(err, syscall.ENOTDIR) {
+		t.Fatalf("folder over a file: %v", err)
+	}
+	lib.locked(func() {
+		if len(lib.updates) != 0 || len(lib.deleted) != 0 {
+			t.Fatalf("%+v %v", lib.updates, lib.deleted)
+		}
+	})
 }
 
 func TestMoveAndMkdir(t *testing.T) {
@@ -623,7 +703,7 @@ func TestARefusedUploadIsRetriedOnRelease(t *testing.T) {
 	})
 }
 
-func TestARefusedFileIsDropped(t *testing.T) {
+func TestARefusedFileIsKeptAside(t *testing.T) {
 	lib := newFakeLibrary()
 	lib.failUploads, lib.failStatus = 2, http.StatusRequestEntityTooLarge
 	state := t.TempDir()
@@ -637,11 +717,15 @@ func TestARefusedFileIsDropped(t *testing.T) {
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("%v", err)
 	}
-	if got := log.String(); !strings.Contains(got, "lost") {
-		t.Fatalf("log: %q", got)
+	kept, err := ListUnsent(state)
+	if err != nil || len(kept) != 1 || !kept[0].Refused || kept[0].Name != "a.3mf" || !strings.Contains(kept[0].LastError, "413") {
+		t.Fatalf("kept %+v %v", kept, err)
 	}
-	if queued, err := ListUnsent(state); err != nil || len(queued) != 0 {
-		t.Fatalf("queued %v %v", queued, err)
+	if data, err := os.ReadFile(filepath.Join(kept[0].Path, "contents")); err != nil || string(data) != "abc" {
+		t.Fatalf("contents %q %v", data, err)
+	}
+	if got := log.String(); !strings.Contains(got, kept[0].Path) || strings.Contains(got, "lost") {
+		t.Fatalf("log: %q", got)
 	}
 }
 

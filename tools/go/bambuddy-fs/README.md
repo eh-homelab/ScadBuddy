@@ -119,22 +119,46 @@ and the first read of an open file streams all of it. Listings are cached for
 `--attr-ttl`; every write invalidates its folder.
 
 Writes go to a temporary file, and the upload runs when the descriptor is closed
-(`flush`). A close with nothing new to send uploads nothing. If the upload fails, the
-write is queued (below) and `close()` succeeds; only a refusal of the upload itself
-(400, 413, 415, 422) is returned to `close()`, and is not queued. Writing over an existing name uploads the new file and then deletes the
-old one, so the path keeps its name but its file ID changes: Bambuddy has no in-place
-replace. Truncating to 0 a file being written is allowed.
+(`flush`). A close with nothing new to send uploads nothing. `fsync()` makes the
+temporary file durable. Writing over an existing name uploads the new file and then
+deletes the old one, so the path keeps its name but its file ID changes: Bambuddy has
+no in-place replace. Truncating to 0 a file being written is allowed. If the upload
+fails, the write is queued (below) and `close()` succeeds.
+
+Without `--all`, a file this mount uploaded that the listing does not show (an app's
+`x.3mf.tmp`, say) stays visible until it is renamed, removed or the mount ends, so the
+app can still rename or remove it.
+
+## Renames
+
+`rename()` over an existing file replaces it, as on any filesystem, though the library
+cannot do it in one step:
+
+- A stored file renamed over another takes the name, then the other is deleted. If that
+  delete fails (a queued print uses it), both remain, the answer is `EIO`, and the log
+  names both IDs.
+- A file not sent yet (still being written, or queued) takes the name at once and
+  shadows the stored file there, which it replaces when it is sent (see the conflict
+  rule below). A slicer's save, write `x.3mf.tmp`, close, rename over `x.3mf`, works
+  whether ScadBuddy is up or not.
+- A queued file renamed over another queued file supersedes it; a file still being
+  written supersedes it once its own bytes are durable (sent or queued).
+
+`RENAME_NOREPLACE` over anything, a folder over a folder, and anything over a file
+still being written are `EEXIST`; a file over a folder is `EISDIR`, a folder over a file
+`ENOTDIR`.
 
 ## Unsent writes
 
 A write whose upload fails (ScadBuddy down or unreachable, a 5xx, a 404 from an older
 ScadBuddy without the upload route, a timeout) is not dropped. Its bytes move to
 `<state-dir>/unsent/<n>/contents`, beside a `record.json` (folder ID, name, size, when
-it was saved, attempts, last error, and the file it replaces), both fsync'd, and the log
-names that directory once.
+it was saved, attempts, last error, and the stored files it replaces), both fsync'd, and
+the log names that directory once.
 
 The queue is in the state directory, not the cache directory, because it is the only
-copy of what was written: cache cleaners may empty `~/.cache`.
+copy of what was written: cache cleaners may empty `~/.cache`. One mount at a time uses
+a state directory (it holds `<state-dir>/lock`); a second fails to start.
 
 `close()`, `fsync()` and `release` then succeed: the bytes are as safe on local disk as
 they would be in the library, and an app told its save failed would report it, or
@@ -144,10 +168,10 @@ error) is `EIO`.
 While queued, the file stays in its folder: `stat` and reads come from the local copy,
 and it can be renamed, moved, overwritten or removed like any file. Its inode numbers
 have bit 62 set, apart from folders (`id << 1`) and files (`id << 1 | 1`). A rename
-updates the record, so a slicer's save (write `x.3mf.tmp`, close, rename to `x.3mf`)
-is sent as `x.3mf`. A queued file moved onto another queued file's name replaces it:
-the later save supersedes the earlier one, which is dropped, so two saves of one name
-never land out of order. Any other taken name is `EEXIST`, as for stored files.
+updates the record, so it is sent under its final name and folder. Writing a queued
+file never changes the queued copy: the writer works on a copy, which supersedes the
+queued one once it is itself sent or queued. Two saves of one name never land out of
+order: the later always supersedes the earlier.
 
 A background retrier sends each queued write when no handle has it open: first at
 mount start, then after 15 s doubling to 10 min, with 20% jitter. Read-only mounts
@@ -155,23 +179,37 @@ retry too. Records survive an unmount, a crash or `kill -9`, and are reloaded at
 next mount; a record that cannot be read is logged and left in place. If the queued
 write's folder is gone, it is sent to the top level instead.
 
-Before each attempt the retrier lists the folder afresh, so a save that waited never
-overwrites a newer one. The record remembers the file that had the name when the write
-was saved (its ID and `created_at`, or none):
+Before each upload the folder is listed afresh, so a save that waited never overwrites
+a newer one. The record keeps the stored files the write replaces: the one that had the
+name when the write was saved, and those of whatever it was renamed over, each with its
+ID, `created_at` and name.
 
-- If that file still holds the name, or nothing does, the write is sent under its name,
-  and the file it replaces is deleted.
-- If a different file holds the name (someone saved after this write, or created the
-  name while it waited), that file is left alone and the write is sent as a conflict
-  copy, `<stem> (conflict <saved at, local time, YYYY-MM-DD HHMMSS>)<ext>`, for example
-  `bracket (conflict 2026-10-13 141502).3mf`, and a warning names both.
+- If no file has the name, or only files the write replaces, the write is sent under
+  its name, and each file it replaces that is still the same file under the same name
+  is deleted. One renamed or replaced meanwhile is left alone.
+- If any other file has the name (someone saved after this write, or created the name
+  while it waited), it is left alone and the write is sent as a conflict copy,
+  `<stem> (conflict <saved at, local time, YYYY-MM-DD HHMMSS>)<ext>`, for example
+  `bracket (conflict 2026-10-13 141502).3mf`, and a warning names both. Nothing is
+  deleted.
 
 Once sent, the local copy is deleted and the folder is listed afresh. While a library
-file has the name, a queued write of that name is not shown, so a name never shows
-twice.
+file it does not replace has the name, a queued write of that name is not shown, so a
+name never shows twice.
+
+### Refused writes
+
+An upload ScadBuddy refuses outright (400, 413, 415, 422) would be refused again, so it
+is not retried, but the bytes are kept: on the first close the refusal is that
+`close()`'s error (`EFBIG` for 413) and the last release tries once more; then the bytes
+move to `<state-dir>/refused/<n>/` with the same `record.json`, and the log names the
+path. A queued write refused on a retry moves there too. Refused writes leave their
+folder; fix the cause (a proxy's body limit, a name) and copy the file back in.
 
 `bambuddy-fs unsent [--state-dir <dir>]` lists the queue (path, folder ID, name, size,
-attempts, last error) and exits; it works while a mount runs.
+attempts, last error), then the refused writes under a "refused" heading, and exits. It
+works while a mount runs (it takes no lock), so an entry being written may show briefly
+as an unreadable record.
 
 ## Errors
 

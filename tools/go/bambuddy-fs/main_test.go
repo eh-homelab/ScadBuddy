@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/eh-homelab/ScadBuddy/tools/go/bambuddy-fs/internal/fsys"
 )
 
 func TestParseFlags(t *testing.T) {
@@ -61,7 +63,7 @@ func TestTheUnsentCommand(t *testing.T) {
 	}
 
 	var out strings.Builder
-	if err := listUnsent(&out, state); err != nil || !strings.Contains(out.String(), "no unsent writes in "+filepath.Join(state, "unsent")) {
+	if err := listUnsent(&out, state); err != nil || !strings.Contains(out.String(), "no unsent writes in "+state) {
 		t.Fatalf("empty: %q %v", out.String(), err)
 	}
 
@@ -82,12 +84,22 @@ func TestTheUnsentCommand(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bad, "record.json"), []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	refused := filepath.Join(state, "refused", "5")
+	if err := os.MkdirAll(refused, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(refused, "contents"), []byte("big"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(refused, "record.json"), []byte(`{"folder_id": 0, "name": "big.3mf", "size": 3, "attempts": 1, "last_error": "upload: 413 Request Entity Too Large"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	out.Reset()
 	if err := listUnsent(&out, state); err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	if len(lines) != 3 || !strings.HasPrefix(lines[0], "PATH") {
+	if len(lines) != 6 || !strings.HasPrefix(lines[0], "PATH") || lines[4] != "refused (kept, not sent again):" || !strings.HasPrefix(lines[5], refused) || !strings.Contains(lines[5], "big.3mf") {
 		t.Fatalf("%q", out.String())
 	}
 	if f := strings.Fields(lines[1]); !slices.Equal(f, []string{entry, "4", "a.3mf", "3", "2", "upload:", "502", "Bad", "Gateway"}) {
@@ -96,4 +108,21 @@ func TestTheUnsentCommand(t *testing.T) {
 	if !strings.HasPrefix(lines[2], bad) || !strings.Contains(lines[2], "unreadable record") {
 		t.Fatalf("corrupt: %q", lines[2])
 	}
+}
+
+func TestASecondMountOfAStateDirectoryIsRefused(t *testing.T) {
+	state := t.TempDir()
+	lock, err := fsys.LockState(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fsys.LockState(state); err == nil || !strings.Contains(err.Error(), "another bambuddy-fs mount") {
+		t.Fatalf("second: %v", err)
+	}
+	_ = lock.Close()
+	again, err := fsys.LockState(state)
+	if err != nil {
+		t.Fatalf("after unlock: %v", err)
+	}
+	_ = again.Close()
 }

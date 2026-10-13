@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -142,7 +143,7 @@ func TestAFailedUploadIsQueued(t *testing.T) {
 		t.Fatalf("contents: %q %v", data, err)
 	}
 	rec, err := readRecord(q[0].Path)
-	if err != nil || rec.Base != nil || rec.SavedAt.IsZero() {
+	if err != nil || len(rec.Bases) != 0 || rec.SavedAt.IsZero() {
 		t.Fatalf("record: %+v %v", rec, err)
 	}
 	if got := log.String(); !strings.Contains(got, q[0].Path) {
@@ -234,8 +235,8 @@ func TestQueuedWritesSurviveARestart(t *testing.T) {
 			before, _ = readRecord(u.Path)
 		}
 	}
-	if before.Base == nil || before.Base.ID != 10 || before.Base.Created.IsZero() {
-		t.Fatalf("b's base: %+v", before.Base)
+	if len(before.Bases) != 1 || before.Bases[0].ID != 10 || before.Bases[0].Created.IsZero() || before.Bases[0].Name != "b.3mf" {
+		t.Fatalf("b's bases: %+v", before.Bases)
 	}
 
 	// A new mount over the same state directory, with a cache directory of its own.
@@ -251,8 +252,8 @@ func TestQueuedWritesSurviveARestart(t *testing.T) {
 		t.Fatalf("read: %q %v", data, err)
 	}
 	for _, u := range queued(t, state) {
-		if rec, _ := readRecord(u.Path); u.Name == "b.3mf" && (rec.Base == nil || *rec.Base != *before.Base) {
-			t.Fatalf("base after the restart: %+v", rec.Base)
+		if rec, _ := readRecord(u.Path); u.Name == "b.3mf" && !slices.Equal(rec.Bases, before.Bases) {
+			t.Fatalf("bases after the restart: %+v", rec.Bases)
 		}
 	}
 
@@ -299,7 +300,7 @@ func TestACorruptRecordIsSkippedAndKept(t *testing.T) {
 }
 
 func TestBackoffSchedule(t *testing.T) {
-	q := newQueue(filepath.Join(t.TempDir(), "unsent"))
+	q := newQueue(t.TempDir())
 	clock := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
 	q.now = func() time.Time { return clock }
 	jitter := 0.5
@@ -478,11 +479,11 @@ func TestListUnsent(t *testing.T) {
 	if q, err := ListUnsent(state); err != nil || len(q) != 0 {
 		t.Fatalf("no queue: %v %v", q, err)
 	}
-	rec := record{FolderID: 4, Name: "a.3mf", Size: 3, Attempts: 2, LastError: "upload: 502 Bad Gateway", Base: &base{ID: 10}}
+	rec := record{FolderID: 4, Name: "a.3mf", Size: 3, Attempts: 2, LastError: "upload: 502 Bad Gateway", Bases: []base{{ID: 10}}}
 	path := writeQueued(t, state, 3, rec, "abc")
 	data, _ := os.ReadFile(filepath.Join(path, "record.json"))
 	var raw map[string]any
-	if err := json.Unmarshal(data, &raw); err != nil || raw["folder_id"] != 4.0 || raw["saved_at"] == nil || raw["base"].(map[string]any)["id"] != 10.0 {
+	if err := json.Unmarshal(data, &raw); err != nil || raw["folder_id"] != 4.0 || raw["saved_at"] == nil || raw["bases"].([]any)[0].(map[string]any)["id"] != 10.0 {
 		t.Fatalf("record.json: %s %v", data, err)
 	}
 	q, err := ListUnsent(state)
@@ -490,4 +491,197 @@ func TestListUnsent(t *testing.T) {
 	if err != nil || len(q) != 1 || q[0] != want {
 		t.Fatalf("%+v %v", q, err)
 	}
+}
+
+// The save an app makes with a temp file and a rename, over a file the library has.
+func saveByRename(t *testing.T, dir, data string) {
+	t.Helper()
+	tmp := filepath.Join(dir, "X.3mf.tmp")
+	if err := os.WriteFile(tmp, []byte(data), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := syscall.Rename(tmp, filepath.Join(dir, "X.3mf")); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+}
+
+func TestASaveByRenameReplacesTheStoredFile(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.folder(4, "Top", 0)
+	lib.file(10, "X.3mf", 4, []byte("old"))
+	dir, released := retrying(t, lib, Options{StateDir: t.TempDir()})
+	top := filepath.Join(dir, "Top")
+	if _, err := os.Stat(filepath.Join(top, "X.3mf")); err != nil {
+		t.Fatal(err)
+	}
+	saveByRename(t, top, "new")
+	waitRelease(t, released)
+	if !libraryHas(lib, map[string]string{"4/X.3mf": "new"}) {
+		lib.locked(func() { t.Fatalf("%+v", lib.files) })
+	}
+	lib.locked(func() {
+		if !lib.deleted[10] {
+			t.Fatal("old file kept")
+		}
+	})
+	if data, err := os.ReadFile(filepath.Join(top, "X.3mf")); err != nil || string(data) != "new" {
+		t.Fatalf("%q %v", data, err)
+	}
+}
+
+func TestASaveByRenameWhileTheLibraryIsDownIsQueuedOverTheStoredFile(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.folder(4, "Top", 0)
+	lib.file(10, "X.3mf", 4, []byte("old"))
+	lib.down, lib.failStatus = true, http.StatusNotFound
+	state := t.TempDir()
+	dir, released := retrying(t, lib, Options{StateDir: state})
+	logs(t)
+	top := filepath.Join(dir, "Top")
+	if _, err := os.Stat(filepath.Join(top, "X.3mf")); err != nil {
+		t.Fatal(err)
+	}
+	saveByRename(t, top, "new")
+	waitRelease(t, released)
+	if data, err := os.ReadFile(filepath.Join(top, "X.3mf")); err != nil || string(data) != "new" {
+		t.Fatalf("read: %q %v", data, err)
+	}
+	if got := names(t, top); !slices.Equal(got, []string{"X.3mf"}) {
+		t.Fatalf("listed: %v", got)
+	}
+	if info, err := os.Stat(filepath.Join(top, "X.3mf")); err != nil || info.Size() != 3 {
+		t.Fatalf("stat: %v %v", info, err)
+	}
+	q := queued(t, state)
+	if len(q) != 1 || q[0].Name != "X.3mf" || q[0].FolderID != 4 {
+		t.Fatalf("queue: %+v", q)
+	}
+	if rec, err := readRecord(q[0].Path); err != nil || len(rec.Bases) != 1 || rec.Bases[0].ID != 10 || rec.Bases[0].Created.IsZero() {
+		t.Fatalf("bases: %+v %v", rec.Bases, err)
+	}
+	lib.setDown(false)
+	eventually(t, "the replace", func() bool { return libraryHas(lib, map[string]string{"4/X.3mf": "new"}) })
+	eventually(t, "the queue to empty", func() bool { return len(queued(t, state)) == 0 })
+	lib.locked(func() {
+		if !lib.deleted[10] {
+			t.Fatal("old file kept")
+		}
+	})
+}
+
+func TestMovingAQueuedSaveOverAnotherReplacesBothBases(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.file(10, "x.3mf", 0, []byte("A"))
+	lib.file(11, "y.3mf", 0, []byte("B"))
+	lib.down = true
+	state := t.TempDir()
+	dir, released := retrying(t, lib, Options{StateDir: state})
+	logs(t)
+	for name, data := range map[string]string{"x.3mf": "x2", "y.3mf": "y2"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		waitRelease(t, released)
+	}
+	if err := os.Rename(filepath.Join(dir, "x.3mf"), filepath.Join(dir, "y.3mf")); err != nil {
+		t.Fatal(err)
+	}
+	if got := names(t, dir); !slices.Equal(got, []string{"y.3mf"}) {
+		t.Fatalf("listed: %v", got)
+	}
+	if q := queued(t, state); len(q) != 1 || q[0].Name != "y.3mf" {
+		t.Fatalf("queue: %+v", q)
+	}
+	lib.setDown(false)
+	eventually(t, "the upload", func() bool { return libraryHas(lib, map[string]string{"0/y.3mf": "x2"}) })
+	lib.locked(func() {
+		if !lib.deleted[10] || !lib.deleted[11] {
+			t.Fatalf("deleted %v", lib.deleted)
+		}
+	})
+}
+
+func TestWritingAQueuedSaveLeavesTheQueuedCopyAlone(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.down = true
+	state := t.TempDir()
+	dir, released := retrying(t, lib, Options{StateDir: state})
+	logs(t)
+	path := filepath.Join(dir, "a.3mf")
+	if err := os.WriteFile(path, []byte("abc"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitRelease(t, released)
+	first := queued(t, state)[0].Path
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_TRUNC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.Write([]byte("Z")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Sync(); err != nil {
+		t.Fatalf("fsync: %v", err)
+	}
+	// Until the new bytes are durable, the queued copy is untouched.
+	if data, err := os.ReadFile(filepath.Join(first, "contents")); err != nil || string(data) != "abc" {
+		t.Fatalf("queued copy while writing: %q %v", data, err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	waitRelease(t, released)
+	q := queued(t, state)
+	if len(q) != 1 || q[0].Path == first || q[0].Size != 1 {
+		t.Fatalf("queue: %+v", q)
+	}
+	if _, err := os.Stat(first); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("superseded copy: %v", err)
+	}
+	if data, err := os.ReadFile(path); err != nil || string(data) != "Z" {
+		t.Fatalf("read: %q %v", data, err)
+	}
+	lib.setDown(false)
+	eventually(t, "the upload", func() bool { return libraryHas(lib, map[string]string{"0/a.3mf": "Z"}) })
+}
+
+func TestAQueuedWriteTheLibraryRefusesIsKeptAside(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.down = true
+	state := t.TempDir()
+	dir, released := retrying(t, lib, Options{StateDir: state})
+	logs(t)
+	if err := os.WriteFile(filepath.Join(dir, "a.3mf"), []byte("abc"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitRelease(t, released)
+	lib.locked(func() { lib.failStatus = http.StatusUnprocessableEntity })
+	eventually(t, "the refusal", func() bool {
+		q := queued(t, state)
+		return len(q) == 1 && q[0].Refused
+	})
+	q := queued(t, state)
+	if data, err := os.ReadFile(filepath.Join(q[0].Path, "contents")); err != nil || string(data) != "abc" || !strings.Contains(q[0].LastError, "422") {
+		t.Fatalf("kept: %q %v %+v", data, err, q[0])
+	}
+	if got := names(t, dir); len(got) != 0 {
+		t.Fatalf("listed: %v", got)
+	}
+}
+
+func TestOfTwoReloadedSavesOfOneNameTheLaterIsSent(t *testing.T) {
+	lib := newFakeLibrary()
+	state := t.TempDir()
+	writeQueued(t, state, 1, record{Name: "x.3mf", Size: 3, Attempts: 1, Bases: []base{{ID: 10, Name: "x.3mf"}}}, "one")
+	writeQueued(t, state, 2, record{Name: "x.3mf", Size: 3, Attempts: 1}, "two")
+	lib.file(10, "x.3mf", 0, []byte("old"))
+	logs(t)
+	retrying(t, lib, Options{StateDir: state})
+	eventually(t, "the later save", func() bool { return libraryHas(lib, map[string]string{"0/x.3mf": "two"}) })
+	lib.locked(func() {
+		if lib.uploads != 1 || !lib.deleted[10] {
+			t.Fatalf("uploads %d deleted %v", lib.uploads, lib.deleted)
+		}
+	})
 }

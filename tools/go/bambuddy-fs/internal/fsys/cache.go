@@ -161,6 +161,7 @@ func (n *file) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 // listing, and the parent's entry, here and in the kernel.
 func (n *file) gone() {
 	n.tree.cache.drop(n.current().ID)
+	n.tree.unremember(n.current().ID)
 	name, parent := n.Parent()
 	if parent == nil {
 		return

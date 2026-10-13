@@ -142,19 +142,25 @@ func main() {
 	os.Exit(run(cfg))
 }
 
-// listUnsent prints the writes queued under stateDir, one per line.
+// listUnsent prints the writes queued under stateDir, one per line, then those the
+// library refused, which are kept but not sent again.
 func listUnsent(w io.Writer, stateDir string) error {
-	queued, err := fsys.ListUnsent(stateDir)
+	all, err := fsys.ListUnsent(stateDir)
 	if err != nil {
 		return err
 	}
-	if len(queued) == 0 {
-		_, err := fmt.Fprintf(w, "no unsent writes in %s\n", filepath.Join(stateDir, "unsent"))
+	if len(all) == 0 {
+		_, err := fmt.Fprintf(w, "no unsent writes in %s\n", stateDir)
 		return err
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "PATH\tFOLDER\tNAME\tSIZE\tATTEMPTS\tLAST ERROR")
-	for _, u := range queued {
+	refused := false
+	for _, u := range all {
+		if u.Refused && !refused {
+			refused = true
+			fmt.Fprintln(tw, "\nrefused (kept, not sent again):")
+		}
 		if u.Err != nil {
 			fmt.Fprintf(tw, "%s\t\t\t\t\tunreadable record: %v\n", u.Path, u.Err)
 			continue
@@ -182,6 +188,13 @@ func run(cfg config) int {
 			return 1
 		}
 	}
+	// The state directory's queue is sent by one mount only.
+	lock, err := fsys.LockState(cfg.StateDir)
+	if err != nil {
+		log.Printf("bambuddy-fs: %v", err)
+		return 1
+	}
+	defer lock.Close()
 	root := fsys.NewRoot(lib, fsys.Options{All: cfg.All, ReadOnly: cfg.ReadOnly, TTL: cfg.TTL, CacheDir: cfg.CacheDir, StateDir: cfg.StateDir})
 	ttl := cfg.TTL
 	server, err := fs.Mount(cfg.Mountpoint, root, &fs.Options{

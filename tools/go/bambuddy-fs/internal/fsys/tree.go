@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"maps"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -48,8 +47,8 @@ type Options struct {
 // under opts.StateDir queued (RetryUnsent sends them).
 func NewRoot(lib Library, opts Options) fs.InodeEmbedder {
 	t := &tree{
-		lib: lib, opts: opts, cache: newCache(opts.CacheDir), listings: map[int]listing{},
-		unsent: newQueue(filepath.Join(opts.StateDir, "unsent")),
+		lib: lib, opts: opts, cache: newCache(opts.CacheDir), listings: map[int]listing{}, uploaded: map[int]api.File{},
+		unsent: newQueue(opts.StateDir),
 	}
 	t.unsent.load()
 	return &dir{tree: t}
@@ -65,6 +64,11 @@ type tree struct {
 
 	mu       sync.Mutex
 	listings map[int]listing
+	// uploaded holds, by ID, the files this mount uploaded that a listing without
+	// --all may not show (not printable, such as an app's "x.3mf.tmp" before it renames
+	// it), so they can still be renamed and removed. One goes once a listing shows it,
+	// or it is removed.
+	uploaded map[int]api.File
 
 	// released, if set, is called when a write handle's release has finished (tests).
 	released func()
@@ -113,9 +117,16 @@ func (t *tree) view(ctx context.Context, folderID int) (view, syscall.Errno) {
 		return view{}, errno
 	}
 	queued, replaced := t.unsent.in(folderID)
-	if len(replaced) > 0 {
+	if extra := t.unlisted(l, folderID); len(replaced) > 0 || len(extra) > 0 {
 		l.files = maps.Clone(l.files)
 		maps.DeleteFunc(l.files, func(_ string, f api.File) bool { return replaced[f.ID] })
+		for _, f := range extra {
+			if _, isDir := l.folders[f.Name]; !isDir && !replaced[f.ID] {
+				if _, taken := l.files[f.Name]; !taken {
+					l.files[f.Name] = f
+				}
+			}
+		}
 	}
 	for name := range queued {
 		_, isDir := l.folders[name]
@@ -124,6 +135,56 @@ func (t *tree) view(ctx context.Context, folderID int) (view, syscall.Errno) {
 		}
 	}
 	return view{listing: l, queued: queued}, 0
+}
+
+// remember keeps a file this mount uploaded, for a listing without --all.
+func (t *tree) remember(f api.File) {
+	if t.opts.All {
+		return
+	}
+	t.mu.Lock()
+	t.uploaded[f.ID] = f
+	t.mu.Unlock()
+}
+
+func (t *tree) unremember(id int) {
+	t.mu.Lock()
+	delete(t.uploaded, id)
+	t.mu.Unlock()
+}
+
+// moved follows a rename of a file this mount uploaded.
+func (t *tree) moved(id int, name string, folderID int) {
+	t.mu.Lock()
+	if f, ok := t.uploaded[id]; ok {
+		f.Name, f.FolderID = name, folderID
+		t.uploaded[id] = f
+	}
+	t.mu.Unlock()
+}
+
+// unlisted returns the files this mount uploaded into folderID that l does not show,
+// and forgets those it shows.
+func (t *tree) unlisted(l listing, folderID int) []api.File {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.uploaded) == 0 {
+		return nil
+	}
+	listed := map[int]bool{}
+	for _, f := range l.files {
+		listed[f.ID] = true
+	}
+	var out []api.File
+	for id, f := range t.uploaded {
+		switch {
+		case listed[id]:
+			delete(t.uploaded, id)
+		case f.FolderID == folderID:
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // listedCreated is a file's created_at in its folder's cached listing, or zero.
