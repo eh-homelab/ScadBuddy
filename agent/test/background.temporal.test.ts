@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { backgroundActivities, type FireResult } from '../src/background/activities.js'
 import { BACKGROUND_WORKFLOW, BackgroundTasks, backgroundWorkflowId } from '../src/background/service.js'
+import { eventNotice } from '../src/background/monitor.js'
 import { BackgroundTaskStore } from '../src/background/store.js'
 import { temporalTaskRunner } from '../src/background/temporal.js'
 import type { Database } from '../src/db.js'
@@ -48,6 +49,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a background task's workfl
       activities: backgroundActivities({
         store,
         tz: 'UTC',
+        paths: await tempPaths(),
         send: async (_t, prompt) => {
           const answer = answers.shift() ?? { result: 'sent' }
           if (answer.result === 'sent') sent.push(prompt)
@@ -89,6 +91,30 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a background task's workfl
     await (await start(t.id)).result()
     expect(sent).toEqual([])
     expect(await store.get(t.id)).toMatchObject({ state: 'failed', detail: 'not sent: the session is archived' })
+  }, 60_000)
+
+  it("runs a monitor's command, sends its events and its end once the session is idle, then ends", async () => {
+    const t = (await store.create({
+      sessionId,
+      kind: 'monitor',
+      description: 'build',
+      spec: { description: 'build', command: 'echo step one; sleep 0.6; echo step two; exit 2', queue: TASK_QUEUE, timeoutMs: 20_000 },
+      createdBy: browser,
+    }))!
+    answers = [{ result: 'busy' }]
+    await (
+      await env.client.workflow.start(BACKGROUND_WORKFLOW, {
+        workflowId: backgroundWorkflowId(t.id),
+        taskQueue: TASK_QUEUE,
+        args: [{ taskId: t.id, kind: 'monitor', retryMs: 200 }],
+      })
+    ).result()
+    const all = sent.join('\n\n')
+    expect(all).toContain(eventNotice(t.id, 'build', 'step one'))
+    expect(all).toContain(eventNotice(t.id, 'build', 'step two'))
+    expect(all).toContain(`<summary>Monitor "build" stream ended</summary>\n<event>exit code 2 · 2 events</event>`)
+    expect(await store.pendingEvents(t.id)).toEqual([])
+    expect(await store.get(t.id)).toMatchObject({ state: 'done', detail: 'exited' })
   }, 60_000)
 
   it('is cancelled while it waits, through the service, and never fires', async () => {

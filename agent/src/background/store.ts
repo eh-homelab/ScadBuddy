@@ -29,6 +29,10 @@ export type BackgroundTask = {
 
 /** At most this many tasks active in one session at once. */
 export const MAX_ACTIVE = 10
+/** A monitor that makes more events than this is stopped ("Monitors that produce too many events are automatically stopped"). */
+export const MAX_EVENTS = 200
+/** One event's text at most (its lines past this are cut). */
+export const EVENT_MAX_CHARS = 8000
 
 type Row = {
   id: string
@@ -131,5 +135,36 @@ export class BackgroundTaskStore {
       UPDATE ai_background_tasks SET state = ${state}, detail = ${detail ?? null}, next_at = NULL, updated_at = now()
       WHERE id = ${id} AND state = 'active' RETURNING id`
     return rows.length === 1
+  }
+
+  /** Records one event of a monitor; false once it has MAX_EVENTS (it is then stopped). */
+  async appendEvent(taskId: string, text: string): Promise<boolean> {
+    const rows = await this.#sql`
+      INSERT INTO ai_background_events (task_id, text)
+      SELECT ${taskId}, ${text.slice(0, EVENT_MAX_CHARS)}
+      WHERE (SELECT count(*) FROM ai_background_events WHERE task_id = ${taskId}) < ${MAX_EVENTS}
+      RETURNING seq`
+    return rows.length === 1
+  }
+
+  /** Records a monitor's last notice (its end), past MAX_EVENTS. */
+  async appendNotice(taskId: string, text: string): Promise<void> {
+    await this.#sql`INSERT INTO ai_background_events (task_id, text) VALUES (${taskId}, ${text.slice(0, EVENT_MAX_CHARS)})`
+  }
+
+  /** A task's events not yet sent to its session, oldest first. */
+  async pendingEvents(taskId: string): Promise<{ seq: string; text: string }[]> {
+    return this.#sql<{ seq: string; text: string }[]>`
+      SELECT seq::text AS seq, text FROM ai_background_events WHERE task_id = ${taskId} AND delivered_at IS NULL ORDER BY seq`
+  }
+
+  async delivered(taskId: string, upTo: string): Promise<void> {
+    await this.#sql`
+      UPDATE ai_background_events SET delivered_at = now() WHERE task_id = ${taskId} AND seq <= ${upTo} AND delivered_at IS NULL`
+  }
+
+  async eventCount(taskId: string): Promise<number> {
+    const [row] = await this.#sql<{ n: number }[]>`SELECT count(*)::int AS n FROM ai_background_events WHERE task_id = ${taskId}`
+    return row?.n ?? 0
   }
 }
