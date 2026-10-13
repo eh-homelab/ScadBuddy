@@ -25,13 +25,29 @@ export const SILK_PROFILE: FilamentProfile = {
           accessed: '2026-09-28',
           supports: ['SB2001', 'outer_wall_speed'],
         },
+        {
+          url: 'https://github.com/bambulab/BambuStudio/blob/f977235e6d736c4c0b650520ac5a5b72cbfe9244/src/libslic3r/PrintConfig.cpp#L2245-L2249',
+          title: 'Bambu Studio PrintConfig.cpp: outer_wall_speed',
+          quote:
+            "Speed of outer wall which is outermost and visible. It's used to be slower than inner wall speed to get better quality.",
+          accessed: '2026-09-28',
+          supports: ['outer_wall_speed'],
+        },
       ],
     },
   ],
   notes: [
     {
       text: "Bambu also recommends a 235 °C nozzle for silk. ScadBuddy cannot set a filament's temperature yet, so it is not changed here: set it in the spool's filament preset.",
-      sources: [],
+      sources: [
+        {
+          url: 'https://wiki.bambulab.com/en/x1/manual/printing-with-silk-filaments',
+          title: 'Bambu PLA Silk / Silk+ Filament Printing Guide | Bambu Lab Wiki',
+          quote: 'We recommend setting the Nozzle first layer and other layers to 235℃.',
+          accessed: '2026-09-28',
+          supports: ['SB2001', 'nozzle_temperature', 'nozzle_temperature_initial_layer'],
+        },
+      ],
     },
   ],
   builtin: true,

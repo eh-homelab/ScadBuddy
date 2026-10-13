@@ -60,7 +60,6 @@ function printAttributes(source: PrintSource, body: PrintRunRequest): Attributes
   }
 }
 
-
 const NONE: string[] = []
 
 /**

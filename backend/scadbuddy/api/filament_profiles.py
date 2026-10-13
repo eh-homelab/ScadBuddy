@@ -8,8 +8,6 @@ replaces. Applying one is the print request's ``filament_profiles``.
 
 from __future__ import annotations
 
-import asyncio
-
 from fastapi import APIRouter
 from pydantic import BaseModel, Field, field_validator
 
@@ -20,7 +18,7 @@ from scadbuddy.bambuddy.filament_profiles import (
     BUILTIN,
     FilamentProfile,
     ProfilePreview,
-    preview,
+    previews,
     unknown_profiles,
 )
 from scadbuddy.bambuddy.resolver import PrintChoices, process_preset_for
@@ -62,8 +60,8 @@ async def preview_profiles(
     """Each profile's changes against the process preset these choices resolve to: the
     preset's value (a list for a per-extruder-variant option) and the profile's. A
     profile that cannot be applied says why (``applicable: false``, ``reason``), and a
-    print with it on is refused."""
+    print with it on goes ahead without it, saying so in its warnings."""
     async with client_for(store.load()) as client:
         process = process_preset_for(body.choices, await _catalogue(client))
         ids = body.profiles if body.profiles is not None else list(BUILTIN)
-        return list(await asyncio.gather(*(preview(client, process, BUILTIN[i]) for i in ids)))
+        return await previews(client, process, [BUILTIN[i] for i in ids])

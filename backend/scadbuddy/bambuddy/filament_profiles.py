@@ -28,6 +28,7 @@ from scadbuddy.analyzers.model import Source
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.filaments import FilamentWarning
 from scadbuddy.bambuddy.models import PresetRef, ProcessValue
+from scadbuddy.core.problems import ApiError
 
 
 class ProfileMatch(BaseModel):
@@ -147,33 +148,59 @@ def unknown_profiles(ids: list[str]) -> list[str]:
     return [profile_id for profile_id in ids if profile_id not in BUILTIN]
 
 
-async def preview(
-    client: BambuddyClient, process: PresetRef | None, profile: FilamentProfile
-) -> ProfilePreview:
-    """``profile``'s changes against ``process``'s values, in their stored shape."""
+async def previews(
+    client: BambuddyClient, process: PresetRef | None, profiles: list[FilamentProfile]
+) -> list[ProfilePreview]:
+    """Each of ``profiles``' changes against ``process``'s values, in their stored shape.
+    The preset's values are read once, whatever the number of profiles."""
+    if not profiles:
+        return []
     if process is None:
-        return ProfilePreview(
-            profile=profile,
-            applicable=False,
-            reason=(
-                "no process preset resolves for these choices, so there is no "
-                f"{_settings(profile)} to change"
-            ),
+        return [
+            ProfilePreview(
+                profile=profile,
+                applicable=False,
+                reason=(
+                    "no process preset resolves for these choices, so there is no "
+                    f"{_settings(profile)} to change"
+                ),
+            )
+            for profile in profiles
+        ]
+    why: str | None
+    try:
+        values = await client.preset_values(process)
+    except ApiError as error:
+        # Unreachable or failing: skip the profiles, never refuse the print for them.
+        why = error.detail
+    else:
+        why = (
+            None
+            if values.resolved
+            else _REASONS.get(values.reason or "", f"Bambuddy answered {values.reason!r}")
         )
-    values = await client.preset_values(process)
-    if not values.resolved:
-        why = _REASONS.get(values.reason or "", f"Bambuddy answered {values.reason!r}")
-        return ProfilePreview(
-            profile=profile,
-            process_preset=process,
-            applicable=False,
-            reason=f"couldn't read the preset's {_settings(profile)} ({why})",
-        )
+    if why is not None:
+        return [
+            ProfilePreview(
+                profile=profile,
+                process_preset=process,
+                applicable=False,
+                reason=f"couldn't read the preset's {_settings(profile)} ({why})",
+            )
+            for profile in profiles
+        ]
+    return [_against(process, values.values, profile) for profile in profiles]
+
+
+def _against(
+    process: PresetRef, values: dict[str, object], profile: FilamentProfile
+) -> ProfilePreview:
     changes: list[ProfileChange] = []
     for setting in profile.settings:
-        current = values.values.get(setting.key)
+        current = values.get(setting.key)
         if isinstance(current, list):
-            stored: ProcessValue | None = [str(item) for item in current]
+            # An empty list has no shape to copy: the preset has no such setting.
+            stored: ProcessValue | None = [str(item) for item in current] or None
         elif current is None:
             stored = None
         else:
@@ -230,8 +257,7 @@ async def profile_overrides(
     and goes ahead with the preset as it is."""
     merged: dict[str, ProcessValue] = {}
     warnings: list[FilamentWarning] = []
-    for profile_id in profile_ids:
-        shown = await preview(client, process, BUILTIN[profile_id])
+    for shown in await previews(client, process, [BUILTIN[i] for i in profile_ids]):
         if shown.applicable:
             merged.update(overrides(shown))
         else:

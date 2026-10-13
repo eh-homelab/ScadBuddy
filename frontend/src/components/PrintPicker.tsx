@@ -618,7 +618,9 @@ export function PrintPicker({
           rack_algorithm: chosenAlgorithm,
           // #2367: the sequence is a process override, so it changes what the run
           // slices; the check and the background slice must see it as the run does.
-          ...sliceOverrides(printSequence),
+          ...(printSequence === null ? {} : { print_sequence: printSequence }),
+          // #717: a profile left on changes the slice, and Checks says when one can't apply.
+          ...(filamentProfiles.active.length === 0 ? {} : { filament_profiles: filamentProfiles.active }),
         }
       : null
   const check = usePrintCheck(source, checkRequest)
