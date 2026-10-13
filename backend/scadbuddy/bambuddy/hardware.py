@@ -106,10 +106,12 @@ def plate_unlisted_warning(
     if canonical_bed_type(chosen) in listed:
         return None
     named = ", ".join(BED_TYPE_LABELS.get(name, name) for name in listed)
+    # Named as the plate menu names it, like the plates it lists (#2857).
+    label = BED_TYPE_LABELS.get(canonical_bed_type(chosen), chosen)
     return FilamentWarning(
         kind="plate-not-listed",
         message=(
-            f"The {printer_name or 'printer'} does not list {chosen} among its plates "
+            f"The {printer_name or 'printer'} does not list {label} among its plates "
             f"({named}). Pick one of those."
         ),
     )

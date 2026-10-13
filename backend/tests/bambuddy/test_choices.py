@@ -77,10 +77,15 @@ def test_a_different_plate_is_a_swap_reminder_and_the_same_one_is_not() -> None:
 
 def test_a_plate_the_printers_model_does_not_take_warns() -> None:
     """#2366: the H2C takes no Cool, High Temp or Smooth PEI plate."""
-    for chosen in ("Cool Plate", "High Temp Plate", "Smooth PEI Plate"):
+    # Named as the plate menu names it, like the plates listed beside it (#2857).
+    for chosen, label in (
+        ("Cool Plate", "Cool Plate"),
+        ("High Temp Plate", "Smooth PEI Plate / High Temp Plate"),
+        ("Smooth PEI Plate", "Smooth PEI Plate / High Temp Plate"),
+    ):
         warning = plate_unlisted_warning(chosen, "H2C", "3DP-31B-598")
         assert warning is not None and warning.kind == "plate-not-listed", chosen
-        assert warning.message.startswith(f"The 3DP-31B-598 does not list {chosen}")
+        assert warning.message.startswith(f"The 3DP-31B-598 does not list {label} among")
     # Either spelling of the SuperTack is the plate it takes.
     for chosen in ("Supertack Plate", "Cool Plate (SuperTack)", "Textured PEI Plate"):
         assert plate_unlisted_warning(chosen, "H2C", "x") is None, chosen

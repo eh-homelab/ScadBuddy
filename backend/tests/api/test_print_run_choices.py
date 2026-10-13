@@ -1686,6 +1686,23 @@ def test_the_check_warns_of_a_plate_the_printer_does_not_take(
 
 
 @respx.mock
+def test_a_run_records_a_plate_the_printer_does_not_take(client: TestClient, model: str) -> None:
+    """#2858: the run's warnings, not only the check's, name a plate the H2C does not
+    take, judged against the printer's model as the run resolved it."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    slice_routes()
+    queue_route()
+
+    response = run_print(client, output_id, json=body(bed_type="Cool Plate"))
+
+    assert response.status_code == 200, response.text
+    [warning] = [w for w in response.json()["warnings"] if w["kind"] == "plate-not-listed"]
+    assert "does not list Cool Plate among its plates" in warning["message"]
+
+
+@respx.mock
 def test_a_422_bambuddy_answers_on_a_read_fails_the_check_rather_than_refusing(
     client: TestClient, model: str
 ) -> None:
