@@ -5,6 +5,7 @@ import { SettingsStore } from '../src/credentials.js'
 import { CONTINUE_PROMPT, NoUsableCredentialError } from '../src/harness/fallback.js'
 import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun } from '../src/harness/run.js'
 import { HTTP_SERVER, HTTP_TOOL_NAME, SETTING_HTTP_REQUEST } from '../src/harness/httpRequest.js'
+import { userMessage } from '../src/harness/inbox.js'
 import { sessionWorkDir } from '../src/harness/stateDirs.js'
 import {
   BROWSER_TOOLS_GUIDE,
@@ -24,6 +25,7 @@ import { drainRetains, SETTING_RECALL_MAX_QUERY_CHARS } from '../src/memory/hind
 import { startFakeHindsight } from './support/fakeHindsight.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, agentB, browser, collectUntil, type FakeTurn, manager, promptText, scriptedRunner, tempPaths } from './support/sessions.js'
+import { warmHarness } from './support/warm.js'
 
 // The manager's own rules against real Postgres, with a scripted stand-in for
 // the SDK so claims, ownership and interrupts are deterministic. The real SDK
@@ -189,7 +191,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'hi' })
       await turn!.done
       // Only a spawn reports an init: the warm process is let go so the next turn spawns again.
-      m.warm.evict(session.id, 'the test')
+      await m.warm.evict(session.id, 'the test')
       await (await m.send(session.id, agentA, 'again')).done
       expect(runs.map((r) => r.ownPlugin)).toEqual(['/plugins/own', '/plugins/own'])
       const logged = (
@@ -221,9 +223,9 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'hi' })
       await turn!.done
       // Only a spawn reports an init: the warm process is let go before each later turn.
-      m.warm.evict(session.id, 'the test')
+      await m.warm.evict(session.id, 'the test')
       await (await m.send(session.id, agentA, 'again')).done
-      m.warm.evict(session.id, 'the test')
+      await m.warm.evict(session.id, 'the test')
       await (await m.send(session.id, agentA, 'and again')).done
       const logged = (
         await db.sql<{ event: string }[]>`
@@ -330,7 +332,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       // On a fresh process: a warm one that throws before its first message is taken
       // for dead and the turn tried once more (sessions/warmTurn.ts), which the script
       // has no turn for.
-      m.warm.evict(session.id, 'the test')
+      await m.warm.evict(session.id, 'the test')
       expect(await (await m.send(session.id, agentA, 'again')).done).toEqual({
         kind: 'failed',
         message: 'upstream said: bad key [redacted]',
@@ -755,9 +757,10 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const { session } = await m.start(agentA, { origin: 'mcp' })
       await (await m.send(session.id, agentA, 'one')).done
       expect(runs[0]!.maxBudgetUsd).toBe(0.05)
-      // Second turn, on another replica: a fresh process, resumed, reports the
-      // cumulative total; the turn costs what that moved by (warm.ts turnCostUsd).
-      const { runner: r2, runs: runs2 } = scriptedRunner(() => ({ reply: 'ok', costUsd: 0.06 }))
+      // Second turn, on another replica: a fresh process, resumed from a transcript
+      // with no `cost-state` yet (the first replica's process is still warm, and
+      // writes its only as it exits), so its total starts from 0 and is the turn's own.
+      const { runner: r2, runs: runs2 } = scriptedRunner(() => ({ reply: 'ok', costUsd: 0.03 }))
       const m2 = manager({ sql: db.sql, paths, run: r2, settings })
       await (await m2.send(session.id, agentA, 'two')).done
       expect(runs2[0]!.maxBudgetUsd).toBeCloseTo(0.02)
@@ -1009,6 +1012,34 @@ describe.skipIf(!TEST_DATABASE_URL)(
         expect(await (await m.send(session.id, agentA, 'two')).done).toMatchObject({ kind: 'result', subtype: 'success' })
         expect(runs).toHaveLength(2)
         await m.warm.close()
+      })
+
+      // Ruling 9: the manager's claim keeps two turns off one session, so an
+      // entry held by anything else when a turn acquires is a bug, surfaced as
+      // the turn's failure, never swallowed.
+      it('a turn whose process is held fails, saying so, and leaves the held process alone', async () => {
+        const paths = await tempPaths()
+        const { runner, runs } = scriptedRunner(() => ({ reply: 'ok' }))
+        const m = manager({ sql: db.sql, paths, run: runner })
+        const h = await warmHarness({ db, url, schema, drop: () => Promise.resolve() })
+        try {
+          const { session } = await m.start(agentA, { origin: 'mcp' })
+          const held = await m.warm.acquire(session.id, h.assembled(), h.credential(), 1)
+          expect(held.outcome).toBe('miss')
+          expect(await (await m.send(session.id, agentA, 'hi')).done).toEqual({
+            kind: 'failed',
+            message: `session ${session.id} already has a turn running on its warm process`,
+          })
+          // The held process is as it was: still the cache's one entry, its inbox open, nothing pushed into it.
+          expect(m.warm.size()).toBe(1)
+          expect(runs).toHaveLength(1)
+          expect(() => held.entry.inbox.push(userMessage('still open'))).not.toThrow()
+          expect(await m.get(session.id, agentA)).toMatchObject({ status: 'failed' })
+          await m.warm.abandon(held.entry, 'the test')
+          expect(m.warm.size()).toBe(0)
+        } finally {
+          await h.close()
+        }
       })
 
       it('a changed setting spawns a new process for the next turn', async () => {

@@ -1757,7 +1757,7 @@ export class SessionManager {
       if (lost) {
         outcome = { kind: 'lost_claim' }
         // Another turn owns the session now, wherever it runs: this process is not kept for it.
-        for (const entry of served) this.warm.abandon(entry, 'lost the turn claim')
+        for (const entry of served) void this.warm.abandon(entry, 'lost the turn claim')
         return outcome
       }
       const stopped = controller.signal.aborted ? abortMessage(controller.signal) : undefined
@@ -2116,7 +2116,7 @@ export class SessionManager {
     // Its warm process was spawned for the previous owner (the owner is in the
     // fingerprint, and its question gate is the browser user's): gone here and
     // on every other replica (spec 2026-10-13 §5.3, warmEvict.ts).
-    this.warm.evict(id, 'handed off')
+    void this.warm.evict(id, 'handed off')
     await notifyWarmEvict(this.deps.sql, id)
     return this.get(id, to)
   }

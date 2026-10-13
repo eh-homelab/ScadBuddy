@@ -44,7 +44,7 @@ import { turnCostUsd, type WarmEntry, type WarmSessions, type WarmTurn } from '.
 // the remaining budget is the cache's own check (§5.3 "budget").
 
 export type WarmTurnDeps = {
-  warm: Pick<WarmSessions, 'acquire' | 'settle' | 'abandon'>
+  warm: Pick<WarmSessions, 'acquire' | 'settle' | 'abandon' | 'leave'>
   sessionId: string
   /** The turn's assembly, for its first attempt. */
   first: AssembledTurn
@@ -115,18 +115,21 @@ export function warmAttempts(deps: WarmTurnDeps): WarmTurnRun {
     let sawMessage = false
     let settled = false
     let abandoned = false
+    /** Given back untouched: the turn was stopped before its prompt went in. */
+    let left = false
     let grace: ReturnType<typeof setTimeout> | undefined
-    const abandon = (reason: string) => {
-      if (settled || abandoned) return
+    const abandon = (reason: string, how: 'close' | 'drain' = 'close') => {
+      if (settled || abandoned || left) return
       abandoned = true
       clearTimeout(grace)
-      deps.warm.abandon(entry, reason)
+      void deps.warm.abandon(entry, reason, how)
     }
     /** The attempt's signal aborted: by the fallback leaving a refused credential, or through the link by the turn's own `stop`. */
     const onAbort = () => {
       if (settled || abandoned) return
       if (!deps.stop.aborted) {
-        abandon('credential')
+        // The process is alive and well, only on the wrong credential: it may end on its own and land its appends.
+        abandon('credential', 'drain')
         return
       }
       grace = setTimeout(() => abandon('the interrupt grace period ran out'), graceMs)
@@ -136,11 +139,15 @@ export function warmAttempts(deps: WarmTurnDeps): WarmTurnRun {
     const signal = attempt.signal
     try {
       if (signal?.aborted) {
-        abandon('the turn was stopped before its prompt went in')
+        // Nothing went in: the process is as the turn found it, and stays for the next.
+        left = true
+        deps.warm.leave(entry)
         return 'ended'
       }
       await push(entry.inbox, attempt.prompt)
       signal?.addEventListener('abort', onAbort, { once: true })
+      // A stop that landed while the prompt was going in (a streamed one, with images) was not heard above.
+      if (signal?.aborted) onAbort()
       for (;;) {
         const next = await entry.iterator.next()
         if (next.done) break

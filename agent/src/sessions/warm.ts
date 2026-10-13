@@ -95,6 +95,16 @@ export type WarmSessionsDeps = {
 const BUDGET_EPSILON = 1e-6
 /** The least cap a spawn is given, as TurnRunner's (`maxBudgetUsd` must be positive). */
 const MIN_CAP_USD = 0.000001
+/**
+ * How long a live process that is being closed gets to end on its own once its
+ * stdin is closed, and its last transcript appends to land, before `close()`.
+ * Measured against the fake endpoint (test/warm.pg.test.ts, the bundled Claude
+ * Code): nothing is written after the `result` while the process idles; on
+ * stdin EOF it writes `last-prompt` and `cost-state` and its stream ends within
+ * about 50 ms. `close()` at once stops the transport handing appends over, and
+ * those are lost (the flake behind #1093's fallback test).
+ */
+const DRAIN_MS = 2_000
 
 /** `acquire` while a turn holds the session's entry: the caller runs one turn per session at a time, so this is its bug. */
 export class WarmBusyError extends Error {
@@ -197,6 +207,8 @@ export class WarmSessions {
   private readonly slots = new Map<string, Slot>()
   /** A closed process's transcript appends still in flight, by session: the next spawn waits for them before it loads. */
   private readonly draining = new Map<string, MirroredTranscript>()
+  /** Each session's process still closing (`drop`): the next spawn waits for it, and `close()` for all. */
+  private readonly closing = new Map<string, Promise<void>>()
   /** Each session's acquire, one at a time: two would spawn two processes. */
   private readonly acquiring = new Map<string, Promise<unknown>>()
 
@@ -240,7 +252,7 @@ export class WarmSessions {
     slot.busy = false
     await slot.mirror?.pending
     if (slot.doomed !== undefined) {
-      this.drop(slot, slot.doomed)
+      void this.drop(slot, slot.doomed)
       return
     }
     this.arm(slot)
@@ -248,32 +260,58 @@ export class WarmSessions {
   }
 
   /**
-   * After a turn that ended without a `result` (the process died, an abort, a
-   * throwing iterator): its process is closed and its assembly released, busy
-   * or not. The next acquire spawns afresh.
+   * After a turn that ended without a `result`: its process is closed and its
+   * assembly released, busy or not; the next acquire spawns afresh. `close`
+   * (the default) is for a process that is dead or was aborted: it is closed
+   * at once. `drain` is for one still alive and well, left by the fallback for
+   * another credential (sessions/warmTurn.ts): it gets DRAIN_MS to end on its
+   * own and land its last appends first, so the transcript the next attempt
+   * resumes from is whole.
    */
-  abandon(entry: WarmEntry, reason: string): void {
+  abandon(entry: WarmEntry, reason: string, how: 'close' | 'drain' = 'close'): Promise<void> {
     const slot = this.slots.get(entry.sessionId)
-    if (slot?.entry === entry) this.drop(slot, `abandoned: ${reason}`)
+    return slot?.entry === entry ? this.drop(slot, `abandoned: ${reason}`, how) : Promise.resolve()
   }
 
-  /** Closes the session's process (`*`: every one). One with a turn running is closed when the turn settles. */
-  evict(sessionId: string | '*', reason: string): void {
+  /**
+   * A turn that pushed nothing into the entry it acquired (stopped first) gives
+   * it back as it found it: idle, or closed if it was evicted meanwhile.
+   */
+  leave(entry: WarmEntry): void {
+    const slot = this.slots.get(entry.sessionId)
+    if (!slot || slot.entry !== entry || !slot.busy) return
+    slot.busy = false
+    if (slot.doomed !== undefined) {
+      void this.drop(slot, slot.doomed)
+      return
+    }
+    this.arm(slot)
+    this.trim()
+  }
+
+  /**
+   * Closes the session's process (`*`: every one), letting it end on its own
+   * first (`drop`); settled when every one it closed is closed. One with a
+   * turn running is closed when the turn settles.
+   */
+  evict(sessionId: string | '*', reason: string): Promise<void> {
+    const closing: Promise<void>[] = []
     for (const slot of [...this.slots.values()]) {
       if (sessionId !== '*' && slot.entry.sessionId !== sessionId) continue
       if (slot.busy) slot.doomed = reason
-      else this.drop(slot, reason)
+      else closing.push(this.drop(slot, reason))
     }
+    return Promise.all(closing).then(() => {})
   }
 
   size(): number {
     return this.slots.size
   }
 
-  /** Closes every process, running turns' too (shutdown). */
+  /** Closes every process (shutdown): an idle one may end on its own first; a running turn's is closed at once. */
   async close(): Promise<void> {
     const slots = [...this.slots.values()]
-    for (const slot of slots) this.drop(slot, 'shutdown')
+    await Promise.all(slots.map((slot) => this.drop(slot, 'shutdown', slot.busy ? 'close' : 'drain')))
     await Promise.all(slots.map((slot) => slot.mirror?.pending))
   }
 
@@ -293,7 +331,7 @@ export class WarmSessions {
         // A failed check (the tail read) cannot vouch for the process, and the
         // caller has no entry to settle or abandon: it goes now, or it would stay held.
         slot.busy = false
-        this.drop(slot, `the check failed: ${err instanceof Error ? err.message : String(err)}`)
+        void this.drop(slot, `the check failed: ${err instanceof Error ? err.message : String(err)}`, 'close')
         throw err
       }
       // Closed meanwhile (shutdown): nothing to reuse or recycle.
@@ -309,10 +347,11 @@ export class WarmSessions {
           return { entry: slot.entry, outcome: 'hit' }
         }
         slot.busy = false
-        this.drop(slot, `recycled: ${reason}`)
+        void this.drop(slot, `recycled: ${reason}`)
       }
     }
-    // A closed process's last appends (recycled, abandoned, evicted) land before the new one loads the transcript.
+    // A closed process (recycled, abandoned, evicted) ends, and its last appends land, before the new one loads the transcript.
+    await this.closing.get(sessionId)
     await this.draining.get(sessionId)?.pending
     const entry = await this.spawn(sessionId, turn, credential, remainingUsd, print)
     this.trim()
@@ -402,7 +441,7 @@ export class WarmSessions {
     const check = () => {
       if (slot.closed || slot.busy) return
       const idle = this.now() - slot.entry.lastUsedAt
-      if (idle >= this.deps.idleMs) this.drop(slot, 'idle')
+      if (idle >= this.deps.idleMs) void this.drop(slot, 'idle')
       else schedule(this.deps.idleMs - idle)
     }
     const schedule = (ms: number) => {
@@ -414,7 +453,7 @@ export class WarmSessions {
 
   private sweepIdle(): void {
     for (const slot of [...this.slots.values()]) {
-      if (!slot.busy && this.now() - slot.entry.lastUsedAt >= this.deps.idleMs) this.drop(slot, 'idle')
+      if (!slot.busy && this.now() - slot.entry.lastUsedAt >= this.deps.idleMs) void this.drop(slot, 'idle')
     }
   }
 
@@ -426,13 +465,19 @@ export class WarmSessions {
         if (!slot.busy && (!lru || slot.entry.lastUsedAt < lru.entry.lastUsedAt)) lru = slot
       }
       if (!lru) return
-      this.drop(lru, 'lru')
+      void this.drop(lru, 'lru')
     }
   }
 
-  /** Closes the process (its stdin, then the query), then releases the assembly it was spawned with. */
-  private drop(slot: Slot, reason: string): void {
-    if (slot.closed) return
+  /**
+   * Closes the process and releases the assembly it was spawned with; settled
+   * once both are done. Its stdin is closed first either way. `drain` (the
+   * default: a recycle, an eviction, idle, the cap) then gives a live process
+   * DRAIN_MS to end on its own and land its last appends (`last-prompt`,
+   * `cost-state`) before `close()`; `close` (dead or aborted) closes at once.
+   */
+  private drop(slot: Slot, reason: string, how: 'drain' | 'close' = 'drain'): Promise<void> {
+    if (slot.closed) return Promise.resolve()
     slot.closed = true
     clearTimeout(slot.timer)
     const id = slot.entry.sessionId
@@ -451,15 +496,55 @@ export class WarmSessions {
       forget()
     }
     slot.entry.inbox.close()
-    slot.entry.query.close()
-    try {
-      slot.entry.turn.release()
-    } catch (err) {
-      // A route or directory that would not go is the forwarder's or the
-      // package cache's to report; the process is closed and the entry gone.
-      this.log(`warm: releasing session ${id}'s assembly failed: ${err instanceof Error ? err.message : String(err)}`)
+    const closed = (how === 'drain' ? this.drain(slot) : Promise.resolve()).then(async () => {
+      try {
+        // `void` in the SDK's type; a rejection at run time is this log's, not an unhandled one.
+        await slot.entry.query.close()
+      } catch (err) {
+        this.log(`warm: closing session ${id}'s process failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+      try {
+        slot.entry.turn.release()
+      } catch (err) {
+        // A route or directory that would not go is the forwarder's or the
+        // package cache's to report; the process is closed and the entry gone.
+        this.log(`warm: releasing session ${id}'s assembly failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+      this.log(`warm: closed session ${id}'s process: ${reason}`)
+    })
+    this.closing.set(id, closed)
+    void closed.then(() => {
+      if (this.closing.get(id) === closed) this.closing.delete(id)
+    })
+    return closed
+  }
+
+  /** Waits, up to DRAIN_MS in all, for the process's stream to end (its stdin is closed) and then for its appends so far to land. */
+  private async drain(slot: Slot): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, DRAIN_MS)
+      timer.unref()
+    })
+    const ended = (async () => {
+      for (;;) {
+        const next = await slot.entry.iterator.next()
+        if (next.done) return
+      }
+    })().catch(() => {})
+    await Promise.race([ended, deadline])
+    const mirror = slot.mirror
+    if (mirror) {
+      const landed = (async () => {
+        for (;;) {
+          const pending = mirror.pending
+          await pending
+          if (mirror.pending === pending) return
+        }
+      })()
+      await Promise.race([landed, deadline])
     }
-    this.log(`warm: closed session ${id}'s process: ${reason}`)
+    clearTimeout(timer)
   }
 }
 

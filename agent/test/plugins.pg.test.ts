@@ -351,7 +351,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         expect(JSON.stringify(run?.remotePlugins)).not.toContain(TOKEN)
         // Held while the process is warm (spec 2026-10-13 §5.3): released with it.
         expect(forwarder.size).toBe(1)
-        m.warm.evict(session.id, 'the test')
+        await m.warm.evict(session.id, 'the test')
         expect(forwarder.size).toBe(0)
 
         const logged = (

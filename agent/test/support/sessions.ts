@@ -152,10 +152,6 @@ export function scriptedRunner(next: (run: HarnessRun) => FakeTurn) {
         }
         const subtype = turn.subtype ?? 'success'
         total = turn.costUsd ?? total + 0.01
-        // What Claude Code leaves in the transcript for the session's next process to
-        // carry its total in from (sessions/warm.ts `costStateUsd`); before the result,
-        // so a recycle right after it (the cache closes the process at once) has it.
-        await run.sessionStore?.append({ projectKey: '', sessionId: session_id }, [{ type: 'cost-state', totalCostUSD: total }])
         yield result({
           subtype,
           is_error: subtype !== 'success',
@@ -163,6 +159,12 @@ export function scriptedRunner(next: (run: HarnessRun) => FakeTurn) {
           num_turns: 1,
         })
         await turn.holdAfterResult
+      }
+      // What Claude Code writes as it exits on stdin EOF (measured, sessions/warm.ts
+      // DRAIN_MS): the last prompt and its running total, for the session's next
+      // process to carry in (`costStateUsd`). Not after `close()`, as the real one's are lost.
+      if (!closed) {
+        await run.sessionStore?.append({ projectKey: '', sessionId: session_id }, [{ type: 'last-prompt' }, { type: 'cost-state', totalCostUSD: total }])
       }
     }
     const iterator = process()

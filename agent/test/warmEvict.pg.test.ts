@@ -1,12 +1,16 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { CredentialStore } from '../src/credentials.js'
+import { CredentialStore, SettingsStore } from '../src/credentials.js'
 import type { Database } from '../src/db.js'
+import { SETTING_HTTP_REQUEST } from '../src/harness/httpRequest.js'
+import { SETTING_RECALL_MAX_QUERY_CHARS } from '../src/memory/hindsight.js'
+import { builtInToolsSetting } from '../src/plugins/builtInTools.js'
+import { SETTING_OWN_PLUGIN } from '../src/plugins/packages/builtins.js'
 import { PluginStore } from '../src/plugins/registry.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { forgetSubject } from '../src/sessions/forget.js'
-import type { SessionManager } from '../src/sessions/manager.js'
-import { evictOnNotify, WARM_EVICT_CHANNEL } from '../src/sessions/warmEvict.js'
+import { SETTING_MODEL, SETTING_SESSION_BUDGET_USD, type SessionManager } from '../src/sessions/manager.js'
+import { evictOnNotify, evictsWarmOnWrite, WARM_EVICT_CHANNEL } from '../src/sessions/warmEvict.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 
@@ -30,6 +34,17 @@ describe('evictOnNotify', () => {
       ['*', 'notified'],
       [id, 'notified'],
     ])
+  })
+})
+
+describe('evictsWarmOnWrite', () => {
+  it('names every Settings key a turn is assembled by, and no other', () => {
+    for (const key of [SETTING_MODEL, SETTING_HTTP_REQUEST, SETTING_RECALL_MAX_QUERY_CHARS, SETTING_OWN_PLUGIN, builtInToolsSetting('claude')]) {
+      expect(evictsWarmOnWrite(key), key).toBe(true)
+    }
+    // A session's limits are read when it starts, not into its process (manager.ts `start`).
+    expect(evictsWarmOnWrite(SETTING_SESSION_BUDGET_USD)).toBe(false)
+    expect(evictsWarmOnWrite('audit_retention_days')).toBe(false)
   })
 })
 
@@ -66,6 +81,15 @@ describe.skipIf(!TEST_DATABASE_URL)(`warm eviction notifications${TEST_DATABASE_
   it('a plugin registry write tells every replica to evict everything', async () => {
     const store = new PluginStore(db.sql)
     await store.create({ name: 'mem', url: 'https://hs.example/mcp' }, kek)
+    await expect.poll(() => received).toContain('*')
+  })
+
+  it('a Settings write a turn is assembled by tells every replica to evict everything', async () => {
+    const settings = new SettingsStore(db.sql)
+    await settings.set(SETTING_MODEL, 'claude-opus-5')
+    await expect.poll(() => received).toContain('*')
+    received.length = 0
+    await settings.setMany({ [builtInToolsSetting('claude')]: { raised: {}, disabled: [] } })
     await expect.poll(() => received).toContain('*')
   })
 

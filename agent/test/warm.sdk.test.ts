@@ -80,7 +80,8 @@ describe.skipIf(skip !== undefined)(`WarmSessions${skip ? ` (skipped: ${skip})` 
     now += 201
     await expect.poll(() => h?.warm.size()).toBe(0)
     await h.spawns[0]?.exited
-    expect(first.release).toHaveBeenCalledTimes(1)
+    // Released once the process has ended on its own (warm.ts `drop`).
+    await expect.poll(() => vi.mocked(first.release).mock.calls.length).toBe(1)
   }, 60_000)
 
   it('evicts LRU past maxEntries', async () => {
@@ -108,7 +109,7 @@ describe.skipIf(skip !== undefined)(`WarmSessions${skip ? ` (skipped: ${skip})` 
     await expect.poll(() => h?.spawns.length).toBe(1)
     h.spawns[0]?.child.kill('SIGKILL')
     await expect(iterated).rejects.toThrow()
-    h.warm.abandon(warmTurn.entry, 'the turn failed')
+    await h.warm.abandon(warmTurn.entry, 'the turn failed')
     expect(h.warm.size()).toBe(0)
     expect(first.release).toHaveBeenCalledTimes(1)
     await h.spawns[0]?.exited

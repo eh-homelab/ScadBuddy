@@ -364,10 +364,16 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     expect(await m.get(session.id, browser)).toMatchObject({ status: 'idle', turns: 1 })
   }, 60_000)
 
-  it('a gateway that refuses thinking.display costs one refused request a turn, and no fallback (#1101)', async () => {
+  /**
+   * #1101: a gateway that refuses `thinking.display`, and a replica with two
+   * credentials on it, after the first turn: Claude Code's re-send without the
+   * display beta was answered on the same credential, and nothing fell back.
+   * The second turn makes two tool calls, so it has more than one request after
+   * a refused one.
+   */
+  async function strictGateway() {
     const TOKEN_A = 'gw-sessions-strict-aaaa'
     const TOKEN_B = 'gw-sessions-strict-bbbb'
-    // The second turn makes two tool calls, so it has more than one request after the refused one.
     script = (r) => {
       if (displayUpdates(r)) {
         return { error: { status: 400, type: 'invalid_request_error', message: 'thinking.display: Extra inputs are not permitted' } }
@@ -402,7 +408,6 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
     expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success', turns: 1 })
-    // Claude Code's re-send without the display beta is answered, on the same credential.
     const asked = (calls: RecordedRequest[]) => calls.map((c) => [c.headers.authorization, displayUpdates(c)])
     expect(asked(fake.messageCalls())).toEqual([
       [`Bearer ${TOKEN_A}`, true],
@@ -410,10 +415,15 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     ])
     expect(reports).toEqual(['a: ok'])
     expect(await m.get(session.id, browser)).toMatchObject({ status: 'idle', turns: 1 })
+    return { m, session, asked, TOKEN_A }
+  }
+
+  it('a gateway that refuses thinking.display costs one refused request a process, and no fallback (#1101)', async () => {
+    const { m, session, asked, TOKEN_A } = await strictGateway()
     // The next turn runs on the same, warm Claude Code (spec 2026-10-13 §5.3),
     // which dropped the field for the rest of its life after the refusal: the
     // turn's three requests, the two tool calls' follow-ups among them, all go
-    // without it, and none is refused. (A fresh process would send it once more.)
+    // without it, and none is refused.
     expect(await (await m.send(session.id, browser, 'and a lid')).done).toMatchObject({ kind: 'result', subtype: 'success' })
     expect(asked(fake.messageCalls().slice(2))).toEqual([
       [`Bearer ${TOKEN_A}`, false],
@@ -421,6 +431,22 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
       [`Bearer ${TOKEN_A}`, false],
     ])
     // Three answered round trips this time, and the refused request is none of them.
+    expect(await m.get(session.id, browser)).toMatchObject({ status: 'idle', turns: 4 })
+  }, 60_000)
+
+  it('a fresh process after the refusal sends the field once more, and is refused once more (#1101)', async () => {
+    const { m, session, asked, TOKEN_A } = await strictGateway()
+    // The process is gone (an eviction: a plugin changed, say): the next turn's
+    // is new, and sends the field again, once. After its refusal it drops it for
+    // the rest of the process, so the two tool calls' follow-ups go without it.
+    await m.warm.evict(session.id, 'the test')
+    expect(await (await m.send(session.id, browser, 'and a lid')).done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(asked(fake.messageCalls().slice(2))).toEqual([
+      [`Bearer ${TOKEN_A}`, true],
+      [`Bearer ${TOKEN_A}`, false],
+      [`Bearer ${TOKEN_A}`, false],
+      [`Bearer ${TOKEN_A}`, false],
+    ])
     expect(await m.get(session.id, browser)).toMatchObject({ status: 'idle', turns: 4 })
   }, 60_000)
 

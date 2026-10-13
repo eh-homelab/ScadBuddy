@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
 import { type AuditContext, type AuditSink, SYSTEM_ACTOR } from './audit/log.js'
-import { notifyWarmEvict } from './sessions/warmEvict.js'
+import { evictsWarmOnWrite, notifyWarmEvict } from './sessions/warmEvict.js'
 import {
   type Envelope,
   type Kek,
@@ -646,6 +646,8 @@ export class SettingsStore {
       await this.sql`
         INSERT INTO ai_settings (key, value) VALUES (${key}, ${this.sql.json(value as never)})
         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`
+      // A key a warm Claude Code was spawned by tells every cache (spec 2026-10-13 §5.3, sessions/warmEvict.ts).
+      if (evictsWarmOnWrite(key)) await notifyWarmEvict(this.sql, '*')
     } catch (err) {
       failure = err
     }
@@ -731,6 +733,7 @@ export class SettingsStore {
           INSERT INTO ai_settings (key, value) VALUES (${key}, ${tx.json(value as never)})
           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`
       }
+      if (Object.keys(values).some(evictsWarmOnWrite)) await notifyWarmEvict(tx, '*')
       return true
     })
   }

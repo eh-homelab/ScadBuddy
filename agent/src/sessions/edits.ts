@@ -130,7 +130,7 @@ export class SessionEdits {
       return gone
     })
     if (logged) this.deps.events.committed(id, logged.events, logged.seqs)
-    if (done || archive) this.deps.warm?.evict(id, done ? 'marked done' : 'archived')
+    if (done || archive) void this.deps.warm?.evict(id, done ? 'marked done' : 'archived')
     if (context) {
       const changes = [
         ...(title === undefined ? [] : ['renamed']),
