@@ -103,11 +103,13 @@ and answers it exactly as the POST would have.
 
 ### 5.1 The POST
 
-- `start_command` takes `accept_within` (default `COMMAND_ANSWER_DEADLINE`, so every
-  caller that does not opt in is unchanged). A route that opts in passes
-  `FAST_ACCEPT = 3 s`.
-- Past `accept_within`, if the execution exists (`late_answer`'s describe), it raises
-  `CommandAcceptingError(workflow_id, update_id)`.
+- `start_command` keeps its one bound, `deadline` (default `COMMAND_ANSWER_DEADLINE`,
+  so every caller that does not opt in is unchanged). A route that opts in passes
+  `deadline=FAST_ACCEPT` (3 s); there is no second parameter for the same wait.
+- Past `deadline`, if the execution exists (`late_answer`'s describe), it raises
+  `CommandStillAcceptingError`, as it does for every route. A route that opted in
+  answers it with the 202, naming the workflow id and the Update id it sent; any other
+  answers the 503 re-send as today.
 - If Temporal does not answer the describe, the route answers 503
   `temporal-unavailable` as today.
 - The Update always has an id. When the request carries no `Idempotency-Key`, the route
@@ -185,7 +187,9 @@ web client reads only `job_id`.
 ### 5.4 Clients
 
 - **Web.** `reattach` sends `Prefer: respond-async` on command POSTs. On a 202
-  `accepting`, it follows `follow_url`, paced by `Retry-After`, until an answer. On 409
+  `accepting`, it follows `follow_url` at once, and again after each 202 with only its
+  own polling floor (§5.2's pacing; it does not also wait `Retry-After`), until an
+  answer. On 409
   `command-resend` it re-sends the original request with the same key.
   - The overall budget stays `acceptingMs` (240 s), now spent following instead of
     re-POSTing. The `useRenderJob` and print-dialog states are unchanged: they see the
@@ -211,7 +215,8 @@ Each step is its own PR, stacked on this one.
    `RenderService._answer` but is not opted in at this step: its route keeps the 503
    re-send, so §5.3 needs no Arrange row yet. Opting it in later means adding a row
    whose response is Arrange's own `RenderAccepted`-shaped job answer.
-   - `start_command`'s `accept_within` and `CommandAcceptingError`
+   - routes passing `start_command` `deadline=FAST_ACCEPT`, and answering its
+     `CommandStillAcceptingError` with the 202
    - `CommandAccepting` and the follow route, with the render adapter
    - the supersede in the follow
    - the web client's `render` call opting in
