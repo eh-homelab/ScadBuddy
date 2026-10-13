@@ -10,8 +10,10 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import struct
 import time
 import zipfile
+from collections.abc import Iterator
 from datetime import timedelta
 from typing import Any
 
@@ -21,7 +23,7 @@ import respx
 from fastapi.testclient import TestClient
 
 from scadbuddy.bambuddy.client import client_for
-from scadbuddy.bambuddy.preview import PREVIEW_GRACE, sweep_preview_slices
+from scadbuddy.bambuddy.preview import _TOOLPATHS, PREVIEW_GRACE, sweep_preview_slices
 from scadbuddy.core.paths import DataPaths
 from tests.api.test_print_filaments import prepared, queue_route
 from tests.api.test_print_run_choices import body, run_print, run_routes, two_plate_output
@@ -166,6 +168,91 @@ def test_an_unknown_background_slice_is_a_404(client: TestClient, model: str) ->
     assert client.get(f"/api/v1/print/outputs/{output_id}/preview-slices/12345").status_code == 404
     # Nor is one read through another source.
     assert client.get("/api/v1/print/library/5/preview-slices/12345").status_code == 404
+
+
+@pytest.fixture(autouse=True)
+def _no_toolpaths_kept() -> Iterator[None]:
+    """Toolpaths are kept per process by the slice's row id, which each test's fresh
+    database hands out again."""
+    _TOOLPATHS.clear()
+    yield
+    _TOOLPATHS.clear()
+
+
+TOOLPATH_GCODE = (
+    b"G28\nM83\n; CHANGE_LAYER\n; Z_HEIGHT: 0.2\nG1 Z0.2 F600\n; FEATURE: Outer wall\n"
+    b"G1 X10 Y0 E1 F3000\nG1 X10 Y10 E1\n"
+)
+
+
+def _toolpath_slice(
+    client: TestClient, model: str, gcode: bytes = TOOLPATH_GCODE
+) -> tuple[str, Job, respx.Route]:
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    job = Job()
+    job.routes()
+    sliced_file_route()
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as zipped:
+        zipped.writestr("Metadata/plate_1.gcode", gcode)
+    download = respx.get(f"{API}/library/files/{SLICED}/download").mock(
+        return_value=httpx.Response(200, content=archive.getvalue())
+    )
+    started = client.post(
+        f"/api/v1/print/outputs/{output_id}/preview-slice", json=body(), headers=press()
+    )
+    assert started.status_code == 200, started.text
+    return output_id, job, download
+
+
+@respx.mock
+def test_a_finished_background_slice_answers_its_toolpath_read_once(
+    client: TestClient, model: str
+) -> None:
+    """#2072: the plate's G-code as segments, for the preview's Speed, Movement and
+    Layers views; read from the sliced file once, then from memory."""
+    output_id, _, download = _toolpath_slice(client, model)
+    url = f"/api/v1/print/outputs/{output_id}/preview-slices/9/toolpath"
+
+    first = client.get(url)
+
+    assert first.status_code == 200, first.text
+    assert first.headers["content-type"] == "application/octet-stream"
+    (size,) = struct.unpack_from("<I", first.content)
+    header = json.loads(first.content[4 : 4 + size])
+    assert header["features"] == ["Outer wall"]
+    assert header["layers"] == [{"z": 0.2, "first_segment": 0}]
+    # The Z move, then the two walls.
+    assert header["segment_count"] == 3
+    assert len(first.content) == 4 + size + 3 * 32
+    calls = download.call_count
+    assert client.get(url).content == first.content
+    assert download.call_count == calls, "read once"
+
+
+@respx.mock
+def test_a_toolpath_waits_for_the_slice_and_needs_its_g_code(
+    client: TestClient, model: str
+) -> None:
+    output_id, job, _ = _toolpath_slice(client, model, gcode=b"")
+    url = f"/api/v1/print/outputs/{output_id}/preview-slices/9/toolpath"
+    job.body = {**job.body, "status": "running", "result": None}
+    assert client.get(url).status_code == 409
+
+    job.body = Job().body
+    respx.get(f"{API}/library/files/{SLICED}/download").mock(
+        return_value=httpx.Response(200, content=b"not a zip")
+    )
+    refused = client.get(url)
+    assert refused.status_code == 422, refused.text
+
+    assert (
+        client.get(f"/api/v1/print/outputs/{output_id}/preview-slices/123/toolpath").status_code
+        == 404
+    )
+    assert client.get("/api/v1/print/library/5/preview-slices/9/toolpath").status_code == 404
 
 
 def _preview_then_change(client: TestClient, model: str, change: str) -> tuple[str, respx.Route]:

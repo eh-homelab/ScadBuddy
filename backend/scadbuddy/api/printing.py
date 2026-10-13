@@ -54,7 +54,13 @@ from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.filament_ids import filament_material, filament_name
 from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.models import RackAlgorithm
-from scadbuddy.bambuddy.preview import PreviewStarted, SlicePreview, read_preview
+from scadbuddy.bambuddy.preview import (
+    TOOLPATH_HEADERS,
+    PreviewStarted,
+    SlicePreview,
+    read_preview,
+    read_toolpath,
+)
 from scadbuddy.bambuddy.print_run import (
     PrintCheck,
     PrintRunRequest,
@@ -836,6 +842,35 @@ async def get_preview_slice(
     meta = require_output(outputs, output_id)
     async with client_for(store.load()) as client:
         return await read_preview(client, uploads, job_id, PrintSubject.output(meta.id).run_subject)
+
+
+@router.get(
+    "/outputs/{output_id}/preview-slices/{job_id}/toolpath",
+    response_class=Response,
+    responses={
+        200: {
+            "content": {"application/octet-stream": {}},
+            "description": "The toolpath, as `scadbuddy.bambuddy.toolpath` encodes it",
+        }
+    },
+    summary="The toolpath of a finished background slice",
+)
+async def get_preview_toolpath(
+    output_id: OutputIdPath,
+    job_id: int,
+    outputs: OutputsDep,
+    store: SettingsStoreDep,
+    uploads: UploadsDep,
+) -> Response:
+    """#2072: every move of the sliced plate, from its G-code, for the plate preview's
+    Speed, Movement and Layers views: a binary header and float32 segments. 409 while
+    the slice is under way; 422 when its G-code cannot be read."""
+    meta = require_output(outputs, output_id)
+    async with client_for(store.load()) as client:
+        body = await read_toolpath(
+            client, uploads, job_id, PrintSubject.output(meta.id).run_subject
+        )
+    return Response(body, media_type="application/octet-stream", headers=TOOLPATH_HEADERS)
 
 
 @router.get(
