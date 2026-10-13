@@ -45,9 +45,11 @@ function ChangeRow({ change }: { change: SettingChange }) {
           {change.setting}
           {change.slot_id !== null && change.slot_id !== undefined && ` (slot ${change.slot_id})`}
         </code>
-        <span className="sb-num text-warn">{change.base_known ? show(change.base) : 'unknown'}</span>
+        <span data-testid="change-base" className="sb-num text-warn">
+          {change.base_known ? `${show(change.base)}${change.unit ? ` ${change.unit}` : ''}` : 'unknown'}
+        </span>
         <span aria-hidden="true">→</span>
-        <span className="sb-num text-ok">
+        <span data-testid="change-proposed" className="sb-num text-ok">
           {show(change.proposed)}
           {change.unit ? ` ${change.unit}` : ''}
         </span>
@@ -191,24 +193,31 @@ export function FixPreviewCard({
       className="mt-2 space-y-2 rounded-[6px] border border-line bg-surface-2 p-2 text-[12px] text-muted"
     >
       <p className="text-ink">{fix.description}</p>
-      <div className="flex flex-col gap-1">
-        <label htmlFor={`${id}-scope`}>Accept for</label>
-        <select
-          id={`${id}-scope`}
-          value={scope ? scopeValue(scope) : ''}
-          onChange={(event) => {
-            clearRefusals()
-            setChoice(event.target.value)
-          }}
-          className="sb-field"
-        >
-          {scopes.map((row) => (
-            <option key={scopeValue(row)} value={scopeValue(row)} title={row.key}>
-              {scopeLabel(row)}
-            </option>
-          ))}
-        </select>
-      </div>
+      {scopes.length === 0 && (
+        <p data-testid="fix-no-store" className="text-faint">
+          Decisions are not stored here, so this fix can be previewed but not applied.
+        </p>
+      )}
+      {scopes.length > 0 && (
+        <div className="flex flex-col gap-1">
+          <label htmlFor={`${id}-scope`}>Accept for</label>
+          <select
+            id={`${id}-scope`}
+            value={scope ? scopeValue(scope) : ''}
+            onChange={(event) => {
+              clearRefusals()
+              setChoice(event.target.value)
+            }}
+            className="sb-field"
+          >
+            {scopes.map((row) => (
+              <option key={scopeValue(row)} value={scopeValue(row)} title={row.key}>
+                {scopeLabel(row)}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
 
       {read.loading && (
         <p className="flex items-center gap-2">
@@ -217,7 +226,10 @@ export function FixPreviewCard({
       )}
       {read.error && (
         <p role="alert" className="text-warn">
-          {read.error instanceof ApiError ? read.error.detail : 'The fix could not be previewed.'}
+          {read.error instanceof ApiError ? read.error.detail : 'The fix could not be previewed.'}{' '}
+          <button type="button" onClick={previewAgain} className="underline underline-offset-2">
+            Preview again
+          </button>
         </p>
       )}
 
@@ -263,7 +275,14 @@ export function FixPreviewCard({
         <Button
           size="sm"
           onClick={() => void apply()}
-          disabled={!preview || !preview.applicable || stale !== null || applying || read.loading}
+          disabled={
+            scopes.length === 0 ||
+            !preview ||
+            !preview.applicable ||
+            stale !== null ||
+            applying ||
+            read.loading
+          }
         >
           {applying && <Spinner />}
           Apply

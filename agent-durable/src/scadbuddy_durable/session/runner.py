@@ -55,10 +55,11 @@ import json
 import logging
 import os
 import re
+import urllib.parse
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, replace
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeGuard
 
 import psycopg
 from claude_agent_sdk import AgentDefinition, ResultError, create_sdk_mcp_server, tool
@@ -84,6 +85,18 @@ from scadbuddy_durable.session.package_hash import PackageContentError, hash_tre
 
 Connect = Callable[[], AbstractAsyncContextManager[psycopg.AsyncConnection[Any]]]
 logger = logging.getLogger(__name__)
+
+
+def _http_url(value: object) -> TypeGuard[str]:
+    """Whether ``value`` is an absolute http(s) URL with a host."""
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        parts = urllib.parse.urlsplit(value)
+    except ValueError:
+        return False
+    return parts.scheme in ("http", "https") and bool(parts.hostname)
+
 
 IMAGES_SERVER = "scadbuddy_images"
 VIEW_IMAGES = "view_user_images"
@@ -520,8 +533,9 @@ class ScadBuddyRunner:
             return
         stored = setting[0] if setting else None
         url = stored.get("url") if isinstance(stored, dict) else None
-        # As the route stores it: an http(s) URL, else the worker's own.
-        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+        if not _http_url(url):
+            # The agent's route stores only an http(s) URL; a row written any other way
+            # does not reach the subagents' definitions (#2883).
             url = self._subagent_url
         if self._agents is None:
             self._agents = subagents.load_agents(self._agents_dir)

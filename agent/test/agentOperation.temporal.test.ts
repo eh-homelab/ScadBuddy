@@ -21,6 +21,7 @@ import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.j
 
 const WORKFLOWS = fileURLToPath(new URL('../src/temporal/workflows.ts', import.meta.url))
 const HISTORY = fileURLToPath(new URL('./fixtures/agent_operation_histories/succeeded.json', import.meta.url))
+const HISTORY_WITH_ACTOR = fileURLToPath(new URL('./fixtures/agent_operation_histories/succeeded-with-actor.json', import.meta.url))
 
 let runs = 0
 let release: (() => void) | undefined
@@ -162,6 +163,18 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`AgentOperation${TEMPORAL_S
     }
   }, 60_000)
 
+  it("records the starter the input names, and the history replays", async () => {
+    const id = `op-ok-${randomUUID()}`
+    const actor = { principal: 'browser', session: 's1', viaTool: 'plugin_install' }
+    const answer = await startCommand(env.client, id, { ...input('ok', { n: 1 }), actor }, 30_000)
+    expect(answer.operation).toMatchObject({ status: 'succeeded' })
+    const [row] = await db.sql`SELECT principal, session, via_tool FROM ai_operations WHERE id = ${answer.operation!.id}`
+    expect(row).toEqual({ principal: 'browser', session: 's1', via_tool: 'plugin_install' })
+    const history = await env.client.workflow.getHandle(id).fetchHistory()
+    if (process.env.RECORD_AGENT_OPERATION_HISTORY) await writeFile(HISTORY_WITH_ACTOR, `${historyToJSON(history)}\n`)
+    await Worker.runReplayHistory({ workflowsPath: WORKFLOWS }, history)
+  }, 60_000)
+
   it('answers a refusal, writes nothing, and lets the same key start again', async () => {
     const id = `op-refuse-${randomUUID()}`
     const answer = await startCommand(env.client, id, input('refuse'), 30_000)
@@ -269,6 +282,11 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`AgentOperation${TEMPORAL_S
 
   it('replays its recorded history', async () => {
     const history = JSON.parse(await readFile(HISTORY, 'utf8')) as unknown
+    await Worker.runReplayHistory({ workflowsPath: WORKFLOWS }, history)
+  }, 60_000)
+
+  it('replays its recorded history with an actor', async () => {
+    const history = JSON.parse(await readFile(HISTORY_WITH_ACTOR, 'utf8')) as unknown
     await Worker.runReplayHistory({ workflowsPath: WORKFLOWS }, history)
   }, 60_000)
 })

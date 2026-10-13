@@ -19,6 +19,7 @@ import trimesh
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from scadbuddy.activity.index import ActivityIndex
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.bambuddy.uploads import LibraryCopy, ProjectTarget
 from scadbuddy.render.bambu3mf import (
@@ -563,6 +564,31 @@ def test_the_check_refuses_a_library_file_nothing_on_the_mounted_nozzles(
     assert check.status_code == 200, check.text
     assert (check.json()["errors"], check.json()["warnings"]) == ([], [])
     assert not sliced.called
+
+
+@respx.mock
+def test_a_library_run_is_attributed_to_who_started_it(
+    client: TestClient, gate: Gate, activity_index: ActivityIndex
+) -> None:
+    configure(client)
+    one_color(89)
+    flow_copy_routes()
+    library_file(89)
+    run_routes()
+    gated_slice_routes(gate)
+    queue_route()
+    request = {**body(), "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]}}
+
+    response = client.post(
+        "/api/v1/print/library/89/run",
+        json=request,
+        headers={"X-ScadBuddy-Agent-Author": "token:t9"},
+    )
+
+    assert response.status_code == 202, response.text
+    got = asyncio.run(activity_index.get(f"print_run:{response.json()['id']}"))
+    gate.open()
+    assert got is not None and got.principal == "token:t9"
 
 
 @respx.mock

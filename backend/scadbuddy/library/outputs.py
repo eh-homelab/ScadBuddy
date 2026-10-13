@@ -230,6 +230,11 @@ class OutputStore:
         #: which moves the catalogue's fallback cover, and with it whether the
         #: default-render preview is needed. Must not raise.
         self.on_change: Callable[[str], None] | None = None
+        #: #2755 — where each output's directory was last found. Finding one by id means
+        #: globbing every model's directory (~90 ms on the NAS share in production),
+        #: and a listing's details asked about ten times per output. A hit is checked
+        #: with one stat, so a moved or deleted output is looked for again.
+        self._dirs: dict[str, Path] = {}
 
     def _changed(self, slug: str) -> None:
         if self.on_change is None:
@@ -240,8 +245,13 @@ class OutputStore:
             logger.exception("an output change listener failed", extra={"slug": slug})
 
     def _find_dir(self, output_id: str) -> Path:
+        known = self._dirs.get(output_id)
+        if known is not None and (known / META_NAME).is_file():
+            return known
         for meta_path in self.paths.outputs.glob(f"*/{output_id}/{META_NAME}"):
+            self._dirs[output_id] = meta_path.parent
             return meta_path.parent
+        self._dirs.pop(output_id, None)
         raise OutputNotFoundError(output_id)
 
     def directory(self, output_id: str) -> Path:
@@ -311,10 +321,13 @@ class OutputStore:
         directory = self.paths.outputs / slug
         if not directory.is_dir():
             return []
-        metas = [
-            OutputMeta.model_validate_json(path.read_text(encoding="utf-8"))
-            for path in directory.glob(f"*/{META_NAME}")
-        ]
+        metas = []
+        for path in directory.glob(f"*/{META_NAME}"):
+            meta = OutputMeta.model_validate_json(path.read_text(encoding="utf-8"))
+            # Found by the listing's own glob: the details read next need no search.
+            if meta.id == path.parent.name:
+                self._dirs[meta.id] = path.parent
+            metas.append(meta)
         return sorted(self._with_last_prints(metas), key=lambda meta: meta.created_at, reverse=True)
 
     def ids_for(self, slug: str) -> list[str]:
@@ -366,7 +379,6 @@ class OutputStore:
         # Every copy and write, or none: a failure part-way (a source gone from the
         # store, a full disk) leaves no half-written output behind to list.
         try:
-            shutil.copyfile(self.paths.root / result.model_3mf, directory / MODEL_NAME)
             shutil.copyfile(self.paths.root / result.preview_glb, directory / PREVIEW_NAME)
             (directory / PARAMS_NAME).write_text(
                 json.dumps(job.params, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -378,6 +390,8 @@ class OutputStore:
             # A job from before the hash existed has none to read back; the live tree is
             # then the closest thing to what it rendered.
             version = result.source_version or source_version(self.paths.model_dir(job.slug))
+            # Stamped as it is copied (#2755): one read of the job's 3MF and one write,
+            # not a copy and then a rewrite of the copy.
             stamp(
                 directory / MODEL_NAME,
                 Provenance(
@@ -388,6 +402,7 @@ class OutputStore:
                     edit_url=edit_url(public_url, output_id),
                 ),
                 print_settings,
+                source=self.paths.root / result.model_3mf,
             )
 
             if chosen is not None:
@@ -751,6 +766,23 @@ def _record_slug(refs: BlobRefs, output_id: str, slug: str) -> None:
         )
 
 
+def _record_slugs(refs: BlobRefs, slugs: dict[str, str]) -> None:
+    """Record many outputs' slugs in ONE statement (#2353): the reaper used to upsert
+    every held, live output's slug on every pass, one transaction each, all no-ops once
+    recorded. Rows that already say the same slug are not written."""
+    if not slugs:
+        return
+    ids = sorted(slugs)
+    with refs.pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO output_hold_slugs (output_id, slug)"
+            " SELECT * FROM unnest(%s::text[], %s::text[])"
+            " ON CONFLICT (output_id) DO UPDATE SET slug = EXCLUDED.slug"
+            " WHERE output_hold_slugs.slug IS DISTINCT FROM EXCLUDED.slug",
+            (ids, [slugs[output_id] for output_id in ids]),
+        )
+
+
 def _live_outputs(root: Path) -> dict[str, set[str]]:
     """Every slug directory under ``root``, with the ids of its outputs that have a
     meta.json. Unlike ``glob``, a slug or output directory that cannot be listed raises
@@ -829,8 +861,7 @@ def reap_orphan_holds(
     live = _live_outputs(root) if root.is_dir() else {}
     live_slug = {output_id: slug for slug, ids in live.items() for output_id in ids}
     # Holds taken before slugs were recorded: a live output tells its own slug.
-    for output_id in sorted(held & live_slug.keys()):
-        _record_slug(refs, output_id, live_slug[output_id])
+    _record_slugs(refs, {output_id: live_slug[output_id] for output_id in held & live_slug.keys()})
     candidates = sorted(held - live_slug.keys())
     with refs.pool.connection() as conn:
         slug_rows = conn.execute(

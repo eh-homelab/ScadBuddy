@@ -8,14 +8,19 @@ import { getRealtime, type RealtimeListener, type RealtimeStatus } from './realt
  * an event on a topic. `setStatus('unavailable')` is the socket being down.
  */
 export function fakeRealtime({ confirm = true }: { confirm?: boolean } = {}) {
-  const listeners = new Map<string, RealtimeListener>()
+  const listeners = new Map<string, Set<RealtimeListener>>()
   let status: RealtimeStatus = 'live'
   const realtime = getRealtime()
   vi.spyOn(realtime, 'status', 'get').mockImplementation(() => status)
   vi.spyOn(realtime, 'subscribe').mockImplementation((topic, listener) => {
-    listeners.set(topic, listener)
-    if (confirm) queueMicrotask(() => listeners.get(topic)?.('resync'))
-    return () => listeners.delete(topic)
+    const set = listeners.get(topic) ?? new Set<RealtimeListener>()
+    set.add(listener)
+    listeners.set(topic, set)
+    if (confirm) queueMicrotask(() => listener('resync'))
+    return () => {
+      set.delete(listener)
+      if (set.size === 0 && listeners.get(topic) === set) listeners.delete(topic)
+    }
   })
   return {
     following: () => [...listeners.keys()],
@@ -24,7 +29,9 @@ export function fakeRealtime({ confirm = true }: { confirm?: boolean } = {}) {
     },
     async signal(topic: string, kind = 'event', data: Record<string, unknown> = {}) {
       await act(async () => {
-        listeners.get(topic)?.({ id: 'e', kind, topics: [topic], data })
+        for (const listener of [...(listeners.get(topic) ?? [])]) {
+          listener({ id: 'e', kind, topics: [topic], data })
+        }
         await vi.advanceTimersByTimeAsync(0)
       })
     },

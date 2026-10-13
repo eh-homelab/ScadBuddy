@@ -19,6 +19,7 @@ import type {
   ParamPreset,
   Plate,
   PrintDetail,
+  TimelapseFrames,
   PrintProgress,
   PrintSummary,
   Settings,
@@ -937,6 +938,9 @@ export const settings: Settings = {
   last_project_id: null,
   render_timeout: 300,
   job_ttl: 3600,
+  activity_follow: null,
+  activity_ttl_seconds: null,
+  activity_repair_window_seconds: null,
   has_google_fonts_api_key: false,
   sources: {
     ...Object.fromEntries(Object.keys(settingsApplies).map((name) => [name, 'default' as const])),
@@ -1556,8 +1560,8 @@ export const prints: PrintDetail[] = [
       photos: [],
       timelapse: {
         url: '/api/v1/prints/35/timelapse',
-        info: { duration: 5.208256, width: 1680, height: 1080, fps: 24, codec: 'h264', file_size: 2143595, has_audio: false },
-        poster_frames: [{ timestamp: 0, data_url: `data:image/png;base64,${MEDIA_PNG_BASE64}` }],
+        poster_url: '/api/v1/prints/35/timelapse/frames/0',
+        frames_url: '/api/v1/prints/35/timelapse/frames',
       },
       plate_thumbnails: [{ index: 1, url: '/api/v1/prints/35/plates/1/thumbnail', name: 'Keychain' }],
       attachments: [],
@@ -1569,6 +1573,14 @@ export const prints: PrintDetail[] = [
  * #311 — what each print's printer still holds (`printer_media`, plan A5): the failed
  * print 36 left a timelapse and a camera recording on the printer; the others nothing.
  */
+/** #2360 — each print's timelapse stills and probe, read after its detail. */
+export const timelapseFrames: Record<number, TimelapseFrames> = {
+  35: {
+    info: { duration: 5.208256, width: 1680, height: 1080, fps: 24, codec: 'h264', file_size: 2143595, has_audio: false },
+    frames: [{ timestamp: 0, url: '/api/v1/prints/35/timelapse/frames/0' }],
+  },
+}
+
 export const printerFiles: Record<number, NonNullable<PrintDetail['printer_media']>['remote_files']> = {
   36: [
     {

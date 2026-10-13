@@ -25,6 +25,7 @@ import {
   runArrange,
   type ArrangeGoal,
 } from '../lib/arrange'
+import { traceAction } from '../lib/traceAction'
 import { BackfillProgress, BackfillPrompt } from './BackfillPrompt'
 import { openExternal } from '../lib/embed'
 import { plateLabel } from '../lib/plate'
@@ -458,43 +459,51 @@ export function PrintPicker({
     const controller = new AbortController()
     arrangeRun.current = controller
     try {
-      let from = target
-      if (backfill) {
-        const { ready, failed } = await backfillOutputs([target], {
-          signal: controller.signal,
-          onProgress: (output, message) => setBackfillProgress({ [output.id]: message }),
-        })
-        const read = ready[0]
-        if (!read) {
-          setArrangeError(backfillFailures(failed, 'Re-arrange'))
-          return
-        }
-        from = read
-        setBackfilled(read)
-        setFlaggedId(null)
-      }
-      const next = await runArrange(
-        from.slug,
-        {
-          objects: (from.manifest ?? []).map((object) => ({
-            output_id: from.id,
-            part: object.part,
-            count: object.count,
-          })),
-          goal: arrangeGoal,
-          printer_id: printerId,
-          filament_plan: { slots: plan, force_colour_match: false },
-          colours: from.colors ?? [],
-          name: arrangedName(from.name),
+      // One action from the re-render to the save, as the Arrange dialog's (#2292).
+      await traceAction(
+        'arrange',
+        { 'scadbuddy.output_id': target.id, 'scadbuddy.rerendered': backfill ? 1 : 0 },
+        async (within) => {
+          let from = target
+          if (backfill) {
+            const { ready, failed } = await backfillOutputs([target], {
+              signal: controller.signal,
+              within,
+              onProgress: (output, message) => setBackfillProgress({ [output.id]: message }),
+            })
+            const read = ready[0]
+            if (!read) {
+              setArrangeError(backfillFailures(failed, 'Re-arrange'))
+              return
+            }
+            from = read
+            setBackfilled(read)
+            setFlaggedId(null)
+          }
+          const next = await runArrange(
+            from.slug,
+            {
+              objects: (from.manifest ?? []).map((object) => ({
+                output_id: from.id,
+                part: object.part,
+                count: object.count,
+              })),
+              goal: arrangeGoal,
+              printer_id: printerId,
+              filament_plan: { slots: plan, force_colour_match: false },
+              colours: from.colors ?? [],
+              name: arrangedName(from.name),
+            },
+            { signal: controller.signal, within },
+          )
+          // Closed while the output was being saved: it is saved, a normal output in
+          // History, but this dialog keeps the output it was opened for.
+          if (controller.signal.aborted) return
+          carry.set({ plan, ready: false })
+          setArranged(next.output)
+          setArrangeNote(arrangedNote(next.plates))
         },
-        { signal: controller.signal },
       )
-      // Closed while the output was being saved: it is saved, a normal output in
-      // History, but this dialog keeps the output it was opened for.
-      if (controller.signal.aborted) return
-      carry.set({ plan, ready: false })
-      setArranged(next.output)
-      setArrangeNote(arrangedNote(next.plates))
     } catch (cause) {
       if (controller.signal.aborted) return
       if (backfillIds(cause)) {

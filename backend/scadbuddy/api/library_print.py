@@ -15,6 +15,8 @@ from fastapi import APIRouter, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
+from scadbuddy.activity.component import ACTIVITY, ActivityComponent
+from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import (
     OutputsDep,
     PathsDep,
@@ -46,7 +48,13 @@ from scadbuddy.bambuddy.library_view import (
     library_filaments,
     library_preview,
 )
-from scadbuddy.bambuddy.preview import PreviewStarted, SlicePreview, read_preview
+from scadbuddy.bambuddy.preview import (
+    TOOLPATH_HEADERS,
+    PreviewStarted,
+    SlicePreview,
+    read_preview,
+    read_toolpath,
+)
 from scadbuddy.bambuddy.print_run import (
     PrintCheck,
     PrintRunRequest,
@@ -502,6 +510,7 @@ async def post_library_run(
     body: PrintRunRequest,
     response: Response,
     runs: PrintRunsDep,
+    activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
     store: SettingsStoreDep,
     paths: PathsDep,
     budget: ReadBudgetDep,
@@ -524,6 +533,7 @@ async def post_library_run(
         slug=library_slug(PrintSubject.library(file_id)),
         request=body,
         source=SourceSpec(kind="library", file_id=file_id),
+        activity=activity,
         prepare=prepare,
     )
 
@@ -649,6 +659,28 @@ async def get_library_preview_slice(
         return await read_preview(
             client, uploads, job_id, PrintSubject.library(file_id).run_subject
         )
+
+
+@router.get(
+    "/{file_id}/preview-slices/{job_id}/toolpath",
+    response_class=Response,
+    responses={
+        200: {
+            "content": {"application/octet-stream": {}},
+            "description": "The toolpath, as `scadbuddy.bambuddy.toolpath` encodes it",
+        }
+    },
+    summary="The toolpath of a finished background slice",
+)
+async def get_library_preview_toolpath(
+    file_id: FileIdPath, job_id: int, store: SettingsStoreDep, uploads: UploadsDep
+) -> Response:
+    """As ``/print/outputs/{id}/preview-slices/{job}/toolpath``, for a library file's."""
+    async with client_for(store.load()) as client:
+        body = await read_toolpath(
+            client, uploads, job_id, PrintSubject.library(file_id).run_subject
+        )
+    return Response(body, media_type="application/octet-stream", headers=TOOLPATH_HEADERS)
 
 
 @router.post(

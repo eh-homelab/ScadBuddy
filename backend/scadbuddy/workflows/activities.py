@@ -307,12 +307,12 @@ def _observe_settled(metrics: Metrics, job: Job) -> None:
     the render's own duration (from `mark_started`)."""
     assert job.state in ("done", "failed") and job.finished_at is not None
     outcome: RenderOutcome = job.state
-    metrics.render_finished.labels(outcome).inc()
-    metrics.job_latency.labels(outcome).observe(
+    metrics.render_finished.labels(job.kind, outcome).inc()
+    metrics.job_latency.labels(job.kind, outcome).observe(
         max(0.0, (job.finished_at - job.created_at).total_seconds())
     )
     started = job.started_at or job.created_at
-    metrics.render_duration.labels(outcome).observe(
+    metrics.render_duration.labels(job.kind, outcome).observe(
         max(0.0, (job.finished_at - started).total_seconds())
     )
 
@@ -679,7 +679,7 @@ class RenderActivities:
             started = await asyncio.to_thread(p.mark_started, projection.job_id)
             # Only the call that moved the row records it: a retry finds it running.
             if started is not None and started.started_at is not None and self.deps.metrics:
-                self.deps.metrics.queue_wait.observe(
+                self.deps.metrics.queue_wait.labels(started.kind).observe(
                     max(0.0, (started.started_at - started.created_at).total_seconds())
                 )
             if started is not None:

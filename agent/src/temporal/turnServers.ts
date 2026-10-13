@@ -219,6 +219,9 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
         }
         offered = loaded.loaded.filter((pkg) => !failed.has(pkg.name))
       }
+      // A call (not a listing) builds every loaded package's servers, a failed share's
+      // included: the listing is the guard, since a call can only name a tool the listing
+      // offered, and it offered none of a package that failed to share (#2620).
       servers.push(...localPackageServers(offered, problems))
       // As a remote plugin's: the forwarder URL, which carries its token, is a secret too.
       forwardedPackages = await deps.packages!.forward(offered)

@@ -1,5 +1,7 @@
 import { Link, useParams } from 'react-router'
 import { api } from '../api/client'
+import { NowPrinting } from '../components/prints/NowPrinting'
+import { PrintQueue } from '../components/prints/PrintQueue'
 import { PrintHistory } from '../components/prints/PrintHistory'
 import { modelPath } from '../lib/deeplink'
 import { useAsync } from '../lib/useAsync'
@@ -15,6 +17,8 @@ export function PrintsPage() {
             Every print of a ScadBuddy output, as Bambuddy archived it.
           </p>
         </div>
+        <NowPrinting />
+        <PrintQueue />
         <PrintHistory />
       </div>
     </div>

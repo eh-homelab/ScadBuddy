@@ -360,6 +360,22 @@ class FilaSwitch(BambuddyModel):
     installed: bool = False
 
 
+class HmsError(BambuddyModel):
+    """One of ``status.hms_errors``: a Bambu HMS code with Bambuddy's description,
+    which is ``null`` for a code it has no text for (measured on the recordings)."""
+
+    code: str = ""
+    full_code: str = ""
+    severity: int | None = None
+    description: str | None = None
+    actions: list[str] = Field(default_factory=list)
+
+    @field_validator("actions", mode="before")
+    @classmethod
+    def _actions(cls, value: Any) -> Any:
+        return [str(action) for action in value or []]
+
+
 class PrinterStatus(BambuddyModel):
     """``GET /api/v1/printers/{id}/status`` — live MQTT state, 60-odd fields deep.
 
@@ -386,6 +402,19 @@ class PrinterStatus(BambuddyModel):
     ams_switch_inlet: dict[str, str] = Field(default_factory=dict)
     fila_switch: FilaSwitch | None = None
     current_plate_id: int | None = None
+    #: What the printer is doing now, whoever started it (#977). ``progress`` is a
+    #: percentage and ``remaining_time`` minutes, as Bambu's MQTT ``mc_percent`` and
+    #: ``mc_remaining_time`` are; ``current_archive_id`` is Bambuddy's archive of the job.
+    subtask_name: str | None = None
+    current_print: str | None = None
+    progress: float | None = None
+    remaining_time: int | None = None
+    layer_num: int | None = None
+    total_layers: int | None = None
+    current_archive_id: int | None = None
+    awaiting_plate_clear: bool = False
+    cover_url: str | None = None
+    hms_errors: list[HmsError] = Field(default_factory=list)
 
 
 class AvailableFilament(BambuddyModel):
@@ -654,6 +683,9 @@ class Spool(BambuddyModel):
     storage_location: str | None = None
     location_id: int | None = None
     archived_at: datetime | None = None
+    #: What the spool cost per kilogram, in Bambuddy's currency setting; ``None`` when
+    #: nobody entered a price (#785).
+    cost_per_kg: float | None = None
 
     @property
     def remaining_g(self) -> float:
