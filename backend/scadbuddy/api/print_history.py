@@ -16,6 +16,7 @@ and the archive's media through the proxy in `scadbuddy.api.prints`.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -843,8 +844,11 @@ def _output_files(outputs: OutputStore, meta: OutputMeta) -> list[PrintFile]:
     return files
 
 
-def _frame_url(archive_id: int, index: int) -> str:
-    return _prints_url(archive_id, f"timelapse/frames/{index}")
+def _frame_url(archive_id: int, index: int, timelapse_path: str) -> str:
+    """Versioned by the timelapse it is a still of (#2903): the browser keeps a still a
+    day, and a replaced timelapse must not show the old one's."""
+    version = hashlib.sha256(timelapse_path.encode()).hexdigest()[:12]
+    return _prints_url(archive_id, f"timelapse/frames/{index}?v={version}")
 
 
 def _media(link: LinkedPrint, archive: ArchiveDetail) -> PrintMedia:
@@ -852,7 +856,7 @@ def _media(link: LinkedPrint, archive: ArchiveDetail) -> PrintMedia:
     if archive.timelapse_path is not None:
         timelapse = PrintTimelapse(
             url=_prints_url(archive.id, "timelapse"),
-            poster_url=_frame_url(archive.id, 0),
+            poster_url=_frame_url(archive.id, 0, archive.timelapse_path),
             frames_url=_prints_url(archive.id, "timelapse/frames"),
         )
     plate = archive.plate_id if archive.plate_id is not None else link.plate_id
@@ -1030,7 +1034,8 @@ async def get_print(
     )
 
 
-#: A still is the same for as long as its timelapse is: the browser keeps it a day.
+#: A still is the same for as long as its timelapse is, which its URL's ``v`` names: the
+#: browser keeps it a day.
 FRAME_CACHE_CONTROL = "private, max-age=86400"
 
 
@@ -1085,7 +1090,7 @@ async def get_timelapse_frames(
     return TimelapseFrames(
         info=info,
         frames=[
-            TimelapseFrame(timestamp=at, url=_frame_url(archive_id, index))
+            TimelapseFrame(timestamp=at, url=_frame_url(archive_id, index, path))
             for index, (at, _) in enumerate(frames)
         ],
     )
