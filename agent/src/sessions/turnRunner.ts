@@ -21,7 +21,7 @@ import type { RiskTier, TierResolver } from '../harness/permissions.js'
 import { isQuestionTool } from '../harness/questions.js'
 import { harnessTierOf, type HarnessRun } from '../harness/run.js'
 import { ensureSessionDir } from '../harness/stateDirs.js'
-import { createMemoryHooks, HindsightClient, hindsightTarget, type MemoryHooks } from '../memory/hindsight.js'
+import { createMemoryHooks, HindsightClient, hindsightTarget, type MemoryHooks, turnRecallMaxQueryChars } from '../memory/hindsight.js'
 import type { BuiltInPolicy } from '../plugins/builtInTools.js'
 import type { PluginEndpoint, PluginsForRun } from '../plugins/forwarder.js'
 import { ownPluginEnabled } from '../plugins/packages/builtins.js'
@@ -90,6 +90,11 @@ export type FingerprintParts = {
   /** Whether the run has the http_request tool (#827). */
   httpRequest: boolean
   builtinTools: string[]
+  /**
+   * The memory hooks' recall query cap (#2655, Settings `memory_recall_max_query_chars`),
+   * read at assembly; null when the run has no memory hooks.
+   */
+  recallMaxQueryChars: number | null
 }
 
 export type AssembledTurn = {
@@ -201,7 +206,7 @@ export class TurnRunner {
       // event log like the credential. Claude Code never holds them (the
       // forwarder adds them), but a plugin could echo one in a tool result.
       secrets.push(...(forwarded?.secrets ?? []))
-      const memory = forwarded?.hindsight ? this.memoryHooks(forwarded.hindsight, secrets, session) : undefined
+      const memory = forwarded?.hindsight ? await this.memoryHooks(forwarded.hindsight, secrets, session) : undefined
       // Settings → plugin packages may switch it off (plugins/packages/builtins.ts).
       const ownPlugin =
         this.deps.ownPlugin !== undefined && (await ownPluginEnabled(this.deps.settings))
@@ -391,7 +396,7 @@ export class TurnRunner {
         ...(remotePlugins.length ? { remotePlugins } : {}),
         // Shaped like any turn's memory hooks (the same config gives the same
         // events, matchers and timeouts); each runs the current turn's own.
-        ...(memory ? { memoryHooks: slotHooks(memory('', '').hooks, slot, (turn) => turn.memory?.hooks) } : {}),
+        ...(memory ? { memoryHooks: slotHooks(memory.hooks('', '').hooks, slot, (turn) => turn.memory?.hooks) } : {}),
         traceHooks: TurnTrace.hooksFor(() => slot.current?.trace),
         ...(this.deps.stderr ? { stderr: this.deps.stderr } : {}),
       }
@@ -416,6 +421,7 @@ export class TurnRunner {
         raisedTiers: [...(builtIn?.raised ?? [])],
         httpRequest: http !== undefined,
         builtinTools: run.builtinTools ?? [],
+        recallMaxQueryChars: memory?.recallMaxQueryChars ?? null,
       }
       return {
         run,
@@ -425,7 +431,7 @@ export class TurnRunner {
         eventTierOf: (name, input) => eventTierOf(name, input),
         shownTierOf,
         observe: pluginCheck,
-        ...(memory ? { memory } : {}),
+        ...(memory ? { memory: memory.hooks } : {}),
         release,
       }
     } catch (err) {
@@ -445,12 +451,15 @@ export class TurnRunner {
    * (#818; hooks make no SDK message, so TurnAuditor never sees them). A
    * retain reports after the turn ended; both writes work then too, since
    * they need only the session row. A failure is logged by the hooks.
+   *
+   * The recall query's cap (`recallMaxQueryChars`, #2655) is read from Settings
+   * here, at each assembly, and is fingerprinted, so a change reaches the next turn.
    */
-  private memoryHooks(
+  private async memoryHooks(
     plugin: CheckedPlugin,
     secrets: readonly string[],
     session: SessionRecord,
-  ): ((userText: string, turnId: string) => MemoryHooks) | undefined {
+  ): Promise<{ hooks: (userText: string, turnId: string) => MemoryHooks; recallMaxQueryChars: number } | undefined> {
     const config = this.deps.memory
     if (config === false) return undefined
     const log = (line: string) => this.deps.stderr?.(line)
@@ -462,10 +471,11 @@ export class TurnRunner {
       return undefined
     }
     const fixed = config?.hookConfig?.recallQuery
-    return (userText, turnId) =>
+    const recallMaxQueryChars = await turnRecallMaxQueryChars(this.deps.settings, config?.hookConfig)
+    const hooks = (userText: string, turnId: string) =>
       createMemoryHooks({
         ...config,
-        hookConfig: { ...config?.hookConfig, recallQuery: fixed && fixed !== '$prompt' ? fixed : userText },
+        hookConfig: { ...config?.hookConfig, recallQuery: fixed && fixed !== '$prompt' ? fixed : userText, recallMaxQueryChars },
         client,
         secrets,
         log,
@@ -474,5 +484,6 @@ export class TurnRunner {
         onActivity: (activity) =>
           recordMemoryActivity({ audit: this.deps.audit, events: this.deps.events }, session, turnId, activity, secrets),
       })
+    return { hooks, recallMaxQueryChars }
   }
 }

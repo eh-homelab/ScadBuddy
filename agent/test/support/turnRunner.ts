@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk'
 import { ROOT_CONTEXT } from '@opentelemetry/api'
 import { SETTING_HTTP_REQUEST } from '../../src/harness/httpRequest.js'
+import { SETTING_RECALL_MAX_QUERY_CHARS } from '../../src/memory/hindsight.js'
 import type { ApprovalRequest, RiskTier } from '../../src/harness/permissions.js'
 import { builtInPolicy } from '../../src/plugins/builtInTools.js'
 import { forwardForRun, type PluginForwarder } from '../../src/plugins/forwarder.js'
@@ -33,6 +34,8 @@ export type TurnRunnerTestOptions = {
   httpRequest?: boolean
   /** Whether the loaded package was approved with `allow_refused`. */
   allowRefused?: boolean
+  /** The stored Hindsight recall query cap (#2655); the default when undefined. */
+  recallMaxQueryChars?: number
 }
 
 export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
@@ -66,8 +69,14 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
     paths,
     credentials: fixedCredentials({ kind: 'anthropic_api_key', secret: 'sk-ant-test' }),
     settings: {
-      get: <T>(key: string) =>
-        Promise.resolve((key === 'model' ? 'claude-test' : key === SETTING_HTTP_REQUEST ? options.httpRequest : undefined) as T | undefined),
+      get: <T>(key: string) => {
+        const stored: Record<string, unknown> = {
+          model: 'claude-test',
+          [SETTING_HTTP_REQUEST]: options.httpRequest,
+          [SETTING_RECALL_MAX_QUERY_CHARS]: options.recallMaxQueryChars,
+        }
+        return Promise.resolve(stored[key] as T | undefined)
+      },
     },
     tierOf: () => 'read',
     mcpServers: () => ({ scadbuddy: createSdkMcpServer({ name: 'scadbuddy', tools: [] }) }),

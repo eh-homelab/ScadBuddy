@@ -22,7 +22,7 @@ import re
 import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Awaitable, Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import PurePosixPath
 from typing import Annotated, Literal
 
@@ -65,6 +65,7 @@ from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.tracing import span
 from scadbuddy.library.deeplink import edit_path
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher
@@ -104,6 +105,15 @@ DEFAULT_LIMIT = 50
 MAX_SCANNED = 200
 #: How many archive reads one list request has in flight at once.
 READ_CONCURRENCY = 8
+#: How many template revisions' defaults one list request reads at once (#2359).
+DEFAULTS_CONCURRENCY = 4
+#: The days either side of a batch's links its archives are looked for in one list
+#: read: Bambuddy dates an archive by its dispatch, a link is seen after it (#2359).
+ARCHIVE_WINDOW_SLACK = timedelta(days=1)
+#: The rows that list read asks for, per linked print in the batch: room for the
+#: prints made outside ScadBuddy in the same days. The ones past it are read singly.
+ARCHIVE_WINDOW_ROWS = 4
+MAX_ARCHIVE_WINDOW = 500
 #: A cursor is the last archive id of the page before; opaque to the client.
 CURSOR_PATTERN = r"^[1-9][0-9]{0,17}$"
 
@@ -144,8 +154,8 @@ class PrintSummary(_Response):
     #: ``deleted_in_bambuddy`` for a linked archive Bambuddy no longer has.
     status: str
     printer_id: int | None
-    #: The printer's name as Bambuddy recorded it on the print's runs; None for a
-    #: deleted archive or one with no run yet.
+    #: The printer's name in Bambuddy now (#2363); in the detail, else as Bambuddy
+    #: recorded it on the print's runs. None for a printer Bambuddy has no longer.
     printer_name: str | None
     started_at: datetime | None
     completed_at: datetime | None
@@ -335,7 +345,7 @@ def _summary(
             if archive is not None and archive.printer_id is not None
             else link.printer_id
         ),
-        printer_name=None,  # From the runs, read only for the prints that are shown.
+        printer_name=None,  # From the printers, read only for the prints that are shown.
         started_at=None if archive is None else archive.started_at,
         completed_at=None if archive is None else archive.completed_at,
         actual_time_seconds=None if archive is None else archive.actual_time_seconds,
@@ -377,6 +387,18 @@ class _Defaults:
         self._fetcher = fetcher
         self._known: dict[tuple[str, str | None], dict[str, ParamValue | None] | None] = {}
 
+    async def read(self, outputs: Sequence[_Output]) -> None:
+        """Read the defaults of a page's template revisions at once, ahead of `diff`:
+        each can take a schema export, and one after another they were most of a
+        page's time (#2359)."""
+        keys = [
+            key
+            for key in dict.fromkeys((o.meta.slug, o.meta.model_version) for o in outputs)
+            if key not in self._known
+        ]
+        found = await _bounded([self._defaults(*key) for key in keys], DEFAULTS_CONCURRENCY)
+        self._known.update(zip(keys, found, strict=True))
+
     async def diff(self, output: _Output) -> dict[str, ParamValue] | None:
         key = (output.meta.slug, output.meta.model_version)
         if key not in self._known:
@@ -397,16 +419,20 @@ class _Defaults:
         # (a version that is a content hash, or a history rewritten under it).
         for requested in dict.fromkeys((version, None)):
             try:
-                _, schema = await schema_of(
-                    slug,
-                    requested,
-                    paths=self._paths,
-                    history=self._history,
-                    config=self._config,
-                    version=requested,
-                    fetcher=self._fetcher,
-                    failure_is_fallback=True,
-                )
+                with span(
+                    "prints.template_defaults",
+                    attributes={"scadbuddy.slug": slug, "scadbuddy.version": requested or ""},
+                ):
+                    _, schema = await schema_of(
+                        slug,
+                        requested,
+                        paths=self._paths,
+                        history=self._history,
+                        config=self._config,
+                        version=requested,
+                        fetcher=self._fetcher,
+                        failure_is_fallback=True,
+                    )
             except (ApiError, OpenSCADError):
                 continue
             return {parameter.name: parameter.initial for parameter in schema.parameters}
@@ -480,19 +506,36 @@ def _printer_name(runs: list[ArchiveRun]) -> str | None:
     return next((run.printer_name for run in runs if run.printer_name), None)
 
 
+async def _printer_names(cache: ArchiveCache, client: BambuddyClient) -> dict[int, str]:
+    """Each printer's name in Bambuddy, the one the filter and the print dialog show
+    (#2363). Advisory: a failed read names none, and the UI numbers them."""
+    try:
+        printers = await cache.printers(client)
+    except (ApiError, ValueError) as error:
+        logger.info("could not read the printers' names", extra={"error": type(error).__name__})
+        return {}
+    return {printer.id: printer.name for printer in printers}
+
+
 async def _named(
-    cache: ArchiveCache, client: BambuddyClient, items: list[PrintSummary], present: set[int]
+    cache: ArchiveCache, client: BambuddyClient, items: list[PrintSummary]
 ) -> list[PrintSummary]:
-    """``items`` with their printers' names: one runs read per print on the page."""
-    shown = [item.archive_id for item in items if item.archive_id in present]
-    runs = await _bounded(
-        [cache.runs(client, archive_id) for archive_id in shown], READ_CONCURRENCY
-    )
-    names = {
-        archive_id: _printer_name(run_list.items)
-        for archive_id, run_list in zip(shown, runs, strict=True)
-    }
-    return [item.model_copy(update={"printer_name": names.get(item.archive_id)}) for item in items]
+    """``items`` with their printers' names: one printers read for the page (#2359)."""
+    names = await _printer_names(cache, client)
+    return [
+        item.model_copy(
+            update={"printer_name": names.get(item.printer_id) if item.printer_id else None}
+        )
+        for item in items
+    ]
+
+
+def _window(batch: Sequence[LinkedPrint]) -> tuple[date | None, date | None]:
+    """The days a batch's archives were created in, for one list read of them (#2359)."""
+    seen = [_utc(link.first_seen) for link in batch if link.first_seen is not None]
+    if not seen:
+        return None, None
+    return (min(seen) - ARCHIVE_WINDOW_SLACK).date(), (max(seen) + ARCHIVE_WINDOW_SLACK).date()
 
 
 class _LibraryFiles:
@@ -598,10 +641,22 @@ async def list_prints(
     known: dict[str, _Output | None] = {}
     before = int(cursor) if cursor is not None else None
     items: list[PrintSummary] = []
-    #: The archives Bambuddy still has, of those in ``items``.
-    present: set[int] = set()
+    #: The outputs of the prints in ``items``, by index, for their ``params_diff``.
+    shown: dict[int, _Output] = {}
 
     scanned = 0
+
+    async def page(next_cursor: str | None = None) -> PrintPage:
+        # Only for the prints that are shown: the first of each template revision can
+        # take a schema export (#609 review), so they are read together (#2359).
+        await defaults.read(list(shown.values()))
+        diffed = [
+            item
+            if index not in shown
+            else item.model_copy(update={"params_diff": await defaults.diff(shown[index])})
+            for index, item in enumerate(items)
+        ]
+        return PrintPage(items=await _named(cache, client, diffed), next_cursor=next_cursor)
 
     async with client_for(store.load()) as client:
         files = _LibraryFiles(cache, client)
@@ -618,6 +673,14 @@ async def list_prints(
             wanted = min(limit, MAX_SCANNED - scanned)
             batch = await links.page(limit=wanted, before=before, subjects=subjects)
             scanned += len(batch)
+            date_from, date_to = _window(batch)
+            await cache.prime(
+                client,
+                [link.archive_id for link in batch],
+                date_from=date_from,
+                date_to=date_to,
+                limit=min(ARCHIVE_WINDOW_ROWS * len(batch), MAX_ARCHIVE_WINDOW),
+            )
             archives = await _bounded(
                 [cache.archive(client, link.archive_id) for link in batch], READ_CONCURRENCY
             )
@@ -643,31 +706,20 @@ async def list_prints(
                 if not _matches(filters, summary, link, archive, output):
                     continue
                 if output is not None:
-                    # Only for a print that is shown: the first of each template
-                    # revision can take a schema export (#609 review).
-                    diff = await defaults.diff(output)
-                    summary = summary.model_copy(update={"params_diff": diff})
+                    shown[len(items)] = output
                 items.append(summary)
-                if archive is not None:
-                    present.add(archive.id)
                 if len(items) == limit:
                     # A further linked row, whether or not it will pass the filters:
                     # one row from Postgres, no Bambuddy read (#609 review).
                     more = index < len(batch) - 1 or bool(
                         await links.page(limit=1, before=before, subjects=subjects)
                     )
-                    return PrintPage(
-                        items=await _named(cache, client, items, present),
-                        next_cursor=str(before) if more else None,
-                    )
+                    return await page(str(before) if more else None)
             if len(batch) < wanted:
-                return PrintPage(items=await _named(cache, client, items, present))
+                return await page()
             if scanned >= MAX_SCANNED:
                 more = bool(await links.page(limit=1, before=before, subjects=subjects))
-                return PrintPage(
-                    items=await _named(cache, client, items, present),
-                    next_cursor=str(before) if more else None,
-                )
+                return await page(str(before) if more else None)
 
 
 async def _require_print(links: PrintLinksDep, archive_id: int) -> LinkedPrint:
@@ -917,9 +969,13 @@ async def get_print(
                     thumbnail.model_copy(update={"name": names.get(thumbnail.index)})
                     for thumbnail in media.plate_thumbnails
                 ]
-            summary = summary.model_copy(update={"printer_name": _printer_name(runs)})
             if printer_media:
                 on_printer = await client.printer_media(archive_id)
+        # The name the list and the filter show, else the one Bambuddy recorded on the
+        # print's runs, for a printer it has no longer (#2363).
+        printers = await _printer_names(cache, client)
+        printer_name = printers.get(summary.printer_id) if summary.printer_id else None
+        summary = summary.model_copy(update={"printer_name": printer_name or _printer_name(runs)})
         library = _library_files(link, archive, file) if meta is None else []
         files = await asyncio.to_thread(_files, outputs, meta, archive, library)
         bambuddy_url = client.config.web_url(ARCHIVES_PAGE) if archive is not None else None

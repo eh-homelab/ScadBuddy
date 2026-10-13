@@ -9,6 +9,7 @@ import os
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -219,3 +220,42 @@ def test_a_prune_tolerates_files_another_prune_removed(
     library_view._store(views / "new", b"y", 2)
     monkeypatch.undo()
     assert sorted(entry.name for entry in views.iterdir()) == ["new", "old"]
+
+
+def _out_of_memory(*_: object, **__: object) -> object:
+    raise MemoryError
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("step", "read"),
+    [
+        # The 3MF's read, then the two steps that run on what it read (#2501).
+        ("read_plate_parts", library_preview),
+        ("write_glb", library_preview),
+        ("analyze_geometry", library_geometry),
+    ],
+)
+async def test_running_out_of_memory_is_refused_as_such_and_never_cached(
+    bambuddy: BambuddyClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    step: str,
+    read: Any,
+) -> None:
+    """Wherever the view runs out of memory it is the same refusal, saying how to bound
+    it, and nothing is cached: the next read, with memory to spare, answers."""
+    download = library_file(7, two_colour_3mf(tmp_path))
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(library_view, step, _out_of_memory)
+    with pytest.raises(NotViewableError, match="ran out of memory") as refused:
+        await read(bambuddy, cache, 7, 1)
+    assert "SCADBUDDY_READ_MAX_TRIANGLES" in str(refused.value)
+    assert not [
+        path
+        for path in cache.rglob("*")
+        if path.is_file() and library_view.FILAMENTS_DIRNAME not in path.parts
+    ]
+    monkeypatch.undo()
+    assert await read(bambuddy, cache, 7, 1)
+    assert download.call_count == 2

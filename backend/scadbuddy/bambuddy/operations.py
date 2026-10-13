@@ -347,7 +347,9 @@ def bambuddy_kinds_over(
         OperationKind("timelapse_pull", timelapse_check, timelapse_run),
         OperationKind("register_sidebar", no_check, sidebar_run, run_attempts=3),
         OperationKind("assign_tray_spool", no_check, assign_tray_run),
-        OperationKind("preview_slice", no_check, preview_run),
+        # The dialog follows the operation anyway; the effect (download, upload, slice
+        # start) routinely outlasts the command deadline (#2462).
+        OperationKind("preview_slice", no_check, preview_run, answers_running=True),
         # Only ever a prelude (`output_delete`); a copy already gone counts as deleted,
         # so a retry deletes nothing twice.
         OperationKind(

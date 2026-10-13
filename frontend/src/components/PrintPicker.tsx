@@ -540,11 +540,12 @@ export function PrintPicker({
    * #284 — what the analyzers judge: this dialog's run request as `AnalysisRequest` takes
    * it (`backend/scadbuddy/analyzers/context.py:46`). It has no project. With
    * "All plates" the filament checks read every plate; the mesh checks read plate 1.
+   * Not before the plan is seeded: an empty plan is judged once and then again (#2361).
    */
   const printChoices = printChoicesOf(selection)
   const allPlates = plate === 'all'
   const analysisRequest: AnalysisRequest | null =
-    choices && printChoices
+    choices && printChoices && planReady
       ? {
           printer_id: printerId,
           filament_plan: { slots: plan, force_colour_match: false },
@@ -571,6 +572,9 @@ export function PrintPicker({
           all_plates: allPlates,
           rack_position: rackPosition,
           rack_algorithm: chosenAlgorithm,
+          // #2367: the sequence is a process override, so it changes what the run
+          // slices; the check and the background slice must see it as the run does.
+          ...(printSequence === null ? {} : { print_sequence: printSequence }),
         }
       : null
   const check = usePrintCheck(source, checkRequest)

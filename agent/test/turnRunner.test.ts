@@ -75,6 +75,7 @@ describe('TurnRunner', () => {
     ['a raised built-in tier', { raisedTiers: { get_model: 'outward' } }, 'raisedTiers'],
     ['the http_request setting', { httpRequest: false }, 'httpRequest'],
     ["a package's allow_refused approval", { allowRefused: true }, 'allowedPackageHashes'],
+    ['the Hindsight recall query cap', { recallMaxQueryChars: 12 }, 'recallMaxQueryChars'],
   ])('fingerprints %s', async (_what, changed, field) => {
     const base = await turnRunnerForTest()
     const before = await base.runner.assemble(base.session, base.principal, createTurnSlot())

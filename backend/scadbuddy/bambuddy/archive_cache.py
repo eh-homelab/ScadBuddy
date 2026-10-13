@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
+from datetime import date
 from typing import TypeVar, cast
 
 from fastapi import status
@@ -22,12 +23,15 @@ from scadbuddy.bambuddy.models import (
     ArchiveDetail,
     ArchiveRunList,
     LibraryFile,
+    Printer,
     TimelapseInfo,
     TimelapseThumbnails,
 )
 from scadbuddy.core.problems import ApiError
 
 ARCHIVE_TTL = 30.0
+#: The key of a read that is of no one archive (the printers).
+_ALL = 0
 #: Enough for every print of a busy homelab several times over.
 MAX_ENTRIES = 4096
 
@@ -60,6 +64,39 @@ class ArchiveCache:
                 raise
 
         return await self._get(client, "archive", archive_id, load)
+
+    async def prime(
+        self,
+        client: BambuddyClient,
+        archive_ids: Sequence[int],
+        *,
+        date_from: date | None,
+        date_to: date | None,
+        limit: int,
+    ) -> None:
+        """Keep as many of ``archive_ids`` as one list read holds, ahead of `archive`
+        (#2359). Bambuddy's list answers the same ``ArchiveResponse`` as a single read,
+        but filters only by the day it created the archive, not by id: it is read over
+        ``date_from``..``date_to``, ``limit`` rows at most, newest first. An archive it
+        does not hold (outside the window, past the limit, deleted, or not visible to the
+        key's user) is left to `archive` to read on its own. Nothing is read when at most
+        one of them is missing: the list is then no cheaper."""
+        now = self._clock()
+        missing = {
+            archive_id
+            for archive_id in archive_ids
+            if (hit := self._entries.get(self._key(client, "archive", archive_id))) is None
+            or hit[0] <= now
+        }
+        if len(missing) < 2:
+            return
+        for row in await client.archive_outcomes(date_from=date_from, date_to=date_to, limit=limit):
+            if row.id in missing:
+                self._put(self._key(client, "archive", row.id), row)
+
+    async def printers(self, client: BambuddyClient) -> list[Printer]:
+        """Bambuddy's printers: what the prints name a printer by (#2363)."""
+        return await self._get(client, "printers", _ALL, client.printers)
 
     async def library_file(self, client: BambuddyClient, file_id: int) -> LibraryFile | None:
         """A library file a print was made of (#1755), or None when Bambuddy has none
@@ -122,7 +159,7 @@ class ArchiveCache:
         archive_id: int,
         load: Callable[[], Awaitable[T]],
     ) -> T:
-        key = (client.config.base_url, kind, archive_id)
+        key = self._key(client, kind, archive_id)
         hit = self._entries.get(key)
         if hit is not None and hit[0] > self._clock():
             return cast(T, hit[1])
@@ -132,6 +169,10 @@ class ArchiveCache:
             self._loading[key] = task
         # Shielded: one caller going away does not cancel the read the others wait on.
         return cast(T, await asyncio.shield(task))
+
+    @staticmethod
+    def _key(client: BambuddyClient, kind: str, archive_id: int) -> tuple[str, str, int]:
+        return (client.config.base_url, kind, archive_id)
 
     async def _load(self, key: tuple[str, str, int], load: Callable[[], Awaitable[T]]) -> T:
         task = asyncio.current_task()

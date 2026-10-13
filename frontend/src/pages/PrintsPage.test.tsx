@@ -116,6 +116,31 @@ describe('PrintsPage (#310): the global print history', () => {
     expect(within(screen.getByLabelText('Printer')).getByRole('option', { name: 'Printer 3' })).toHaveValue('3')
   })
 
+  it('names a printing print’s printer once, even unnamed (#2363)', async () => {
+    server.use(
+      http.get('/api/v1/prints', () =>
+        HttpResponse.json({
+          items: [{ ...summaryOf(37), status: 'printing', printer_id: 3, printer_name: null }],
+          next_cursor: null,
+        } satisfies PrintPage),
+      ),
+      http.get('/api/v1/print/outputs/:id/progress', () =>
+        HttpResponse.json({
+          ...queuedSliceProgress,
+          stage: 'running',
+          copies_detail: [
+            { ...queuedSliceProgress.copies_detail![0]!, stage: 'running', message: 'Layer 42 of 180', waiting_reason: null },
+          ],
+        } satisfies PrintProgress),
+      ),
+    )
+    render()
+    const printing = await item(37)
+    expect(await within(printing).findByText('Layer 42 of 180')).toBeInTheDocument()
+    expect(printing).toHaveTextContent('Printer 3')
+    expect(printing).not.toHaveTextContent('3DP-31B-598')
+  })
+
   it('names the attachments a print has', async () => {
     server.use(
       http.get('/api/v1/prints', () =>

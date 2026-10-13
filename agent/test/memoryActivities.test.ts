@@ -109,6 +109,23 @@ describe('memory activities in a durable turn', () => {
     expect(audits).toEqual([expect.objectContaining({ kind: 'memory', action: 'recall', sessionId: SESSION, turnId: TURN })])
   })
 
+  it('reads the recall query cap from Settings at each turn, as a classic turn does', async () => {
+    const long = 'x'.repeat(1000)
+    const events = log(event({ type: 'user.turn', sessionId: SESSION, turnId: TURN, text: long, author: BROWSER }))
+    let stored: unknown
+    const acts = memoryActivities(
+      deps({
+        events: { read: async (_id, after = 0) => events.filter((e) => e.seq > after), append: async () => [] },
+        settings: { get: async <T>(key: string) => (key === 'memory_recall_max_query_chars' ? (stored as T) : undefined) },
+      }),
+    )
+    for (const value of [undefined, 30, 0]) {
+      stored = value
+      await env(MEMORY_RECALL_ACTIVITY).run(acts[MEMORY_RECALL_ACTIVITY], { turn_id: TURN })
+    }
+    expect(fake.recalls().map((r) => (r.body as { query: string }).query.length)).toEqual([800, 30, 1000])
+  })
+
   it("retains the session's transcript as one document, redacted", async () => {
     const acts = memoryActivities(deps())
     await env(MEMORY_RETAIN_ACTIVITY).run(acts[MEMORY_RETAIN_ACTIVITY], { turn_id: TURN })
