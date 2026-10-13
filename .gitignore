@@ -226,3 +226,6 @@ agent/src/api/schema.d.ts
 
 # Playwright MCP session output
 .playwright-mcp/
+
+# The Kiota run's scratch spec (scripts/generate-go-client.sh)
+tools/go/.spec/
