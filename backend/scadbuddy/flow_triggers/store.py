@@ -104,8 +104,11 @@ class TriggerStore:
     async def get(self, trigger_id: str) -> Trigger | None:
         return await self._call(self._get, trigger_id)
 
-    async def list_triggers(self, name: str | None = None) -> list[Trigger]:
-        return await self._call(self._list, name)
+    async def list_triggers(
+        self, name: str | None = None, limit: int | None = None
+    ) -> list[Trigger]:
+        """Newest first; every one without `limit`."""
+        return await self._call(self._list, name, limit)
 
     async def update(
         self, trigger_id: str, fields: dict[str, Any], by: dict[str, Any], revoked_by: str
@@ -240,12 +243,13 @@ class TriggerStore:
             ).fetchone()
         return Trigger.model_validate(row) if row else None
 
-    def _list(self, name: str | None) -> list[Trigger]:
+    def _list(self, name: str | None, limit: int | None) -> list[Trigger]:
         with self._pool.connection() as conn:
             rows = conn.execute(
                 f"SELECT {_TRIGGER} FROM flow_triggers"
-                " WHERE %(name)s::text IS NULL OR name = %(name)s ORDER BY created_at DESC",
-                {"name": name},
+                " WHERE %(name)s::text IS NULL OR name = %(name)s"
+                " ORDER BY created_at DESC, id LIMIT %(limit)s",
+                {"name": name, "limit": limit},
             ).fetchall()
         return [Trigger.model_validate(row) for row in rows]
 

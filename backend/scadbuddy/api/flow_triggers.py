@@ -268,8 +268,10 @@ async def _view(triggers: Triggers, trigger: Trigger) -> TriggerView:
 async def list_flow_triggers(
     triggers: TriggersDep,
     name: Annotated[str | None, Query(description="Only this flow's.")] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> list[TriggerView]:
-    return [await _view(triggers, t) for t in await triggers.store.list_triggers(name)]
+    """Newest first, at most `limit`."""
+    return [await _view(triggers, t) for t in await triggers.store.list_triggers(name, limit)]
 
 
 @router.get("/flow-triggers/{trigger_id}", response_model=TriggerView, summary="Get a flow trigger")
