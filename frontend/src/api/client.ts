@@ -43,8 +43,11 @@ import type {
   CatalogueLibrary,
   DependencyReport,
   LibraryFileObjects,
+  LibraryCopyResult,
   LibraryDeleteResult,
   LibraryListing,
+  LibraryMoveResult,
+  LibraryRenameResult,
   LibraryRestoreResult,
   LibraryPinRequest,
   InstalledLibrary,
@@ -1565,6 +1568,27 @@ export const api = {
     command<LibraryRestoreResult>('/print/library/restore', {
       method: 'POST',
       body: JSON.stringify({ file_ids: fileIds }),
+    }),
+
+  /** #2670 — files into another folder (`null`, the top level), each under its own id. */
+  moveLibraryFiles: (fileIds: number[], folderId: number | null) =>
+    command<LibraryMoveResult>('/print/library/move', {
+      method: 'POST',
+      body: JSON.stringify({ file_ids: fileIds, folder_id: folderId }),
+    }),
+
+  /** #2670 — a copy of each file in a folder (`null`, the top level), each a new file. */
+  copyLibraryFiles: (fileIds: number[], folderId: number | null) =>
+    command<LibraryCopyResult>('/print/library/copy', {
+      method: 'POST',
+      body: JSON.stringify({ file_ids: fileIds, folder_id: folderId }),
+    }),
+
+  /** #2670 — a new name for a file, its extension kept. */
+  renameLibraryFile: (fileId: number, filename: string) =>
+    command<LibraryRenameResult>('/print/library/rename', {
+      method: 'POST',
+      body: JSON.stringify({ file_id: fileId, filename }),
     }),
 
   libraryThumbnailUrl: (fileId: number) => `${API_BASE}/print/library/${fileId}/thumbnail`,
