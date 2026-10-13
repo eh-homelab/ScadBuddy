@@ -89,6 +89,8 @@ WarningKind = Literal[
     "rack-manual-partial",
     # A by-object print whose objects the toolhead or the gantry would hit (#956).
     "sequence-clearance",
+    # #717: a filament profile left on that could not apply; the print goes ahead.
+    "profile-not-applied",
 ]
 
 

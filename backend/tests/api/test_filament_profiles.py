@@ -92,7 +92,9 @@ def test_unreadable_values_make_a_profile_unapplicable_saying_why(client: TestCl
     ).json()
 
     assert silk["applicable"] is False
-    assert "slicer is not reachable" in silk["reason"]
+    assert silk["reason"] == (
+        "couldn't read the preset's outer wall speed (Bambuddy's slicer is not reachable)"
+    )
     assert silk["changes"] == []
 
 
@@ -149,19 +151,34 @@ def test_a_scalar_setting_stays_a_scalar(client: TestClient, model: str) -> None
 
 
 @respx.mock
-def test_a_profile_that_cannot_apply_refuses_the_print_before_any_upload(
+def test_a_profile_that_cannot_apply_is_skipped_with_a_warning_and_the_print_goes_ahead(
     client: TestClient, model: str
 ) -> None:
+    """A print is never refused for a profile: with the preset's values unreadable, the
+    profile's overrides are skipped (never sent in a guessed shape), Checks says so before
+    Print, and the run prints with the preset as it is, saying so again."""
     output_id = prepared(client, model)
-    uploaded = upload_route()
+    upload_route()
     run_routes()
-    preset_values(resolved=False, values={}, reason="preset_unresolved")
+    preset_values(resolved=False, values={}, reason="sidecar_unavailable")
     sliced = slice_routes()
+    queue_route()
+    request = {**body(), "filament_profiles": ["silk-pla"]}
+    expected = {
+        "kind": "profile-not-applied",
+        "slot_id": None,
+        "message": (
+            "Silk PLA profile not applied: couldn't read the preset's outer wall speed "
+            "(Bambuddy's slicer is not reachable). The print uses the preset as it is."
+        ),
+    }
 
-    response = run_print(client, output_id, json={**body(), "filament_profiles": ["silk-pla"]})
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=request)
+    response = run_print(client, output_id, json=request)
 
-    assert response.status_code == 422
-    assert "Silk PLA profile cannot be applied" in response.json()["detail"]
-    assert "Turn it off" in response.json()["detail"]
-    assert not uploaded.called
-    assert not sliced.called
+    assert check.status_code == 200, check.text
+    assert check.json()["errors"] == []
+    assert expected in check.json()["warnings"]
+    assert response.status_code == 200, response.text
+    assert expected in response.json()["warnings"]
+    assert "process_overrides" not in json.loads(sliced.calls.last.request.content)

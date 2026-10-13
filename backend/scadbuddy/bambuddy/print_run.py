@@ -711,6 +711,14 @@ async def check_print(
                     request.choices.bed_type, PRINTER_MODEL, prepared.printer_name
                 )
             ),
+            # #717: what the run will say of a profile it cannot apply.
+            *(
+                await profile_overrides(
+                    client,
+                    process_preset_for(request.choices, prepared.catalogue),
+                    request.filament_profiles,
+                )
+            )[1],
         ],
         rack=rack_view,
         nozzle_plan=nozzle_plan,
@@ -1170,8 +1178,8 @@ async def plan_run(
     printer_status = prepared.printer_status
     choices = request.choices
     catalogue = await _catalogue(client)
-    # Refused before anything is uploaded: a profile left on must apply as shown (#717).
-    from_profiles = await profile_overrides(
+    # #717: a profile that cannot apply is skipped with a warning, never refused.
+    from_profiles, profile_warnings = await profile_overrides(
         client, process_preset_for(choices, catalogue), request.filament_profiles
     )
     # The source places, recolors and uploads what it prints (#105, #126, #476), into
@@ -1274,7 +1282,7 @@ async def plan_run(
         laid_out=await source.states_nozzles(client),
         sides=nozzle_plan.sides if nozzle_plan is not None else None,
     )
-    warnings: list[FilamentWarning] = []
+    warnings: list[FilamentWarning] = list(profile_warnings)
     for _, options, resolved, _ in planned:
         for warning in [*resolved.warnings, *check(options, request.filament_plan, copies=copies)]:
             # Checked once below, against what every plate needs together.

@@ -19,7 +19,8 @@ function slotsOf(suggestion: ProfileSuggestion): string {
 /**
  * #717 — the filament profiles this print's spools match: each suggested and on, its
  * changes shown against the process preset's value, its source a link away, and a
- * switch to print without it. A profile that cannot apply says why and stays off.
+ * switch to print without it. A profile that cannot apply says why and stays off; the
+ * print is never refused for it.
  */
 export function FilamentProfilesStep({
   suggestions,
@@ -57,7 +58,7 @@ export function FilamentProfilesStep({
               <p className="mt-0.5 ml-5 text-muted">{profile.description}</p>
               {unapplicable ? (
                 <p className="mt-0.5 ml-5 text-warn" role="status">
-                  Can't apply: {preview.reason}
+                  Not applied: {preview.reason}. The print uses the preset as it is.
                 </p>
               ) : (
                 <ul className="sb-num mt-0.5 ml-5 text-ink" aria-label={`${profile.name} changes`}>
