@@ -356,24 +356,21 @@ describe('labels', () => {
 })
 
 describe('useAttentionTitle', () => {
-  it('prefixes the count and restores the title it found, even one that looks prefixed', () => {
-    document.title = '(3) copies'
-    const { rerender, unmount } = renderHook(({ n }) => useAttentionTitle(n, true), { initialProps: { n: 0 } })
-    expect(document.title).toBe('(3) copies')
-    rerender({ n: 2 })
-    expect(document.title).toBe('(2) (3) copies')
-    rerender({ n: 5 })
-    expect(document.title).toBe('(5) (3) copies')
-    rerender({ n: 0 })
-    expect(document.title).toBe('(3) copies')
-    rerender({ n: 1 })
-    unmount()
-    expect(document.title).toBe('(3) copies')
+  it('puts the count in front of the page title, and follows the page (#2454)', () => {
+    const { rerender } = renderHook(({ n, title }) => useAttentionTitle(n, true, title), {
+      initialProps: { n: 0, title: '(3) copies · ScadBuddy' },
+    })
+    expect(document.title).toBe('(3) copies · ScadBuddy')
+    rerender({ n: 2, title: '(3) copies · ScadBuddy' })
+    expect(document.title).toBe('(2) (3) copies · ScadBuddy')
+    rerender({ n: 2, title: 'Library · ScadBuddy' })
+    expect(document.title).toBe('(2) Library · ScadBuddy')
+    rerender({ n: 0, title: 'Library · ScadBuddy' })
+    expect(document.title).toBe('Library · ScadBuddy')
   })
 
-  it('leaves the title alone when off (embedded in Bambuddy)', () => {
-    document.title = 'ScadBuddy'
-    renderHook(() => useAttentionTitle(4, false))
-    expect(document.title).toBe('ScadBuddy')
+  it('never prefixes when off (embedded in Bambuddy)', () => {
+    renderHook(() => useAttentionTitle(4, false, 'Library · ScadBuddy'))
+    expect(document.title).toBe('Library · ScadBuddy')
   })
 })
