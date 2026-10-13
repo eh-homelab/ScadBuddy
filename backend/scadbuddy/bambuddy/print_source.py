@@ -461,6 +461,10 @@ class OutputSource(PrintPipeline):
     local: LocalFilaments | None = None
     _local_unreadable: bool = field(default=False, repr=False)
     #: The output's 3MF, read once for every reader of it in a request (#2780 review).
+    #: Held as long as the source lives: a request's, or one activity's in the print
+    #: and preview-slice workflows (print_activities ``_output_source``), each of which
+    #: reads, uploads and ends. Build a source per request or activity, never one kept
+    #: across them, or the file stays in memory with it.
     _payload: bytes | None = field(default=None, repr=False)
 
     @property

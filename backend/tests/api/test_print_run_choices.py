@@ -921,6 +921,38 @@ def test_the_all_plates_filament_read_offers_every_plates_slots_from_the_outputs
 
 
 @respx.mock
+def test_the_all_plates_local_read_combines_every_plates_slots(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#2720, the #2780 review: plate 1 uses slot 1 and plate 2 slot 2, so the whole
+    file's read from the output's own 3MF must offer both, and each plate its own."""
+    configure(client)
+    output_id = make_output(client, model)
+    [output_3mf] = paths.outputs.glob(f"*/{output_id}/model.3mf")
+    body = ColourPart(1, "Body", "#FF0000", trimesh.creation.box(extents=(10, 10, 4)))
+    lid = ColourPart(2, "Lid", "#0047BB", trimesh.creation.box(extents=(12, 12, 2)))
+    write_plates_3mf(
+        [PlateParts((body,), (1,)), PlateParts((lid,), (2,))],
+        ["#FF0000", "#0047BB"],
+        output_3mf,
+        thumbnails=None,
+    )
+    uploaded = upload_route()
+    split_plates_routes()
+    hardware_routes()
+
+    def slots(query: str) -> list[int]:
+        answer = client.get(f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1{query}")
+        assert answer.status_code == 200, answer.text
+        return [slot["slot_id"] for slot in answer.json()["slots"]]
+
+    assert slots("&plate_id=1") == [1]
+    assert slots("&plate_id=2") == [2]
+    assert slots("&all_plates=true") == [1, 2]
+    assert not uploaded.called
+
+
+@respx.mock
 def test_the_all_plates_filament_read_reads_the_spools_once(
     client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
