@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { type Ref, type RefObject, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { useLatest } from '../../lib/useLatest'
 import { api } from '../../api/client'
@@ -421,15 +421,42 @@ const SETTLED_LABEL: Partial<Record<PrintStage, string>> = {
  * live, as the progress panel does, so the row changes without a reload.
  */
 function OutputWaitingRow({ output }: { output: Output }) {
-  const { progress } = usePrintProgress(output.id, true)
-  return <WaitingRow name={output.name ?? output.id.slice(0, 8)} progress={progress} generated={output.created_at} />
+  // #1014 — each read is a Bambuddy read: a template with many waiting outputs reads
+  // only the rows that come into view, not every one each time the tab opens.
+  const row = useRef<HTMLLIElement>(null)
+  const seen = useSeen(row)
+  const { progress } = usePrintProgress(output.id, seen)
+  return (
+    <WaitingRow ref={row} name={output.name ?? output.id.slice(0, 8)} progress={progress} generated={output.created_at} />
+  )
+}
+
+/** Whether the element has come into view (within a little of it), once and for good.
+ * Without an IntersectionObserver every element counts as seen. */
+function useSeen(element: RefObject<Element | null>): boolean {
+  const [seen, setSeen] = useState(() => typeof IntersectionObserver === 'undefined')
+  useEffect(() => {
+    const target = element.current
+    if (seen || !target) return
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) setSeen(true)
+      },
+      { rootMargin: '200px' },
+    )
+    observer.observe(target)
+    return () => observer.disconnect()
+  }, [element, seen])
+  return seen
 }
 
 function WaitingRow({
+  ref,
   name,
   progress,
   generated,
 }: {
+  ref?: Ref<HTMLLIElement>
   name: string
   progress: PrintProgress | null
   /** When the output was made; a library file's print has no such time. */
@@ -437,7 +464,9 @@ function WaitingRow({
 }) {
   const settled = progress?.settled ? progress : null
   return (
-    <li className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-[6px] border border-dashed border-line-strong bg-surface px-3 py-2 text-[13px]">
+    <li
+      ref={ref}
+      className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-[6px] border border-dashed border-line-strong bg-surface px-3 py-2 text-[13px]">
       <span className="text-ink">{name}</span>
       {settled ? (
         settled.route === 'run' ? (
