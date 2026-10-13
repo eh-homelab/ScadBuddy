@@ -106,6 +106,26 @@ export const DEFAULT_BUDGET: Budget = 'mid'
 export const DEFAULT_MAX_TOKENS = 4096
 export const DEFAULT_RECALL_TAGS_MATCH: TagsMatch = 'any'
 
+/**
+ * Hindsight refuses a recall query over 500 tokens (HTTP 400 "Query too long", seen in
+ * prod 2026-10-12 on a 6192-token prompt), so the query is cut below that. Tokens are
+ * estimated conservatively: a quarter per ASCII character, one per any other
+ * character (CJK runs about one token each).
+ */
+export const RECALL_QUERY_MAX_TOKENS = 400
+
+/** The start of `text` whose estimated token count fits `maxTokens`. */
+export function capRecallQuery(text: string, maxTokens = RECALL_QUERY_MAX_TOKENS): string {
+  let tokens = 0
+  let end = 0
+  for (const ch of text) {
+    tokens += ch.charCodeAt(0) < 0x80 ? 0.25 : 1
+    if (tokens > maxTokens) return text.slice(0, end)
+    end += ch.length
+  }
+  return text
+}
+
 /** hooks.py `MemoryHookConfig`, same fields in camelCase, plus `retainMode`. */
 export type MemoryHookConfig = {
   /** Inject relevant memories on each `UserPromptSubmit`. */
@@ -521,7 +541,7 @@ export function createMemoryHooks(options: MemoryHooksOptions): MemoryHooks {
       if (!query) return { output: {} }
       if (cfg.recallQuery !== '$prompt') query = cfg.recallQuery
       // The query leaves for the bank like a retain does, so it is redacted the same way.
-      const body: RecallBody = { query: scrub(query), budget, max_tokens: maxTokens }
+      const body: RecallBody = { query: capRecallQuery(scrub(query)), budget, max_tokens: maxTokens }
       if (options.recallTags?.length) {
         body.tags = options.recallTags
         body.tags_match = options.recallTagsMatch ?? DEFAULT_RECALL_TAGS_MATCH

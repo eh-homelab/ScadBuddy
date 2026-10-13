@@ -5,6 +5,7 @@ import type { HookCallback, HookInput, HookJSONOutput } from '@anthropic-ai/clau
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import {
   actionLine,
+  capRecallQuery,
   createMemoryHooks,
   drainRetains,
   DEFAULT_MEMORY_HOOK_CONFIG,
@@ -172,6 +173,16 @@ describe('memory hooks against a fake Hindsight', () => {
     // At most recallMaxResults (5), numbered as upstream numbers them.
     expect(unwrapUntrusted(envelope)).toBe('1. The user prints in PETG.\n2. Boxes get 2 mm walls.\n3. x3\n4. x4\n5. x5')
     expect(logs).toEqual([])
+  })
+
+  it('cuts a long prompt to a query the bank accepts (Hindsight refuses one over 500 tokens)', async () => {
+    const long = `${'Each line below is one design. '.repeat(200)}${'模型'.repeat(500)}`
+    await call(hooks().hooks.UserPromptSubmit?.[0]?.hooks[0], prompt(long))
+    const query = (fake.recalls()[0]!.body as { query: string }).query
+    expect(long.startsWith(query)).toBe(true)
+    expect(query.length).toBe(1600)
+    expect(capRecallQuery('模型'.repeat(500))).toHaveLength(400)
+    expect(capRecallQuery('Make a box')).toBe('Make a box')
   })
 
   it('recalls once per hooks (one user message): the same prompt again reuses it, any other prompt gets nothing (#1896)', async () => {
