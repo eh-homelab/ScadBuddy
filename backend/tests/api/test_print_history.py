@@ -22,6 +22,7 @@ from fastapi.testclient import TestClient
 from scadbuddy.api import print_history
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.params import schema_of
+from scadbuddy.api.print_history import FINISHED_STATUSES, UNFINISHED_STATUSES
 from scadbuddy.bambuddy import linking
 from scadbuddy.bambuddy.component import ARCHIVE_CACHE
 from scadbuddy.bambuddy.models import ArchiveDetail, ArchiveRun
@@ -1260,3 +1261,11 @@ def test_one_library_files_history_finds_its_reprints_made_inside_bambuddy(
 
     assert listed.status_code == 200, listed.text
     assert [item["archive_id"] for item in listed.json()["items"]] == [92]
+
+
+def test_every_recorded_archive_status_is_known() -> None:
+    """#2904: a status Bambuddy starts writing that is in neither list fails here, rather
+    than a running print quietly reading "Finished"."""
+    statuses = {row["status"] for row in recording("archives-full.json")}
+    assert statuses <= UNFINISHED_STATUSES | FINISHED_STATUSES, statuses
+    assert "printing" in statuses & UNFINISHED_STATUSES

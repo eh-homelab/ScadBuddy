@@ -340,7 +340,20 @@ def _cover(archive: ArchiveDetail) -> PrintCover | None:
 
 #: Bambuddy's statuses of a print that has not finished: it fills ``completed_at`` on
 #: one still printing, about when it created the archive (#2362).
+#:
+#: An archive's ``status`` is a free ``String(20)``, not an enum (``models/archive.py``
+#: L68 at v1.2.5.6). The one in-progress value Bambuddy writes on an archive is
+#: ``printing`` (``services/archive.py`` L1364-1365, ``main.py`` L3719 and L3937); its
+#: finished ones are ``completed``, ``failed``, ``cancelled`` and ``archived``. The other
+#: four are the queue's and the scheduler's in-progress states (``print_scheduler.py``
+#: L4765 ``running``, L4827 ``pending``), kept here so one carried onto an archive never
+#: reads as finished. Sources at
+#: https://github.com/maziggy/bambuddy/tree/d80414b518b602448192abd74506369b523cf29b/backend/app
+#: (v1.2.5.6); `test_every_recorded_archive_status_is_known` holds the list to the
+#: recordings (#2904).
 UNFINISHED_STATUSES = frozenset({"pending", "queued", "printing", "running", "paused"})
+#: The statuses of a print that has ended, from the same sources.
+FINISHED_STATUSES = frozenset({"completed", "failed", "cancelled", "archived", "aborted"})
 
 
 def _completed_at(archive: ArchiveDetail) -> datetime | None:
