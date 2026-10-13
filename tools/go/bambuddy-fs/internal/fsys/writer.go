@@ -52,6 +52,9 @@ type pending struct {
 	dirty    bool
 	// refusal is the library's last refusal of the upload, kept by the last release.
 	refusal error
+	// key is the upload's Idempotency-Key, the same for its retry by release; a new
+	// one once it is sent or queued (the queue keeps it).
+	key string
 
 	// The node's mu guards these. bases are the stored files the write replaces (see
 	// record.Bases); over are the queued entries it holds, the retrier leaving them
@@ -454,10 +457,19 @@ func (p *pending) upload(ctx context.Context) syscall.Errno {
 	n.mu.Lock()
 	bases, over := slices.Clone(p.bases), slices.Clone(p.over)
 	n.mu.Unlock()
-	sendAs, conflict, err := t.target(ctx, cur.FolderID, cur.Name, bases, t.unsent.now())
+	if p.key == "" {
+		p.key = api.NewKey()
+	}
+	sent := attempt{Key: p.key}
+	sendAs, conflict, others, err := t.target(ctx, cur.FolderID, cur.Name, bases, t.unsent.now())
 	var got api.File
 	if err == nil {
-		got, err = t.lib.Upload(ctx, cur.FolderID, sendAs, io.NewSectionReader(p.tmp, 0, p.size.Load()))
+		if conflict {
+			slog.Warn("another file took the name of a write; it is sent as a conflict copy",
+				"folder", cur.FolderID, "name", cur.Name, "others", others, "bases", ids(bases), "copy", sendAs)
+		}
+		sent.FolderID, sent.Name = cur.FolderID, sendAs
+		got, err = t.lib.Upload(ctx, cur.FolderID, sendAs, p.key, io.NewSectionReader(p.tmp, 0, p.size.Load()))
 	}
 	if err != nil {
 		errno := failed("upload", err, "folder", cur.FolderID, "name", sendAs)
@@ -469,9 +481,9 @@ func (p *pending) upload(ctx context.Context) syscall.Errno {
 		n.mu.Lock()
 		bases = slices.Clone(p.bases)
 		n.mu.Unlock()
-		return p.queue(cur, bases, over, err)
+		return p.queue(cur, bases, over, err, sent)
 	}
-	p.dirty, p.refusal = false, nil
+	p.dirty, p.refusal, p.key = false, nil, ""
 	t.forget(cur.FolderID)
 	// The temp file becomes the new ID's cached contents; a later write seeds a new one.
 	if err := os.Rename(p.path, t.cache.path(got.ID)); err != nil {
@@ -523,20 +535,21 @@ func (p *pending) upload(ctx context.Context) syscall.Errno {
 // are safe, and the retrier sends them under whatever name and folder they then have.
 // Answering EIO would have the app report a failed save, and perhaps delete what it
 // wrote, though nothing is lost. Only a failure to queue them is an error (#2865).
-func (p *pending) queue(cur api.File, bases []base, over []*entry, cause error) syscall.Errno {
+func (p *pending) queue(cur api.File, bases []base, over []*entry, cause error, sent attempt) syscall.Errno {
 	q := p.node.tree.unsent
 	now := q.now()
 	size := p.size.Load()
 	rec := record{
 		FolderID: cur.FolderID, Name: cur.Name, Size: size, Created: now.UTC(),
 		Attempts: 1, LastError: cause.Error(), LastAttempt: now.UTC(), Bases: bases, SavedAt: now,
+		Attempt: &sent,
 	}
 	e, f, err := q.add(p.tmp, p.path, size, rec, over...)
 	if err != nil {
 		return errQueue(err, "folder", cur.FolderID, "name", cur.Name)
 	}
 	_ = p.tmp.Close()
-	p.tmp, p.path, p.dirty = nil, "", false
+	p.tmp, p.path, p.dirty, p.key = nil, "", false, ""
 	// The write goes on from the queued copy, held open.
 	p.seed, p.base = true, api.File{}
 	p.setSeedFile(f)

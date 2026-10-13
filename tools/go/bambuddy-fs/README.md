@@ -221,6 +221,15 @@ ID, `created_at` and name.
   `bracket (conflict 2026-10-13 141502).3mf`, and a warning names both. Nothing is
   deleted.
 
+Every attempt to send a write carries the same `Idempotency-Key`, kept in `record.json`
+(a record from an older build gets one when it is loaded). So when an upload ran but
+its answer was lost (a deploy cut the connection), the next attempt, finding a file of
+the write's name that it does not replace and having last been sent under that name,
+sends the same request again, and ScadBuddy answers it with that file instead of
+uploading a second: the write then replaces its bases as usual. If ScadBuddy answers
+with a new file instead, the name is someone else's, and the new file is renamed to the
+conflict copy.
+
 Once sent, the local copy is deleted and the folder is listed afresh. While a library
 file it does not replace has the name, a queued write of that name is not shown, so a
 name never shows twice.

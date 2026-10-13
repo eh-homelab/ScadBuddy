@@ -161,8 +161,13 @@ func (c *Client) Download(ctx context.Context, fileID int, w io.Writer) error {
 
 // Upload streams r into a new file called name in folderID (0 is the top level). The
 // File it returns has the size of the bytes sent and Created set to now, since the
-// route's answer carries neither.
-func (c *Client) Upload(ctx context.Context, folderID int, name string, r io.Reader) (File, error) {
+// route's answer carries neither. key is the Idempotency-Key (NewKey): sent again with
+// the same name, folder and bytes after an answer that never arrived, it is answered
+// with the first upload's file instead of making a second; "" is a new one.
+func (c *Client) Upload(ctx context.Context, folderID int, name, key string, r io.Reader) (File, error) {
+	if key == "" {
+		key = NewKey()
+	}
 	pr, pw := io.Pipe()
 	// Closing the reader on return fails the writer's next write, so it stops.
 	defer pr.Close()
@@ -173,7 +178,7 @@ func (c *Client) Upload(ctx context.Context, folderID int, name string, r io.Rea
 		return File{}, err
 	}
 	req.Header.Set("Content-Type", form.FormDataContentType())
-	req.Header.Set("Idempotency-Key", newKey())
+	req.Header.Set("Idempotency-Key", key)
 	sent := make(chan int64, 1)
 	go func() {
 		n, err := writeForm(form, folderID, name, r)
@@ -372,7 +377,7 @@ func read[T any](ctx context.Context, c *Client, op string, info *abs.RequestInf
 // follows a 202 to its result.
 func write[T any](ctx context.Context, c *Client, op string, info *abs.RequestInformation, factory serialization.ParsableFactory) (T, error) {
 	var zero T
-	info.Headers.Add("Idempotency-Key", newKey())
+	info.Headers.Add("Idempotency-Key", NewKey())
 	status, body, err := c.send(ctx, op, info)
 	if err != nil {
 		return zero, err
@@ -505,8 +510,8 @@ func decode[T any](op string, body []byte, factory serialization.ParsableFactory
 	return out, nil
 }
 
-// newKey is a write's Idempotency-Key: 32 random hex digits.
-func newKey() string {
+// NewKey is a write's Idempotency-Key: 32 random hex digits.
+func NewKey() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)

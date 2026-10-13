@@ -258,12 +258,15 @@ func TestDownloadStreamsAndUploadSendsAKey(t *testing.T) {
 
 	f.folder(4, "Top", 0)
 	f.slow["upload"] = true
-	up, err := c.Upload(context.Background(), 4, "new.3mf", bytes.NewReader([]byte("PK")))
+	up, err := c.Upload(context.Background(), 4, "new.3mf", "", bytes.NewReader([]byte("PK")))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f.lastKey == "" {
-		t.Fatal("no Idempotency-Key on upload")
+	if len(f.lastKey) != 32 {
+		t.Fatalf("Idempotency-Key on upload: %q", f.lastKey)
+	}
+	if _, err := c.Upload(context.Background(), 4, "again.3mf", "the-write's-key", bytes.NewReader([]byte("PK"))); err != nil || f.lastKey != "the-write's-key" {
+		t.Fatalf("given key: %q %v", f.lastKey, err)
 	}
 	stored := f.files[up.ID]
 	if up.Size != 2 || time.Since(up.Created) > time.Minute {

@@ -979,3 +979,63 @@ func TestAFolderNeverListedIsEIOWhileScadBuddyIsDown(t *testing.T) {
 		t.Fatalf("%v", err)
 	}
 }
+
+// The upload runs but its answer is lost (a deploy cuts the connection): the write is
+// queued with its Idempotency-Key, and the retry sends the same request with it, so
+// the route answers with the first upload's file, which then replaces the old one.
+func TestARetryAfterALostAnswerDoesNotUploadTwice(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.folder(4, "Top", 0)
+	lib.file(10, "X.3mf", 4, []byte("old"))
+	lib.loseAnswers = 1
+	state := t.TempDir()
+	dir, released := retrying(t, lib, Options{StateDir: state})
+	log := logs(t)
+	if err := os.WriteFile(filepath.Join(dir, "Top", "X.3mf"), []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitRelease(t, released)
+	eventually(t, "the replace", func() bool { return libraryHas(lib, map[string]string{"4/X.3mf": "new"}) })
+	eventually(t, "the queue to empty", func() bool { return len(queued(t, state)) == 0 })
+	lib.locked(func() {
+		if lib.uploads != 1 || !lib.deleted[10] {
+			t.Fatalf("uploads %d, old deleted %v: %+v", lib.uploads, lib.deleted[10], lib.files)
+		}
+		if len(lib.keys) < 2 || slices.ContainsFunc(lib.keys, func(k string) bool { return k != lib.keys[0] }) || len(lib.keys[0]) != 32 {
+			t.Fatalf("keys: %q", lib.keys)
+		}
+	})
+	if strings.Contains(log.String(), "conflict copy") {
+		t.Fatalf("log: %s", log.String())
+	}
+}
+
+// A record from a build before the key gets one when it is loaded, kept on disk and
+// sent with every attempt.
+func TestAnOlderRecordGetsAKeyWhenLoaded(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.folder(4, "Top", 0)
+	lib.down = true
+	state := t.TempDir()
+	path := writeQueued(t, state, 1, record{FolderID: 4, Name: "a.3mf", Size: 3, SavedAt: time.Now()}, "abc")
+	retrying(t, lib, Options{StateDir: state})
+	logs(t)
+	rec, err := readRecord(path)
+	if err != nil || rec.Attempt == nil || len(rec.Attempt.Key) != 32 {
+		t.Fatalf("record: %+v %v", rec, err)
+	}
+	eventually(t, "two attempts", func() bool {
+		var n int
+		lib.locked(func() { n = len(lib.keys) })
+		return n >= 2
+	})
+	lib.setDown(false)
+	eventually(t, "the upload", func() bool { return libraryHas(lib, map[string]string{"4/a.3mf": "abc"}) })
+	lib.locked(func() {
+		for _, k := range lib.keys {
+			if k != rec.Attempt.Key {
+				t.Fatalf("keys %q, record's %q", lib.keys, rec.Attempt.Key)
+			}
+		}
+	})
+}

@@ -60,6 +60,18 @@ type record struct {
 	// could not be applied to it: the next pass renames that file instead of sending
 	// the write again.
 	Uploaded *uploadedAs `json:"uploaded,omitempty"`
+	// Attempt is the Idempotency-Key every attempt sends, so an attempt whose answer
+	// never arrived (the upload ran, then a deploy cut the connection) is answered with
+	// its file by the next, not uploaded twice; and the folder and name it was last
+	// sent under, Name "" if none. A record written before it gets one when loaded.
+	Attempt *attempt `json:"attempt,omitempty"`
+}
+
+// attempt is a write's Idempotency-Key and the request it was last sent with.
+type attempt struct {
+	Key      string `json:"idempotency_key"`
+	FolderID int    `json:"folder_id"`
+	Name     string `json:"name"`
 }
 
 // uploadedAs is a sent write's file, where it was sent.
@@ -248,6 +260,12 @@ func (q *queue) load() {
 		if s.err != nil {
 			slog.Warn("unsent write skipped: its record cannot be read; it is left in place", "path", s.dir, "err", s.err)
 			continue
+		}
+		if s.rec.Attempt == nil {
+			s.rec.Attempt = &attempt{Key: api.NewKey()}
+			if err := writeRecord(s.dir, s.rec); err != nil {
+				slog.Warn("keeping an unsent write's Idempotency-Key failed; it is minted again at the next mount", "path", s.dir, "err", err)
+			}
 		}
 		q.entries[s.seq] = &entry{seq: s.seq, dir: s.dir, rec: s.rec, due: q.now()}
 		slog.Warn("unsent write queued from an earlier mount", "path", s.dir, "folder", s.rec.FolderID, "name", s.rec.Name)
@@ -774,10 +792,9 @@ func (t *tree) send(ctx context.Context, e *entry) {
 		got = api.File{ID: u.ID, Name: u.Name, FolderID: u.FolderID, Size: rec.Size, Created: rec.Created}
 		sentAs.Name, sentAs.FolderID = u.Name, u.FolderID
 	} else {
-		var name string
-		name, conflict, err = t.target(ctx, rec.FolderID, rec.Name, rec.Bases, rec.SavedAt)
-		if err == nil {
-			got, err = t.uploadFile(ctx, rec.FolderID, name, e.contents())
+		got, conflict, err = t.sendOnce(ctx, e, rec)
+		if conflict {
+			sentAs.Name = got.Name
 		}
 	}
 	if err != nil {
@@ -806,7 +823,50 @@ func (t *tree) send(ctx context.Context, e *entry) {
 	}
 }
 
-func (t *tree) uploadFile(ctx context.Context, folderID int, name, path string) (api.File, error) {
+// sendOnce uploads a queued write with its Idempotency-Key, under target's name. When
+// another file has the write's name and the last attempt went under that name, that
+// file may be the last attempt's, whose answer was lost: the same request is sent
+// again, and the route answers it with that file. If it answers with a new file
+// instead, the name is someone else's, and the new file is renamed to the conflict
+// copy. It returns the file and whether it is a conflict copy.
+func (t *tree) sendOnce(ctx context.Context, e *entry, rec record) (api.File, bool, error) {
+	q := t.unsent
+	a := *rec.Attempt
+	name, conflict, others, err := t.target(ctx, rec.FolderID, rec.Name, rec.Bases, rec.SavedAt)
+	if err != nil {
+		return api.File{}, false, err
+	}
+	again := conflict && a.Name == rec.Name && a.FolderID == rec.FolderID
+	if again {
+		name, conflict = rec.Name, false
+	}
+	if a.Name != name || a.FolderID != rec.FolderID {
+		if err := q.update(e, func(r *record) { r.Attempt = &attempt{Key: a.Key, FolderID: rec.FolderID, Name: name} }); err != nil {
+			slog.Error("updating an unsent write's record failed", "path", e.dir, "err", err)
+		}
+	}
+	got, err := t.uploadFile(ctx, rec.FolderID, name, a.Key, e.contents())
+	if err != nil {
+		return api.File{}, false, err
+	}
+	if again && !slices.Contains(others, got.ID) {
+		conflict = true
+		copyName := conflictName(rec.Name, rec.SavedAt)
+		if moved, err := t.lib.UpdateFile(ctx, got.ID, &copyName, nil); err != nil {
+			slog.Warn("renaming a write sent beside another file of its name to its conflict copy failed; both keep the name",
+				"folder", rec.FolderID, "name", rec.Name, "file", got.ID, "err", err)
+		} else {
+			got.Name = moved.Name
+		}
+	}
+	if conflict {
+		slog.Warn("another file took the name of a write; it is sent as a conflict copy",
+			"folder", rec.FolderID, "name", rec.Name, "others", others, "bases", ids(rec.Bases), "file", got.ID, "copy", got.Name)
+	}
+	return got, conflict, nil
+}
+
+func (t *tree) uploadFile(ctx context.Context, folderID int, name, key, path string) (api.File, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return api.File{}, err
@@ -814,27 +874,29 @@ func (t *tree) uploadFile(ctx context.Context, folderID int, name, path string) 
 	defer f.Close()
 	ctx, cancel := context.WithTimeout(ctx, uploadTimeout)
 	defer cancel()
-	return t.lib.Upload(ctx, folderID, name, f)
+	return t.lib.Upload(ctx, folderID, name, key, f)
 }
 
 // target is the name a write is sent under, from a fresh listing of its folder, so a
 // save never overwrites a newer one: its own name if no file has it or only its bases
-// do, else a conflict copy's (conflictName), and then no base is deleted. Library
-// times are never compared with local ones.
-func (t *tree) target(ctx context.Context, folderID int, name string, bases []base, savedAt time.Time) (string, bool, error) {
+// do, else a conflict copy's (conflictName), and then no base is deleted; others are
+// the files that are not its bases under its name. Library times are never compared
+// with local ones.
+func (t *tree) target(ctx context.Context, folderID int, name string, bases []base, savedAt time.Time) (string, bool, []int, error) {
 	l, err := t.lib.List(ctx, folderID, true)
 	if err != nil {
-		return "", false, err
+		return "", false, nil, err
 	}
+	var others []int
 	for _, f := range l.Files {
 		if f.FolderID == folderID && f.Name == name && !ours(bases, f) {
-			copyName := conflictName(name, savedAt)
-			slog.Warn("another file took the name of a write; it is sent as a conflict copy",
-				"folder", folderID, "name", name, "file", f.ID, "bases", ids(bases), "copy", copyName)
-			return copyName, true, nil
+			others = append(others, f.ID)
 		}
 	}
-	return name, false, nil
+	if len(others) > 0 {
+		return conflictName(name, savedAt), true, others, nil
+	}
+	return name, false, nil, nil
 }
 
 // deleteBases deletes, once a write that replaces them is sent, the bases that are
@@ -845,6 +907,10 @@ func (t *tree) deleteBases(ctx context.Context, bases []base, newID int) syscall
 	listed := map[int][]api.File{}
 	var errno syscall.Errno
 	for _, b := range bases {
+		if b.ID == newID {
+			// The write's own file, answered again for its Idempotency-Key.
+			continue
+		}
 		files, ok := listed[b.FolderID]
 		if !ok {
 			l, err := t.lib.List(ctx, b.FolderID, true)

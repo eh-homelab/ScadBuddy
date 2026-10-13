@@ -25,7 +25,7 @@ import (
 type Library interface {
 	List(ctx context.Context, folderID int, all bool) (api.Listing, error)
 	Download(ctx context.Context, fileID int, w io.Writer) error
-	Upload(ctx context.Context, folderID int, name string, r io.Reader) (api.File, error)
+	Upload(ctx context.Context, folderID int, name, key string, r io.Reader) (api.File, error)
 	UpdateFile(ctx context.Context, fileID int, name *string, folderID *int) (api.File, error)
 	DeleteFiles(ctx context.Context, ids ...int) error
 	Mkdir(ctx context.Context, parentID int, name string) (api.Folder, error)
