@@ -65,6 +65,14 @@ from scadbuddy.library.library_file_operations import (
     LibraryFilesRequest,
     LibraryRestoreResult,
 )
+from scadbuddy.library.library_write_operations import (
+    LibraryEntryUpdated,
+    LibraryFileUpdate,
+    LibraryFolder,
+    LibraryFolderCreate,
+    LibraryFolderDeleteResult,
+    LibraryFolderUpdate,
+)
 from scadbuddy.library.settings_store import ModelPrintChoices, SettingsStore
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.rack.component import RackUsageDep
@@ -79,6 +87,7 @@ router = APIRouter(prefix="/print/library", tags=["print"])
 LIBRARY_FILES_SUBJECT = "library-files"
 
 FileIdPath = Annotated[int, Path(ge=1)]
+FolderIdPath = Annotated[int, Path(ge=1)]
 
 
 @router.get("", response_model=LibraryListing, summary="Bambuddy's library, one folder at a time")
@@ -158,6 +167,108 @@ async def post_library_restore(
         idempotency_key=idempotency_key,
     )
     return operation_answer(result, LibraryRestoreResult)
+
+
+@router.patch(
+    "/folders/{folder_id}",
+    response_model=LibraryFolder,
+    summary="Rename or move a library folder",
+    responses=OPERATION_RESPONSES,
+)
+async def patch_library_folder(
+    folder_id: FolderIdPath,
+    body: LibraryFolderUpdate,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> LibraryFolder | JSONResponse:
+    """A partial update through Bambuddy: ``name``, ``parent_id`` (``0`` is the top
+    level), or both (#2686)."""
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["library_folder_update"],
+        subject=LIBRARY_FILES_SUBJECT,
+        request={"folder_id": folder_id, "update": body.model_dump(mode="json", exclude_none=True)},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, LibraryFolder)
+
+
+@router.post(
+    "/folders/{folder_id}/delete",
+    response_model=LibraryFolderDeleteResult,
+    summary="Delete a library folder and everything in it",
+    responses=OPERATION_RESPONSES,
+)
+async def post_library_folder_delete(
+    folder_id: FolderIdPath,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> LibraryFolderDeleteResult | JSONResponse:
+    """Deletes the folder's files as ``/delete`` does, then its folders, deepest first
+    (#2686). A file a print waiting in Bambuddy's queue names is a 409 before anything
+    is deleted. A folder holding a file Bambuddy skipped, and its ancestors, are kept."""
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["library_folder_delete"],
+        subject=LIBRARY_FILES_SUBJECT,
+        request={"folder_id": folder_id},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, LibraryFolderDeleteResult)
+
+
+@router.post(
+    "/folders",
+    response_model=LibraryFolder,
+    summary="Make a library folder",
+    responses=OPERATION_RESPONSES,
+)
+async def post_library_folder(
+    body: LibraryFolderCreate,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> LibraryFolder | JSONResponse:
+    """A new folder through Bambuddy, at the top level without ``parent_id`` (#2686)."""
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["library_folder_create"],
+        subject=LIBRARY_FILES_SUBJECT,
+        request=body,
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, LibraryFolder)
+
+
+@router.patch(
+    "/{file_id}",
+    response_model=LibraryEntryUpdated,
+    summary="Rename or move a library file",
+    responses=OPERATION_RESPONSES,
+)
+async def patch_library_file(
+    file_id: FileIdPath,
+    body: LibraryFileUpdate,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> LibraryEntryUpdated | JSONResponse:
+    """A partial update through Bambuddy: ``filename``, ``folder_id`` (``0`` is the top
+    level), or both (#2686)."""
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds["library_file_update"],
+        subject=LIBRARY_FILES_SUBJECT,
+        request={"file_id": file_id, "update": body.model_dump(mode="json", exclude_none=True)},
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, LibraryEntryUpdated)
 
 
 @router.get(
