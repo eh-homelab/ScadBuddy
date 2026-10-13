@@ -6,6 +6,7 @@ import json
 import re
 import zipfile
 from pathlib import Path
+from typing import Any
 from xml.etree import ElementTree as ET
 
 import pytest
@@ -13,6 +14,7 @@ import trimesh
 
 from scadbuddy.core.paths import RENDERS_DIR_NAME
 from scadbuddy.library.deeplink import EDIT_NOTE, edit_url
+from scadbuddy.render import provenance
 from scadbuddy.render.bambu3mf import (
     CORE_NS,
     PRODUCTION_NS,
@@ -96,6 +98,44 @@ def test_every_other_part_survives_byte_for_byte(written: Path) -> None:
     assert {name: payload for name, payload in after.items() if name != "3D/3dmodel.model"} == {
         name: payload for name, payload in before.items() if name != "3D/3dmodel.model"
     }
+
+
+def _compressed(path: Path) -> dict[str, tuple[int, int, int, int]]:
+    with zipfile.ZipFile(path) as archive:
+        return {
+            info.filename: (info.compress_type, info.CRC, info.compress_size, info.file_size)
+            for info in archive.infolist()
+        }
+
+
+def test_every_other_part_is_copied_as_its_compressed_bytes(tmp_path: Path) -> None:
+    """#2755: the meshes are not inflated and deflated again. Written here at a
+    compression level the stamp would never choose, so a re-deflate would change
+    their compressed size."""
+    source = tmp_path / "source.3mf"
+    mesh = b"<vertex x='1' y='2' z='3'/>" * 20_000
+    with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
+        archive.writestr("3D/3dmodel.model", f'<model xmlns="{CORE_NS}">\n<resources/>\n</model>')
+        archive.writestr("3D/Objects/object_1.model", mesh)
+        archive.writestr(
+            zipfile.ZipInfo("Metadata/plate_1.png"), b"\x89PNG" + bytes(range(256)) * 4
+        )
+    before = _compressed(source)
+    target = tmp_path / "out" / "model.3mf"
+    target.parent.mkdir()
+
+    stamp(target, PROVENANCE, source=source)
+
+    after = _compressed(target)
+    assert list(after) == list(before)
+    for name in ("3D/Objects/object_1.model", "Metadata/plate_1.png"):
+        assert after[name] == before[name]
+    with zipfile.ZipFile(target) as archive:
+        assert archive.testzip() is None
+        assert archive.read("3D/Objects/object_1.model") == mesh
+    assert read(target) == PROVENANCE
+    # The source is the job's file, read and never written.
+    assert _compressed(source) == before and read(source) is None
 
 
 def test_bambu_studio_still_reads_the_root_model(written: Path) -> None:
@@ -355,15 +395,16 @@ def test_a_failed_rewrite_leaves_the_original_3mf_alone(
     """The 3MF is the deliverable; a half-written one is worse than an unstamped one."""
     original = written.read_bytes()
     calls = {"n": 0}
-    real = zipfile.ZipFile.writestr
+    # Every entry but the root model is copied raw (#2755): fail the second of those.
+    real = provenance._copy_raw
 
-    def fail_partway(self: zipfile.ZipFile, *args: object, **kwargs: object) -> None:
+    def fail_partway(*args: Any) -> None:
         calls["n"] += 1
         if calls["n"] > 1:
             raise OSError("no space left on device")
-        real(self, *args, **kwargs)  # type: ignore[arg-type]
+        real(*args)
 
-    monkeypatch.setattr(zipfile.ZipFile, "writestr", fail_partway)
+    monkeypatch.setattr(provenance, "_copy_raw", fail_partway)
     with pytest.raises(OSError, match="no space"):
         stamp(written, PROVENANCE)
 

@@ -16,9 +16,11 @@ import hashlib
 import json
 import os
 import re
+import struct
 import zipfile
 from collections.abc import Mapping
 from pathlib import Path
+from typing import BinaryIO
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape
 
@@ -147,42 +149,87 @@ def with_print_settings(project_settings: bytes, print_settings: Mapping[str, st
     return (json.dumps(settings, indent=4) + "\n").encode("utf-8")
 
 
+#: A local file header's fixed part: signature to extra-field length (APPNOTE 4.3.7).
+_LOCAL_HEADER = struct.Struct("<4s2B4HL2L2H")
+_LOCAL_SIGNATURE = b"PK\x03\x04"
+#: General purpose flag bit 0: the entry is encrypted, so its bytes are not copied as is.
+_ENCRYPTED = 0x1
+
+
+def _copy_raw(source: BinaryIO, info: zipfile.ZipInfo, target: zipfile.ZipFile) -> None:
+    """Append ``info``'s entry to ``target`` as its compressed bytes stand (#2755).
+
+    `zipfile` has no public way to move an entry without inflating and deflating it
+    again, and a saved 3MF is mostly mesh objects the stamp never touches: rewriting
+    them cost seconds of CPU per save (3.5 s for a 14 MB arranged 3MF in the API pod).
+    The entry keeps its CRC and sizes, so a reader verifies it exactly as before. It
+    writes through the `ZipFile`'s own file and bookkeeping, as `writestr` does."""
+    source.seek(info.header_offset)
+    header = _LOCAL_HEADER.unpack(source.read(_LOCAL_HEADER.size))
+    if header[0] != _LOCAL_SIGNATURE:
+        raise zipfile.BadZipFile(f"no local header for {info.filename}")
+    source.seek(info.header_offset + _LOCAL_HEADER.size + header[-2] + header[-1])
+    data = source.read(info.compress_size)
+    entry = zipfile.ZipInfo(info.filename, date_time=ZIP_TIMESTAMP)
+    entry.compress_type = info.compress_type
+    entry.CRC = info.CRC
+    entry.compress_size = info.compress_size
+    entry.file_size = info.file_size
+    fp = target.fp
+    assert fp is not None
+    entry.header_offset = fp.tell()
+    fp.write(entry.FileHeader())
+    fp.write(data)
+    target.filelist.append(entry)
+    target.NameToInfo[entry.filename] = entry
+    target.start_dir = fp.tell()
+    target._didModify = True  # type: ignore[attr-defined]  # what writestr sets
+
+
 def stamp(
-    path: Path, provenance: Provenance, print_settings: Mapping[str, str] | None = None
+    path: Path,
+    provenance: Provenance,
+    print_settings: Mapping[str, str] | None = None,
+    *,
+    source: Path | None = None,
 ) -> None:
     """Rewrite ``path`` with the provenance on its root model and the template's
     ``print_settings`` in its project settings, leaving the rest alone. Written when the
-    output is saved, so the saved file is what a download serves (#2652)."""
-    with zipfile.ZipFile(path) as archive:
-        entries = [
-            (info.filename, info.compress_type, archive.read(info.filename))
-            for info in archive.infolist()
-        ]
-    rewritten = [
-        (
-            name,
-            compression,
-            _stamped_root_model(payload.decode("utf-8"), provenance).encode("utf-8")
-            if name == ROOT_MODEL
-            else with_print_settings(payload, print_settings)
-            if name == PROJECT_SETTINGS_NAME and print_settings
-            else payload,
-        )
-        for name, compression, payload in entries
-    ]
+    output is saved, so the saved file is what a download serves (#2652). With
+    ``source``, the 3MF is read from there and written to ``path``: a save stamps the
+    job's file as it copies it, rather than copying it and then rewriting the copy.
+    Only the entries it changes are read and written again; every other one is copied
+    as its compressed bytes (#2755)."""
+    origin = path if source is None else source
     # Written beside the original and moved over it, never truncated in place: the 3MF
     # is the deliverable, and a rewrite that dies halfway would otherwise leave a
     # partial file where a whole one used to be.
     temporary = path.with_name(path.name + ".stamping")
     try:
-        with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as archive:
-            for name, compression, payload in rewritten:
-                info = zipfile.ZipInfo(name, date_time=ZIP_TIMESTAMP)
-                # Each entry is rewritten the way it was written: the 3MF writer stores
-                # the cover PNGs uncompressed on purpose (#107), and deflating already
-                # compressed image data here would spend CPU to no effect.
-                info.compress_type = compression
-                archive.writestr(info, payload)
+        with (
+            origin.open("rb") as raw,
+            zipfile.ZipFile(raw) as archive,
+            zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as written,
+        ):
+            for info in archive.infolist():
+                settings = info.filename == PROJECT_SETTINGS_NAME and bool(print_settings)
+                changed = info.filename == ROOT_MODEL or settings
+                if not changed and not info.flag_bits & _ENCRYPTED:
+                    _copy_raw(raw, info, written)
+                    continue
+                payload = archive.read(info.filename)
+                if info.filename == ROOT_MODEL:
+                    payload = _stamped_root_model(payload.decode("utf-8"), provenance).encode(
+                        "utf-8"
+                    )
+                elif settings:
+                    assert print_settings is not None
+                    payload = with_print_settings(payload, print_settings)
+                entry = zipfile.ZipInfo(info.filename, date_time=ZIP_TIMESTAMP)
+                # Rewritten the way it was written: the 3MF writer stores the cover PNGs
+                # uncompressed on purpose (#107).
+                entry.compress_type = info.compress_type
+                written.writestr(entry, payload)
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
