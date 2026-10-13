@@ -520,7 +520,8 @@ class ScadBuddyRunner:
             return
         stored = setting[0] if setting else None
         url = stored.get("url") if isinstance(stored, dict) else None
-        if not isinstance(url, str) or not url:
+        # As the route stores it: an http(s) URL, else the worker's own.
+        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
             url = self._subagent_url
         if self._agents is None:
             self._agents = subagents.load_agents(self._agents_dir)

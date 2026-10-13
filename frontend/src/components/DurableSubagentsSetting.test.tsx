@@ -48,13 +48,17 @@ describe('DurableSubagentsSetting', () => {
   })
 
   it('is hidden when the agent service or its database is not there', async () => {
+    let answered = false
     server.use(
-      http.get('/api/v1/ai/settings/durable-subagents', () =>
-        HttpResponse.json({ detail: 'AI features need the database' }, { status: 503 }),
-      ),
+      http.get('/api/v1/ai/settings/durable-subagents', () => {
+        answered = true
+        return HttpResponse.json({ detail: 'AI features need the database' }, { status: 503 })
+      }),
     )
-    renderPage(<DurableSubagentsSetting />)
-    await new Promise((r) => setTimeout(r, 50))
-    await waitFor(() => expect(screen.queryByText('Durable subagents')).not.toBeInTheDocument())
+    const { container } = renderPage(<DurableSubagentsSetting />)
+    await waitFor(() => expect(answered).toBe(true))
+    // A settled 503 leaves nothing rendered, not a section waiting on its data.
+    await new Promise((r) => setTimeout(r, 0))
+    expect(container).toBeEmptyDOMElement()
   })
 })

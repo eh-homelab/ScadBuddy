@@ -116,6 +116,7 @@ async def test_a_segment_gives_its_subagents_the_loopback_server_for_its_turn(
         ),
         ('{"url": null, "peers": []}', "http://127.0.0.1:1/x"),
         ('"nonsense"', "http://127.0.0.1:1/x"),
+        ('{"url": "file:///etc/passwd", "peers": []}', "http://127.0.0.1:1/x"),
     ):
         await agent_db.execute(
             "INSERT INTO ai_settings (key, value) VALUES ('durable_subagents', %s::jsonb)"
