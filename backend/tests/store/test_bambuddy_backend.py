@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import tracemalloc
 from collections.abc import Awaitable, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
@@ -33,8 +35,10 @@ from scadbuddy.store.bambuddy import (
     folder_name,
     instance_key,
 )
-from scadbuddy.store.content import BlobMissingError, BlobScope
-from scadbuddy.store.index import Pool
+from scadbuddy.store.cache import CachedBlobStore
+from scadbuddy.store.content import BlobMissingError, BlobScope, ContentStore
+from scadbuddy.store.index import BlobIndex, Pool
+from scadbuddy.store.local import LocalBlobStore
 from tests.bambuddy.conftest import BASE_URL, recorded_schema, recording, shaped
 from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 from tests.support.store import store_pool
@@ -855,3 +859,51 @@ async def test_a_file_moved_out_of_work_after_the_listing_is_kept(pool: Pool) ->
     assert await backend.sweep_unrecorded(cutoff=CUTOFF) == []
     assert not delete.called
     await backend.aclose()
+
+
+class _DrainingBambuddy(httpx.AsyncBaseTransport):
+    """Bambuddy's folder and upload routes, the upload read a chunk at a time and let go,
+    as a socket would: what it costs is what ScadBuddy holds to send it (#503)."""
+
+    def __init__(self) -> None:
+        self.uploaded = 0
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/api/v1/library/folders":
+            return inbox_tree()
+        if request.method == "POST" and request.url.path == "/api/v1/library/folders/":
+            return await create_folder(
+                httpx.Request("POST", request.url, content=await request.aread())
+            )
+        assert (request.method, request.url.path) == ("POST", "/api/v1/library/files")
+        assert isinstance(request.stream, httpx.AsyncByteStream)
+        async for chunk in request.stream:
+            self.uploaded += len(chunk)
+        return uploaded()
+
+
+async def test_a_piece_is_packed_and_uploaded_a_chunk_at_a_time(pool: Pool, tmp_path: Path) -> None:
+    """#503: a piece was packed into bytes and uploaded from them, so publishing one held
+    it whole (twice, with the archive): a 1 GiB result needed 1 GiB more memory. Its peak
+    is now a chunk's, whatever the piece's size."""
+    sink = _DrainingBambuddy()
+    http = httpx.AsyncClient(transport=sink)
+    content = ContentStore(BambuddyContentBackend(target(), pool, http=http), BlobIndex(pool))
+    cache = CachedBlobStore(
+        LocalBlobStore(tmp_path / "cache"), content, max_bytes=1 << 40, min_age=0.0
+    )
+    size = 48 * 2**20
+    with (cache.dir_for("big") / "model.3mf").open("wb") as out:
+        for _ in range(size // 2**20):
+            out.write(os.urandom(2**20))  # incompressible: the archive is as large
+
+    tracemalloc.start()
+    try:
+        await cache.publish("big", scope=SCOPE)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+        await http.aclose()
+
+    assert sink.uploaded > size
+    assert peak < 8 * 2**20, f"publishing a {size >> 20} MiB piece peaked at {peak >> 20} MiB"
