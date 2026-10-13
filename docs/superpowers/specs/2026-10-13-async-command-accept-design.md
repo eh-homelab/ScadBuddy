@@ -83,7 +83,8 @@ and answers it exactly as the POST would have.
   written once, with a small per-kind adapter that turns the Update's answer into that
   route's response (§5.3).
 - **The healthy path does not change.** On a healthy worker the Update answers in
-  ~100–300 ms, inside the short wait, so the POST answers 200 as it does now, with no
+  ~100–300 ms, inside the short wait, so the POST answers as it does now (a render's
+  202 `RenderAccepted`, a print run's 202 or 200), with no `Preference-Applied` and no
   extra round trip.
 - **It is backed by measurement, not docs alone.** Measured on 2026-10-13 against the
   Temporal dev server (temporalio 1.34, a task queue with no worker):
