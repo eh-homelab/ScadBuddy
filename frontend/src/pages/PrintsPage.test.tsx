@@ -790,3 +790,13 @@ describe('now printing (#977)', () => {
     expect(await list()).toBeInTheDocument()
   })
 })
+
+describe('up next (#2351)', () => {
+  it("shows Bambuddy's queue between what is printing and the history", async () => {
+    render()
+    const queue = await screen.findByRole('region', { name: 'Up next' })
+    expect(within(queue).getByTestId('queue-item-259')).toHaveTextContent('Luna keychain')
+    const now = await screen.findByRole('region', { name: 'Now printing' })
+    expect(now.compareDocumentPosition(queue) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+})
