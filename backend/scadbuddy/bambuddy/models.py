@@ -38,6 +38,11 @@ class PresetRef(BambuddyModel):
     id: str
 
 
+#: One process setting's value as a process preset stores it: a string, or a list of
+#: strings for a per-extruder-variant option (#717).
+ProcessValue = str | list[str]
+
+
 class Preset(PresetRef):
     name: str | None = None
     filament_type: str | None = None
@@ -704,11 +709,6 @@ class MoveResult(BambuddyModel):
     moved: int = 0
     skipped: int = 0
     skipped_reasons: list[MoveSkip] = Field(default_factory=list)
-
-
-#: One process setting's value as a process preset stores it: a string, or a list of
-#: strings for a per-extruder-variant option.
-ProcessValue = str | list[str]
 
 
 class SliceRequest(BambuddyModel):

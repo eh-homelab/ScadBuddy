@@ -905,8 +905,6 @@ export function PrintPicker({
                     />
                   )}
                   <NozzlePlanLine plan={check.verdict?.nozzle_plan} stale={!check.current} />
-                  {/* #717: outside Advanced, since a suggested profile is on until switched off. */}
-                  <FilamentProfilesStep suggestions={filamentProfiles.suggestions} onToggle={filamentProfiles.toggle} />
                   {target && known && (
                     <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2">
                       <legend className="px-1 text-[13px] text-ink">Arrange</legend>
@@ -959,7 +957,10 @@ export function PrintPicker({
                     </fieldset>
                   )}
 
-                  {picker.advanced && !sliced && filaments && (filaments.slots ?? []).length > 0 && (
+                  {/* #717: outside Advanced, since a suggested profile is on until switched off. */}
+                  <FilamentProfilesStep suggestions={filamentProfiles.suggestions} onToggle={filamentProfiles.toggle} />
+
+                  {picker.advanced && filaments && (filaments.slots ?? []).length > 0 && (
                     <PresetOverrides
                       size={size}
                       slots={filaments.slots ?? []}

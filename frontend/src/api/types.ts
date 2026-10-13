@@ -170,6 +170,9 @@ export type OperationAccepted = Schemas['OperationAccepted']
 /** spec 2026-09-27 — the spool-first print dialog's own choices. */
 export type ChoicesView = Schemas['ChoicesView']
 export type PrintChoices = Schemas['PrintChoices']
+/** #717 — filament profiles: cited process changes suggested for a spool. */
+export type FilamentProfile = Schemas['FilamentProfile']
+export type ProfilePreview = Schemas['ProfilePreview']
 export type NozzleChoice = Schemas['NozzleChoice']
 export type InstalledNozzle = Schemas['InstalledNozzle']
 export type TierOption = Schemas['TierOption']
@@ -231,9 +234,6 @@ export type LibraryFileObject = Schemas['LibraryFileObject']
 /** #2351 — Bambuddy's spool inventory and loaded slots, read through `/farm/inventory`. */
 export type InventoryView = Schemas['InventoryView']
 export type InventorySpool = Schemas['InventorySpool']
-/** #717 — filament profiles: cited process changes suggested for a spool. */
-export type FilamentProfile = Schemas['FilamentProfile']
-export type ProfilePreview = Schemas['ProfilePreview']
 
 /**
  * #89 — run tracking.
