@@ -97,6 +97,7 @@ export function withSlicedGrams(
     ...options,
     slots: (options.slots ?? []).map((slot) => {
       const grams = sliced.get(slot.slot_id)
+      // A slot the slice gives no grams keeps the 3MF's own figure: the intended fallback.
       return grams != null && grams > 0 ? { ...slot, used_grams: grams } : slot
     }),
   }

@@ -29,6 +29,7 @@ import { BackfillProgress, BackfillPrompt } from './BackfillPrompt'
 import { openExternal } from '../lib/embed'
 import { plateLabel } from '../lib/plate'
 import { resolvedColors } from '../lib/plateColors'
+import { checkPlan, withSlicedGrams } from '../lib/filaments'
 import { printChoicesOf } from '../lib/printChoices'
 import { resolveOptions } from '../lib/printOptions'
 import {
@@ -43,7 +44,6 @@ import { useAsync } from '../lib/useAsync'
 import { CarryBox, useFilamentPlan } from '../lib/useFilamentPlan'
 import { usePrintCheck } from '../lib/usePrintCheck'
 import { usePreviewSlice } from '../lib/usePreviewSlice'
-import { checkPlan, withSlicedGrams } from '../lib/filaments'
 import { usePrintChoices } from '../lib/usePrintChoices'
 import { usePrintProgress } from '../lib/usePrintProgress'
 import { useRunPrint } from '../lib/useRunPrint'
@@ -619,18 +619,21 @@ export function PrintPicker({
       : (warnings ?? []).filter((warning) => !NOZZLE_WARNINGS.has(warning.kind))
   /**
    * #2365 — the background slice's grams, for the plate the slots describe: the one
-   * chosen to print, when it is the one sliced. "All plates" slices plate 1 alone, which
-   * is not every plate's need.
+   * chosen to print, when its result is of that plate. The result is kept, stale, while
+   * the next slice runs or after it fails, so it can be another plate's (#2714 review):
+   * the plate it was sliced for decides, not the plate on screen. "All plates" slices
+   * plate 1 alone, which is not every plate's need.
    */
-  const slicedForSlots = plate !== 'all' && previewPlate === plate ? previewSlice.result : null
+  const slicedForSlots = plate !== 'all' && previewSlice.plateId === plate ? previewSlice.result : null
   const pickerOptions = useMemo(
     () => (filaments ? withSlicedGrams(filaments, slicedForSlots) : null),
     [filaments, slicedForSlots],
   )
   // The check reads grams from the 3MF, which an unsliced upload does not carry, so a
   // spool short of what the slice needs is said here (#2365).
+  // Not from a stale slice: Checks would state an old need as this one's.
   const slicedShort =
-    slicedForSlots && pickerOptions
+    slicedForSlots && !previewSlice.stale && pickerOptions
       ? checkPlan(pickerOptions, plan, effectiveCopies).filter(
           (warning) =>
             warning.kind === 'low-filament' &&
