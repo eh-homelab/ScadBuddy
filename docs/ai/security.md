@@ -1074,24 +1074,40 @@ the render timeout, the queue's workers and the body-size gates in
 cannot tell a person dragging a slider from an agent rendering in a loop, so the
 agent bounds its own callers before a render reaches the queue
 ([`agent/src/tools/renderLimits.ts`](../../agent/src/tools/renderLimits.ts), used by
-`render_model` in [`customizer.ts`](../../agent/src/tools/customizer.ts)):
+`render_model` in [`customizer.ts`](../../agent/src/tools/customizer.ts) and `arrange`
+in [`arrange.ts`](../../agent/src/tools/arrange.ts), on every path a tool runs: in
+process, over `/mcp` and as a Temporal activity, all sharing one limiter):
 
-- per principal (`Principal.id`: a token, an OIDC subject, an anonymous MCP session,
-  or the browser user, whose harness sessions share one count);
-- at most **2** of its renders in flight at once, counted until the backend job
-  settles (done, failed or cancelled). A render `render_model` hands back still
-  running keeps its slot while the agent polls the job in the background, for at most
-  **30 minutes**, or until the backend stops answering for it (PR #752 review). Past
-  30 minutes the slot is freed even if the job still runs, so for a job that long (a
-  raised render timeout, applied per colour) this cap is best effort, and only the
-  backend's shared render concurrency bounds it;
-- at most **30** started in any **10 minutes**.
+- per principal (`Principal.id`: a token, an OIDC subject, or the browser user, whose
+  harness sessions and sub-agents share one count). Anonymous MCP principals are one
+  per MCP session, which a caller opens at will, so they all share the one count
+  `anonymous`: a new session buys no new slots;
+- at most **4** of its renders in flight at once (an override per principal may change
+  that), and optionally at most N of every principal's together, counted until the
+  backend job settles (done, failed or cancelled). A render past either bound **waits**
+  for a slot, first come first served, until its caller aborts, rather than being
+  refused. At most **100** of one principal's renders may wait; past that a call is
+  refused. A render `render_model` hands back still running keeps its slot while the
+  agent polls the job in the background, for at most **30 minutes** (PR #752 review).
+  Past 30 minutes the slot is freed even if the job still runs, so for a job that long
+  this cap is best effort, and only the backend's shared render concurrency bounds it;
+- at most **30** started in any **10 minutes** (0 turns it off). Renders waiting for a
+  slot count against it as if started, and a waiting render is checked again when it
+  starts, so a burst cannot queue past the cap.
+
+The numbers are a setting (`ai_settings.render_limits`, Settings → "Assistant render
+limits", `GET`/`PUT /api/v1/ai/settings/render-limits` in
+[`routes/renderLimits.ts`](../../agent/src/routes/renderLimits.ts)), written only
+through the UI-origin gate (`uiRequestProblem`, audited as the browser user) and
+validated (integers in range; a stored value out of range falls back to its default).
+The limiter re-reads it at every render it starts and settles and while any render
+waits, so a change applies without a restart; a failed read keeps the last limits.
+The Save button is user-only, so an agent driving the page cannot raise its own limits.
 
 A refusal is an error result that names the limit and when to try again, and nothing is
 sent to the backend. The counts are in memory. They bound a burst, not a total, so a
-restart clears them, and there is no new state or setting. A principal with nothing in
-flight and nothing started in the window is dropped, so the counts hold only recent
-callers (anonymous MCP principals are one per session).
+restart clears them. A principal with nothing in flight and nothing started in the
+window is dropped, so the counts hold only recent callers.
 
 ## Known limitations
 
