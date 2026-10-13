@@ -21,7 +21,7 @@ from scadbuddy.flows.history import outward_since
 from scadbuddy.flows.operations import FLOW_DECIDE, flow_kinds, request_id
 from tests.flows.fake_api import Outward
 from tests.flows.flows_support import HASH_KEY, AgentTiers, Keys, history_payloads, script
-from tests.flows.test_project_replay import HISTORIES
+from tests.flows.test_project_replay import HISTORIES, RECORD
 
 pytestmark = [pytest.mark.requires_temporal, pytest.mark.requires_postgres]
 
@@ -418,6 +418,70 @@ async def test_an_outward_turn_tool_waits_for_approval(
     assert served.calls == [
         ("turn:scadbuddy_http__http_request", f"tool-{call_id}", {"method": "POST"})
     ]
+    if RECORD:
+        # `turned.json` (test_project_replay.py), recorded on the workflow before #2937.
+        handle = outward.client.get_workflow_handle(f"flow-{run_id}")
+        (HISTORIES / "turned.json").write_text((await handle.fetch_history()).to_json())
+
+
+async def test_an_approved_turn_tool_runs_on_the_replica_live_once_approved(
+    outward: Outward,
+) -> None:
+    """#2937: the replica that tiered an outward call is replaced while the call waits
+    for its approval (a deploy). The call goes to the replica live when it is approved,
+    not to the gone one's queue, where nothing would ever pick it up."""
+    queue = f"agent-tools-{uuid.uuid4().hex[:8]}"
+    served = TurnTools(f"{queue}.gone")
+    live = f"{queue}.live"
+    async with (
+        Worker(outward.client, task_queue=queue, activities=[served.tier()]),
+        Worker(outward.client, task_queue=live, activities=[served.call()]),
+    ):
+        run_id = await outward.run(
+            script("return await tool('scadbuddy_http__http_request', {'method': 'POST'})"),
+            tools_queue=queue,
+        )
+        call_id = await outward.approval(run_id)
+        served.host = live
+        decide = next(
+            k for k in flow_kinds(outward.store, Keys(), HASH_KEY) if k.name == FLOW_DECIDE
+        )
+        request = {"run_id": run_id, "call_id": call_id, "approved": True}
+        env = ActivityEnvironment(client=outward.client)
+        await env.run(decide.run, request, await env.run(decide.check, request))
+        run = await outward.finished(run_id)
+        if RECORD:
+            handle = outward.client.get_workflow_handle(f"flow-{run_id}")
+            (HISTORIES / "requeued.json").write_text((await handle.fetch_history()).to_json())
+    assert run.result == "result: 'POST done'"
+    assert served.tiered == ["scadbuddy_http__http_request"] * 2
+    assert served.calls == [
+        ("turn:scadbuddy_http__http_request", f"tool-{call_id}", {"method": "POST"})
+    ]
+
+
+async def test_a_turn_tool_on_a_gone_replicas_queue_fails_instead_of_waiting(
+    outward: Outward,
+) -> None:
+    """#2937: a call on a replica's own queue that no worker polls any more (the replica
+    died, and an activity's retries keep its queue) fails, saying so, rather than leave
+    the run Running for ever."""
+    queue = f"agent-tools-{uuid.uuid4().hex[:8]}"
+    served = TurnTools(f"{queue}.gone")
+    async with Worker(outward.client, task_queue=queue, activities=[served.tier()]):
+        run_id = await outward.run(
+            script(
+                "try:",
+                "    await tool('scadbuddy_http__http_request', {'method': 'GET'})",
+                "except Exception as e:",
+                "    return str(e)",
+            ),
+            tools_queue=queue,
+            host_queue_start_s=2,
+        )
+        run = await outward.finished(run_id)
+    assert "the agent replica that holds its state is gone" in (run.result or "")
+    assert served.calls == []
 
 
 async def test_a_turn_tool_nothing_offers_is_refused_before_any_call(
