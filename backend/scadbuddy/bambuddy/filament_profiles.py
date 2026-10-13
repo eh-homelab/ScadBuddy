@@ -21,12 +21,14 @@ Filament settings (nozzle temperature) have no verified channel yet (#284's
 
 from __future__ import annotations
 
+from fastapi import status
 from pydantic import BaseModel, Field
 
 from scadbuddy.analyzers import sources as src
 from scadbuddy.analyzers.model import Source
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import PresetRef, ProcessValue
+from scadbuddy.core.problems import ApiError
 
 
 class ProfileMatch(BaseModel):
@@ -198,3 +200,22 @@ def overrides(preview: ProfilePreview) -> dict[str, ProcessValue]:
         )
         for change in preview.changes
     }
+
+
+async def profile_overrides(
+    client: BambuddyClient, process: PresetRef | None, profile_ids: list[str]
+) -> dict[str, ProcessValue]:
+    """The process overrides of every profile a print applies, each read against the
+    print's own process preset. A profile that cannot apply as shown refuses the print,
+    naming why, so it is never sliced without it."""
+    merged: dict[str, ProcessValue] = {}
+    for profile_id in profile_ids:
+        shown = await preview(client, process, BUILTIN[profile_id])
+        if not shown.applicable:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"The {shown.profile.name} profile cannot be applied: {shown.reason} "
+                "Turn it off to print without it.",
+            )
+        merged.update(overrides(shown))
+    return merged
