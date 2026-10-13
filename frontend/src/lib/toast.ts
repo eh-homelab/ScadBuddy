@@ -14,6 +14,18 @@ function publish(next: readonly Toast[]): void {
   for (const listener of listeners) listener()
 }
 
+/** Holds a toast's timer while it is hovered or focused (WCAG 2.2.1); {@link resumeToast} restarts it. */
+export function holdToast(id: number): void {
+  clearTimeout(timers.get(id))
+  timers.delete(id)
+}
+
+export function resumeToast(id: number): void {
+  if (!toasts.some((one) => one.id === id)) return
+  holdToast(id)
+  timers.set(id, setTimeout(() => dismissToast(id), TOAST_MS))
+}
+
 export function dismissToast(id: number): void {
   clearTimeout(timers.get(id))
   timers.delete(id)

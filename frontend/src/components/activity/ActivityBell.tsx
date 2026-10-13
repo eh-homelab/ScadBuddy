@@ -1,15 +1,23 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import { api } from '../../api/client'
 import type { Activity } from '../../api/types'
 import { DEFAULT_ACTIVITY_QUERY } from '../../lib/activityQuery'
-import { getRealtime } from '../../lib/realtime'
+import { focusInto } from '../../lib/modal'
+import { getRealtime, useSubscription } from '../../lib/realtime'
 import { toast } from '../../lib/toast'
 import { principalLabel } from './labels'
 
 const SEEN_KEY = 'scadbuddy.activity.seen'
 const DEBOUNCE_MS = 500
-/** `since` filters on when a row was created, so look back this far for rows that finished now. */
+/** A steady stream of signals still re-reads at least this often. */
+const MAX_WAIT_MS = 2_000
+/**
+ * `since` filters on when a row was created, so look back this far for rows that finished
+ * now. Known limits: a job created more than this before the last open (a print longer than
+ * a day) is never counted, and `limit` 50 newest-created can push a late finisher out; a
+ * server-side `finished_since` filter would remove both.
+ */
 const LOOKBACK_MS = 24 * 3600 * 1000
 const FINISHED = 'succeeded,failed,cancelled'
 const DEFAULT_FOLLOW = ['browser']
@@ -21,7 +29,10 @@ function readSeen(): number {
   } catch {
     // Storage blocked: the bell counts from this page load.
   }
-  return Date.now()
+  // The first marker is kept, or every load before the first open would restart the count.
+  const now = Date.now()
+  writeSeen(now)
+  return now
 }
 
 function writeSeen(at: number): void {
@@ -43,25 +54,33 @@ export function ActivityBell() {
   const [follow, setFollow] = useState<string[] | null>(null)
   const [rows, setRows] = useState<Activity[]>([])
   const [listed, setListed] = useState<Activity[] | null>(null)
-  const seen = useRef(readSeen())
+  const seen = useRef(0)
+  // Before the effects below, which read it.
+  useEffect(() => {
+    seen.current = readSeen()
+  }, [])
   const [mounted] = useState(() => Date.now())
   const toasted = useRef(new Set<string>())
+  const generation = useRef(0)
+  const button = useRef<HTMLButtonElement>(null)
+  const popover = useRef<HTMLDivElement>(null)
+  const popoverId = useId()
 
-  useEffect(() => {
-    let live = true
+  const loadFollow = useCallback(() => {
     api
       .getSettings()
-      .then((settings) => live && setFollow(settings.activity_follow ?? DEFAULT_FOLLOW))
-      .catch(() => live && setFollow(DEFAULT_FOLLOW))
-    return () => {
-      live = false
-    }
+      .then((settings) => setFollow(settings.activity_follow ?? DEFAULT_FOLLOW))
+      .catch(() => setFollow((current) => current ?? DEFAULT_FOLLOW))
   }, [])
+  useEffect(loadFollow, [loadFollow])
+  // Saved in Settings (here or elsewhere): follow the new list without a reload.
+  useSubscription('settings', loadFollow)
 
   const followKey = follow === null ? null : JSON.stringify(follow)
   const refresh = useCallback(async () => {
     if (followKey === null) return
     const principals = JSON.parse(followKey) as string[]
+    const mine = ++generation.current
     const since = new Date(seen.current - LOOKBACK_MS).toISOString()
     const pages = await Promise.all(
       principals.map((principal) =>
@@ -71,6 +90,8 @@ export function ActivityBell() {
           .catch(() => [] as Activity[]),
       ),
     )
+    // A newer read started meanwhile: its answer is the fresher one.
+    if (mine !== generation.current) return
     const fresh = pages
       .flat()
       .filter((row) => finishedAt(row) > seen.current)
@@ -92,9 +113,18 @@ export function ActivityBell() {
     if (followKey === null) return
     const principals = new Set(JSON.parse(followKey) as string[])
     let timer: ReturnType<typeof setTimeout> | undefined
+    let first = 0
     const schedule = () => {
       clearTimeout(timer)
-      timer = setTimeout(() => void refresh(), DEBOUNCE_MS)
+      const now = Date.now()
+      if (first === 0) first = now
+      timer = setTimeout(
+        () => {
+          first = 0
+          void refresh()
+        },
+        Math.max(0, Math.min(DEBOUNCE_MS, first + MAX_WAIT_MS - now)),
+      )
     }
     const stop = getRealtime().subscribe('activity', (signal) => {
       if (signal !== 'resync') {
@@ -110,7 +140,31 @@ export function ActivityBell() {
     }
   }, [followKey, refresh])
 
+  // One read per followed principal per burst (the API's `principal` takes one value), and
+  // any signal from a followed principal triggers it, since the event carries no status.
   const count = rows.length
+  const close = useCallback((refocus: boolean) => {
+    setListed(null)
+    if (refocus) button.current?.focus()
+  }, [])
+  const isOpen = listed !== null
+  useEffect(() => {
+    if (!isOpen) return
+    if (popover.current) focusInto(popover.current)
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') close(true)
+    }
+    const onPointer = (event: MouseEvent) => {
+      const target = event.target as Node
+      if (!popover.current?.contains(target) && !button.current?.contains(target)) close(false)
+    }
+    document.addEventListener('keydown', onKey)
+    document.addEventListener('mousedown', onPointer)
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('mousedown', onPointer)
+    }
+  }, [isOpen, close])
   const markSeen = () => {
     const now = Date.now()
     seen.current = now
@@ -121,7 +175,9 @@ export function ActivityBell() {
   return (
     <div className="relative">
       <button
+        ref={button}
         type="button"
+        aria-controls={listed !== null ? popoverId : undefined}
         aria-label={`Activity, ${count} finished`}
         aria-expanded={listed !== null}
         onClick={() => {
@@ -146,7 +202,7 @@ export function ActivityBell() {
         </span>
       </button>
       {listed !== null && (
-        <div className="absolute right-0 top-9 z-40 w-72 rounded-[6px] border border-line bg-surface p-2 text-[13px] shadow-lg">
+        <div ref={popover} id={popoverId} className="absolute right-0 top-9 z-40 w-72 rounded-[6px] border border-line bg-surface p-2 text-[13px] shadow-lg">
           {listed.length === 0 ? (
             <p className="px-1 py-1 text-muted">Nothing new has finished.</p>
           ) : (
