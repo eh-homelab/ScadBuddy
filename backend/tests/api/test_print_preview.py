@@ -142,6 +142,44 @@ def test_a_background_slice_is_read_back_and_a_run_of_the_same_choices_queues_it
 
 
 @respx.mock
+def test_a_background_slice_totals_its_slots_not_bambuddys_first_filament(
+    client: TestClient, model: str
+) -> None:
+    """#2450: Bambuddy's ``filament_used_g`` is the first filament's grams alone, so the
+    dialog's "Filament" read less than the slots listed above it."""
+    output_id = prepared(client, model)
+    slots = [(1, 5.2), (2, 5.6), (3, 0.3)]
+    # Registered first, so it answers for the sliced file ahead of the copy's route.
+    respx.get(f"{API}/library/files/{SLICED}/filament-requirements").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "file_id": SLICED,
+                "filaments": [
+                    {"slot_id": slot, "used_grams": grams, "used_in_plate": True}
+                    for slot, grams in slots
+                ],
+            },
+        )
+    )
+    upload_route()
+    run_routes()
+    job = Job()
+    job.body["result"] = {**job.body["result"], "filament_used_g": 5.2}  # type: ignore[dict-item]
+    job.routes()
+    sliced_routes()
+
+    started = client.post(
+        f"/api/v1/print/outputs/{output_id}/preview-slice", json=body(), headers=press()
+    )
+    assert started.status_code == 200, started.text
+    answer = client.get(f"/api/v1/print/outputs/{output_id}/preview-slices/9").json()
+
+    assert [slot["grams"] for slot in answer["slots"]] == [5.2, 5.6, 0.3]
+    assert answer["filament_used_g"] == pytest.approx(11.1)
+
+
+@respx.mock
 def test_a_background_slice_with_a_project_chosen_files_nothing_in_the_project(
     client: TestClient, model: str
 ) -> None:

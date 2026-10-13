@@ -216,7 +216,6 @@ async def read_preview(
     if job.status != "completed" or job.result is None or sliced is None:
         return answer
     answer.print_time_seconds = job.result.print_time_seconds
-    answer.filament_used_g = job.result.filament_used_g
     requirements = await client.filament_requirements(sliced, plate_id=row.plate_id)
     answer.slots = [
         PreviewSlot(
@@ -227,6 +226,7 @@ async def read_preview(
         for need in requirements.filaments
         if need.used_in_plate
     ]
+    answer.filament_used_g = _total_grams(answer.slots, job.result.filament_used_g)
     answer.filament_changes = await _filament_changes(client, sliced, row.plate_id)
     return answer
 
@@ -296,6 +296,15 @@ async def read_toolpath(
         return encoded
     finally:
         _READING_TOOLPATHS.release()
+
+
+def _total_grams(slots: list[PreviewSlot], reported: float | None) -> float | None:
+    """The plate's filament: the sum of its slots' grams when every slot has them.
+    Bambuddy's ``filament_used_g`` is the first filament's alone (#2450: 5.2 g reported
+    for slots of 5.2, 5.6 and 0.3 g), so it is used only when the slots cannot say."""
+    if slots and all(slot.grams is not None for slot in slots):
+        return round(sum(slot.grams or 0.0 for slot in slots), 2)
+    return reported
 
 
 async def _filament_changes(client: BambuddyClient, sliced: int, plate_id: int) -> int | None:

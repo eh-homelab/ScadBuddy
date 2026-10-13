@@ -1111,6 +1111,7 @@ export function PrintPicker({
                 plan={plan}
                 colors={previewColors}
                 slice={previewSlice.result}
+                nozzlePlan={previewSlice.plan}
                 stale={previewSlice.stale}
                 slicing={previewSlice.slicing}
                 sliceError={previewSlice.error}
