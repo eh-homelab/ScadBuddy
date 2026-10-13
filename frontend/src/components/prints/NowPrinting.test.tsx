@@ -1,4 +1,4 @@
-import { act, screen, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PRINTERS_NOW, setPrintersNow } from '../../mocks/features/printersNow'
@@ -148,5 +148,38 @@ describe('NowPrinting (#977)', () => {
       await new Promise((resolve) => setTimeout(resolve, 50))
     })
     expect(screen.queryByTestId('now-printing')).toBeNull()
+  })
+
+  it('opens the live camera with the job status beside it, and closing it drops the stream (#981)', async () => {
+    const { user } = renderPage(<NowPrinting />)
+    await screen.findByTestId('printer-now-1')
+    await user.click(screen.getByRole('button', { name: 'Camera of 3DP-31B-598' }))
+
+    const dialog = await screen.findByRole('dialog', { name: '3DP-31B-598 camera' })
+    expect(within(dialog).getByRole('img', { name: 'Live camera of 3DP-31B-598' })).toHaveAttribute(
+      'src',
+      '/api/v1/print/printers/1/camera/stream',
+    )
+    const status = within(dialog).getByTestId('printer-camera-status')
+    expect(status).toHaveTextContent('Paused')
+    expect(status).toHaveTextContent('Layer 9/90')
+    expect(status).toHaveTextContent('Spaghetti detected')
+
+    await user.click(within(dialog).getByRole('button', { name: 'Close' }))
+    await waitFor(() => expect(screen.queryByRole('img', { name: /Live camera/ })).toBeNull())
+  })
+
+  it('falls back to a snapshot with Refresh when the stream fails (#981)', async () => {
+    const { user } = renderPage(<NowPrinting />)
+    await screen.findByTestId('printer-now-2')
+    await user.click(screen.getByRole('button', { name: 'Camera of Workshop' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Workshop camera' })
+    fireEvent.error(within(dialog).getByRole('img', { name: 'Live camera of Workshop' }))
+
+    const snapshot = within(dialog).getByRole('img', { name: 'Camera snapshot of Workshop' })
+    expect(snapshot.getAttribute('src')).toMatch(/^\/api\/v1\/print\/printers\/2\/camera\?at=\d+$/)
+    expect(within(dialog).getByRole('status')).toHaveTextContent('The live stream stopped')
+    await user.click(within(dialog).getByRole('button', { name: 'Try live again' }))
+    expect(within(dialog).getByRole('img', { name: 'Live camera of Workshop' })).toBeInTheDocument()
   })
 })

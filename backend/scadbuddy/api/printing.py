@@ -10,16 +10,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable
-from contextlib import suppress
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AsyncExitStack, suppress
 from datetime import datetime, timedelta
 from typing import Annotated, Any
 
 import psycopg
 from fastapi import APIRouter, Path, Query, Response, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 from temporalio.common import WorkflowIDReusePolicy
 
 from scadbuddy.activity.component import ACTIVITY, ActivityComponent
@@ -53,7 +54,7 @@ from scadbuddy.api.operations import (
     temporal_unavailable,
 )
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
-from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.client import MJPEG_TYPE, client_for
 from scadbuddy.bambuddy.filament_ids import filament_material, filament_name
 from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.models import RackAlgorithm
@@ -554,6 +555,56 @@ async def get_printer_camera(printer_id: int, store: SettingsStoreDep) -> Respon
         frame,
         media_type="image/jpeg",
         headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"},
+    )
+
+
+@router.get(
+    "/printers/{printer_id}/camera/stream",
+    response_class=StreamingResponse,
+    responses={200: {"content": {MJPEG_TYPE: {}}, "description": "The live camera, as MJPEG"}},
+    summary="The printer's live camera",
+    description=(
+        "Bambuddy's MJPEG stream of the printer's camera (#981), for an `<img>`: open "
+        "until the viewer leaves, which closes Bambuddy's stream too. `fps` is capped "
+        "at 15. Read only: nothing here controls the printer or the camera."
+    ),
+)
+async def stream_printer_camera(
+    printer_id: int,
+    store: SettingsStoreDep,
+    fps: Annotated[int, Query(ge=1, le=15)] = 5,
+) -> StreamingResponse:
+    stack = AsyncExitStack()
+    try:
+        client = await stack.enter_async_context(client_for(store.load()))
+        media_type, chunks = await stack.enter_async_context(
+            client.camera_stream(printer_id, fps=fps)
+        )
+    except BaseException:
+        await stack.aclose()
+        raise
+
+    async def body() -> AsyncIterator[bytes]:
+        try:
+            async for chunk in chunks:
+                yield chunk
+        except ApiError:
+            # A camera that stalls or drops mid-stream ends it; the viewer shows that.
+            logger.info("camera stream ended", extra={"printer_id": printer_id})
+        finally:
+            await stack.aclose()
+
+    return StreamingResponse(
+        body(),
+        media_type=media_type,
+        headers={
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "X-Accel-Buffering": "no",
+        },
+        # A viewer that leaves mid-frame may never resume the generator; this closes
+        # Bambuddy's stream all the same (a second close is a no-op).
+        background=BackgroundTask(stack.aclose),
     )
 
 

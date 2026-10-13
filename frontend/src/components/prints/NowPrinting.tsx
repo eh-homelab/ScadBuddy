@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react'
+import { Button } from '../ui/Button'
+import { Dialog } from '../ui/Dialog'
 import { Link } from 'react-router'
 import { api, ApiError } from '../../api/client'
 import type { PrinterNow } from '../../api/types'
@@ -26,6 +28,8 @@ const ACTIVITY: Record<PrinterNow['activity'], { label: string; tone: string }> 
 export function NowPrinting() {
   const [printers, setPrinters] = useState<PrinterNow[] | null>(null)
   const [error, setError] = useState<string | null>(null)
+  /** #981 — the printer whose camera is open, by id, so its status stays current. */
+  const [watching, setWatching] = useState<number | null>(null)
 
   useEffect(() => {
     let live = true
@@ -71,19 +75,20 @@ export function NowPrinting() {
       {printers && (
         <ul className="grid gap-2 sm:grid-cols-2" aria-label="Printers">
           {printers.map((printer) => (
-            <PrinterCard key={printer.printer_id} printer={printer} />
+            <PrinterCard key={printer.printer_id} printer={printer} onCamera={() => setWatching(printer.printer_id)} />
           ))}
         </ul>
       )}
+      <CameraDialog
+        printer={printers?.find((printer) => printer.printer_id === watching) ?? null}
+        onClose={() => setWatching(null)}
+      />
     </section>
   )
 }
 
-function PrinterCard({ printer }: { printer: PrinterNow }) {
+function PrinterCard({ printer, onCamera }: { printer: PrinterNow; onCamera: () => void }) {
   const activity = ACTIVITY[printer.activity]
-  const working = printer.activity === 'printing' || printer.activity === 'paused'
-  const hms = printer.hms ?? []
-  const progress = printer.progress == null ? null : Math.max(0, Math.min(100, printer.progress))
   return (
     <li
       className="min-w-0 rounded-[6px] border border-line bg-surface px-3 py-2 text-[12.5px]"
@@ -95,6 +100,23 @@ function PrinterCard({ printer }: { printer: PrinterNow }) {
           {activity.label}
         </span>
       </div>
+      <JobStatus printer={printer} />
+      {printer.activity !== 'offline' && !printer.error && (
+        <Button variant="ghost" size="sm" onClick={onCamera} className="mt-1.5" aria-label={`Camera of ${printer.name}`}>
+          Camera
+        </Button>
+      )}
+    </li>
+  )
+}
+
+/** What the printer is doing: the job, its progress, HMS errors and where it is recorded. */
+function JobStatus({ printer }: { printer: PrinterNow }) {
+  const working = printer.activity === 'printing' || printer.activity === 'paused'
+  const hms = printer.hms ?? []
+  const progress = printer.progress == null ? null : Math.max(0, Math.min(100, printer.progress))
+  return (
+    <>
       {printer.error && <p className="mt-1 text-[12px] text-muted">{printer.error}</p>}
       {working && (
         <>
@@ -161,6 +183,70 @@ function PrinterCard({ printer }: { printer: PrinterNow }) {
             · archive {printer.archive_id}
           </p>
         ) : null)}
-    </li>
+    </>
+  )
+}
+
+/**
+ * #981 — the printer's live camera, with what it is printing beside it. The stream is
+ * Bambuddy's MJPEG through ScadBuddy, open only while this dialog is: closing it drops
+ * the image, which ends the request and so Bambuddy's stream. A stream that fails or
+ * stalls falls back to a snapshot with Refresh. Read only.
+ */
+function CameraDialog({ printer, onClose }: { printer: PrinterNow | null; onClose: () => void }) {
+  const [live, setLive] = useState(true)
+  const [at, setAt] = useState(() => Date.now())
+  const id = printer?.printer_id ?? null
+  useEffect(() => {
+    setLive(true)
+  }, [id])
+  return (
+    <Dialog
+      open={printer !== null}
+      title={printer ? `${printer.name} camera` : 'Camera'}
+      onClose={onClose}
+      size="wide"
+      footer={
+        <Button variant="ghost" onClick={onClose}>
+          Close
+        </Button>
+      }
+    >
+      {printer && (
+        <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_16rem]" data-testid="printer-camera">
+          <div className="min-w-0">
+            {live ? (
+              <img
+                src={api.printerCameraStreamUrl(printer.printer_id)}
+                alt={`Live camera of ${printer.name}`}
+                className="w-full rounded-[6px] border border-line bg-surface-2"
+                onError={() => setLive(false)}
+              />
+            ) : (
+              <>
+                <img
+                  src={api.printerCameraUrl(printer.printer_id, at)}
+                  alt={`Camera snapshot of ${printer.name}`}
+                  className="w-full rounded-[6px] border border-line bg-surface-2"
+                />
+                <p className="mt-2 flex flex-wrap items-center gap-2 text-[12px] text-muted" role="status">
+                  The live stream stopped; this is a snapshot.
+                  <Button variant="ghost" size="sm" onClick={() => setAt(Date.now())}>
+                    Refresh
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={() => setLive(true)}>
+                    Try live again
+                  </Button>
+                </p>
+              </>
+            )}
+          </div>
+          <div className="min-w-0 text-[12.5px]" data-testid="printer-camera-status">
+            <p className="font-medium text-ink">{ACTIVITY[printer.activity].label}</p>
+            <JobStatus printer={printer} />
+          </div>
+        </div>
+      )}
+    </Dialog>
   )
 }
