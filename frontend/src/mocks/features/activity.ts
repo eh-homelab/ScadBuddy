@@ -37,6 +37,7 @@ function defaultRows(): Activity[] {
       status: 'running',
       title: 'Render box',
       subject: 'box',
+      facets: { slug: 'box' },
       created_at: '2026-10-09T10:02:00Z',
       updated_at: '2026-10-09T10:02:00Z',
     }),
@@ -97,9 +98,37 @@ export function reset(): void {
   facets = defaultFacets()
 }
 
-function bad(detail: string) {
-  return HttpResponse.json({ detail }, { status: 400 })
+const PROBLEM = 'https://scadbuddy.dev/problems/'
+const TITLES: Record<number, string> = { 400: 'Bad Request', 404: 'Not Found', 422: 'Unprocessable Content' }
+
+/** An RFC 9457 problem, as the backend answers every error. */
+function problem(request: Request, status: number, detail: string, type = 'about:blank') {
+  return HttpResponse.json(
+    { type, title: TITLES[status] ?? 'Error', status, detail, instance: new URL(request.url).pathname },
+    { status, headers: { 'Content-Type': 'application/problem+json' } },
+  )
 }
+
+const unknownParameter = (request: Request, name: string) =>
+  problem(request, 400, `unknown query parameter '${name}'`, `${PROBLEM}unknown-parameter`)
+
+function encodeCursor(item: Activity): string {
+  return btoa(`${item.created_at ?? ''}|${item.id}`).replaceAll('+', '-').replaceAll('/', '_')
+}
+
+/** The (created_at, id) a cursor names, or null for anything `encodeCursor` did not write. */
+function decodeCursor(cursor: string): [string, string] | null {
+  try {
+    const raw = atob(cursor.replaceAll('-', '+').replaceAll('_', '/'))
+    const [created, sep, id] = [raw.slice(0, raw.indexOf('|')), raw.includes('|'), raw.slice(raw.indexOf('|') + 1)]
+    return sep && id && Number.isFinite(Date.parse(created)) && /(Z|[+-]\d\d:\d\d)$/.test(created) ? [created, id] : null
+  } catch {
+    return null
+  }
+}
+
+const STATUSES = new Set(['queued', 'running', 'succeeded', 'failed', 'cancelled'])
+const validTime = (value: string) => Number.isFinite(Date.parse(value))
 
 function shape(item: Activity, advanced: boolean): Activity {
   if (advanced) return item
@@ -112,15 +141,15 @@ function shape(item: Activity, advanced: boolean): Activity {
 export const handlers = [
   http.get('/api/v1/activity/facets', ({ request }) => {
     const url = new URL(request.url)
-    for (const name of url.searchParams.keys()) if (name !== 'since') return bad(`unknown query parameter '${name}'`)
+    for (const name of url.searchParams.keys()) if (name !== 'since') return unknownParameter(request, name)
     return HttpResponse.json(facets)
   }),
   http.get('/api/v1/activity/:id', ({ request, params }) => {
     const url = new URL(request.url)
-    for (const name of url.searchParams.keys()) if (name !== 'advanced') return bad(`unknown query parameter '${name}'`)
+    for (const name of url.searchParams.keys()) if (name !== 'advanced') return unknownParameter(request, name)
     const advanced = ['1', 'true'].includes(url.searchParams.get('advanced') ?? '')
     const found = rows.find((r) => r.id === params.id)
-    if (!found) return HttpResponse.json({ detail: `no activity '${String(params.id)}'` }, { status: 404 })
+    if (!found) return problem(request, 404, `no activity '${String(params.id)}'`)
     return HttpResponse.json({
       row: shape(found, advanced),
       children: rows.filter((r) => r.parent_id === found.id).map((r) => shape(r, advanced)),
@@ -130,16 +159,46 @@ export const handlers = [
   }),
   http.get('/api/v1/activity', ({ request }) => {
     const sp = new URL(request.url).searchParams
-    for (const name of sp.keys()) {
-      if (!LIST_PARAMS.has(name) && !name.startsWith('facet.')) return bad(`unknown query parameter '${name}'`)
-    }
     const kinds = sp.getAll('kind')
+    const facetFilters: [string, string][] = []
+    for (const [name, value] of sp) {
+      if (LIST_PARAMS.has(name)) continue
+      if (!name.startsWith('facet.')) return unknownParameter(request, name)
+      const facet = name.slice('facet.'.length)
+      const declared = facets.kinds
+        .filter((k) => kinds.includes(k.key))
+        .flatMap((k) => k.facets)
+        .some((f) => f.name === facet && f.filterable)
+      if (!declared) {
+        return problem(
+          request,
+          400,
+          `no selected kind declares a filterable facet '${facet}'`,
+          `${PROBLEM}unknown-parameter`,
+        )
+      }
+      facetFilters.push([facet, value])
+    }
     const statuses = sp.getAll('status')
+    if (statuses.some((s) => !STATUSES.has(s))) return problem(request, 422, 'status is not a status')
+    const limitText = sp.get('limit') ?? '50'
+    const limit = Number(limitText)
+    if (!/^\d+$/.test(limitText) || limit < 1 || limit > 200) {
+      return problem(request, 422, 'limit must be an integer from 1 to 200')
+    }
+    for (const name of ['since', 'until']) {
+      const value = sp.get(name)
+      if (value !== null && !validTime(value)) return problem(request, 422, `${name} is not a datetime`)
+    }
+    const cursorText = sp.get('cursor')
+    const cursor = cursorText === null ? null : decodeCursor(cursorText)
+    if (cursorText !== null && cursor === null) {
+      return problem(request, 400, 'cursor is not a next_cursor', `${PROBLEM}bad-cursor`)
+    }
     const q = (sp.get('q') ?? '').toLowerCase()
     const since = sp.get('since')
     const until = sp.get('until')
-    const limit = Number(sp.get('limit') ?? 50)
-    const offset = Number(sp.get('cursor') ?? 0)
+    const at = (r: Activity) => Date.parse(r.created_at ?? '')
     const filtered = rows
       .filter((r) => kinds.length === 0 || kinds.includes(r.kind))
       .filter((r) => statuses.length === 0 || statuses.includes(r.status))
@@ -148,22 +207,20 @@ export const handlers = [
       .filter((r) => !sp.has('via_tool') || r.via_tool === sp.get('via_tool'))
       .filter((r) => !sp.has('subject') || r.subject === sp.get('subject'))
       .filter((r) => !sp.has('parent') || r.parent_id === sp.get('parent'))
-      .filter((r) => !since || (r.created_at ?? '') >= since)
-      .filter((r) => !until || (r.created_at ?? '') <= until)
+      .filter((r) => !since || at(r) >= Date.parse(since))
+      .filter((r) => !until || at(r) <= Date.parse(until))
       .filter((r) => !q || `${r.title} ${r.subject}`.toLowerCase().includes(q))
-      .filter((r) => {
-        for (const [key, value] of sp) {
-          if (!key.startsWith('facet.')) continue
-          if (String(r.facets?.[key.slice('facet.'.length)]) !== value) return false
-        }
-        return true
-      })
-      .sort((a, b) => (b.created_at ?? '').localeCompare(a.created_at ?? ''))
-    const page = filtered.slice(offset, offset + limit)
+      .filter((r) => facetFilters.every(([name, value]) => String(r.facets?.[name]) === value))
+      .sort((a, b) => at(b) - at(a) || b.id.localeCompare(a.id))
+    // Keyset: everything after the cursor's (created_at, id), newest first.
+    const after = cursor
+      ? filtered.filter((r) => at(r) < Date.parse(cursor[0]) || (at(r) === Date.parse(cursor[0]) && r.id < cursor[1]))
+      : filtered
+    const page = after.slice(0, limit)
     const advanced = ['1', 'true'].includes(sp.get('advanced') ?? '')
     return HttpResponse.json({
       items: page.map((r) => shape(r, advanced)),
-      next_cursor: offset + limit < filtered.length ? String(offset + limit) : null,
+      next_cursor: after.length > limit ? encodeCursor(page[page.length - 1]!) : null,
     })
   }),
 ]

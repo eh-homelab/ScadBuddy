@@ -142,7 +142,7 @@ import type {
   AiCredentialList,
   AiCredentialSave,
 } from './aiCredential'
-import { apiParams, type ActivityQuery } from '../lib/activityQuery'
+import { apiParams, splitList, type ActivityQuery } from '../lib/activityQuery'
 import type { PrintFilters } from '../lib/printsQuery'
 import type { DefinitionFile } from '../lib/lsp'
 import type { JsonObject } from '../lib/inputs'
@@ -1526,7 +1526,7 @@ export const api = {
     const search = new URLSearchParams()
     for (const [key, value] of Object.entries(apiParams(query))) {
       if (key === 'kind' || key === 'status') {
-        for (const one of value.split(',')) if (one) search.append(key, one)
+        for (const one of splitList(value)) search.append(key, one)
       } else search.set(key, value)
     }
     if (page.limit !== undefined) search.set('limit', String(page.limit))

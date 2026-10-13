@@ -52,8 +52,8 @@ export function parseActivityQuery(params: URLSearchParams): ActivityQuery {
 export function toActivityParams(query: ActivityQuery): URLSearchParams {
   const params = new URLSearchParams()
   for (const key of FIXED) {
-    const value = query[key]
-    if (key === 'q' ? value.trim() : value) params.set(key, value)
+    const value = key === 'q' ? query.q.trim() : query[key]
+    if (value) params.set(key, value)
   }
   for (const [name, value] of Object.entries(query.facets)) {
     if (value !== '') params.set(`${FACET_PREFIX}${name}`, value)
@@ -65,9 +65,18 @@ export function isActivityFiltered(query: ActivityQuery): boolean {
   return toActivityParams(query).size > 0
 }
 
-/** The query as `GET /api/v1/activity` parameters (`tool` is `via_tool`). A `kind` or
- * `status` holding several values is comma-joined in the URL, so the client splits it
- * into repeated keys in `client.ts`. */
+/** `kind` and `status` hold several values comma-joined (neither a kind key nor a status
+ * holds a comma); the API takes them as repeated keys. */
+export function splitList(value: string): string[] {
+  return value.split(',').filter((one) => one !== '')
+}
+
+export function joinList(values: string[]): string {
+  return values.join(',')
+}
+
+/** The query as `GET /api/v1/activity` parameters (`tool` is `via_tool`); the client
+ * splits `kind` and `status` with `splitList`. */
 export function apiParams(query: ActivityQuery): Record<string, string> {
   const out: Record<string, string> = {}
   if (query.kind) out.kind = query.kind
