@@ -412,7 +412,6 @@ async def post_library_run(
     body: PrintRunRequest,
     response: Response,
     runs: PrintRunsDep,
-    http_request: Request,
     activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
     store: SettingsStoreDep,
     paths: PathsDep,
@@ -436,7 +435,6 @@ async def post_library_run(
         slug=library_slug(PrintSubject.library(file_id)),
         request=body,
         source=SourceSpec(kind="library", file_id=file_id),
-        http_request=http_request,
         activity=activity,
         prepare=prepare,
     )

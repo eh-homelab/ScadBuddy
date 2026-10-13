@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 from typing import Annotated, Any
 
 import psycopg
-from fastapi import APIRouter, Path, Query, Request, Response, status
+from fastapi import APIRouter, Path, Query, Response, status
 from fastapi.responses import JSONResponse
 from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, Field
@@ -552,7 +552,6 @@ async def post_run(
     response: Response,
     outputs: OutputsDep,
     runs: PrintRunsDep,
-    http_request: Request,
     activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
 ) -> PrintRun:
     """Derive every slicer preset from the chosen spools, nozzles, quality and plate
@@ -589,7 +588,6 @@ async def post_run(
         slug=meta.slug,
         request=body,
         source=SourceSpec(kind="output", output_id=meta.id),
-        http_request=http_request,
         activity=activity,
     )
 
@@ -612,7 +610,6 @@ async def accept_run(
     slug: str,
     request: PrintRunRequest,
     source: SourceSpec,
-    http_request: Request,
     activity: ActivityComponent,
     prepare: Callable[[SourceSpec], Awaitable[SourceSpec]] | None = None,
 ) -> PrintRun:
@@ -745,7 +742,7 @@ async def accept_run(
             **refusal.extensions,
         )
     assert answer.run is not None  # the Update answers one or the other
-    await attribute_request(activity.index, f"print_run:{answer.run.id}", http_request)
+    await attribute_request(activity.index, f"print_run:{answer.run.id}")
     if answer.repeated:
         response.status_code = status.HTTP_200_OK
     return answer.run.model_copy(update={"repeated": answer.repeated})

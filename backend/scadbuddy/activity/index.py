@@ -17,11 +17,8 @@ from typing import Any
 from psycopg import Connection, errors, sql
 from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
-from starlette.requests import Request
 
 from scadbuddy.activity.models import FINISHED, ActivityRow, ActivityStatus
-from scadbuddy.activity.visibility import UNKNOWN_SESSION, session_owner
-from scadbuddy.api.agent_actor import AGENT_ACTOR_HEADER
 from scadbuddy.core.authorship import current_author
 from scadbuddy.core.events import ActivityEvent
 from scadbuddy.core.metrics import Metrics
@@ -141,17 +138,8 @@ def _escape_like(text: str) -> str:
     return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
-def _visible(pinned: str | None) -> tuple[list[sql.Composable], list[Any]]:
-    """Placeholders are never read; a pinned request reads its principal's rows only,
-    and one pinned to an unknown session reads none."""
-    where: list[sql.Composable] = [sql.SQL("source <> ''")]
-    if pinned == UNKNOWN_SESSION:
-        where.append(sql.SQL("false"))
-    elif pinned is not None:
-        # A placeholder, never a literal: an encoded principal holds `%`.
-        where.append(sql.SQL("principal = %s"))
-        return where, [pinned]
-    return where, []
+#: Placeholders are never read.
+_VISIBLE = sql.SQL("source <> ''")
 
 
 def _where(conditions: list[sql.Composable]) -> sql.Composable:
@@ -483,25 +471,22 @@ class ActivityIndex:
         self,
         filters: ActivityFilter,
         *,
-        pinned: str | None,
         cursor: tuple[datetime, str] | None = None,
         limit: int = DEFAULT_LIMIT,
     ) -> tuple[list[ActivityRow], str | None]:
-        """Newest first, and the cursor of the next page (None on the last). ``pinned``
-        is ``visibility.pinned_principal``'s answer: a ``principal`` filter that differs
-        from it matches nothing."""
-        return await asyncio.to_thread(self._list, filters, pinned, cursor, limit)
+        """Newest first, and the cursor of the next page (None on the last)."""
+        return await asyncio.to_thread(self._list, filters, cursor, limit)
 
     def _list(
         self,
         filters: ActivityFilter,
-        pinned: str | None,
         cursor: tuple[datetime, str] | None,
         limit: int,
     ) -> tuple[builtins.list[ActivityRow], str | None]:
         if not 1 <= limit <= MAX_LIMIT:
             raise ValueError(f"limit must be 1 to {MAX_LIMIT}")
-        where, params = _visible(pinned)
+        where: builtins.list[sql.Composable] = [_VISIBLE]
+        params: builtins.list[Any] = []
 
         def add(condition: str, *values: Any) -> None:
             where.append(sql.SQL(condition))  # fixed text from this module only
@@ -542,28 +527,26 @@ class ActivityIndex:
         rows = [ActivityRow.model_validate(r) for r in found[:limit]]
         return rows, encode_cursor(rows[-1]) if len(found) > limit else None
 
-    async def children(self, activity_id: str, *, pinned: str | None) -> builtins.list[ActivityRow]:
-        return await asyncio.to_thread(self._children, activity_id, pinned)
+    async def children(self, activity_id: str) -> builtins.list[ActivityRow]:
+        return await asyncio.to_thread(self._children, activity_id)
 
-    def _children(self, activity_id: str, pinned: str | None) -> builtins.list[ActivityRow]:
-        visible, params = _visible(pinned)
-        where = [*visible, sql.SQL("parent_id = %s")]
+    def _children(self, activity_id: str) -> builtins.list[ActivityRow]:
+        where: builtins.list[sql.Composable] = [_VISIBLE, sql.SQL("parent_id = %s")]
         with self.pool.connection() as conn:
             found = conn.execute(
                 sql.SQL("{} WHERE {} ORDER BY created_at, id").format(_SELECT, _where(where)),
-                [*params, activity_id],
+                [activity_id],
             ).fetchall()
         return [ActivityRow.model_validate(r) for r in found]
 
-    async def counts(self, *, since: datetime | None, pinned: str | None) -> Counts:
+    async def counts(self, *, since: datetime | None) -> Counts:
         """The principals, tools and subjects present since ``since`` (default the last
         ``FACETS_WINDOW``), most frequent first."""
-        return await asyncio.to_thread(self._counts, since, pinned)
+        return await asyncio.to_thread(self._counts, since)
 
-    def _counts(self, since: datetime | None, pinned: str | None) -> Counts:
+    def _counts(self, since: datetime | None) -> Counts:
         start = since if since is not None else datetime.now(UTC) - FACETS_WINDOW
-        visible, params = _visible(pinned)
-        where = _where([*visible, sql.SQL("created_at >= %s")])
+        where = _where([_VISIBLE, sql.SQL("created_at >= %s")])
         counted: dict[str, list[Count]] = {}
         with self.pool.connection() as conn:
             for column, blank in (("principal", None), ("via_tool", None), ("subject", "")):
@@ -575,41 +558,29 @@ class ActivityIndex:
                         "SELECT {c} AS value, count(*) AS count FROM activity"
                         " WHERE {where} AND {present} GROUP BY {c} ORDER BY count DESC, {c}"
                     ).format(c=sql.Identifier(column), where=where, present=present),
-                    [*params, start],
+                    [start],
                 ).fetchall()
                 counted[column] = [Count(r["value"], r["count"]) for r in found]
         return Counts(counted["principal"], counted["via_tool"], counted["subject"])
 
 
-async def attribute_request(index: ActivityIndex, activity_id: str, request: Request) -> None:
-    """Who started ``activity_id``: the agent author, the headless-browser session's owner,
-    or the browser user (spec §3). Never raises: the start it follows is already accepted,
-    so a failure here is logged and counted, not a 500."""
+async def attribute_request(index: ActivityIndex, activity_id: str) -> None:
+    """Who started ``activity_id``: the agent author, or the browser user (spec §3).
+    Never raises: the start it follows is already accepted, so a failure here is logged
+    and counted, not a 500."""
     try:
-        await _attribute_request(index, activity_id, request)
+        await _attribute_request(index, activity_id)
     except Exception:
         logger.exception("an activity attribution failed", extra={"activity_id": activity_id})
         if index.metrics is not None:
             index.metrics.activity_write_failures.inc()
 
 
-async def _attribute_request(index: ActivityIndex, activity_id: str, request: Request) -> None:
-    """Who started ``activity_id``: the agent author, the headless-browser session's owner,
-    or the browser user (spec §3)."""
+async def _attribute_request(index: ActivityIndex, activity_id: str) -> None:
     author = current_author()
-    session_marker = request.headers.get(AGENT_ACTOR_HEADER)
     if author is not None and author.principal is not None:
         await index.attribute(
             activity_id, principal=author.principal, session=author.session, via_tool=author.tool
-        )
-    elif session_marker is not None:
-        principal = await session_owner(index.pool, session_marker)
-        tool = None if author is None else author.tool
-        await index.attribute(
-            activity_id,
-            principal=principal or UNKNOWN_SESSION,
-            session=session_marker,
-            via_tool=tool,
         )
     else:
         await index.attribute(activity_id, principal="browser", session=None, via_tool=None)

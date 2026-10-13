@@ -1,9 +1,8 @@
 """Reading activity (spec 2026-10-09 §6, §7): the list, its facets and one row.
 
-A request with the agent-actor marker (the agent's headless browser) reads only its
-session owner's rows, in all three (``activity/visibility.py``); every other request
-reads everything. Unknown query parameters answer 400: FastAPI would ignore them, and a
-misspelt filter would then list everything.
+Every request reads everything, as the browser does: a non-browser principal is held
+to its own rows by the agent's activity tools. Unknown query parameters answer 400:
+FastAPI would ignore them, and a misspelt filter would then list everything.
 
 No ``from __future__ import annotations``: FastAPI reads the dependency annotations at
 runtime (``api/components.py``).
@@ -29,7 +28,6 @@ from scadbuddy.activity.index import (
 )
 from scadbuddy.activity.kinds import KindRegistry
 from scadbuddy.activity.models import STATUSES, ActivityRow, ActivityStatus, Facet, FacetType
-from scadbuddy.activity.visibility import pinned_principal, readable
 from scadbuddy.api.components import component_dep
 from scadbuddy.core.problems import ApiError
 
@@ -232,7 +230,6 @@ async def list_activity(
             position = decode_cursor(cursor)
         except ValueError:
             raise ApiError(400, "cursor is not a next_cursor", type_=BAD_CURSOR) from None
-    pinned = await pinned_principal(request, activity.index.pool)
     rows, next_cursor = await activity.index.list(
         ActivityFilter(
             kinds=tuple(kind or ()),
@@ -247,7 +244,6 @@ async def list_activity(
             until=until,
             facets=facets,
         ),
-        pinned=pinned,
         cursor=position,
         limit=limit,
     )
@@ -267,8 +263,7 @@ async def activity_facets(
     _no_nul(request)
     _unknown(request, frozenset({"since"}))
     kinds = await asyncio.to_thread(activity.kinds)
-    pinned = await pinned_principal(request, activity.index.pool)
-    counts = await activity.index.counts(since=since, pinned=pinned)
+    counts = await activity.index.counts(since=since)
     return ActivityFacets(
         kinds=[
             KindOut(
@@ -292,15 +287,13 @@ async def activity_facets(
 async def get_activity(
     request: Request, activity_id: str, activity: ActivityDep, advanced: bool = False
 ) -> ActivityDetail:
-    """One row with its children, its links and its kind's detail. A row the request
-    may not read answers 404, as a missing one does."""
+    """One row with its children, its links and its kind's detail."""
     _no_nul(request, activity_id)
     _unknown(request, frozenset({"advanced"}))
-    pinned = await pinned_principal(request, activity.index.pool)
     row = await activity.index.get(activity_id)
-    if row is None or not readable(pinned, row.principal):
+    if row is None:
         raise ApiError(404, f"no activity {activity_id!r}")
-    children = await activity.index.children(activity_id, pinned=pinned)
+    children = await activity.index.children(activity_id)
     kinds = await asyncio.to_thread(activity.kinds)
     kind = kinds.get(row.kind)
     links = [] if kind is None else kind.links(row)

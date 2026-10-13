@@ -442,7 +442,7 @@ async def render_model(
             whole_inputs=pipeline,
             request_id=idempotency_key,
         )
-    await attribute_request(activity.index, f"render:{job.id}", request)
+    await attribute_request(activity.index, f"render:{job.id}")
     return RenderAccepted(
         job_id=job.id,
         status_url=request.url_for("get_job", job_id=job.id).path,

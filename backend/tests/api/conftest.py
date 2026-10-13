@@ -259,11 +259,9 @@ def seed_activity(activity_index: ActivityIndex) -> SeedActivity:
     return seed
 
 
-#: The agent's tables the backend reads, cut down to the columns it reads:
-#: `ai_sessions`' owner, and `ai_operations` and `ai_activity_kinds` as the agent's
-#: migrations create them.
+#: The agent's tables the backend reads: `ai_operations` and `ai_activity_kinds` as the
+#: agent's migrations create them.
 AGENT_TABLES = """
-CREATE TABLE ai_sessions (id uuid PRIMARY KEY, owner_kind text NOT NULL, owner_id text NOT NULL);
 CREATE TABLE ai_operations (
   id              text PRIMARY KEY,
   kind            text NOT NULL,
@@ -291,15 +289,6 @@ CREATE TABLE ai_activity_kinds (
 @dataclass
 class AgentTables:
     conninfo: str
-
-    def insert_session(self, *, owner_kind: str, owner_id: str) -> str:
-        session_id = str(uuid.uuid4())
-        with psycopg.connect(self.conninfo, autocommit=True) as conn:
-            conn.execute(
-                "INSERT INTO ai_sessions (id, owner_kind, owner_id) VALUES (%s, %s, %s)",
-                (session_id, owner_kind, owner_id),
-            )
-        return session_id
 
 
 @pytest.fixture

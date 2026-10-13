@@ -10,7 +10,6 @@ import pytest
 from starlette.datastructures import Headers
 
 from scadbuddy.activity.index import ActivityIndex
-from scadbuddy.activity.visibility import UNKNOWN_SESSION
 from scadbuddy.api.operations import _author
 from scadbuddy.bambuddy.activity import row_of as run_row_of
 from scadbuddy.bambuddy.runs import PrintRun, PrintRunError, PrintRunStore
@@ -133,12 +132,8 @@ def test_author_from_tool_alone_is_none() -> None:
     assert author_from(Headers({"x-scadbuddy-agent-tool": "render_model"})) is None
 
 
-async def test_author_keeps_tool_and_session_owner_fallback(jobs: JobProjection) -> None:
+def test_author_keeps_tool() -> None:
     with authored_as(AgentAuthor("token:t1", "s1", "render_model")):
-        got = await _author(jobs.pool)
+        got = _author()
     assert got == OperationAuthor(principal="token:t1", session="s1", tool="render_model")
-    # a headless-browser marker with no owner on record
-    with authored_as(AgentAuthor(None, "sess1", None)):
-        got = await _author(jobs.pool)
-    assert got is not None and got.principal == UNKNOWN_SESSION and got.session == "sess1"
-    assert await _author(jobs.pool) is None
+    assert _author() is None

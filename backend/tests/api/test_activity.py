@@ -1,22 +1,18 @@
-"""Reading activity (spec 2026-10-09 §6, §7): the list, its facets, one row, and the
-headless browser pinned to its session owner."""
+"""Reading activity (spec 2026-10-09 §6, §7): the list, its facets and one row."""
 
 from __future__ import annotations
 
 import asyncio
 import base64
 import json
-import uuid
 
 import psycopg
 from fastapi.testclient import TestClient
 
 from scadbuddy.activity.index import ActivityIndex
-from scadbuddy.activity.visibility import UNKNOWN_SESSION
 from tests.api.conftest import AgentTables, SeedActivity
 from tests.support.operations import press
 
-SESSION_HEADER = "X-ScadBuddy-Agent-Session"
 ADVANCED = {"workflow_id", "run_id", "traceparent", "source", "source_id", "facets"}
 
 
@@ -121,69 +117,6 @@ def test_facets_without_agent_tables(client: TestClient) -> None:
     assert client.get("/api/v1/activity/facets").status_code == 200
 
 
-def test_headless_session_is_pinned_to_its_owner(
-    client: TestClient, seed_activity: SeedActivity, agent_tables: AgentTables
-) -> None:
-    sid = agent_tables.insert_session(owner_kind="bearer", owner_id="token:t1")
-    seed_activity(id="render:a", principal="browser")
-    seed_activity(id="render:b", principal="token:t1")
-    headers = {SESSION_HEADER: sid}
-    assert ids(client.get("/api/v1/activity", headers=headers).json()) == ["render:b"]
-    page = client.get("/api/v1/activity", params={"principal": "browser"}, headers=headers)
-    assert page.json()["items"] == []
-    facets = client.get("/api/v1/activity/facets", headers=headers).json()
-    assert facets["principals"] == [{"value": "token:t1", "count": 1}]
-
-
-def test_headless_session_of_the_browser_user_sees_everything(
-    client: TestClient, seed_activity: SeedActivity, agent_tables: AgentTables
-) -> None:
-    sid = agent_tables.insert_session(owner_kind="browser", owner_id="browser")
-    seed_activity(id="render:a", principal="browser")
-    seed_activity(id="render:b", principal="token:t1")
-    page = client.get("/api/v1/activity", headers={SESSION_HEADER: sid}).json()
-    assert ids(page) == ["render:b", "render:a"]
-
-
-def test_headless_session_cannot_read_other_detail(
-    client: TestClient, seed_activity: SeedActivity, agent_tables: AgentTables
-) -> None:
-    sid = agent_tables.insert_session(owner_kind="bearer", owner_id="token:t1")
-    seed_activity(id="render:a", principal="browser")
-    seed_activity(id="render:b", principal="token:t1")
-    seed_activity(id="render:c", principal="browser", parent_id="render:b")
-    headers = {SESSION_HEADER: sid}
-    hidden = client.get("/api/v1/activity/render:a", headers=headers)
-    missing = client.get("/api/v1/activity/render:zzz", headers=headers)
-    assert hidden.status_code == missing.status_code == 404
-    assert hidden.json()["detail"] == missing.json()["detail"].replace("render:zzz", "render:a")
-    own = client.get("/api/v1/activity/render:b", headers=headers).json()
-    assert own["children"] == []
-    browser = client.get("/api/v1/activity/render:b").json()
-    assert [c["id"] for c in browser["children"]] == ["render:c"]
-
-
-def test_unknown_session_sees_nothing(
-    client: TestClient, seed_activity: SeedActivity, agent_tables: AgentTables
-) -> None:
-    seed_activity(id="render:a", principal="browser")
-    seed_activity(id="render:b", principal=UNKNOWN_SESSION)
-    for marker in (str(uuid.uuid4()), "not-a-uuid"):
-        headers = {SESSION_HEADER: marker}
-        page = client.get("/api/v1/activity", headers=headers).json()
-        assert page["items"] == [], marker
-        assert client.get("/api/v1/activity/render:a", headers=headers).status_code == 404
-        assert client.get("/api/v1/activity/facets", headers=headers).json()["principals"] == []
-
-
-def test_without_agent_tables_a_session_sees_nothing(
-    client: TestClient, seed_activity: SeedActivity
-) -> None:
-    seed_activity(id="render:a", principal="browser")
-    page = client.get("/api/v1/activity", headers={SESSION_HEADER: str(uuid.uuid4())}).json()
-    assert page["items"] == []
-
-
 def test_detail_simple_and_advanced(client: TestClient, seed_activity: SeedActivity) -> None:
     seed_activity(
         id="render:a",
@@ -218,22 +151,19 @@ def test_paging_is_stable(client: TestClient, seed_activity: SeedActivity) -> No
     assert cursor is None
 
 
-def test_headless_operation_is_its_session_owners(
-    client: TestClient, agent_tables: AgentTables
-) -> None:
-    sid = agent_tables.insert_session(owner_kind="bearer", owner_id="token:t1")
-    headers = {SESSION_HEADER: sid}
+def test_an_agent_operation_is_its_authors(client: TestClient) -> None:
+    headers = {"X-ScadBuddy-Agent-Author": "token:t1", "X-ScadBuddy-Agent-Author-Session": "s1"}
     created = client.post(
         "/api/v1/models",
         json={"name": "Widget", "source": "width = 10;\n"},
         headers={**press(), **headers},
     )
     assert created.status_code == 201, created.text
-    page = client.get("/api/v1/activity", headers=headers).json()
+    page = client.get("/api/v1/activity").json()
     operations = [r for r in page["items"] if r["id"].startswith("operation:")]
     assert operations, page
     assert all(r["principal"] == "token:t1" for r in operations)
-    assert all(r["session"] == sid for r in operations)
+    assert all(r["session"] == "s1" for r in operations)
 
 
 def test_a_nul_byte_is_a_400_problem(client: TestClient, seed_activity: SeedActivity) -> None:
@@ -266,21 +196,6 @@ def test_advanced_fields_only_with_advanced(
     assert {r["workflow_id"] for r in shown} == {"render-x", "render-y"}
     advanced = client.get("/api/v1/activity/render:a", params={"advanced": "1"}).json()
     assert advanced["children"][0]["workflow_id"] == "render-y"
-
-
-def test_a_tool_written_row_is_its_session_owners(
-    client: TestClient, seed_activity: SeedActivity, agent_tables: AgentTables
-) -> None:
-    owner = "oidc:https://idp.example#ünï code"
-    sid = agent_tables.insert_session(owner_kind="oidc", owner_id=owner)
-    # What a tool's request is attributed to: its X-ScadBuddy-Agent-Author, encoded.
-    encoded = "oidc:https://idp.example#%C3%BCn%C3%AF%20code"
-    seed_activity(id="render:a", principal=encoded)
-    headers = {SESSION_HEADER: sid}
-    assert ids(client.get("/api/v1/activity", headers=headers).json()) == ["render:a"]
-    assert client.get("/api/v1/activity/render:a", headers=headers).status_code == 200
-    facets = client.get("/api/v1/activity/facets", headers=headers).json()
-    assert [p["value"] for p in facets["principals"]] == [encoded]
 
 
 def test_a_bad_facet_value_is_a_400_problem(client: TestClient, agent_tables: AgentTables) -> None:

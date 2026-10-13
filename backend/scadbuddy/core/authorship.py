@@ -36,7 +36,6 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
-from urllib.parse import quote
 
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
@@ -59,26 +58,6 @@ MAX_PRINCIPAL = 300
 # \Z, not $: `$` also matches before a trailing newline, which would reach the
 # trailer (review of #741).
 _PRINCIPAL = re.compile(rf"^[\x21-\x7e]{{1,{MAX_PRINCIPAL}}}\Z")
-
-
-def principal_header(principal_id: str) -> str:
-    """A principal id as the agent sends it in ``AUTHOR_HEADER``, exactly as
-    ``agent/src/tools/authorship.ts`` ``principalHeader`` writes it: printable ASCII
-    kept, every other character percent-encoded as UTF-8, cut whole characters at a time
-    to ``MAX_PRINCIPAL``, ``unknown`` when empty. A lone surrogate is U+FFFD, as
-    ``toWellFormed`` makes it. So a principal read from ``ai_sessions`` matches the one
-    a tool's request was attributed to."""
-    out = ""
-    for c in principal_id:
-        if 0xD800 <= ord(c) <= 0xDFFF:
-            c = "\ufffd"
-        encoded = c if "\x21" <= c <= "\x7e" else quote(c, safe="")
-        if len(out) + len(encoded) > MAX_PRINCIPAL:
-            break
-        out += encoded
-    return out or "unknown"
-
-
 _SESSION = re.compile(r"^[A-Za-z0-9_-]{1,64}\Z")
 
 
