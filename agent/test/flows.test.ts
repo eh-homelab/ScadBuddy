@@ -266,3 +266,56 @@ describe('run grants (#2481)', () => {
     expect(revoked).toHaveLength(1)
   })
 })
+
+describe('typed flow inputs (#2483)', () => {
+  const SCHEMA = {
+    type: 'object',
+    properties: { slug: { type: 'string' }, copies: { type: 'integer', default: 1 } },
+    required: ['slug'],
+  }
+
+  it('registers and checks a script with its inputs schema', async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/workflows`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ id: DEFINITION, name: 'swap', version: 1, inputs_schema: SCHEMA }, { status: 201 })
+      }),
+      http.post(`${BACKEND}/api/v1/workflow-script/check`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ problems: [] })
+      }),
+    )
+    await runTool(tool('check_flow_script'), { script: 's', inputs_schema: SCHEMA }, ctx())
+    const result = await runTool(tool('register_flow'), { name: 'swap', script: 's', inputs_schema: SCHEMA }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(bodies).toEqual([
+      { script: 's', inputs_schema: SCHEMA },
+      { name: 'swap', script: 's', inputs_schema: SCHEMA },
+    ])
+    expect(tool('register_flow').description).toMatch(/inputs\(\)/)
+  })
+
+  it("starts a run with its inputs and reports the ones that do not fit", async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/workflows/${DEFINITION}/runs`, async ({ request }) => {
+        const body = (await request.json()) as { inputs?: { slug?: unknown } }
+        bodies.push(body)
+        if (typeof body.inputs?.slug !== 'string') {
+          return HttpResponse.json(
+            { status: 422, detail: "The run's inputs do not fit the flow's inputs schema: inputs: 'slug' is a required property", problems: ["inputs: 'slug' is a required property"] },
+            { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+          )
+        }
+        return HttpResponse.json({ id: 'r1', status: 'starting', repeated: false }, { status: 202 })
+      }),
+    )
+    const started = await runTool(tool('start_flow_run'), { definition_id: DEFINITION, inputs: { slug: 'box' } }, ctx())
+    expect(started.isError).toBeFalsy()
+    const refused = await runTool(tool('start_flow_run'), { definition_id: DEFINITION, inputs: {} }, ctx())
+    expect(refused.isError).toBe(true)
+    expect(JSON.stringify(refused.content)).toContain('required property')
+    expect(bodies).toEqual([{ inputs: { slug: 'box' } }, { inputs: {} }])
+  })
+})

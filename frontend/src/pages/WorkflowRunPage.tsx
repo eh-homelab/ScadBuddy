@@ -106,6 +106,7 @@ export function WorkflowRunPage() {
                 {notice}
               </p>
             )}
+            {run?.inputs && Object.keys(run.inputs).length > 0 && <Inputs inputs={run.inputs} />}
             {view.data.grant && <GrantPanel runId={id} grant={view.data.grant} onChange={() => view.refresh()} />}
             {view.data.pending.map((entry) => (
               <PendingCard key={entry.call_id} entry={entry} runId={id} respond={respond} />
@@ -127,6 +128,23 @@ export function WorkflowRunPage() {
         )}
       </div>
     </div>
+  )
+}
+
+/** #2483: the inputs the run started with, defaults filled in; a Reset replays the same. */
+function Inputs({ inputs }: { inputs: Record<string, unknown> }) {
+  return (
+    <section aria-label="Inputs" className="mb-3">
+      <h2 className="mb-1 text-[13px] font-medium">Inputs</h2>
+      <dl className="grid grid-cols-[max-content_minmax(0,1fr)] gap-x-3 gap-y-0.5 text-[12.5px]">
+        {Object.entries(inputs).map(([name, value]) => (
+          <div key={name} className="contents">
+            <dt className="font-mono text-muted">{name}</dt>
+            <dd className="break-words font-mono">{value === null ? '—' : JSON.stringify(value)}</dd>
+          </div>
+        ))}
+      </dl>
+    </section>
   )
 }
 

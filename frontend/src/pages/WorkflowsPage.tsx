@@ -3,6 +3,7 @@ import { Link, NavLink, useSearchParams } from 'react-router'
 import { api } from '../api/client'
 import type { FlowRun, FlowSummary } from '../api/types'
 import { FlowActions } from '../components/flows/FlowActions'
+import { StartRun } from '../components/flows/StartRun'
 import { timeAgo } from '../lib/format'
 import {
   actorText,
@@ -162,12 +163,16 @@ function FlowRow({ latest, onChanged }: { latest: FlowSummary; onChanged: () => 
           {state && `. ${state}, ${timeAgo((latest.deleted_at ?? latest.archived_at)!)}`}
         </p>
       </div>
-      <FlowActions
-        flow={latest}
-        onChanged={onChanged}
-        onRestored={onChanged}
-        restore={latest.commit ? { commit: latest.commit, version: latest.version } : null}
-      />
+      <div className="flex flex-wrap items-start gap-2">
+        {/* #2483: a flow's inputs are asked for before it starts. */}
+        {!state && <StartRun flowId={latest.id} size="sm" variant="default" />}
+        <FlowActions
+          flow={latest}
+          onChanged={onChanged}
+          onRestored={onChanged}
+          restore={latest.commit ? { commit: latest.commit, version: latest.version } : null}
+        />
+      </div>
     </li>
   )
 }

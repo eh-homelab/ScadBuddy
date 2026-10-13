@@ -2,7 +2,7 @@
 name = "scadbuddy-durable"
 version = "0.1.0"
 description = "ScadBuddy's durable agent sessions on Temporal (spec 2026-10-01 §6)"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.14,<3.15"
 dependencies = [
     # ai-integrations#33, by full SHA in Temporal's own repository, never the
     # contributor's fork (spec §6.2). A bump is its own reviewed PR carrying the
@@ -39,13 +39,13 @@ dev = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+target-version = "py314"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.14"
 strict = true
 files = ["src", "tests"]
 

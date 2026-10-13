@@ -147,9 +147,12 @@ export type FlowState = Schemas['FlowState']
 /** #2487 — the editor's Save body, its check, and what it completes. */
 export type FlowRegister = Schemas['DefinitionCreate']
 export type FlowScriptCheck = Schemas['ScriptCheckResult']
-export type FlowScriptProblem = Schemas['ScriptProblem']
+/** A problem with a script or (#2483, `file` inputs.json) its inputs schema; `file` is flow.py when left out. */
+export type FlowScriptProblem = Omit<Schemas['ScriptProblem'], 'file'> & Partial<Pick<Schemas['ScriptProblem'], 'file'>>
 export type FlowHostInterface = Schemas['HostInterface']
 export type FlowRunStarted = Schemas['RunAnswer']
+/** #2483 — a run's options: its typed inputs (and its grant, #2481). */
+export type FlowRunOptions = Schemas['RunCreate']
 export type FlowResetPoints = Schemas['ResetPoints']
 export type FlowResetPreview = Schemas['ResetPreview']
 export type FlowReset = Schemas['Reset']
@@ -344,6 +347,22 @@ export interface BlankTemplate {
 export interface SessionLimits {
   budget_usd: number
   max_turns: number
+}
+
+/**
+ * How many of the assistant's renders run at once (`GET/PUT /api/v1/ai/settings/render-limits`,
+ * agent `src/routes/renderLimits.ts`). Past a limit a render waits for a slot; nothing
+ * is refused for it. Read live by the agent, so a change applies to waiting renders too.
+ */
+export interface RenderLimits {
+  /** Each caller's renders at once, unless an override names it. */
+  per_principal: number
+  /** Every caller's together; 0 is no limit. */
+  global: number
+  /** Renders one caller may start in 10 minutes; 0 is no limit. */
+  per_window: number
+  /** By principal id: `browser` (you and your chats), `token:<id>`, `oidc:<issuer>#<sub>`, `anonymous` (every anonymous MCP session together). */
+  overrides: { principal: string; concurrent: number }[]
 }
 
 /**
