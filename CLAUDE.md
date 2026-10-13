@@ -137,7 +137,7 @@ them through a real durable session (`evals/durable.ts`: the Python worker, Temp
 agent-tools worker; skips without uv, Temporal or Postgres), and `pnpm evals` takes
 `SCADBUDDY_EVAL_MODE=classic|durable|both` (default both).
 
-Durable sessions (`agent-durable/`, Python 3.14, uv; the `agent-durable` CI job, #1056):
+Durable sessions (`agent-durable/`, Python 3.14, uv 0.9.0 or later, which `[tool.uv] required-version` enforces; the `agent-durable` CI job, #1056):
 
 ```bash
 cd agent-durable

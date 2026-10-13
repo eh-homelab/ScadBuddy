@@ -15,7 +15,7 @@ import os
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from claude_agent_sdk import ProcessError, ResultError
@@ -46,11 +46,11 @@ from temporalio.client import Client
 from temporalio.testing import ActivityEnvironment, WorkflowEnvironment
 
 from scadbuddy_durable.codec import PgPayloadKeys, data_converter
-from scadbuddy_durable.credentials import credential_aad
+from scadbuddy_durable.credentials import Credential, credential_aad
 from scadbuddy_durable.gate.names import PENDING_INPUT_QUERY, RESPOND_UPDATE
 from scadbuddy_durable.secrets import Kek, kek_from_base64, seal_bytes
 from scadbuddy_durable.session import tools
-from scadbuddy_durable.session.models import ImageRef
+from scadbuddy_durable.session.models import BUDGET_EXHAUSTED, ImageRef
 from scadbuddy_durable.session.runner import (
     IMAGE_TOO_LARGE,
     IMAGES_SERVER,
@@ -60,6 +60,7 @@ from scadbuddy_durable.session.runner import (
     VIEW_TOOL_IMAGES_TOOL,
     Image,
     ScadBuddyRunner,
+    TurnSettings,
     image_problem,
     image_size,
     tool_images_loader,
@@ -871,3 +872,68 @@ async def test_a_denied_call_is_followed_by_why_in_a_classic_turns_words(
         f"{PLUGIN_REJECTION}\n\n" + refusal("print_output", entry["id"], "denied", None)
     )
     assert is_error is True
+
+
+class _Answers:
+    """make_runner whose segment answers ``out``, whatever it is asked."""
+
+    def __init__(self, out: SegmentOutput) -> None:
+        self.out = out
+        self.budgets: list[float] = []
+
+    def __call__(self, **kwargs: Any) -> Any:
+        self.budgets.append(kwargs["max_budget_usd"])
+        out = self.out
+
+        class Answers:
+            async def run(self, inp: SegmentInput, attempt: int) -> SegmentOutput:
+                return out
+
+        return Answers()
+
+
+def _credential() -> Credential:
+    return Credential(id="c1", priority=0, kind="gateway", base_url="http://x", secret=TOKEN)
+
+
+async def _segment(out: SegmentOutput, left: float) -> SegmentOutput:
+    answers = _Answers(out)
+    runner = ScadBuddyRunner(cast(Any, None), KEK, cwd="/tmp", make_runner=answers)
+    settings = TurnSettings(long_edge=1568, model=None, own_plugin=False)
+    got = await runner._on_credentials(
+        "s", "wf", cast(Any, None), 1, [_credential()], left, {}, settings
+    )
+    assert answers.budgets == [left]
+    return got
+
+
+@pytest.mark.parametrize(("cost", "charged"), [(0.25, 1.0), (0.0, 1.0), (1.5, 1.5)])
+async def test_a_segment_that_reached_its_cap_is_charged_at_least_what_was_left(
+    cost: float, charged: float
+) -> None:
+    """#2675: Claude Code stops once the cost reached the cap, so the segment is charged
+    `max(cost_usd, left)`: what was left when its own report is lower, its report when
+    higher. Either way the turn ends as the budget's."""
+    out = SegmentOutput(
+        session_id="s", is_error=True, error="Reached maximum budget ($1.00)", cost_usd=cost
+    )
+    got = await _segment(out, left=1.0)
+    assert got.error == BUDGET_EXHAUSTED
+    assert got.cost_usd == pytest.approx(charged)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "the tool said error_max_budget_usd somewhere in its output",
+        "Quoting: Reached maximum budget is what it says",
+    ],
+)
+async def test_an_error_that_only_quotes_the_budget_text_is_not_the_cap(text: str) -> None:
+    """#2675: the error text is session content. Only Claude Code's own message,
+    "Reached maximum budget ($N)", is the cap; a result that quotes the subtype or the
+    words is the error it is, charged what it reported."""
+    out = SegmentOutput(session_id="s", is_error=True, error=text, cost_usd=0.1)
+    got = await _segment(out, left=1.0)
+    assert got.error == text
+    assert got.cost_usd == pytest.approx(0.1)
