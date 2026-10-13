@@ -1150,14 +1150,24 @@ func ListUnsent(stateDir string) ([]Unsent, error) {
 // LockState takes <state dir>/lock for the mount's life, so two mounts never send one
 // queue; the second fails at once. Unlock by closing the returned file.
 func LockState(stateDir string) (*os.File, error) {
-	f, err := os.OpenFile(filepath.Join(stateDir, "lock"), os.O_RDWR|os.O_CREATE, 0o600)
+	return lockDir(stateDir, "another bambuddy-fs mount is using the state directory %s (its unsent writes); unmount it or pass a different --state-dir")
+}
+
+// LockCache takes <cache dir>/lock for the mount's life, so two mounts never fetch or
+// trim one cache's files at once; the second fails at once.
+func LockCache(cacheDir string) (*os.File, error) {
+	return lockDir(cacheDir, "another bambuddy-fs mount is using the cache directory %s; unmount it or pass a different --cache-dir")
+}
+
+func lockDir(dir, busy string) (*os.File, error) {
+	f, err := os.OpenFile(filepath.Join(dir, "lock"), os.O_RDWR|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, err
 	}
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = f.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) {
-			return nil, fmt.Errorf("another bambuddy-fs mount is using the state directory %s (its unsent writes); unmount it or pass a different --state-dir", stateDir)
+			return nil, fmt.Errorf(busy, dir)
 		}
 		return nil, err
 	}

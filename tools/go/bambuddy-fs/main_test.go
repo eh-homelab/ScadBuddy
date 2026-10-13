@@ -142,6 +142,31 @@ func TestTheUnsentCommand(t *testing.T) {
 	}
 }
 
+func TestASecondMountOfACacheDirectoryIsRefused(t *testing.T) {
+	cache := t.TempDir()
+	lock, err := fsys.LockCache(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	if _, err := fsys.LockCache(cache); err == nil || !strings.Contains(err.Error(), "--cache-dir") {
+		t.Fatalf("second: %v", err)
+	}
+}
+
+func TestEachAPIHasItsOwnCache(t *testing.T) {
+	for api, want := range map[string]string{
+		"http://scadbuddy.lan/api/v1":       "scadbuddy.lan",
+		"https://scadbuddy.lan:8443/api/v1": "scadbuddy.lan_8443",
+		"http://[::1]:8080/api/v1":          "__1_8080",
+		"https://other.example.com/api/v1":  "other.example.com",
+	} {
+		if got := cacheName(api); got != want {
+			t.Errorf("%s: %q, want %q", api, got, want)
+		}
+	}
+}
+
 func TestASecondMountOfAStateDirectoryIsRefused(t *testing.T) {
 	state := t.TempDir()
 	lock, err := fsys.LockState(state)

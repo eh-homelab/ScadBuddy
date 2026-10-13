@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"math"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -102,6 +103,16 @@ func (b *byteSize) Set(s string) error {
 	}
 	*b = byteSize(n << shift)
 	return nil
+}
+
+// cacheName is the directory under --cache-dir of an API's cache: its host and port,
+// as in scadbuddy.lan_8080.
+func cacheName(apiURL string) string {
+	u, err := url.Parse(apiURL)
+	if err != nil || u.Host == "" {
+		return "default"
+	}
+	return strings.NewReplacer(":", "_", "/", "_", "[", "", "]", "").Replace(u.Host)
 }
 
 func defaultCacheDir() string { return xdgDir("XDG_CACHE_HOME", ".cache") }
@@ -224,19 +235,28 @@ func run(cfg config) int {
 		log.Printf("bambuddy-fs: %v", err)
 		return 2
 	}
-	for _, d := range []string{cfg.CacheDir, cfg.StateDir} {
+	// Contents are cached by file ID, which another ScadBuddy numbers differently, so
+	// each API has its own cache under --cache-dir.
+	cacheDir := filepath.Join(cfg.CacheDir, cacheName(cfg.API))
+	for _, d := range []string{cacheDir, cfg.StateDir} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			log.Printf("bambuddy-fs: %v", err)
 			return 1
 		}
 	}
-	// The state directory's queue is sent by one mount only.
-	lock, err := fsys.LockState(cfg.StateDir)
+	// The state directory's queue is sent, and a cache filled, by one mount only.
+	stateLock, err := fsys.LockState(cfg.StateDir)
 	if err != nil {
 		log.Printf("bambuddy-fs: %v", err)
 		return 1
 	}
-	defer lock.Close()
+	defer stateLock.Close()
+	cacheLock, err := fsys.LockCache(cacheDir)
+	if err != nil {
+		log.Printf("bambuddy-fs: %v", err)
+		return 1
+	}
+	defer cacheLock.Close()
 	stopTelemetry, err := telemetry.Start(cfg.Telemetry)
 	if err != nil {
 		log.Printf("bambuddy-fs: telemetry: %v", err)
@@ -246,7 +266,7 @@ func run(cfg config) int {
 	// 1 s if the mount failed, when there is little to send and the user waits.
 	flush := 5 * time.Second
 	defer func() { stopTelemetry(flush) }()
-	root := fsys.NewRoot(lib, fsys.Options{All: cfg.All, ReadOnly: cfg.ReadOnly, TTL: cfg.TTL, CacheDir: cfg.CacheDir, CacheMax: int64(cfg.CacheMax), StateDir: cfg.StateDir})
+	root := fsys.NewRoot(lib, fsys.Options{All: cfg.All, ReadOnly: cfg.ReadOnly, TTL: cfg.TTL, CacheDir: cacheDir, CacheMax: int64(cfg.CacheMax), StateDir: cfg.StateDir})
 	ttl := cfg.TTL
 	server, err := fs.Mount(cfg.Mountpoint, root, &fs.Options{
 		EntryTimeout: &ttl,
