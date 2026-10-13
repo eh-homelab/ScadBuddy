@@ -222,7 +222,14 @@ async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobRe
     # One slot per colour: a plan that spells it twice (in two cases) still gets one.
     colours: list[str] = list(dict.fromkeys(c.upper() for c in req.colours))
     plates: list[PlateParts] = []
-    for plate in req.layout.plates:
+    # The plate each piece is last placed on: its meshes are let go after it (#2573),
+    # so the pieces loaded at once are those still to be placed, not every one read.
+    last = {
+        item.piece_key: index
+        for index, plate in enumerate(req.layout.plates)
+        for item in plate.items
+    }
+    for index, plate in enumerate(req.layout.plates):
         by_colour: dict[str, list[trimesh.Trimesh]] = {}
         names: dict[str, str] = {}
         # Each painted copy is a part of its own: its faces are its painting's (#1965).
@@ -272,6 +279,8 @@ async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobRe
             else ()
         )
         plates.append(PlateParts((*printed, *cut), (*extruders, *(extruders[0] for _ in cut))))
+        for done in [key for key in layouts if last[key] == index]:
+            del layouts[done]
     if not plates:
         raise _refuse("the layout has no plates")
     everything = [part for plate in plates for part in plate.parts]
