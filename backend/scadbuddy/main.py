@@ -22,7 +22,11 @@ from temporalio.worker import Worker
 import scadbuddy.api
 from scadbuddy import __version__
 from scadbuddy.activity.component import ACTIVITY
-from scadbuddy.activity.index import ACTIVITY_REPAIR_WINDOW_DEFAULT, ACTIVITY_TTL_DEFAULT
+from scadbuddy.activity.index import (
+    ACTIVITY_PRUNE_MARGIN,
+    ACTIVITY_REPAIR_WINDOW_DEFAULT,
+    ACTIVITY_TTL_DEFAULT,
+)
 from scadbuddy.api import (
     health,
     libraries,
@@ -510,8 +514,9 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
 async def _sweep_activity_logged(state: AppState) -> None:
     """Spec 2026-10-09 §6: repair what the sources' own writes missed, then prune. Repair
     first, so a placeholder it can fill is filled before its time is up; prune runs
-    whatever repair did. The window is never longer than the TTL, or a pruned row would
-    be restored from its source on the next run."""
+    whatever repair did. The window stays an hour inside the TTL, or a pruned row could
+    be restored from its source on the next run: prune reads the row's own finished_at,
+    the moment it was written, and repair the source's, a little earlier."""
     failed = False
     try:
         settings = await asyncio.to_thread(state.settings_store.load)
@@ -521,7 +526,10 @@ async def _sweep_activity_logged(state: AppState) -> None:
         logger.warning("could not load the activity settings; skipping the sweep", exc_info=True)
         raise
     ttl = settings.activity_ttl_seconds or ACTIVITY_TTL_DEFAULT
-    window = min(settings.activity_repair_window_seconds or ACTIVITY_REPAIR_WINDOW_DEFAULT, ttl)
+    window = min(
+        settings.activity_repair_window_seconds or ACTIVITY_REPAIR_WINDOW_DEFAULT,
+        ttl - ACTIVITY_PRUNE_MARGIN,
+    )
     index = state.components.get(ACTIVITY).index
     try:
         await index.repair(window)

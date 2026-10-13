@@ -82,6 +82,19 @@ async def test_upsert_then_attribute_keeps_principal_across_status_writes(pg_poo
 
 
 @pytest.mark.requires_postgres
+async def test_a_late_write_never_reopens_a_finished_row(pg_pool: PgPool) -> None:
+    index = ActivityIndex(pg_pool, events=None)
+    with pg_pool.connection() as conn:
+        assert index.upsert_in(conn, row(status="succeeded"))
+        assert not index.upsert_in(conn, row(status="running"))
+        # A finished row still takes a finished write (a detail the source settles late).
+        assert index.upsert_in(conn, row(status="failed"))
+    got = await index.get("render:j1")
+    assert got is not None
+    assert got.status == "failed" and got.finished_at is not None
+
+
+@pytest.mark.requires_postgres
 async def test_attribute_before_upsert_is_kept(pg_pool: PgPool) -> None:
     index = ActivityIndex(pg_pool, events=None)
     await index.attribute("render:j2", principal="browser", session=None, via_tool=None)

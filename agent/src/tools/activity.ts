@@ -17,7 +17,13 @@ const ID = z.string().min(3).max(200).describe('An activity id, e.g. "render:<id
  * subject holding `%20` against one holding a space, are one principal here.
  */
 function pinned(ctx: ToolContext, asked: string | undefined): string | undefined {
-  return hasTier(ctx.principal, 'outward') ? asked : principalHeader(ctx.principal.id)
+  if (hasTier(ctx.principal, 'outward')) return asked
+  const mine = principalHeader(ctx.principal.id)
+  // Refused, not replaced: an empty list for someone else would read as "they did nothing".
+  if (asked !== undefined && asked !== mine) {
+    throw new ToolError('principal needs the outward tier; leave it out to list your own activity')
+  }
+  return mine
 }
 
 async function read(ctx: ToolContext, activity_id: string) {
@@ -49,7 +55,7 @@ export const activityTools = [
     input: z.object({
       kind: NO_NUL(100).optional(),
       status: STATUS.optional(),
-      principal: z.string().max(300).optional().describe('Only with the outward tier; otherwise yours'),
+      principal: z.string().max(300).optional().describe('Only with the outward tier; without it, leave it out (yours is listed)'),
       subject: NO_NUL(200).optional(),
       since: z.string().datetime({ offset: true }).optional(),
       cursor: NO_NUL(400).optional(),

@@ -41,8 +41,18 @@ function listed(): { asked: () => URL | undefined } {
 
 it('activity_list pins a read-tier caller to itself', async () => {
   const l = listed()
-  await tool('activity_list').execute({ principal: 'browser' }, ctx({ principal: reader('token:t1') }))
+  await tool('activity_list').execute({}, ctx({ principal: reader('token:t1') }))
   expect(l.asked()?.searchParams.get('principal')).toBe('token:t1')
+  await tool('activity_list').execute({ principal: 'token:t1' }, ctx({ principal: reader('token:t1') }))
+  expect(l.asked()?.searchParams.get('principal')).toBe('token:t1')
+})
+
+it('activity_list refuses another principal to a read-tier caller, rather than listing its own', async () => {
+  const l = listed()
+  const result = await runTool(tool('activity_list'), { principal: 'browser' }, ctx({ principal: reader('token:t1') }))
+  expect(result.isError).toBe(true)
+  expect(JSON.stringify(result.content)).toContain('outward')
+  expect(l.asked()).toBeUndefined()
 })
 
 it('activity_list lets an outward caller filter anyone', async () => {

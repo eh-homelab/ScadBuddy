@@ -75,6 +75,8 @@ _AGENT_STATUS: dict[str, ActivityStatus] = {
 #: Stored-setting defaults (``activity_ttl_seconds``, ``activity_repair_window_seconds``).
 ACTIVITY_TTL_DEFAULT = 30 * 86400.0
 ACTIVITY_REPAIR_WINDOW_DEFAULT = 86400.0
+#: How far inside the TTL the repair window stays (`main.py` `_sweep_activity_logged`).
+ACTIVITY_PRUNE_MARGIN = 3600.0
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 200
 #: The window ``facets`` counts over when its caller names none.
@@ -206,7 +208,12 @@ class ActivityIndex:
                     else ", finished_at = CASE WHEN %(finished)s"
                     " THEN coalesce(activity.finished_at, now()) END"
                 )
-                guard = " WHERE activity.source = ''" if restore else ""
+                # A late or retried write never reopens a finished row.
+                guard = (
+                    " WHERE activity.source = ''"
+                    if restore
+                    else " WHERE activity.finished_at IS NULL OR EXCLUDED.finished_at IS NOT NULL"
+                )
                 found = conn.execute(
                     sql.SQL(
                         "INSERT INTO activity (id, {cols}"
@@ -236,7 +243,9 @@ class ActivityIndex:
                     },
                 ).fetchone()
                 if found is None:
-                    return False  # a restore found a row that is no longer a placeholder
+                    # A restore found a row that is no longer a placeholder, or a write
+                    # would have reopened a finished one.
+                    return False
                 if attribution is not None:
                     found = conn.execute(
                         "UPDATE activity SET principal = coalesce(principal, %s),"

@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from scadbuddy import main
-from scadbuddy.activity.index import ActivityIndex
+from scadbuddy.activity.index import ACTIVITY_PRUNE_MARGIN, ActivityIndex
 from scadbuddy.activity.models import ActivityRow
 from scadbuddy.library.settings_store import SettingsPatch, StoredSettings
 from scadbuddy.operations.store import OperationStore
@@ -243,7 +243,7 @@ async def test_a_pruned_row_is_not_restored_when_the_window_fits_the_ttl(
             " finished_at = now() - interval '29 hours', state = 'done'"
         )
     ttl = DAY
-    window = min(7 * DAY, ttl)  # what the sweep passes
+    window = min(7 * DAY, ttl - ACTIVITY_PRUNE_MARGIN)  # what the sweep passes
     assert await index.repair(window) == 0  # older than the window
     assert await index.prune(ttl, window) == 0
     assert await index.get(f"render:{job.id}") is None
@@ -319,13 +319,13 @@ async def test_the_sweep_reads_the_settings_each_run() -> None:
     state = sweep_state(stored, index)
     await main._sweep_activity_logged(state)
     stored.activity_ttl_seconds = 2 * DAY
-    stored.activity_repair_window_seconds = 5 * DAY  # longer than the TTL: clamped
+    stored.activity_repair_window_seconds = 5 * DAY  # longer than the TTL: clamped inside it
     await main._sweep_activity_logged(state)
     assert index.calls == [
         ("repair", 3600, None),
         ("prune", 7 * DAY, 3600),
-        ("repair", 2 * DAY, None),
-        ("prune", 2 * DAY, 2 * DAY),
+        ("repair", 2 * DAY - ACTIVITY_PRUNE_MARGIN, None),
+        ("prune", 2 * DAY, 2 * DAY - ACTIVITY_PRUNE_MARGIN),
     ]
 
 
