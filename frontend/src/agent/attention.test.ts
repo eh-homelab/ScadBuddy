@@ -71,6 +71,21 @@ describe('fetchPendingInput', () => {
     expect(await fetchPendingInput()).toEqual({ approvals: 1, questions: 0, attention: 0, summaries: 0 })
   })
 
+  it("counts a flow run's call once it is the user's, not while it waits for the starting session (#2482)", async () => {
+    server.use(
+      http.get('/api/v1/ai/pending-input', () =>
+        HttpResponse.json({
+          entries: [
+            { kind: 'approval', run: { id: 'r1', hop: 'parent', reason: 'print limit reached' } },
+            { kind: 'approval', run: { id: 'r1', hop: 'person', reason: 'print limit reached' } },
+            { kind: 'approval', run: { id: 'r2', hop: null, reason: null } },
+          ],
+        }),
+      ),
+    )
+    expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 0, attention: 0, summaries: 0 })
+  })
+
   it('counts an older replica\'s timed done row as waiting: its turn is parked on it', async () => {
     server.use(
       http.get('/api/v1/ai/pending-input', () =>

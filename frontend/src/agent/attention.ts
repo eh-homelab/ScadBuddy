@@ -98,6 +98,8 @@ async function read(signal: AbortSignal): Promise<PendingCounts | null> {
     const counts: PendingCounts = { approvals: 0, questions: 0, attention: 0, summaries: 0 }
     for (const entry of parsed.data.entries) {
       if (entry.expiring) continue
+      // #2482: a flow run's call still with the session that started it (spec 2026-10-11 §4.5).
+      if (entry.run?.hop === 'parent') continue
       // An approval is the call's decision; an answer is a question, or an attention request when it says so
       // (a summary when its reason is `done`).
       if (entry.kind === 'approval') counts.approvals += 1

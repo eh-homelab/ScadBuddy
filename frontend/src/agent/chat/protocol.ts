@@ -173,6 +173,8 @@ export const PendingInputSchema = z.object({
       kind: z.enum(['approval', 'answer']),
       /** A durable entry past its timer whose worker has not resolved it yet: not waiting on anyone. */
       expiring: z.boolean().optional(),
+      /** #2482 — a flow run's entry: at hop `parent` it waits for the starting session, not yet for the user. */
+      run: z.object({ hop: z.enum(['parent', 'person']).nullable() }).optional(),
       attention: z
         .object({ reason: z.string(), on_timeout: z.string().nullable(), summary: z.string().optional() })
         .optional(),

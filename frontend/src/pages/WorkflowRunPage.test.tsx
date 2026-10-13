@@ -1,5 +1,5 @@
 import { act, screen, waitFor, within } from '@testing-library/react'
-import { http } from 'msw'
+import { HttpResponse, http } from 'msw'
 import { Route, Routes } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { fakeRealtime } from '../lib/realtime.fake'
@@ -131,6 +131,42 @@ describe('WorkflowRunPage', () => {
       expect.stringMatching(/^narrow by .* \(at the starting session\)$/),
       expect.stringMatching(/^pass up by .* \(at the person\)$/),
     ])
+  })
+
+  // #2482 — the run's one queue: a child session's call is in it too (spec 2026-10-11 §4.5).
+  it("shows a child session's call with its step, where it waits, why, and the session's own words", async () => {
+    render('run-escalated')
+    const card = await screen.findByRole('region', { name: 'Waiting for approval: print_output' })
+    expect(card).toHaveTextContent('print box on printer 5')
+    expect(card).toHaveTextContent('From a session the run talks to, at step 3 (ask_session)')
+    expect(card).toHaveTextContent('Outside the grant: printer 5 is not in the grant')
+    expect(within(card).getByRole('list', { name: 'Its way here' })).toHaveTextContent('pass up by the starting session')
+    const words = within(card).getByRole('figure', { name: 'What the session wrote before the call' })
+    expect(words).toHaveTextContent("These are the model's words, not ScadBuddy's")
+    expect(words).toHaveTextContent('Printer 5 is idle, so I will print the box there.')
+  })
+
+  it("decides a child session's call through the agent, and keeps that decision for the person", async () => {
+    const sent: { id: string; body: unknown }[] = []
+    server.use(
+      http.post('/api/v1/ai/pending-input/:id', async ({ params, request }) => {
+        sent.push({ id: String(params['id']), body: await request.json() })
+        return HttpResponse.json({ id: params['id'], kind: 'approval', outcome: 'denied' })
+      }),
+    )
+    const { user } = render('run-escalated')
+    const card = await screen.findByRole('region', { name: 'Waiting for approval: print_output' })
+    const deny = within(card).getByRole('button', { name: 'Deny' })
+    expect(deny.closest('[data-agent-user-only]')).not.toBeNull()
+    await user.click(deny)
+    await waitFor(() => expect(sent).toHaveLength(1))
+    expect(sent[0]).toEqual({ id: 'durable:sess-child:wr-child:toolu_1', body: { kind: 'approval', decision: 'deny' } })
+  })
+
+  it("names the step of the run's own call", async () => {
+    render('run-escalated')
+    const card = await screen.findByRole('region', { name: 'Waiting for approval: queue_print' })
+    expect(card).toHaveTextContent('Step 1 (queue_print)')
   })
 
   it('keeps the approval of every outward call for the person', async () => {
