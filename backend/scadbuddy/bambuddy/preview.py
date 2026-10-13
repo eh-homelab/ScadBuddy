@@ -235,6 +235,7 @@ async def read_preview(
 _TOOLPATHS: OrderedDict[tuple[int, int, str | None, int], bytes] = OrderedDict()
 #: How many are kept: each is up to ~13 MB (``toolpath.MAX_SEGMENTS``).
 TOOLPATHS_KEPT = 4
+_READING_TOOLPATH = asyncio.Lock()
 #: A slice's toolpath never changes, but its job id is reused once Bambuddy restarts.
 TOOLPATH_HEADERS = {"Cache-Control": "private, no-cache", "X-Content-Type-Options": "nosniff"}
 
@@ -253,20 +254,24 @@ async def read_toolpath(
     if job.status != "completed" or job.result is None or sliced is None:
         raise ApiError(status.HTTP_409_CONFLICT, f"background slice {job_id} has not finished")
     key = (row.id or 0, sliced, job.result.name, row.plate_id)
-    if (cached := _TOOLPATHS.get(key)) is not None:
-        _TOOLPATHS.move_to_end(key)
-        return cached
-    gcode = await _plate_gcode(client, sliced, row.plate_id)
-    if gcode is None:
-        raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "the sliced file has no G-code for this plate that can be read",
-        )
-    encoded = (await asyncio.to_thread(toolpath.parse, gcode)).encode()
-    _TOOLPATHS[key] = encoded
-    while len(_TOOLPATHS) > TOOLPATHS_KEPT:
-        _TOOLPATHS.popitem(last=False)
-    return encoded
+    # One read at a time: each holds up to a 256 MB G-code while it parses, and a
+    # second request for the same slice then finds the first one's answer kept.
+    async with _READING_TOOLPATH:
+        if (cached := _TOOLPATHS.get(key)) is not None:
+            _TOOLPATHS.move_to_end(key)
+            return cached
+        gcode = await _plate_gcode(client, sliced, row.plate_id)
+        if gcode is None:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "the sliced file has no G-code for this plate that can be read",
+            )
+        encoded = (await asyncio.to_thread(toolpath.parse, gcode)).encode()
+        del gcode
+        _TOOLPATHS[key] = encoded
+        while len(_TOOLPATHS) > TOOLPATHS_KEPT:
+            _TOOLPATHS.popitem(last=False)
+        return encoded
 
 
 async def _filament_changes(client: BambuddyClient, sliced: int, plate_id: int) -> int | None:

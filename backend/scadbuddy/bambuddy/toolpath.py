@@ -18,6 +18,7 @@ merged, and past :data:`MAX_SEGMENTS` the layers above are left out (``truncated
 
 from __future__ import annotations
 
+import io
 import json
 import math
 import re
@@ -27,6 +28,12 @@ from dataclasses import dataclass, field
 
 #: Segments past this are not drawn: 32 bytes each, so about 13 MB at most.
 MAX_SEGMENTS = 400_000
+#: Layers past this are not drawn, segments or not: each is a header entry.
+MAX_LAYERS = 20_000
+#: Distinct features past this are drawn as one, "Other"; a name is cut at 64 characters.
+MAX_FEATURES = 64
+_FEATURE_NAME = 64
+OTHER = "Other"
 #: How far (degrees) an arc's chords may turn: a G2/G3 is drawn as chords this fine.
 ARC_STEP = math.radians(15)
 #: Two segments whose directions differ by less than this are merged (cos of ~0.8°).
@@ -82,7 +89,8 @@ class Toolpath:
 def parse(gcode: bytes, *, max_segments: int = MAX_SEGMENTS) -> Toolpath:
     """The toolpath of one plate's G-code."""
     path = _Parser(max_segments)
-    for raw in gcode.splitlines():
+    # Line by line, not split up front: a copy of every line would double the file.
+    for raw in io.BytesIO(gcode):
         if not path.line(raw.decode("ascii", "replace")):
             break
     return path.result
@@ -112,6 +120,9 @@ class _Parser:
             return self.comment(text)
         code, _, _ = text.partition(";")
         words = dict(_WORD.findall(code.upper()))
+        if not all(math.isfinite(_number(value)) for value in words.values()):
+            # A number past float range: not a move a printer would make.
+            return True
         command = code.split(None, 1)[0].upper() if code.split() else ""
         if command in ("G0", "G1", "G2", "G3"):
             self.move(command, words)
@@ -130,19 +141,24 @@ class _Parser:
     def comment(self, text: str) -> bool:
         if text.startswith(_LAYER_CHANGE):
             self.started = True
+            if len(self.result.layers) >= MAX_LAYERS:
+                self.result.truncated = True
             if not self.result.truncated:
                 self.result.layers.append((self.z, self.result.count))
             self.last = None
             return True
         if text.startswith(_PRINT_END) and self.started:
             return False
-        if (match := _Z_HEIGHT.match(text)) and self.result.layers:
+        if (match := _Z_HEIGHT.match(text)) and self.result.layers and not self.result.truncated:
             # The layer's own height; the Z move to it may come later.
             _, first = self.result.layers[-1]
-            self.result.layers[-1] = (float(match.group(1)), first)
+            if math.isfinite(height := _number(match.group(1))):
+                self.result.layers[-1] = (height, first)
             return True
         if match := _FEATURE.match(text):
-            name = match.group(1).strip()
+            name = match.group(1).strip()[:_FEATURE_NAME]
+            if name not in self.feature_ids and len(self.result.features) >= MAX_FEATURES:
+                name = OTHER
             if name not in self.feature_ids:
                 self.feature_ids[name] = len(self.result.features)
                 self.result.features.append(name)
@@ -246,6 +262,13 @@ class _Parser:
         if kind != TRAVEL:
             self.result.max_speed = max(self.result.max_speed, speed)
         self.last = (kind, speed, *unit)
+
+
+def _number(text: str) -> float:
+    try:
+        return float(text)
+    except ValueError:
+        return math.nan
 
 
 def _f32(value: float) -> float:

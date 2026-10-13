@@ -8,7 +8,8 @@ from array import array
 
 import pytest
 
-from scadbuddy.bambuddy.toolpath import TRAVEL, Toolpath, parse
+from scadbuddy.bambuddy import toolpath
+from scadbuddy.bambuddy.toolpath import OTHER, TRAVEL, Toolpath, parse
 
 #: Bambu Studio's shape: machine start code (homing, a purge line), two layers, the end.
 GCODE = b"""\
@@ -112,3 +113,31 @@ def test_the_encoding_is_a_header_then_float32_records() -> None:
     records.frombytes(data[4 + size :])
     assert len(records) == path.count * 8
     assert records[16:24].tolist() == pytest.approx([100, 100, 0.2, 120, 100, 0.2, 50, 1])
+
+
+def test_layers_and_features_are_bounded_whatever_the_file_says(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file of nothing but markers must not grow the header without bound."""
+    monkeypatch.setattr(toolpath, "MAX_LAYERS", 3)
+    monkeypatch.setattr(toolpath, "MAX_FEATURES", 2)
+    names = b"".join(b"; FEATURE: f%d\nG1 X%d E1 F60\n" % (i, i + 1) for i in range(5))
+    path = parse(b"; CHANGE_LAYER\n" * 10 + names + b"; FEATURE: " + b"x" * 500 + b"\n")
+
+    assert path.truncated
+    assert len(path.layers) == 3
+    assert path.features == ["f0", "f1", OTHER]
+
+
+def test_a_number_past_float_range_is_not_drawn() -> None:
+    huge = b"9" * 400
+    path = parse(
+        b"; CHANGE_LAYER\n; Z_HEIGHT: " + huge + b"\n; FEATURE: w\n"
+        b"G1 X1 E1 F" + huge + b"\nG1 X2 E1 F60\n"
+    )
+
+    assert path.layers == [(0.0, 0)]
+    assert path.count == 1
+    data = path.encode()
+    (size,) = struct.unpack_from("<I", data)
+    assert json.loads(data[4 : 4 + size])["max_speed"] == 1
