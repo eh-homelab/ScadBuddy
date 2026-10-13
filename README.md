@@ -327,6 +327,12 @@ fresh install can be configured; that gives up DNS-rebinding protection until on
 of the two is set. The agent reads the same variable for its own origin check
 (below).
 
+## Mounting the library (bambuddy-fs)
+
+`tools/go/bambuddy-fs` mounts Bambuddy's print library, through ScadBuddy's API, as a
+FUSE filesystem, as a binary built from the workspace or as a container image. See
+[its README](tools/go/bambuddy-fs/README.md).
+
 ## Deploying
 
 ScadBuddy runs on the homelab cluster from
