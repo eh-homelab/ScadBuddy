@@ -228,6 +228,9 @@ export type LibraryFileObject = Schemas['LibraryFileObject']
  * than string literals of their own: the backend's vocabulary is the contract, and a
  * hand-kept copy would drift the moment it gains a state.
  */
+/** #2351 — Bambuddy's spool inventory and loaded slots, read through `/farm/inventory`. */
+export type InventoryView = Schemas['InventoryView']
+export type InventorySpool = Schemas['InventorySpool']
 export type PrintProgress = Schemas['PrintProgress']
 /** #308 — ScadBuddy's print history: one linked Bambuddy archive per print. */
 export type PrintSummary = Schemas['PrintSummary']

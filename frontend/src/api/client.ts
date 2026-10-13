@@ -1,4 +1,5 @@
 import type {
+  InventoryView,
   AnalysisReport,
   AnalysisRun,
   AnalyzerDecision,
@@ -1528,6 +1529,10 @@ export const api = {
    */
   getPrintProgress: (outputId: string) =>
     request<PrintProgress | null>(`/print/outputs/${seg(outputId)}/progress`),
+
+  /** #2351 — Bambuddy's spool inventory, each spool with where it is loaded. */
+  getSpoolInventory: (includeArchived = false) =>
+    request<InventoryView>(`/farm/inventory${includeArchived ? '?include_archived=true' : ''}`),
 
   /** #308 — the print history, newest first, a page at a time; `cursor` is the last
    * page's `next_cursor`. */

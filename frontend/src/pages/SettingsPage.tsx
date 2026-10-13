@@ -52,6 +52,7 @@ import {
 } from './settings/fields'
 import { HotendUsagePanel } from './settings/HotendUsagePanel'
 import { RememberedChoicesPanel } from './settings/RememberedChoicesPanel'
+import { SpoolInventoryPanel } from './settings/SpoolInventoryPanel'
 import { editedSince, pendingFields, seedDraft, type Draft, type Edits, type Seed } from './settings/seed'
 import { useLeaveGuard } from '../lib/useLeaveGuard'
 
@@ -990,6 +991,14 @@ export function SettingsPage() {
               </FieldRow>
             </>,
           )}
+
+          <Section
+            id="inventory"
+            title={sectionTitle('inventory')}
+            description="Bambuddy's spools, read only: what is left on each, what it cost and where it is loaded. Spools are added, weighed and edited in Bambuddy."
+          >
+            <SpoolInventoryPanel />
+          </Section>
 
           {saved(
             'projects',
