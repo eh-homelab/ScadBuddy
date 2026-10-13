@@ -112,7 +112,7 @@ function resendOf(result: FetchResult<unknown>): boolean {
 
 /**
  * `answered` for a command sent with `RESPOND_ASYNC`: a 202 `accepting` is followed at
- * `GET /api/v1/commands/{workflow_id}/updates/{update_id}` (a long-poll) to the answer
+ * `POST /api/v1/commands/{workflow_id}/updates/{update_id}` (a long-poll) to the answer
  * the route would have given, for up to `ACCEPTING_MS` as the re-sends were. A follow
  * answered 409 `command-resend` sends the request again, with its key.
  */
