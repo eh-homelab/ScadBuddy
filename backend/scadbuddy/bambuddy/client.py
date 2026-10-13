@@ -26,7 +26,7 @@ from contextlib import AbstractContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import date
 from types import TracebackType
-from typing import Any, Literal, Self
+from typing import Any, BinaryIO, Literal, Self
 
 import httpx
 from fastapi import status
@@ -770,11 +770,15 @@ class BambuddyClient:
     async def upload_library_file(
         self,
         filename: str,
-        content: bytes,
+        content: bytes | BinaryIO,
         *,
         folder_id: int | None = None,
         media_type: str = THREE_MF_MEDIA_TYPE,
     ) -> LibraryFile:
+        """``content`` as bytes, or a seekable file, which is sent from its start a chunk
+        at a time rather than read whole (#503); a retry sends it from its start again."""
+        if not isinstance(content, bytes):
+            content.seek(0)
         response = await self._send(
             "POST",
             "/library/files",

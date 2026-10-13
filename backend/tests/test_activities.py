@@ -363,6 +363,22 @@ async def test_cancelling_a_heartbeating_activity_cancels_its_work() -> None:
     assert inner is not None and inner.cancelled()
 
 
+async def test_a_step_past_the_heartbeat_interval_outside_an_activity_still_returns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stage called directly (a test, or a caller that runs it outside Temporal) that
+    outlasts the heartbeat interval returns its result rather than raising "Not in
+    activity context": the flake a loaded machine made of the piece-activity tests. The
+    interval is shrunk rather than waited out."""
+    monkeypatch.setattr(_heartbeating, "__defaults__", (0.01,))
+
+    async def slow() -> str:
+        await asyncio.sleep(0.05)  # several intervals
+        return "done"
+
+    assert await _heartbeating(asyncio.create_task(slow())) == "done"
+
+
 async def test_a_cancelled_finish_piece_returns_only_once_its_writer_has(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

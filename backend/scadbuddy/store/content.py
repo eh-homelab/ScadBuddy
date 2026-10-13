@@ -4,8 +4,8 @@ Phase 1's `BlobStore` is directory-shaped: a piece renders into `dir_for(key)`. 
 §6.2's byte-stream interface, named `ContentStore` because `BlobStore` is taken:
 `put/get/stat/delete/list` over a backend, plus the Postgres index that makes a fetch
 by id, the caps and the usage one query each. `store/cache.py` puts the directory shape back on
-top for processes that share no volume. `put` takes bytes, not a stream: every caller
-holds the blob in memory already (a packed directory, a sanitised upload).
+top for processes that share no volume. `put` takes bytes or a seekable file: a packed
+directory is staged in a file and travels a chunk at a time, never whole (#503).
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from psycopg.errors import DeadlockDetected
 from scadbuddy.store.content_models import (
     SWEPT_KINDS,
     BlobCorruptError,
+    BlobData,
     BlobKind,
     BlobMissingError,
     BlobRef,
@@ -35,6 +36,7 @@ from scadbuddy.store.content_models import (
     ReuseLostError,
     StoreFullError,
     StoreUsage,
+    blob_digest,
 )
 from scadbuddy.store.index import BlobIndex
 from scadbuddy.store.refs import BlobRefs
@@ -48,7 +50,9 @@ logger = logging.getLogger(__name__)
 class ContentBackend(Protocol):
     backend: str
 
-    async def upload(self, kind: BlobKind, data: bytes, *, name: str, scope: BlobScope) -> str: ...
+    async def upload(
+        self, kind: BlobKind, data: BlobData, *, name: str, scope: BlobScope
+    ) -> str: ...
     def download(self, backend_id: str) -> AsyncGenerator[bytes]: ...
     async def exists(self, backend_id: str) -> bool: ...
     async def remove(self, backend_id: str) -> None: ...
@@ -119,7 +123,7 @@ class ContentStore:
     async def _store(
         self,
         kind: BlobKind,
-        data: bytes,
+        data: BlobData,
         *,
         name: str,
         scope: BlobScope,
@@ -129,7 +133,7 @@ class ContentStore:
         be written with ``reuse=True``, which fails if a release freed it meanwhile.
         ``lost_reuse`` stores the copy that stands in for such a reuse: no lookup, and,
         like the re-put it replaces, no room check."""
-        sha = hashlib.sha256(data).hexdigest()
+        sha, size = await asyncio.to_thread(blob_digest, data)
         existing = (
             None if lost_reuse else await asyncio.to_thread(self.index.by_sha, sha, kind, self.name)
         )
@@ -137,15 +141,13 @@ class ContentStore:
             return existing, True  # a re-put: never refused, never uploaded twice
         if not lost_reuse:
             try:
-                await asyncio.to_thread(self._require_room, len(data))
+                await asyncio.to_thread(self._require_room, size)
             except StoreFullError:
                 self._count("put", "full")
                 raise
         backend_id = await self.backend.upload(kind, data, name=name, scope=scope)
         self._count("put", "ok")
-        ref = BlobRef(
-            sha256=sha, kind=kind, backend=self.name, backend_id=backend_id, size=len(data)
-        )
+        ref = BlobRef(sha256=sha, kind=kind, backend=self.name, backend_id=backend_id, size=size)
         return ref, False
 
     async def _release(self, ref: BlobRef) -> None:
@@ -160,7 +162,7 @@ class ContentStore:
     async def put(
         self,
         kind: BlobKind,
-        data: bytes,
+        data: BlobData,
         *,
         name: str,
         scope: BlobScope,
@@ -215,7 +217,7 @@ class ContentStore:
         self,
         key: str,
         kind: BlobKind,
-        data: bytes,
+        data: BlobData,
         *,
         name: str,
         scope: BlobScope,
@@ -377,6 +379,7 @@ async def sweep_content(
 __all__ = [
     "SWEPT_KINDS",
     "BlobCorruptError",
+    "BlobData",
     "BlobKind",
     "BlobMissingError",
     "BlobRef",
