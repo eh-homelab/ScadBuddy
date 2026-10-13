@@ -45,7 +45,7 @@ export function HistoryPage() {
   const bambuddyUrl = bambuddyBase(webUrls(settings)) ?? undefined
   const [sendFor, setSendFor] = useState<Output | undefined>(undefined)
   const [deleting, setDeleting] = useState<string | null>(null)
-  // #316 — an output with copies in Bambuddy asks first, and offers the inbox ones.
+  // #316, #2369 — every delete asks first; one with copies in Bambuddy offers the inbox ones.
   const [confirmFor, setConfirmFor] = useState<Output | undefined>(undefined)
   /** §7 — outputs ticked for the next Arrange (#314). */
   const [picked, setPicked] = useState<string[]>([])
@@ -71,11 +71,6 @@ export function HistoryPage() {
     } finally {
       setDeleting(null)
     }
-  }
-
-  function requestDelete(output: Output) {
-    if ((output.library_files ?? []).length === 0) void remove(output.id)
-    else setConfirmFor(output)
   }
 
   const loading = schemaState.loading || outputsState.loading
@@ -175,7 +170,7 @@ export function HistoryPage() {
                   }
                   onSend={() => setSendFor(output)}
                   onPrint={() => setPrintFor(output)}
-                  onDelete={() => requestDelete(output)}
+                  onDelete={() => setConfirmFor(output)}
                   bambuddyUrl={bambuddyUrl}
                   pinned={modelState.data?.libraries}
                 />
@@ -238,7 +233,8 @@ function placeOf(copy: LibraryCopy, inboxFolderId: number | null | undefined): C
 }
 
 /**
- * #316 — deleting an output that has copies in Bambuddy's library. The copies in the
+ * #2369 — every output delete asks first: it cannot be undone.
+ * #316 — for an output that has copies in Bambuddy's library, the copies in the
  * inbox folder can go with it; a copy in a project's folder is that project's record
  * of what it printed and always stays. While the inbox folder is not known yet, the
  * server decides, and deletes a copy only if it is in the inbox.
@@ -297,37 +293,44 @@ function DeleteOutputDialog({
         </>
       }
     >
-      <p className="text-[13px] text-muted">This output has copies in Bambuddy&apos;s library:</p>
-      <ul className="mt-1 list-disc pl-5 text-[13px] text-muted" aria-label="Library copies">
-        {copies.map((copy) => {
-          const place = placeOf(copy, inboxFolderId)
-          return (
-            <li key={copy.id}>
-              <span className="sb-num">#{copy.id}</span>{' '}
-              {place === 'inbox'
-                ? 'in the inbox folder'
-                : place === 'project'
-                  ? 'in a project folder, kept'
-                  : 'folder not recorded; checked before deleting'}
-            </li>
-          )
-        })}
-      </ul>
-      {removable > 0 ? (
-        <label className="mt-3 flex items-center gap-2 text-[13px] text-ink">
-          <input
-            type="checkbox"
-            checked={alsoInbox}
-            onChange={(event) => setAlsoInbox(event.target.checked)}
-          />
-          Also delete the inbox copies in Bambuddy
-        </label>
-      ) : (
-        <p className="mt-3 text-[13px] text-muted">Copies in project folders stay in Bambuddy.</p>
-      )}
-      <p className="mt-2 text-[12px] text-faint">
-        Sliced files and project copies are never deleted from here.
+      <p className="text-[13px] text-ink">
+        The output, its file and its parameters are deleted. This cannot be undone.
       </p>
+      {copies.length > 0 && (
+        <>
+          <p className="mt-3 text-[13px] text-muted">This output has copies in Bambuddy&apos;s library:</p>
+          <ul className="mt-1 list-disc pl-5 text-[13px] text-muted" aria-label="Library copies">
+            {copies.map((copy) => {
+              const place = placeOf(copy, inboxFolderId)
+              return (
+                <li key={copy.id}>
+                  <span className="sb-num">#{copy.id}</span>{' '}
+                  {place === 'inbox'
+                    ? 'in the inbox folder'
+                    : place === 'project'
+                      ? 'in a project folder, kept'
+                      : 'folder not recorded; checked before deleting'}
+                </li>
+              )
+            })}
+          </ul>
+          {removable > 0 ? (
+            <label className="mt-3 flex items-center gap-2 text-[13px] text-ink">
+              <input
+                type="checkbox"
+                checked={alsoInbox}
+                onChange={(event) => setAlsoInbox(event.target.checked)}
+              />
+              Also delete the inbox copies in Bambuddy
+            </label>
+          ) : (
+            <p className="mt-3 text-[13px] text-muted">Copies in project folders stay in Bambuddy.</p>
+          )}
+          <p className="mt-2 text-[12px] text-faint">
+            Sliced files and project copies are never deleted from here.
+          </p>
+        </>
+      )}
       {error && (
         <p role="alert" className="mt-3 text-[13px] text-warn">
           {error}

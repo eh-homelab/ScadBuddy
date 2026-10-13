@@ -394,8 +394,26 @@ export function CustomizePage() {
 
   // A parameter change invalidates the saved output — Generate has to run again. So does
   // a UI-state-only change (#848): it starts no render, but the output records the old state.
+  // #2445 — an output reopened from History is already saved: once the render on screen is
+  // of its own values, UI state and revision, Download, Send and Print act on it, rather
+  // than waiting for a Generate that would only save a duplicate of it.
+  const reopenedOutput =
+    reopened?.source === 'record' ? outputsState.data?.find((o) => o.id === reopened.output_id) : undefined
+  const reopenedOnScreen =
+    reopenedOutput !== undefined &&
+    schema !== undefined &&
+    reopenedInputs !== null &&
+    upToDate &&
+    job?.status === 'done' &&
+    (job.model_version ?? null) === (reopenedOutput.model_version ?? null) &&
+    sameJson(job.params, { ...defaultValues(schema), ...reopenedOutput.params }) &&
+    sameJson(extra, reopenedInputs.extra)
   const output =
-    settled && !invalid && saved && saved.jobId === job?.id && sameJson(saved.extra, extra) ? saved.output : undefined
+    settled && !invalid && saved && saved.jobId === job?.id && sameJson(saved.extra, extra)
+      ? saved.output
+      : reopenedOnScreen
+        ? reopenedOutput
+        : undefined
 
   // #289 — a multi-plate render is checked plate by plate.
   const targets = useMemo(() => fitTargets(job), [job])
