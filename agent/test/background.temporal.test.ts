@@ -75,7 +75,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a background task's workfl
       createdBy: browser,
     }))!
   const start = (taskId: string) =>
-    env.client.workflow.start(BACKGROUND_WORKFLOW, { workflowId: backgroundWorkflowId(taskId), taskQueue: TASK_QUEUE, args: [{ taskId, retryMs: 200 }] })
+    env.client.workflow.start(BACKGROUND_WORKFLOW, { workflowId: backgroundWorkflowId(sessionId, taskId), taskQueue: TASK_QUEUE, args: [{ taskId, retryMs: 200 }] })
 
   it('sends a wakeup once it is due and the session is no longer busy, then ends', async () => {
     const t = await wakeup(1000)
@@ -105,7 +105,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a background task's workfl
     answers = [{ result: 'busy' }]
     await (
       await env.client.workflow.start(BACKGROUND_WORKFLOW, {
-        workflowId: backgroundWorkflowId(t.id),
+        workflowId: backgroundWorkflowId(sessionId, t.id),
         taskQueue: TASK_QUEUE,
         args: [{ taskId: t.id, kind: 'monitor', retryMs: 200 }],
       })
@@ -129,7 +129,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a background task's workfl
       spec: { prompt: 'never', at: new Date(Date.now() + 3_600_000).toISOString() },
       createdBy: browser,
     }))!
-    const handle = env.client.workflow.getHandle(backgroundWorkflowId(t.id))
+    const handle = env.client.workflow.getHandle(backgroundWorkflowId(sessionId, t.id))
     await expect.poll(async () => (await store.get(t.id))?.nextAt?.getTime(), { timeout: 20_000 }).toBeDefined()
     expect(await tasks.cancel(sessionId, t.id, 'the test')).toMatchObject({ state: 'cancelled' })
     // It handles its cancellation (it ends the row) and completes.

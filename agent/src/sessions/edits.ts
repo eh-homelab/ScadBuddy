@@ -32,6 +32,8 @@ export type SessionEditsDeps = {
   audit?: AuditLog
   /** Ends a durable session's workflow (#1056); refuses when it cannot be told. */
   endDurable: (id: string) => Promise<void>
+  /** Ends a session's background tasks (src/background/) when it is archived or marked done. */
+  endBackground?: ((id: string, why: string) => Promise<unknown>) | undefined
 }
 
 /** Why a `done` summary dismissed by an archive ended, on its card and its audit row. */
@@ -124,6 +126,8 @@ export class SessionEdits {
       return gone
     })
     if (logged) this.deps.events.committed(id, logged.events, logged.seqs)
+    // Its cron jobs, wakeups and monitors end with it: nothing fires into an archived or done chat.
+    if (archive || done) await this.deps.endBackground?.(id, archive ? 'the chat was archived' : 'the chat was marked done')
     if (context) {
       const changes = [
         ...(title === undefined ? [] : ['renamed']),
