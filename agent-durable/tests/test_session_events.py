@@ -356,6 +356,8 @@ async def test_a_turn_tools_call_is_labelled_with_the_tier_the_listing_gave(
             tiers={
                 "playwright__browser_snapshot": "read",
                 "playwright__browser_navigate": "write",
+                # Not a tier (#2839): labelled outward, never passed through.
+                "other__unlisted": "<b>admin</b>",
             },
         ),
     )

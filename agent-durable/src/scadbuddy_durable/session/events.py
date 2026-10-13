@@ -47,6 +47,9 @@ REDACTED = "[redacted]"
 LAST = frozenset({"done", "error", "cancelled"})
 FOLLOW_HEARTBEAT = timedelta(seconds=30)
 
+#: The panel's risk labels (agent harness/permissions.ts `RiskTier`).
+RISK_TIERS = frozenset({"read", "write", "outward"})
+
 
 def _blank(value: Any) -> Any:
     if isinstance(value, list):
@@ -191,7 +194,10 @@ class SessionEvents:
 
     @activity.defn(name="follow_session")
     async def follow_session(self, args: FollowArgs) -> FollowResult:
-        tiers = {e.name: e.tier for e in tools.manifest()} | args.tiers
+        # A listed tier is the agent's free string: one that is not a tier is labelled
+        # outward, as an unlisted tool is, rather than reaching the transcript as is (#2839).
+        listed = {name: tier for name, tier in args.tiers.items() if tier in RISK_TIERS}
+        tiers = {e.name: e.tier for e in tools.manifest()} | listed
         at = [0]
         failed: str | None = None
         try:

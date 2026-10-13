@@ -118,16 +118,18 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
     ]
     for (const plugin of forwarded?.plugins ?? []) {
       const tiers = pluginTierResolver([plugin])
+      // An unlisted plugin tool is outward (registry.ts), as in a classic turn. One
+      // function for the label, the park and the call, so they cannot disagree (#2838).
+      const tierOf = (name: string) => tiers(name) ?? 'outward'
       const keep = forwarded?.keep?.(plugin.name)
       servers.push({
         name: plugin.name,
         connect: () => connectHttp(plugin.url),
         // Its forwarder URL is new each run; its tools change with what Settings disabled.
         listingKey: JSON.stringify(plugin.disabledTools),
-        // An unlisted plugin tool is outward (registry.ts), as in a classic turn.
-        tierOf: (name) => tiers(name) ?? 'outward',
-        mayPark: (name) => (tiers(name) ?? 'outward') === 'outward',
-        fixedTier: (name) => tiers(name) ?? 'outward',
+        tierOf,
+        mayPark: (name) => tierOf(name) === 'outward',
+        fixedTier: tierOf,
         // Its MCP session is kept for the durable session, on its own route (#2581).
         ...(keep
           ? {
