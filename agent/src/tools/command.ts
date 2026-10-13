@@ -124,11 +124,13 @@ export async function answeredFollowing<T>(
 ): Promise<FetchResult<T>> {
   const began = performance.now()
   let result = await answered(ctx, send, what, gaveUp)
-  for (let accepting = acceptingOf(result); accepting; accepting = acceptingOf(result)) {
-    if (performance.now() - began >= ACCEPTING_MS) {
+  for (let follows = 0, accepting = acceptingOf(result); accepting; accepting = acceptingOf(result), follows++) {
+    if (performance.now() - began >= (ctx.acceptingMs ?? ACCEPTING_MS)) {
       throw new ToolError(`${what}: ScadBuddy is still starting it.${gaveUp}`)
     }
-    await sleep(Math.max(ctx.pollIntervalMs, accepting.retry_after * 1000), undefined, { signal: ctx.signal })
+    // The follow is itself a long-poll, so the first goes at once; a repeat waits only
+    // the polling floor, not `retry_after` on top of the server's wait (review #2849).
+    if (follows > 0) await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
     const { workflow_id, update_id } = accepting
     // The follow URL's query (a render's `supersedes`) rides along.
     const query = Object.fromEntries(new URL(accepting.follow_url, 'http://follow').searchParams)

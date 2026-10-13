@@ -2579,7 +2579,6 @@ describe('list_models and list_outputs page in the backend (#843)', () => {
   })
 })
 
-
 describe('a command the backend answers 202 accepting (#2795)', () => {
   const OUT = 'e'.repeat(32)
 
@@ -2603,5 +2602,50 @@ describe('a command the backend answers 202 accepting (#2795)', () => {
     expect(firstText(result)).toMatchObject({ deleted: OUT, slug: 'box' })
     expect(deletes).toBe(1)
     expect(prefer).toBe('respond-async')
+  })
+
+  it('follows a followed operation that is still running into /operations/{id} (review #2849)', async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/outputs/${OUT}`, () => HttpResponse.json({ slug: 'box' })),
+      http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () =>
+        HttpResponse.json(
+          { status: 'accepting', workflow_id: 'op-delete_output-x', update_id: 'k', follow_url: '/api/v1/commands/op-delete_output-x/updates/k', retry_after: 0 },
+          { status: 202 },
+        ),
+      ),
+      http.post(`${BACKEND}/api/v1/commands/op-delete_output-x/updates/k`, () =>
+        HttpResponse.json({ id: 'op-1', kind: 'delete_output', subject: OUT, status: 'running', created_at: '', repeated: false }, { status: 202 }),
+      ),
+      http.get(`${BACKEND}/api/v1/operations/op-1`, () =>
+        HttpResponse.json({ id: 'op-1', kind: 'delete_output', subject: OUT, status: 'succeeded', created_at: '', result: { deleted: OUT } }),
+      ),
+    )
+    const result = await tool('delete_output').execute({ output_id: OUT }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(firstText(result)).toMatchObject({ deleted: OUT })
+  })
+
+  it('gives up following after its budget, saying it may still start (review #2849)', async () => {
+    let follows = 0
+    server.use(
+      http.get(`${BACKEND}/api/v1/outputs/${OUT}`, () => HttpResponse.json({ slug: 'box' })),
+      http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () =>
+        HttpResponse.json(
+          { status: 'accepting', workflow_id: 'op-delete_output-x', update_id: 'k', follow_url: '/api/v1/commands/op-delete_output-x/updates/k', retry_after: 0 },
+          { status: 202 },
+        ),
+      ),
+      http.post(`${BACKEND}/api/v1/commands/op-delete_output-x/updates/k`, () => {
+        follows += 1
+        return HttpResponse.json(
+          { status: 'accepting', workflow_id: 'op-delete_output-x', update_id: 'k', follow_url: '/api/v1/commands/op-delete_output-x/updates/k', retry_after: 0 },
+          { status: 202 },
+        )
+      }),
+    )
+    const result = await runTool({ ...tool('delete_output'), gated: false }, { output_id: OUT }, ctx({ acceptingMs: 30 }))
+    expect(result.isError).toBe(true)
+    expect(firstText(result)).toContain('ScadBuddy is still starting it')
+    expect(follows).toBeGreaterThan(0)
   })
 })
