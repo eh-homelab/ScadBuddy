@@ -1,0 +1,193 @@
+---
+name: Go Module CI
+
+# Reusable workflow, called once from ci.yml's `go` job (#2686, spec 2026-10-13
+# §7). Adapted from WonderForgeLabs/forge's go-module-ci.yml: one runner checks
+# every module under tools/go/ (gofmt, vet, build, `test -race`, and a
+# module-mode vendor build for a module that ships its own vendor/), then checks
+# that the root vendor/ is what `go work vendor` writes.
+#
+# Never path-gated. ci.yml's `go-select` decides whether this change touched Go
+# and passes `run`; on "false" the job still runs, says so in its summary and
+# succeeds, so `CI Summary` asserts a job that really ran rather than counting a
+# skip as a pass.
+
+on:
+  workflow_call:
+    inputs:
+      run:
+        description: '"true" when this change touched Go (ci.yml `go-select`), else "false".'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  # `toolchain go1.25.6` in go.work is only a minimum: a runner whose Go is newer
+  # would use it and write a different `go work vendor` tree, failing the drift
+  # check below for nothing. +auto still follows a later go.work bump.
+  GOTOOLCHAIN: go1.25.6+auto
+
+jobs:
+  build-and-test:
+    name: gofmt, vet, build, test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: No Go changes
+        if: ${{ inputs.run != 'true' }}
+        run: echo "No Go changes in this PR; nothing to check." >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/checkout@v7
+        if: ${{ inputs.run == 'true' }}
+
+      # With the root vendor/ the module cache is barely used; the glob only
+      # gives the cache key something that exists (there is no root go.sum).
+      - uses: actions/setup-go@v7
+        if: ${{ inputs.run == 'true' }}
+        with:
+          go-version-file: go.work
+          cache-dependency-path: tools/go/*/go.sum
+
+      # bambuddy-fs's mount test needs fusermount3 (it skips without /dev/fuse,
+      # which hosted runners have).
+      - name: Install fuse3
+        if: ${{ inputs.run == 'true' }}
+        run: sudo apt-get update -qq && sudo apt-get install -y fuse3
+
+      # Every module and every check runs even after a failure; failures are
+      # collected and the step fails at the end. Each module's output is
+      # buffered and replayed in order, so concurrent modules do not interleave
+      # their `::group::` blocks. Each module records its failures in its own
+      # file: an array assigned in a background subshell dies with it, and a
+      # lost failure would read as green.
+      - name: gofmt, vet, build, test all modules
+        if: ${{ inputs.run == 'true' }}
+        env:
+          # Per-check cap, so one wedged `go test` cannot take the job budget.
+          TASK_TIMEOUT: 12m
+          MAX_PARALLEL: 2
+        run: |
+          set -uo pipefail
+          mods=()
+          for gomod in tools/go/*/go.mod; do
+            if [ -f "$gomod" ]; then mods+=("$(dirname "$gomod")"); fi
+          done
+          # An empty list would run nothing and pass.
+          if [ ${#mods[@]} -eq 0 ]; then
+            echo "::error::No Go modules found under tools/go/*/go.mod"
+            exit 1
+          fi
+
+          if ! jobs_max=$(nproc 2>/dev/null); then jobs_max=1; fi
+          if [ "$jobs_max" -gt "$MAX_PARALLEL" ]; then jobs_max=$MAX_PARALLEL; fi
+          if [ "$jobs_max" -lt 1 ]; then jobs_max=1; fi
+          echo "Checking ${#mods[@]} module(s), ${jobs_max} at a time"
+
+          scratch=$(mktemp -d)
+
+          # Every failable command is guarded (`if ! …`) and recorded: under
+          # `bash -e` an aborted subshell would drop the checks after it and
+          # the record of why.
+          check_module() {
+            local mod=$1 log=$2 failfile=$3 unformatted check
+            local cmd
+            {
+              echo "::group::${mod} — gofmt"
+              if ! unformatted=$(find "$mod" -name '*.go' -not -path '*/vendor/*' -print0 | xargs -0 -r gofmt -l); then
+                echo "::error::${mod} failed: gofmt could not process the module's sources (parse error?)"
+                echo "${mod}: gofmt" >> "$failfile"
+                unformatted=""
+              fi
+              if [ -n "$unformatted" ]; then
+                echo "::error::${mod} failed: gofmt (files not gofmt-clean):"
+                echo "$unformatted"
+                echo "${mod}: gofmt" >> "$failfile"
+              fi
+              echo "::endgroup::"
+
+              # Workspace mode: with go.work and the root vendor/, Go builds
+              # with -mod=vendor by default, so a package missing from vendor/
+              # fails here.
+              for check in vet build test; do
+                case "$check" in
+                  vet)   cmd=(go vet ./...) ;;
+                  build) cmd=(go build ./...) ;;
+                  test)  cmd=(go test -race ./...) ;;
+                esac
+                echo "::group::${mod} — go ${check}"
+                if ! (cd "$mod" && timeout -k 30s "$TASK_TIMEOUT" "${cmd[@]}"); then
+                  echo "::error::${mod} failed: go ${check} (exit/timeout)"
+                  echo "${mod}: go ${check}" >> "$failfile"
+                fi
+                echo "::endgroup::"
+              done
+
+              # A module that ships its own vendor/ (scadbuddy-client, for
+              # consumers outside this workspace) is also built the way such a
+              # consumer builds it: module mode, its own vendor/. A module
+              # without one has only the workspace build above.
+              if [ -f "${mod}/vendor/modules.txt" ]; then
+                echo "::group::${mod} — module-mode vendor build (GOWORK=off)"
+                if ! (cd "$mod" && GOWORK=off timeout -k 30s "$TASK_TIMEOUT" go build -mod=vendor ./...); then
+                  echo "::error::${mod} failed: module-mode vendor build — run 'cd ${mod} && GOWORK=off go mod vendor'"
+                  echo "${mod}: module-vendor" >> "$failfile"
+                fi
+                echo "::endgroup::"
+              fi
+            } > "$log" 2>&1
+            return 0
+          }
+
+          # Scratch files are keyed by loop index, not by a slug of the path,
+          # so two modules can never share a log.
+          running=0
+          for i in "${!mods[@]}"; do
+            mod="${mods[$i]}"
+            : > "${scratch}/${i}.fail"
+            echo "> started ${mod}"
+            check_module "$mod" "${scratch}/${i}.log" "${scratch}/${i}.fail" &
+            running=$((running + 1))
+            if [ "$running" -ge "$jobs_max" ]; then
+              wait -n || true
+              running=$((running - 1))
+            fi
+          done
+          wait
+
+          failed=()
+          for i in "${!mods[@]}"; do
+            if [ -f "${scratch}/${i}.log" ]; then cat "${scratch}/${i}.log"; fi
+            if [ -s "${scratch}/${i}.fail" ]; then
+              while IFS= read -r line; do failed+=("$line"); done < "${scratch}/${i}.fail"
+            fi
+          done
+
+          # After the join, never alongside the builds: it rewrites the vendor/
+          # they read. `git status --porcelain`, not `git diff`, so a new
+          # untracked vendored package counts as drift too. The per-module
+          # go.mod/go.sum are in it because `go work vendor` can add entries to
+          # a go.sum that was missing some.
+          echo "::group::workspace vendor freshness (go work vendor)"
+          if ! timeout -k 30s "$TASK_TIMEOUT" go work vendor; then
+            echo "::error::'go work vendor' failed (toolchain/network?) — see output above"
+            failed+=("workspace: go work vendor failed")
+          else
+            drift=$(git status --porcelain -- vendor go.work go.work.sum 'tools/go/*/go.mod' 'tools/go/*/go.sum')
+            if [ -z "$drift" ]; then
+              echo "workspace vendor is up to date"
+            else
+              echo "::error::workspace vendor out of sync — run 'go work vendor' and commit the changed paths"
+              printf '%s\n' "$drift"
+              failed+=("workspace: vendor drift")
+            fi
+          fi
+          echo "::endgroup::"
+
+          if [ ${#failed[@]} -gt 0 ]; then
+            printf '%s\n' "Failed module checks:" "${failed[@]}"
+            exit 1
+          fi
