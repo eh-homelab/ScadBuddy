@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/eh-homelab/ScadBuddy/tools/go/scadbuddy-client v0.0.0-00010101000000-000000000000
+	github.com/hanwen/go-fuse/v2 v2.12.0
 	github.com/microsoft/kiota-abstractions-go v1.11.1
 	github.com/microsoft/kiota-http-go v1.5.6
 	github.com/microsoft/kiota-serialization-json-go v1.1.4
@@ -22,6 +23,7 @@ require (
 	go.opentelemetry.io/otel v1.46.0 // indirect
 	go.opentelemetry.io/otel/metric v1.46.0 // indirect
 	go.opentelemetry.io/otel/trace v1.46.0 // indirect
+	golang.org/x/sys v0.28.0 // indirect
 )
 
 replace github.com/eh-homelab/ScadBuddy/tools/go/scadbuddy-client => ../scadbuddy-client
