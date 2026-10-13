@@ -92,8 +92,8 @@ export function useFilamentProfiles({
 
   return {
     suggestions,
-    /** The ids to send: every suggestion left on. One not yet previewed is sent, and the
-     * server refuses the print if it cannot apply. */
+    /** The ids to send: every suggestion left on. One not yet previewed is sent; if it
+     * cannot apply, the server skips it and the run's warnings say so. */
     active: suggestions.filter((entry) => entry.on).map((entry) => entry.profile.id),
     toggle: (id: string, on: boolean) =>
       setOff((current) => {

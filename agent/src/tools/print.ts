@@ -831,7 +831,8 @@ export const printTools: Tool[] = [
         .optional()
         .describe(
           'Filament profiles to apply, by id (list_filament_profiles), e.g. silk-pla for a silk PLA spool. ' +
-            'Never applied unless named here; a profile that cannot apply to this print refuses it, saying why.',
+            "Never applied unless named here. One that cannot apply to this print is skipped, never refused: " +
+            "the run's warnings say so (profile-not-applied) and it prints with the preset as it is.",
         ),
     }),
     risk: 'outward',

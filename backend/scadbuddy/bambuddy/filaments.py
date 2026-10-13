@@ -91,12 +91,8 @@ WarningKind = Literal[
     "rack-manual-partial",
     # A by-object print whose objects the toolhead or the gantry would hit (#956).
     "sequence-clearance",
-    # A sliced file queued as it is (#2671), never refused: what to set right first.
-    "sliced-other-model",
-    "sliced-nozzle-missing",
-    "sliced-plate-missing",
-    # ScadBuddy's own earlier slice of the same choices queued, nothing sliced (#2955).
-    "slice-reused",
+    # #717: a filament profile left on that could not apply; the print goes ahead.
+    "profile-not-applied",
 ]
 
 

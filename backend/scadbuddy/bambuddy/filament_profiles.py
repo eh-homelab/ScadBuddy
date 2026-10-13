@@ -12,8 +12,8 @@ the setting: on an H2C, ``outer_wall_speed`` is a list with one entry per extrud
 variant (``0.20mm Standard @BBL H2C``: ``["200", "500", "500", "200", "500"]``), and a
 bare string there would collapse it. So the base preset's values are read first
 (``GET /slicer/preset-values``), and a profile whose values cannot be read is not
-applied: the print is refused, naming why, rather than sliced without it or with a
-guessed shape.
+applied rather than sent in a guessed shape: the print goes ahead with the preset as it
+is, and its Checks say the profile was not applied and why.
 
 Filament settings (nozzle temperature) have no verified channel yet (#284's
 ``UNVERIFIED_TARGETS``), so a profile states them as notes and never sends them.
@@ -21,14 +21,13 @@ Filament settings (nozzle temperature) have no verified channel yet (#284's
 
 from __future__ import annotations
 
-from fastapi import status
 from pydantic import BaseModel, Field
 
 from scadbuddy.analyzers import sources as src
 from scadbuddy.analyzers.model import Source
 from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.filaments import FilamentWarning
 from scadbuddy.bambuddy.models import PresetRef, ProcessValue
-from scadbuddy.core.problems import ApiError
 
 
 class ProfileMatch(BaseModel):
@@ -125,7 +124,7 @@ class ProfilePreview(BaseModel):
     #: The process preset the changes were read against.
     process_preset: PresetRef | None = None
     #: Whether the profile can be applied to this print. When false, ``reason`` says
-    #: why, and printing with it on is refused.
+    #: why, and a print with it on goes ahead without it, saying so in its warnings.
     applicable: bool
     reason: str | None = None
     changes: list[ProfileChange] = Field(default_factory=list)
@@ -136,6 +135,12 @@ _REASONS = {
     "not_configured": "Bambuddy has no slicer configured",
     "preset_unresolved": "Bambuddy could not find the process preset",
 }
+
+
+def _settings(profile: FilamentProfile) -> str:
+    """ "outer wall speed", "outer wall speed and inner wall speed"…"""
+    labels = [setting.label.lower() for setting in profile.settings]
+    return " and ".join([", ".join(labels[:-1]), labels[-1]] if len(labels) > 1 else labels)
 
 
 def unknown_profiles(ids: list[str]) -> list[str]:
@@ -150,7 +155,10 @@ async def preview(
         return ProfilePreview(
             profile=profile,
             applicable=False,
-            reason="No process preset resolves for these choices.",
+            reason=(
+                "no process preset resolves for these choices, so there is no "
+                f"{_settings(profile)} to change"
+            ),
         )
     values = await client.preset_values(process)
     if not values.resolved:
@@ -159,7 +167,7 @@ async def preview(
             profile=profile,
             process_preset=process,
             applicable=False,
-            reason=f"The process preset's values could not be read ({why}).",
+            reason=f"couldn't read the preset's {_settings(profile)} ({why})",
         )
     changes: list[ProfileChange] = []
     for setting in profile.settings:
@@ -175,7 +183,7 @@ async def preview(
                 profile=profile,
                 process_preset=process,
                 applicable=False,
-                reason=f"The process preset has no {setting.key}.",
+                reason=f"the preset has no {setting.label.lower()} ({setting.key})",
             )
         changes.append(
             ProfileChange(
@@ -202,20 +210,30 @@ def overrides(preview: ProfilePreview) -> dict[str, ProcessValue]:
     }
 
 
+def not_applied(preview: ProfilePreview) -> FilamentWarning:
+    """The Checks warning for a profile left on that cannot apply to this print."""
+    return FilamentWarning(
+        kind="profile-not-applied",
+        message=(
+            f"{preview.profile.name} profile not applied: {preview.reason}. The print uses "
+            "the preset as it is."
+        ),
+    )
+
+
 async def profile_overrides(
     client: BambuddyClient, process: PresetRef | None, profile_ids: list[str]
-) -> dict[str, ProcessValue]:
+) -> tuple[dict[str, ProcessValue], list[FilamentWarning]]:
     """The process overrides of every profile a print applies, each read against the
-    print's own process preset. A profile that cannot apply as shown refuses the print,
-    naming why, so it is never sliced without it."""
+    print's own process preset in the shape it stores them. A profile that cannot apply
+    is skipped, never guessed at, and a warning says so: the print is not refused for it,
+    and goes ahead with the preset as it is."""
     merged: dict[str, ProcessValue] = {}
+    warnings: list[FilamentWarning] = []
     for profile_id in profile_ids:
         shown = await preview(client, process, BUILTIN[profile_id])
-        if not shown.applicable:
-            raise ApiError(
-                status.HTTP_422_UNPROCESSABLE_CONTENT,
-                f"The {shown.profile.name} profile cannot be applied: {shown.reason} "
-                "Turn it off to print without it.",
-            )
-        merged.update(overrides(shown))
-    return merged
+        if shown.applicable:
+            merged.update(overrides(shown))
+        else:
+            warnings.append(not_applied(shown))
+    return merged, warnings

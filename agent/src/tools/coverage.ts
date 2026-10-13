@@ -197,8 +197,8 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     operation: 'POST /api/v1/print/filament-profiles/preview',
     reason:
       "The print dialog's preview of a profile against the process preset its choices resolve to (#717). An " +
-      'agent lists profiles with list_filament_profiles and applies one through print_output, which refuses ' +
-      'a profile that cannot apply, saying why.',
+      'agent lists profiles with list_filament_profiles and applies one through print_output, whose run ' +
+      'warns (profile-not-applied) when one cannot apply.',
   },
   {
     operation: 'GET /api/v1/analyzers/decisions',
