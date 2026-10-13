@@ -66,6 +66,52 @@ function printAttributes(source: PrintSource, body: PrintRunRequest): Attributes
 const NONE: string[] = []
 
 /**
+ * The run request the dialog's choices make, without a press's `request_id`: what Print
+ * sends, and what a batch print's step keeps for Queue all to send (#2672).
+ */
+export function printRunBody({
+  printerId,
+  plan,
+  printChoices,
+  copies,
+  plate,
+  projectId,
+  options,
+  printSequence,
+  supports = null,
+  filamentProfiles = [],
+  rackPosition,
+  rackAlgorithm,
+}: {
+  printerId: number | null
+  plan: SlotChoice[]
+  printChoices: NonNullable<ReturnType<typeof printChoicesOf>>
+  copies: number | null
+  plate: number | 'all'
+  projectId: number | null | undefined
+  options: PrintOptions
+  printSequence: PrintSequence | null
+  supports?: SupportsChoice | null
+  filamentProfiles?: readonly string[]
+  rackPosition: number | null
+  rackAlgorithm: RackAlgorithm | null
+}): PrintRunRequest {
+  return {
+    printer_id: printerId,
+    filament_plan: { slots: plan, force_colour_match: false },
+    choices: printChoices,
+    ...(copies === null ? {} : { copies }),
+    plate_id: plate === 'all' ? 1 : plate,
+    all_plates: plate === 'all',
+    ...(projectId === undefined ? {} : { project_id: projectId }),
+    options,
+    ...sliceOverrides(printSequence, supports, filamentProfiles),
+    rack_position: rackPosition,
+    rack_algorithm: rackAlgorithm,
+  }
+}
+
+/**
  * The print dialog's one write, the source's run (`POST /print/outputs/{id}/run` or
  * `POST /print/library/{file_id}/run`, #313). A 422 is the resolver
  * refusing a combination; its `detail` is `runError`, and `refused` keeps Print disabled
@@ -176,17 +222,20 @@ export function useRunPrint({
     setRefused(false)
     try {
       const body: PrintRunRequest = {
-        printer_id: printerId,
-        filament_plan: { slots: plan, force_colour_match: false },
-        choices: printChoices,
-        ...(copies === null ? {} : { copies }),
-        plate_id: plate === 'all' ? 1 : plate,
-        all_plates: plate === 'all',
-        ...(projectId === undefined ? {} : { project_id: projectId }),
-        options,
-        ...sliceOverrides(printSequence, supports, filamentProfiles),
-        rack_position: rackPosition,
-        rack_algorithm: rackAlgorithm,
+        ...printRunBody({
+          printerId,
+          plan,
+          printChoices,
+          copies,
+          plate,
+          projectId,
+          options,
+          printSequence,
+          supports,
+          filamentProfiles,
+          rackPosition,
+          rackAlgorithm,
+        }),
         // One per press: the same choices printed again are a new print, while
         // runPrint's own retries of this press re-attach to its run (#470).
         request_id: newRequestId(),

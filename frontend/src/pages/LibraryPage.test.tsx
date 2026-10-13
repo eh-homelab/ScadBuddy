@@ -126,6 +126,27 @@ describe('LibraryPage', () => {
     expect(screen.getByRole('button', { name: 'Arrange selected (1)' })).toBeEnabled()
   })
 
+  it('prints the ticked files as one batch, and a reload resumes it (#2672)', async () => {
+    const { user, unmount } = renderPage(<LibraryPage />, { route: '/library' })
+    await screen.findByTestId('library-file-89')
+    const print = screen.getByTestId('library-print-selected')
+    expect(print).toBeDisabled()
+    const boxes = screen.getAllByRole('checkbox', { name: /^Select / })
+    await user.click(boxes[0] as HTMLElement)
+    expect(print).toBeDisabled()
+    await user.click(boxes[1] as HTMLElement)
+    expect(print).toHaveTextContent('Print 2 files')
+    const created = vi.spyOn(api, 'createPrintBatch')
+    await user.click(print)
+    expect(await screen.findByRole('dialog', { name: /^File 1 of 2 — / })).toBeInTheDocument()
+    const batch = await (created.mock.results[0]?.value as ReturnType<typeof api.createPrintBatch>)
+    await api.putPrintBatchStep(batch.id, 1)
+    unmount()
+
+    renderPage(<LibraryPage />, { route: `/library?batch=${batch.id}` })
+    expect(await screen.findByRole('dialog', { name: /^File 2 of 2 — / })).toBeInTheDocument()
+  })
+
   it('renders a folder of hundreds of files with lazy thumbnails', async () => {
     const { user, container } = renderPage(<LibraryPage />, { route: '/library' })
     await user.click(await screen.findByTestId('library-folder-9'))

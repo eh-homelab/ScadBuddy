@@ -14,6 +14,7 @@ import { ArrangeDialog } from '../components/ArrangeDialog'
 import { ArrangedNext } from '../components/ArrangedNext'
 import { DeleteLibraryFilesDialog } from '../components/library/DeleteLibraryFilesDialog'
 import { LibraryTree } from '../components/library/LibraryTree'
+import { BatchPrintDialog } from '../components/BatchPrintDialog'
 import { RenameLibraryFileDialog } from '../components/library/RenameLibraryFileDialog'
 import { TransferLibraryFilesDialog, type TransferMode } from '../components/library/TransferLibraryFilesDialog'
 import { PrintPicker } from '../components/PrintPicker'
@@ -82,6 +83,8 @@ export function LibraryPage() {
   const segments = folderSegments(location.pathname)
   const fileParam = idParam(search.get('file'))
   const printParam = idParam(search.get('print'))
+  /** #2672 — the batch print open, by id: a reload resumes it. */
+  const batchParam = search.get('batch')
 
   const [advanced, toggleAdvanced] = useAdvanced(ADVANCED_KEY)
   const [tree, setTree] = useState<LibraryFolderView[] | null>(null)
@@ -194,6 +197,33 @@ export function LibraryPage() {
     }
   }
 
+  /** #2672 — a batch print of the ticked printable files, in the order they were ticked. */
+  const [batchError, setBatchError] = useState<string | null>(null)
+  const [startingBatch, setStartingBatch] = useState(false)
+  async function startBatch(files: LibraryEntry[]) {
+    setStartingBatch(true)
+    setBatchError(null)
+    try {
+      const batch = await api.createPrintBatch(
+        files.map((file) => ({ library_file_id: file.id, filename: file.filename, sliced: file.sliced ?? false })),
+      )
+      setPicked([])
+      const next = new URLSearchParams(search)
+      next.set('batch', batch.id)
+      setSearch(next)
+    } catch (cause) {
+      setBatchError(cause instanceof ApiError ? cause.detail : 'Could not start the batch print.')
+    } finally {
+      setStartingBatch(false)
+    }
+  }
+
+  function closeBatch() {
+    const next = new URLSearchParams(search)
+    next.delete('batch')
+    setSearch(next, { replace: true })
+  }
+
   async function deleteFiles(files: LibraryEntry[]) {
     const ids = files.map((file) => file.id)
     // Library actions are user actions in Tempo (#2292), each request its child.
@@ -263,6 +293,8 @@ export function LibraryPage() {
   const hidden = listing?.hidden ?? 0
   // #2671 — a sliced file prints, but has no objects to arrange.
   const printable = picked.filter((file) => file.printable && !file.sliced)
+  // #2672 — any printable file, sliced or not, prints in a batch.
+  const batchable = picked.filter((file) => file.printable)
   const printing = printParam === null ? null : (files.find((file) => file.id === printParam) ?? null)
   const folderId = wanted?.fileId !== undefined ? (listing?.folder_id ?? null) : (wanted?.folderId ?? null)
 
@@ -349,6 +381,15 @@ export function LibraryPage() {
             </Button>
             <Button
               size="sm"
+              variant="primary"
+              data-testid="library-print-selected"
+              disabled={batchable.length < 2 || startingBatch}
+              onClick={() => void startBatch(batchable)}
+            >
+              Print {batchable.length} files
+            </Button>
+            <Button
+              size="sm"
               variant="danger"
               data-testid="library-delete-selected"
               disabled={picked.length === 0}
@@ -388,6 +429,11 @@ export function LibraryPage() {
               Advanced lists every file, sliced files and STLs too.
             </span>
           </header>
+          {batchError && (
+            <p role="alert" className="text-[13px] text-warn">
+              {batchError}
+            </p>
+          )}
 
           {missing && (
             <p role="alert" className="text-[13px] text-warn">
@@ -524,6 +570,7 @@ export function LibraryPage() {
           onClose={() => (printing ? openPrint(null) : setPrintArranged(false))}
           onRan={() => (printing ? undefined : setArrangedSent(true))}
         />
+        {batchParam !== null && <BatchPrintDialog key={batchParam} batchId={batchParam} onClose={closeBatch} />}
         <ArrangeDialog
           open={arranging}
           sources={fromFiles(printable)}

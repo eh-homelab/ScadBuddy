@@ -69,6 +69,9 @@ import type {
   ModelProjectPut,
   ModelProjects,
   ModelPrintChoices,
+  NewBatchFile,
+  BatchChoice,
+  PrintBatch,
   ModelSummary,
   ModelVersion,
   Output,
@@ -1831,6 +1834,38 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+
+  /** #2672 — a batch print over library files, opened on the first file's step. */
+  createPrintBatch: (files: NewBatchFile[]) =>
+    request<PrintBatch>('/print/batches', { method: 'POST', body: JSON.stringify({ files }) }),
+
+  /** #2672 — a batch print as it was left, to resume it. */
+  getPrintBatch: (batchId: string) => request<PrintBatch>(`/print/batches/${seg(batchId)}`),
+
+  /** #2672 — the step in view: a file's position, or the file count for the review. */
+  putPrintBatchStep: (batchId: string, step: number) =>
+    request<PrintBatch>(`/print/batches/${seg(batchId)}/step`, {
+      method: 'PUT',
+      body: JSON.stringify({ step }),
+    }),
+
+  /** #2672 — one file's choices, or that it is skipped or removed. */
+  putPrintBatchItem: (batchId: string, position: number, choice: BatchChoice) =>
+    request<PrintBatch>(`/print/batches/${seg(batchId)}/items/${position}`, {
+      method: 'PUT',
+      body: JSON.stringify(choice),
+    }),
+
+  /** #2672 — starts each chosen file's library run and says what happened to each. */
+  queuePrintBatch: (batchId: string) =>
+    request<PrintBatch>(`/print/batches/${seg(batchId)}/queue`, { method: 'POST' }),
+
+  /** #2672 — forgets the batch; whatever it queued stays queued. */
+  deletePrintBatch: (batchId: string) =>
+    request<void>(`/print/batches/${seg(batchId)}`, { method: 'DELETE' }),
+
+  /** #2672 — one run as it stands, for a batch's per-file result. */
+  getPrintRun: (runId: string) => request<PrintRun>(`/print/runs/${seg(runId)}`),
 
   putLibraryChoices: (fileId: number, body: ModelPrintChoices) =>
     request<ModelPrintChoices>(`/print/library/${fileId}/choices`, {
