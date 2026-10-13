@@ -36,7 +36,7 @@ def triggers(client: TestClient, workflow_reaper: WorkflowReaper) -> Iterator[No
     """Every trigger's Schedule goes with the test: one left would fire on a queue
     nobody serves."""
     yield
-    for trigger in client.get("/api/v1/flow-triggers").json():
+    for trigger in client.get("/api/v1/flow-triggers", params={"limit": 200}).json():
         workflow_reaper.delete_schedules(schedule_id(trigger["id"]))
 
 
@@ -520,3 +520,14 @@ def test_a_deleted_trigger_loses_its_schedule_and_its_grants(
 
 async def _schedule_ids(client: Client) -> set[str]:
     return {entry.id async for entry in await client.list_schedules()}
+
+
+@pytest.mark.usefixtures("triggers")
+def test_the_list_is_newest_first_and_bounded(client: TestClient) -> None:
+    definition = register(client, WAITS)
+    made = [create(client, definition["id"]) for _ in range(3)]
+    query = {"name": made[0]["name"], "limit": 2}
+    listed = client.get("/api/v1/flow-triggers", params=query)
+    assert listed.status_code == 200, listed.text
+    assert [t["id"] for t in listed.json()] == [t["id"] for t in made[::-1][:2]]
+    assert client.get("/api/v1/flow-triggers", params={"limit": 201}).status_code == 422

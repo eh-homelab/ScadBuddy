@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { ok } from './call.js'
 import { approvalTimeout, definitionId, grantRule, runInputs } from './flows.js'
+import { page, PAGED, pageInput } from './pagination.js'
 import { defineTool, json, type Tool } from './registry.js'
 
 // Flow triggers (#2484, spec 2026-10-11 §12): runs of a pinned flow version started on a
@@ -49,12 +50,19 @@ export const flowTriggerTools: Tool[] = [
     description:
       "Flow triggers, newest first, or one flow's: each with its pinned version, when it fires (`schedule`'s " +
       '`next_fires`, or `event`), whether it is paused and why, its standing grant, and its last fires with ' +
-      "each run's id and status.",
-    input: z.object({ name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/).optional().describe("Only this flow's") }),
+      "each run's id and status." +
+      PAGED,
+    input: z.object({
+      name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/).optional().describe("Only this flow's"),
+      ...pageInput,
+    }),
     risk: 'read',
     routes: ['GET /api/v1/flow-triggers'],
-    handler: async ({ name }, { backend }) =>
-      json(await ok(backend.GET('/api/v1/flow-triggers', { params: { query: { name } } }), 'list flow triggers')),
+    handler: async (args, { backend }) => {
+      const query = { name: args.name, limit: 200 }
+      const items = await ok(backend.GET('/api/v1/flow-triggers', { params: { query } }), 'list flow triggers')
+      return json(page(items, args, (item) => item.id, 'list_flow_triggers'))
+    },
   }),
 
   defineTool({
