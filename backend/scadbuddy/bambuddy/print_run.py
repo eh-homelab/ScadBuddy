@@ -409,7 +409,8 @@ class PrintCheck(BaseModel):
     #: ``None`` when the slicer is left to choose (one extruder, no readable status).
     nozzle_plan: NozzlePlan | None = None
     #: How many objects the checked plate holds, read only for a by-object print
-    #: (#956); ``None`` when it was not read.
+    #: (#956); ``None`` when it was not read, or when every plate was checked at once
+    #: (#2976), whose warnings name each plate.
     objects: int | None = None
 
 
@@ -721,7 +722,8 @@ async def _sequence_clearance(
         return None, []
     clearance = clearance_for(PRINTER_MODEL)
     try:
-        payload = await source.fetch_3mf(client)
+        # The source's own read, which the nozzle check made already (#2976).
+        payload = await source.fetched_3mf(client)
         if payload is None:
             return None, []
         # One read of the file for every plate (#2875 review), against one budget.
@@ -741,7 +743,8 @@ async def _sequence_clearance(
         if clearance is not None
         else []
     )
-    return len(per_plate[0][1]) if per_plate else None, warnings
+    # One count only for one plate: the dialog says "this plate" (#2976).
+    return len(per_plate[0][1]) if len(per_plate) == 1 else None, warnings
 
 
 def _rack_option(candidate: RackCandidate) -> RackOption:
@@ -877,11 +880,20 @@ async def check_for_output(
     request: PrintRunRequest,
     *,
     rack: RackUsage | None = None,
+    print_settings: dict[str, str] | None = None,
 ) -> PrintCheck:
-    """:func:`check_print` for an output ScadBuddy rendered."""
+    """:func:`check_print` for an output ScadBuddy rendered, with its template's
+    ``print_settings`` as the run reads them, so a template that prints by object is
+    checked by object (#2976)."""
     return await check_print(
         client,
-        OutputSource(store=store, meta=meta, uploads=uploads, settings=settings),
+        OutputSource(
+            store=store,
+            meta=meta,
+            uploads=uploads,
+            settings=settings,
+            print_settings=print_settings or {},
+        ),
         settings,
         request,
         rack=rack,

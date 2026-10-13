@@ -246,6 +246,27 @@ def test_the_dialogs_print_sequence_goes_over_the_templates(
 
 
 @respx.mock
+def test_a_templates_by_object_default_is_checked_as_by_object(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#2976: a template that prints by object, with nothing chosen in the dialog, is
+    checked by object: its objects are counted, as a by-layer print's are not."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    by_layer = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+    declare_print_settings(paths, model, {"print_sequence": "by object"})
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+
+    assert by_layer.status_code == 200, by_layer.text
+    assert by_layer.json()["objects"] is None
+    assert check.status_code == 200, check.text
+    assert check.json()["objects"] == 1
+    assert "print_sequence" not in body()
+
+
+@respx.mock
 def test_a_print_sequence_without_template_settings_is_the_only_override(
     client: TestClient, model: str
 ) -> None:

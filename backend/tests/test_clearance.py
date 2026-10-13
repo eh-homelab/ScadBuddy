@@ -37,8 +37,9 @@ def _at(x: float, height: float) -> np.ndarray:
     return matrix
 
 
-def two_objects_3mf(out: Path, *, apart: float, height: float = 10.0) -> bytes:
-    """Two 20 mm boxes ``apart`` mm apart edge to edge, each its own object."""
+def two_objects_3mf(out: Path, *, apart: float, height: float = 10.0, plates: int = 1) -> bytes:
+    """Two 20 mm boxes ``apart`` mm apart edge to edge, each its own object, on each of
+    ``plates`` plates."""
     parts = tuple(
         ColourPart(
             index,
@@ -49,7 +50,11 @@ def two_objects_3mf(out: Path, *, apart: float, height: float = 10.0) -> bytes:
         for index, x in ((1, 0.0), (2, 20.0 + apart))
     )
     write_plates_3mf(
-        [PlateParts(parts, (1, 1), (1, 2))], ["#FF6AC1"], out, thumbnails=None, model_name="bins"
+        [PlateParts(parts, (1, 1), (1, 2))] * plates,
+        ["#FF6AC1"],
+        out,
+        thumbnails=None,
+        model_name="bins",
     )
     return out.read_bytes()
 
