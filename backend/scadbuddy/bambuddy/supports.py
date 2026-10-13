@@ -36,18 +36,27 @@ SUPPORT_KEYS: tuple[str, ...] = (
 SupportType = Literal["tree", "normal"]
 
 
+#: The support keys every Bambu process preset stores as one value, not one per extruder
+#: variant (``fdm_process_common``): sent as they are when the preset cannot be read,
+#: as a template's were before #1899, rather than dropped (review of #2835).
+SCALAR_KEYS = frozenset({"enable_support", "support_type", "support_on_build_plate_only"})
+
+
 class SupportsChoice(BaseModel):
-    """Supports for one print, over whatever the template declares."""
+    """Supports for one print, over whatever the template declares. A field left out
+    keeps the template's value, else the process preset's."""
 
     #: Whether the slicer generates supports at all.
     enabled: bool
-    #: Tree supports (Bambu Studio's default) or normal ones.
-    type: SupportType = "tree"
+    #: Tree supports (Bambu Studio's default) or normal ones; omitted keeps the
+    #: template's type, else tree.
+    type: SupportType | None = None
     #: Overhangs steeper than this many degrees from vertical get supports; omitted is
     #: the template's angle, else the process preset's (Bambu's default is 30).
     threshold_angle: int | None = Field(default=None, ge=0, le=90)
-    #: Supports only from the build plate, never from the model itself.
-    on_build_plate_only: bool = False
+    #: Supports only from the build plate, never from the model itself; omitted keeps
+    #: the template's, else the preset's.
+    on_build_plate_only: bool | None = None
 
 
 def wanted_settings(template: Mapping[str, str], choice: SupportsChoice | None) -> dict[str, str]:
@@ -57,13 +66,13 @@ def wanted_settings(template: Mapping[str, str], choice: SupportsChoice | None) 
         return wanted
     if not choice.enabled:
         return {"enable_support": "0"}
-    wanted.update(
-        {
-            "enable_support": "1",
-            "support_type": f"{choice.type}(auto)",
-            "support_on_build_plate_only": "1" if choice.on_build_plate_only else "0",
-        }
-    )
+    wanted["enable_support"] = "1"
+    if choice.type is not None:
+        wanted["support_type"] = f"{choice.type}(auto)"
+    elif "support_type" not in wanted:
+        wanted["support_type"] = "tree(auto)"
+    if choice.on_build_plate_only is not None:
+        wanted["support_on_build_plate_only"] = "1" if choice.on_build_plate_only else "0"
     if choice.threshold_angle is not None:
         wanted["support_threshold_angle"] = str(choice.threshold_angle)
     return {key: wanted[key] for key in SUPPORT_KEYS if key in wanted}
@@ -77,8 +86,11 @@ async def support_overrides(
     client: BambuddyClient, process: PresetRef | None, wanted: Mapping[str, str]
 ) -> tuple[dict[str, ProcessValue], list[FilamentWarning]]:
     """``wanted`` as process overrides in the shape ``process`` stores each setting,
-    and a warning for what had to be left out. Never refuses: a setting whose shape
-    cannot be read is not sent, and the print goes ahead without it."""
+    and a warning for what had to be left out. Never refuses.
+
+    When the preset cannot be read, the keys every preset stores as one value
+    (:data:`SCALAR_KEYS`) still go as they are, so a template's supports print as they
+    did before #1899; only a setting whose shape is in doubt is left out."""
     if not wanted:
         return {}, []
     reason: str | None = None
@@ -96,27 +108,28 @@ async def support_overrides(
             else:
                 reason = f"Bambuddy could not read them ({read.reason or 'no reason given'})"
     if values is None:
-        return {}, [
+        sent: dict[str, ProcessValue] = {k: v for k, v in wanted.items() if k in SCALAR_KEYS}
+        withheld = [key for key in wanted if key not in SCALAR_KEYS]
+        if not withheld:
+            return sent, []
+        return sent, [
             _not_applied(
-                "Printing without the support settings: the process preset's values "
-                f"could not be read, so they could not be written in its shape: {reason}."
+                f"Printing without {', '.join(withheld)}: the process preset's values could "
+                f"not be read, so it could not be written in the preset's shape: {reason}."
             )
         ]
     overrides: dict[str, ProcessValue] = {}
-    missing: list[str] = []
+    problems: list[str] = []
     for key, value in wanted.items():
         current = values.get(key)
         if isinstance(current, list) and current:
             overrides[key] = [value] * len(current)
-        elif current is None or isinstance(current, list | dict):
-            missing.append(key)
+        elif current is None:
+            problems.append(f"{key} (the process preset has no value to write it over)")
+        elif isinstance(current, list | dict):
+            problems.append(f"{key} (the process preset stores it as an empty or nested value)")
         else:
             overrides[key] = value
-    if not missing:
+    if not problems:
         return overrides, []
-    return overrides, [
-        _not_applied(
-            f"Printing without {', '.join(missing)}: the process preset has no value to "
-            "write it over."
-        )
-    ]
+    return overrides, [_not_applied(f"Printing without {'; '.join(problems)}.")]

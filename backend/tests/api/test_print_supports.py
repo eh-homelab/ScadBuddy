@@ -95,7 +95,6 @@ def test_a_templates_supports_apply_and_the_prints_choice_wins(
         "enable_support": "1",
         "support_type": "normal(auto)",
         "support_threshold_angle": ["25", "25"],
-        "support_on_build_plate_only": "0",
     }
 
     off = {**body(), "supports": {"enabled": False}}
@@ -104,26 +103,34 @@ def test_a_templates_supports_apply_and_the_prints_choice_wins(
 
 
 @respx.mock
-def test_unreadable_preset_values_print_without_supports_and_say_so(
+def test_unreadable_preset_values_still_send_a_templates_supports(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
+    """Review of #2835: a template's `enable_support` went out as it is before #1899,
+    and still does when the preset cannot be read. Only the angle, the one setting whose
+    shape is in doubt, is left out, with a warning naming why."""
     output_id = prepared(client, model)
-    declare_print_settings(paths, model, {"enable_prime_tower": "1", "enable_support": "1"})
+    declare_print_settings(
+        paths,
+        model,
+        {"enable_prime_tower": "1", "enable_support": "1", "support_threshold_angle": "25"},
+    )
     sliced = routes()
     preset_values(resolved=False, values={}, reason="sidecar_unavailable")
 
-    response = run_print(client, output_id, json={**body(), "supports": {"enabled": True}})
+    response = run_print(client, output_id, json=body())
 
     assert response.status_code == 200, response.text
-    # Never refused: the template's other settings still go, the supports do not.
-    assert overrides(sliced) == {"enable_prime_tower": "1"}
+    assert overrides(sliced) == {"enable_prime_tower": "1", "enable_support": "1"}
     [warning] = [w for w in response.json()["warnings"] if w["kind"] == "supports-not-applied"]
-    assert "Printing without the support settings" in warning["message"]
+    assert "Printing without support_threshold_angle" in warning["message"]
     assert "sidecar_unavailable" in warning["message"]
 
 
 @respx.mock
-def test_bambuddy_failing_the_read_prints_without_supports(client: TestClient, model: str) -> None:
+def test_bambuddy_failing_the_read_still_sends_the_prints_choice(
+    client: TestClient, model: str
+) -> None:
     output_id = prepared(client, model)
     sliced = routes()
     respx.get(f"{BASE}/api/v1/slicer/preset-values").mock(
@@ -133,8 +140,33 @@ def test_bambuddy_failing_the_read_prints_without_supports(client: TestClient, m
     response = run_print(client, output_id, json={**body(), "supports": {"enabled": True}})
 
     assert response.status_code == 200, response.text
-    assert overrides(sliced) == {}
-    assert [w["kind"] for w in response.json()["warnings"]].count("supports-not-applied") == 1
+    assert overrides(sliced) == {"enable_support": "1", "support_type": "tree(auto)"}
+    assert "supports-not-applied" not in [w["kind"] for w in response.json()["warnings"]]
+
+
+@respx.mock
+def test_a_choice_that_leaves_a_field_out_keeps_the_templates(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """Review of #2835: `{"enabled": true}` keeps a template's type and build-plate
+    setting, as it keeps its angle."""
+    output_id = prepared(client, model)
+    declare_print_settings(
+        paths,
+        model,
+        {"support_type": "normal(auto)", "support_on_build_plate_only": "1"},
+    )
+    sliced = routes()
+    preset_values(PRESET)
+
+    response = run_print(client, output_id, json={**body(), "supports": {"enabled": True}})
+
+    assert response.status_code == 200, response.text
+    assert overrides(sliced) == {
+        "enable_support": "1",
+        "support_type": "normal(auto)",
+        "support_on_build_plate_only": "1",
+    }
 
 
 @respx.mock
@@ -149,8 +181,7 @@ def test_a_setting_the_preset_lacks_is_left_out_and_named(client: TestClient, mo
     assert response.status_code == 200, response.text
     assert overrides(sliced) == {"enable_support": "1", "support_type": "tree(auto)"}
     [warning] = [w for w in response.json()["warnings"] if w["kind"] == "supports-not-applied"]
-    assert "support_threshold_angle" in warning["message"]
-    assert "support_on_build_plate_only" in warning["message"]
+    assert "support_threshold_angle (the process preset has no value" in warning["message"]
 
 
 @pytest.mark.parametrize(
