@@ -523,12 +523,20 @@ function OutcomeSection({ print }: { print: PrintDetail }) {
   )
 }
 
+/** A colour as Bambuddy reports one: `#RGB`, `#RRGGBB` or with alpha, nothing else. */
+const HEX_COLOUR = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i
+
+/**
+ * One filament colour. Only a hex colour is painted: the value is Bambuddy's, and a CSS
+ * `background` would otherwise load whatever `url(...)` it named.
+ */
 function Swatch({ colour }: { colour: string }) {
+  const paint = HEX_COLOUR.test(colour.trim()) ? colour.trim() : undefined
   return (
     <span
       title={colour}
       className="inline-block h-3.5 w-3.5 shrink-0 rounded-full border border-line"
-      style={{ background: colour }}
+      style={paint ? { background: paint } : undefined}
     />
   )
 }

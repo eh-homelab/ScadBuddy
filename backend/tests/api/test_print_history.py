@@ -673,7 +673,17 @@ def test_the_detail_shows_everything_bambuddy_knows_of_the_print(
     configure(client)
     output_id = make_output(client, model)
     link(client, output_id, 35)
-    mock_archive(35, timelapse_path=None, brand_new_field="kept", nested_field={"a": 1})
+    mock_archive(
+        35,
+        timelapse_path=None,
+        brand_new_field="kept",
+        nested_field={"a": 1},
+        upload_token="t0ken",
+        storage_dir="/data/archive",
+        printer_ip="10.0.0.5",
+        created_by_username="elan",
+        shipping_description="kept too",
+    )
 
     body = client.get("/api/v1/prints/35").json()
 
@@ -701,8 +711,11 @@ def test_the_detail_shows_everything_bambuddy_knows_of_the_print(
     assert record["created_at"] == "2026-09-27T03:45:32.515537"
     other = record["other"]
     assert other["brand_new_field"] == "kept"
+    assert other["shipping_description"] == "kept too", "a word that merely contains one"
     assert "nested_field" not in other, "only scalars"
     assert not any(name.endswith("_path") for name in other)
+    for private in ("upload_token", "storage_dir", "printer_ip", "created_by_username"):
+        assert private not in other, private
     assert "source_ip" not in json.dumps(body), "the sender's address stays in Bambuddy"
 
 

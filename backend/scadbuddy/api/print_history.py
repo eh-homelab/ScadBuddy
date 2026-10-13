@@ -338,6 +338,14 @@ _SHOWN_ELSEWHERE = frozenset(
 
 ScalarValue = str | int | float | bool | None
 
+#: Names of archive fields "other" never passes on, whatever Bambuddy adds: who made it,
+#: where it is on Bambuddy's disk or network, and anything that may be a credential.
+_PRIVATE_FIELD = re.compile(
+    r"(?:^|_)(?:path|dir|file|url|ip|host|address|token|secret|password|passwd|key|auth"
+    r"|cookie|session|user|username|email|created_by|owner)(?:_|$)",
+    re.IGNORECASE,
+)
+
 
 class PrintRecord(_Response):
     """Bambuddy's bookkeeping of the print (#1860)."""
@@ -362,8 +370,9 @@ class PrintRecord(_Response):
     filament_actual_grams: float | None = None
     energy_kwh: float | None = None
     energy_cost: float | None = None
-    #: Every other field Bambuddy's archive answers, by its own name, so a field ScadBuddy
-    #: does not map yet is still shown.
+    #: Every other scalar field Bambuddy's archive answers, by its own name, so a field
+    #: ScadBuddy does not map yet is still shown; never one named for a path, an address,
+    #: a user or a credential (`_PRIVATE_FIELD`).
     other: dict[str, ScalarValue] = {}
 
 
@@ -396,7 +405,7 @@ def _record(archive: ArchiveDetail) -> PrintRecord:
         name: value
         for name, value in sorted((archive.model_extra or {}).items())
         if name not in _SHOWN_ELSEWHERE
-        and not name.endswith("_path")
+        and not _PRIVATE_FIELD.search(name)
         and (value is None or isinstance(value, str | int | float | bool))
     }
     return PrintRecord(

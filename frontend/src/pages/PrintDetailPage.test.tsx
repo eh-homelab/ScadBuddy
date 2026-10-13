@@ -117,6 +117,24 @@ describe('PrintDetailPage (#311)', () => {
     expect(within(record).getByLabelText('All other fields')).toHaveTextContent('original_archive_id—')
   })
 
+  it('paints only a hex colour as a swatch (#1860)', async () => {
+    const done = prints.find((print) => print.archive_id === 35)!
+    server.use(
+      http.get('/api/v1/prints/35', () =>
+        HttpResponse.json({
+          ...done,
+          slicing: {
+            ...done.slicing!,
+            filament_slots: [{ slot_id: 1, used_grams: 1, filament_type: 'PLA', color: 'url(https://x.example/t.png)' }],
+          },
+        }),
+      ),
+    )
+    render(35)
+    const slots = within(await section('Slicing')).getByRole('list', { name: 'Filament by slot' })
+    expect(within(slots).getByTitle('url(https://x.example/t.png)')).not.toHaveAttribute('style')
+  })
+
   it('says why a library print has no provenance (#1860)', async () => {
     const done = prints.find((print) => print.archive_id === 35)!
     server.use(
