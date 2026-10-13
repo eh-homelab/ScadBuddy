@@ -14,7 +14,7 @@ answers. What is tested here is that ScadBuddy sends it what it needs to answer 
 from __future__ import annotations
 
 import asyncio
-from typing import ClassVar, cast
+from typing import Any, ClassVar, cast
 
 import httpx
 import pytest
@@ -760,6 +760,18 @@ class _ReadSource:
         return [1]
 
 
+class _WatchedRead(asyncio.Future[PrinterStatus | None]):
+    """A status read that says when someone starts waiting on it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.waited_on = asyncio.Event()
+
+    def add_done_callback(self, fn: Any, *, context: Any = None) -> None:
+        self.waited_on.set()
+        super().add_done_callback(fn, context=context)
+
+
 @respx.mock
 async def test_a_cancelled_filament_step_leaves_the_callers_status_read_running(
     bambuddy: BambuddyClient,
@@ -778,28 +790,21 @@ async def test_a_cancelled_filament_step_leaves_the_callers_status_read_running(
     respx.get(f"{API}/printers/1").mock(
         return_value=httpx.Response(200, json=recording("printer.json"))
     )
-    remain = respx.get(f"{API}/printers/1/inventory-remain").mock(
+    respx.get(f"{API}/printers/1/inventory-remain").mock(
         return_value=httpx.Response(200, json=recording("inventory-remain.json"))
     )
-    release = asyncio.Event()
-
-    async def slow_status() -> PrinterStatus | None:
-        await release.wait()
-        return None
-
-    reading = asyncio.ensure_future(slow_status())
+    reading = _WatchedRead()
     step = asyncio.ensure_future(
         filament_options(bambuddy, cast(PrintSource, _ReadSource()), printer_id=1, status=reading)
     )
-    # Every other read done: the step now waits on the status alone.
+    # The step waits on the read only once every other read is done (#2630): no sleep
+    # can say when that is under load, so the read itself says.
     async with asyncio.timeout(5):
-        while not remain.called:
-            await asyncio.sleep(0.01)
-    await asyncio.sleep(0.01)
+        await reading.waited_on.wait()
     step.cancel()
     with pytest.raises(asyncio.CancelledError):
         await step
 
     assert not reading.done()
-    release.set()
+    reading.set_result(None)
     assert await reading is None

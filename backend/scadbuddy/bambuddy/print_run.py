@@ -289,16 +289,20 @@ async def filament_options(
     the step still opens, with no mounted nozzles to compare against.
 
     The file, the spools and the printer's status are read concurrently (#2504);
-    ``status`` is that read when the caller has started it already: a task the caller
-    keeps, and cancels if it must, since this never does.
+    ``status`` is that read when the caller has started it already: the caller's to
+    keep, and to cancel if it must, since this call never does, even when it is itself
+    cancelled. That promise is this call's alone: in ``choices_for`` a cancelled request
+    still cancels the read, through the rack's ``_record_seen`` awaiting it, which is
+    right, since the read is the request's (#2630).
     """
-    reading = (
-        status
-        if status is not None
-        else asyncio.ensure_future(read_status(client, printer_id))
-        if printer_id is not None
-        else None
-    )
+    reading: asyncio.Future[PrinterStatus | None] | None
+    if status is not None:
+        assert printer_id is not None, "a shared status read is some printer's"
+        reading = status
+    elif printer_id is not None:
+        reading = asyncio.ensure_future(read_status(client, printer_id))
+    else:
+        reading = None
     try:
         read_file, inventory = await asyncio.gather(
             source.file_to_read(client), read_inventory(client), return_exceptions=True

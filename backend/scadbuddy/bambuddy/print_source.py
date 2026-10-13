@@ -701,6 +701,16 @@ class LibrarySource(PrintPipeline):
             return await asyncio.to_thread(
                 stl_3mf, payload, model_name=_file_stem(self.filename) or "model"
             )
+        except MemoryError:
+            # Deliberately the same fallback (#2502): the STL prints as it is, which
+            # Bambuddy's slicer reads itself, so a print needs no wrap. Unlike Arrange's
+            # read (:meth:`write_3mf`) nothing here is kept as the file's refusal, so
+            # there is nothing to protect by refusing; only the log names the cause.
+            logger.warning(
+                "ran out of memory wrapping the STL; printing it as it is",
+                extra={"library_file_id": self.file_id, "error": "MemoryError"},
+            )
+            return None
         except Exception as exc:
             # Untrusted bytes: whatever the mesh reader refuses, the STL prints as it is.
             logger.warning(

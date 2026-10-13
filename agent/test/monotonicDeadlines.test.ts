@@ -5,7 +5,7 @@ import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { runTool, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { PendingActionStore } from '../src/tools/pending.js'
-import { RenderLimiter } from '../src/tools/renderLimits.js'
+import { RENDER_LIMITS, RenderLimiter } from '../src/tools/renderLimits.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
 
 // The wall clock may step (NTP; on WSL it jumps about ±11 s every few seconds), so a
@@ -92,11 +92,11 @@ describe('deadlines on a stepping wall clock (#1485)', () => {
     expect(firstText(result)).toMatchObject({ status: 'running', operation_id: 'op-1' })
   }, 5_000)
 
-  it('the default render limiter counts its window on a monotonic clock', () => {
+  it('the default render limiter counts its window on a monotonic clock', async () => {
     steppingWallClock(HOUR)
-    const limiter = new RenderLimiter({ concurrent: 10, perWindow: 1, windowMs: 60_000, holdMs: 60_000 })
-    limiter.acquire('p')()
-    expect(() => limiter.acquire('p')).toThrow(/most allowed/)
+    const limiter = new RenderLimiter({ ...RENDER_LIMITS, concurrent: 10, perWindow: 1, windowMs: 60_000 })
+    ;(await limiter.acquire('p'))()
+    await expect(limiter.acquire('p')).rejects.toThrow(/most allowed/)
   })
 
   it('a pending action does not expire when the wall clock jumps forward', async () => {

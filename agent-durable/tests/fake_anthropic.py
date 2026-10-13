@@ -2,7 +2,8 @@
 
 Claude Code is pointed at it as a gateway (``ANTHROPIC_BASE_URL`` and a token), so no
 test calls Anthropic. ``reply(body)`` scripts each ``/v1/messages`` answer: a text,
-or one tool_use. Streaming requests get the SSE event sequence; others JSON.
+or one tool_use, with ``input_tokens`` (default 10) as the usage it reports.
+Streaming requests get the SSE event sequence; others JSON.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
-Reply = dict[str, Any]  # {"text": str} or {"tool_use": {"name": str, "input": dict}}
+Reply = dict[str, Any]  # {"text": str} or {"tool_use": {...}}, optionally "input_tokens"
 
 _ids = itertools.count(1)
 
@@ -80,7 +81,7 @@ class FakeAnthropic:
                         "input": use["input"],
                     }
                     stop = "tool_use"
-                usage = {"input_tokens": 10, "output_tokens": 5}
+                usage = {"input_tokens": int(answer.get("input_tokens", 10)), "output_tokens": 5}
                 model = body.get("model", "claude-fake")
                 if not body.get("stream"):
                     self._json(

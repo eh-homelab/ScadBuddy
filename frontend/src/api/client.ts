@@ -4,6 +4,9 @@ import type {
   AnalyzerDecision,
   ArrangeRequest,
   DecisionCreate,
+  FixApply,
+  FixPreview,
+  FixRequest,
   Asset,
   AssetUsage,
   AttachResult,
@@ -22,12 +25,14 @@ import type {
   ModelSetting,
   PrinterCameraSetting,
   ImageSettings,
+  MemorySettings,
   WorkspaceFile,
   WorkspaceFileList,
   WorkspaceSettings,
   AttachmentView,
   AiSessionEdit,
   AiSessionView,
+  RenderLimits,
   SessionLimits,
   BlankTemplate,
   SessionModeSetting,
@@ -1444,6 +1449,26 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  /**
+   * #284 — a fix's whole diff, where each line lands, whether it can be applied yet, and
+   * the fingerprint an apply confirms against. Changes nothing (`post_preview`).
+   */
+  previewFix: (body: FixRequest) =>
+    request<FixPreview>('/analyzers/fixes/preview', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  /**
+   * #284 — record a previewed fix as accepted at its scope (`post_apply`). A 409
+   * `analyzer-fix-stale` means the diff, scope, print or base moved since the preview.
+   */
+  applyFix: (body: FixApply) =>
+    request<AnalyzerDecision>('/analyzers/fixes/apply', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
   /** #284 — remove a decision, so its finding is open again (`delete_decision`). */
   deleteDecision: (id: string) =>
     request<void>(`/analyzers/decisions/${seg(id)}`, { method: 'DELETE' }),
@@ -1821,6 +1846,15 @@ export const api = {
       body: JSON.stringify({ long_edge: longEdge }),
     }),
 
+  /** The automatic Hindsight recall query's cap, in characters, served by the agent service. */
+  getMemorySettings: () => request<MemorySettings>('/ai/settings/memory'),
+
+  putMemorySettings: (recallMaxQueryChars: number) =>
+    request<MemorySettings>('/ai/settings/memory', {
+      method: 'PUT',
+      body: JSON.stringify({ recall_max_query_chars: recallMaxQueryChars }),
+    }),
+
   /** #2329 — the caps on the assistant's workspace (bytes), served by the agent service. */
   getWorkspaceSettings: () => request<WorkspaceSettings>('/ai/settings/workspace'),
 
@@ -1894,6 +1928,15 @@ export const api = {
 
   putSessionLimits: (limits: SessionLimits) =>
     request<SessionLimits>('/ai/settings/session-limits', {
+      method: 'PUT',
+      body: JSON.stringify(limits),
+    }),
+
+  /** How many of the assistant's renders run at once, per caller and in all; read live by the agent. */
+  getRenderLimits: () => request<RenderLimits>('/ai/settings/render-limits'),
+
+  putRenderLimits: (limits: RenderLimits) =>
+    request<RenderLimits>('/ai/settings/render-limits', {
       method: 'PUT',
       body: JSON.stringify(limits),
     }),

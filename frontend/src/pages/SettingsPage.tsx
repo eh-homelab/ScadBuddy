@@ -13,7 +13,9 @@ import { AiCredentialSection } from '../components/assistant/AiCredentialSection
 import { AiStatusSection } from '../components/assistant/AiStatusSection'
 import { McpAuthSection } from '../components/McpAuthSection'
 import { HttpRequestSetting } from '../components/HttpRequestSetting'
+import { RenderLimitsSetting } from '../components/RenderLimitsSetting'
 import { ImageSettingsSetting } from '../components/ImageSettingsSetting'
+import { MemorySettingsSetting } from '../components/MemorySettingsSetting'
 import { SessionLimitsSetting } from '../components/SessionLimitsSetting'
 import { WorkspaceSettingsSetting } from '../components/WorkspaceSettingsSetting'
 import { SessionModeSetting } from '../components/SessionModeSetting'
@@ -1243,6 +1245,8 @@ export function SettingsPage() {
             <ModelSetting />
             {/* Saves on its own (#790); hidden without the agent's database, like the switch above. */}
             <SessionLimitsSetting />
+            {/* Saves on its own; read live by the agent, hidden without its database. */}
+            <RenderLimitsSetting />
             {/* Saves on its own; hidden without the agent's database, like the limits above. */}
             <ImageSettingsSetting />
             {/* #2329 — the workspace caps; saves on its own, hidden without the agent's database. */}
@@ -1279,6 +1283,8 @@ export function SettingsPage() {
                 </p>
                 <PluginPackagesPanel />
                 <RemotePluginsPanel />
+                {/* Beside the plugins, where a hindsight plugin is added; saves on its own, read at each turn. */}
+                <MemorySettingsSetting />
               </div>
             )}
             {/* Saves on its own (#258); shown only when the assistant is available. */}

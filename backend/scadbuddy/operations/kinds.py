@@ -51,6 +51,10 @@ class OperationKind:
     #: ``needs_prelude`` says the request needs it.
     prelude: str | None = None
     needs_prelude: Callable[[dict[str, Any]], bool] = lambda request: True
+    #: Answer the route once the record is written, with the operation ``running``,
+    #: instead of once the effect ended (#2462): for a fire-and-forget effect the caller
+    #: follows anyway, which would otherwise ride out the command deadline every time.
+    answers_running: bool = False
 
     def __post_init__(self) -> None:
         # Temporal reads `maximum_attempts=0` as unlimited (review #1063 fourth review 2).

@@ -638,3 +638,10 @@ are set ([headless-browser.md](ai/headless-browser.md)).
   **Test connection** lists its tools, each with a tier (outward, which asks first, by
   default) and **Hide**. Press **Save tool settings**, then **Enable**. Claude never
   sees the endpoint's address or secret.
+- **Hindsight memory**. With a plugin named `hindsight` enabled, the assistant recalls
+  memories against each message you send. **Recall query limit (characters)** is how
+  much of the message it sends as the query: the first 800 characters by default, as
+  the Claude Code Hindsight plugin does (`recallMaxQueryChars`), or all of it at 0. The
+  bank has its own limit in tokens (`HINDSIGHT_API_RECALL_MAX_QUERY_TOKENS` on the
+  Hindsight server, 500 by default); a query it still finds too long is retried once,
+  shorter. A change applies from your next message, in classic and durable chats.
