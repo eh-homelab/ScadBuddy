@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import socket
@@ -85,7 +86,7 @@ def test_the_plugins_subagents_are_read_as_they_declare_themselves() -> None:
 
 @pytest.mark.requires_postgres
 async def test_a_segment_gives_its_subagents_the_loopback_server_for_its_turn(
-    agent_db: Conn, connect: Connect, tmp_path: Path
+    agent_db: Conn, connect: Connect, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     kek = Kek(id="k", key=b"\1" * 32)
     runner = ScadBuddyRunner(
@@ -109,20 +110,28 @@ async def test_a_segment_gives_its_subagents_the_loopback_server_for_its_turn(
     assert extra["allowed_tools"] == ["mcp__scadbuddy_images__view_user_images", "mcp__scadbuddy"]
     # Settings names another URL (agent-durable outside the agent's pod): it replaces the
     # worker's own, read at each segment; a value the agent could not have stored does not.
-    for stored, expected in (
+    # A URL set but refused is warned of with why, never with the URL (#3054).
+    for stored, expected, problem in (
         (
             '{"url": "http://agent.svc:8081/internal/durable/subagent-mcp", "peers": []}',
             "http://agent.svc:8081/internal/durable/subagent-mcp",
+            None,
         ),
-        ('{"url": null, "peers": []}', "http://127.0.0.1:1/x"),
-        ('"nonsense"', "http://127.0.0.1:1/x"),
+        ('{"url": null, "peers": []}', "http://127.0.0.1:1/x", None),
+        ('"nonsense"', "http://127.0.0.1:1/x", None),
         # Not http(s) with a host: the worker's own (#2883).
-        ('{"url": "file:///etc/passwd", "peers": []}', "http://127.0.0.1:1/x"),
-        ('{"url": "javascript:alert(1)", "peers": []}', "http://127.0.0.1:1/x"),
-        ('{"url": "http://", "peers": []}', "http://127.0.0.1:1/x"),
-        ('{"url": "http://[::1", "peers": []}', "http://127.0.0.1:1/x"),
-        ('{"url": "agent.svc:8081/mcp", "peers": []}', "http://127.0.0.1:1/x"),
+        ('{"url": "file:///etc/passwd", "peers": []}', "http://127.0.0.1:1/x", "scheme 'file'"),
+        (
+            '{"url": "javascript:alert(1)", "peers": []}',
+            "http://127.0.0.1:1/x",
+            "scheme 'javascript'",
+        ),
+        ('{"url": "http://", "peers": []}', "http://127.0.0.1:1/x", "no host"),
+        ('{"url": "http://[::1", "peers": []}', "http://127.0.0.1:1/x", "unparseable"),
+        ('{"url": "agent.svc:8081/mcp", "peers": []}', "http://127.0.0.1:1/x", "no scheme"),
+        ('{"url": "http:agent.svc/mcp", "peers": []}', "http://127.0.0.1:1/x", "no host"),
     ):
+        caplog.clear()
         await agent_db.execute(
             "INSERT INTO ai_settings (key, value) VALUES ('durable_subagents', %s::jsonb)"
             " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
@@ -132,6 +141,17 @@ async def test_a_segment_gives_its_subagents_the_loopback_server_for_its_turn(
         await runner._subagent_tools(sid, again)
         [server] = again["agents"]["model-author"].mcpServers
         assert server["scadbuddy"]["url"] == expected
+        warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        if problem is None:
+            assert warned == []
+        else:
+            [message] = warned
+            assert f"({problem})" in message
+            assert (
+                "etc/passwd" not in message
+                and "alert" not in message
+                and "agent.svc" not in message
+            )
     # Off, or no definitions: no subagents, whatever Settings names.
     for off_runner in (
         ScadBuddyRunner(connect, kek, cwd=str(tmp_path), agents_dir=str(AGENTS)),

@@ -69,6 +69,16 @@ describe('the durable subagents setting', () => {
     expect(values.get(SETTING_DURABLE_SUBAGENTS)).toEqual({ url: null, peers })
   })
 
+  it.each([
+    ['http:scadbuddy.svc/mcp', 'http://scadbuddy.svc/mcp'],
+    [' http://scadbuddy.svc:8081/mcp', 'http://scadbuddy.svc:8081/mcp'],
+    ['HTTP://ScadBuddy.svc', 'http://scadbuddy.svc/'],
+  ])('stores %j as the URL it parses to, which the durable worker reads the same (#3054)', async (sent, href) => {
+    const { app, values } = setup()
+    expect((await put(app, { url: sent, peers: [] })).status).toBe(200)
+    expect(values.get(SETTING_DURABLE_SUBAGENTS)).toEqual({ url: href, peers: [] })
+  })
+
   it('stores a null url and no peers, back to the pod loopback', async () => {
     const { app, values } = setup({ stored: IN_CLUSTER })
     expect((await put(app, { url: null, peers: [] })).status).toBe(200)

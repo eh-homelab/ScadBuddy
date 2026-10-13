@@ -98,6 +98,17 @@ def _http_url(value: object) -> TypeGuard[str]:
     return parts.scheme in ("http", "https") and bool(parts.hostname)
 
 
+def _url_problem(value: str) -> str:
+    """Why :func:`_http_url` refused ``value``, naming nothing of the URL but its scheme."""
+    try:
+        parts = urllib.parse.urlsplit(value)
+    except ValueError:
+        return "unparseable"
+    if parts.scheme not in ("http", "https"):
+        return f"scheme {parts.scheme!r}" if parts.scheme.isalnum() else "no scheme"
+    return "no host"
+
+
 IMAGES_SERVER = "scadbuddy_images"
 VIEW_IMAGES = "view_user_images"
 VIEW_IMAGES_TOOL = f"mcp__{IMAGES_SERVER}__{VIEW_IMAGES}"
@@ -543,7 +554,14 @@ class ScadBuddyRunner:
         url = stored.get("url") if isinstance(stored, dict) else None
         if not _http_url(url):
             # The agent's route stores only an http(s) URL; a row written any other way
-            # does not reach the subagents' definitions (#2883).
+            # does not reach the subagents' definitions (#2883). Said, so an operator
+            # sees why the setting has no effect; the URL itself is never logged (#3054).
+            if isinstance(url, str) and url:
+                logger.warning(
+                    "the stored subagent server URL is not an http(s) URL with a host (%s);"
+                    " using the worker's own",
+                    _url_problem(url),
+                )
             url = self._subagent_url
         if self._agents is None:
             self._agents = subagents.load_agents(self._agents_dir)
