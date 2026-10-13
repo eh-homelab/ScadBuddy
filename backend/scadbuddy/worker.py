@@ -84,6 +84,7 @@ from scadbuddy.workflows.client import (
     PRINT_DEPLOYMENT_NAME,
     bambuddy_worker,
     connect,
+    current_build,
     drained,
     follow_worker,
     is_current,
@@ -120,6 +121,9 @@ DRAIN_CURRENT_GRACE = 30.0
 MAKE_CURRENT_BACKOFF = (1.0, 2.0, 4.0)
 MAKE_CURRENT_EVERY = 5.0
 MAKE_CURRENT_ERROR_AFTER = 60.0
+#: How often a make-current that is still refused past `MAKE_CURRENT_ERROR_AFTER` tries
+#: again, and so logs its error: once a minute, not every `MAKE_CURRENT_EVERY` (#2538).
+MAKE_CURRENT_ERROR_EVERY = 60.0
 
 
 def build_worker_deps(
@@ -283,21 +287,55 @@ async def make_current_until_polled(
     backoff: Sequence[float],
     every: float,
     error_after: float,
+    error_every: float | None = None,
+    current: Callable[[], Awaitable[str | None]] | None = None,
 ) -> None:
     """Make the build current, retrying an `RPCError` until it takes; cancel it to
-    stop. Failures past ``error_after`` seconds log at error level. Any other error
-    propagates."""
+    stop. Failures past ``error_after`` seconds log at error level, and are retried
+    every ``error_every`` (default ``every``). Any other error propagates.
+
+    With ``current`` (the deployment's current build), it stops once a build other than
+    this one and the one current when it began is made current (#2538): a newer
+    rollout's worker has taken over, and a late write here, which carries no conflict
+    token, would hand the deployment back to this old build, whose stop then skips its
+    drain because it is current."""
     loop = asyncio.get_running_loop()
     escalate = loop.time() + error_after
+    unread = object()
+    before: object = unread
+
+    async def read() -> object:
+        assert current is not None
+        try:
+            return await current()
+        except RPCError:
+            logger.warning("could not read the deployment's current build", exc_info=True)
+            return unread
+
+    if current is not None:
+        before = await read()
     attempt = 0
     while True:
         attempt += 1
+        if current is not None and attempt > 1:
+            now = await read()
+            if before is unread:
+                before = now
+            elif now not in (unread, None, build_id, before):
+                logger.info(
+                    "another build was made current; this one no longer tries to be",
+                    extra={"build_id": build_id, "current": now},
+                )
+                return
         try:
             await set_current()
         except RPCError as error:
+            late = loop.time() >= escalate
             delay = backoff[attempt - 1] if attempt <= len(backoff) else every
+            if late and error_every is not None:
+                delay = max(delay, error_every)
             logger.log(
-                logging.ERROR if loop.time() >= escalate else logging.WARNING,
+                logging.ERROR if late else logging.WARNING,
                 "could not make this build current yet",
                 extra={"build_id": build_id, "attempt": attempt, "error": str(error)},
             )
@@ -354,12 +392,10 @@ async def _serve_versioned(
     build_id: str,
     deployment_name: str,
     drain_timeout: float | None,
-    ignore_types: Sequence[str] = (),
     stop_now: asyncio.Event | None = None,
 ) -> None:
     """Run ``workers`` (one deployment version) until ``stop``, making the build current
     beside them; then, unless ``drain_timeout`` is None, drain the build's pinned runs.
-    ``ignore_types`` are AUTO_UPGRADE workflow types the drain does not wait for;
     ``stop_now`` cuts the drain short (#605)."""
 
     async def is_drained() -> bool:
@@ -369,7 +405,6 @@ async def _serve_versioned(
                 namespace=client.namespace,
                 build_id=build_id,
                 deployment_name=deployment_name,
-                ignore_types=ignore_types,
             )
         except RPCError:
             logger.warning("could not count this build's running workflows", exc_info=True)
@@ -404,6 +439,10 @@ async def _serve_versioned(
                 backoff=MAKE_CURRENT_BACKOFF,
                 every=MAKE_CURRENT_EVERY,
                 error_after=MAKE_CURRENT_ERROR_AFTER,
+                error_every=MAKE_CURRENT_ERROR_EVERY,
+                current=lambda: current_build(
+                    client, namespace=client.namespace, deployment_name=deployment_name
+                ),
             )
         )
         stopped = asyncio.create_task(stop.wait())

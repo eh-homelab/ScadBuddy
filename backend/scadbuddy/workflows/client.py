@@ -140,14 +140,13 @@ def bambuddy_worker(
     a new activity name also needs ``patched``, or an old replica takes its task and
     fails it as unregistered.
 
-    A new workflow type, or activity names no ``patched`` can guard, cannot be rolled:
-    the release that adds them needs a ``Recreate`` rollout (or the old replicas scaled
-    to 0 first). #1053 is one: it adds ``Operation`` and its ``op_*`` and
-    ``op.<kind>.*`` activities, and ``FollowPrint`` with its ``follow_print`` activity
-    on the follow queue (README, "Bambuddy writes on the ``bambuddy`` queue").
-    Rolled anyway, an unregistered workflow task only stalls, but an activity's failure
-    counts against its retry policy: an effect that runs once is recorded ``failed``
-    ("may have been done") without reaching Bambuddy, and a check can answer 500."""
+    ``tests/test_operation_replay.py`` does the same for ``Operation``.
+
+    Versioned, a run moves to the new build on its next workflow task, so the new build
+    replays every open run: a change to a workflow's commands goes behind ``patched``,
+    and a new workflow type or activity name is only safe once no old build polls. The
+    ``Recreate`` rollout is the usual one and gives that: the old pod stops before the
+    new one starts, and the runs wait for it rather than land on a build without them."""
     return Worker(
         client,
         task_queue=task_queue,
@@ -216,17 +215,25 @@ async def make_current(
     )
 
 
-async def is_current(
-    client: Client, *, namespace: str, build_id: str, deployment_name: str = DEPLOYMENT_NAME
-) -> bool:
-    """Whether `build_id` is the deployment's current version. Then any worker of this
-    build serves the runs pinned to it, so one that stops need not drain (#874)."""
+async def current_build(
+    client: Client, *, namespace: str, deployment_name: str = DEPLOYMENT_NAME
+) -> str | None:
+    """The deployment's current build, or None while it has none."""
     response = await client.workflow_service.describe_worker_deployment(
         DescribeWorkerDeploymentRequest(namespace=namespace, deployment_name=deployment_name),
         timeout=RPC_TIMEOUT,
     )
     current = response.worker_deployment_info.routing_config.current_deployment_version
-    return current.build_id == build_id
+    return current.build_id or None
+
+
+async def is_current(
+    client: Client, *, namespace: str, build_id: str, deployment_name: str = DEPLOYMENT_NAME
+) -> bool:
+    """Whether `build_id` is the deployment's current version. Then any worker of this
+    build serves the runs pinned to it, so one that stops need not drain (#874)."""
+    current = await current_build(client, namespace=namespace, deployment_name=deployment_name)
+    return current == build_id
 
 
 async def drained(
@@ -235,19 +242,14 @@ async def drained(
     namespace: str,
     build_id: str,
     deployment_name: str = DEPLOYMENT_NAME,
-    ignore_types: Sequence[str] = (),
 ) -> bool:
     """Whether no workflow pinned to `build_id` is still running. A visibility count,
     not `DescribeWorkerDeploymentVersion`'s drainage status: that one is absent while
-    the version is current and still says DRAINING well after its last run has ended.
-    ``ignore_types`` are AUTO_UPGRADE types (``FollowPrint``): attributed to the build
-    until their next workflow task, they move to the current one rather than wait."""
+    the version is current and still says DRAINING well after its last run has ended."""
     query = (
         f'TemporalWorkerDeploymentVersion="{deployment_name}:{build_id}"'
         ' AND ExecutionStatus="Running"'
     )
-    for name in ignore_types:
-        query += f' AND WorkflowType!="{name}"'
     response = await client.workflow_service.count_workflow_executions(
         CountWorkflowExecutionsRequest(namespace=namespace, query=query),
         timeout=RPC_TIMEOUT,
@@ -261,6 +263,7 @@ __all__ = [
     "RENDER_TASK_QUEUE_DEFAULT",
     "bambuddy_worker",
     "connect",
+    "current_build",
     "drained",
     "follow_worker",
     "is_current",
