@@ -123,7 +123,7 @@ class ForkPoint:
     # The Claude session the entries belong to, and where it was last committed.
     session_id: str | None
     checkpoint: str | None
-    # A turn runs: the conversation past the checkpoint is not committed yet.
+    # The agent's task runs: what it writes past the checkpoint is not committed yet.
     busy: bool
     total: int
     entries: list[str] = field(default_factory=list)

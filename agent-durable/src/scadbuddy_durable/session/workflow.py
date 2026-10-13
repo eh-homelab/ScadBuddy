@@ -932,7 +932,9 @@ class DurableSession:
         return ForkPoint(
             session_id=state.session_id,
             checkpoint=state.checkpoint,
-            busy=self._in_turn or self._agent.busy,
+            # The plugin's task, not the turn: once its run returns, the conversation is
+            # committed through the reply, while the turn still drains and is written.
+            busy=self._agent.busy,
             total=len(texts),
             entries=texts[start:end],
         )
