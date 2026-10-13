@@ -1,11 +1,12 @@
 """A flow's typed inputs (#2483): the schema's check, a run's values, and the script's
 type check against them."""
 
+import warnings
 from typing import Any
 
 import pytest
 
-from scadbuddy.flows.inputs import InputsError, resolve_inputs, schema_problems
+from scadbuddy.flows.inputs import InputsError, inputs_model, resolve_inputs, schema_problems
 from scadbuddy.flows.typecheck import check_script
 
 SCHEMA: dict[str, Any] = {
@@ -113,6 +114,46 @@ async def test_a_boolean_left_out_reads_as_bool_in_the_script() -> None:
 def test_a_long_pattern_is_refused() -> None:
     schema = {"type": "object", "properties": {"s": {"type": "string", "pattern": "a" * 300}}}
     assert any("pattern" in p for p in schema_problems(schema))
+
+
+def test_a_required_boolean_is_refused() -> None:
+    """#2661: left out, a boolean is false, so `required` could never refuse it."""
+    schema = {"type": "object", "properties": {"dry": {"type": "boolean"}}, "required": ["dry"]}
+    assert any("never missing" in p for p in schema_problems(schema))
+
+
+@pytest.mark.parametrize(
+    "prop",
+    [
+        {"type": "string", "pattern": "^(a+)+$"},
+        {"type": "string", "pattern": "^(a+)+$", "maxLength": 100_000},
+        {"type": "array", "items": {"type": "string", "pattern": "^(a+)+$"}},
+    ],
+)
+def test_a_pattern_needs_a_bounded_max_length(prop: dict[str, Any]) -> None:
+    """#2661: every start runs the pattern; a short backtracking one on a long value is slow."""
+    schema = {"type": "object", "properties": {"s": prop}}
+    assert any("maxLength" in p for p in schema_problems(schema))
+    bounded = {
+        "type": "object",
+        "properties": {"s": {"type": "string", "pattern": "^a+$", "maxLength": 64}},
+    }
+    assert schema_problems(bounded) == []
+
+
+def test_an_input_in_pydantics_protected_namespace_raises_no_warning() -> None:
+    """#2661: pydantic's protected namespaces (`model_validate`, `model_dump`) are not the
+    script's."""
+    schema = {
+        "type": "object",
+        "properties": {"model_validate_size": {"type": "integer", "default": 1}},
+    }
+    assert schema_problems(schema) == []
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        model = inputs_model(schema)
+    assert resolve_inputs(schema, {}) == {"model_validate_size": 1}
+    assert "model_validate_size" in model.model_fields
 
 
 def test_a_flow_without_a_schema_takes_no_inputs() -> None:

@@ -26,12 +26,15 @@ import re
 from typing import Any, Final, Literal
 
 import jsonschema
-from pydantic import BaseModel, ValidationError, create_model
+from pydantic import BaseModel, ConfigDict, ValidationError, create_model
 
 INPUTS_FILE: Final = "inputs.json"
 MAX_SCHEMA_BYTES = 16_384
 MAX_INPUTS = 50
 MAX_PATTERN = 256
+#: The longest value a ``pattern`` runs against, which such an input must declare as its
+#: ``maxLength`` (#2661): every start runs the regex in the API process.
+MAX_PATTERNED_LENGTH = 1024
 #: The type the script's `inputs()` returns, in the stubs and the editor's help.
 INPUTS_TYPE = "FlowInputs"
 
@@ -84,6 +87,9 @@ def schema_problems(schema: Any) -> list[str]:
     for name in schema.get("required", []):
         if name not in properties:
             problems.append(f"required names {name!r}, which is not an input")
+        elif isinstance(properties[name], dict) and properties[name].get("type") == "boolean":
+            # Left out, a boolean is false (`_default`), so it is never missing (#2661).
+            problems.append(f"required names {name!r}, a boolean, which is never missing")
     return problems
 
 
@@ -110,9 +116,16 @@ def _property_problems(name: str, prop: Any) -> list[str]:
         problems.append("enum must list at least one value")
     items = prop.get("items")
     for where in (prop, items if isinstance(items, dict) else {}):
-        if len(str(where.get("pattern", ""))) > MAX_PATTERN:
+        if "pattern" not in where:
+            continue
+        if len(str(where["pattern"])) > MAX_PATTERN:
             # Every start runs it: a pasted one is bounded.
             problems.append(f"a pattern is at most {MAX_PATTERN} characters")
+        # And so is what it runs against: a short backtracking pattern on a long value is
+        # still slow (#2661).
+        length = where.get("maxLength")
+        if not isinstance(length, int) or isinstance(length, bool) or length > MAX_PATTERNED_LENGTH:
+            problems.append(f"a pattern needs a maxLength of at most {MAX_PATTERNED_LENGTH}")
     if "default" in prop and not problems:
         try:
             jsonschema.Draft202012Validator(prop).validate(prop["default"])
@@ -149,7 +162,10 @@ def inputs_model(schema: dict[str, Any]) -> type[BaseModel]:
         kind = _python_type(prop)
         present = name in required or _default(prop)[0]
         fields[name] = (kind, ...) if present else (kind | None, None)
-    model: type[BaseModel] = create_model(INPUTS_TYPE, **fields)
+    # An input may be named `model_<x>`: pydantic's own namespace is not the script's (#2661).
+    model: type[BaseModel] = create_model(
+        INPUTS_TYPE, __config__=ConfigDict(protected_namespaces=()), **fields
+    )
     model.__doc__ = schema.get("description") or "This run's inputs."
     return model
 
