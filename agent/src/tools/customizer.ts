@@ -7,7 +7,7 @@ import { ok } from './call.js'
 import { CAMERA, cameraQuery, params, slug, VIEW, VIEW_SIZE, withQuery } from './common.js'
 import { binarySource, fromWorkspace, uploadInit, uploadName, withSent, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 import { blob, defineTool, image, json, type Tool, type ToolContext, ToolError, toolErrorText } from './registry.js'
-import { DEFAULT_RENDER_LIMITER } from './renderLimits.js'
+import { DEFAULT_RENDER_LIMITER, renderPrincipal } from './renderLimits.js'
 import { validateParams } from './validate.js'
 import { page, PAGED, pageInput } from './pagination.js'
 
@@ -49,6 +49,21 @@ async function getJob(ctx: ToolContext, id: string) {
 }
 
 /**
+ * A slot under the per-principal render bounds (renderLimits.ts, #252) for a job
+ * the agent puts on the render queue (render_model, arrange). Past the bound this
+ * waits for a slot rather than refusing. Call the returned function when the job settles.
+ */
+export function acquireRenderSlot(ctx: ToolContext): Promise<() => void> {
+  const limiter = ctx.renderLimiter ?? DEFAULT_RENDER_LIMITER
+  return limiter.acquire(renderPrincipal(ctx.principal), {
+    signal: ctx.signal,
+    onWait: (ahead) => {
+      ctx.progress(0, undefined, `waiting for a render slot (${ahead} ahead of this one)`).catch(() => {})
+    },
+  })
+}
+
+/**
  * Polls a render until it settles or `renderWaitMs` passes, reporting each
  * poll as progress so a streaming client sees the job move (spec §5.1: the
  * tool "submits a render and streams progress until it settles").
@@ -87,7 +102,7 @@ async function holdUntilSettled(ctx: ToolContext, id: string, holdMs: number): P
       await sleep(ctx.pollIntervalMs)
       const { data } = await ctx.backend.GET('/api/v1/jobs/{job_id}', {
         params: { path: { job_id: id } },
-        signal: AbortSignal.timeout(Math.max(1, deadline - performance.now())),
+        signal: AbortSignal.timeout(Math.max(1, Math.ceil(deadline - performance.now()))),
       })
       if (!data || settled(data.status)) return
     }
@@ -184,10 +199,8 @@ export const customizerTools: Tool[] = [
           `not rendered: ${report.issues.map((i) => `${i.param} ${i.problem}`).join('; ')}`,
         )
       }
-      // Per-principal render bounds (renderLimits.ts, #252), held until the
-      // backend job settles, past this call when it hands the job back running.
-      const limiter = ctx.renderLimiter ?? DEFAULT_RENDER_LIMITER
-      const release = limiter.acquire(ctx.principal.id)
+      // Held until the backend job settles, past this call when it hands the job back running.
+      const release = await acquireRenderSlot(ctx)
       let submitted: string | undefined
       let job: JobStatus | undefined
       try {
@@ -222,7 +235,7 @@ export const customizerTools: Tool[] = [
         }
       } finally {
         if (submitted !== undefined && (job === undefined || !settled(job.status))) {
-          void holdUntilSettled(ctx, submitted, limiter.limits.holdMs).finally(release)
+          void holdUntilSettled(ctx, submitted, (ctx.renderLimiter ?? DEFAULT_RENDER_LIMITER).limits.holdMs).finally(release)
         } else {
           release()
         }
