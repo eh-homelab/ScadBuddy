@@ -92,3 +92,17 @@ it('activity_watch returns when the row finishes', async () => {
   expect(JSON.stringify(result.content)).toContain('succeeded')
   expect(reads).toBe(3)
 })
+
+it('activity_get leaves out another principal’s child rows for a read-tier caller', async () => {
+  server.use(http.get(`${BACKEND}/api/v1/activity/render%3Aa`, () =>
+    HttpResponse.json({
+      row: { id: 'render:a', principal: 'token:t1' },
+      children: [{ id: 'render:b', principal: 'token:t1' }, { id: 'render:c', principal: 'browser' }],
+      links: [],
+      detail: {},
+    })))
+  const result = await tool('activity_get').execute({ activity_id: 'render:a' }, ctx({ principal: reader('token:t1') }))
+  const text = JSON.stringify(result.content)
+  expect(text).toContain('render:b')
+  expect(text).not.toContain('render:c')
+})

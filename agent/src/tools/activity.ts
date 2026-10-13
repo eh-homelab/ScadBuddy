@@ -19,10 +19,12 @@ async function read(ctx: ToolContext, activity_id: string) {
     ctx.backend.GET('/api/v1/activity/{activity_id}', { params: { path: { activity_id } } }),
     `get activity ${activity_id}`,
   )
-  if (!hasTier(ctx.principal, 'outward') && found.row.principal !== principalHeader(ctx.principal.id)) {
+  if (hasTier(ctx.principal, 'outward')) return found
+  const mine = principalHeader(ctx.principal.id)
+  if (found.row.principal !== mine) {
     throw new ToolError(`activity ${activity_id} was not started by this caller`, 404)
   }
-  return found
+  return { ...found, children: found.children.filter((child) => child.principal === mine) }
 }
 
 export const activityTools = [
