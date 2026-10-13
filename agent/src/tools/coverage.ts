@@ -12,6 +12,18 @@ const ANALYZERS_LATER =
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
+    operation: 'GET /api/v1/prints/{archive_id}/timelapse/frames',
+    reason:
+      "The print page's timelapse stills and probe, read after the detail so it need not wait on Bambuddy's " +
+      'ffmpeg (#2360). An agent watches the timelapse itself through get_print_timelapse.',
+  },
+  {
+    operation: 'GET /api/v1/prints/{archive_id}/timelapse/frames/{index}',
+    reason:
+      "One timelapse still as a JPEG (#2512), the print page's poster and seek strip. An agent watches the " +
+      'timelapse itself through get_print_timelapse.',
+  },
+  {
     operation: 'POST /api/v1/workflow-runs/{run_id}/answer',
     reason:
       "A flow's entries are answered by the browser user on the Workflows page only (spec §6.6, plan 6 " +
