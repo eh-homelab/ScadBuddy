@@ -147,14 +147,19 @@ function PrinterCard({ printer }: { printer: PrinterNow }) {
             View this print
           </Link>
         ) : printer.bambuddy_url ? (
-          <a
-            href={bambuddyLink(printer.bambuddy_url)}
-            target="_blank"
-            rel="noreferrer"
-            className="mt-1.5 inline-block text-[12px] text-accent hover:underline"
-          >
-            Open in Bambuddy (archive {printer.archive_id})
-          </a>
+          // Bambuddy has no page per archive, so the link names the page it opens and the
+          // archive to look for there sits beside it (#2930).
+          <p className="mt-1.5 text-[12px] text-muted">
+            <a
+              href={bambuddyLink(printer.bambuddy_url)}
+              target="_blank"
+              rel="noreferrer"
+              className="text-accent hover:underline"
+            >
+              Bambuddy's archives
+            </a>{' '}
+            · archive {printer.archive_id}
+          </p>
         ) : null)}
     </li>
   )

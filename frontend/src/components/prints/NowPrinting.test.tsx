@@ -40,10 +40,12 @@ describe('NowPrinting (#977)', () => {
     expect(errors).toHaveTextContent('No description from Bambuddy HMS 0700220000020025')
     expect(errors).toHaveClass('text-warn')
     // Started from Bambuddy: its archive there, not a ScadBuddy print.
-    expect(within(paused).getByRole('link', { name: 'Open in Bambuddy (archive 90)' })).toHaveAttribute(
+    // Bambuddy has no page per archive: the link names the page, and the archive sits beside it (#2930).
+    expect(within(paused).getByRole('link', { name: "Bambuddy's archives" })).toHaveAttribute(
       'href',
       'http://bambuddy.local/archives',
     )
+    expect(paused).toHaveTextContent("Bambuddy's archives · archive 90")
 
     const linked = screen.getByTestId('printer-now-2')
     expect(within(linked).getByRole('link', { name: 'View this print' })).toHaveAttribute('href', '/prints/35')
@@ -62,7 +64,7 @@ describe('NowPrinting (#977)', () => {
     renderPage(<NowPrinting />)
 
     const paused = await screen.findByTestId('printer-now-1')
-    expect(within(paused).getByRole('link', { name: 'Open in Bambuddy (archive 90)' })).toHaveAttribute(
+    expect(within(paused).getByRole('link', { name: "Bambuddy's archives" })).toHaveAttribute(
       'href',
       'http://bambuddy.lan:8000/archives',
     )

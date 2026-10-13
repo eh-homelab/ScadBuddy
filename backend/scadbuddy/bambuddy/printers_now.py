@@ -22,7 +22,9 @@ from scadbuddy.core.problems import ApiError
 
 logger = logging.getLogger(__name__)
 
-#: Bambuddy's archives page, where a job ScadBuddy did not start is found.
+#: Bambuddy's archives page, where a job ScadBuddy did not start is found. Bambuddy has
+#: no page per archive (``App.tsx`` at 14da007, as ``api/print_history.py`` records),
+#: so the card names the archive beside this link rather than in it.
 ARCHIVES_PAGE = "/archives"
 
 Activity = Literal["printing", "paused", "idle", "finished", "failed", "offline", "unknown"]
