@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, delay, http } from 'msw'
 import { useLocation } from 'react-router'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { api } from '../api/client'
 import { libraryFiles } from '../mocks/features/library'
 import * as fixtures from '../mocks/fixtures'
@@ -21,6 +21,31 @@ vi.mock('../lib/traceAction', async (importOriginal) => {
   }
   return { ...actual, traceAction }
 })
+
+/**
+ * Counts the listing GETs MSW answers from now on. A copy, move or rename reloads the
+ * listing: the page empties it, then fills it from the answer, so a card read between
+ * the action and the answer is the old one, about to be unmounted. Wait for this count
+ * before reading the new listing.
+ */
+function listingAnswers(): { count: () => number; stop: () => void } {
+  let answered = 0
+  const listen = ({ request }: { request: Request }) => {
+    if (request.method === 'GET' && new URL(request.url).pathname === '/api/v1/print/library') answered += 1
+  }
+  server.events.on('response:mocked', listen)
+  return { count: () => answered, stop: () => server.events.removeListener('response:mocked', listen) }
+}
+
+/** The request body of each POST to `path`, recorded until `stop`. */
+function posted(path: string): { bodies: unknown[]; stop: () => void } {
+  const bodies: unknown[] = []
+  const listen = async ({ request }: { request: Request }) => {
+    if (request.method === 'POST' && new URL(request.url).pathname === path) bodies.push(await request.clone().json())
+  }
+  server.events.on('request:start', listen)
+  return { bodies, stop: () => server.events.removeListener('request:start', listen) }
+}
 
 describe('LibraryPage', () => {
   beforeEach(() => {
@@ -358,10 +383,8 @@ describe('LibraryPage, item context (#975)', () => {
   })
 
   it('moves a file from its actions menu, keeping it under its id (#2670)', async () => {
-    let sent: unknown
-    server.events.on('request:start', async ({ request }) => {
-      if (request.url.endsWith('/print/library/move')) sent = await request.clone().json()
-    })
+    const move = posted('/api/v1/print/library/move')
+    onTestFinished(move.stop)
     const { user } = renderPage(<LibraryPage />, { route: '/library' })
     await user.click((await screen.findAllByRole('button', { name: /^More actions for bag-clip/ }))[0]!)
     await user.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Move to…' }))
@@ -375,7 +398,7 @@ describe('LibraryPage, item context (#975)', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Move to MakerWorld' }))
     const toast = await screen.findByTestId('library-done')
     expect(toast).toHaveTextContent('Moved 1 file to MakerWorld.')
-    expect(sent).toEqual({ file_ids: [89], folder_id: 1 })
+    expect(move.bodies).toEqual([{ file_ids: [89], folder_id: 1 }])
     await waitFor(() => expect(screen.queryByTestId('library-file-89')).toBeNull())
     await user.click(screen.getByTestId('library-folder-1'))
     expect(await screen.findByTestId('library-file-89')).toBeInTheDocument()
@@ -395,13 +418,13 @@ describe('LibraryPage, item context (#975)', () => {
     const toast = await screen.findByTestId('library-done')
     expect(toast).toHaveTextContent('Moved 1 file to Top level.')
     expect(toast).toHaveTextContent('The project Desk lamp no longer lists lamp-shade.3mf.')
+    // The move's reload has answered before the test ends.
+    expect(await screen.findByText('No files here yet.')).toBeInTheDocument()
   })
 
   it('copies the selection into a nested folder, and reports a skipped move (#2670)', async () => {
-    let sent: unknown
-    server.events.on('request:start', async ({ request }) => {
-      if (request.url.endsWith('/print/library/copy')) sent = await request.clone().json()
-    })
+    const copy = posted('/api/v1/print/library/copy')
+    onTestFinished(copy.stop)
     const { user } = renderPage(<LibraryPage />, { route: '/library' })
     await screen.findByTestId('library-file-89')
     for (const card of ['library-file-89', 'library-file-91']) {
@@ -411,11 +434,14 @@ describe('LibraryPage, item context (#975)', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Copy 2 files to…' })
     await user.click(within(dialog).getByTestId('library-copy-folder-toggle-3'))
     await user.click(within(dialog).getByTestId('library-copy-folder-4'))
+    const reloads = listingAnswers()
+    onTestFinished(reloads.stop)
     await user.click(within(dialog).getByRole('button', { name: 'Copy to Supplies / Storage' }))
     expect(await screen.findByTestId('library-done')).toHaveTextContent('Copied 2 files to Supplies / Storage.')
-    expect(sent).toEqual({ file_ids: [89, 91], folder_id: 4 })
-    // The originals stay where they were.
-    expect(screen.getByTestId('library-file-89')).toBeInTheDocument()
+    expect(copy.bodies).toEqual([{ file_ids: [89, 91], folder_id: 4 }])
+    // The originals stay where they were, in the listing the copy reloaded.
+    await waitFor(() => expect(reloads.count()).toBe(1))
+    await waitFor(() => expect(screen.getByTestId('library-file-89')).toBeInTheDocument())
   })
 
   it('reports a file Bambuddy would not move (#2670)', async () => {
@@ -424,10 +450,15 @@ describe('LibraryPage, item context (#975)', () => {
     await user.click(screen.getByRole('button', { name: 'Move selected (1)' }))
     const dialog = await screen.findByRole('dialog', { name: 'Move alex-headphone-hook.3mf to…' })
     await user.click(within(dialog).getByTestId('library-move-folder-root'))
+    const reloads = listingAnswers()
+    onTestFinished(reloads.stop)
     await user.click(within(dialog).getByRole('button', { name: 'Move to Top level' }))
     const toast = await screen.findByTestId('library-done')
     expect(toast).toHaveTextContent('Nothing was moved.')
     expect(within(toast).getByTestId('library-done-skipped')).toHaveTextContent('alex-headphone-hook.3mf')
+    // The file Bambuddy skipped is still listed once the move's reload has answered.
+    await waitFor(() => expect(reloads.count()).toBe(1))
+    await waitFor(() => expect(screen.getByTestId('library-file-121')).toBeInTheDocument())
   })
 
   it('renames a file, keeping its extension, and shows a name Bambuddy refuses (#2670)', async () => {
@@ -447,7 +478,11 @@ describe('LibraryPage, item context (#975)', () => {
     expect(await screen.findByTestId('library-done')).toHaveTextContent(
       "Renamed Clara's Wand.3mf to Wand for Clara.3mf.",
     )
-    expect(await within(screen.getByTestId('library-file-67')).findByTitle('Wand for Clara.3mf')).toBeInTheDocument()
+    // Waited for as a whole: the rename reloads the listing, which unmounts the card
+    // until the reload answers, so a card got before then never shows the new name.
+    await waitFor(() =>
+      expect(within(screen.getByTestId('library-file-67')).getByTitle('Wand for Clara.3mf')).toBeInTheDocument(),
+    )
   })
 })
 
