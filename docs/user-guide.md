@@ -390,8 +390,9 @@ stepped dialog. Each step is the print dialog for one file, titled "File 2 of 5 
 with **Back**, **Skip** and **Next**, and a strip above it to jump to any file. The next
 file opens on the last one's printer, and on its spools, nozzles, quality and options
 when its slots (number, material and colour) are the same; otherwise it opens on its own.
-A file whose check finds something its print would refuse is flagged in the strip, not
-held. The last step is the review: each file's printer, plate, spools, time and filament,
+A file whose check finds something its print would refuse is flagged (⚠) in the strip,
+not held. One with only warnings, which is all a sliced file's mismatches ever are, is
+marked (!) and queues. The last step is the review: each file's printer, plate, spools, time and filament,
 with **Edit** (back to its step) and **Remove**. **Queue all** starts each file's own
 print, exactly as Print on it would, and reports each: one refused does not stop the
 rest, and a skipped file is not queued. An unsliced file's slice starts in the background

@@ -26,14 +26,27 @@ function carriedFor(batch: PrintBatch, position: number): BatchItem | null {
   return before[before.length - 1] ?? null
 }
 
-/** What the strip says about a file: chosen, skipped, flagged or not yet chosen. */
-function stateOf(item: BatchItem): 'chosen' | 'skipped' | 'flagged' | 'open' {
+/**
+ * What the strip says about a file: chosen, skipped, not yet chosen, flagged (its print
+ * would be refused) or warned (it queues, with something to set right first, which is
+ * all a sliced file's mismatches ever are, #2671).
+ */
+function stateOf(item: BatchItem): 'chosen' | 'skipped' | 'flagged' | 'warned' | 'open' {
   if (item.skipped) return 'skipped'
   if ((item.problems ?? []).length > 0) return 'flagged'
-  return item.request ? 'chosen' : 'open'
+  if (!item.request) return 'open'
+  return (item.summary?.warnings ?? []).length > 0 ? 'warned' : 'chosen'
 }
 
-const STATE_LABEL = { chosen: 'chosen', skipped: 'skipped', flagged: 'needs attention', open: 'not chosen yet' } as const
+const STATE_LABEL = {
+  chosen: 'chosen',
+  skipped: 'skipped',
+  flagged: 'would be refused',
+  warned: 'chosen, with a warning',
+  open: 'not chosen yet',
+} as const
+
+const STATE_MARK = { chosen: '✓ ', skipped: '', flagged: '⚠ ', warned: '! ', open: '' } as const
 
 /**
  * #2672 — a batch print: one stepped print dialog over several library files. Each step
@@ -151,7 +164,7 @@ export function BatchPrintDialog({ batchId, onClose }: Props) {
               here ? 'border-accent text-ink' : 'border-line text-muted'
             } ${state === 'flagged' ? 'text-warn' : ''} ${state === 'skipped' ? 'line-through' : ''}`}
           >
-            {state === 'flagged' ? '⚠ ' : state === 'chosen' ? '✓ ' : ''}
+            {STATE_MARK[state]}
             {at + 1}. {item.filename}
           </button>
         )
@@ -347,6 +360,12 @@ function ReviewRow({
             ⚠ {problem}
           </p>
         ))}
+        {!item.skipped &&
+          (summary?.warnings ?? []).map((warning) => (
+            <p key={warning} className="text-[12px] text-muted">
+              ! {warning}
+            </p>
+          ))}
         {queued && <Outcome item={item} run={run} />}
       </div>
       {!queued && (

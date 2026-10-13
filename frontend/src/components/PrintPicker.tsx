@@ -860,8 +860,11 @@ export function PrintPicker({
       print_seconds: estimate?.print_time_seconds ?? null,
       filament_g: estimate?.filament_used_g ?? null,
       slots: filaments ? slotKeys(filaments) : [],
+      warnings: check.current ? shown(check.verdict?.warnings).map((warning) => warning.message) : [],
     }
-    batch.onNext({ request, summary, problems: check.current ? (check.verdict?.errors ?? []) : [] })
+    // A sliced file is never refused (#2671): what its check says is only ever a warning.
+    const problems = check.current && !sliced ? (check.verdict?.errors ?? []) : []
+    batch.onNext({ request, summary, problems })
   }
 
   function close() {

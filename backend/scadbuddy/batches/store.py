@@ -34,6 +34,9 @@ class BatchSummary(BaseModel):
     #: The file's slots as ``<slot>:<material>:<colour>``: the next file takes this one's
     #: spools as defaults only when its own are the same.
     slots: list[str] = Field(default_factory=list)
+    #: What its check warned of: never a refusal, so it does not flag the file (a sliced
+    #: file's mismatches are only ever these, #2671).
+    warnings: list[str] = Field(default_factory=list)
 
 
 class BatchOutcome(BaseModel):

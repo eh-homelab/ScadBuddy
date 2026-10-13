@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
@@ -16,11 +17,12 @@ from scadbuddy.batches.store import BatchItem
 from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_library import SLICED_RUN, sliced_3mf, sliced_file
 from tests.api.test_print_run_choices import follow_run, run_routes
-from tests.api.test_send import configure
+from tests.api.test_send import BASE, configure
 
 pytestmark = pytest.mark.requires_postgres
 
 BATCHES = "/api/v1/print/batches"
+API = f"{BASE}/api/v1"
 
 
 def new_batch(client: TestClient, *ids: int) -> Any:
@@ -98,19 +100,23 @@ def test_a_batch_refuses_a_file_twice_an_unknown_step_and_an_unknown_batch(
 
 @respx.mock
 def test_queue_all_runs_each_chosen_file_and_reports_each(client: TestClient) -> None:
-    """Each chosen file's own library run: one queued, one refused as a single print
-    would be, one with no choices, one skipped and one removed left out entirely."""
+    """Each chosen file's own library run: a sliced file that fits and one sliced for
+    another model both queue (a sliced file is never refused, #2671), a file Bambuddy no
+    longer has is refused as a single print would be, one with no choices is said to be,
+    and a skipped and a removed one are left out entirely."""
     configure(client)
     sliced_file(104)
     sliced_file(105, sliced_3mf(printer_model="Bambu Lab X1 Carbon"))
+    respx.get(f"{API}/library/files/109").mock(return_value=httpx.Response(404))
     run_routes()
     sliced = slice_routes()
     queued = queue_route()
-    batch = new_batch(client, 104, 105, 106, 107, 108)
+    batch = new_batch(client, 104, 105, 106, 107, 108, 109)
     choose(client, batch["id"], 0, request=SLICED_RUN)
     choose(client, batch["id"], 1, request=SLICED_RUN)
     choose(client, batch["id"], 3, request=SLICED_RUN, skipped=True)
     choose(client, batch["id"], 4, request=SLICED_RUN, removed=True)
+    choose(client, batch["id"], 5, request=SLICED_RUN)
 
     response = client.post(f"{BATCHES}/{batch['id']}/queue")
 
@@ -118,19 +124,24 @@ def test_queue_all_runs_each_chosen_file_and_reports_each(client: TestClient) ->
     done = response.json()
     assert done["status"] == "queued"
     outcomes = [item["outcome"] for item in done["items"]]
-    assert outcomes[0]["status"] == "started"
-    assert outcomes[1] == {
-        "status": "refused",
-        "run_id": None,
-        "detail": outcomes[1]["detail"],
-    }
-    assert "X1" in outcomes[1]["detail"]
-    assert outcomes[2]["status"] == "unchosen"
-    assert outcomes[3] is None and outcomes[4] is None
-    run = follow_run(client, outcomes[0]["run_id"])
-    assert run["status"] == "succeeded"
-    assert queued.call_count == 1
-    assert json.loads(queued.calls.last.request.content)["library_file_id"] == 104
+    assert [o and o["status"] for o in outcomes] == [
+        "started",
+        "started",
+        "unchosen",
+        None,
+        None,
+        "refused",
+    ]
+    assert outcomes[5]["detail"]
+    first, other_model = (follow_run(client, outcomes[n]["run_id"]) for n in (0, 1))
+    assert first["status"] == "succeeded"
+    assert other_model["status"] == "succeeded"
+    assert any(
+        warning["kind"] == "sliced-other-model" for warning in other_model["result"]["warnings"]
+    )
+    assert queued.call_count == 2
+    sent = sorted(json.loads(call.request.content)["library_file_id"] for call in queued.calls)
+    assert sent == [104, 105]
     assert not sliced.called
     # Queued, it no longer changes.
     assert client.put(f"{BATCHES}/{batch['id']}/items/2", json={}).status_code == 409

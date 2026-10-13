@@ -142,6 +142,38 @@ describe('BatchPrintDialog (#2672)', () => {
     expect(screen.queryByTestId('batch-outcome-1')).toBeNull()
   })
 
+  it('marks a sliced file that does not fit as warned, never flagged, and queues it (#2671)', async () => {
+    const warning = 'Sliced for a 0.6 mm nozzle; 0.4 mm is mounted on H2C. Swap it before the print starts.'
+    server.use(
+      http.post('/api/v1/print/library/104/check', () =>
+        HttpResponse.json({
+          errors: [],
+          warnings: [{ kind: 'sliced-nozzle-missing', slot_id: null, message: warning }],
+          rack: null,
+        }),
+      ),
+    )
+    const batch = await newBatch(104, 89)
+    const { user } = renderPage(<BatchPrintDialog batchId={batch.id} onClose={vi.fn()} />)
+    await step(1, 2)
+    await loaded()
+    await screen.findByText(warning)
+    await waitFor(() => expect(screen.getByTestId('batch-next')).toBeEnabled())
+    await user.click(screen.getByTestId('batch-next'))
+    await step(2, 2)
+    expect(screen.getByTestId('batch-step-0')).toHaveAttribute('data-state', 'warned')
+    expect(screen.getByTestId('batch-step-0')).toHaveAccessibleName(/chosen, with a warning/)
+    await loaded()
+    await user.click(screen.getByTestId('batch-next'))
+
+    await screen.findByRole('dialog', { name: 'Review 2 files' })
+    expect(screen.getByTestId('batch-row-0')).toHaveTextContent(`! ${warning}`)
+    expect(screen.getByTestId('batch-row-0')).not.toHaveTextContent('⚠')
+    expect(screen.getByTestId('batch-queue-all')).toHaveTextContent('Queue all (2)')
+    await user.click(screen.getByTestId('batch-queue-all'))
+    expect(await screen.findByTestId('batch-outcome-0')).toHaveTextContent('Queued in Bambuddy.')
+  })
+
   it("reports a refused file beside the queued ones, and one refusal stops nothing", async () => {
     const batch = await newBatch(89, 91)
     await api.putPrintBatchItem(batch.id, 0, { request: { ...REQUEST }, skipped: false, removed: false })
