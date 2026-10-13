@@ -66,7 +66,7 @@ describe('the bundled Claude Code (spec §2.1)', () => {
     const before = fake.messageCalls().length
     let asked = false
     for await (const _ of query({ prompt: 'continue', options: { ...base(), env: await env(fake), sessionStore: store, resume: sessionId,
-      mcpServers: { x: server }, allowedTools: ['mcp__x__slow'], canUseTool: async (_n, input) => { asked = true; return { behavior: 'allow', updatedInput: input } } } })) { /* drain */ }
+      mcpServers: { x: server }, canUseTool: async (_n, input) => { asked = true; return { behavior: 'allow', updatedInput: input } } } })) { /* drain */ }
     const resumed = JSON.stringify(fake.messageCalls()[before]?.body?.messages)
     expect(calls).toBe(1)
     expect(asked).toBe(false)
