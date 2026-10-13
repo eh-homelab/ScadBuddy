@@ -402,7 +402,8 @@ it off when approving the grant), an outside call goes there first.
   that started the run. Its outside calls would escalate to itself in the middle of its
   own turn, and it receives escalations only when idle, so they would wait out the whole
   parent hop. So the parent hop is skipped when the child is the starter session: its
-  outside calls go straight to the person.
+  outside calls go to the person on the delivery's next tick, and it is never sent them
+  (#2482).
 - **The escalation turn's text is untrusted.** The summary, the proposal, the outside
   reason and above all the child's reasoning are model or tool output. The turn wraps
   them in the untrusted-data envelope every tool result uses

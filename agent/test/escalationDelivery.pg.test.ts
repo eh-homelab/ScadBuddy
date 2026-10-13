@@ -60,13 +60,13 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     return sid
   }
 
-  async function park(parentSession = parent): Promise<string> {
-    const id = durableRequestId(child, 'run-1', `toolu_${randomUUID()}`)
+  async function park(parentSession = parent, childSession = child): Promise<string> {
+    const id = durableRequestId(childSession, 'run-1', `toolu_${randomUUID()}`)
     await db.sql`
       INSERT INTO ai_pending_input (request_id, session_id, workflow_id, workflow_run_id, kind, tool, summary, input_hash, prompt,
                                     requested_by, responders, expires_at, flow_run_id, hop, hop_until, parent_session,
                                     parent_principal, outside_reason)
-      VALUES (${id}, ${child}, ${`session-${child}`}, 'run-1', 'approval', 'print_output', 'print box on printer 5', ${'a'.repeat(64)}, '',
+      VALUES (${id}, ${childSession}, ${`session-${childSession}`}, 'run-1', 'approval', 'print_output', 'print box on printer 5', ${'a'.repeat(64)}, '',
               ${db.sql.json({ kind: 'flow', id: `flow:${RUN}`, label: 'Flow' })}, ${['browser']}, now() + interval '1 hour',
               ${RUN}, 'parent', now() + interval '10 minutes', ${parentSession}, ${TOKEN}, 'printer 5 is not in the grant')`
     return id
@@ -159,5 +159,17 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     expect(await escalations.deliver()).toBe(0)
     expect(await hop(revoked)).toMatchObject({ hop: 'person' })
     expect(sent).toEqual([])
+  })
+
+  // Spec §4.4: a script that asks the very session that started the run. That session
+  // is in its own turn while the call waits, so it could only wait out the whole hop.
+  it("a child that is the starter session is not asked: its call goes to the person at once", async () => {
+    const own = await park(parent, parent)
+    const other = await park()
+    expect(await escalations.deliver()).toBe(1)
+    expect(await hop(own)).toMatchObject({ hop: 'person', delivered: false })
+    expect(await hop(other)).toMatchObject({ hop: 'parent', delivered: true })
+    const data = JSON.parse(sent[0]!.text.slice(sent[0]!.text.indexOf('{'))) as { untrusted_data: { content: { request_id: string }[] } }
+    expect(data.untrusted_data.content.map((c) => c.request_id)).toEqual([other])
   })
 })

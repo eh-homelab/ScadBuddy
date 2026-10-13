@@ -190,7 +190,12 @@ export class Escalations {
     }
     for (const own of await this.#flowOwn()) add(own.session, own.principal, own.call)
     let delivered = 0
-    for (const [session, { principal, calls }] of bySession) {
+    for (const [session, { principal, calls: held }] of bySession) {
+      // A child that is the starter session (spec §4.4) is in its own turn while its
+      // call waits, so it is never asked: the call goes to the person now.
+      const self = held.filter((c) => c.child_session === session)
+      if (self.length) await this.#skip(self)
+      const calls = held.filter((c) => c.child_session !== session)
       if (calls.length === 0) continue
       const owner = await this.#parentOwner(session, principal)
       if (!owner || !owner.tiers.includes('write')) {
