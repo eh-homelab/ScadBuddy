@@ -331,7 +331,14 @@ describe('the durable run: gate failures and turn errors (#2465)', () => {
   })
 
   it("keeps one turn's error out of the next turn's result", () => {
-    expect(fold([result, failed, status, result, status])).toBe('success')
+    // Only these fail without the reset: the error would carry into the next result.
+    expect(fold([failed, status, result, status])).toBe('success')
     expect(fold([failed, result, status, result, status])).toBe('success')
+  })
+
+  it("keeps a turn's error across its own park, before its result", () => {
+    const running: Logged = { ...base, type: 'session.status', status: 'running' }
+    const waiting: Logged = { ...base, type: 'session.status', status: 'waiting' }
+    expect(fold([failed, waiting, running, result, status])).toBe('error: turn_failed: boom')
   })
 })

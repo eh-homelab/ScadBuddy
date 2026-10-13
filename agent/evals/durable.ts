@@ -315,7 +315,6 @@ function ended(log: Logged[]): boolean {
   return result >= 0 && log.slice(result).some((e) => e.type === 'session.status')
 }
 
-/** The session's events as an Outcome's tool calls, final text and result. */
 /** What the last poll of the gate's pending input saw: its failure, while the gate keeps failing. */
 export type Polled = { gateError?: string }
 
@@ -344,15 +343,21 @@ export function timedOut(polled: Polled): string {
   return polled.gateError === undefined ? 'eval timed out' : `eval timed out; the gate's pending input last failed: ${polled.gateError}`
 }
 
+/** A turn's own statuses, around a parked call: they do not end it. */
+const IN_TURN = new Set(['running', 'waiting'])
+
+/** The session's events as an Outcome's tool calls, final text and result. */
 export function foldEvents(log: Logged[], ran: ReadonlyMap<string, Ran>): Pick<Outcome, 'toolCalls' | 'finalText' | 'result'> {
   const toolCalls: ToolCall[] = []
   let finalText = ''
   const texts = new Map<string, string>()
   let result: RunResult | undefined
   // A turn's `error` and `session.result` are matched within the turn, which its
-  // `session.status` closes, in either order. finish_turn logs the error after the
-  // result today (agent-durable session/activities.py `turn_events`); a reorder must
-  // not score a failed turn as a success (#2465).
+  // settled `session.status` closes, in either order. finish_turn logs the error after
+  // the result today (agent-durable session/activities.py `turn_events`); a reorder must
+  // not score a failed turn as a success (#2465). The gate also logs `running` and
+  // `waiting` partway through a turn, around a parked call (gate/store.py); those do
+  // not close it, so an error logged before a park still counts.
   let turnError: string | undefined
   let turnResult = false
   for (const e of log) {
@@ -386,7 +391,7 @@ export function foldEvents(log: Logged[], ran: ReadonlyMap<string, Ran>): Pick<O
     } else if (e.type === 'error') {
       turnError = `error: ${String(e.code)}: ${String(e.message ?? '')}`
       if (result && turnResult) result = { ...result, subtype: turnError }
-    } else if (e.type === 'session.status') {
+    } else if (e.type === 'session.status' && !IN_TURN.has(String(e.status))) {
       turnError = undefined
       turnResult = false
     }
