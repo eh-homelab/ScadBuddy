@@ -1498,6 +1498,37 @@ describe('PrintPicker · Options', () => {
   })
 })
 
+describe('PrintPicker · grams from the background slice (#2365)', () => {
+  it('shows the slice’s grams per slot, and a spool short of them in Checks', async () => {
+    // An unsliced upload: the 3MF carries no grams, so only the slice can say.
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', () =>
+        HttpResponse.json({
+          ...choicesView,
+          filaments: {
+            ...choicesView.filaments,
+            slots: (choicesView.filaments.slots ?? []).map((slot) => ({ ...slot, used_grams: null })),
+          },
+        }),
+      ),
+    )
+    const { user } = renderPicker()
+    await loaded()
+    const slot = screen.getByTestId('filament-slot-1')
+    expect(within(slot).getByText('grams unknown until this is sliced')).toBeInTheDocument()
+
+    // The mock slice answers 3.3 g a slot.
+    expect(await within(slot).findByText('3.3 g for 1 copy', {}, { timeout: 8000 })).toBeInTheDocument()
+    expect(screen.queryByText(/this needs/)).toBeNull()
+
+    await showAdvanced()
+    await user.type(screen.getByLabelText('Copies'), '400')
+    expect(await within(slot).findByText('1320 g for 400 copies')).toBeInTheDocument()
+    const checks = screen.getByTestId('print-checks')
+    await waitFor(() => expect(within(checks).getAllByText(/this needs 1320 g\./).length).toBeGreaterThan(0))
+  }, 20000)
+})
+
 describe('PrintPicker · Print sequence (#1862)', () => {
   const LIBRARY = { kind: 'library', file: { id: 89, filename: 'bag-clip.3mf' } } as const
 

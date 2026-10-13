@@ -43,6 +43,7 @@ import { useAsync } from '../lib/useAsync'
 import { CarryBox, useFilamentPlan } from '../lib/useFilamentPlan'
 import { usePrintCheck } from '../lib/usePrintCheck'
 import { usePreviewSlice } from '../lib/usePreviewSlice'
+import { checkPlan, withSlicedGrams } from '../lib/filaments'
 import { usePrintChoices } from '../lib/usePrintChoices'
 import { usePrintProgress } from '../lib/usePrintProgress'
 import { useRunPrint } from '../lib/useRunPrint'
@@ -616,7 +617,32 @@ export function PrintPicker({
     picker.advanced
       ? (warnings ?? [])
       : (warnings ?? []).filter((warning) => !NOZZLE_WARNINGS.has(warning.kind))
-  const checkVerdict = check.verdict && { ...check.verdict, warnings: shown(check.verdict.warnings) }
+  /**
+   * #2365 — the background slice's grams, for the plate the slots describe: the one
+   * chosen to print, when it is the one sliced. "All plates" slices plate 1 alone, which
+   * is not every plate's need.
+   */
+  const slicedForSlots = plate !== 'all' && previewPlate === plate ? previewSlice.result : null
+  const pickerOptions = useMemo(
+    () => (filaments ? withSlicedGrams(filaments, slicedForSlots) : null),
+    [filaments, slicedForSlots],
+  )
+  // The check reads grams from the 3MF, which an unsliced upload does not carry, so a
+  // spool short of what the slice needs is said here (#2365).
+  const slicedShort =
+    slicedForSlots && pickerOptions
+      ? checkPlan(pickerOptions, plan, effectiveCopies).filter(
+          (warning) =>
+            warning.kind === 'low-filament' &&
+            !(check.verdict?.warnings ?? []).some(
+              (known) => known.kind === 'low-filament' && known.slot_id === warning.slot_id,
+            ),
+        )
+      : []
+  const checkVerdict = check.verdict && {
+    ...check.verdict,
+    warnings: [...shown(check.verdict.warnings), ...slicedShort],
+  }
   const verdict = (
     <>
       <RackNozzleLine rack={check.verdict?.rack} algorithm={rackAlgorithm} />
@@ -817,11 +843,12 @@ export function PrintPicker({
                     ))}
                   {filaments && (
                     <FilamentPicker
-                      options={filaments}
+                      options={pickerOptions ?? filaments}
                       plan={plan}
                       onChange={setPlan}
                       copies={effectiveCopies}
                       offeredTrays={trays.offered}
+                      gramsStale={slicedForSlots !== null && previewSlice.stale}
                     />
                   )}
                   <NozzlePlanLine plan={check.verdict?.nozzle_plan} stale={!check.current} />

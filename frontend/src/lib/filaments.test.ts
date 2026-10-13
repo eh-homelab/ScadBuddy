@@ -9,6 +9,7 @@ import {
   loadedLabel,
   seedPlan,
   slotNeed,
+  withSlicedGrams,
   spoolLabel,
   warningsFor,
 } from './filaments'
@@ -109,6 +110,21 @@ describe('slotNeed', () => {
     // nothing" would declare every spool sufficient and print "0 g".
     expect(slotNeed(slot({ used_grams: 0 }), 2)).toBeNull()
     expect(slotNeed(slot({ used_grams: null }), 2)).toBeNull()
+  })
+})
+
+describe('withSlicedGrams (#2365)', () => {
+  const options = { slots: [slot({ slot_id: 1, used_grams: null }), slot({ slot_id: 2, used_grams: 0 })] } as FilamentOptions
+
+  it("takes each slot's grams from the slice", () => {
+    const merged = withSlicedGrams(options, { slots: [{ slot_id: 1, grams: 13 }, { slot_id: 2, grams: 0.1 }] })
+    expect(merged.slots?.map((each) => each.used_grams)).toEqual([13, 0.1])
+  })
+
+  it('leaves a slot the slice has no grams for, and everything without a slice', () => {
+    const merged = withSlicedGrams(options, { slots: [{ slot_id: 1, grams: null }] })
+    expect(merged.slots?.map((each) => each.used_grams)).toEqual([null, 0])
+    expect(withSlicedGrams(options, null)).toBe(options)
   })
 })
 
