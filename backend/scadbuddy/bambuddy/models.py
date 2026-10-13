@@ -366,7 +366,9 @@ def _number(value: Any, kind: type[int] | type[float]) -> int | float | None:
         return None
     try:
         number = float(value)
-    except ValueError:
+    except (ValueError, OverflowError):
+        # OverflowError: an int too large for a float, which pydantic would not turn
+        # into a ValidationError.
         return None
     if number != number or number in (float("inf"), float("-inf")):
         return None

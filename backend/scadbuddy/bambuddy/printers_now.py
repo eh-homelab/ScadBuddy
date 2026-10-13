@@ -105,8 +105,10 @@ async def printer_now(
         return PrinterNow(
             printer_id=printer.id, name=printer.name, activity="unknown", error=error.detail
         )
-    except ValidationError:
-        # A shape the model cannot take is this printer's card, not the strip's 500.
+    except (ValidationError, ValueError):
+        # A shape the model cannot take, or a body that is not JSON at all
+        # (``JSONDecodeError`` is a ``ValueError``), is this printer's card, not the
+        # strip's 500.
         logger.warning("printer status malformed", extra={"printer_id": printer.id})
         return PrinterNow(
             printer_id=printer.id,

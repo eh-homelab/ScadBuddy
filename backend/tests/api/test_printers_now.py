@@ -13,6 +13,7 @@ import respx
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.bambuddy.models import PrinterStatus
 from scadbuddy.bambuddy.print_links import PrintLink
 from scadbuddy.bambuddy.subject import PrintSubject
 from tests.api.test_send import API, configure
@@ -128,6 +129,19 @@ def test_an_idle_printer_names_no_job(client: TestClient) -> None:
     assert card["job_name"] is None and card["progress"] is None and card["archive_id"] is None
 
 
+DRIFTED = {
+    "state": "PAUSE",
+    "progress": "n/a",
+    "remaining_time": 12.7,
+    "layer_num": None,
+    "total_layers": "90",
+    "hms_errors": [
+        {"code": 32834, "full_code": 201359426, "severity": "2", "actions": "STOP"},
+        "garbage",
+    ],
+}
+
+
 @respx.mock
 def test_a_drifted_status_field_reads_as_unknown_not_a_failed_strip(client: TestClient) -> None:
     """#2750 review: an int HMS code, a fractional ``remaining_time`` or a non-dict HMS
@@ -136,21 +150,7 @@ def test_a_drifted_status_field_reads_as_unknown_not_a_failed_strip(client: Test
     configure(client)
     respx.get(f"{API}/printers/").mock(return_value=httpx.Response(200, json=[printer(1)]))
     respx.get(f"{API}/printers/1/status").mock(
-        return_value=httpx.Response(
-            200,
-            json=status(
-                1,
-                state="PAUSE",
-                progress="n/a",
-                remaining_time=12.7,
-                layer_num=None,
-                total_layers="90",
-                hms_errors=[
-                    {"code": 32834, "full_code": 201359426, "severity": "2", "actions": "STOP"},
-                    "garbage",
-                ],
-            ),
-        )
+        return_value=httpx.Response(200, json=status(1, **DRIFTED))
     )
 
     response = client.get("/api/v1/print/printers/now")
@@ -160,6 +160,43 @@ def test_a_drifted_status_field_reads_as_unknown_not_a_failed_strip(client: Test
     assert card["activity"] == "paused" and card["error"] is None
     assert (card["progress"], card["remaining_minutes"], card["total_layers"]) == (None, 12, 90)
     assert [hms["code"] for hms in card["hms"]] == ["201359426"]
+
+
+def test_the_print_dialogs_status_read_takes_the_same_drifted_payload() -> None:
+    """#2967 review: the print decisions read ``PrinterStatus`` directly, so the drifted
+    payload must validate there too, not only on /prints."""
+    read = PrinterStatus.model_validate(status(1, **DRIFTED))
+
+    assert (read.progress, read.remaining_time, read.total_layers) == (None, 12, 90)
+    assert [error.full_code for error in read.hms_errors] == ["201359426"]
+
+
+def test_a_number_too_large_for_a_float_reads_as_unknown() -> None:
+    """#2967 review: ``float()`` raises OverflowError, not ValueError, on a huge JSON int."""
+    read = PrinterStatus.model_validate(status(1, progress=10**400, remaining_time=10**400))
+
+    assert (read.progress, read.remaining_time) == (None, None)
+
+
+@respx.mock
+def test_a_status_body_that_is_not_json_is_that_printers_card(client: TestClient) -> None:
+    """#2967 review: a proxy error page in place of JSON is one card, not a failed strip."""
+    configure(client)
+    respx.get(f"{API}/printers/").mock(
+        return_value=httpx.Response(200, json=[printer(1), printer(2)])
+    )
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(200, json=status(1)))
+    respx.get(f"{API}/printers/2/status").mock(
+        return_value=httpx.Response(200, text="<html>Bad gateway</html>")
+    )
+
+    response = client.get("/api/v1/print/printers/now")
+
+    assert response.status_code == 200, response.text
+    cards = {card["printer_id"]: card for card in response.json()["printers"]}
+    assert cards[1]["activity"] == "printing"
+    assert cards[2]["activity"] == "unknown"
+    assert "can't read" in cards[2]["error"]
 
 
 @respx.mock
