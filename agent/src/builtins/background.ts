@@ -1,5 +1,6 @@
 import type { BackgroundTasks } from '../background/service.js'
 import { CRON_EXPIRY_MS, CronError, describeCron, nextFire, timeOfDay, WAKEUP_MAX_S, WAKEUP_MIN_S } from '../background/schedule.js'
+import { checkSocketUrl, MONITOR_DEFAULT_MS, MONITOR_MAX_MS, shortDuration } from '../background/monitor.js'
 import { type BackgroundTask, MAX_ACTIVE } from '../background/store.js'
 import type { Owner } from '../sessions/protocol.js'
 import type { BuiltinResult } from './files.js'
@@ -18,6 +19,11 @@ export type BackgroundContext = {
   owner: Owner
   tz: string
   now: () => Date
+  /**
+   * The queue a Monitor's command runs on: where this session's Bash runs (the replica
+   * that ran a classic turn, agent-durable's for a durable one). None: no commands.
+   */
+  commandQueue?: string | undefined
 }
 
 const error = (text: string): BuiltinResult => ({ text, isError: true })
@@ -127,6 +133,43 @@ export async function taskStop(ctx: BackgroundContext, input: { task_id?: string
   const stopped = await ctx.tasks.cancel(ctx.sessionId, id, 'TaskStop')
   if (!stopped) return error(`No task found with ID: ${id}`)
   return {
-    text: JSON.stringify({ message: `Successfully stopped task: ${id} (${stopped.description})`, task_id: id, task_type: stopped.kind }),
+    text: JSON.stringify({
+      message: `Successfully stopped task: ${id} (${stopped.kind === 'monitor' ? String(stopped.spec.command ?? (stopped.spec.ws as { url?: string } | undefined)?.url ?? stopped.description) : stopped.description})`,
+      task_id: id,
+      task_type: stopped.kind,
+    }),
+  }
+}
+
+export async function monitor(
+  ctx: BackgroundContext,
+  input: { description: string; timeout_ms?: number; command?: string; ws?: { url: string; protocols?: string[] } },
+): Promise<BuiltinResult> {
+  if ((input.command === undefined) === (input.ws === undefined)) return error('Give exactly one of command and ws.')
+  if (input.command !== undefined && !ctx.commandQueue) return error('This session cannot run monitor commands; a ws source works.')
+  if (input.ws) {
+    const refused = await checkSocketUrl(input.ws.url)
+    if (refused) return error(refused)
+  }
+  const timeoutMs = Math.round(Math.min(MONITOR_MAX_MS, Math.max(1000, input.timeout_ms ?? MONITOR_DEFAULT_MS)))
+  const t = await ctx.tasks.create({
+    sessionId: ctx.sessionId,
+    kind: 'monitor',
+    description: input.description.slice(0, 500) || 'monitor',
+    spec: {
+      description: input.description,
+      timeoutMs,
+      ...(input.command !== undefined ? { command: input.command, queue: ctx.commandQueue } : { ws: input.ws }),
+    },
+    createdBy: ctx.owner,
+    expiresAt: new Date(ctx.now().getTime() + timeoutMs),
+  })
+  if (!t) return full()
+  return {
+    text:
+      `Monitor started (task ${t.id}, expires in ${shortDuration(timeoutMs)} unless the source ends first; you get one notice at expiry — ` +
+      're-arm if you still need the watch). You will be notified on each event: the session sends its events to you as a new ' +
+      'message once this turn has ended and it is idle. Keep working — do not poll or sleep. Events may arrive while you are ' +
+      'waiting for the user — an event is not their reply.',
   }
 }

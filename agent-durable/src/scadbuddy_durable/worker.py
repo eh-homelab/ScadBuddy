@@ -42,6 +42,7 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
 
+from scadbuddy_durable.background import MonitorActivities
 from scadbuddy_durable.codec import PgPayloadKeys, data_converter
 from scadbuddy_durable.gate.activities import GateActivities
 from scadbuddy_durable.payload_store import external_storage
@@ -136,6 +137,7 @@ def build_worker(
     task_queue: str = TASK_QUEUE,
     session: SessionActivities | None = None,
     gate: GateActivities | None = None,
+    monitors: MonitorActivities | None = None,
 ) -> Worker:
     gate = gate or GateActivities(connect)
     session = session or SessionActivities(connect)
@@ -151,6 +153,8 @@ def build_worker(
             session.gate_settings,
             session.finish_turn,
             events.follow_session,
+            # A durable session's Monitor commands, where its Bash runs (agent/src/background/).
+            *([monitors.bg_monitor_command] if monitors else []),
         ],
         plugins=[ClaudeAgentPlugin(runner)],
         # The manifest the worker loaded at start is every DurableSession's: the sandbox
@@ -201,4 +205,9 @@ async def start(cfg: Config) -> Worker:
     )
     connect = connector(cfg.database_url)
     client = await connect_client(cfg, connect, kek, previous)
-    return build_worker(client, connect, segment_runner(cfg, connect, kek))
+    return build_worker(
+        client,
+        connect,
+        segment_runner(cfg, connect, kek),
+        monitors=MonitorActivities(connect, cfg.cwd),
+    )
