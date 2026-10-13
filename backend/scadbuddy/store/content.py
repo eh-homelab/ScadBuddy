@@ -38,7 +38,7 @@ from scadbuddy.store.content_models import (
     StoreUsage,
     blob_digest,
 )
-from scadbuddy.store.download_cache import DownloadCache
+from scadbuddy.store.download_cache import DownloadCache, TooLargeError
 from scadbuddy.store.index import BlobIndex
 from scadbuddy.store.refs import BlobRefs
 
@@ -272,7 +272,7 @@ class ContentStore:
             return
         if not isinstance(data, bytes):
             try:
-                await asyncio.to_thread(downloads.put_file, sha, data)
+                await asyncio.to_thread(downloads.keep_file, sha, data)
             except OSError:
                 logger.warning(
                     "could not keep an uploaded blob", extra={"sha256": sha}, exc_info=True
@@ -310,12 +310,18 @@ class ContentStore:
             except OSError:
                 logger.warning("could not start keeping a blob", extra={"sha256": ref.sha256})
             else:
+                keeping = True
                 try:
                     async with aclosing(self._download(ref)) as chunks:
                         async for chunk in chunks:
-                            await asyncio.to_thread(fill.write, chunk)
+                            if keeping:
+                                try:
+                                    await asyncio.to_thread(fill.write, chunk)
+                                except TooLargeError:
+                                    keeping = False  # read on, keep nothing
                             yield chunk
-                    await asyncio.to_thread(fill.commit)
+                    if keeping:
+                        await asyncio.to_thread(fill.commit)
                 finally:
                     await asyncio.to_thread(fill_cm.__exit__, None, None, None)
                 return

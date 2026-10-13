@@ -13,7 +13,7 @@ import pytest
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from scadbuddy.store.content import BlobCorruptError, BlobScope, ContentStore
-from scadbuddy.store.download_cache import PARTIAL_MAX_AGE, DownloadCache, prune
+from scadbuddy.store.download_cache import PARTIAL_MAX_AGE, DownloadCache, TooLargeError, prune
 from scadbuddy.store.index import BlobIndex, Pool
 from scadbuddy.store.local import LocalContentBackend
 
@@ -92,9 +92,11 @@ def test_the_least_recently_used_go_past_the_byte_cap(tmp_path: Path) -> None:
 
 def test_an_entry_used_within_min_age_is_never_evicted(tmp_path: Path) -> None:
     """A read may be under way: past the cap the directory runs over instead."""
-    cache = DownloadCache(tmp_path, max_bytes=150, min_age=600)
+    cache = DownloadCache(tmp_path, max_bytes=1 << 20, min_age=600)
     for n in range(3):
         cache.put(_sha(bytes([n]) * 100), bytes([n]) * 100)
+    cache.max_bytes = 150
+    cache.prune()
     assert len(list(tmp_path.iterdir())) == 3
     for path in tmp_path.iterdir():
         _aged(path, 601)
@@ -140,6 +142,34 @@ def test_a_verified_copy_is_the_callers_own_and_a_bad_entry_a_miss(tmp_path: Pat
         assert not cache.copy_verified(_sha(data), out, what="test")
         assert out.read() == b""
     assert not cache.has(_sha(data))
+
+
+def test_a_fill_past_the_entry_limit_stops_and_keeps_nothing(tmp_path: Path) -> None:
+    cache = DownloadCache(tmp_path, max_bytes=400)
+    data = b"x" * 101
+    with pytest.raises(TooLargeError), cache.fill(_sha(data)) as fill:
+        fill.write(data)
+    assert list(tmp_path.iterdir()) == []
+    cache.put(_sha(data), data)
+    assert not cache.has(_sha(data))
+
+
+def test_a_kept_file_is_a_copy_and_the_callers_file_is_left_at_its_start(
+    tmp_path: Path,
+) -> None:
+    cache = DownloadCache(tmp_path / "shared", max_bytes=1 << 20)
+    data = b"the file"
+    with (tmp_path / "mine").open("w+b") as mine:
+        mine.write(data)
+        cache.keep_file(_sha(data), mine)
+        assert mine.tell() == 0
+        cache.path(_sha(data)).write_bytes(b"changed in the directory")
+        assert mine.read() == data
+    with (tmp_path / "big").open("w+b") as big:
+        big.write(b"y" * (1 << 19))
+        cache.keep_file(_sha(b"y" * (1 << 19)), big)
+        assert big.tell() == 0
+    assert not cache.has(_sha(b"y" * (1 << 19)))
 
 
 # --- through the content store: what one process put or got, another reads ----------
@@ -220,4 +250,20 @@ async def test_a_read_stopped_early_keeps_nothing(tmp_path: Path, pool: Pool) ->
     chunks = store.get(ref)
     await anext(chunks)
     await chunks.aclose()
+    assert list((tmp_path / "shared").iterdir()) == []
+
+
+@pytest.mark.requires_postgres
+async def test_a_blob_larger_than_the_entry_limit_is_read_and_not_kept(
+    tmp_path: Path, pool: Pool
+) -> None:
+    plain = ContentStore(LocalContentBackend(tmp_path / "remote"), BlobIndex(pool))
+    data = os.urandom(3 << 20)
+    ref = await plain.put("piece", data, name="p", scope=SCOPE)
+    store = ContentStore(
+        LocalContentBackend(tmp_path / "remote"),
+        BlobIndex(pool),
+        downloads=DownloadCache(tmp_path / "shared", max_bytes=4 << 20),
+    )
+    assert await store.read(ref) == data
     assert list((tmp_path / "shared").iterdir()) == []

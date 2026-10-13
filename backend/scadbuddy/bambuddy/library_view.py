@@ -28,7 +28,7 @@ import tempfile
 from collections.abc import AsyncIterator, Callable
 from functools import partial
 from pathlib import Path
-from typing import BinaryIO, cast
+from typing import BinaryIO
 
 from pydantic import ValidationError
 
@@ -125,14 +125,13 @@ async def spooled_3mf(
             ):
                 yield out
                 return
-        with downloads.fill(file_hash) as fill:
-            # A Fill writes and tells as a file does, which is all a 3MF's write uses.
-            await source.write_3mf(client, cast(BinaryIO, fill), budget, _room(downloads.root))
+        with await asyncio.to_thread(lambda: tempfile.TemporaryFile("w+b", dir=spool)) as out:
+            # Downloaded into this read's own file, as without a cache; a copy is kept.
             # Bytes that are not the stated hash (the file changed since) are read all
             # the same, and not kept.
-            await asyncio.to_thread(fill.commit)
-            await asyncio.to_thread(fill.file.seek, 0)
-            yield fill.file
+            await source.write_3mf(client, out, budget, _room(spool))
+            await asyncio.to_thread(downloads.keep_file, file_hash, out)
+            yield out
         return
     spool = cache / SPOOL_DIRNAME
     await asyncio.to_thread(spool.mkdir, parents=True, exist_ok=True)

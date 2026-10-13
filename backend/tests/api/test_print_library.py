@@ -1769,7 +1769,8 @@ def test_the_library_file_is_always_a_download_never_a_page(
 def test_a_library_file_with_a_hash_is_downloaded_from_bambuddy_once(
     client: TestClient, app: FastAPI
 ) -> None:
-    """#2788: the second ask, and a ranged one, are served from the download cache."""
+    """#2788: the second whole-file ask is served from the download cache; a ranged ask
+    is still Bambuddy's to answer."""
     configure(client)
     content = library_3mf()
     download = library_file(89, content=content, file_hash=hashlib.sha256(content).hexdigest())
@@ -1779,8 +1780,10 @@ def test_a_library_file_with_a_hash_is_downloaded_from_bambuddy_once(
     ranged = client.get("/api/v1/print/library/89/file", headers={"range": "bytes=0-3"})
 
     assert first.content == second.content == content
-    assert (ranged.status_code, ranged.content) == (206, content[:4])
-    assert download.call_count == 1
+    assert second.headers["content-length"] == str(len(content))
+    assert download.call_count == 2
+    assert download.calls[-1].request.headers["range"] == "bytes=0-3"
+    assert ranged.status_code == 200
     state: AppState = getattr(app.state, STATE_ATTR)
     downloads = state.store.downloads
     assert downloads is not None and downloads.has(hashlib.sha256(content).hexdigest())
@@ -1810,6 +1813,25 @@ def test_a_cached_library_file_that_is_not_its_hash_is_never_served(
     assert downloads.path(sha).read_bytes() == content
     spool = state.paths.cache / "library-spool"
     assert not spool.exists() or list(spool.iterdir()) == []
+
+
+@respx.mock
+def test_a_library_file_larger_than_its_stated_size_is_not_kept(
+    client: TestClient, app: FastAPI
+) -> None:
+    """A size Bambuddy does not state, or understates, cannot fill the volume: the fill
+    stops at the cache's limit, keeps nothing, and the file streams as before."""
+    configure(client)
+    content = library_3mf()
+    download = library_file(89, content=content, file_hash=hashlib.sha256(content).hexdigest())
+    state: AppState = getattr(app.state, STATE_ATTR)
+    downloads = state.store.downloads
+    assert downloads is not None
+    downloads.max_bytes = 4 * (len(content) - 1)
+
+    assert client.get("/api/v1/print/library/89/file").content == content
+    assert download.call_count == 2  # the stopped fill, then the stream
+    assert list(downloads.root.iterdir()) == []
 
 
 @respx.mock

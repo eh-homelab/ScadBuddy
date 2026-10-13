@@ -107,6 +107,11 @@ def store_bytes(path: Path, data: bytes, *, keep: int) -> None:
     prune(path.parent, keep=keep)
 
 
+class TooLargeError(Exception):
+    """A fill past :attr:`DownloadCache.max_entry_bytes`: not kept, whatever its source
+    said its size was."""
+
+
 class Fill:
     """One download being written into the cache: :meth:`write` its bytes, then
     :meth:`commit`. The file is the cache's own until then, under a name no reader
@@ -118,9 +123,15 @@ class Fill:
         self.file = out
         self.partial = partial
         self._digest = hashlib.sha256()
+        self._size = 0
         self.committed = False
 
     def write(self, chunk: bytes) -> int:
+        """Counted against :attr:`DownloadCache.max_entry_bytes` as it is written, so a
+        size the source understated cannot fill the volume."""
+        self._size += len(chunk)
+        if self._size > self.cache.max_entry_bytes:
+            raise TooLargeError
         self._digest.update(chunk)
         return self.file.write(chunk)
 
@@ -149,6 +160,12 @@ class DownloadCache:
     max_bytes: int
     #: Never evict an entry used this recently: a read of it may be under way.
     min_age: float = 600.0
+
+    @property
+    def max_entry_bytes(self) -> int:
+        """The largest file kept: a quarter of the cap, so one file never evicts most of
+        the others."""
+        return self.max_bytes // 4
 
     def path(self, sha256: str) -> Path:
         return self.root / sha256
@@ -219,17 +236,18 @@ class DownloadCache:
                     partial.unlink(missing_ok=True)
 
     def put(self, sha256: str, data: bytes) -> None:
-        """Keep ``data``, which the caller already knows hashes to ``sha256``."""
-        if not is_sha256(sha256) or self.has(sha256):
+        """Keep ``data`` under ``sha256`` if it is that hash and small enough."""
+        if not is_sha256(sha256) or self.has(sha256) or len(data) > self.max_entry_bytes:
             return
         with self.fill(sha256) as fill:
             for start in range(0, len(data), _CHUNK):
                 fill.write(data[start : start + _CHUNK])
             fill.commit()
 
-    def put_file(self, sha256: str, source: BinaryIO) -> None:
-        """Keep a copy of ``source``, the caller's own seekable file, under ``sha256`` if
-        it is that hash; ``source`` is left at its start."""
+    def keep_file(self, sha256: str, source: BinaryIO) -> None:
+        """Keep a copy of ``source``, the caller's own file, under ``sha256`` if it is that
+        hash and small enough; ``source`` is left at its start. The caller goes on reading
+        its own file, never the entry: what is in the directory is only ever a copy."""
         if not is_sha256(sha256) or self.has(sha256):
             return
         source.seek(0)
@@ -238,6 +256,8 @@ class DownloadCache:
                 while chunk := source.read(_CHUNK):
                     fill.write(chunk)
                 fill.commit()
+        except TooLargeError:
+            pass
         finally:
             source.seek(0)
 

@@ -12,15 +12,15 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+from collections.abc import AsyncIterator
 from contextlib import aclosing
 from functools import partial
 from pathlib import Path as FsPath
-from typing import Annotated
+from typing import Annotated, BinaryIO
 
 from fastapi import APIRouter, Path, Query, Request, Response, status
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
-from starlette.background import BackgroundTask
 
 from scadbuddy.activity.component import ACTIVITY, ActivityComponent
 from scadbuddy.api.components import component_dep
@@ -106,7 +106,7 @@ from scadbuddy.operations.component import OperationsDep
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.render.geometry import NoSuchPlateError
 from scadbuddy.render.read_budget import ReadBudget
-from scadbuddy.store.download_cache import DownloadCache, is_sha256
+from scadbuddy.store.download_cache import DownloadCache, TooLargeError, is_sha256
 from scadbuddy.workflows.component import FollowsDep
 from scadbuddy.workflows.print_models import SourceSpec
 
@@ -585,16 +585,19 @@ async def get_library_file(
     a download: a library file can be any type (an SVG, an HTML page), and served on
     ScadBuddy's origin under the type Bambuddy names it could run script there.
 
-    #2788: a file Bambuddy states a hash for is served from the shared download cache,
-    downloaded into it first when it is not there yet."""
-    cached = await _cached_library_file(store, downloads, paths, file_id)
-    if cached is not None:
-        return FileResponse(
-            cached,
-            media_type="application/octet-stream",
-            headers={"content-disposition": "attachment", "x-content-type-options": "nosniff"},
-            background=BackgroundTask(cached.unlink, missing_ok=True),
-        )
+    #2788: a whole-file ask for a file Bambuddy states a hash for is served from the
+    shared download cache, downloaded into it first when it is not there yet. A ranged
+    ask streams from Bambuddy as before."""
+    headers = {"content-disposition": "attachment", "x-content-type-options": "nosniff"}
+    if request.headers.get("range") is None:
+        copy = await _cached_library_file(store, downloads, paths, file_id)
+        if copy is not None:
+            size = await asyncio.to_thread(lambda: os.fstat(copy.fileno()).st_size)
+            return StreamingResponse(
+                _read_closing(copy),
+                media_type="application/octet-stream",
+                headers={**headers, "content-length": str(size)},
+            )
     response = await _proxy(
         store,
         request,
@@ -607,40 +610,53 @@ async def get_library_file(
     return response
 
 
+async def _read_closing(copy: BinaryIO) -> AsyncIterator[bytes]:
+    """``copy``'s bytes, closing it however the response ends. It has no name on disk,
+    so a dropped connection leaves nothing behind."""
+    try:
+        while chunk := await asyncio.to_thread(copy.read, 1 << 20):
+            yield chunk
+    finally:
+        await asyncio.to_thread(copy.close)
+
+
 async def _cached_library_file(
     store: SettingsStore, downloads: DownloadCache | None, paths: DataPaths, file_id: int
-) -> FsPath | None:
-    """A private, checked copy of library file ``file_id`` from the shared download
-    cache, downloaded into the cache first on a miss; the caller removes it once served.
-    None for a file to stream from Bambuddy as before: no cache, no hash stated (#2160),
-    a file too large to keep beside the others, or bytes that are not the stated hash."""
+) -> BinaryIO | None:
+    """A private, digest-checked copy of library file ``file_id`` from the shared
+    download cache, open at its start and with no name on disk; downloaded into the
+    cache first on a miss. None for a file to stream from Bambuddy as before: no cache,
+    no hash stated (#2160), a file larger than the cache keeps (by its stated size, or
+    by what actually came), or bytes that are not the stated hash."""
     if downloads is None:
         return None
     async with client_for(store.load()) as client:
         file = await client.library_file(file_id)
         sha = (file.file_hash or "").lower()
-        if not is_sha256(sha) or (file.file_size or 0) > downloads.max_bytes // 4:
+        if not is_sha256(sha) or (file.file_size or 0) > downloads.max_entry_bytes:
             return None
         if not await asyncio.to_thread(downloads.has, sha):
-            with downloads.fill(sha) as fill:
-                async with aclosing(client.download_library_file(file_id)) as chunks:
-                    async for chunk in chunks:
-                        await asyncio.to_thread(fill.write, chunk)
-                if not await asyncio.to_thread(fill.commit):
-                    return None
+            try:
+                with downloads.fill(sha) as fill:
+                    async with aclosing(client.download_library_file(file_id)) as chunks:
+                        async for chunk in chunks:
+                            await asyncio.to_thread(fill.write, chunk)
+                    if not await asyncio.to_thread(fill.commit):
+                        return None
+            except TooLargeError:
+                return None
     return await asyncio.to_thread(_private_copy, downloads, sha, paths.cache / SPOOL_DIRNAME)
 
 
-def _private_copy(downloads: DownloadCache, sha: str, spool: FsPath) -> FsPath | None:
+def _private_copy(downloads: DownloadCache, sha: str, spool: FsPath) -> BinaryIO | None:
     """The entry copied, digest-checked, into a file under ``spool`` that only this
-    request reads: served from there, the bytes are the ones checked."""
+    request reads and that has no name: the bytes served are the ones checked."""
     spool.mkdir(parents=True, exist_ok=True)
-    descriptor, name = tempfile.mkstemp(dir=spool)
-    path = FsPath(name)
-    with os.fdopen(descriptor, "w+b") as out:
-        if downloads.copy_verified(sha, out, what="library_file"):
-            return path
-    path.unlink(missing_ok=True)
+    # Handed to the response, which closes it (`_read_closing`).
+    out = tempfile.TemporaryFile("w+b", dir=spool)  # noqa: SIM115
+    if downloads.copy_verified(sha, out, what="library_file"):
+        return out
+    out.close()
     return None
 
 
