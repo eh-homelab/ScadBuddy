@@ -600,6 +600,32 @@ describe('HistoryPage', () => {
     expect(within(batch).getByRole('button', { name: 'Print Batch' })).toBeInTheDocument()
     expect(within(batch).getByRole('button', { name: 'Send Batch' })).toBeInTheDocument()
   })
+
+  it('shows an arranged output\'s plates on its row, and a rendered one\'s not (#2282)', async () => {
+    const arranged = { ...outputs[0], id: 'f'.repeat(32), name: 'Batch', arranged_from: ['a'.repeat(32), 'c'.repeat(32)] }
+    const read: string[] = []
+    server.use(
+      http.get('/api/v1/models/name-keychain/outputs', () => HttpResponse.json([arranged, outputs[1]])),
+      http.get('/api/v1/outputs/:id/plates', ({ params }) => {
+        read.push(String(params['id']))
+        return HttpResponse.json([
+          { index: 1, has_thumbnail: true },
+          { index: 2, has_thumbnail: false, name: 'tags' },
+        ])
+      }),
+    )
+    render()
+    const batch = await row('Batch')
+    const plates = await within(batch).findByRole('figure', { name: 'Plates' })
+    expect(plates).toHaveTextContent('2 plates')
+    expect(within(plates).getByRole('img', { name: 'Plate 1' })).toHaveAttribute(
+      'src',
+      `/api/v1/outputs/${'f'.repeat(32)}/plates/1/thumbnail`,
+    )
+    expect(plates).toHaveTextContent('Plate 2: tags')
+    expect(within(await row('Nova')).queryByRole('figure', { name: 'Plates' })).not.toBeInTheDocument()
+    expect(read).toEqual(['f'.repeat(32)])
+  })
 })
 
 describe('template inputs (spec 2026-09-27 §4.3)', () => {

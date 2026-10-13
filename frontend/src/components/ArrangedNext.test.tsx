@@ -1,9 +1,11 @@
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
+import { HttpResponse, http } from 'msw'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as embed from '../lib/embed'
 import { DownloadBlockedError, DownloadWindowClosedError, downloadBlob } from '../lib/embed'
 import type { Output } from '../api/types'
 import { outputs } from '../mocks/fixtures'
+import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { ArrangedNext } from './ArrangedNext'
 
@@ -38,6 +40,24 @@ describe('ArrangedNext (#2287)', () => {
     )
     await waitFor(() => expect(loaded).toBeInstanceOf(Blob))
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('shows the plates of the arranged result before its next step (#2282)', async () => {
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: true },
+          { index: 2, has_thumbnail: true },
+        ]),
+      ),
+    )
+    renderPage(<ArrangedNext output={output} sent={false} onPrint={vi.fn()} />)
+    const plates = await screen.findByRole('figure', { name: 'Plates' })
+    expect(plates).toHaveTextContent('2 plates')
+    expect(within(plates).getAllByRole('img').map((img) => img.getAttribute('src'))).toEqual([
+      `/api/v1/outputs/${output.id}/plates/1/thumbnail`,
+      `/api/v1/outputs/${output.id}/plates/2/thumbnail`,
+    ])
   })
 
   it('says why when the popup is blocked or closed', async () => {
