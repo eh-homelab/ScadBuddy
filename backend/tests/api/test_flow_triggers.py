@@ -13,10 +13,12 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from temporalio.client import Client, ScheduleOverlapPolicy
+from temporalio.client import Client, ScheduleActionStartWorkflow, ScheduleOverlapPolicy
 
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.events import EventBus, JobEvent, VersionCommitted
+from scadbuddy.flow_triggers.component import FLOW_TRIGGERS
+from scadbuddy.flow_triggers.fire import ensure_trigger_schedules
 from scadbuddy.workflows.flow_triggers import schedule_id
 from tests.api.test_flows import AGENT, register, script, settings, until
 from tests.support.temporal import WorkflowReaper
@@ -433,6 +435,39 @@ def test_archiving_or_deleting_the_flow_pauses_its_triggers(
     # A fire that reaches it anyway starts nothing.
     fired = fire(workflow_reaper, client, trigger["id"])
     assert fired["outcome"] == "skipped"
+
+
+@pytest.mark.usefixtures("triggers")
+def test_a_stale_schedule_never_fires_an_event_trigger(
+    app: FastAPI, client: TestClient, workflow_reaper: WorkflowReaper
+) -> None:
+    """A schedule trigger edited into an event trigger while Temporal was away keeps its
+    old Schedule: its fires start nothing, and the next reconcile removes it."""
+    definition = register(client, QUICK)
+    trigger = create(client, definition["id"], overlap="allow_all")
+    temporal = workflow_reaper.client
+    assert isinstance(temporal, Client)
+    handle = temporal.get_schedule_handle(schedule_id(trigger["id"]))
+    described = workflow_reaper.run(handle.describe())
+    action = described.schedule.action
+    assert isinstance(action, ScheduleActionStartWorkflow)
+    queue = action.task_queue
+    # The row becomes an event trigger, but the Schedule's delete never happened.
+    store = getattr(app.state, STATE_ATTR).components.get(FLOW_TRIGGERS).store
+    workflow_reaper.run(
+        store.update(
+            trigger["id"],
+            {"kind": "event", "schedule": None, "event": {"kind": "model.changed"}},
+            {"kind": "browser"},
+            "edit",
+        )
+    )
+    workflow_reaper.run(handle.trigger(overlap=ScheduleOverlapPolicy.ALLOW_ALL))
+    fired = decided(client, trigger["id"], 1)
+    assert (fired["outcome"], fired["reason"]) == ("skipped", "not a schedule trigger")
+    # The reconcile at the worker's start removes the Schedule of every non-schedule trigger.
+    workflow_reaper.run(ensure_trigger_schedules(temporal, queue, store))
+    assert schedule_id(trigger["id"]) not in workflow_reaper.run(_schedule_ids(temporal))
 
 
 @pytest.mark.usefixtures("triggers")

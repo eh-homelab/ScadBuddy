@@ -253,7 +253,7 @@ async def _view(triggers: Triggers, trigger: Trigger) -> TriggerView:
     if trigger.kind == "schedule" and not trigger.paused:
         try:
             upcoming = await next_fires(triggers.client, trigger.id)
-        except RPCError:
+        except (RPCError, TimeoutError, ConnectionError):
             logger.warning("could not read a trigger's Schedule", exc_info=True)
     return TriggerView(
         **trigger.model_dump(),
@@ -307,11 +307,13 @@ async def create_flow_trigger(body: TriggerCreate, triggers: TriggersDep) -> Tri
             created_at=datetime.now(UTC),
         )
     )
-    try:
-        await _sync_schedule(triggers, trigger)
-    except ApiError:
-        await triggers.store.delete(trigger.id, revoked_by="system")
-        raise
+    # A new event trigger has no Schedule to make or remove.
+    if trigger.kind == "schedule":
+        try:
+            await _sync_schedule(triggers, trigger)
+        except ApiError:
+            await triggers.store.delete(trigger.id, revoked_by="system")
+            raise
     return await _view(triggers, trigger)
 
 
