@@ -1,7 +1,7 @@
 import { Context } from '@temporalio/activity'
 import { ApplicationFailure, CancelledFailure } from '@temporalio/common'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import type { AuditLog } from '../audit/log.js'
@@ -124,6 +124,8 @@ export type TurnServers = {
   secrets: readonly string[]
   /** The plugin packages the turn's Claude Code loads; only for a listing (`TurnContext.listing`). */
   packages?: TurnPackage[]
+  /** Said to the model in the turn's system prompt (the built-ins offered as turn tools, #2393). */
+  notes?: string[]
   release(): void | Promise<void>
 }
 
@@ -186,10 +188,15 @@ export type TurnPackage = {
   builtin_tools: string[]
 }
 
-export type TurnToolsResult = { tools: TurnToolEntry[]; packages: TurnPackage[] }
+export type TurnToolsResult = {
+  tools: TurnToolEntry[]
+  packages: TurnPackage[]
+  /** Appended to the turn's system prompt (TurnServers.notes); absent when there is nothing to say. */
+  system_note?: string
+}
 
 /** A client on an in-process MCP server (an SDK server's `instance`), made fresh for each use. */
-export async function connectInProcess(create: () => McpServer): Promise<Client> {
+export async function connectInProcess(create: () => { connect(transport: Transport): Promise<void> }): Promise<Client> {
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
   await create().connect(serverSide)
   const client = new Client({ name: 'scadbuddy-durable-turn', version: '1' })
@@ -486,7 +493,8 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
         // Said once, after the listing, so a retried attempt does not say it again.
         const problems = [...set.problems, ...listings.flatMap((l) => (l.problem ? [l.problem] : [])), ...tooLong]
         if (problems.length) await deps.report?.(session, problems.map(scrub))
-        return { tools, packages: set.packages ?? [] }
+        const notes = set.notes ?? []
+        return { tools, packages: set.packages ?? [], ...(notes.length ? { system_note: notes.join('\n\n') } : {}) }
       })
     },
     [TURN_TOOLS_CLOSE_ACTIVITY]: async (): Promise<void> => {

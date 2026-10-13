@@ -211,6 +211,8 @@ export type HttpRequestContext = {
   limits?: Partial<HttpLimits>
   /** Where `save_to_workspace` stores a body (#2329): the session's workspace. Refused without it. */
   workspace?: { files: SessionFiles; ref: WorkspaceRef } | undefined
+  /** A redirect to another host is returned (`redirectTo`) instead of followed, as Claude Code's WebFetch does (#2393). */
+  sameHostRedirects?: boolean | undefined
 }
 
 function contains(value: string, secrets: readonly string[]): boolean {
@@ -235,7 +237,7 @@ export function requestProblem(args: HttpRequestArgs, secrets: readonly string[]
   return undefined
 }
 
-type Hop = {
+export type Hop = {
   status: number
   statusText: string
   headers: IncomingHttpHeaders
@@ -341,7 +343,7 @@ function isRedirect(status: number): boolean {
   return status === 301 || status === 302 || status === 303 || status === 307 || status === 308
 }
 
-type Outcome =
+export type Outcome =
   | {
       ok: true
       url: URL
@@ -349,6 +351,8 @@ type Outcome =
       hop: Hop
       /** Set when a redirect was returned instead of followed. */
       note?: string
+      /** Where that redirect pointed, with `HttpRequestContext.sameHostRedirects`. */
+      redirectTo?: string
       /**
        * Writes the last hop's audit row, naming `saved` when its body was saved
        * under that id. Left to the caller so a row never names a body whose save
@@ -363,7 +367,7 @@ type Outcome =
  * the last one of a completed exchange, whose row the caller writes with `audit`
  * once it knows whether the body was saved (#1292, #2224).
  */
-async function exchange(args: HttpRequestArgs, context: HttpRequestContext, callSignal?: AbortSignal): Promise<Outcome> {
+export async function exchange(args: HttpRequestArgs, context: HttpRequestContext, callSignal?: AbortSignal): Promise<Outcome> {
   const limits = { ...DEFAULT_LIMITS, ...context.limits }
   const resolve = context.resolve ?? systemResolver
   const deadline = AbortSignal.timeout(args.timeout_ms)
@@ -446,6 +450,9 @@ async function exchange(args: HttpRequestArgs, context: HttpRequestContext, call
       return { ok: false, reason: (err as Error).message }
     }
     const crossOrigin = next.origin !== url.origin
+    if (context.sameHostRedirects && next.host !== url.host) {
+      return { ok: true, url, redirects, hop: result, audit: last, note: `not followed: a redirect to another host`, redirectTo: next.href }
+    }
     const toGet = result.status === 303 ? method !== 'HEAD' : (result.status === 301 || result.status === 302) && method === 'POST'
     if (!toGet && crossOrigin && !READ_METHODS.has(method)) {
       return {

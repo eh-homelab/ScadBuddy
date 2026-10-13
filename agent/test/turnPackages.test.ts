@@ -9,7 +9,8 @@ import { declaresRemoteServers, forwardPackageServers, type PackageServers, with
 import { buildHarnessOptions } from '../src/harness/run.js'
 import { PluginRefusedError } from '../src/harness/plugins.js'
 import { localPackageServers, PACKAGE_COPY_KEPT_MS, sharePackage, sharedName, sweepPackageCopies } from '../src/temporal/turnPackages.js'
-import { turnServers } from '../src/temporal/turnServers.js'
+import { builtinNote, turnServers } from '../src/temporal/turnServers.js'
+import type { SessionFiles } from '../src/workspace/store.js'
 import { connectHttp } from '../src/temporal/turnTools.js'
 import { startFakeMcp } from './support/fakeMcp.js'
 
@@ -195,6 +196,33 @@ describe('plugin packages in a durable turn', () => {
     const unshared = await turnServers({ packages: { load, root: undefined, localRoot: root, forward: none } })({ session: 's', owner: OWNER, signal, listing: true })
     expect(unshared.packages).toEqual([])
     expect(unshared.problems.join('\n')).toContain('SCADBUDDY_PAYLOAD_DIR is not set')
+  })
+
+  it("offers an allowed package's other built-ins as the builtin turn tools, and tells the model (#2393)", async () => {
+    const pkg = { ...(await fakePackage(undefined)), allowed: true, builtinTools: ['Bash', 'Monitor', 'Read', 'Skill', 'Task', 'WebFetch'] }
+    const root = await mkdtemp(path.join(os.tmpdir(), 'turn-share-'))
+    const load = async (): Promise<PackagesForRun> => ({ paths: [], allowedPaths: [pkg.dir], builtinTools: pkg.builtinTools, loaded: [pkg], problems: [], release: () => {} })
+    const nested = { ask: async () => '', search: async () => ({ text: '' }) }
+    const builtins = { files: {} as SessionFiles, nested: () => nested }
+    const servers = turnServers({ packages: { load, root, localRoot: root, forward: none }, builtins })
+    const signal = new AbortController().signal
+    const listing = await servers({ session: 's', owner: OWNER, signal, listing: true })
+    // The engine runs Bash, Skill and Agent (Task); the agent serves Read and WebFetch.
+    expect(listing.packages?.[0]?.builtin_tools).toEqual(['Bash', 'Skill', 'Task'])
+    expect(listing.servers.map((s) => s.name)).toEqual(['builtin'])
+    expect(listing.servers[0]!.tierOf('mcp__builtin__Read', {})).toBe('outward')
+    const client = await listing.servers[0]!.connect()
+    expect((await client.listTools()).tools.map((t) => t.name)).toEqual(['Read', 'WebFetch'])
+    await client.close()
+    expect(listing.notes).toEqual([builtinNote(['Read', 'WebFetch'])])
+    expect(listing.notes?.[0]).toContain('Read (mcp__durable__builtin__Read)')
+    // Only what nothing provides is left out, and said.
+    expect(listing.problems).toEqual([expect.stringContaining('plugin package notes names Monitor: a durable session cannot ask you')])
+    await listing.release()
+    // A flow has no session workspace: no built-ins there.
+    const flow = await servers({ session: 'flow-x', flow: 'x', owner: OWNER, signal })
+    expect(flow.servers).toEqual([])
+    await flow.release()
   })
 
   it("offers no server of a package that failed to share, on the listing (#2563)", async () => {

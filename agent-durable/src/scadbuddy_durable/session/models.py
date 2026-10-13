@@ -171,6 +171,9 @@ class TurnTools:
     tools: list[TurnTool] = field(default_factory=list)
     # Defaulted: a listing an older agent made named no packages.
     packages: list[TurnPackage] = field(default_factory=list)
+    # Said to the model in the turn's system prompt: the built-ins it gets as turn tools
+    # (#2393, agent/src/temporal/turnServers.ts builtinNote). None from an older agent.
+    system_note: str | None = None
 
 
 @dataclass

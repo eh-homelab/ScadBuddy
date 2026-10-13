@@ -13,6 +13,7 @@ import { approvalGrantCheck, FailClosedTokenStore, liveTokenTiers, PostgresToken
 import { loadConfig } from './config.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
 import { CredentialPool } from './harness/fallback.js'
+import { nestedQueries } from './builtins/nested.js'
 import { connectDatabase } from './db.js'
 import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js'
 import { PgEventListener } from './events/pgListener.js'
@@ -453,6 +454,28 @@ const turnToolDeps = temporal
                 root: config.payloadDir ? path.join(config.payloadDir, SHARED_PACKAGES) : undefined,
                 localRoot: path.join(paths.stateDir, 'plugins-local'),
                 forward: (loaded) => forwardPackageServers(loaded, pluginForwarder),
+              },
+            }
+          : {}),
+        // An allowed package's other built-ins (#2393), on the session's workspace and credential.
+        ...(workspace && credentials
+          ? {
+              builtins: {
+                files: workspace,
+                audit,
+                nested: (context: { session: string; flow?: string }) =>
+                  nestedQueries({
+                    paths,
+                    credential: async () => (await new CredentialPool({ repo: credentials, kek, audit }).candidates())[0]!.credential,
+                    // Counted in the session's cost, which its budget reads, as a classic turn counts Claude Code's own calls.
+                    ...(context.flow
+                      ? {}
+                      : {
+                          spent: async (cost: number) => {
+                            await temporal.sql`UPDATE ai_sessions SET cost_usd = cost_usd + ${cost} WHERE id = ${context.session}`
+                          },
+                        }),
+                  }),
               },
             }
           : {}),

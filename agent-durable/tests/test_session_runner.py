@@ -121,14 +121,14 @@ async def _client(env: WorkflowEnvironment, connect: Connect) -> Client:
 
 @contextlib.asynccontextmanager
 async def running(
-    env: WorkflowEnvironment, connect: Connect, runner: Any
+    env: WorkflowEnvironment, connect: Connect, runner: Any, stand_in: StandInTools | None = None
 ) -> AsyncIterator[tuple[Client, str]]:
     tools.use_manifest(MANIFEST)
     client = await _client(env, connect)
     queue = f"agent-{uuid.uuid4().hex[:8]}"
     async with (
         build_worker(client, connect, runner, task_queue=queue),
-        tools_worker(client, StandInTools(connect)),
+        tools_worker(client, stand_in or StandInTools(connect)),
     ):
         yield client, queue
 
@@ -528,6 +528,35 @@ async def test_each_turn_runs_with_the_append_it_was_sent_with(
             await handle.terminate()
     appends = [m["extra_options"]["system_prompt"].get("append") for m in recording.made]
     assert appends == ["no browser", "a headless browser"]
+
+
+async def test_the_built_ins_the_agent_provides_are_named_in_the_append(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """#2393: what the turn's listing says to tell the model (the package built-ins it
+    gets as turn tools) follows the turn's append, or stands alone without one."""
+    await insert_gateway(agent_db, KEK, "http://127.0.0.1:9")
+    recording = Recording()
+    runner = ScadBuddyRunner(connect, KEK, cwd=str(tmp_path), make_runner=recording)
+    stand_in = StandInTools(connect)
+    stand_in.turn_note = "Read is builtin__Read."
+    async with running(temporal_env, connect, runner, stand_in) as (client, queue):
+        sid = await insert_session(agent_db)
+        handle = await start_session(client, sid, queue, system_append="Be careful.")
+        try:
+            await send(handle, "hi")
+            assert await settled(connect, sid) == "idle"
+        finally:
+            await handle.terminate()
+        sid = await insert_session(agent_db)
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "hi")
+            assert await settled(connect, sid) == "idle"
+        finally:
+            await handle.terminate()
+    appends = [m["extra_options"]["system_prompt"].get("append") for m in recording.made]
+    assert appends == ["Be careful.\n\nRead is builtin__Read.", "Read is builtin__Read."]
 
 
 async def _setting(conn: Conn, key: str, value: str) -> None:
