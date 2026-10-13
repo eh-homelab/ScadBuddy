@@ -559,7 +559,7 @@ async function runJudgedByResult(
       tool.execute(args, {
         ...ctx,
         signal,
-        backend: authored(ctx.backend, authorHeaders(ctx.principal, ctx.session)),
+        backend: authored(ctx.backend, authorHeaders(ctx.principal, ctx.session, tool.name)),
       }),
     )
     if (raw === TIMED_OUT) {
