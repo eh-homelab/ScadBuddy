@@ -237,20 +237,32 @@ class _NoListener:
 async def test_the_follower_refreshes_off_the_loop_and_moves_head_after(
     paths: DataPaths,
 ) -> None:
-    """#2617: the NFS walk runs on a thread, and `head` names a commit only once this
-    replica has revalidated for it."""
+    """#2617: the NFS walk runs on a thread, the catalogue forgets those templates after
+    it, and `head` names a commit only once this replica has revalidated for it."""
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX)
     follower = ModelsHeadFollower(paths, history, cast(PgListener, _NoListener()))
-    seen: list[tuple[bool, str | None]] = []
+    seen: list[tuple[str, bool, str | None, list[str] | None]] = []
     loop_thread = threading.current_thread()
 
     def revalidate(model_ids: list[str] | None) -> None:
-        seen.append((threading.current_thread() is loop_thread, follower.head))
+        seen.append(("walk", threading.current_thread() is loop_thread, follower.head, model_ids))
+
+    class _Catalogue:
+        def forget(self, model_ids: list[str] | None) -> None:
+            seen.append(
+                ("forget", threading.current_thread() is loop_thread, follower.head, model_ids)
+            )
 
     follower.revalidate = revalidate  # type: ignore[method-assign]
+    follower.catalogue = cast(Catalogue, _Catalogue())
     await follower._received(encode_change(HeadChange("c" * 40, ["keychain"])))
     await follower._connected(True)
-    assert seen == [(False, None), (False, "c" * 40)]
+    assert seen == [
+        ("walk", False, None, ["keychain"]),
+        ("forget", True, None, ["keychain"]),
+        ("walk", False, "c" * 40, None),
+        ("forget", True, "c" * 40, None),
+    ]
     assert follower.head == "c" * 40
 
 

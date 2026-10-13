@@ -14,6 +14,11 @@ reconnect in step after a database restart. An idle connection is checked every
 ``check_interval``, since a half-open TCP connection delivers nothing and raises nothing
 until something is sent on it.
 
+Each callback is awaited before the next notification is handed on, on every channel:
+a slow one (the models HEAD follower's whole-library NFS walk after a reconnect) holds
+up the event bus and the liveness check until it ends. The follower logs how long each
+of its refreshes took.
+
 Several owners may :meth:`~PgListener.run` it; the connection lives while at least
 one does. Channels are registered before the first run: a channel added to a live
 connection would silently miss what was sent before its ``LISTEN``.

@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from pathlib import Path
 
 from scadbuddy.core.paths import DataPaths, revalidate_dirs
@@ -78,9 +79,21 @@ class ModelsHeadFollower:
         None -- and forget what is cached about them. The revalidation walks and opens
         directories over NFS, so it runs on a thread (#2617): a large library or a slow
         mount holds up this channel, never the event loop."""
+        # Not cancellable: a listener cancelled at shutdown leaves the walk running on
+        # the default executor until it ends, and the loop's close joins it.
+        started = time.monotonic()
         await asyncio.to_thread(self.revalidate, model_ids)
         if self.catalogue is not None:
             self.catalogue.forget(model_ids)
+        # It holds up every channel on the shared listener (pg_listener.py): a slow mount
+        # shows here.
+        logger.debug(
+            "refreshed the models library",
+            extra={
+                "models": None if model_ids is None else len(model_ids),
+                "seconds": round(time.monotonic() - started, 3),
+            },
+        )
 
     def revalidate(self, model_ids: list[str] | None) -> None:
         """Have the NFS client revalidate the repository and those templates."""
