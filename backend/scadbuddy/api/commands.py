@@ -24,7 +24,7 @@ WorkflowIdPath = Annotated[str, Path(max_length=200)]
 UpdateIdPath = Annotated[str, Path(max_length=128)]
 
 
-@router.get(
+@router.post(
     "/{workflow_id}/updates/{update_id}",
     name="follow_command",
     response_model=RenderAccepted,

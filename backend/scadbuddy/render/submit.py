@@ -361,9 +361,11 @@ class RenderService:
         if answer.closing:
             raise CommandResendError(workflow_id)
         job, _ = await self._counted(answer, answer.job.kind if answer.job else "render")
+        # Checked as the POST checks it (`_superseded`): the answered job's template, still
+        # open, and neither that job nor its run (a submit that replaced its own render
+        # answered with it). The follow URL's `supersedes` is the client's to send.
         previous = await self._superseded(supersedes, job.slug) if supersedes else None
-        # Not the same run: a submit that replaced its own render answered with it.
-        if previous is not None and previous.workflow_id != workflow_id:
+        if previous is not None and previous.id != job.id and previous.workflow_id != workflow_id:
             await self._supersede(previous, update_id)
         return job
 

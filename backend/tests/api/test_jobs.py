@@ -753,7 +753,7 @@ def _job(job_id: str = "j" * 32) -> Job:
 def test_following_a_render_answers_its_job(client: TestClient) -> None:
     follow = mock.AsyncMock(return_value=_job())
     with mock.patch.object(RenderService, "follow", follow):
-        response = client.get(
+        response = client.post(
             "/api/v1/commands/render-abc/updates/k1", params={"supersedes": "old"}
         )
 
@@ -769,7 +769,7 @@ def test_following_a_render_answers_its_job(client: TestClient) -> None:
 def test_following_a_render_still_accepting_is_202_again(client: TestClient) -> None:
     still = mock.AsyncMock(side_effect=CommandStillAcceptingError("render-abc"))
     with mock.patch.object(RenderService, "follow", still):
-        response = client.get(
+        response = client.post(
             "/api/v1/commands/render-abc/updates/k1", params={"supersedes": "old"}
         )
 
@@ -780,7 +780,7 @@ def test_following_a_render_still_accepting_is_202_again(client: TestClient) -> 
 def test_following_an_unknown_update_says_to_send_the_request_again(client: TestClient) -> None:
     lost = mock.AsyncMock(side_effect=CommandResendError("render-abc"))
     with mock.patch.object(RenderService, "follow", lost):
-        response = client.get("/api/v1/commands/render-abc/updates/k1")
+        response = client.post("/api/v1/commands/render-abc/updates/k1")
 
     assert response.status_code == 409
     assert response.json()["type"] == COMMAND_RESEND_PROBLEM
@@ -789,7 +789,7 @@ def test_following_an_unknown_update_says_to_send_the_request_again(client: Test
 def test_following_a_full_queue_is_the_renders_own_refusal(client: TestClient) -> None:
     full = mock.AsyncMock(side_effect=QueueFullError(3, 7))
     with mock.patch.object(RenderService, "follow", full):
-        response = client.get("/api/v1/commands/render-abc/updates/k1")
+        response = client.post("/api/v1/commands/render-abc/updates/k1")
 
     assert response.status_code == 503
     assert response.headers["retry-after"] == "7"
@@ -798,7 +798,27 @@ def test_following_a_full_queue_is_the_renders_own_refusal(client: TestClient) -
 def test_only_a_render_is_followed(client: TestClient) -> None:
     follow = mock.AsyncMock(return_value=_job())
     with mock.patch.object(RenderService, "follow", follow):
-        response = client.get("/api/v1/commands/print-abc/updates/k1")
+        response = client.post("/api/v1/commands/print-abc/updates/k1")
 
     assert response.status_code == 404
+    follow.assert_not_awaited()
+
+
+def test_a_follow_is_a_write_the_cross_site_gate_checks(client: TestClient) -> None:
+    """Review of #2782: a render's follow makes its supersede (it releases, maybe cancels,
+    the job it replaces), so it is a POST: a page on another origin cannot make a LAN
+    user's browser send it, as it could an `<img src>` GET."""
+    configured = client.put("/api/v1/settings", json={"public_url": "https://scad.example.com/"})
+    assert configured.status_code == 200, configured.text
+    follow = mock.AsyncMock(return_value=_job())
+    with mock.patch.object(RenderService, "follow", follow):
+        read = client.get("/api/v1/commands/render-abc/updates/k1", params={"supersedes": "old"})
+        foreign = client.post(
+            "/api/v1/commands/render-abc/updates/k1",
+            params={"supersedes": "old"},
+            headers={"Origin": "https://evil.example", "Sec-Fetch-Site": "cross-site"},
+        )
+
+    assert read.status_code == 405, read.text
+    assert foreign.status_code == 403, foreign.text
     follow.assert_not_awaited()

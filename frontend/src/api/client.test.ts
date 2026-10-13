@@ -1516,7 +1516,7 @@ describe('render (#1053)', () => {
         prefer = request.headers.get('Prefer')
         return stillAccepting()
       }),
-      http.get(followUrl, () => {
+      http.post(followUrl, () => {
         follows += 1
         return follows === 1
           ? stillAccepting()
@@ -1540,7 +1540,7 @@ describe('render (#1053)', () => {
           ? stillAccepting()
           : HttpResponse.json({ job_id: 'j1', status_url: '/api/v1/jobs/j1' }, { status: 202 })
       }),
-      http.get(followUrl, () =>
+      http.post(followUrl, () =>
         HttpResponse.json(
           { type: COMMAND_RESEND, title: 'Conflict', status: 409, detail: 'send it again' },
           { status: 409 },
@@ -1562,7 +1562,7 @@ describe('render (#1053)', () => {
         setTimeout(() => controller.abort(), 10)
         return stillAccepting()
       }),
-      http.get(followUrl, () => {
+      http.post(followUrl, () => {
         follows += 1
         return HttpResponse.json({ job_id: 'j1', status_url: '/api/v1/jobs/j1', inputs: {} })
       }),

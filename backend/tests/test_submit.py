@@ -11,8 +11,9 @@ import uuid
 from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
 from dataclasses import replace
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, NoReturn
+from unittest import mock
 
 import psycopg
 import pytest
@@ -47,6 +48,7 @@ from scadbuddy.render.job_models import (
     SUPERSEDED_ERROR,
     Job,
     JobNotFoundError,
+    JobState,
     QueueFullError,
     now,
     render_key,
@@ -2446,3 +2448,49 @@ async def test_a_followed_submit_releases_the_render_it_supersedes(
 
     assert new.id != old.id
     assert released.state == "cancelled"
+
+
+@pytest.mark.parametrize(
+    ("slug", "state", "same_job", "released"),
+    [
+        (SLUG, "running", False, True),
+        ("another-template", "running", False, False),
+        (SLUG, "done", False, False),
+        (SLUG, "running", True, False),
+    ],
+)
+async def test_a_follow_supersedes_only_what_the_post_would(
+    make_service: ServiceFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    slug: str,
+    state: JobState,
+    same_job: bool,
+    released: bool,
+) -> None:
+    """Review of #2782: the follow URL's `supersedes` is the client's to send, so the
+    follow checks it as the POST does (`_superseded`): the answered job's template,
+    still open, and not the answered job. Anything else is left alone."""
+    answered = Job(id="n" * 32, slug=SLUG, created_at=datetime.now(UTC), inputs={})
+    old = Job(
+        id=answered.id if same_job else "o" * 32,
+        slug=slug,
+        created_at=datetime.now(UTC),
+        inputs={},
+        state=state,
+        workflow_id="render-old",
+    )
+
+    async def answer(*args: Any, **kwargs: Any) -> RenderAnswer:
+        return RenderAnswer(job=answered)
+
+    monkeypatch.setattr(submit_module, "follow_update", answer)
+    async with temporal_client() as client:
+        service = make_service(client, "unused")
+        monkeypatch.setattr(service.store, "read", lambda job_id: old)
+        supersede = mock.AsyncMock()
+        monkeypatch.setattr(service, "_supersede", supersede)
+        job = await service.follow("render-new", "k", supersedes=old.id)
+        await service.aclose()
+
+    assert job.id == answered.id
+    assert supersede.await_count == (1 if released else 0)

@@ -618,7 +618,9 @@ async function untilAccepted<T>(send: () => Promise<T | CommandAccepting>, signa
     }
     const url = answer.follow_url.startsWith(API_BASE) ? answer.follow_url.slice(API_BASE.length) : answer.follow_url
     try {
-      answer = await reattach(() => request<T | CommandAccepting>(url), last ? undefined : signal)
+      // A POST (#2782 review): a render's follow makes its supersede, a change the
+      // cross-site gate must see.
+      answer = await reattach(() => request<T | CommandAccepting>(url, { method: 'POST' }), last ? undefined : signal)
     } catch (caught) {
       if (!(caught instanceof ApiError && caught.problem.type === COMMAND_RESEND)) throw caught
       answer = await send()
