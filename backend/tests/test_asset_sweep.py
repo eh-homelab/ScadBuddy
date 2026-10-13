@@ -180,3 +180,47 @@ async def test_a_failing_bambuddy_step_still_trims_the_worker_cache(
     with pytest.raises(OSError, match="down"):
         await main._sweep_blobs_logged(state)  # type: ignore[arg-type]
     assert cache.evicted == 1
+
+
+class _FailingCache(CachedBlobStore):
+    """A worker cache whose trim fails."""
+
+    def __init__(self) -> None:
+        pass
+
+    def evict(self, *, now: float | None = None) -> list[str]:
+        raise RuntimeError("the cache disk is full")
+
+
+def _sweep_state(cache: CachedBlobStore, backend: Any) -> SimpleNamespace:
+    return SimpleNamespace(
+        store=SimpleNamespace(content=SimpleNamespace(backend=backend), blobs=cache),
+        refs=object(),
+        config=SimpleNamespace(job_ttl=86400),
+    )
+
+
+async def test_a_failing_trim_does_not_hide_the_bambuddy_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#2560: each failure is logged on its own, and the Bambuddy one is what fails
+    the Schedule's activity, not the trim raised over it."""
+
+    async def sweep_content(store: Any, refs: Any, *, grace: int) -> list[str]:
+        raise OSError("Bambuddy is down")
+
+    monkeypatch.setattr(main, "sweep_content", sweep_content)
+    with pytest.raises(OSError, match="down"):
+        await main._sweep_blobs_logged(_sweep_state(_FailingCache(), _Unreachable()))  # type: ignore[arg-type]
+    logged = {r.getMessage(): r.exc_info[1] for r in caplog.records if r.exc_info}
+    assert isinstance(logged["could not trim the worker cache"], RuntimeError)
+    assert isinstance(logged["could not sweep unreferenced blobs"], OSError)
+
+
+async def test_a_failing_trim_alone_fails_the_sweep(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def sweep_content(store: Any, refs: Any, *, grace: int) -> list[str]:
+        return []
+
+    monkeypatch.setattr(main, "sweep_content", sweep_content)
+    with pytest.raises(RuntimeError, match="disk is full"):
+        await main._sweep_blobs_logged(_sweep_state(_FailingCache(), object()))  # type: ignore[arg-type]

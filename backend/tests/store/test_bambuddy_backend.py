@@ -861,6 +861,29 @@ async def test_a_file_moved_out_of_work_after_the_listing_is_kept(pool: Pool) ->
     await backend.aclose()
 
 
+@respx.mock
+@pytest.mark.parametrize(("status", "answered"), [(403, 409), (503, 502)])
+async def test_a_re_read_that_fails_otherwise_stops_the_sweep_before_any_delete(
+    pool: Pool, status: int, answered: int
+) -> None:
+    """#2561: only a 404 on the re-read means the file is gone. Any other answer is a
+    Bambuddy that cannot say where the file is, so nothing is deleted and the sweep fails."""
+    work_folder(pool)
+    respx.get(f"{API}/library/files/", params={"folder_id": "11"}).mock(
+        return_value=listed((630, OLD))
+    )
+    respx.get(f"{API}/library/files/630").mock(
+        return_value=httpx.Response(status, json={"detail": "no"})
+    )
+    delete = respx.delete(url__regex=rf"{API}/library/files/\d+")
+    backend = BambuddyContentBackend(target(), pool)
+    with pytest.raises(ApiError) as raised:
+        await backend.sweep_unrecorded(cutoff=CUTOFF)
+    assert raised.value.status == answered  # the client's mapping of Bambuddy's answer
+    assert not delete.called
+    await backend.aclose()
+
+
 class _DrainingBambuddy(httpx.AsyncBaseTransport):
     """Bambuddy's folder and upload routes, the upload read a chunk at a time and let go,
     as a socket would: what it costs is what ScadBuddy holds to send it (#503)."""
