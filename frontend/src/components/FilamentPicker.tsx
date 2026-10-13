@@ -76,6 +76,8 @@ const WARNING_TONE: Record<FilamentWarning['kind'], string> = {
   'sliced-plate-missing': 'text-warn',
   // #2955 — ScadBuddy's own earlier slice queued: said, so a missing slice job reads as intended.
   'slice-reused': 'text-muted',
+  // #2722 — the chosen spools mix material families: a warning, never a refusal.
+  'mixed-materials': 'text-warn',
 }
 
 /**

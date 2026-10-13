@@ -1690,20 +1690,29 @@ def test_the_check_warns_of_a_plate_the_printer_does_not_take(
 
 
 @respx.mock
-def test_a_run_records_a_plate_the_printer_does_not_take(client: TestClient, model: str) -> None:
-    """#2858: the run's warnings, not only the check's, name a plate the H2C does not
-    take, judged against the printer's model as the run resolved it."""
+def test_the_check_says_a_spool_is_not_loaded_and_the_plan_mixes_materials(
+    client: TestClient, model: str
+) -> None:
+    """#2722: Checks said nothing of either; the picker said only the first, under the slot."""
     output_id = prepared(client, model)
     upload_route()
     run_routes()
-    slice_routes()
-    queue_route()
 
-    response = run_print(client, output_id, json=body(bed_type="Cool Plate"))
+    # Spool 9 is PETG, loaded in printer 1; spool 5 is PLA on the shelf.
+    mixed = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+    assert mixed.status_code == 200, mixed.text
+    found = [(w["kind"], w["slot_id"]) for w in mixed.json()["warnings"]]
+    assert ("not-loaded", 2) in found
+    assert ("mixed-materials", None) in found
 
-    assert response.status_code == 200, response.text
-    [warning] = [w for w in response.json()["warnings"] if w["kind"] == "plate-not-listed"]
-    assert "does not list Cool Plate among its plates" in warning["message"]
+    # Both PETG and both loaded (spools 9 and 10).
+    request = body()
+    request["filament_plan"] = {
+        "slots": [{"slot_id": 1, "spool_id": 9}, {"slot_id": 2, "spool_id": 10}]
+    }
+    plain = client.post(f"/api/v1/print/outputs/{output_id}/check", json=request)
+    kinds = {w["kind"] for w in plain.json()["warnings"]}
+    assert not kinds & {"not-loaded", "mixed-materials"}
 
 
 @respx.mock

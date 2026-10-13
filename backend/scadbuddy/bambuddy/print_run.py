@@ -50,11 +50,15 @@ from scadbuddy.bambuddy.filaments import (
     FilamentOptions,
     FilamentPlan,
     FilamentWarning,
+    Inventory,
     QueueFilaments,
+    SlotNeed,
     SpoolOption,
     across_plates,
+    build_options,
     check,
     every_plate,
+    family,
     gather_plate_options,
     queue_filaments,
     read_inventory,
@@ -93,13 +97,13 @@ from scadbuddy.bambuddy.resolver import (
     resolve,
 )
 from scadbuddy.bambuddy.send import request_scope, resolve_print_options
-from scadbuddy.bambuddy.supports import (
-    SUPPORT_KEYS,
-    SupportsChoice,
-    support_overrides,
-    wanted_settings,
+from scadbuddy.bambuddy.trays import (
+    colour_word,
+    tray_colours,
+    tray_material_colour,
+    tray_of_spool_id,
+    with_trays,
 )
-from scadbuddy.bambuddy.trays import colour_word, tray_colours, with_trays
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import PrintSequence
@@ -680,6 +684,8 @@ async def check_print(
         # and there is no nozzle plan, slots or rack side to judge before it.
         return PrintCheck(warnings=prepared.warnings)
     laid_out = await source.states_nozzles(client)
+    # One read of the inventory for the plan and the spool warnings (#2722).
+    inventory = await read_inventory(client)
     nozzle_plan = (
         await plan_for(
             client,
@@ -688,6 +694,7 @@ async def check_print(
             request.filament_plan,
             request.choices.nozzles,
             request.choices.sides,
+            inventory=inventory,
         )
         if laid_out
         else None
@@ -745,17 +752,12 @@ async def check_print(
                     request.choices.bed_type, prepared.printer_model, prepared.printer_name
                 )
             ),
-            # #717: what the run will say of a profile it cannot apply.
-            *(await profile_overrides(client, process, request.filament_profiles, read=read))[1],
-            # #1899: and of a support setting it cannot apply.
-            *(
-                await support_overrides(
-                    client,
-                    process,
-                    wanted_settings(source.print_settings, request.supports),
-                    read=read,
-                )
-            )[1],
+            *plan_warnings(
+                request.filament_plan,
+                inventory,
+                printer_id=prepared.printer_id,
+                status=prepared.printer_status,
+            ),
         ],
         rack=rack_view,
         nozzle_plan=nozzle_plan,
@@ -797,6 +799,53 @@ async def _sequence_clearance(
         return None, []
     # One count only for one plate: the dialog says "this plate" (#2976).
     return len(per_plate[0][1]) if len(per_plate) == 1 else None, warnings
+
+
+def plan_warnings(
+    plan: FilamentPlan,
+    inventory: Inventory,
+    *,
+    printer_id: int,
+    status: PrinterStatus | None,
+) -> list[FilamentWarning]:
+    """What the chosen spools themselves say, for Checks (#2722): a spool not loaded in
+    this printer, as the picker says it under the slot, and a plan that mixes material
+    families. Mixing is planned for (each family gets a hotend of its own), so it is a
+    warning, never a refusal; but a TPU among PLA is more often a slip than a choice. A
+    tray chosen as itself is loaded by definition, and counts by its own material."""
+    spools, assignments = inventory
+    chosen = [slot for slot in plan.slots if tray_of_spool_id(slot.spool_id) is None]
+    options = build_options(
+        library_file_id=0,
+        spools=list(spools),
+        assignments=list(assignments),
+        requirements=[SlotNeed(slot_id=slot.slot_id) for slot in chosen],
+    ).model_copy(update={"printer_id": printer_id})
+    found = [
+        warning
+        for warning in check(options, FilamentPlan(slots=chosen))
+        if warning.kind == "not-loaded"
+    ]
+    by_id = {option.spool_id: option for option in options.spools}
+    materials: list[str] = []
+    for slot in plan.slots:
+        tray = tray_material_colour(slot.spool_id, status)
+        option = by_id.get(slot.spool_id)
+        material = tray[0] if tray else option.material if option else None
+        if material and family(material) not in {family(seen) for seen in materials}:
+            materials.append(material)
+    if len(materials) > 1:
+        named = ", ".join(family(material) for material in materials[:-1])
+        found.append(
+            FilamentWarning(
+                kind="mixed-materials",
+                message=(
+                    f"This print mixes {named} and {family(materials[-1])}. Each prints "
+                    "from a nozzle of its own; check that is what you meant."
+                ),
+            )
+        )
+    return found
 
 
 def _rack_option(candidate: RackCandidate) -> RackOption:
