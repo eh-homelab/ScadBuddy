@@ -222,9 +222,9 @@ def _store(path: Path, data: bytes, keep: int) -> None:
     """Write ``path`` aside and rename it in, then drop all but the ``keep`` most recently
     used files (a hit touches its file: :func:`_hit`)."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    partial = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
-    partial.write_bytes(data)
-    partial.replace(path)
+    aside = path.with_name(f".{path.name}.{uuid.uuid4().hex}")
+    aside.write_bytes(data)
+    aside.replace(path)
     used: list[tuple[int, Path]] = []
     for entry in path.parent.iterdir():
         if entry.name.startswith("."):

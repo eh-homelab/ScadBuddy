@@ -7,9 +7,8 @@ import hashlib
 import io
 import os
 import time
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
-from typing import Any
 
 import httpx
 import pytest
@@ -241,7 +240,7 @@ async def test_running_out_of_memory_is_refused_as_such_and_never_cached(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     step: str,
-    read: Any,
+    read: Callable[..., Awaitable[object]],
 ) -> None:
     """Wherever the view runs out of memory it is the same refusal, saying how to bound
     it, and nothing is cached: the next read, with memory to spare, answers."""
