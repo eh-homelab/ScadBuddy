@@ -188,11 +188,11 @@ function defaults(): FlowRun[] {
           proposed: true,
           hops: [
             { hop: 'parent', action: 'parked', actor: 'flow', at: at(2), reason: 'no rule admits it' },
-            { hop: 'parent', action: 'narrow', actor: 'session:sess-1', at: at(3), reason: 'no rule admits it' },
+            { hop: 'parent', action: 'narrow', actor: 'session:sess-escalated', at: at(3), reason: 'no rule admits it' },
           ],
         },
       ],
-      started_by: { kind: 'agent', principal: 'p', session: 'sess-1' },
+      started_by: { kind: 'agent', principal: 'p', session: 'sess-escalated' },
       created_at: at(4),
     }),
     // #2483: a run of a flow with inputs, recorded with its defaults filled in.
@@ -884,7 +884,7 @@ export const handlers = [
       original: { request: { objects: [{ output_id: 'a', count: 3 }, { output_id: 'b' }], goal: 'fewest_plates' } },
       proposed: { request: { objects: [{ output_id: 'a', count: 2 }], goal: 'fewest_plates' } },
       proposal_hash: 'f'.repeat(64),
-      proposed_by: 'session:sess-1',
+      proposed_by: 'session:sess-escalated',
     })
   }),
 ]
