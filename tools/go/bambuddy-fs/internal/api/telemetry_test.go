@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -169,5 +170,52 @@ func checkAttrs(t *testing.T, metric string, attrs []attribute.KeyValue, allowed
 		if !allowed[a.Key] {
 			t.Fatalf("%s has attribute %s", metric, a.Key)
 		}
+	}
+}
+
+// An upload counts the file's bytes, not the multipart body's, and a request answered
+// with an error carries its status as error.type.
+func TestUploadCountsFileBytesAndAnErrorHasAType(t *testing.T) {
+	f := newFake(t)
+	f.folder(4, "Top", 0)
+	reader := sdkmetric.NewManualReader()
+	t.Cleanup(telemetry.Use(nil, sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))))
+	c := f.client(t)
+	if _, err := c.Upload(context.Background(), 4, "a.3mf", "", strings.NewReader("0123456789")); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Download(context.Background(), 99, &bytes.Buffer{}); Errno(err) != syscall.ENOENT {
+		t.Fatalf("%v", err)
+	}
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatal(err)
+	}
+	var uploaded int64
+	typed := false
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			switch data := m.Data.(type) {
+			case metricdata.Sum[int64]:
+				for _, dp := range data.DataPoints {
+					if v, _ := dp.Attributes.Value("direction"); m.Name == "bambuddy_fs.transfer.bytes" && v.AsString() == "upload" {
+						uploaded += dp.Value
+					}
+				}
+			case metricdata.Histogram[float64]:
+				for _, dp := range data.DataPoints {
+					status, _ := dp.Attributes.Value("http.response.status_code")
+					errType, ok := dp.Attributes.Value("error.type")
+					if status.AsInt64() == 404 {
+						typed = ok && errType.AsString() == "404"
+					} else if ok {
+						t.Fatalf("error.type on a %d", status.AsInt64())
+					}
+				}
+			}
+		}
+	}
+	if uploaded != 10 || !typed {
+		t.Fatalf("uploaded %d, 404 typed %v", uploaded, typed)
 	}
 }

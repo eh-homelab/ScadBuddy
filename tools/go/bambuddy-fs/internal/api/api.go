@@ -182,6 +182,7 @@ func (c *Client) Upload(ctx context.Context, folderID int, name, key string, r i
 	sent := make(chan int64, 1)
 	go func() {
 		n, err := writeForm(form, folderID, name, r)
+		telemetry.Uploaded(n)
 		sent <- n
 		pw.CloseWithError(err)
 	}()

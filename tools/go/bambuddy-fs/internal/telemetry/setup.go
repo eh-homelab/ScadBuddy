@@ -30,14 +30,13 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
-// DefaultEndpoint is the collector the homelab exposes to the LAN (eh-homelab/clusters#2221).
+// DefaultEndpoint is the homelab's collector (eh-homelab/clusters#2221). It takes no
+// credentials, and its address is also the gateway's public HTTPS target, so it is
+// reachable from outside the LAN too.
 const DefaultEndpoint = "https://otlp.internal.nullreference.io"
 
 // ServiceName is the resource's service.name, and so the Prometheus job label.
 const ServiceName = "bambuddy-fs"
-
-// shutdownTimeout bounds the final flush on unmount.
-var shutdownTimeout = 5 * time.Second
 
 // Config is the command line's say: Endpoint (--otel-endpoint) is a base URL, like
 // OTEL_EXPORTER_OTLP_ENDPOINT, and wins over the environment; Disabled
@@ -87,12 +86,12 @@ func join(base, p string) string {
 }
 
 // Start sets up the providers the mount records to and returns the function that
-// flushes and stops them, within shutdownTimeout. It makes no network call: an
+// flushes and stops them, within the time it is given. It makes no network call: an
 // unreachable collector shows only as one logged export error.
-func Start(cfg Config) (stop func(), err error) {
+func Start(cfg Config) (stop func(within time.Duration), err error) {
 	tracesURL, metricsURL := endpoint(cfg, traces, os.Getenv), endpoint(cfg, metrics, os.Getenv)
 	if tracesURL == "" && metricsURL == "" {
-		return func() {}, nil
+		return func(time.Duration) {}, nil
 	}
 	otel.SetErrorHandler(&logOnce{})
 	res, err := newResource()
@@ -125,8 +124,8 @@ func Start(cfg Config) (stop func(), err error) {
 		shutdowns = append(shutdowns, mp.Shutdown)
 	}
 	restore := install(tp, mp)
-	return func() {
-		ctx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	return func(within time.Duration) {
+		ctx, cancel := context.WithTimeout(context.Background(), within)
 		defer cancel()
 		var wg sync.WaitGroup
 		for _, shutdown := range shutdowns {

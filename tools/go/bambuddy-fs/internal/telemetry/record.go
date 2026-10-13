@@ -153,6 +153,10 @@ func (o *Op) End(errno syscall.Errno) {
 	result := "ok"
 	if errno != 0 {
 		result = ErrnoName(errno)
+	}
+	// A lookup of a name that is not there is an answer, not a failure: every
+	// create looks its name up first.
+	if errno != 0 && (o.name != "lookup" || errno != syscall.ENOENT) {
 		o.span.SetAttributes(errorTypeKey.String(result))
 		o.span.SetStatus(codes.Error, result)
 	}

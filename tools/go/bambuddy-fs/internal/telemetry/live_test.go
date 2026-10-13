@@ -21,9 +21,6 @@ func TestLiveExport(t *testing.T) {
 	prev := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 	t.Cleanup(func() { slog.SetDefault(prev) })
-	prevTimeout := shutdownTimeout
-	shutdownTimeout = 15 * time.Second
-	t.Cleanup(func() { shutdownTimeout = prevTimeout })
 
 	stop, err := Start(Config{})
 	if err != nil {
@@ -31,7 +28,7 @@ func TestLiveExport(t *testing.T) {
 	}
 	_, op := StartOp(context.Background(), "live_check", FolderID(0))
 	op.End(0)
-	stop()
+	stop(15 * time.Second)
 	if buf.Len() != 0 {
 		t.Fatalf("export failed: %s", buf.String())
 	}

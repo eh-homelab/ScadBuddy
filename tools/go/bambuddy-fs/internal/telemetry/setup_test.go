@@ -56,15 +56,13 @@ func TestDisabledBuildsNothing(t *testing.T) {
 	if rec() != before {
 		t.Fatal("a recorder was installed")
 	}
-	stop()
+	stop(time.Second)
 }
 
 // An unresolvable or refusing collector, as off the LAN, delays neither the start nor
 // an operation, and the stop is bounded.
 func TestAnUnreachableCollectorDelaysNothing(t *testing.T) {
-	prev := shutdownTimeout
-	shutdownTimeout = 300 * time.Millisecond
-	t.Cleanup(func() { shutdownTimeout = prev })
+	const within = 300 * time.Millisecond
 	for _, endpoint := range []string{"https://bambuddy-fs-test.invalid", "http://127.0.0.1:1"} {
 		started := time.Now()
 		stop, err := Start(Config{Endpoint: endpoint})
@@ -83,8 +81,8 @@ func TestAnUnreachableCollectorDelaysNothing(t *testing.T) {
 			t.Fatalf("%s: operations took %v", endpoint, d)
 		}
 		started = time.Now()
-		stop()
-		if d := time.Since(started); d > shutdownTimeout+time.Second {
+		stop(within)
+		if d := time.Since(started); d > within+time.Second {
 			t.Fatalf("%s: stop took %v", endpoint, d)
 		}
 	}

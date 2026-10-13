@@ -64,7 +64,7 @@ func newFlagSet(cfg *config) *flag.FlagSet {
 	set.Var(&cfg.CacheMax, "cache-max", "at most this much downloaded contents is kept, least recently used removed first, like 500M or 2G (0: no bound)")
 	stateDirFlag(set, cfg)
 	set.StringVar(&cfg.Telemetry.Endpoint, "otel-endpoint", "", "OTLP/HTTP collector base URL for traces and metrics (default $OTEL_EXPORTER_OTLP_ENDPOINT, else "+telemetry.DefaultEndpoint+")")
-	set.BoolVar(&cfg.Telemetry.Disabled, "no-telemetry", false, "send no traces or metrics")
+	set.BoolVar(&cfg.Telemetry.Disabled, "no-telemetry", false, "send no traces or metrics (by default they go to eh-homelab's collector, with the host's name)")
 	set.BoolVar(&cfg.Telemetry.Disabled, "no-tracing", false, "the same as --no-telemetry")
 	return set
 }
@@ -242,8 +242,10 @@ func run(cfg config) int {
 		log.Printf("bambuddy-fs: telemetry: %v", err)
 		return 1
 	}
-	// Flushes, within 5 s, once the mount is gone and before the lock is released.
-	defer stopTelemetry()
+	// Flushes once the mount is gone and before the lock is released: within 5 s, or
+	// 1 s if the mount failed, when there is little to send and the user waits.
+	flush := 5 * time.Second
+	defer func() { stopTelemetry(flush) }()
 	root := fsys.NewRoot(lib, fsys.Options{All: cfg.All, ReadOnly: cfg.ReadOnly, TTL: cfg.TTL, CacheDir: cfg.CacheDir, CacheMax: int64(cfg.CacheMax), StateDir: cfg.StateDir})
 	ttl := cfg.TTL
 	server, err := fs.Mount(cfg.Mountpoint, root, &fs.Options{
@@ -253,6 +255,7 @@ func run(cfg config) int {
 	})
 	if err != nil {
 		log.Printf("bambuddy-fs: mount: %v", err)
+		flush = time.Second
 		return 1
 	}
 

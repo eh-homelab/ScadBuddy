@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -107,6 +108,16 @@ func TestOperationsAreTracedWithoutNames(t *testing.T) {
 				t.Fatalf("span %s records %s=%s", s.Name(), a.Key, a.Value.Emit())
 			}
 		}
+		if strings.Contains(s.Status().Description, "secret") {
+			t.Fatalf("span %s status %q", s.Name(), s.Status().Description)
+		}
+		for _, e := range s.Events() {
+			for _, a := range append(e.Attributes, attribute.String("name", e.Name)) {
+				if strings.Contains(a.Value.Emit(), "secret") {
+					t.Fatalf("span %s event %s records %s=%s", s.Name(), e.Name, a.Key, a.Value.Emit())
+				}
+			}
+		}
 		if s.Name() == "fuse.read" && !hasAttr(s.Attributes(), "bambuddy_fs.file.id", "10") {
 			t.Fatalf("read attributes: %v", s.Attributes())
 		}
@@ -157,6 +168,28 @@ func TestACachedLookupHasNoSpan(t *testing.T) {
 	}
 	if after := len(spans.Ended()); after != before {
 		t.Fatalf("%d spans for cached lookups", after-before)
+	}
+}
+
+// A lookup of a name that is not there is answered, not failed: its span is no error.
+func TestALookupOfAMissingNameIsNoSpanError(t *testing.T) {
+	spans, _ := recording(t)
+	lib := newFakeLibrary()
+	dir := mount(t, lib, Options{})
+	if _, err := os.Stat(filepath.Join(dir, "missing")); err == nil {
+		t.Fatal("missing exists")
+	}
+	found := false
+	for _, s := range spans.Ended() {
+		if s.Name() == "fuse.lookup" {
+			found = true
+			if s.Status().Code == codes.Error {
+				t.Fatalf("lookup span: %v %v", s.Status(), s.Attributes())
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no lookup span")
 	}
 }
 

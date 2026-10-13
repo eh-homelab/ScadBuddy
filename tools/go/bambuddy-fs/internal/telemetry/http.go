@@ -105,6 +105,7 @@ func (m *measured) finish(status int, err error) {
 			set = append(set, attribute.Int("http.response.status_code", status))
 			if status >= 400 {
 				m.span.SetStatus(codes.Error, strconv.Itoa(status/100)+"xx")
+				set = append(set, errorTypeKey.String(strconv.Itoa(status)))
 			}
 		}
 		if err != nil {
@@ -117,14 +118,14 @@ func (m *measured) finish(status int, err error) {
 		var moved int64
 		switch m.call.Transfer {
 		case Upload:
-			moved = m.sent.Load()
-			m.span.SetAttributes(attribute.Int64("http.request.body.size", moved))
+			// The whole multipart body; the file's own bytes are counted by Uploaded.
+			m.span.SetAttributes(attribute.Int64("http.request.body.size", m.sent.Load()))
 		case Download:
 			moved = m.read.Load()
 			m.span.SetAttributes(attribute.Int64("http.response.body.size", moved))
 		}
 		if moved > 0 {
-			m.r.transfer.Add(ctx, moved, metric.WithAttributes(attribute.String("direction", m.call.Transfer)))
+			m.r.transfer.Add(ctx, moved, metric.WithAttributes(attribute.String("direction", Download)))
 		}
 		m.r.httpDuration.Record(ctx, time.Since(m.start).Seconds(), metric.WithAttributes(set...))
 		m.span.End()
@@ -142,6 +143,13 @@ func errorKind(err error) string {
 		return "timeout"
 	}
 	return "transport"
+}
+
+// Uploaded counts n bytes of file contents sent in an upload's form.
+func Uploaded(n int64) {
+	if n > 0 {
+		rec().transfer.Add(context.Background(), n, metric.WithAttributes(attribute.String("direction", Upload)))
+	}
 }
 
 // counted counts the bytes read from a request body.

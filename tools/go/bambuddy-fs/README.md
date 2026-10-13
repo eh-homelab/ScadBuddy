@@ -4,7 +4,9 @@ Mounts Bambuddy's print library, through ScadBuddy's API, as a FUSE filesystem, 
 folders and files can be browsed, copied in and out, renamed and deleted with ordinary
 tools (#2686). Design: `docs/superpowers/specs/2026-10-13-bambuddy-fs-design.md`.
 
-It needs `fuse3` (`fusermount3`) and `/dev/fuse`.
+It needs `fuse3` (`fusermount3`) and `/dev/fuse`. By default it sends traces and
+metrics, with the host's name, to eh-homelab's collector; `--no-telemetry` turns that
+off (see "Telemetry").
 
 ## Build and run
 
@@ -279,10 +281,17 @@ result is `EIO` and the log names the operation id.
 
 ## Telemetry
 
-The mount sends OpenTelemetry traces and metrics over OTLP/HTTP to
-`https://otlp.internal.nullreference.io` (`/v1/traces`, `/v1/metrics`), the homelab's
-collector, reachable from the LAN only, with TLS checked against the system roots
-(eh-homelab/clusters#2221). The standard `OTEL_*` variables apply as the OpenTelemetry
+Telemetry is on by default: unless told otherwise, the mount sends OpenTelemetry
+traces and metrics, including this machine's host name as `service.instance.id`, to
+eh-homelab's collector. Pass `--no-telemetry` (or set `OTEL_SDK_DISABLED=true`) to send
+nothing, which anyone running the published image outside eh-homelab should do.
+
+They go over OTLP/HTTP to `https://otlp.internal.nullreference.io` (`/v1/traces`,
+`/v1/metrics`), with TLS checked against the system roots (eh-homelab/clusters#2221).
+That endpoint takes no credentials, and its address is also the gateway's public HTTPS
+target, so it is reachable from outside the LAN as well, not only from it.
+
+The standard `OTEL_*` variables apply as the OpenTelemetry
 SDK reads them (`OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_EXPORTER_OTLP_CERTIFICATE`,
 `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_TRACES_SAMPLER` and `_ARG`,
 `OTEL_METRIC_EXPORT_INTERVAL`, default 60 s). Where each signal goes, first match wins:
@@ -299,14 +308,16 @@ whatever `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE` says, since Prometh
 refuses delta.
 
 Telemetry never holds up the mount: setup makes no network call, export runs in the
-background, an unreachable collector (off the LAN, or a name that does not resolve) is
+background, an unreachable collector (a name that does not resolve, a refused connection) is
 logged once with the first export error and never again, and the final flush on unmount
-is bounded at 5 s.
+is bounded at 5 s (1 s when the mount itself failed).
 
 The resource is `service.name=bambuddy-fs`, `service.version` when the binary carries
 one, and `service.instance.id` set to the host's name (a random UUID if it has none):
 the collector replaces `host.name` with its own, so the instance id is what keeps two
-workstations' series apart. `service.namespace` is not set. In Prometheus the series
+workstations' series apart. In a container the host name is the container's ID, so
+each new container starts new series; set `OTEL_RESOURCE_ATTRIBUTES=service.instance.id=<name>`
+to keep one. `service.namespace` is not set. In Prometheus the series
 carry `job="bambuddy-fs"`, so `{job="bambuddy-fs"}` selects them (eh-homelab/clusters#2224).
 
 Spans:
@@ -314,7 +325,8 @@ Spans:
 - `fuse.<op>` (INTERNAL) for each FUSE operation that reaches ScadBuddy or does work:
   a lookup or readdir that lists its folder, a read or write that downloads,
   a flush or release that uploads, create, mkdir, rmdir, unlink, rename and a truncate.
-  A lookup or getattr answered from the cache has none.
+  A lookup or getattr answered from the cache has none, and a lookup of a name that is
+  not there (`ENOENT`) is not an error.
 - `scadbuddy.<operation>` (CLIENT) for each ScadBuddy API request (`list_library`,
   `download`, `upload`, `update_file`, `delete_files`, `create_folder`, `update_folder`,
   `delete_folder`, `poll_operation`), with the method, status code and route template
@@ -325,8 +337,10 @@ Spans:
 
 Metrics: `bambuddy_fs.fuse.operations` and `bambuddy_fs.fuse.operation.duration` (by
 `op` and `result`, `ok` or the errno's name), `http.client.request.duration` (by
-`scadbuddy.operation`, method and status code), `bambuddy_fs.transfer.bytes` (by
-`direction`, `upload` or `download`), the gauges `bambuddy_fs.cache.bytes`,
+`scadbuddy.operation`, method, status code, and `error.type`: the status code of a
+4xx/5xx, or `timeout`, `canceled` or `transport` with no answer),
+`bambuddy_fs.transfer.bytes` (file contents only, by `direction`, `upload` or
+`download`), the gauges `bambuddy_fs.cache.bytes`,
 `bambuddy_fs.unsent.entries` and `bambuddy_fs.unsent.bytes`, and
 `bambuddy_fs.unsent.uploads` (by `result`).
 
