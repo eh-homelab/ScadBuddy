@@ -32,7 +32,12 @@ export function decodeToolpath(buffer: ArrayBuffer): Toolpath {
 
 export async function fetchToolpath(url: string, signal?: AbortSignal): Promise<Toolpath> {
   const response = await fetch(url, { signal })
-  if (!response.ok) throw new Error(`The toolpath could not be read (HTTP ${response.status}).`)
+  if (!response.ok) {
+    // The problem's detail says why (busy, still slicing, no G-code), when it has one.
+    const problem = (await response.json().catch(() => null)) as { detail?: unknown } | null
+    const detail = typeof problem?.detail === 'string' && problem.detail ? problem.detail : null
+    throw new Error(detail ?? `The toolpath could not be read (HTTP ${response.status}).`)
+  }
   return decodeToolpath(await response.arrayBuffer())
 }
 

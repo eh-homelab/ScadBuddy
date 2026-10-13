@@ -164,9 +164,46 @@ describe('PlatePreviewDialog · the slice (#2072)', () => {
     expect(await screen.findByText(/too large to draw whole: the first 1 layers/)).toBeInTheDocument()
   })
 
-  it('says why when the toolpath cannot be read', async () => {
+  it('says why when the toolpath cannot be read, in the problem’s own words', async () => {
     openSliced(null)
     fireEvent.click(screen.getByRole('radio', { name: 'Speed' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('HTTP 422')
+    expect(await screen.findByRole('alert')).toHaveTextContent('nope')
+  })
+
+  it('reads a toolpath once, however often the views are switched', async () => {
+    const read = openSliced()
+    fireEvent.click(screen.getByRole('radio', { name: 'Speed' }))
+    await screen.findByTestId('toolpath')
+    fireEvent.click(screen.getByRole('radio', { name: 'Colors' }))
+    fireEvent.click(screen.getByRole('radio', { name: 'Speed' }))
+    expect(screen.getByTestId('toolpath')).toHaveAttribute('data-view', 'speed')
+    expect(read).toHaveBeenCalledTimes(1)
+  })
+
+  it('reads it again on Retry after a busy answer', async () => {
+    let busy = true
+    server.use(
+      http.get(TOOLPATH, () =>
+        busy
+          ? HttpResponse.json({ detail: 'Other toolpaths are being read; try again shortly.' }, { status: 503 })
+          : new HttpResponse(demoToolpath(), { headers: { 'Content-Type': 'application/octet-stream' } }),
+      ),
+    )
+    render(
+      <PlatePreviewDialog
+        open
+        onClose={vi.fn()}
+        url="/api/v1/outputs/abc/preview.glb"
+        label="Lid"
+        colors={new Map()}
+        toolpathUrl={TOOLPATH}
+      />,
+    )
+    fireEvent.click(screen.getByRole('radio', { name: 'Speed' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Other toolpaths are being read')
+    busy = false
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(await screen.findByTestId('toolpath')).toHaveAttribute('data-view', 'speed')
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 })

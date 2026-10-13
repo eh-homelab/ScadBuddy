@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   PRINT_MOVE,
   SPEED_GRADIENT,
@@ -39,27 +39,41 @@ type Props = {
   toolpathUrl?: string | null
 }
 
-type Loaded = { url: string; path: Toolpath } | { url: string; error: string }
+type Loaded = { url: string; path: Toolpath } | { url: string; error: string; attempt: number }
 
 /** The toolpath at `url`, read once a view needs it. */
-function useToolpath(url: string | null): Toolpath | 'loading' | { error: string } | null {
+function useToolpath(url: string | null): {
+  toolpath: Toolpath | 'loading' | { error: string } | null
+  retry: () => void
+} {
   const [loaded, setLoaded] = useState<Loaded | null>(null)
+  const [attempt, setAttempt] = useState(0)
+  // A toolpath already read is drawn again without a second read when a view comes back.
+  const kept = useRef<Loaded | null>(null)
+  useEffect(() => {
+    kept.current = loaded
+  }, [loaded])
   useEffect(() => {
     if (url === null) return
+    const had = kept.current
+    if (had?.url === url && 'path' in had) return
     const abort = new AbortController()
     fetchToolpath(url, abort.signal).then(
       (path) => setLoaded({ url, path }),
       (cause: unknown) => {
         if (!abort.signal.aborted) {
-          setLoaded({ url, error: cause instanceof Error ? cause.message : 'The toolpath could not be read.' })
+          const error = cause instanceof Error ? cause.message : 'The toolpath could not be read.'
+          setLoaded({ url, error, attempt })
         }
       },
     )
     return () => abort.abort()
-  }, [url])
-  if (url === null) return null
-  if (loaded?.url !== url) return 'loading'
-  return 'path' in loaded ? loaded.path : { error: loaded.error }
+  }, [url, attempt])
+  const retry = useCallback(() => setAttempt((count) => count + 1), [])
+  if (url === null) return { toolpath: null, retry }
+  // A failure is shown only for the attempt it was of: a Retry reads as loading again.
+  if (loaded?.url !== url || ('error' in loaded && loaded.attempt !== attempt)) return { toolpath: 'loading', retry }
+  return { toolpath: 'path' in loaded ? loaded.path : { error: loaded.error }, retry }
 }
 
 /** The Layers slider's step, in mm: a common layer height. The cut is the model's, not a slice's. */
@@ -83,7 +97,7 @@ export function PlatePreviewDialog({ open, onClose, url, label, colors, toolpath
   const onHeight = useCallback((next: number) => setHeight(next), [])
   // Read only once a view draws it: Colors never does.
   const sliced = toolpathUrl !== null && view !== 'colors'
-  const toolpath = useToolpath(sliced ? toolpathUrl : null)
+  const { toolpath, retry } = useToolpath(sliced ? toolpathUrl : null)
   const path = toolpath !== null && toolpath !== 'loading' && !('error' in toolpath) ? toolpath : null
 
   const step = STEP
@@ -146,9 +160,14 @@ export function PlatePreviewDialog({ open, onClose, url, label, colors, toolpath
                 background={background()}
               />
             ) : toolpath !== null && toolpath !== 'loading' && 'error' in toolpath ? (
-              <p role="alert" className="p-4 text-[13px] text-warn">
-                {toolpath.error}
-              </p>
+              <div className="space-y-2 p-4">
+                <p role="alert" className="text-[13px] text-warn">
+                  {toolpath.error}
+                </p>
+                <Button size="sm" onClick={retry}>
+                  Retry
+                </Button>
+              </div>
             ) : (
               <div className="flex h-full items-center justify-center gap-2 text-[13px] text-muted">
                 <Spinner /> Reading the slice's toolpaths…
