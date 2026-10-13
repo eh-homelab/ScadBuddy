@@ -201,10 +201,7 @@ def _toolpath_slice(
     download = respx.get(f"{API}/library/files/{SLICED}/download").mock(
         return_value=httpx.Response(200, content=archive.getvalue())
     )
-    started = client.post(
-        f"/api/v1/print/outputs/{output_id}/preview-slice", json=body(), headers=press()
-    )
-    assert started.status_code == 200, started.text
+    start_slice(client, output_id, body())
     return output_id, job, download
 
 
