@@ -34,7 +34,7 @@ from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate
-from scadbuddy.library.previews import PreviewStore, new_work_dir, source_key
+from scadbuddy.library.previews import PreviewRecord, PreviewStore, new_work_dir, source_key
 from scadbuddy.render.jobs import (
     RAW_RENDER_NAME,
     SnapshotPendingError,
@@ -232,9 +232,11 @@ class PreviewScheduler:
         the lock. One that cannot be looked at is logged and left out; a listing that
         fails raises."""
         due: list[str] = []
+        # Every record read once, not one query per model (#2353).
+        records = self.store.records()
         for slug in self.catalogue.slugs():
             try:
-                if self.needs_refresh(slug):
+                if self._needs_refresh(slug, records.get(slug)):
                     due.append(slug)
             except Exception:
                 logger.exception("could not plan a model's preview", extra={"slug": slug})
@@ -374,10 +376,14 @@ class PreviewScheduler:
     def needs_refresh(self, slug: str) -> bool:
         """Whether `plan` would render ``slug``'s preview or drop it, without doing
         either."""
+        return self._needs_refresh(slug, self.store.record(slug))
+
+    def _needs_refresh(self, slug: str, record: PreviewRecord | None) -> bool:
+        """`needs_refresh`, given ``slug``'s record, read already."""
         if not self._keeps_preview(slug):
-            return self.store.record(slug) is not None
+            return record is not None
         key = source_key(self.catalogue.paths, slug)
-        return key is not None and not self.store.current(slug, key)
+        return key is not None and (record is None or record.key != key)
 
     def _keeps_preview(self, slug: str) -> bool:
         """Whether ``slug`` shows a preview: it exists, with no thumbnail of its own

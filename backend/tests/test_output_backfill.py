@@ -817,6 +817,39 @@ async def test_the_reaper_keeps_holds_of_unknown_template_and_learns_live_ones(
 
 
 @pytest.mark.requires_postgres
+async def test_the_reaper_writes_no_slug_it_has_already_and_corrects_a_wrong_one(
+    tmp_path: Path, pg_conninfo: str
+) -> None:
+    """#2353: every pass used to upsert every held live output's slug, one transaction
+    each, though all were recorded already. Now one statement writes only what differs."""
+    store, old, _, written = await _legacy_output(tmp_path)
+
+    def version(refs: BlobRefs, output_id: str) -> str:
+        with refs.pool.connection() as conn:
+            row = conn.execute(
+                "SELECT xmin::text AS v FROM output_hold_slugs WHERE output_id = %s",
+                (output_id,),
+            ).fetchone()
+        assert row is not None
+        return str(row["v"])
+
+    with store_pool(pg_conninfo) as pool:
+        refs = BlobRefs(pool)
+        hold_parts(refs, old.id, written.manifest, old.slug)
+        _age_holds(refs, old.id, 2)
+        before = version(refs, old.id)
+        assert reap_orphan_holds(refs, store) == 0
+        assert version(refs, old.id) == before, "an unchanged slug is not written again"
+
+        with refs.pool.connection() as conn:
+            conn.execute(
+                "UPDATE output_hold_slugs SET slug = 'wrong' WHERE output_id = %s", (old.id,)
+            )
+        assert reap_orphan_holds(refs, store) == 0
+        assert _slug_of(refs, old.id) == old.slug
+
+
+@pytest.mark.requires_postgres
 async def test_releasing_an_output_forgets_its_slug(tmp_path: Path, pg_conninfo: str) -> None:
     _, old, _, written = await _legacy_output(tmp_path)
     with store_pool(pg_conninfo) as pool:

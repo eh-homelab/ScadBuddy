@@ -766,6 +766,23 @@ def _record_slug(refs: BlobRefs, output_id: str, slug: str) -> None:
         )
 
 
+def _record_slugs(refs: BlobRefs, slugs: dict[str, str]) -> None:
+    """Record many outputs' slugs in ONE statement (#2353): the reaper used to upsert
+    every held, live output's slug on every pass, one transaction each, all no-ops once
+    recorded. Rows that already say the same slug are not written."""
+    if not slugs:
+        return
+    ids = sorted(slugs)
+    with refs.pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO output_hold_slugs (output_id, slug)"
+            " SELECT * FROM unnest(%s::text[], %s::text[])"
+            " ON CONFLICT (output_id) DO UPDATE SET slug = EXCLUDED.slug"
+            " WHERE output_hold_slugs.slug IS DISTINCT FROM EXCLUDED.slug",
+            (ids, [slugs[output_id] for output_id in ids]),
+        )
+
+
 def _live_outputs(root: Path) -> dict[str, set[str]]:
     """Every slug directory under ``root``, with the ids of its outputs that have a
     meta.json. Unlike ``glob``, a slug or output directory that cannot be listed raises
@@ -844,8 +861,7 @@ def reap_orphan_holds(
     live = _live_outputs(root) if root.is_dir() else {}
     live_slug = {output_id: slug for slug, ids in live.items() for output_id in ids}
     # Holds taken before slugs were recorded: a live output tells its own slug.
-    for output_id in sorted(held & live_slug.keys()):
-        _record_slug(refs, output_id, live_slug[output_id])
+    _record_slugs(refs, {output_id: live_slug[output_id] for output_id in held & live_slug.keys()})
     candidates = sorted(held - live_slug.keys())
     with refs.pool.connection() as conn:
         slug_rows = conn.execute(
