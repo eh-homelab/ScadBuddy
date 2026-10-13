@@ -627,20 +627,86 @@ def test_a_create_whose_commit_fails_is_a_503_that_leaves_nothing(client: TestCl
     assert created.json()["version"] is not None
 
 
-def test_a_model_with_a_render_in_progress_cannot_be_deleted(
-    app: FastAPI, client: TestClient, model: str, paths: DataPaths
-) -> None:
+class _Handle:
+    """A render's workflow handle that records the cancel and, as the real run does
+    (`TemplatePipeline._settle_failed`), settles the row `cancelled` when ``settles``."""
+
+    def __init__(self, cancelled: list[tuple[str, str | None]], settle: Callable[[], None] | None):
+        self.cancelled = cancelled
+        self.settle = settle
+        self.workflow_id = ""
+        self.run_id: str | None = None
+
+    async def cancel(self, **_: object) -> None:
+        self.cancelled.append((self.workflow_id, self.run_id))
+        if self.settle is not None:
+            self.settle()
+
+
+def _plant_running(app: FastAPI, model: str, workflow_id: str = "render-planted") -> Job:
     projection = getattr(app.state, STATE_ATTR).projection
     job = Job(id="a" * 32, slug=model, created_at=datetime.now(UTC))
-    projection.accept(job, "planted", workflow_id="render-planted", run_id="r")
+    projection.accept(job, "planted", workflow_id=workflow_id, run_id="r")
     assert projection.mark_started(job.id) is not None
+    return job
+
+
+def _cancels(
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch, settle: Callable[[], None] | None
+) -> list[tuple[str, str | None]]:
+    render = getattr(app.state, STATE_ATTR).render
+    render.cancel_wait = 0.5
+    cancelled: list[tuple[str, str | None]] = []
+
+    def handle(workflow_id: str, *, run_id: str | None = None) -> _Handle:
+        made = _Handle(cancelled, settle)
+        made.workflow_id, made.run_id = workflow_id, run_id
+        return made
+
+    monkeypatch.setattr(render.client, "get_workflow_handle", handle)
+    return cancelled
+
+
+def test_deleting_a_model_cancels_its_render_in_progress_and_goes_ahead(
+    app: FastAPI,
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2387: opening a model starts its preview render, so a delete from its own page
+    met that render. A model that is going has no use for it: its workflow is
+    cancelled, and once the row settles the model is deleted."""
+    projection = getattr(app.state, STATE_ATTR).projection
+    job = _plant_running(app, model)
+    cancelled = _cancels(app, monkeypatch, lambda: projection.release_claim(job.id, slug=model))
+
+    response = client.delete(f"/api/v1/models/{model}", headers=press())
+
+    assert response.status_code == 204, response.text
+    assert cancelled == [("render-planted", "r")]
+    assert projection.read(job.id).state == "cancelled"
+    assert not paths.model_source(model).is_file()
+
+
+def test_a_render_that_does_not_settle_once_cancelled_still_refuses_the_delete(
+    app: FastAPI,
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    projection = getattr(app.state, STATE_ATTR).projection
+    job = _plant_running(app, model)
+    cancelled = _cancels(app, monkeypatch, None)
 
     response = client.delete(f"/api/v1/models/{model}", headers=press())
 
     assert response.status_code == 409
     assert response.headers["content-type"].startswith("application/problem+json")
-    # Marked, so the delete dialog waits for the render and retries (#2387).
+    # Marked, so the delete dialog waits for the render and retries.
     assert response.json()["render_in_progress"] is True
+    assert cancelled == [("render-planted", "r")]
     assert paths.model_source(model).is_file()
 
     job.state = "done"

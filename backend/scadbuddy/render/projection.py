@@ -509,6 +509,17 @@ class JobProjection:
             rows = conn.execute("SELECT * FROM render_jobs ORDER BY created_at, id").fetchall()
         return [_job(row) for row in rows]
 
+    def unfinished(self, slug: str) -> list[Job]:
+        """Every pending or running job of ``slug``: a render, or an arrange of its
+        outputs (#2387: what deleting the model cancels)."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM render_jobs WHERE slug = %s AND state IN ('pending', 'running')"
+                " ORDER BY created_at, id",
+                (slug,),
+            ).fetchall()
+        return [_job(row) for row in rows]
+
     def has_unfinished(self, slug: str) -> bool:
         with self._pool.connection() as conn:
             row = conn.execute(
