@@ -121,18 +121,44 @@ is today. The others take the tiers their library-write peers have.
   2. Normalise it with forge's jq pass, which drops `$ref`-sibling
      `description`/`summary`. Without it, Kiota's doc comments depend on hash order
      and the check flip-flops (forge #1043).
-  3. **`rm -rf tools/go/scadbuddy-client/client`**, then `kiota generate -l Go -n
-     <module>/client --clean-output`. Deleting first is what makes a file the
-     generator no longer emits show up as a deletion.
-  4. gofmt, `go mod tidy`, `GOWORK=off go mod vendor` in the client module, and
+  3. **`rm -rf tools/go/scadbuddy-client/client`**, then run Kiota from its official
+     image (§6.1) with `generate -l Go -n <module>/client --include-path
+     '/api/v1/print/library**' --include-path '/api/v1/operations/**'
+     --clean-output`. Deleting first is what makes a file the generator no longer
+     emits show up as a deletion. The include paths keep the client to what the mount
+     calls.
+  4. Drop `descriptionHash` from `client/kiota-lock.json`. That hash covers the whole
+     spec, so without dropping it every API change anywhere would churn the committed
+     client. What matters is the generated code.
+  5. gofmt, `go mod tidy`, `GOWORK=off go mod vendor` in the client module, and
      `go work vendor` at the root.
-  5. Write `tools/go/scadbuddy-client/openapi.sha256`, the hash of the normalised
-     spec.
 - **Drift.** `--check` fails on `git status --porcelain` of the client, both vendor
   trees, `go.work*` and the go.mod/go.sum files. Untracked and deleted files count.
-- **Kiota install.** Kiota is the pinned release binary (1.32.4, forge's version),
-  downloaded and checked by sha256, as the lint job does with kustomize. ScadBuddy
-  has no .NET for forge's `dotnet tool`.
+
+### 6.1 Kiota from its image
+
+Kiota runs from Microsoft's image, pinned by tag and index digest as the Dockerfile
+pins OpenSCAD:
+`mcr.microsoft.com/openapi/kiota:1.36.1@sha256:077073656898de0f8d3339bad496f154d603c30c0cdcbcbc5feacad2ad988d9d`.
+Forge runs Kiota as a `dotnet tool`, and ScadBuddy has no .NET.
+
+Measured 2026-10-13 on this machine (Docker on WSL2), against this repo's exported
+spec: 225 Go files in about 8 s. Three facts about the image follow from that run:
+
+- **The working directory must stay `/app`.** The entrypoint is `dotnet kiota.dll`,
+  resolved relative to the working directory, and the image's working directory is
+  `/app`. With `-w /work` the container fails with ".NET SDK not found". So the repo
+  is mounted at `/work`, and every path passed to Kiota is absolute (`-d
+  /work/...`, `-o /work/...`).
+- **It runs as uid 1654**, so the script passes `-u "$(id -u):$(id -g)" -e
+  HOME=/tmp`. With that, the files it writes are owned by the caller.
+- **The image has no shell.** `sh` is not on `PATH`, so every step besides `kiota`
+  (jq, gofmt, go) runs on the host.
+
+The `kiota-lock.json` it writes records `descriptionLocation` relative to the output
+directory. Mounting the repo root at `/work` in both CI and locally keeps that
+identical.
+
 - **Exception to #492.** `backend/openapi.json` and the two `schema.d.ts` stay
   gitignored. The Go client is the one committed generated client, because a
   vendored Go module must build offline. CLAUDE.md gains that line.
@@ -144,7 +170,9 @@ is today. The others take the tiers their library-write peers have.
 
 1. **Determinism.** Generate the client twice from `head.json` into scratch
    directories and require byte-identical trees.
-2. **Freshness.** If `head.json`'s normalised hash differs from `openapi.sha256`:
+2. **Freshness.** When the API diff against main is non-empty, or the PR touches
+   `tools/go/scadbuddy-client/**` or the script, regenerate and check drift. If the
+   tree drifts:
    - Run the script in a worktree of the PR's **head ref** (the job checks out the
      merge ref).
    - `git add -A` the generated paths and commit `chore: regenerate Kiota client`.
@@ -155,7 +183,7 @@ is today. The others take the tiers their library-write peers have.
    gains a **Go client** section: "up to date", or "regenerated in `<sha>`" with a
    `git diff --stat`.
 
-With no spec change, all of this is a hash compare.
+With no API change and no client change, the steps are skipped.
 
 **The `go` job.** It calls `go-module-ci.yml`, copied from forge's: for each
 `tools/go/*` module, gofmt, vet, build, `test -race`, and the module-mode vendor
