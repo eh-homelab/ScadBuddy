@@ -135,7 +135,7 @@ export async function answeredFollowing<T>(
     const followed = (await answered(
       ctx,
       () =>
-        ctx.backend.GET('/api/v1/commands/{workflow_id}/updates/{update_id}', {
+        ctx.backend.POST('/api/v1/commands/{workflow_id}/updates/{update_id}', {
           params: { path: { workflow_id, update_id }, query },
           signal: ctx.signal,
         }),

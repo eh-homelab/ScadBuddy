@@ -347,7 +347,7 @@ describe('render_model', () => {
           { status: 202 },
         )
       }),
-      http.get(`${BACKEND}/api/v1/commands/render-x/updates/k`, ({ request }) => {
+      http.post(`${BACKEND}/api/v1/commands/render-x/updates/k`, ({ request }) => {
         followed = new URL(request.url).searchParams.get('supersedes') ?? undefined
         return HttpResponse.json({ job_id: 'j', status_url: '', inputs: {} })
       }),
@@ -860,7 +860,7 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
           ids.push(((await request.json()) as { request_id: string }).request_id)
           return runAccepting()
         }),
-        http.get(followUrl, () => ((follows += 1), follows === 1 ? runAccepting() : HttpResponse.json(running))),
+        http.post(followUrl, () => ((follows += 1), follows === 1 ? runAccepting() : HttpResponse.json(running))),
         done,
       )
       const result = await tool('print_output').execute(args, ctx())
@@ -875,7 +875,7 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       const { ids, handler } = posts([runAccepting, () => HttpResponse.json(running, { status: 202 })])
       server.use(
         handler,
-        http.get(followUrl, () =>
+        http.post(followUrl, () =>
           HttpResponse.json({ type: 'https://scadbuddy.dev/problems/command-resend', title: 'Conflict', status: 409, detail: 'send it again' }, { status: 409 }),
         ),
         done,
@@ -2596,7 +2596,7 @@ describe('a command the backend answers 202 accepting (#2795)', () => {
           { status: 202 },
         )
       }),
-      http.get(`${BACKEND}/api/v1/commands/op-delete_output-x/updates/k`, () => HttpResponse.json({ deleted: OUT })),
+      http.post(`${BACKEND}/api/v1/commands/op-delete_output-x/updates/k`, () => HttpResponse.json({ deleted: OUT })),
     )
     const result = await tool('delete_output').execute({ output_id: OUT }, ctx())
     expect(result.isError).toBeFalsy()
