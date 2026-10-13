@@ -320,12 +320,18 @@ function defaultChildren(): void {
       ],
       created_at: at(2),
       expires_at: at(60),
+      expiring: false,
       step: { seq: 3, fn: 'ask_session' },
       reasoning: 'Printer 5 is idle, so I will print the box there.',
     },
   ])
 }
 defaultChildren()
+
+/** Tests: a run's child sessions' calls as the mock lists them now (#2482). */
+export function childEntries(id: string): Extract<FlowQueueEntry, { source: 'child' }>[] {
+  return children.get(id) ?? []
+}
 
 /** Tests: a run's child sessions' calls in its queue (#2482). */
 export function setFlowRunChildren(id: string, next: Extract<FlowQueueEntry, { source: 'child' }>[]): void {

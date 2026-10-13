@@ -3,9 +3,11 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from '../src/db.js'
+import { Hono } from 'hono'
 import { childReasoning, FlowQueue, REASONING_MAX } from '../src/flows/queue.js'
+import { originPolicy } from '../src/http/origins.js'
 import { durableRequestId, flowRequestId } from '../src/gate/ids.js'
-import { pendingInput } from '../src/routes/pendingInput.js'
+import { pendingInput, registerPendingInputRoutes } from '../src/routes/pendingInput.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { manager, tempPaths } from './support/sessions.js'
 
@@ -74,14 +76,14 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow run queue${TEST_DATABASE_URL ? '' : ` 
               ${db.sql.json(steps as never)})`
   }
 
-  async function park(hop: 'parent' | 'person' = 'parent', toolUseId = `toolu_${randomUUID()}`): Promise<string> {
+  async function park(hop: 'parent' | 'person' = 'parent', toolUseId = `toolu_${randomUUID()}`, expiresIn = '1 hour'): Promise<string> {
     const id = durableRequestId(child, 'run-1', toolUseId)
     await db.sql`
       INSERT INTO ai_pending_input (request_id, session_id, workflow_id, workflow_run_id, kind, tool, summary, input_hash, prompt,
                                     requested_by, responders, expires_at, flow_run_id, hop, hop_until, parent_session,
                                     parent_principal, outside_reason, hops)
       VALUES (${id}, ${child}, ${`session-${child}`}, 'run-1', 'approval', 'print_output', 'print box on printer 5', ${'a'.repeat(64)}, '',
-              ${db.sql.json({ kind: 'flow', id: `flow:${RUN}`, label: 'Flow' })}, ${['browser']}, now() + interval '1 hour',
+              ${db.sql.json({ kind: 'flow', id: `flow:${RUN}`, label: 'Flow' })}, ${['browser']}, now() + ${expiresIn}::interval,
               ${RUN}, ${hop}, ${hop === 'parent' ? db.sql`now() + interval '10 minutes'` : null},
               ${hop === 'parent' ? parent : null}, ${hop === 'parent' ? TOKEN : null},
               'printer 5 is not in the grant', ${db.sql.json([{ hop, action: 'parked', actor: 'flow', at: new Date().toISOString() }])})`
@@ -196,4 +198,49 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow run queue${TEST_DATABASE_URL ? '' : ` 
     const other = { kind: 'bearer' as const, id: TOKEN, label: 'Agent' }
     expect((await pendingInput(m, other, { runs: true })).entries.map((e) => e.id)).not.toContain(flowRequestId(RUN, 'wr1', 'c1'))
   })
+
+  it('looks for the call and its turn only in the last events of the log, never the whole session', async () => {
+    const toolu = `toolu_${randomUUID()}`
+    const id = durableRequestId(child, 'run-1', toolu)
+    await log(child, { type: 'user.turn', turnId: 't1', text: 'go' }, text('m1', 'old'), text('m2', 'new'), {
+      type: 'tool.call',
+      id: toolu,
+      name: 'print_output',
+      input: {},
+      risk: 'outward',
+    })
+    // A turn that starts before the window shows the text from the window's start.
+    expect(await childReasoning(db.sql, id, 2)).toBe('new')
+    expect(await childReasoning(db.sql, id)).toBe('old\n\nnew')
+    // A call before the window is not looked for.
+    await log(child, text('m3', 'later'), text('m4', 'later still'))
+    expect(await childReasoning(db.sql, id, 2)).toBe('')
+  })
+
+  it("marks a child's call past its timer, which no one can decide any more", async () => {
+    await run()
+    const live = await park('person')
+    const late = await park('person', `toolu_${randomUUID()}`, '-1 minute')
+    const entries = (await queue.forRun(RUN))!.entries
+    expect(entries.find((e) => e.id === live)).toMatchObject({ expiring: false })
+    expect(entries.find((e) => e.id === late)).toMatchObject({ expiring: true })
+  })
+
+  it("serves the run's own calls on the person's GET /api/v1/ai/pending-input", async () => {
+    await run()
+    const app = new Hono()
+    registerPendingInputRoutes(app, {
+      sessions: manager({ sql: db.sql, paths: await tempPaths() }),
+      ready: () => Promise.resolve(true),
+      remoteAddress: () => '10.0.0.7',
+      origins: originPolicy('https://scadbuddy.example', '10.0.0.0/8'),
+    })
+    const res = await app.request('https://scadbuddy.example/api/v1/ai/pending-input', {
+      headers: { host: 'scadbuddy.example', 'x-forwarded-proto': 'https' },
+    })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { entries: { id: string; run?: unknown }[] }
+    expect(body.entries).toContainEqual(expect.objectContaining({ id: flowRequestId(RUN, 'wr1', 'c1'), run: expect.objectContaining({ id: RUN }) }))
+  })
 })
+

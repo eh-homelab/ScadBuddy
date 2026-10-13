@@ -322,7 +322,9 @@ function ChildCard({ entry, respond }: { entry: ChildEntry; respond: (send: () =
             <p className="whitespace-pre-wrap break-words font-mono text-[12px]">{entry.reasoning}</p>
           </figure>
         )}
-        {entry.kind === 'approval' ? (
+        {entry.expiring ? (
+          <p className="text-[12px] text-muted">Its time is up: ScadBuddy is closing it.</p>
+        ) : entry.kind === 'approval' ? (
           <div className="flex gap-2" {...USER_ONLY}>
             <Button variant="primary" size="sm" disabled={busy} onClick={() => void decide(true)}>
               Approve

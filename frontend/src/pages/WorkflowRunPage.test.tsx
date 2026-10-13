@@ -10,6 +10,8 @@ import {
   setFlowRunImages,
   setFlowRunOffline,
   setFlowRunStarting,
+  childEntries,
+  setFlowRunChildren,
 } from '../mocks/features/flows'
 import { mockSettings, setMockSettings } from '../mocks/handlers'
 import { server } from '../mocks/server'
@@ -161,6 +163,16 @@ describe('WorkflowRunPage', () => {
     await user.click(deny)
     await waitFor(() => expect(sent).toHaveLength(1))
     expect(sent[0]).toEqual({ id: 'durable:sess-child:wr-child:toolu_1', body: { kind: 'approval', decision: 'deny' } })
+  })
+
+  it("offers no decision on a child's call past its timer", async () => {
+    const [entry] = childEntries('run-escalated')
+    setFlowRunChildren('run-escalated', [{ ...entry!, expiring: true }])
+    render('run-escalated')
+    const card = await screen.findByRole('region', { name: 'Waiting for approval: print_output' })
+    expect(card).toHaveTextContent('Its time is up: ScadBuddy is closing it.')
+    expect(within(card).queryByRole('button', { name: 'Approve' })).toBeNull()
+    expect(within(card).queryByRole('button', { name: 'Deny' })).toBeNull()
   })
 
   it("names the step of the run's own call", async () => {

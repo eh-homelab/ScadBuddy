@@ -1,7 +1,7 @@
 import { Link } from 'react-router'
 import { api } from '../../api/client'
 import type { FlowQueueEntry, FlowRunQueue } from '../../api/types'
-import { FLOW_RUNS_TOPIC, flowRunPath } from '../../lib/flows'
+import { FLOW_RUNS_TOPIC, flowRunPath, hopUntilText } from '../../lib/flows'
 import { useAsync } from '../../lib/useAsync'
 
 const TOPICS = [FLOW_RUNS_TOPIC]
@@ -62,7 +62,7 @@ function entryText(e: FlowQueueEntry): string {
   const what = e.source === 'flow' ? e.fn : `${e.tool} (in a session it talks to)`
   const where =
     e.hop === 'parent'
-      ? `with this session${e.hop_until ? ` until ${new Date(e.hop_until).toLocaleTimeString()}` : ''}`
+      ? `with this session${e.hop_until ? ` until ${hopUntilText(e.hop_until)}` : ''}`
       : 'with you'
   return `${what}: ${where}${e.reason ? `; outside the grant: ${e.reason}` : ''}`
 }

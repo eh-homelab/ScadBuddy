@@ -541,6 +541,8 @@ export type FlowQueueEntry =
       input_hash: string | null
       created_at: string
       expires_at: string
+      /** Past its timer, not yet resolved by its worker: no one can decide it now. */
+      expiring: boolean
       reasoning: string
     })
   | { source: 'grant'; id: string; status: 'requested'; created_at: string }

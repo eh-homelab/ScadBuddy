@@ -22,6 +22,14 @@ import { flowRequestId, parseRequestId } from '../gate/ids.js'
 /** How much of a child's reasoning is kept: its last 2 KiB (spec §4.5), in characters. */
 export const REASONING_MAX = 2048
 
+/**
+ * How far back in a child's event log the call and its turn's start are looked for: its
+ * last this many events, an index range on the log's key, never a scan of a long session.
+ * A call parks as it is logged, so it is near the end; a turn longer than this shows the
+ * text from the window's start.
+ */
+export const REASONING_SCAN = 2000
+
 export type QueueStep = { seq: number; fn: string }
 export type QueueHop = { hop: string; action: string; actor: string; at: string; reason?: string | null }
 
@@ -57,6 +65,8 @@ export type QueueEntry =
       input_hash: string | null
       created_at: string
       expires_at: string
+      /** Past its timer, its worker not yet resolved it: no one can decide it now (as `PendingProjection`'s). */
+      expiring: boolean
       /** The child's text before the call, untrusted; empty when none was written. */
       reasoning: string
     })
@@ -113,23 +123,29 @@ export function childStep(steps: readonly StepRow[], sessionId: string): QueueSt
  * `tool.call` (spec §4.5), the last `REASONING_MAX` characters. Empty when the call is
  * not logged yet, or nothing was written.
  */
-export async function childReasoning(sql: Sql, requestId: string): Promise<string> {
+export async function childReasoning(sql: Sql, requestId: string, scan = REASONING_SCAN): Promise<string> {
   const parsed = parseRequestId(requestId)
   if (parsed?.store !== 'durable') return ''
   const { sessionId, toolUseId } = parsed
+  // The window's floor, from the log's last seq (a backward step on its primary key).
+  const [top] = await sql<{ floor: string }[]>`
+    SELECT coalesce(max(seq), 0) - ${scan} AS floor FROM ai_session_events WHERE session_id = ${sessionId}::uuid`
+  const floor = top?.floor ?? '0'
   const [call] = await sql<{ seq: string }[]>`
     SELECT seq FROM ai_session_events
-     WHERE session_id = ${sessionId}::uuid AND strpos(event, ${toolUseId}) > 0
+     WHERE session_id = ${sessionId}::uuid AND seq > ${floor} AND strpos(event, ${toolUseId}) > 0
        AND event::jsonb ->> 'type' = 'tool.call' AND event::jsonb ->> 'id' = ${toolUseId}
      ORDER BY seq DESC LIMIT 1`
   if (!call) return ''
+  const [start] = await sql<{ seq: string }[]>`
+    SELECT seq FROM ai_session_events
+     WHERE session_id = ${sessionId}::uuid AND seq > ${floor} AND seq < ${call.seq}
+       AND strpos(event, '"user.turn"') > 0 AND event::jsonb ->> 'type' = 'user.turn'
+     ORDER BY seq DESC LIMIT 1`
   const rows = await sql<{ message: string | null; delta: string | null }[]>`
     SELECT event::jsonb ->> 'messageId' AS message, event::jsonb ->> 'delta' AS delta
       FROM ai_session_events
-     WHERE session_id = ${sessionId}::uuid AND seq < ${call.seq}
-       AND seq > (SELECT coalesce(max(seq), 0) FROM ai_session_events
-                   WHERE session_id = ${sessionId}::uuid AND seq < ${call.seq}
-                     AND strpos(event, '"user.turn"') > 0 AND event::jsonb ->> 'type' = 'user.turn')
+     WHERE session_id = ${sessionId}::uuid AND seq < ${call.seq} AND seq > ${start?.seq ?? floor}
        AND strpos(event, '"assistant.text.delta"') > 0 AND event::jsonb ->> 'type' = 'assistant.text.delta'
      ORDER BY seq`
   const parts: string[] = []
@@ -202,10 +218,11 @@ export class FlowQueue {
         hops: QueueHop[] | null
         created_at: Date
         expires_at: Date
+        expiring: boolean
       }[]
     >`
       SELECT request_id, kind, session_id::text, tool, summary, input_hash, hop, hop_until, outside_reason, hops,
-             created_at, expires_at
+             created_at, expires_at, (expires_at <= now()) AS expiring
         FROM ai_pending_input WHERE flow_run_id = ${run.id} ORDER BY created_at, request_id`
     for (const c of children) {
       entries.push({
@@ -222,6 +239,7 @@ export class FlowQueue {
         hops: c.hops ?? [],
         created_at: c.created_at.toISOString(),
         expires_at: c.expires_at.toISOString(),
+        expiring: c.expiring,
         step: childStep(steps, c.session_id),
         reasoning: await childReasoning(this.#sql, c.request_id),
       })
