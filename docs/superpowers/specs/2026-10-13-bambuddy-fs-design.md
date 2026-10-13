@@ -330,7 +330,7 @@ such as the host and other containers, see the files.
 | 401/403 (a Bambuddy scope the key lacks) | `EACCES` |
 | 5xx, timeout, unreachable | `EIO` |
 | any write on `--ro` | `EROFS` |
-| chmod, chown, symlink, link, xattrs, truncate of a stored file | `ENOTSUP` |
+| chmod, chown, symlink, link, setting or removing an xattr, truncate of a stored file | `ENOTSUP` (reading xattrs answers `ENODATA` and an empty list, so `ls -l` and `cp` stay quiet; a change of times only is accepted and ignored, since times are Bambuddy's `created_at`) |
 
 Each error is logged with the operation and the response's problem `detail`. A 202
 is followed through `GET /operations/{id}` until it finishes or the FUSE request's
