@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import gc
 import json
+import time
 import weakref
 import zipfile
 from pathlib import Path
@@ -504,9 +506,22 @@ async def test_each_pieces_meshes_are_let_go_after_its_last_plate(
     alive_at_load: list[list[str]] = []
     real_load = PlateLayout.load
 
+    def alive() -> list[str]:
+        """The layouts still held. A let-go one can outlive its ``del`` for a moment:
+        ``asyncio.to_thread``'s worker keeps its finished work item, whose future's
+        result is the layout, until it gets the CPU back, and under a loaded CI runner
+        the event loop resumes first. So wait, briefly, for it to go; one really held
+        stays alive past the wait and still fails."""
+        deadline = time.monotonic() + 5
+        while True:
+            gc.collect()
+            held = [key for key, ref in loaded.items() if ref() is not None]
+            if not held or time.monotonic() > deadline:
+                return held
+            time.sleep(0.01)
+
     def load(path: Path) -> PlateLayout:
-        gc.collect()
-        alive_at_load.append([key for key, ref in loaded.items() if ref() is not None])
+        alive_at_load.append(alive())
         layout = real_load(path)
         loaded[path.parent.name] = weakref.ref(layout)
         return layout
@@ -515,8 +530,7 @@ async def test_each_pieces_meshes_are_let_go_after_its_last_plate(
     real_covers = plates_thumbnails
 
     async def covers(*args: Any, **kwargs: Any) -> Any:
-        gc.collect()
-        alive_at_covers.extend(key for key, ref in loaded.items() if ref() is not None)
+        alive_at_covers.extend(await asyncio.to_thread(alive))
         return await real_covers(*args, **kwargs)
 
     monkeypatch.setattr(PlateLayout, "load", staticmethod(load))
