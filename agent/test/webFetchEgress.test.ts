@@ -26,6 +26,13 @@ describe('webFetchRefusal', () => {
     expect(await webFetchRefusal('http://rebound.example/', async () => ['::ffff:127.0.0.1'])).toMatch(/loopback/)
   })
 
+  it('takes only a URL in its normal form, so Claude Code fetches the host checked here', async () => {
+    expect(await webFetchRefusal('https://example.com', publicHost)).toBeUndefined()
+    expect(await webFetchRefusal('http://2130706433/', publicHost)).toMatch(/normal form, http:\/\/127\.0\.0\.1\//)
+    expect(await webFetchRefusal('http://example.com\\@169.254.169.254/', publicHost)).toMatch(/normal form/)
+    expect(await webFetchRefusal(' https://Example.com/', publicHost)).toMatch(/normal form, https:\/\/example\.com\//)
+  })
+
   it('refuses what is not a plain http(s) URL', async () => {
     expect(await webFetchRefusal('file:///etc/passwd', publicHost)).toMatch(/^WebFetch refused/)
     expect(await webFetchRefusal('https://user:pw@example.com/', publicHost)).toMatch(/^WebFetch refused/)

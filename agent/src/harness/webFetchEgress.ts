@@ -22,6 +22,12 @@ export const WEB_FETCH = 'WebFetch'
 export async function webFetchRefusal(url: unknown, resolve: Resolver = systemResolver): Promise<string | undefined> {
   try {
     const parsed = assertHttpUrl(String(url), 'url')
+    // Claude Code parses the string again itself; only a URL already in its normal form
+    // is sure to name the host checked here (no decimal or short IPv4, backslashes,
+    // stray whitespace or case that another parser could read differently).
+    if (parsed.href !== url && parsed.href !== `${String(url)}/`) {
+      return `WebFetch refused: give the URL in its normal form, ${parsed.href}`
+    }
     if (isLoopbackHost(parsed.hostname)) return `WebFetch refused: url host ${parsed.hostname} is this pod's loopback, not a web page`
     const addresses = await assertHostAllowed(parsed.href, resolve, 'url', 'an allowed host')
     const loopback = addresses.find((a) => isLoopbackHost(embeddedIPv4(a) ?? a))
