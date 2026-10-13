@@ -49,6 +49,7 @@ const NAV = [
   { to: '/prints', label: 'Prints', end: false },
   { to: '/library', label: 'Library', end: false },
   { to: '/workflows', label: 'Workflows', end: false },
+  { to: '/activity', label: 'Activity', end: false },
   { to: '/settings', label: 'Settings', end: false },
 ]
 
