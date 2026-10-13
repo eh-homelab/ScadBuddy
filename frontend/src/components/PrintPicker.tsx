@@ -999,6 +999,7 @@ export function PrintPicker({
                               ? (choices.bed_types ?? [])
                               : [bedType, ...(choices.bed_types ?? [])]
                           }
+                          labels={choices.bed_type_labels ?? {}}
                           value={bedType}
                           lastBedType={choices.last_bed_type ?? null}
                           printerName={printer?.name ?? null}

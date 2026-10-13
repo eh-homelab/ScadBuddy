@@ -15,6 +15,7 @@ from scadbuddy.bambuddy.extruders import default_nozzles
 from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.hardware import (
     InstalledNozzle,
+    bed_type_labels,
     installed_nozzles,
     last_bed_type,
     nozzle_warning,
@@ -28,7 +29,7 @@ from scadbuddy.bambuddy.models import (
     PrinterStatus,
     RackAlgorithm,
 )
-from scadbuddy.bambuddy.print_run import BED_TYPES, filament_options, read_status
+from scadbuddy.bambuddy.print_run import filament_options, read_status
 from scadbuddy.bambuddy.print_source import OutputSource, PrintSource
 from scadbuddy.bambuddy.resolver import _SOURCE_ORDER, DEFAULT_BED, TIERS, Tier
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
@@ -36,6 +37,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import ModelPrintChoices, StoredSettings
 from scadbuddy.rack.usage import RackUsage, record_seen
+from scadbuddy.render.plate import bed_types_for
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +82,11 @@ class ChoicesView(BaseModel):
     default_nozzles: list[NozzleChoice] = Field(default_factory=lambda: default_nozzles(None))
     tiers: dict[str, list[TierOption]] = Field(default_factory=dict)
     processes: dict[str, list[str]] = Field(default_factory=dict)
-    bed_types: list[str] = Field(default_factory=lambda: list(BED_TYPES))
+    #: The plates the chosen printer's model takes, by ``curr_bed_type`` (#2366); every
+    #: plate for a model the profiles do not know.
+    bed_types: list[str] = Field(default_factory=lambda: list(bed_types_for(None)))
+    #: The label Bambu Studio shows for each of ``bed_types``.
+    bed_type_labels: dict[str, str] = Field(default_factory=dict)
     last_bed_type: str | None = None
     bed_type: str = DEFAULT_BED
     filaments: FilamentOptions
@@ -180,9 +186,13 @@ async def choices_for(
         or (settings.printer_bed_types.get(str(printer_id)) if printer_id is not None else None)
         or DEFAULT_BED
     )
+    model = next((row.model for row in printers if row.id == printer_id), None)
+    bed_types = list(bed_types_for(model))
     return ChoicesView(
         printer_id=printer_id,
         printers=printers,
+        bed_types=bed_types,
+        bed_type_labels=bed_type_labels(bed_types),
         installed=installed_nozzles(status),
         default_nozzles=default_nozzles(status),
         tiers={
