@@ -409,7 +409,8 @@ class OutputStore:
                 # What reproduces it (§8.4), for every pipeline's output, the built-in one's too;
                 # a bill of materials only when the pipeline wrote one.
                 (directory / RECORD_NAME).write_text(
-                    chosen.record.model_dump_json(), encoding="utf-8"
+                    chosen.record.model_copy(update={"output_index": index}).model_dump_json(),
+                    encoding="utf-8",
                 )
                 if chosen.bom:
                     (directory / BOM_NAME).write_text(

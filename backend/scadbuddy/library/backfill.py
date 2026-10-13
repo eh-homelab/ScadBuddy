@@ -35,19 +35,33 @@ from scadbuddy.store.refs import BlobRefs
 
 logger = logging.getLogger(__name__)
 
+#: The jobs whose rows did not validate when last read, so each one's trace is logged once.
+_unreadable_jobs: set[str] = set()
+
+
+class AmbiguousOutputError(ValueError):
+    """Several of the re-render's outputs were built from the output's Parts, and the
+    output does not record which one it was."""
+
 
 def choose_output(job: Job, record: OutputRecord | None) -> PipelineOutput | None:
     """The re-render's output that is this output: the job's only one, else the one
     built from the same Parts. A Part's key is its slug, revision, file and params, so
     the same inputs at the same revision give the same keys. Two outputs of one job with
-    the same Parts are not told apart: a saved output records neither its index nor its
-    pipeline name (#1007 item 2)."""
+    the same Parts are told apart by the index the output recorded when it was saved;
+    one saved before that was recorded is refused rather than given either (#1007 item 2).
+    """
     if len(job.outputs) == 1:
         return job.outputs[0]
     if record is None:
         return None
     wanted = set(record.parts)
-    return next((out for out in job.outputs if set(out.record.parts) == wanted), None)
+    same = [i for i, out in enumerate(job.outputs) if set(out.record.parts) == wanted]
+    if record.output_index is not None and record.output_index in same:
+        return job.outputs[record.output_index]
+    if len(same) > 1:
+        raise AmbiguousOutputError(record.parts)
+    return job.outputs[same[0]] if same else None
 
 
 #: The events that settle a job: its re-render is attached, or marked with why not.
@@ -240,9 +254,22 @@ def _attach(
     except ValueError:
         # The job's row did not validate: not the output's fault, and not permanent (a
         # row written by another release mid-deploy). Left for the next pass (#1007),
-        # where a ValueError here would otherwise mark the backfill failed.
-        logger.exception("could not read a re-render's job; retrying", extra={"id": output_id})
+        # where a ValueError here would otherwise mark the backfill failed. Its trace is
+        # logged once per job; a row that never validates would otherwise log one every
+        # pass, for as long as it stays.
+        if job_id in _unreadable_jobs:
+            logger.warning(
+                "a re-render's job still does not validate; retrying",
+                extra={"id": output_id, "job_id": job_id},
+            )
+        else:
+            _unreadable_jobs.add(job_id)
+            logger.exception(
+                "could not read a re-render's job; retrying",
+                extra={"id": output_id, "job_id": job_id},
+            )
         return False
+    _unreadable_jobs.discard(job_id)
     if job.state in ("pending", "running"):
         return False
     if job.state != "done":
@@ -253,6 +280,14 @@ def _attach(
         chosen = choose_output(job, outputs.record(output_id))
     except OutputNotFoundError:
         return False  # deleted while it was re-rendering: nothing to attach to
+    except AmbiguousOutputError:
+        outputs.fail_backfill(
+            output_id,
+            job.id,
+            "the re-render wrote several outputs from this output's objects, and it was"
+            " saved before outputs recorded which one they were; save it again",
+        )
+        return False
     if chosen is None or not chosen.manifest:
         outputs.fail_backfill(
             output_id, job.id, "the re-render wrote no output with this output's objects"
