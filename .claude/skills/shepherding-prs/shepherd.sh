@@ -55,12 +55,17 @@ while [ "$(date +%s)" -lt "$end" ]; do
     if [ "$state" = MERGED ]; then
       # Done only once every claim is released: a release that failed is logged and
       # tried again on the next pass (#2570).
-      released=1
+      # Logged "merged" only when a claim was released now: a restart's sweep of PRs
+      # whose claims were released long ago stays quiet (#3096).
+      released=1 patched=""
       for iss in $(jq -r .body <<<"$j" | grep -oiE '(closes|fixes|resolves) #[0-9]+' | grep -oE '[0-9]+'); do
-        bash "$here/release-claim.sh" --repo "$repo" --owner "$owner" --author "$author" "$pr" "$iss" >/dev/null 2>&1 ||
-          { released=""; echo "$(date +%H:%M) release failed #$pr #$iss"; }
+        if said=$(bash "$here/release-claim.sh" --repo "$repo" --owner "$owner" --author "$author" "$pr" "$iss" 2>/dev/null); then
+          [[ "$said" == http* ]] && patched=1
+        else
+          released=""; echo "$(date +%H:%M) release failed #$pr #$iss"
+        fi
       done
-      [ -n "$released" ] && { done_[$pr]=1; echo "$(date +%H:%M) merged #$pr"; }
+      [ -n "$released" ] && { done_[$pr]=1; [ -z "$patched" ] || echo "$(date +%H:%M) merged #$pr"; }
       continue
     fi
     [ "$state" = OPEN ] || { done_[$pr]=1; echo "$(date +%H:%M) #$pr $state"; continue; }

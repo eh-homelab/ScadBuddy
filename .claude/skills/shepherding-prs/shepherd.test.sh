@@ -98,6 +98,12 @@ jq -s . <(claim 5 "Working on this: #300 $mark") > "$work/fx/comments-8.json"
 bash "$here/release-claim.sh" --owner "$OWNER" 30 8 >/dev/null
 check "#30 does not match a claim naming #300" "" "$(cat "$work/fx/patches" 2>/dev/null)"
 
+reset
+jq -s . <(claim 6 "Working on this: #30, after the first try was released $mark") > "$work/fx/comments-8.json"
+bash "$here/release-claim.sh" --owner "$OWNER" 30 8 >/dev/null
+check "a live claim that says 'released' in passing is still released (#3096)" \
+  "repos/eh-homelab/ScadBuddy/issues/comments/6" "$(cat "$work/fx/patches" 2>/dev/null)"
+
 # --- shepherd.sh (#2570) ---
 pr_json() { # number state body [rollup]
   jq -n --arg s "$2" --arg b "$3" --argjson r "${4:-[]}" \
@@ -114,6 +120,13 @@ out=$(bash "$here/shepherd.sh" --owner "$OWNER" --once)
 check "a PR merged while no shepherd ran has its claim released" \
   "repos/eh-homelab/ScadBuddy/issues/comments/5" "$(cat "$work/fx/patches" 2>/dev/null)"
 check "... and is logged merged" "1" "$(grep -c 'merged #30' <<<"$out")"
+
+reset
+listed 30 8 > "$work/fx/merged.json"
+pr_json 30 MERGED "Closes #8 $mark"
+jq -s . <(claim 5 "Working on this: #30 (merged) released $mark") > "$work/fx/comments-8.json"
+out=$(bash "$here/shepherd.sh" --owner "$OWNER" --once)
+check "a restart's sweep of a PR released long ago logs nothing (#3096)" "0" "$(grep -c 'merged #30' <<<"$out" || true)"
 
 reset
 listed 31 9 > "$work/fx/open.json"
