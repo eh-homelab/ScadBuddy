@@ -185,7 +185,7 @@ describe('BatchPrintDialog (#2672)', () => {
         const done = read as PrintBatch
         return HttpResponse.json({
           ...done,
-          status: 'queued',
+          status: 'open',
           items: [
             { ...done.items[0], outcome: { status: 'refused', run_id: null, detail: 'This file was sliced for a X1C.' } },
             { ...done.items[1], outcome: { status: 'unchosen', run_id: null, detail: 'No choices were made for this file.' } },
@@ -197,6 +197,64 @@ describe('BatchPrintDialog (#2672)', () => {
     await user.click(await screen.findByTestId('batch-queue-all'))
     expect(await screen.findByTestId('batch-outcome-0')).toHaveTextContent('Not queued: This file was sliced for a X1C.')
     expect(screen.getByTestId('batch-outcome-1')).toHaveTextContent('Not queued: No choices were made')
+    // Open still: a refused file can be edited and the batch sent again.
+    expect(within(screen.getByTestId('batch-row-0')).getByRole('button', { name: /^Edit / })).toBeEnabled()
+    expect(screen.getByTestId('batch-queue-all')).toBeEnabled()
+  })
+
+  it('keeps a file still being checked pending, and Queue all again follows it (#2718 review)', async () => {
+    const onClose = vi.fn()
+    const batch = await newBatch(89)
+    await api.putPrintBatchItem(batch.id, 0, { request: { ...REQUEST }, skipped: false, removed: false })
+    await api.putPrintBatchStep(batch.id, 1)
+    let sends = 0
+    server.use(
+      http.post(`/api/v1/print/batches/${batch.id}/queue`, async () => {
+        sends += 1
+        const done = (await (await fetch(`/api/v1/print/batches/${batch.id}`)).json()) as PrintBatch
+        const detail = 'ScadBuddy is still checking this print. Try again to follow it.'
+        return HttpResponse.json(
+          sends === 1
+            ? { ...done, status: 'open', items: [{ ...done.items[0], outcome: { status: 'pending', run_id: null, detail } }] }
+            : { ...done, status: 'queued', items: [{ ...done.items[0], outcome: { status: 'started', run_id: 'run-1', detail: null } }] },
+        )
+      }),
+    )
+    const { user } = renderPage(<BatchPrintDialog batchId={batch.id} onClose={onClose} />)
+    await user.click(await screen.findByTestId('batch-queue-all'))
+
+    const outcome = await screen.findByTestId('batch-outcome-0')
+    expect(outcome).toHaveTextContent('Still being checked')
+    expect(outcome).not.toHaveTextContent('Not queued')
+    // It may be printing: no Edit into a second print, but Queue all again is offered.
+    expect(within(screen.getByTestId('batch-row-0')).queryByRole('button', { name: /^Edit / })).toBeNull()
+    expect(screen.getByTestId('batch-queue-all')).toHaveTextContent('Queue all (1)')
+
+    await user.click(screen.getByTestId('batch-queue-all'))
+    await screen.findByRole('dialog', { name: 'Batch print queued' })
+    expect(sends).toBe(2)
+  })
+
+  it('keeps a batch with a file still being checked when it is closed', async () => {
+    const onClose = vi.fn()
+    const batch = await newBatch(89)
+    await api.putPrintBatchItem(batch.id, 0, { request: { ...REQUEST }, skipped: false, removed: false })
+    await api.putPrintBatchStep(batch.id, 1)
+    server.use(
+      http.post(`/api/v1/print/batches/${batch.id}/queue`, async () => {
+        const done = (await (await fetch(`/api/v1/print/batches/${batch.id}`)).json()) as PrintBatch
+        return HttpResponse.json({
+          ...done,
+          items: [{ ...done.items[0], outcome: { status: 'pending', run_id: null, detail: 'Temporal is down.' } }],
+        })
+      }),
+    )
+    const { user } = renderPage(<BatchPrintDialog batchId={batch.id} onClose={onClose} />)
+    await user.click(await screen.findByTestId('batch-queue-all'))
+    await screen.findByTestId('batch-outcome-0')
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(onClose).toHaveBeenCalledOnce()
+    await expect(api.getPrintBatch(batch.id)).resolves.toMatchObject({ id: batch.id })
   })
 
   it('removes a file in the review, and Edit goes back to its step on its own choices', async () => {

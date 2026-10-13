@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.api.deps import PathsDep, PrintRunsDep, ReadBudgetDep, SettingsStoreDep
 from scadbuddy.api.library_print import post_library_run
+from scadbuddy.api.operations import MAY_HAVE_STARTED
 from scadbuddy.batches.component import PrintBatchesDep
 from scadbuddy.batches.store import (
     BatchChoice,
@@ -58,6 +59,25 @@ def _item(batch: PrintBatch, position: int) -> BatchItem:
         if item.position == position:
             return item
     raise ApiError(status.HTTP_404_NOT_FOUND, "The batch print has no such file.")
+
+
+def _settled(batch: PrintBatch) -> bool:
+    """Whether Queue all has nothing left to do: every file kept has a started run."""
+    return all(
+        item.outcome is not None and item.outcome.status == "started"
+        for item in batch.items
+        if not (item.skipped or item.removed)
+    )
+
+
+def _changeable(item: BatchItem) -> None:
+    """A started run is Bambuddy's now, and a pending one may be: changing its choices
+    would send another request and could print the file twice."""
+    if item.outcome is not None and item.outcome.status in ("started", "pending"):
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "This file's print has started, or may have, so its choices cannot change.",
+        )
 
 
 def _open(batch: PrintBatch) -> None:
@@ -111,7 +131,7 @@ async def put_batch_item(
     or removed. Nothing is checked or queued here: Queue all runs each file's own print."""
     batch = await _batch(batches, batch_id)
     _open(batch)
-    _item(batch, position)
+    _changeable(_item(batch, position))
     updated = await batches.choose(batch_id, position, body)
     assert updated is not None
     return updated
@@ -134,7 +154,10 @@ async def post_batch_queue(
     run it started (follow it at ``GET /print/runs/{id}``), the refusal, or that it has
     no choices yet. Skipped and removed files are left out. One file's refusal never
     stops the rest. Sent again, a file whose run started is left as it is, and one whose
-    choices are unchanged re-attaches to its run rather than queueing it twice."""
+    choices are unchanged re-attaches to its run rather than queueing it twice.
+
+    The batch stays open, so it can be sent again and its refused files edited, until
+    every file kept has a started run."""
     batch = await _batch(batches, batch_id)
     for item in batch.items:
         if item.skipped or item.removed:
@@ -144,6 +167,9 @@ async def post_batch_queue(
         await batches.record_outcome(
             batch_id, item.position, await _queue_one(batch_id, item, runs, store, paths, budget)
         )
+    done = await _batch(batches, batch_id)
+    if not _settled(done):
+        return done
     await batches.mark_queued(batch_id)
     return await _batch(batches, batch_id)
 
@@ -164,6 +190,12 @@ async def _queue_one(
             item.library_file_id, request, Response(), runs, store, paths, budget
         )
     except ApiError as error:
+        # Not a refusal: ScadBuddy still checking (503) or Temporal down, when the run
+        # may have started. The same request_id sent again follows that run.
+        if error.status == status.HTTP_503_SERVICE_UNAVAILABLE or error.extensions.get(
+            MAY_HAVE_STARTED
+        ):
+            return BatchOutcome(status="pending", detail=error.detail)
         return BatchOutcome(status="refused", detail=error.detail)
     return BatchOutcome(status="started", run_id=run.id)
 

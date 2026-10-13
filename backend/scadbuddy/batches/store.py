@@ -40,9 +40,14 @@ class BatchSummary(BaseModel):
 
 
 class BatchOutcome(BaseModel):
-    """What Queue all did with a file: the run it started, or why it started none."""
+    """What Queue all did with a file: the run it started, or why it started none.
 
-    status: Literal["started", "refused", "unchosen"]
+    ``pending`` is an answer that is not a refusal: ScadBuddy was still checking the
+    print, or Temporal was unreachable and the run may have started. Queue all sends it
+    again with the same ``request_id``, which attaches to that run rather than starting
+    a second one."""
+
+    status: Literal["started", "pending", "refused", "unchosen"]
     run_id: str | None = None
     detail: str | None = None
 

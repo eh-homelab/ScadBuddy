@@ -115,7 +115,11 @@ export function BatchPrintDialog({ batchId, onClose }: Props) {
   }
 
   function close() {
-    void api.deletePrintBatch(batchId).catch(() => undefined)
+    // A file still being checked may yet print: the batch is kept, so Queue all can
+    // follow that run rather than a new batch queueing the file twice (#2718 review).
+    if (!batch?.items.some((item) => item.outcome?.status === 'pending')) {
+      void api.deletePrintBatch(batchId).catch(() => undefined)
+    }
     onClose()
   }
 
@@ -229,7 +233,10 @@ export function BatchPrintDialog({ batchId, onClose }: Props) {
   }
 
   const queued = batch.status === 'queued'
-  const toQueue = items.filter((item) => !item.skipped && item.request)
+  const toQueue = items.filter(
+    (item) => !item.skipped && item.request && item.outcome?.status !== 'started',
+  )
+  const sentBefore = items.some((item) => item.outcome)
 
   async function queueAll() {
     setQueueing(true)
@@ -251,7 +258,9 @@ export function BatchPrintDialog({ batchId, onClose }: Props) {
       description={
         queued
           ? 'Each file went to its own print. One that was refused did not stop the rest.'
-          : 'Check each file, then Queue all. A file that is refused does not stop the rest.'
+          : sentBefore
+            ? 'Some files are not queued yet. Edit a refused one, then Queue all again: a file still being checked is followed, never queued twice.'
+            : 'Check each file, then Queue all. A file that is refused does not stop the rest.'
       }
       onClose={queued ? close : () => goTo(before(total) ?? 0)}
       footer={
@@ -366,9 +375,9 @@ function ReviewRow({
               ! {warning}
             </p>
           ))}
-        {queued && <Outcome item={item} run={run} />}
+        <Outcome item={item} run={run} />
       </div>
-      {!queued && (
+      {!queued && !locked(item) && (
         <div className="flex gap-1.5">
           <Button size="sm" onClick={onEdit} disabled={busy} aria-label={`Edit ${item.filename}`}>
             Edit
@@ -382,10 +391,22 @@ function ReviewRow({
   )
 }
 
+/** A file whose print has started, or may have: its choices no longer change. */
+function locked(item: BatchItem): boolean {
+  return item.outcome?.status === 'started' || item.outcome?.status === 'pending'
+}
+
 /** What Queue all did with one file, and how its run ended once it has. */
 function Outcome({ item, run }: { item: BatchItem; run: PrintRun | undefined }) {
   const outcome = item.outcome
   if (!outcome) return null
+  if (outcome.status === 'pending') {
+    return (
+      <p role="status" className="text-[12px] text-muted" data-testid={`batch-outcome-${item.position}`}>
+        Still being checked: {outcome.detail} Queue all again to follow it.
+      </p>
+    )
+  }
   if (outcome.status !== 'started') {
     return (
       <p role="status" className="text-[12px] text-warn" data-testid={`batch-outcome-${item.position}`}>

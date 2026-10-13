@@ -507,7 +507,9 @@ function batchHandlers() {
           ? { status: 'refused', run_id: null, detail: `${item.filename} cannot be printed.` }
           : { status: 'started', run_id: startLibraryRun(item.library_file_id, item.request).id, detail: null }
       }
-      batch.status = 'queued'
+      // Open until every file kept has started, as the backend leaves it (#2718 review).
+      const kept = batch.items.filter((item) => !item.skipped && !item.removed)
+      if (kept.every((item) => item.outcome?.status === 'started')) batch.status = 'queued'
       return HttpResponse.json(batch)
     }),
     http.delete(`${base}/print/batches/:id`, ({ params }) =>

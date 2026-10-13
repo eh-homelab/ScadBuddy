@@ -11,9 +11,13 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.api import library_print, print_batches
+from scadbuddy.api.operations import STILL_ACCEPTING_PROBLEM
 from scadbuddy.api.print_batches import batch_request_id
+from scadbuddy.api.printing import STILL_CHECKING_DETAIL
 from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.batches.store import BatchItem
+from scadbuddy.core.problems import ApiError
 from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_library import SLICED_RUN, sliced_3mf, sliced_file
 from tests.api.test_print_run_choices import follow_run, run_routes
@@ -122,7 +126,8 @@ def test_queue_all_runs_each_chosen_file_and_reports_each(client: TestClient) ->
 
     assert response.status_code == 200, response.text
     done = response.json()
-    assert done["status"] == "queued"
+    # A file refused and one unchosen: open still, so they can be fixed and sent again.
+    assert done["status"] == "open"
     outcomes = [item["outcome"] for item in done["items"]]
     assert [o and o["status"] for o in outcomes] == [
         "started",
@@ -143,8 +148,9 @@ def test_queue_all_runs_each_chosen_file_and_reports_each(client: TestClient) ->
     sent = sorted(json.loads(call.request.content)["library_file_id"] for call in queued.calls)
     assert sent == [104, 105]
     assert not sliced.called
-    # Queued, it no longer changes.
-    assert client.put(f"{BATCHES}/{batch['id']}/items/2", json={}).status_code == 409
+    # A started file no longer changes; an unchosen one still can.
+    assert client.put(f"{BATCHES}/{batch['id']}/items/0", json={}).status_code == 409
+    assert client.put(f"{BATCHES}/{batch['id']}/items/2", json={}).status_code == 200
 
 
 @respx.mock
@@ -164,6 +170,75 @@ def test_queue_all_sent_again_queues_nothing_twice(client: TestClient) -> None:
 
     assert again["items"][0]["outcome"] == first["items"][0]["outcome"]
     assert queued.call_count == 1
+    # Every file started: the batch is queued, and nothing in it changes.
+    assert (first["status"], again["status"]) == ("queued", "queued")
+    assert client.put(f"{BATCHES}/{batch['id']}/items/0", json={}).status_code == 409
+
+
+@respx.mock
+def test_still_checking_is_pending_and_queue_all_follows_the_same_run(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2718 review: a 503 "still checking" is not a refusal; the run may go on. The
+    file is pending, the batch stays open, and Queue all again sends the same request_id
+    rather than starting a second print."""
+    configure(client)
+    sliced_file(104)
+    run_routes()
+    queued = queue_route()
+    batch = new_batch(client, 104)
+    choose(client, batch["id"], 0, request=SLICED_RUN)
+    real = library_print.post_library_run
+    sent: list[str | None] = []
+
+    async def still_checking_once(file_id: int, request: PrintRunRequest, *rest: Any) -> Any:
+        sent.append(request.request_id)
+        if len(sent) == 1:
+            raise ApiError(503, STILL_CHECKING_DETAIL, type_=STILL_ACCEPTING_PROBLEM)
+        return await real(file_id, request, *rest)
+
+    monkeypatch.setattr(print_batches, "post_library_run", still_checking_once)
+
+    first = client.post(f"{BATCHES}/{batch['id']}/queue").json()
+
+    assert first["status"] == "open"
+    assert first["items"][0]["outcome"]["status"] == "pending"
+    # Pending may be running: its choices cannot change into a second print.
+    assert client.put(f"{BATCHES}/{batch['id']}/items/0", json={}).status_code == 409
+
+    again = client.post(f"{BATCHES}/{batch['id']}/queue").json()
+
+    assert again["items"][0]["outcome"]["status"] == "started"
+    assert again["status"] == "queued"
+    assert sent[0] is not None and sent == [sent[0], sent[0]]
+    follow_run(client, again["items"][0]["outcome"]["run_id"])
+    assert queued.call_count == 1
+
+
+@pytest.mark.parametrize(
+    ("error", "outcome"),
+    [
+        (ApiError(503, "Temporal is down.", may_have_started=False), "pending"),
+        (ApiError(500, "Temporal refused.", may_have_started=True), "pending"),
+        (ApiError(500, "Temporal refused.", may_have_started=False), "refused"),
+        (ApiError(422, "No such plate."), "refused"),
+    ],
+)
+async def test_only_an_answer_that_is_not_a_refusal_is_pending(
+    monkeypatch: pytest.MonkeyPatch, error: ApiError, outcome: str
+) -> None:
+    async def answers(*_: Any) -> Any:
+        raise error
+
+    monkeypatch.setattr(print_batches, "post_library_run", answers)
+    item = BatchItem(
+        position=0,
+        library_file_id=104,
+        filename="a",
+        request=PrintRunRequest.model_validate(SLICED_RUN),
+    )
+    result = await print_batches._queue_one("b1", item, *([None] * 4))  # type: ignore[arg-type]
+    assert result.status == outcome
 
 
 def test_a_files_press_is_its_choices() -> None:
