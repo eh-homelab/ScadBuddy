@@ -177,6 +177,9 @@ const STATUS_OF: Record<ApprovalErrorCode, 400 | 403 | 404 | 409 | 410> = {
 }
 
 /** A refused approval operation; `status` is the HTTP status a route answers with. */
+/** How many due approvals one query of `expireDue` takes. */
+export const EXPIRE_PAGE = 500
+
 export class ApprovalError extends Error {
   override name = 'ApprovalError'
   readonly code: ApprovalErrorCode
@@ -962,22 +965,36 @@ export class ApprovalService {
     return approval
   }
 
-  /** Expires every pending approval past its time; returns how many. */
-  async expireDue(): Promise<number> {
-    const due = await this.deps.sql<{ id: string }[]>`
-      SELECT id FROM ai_approvals WHERE decision IS NULL AND expires_at <= now() ORDER BY expires_at LIMIT 500`
+  /**
+   * Expires every pending approval past its time; returns how many. Taken `page` at a
+   * time, oldest first, each page leaving out what this sweep already tried: a page of
+   * rows that keep failing never holds back the ones after it (#2382).
+   */
+  async expireDue(page = EXPIRE_PAGE): Promise<number> {
     let n = 0
-    // One approval that fails to expire never holds back the rest (#2382): the first
-    // failure is thrown once every other one has been tried.
-    let failure: unknown
-    for (const { id } of due) {
-      try {
-        if (await this.expire(id)) n += 1
-      } catch (err) {
-        failure ??= err
+    const tried: string[] = []
+    // One approval that fails to expire never holds back the rest: the failures are
+    // thrown once every other one has been tried, the first alone or all of them.
+    const failures: unknown[] = []
+    for (;;) {
+      const due = await this.deps.sql.unsafe<{ id: string }[]>(
+        `SELECT id FROM ai_approvals
+         WHERE decision IS NULL AND expires_at <= now() AND NOT (id = ANY($1::uuid[]))
+         ORDER BY expires_at LIMIT $2`,
+        [tried, page],
+      )
+      for (const { id } of due) {
+        tried.push(id)
+        try {
+          if (await this.expire(id)) n += 1
+        } catch (err) {
+          failures.push(err)
+        }
       }
+      if (due.length < page) break
     }
-    if (failure !== undefined) throw failure
+    if (failures.length === 1) throw failures[0]
+    if (failures.length > 1) throw new AggregateError(failures, `${failures.length} approvals failed to expire`)
     return n
   }
 
@@ -1325,6 +1342,10 @@ export class ApprovalService {
  * next one names the query. Never the parameters: they can hold an input's summary.
  */
 export function sweepErrorText(err: unknown): string {
+  // Several failed: the first as one is said, and how many more.
+  if (err instanceof AggregateError && err.errors.length > 0) {
+    return `${sweepErrorText(err.errors[0])} (and ${err.errors.length - 1} more)`
+  }
   const message = err instanceof Error ? err.message : String(err)
   const query = (err as { query?: unknown } | null)?.query
   if (typeof query !== 'string' || query.trim() === '') return message

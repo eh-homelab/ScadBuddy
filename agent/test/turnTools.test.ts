@@ -14,7 +14,7 @@ import type { Owner } from '../src/sessions/protocol.js'
 import { HTTP_READ_TOOL, HTTP_SERVER, HTTP_TOOL } from '../src/harness/httpRequest.js'
 import { PgHttpBodies } from '../src/sessions/httpBodies.js'
 import { FLOW_BODIES_KEPT_MS, removeTurnDir, sweepTurnDirs, turnServers } from '../src/temporal/turnServers.js'
-import { FLOW_IMAGES_FULL } from '../src/temporal/toolActivities.js'
+import { FLOW_IMAGES_FULL, GRANT_REVOKED } from '../src/temporal/toolActivities.js'
 import {
   connectInProcess,
   TURN_TOOL_TIER_ACTIVITY,
@@ -101,6 +101,7 @@ function harness(
     fixedTier?: (name: string) => RiskTier | undefined
     listingKey?: string
     flowBlobs?: TurnToolsDeps['flowBlobs']
+    lapsed?: (requestId: string) => boolean
   } = {},
 ) {
   const contexts: TurnContext[] = []
@@ -136,6 +137,7 @@ function harness(
         bindings.push(binding?.inputHash)
         return requestId.endsWith(':toolu_approved')
       },
+      ...(options.lapsed ? { lapsed: async (requestId: string) => options.lapsed!(requestId) } : {}),
     },
     flows: {
       startedBy: async (run) => (run === FLOW ? (options.flowStarter ?? BROWSER) : undefined),
@@ -414,6 +416,15 @@ describe('turn tools in a durable session', () => {
     const reported = harness({ problems: [`plugin x failed with header ${SECRET}`] })
     await env(TURN_TOOLS_ACTIVITY).run(reported.activities[TURN_TOOLS_ACTIVITY] as () => Promise<TurnToolsResult>)
     expect(reported.reported).toEqual(['plugin x failed with header [redacted]'])
+  })
+
+  it("refuses a session's call whose approval lapsed as GrantRevoked, before it runs (#2871)", async () => {
+    const h = harness({ lapsed: (requestId) => requestId.endsWith(':toolu_lapsed') })
+    const lapsed = await failure(env('turn:notes__post', 'tool-toolu_lapsed').run(h.call, { method: 'POST', body: 'x' }))
+    expect(lapsed.type).toBe(GRANT_REVOKED)
+    const never = await failure(env('turn:notes__post', 'tool-toolu_other').run(h.call, { method: 'POST', body: 'x' }))
+    expect(never.type).toBe('NotApproved')
+    expect(h.calls).toEqual([])
   })
 
   describe("from a flow's tool(name, args) (#2320 phase 8)", () => {

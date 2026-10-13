@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { Hono } from 'hono'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   approvalHashKey,
   ApprovalService,
@@ -75,6 +75,41 @@ describe('sweepErrorText', () => {
     expect(sweepErrorText(long).length).toBeLessThan(320)
     expect(sweepErrorText(new Error('plain'))).toBe('plain')
     expect(sweepErrorText('text')).toBe('text')
+  })
+
+  it('says how many more failed when a sweep threw several', () => {
+    const first = Object.assign(new Error('boom'), { query: 'UPDATE ai_approvals SET x = $1', parameters: ['secret-ish'] })
+    const several = new AggregateError([first, new Error('two'), new Error('three')], '3 approvals failed to expire')
+    expect(sweepErrorText(several)).toBe('boom (in: UPDATE ai_approvals SET x = $1) (and 2 more)')
+    expect(sweepErrorText(several)).not.toContain('secret-ish')
+  })
+})
+
+describe('the approval sweeper', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('skips a tick while the last sweep is still running', async () => {
+    vi.useFakeTimers()
+    let sweeps = 0
+    let finish: () => void = () => {}
+    const service = Object.create(ApprovalService.prototype) as ApprovalService
+    service.expireDue = () => {
+      sweeps += 1
+      return new Promise<number>((resolve) => {
+        finish = () => resolve(0)
+      })
+    }
+    const stop = service.startSweeper(100)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(sweeps).toBe(1)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(sweeps).toBe(1)
+    finish()
+    await vi.advanceTimersByTimeAsync(100)
+    expect(sweeps).toBe(2)
+    stop()
   })
 })
 
@@ -168,6 +203,28 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     // The failed one is tried again on the next sweep.
     expect(await m.approvals.expireDue()).toBe(1)
     expect((await decisions())[first.approval.id]).toBe('expired')
+  })
+
+  // #2382: a page of rows that keep failing never holds back the ones after it.
+  it('pages past due approvals that keep failing to the ones after them', async () => {
+    const stuck = [await orphan(), await orphan(agentB)]
+    const later = await orphan()
+    await db.sql`UPDATE ai_approvals SET expires_at = now() - interval '1 minute' WHERE id IN ${db.sql(stuck.map((o) => o.approval.id))}`
+    await db.sql`UPDATE ai_approvals SET expires_at = now() - interval '1 second' WHERE id = ${later.approval.id}`
+    const failing = new Set(stuck.map((o) => o.session.id))
+    const append = m.events.append.bind(m.events)
+    m.events.append = async (sessionId, events, tx) => {
+      if (sessionId && failing.has(sessionId)) throw new Error('boom')
+      return append(sessionId, events, tx)
+    }
+    const thrown = await m.approvals.expireDue(2).then(
+      () => undefined,
+      (e: unknown) => e,
+    )
+    expect(thrown).toBeInstanceOf(AggregateError)
+    expect((thrown as AggregateError).errors).toHaveLength(2)
+    const [row] = await db.sql<{ decision: string | null }[]>`SELECT decision FROM ai_approvals WHERE id = ${later.approval.id}`
+    expect(row!.decision).toBe('expired')
   })
 
   it('expires an orphan that nobody decided, and the session goes back to idle', async () => {
