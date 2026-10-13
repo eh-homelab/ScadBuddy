@@ -3,7 +3,7 @@ import { ok } from './call.js'
 import { command } from './command.js'
 import { binary } from './binary.js'
 import { CAMERA, cameraQuery, outputId, slug, VIEW, VIEW_SIZE, withQuery } from './common.js'
-import { blob, defineTool, image, json, type Tool, ToolError } from './registry.js'
+import { blob, defineTool, image, json, type Tool } from './registry.js'
 import { backendPage, compositeKey, page, PAGED, pageInput, totalCount } from './pagination.js'
 import { getPlates, sourceOf, withSource } from './print.js'
 import { binarySource, fromWorkspace, uploadInit, withSent, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
@@ -127,11 +127,12 @@ export const outputTools: Tool[] = [
   defineTool({
     name: 'get_output_preview',
     description:
-      "An output's preview mesh, or one plate of a Bambuddy library file (`library_file_id`, `plate` from 1) " +
-      'read from the 3MF a print of it slices, as a binary glTF (model/gltf-binary), embedded as a base64 ' +
-      'resource; when it is too large to inline, a link to fetch it instead.',
+      "An output's preview mesh, or with `plate` (from 1) one plate of its 3MF where the file places it; or " +
+      'one plate of a Bambuddy library file (`library_file_id`) read from the 3MF a print of it slices. A binary ' +
+      'glTF (model/gltf-binary), embedded as a base64 resource; when it is too large to inline, a link to fetch it ' +
+      'instead.',
     input: withSource({
-      plate: z.number().int().min(1).optional().describe("A library file's plate, 1 by default; refused with output_id"),
+      plate: z.number().int().min(1).optional().describe("One plate; an output's whole preview, or a library file's plate 1, by default"),
     }),
     risk: 'read',
     bambuddyScope: ['Manage Library'],
@@ -155,14 +156,21 @@ export const outputTools: Tool[] = [
           (bytes, mimeType) => blob(`scadbuddy://print/library/${id}/preview.glb`, bytes, mimeType),
         )
       }
-      if (plate !== undefined) throw new ToolError("`plate` is a library file's; an output's preview is the whole output")
       const output_id = source.id
+      const query = plate === undefined ? '' : `?plate=${plate}`
       return binary(
-        ctx.backend.GET('/api/v1/outputs/{output_id}/preview.glb', { params: { path: { output_id } }, parseAs: 'stream' }),
+        ctx.backend.GET('/api/v1/outputs/{output_id}/preview.glb', {
+          params: { path: { output_id }, query: { plate } },
+          parseAs: 'stream',
+        }),
         `get preview of ${output_id}`,
         ctx,
-        { path: `/api/v1/outputs/${output_id}/preview.glb`, name: `${output_id}.glb`, fallbackType: 'model/gltf-binary' },
-        (bytes, mimeType) => blob(`scadbuddy://outputs/${output_id}/preview.glb`, bytes, mimeType),
+        {
+          path: `/api/v1/outputs/${output_id}/preview.glb${query}`,
+          name: plate === undefined ? `${output_id}.glb` : `${output_id}-plate-${plate}.glb`,
+          fallbackType: 'model/gltf-binary',
+        },
+        (bytes, mimeType) => blob(`scadbuddy://outputs/${output_id}/preview.glb${query}`, bytes, mimeType),
       )
     },
   }),
