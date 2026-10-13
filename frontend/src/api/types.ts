@@ -224,6 +224,10 @@ export type LibraryRenameResult = Schemas['LibraryRenameResult']
 export type LibraryFileObjects = Schemas['LibraryFileObjects']
 export type LibraryFileObject = Schemas['LibraryFileObject']
 
+/** #2351 — Bambuddy's spool inventory and loaded slots, read through `/farm/inventory`. */
+export type InventoryView = Schemas['InventoryView']
+export type InventorySpool = Schemas['InventorySpool']
+
 /**
  * #89 — run tracking.
  *
@@ -231,9 +235,6 @@ export type LibraryFileObject = Schemas['LibraryFileObject']
  * than string literals of their own: the backend's vocabulary is the contract, and a
  * hand-kept copy would drift the moment it gains a state.
  */
-/** #2351 — Bambuddy's spool inventory and loaded slots, read through `/farm/inventory`. */
-export type InventoryView = Schemas['InventoryView']
-export type InventorySpool = Schemas['InventorySpool']
 export type PrintProgress = Schemas['PrintProgress']
 /** #977 — what each printer is doing now, whoever started it. */
 export type PrintersNow = Schemas['PrintersNow']

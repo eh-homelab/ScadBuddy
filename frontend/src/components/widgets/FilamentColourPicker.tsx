@@ -1,30 +1,15 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { api, ApiError } from '../../api/client'
 import type { InventorySpool } from '../../api/types'
-import { amsUnitLabel } from '../../lib/filaments'
+import { trayPlace } from '../../lib/filaments'
 import { spoolColour, spoolName } from '../../lib/filamentColour'
-import { Swatch } from '../print/Swatch'
+import { ClearSwatch, Swatch } from '../print/Swatch'
 
 type State =
   | { kind: 'closed' }
   | { kind: 'loading' }
   | { kind: 'failed'; message: string }
   | { kind: 'open'; spools: InventorySpool[] }
-
-/** A clear spool's chip: a hatched square, never the black a missing colour reads as. */
-function ClearSwatch() {
-  return (
-    <span
-      aria-hidden="true"
-      title="clear"
-      data-testid="clear-swatch"
-      className="inline-block size-4 shrink-0 rounded-[3px] ring-1 ring-black/25 ring-inset"
-      style={{
-        background: 'repeating-linear-gradient(45deg, transparent 0 3px, rgb(0 0 0 / 0.18) 3px 4px)',
-      }}
-    />
-  )
-}
 
 /** Loaded spools first, then the fullest. */
 function order(a: InventorySpool, b: InventorySpool): number {
@@ -111,15 +96,7 @@ export function FilamentColourPicker({
                 const name = spoolName(spool)
                 const chosen = colour !== null && colour.hex === value
                 // The printer too: on a farm, two spools can both be in AMS-A slot 1.
-                const where = spool.loaded
-                  ? [
-                      spool.loaded.printer_name,
-                      amsUnitLabel(spool.loaded.ams_id),
-                      `slot ${spool.loaded.tray_id + 1}`,
-                    ]
-                      .filter(Boolean)
-                      .join(' · ')
-                  : null
+                const where = spool.loaded ? trayPlace(spool.loaded, { printer: true }) : null
                 return (
                   <li key={spool.id}>
                     <button
@@ -133,7 +110,7 @@ export function FilamentColourPicker({
                       }}
                       className="flex w-full items-center gap-2 rounded-[4px] px-1.5 py-1 text-left hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-50 aria-pressed:bg-accent/10"
                     >
-                      {colour === null ? <ClearSwatch /> : <Swatch colour={colour.hex} size="sm" />}
+                      {colour === null ? <ClearSwatch size="sm" /> : <Swatch colour={colour.hex} size="sm" />}
                       <span className="min-w-0 flex-1 truncate text-ink">{name}</span>
                       <span className="sb-num shrink-0 text-muted">
                         {colour === null
