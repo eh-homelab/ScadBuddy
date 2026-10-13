@@ -16,6 +16,12 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: "The UI's filter bar; activity_list's own filters say the same.",
   },
   {
+    operation: 'GET /api/v1/fonts/glyphs',
+    reason:
+      "The font field's note, as the user types, of characters the chosen font cannot draw (#2358). A render " +
+      'already reports the same characters as a missing-glyph warning, which render_model returns to an agent.',
+  },
+  {
     operation: 'GET /api/v1/prints/{archive_id}/timelapse/frames',
     reason:
       "The print page's timelapse stills and probe, read after the detail so it need not wait on Bambuddy's " +
