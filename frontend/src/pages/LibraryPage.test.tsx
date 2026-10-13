@@ -141,8 +141,8 @@ describe('LibraryPage', () => {
     server.use(http.get('/api/v1/print/library', () => delay('infinite')))
     await user.click(screen.getByTestId('library-folder-9'))
 
-    await waitFor(() => expect(screen.queryByTestId('library-print-89')).toBeNull())
-    expect(screen.getByText(/Reading the Bambuddy library/)).toBeInTheDocument()
+    expect(await screen.findByText(/Reading the Bambuddy library/)).toBeInTheDocument()
+    expect(screen.queryByTestId('library-print-89')).toBeNull()
   })
 
   it('cuts a name with an early dot in the middle, keeping only its end whole (#935)', async () => {
