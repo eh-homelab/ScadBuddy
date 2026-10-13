@@ -54,12 +54,46 @@ func TestEqualCreationTimesFallBackToTheID(t *testing.T) {
 }
 
 func TestDuplicateFolderNamesGetTheirID(t *testing.T) {
-	got := folderNames([]api.Folder{
+	got, _ := shownNames([]api.Folder{
 		{ID: 7, Name: "Parts", ParentID: 1},
 		{ID: 5, Name: "Parts", ParentID: 1},
 		{ID: 6, Name: "Parts", ParentID: 2},
-	}, 1)
+	}, nil, 1)
 	if len(got) != 2 || got["Parts"].ID != 5 || got["Parts (id 7)"].ID != 7 {
 		t.Fatalf("%v", got)
+	}
+}
+
+func TestAGeneratedNameThatIsSomeonesRealNameIsDisambiguated(t *testing.T) {
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	// The real "a (id 12).3mf" is newer than file 12, and still keeps its name.
+	got := Names([]api.File{
+		{ID: 10, Name: "a.3mf", Created: t0},
+		{ID: 12, Name: "a.3mf", Created: t0.Add(time.Hour)},
+		{ID: 13, Name: "a (id 12).3mf", Created: t0.Add(2 * time.Hour)},
+		{ID: 14, Name: "a (id 12) (2).3mf", Created: t0.Add(3 * time.Hour)},
+	})
+	want := map[string]int{"a.3mf": 10, "a (id 12).3mf": 13, "a (id 12) (2).3mf": 14, "a (id 12) (3).3mf": 12}
+	if len(got) != len(want) {
+		t.Fatalf("%v", got)
+	}
+	for name, id := range want {
+		if got[name].ID != id {
+			t.Fatalf("%s: %v", name, got)
+		}
+	}
+}
+
+func TestAFolderWinsANameOverAFile(t *testing.T) {
+	folders, files := shownNames(
+		[]api.Folder{{ID: 4, Name: "Parts"}, {ID: 5, Name: "Parts (id 4)"}, {ID: 4, Name: "x", ParentID: 9}},
+		[]api.File{{ID: 10, Name: "Parts"}, {ID: 11, Name: "Parts (id 4)"}, {ID: 12, Name: "b.3mf"}},
+		0,
+	)
+	if len(folders) != 2 || folders["Parts"].ID != 4 || folders["Parts (id 4)"].ID != 5 {
+		t.Fatalf("folders %v", folders)
+	}
+	if len(files) != 3 || files["Parts (id 10)"].ID != 10 || files["Parts (id 4) (id 11)"].ID != 11 || files["b.3mf"].ID != 12 {
+		t.Fatalf("files %v", files)
 	}
 }

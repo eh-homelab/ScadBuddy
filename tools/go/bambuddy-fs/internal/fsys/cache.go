@@ -120,11 +120,15 @@ func (c *cache) drop(id int) {
 
 func (n *file) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
 	if flags&(syscall.O_WRONLY|syscall.O_RDWR) != 0 {
-		return nil, 0, syscall.EROFS
+		if n.tree.opts.ReadOnly {
+			return nil, 0, syscall.EROFS
+		}
+		return n.write(false), 0, 0
 	}
-	fh, err := n.tree.cache.open(ctx, n.tree.lib, n.file)
+	f := n.current()
+	fh, err := n.tree.cache.open(ctx, n.tree.lib, f)
 	if err != nil {
-		slog.Warn("open failed", "file", n.file.ID, "err", err)
+		slog.Warn("open failed", "file", f.ID, "err", err)
 		errno := api.Errno(err)
 		if errno == syscall.ENOENT {
 			n.gone()
@@ -138,7 +142,7 @@ func (n *file) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 // gone forgets a file the library no longer has: its cached contents, its folder's
 // listing, and the parent's entry, here and in the kernel.
 func (n *file) gone() {
-	n.tree.cache.drop(n.file.ID)
+	n.tree.cache.drop(n.current().ID)
 	name, parent := n.Parent()
 	if parent == nil {
 		return

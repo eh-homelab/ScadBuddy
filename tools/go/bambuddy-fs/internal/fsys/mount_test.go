@@ -150,7 +150,7 @@ func TestAttributes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !info.IsDir() || info.Mode().Perm() != 0o555 || info.Sys().(*syscall.Stat_t).Ino != 4<<1 {
+	if !info.IsDir() || info.Mode().Perm() != 0o755 || info.Sys().(*syscall.Stat_t).Ino != 4<<1 {
 		t.Fatalf("dir: %v ino %d", info.Mode(), info.Sys().(*syscall.Stat_t).Ino)
 	}
 
@@ -160,7 +160,7 @@ func TestAttributes(t *testing.T) {
 	}
 	st := info.Sys().(*syscall.Stat_t)
 	created := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
-	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o444 || st.Ino != 10<<1|1 {
+	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o644 || st.Ino != 10<<1|1 {
 		t.Fatalf("file: %v ino %d", info.Mode(), st.Ino)
 	}
 	if !info.ModTime().Equal(created) || st.Ctim.Sec != created.Unix() {

@@ -18,14 +18,23 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
-// Library is what the tree reads the library through; *api.Client is one.
+// Library is what the tree reads and writes the library through; *api.Client is one.
 type Library interface {
 	List(ctx context.Context, folderID int, all bool) (api.Listing, error)
 	Download(ctx context.Context, fileID int, w io.Writer) error
+	Upload(ctx context.Context, folderID int, name string, r io.Reader) (api.File, error)
+	UpdateFile(ctx context.Context, fileID int, name *string, folderID *int) (api.File, error)
+	DeleteFiles(ctx context.Context, ids ...int) error
+	Mkdir(ctx context.Context, parentID int, name string) (api.Folder, error)
+	UpdateFolder(ctx context.Context, folderID int, name *string, parentID *int) (api.Folder, error)
+	DeleteFolder(ctx context.Context, folderID int) error
 }
 
-// Options are the mount's settings. All lists every file type, TTL is how long a
-// folder's listing is kept, and CacheDir holds downloaded contents.
+var _ Library = (*api.Client)(nil)
+
+// Options are the mount's settings. All lists every file type, ReadOnly refuses every
+// write with EROFS, TTL is how long a folder's listing is kept, and CacheDir holds
+// downloaded contents and files being written.
 type Options struct {
 	All, ReadOnly bool
 	TTL           time.Duration
@@ -68,7 +77,8 @@ func (t *tree) list(ctx context.Context, folderID int) (listing, syscall.Errno) 
 		slog.Warn("list failed", "folder", folderID, "err", err)
 		return listing{}, api.Errno(err)
 	}
-	l = listing{at: time.Now(), folders: folderNames(got.Folders, folderID), files: Names(got.Files)}
+	folders, files := shownNames(got.Folders, got.Files, folderID)
+	l = listing{at: time.Now(), folders: folders, files: files}
 	t.mu.Lock()
 	t.listings[folderID] = l
 	t.mu.Unlock()
@@ -80,6 +90,21 @@ func (t *tree) forget(folderID int) {
 	t.mu.Lock()
 	delete(t.listings, folderID)
 	t.mu.Unlock()
+}
+
+// forgetAll drops every cached listing.
+func (t *tree) forgetAll() {
+	t.mu.Lock()
+	clear(t.listings)
+	t.mu.Unlock()
+}
+
+// mode is perm without its write bits on a read-only mount.
+func (t *tree) mode(perm uint32) uint32 {
+	if t.opts.ReadOnly {
+		return perm &^ 0o222
+	}
+	return perm
 }
 
 // Inode numbers: folders are even and files odd, so the two ID spaces never meet.
@@ -114,7 +139,24 @@ func (d *dir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.
 		child.attr(&out.Attr)
 		return d.NewInode(ctx, child, fs.StableAttr{Mode: syscall.S_IFREG, Ino: fileIno(f.ID)}), 0
 	}
+	if child, n := d.unsent(name); child != nil {
+		n.attr(&out.Attr)
+		return child, 0
+	}
 	return nil, syscall.ENOENT
+}
+
+// unsent returns the child called name if it is a file created here and not uploaded
+// yet, which no listing has.
+func (d *dir) unsent(name string) (*fs.Inode, *file) {
+	child := d.GetChild(name)
+	if child == nil {
+		return nil, nil
+	}
+	if n, ok := child.Operations().(*file); ok && n.current().ID == 0 {
+		return child, n
+	}
+	return nil, nil
 }
 
 func (d *dir) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
@@ -129,6 +171,13 @@ func (d *dir) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	for name, f := range l.files {
 		entries = append(entries, fuse.DirEntry{Name: name, Mode: syscall.S_IFREG, Ino: fileIno(f.ID)})
 	}
+	for name, child := range d.Children() {
+		if _, isListed := l.files[name]; !isListed {
+			if n, ok := child.Operations().(*file); ok && n.current().ID == 0 {
+				entries = append(entries, fuse.DirEntry{Name: name, Mode: syscall.S_IFREG, Ino: child.StableAttr().Ino})
+			}
+		}
+	}
 	slices.SortFunc(entries, func(a, b fuse.DirEntry) int { return strings.Compare(a.Name, b.Name) })
 	return fs.NewListDirStream(entries), 0
 }
@@ -138,16 +187,33 @@ func (d *dir) Getattr(_ context.Context, _ fs.FileHandle, out *fuse.AttrOut) sys
 	return 0
 }
 
-// attr: writes arrive in Task 8, so until then everything is read-only.
 func (d *dir) attr(out *fuse.Attr) {
-	out.Mode = syscall.S_IFDIR | 0o555
+	out.Mode = syscall.S_IFDIR | d.tree.mode(0o755)
 }
 
-// file is a library file. Its bytes, size and creation time never change for its ID.
+// file is a library file. Its bytes, size and creation time never change for its ID:
+// a write uploads a new file under the same name (writer.upload). A file created here
+// has ID 0 until its first upload gives it one.
 type file struct {
 	fs.Inode
 	tree *tree
+
+	mu   sync.Mutex
 	file api.File
+	// writing is the file's latest write handle, whose size is the file's until it ends.
+	writing *writer
+}
+
+func (n *file) current() api.File {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.file
+}
+
+func (n *file) set(f api.File) {
+	n.mu.Lock()
+	n.file = f
+	n.mu.Unlock()
 }
 
 var (
@@ -161,7 +227,13 @@ func (n *file) Getattr(_ context.Context, _ fs.FileHandle, out *fuse.AttrOut) sy
 }
 
 func (n *file) attr(out *fuse.Attr) {
-	out.Mode = syscall.S_IFREG | 0o444
-	out.Size = uint64(n.file.Size)
-	out.SetTimes(&n.file.Created, &n.file.Created, &n.file.Created)
+	n.mu.Lock()
+	f, w := n.file, n.writing
+	n.mu.Unlock()
+	out.Mode = syscall.S_IFREG | n.tree.mode(0o644)
+	out.Size = uint64(f.Size)
+	if w != nil {
+		out.Size = uint64(w.size.Load())
+	}
+	out.SetTimes(&f.Created, &f.Created, &f.Created)
 }
