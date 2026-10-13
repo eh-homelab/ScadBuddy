@@ -69,6 +69,7 @@ from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.commands import (
     CommandClosedError,
     CommandClosingError,
+    CommandResendError,
     CommandStillAcceptingError,
     TemporalBusyError,
     TemporalRefusedError,
@@ -2350,3 +2351,98 @@ async def test_retry_after_is_how_long_renders_take_now(
         monkeypatch.setattr(projection, "recent_render_seconds", lambda: 0.2)
         assert await service.retry_after() == 1
         await service.aclose()
+
+
+# --- #2340: a submit answered before its Update is followed to its job ---------------
+
+
+@pytest.fixture
+def short_follow(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One follow waits a second, not `FOLLOW_WAIT`, so a test sees it still waiting."""
+    defaults = commands_module.follow_update.__kwdefaults__
+    assert defaults is not None
+    monkeypatch.setitem(defaults, "wait", timedelta(seconds=1))
+
+
+async def test_a_submit_no_worker_has_picked_up_is_followed_to_its_job(
+    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection, short_follow: None
+) -> None:
+    """Spec 2026-10-13 §5: past `accept_within` the submit is still accepting; the same
+    Update, followed by its id, answers the job once a worker runs the first task, and
+    no second claim or request is made."""
+    width = _w()
+    request_id = uuid.uuid4().hex
+    key = render_key(SLUG, {"width": width}, None)
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        with pytest.raises(CommandStillAcceptingError) as accepting:
+            await service.submit(
+                SLUG,
+                {"width": width},
+                request_id=request_id,
+                accept_within=timedelta(seconds=1),
+            )
+        workflow_id = str(accepting.value.args[0])
+        assert workflow_id == workflow_id_for_key(key)
+        with pytest.raises(CommandStillAcceptingError):
+            await service.follow(workflow_id, request_id, supersedes=None)
+
+        async with _worker(client, queue, ProjectingActivities(deps)):
+            job = await service.follow(workflow_id, request_id, supersedes=None)
+            await _settled(projection, job.id)
+        await service.aclose()
+
+    assert job.slug == SLUG and job.claims == 1
+    assert _sample(service.metrics, "scadbuddy_render_jobs_submitted_total", RENDER) == 1
+    assert _sample(service.metrics, "scadbuddy_render_accept_pending_total") == 2
+
+
+async def test_following_an_update_temporal_does_not_know_is_a_resend(
+    make_service: ServiceFactory,
+) -> None:
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
+        with pytest.raises(CommandResendError):
+            await service.follow(f"render-{uuid.uuid4().hex}", "never-sent", supersedes=None)
+        await service.aclose()
+
+
+async def test_a_followed_submit_releases_the_render_it_supersedes(
+    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection, short_follow: None
+) -> None:
+    """The supersede ran in the submit after its Update answered; answered 202, the
+    submit leaves it to the follow, which makes it once the new job exists."""
+    async with temporal_client() as client:
+        running_queue = f"t-{uuid.uuid4().hex[:8]}"
+        later_queue = f"t-{uuid.uuid4().hex[:8]}"
+        first_service = make_service(client, running_queue)
+        later_service = make_service(client, later_queue)
+        gate = asyncio.Event()
+        acts = ProjectingActivities(deps, block_main=gate)
+        request_id = uuid.uuid4().hex
+        async with _worker(client, running_queue, acts):
+            old = await first_service.submit(SLUG, {"width": _w()}, request_id=uuid.uuid4().hex)
+            await _until(acts, "render_main")
+            with pytest.raises(CommandStillAcceptingError) as accepting:
+                await later_service.submit(
+                    SLUG,
+                    {"width": _w()},
+                    supersedes=old.id,
+                    request_id=request_id,
+                    accept_within=timedelta(seconds=1),
+                )
+            # Not released before the new job exists.
+            assert (await asyncio.to_thread(projection.read, old.id)).state == "running"
+            async with _worker(client, later_queue, ProjectingActivities(deps)):
+                new = await later_service.follow(
+                    str(accepting.value.args[0]), request_id, supersedes=old.id
+                )
+                released = await _settled(projection, old.id)
+                await _settled(projection, new.id)
+            gate.set()
+        await first_service.aclose()
+        await later_service.aclose()
+
+    assert new.id != old.id
+    assert released.state == "cancelled"

@@ -140,6 +140,7 @@ import type {
   ProjectView,
   RememberedChoices,
   RenderAccepted,
+  CommandAccepting,
   SendRequest,
   SendResult,
   Settings,
@@ -580,6 +581,50 @@ async function reattach<T>(
       }
     }
   }
+}
+
+/** #2340 — the Update a 202 `accepting` named is not known: send the request again, same key. */
+export const COMMAND_RESEND = 'https://scadbuddy.dev/problems/command-resend'
+
+function isAccepting(body: unknown): body is CommandAccepting {
+  return typeof body === 'object' && body !== null && (body as { status?: unknown }).status === 'accepting'
+}
+
+/**
+ * #2340 — a command sent with `Prefer: respond-async` (spec 2026-10-13): a 202
+ * `accepting` is followed through its `follow_url` to the answer the route would have
+ * given, instead of sending the request again every few seconds. A follow answered 409
+ * `command-resend` (the Update was never kept, or a closing run rejected it) sends the
+ * request again with its key. Followed for up to `acceptingMs`, as the re-sends were.
+ * `signal` aborting sends one last follow at once, which names a claim already made.
+ */
+async function untilAccepted<T>(send: () => Promise<T | CommandAccepting>, signal?: AbortSignal): Promise<T> {
+  const began = performance.now()
+  let answer = await send()
+  let last = false
+  while (isAccepting(answer)) {
+    if (last || performance.now() - began >= printRunPoll.acceptingMs) {
+      throw new ApiError({
+        type: STILL_ACCEPTING,
+        title: 'Still starting',
+        status: 503,
+        detail: 'ScadBuddy is still starting this. It may start anyway.',
+      })
+    }
+    try {
+      await wait(Math.max(printRunPoll.intervalMs, answer.retry_after * 1000), signal)
+    } catch {
+      last = true
+    }
+    const url = answer.follow_url.startsWith(API_BASE) ? answer.follow_url.slice(API_BASE.length) : answer.follow_url
+    try {
+      answer = await reattach(() => request<T | CommandAccepting>(url), last ? undefined : signal)
+    } catch (caught) {
+      if (!(caught instanceof ApiError && caught.problem.type === COMMAND_RESEND)) throw caught
+      answer = await send()
+    }
+  }
+  return answer
 }
 
 /**
@@ -1248,23 +1293,25 @@ export const api = {
     signal?: AbortSignal,
     requestId: string = newRequestId(),
   ) => {
-    // Sent again while the server is still accepting it (#1053), with one
-    // `Idempotency-Key`: the server counts the re-sends as this one request's claim.
-    const headers = { 'Idempotency-Key': requestId }
-    return reattach(
-      () =>
-        request<RenderAccepted>(`/models/${seg(slug)}/render`, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({
-            inputs,
-            version: version ?? null,
-            ...(supersedes ? { supersedes } : {}),
+    // One `Idempotency-Key` (#1053): the server counts a re-send as this one request's
+    // claim. A start still accepting is answered 202 and its Update followed (#2340).
+    const headers = { 'Idempotency-Key': requestId, Prefer: 'respond-async' }
+    const send = () =>
+      reattach(
+        () =>
+          request<RenderAccepted | CommandAccepting>(`/models/${seg(slug)}/render`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              inputs,
+              version: version ?? null,
+              ...(supersedes ? { supersedes } : {}),
+            }),
           }),
-        }),
-      signal,
-      { finish: true },
-    )
+        signal,
+        { finish: true },
+      )
+    return untilAccepted<RenderAccepted>(send, signal)
   },
 
   getJob: (jobId: string) => request<Job>(`/jobs/${seg(jobId)}`),

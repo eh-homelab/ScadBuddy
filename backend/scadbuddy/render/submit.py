@@ -76,10 +76,12 @@ from scadbuddy.workflows.commands import (
     CONNECT_MARGIN_SECONDS,
     CommandClosedError,
     CommandClosingError,
+    CommandResendError,
     CommandStillAcceptingError,
     TemporalBusyError,
     TemporalUnavailableError,
     execution_gone,
+    follow_update,
     late_answer,
     start_command,
 )
@@ -209,6 +211,7 @@ class RenderService:
         inputs: Mapping[str, Any] | None = None,
         whole_inputs: bool = False,
         request_id: str | None = None,
+        accept_within: timedelta | None = None,
     ) -> Job:
         """Start the job's execution, or join the open one rendering the same content,
         and answer the row its first activity wrote. ``whole_inputs``: a pipeline
@@ -216,7 +219,9 @@ class RenderService:
         `Idempotency-Key`) makes a re-sent request the same claim, not another: it is
         the `accepted` Update's id, which Temporal answers with its first outcome on
         the open run and, once that run has closed, on the closed one (until another
-        run of the key starts)."""
+        run of the key starts). ``accept_within`` is how long the Update is waited on
+        before `CommandStillAcceptingError` (``None``: `COMMAND_ANSWER_DEADLINE`), shorter
+        for a client that follows the Update itself (`follow`, spec 2026-10-13)."""
         refusal: Exception | None = None
         with span("render.submit", attributes={"scadbuddy.slug": slug}) as current:
             try:
@@ -228,6 +233,7 @@ class RenderService:
                     inputs=inputs,
                     whole_inputs=whole_inputs,
                     request_id=request_id,
+                    accept_within=accept_within,
                 )
             except (ApiError, QueueFullError) as error:
                 if isinstance(error, ApiError) and error.status >= 500:
@@ -259,6 +265,7 @@ class RenderService:
         inputs: Mapping[str, Any] | None = None,
         whole_inputs: bool = False,
         request_id: str | None = None,
+        accept_within: timedelta | None = None,
     ) -> tuple[Job, bool]:
         if self.snapshots is not None:
             # The bambuddy store (spec §6.1): workers read the source from the store,
@@ -298,15 +305,19 @@ class RenderService:
             # The same render it replaces: answered with it, as the row did (no claim).
             self.metrics.render_coalesced.labels("render").inc()
             return previous, True
-        return await self._answer(start, previous, request_id)
+        return await self._answer(start, previous, request_id, accept_within)
 
     async def _answer(
-        self, start: RenderStart, previous: Job | None, request_id: str | None
+        self,
+        start: RenderStart,
+        previous: Job | None,
+        request_id: str | None,
+        accept_within: timedelta | None = None,
     ) -> tuple[Job, bool]:
         """The job ``start`` was answered with, and whether it joined an open one;
         counted under its kind."""
         try:
-            answer = await self._started(start, previous, request_id)
+            answer = await self._started(start, previous, request_id, accept_within)
         except (CommandStillAcceptingError, CommandClosedError):
             # Re-sent by the client with the same key: pending, not an error (review
             # #1066 (5) 3.1).
@@ -316,15 +327,45 @@ class RenderService:
             # Answered as a 503 or 500, and counted (review #1066 4.1).
             self.metrics.store_errors.labels("start_workflow").inc()
             raise
+        return await self._counted(answer, start.kind)
+
+    async def _counted(self, answer: RenderAnswer, kind: str) -> tuple[Job, bool]:
         if answer.queue_full is not None:
-            self.metrics.render_rejected.labels(start.kind).inc()
+            self.metrics.render_rejected.labels(kind).inc()
             raise QueueFullError(answer.queue_full, await self.retry_after())
         assert answer.job is not None
         if answer.coalesced:
-            self.metrics.render_coalesced.labels(start.kind).inc()
+            self.metrics.render_coalesced.labels(kind).inc()
         else:
-            self.metrics.render_submitted.labels(start.kind).inc()
+            self.metrics.render_submitted.labels(kind).inc()
         return answer.job, answer.coalesced
+
+    async def follow(self, workflow_id: str, update_id: str, *, supersedes: str | None) -> Job:
+        """The job a submit answered 202 for (spec 2026-10-13 §5.2): the outcome of its
+        `accepted` Update ``update_id`` on ``workflow_id``, then the supersede the
+        submit could not make before it answered. Still not answered, it is
+        `CommandStillAcceptingError`; an Update a closing run rejected, or one Temporal
+        does not know, `CommandResendError`; a refusal, as `submit` raises it."""
+        try:
+            answer = await follow_update(
+                self.client, workflow_id, update_id, result_type=RenderAnswer
+            )
+        except CommandStillAcceptingError:
+            self.metrics.render_accept_pending.inc()
+            raise
+        except WorkflowUpdateFailedError as error:
+            cause = error.cause
+            if isinstance(cause, ApplicationError) and cause.type == CLOSING:
+                raise CommandResendError(workflow_id) from error
+            raise
+        if answer.closing:
+            raise CommandResendError(workflow_id)
+        job, _ = await self._counted(answer, answer.job.kind if answer.job else "render")
+        previous = await self._superseded(supersedes, job.slug) if supersedes else None
+        # Not the same run: a submit that replaced its own render answered with it.
+        if previous is not None and previous.workflow_id != workflow_id:
+            await self._supersede(previous, update_id)
+        return job
 
     async def arrange(
         self, slug: str, inputs: ArrangeInputs, *, request_id: str | None = None
@@ -363,16 +404,25 @@ class RenderService:
         return job
 
     async def _started(
-        self, start: RenderStart, previous: Job | None, request_id: str | None
+        self,
+        start: RenderStart,
+        previous: Job | None,
+        request_id: str | None,
+        accept_within: timedelta | None = None,
     ) -> RenderAnswer:
         """`_accepted`, then the supersede, under one `SUBMIT_DEADLINE`. Past it the
         request is still accepting if the execution exists; if Temporal cannot say (a
         client that never connected, say), it is unavailable, as `start_command` answers
         a call that outlived its own bound."""
-        bound = asyncio.timeout(SUBMIT_DEADLINE)
+        seconds = (
+            SUBMIT_DEADLINE
+            if accept_within is None
+            else accept_within.total_seconds() + CONNECT_MARGIN_SECONDS
+        )
+        bound = asyncio.timeout(seconds)
         try:
             async with bound:
-                answer = await self._accepted(start, request_id)
+                answer = await self._accepted(start, request_id, accept_within)
                 # Started first, so a refused submit supersedes nothing.
                 if answer.job is not None and previous is not None:
                     await self._supersede(previous, request_id)
@@ -382,12 +432,19 @@ class RenderService:
             raise await late_answer(self.client, workflow_id_for_key(start.render_key)) from error
         return answer
 
-    async def _accepted(self, start: RenderStart, request_id: str | None) -> RenderAnswer:
+    async def _accepted(
+        self,
+        start: RenderStart,
+        request_id: str | None,
+        accept_within: timedelta | None = None,
+    ) -> RenderAnswer:
         """The `accepted` answer of ``render-<render_key>``, started or joined. An
         execution closing (its last claim released, or its render raised) is waited out
         once and started again; still closing, the request is still accepting, and the
         client sends it again with the same key."""
         workflow_id = workflow_id_for_key(start.render_key)
+        # `start_command`'s own default unless the caller set one.
+        deadline: dict[str, Any] = {"deadline": accept_within} if accept_within else {}
         for _ in range(2):
             try:
                 answer = await start_command(
@@ -401,6 +458,7 @@ class RenderService:
                     reuse=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
                     memo=self._memo(),
                     update_id=request_id,
+                    **deadline,
                     # Bounds a pipeline that never yields; `settle_closed` fails its row.
                     execution_timeout=timedelta(seconds=self.config.pipeline_timeout),
                 )

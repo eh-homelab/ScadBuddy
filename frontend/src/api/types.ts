@@ -64,6 +64,8 @@ export type JobState = Job['status']
 export type BoundingBox = Schemas['BoundingBox']
 export type PartInfo = Schemas['PartInfo']
 export type RenderAccepted = Schemas['RenderAccepted']
+/** #2340 — a command still accepting, answered 202 for the client to follow (spec 2026-10-13). */
+export type CommandAccepting = Schemas['CommandAccepting']
 
 export type Output = Schemas['OutputDetail']
 export type ArrangeRequest = Schemas['ArrangeRequest']

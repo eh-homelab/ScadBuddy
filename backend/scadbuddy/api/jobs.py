@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from collections import OrderedDict
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -12,13 +13,14 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request, Response, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from temporalio.client import WorkflowUpdateFailedError
 
 from scadbuddy.activity.component import ACTIVITY, ActivityComponent
 from scadbuddy.activity.index import attribute_request
 from scadbuddy.api.components import component_dep
+from scadbuddy.api.accepting import accepting, prefers_async
 from scadbuddy.api.deps import (
     HEX_ID_PATTERN,
     AssetsDep,
@@ -90,6 +92,7 @@ from scadbuddy.render.thumbnail import (
 from scadbuddy.store.cache import materialize_result
 from scadbuddy.store.content import StoreFullError
 from scadbuddy.workflows.commands import (
+    FAST_ACCEPT,
     CommandClosedError,
     CommandStillAcceptingError,
     TemporalBusyError,
@@ -400,7 +403,11 @@ async def render_model(
     fonts: FontsDep,
     activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
     idempotency_key: IdempotencyKey = None,
-) -> RenderAccepted:
+) -> RenderAccepted | JSONResponse:
+    respond_async = prefers_async(request)
+    if respond_async and idempotency_key is None:
+        # What the 202 follows is this request's Update, so it needs an id (#2340).
+        idempotency_key = uuid.uuid4().hex
     if body.supersedes is not None and idempotency_key is None:
         # A re-send without a key would release the job once more, and with it another
         # request's claim (review #1066 2.1).
@@ -442,15 +449,26 @@ async def render_model(
     # Refused only when SCADBUDDY_RENDER_QUEUE_MAX is set and reached; by default
     # the queue accepts every render and works through them.
     with submit_problems():
-        job = await render.submit(
-            slug,
-            params,
-            inputs=inputs,
-            model_version=source.version,
-            supersedes=body.supersedes,
-            whole_inputs=pipeline,
-            request_id=idempotency_key,
-        )
+        try:
+            job = await render.submit(
+                slug,
+                params,
+                inputs=inputs,
+                model_version=source.version,
+                supersedes=body.supersedes,
+                whole_inputs=pipeline,
+                request_id=idempotency_key,
+                accept_within=FAST_ACCEPT if respond_async else None,
+            )
+        except CommandStillAcceptingError as error:
+            if not respond_async:
+                raise
+            # The client follows the Update rather than sending the render again
+            # (spec 2026-10-13 §5.1); the supersede waits for its answer.
+            assert idempotency_key is not None
+            return accepting(
+                request, str(error.args[0]), idempotency_key, supersedes=body.supersedes
+            )
     await attribute_request(activity.index, f"render:{job.id}")
     return RenderAccepted(
         job_id=job.id,

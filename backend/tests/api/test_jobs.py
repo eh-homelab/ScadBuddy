@@ -4,6 +4,7 @@ import asyncio
 import logging
 import uuid
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -15,6 +16,7 @@ from temporalio.client import WorkflowUpdateFailedError
 from temporalio.exceptions import ApplicationError
 
 from scadbuddy.api import jobs as jobs_api
+from scadbuddy.api.accepting import COMMAND_RESEND_PROBLEM
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.jobs import RENDER_UNSTARTABLE_PROBLEM, SNAPSHOT_UNAVAILABLE
 from scadbuddy.api.operations import STILL_ACCEPTING_PROBLEM, TEMPORAL_UNAVAILABLE_PROBLEM
@@ -30,7 +32,9 @@ from scadbuddy.render.submit import RenderService
 from scadbuddy.store.content import StoreFullError
 from scadbuddy.store.snapshots import SnapshotStore, snapshot_key
 from scadbuddy.workflows.commands import (
+    FAST_ACCEPT,
     CommandClosedError,
+    CommandResendError,
     CommandStillAcceptingError,
     TemporalBusyError,
     TemporalRefusedError,
@@ -697,3 +701,104 @@ def test_bad_inputs_are_refused_before_a_job_exists(
     assert detail in refused.json()["detail"]
     state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
     assert state.render.store.list_jobs() == []
+
+
+# --- #2340: Prefer: respond-async answers 202 and the client follows the Update -------
+
+
+def test_a_render_still_accepting_answers_202_to_a_client_that_follows(
+    client: TestClient, model: str
+) -> None:
+    """Spec 2026-10-13 §5.1: no 503 for a slow pickup when the client follows the
+    Update itself; it waits `FAST_ACCEPT`, and its key is the Update it follows."""
+    slow = mock.AsyncMock(side_effect=CommandStillAcceptingError("render-abc"))
+    with mock.patch.object(RenderService, "submit", slow):
+        response = client.post(
+            f"/api/v1/models/{model}/render",
+            json={"params": {"width": 12}},
+            headers={"Idempotency-Key": "k" * 32, "Prefer": "respond-async"},
+        )
+
+    assert response.status_code == 202, response.text
+    body = response.json()
+    assert body["status"] == "accepting"
+    assert (body["workflow_id"], body["update_id"]) == ("render-abc", "k" * 32)
+    assert body["follow_url"] == f"/api/v1/commands/render-abc/updates/{'k' * 32}"
+    assert response.headers["location"] == body["follow_url"]
+    assert response.headers["retry-after"] == "2"
+    assert response.headers["preference-applied"] == "respond-async"
+    assert slow.await_args is not None
+    assert slow.await_args.kwargs["accept_within"] == FAST_ACCEPT
+
+
+def test_a_followed_render_without_a_key_gets_one_to_follow(client: TestClient, model: str) -> None:
+    slow = mock.AsyncMock(side_effect=CommandStillAcceptingError("render-abc"))
+    with mock.patch.object(RenderService, "submit", slow):
+        response = client.post(
+            f"/api/v1/models/{model}/render",
+            json={"params": {"width": 12}},
+            headers={"Prefer": "respond-async"},
+        )
+
+    assert response.status_code == 202, response.text
+    assert slow.await_args is not None
+    assert slow.await_args.kwargs["request_id"] == response.json()["update_id"]
+    assert len(response.json()["update_id"]) == 32
+
+
+def _job(job_id: str = "j" * 32) -> Job:
+    return Job(id=job_id, slug="demo", created_at=datetime.now(UTC), inputs={"v": 0})
+
+
+def test_following_a_render_answers_its_job(client: TestClient) -> None:
+    follow = mock.AsyncMock(return_value=_job())
+    with mock.patch.object(RenderService, "follow", follow):
+        response = client.get(
+            "/api/v1/commands/render-abc/updates/k1", params={"supersedes": "old"}
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "job_id": "j" * 32,
+        "status_url": f"/api/v1/jobs/{'j' * 32}",
+        "inputs": {"v": 0},
+    }
+    follow.assert_awaited_once_with("render-abc", "k1", supersedes="old")
+
+
+def test_following_a_render_still_accepting_is_202_again(client: TestClient) -> None:
+    still = mock.AsyncMock(side_effect=CommandStillAcceptingError("render-abc"))
+    with mock.patch.object(RenderService, "follow", still):
+        response = client.get(
+            "/api/v1/commands/render-abc/updates/k1", params={"supersedes": "old"}
+        )
+
+    assert response.status_code == 202
+    assert response.json()["follow_url"] == "/api/v1/commands/render-abc/updates/k1?supersedes=old"
+
+
+def test_following_an_unknown_update_says_to_send_the_request_again(client: TestClient) -> None:
+    lost = mock.AsyncMock(side_effect=CommandResendError("render-abc"))
+    with mock.patch.object(RenderService, "follow", lost):
+        response = client.get("/api/v1/commands/render-abc/updates/k1")
+
+    assert response.status_code == 409
+    assert response.json()["type"] == COMMAND_RESEND_PROBLEM
+
+
+def test_following_a_full_queue_is_the_renders_own_refusal(client: TestClient) -> None:
+    full = mock.AsyncMock(side_effect=QueueFullError(3, 7))
+    with mock.patch.object(RenderService, "follow", full):
+        response = client.get("/api/v1/commands/render-abc/updates/k1")
+
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "7"
+
+
+def test_only_a_render_is_followed(client: TestClient) -> None:
+    follow = mock.AsyncMock(return_value=_job())
+    with mock.patch.object(RenderService, "follow", follow):
+        response = client.get("/api/v1/commands/print-abc/updates/k1")
+
+    assert response.status_code == 404
+    follow.assert_not_awaited()

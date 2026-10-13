@@ -6,6 +6,7 @@ import { server } from '../mocks/server'
 import {
   ApiError,
   BAMBUDDY_UNAVAILABLE,
+  COMMAND_RESEND,
   MEDIA_THUMBNAIL_VERSION,
   OPERATION_UNFINISHED,
   SETTINGS_SHARE_MS,
@@ -1494,6 +1495,83 @@ describe('render (#1053)', () => {
     await expect(api.render('box', { params: {} }, undefined, undefined, controller.signal)).rejects.toBeDefined()
     await new Promise((resolve) => setTimeout(resolve, 60))
     expect(posts).toBe(2)
+  })
+
+  // #2340 — spec 2026-10-13: a slow pickup is a 202 to follow, not a 503 to send again.
+  const followUrl = '/api/v1/commands/render-x/updates/k'
+  const stillAccepting = () =>
+    HttpResponse.json(
+      { status: 'accepting', workflow_id: 'render-x', update_id: 'k', follow_url: followUrl, retry_after: 0 },
+      { status: 202 },
+    )
+
+  it('asks to follow, and follows a 202 accepting to its job without sending the render again', async () => {
+    printRunPoll.intervalMs = 1
+    let posts = 0
+    let follows = 0
+    let prefer: string | null = null
+    server.use(
+      http.post('/api/v1/models/box/render', ({ request }) => {
+        posts += 1
+        prefer = request.headers.get('Prefer')
+        return stillAccepting()
+      }),
+      http.get(followUrl, () => {
+        follows += 1
+        return follows === 1
+          ? stillAccepting()
+          : HttpResponse.json({ job_id: 'j1', status_url: '/api/v1/jobs/j1', inputs: {} })
+      }),
+    )
+
+    await expect(api.render('box', { params: {} })).resolves.toMatchObject({ job_id: 'j1' })
+    expect(prefer).toBe('respond-async')
+    expect(posts).toBe(1)
+    expect(follows).toBe(2)
+  })
+
+  it('sends the render again with its key when the follow says command-resend', async () => {
+    printRunPoll.intervalMs = 1
+    const keys: (string | null)[] = []
+    server.use(
+      http.post('/api/v1/models/box/render', ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return keys.length === 1
+          ? stillAccepting()
+          : HttpResponse.json({ job_id: 'j1', status_url: '/api/v1/jobs/j1' }, { status: 202 })
+      }),
+      http.get(followUrl, () =>
+        HttpResponse.json(
+          { type: COMMAND_RESEND, title: 'Conflict', status: 409, detail: 'send it again' },
+          { status: 409 },
+        ),
+      ),
+    )
+
+    await expect(api.render('box', { params: {} })).resolves.toMatchObject({ job_id: 'j1' })
+    expect(keys).toHaveLength(2)
+    expect(keys[1]).toBe(keys[0])
+  })
+
+  it('after an abort while following, follows once more to learn the job it claimed', async () => {
+    printRunPoll.intervalMs = 50
+    const controller = new AbortController()
+    let follows = 0
+    server.use(
+      http.post('/api/v1/models/box/render', () => {
+        setTimeout(() => controller.abort(), 10)
+        return stillAccepting()
+      }),
+      http.get(followUrl, () => {
+        follows += 1
+        return HttpResponse.json({ job_id: 'j1', status_url: '/api/v1/jobs/j1', inputs: {} })
+      }),
+    )
+
+    await expect(api.render('box', { params: {} }, undefined, undefined, controller.signal)).resolves.toMatchObject({
+      job_id: 'j1',
+    })
+    expect(follows).toBe(1)
   })
 })
 
