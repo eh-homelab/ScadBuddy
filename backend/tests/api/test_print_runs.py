@@ -31,10 +31,11 @@ from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.api import operations as operations_api
 from scadbuddy.api import printing as printing_api
+from scadbuddy.api.accepting import COMMAND_RESEND_PROBLEM
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.print_run import PrintRunRequest
-from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, run_key
+from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, PrintRunError, run_key
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
@@ -42,6 +43,8 @@ from scadbuddy.workflows import commands as commands_module
 from scadbuddy.workflows.client import connect_lazily
 from scadbuddy.workflows.commands import (
     CommandClosedError,
+    CommandResendError,
+    CommandStillAcceptingError,
     TemporalUnavailableError,
     TemporalUnreachableError,
     temporal_failure,
@@ -1276,9 +1279,7 @@ def test_a_run_no_worker_has_accepted_yet_is_followed_to_its_run(
     again; following that Update answers the run once it is recorded, and it prints
     once. The check's printer read is held to keep the Update from answering."""
     monkeypatch.setattr(printing_api, "FAST_ACCEPT", timedelta(seconds=1))
-    follow_defaults = commands_module.follow_update.__kwdefaults__
-    assert follow_defaults is not None
-    monkeypatch.setitem(follow_defaults, "wait", timedelta(seconds=1))
+    monkeypatch.setattr(commands_module, "FOLLOW_WAIT", timedelta(seconds=1))
     output_id = prepared(client, model)
     upload_route()
     run_routes()
@@ -1317,3 +1318,59 @@ def test_a_run_no_worker_has_accepted_yet_is_followed_to_its_run(
     assert run["status"] == "running" and run["repeated"] is False
     assert follow_run(client, run["id"])["status"] == "succeeded"
     assert queued.call_count == 1
+
+
+def test_only_a_press_with_a_request_id_is_offered_the_202(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #2834: without a `request_id`, a repeat of an ended run must start anew
+    (`ended`), which a follow cannot tell from this request's own run. Such a request
+    keeps the 503 re-send even when it asks to follow."""
+    output_id = prepared(client, model)
+
+    async def slow(*args: Any, **kwargs: Any) -> AcceptAnswer:
+        raise CommandStillAcceptingError("print-x")
+
+    monkeypatch.setattr(printing_api, "start_command", slow)
+    prefer = {"Prefer": "respond-async"}
+    anonymous = client.post(f"/api/v1/print/outputs/{output_id}/run", json=body(), headers=prefer)
+    pressed = client.post(
+        f"/api/v1/print/outputs/{output_id}/run",
+        json={**body(), "request_id": "r" * 32},
+        headers=prefer,
+    )
+
+    assert anonymous.status_code == 503, anonymous.text
+    assert anonymous.json()["type"] == operations_api.STILL_ACCEPTING_PROBLEM
+    assert pressed.status_code == 202, pressed.text
+    assert pressed.json()["update_id"] == "r" * 32
+
+
+def test_following_a_refused_run_answers_the_refusal(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The follow answers a refusal as the run route would have (review #2834)."""
+
+    async def refused(*args: Any, **kwargs: Any) -> AcceptAnswer:
+        return AcceptAnswer(
+            refusal=PrintRunError(
+                type="about:blank", status=422, title="Unprocessable", detail="no 0.2 nozzle"
+            )
+        )
+
+    monkeypatch.setattr(printing_api, "follow_update", refused)
+    response = client.post("/api/v1/commands/print-x/updates/r1")
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == "no 0.2 nozzle"
+
+
+def test_following_a_run_temporal_does_not_know_says_to_send_it_again(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def unknown(*args: Any, **kwargs: Any) -> AcceptAnswer:
+        raise CommandResendError("print-x")
+
+    monkeypatch.setattr(printing_api, "follow_update", unknown)
+    response = client.post("/api/v1/commands/print-x/updates/r1")
+    assert response.status_code == 409, response.text
+    assert response.json()["type"] == COMMAND_RESEND_PROBLEM

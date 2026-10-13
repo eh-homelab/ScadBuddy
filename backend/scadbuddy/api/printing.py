@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-import uuid
 from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, suppress
@@ -801,8 +800,11 @@ async def accept_run(
         search_attributes=runs.search_attributes,
     )
     workflow_id = f"print-{key}"
-    respond_async = http is not None and prefers_async(http)
-    update_id = (request.request_id or uuid.uuid4().hex) if respond_async else None
+    # Only for a press with a `request_id` (review #2834): without one, a repeat of an
+    # ended run outside its window must start anew (`ended` below), which a follow of the
+    # Update cannot tell from the run this request made. Those keep the 503 re-send.
+    respond_async = http is not None and prefers_async(http) and has_request_id
+    update_id = request.request_id if respond_async else None
 
     began = time.monotonic()
 
