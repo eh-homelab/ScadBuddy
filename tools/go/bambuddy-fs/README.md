@@ -60,19 +60,30 @@ It runs as the unprivileged user `bambuddy` (uid 10001) and mounts through the s
   no-new-privileges` (in Kubernetes, `allowPrivilegeEscalation: true`);
 - under Docker's default AppArmor profile, which denies `mount`:
   `--security-opt apparmor:unconfined`;
-- a mountpoint uid 10001 can write. Otherwise run it with `--user 0`.
+- a mountpoint uid 10001 can write. Otherwise run it with `--user 0`;
+- a volume for the state directory, `/home/bambuddy/.local/state/bambuddy-fs`. It holds
+  the unsent and refused writes (see "Unsent writes"), the only copy of a save
+  ScadBuddy has not taken yet, so it must outlive the container: an image update, a
+  `docker run --rm` or a pod restart would otherwise delete them. The image declares it
+  a `VOLUME`, but an anonymous one goes with `--rm`; use a named volume (Docker gives an
+  empty one the directory's owner, uid 10001) or a host directory uid 10001 owns. In
+  Kubernetes, a PersistentVolumeClaim. One mount at a time may use it.
+- optionally, a volume for the cache directory, `/home/bambuddy/.cache/bambuddy-fs`, so
+  downloads stay cached across recreates.
 
 ```bash
 sudo install -d -o 10001 -g 10001 /mnt/bambuddy
 docker run --device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor:unconfined \
+  -v bambuddy-fs-state:/home/bambuddy/.local/state/bambuddy-fs \
+  -v bambuddy-fs-cache:/home/bambuddy/.cache/bambuddy-fs \
   -v /mnt/bambuddy:/mnt/bambuddy:rshared ghcr.io/eh-homelab/scadbuddy-bambuddy-fs \
   mount --api http://scadbuddy/api/v1 --allow-other /mnt/bambuddy
 ```
 
 `--allow-other` lets processes other than the mounting one, such as the host and other
 containers, see the files; the image's `/etc/fuse.conf` sets `user_allow_other` so the
-unprivileged user may pass it. `--cache-dir` defaults to `/home/bambuddy/.cache/bambuddy-fs`
-inside the container. With no arguments the image prints `mount --help`.
+unprivileged user may pass it. `--cache-dir` and `--state-dir` default to the two volume
+paths above. With no arguments the image prints `mount --help`.
 
 ## Flags
 

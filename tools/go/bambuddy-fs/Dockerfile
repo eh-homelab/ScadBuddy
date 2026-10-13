@@ -36,8 +36,17 @@ RUN apt-get update \
 # user_allow_other: without it fusermount3 refuses `--allow-other` to anyone but root.
 RUN sed -i 's/^#user_allow_other/user_allow_other/' /etc/fuse.conf \
     && grep -qx user_allow_other /etc/fuse.conf \
-    && useradd --uid 10001 --user-group --create-home --shell /usr/sbin/nologin bambuddy
+    && useradd --uid 10001 --user-group --create-home --shell /usr/sbin/nologin bambuddy \
+    && install -d -o bambuddy -g bambuddy -m 0700 \
+       /home/bambuddy/.local/state/bambuddy-fs /home/bambuddy/.cache/bambuddy-fs
 COPY --from=build /out/bambuddy-fs /usr/local/bin/bambuddy-fs
+# The state directory holds the unsent and refused writes, the only copy of a save
+# ScadBuddy has not taken yet: never the container's writable layer. Mount a named
+# volume (or a host directory uid 10001 owns) here; Docker copies this directory's
+# owner into an empty named volume. Without one, Docker makes an anonymous volume,
+# which `docker run --rm` deletes with the container. The cache directory is
+# optional: without a volume, downloads start cold after a recreate.
+VOLUME ["/home/bambuddy/.local/state/bambuddy-fs"]
 USER bambuddy
 ENTRYPOINT ["bambuddy-fs"]
 CMD ["mount", "--help"]
