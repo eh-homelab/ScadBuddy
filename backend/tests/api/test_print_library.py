@@ -30,7 +30,7 @@ from scadbuddy.render.bambu3mf import (
     write_bambu_3mf,
 )
 from scadbuddy.render.split import ColourPart
-from tests.api.test_print_filaments import queue_route, slice_routes
+from tests.api.test_print_filaments import queue_route, slice_kept, slice_routes
 from tests.api.test_print_progress import watched as watched  # the fixture, shared
 from tests.api.test_print_run_choices import body, follow_run, run_routes
 from tests.api.test_print_runs import Gate, gated_slice_routes
@@ -145,7 +145,8 @@ def test_the_root_lists_unsliced_3mfs_and_advanced_lists_every_file(client: Test
     assert plain["files"] and {row["file_type"] for row in plain["files"]} == {"3mf"}
     assert all(row["printable"] for row in plain["files"])
     sliced = [row for row in every["files"] if row["file_type"] == "gcode.3mf"]
-    assert sliced and not any(row["printable"] for row in sliced)
+    # #2671: a sliced file prints as it is, and says it is sliced (so it is never arranged).
+    assert sliced and all(row["printable"] and row["sliced"] for row in sliced)
     assert plain["hidden"] == len(every["files"]) - len(plain["files"])
     # The folder tree arrives flattened, each with its depth.
     assert {"Supplies": 0, "Storage": 1}.items() <= {
@@ -377,6 +378,65 @@ def test_a_deleted_files_choices_are_its_404_whatever_else_fails(client: TestCli
     assert response.json()["type"].endswith("/bambuddy-not-found")
 
 
+def sliced_3mf(
+    *,
+    printer_model: str = "Bambu Lab H2C",
+    nozzle: str = "0.4",
+    plates: tuple[int, ...] = (1,),
+) -> bytes:
+    """A sliced file as Bambu Studio exports one (#2671): G-code for ``plates``, and
+    ``slice_info.config`` saying what each was sliced for and which filament it uses."""
+    info = "".join(
+        f"""<plate>
+          <metadata key="index" value="{index}"/>
+          <metadata key="nozzle_diameters" value="{nozzle}"/>
+          <metadata key="prediction" value="{1800 * index}"/>
+          <metadata key="weight" value="{4.5 * index}"/>
+          <filament id="1" type="PLA" color="#0047BB" used_m="1.2" used_g="{4.5 * index}"/>
+        </plate>"""
+        for index in plates
+    )
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        archive.writestr("3D/3dmodel.model", "<model/>")
+        archive.writestr(
+            "Metadata/project_settings.config",
+            json.dumps(
+                {
+                    "printer_model": printer_model,
+                    "printer_settings_id": f"{printer_model} {nozzle} nozzle",
+                    "print_settings_id": "0.20mm Standard @BBL H2C",
+                    "curr_bed_type": "Textured PEI Plate",
+                    "nozzle_diameter": [nozzle, nozzle],
+                    "filament_colour": ["#0047BB"],
+                    "filament_type": ["PLA"],
+                }
+            ),
+        )
+        archive.writestr("Metadata/slice_info.config", f"<config>{info}</config>")
+        for index in plates:
+            archive.writestr(f"Metadata/plate_{index}.gcode", "; sliced\n")
+    return buffer.getvalue()
+
+
+def sliced_file(file_id: int = 104, content: bytes | None = None) -> respx.Route:
+    """A sliced library file with a hash, so its slots and profile are read from it."""
+    return library_file(
+        file_id,
+        file_type="gcode.3mf",
+        content=sliced_3mf() if content is None else content,
+        file_hash=hashlib.sha256(f"sliced-{file_id}".encode()).hexdigest(),
+    )
+
+
+SLICED_RUN = {
+    "printer_id": 1,
+    "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]},
+    "choices": {"nozzles": [{"size": "0.4"}], "tier": "standard"},
+}
+
+
 @respx.mock
 def test_an_unprintable_files_choices_are_its_422_whatever_else_fails(client: TestClient) -> None:
     """#2532: as the 404 above, an unprintable file's 422 beats the printers' and the
@@ -396,22 +456,190 @@ def test_an_unprintable_files_choices_are_its_422_whatever_else_fails(client: Te
 
 
 @respx.mock
-def test_a_sliced_file_is_a_422_before_anything_is_sliced(client: TestClient) -> None:
+def test_a_sliced_file_is_queued_as_it_is_with_nothing_sliced_or_uploaded(
+    client: TestClient,
+) -> None:
+    """#2671: the file itself is queued, with the spools chosen for its slots and the
+    options remembered for it (a manual start among them); nothing is uploaded or
+    sliced, and the user's file is only read."""
     configure(client)
-    library_file(104, file_type="gcode.3mf")
+    upload = flow_copy_routes()
+    sliced_file(104)
+    run_routes()
+    sliced = slice_routes()
+    queued = queue_route()
+    assert (
+        client.put(
+            "/api/v1/settings/print-options",
+            json={"scope": "model", "key": "library:104", "options": {"manual_start": True}},
+        ).status_code
+        == 200
+    )
+
+    response = run_library(client, 104, json=SLICED_RUN)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["library_file_id"] == 104
+    assert response.json()["sliced_library_file_id"] == 104
+    assert response.json()["slice_job_id"] is None
+    assert not sliced.called and not upload.called
+    sent = json.loads(queued.calls.last.request.content)
+    assert sent["library_file_id"] == 104
+    assert sent["plate_id"] == 1
+    assert sent["manual_start"] is True
+    assert sent["filament_overrides"][0]["slot_id"] == 1
+    assert not [
+        call
+        for call in respx.calls
+        if "/library/files/104" in call.request.url.path and call.request.method != "GET"
+    ]
+
+
+@respx.mock
+def test_a_sliced_files_choices_say_what_it_was_sliced_for(client: TestClient) -> None:
+    """#2671: the dialog shows the baked-in slicer choices read-only, and its slots are
+    the ones the file was sliced with."""
+    configure(client)
+    sliced_file(104, sliced_3mf(plates=(1, 3)))
+    run_routes()
+
+    choices = client.get("/api/v1/print/library/104/choices")
+
+    assert choices.status_code == 200, choices.text
+    profile = choices.json()["sliced"]
+    assert profile["printer_model"] == "Bambu Lab H2C"
+    assert profile["nozzle_diameters"] == ["0.4"]
+    assert profile["process"] == "0.20mm Standard @BBL H2C"
+    assert profile["bed_type"] == "Textured PEI Plate"
+    assert [(p["index"], p["print_seconds"], p["weight_g"]) for p in profile["plates"]] == [
+        (1, 1800, 4.5),
+        (3, 5400, 13.5),
+    ]
+    assert [slot["slot_id"] for slot in choices.json()["filaments"]["slots"]] == [1]
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("content", "plate_id", "refusal"),
+    [
+        pytest.param(
+            sliced_3mf(printer_model="Bambu Lab X1 Carbon"),
+            1,
+            "This file was sliced for a Bambu Lab X1 Carbon, and 3DP-31B-598 is a H2C.",
+            id="another-model",
+        ),
+        pytest.param(
+            sliced_3mf(nozzle="0.6"),
+            1,
+            "This file was sliced for a 0.6 mm nozzle, and 3DP-31B-598 has only 0.2, 0.4 mm.",
+            id="another-nozzle",
+        ),
+        pytest.param(sliced_3mf(plates=(1,)), 2, "there is no plate 2", id="no-such-plate"),
+    ],
+)
+def test_a_sliced_file_that_does_not_fit_the_printer_is_refused_before_anything_queues(
+    client: TestClient, content: bytes, plate_id: int, refusal: str
+) -> None:
+    """#2671: only a real mismatch refuses, and it says which."""
+    configure(client)
+    sliced_file(104, content)
+    run_routes()
+    queued = queue_route()
+
+    check = client.post(
+        "/api/v1/print/library/104/check", json={**SLICED_RUN, "plate_id": plate_id}
+    )
+    run = client.post("/api/v1/print/library/104/run", json={**SLICED_RUN, "plate_id": plate_id})
+
+    assert check.status_code == 200, check.text
+    assert any(refusal in error for error in check.json()["errors"]), check.json()
+    assert run.status_code == 422, run.text
+    assert refusal in run.json()["detail"]
+    assert not queued.called
+
+
+@respx.mock
+def test_a_sliced_file_that_fits_checks_clean(client: TestClient) -> None:
+    """#2671: an H2C file for the 0.4 the printer has, on a plate it holds: no refusal,
+    though the printer is not one ScadBuddy chooses presets for by name."""
+    configure(client)
+    sliced_file(104)
+    run_routes()
+
+    check = client.post("/api/v1/print/library/104/check", json=SLICED_RUN)
+
+    assert check.status_code == 200, check.text
+    assert check.json()["errors"] == []
+
+
+@respx.mock
+def test_a_sliced_file_is_never_preview_sliced(client: TestClient) -> None:
+    configure(client)
+    sliced_file(104)
     run_routes()
     sliced = slice_routes()
 
-    run = client.post("/api/v1/print/library/104/run", json=body())
-    choices = client.get("/api/v1/print/library/104/choices")
-    filaments = client.get("/api/v1/print/library/104/filaments")
+    response = client.post(
+        "/api/v1/print/library/104/preview-slice", json=SLICED_RUN, headers=press()
+    )
 
-    for response in (run, choices, filaments):
-        assert response.status_code == 422, response.text
-        assert response.json()["detail"] == (
-            "file-104.gcode.3mf is sliced already. Print it from Bambuddy."
-        )
+    assert response.status_code == 422, response.text
+    assert "sliced already" in response.json()["detail"]
     assert not sliced.called
+
+
+@respx.mock
+def test_a_second_print_of_the_same_choices_queues_scadbuddys_own_slice(
+    client: TestClient,
+) -> None:
+    """#2671: ScadBuddy recorded the slice of its copy with these presets, and Bambuddy
+    still has it, so printing the same again queues that slice rather than slicing."""
+    configure(client)
+    one_color(89)
+    upload = flow_copy_routes()
+    library_file(89)
+    run_routes()
+    sliced = slice_routes(sliced_id=77)
+    queued = queue_route()
+    slice_kept()
+    request = {**body(), "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]}}
+
+    first = run_library(client, 89, json={**request, "request_id": "first"})
+    copy_kept(upload)
+    second = run_library(client, 89, json={**request, "request_id": "second"})
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert sliced.call_count == 1
+    assert second.json()["sliced_library_file_id"] == 77
+    assert second.json()["slice_job_id"] is None
+    assert [json.loads(call.request.content)["library_file_id"] for call in queued.calls] == [
+        77,
+        77,
+    ]
+
+
+@respx.mock
+def test_a_recorded_slice_bambuddy_no_longer_has_is_sliced_again(client: TestClient) -> None:
+    configure(client)
+    one_color(89)
+    upload = flow_copy_routes()
+    library_file(89)
+    run_routes()
+    sliced = slice_routes(sliced_id=77)
+    queue_route()
+    respx.get(f"{API}/library/files/77").mock(
+        return_value=httpx.Response(404, json={"detail": "File not found"})
+    )
+    request = {**body(), "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]}}
+
+    first = run_library(client, 89, json={**request, "request_id": "first"})
+    copy_kept(upload)
+    second = run_library(client, 89, json={**request, "request_id": "second"})
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert sliced.call_count == 2
 
 
 @respx.mock
@@ -801,6 +1029,7 @@ def test_a_library_print_s_progress_is_its_newest_run_s_and_is_followed(
             200, json={**row, "file_hash": hashlib.sha256(payload).hexdigest()}
         )
     )
+    slice_kept()
     queue_route(item_id=52)
     second = run_library(client, 89, json={**body(), **plan, "request_id": "second"})
     assert second.status_code == 200, second.text
@@ -908,6 +1137,18 @@ def flow_copy_routes(listed: list[dict[str, Any]] | None = None) -> respx.Route:
     )
 
 
+def copy_kept(upload: respx.Route) -> None:
+    """The copy the first run uploaded, still in the inbox, so a second run takes it."""
+    payload = _uploaded_3mf(upload)
+    row = {"id": 141, "filename": uploaded_name(upload), "file_type": "3mf"}
+    flow_copy_routes([{**row, "file_size": len(payload)}])
+    respx.get(f"{API}/library/files/141").mock(
+        return_value=httpx.Response(
+            200, json={**row, "file_hash": hashlib.sha256(payload).hexdigest()}
+        )
+    )
+
+
 def uploaded_name(route: respx.Route) -> str:
     content: bytes = route.calls.last.request.content
     return content.split(b'filename="', 1)[1].split(b'"', 1)[0].decode()
@@ -961,8 +1202,8 @@ def test_a_library_file_bambuddy_slices_is_sliced_for_the_high_flow_chosen(
 
 @respx.mock
 def test_a_library_files_flow_copy_in_the_inbox_is_reused(client: TestClient) -> None:
-    """The same bytes under the same name in the inbox are sliced again, not uploaded
-    again, so printing a file twice leaves one copy."""
+    """The same bytes under the same name in the inbox are not uploaded again, so
+    printing a file twice leaves one copy; its slice is queued again too (#2671)."""
     configure(client)
     one_color(89)
     first = flow_copy_routes()
@@ -981,11 +1222,13 @@ def test_a_library_files_flow_copy_in_the_inbox_is_reused(client: TestClient) ->
         )
     )
 
+    slice_kept()
+
     # Two copies, so it is a second run rather than the first one's answer repeated.
     response = run_library(client, 89, json={**high_flow_run(), "copies": 2})
 
     assert response.status_code == 200, response.text
-    assert sliced.call_count == 2
+    assert sliced.call_count == 1
     assert "/library/files/141/slice" in str(sliced.calls.last.request.url)
     assert first.call_count == 1
 

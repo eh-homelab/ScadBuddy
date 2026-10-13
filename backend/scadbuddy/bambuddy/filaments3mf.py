@@ -22,6 +22,11 @@ What Bambuddy answers, and so what this answers (its ``library.py``):
 
 Only the settings entries are inflated, each capped, plus a scan of the model files for
 painting within the read budget; a file past the budget is read as "painting unknown".
+
+A sliced file (``gcode.3mf``, #2671) is read with ``sliced=True``: its slots are
+``slice_info.config``'s, as above, and :class:`SlicedProfile` says what it was sliced
+for (the printer, the nozzle, the process and plate type) and which plates it holds
+G-code for, which is what decides whether it can print as it is.
 """
 
 from __future__ import annotations
@@ -46,6 +51,14 @@ from scadbuddy.render.read_budget import ReadBudget
 from scadbuddy.render.split import PAINT_ATTRIBUTE
 
 SLICE_INFO_NAME = "Metadata/slice_info.config"
+#: Bambu Studio's prefix on a printer model in ``project_settings.config``.
+_VENDOR = "BAMBU LAB"
+#: Bambu Studio's names for a model (``printer_model``) that Bambuddy names otherwise
+#: (``Printer.model``), compared as :func:`model_key` leaves them.
+_MODEL_ALIASES = {"X1CARBON": "X1C"}
+#: Where a plate's index sits in ``Metadata/plate_<n>.gcode``.
+_PLATE_PREFIX = len("Metadata/plate_")
+_GCODE_SUFFIX = -len(".gcode")
 #: Moves when what is read from the same bytes changes, so an older cached read is not
 #: served.
 FILAMENTS_VERSION = 1
@@ -62,6 +75,68 @@ class UnreadableFilamentsError(ValueError):
     """A file whose slots cannot be read here; Bambuddy is asked instead."""
 
 
+class SlicedPlate(BaseModel):
+    """One plate a sliced file holds G-code for, as ``slice_info.config`` states it."""
+
+    index: int
+    #: Bambu Studio's estimate (``prediction``), seconds.
+    print_seconds: int | None = None
+    #: Filament it uses (``weight``), grams.
+    weight_g: float | None = None
+    #: The nozzle diameters it was sliced for (``nozzle_diameters``), as written.
+    nozzle_diameters: list[str] = Field(default_factory=list)
+
+
+class SlicedProfile(BaseModel):
+    """What a sliced file was sliced for (#2671), read from the file itself: none of it
+    can change without slicing again, so the print dialog shows it read-only and the
+    run refuses a printer it does not fit."""
+
+    #: ``project_settings.config``'s ``printer_model`` ("Bambu Lab H2C").
+    printer_model: str | None = None
+    #: Its printer and process presets' names, and the plate type.
+    printer_preset: str | None = None
+    process: str | None = None
+    bed_type: str | None = None
+    #: Every nozzle diameter a plate was sliced for, else the project's.
+    nozzle_diameters: list[str] = Field(default_factory=list)
+    #: The plates with G-code in the file, in index order.
+    plates: list[SlicedPlate] = Field(default_factory=list)
+
+    def plate(self, index: int) -> SlicedPlate | None:
+        return next((plate for plate in self.plates if plate.index == index), None)
+
+    def diameters_for(self, indices: list[int]) -> list[str]:
+        """The nozzle diameters ``indices`` were sliced for, each once, normalised."""
+        found: list[str] = []
+        for index in indices:
+            plate = self.plate(index)
+            for value in (plate.nozzle_diameters if plate else []) or self.nozzle_diameters:
+                size = diameter(value)
+                if size is not None and size not in found:
+                    found.append(size)
+        return found
+
+
+def diameter(value: str | None) -> str | None:
+    """A nozzle diameter as Bambuddy writes one ("0.4"), whatever the file wrote ("0.40")."""
+    try:
+        number = float(value or "")
+    except ValueError:
+        return None
+    return f"{number:g}" if number > 0 else None
+
+
+def model_key(model: str | None) -> str | None:
+    """A printer model compared across Bambu Studio's and Bambuddy's names: "Bambu Lab
+    X1 Carbon" and "X1C" are one key, "Bambu Lab H2C" and "H2C" another."""
+    text = (model or "").upper().strip()
+    if text.startswith(_VENDOR):
+        text = text[len(_VENDOR) :]
+    key = "".join(ch for ch in text if ch.isalnum())
+    return _MODEL_ALIASES.get(key, key) or None
+
+
 class LocalFilaments(BaseModel):
     """What :func:`read_filaments` read: enough to answer ``filament-requirements`` for
     any plate, cached as one file per library file."""
@@ -74,6 +149,8 @@ class LocalFilaments(BaseModel):
     #: The slots each plate's parts name, by plate index; ``None`` when that cannot be
     #: known, and every slot then counts as used.
     plate_slots: dict[int, list[int]] | None = None
+    #: What a sliced file was sliced for (#2671); ``None`` for a file that is not.
+    profile: SlicedProfile | None = None
 
     def for_plate(self, plate_id: int | None) -> FilamentRequirements:
         """Bambuddy's answer for ``plate_id`` (``None``: the whole file)."""
@@ -177,6 +254,59 @@ def _sliced(root: ET.Element | None) -> dict[int, list[FilamentRequirement]]:
     return {index: sorted(found, key=lambda f: f.slot_id) for index, found in plates.items()}
 
 
+def _diameters(value: str | None) -> list[str]:
+    return [part for part in (value or "").replace(",", " ").split() if part]
+
+
+def _first(value: Any) -> str | None:
+    """A project setting that is a string, or a list of them, as one string."""
+    if isinstance(value, list):
+        value = value[0] if value else None
+    return value if isinstance(value, str) and value else None
+
+
+def _profile(
+    archive: zipfile.ZipFile, root: ET.Element | None, settings: dict[str, Any]
+) -> SlicedProfile:
+    with_gcode = {
+        index
+        for name in archive.namelist()
+        if _GCODE.fullmatch(name) and (index := _number(name[_PLATE_PREFIX:_GCODE_SUFFIX]))
+    }
+    plates: dict[int, SlicedPlate] = {}
+    for plate in root.findall("plate") if root is not None else []:
+        meta = _metadata(plate)
+        index = _number(meta.get("index"))
+        if index is None or index not in with_gcode:
+            continue
+        try:
+            weight: float | None = round(float(meta.get("weight", "")), 2)
+        except ValueError:
+            weight = None
+        plates[index] = SlicedPlate(
+            index=index,
+            print_seconds=_number(meta.get("prediction")),
+            weight_g=weight,
+            nozzle_diameters=_diameters(meta.get("nozzle_diameters")),
+        )
+    for index in with_gcode - plates.keys():
+        plates[index] = SlicedPlate(index=index)
+    nozzles = settings.get("nozzle_diameter")
+    project = [value for value in (nozzles if isinstance(nozzles, list) else [nozzles]) if value]
+    profile = SlicedProfile(
+        printer_model=_first(settings.get("printer_model")),
+        printer_preset=_first(settings.get("printer_settings_id")),
+        process=_first(settings.get("print_settings_id")),
+        bed_type=_first(settings.get("curr_bed_type")),
+        nozzle_diameters=[str(value) for value in project if isinstance(value, (str, int, float))],
+        plates=[plates[index] for index in sorted(plates)],
+    )
+    profile.nozzle_diameters = profile.diameters_for([p.index for p in profile.plates]) or [
+        size for value in profile.nozzle_diameters if (size := diameter(value)) is not None
+    ]
+    return profile
+
+
 def _painted(archive: zipfile.ZipFile, budget: ReadBudget) -> bool | None:
     """Whether any model file paints a triangle; ``None`` when that would inflate more
     than ``budget`` allows the model files."""
@@ -236,19 +366,27 @@ def _plate_slots(
     return plates or None
 
 
-def read_filaments(payload: BinaryIO, budget: ReadBudget | None = None) -> LocalFilaments:
+def read_filaments(
+    payload: BinaryIO, budget: ReadBudget | None = None, *, sliced: bool = False
+) -> LocalFilaments:
     """``payload``'s filament slots, as :class:`LocalFilaments`. A file that is not a
-    3MF, is sliced, or whose settings cannot be read is
-    :class:`UnreadableFilamentsError`."""
+    3MF, or whose settings cannot be read, is :class:`UnreadableFilamentsError`; so is
+    one with G-code in it unless ``sliced`` says it is a sliced file (#2671), which is
+    then read with its :class:`SlicedProfile`, and must hold G-code."""
     try:
         with zipfile.ZipFile(payload) as archive:
-            if any(_GCODE.fullmatch(name) for name in archive.namelist()):
-                raise UnreadableFilamentsError("the file is sliced already")
+            has_gcode = any(_GCODE.fullmatch(name) for name in archive.namelist())
+            if has_gcode != sliced:
+                raise UnreadableFilamentsError(
+                    "the file is sliced already" if has_gcode else "the file holds no G-code"
+                )
             project, settings = _project(archive)
-            sliced = _sliced(_xml(archive, SLICE_INFO_NAME))
+            info = _xml(archive, SLICE_INFO_NAME)
+            used = _sliced(info)
+            profile = _profile(archive, info, settings) if sliced else None
             plate_slots = (
                 None
-                if sliced
+                if used or sliced
                 else _plate_slots(
                     archive, _xml(archive, MODEL_SETTINGS_NAME), settings, budget or ReadBudget()
                 )
@@ -260,4 +398,4 @@ def read_filaments(payload: BinaryIO, budget: ReadBudget | None = None) -> Local
     except (KeyError, OSError, EOFError) as error:
         reason = type(error).__name__
         raise UnreadableFilamentsError(f"the 3MF could not be read ({reason})") from None
-    return LocalFilaments(project=project, sliced=sliced, plate_slots=plate_slots)
+    return LocalFilaments(project=project, sliced=used, plate_slots=plate_slots, profile=profile)

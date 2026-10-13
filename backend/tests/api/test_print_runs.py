@@ -47,7 +47,7 @@ from scadbuddy.workflows.commands import (
 )
 from scadbuddy.workflows.print_models import AcceptAnswer
 from scadbuddy.workflows.printing import CANCELLED_QUEUEING, CANCELLED_UNQUEUED
-from tests.api.test_print_filaments import prepared, queue_route, slice_routes
+from tests.api.test_print_filaments import prepared, queue_route, slice_kept, slice_routes
 from tests.api.test_print_run_choices import (
     API,
     body,
@@ -249,6 +249,7 @@ def test_a_deliberate_reprint_with_the_same_choices_is_a_new_print(
     upload_route()
     run_routes()
     gated_slice_routes(gate)
+    slice_kept()
     queued = queue_route()
     gate.open()
 
@@ -270,6 +271,7 @@ def test_another_request_for_the_same_output_is_another_run(
     upload_route()
     run_routes()
     gated_slice_routes(gate)
+    slice_kept()
     queued = queue_route()
     gate.open()
 

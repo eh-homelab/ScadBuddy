@@ -224,6 +224,12 @@ class BambuddyUploadStore:
         """
         await asyncio.to_thread(self._record_sliced, output_id, library_file_id, sliced)
 
+    async def slices_of(self, output_id: str, library_file_id: int, preset_key: str) -> list[int]:
+        """The sliced files recorded against copy ``library_file_id`` with these presets
+        (:meth:`record_sliced`), newest first: what a print may queue rather than slice
+        the same again (#2671)."""
+        return await asyncio.to_thread(self._slices_of, output_id, library_file_id, preset_key)
+
     async def record_preview(self, preview: PreviewSlice) -> None:
         """Record one of the print dialog's background slices (#2169)."""
         await asyncio.to_thread(self._record_preview, preview)
@@ -694,6 +700,16 @@ class BambuddyUploadStore:
                     "preset": sliced.preset_key,
                 },
             )
+
+    def _slices_of(self, output_id: str, library_file_id: int, preset_key: str) -> list[int]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT sliced_library_file_id FROM output_bambuddy_slices"
+                " WHERE output_id = %s AND source_library_file_id = %s AND preset_key = %s"
+                " ORDER BY created_at DESC, sliced_library_file_id DESC",
+                (output_id, library_file_id, preset_key),
+            ).fetchall()
+        return [row["sliced_library_file_id"] for row in rows]
 
     def _record_slice_hash(self, output_id: str, sliced_id: int, file_hash: str) -> None:
         with self._pool.connection() as conn:

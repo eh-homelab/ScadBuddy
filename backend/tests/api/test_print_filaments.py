@@ -63,6 +63,16 @@ def slice_routes(*, sliced_id: int = 77, job_id: int = 9) -> respx.Route:
     return posted
 
 
+def slice_kept(sliced_id: int = 77) -> respx.Route:
+    """The sliced file a run recorded, still in Bambuddy, so a later print of the same
+    copy with the same presets queues it rather than slicing again (#2671)."""
+    return respx.get(f"{API}/library/files/{sliced_id}").mock(
+        return_value=httpx.Response(
+            200, json={"id": sliced_id, "filename": "sliced.gcode.3mf", "file_type": "gcode.3mf"}
+        )
+    )
+
+
 def queue_route(item_id: int = 51) -> respx.Route:
     return respx.post(f"{API}/queue/").mock(
         return_value=httpx.Response(

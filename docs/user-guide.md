@@ -356,8 +356,16 @@ flow — either would otherwise apply unseen from Simple mode.
 
 The **Library** page lists everything already in Bambuddy's library, by folder. By
 default it shows only unsliced `.3mf` files. The **Advanced** switch, remembered per
-browser, also lists STLs (printable, as one plate) and sliced `.gcode.3mf` files —
-shown without **Print**, since a sliced file is printed from Bambuddy directly.
+browser, also lists STLs (printable, as one plate) and sliced `.gcode.3mf` files.
+
+**Print** on a sliced file (#2671) queues the file itself, with no slice: the dialog
+offers the plates it holds G-code for, the spools for its slots, the printer and the
+print options (a held manual start among them), and shows what it was sliced for —
+printer, nozzle, process and plate type — read-only, with Bambu Studio's own time and
+filament estimate. It refuses a printer of another model, or one without a nozzle of the
+diameter the file was sliced for, and says which. A sliced file cannot be arranged.
+Printing a ScadBuddy copy again with the same presets queues the slice ScadBuddy already
+made of it, while Bambuddy still has that file, instead of slicing it again.
 
 **Print** on a file opens the same print picker an output uses, and the print goes
 exactly as an output's does (#1752): a copy of the file is laid out for the nozzle side

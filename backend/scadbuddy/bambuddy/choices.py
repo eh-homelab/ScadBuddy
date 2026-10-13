@@ -13,6 +13,7 @@ from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.concurrent import settled
 from scadbuddy.bambuddy.extruders import default_nozzles
 from scadbuddy.bambuddy.filaments import FilamentOptions
+from scadbuddy.bambuddy.filaments3mf import SlicedProfile
 from scadbuddy.bambuddy.hardware import (
     InstalledNozzle,
     bed_type_labels,
@@ -102,6 +103,10 @@ class ChoicesView(BaseModel):
     #: How the chosen printer's rack nozzle is ranked (#836): remembered per printer,
     #: else Least used. The dialog's Advanced selector opens on it.
     rack_algorithm: RackAlgorithm = DEFAULT_ALGORITHM
+    #: A sliced file (#2671): what it was sliced for, which the dialog shows read-only in
+    #: place of the slicer steps; empty when that could not be read. ``None`` for a file
+    #: the print slices.
+    sliced: SlicedProfile | None = None
 
 
 def filament_presets_by_size(catalogue: _Catalogue) -> dict[str, list[FilamentPresetOption]]:
@@ -243,6 +248,7 @@ async def _choices(
         filament_presets=filament_presets_by_size(catalogue),
         model_choices=remembered or ModelPrintChoices(),
         rack_algorithm=settings.rack_algorithm(printer_id),
+        sliced=(ready.sliced_profile or SlicedProfile()) if ready.is_sliced else None,
     )
 
 

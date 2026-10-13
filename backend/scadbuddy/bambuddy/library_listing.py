@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import LibraryListRow
-from scadbuddy.bambuddy.print_source import printable
+from scadbuddy.bambuddy.print_source import is_sliced, printable
 
 #: What the page lists without Advanced: unsliced 3MFs (spec 2026-09-28 §2).
 DEFAULT_TYPES: frozenset[str] = frozenset({"3mf"})
@@ -34,8 +34,10 @@ class LibraryEntry(BaseModel):
     folder_id: int | None = None
     has_thumbnail: bool = False
     print_count: int = 0
-    #: Whether the dialog prints it; a sliced file is printed from Bambuddy directly.
+    #: Whether the dialog prints it.
     printable: bool
+    #: Sliced already (``gcode.3mf``, #2671): printed as it is, never arranged.
+    sliced: bool = False
     #: Bytes, and when it was added (UTC): what tells two files of one name apart (#935).
     file_size: int | None = None
     created_at: datetime | None = None
@@ -65,6 +67,7 @@ def _entry(row: LibraryListRow) -> LibraryEntry:
         has_thumbnail=row.thumbnail_path is not None,
         print_count=row.print_count,
         printable=printable(row.file_type),
+        sliced=is_sliced(row.file_type),
         file_size=row.file_size,
         created_at=_utc(row.created_at) if row.created_at is not None else None,
         is_external=row.is_external,

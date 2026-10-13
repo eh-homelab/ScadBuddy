@@ -201,6 +201,8 @@ export type PlannedSlot = Schemas['PlannedSlot']
 export type UnknownTray = Schemas['UnknownTray']
 export type PreviewStarted = Schemas['PreviewStarted']
 export type SlicePreview = Schemas['SlicePreview']
+/** #2671 — what a sliced library file was sliced for, read from the file itself. */
+export type SlicedProfile = Schemas['SlicedProfile']
 export type TrayAssigned = Schemas['TrayAssigned']
 export type RackSentPick = Schemas['RackSentPick']
 export type RackAlgorithm = NonNullable<Schemas['ChoicesView']['rack_algorithm']>
