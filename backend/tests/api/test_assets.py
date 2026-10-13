@@ -565,7 +565,7 @@ def _never(*args: object, **kwargs: object) -> Any:
     raise AssertionError("read after the sweep was stopped")
 
 
-def test_a_stopped_sweep_reads_no_references(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_stopped_sweep_reads_no_references() -> None:
     """#2554: a shutdown before the sweep starts reads nothing: the reference reads
     cannot be interrupted once begun, and would hold the shutdown's join."""
     stop = threading.Event()

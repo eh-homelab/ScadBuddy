@@ -168,6 +168,9 @@ class SnapshotStore:
         self._pins[key] = (storing, self._clock())
 
         def ended(task: asyncio.Task[str]) -> None:
+            # Only while the pin is still this store's: a late `ended` runs after the
+            # next store of the key started, and must not drop that store's pin or the
+            # promotion an interactive pin gave it. Keep this guard on both pops.
             if self._pins.get(key, (None,))[0] is task:
                 del self._pins[key]
                 self._promoted.pop(key, None)
