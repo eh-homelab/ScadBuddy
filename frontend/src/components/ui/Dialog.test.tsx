@@ -68,7 +68,8 @@ describe('Dialog focus (#351)', () => {
           <button type="button" onClick={() => setOpen(true)}>
             Open it
           </button>
-          <Dialog open={open} title="Note" onClose={() => setOpen(false)}>
+          {/* A footer of its own, with nothing to press: without one it would get Close (#2386). */}
+          <Dialog open={open} title="Note" onClose={() => setOpen(false)} footer={<span>Read only</span>}>
             <p>Nothing to press.</p>
           </Dialog>
         </>
@@ -130,5 +131,34 @@ describe('Dialog placement', () => {
     expect(panel.className).toContain('h-full')
     expect(panel.className).toContain('max-w-[480px]')
     expect(panel.parentElement?.className).toContain('justify-end')
+  })
+})
+
+// #2386 — a dialog with no actions of its own (Colours, the font picker, Media) still has a
+// labelled way out that is not Esc or the backdrop, and it does not take the first focus.
+describe('Dialog without a footer', () => {
+  function Bare() {
+    const [open, setOpen] = useState(true)
+    return (
+      <Dialog open={open} title="Choose a font" onClose={() => setOpen(false)}>
+        <input aria-label="Search fonts" />
+      </Dialog>
+    )
+  }
+
+  it('has a Close button after its content, which closes it', async () => {
+    const user = userEvent.setup()
+    render(<Bare />)
+    const dialog = screen.getByRole('dialog', { name: 'Choose a font' })
+    expect(screen.getByLabelText('Search fonts')).toHaveFocus()
+    await user.click(screen.getByRole('button', { name: 'Close' }))
+    expect(dialog).not.toBeInTheDocument()
+  })
+
+  it('shows only the caller’s footer when it has one', async () => {
+    const user = userEvent.setup()
+    render(<Page />)
+    await user.click(screen.getByRole('button', { name: 'Open it' }))
+    expect(screen.queryByRole('button', { name: 'Close' })).toBeNull()
   })
 })
