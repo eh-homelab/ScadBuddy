@@ -166,6 +166,13 @@ class BambuddyUploadStore:
         touches)."""
         await asyncio.to_thread(self._relocate, list(library_file_ids), folder_id)
 
+    async def forget_files(self, library_file_ids: Iterable[int]) -> None:
+        """Stop recording these files as any output's copy, their slices with them
+        (#2670): a person moved them into the inbox, and a recorded copy there is one
+        ScadBuddy replaces and deletes. Unrecorded, each stays an ordinary library file
+        that ScadBuddy never deletes on its own; the next send uploads a copy of its own."""
+        await asyncio.to_thread(self._forget_files, list(library_file_ids))
+
     async def recorded_as(self, library_file_id: int) -> list[tuple[str, str]]:
         """Each ``(output_id, target_key)`` that records ``library_file_id`` as a copy:
         what a byte-for-byte copy of it is a copy of too (#2670)."""
@@ -516,6 +523,14 @@ class BambuddyUploadStore:
             conn.execute(
                 "UPDATE output_bambuddy_uploads SET folder_id = %s WHERE library_file_id = ANY(%s)",
                 (folder_id, ids),
+            )
+
+    def _forget_files(self, ids: list[int]) -> None:
+        if not ids:
+            return
+        with self._pool.connection() as conn:
+            conn.execute(
+                "DELETE FROM output_bambuddy_uploads WHERE library_file_id = ANY(%s)", (ids,)
             )
 
     def _recorded_as(self, library_file_id: int) -> list[tuple[str, str]]:

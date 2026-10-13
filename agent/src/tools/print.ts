@@ -463,7 +463,9 @@ export const printTools: Tool[] = [
       "(folder names from the top, joined by '/'), or neither for the top level. Each keeps its id, so its " +
       'print history, slices and remembered print choices stay with it. A file that leaves a project\'s folder ' +
       'names that project in `left_project`: the project no longer lists it, so say so. Bambuddy may skip a ' +
-      "file its API key's user did not add: those are listed in `skipped`, not moved.",
+      "file its API key's user did not add: those are listed in `skipped`, not moved. A file moved into the " +
+      "inbox (Settings' library folder) stops being tracked as an output's copy, so ScadBuddy never deletes it; " +
+      'the next send uploads a fresh copy.',
     input: z.object({
       file_ids: z.array(libraryFileId).min(1).max(500),
       folder_id: z.number().int().positive().optional().describe('The folder to move into (list_library)'),
@@ -487,7 +489,8 @@ export const printTools: Tool[] = [
     description:
       "Copy files in Bambuddy's library (ids from list_library) into a folder: `folder_id`, or `folder_path` " +
       "(folder names from the top, joined by '/'), or neither for the top level. Each copy is a new file with " +
-      'its own id (`copied[].id`), the same name, bytes and notes. A file too large to copy is listed in `skipped`.',
+      'its own id (`copied[].id`), the same name, bytes and notes. A file too large to copy, or one Bambuddy ' +
+      'failed on (and any after it), is listed in `skipped`; the copies made before it are still in `copied`.',
     input: z.object({
       file_ids: z.array(libraryFileId).min(1).max(500),
       folder_id: z.number().int().positive().optional().describe('The folder to copy into (list_library)'),

@@ -9,9 +9,12 @@ What ScadBuddy keeps about a file, and what each one does to it:
 * Its upload rows (#316, ``output_bambuddy_uploads``) name the folder a copy sits in, and
   that folder is what tells an inbox copy (replaced and deleted by ScadBuddy) from a
   project's (never touched). A move rewrites it (:meth:`BambuddyUploadStore.relocate`),
-  so a copy moved out of the inbox is not later deleted as an inbox copy. A copy of a file
-  that is an output's copy is recorded as one more copy of that output, laid out for the
-  same target, in its new folder.
+  so a copy moved out of the inbox is not later deleted as an inbox copy. A file moved
+  *into* the inbox is not made an inbox copy: its rows are dropped
+  (:meth:`BambuddyUploadStore.forget_files`), so it is an ordinary file ScadBuddy never
+  deletes, and the next send uploads a copy of its own. A copy of an output's copy is
+  recorded as one more copy of that output, in its new folder, unless that folder is the
+  inbox, for the same reason (review #2681).
 * Its slices (``output_bambuddy_slices``), print choices and progress (``library:<id>``),
   the dialog's preview slices and Bambuddy's thumbnails are all keyed by the id, which a
   move and a rename keep. A copy starts with none of them, as any new file does.
@@ -24,12 +27,14 @@ file out of that project, since Bambuddy lists a project's files as those in fol
 linked to it; each such file names the project it left (``left_project``).
 
 All three run once: a repeated copy would upload a second copy, and a repeated move or
-rename would answer as though it did the work again.
+rename would answer as though it did the work again. So a copy that fails partway, or
+nears its time limit, still answers: the copies made, and every other file ``skipped``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 import mimetypes
 import posixpath
 from contextlib import aclosing
@@ -42,6 +47,7 @@ from pydantic import BaseModel, Field, model_validator
 from scadbuddy.bambuddy.client import THREE_MF_MEDIA_TYPE, BambuddyClient, client_for
 from scadbuddy.bambuddy.commits import upload_into
 from scadbuddy.bambuddy.models import Folder, LibraryFile
+from scadbuddy.bambuddy.send import is_inbox
 from scadbuddy.bambuddy.uploads import LibraryCopy
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.library_file_operations import (
@@ -55,11 +61,18 @@ from scadbuddy.operations.kinds import OperationKind, waiting_on_bambuddy
 if TYPE_CHECKING:
     from scadbuddy.core.components import Core
 
+logger = logging.getLogger(__name__)
+
 #: The largest file a copy downloads; it is held in memory between download and upload.
 MAX_COPY_BYTES = 256 * 1024 * 1024
 #: A copy downloads and uploads every file, so it may take longer than a move. The
 #: browser and the agent follow a 202 for 15 minutes (#1063).
 COPY_TIMEOUT = timedelta(minutes=10)
+#: When a copy stops starting files, so the run answers with what it made before
+#: :data:`COPY_TIMEOUT` cuts it off: one more file's download and upload fit in the rest.
+COPY_BUDGET = COPY_TIMEOUT - timedelta(minutes=3)
+#: Where to look when a copy failed partway: Bambuddy may have kept the upload.
+WHERE_COPIES = "the target folder in Bambuddy"
 #: Bambuddy's ``FileUpdate.filename`` limit.
 MAX_FILENAME = 255
 
@@ -167,7 +180,7 @@ def resolve_folder(target: LibraryFolderTarget, folders: list[Folder]) -> int | 
         return target.folder_id
     if target.folder_path is None:
         return None
-    wanted = "/".join(part for part in target.folder_path.split("/") if part.strip())
+    wanted = "/".join(part.strip() for part in target.folder_path.split("/") if part.strip())
     if not wanted:
         return None
     found = sorted(fid for fid, path in _paths(folders).items() if path == wanted)
@@ -238,6 +251,27 @@ def _extension(filename: str, file_type: str | None) -> str:
     return posixpath.splitext(filename)[1]
 
 
+async def _not_moved_to(
+    client: BambuddyClient, ids: list[int], folder_id: int | None
+) -> dict[int, str]:
+    """Why each of ``ids`` is not in ``folder_id`` after a move, read back from Bambuddy;
+    the ones that are there are left out."""
+
+    async def one(file_id: int) -> tuple[int, str | None]:
+        try:
+            found = await client.library_file(file_id)
+        except ApiError as error:
+            if error.status != status.HTTP_404_NOT_FOUND:
+                raise
+            return file_id, "it is no longer in Bambuddy's library"
+        if found.folder_id != folder_id:
+            return file_id, "Bambuddy did not move it, and gave no reason"
+        return file_id, None
+
+    read = await asyncio.gather(*(one(file_id) for file_id in ids))
+    return {file_id: reason for file_id, reason in read if reason is not None}
+
+
 def library_file_move_kinds(state: Core) -> list[OperationKind]:
     """Copy, move and rename, bound to this process's settings store and upload rows
     (read at each call, so a test's replaced store is the one used)."""
@@ -269,22 +303,36 @@ def library_file_move_kinds(state: Core) -> list[OperationKind]:
     async def move_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         folder_id: int | None = checked["folder_id"]
         files = [MovedLibraryFile.model_validate(entry) for entry in checked["files"]]
-        async with client_for(await asyncio.to_thread(state.settings_store.load)) as client:
-            answer = await client.move_library_files([file.id for file in files], folder_id)
-        reasons = {skip.file_id: skip.reason or skip.code for skip in answer.skipped_reasons}
+        settings = await asyncio.to_thread(state.settings_store.load)
         result = LibraryMoveResult(folder_id=folder_id, moved=[], skipped=[])
+        async with client_for(settings) as client:
+            answer = await client.move_library_files([file.id for file in files], folder_id)
+            reasons = {skip.file_id: skip.reason or skip.code for skip in answer.skipped_reasons}
+            unreported = [file for file in files if file.id not in reasons]
+            gone: dict[int, str] = {}
+            if answer.moved < len(unreported):
+                # Bambuddy passes over an id it no longer has without a word: what it did
+                # not count as moved is read back, never assumed to be where it was sent.
+                gone = await _not_moved_to(client, [file.id for file in unreported], folder_id)
         for file in files:
-            if file.id in reasons:
+            reason = (
+                f"Bambuddy did not move it: {reasons[file.id] or 'no reason given'}"
+                if file.id in reasons
+                else gone.get(file.id)
+            )
+            if reason is not None:
                 result.skipped.append(
-                    SkippedLibraryFile(
-                        id=file.id,
-                        filename=file.filename,
-                        reason=f"Bambuddy did not move it: {reasons[file.id] or 'no reason given'}",
-                    )
+                    SkippedLibraryFile(id=file.id, filename=file.filename, reason=reason)
                 )
             else:
                 result.moved.append(file)
-        await state.uploads.relocate([file.id for file in result.moved], folder_id)
+        moved = [file.id for file in result.moved]
+        if is_inbox(folder_id, settings):
+            # A recorded copy in the inbox is one ScadBuddy replaces and deletes; a file a
+            # person put there is theirs, so it stops being recorded instead.
+            await state.uploads.forget_files(moved)
+        else:
+            await state.uploads.relocate(moved, folder_id)
         return result.model_dump(mode="json")
 
     async def copy_check(request: dict[str, Any]) -> dict[str, Any]:
@@ -299,53 +347,86 @@ def library_file_move_kinds(state: Core) -> list[OperationKind]:
         }
 
     async def copy_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        """Each file in turn. A failure stops the run but not the answer: the copies made
+        so far are reported (and recorded), the file that failed and those after it are
+        ``skipped``, so the one run never fails having made copies nobody is told of."""
         folder_id: int | None = checked["folder_id"]
+        settings = await asyncio.to_thread(state.settings_store.load)
+        # A copy into the inbox stays an ordinary file: a recorded inbox copy is one the
+        # next send replaces and an output's delete removes (review #2681).
+        record = not is_inbox(folder_id, settings)
         result = LibraryCopyResult(folder_id=folder_id, copied=[], skipped=[])
-        async with client_for(await asyncio.to_thread(state.settings_store.load)) as client:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + COPY_BUDGET.total_seconds()
+        stopped: str | None = None
+        async with client_for(settings) as client:
             for entry in checked["files"]:
+                if stopped is None and loop.time() >= deadline:
+                    stopped = "not tried: the copy ran out of time. Copy it again"
+                if stopped is not None:
+                    result.skipped.append(
+                        SkippedLibraryFile(
+                            id=entry["id"], filename=entry["filename"], reason=stopped
+                        )
+                    )
+                    continue
                 try:
-                    source = await client.library_file(entry["id"])
-                    content = await _download(client, source.id)
+                    copied = await _copy_one(client, entry, folder_id, record)
                 except ApiError as error:
-                    if error.status != status.HTTP_404_NOT_FOUND:
-                        raise
+                    if error.status == status.HTTP_404_NOT_FOUND:
+                        reason = "it is no longer in Bambuddy's library"
+                    else:
+                        reason = (
+                            f"Bambuddy failed while copying it ({error.detail}). Check "
+                            f"{WHERE_COPIES} before copying it again"
+                        )
+                        stopped = f"not tried after {entry['filename']} failed"
                     result.skipped.append(
                         SkippedLibraryFile(
-                            id=entry["id"],
-                            filename=entry["filename"],
-                            reason="it is no longer in Bambuddy's library",
+                            id=entry["id"], filename=entry["filename"], reason=reason
                         )
                     )
                     continue
-                if content is None:
-                    result.skipped.append(
-                        SkippedLibraryFile(
-                            id=source.id,
-                            filename=source.filename,
-                            reason=f"it is larger than the {MAX_COPY_BYTES // 1024**2} MiB "
-                            "ScadBuddy copies",
-                        )
-                    )
-                    continue
-                copy = await upload_into(
-                    client,
-                    source.filename,
-                    content,
-                    folder_id=folder_id,
-                    media_type=_media_type(source.filename),
-                )
-                if source.notes:
-                    # The notes carry the "Edit in ScadBuddy" link of an output's copy.
-                    await client.annotate_library_file(copy.id, source.notes)
-                for output_id, target_key in await state.uploads.recorded_as(source.id):
-                    await state.uploads.record(
-                        output_id,
-                        LibraryCopy(id=copy.id, folder_id=folder_id, target_key=target_key),
-                    )
-                result.copied.append(
-                    CopiedLibraryFile(source_id=source.id, id=copy.id, filename=copy.filename)
-                )
+                if isinstance(copied, SkippedLibraryFile):
+                    result.skipped.append(copied)
+                else:
+                    result.copied.append(copied)
         return result.model_dump(mode="json")
+
+    async def _copy_one(
+        client: BambuddyClient, entry: dict[str, Any], folder_id: int | None, record: bool
+    ) -> CopiedLibraryFile | SkippedLibraryFile:
+        source = await client.library_file(entry["id"])
+        content = await _download(client, source.id)
+        if content is None:
+            return SkippedLibraryFile(
+                id=source.id,
+                filename=source.filename,
+                reason=f"it is larger than the {MAX_COPY_BYTES // 1024**2} MiB ScadBuddy copies",
+            )
+        copy = await upload_into(
+            client,
+            source.filename,
+            content,
+            folder_id=folder_id,
+            media_type=_media_type(source.filename),
+        )
+        if record:
+            for output_id, target_key in await state.uploads.recorded_as(source.id):
+                await state.uploads.record(
+                    output_id, LibraryCopy(id=copy.id, folder_id=folder_id, target_key=target_key)
+                )
+        if source.notes:
+            # The notes carry the "Edit in ScadBuddy" link of an output's copy. The copy is
+            # made by now, so a failure here is logged, not reported as no copy.
+            try:
+                await client.annotate_library_file(copy.id, source.notes)
+            except ApiError as error:
+                logger.warning(
+                    "could not copy a library file's notes to its copy",
+                    extra={"library_file_id": copy.id, "status": error.status},
+                )
+        return CopiedLibraryFile(source_id=source.id, id=copy.id, filename=copy.filename)
 
     async def rename_check(request: dict[str, Any]) -> dict[str, Any]:
         body = LibraryRenameRequest.model_validate(request)

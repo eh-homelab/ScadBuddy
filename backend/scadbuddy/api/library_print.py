@@ -181,7 +181,8 @@ async def post_library_move(
 ) -> LibraryMoveResult | JSONResponse:
     """Moves each file into ``folder_id`` or ``folder_path`` (the top level with neither)
     under its own id (#2670), so everything ScadBuddy keys by the id stays with it, and
-    its upload rows (#316) follow it to the new folder. A file that leaves a project's
+    its upload rows (#316) follow it to the new folder; moved into the inbox, it stops being
+    recorded, so no send or output delete removes it. A file that leaves a project's
     folder names that project in ``left_project``: the project no longer lists it. A file
     Bambuddy skipped is in ``skipped``. A folder or file Bambuddy does not have is a 404,
     and a path two folders share a 409, both before anything moves."""
@@ -211,7 +212,9 @@ async def post_library_copy(
     """Copies each file into ``folder_id`` or ``folder_path`` (the top level with neither)
     as a new library file (#2670). Bambuddy has no copy, so each is downloaded and
     uploaded, its notes copied after; a copy of an output's copy is recorded as one more
-    copy of that output. A file too large to copy, or gone by then, is in ``skipped``."""
+    copy of that output, unless it is in the inbox. A file too large to copy, gone by then,
+    or that Bambuddy failed on is in ``skipped``, with any after a failure; the copies made
+    before it are still answered."""
     result = await run_operation(
         ops,
         response,

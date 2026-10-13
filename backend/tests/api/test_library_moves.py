@@ -373,3 +373,164 @@ def test_the_listing_names_each_folder_s_project(client: TestClient) -> None:
         13: (None, None),
         14: (None, None),
     }
+
+
+# --- review #2681: what ScadBuddy may later delete ----------------------------------
+
+
+def _copy_routes(source: int = 89, copy_id: int = 140) -> respx.Route:
+    folders()
+    file(source, 11)
+    respx.get(f"{API}/library/files/{source}/download").mock(
+        return_value=httpx.Response(200, content=b"PK3mf-bytes")
+    )
+    return respx.post(f"{API}/library/files").mock(
+        return_value=httpx.Response(200, json={"id": copy_id, "filename": f"file-{source}.3mf"})
+    )
+
+
+@pytest.mark.parametrize(
+    ("inbox", "target"),
+    [(None, {}), (2, {"folder_id": 2})],
+    ids=["the-root-with-no-inbox-set", "a-named-inbox-folder"],
+)
+@respx.mock
+def test_a_copy_into_the_inbox_is_not_recorded_so_no_send_deletes_it(
+    client: TestClient, app: FastAPI, inbox: int | None, target: dict[str, Any]
+) -> None:
+    """An inbox copy is one the next send replaces and an output delete removes: the
+    user's deliberate copy must stay an ordinary file."""
+    configure(client, library_folder_id=inbox)
+    state = state_of(app)
+    asyncio.run(state.uploads.record(OUTPUT, LibraryCopy(id=89, folder_id=11, target_key="k")))
+    _copy_routes()
+
+    body = post(client, "copy", {"file_ids": [89], **target}).json()
+
+    assert [row["id"] for row in body["copied"]] == [140]
+    copies = asyncio.run(state.uploads.for_output(OUTPUT))
+    assert [copy.id for copy in copies] == [89]
+
+
+@respx.mock
+def test_a_file_moved_into_the_inbox_stops_being_recorded(client: TestClient, app: FastAPI) -> None:
+    """A project's copy moved into the inbox would otherwise read as an inbox copy, which
+    the next send deletes."""
+    configure(client)  # the inbox is folder 2
+    state = state_of(app)
+    asyncio.run(state.uploads.record(OUTPUT, LibraryCopy(id=89, folder_id=11, target_key="k")))
+    folders()
+    file(89, 11)
+    respx.post(f"{API}/library/files/move").mock(
+        return_value=httpx.Response(200, json={"moved": 1, "skipped": 0, "skipped_reasons": []})
+    )
+
+    body = post(client, "move", {"file_ids": [89], "folder_id": 2}).json()
+
+    assert [row["id"] for row in body["moved"]] == [89]
+    assert asyncio.run(state.uploads.for_output(OUTPUT)) == []
+
+
+@respx.mock
+def test_a_file_bambuddy_passed_over_without_a_word_is_reported_skipped(
+    client: TestClient, app: FastAPI
+) -> None:
+    """Bambuddy counts an id it no longer has as neither moved nor skipped."""
+    configure(client)
+    state = state_of(app)
+    asyncio.run(state.uploads.record(OUTPUT, LibraryCopy(id=91, folder_id=2, target_key="k")))
+    folders()
+    file(89, 2)
+    respx.get(f"{API}/library/files/91").mock(
+        side_effect=[
+            httpx.Response(200, json={"id": 91, "filename": "file-91.3mf", "folder_id": 2}),
+            httpx.Response(404, json={"detail": "File not found"}),
+        ]
+    )
+    respx.post(f"{API}/library/files/move").mock(
+        return_value=httpx.Response(200, json={"moved": 1, "skipped": 0, "skipped_reasons": []})
+    )
+    # Once moved, 89 reads back in the new folder.
+    respx.get(f"{API}/library/files/89").mock(
+        side_effect=[
+            httpx.Response(200, json={"id": 89, "filename": "file-89.3mf", "folder_id": 2}),
+            httpx.Response(200, json={"id": 89, "filename": "file-89.3mf", "folder_id": 13}),
+        ]
+    )
+
+    body = post(client, "move", {"file_ids": [89, 91], "folder_id": 13}).json()
+
+    assert [row["id"] for row in body["moved"]] == [89]
+    assert [row["id"] for row in body["skipped"]] == [91]
+    assert "no longer in Bambuddy's library" in body["skipped"][0]["reason"]
+    [copy] = asyncio.run(state.uploads.for_output(OUTPUT))
+    assert copy.folder_id == 2
+
+
+@respx.mock
+def test_a_copy_that_fails_partway_reports_the_copies_already_made(
+    client: TestClient, app: FastAPI
+) -> None:
+    configure(client)
+    state = state_of(app)
+    asyncio.run(state.uploads.record(OUTPUT, LibraryCopy(id=89, folder_id=11, target_key="k")))
+    folders()
+    file(89, 11)
+    file(91, 11)
+    file(92, 11)
+    for source in (89, 91):
+        respx.get(f"{API}/library/files/{source}/download").mock(
+            return_value=httpx.Response(200, content=b"PK3mf-bytes")
+        )
+    uploaded = respx.post(f"{API}/library/files").mock(
+        side_effect=[
+            httpx.Response(200, json={"id": 140, "filename": "file-89.3mf"}),
+            httpx.Response(500, json={"detail": "disk full"}),
+        ]
+    )
+
+    response = post(client, "copy", {"file_ids": [89, 91, 92], "folder_id": 12})
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert [row["id"] for row in body["copied"]] == [140]
+    assert [row["id"] for row in body["skipped"]] == [91, 92]
+    assert "Bambuddy" in body["skipped"][0]["reason"]
+    assert "not tried" in body["skipped"][1]["reason"]
+    assert uploaded.call_count == 2
+    assert [copy.id for copy in asyncio.run(state.uploads.for_output(OUTPUT))] == [89, 140]
+
+
+@respx.mock
+def test_a_folder_path_s_segments_are_trimmed(client: TestClient) -> None:
+    configure(client)
+    folders()
+    file(89, 2)
+    respx.post(f"{API}/library/files/move").mock(
+        return_value=httpx.Response(200, json={"moved": 1, "skipped": 0, "skipped_reasons": []})
+    )
+
+    body = post(client, "move", {"file_ids": [89], "folder_path": " Projects / Lamp "}).json()
+
+    assert body["folder_id"] == 11
+
+
+@respx.mock
+def test_a_copy_out_of_time_reports_the_files_it_did_not_start(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import timedelta
+
+    from scadbuddy.library import library_file_moves
+
+    monkeypatch.setattr(library_file_moves, "COPY_BUDGET", timedelta(0))
+    configure(client)
+    folders()
+    file(89, 11)
+    uploaded = respx.post(f"{API}/library/files")
+
+    body = post(client, "copy", {"file_ids": [89], "folder_id": 12}).json()
+
+    assert body["copied"] == []
+    assert "ran out of time" in body["skipped"][0]["reason"]
+    assert not uploaded.called
