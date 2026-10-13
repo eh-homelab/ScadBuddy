@@ -9,6 +9,7 @@ and until then `GET /workflow-runs/{id}` answers `starting` from the execution.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 from collections.abc import Iterator
@@ -19,7 +20,7 @@ from typing import Annotated, Any, Literal
 import psycopg
 from fastapi import APIRouter, Body, Path, Query, Response, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from temporal_agent_harness.harness.agent_client import AgentClient, MidTurnRejectedError
 from temporal_agent_harness.harness.agent_protocol import AgentConfig
 from temporalio.client import Client, WorkflowExecutionStatus, WorkflowUpdateFailedError
@@ -70,12 +71,20 @@ from scadbuddy.flows.models import (
     Run,
     RunStatus,
 )
-from scadbuddy.flows.operations import FLOW_ANSWER, FLOW_DECIDE, FLOW_RESET, seal_answer
+from scadbuddy.flows.operations import (
+    FLOW_ANSWER,
+    FLOW_DECIDE,
+    FLOW_ESCALATE,
+    FLOW_RESET,
+    NOT_PARENT,
+    seal_answer,
+)
 from scadbuddy.flows.store import GrantStateError
 from scadbuddy.flows.typecheck import MAX_SCRIPT_BYTES, ScriptProblem, check_script
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.workflows.commands import COMMAND_ANSWER_DEADLINE
-from scadbuddy.workflows.flow_grants import FlowGrants
+from scadbuddy.workflows.flow_grants import FlowGrants, parked_call
+from scadbuddy.workflows.flow_models import HopRecord
 from scadbuddy.workflows.flow_routes import api_client
 from scadbuddy.workflows.payload_codec import SubjectForgottenError
 from scadbuddy.workflows.project import PROJECT_WORKFLOW, FlowStart, RunFlow
@@ -168,13 +177,23 @@ class RunAnswer(BaseModel):
 
 
 class PendingEntry(BaseModel):
-    """A host call parked for a person. Never an approval's input (§6.6)."""
+    """A host call parked for a person. Never an approval's input (§6.6), nor a
+    parent's narrowing of it (#2482): only that one was proposed."""
 
     call_id: str
     kind: Literal["approval", "answer"]
     fn: str
     prompt: str | None = None
     since: datetime | None = None
+    #: Where an approval outside the run's grant waits (#2482): `parent` (the starting
+    #: session) until `hop_until`, then `person`; the person may decide at either.
+    hop: Literal["parent", "person"] | None = None
+    hop_until: datetime | None = None
+    #: Why the grant did not admit it.
+    reason: str | None = None
+    #: Whether the starting session narrowed it into a proposal the person may approve.
+    proposed: bool = False
+    hops: list[HopRecord] = []
 
 
 class GrantUseView(BaseModel):
@@ -642,11 +661,12 @@ async def _pending(client: Client, run: Run) -> tuple[list[PendingEntry], bool]:
     for approval in status_.pending_approvals:
         seen = waiting.get(approval.tool_id)
         entries.append(
-            PendingEntry(
+            PendingEntry.model_validate(seen.model_dump())
+            if seen is not None
+            else PendingEntry(
                 call_id=approval.tool_id,
                 kind="approval",
-                fn=seen.fn if seen else HOST_FN.get(approval.tool_name, approval.tool_name),
-                since=seen.since if seen else None,
+                fn=HOST_FN.get(approval.tool_name, approval.tool_name),
             )
         )
     for callback in status_.pending_callbacks:
@@ -766,6 +786,55 @@ class DecideBody(BaseModel):
     approved: bool
     #: Why, for a denial: the script sees it.
     reason: str | None = Field(default=None, max_length=1024)
+    #: Approve the starting session's narrowing of the call as it proposed it (#2482),
+    #: rather than the call as it was parked.
+    proposal: bool = False
+    #: With `proposal`: the `proposal_hash` of the proposal the person was shown
+    #: (`GET .../proposals/{call_id}`). Any other, or none, is refused: the person
+    #: approves what they saw, never a proposal replaced since.
+    proposal_hash: str | None = Field(default=None, max_length=128)
+
+
+class ProposalView(BaseModel):
+    """A parent's proposal beside the call it narrows, for the person to compare
+    (#2482). Only the person reads it; approving it names `proposal_hash`."""
+
+    call_id: str
+    fn: str
+    tool: str | None = None
+    #: The call's arguments as it is parked, and as the starting session narrowed them.
+    original: dict[str, Any]
+    proposed: dict[str, Any]
+    proposal_hash: str
+    proposed_by: str
+
+
+class EscalateBody(BaseModel):
+    """The starting session's action on a call of its run outside the run's grant
+    (#2482, spec 2026-10-11 §4.2). Never an approval: only a person or the grant
+    approves."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["deny", "narrow", "pass_up"]
+    #: For `narrow`: the call's input for the same tool (a print's or arrange's
+    #: `request`, an agent tool's arguments). It runs only if the grant admits it;
+    #: otherwise it goes to the person as a proposal.
+    input: dict[str, Any] | None = None
+    #: Why, for a denial: the script sees it.
+    reason: str | None = Field(default=None, max_length=1024)
+
+
+#: A narrowed input's largest size, as any pending-input response (10-01 §6.6).
+NARROWED_MAX_BYTES = 16 * 1024
+
+
+class Escalated(BaseModel):
+    """What the starting session's action did."""
+
+    run_id: str
+    call_id: str
+    outcome: Literal["denied", "approved", "passed_up", "with_person"]
 
 
 class Decided(BaseModel):
@@ -850,6 +919,87 @@ async def decide_flow_run(
         idempotency_key=idempotency_key,
     )
     return operation_answer(result, Decided)
+
+
+@router.get(
+    "/workflow-runs/{run_id}/proposals/{call_id}",
+    response_model=ProposalView,
+    summary="Compare a parent's proposal with the call it narrows",
+)
+async def get_flow_run_proposal(
+    run_id: str, call_id: Annotated[str, Path(min_length=1, max_length=64)], flows: FlowsDep
+) -> ProposalView:
+    """Browser only: the proposal is the person's to judge, so no agent reads it. The
+    original is read from the run's parked call, never from anything stored with the
+    proposal."""
+    _browser_only("Only a person reads a proposal it may approve.")
+    run = await flows.store.get_run(run_id)
+    if run is None or flows.client is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, "No such proposal.")
+    held = await flows.store.get_proposal(f"flow:{run.id}:{run.workflow_run_id}:{call_id}")
+    if held is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, "No such proposal.")
+    for parked in await AgentClient(flows.client, run.workflow_id).get_pending_approvals():
+        if parked.tool_id == call_id and (call := parked_call(parked.tool_name, parked.tool_input)):
+            fn, tool, original = call
+            return ProposalView(
+                call_id=call_id,
+                fn=fn,
+                tool=tool,
+                original=original,
+                proposed=held.args,
+                proposal_hash=held.input_hash,
+                proposed_by=held.proposed_by,
+            )
+    raise ApiError(status.HTTP_404_NOT_FOUND, "That call is no longer waiting.")
+
+
+@router.post(
+    "/workflow-runs/{run_id}/escalations/{call_id}",
+    response_model=Escalated,
+    responses=OPERATION_RESPONSES,
+    summary="Deny, narrow or pass up a run's call as its starting session",
+)
+async def escalate_flow_run(
+    run_id: str,
+    call_id: Annotated[str, Path(min_length=1, max_length=64)],
+    body: EscalateBody,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> Escalated | JSONResponse:
+    """The run's starting session, while the call waits at hop `parent` (spec 2026-10-11
+    §4.4). The session is the request's author, which the agent sets from the session
+    the call runs in; the run's own record (`started_by`) must name it, and the call is
+    read from the run's parked entry. A forged author can at most deny, narrow into the
+    grant or pass up (§4.2). The browser decides through `/decide`."""
+    author = current_author()
+    if author is None or not author.session or not author.principal:
+        raise ApiError(
+            status.HTTP_403_FORBIDDEN,
+            "Only the session that started the run acts on its calls before the person does.",
+            type_=NOT_PARENT,
+        )
+    if body.action == "narrow":
+        if body.input is None:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "A narrowing names its input.")
+        if len(json.dumps(body.input, separators=(",", ":")).encode()) > NARROWED_MAX_BYTES:
+            raise ApiError(status.HTTP_413_CONTENT_TOO_LARGE, "A narrowed input is at most 16 KiB.")
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds[FLOW_ESCALATE],
+        subject=f"flow:{run_id}",
+        request={
+            "run_id": run_id,
+            "call_id": call_id,
+            **body.model_dump(),
+            "session": author.session,
+            "principal": author.principal,
+        },
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, Escalated)
 
 
 def _check_grant(spec: GrantSpec, tool_tiers: dict[str, str]) -> None:

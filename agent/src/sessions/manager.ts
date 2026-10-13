@@ -44,6 +44,7 @@ import {
   type MemoryHooks,
   type MemoryHooksOptions,
   hindsightTarget,
+  turnRecallMaxQueryChars,
 } from '../memory/hindsight.js'
 import type { LoadedPackage, PackagesForRun } from '../plugins/packages/install.js'
 import { type PackageServers, withoutRemoteServers } from '../plugins/packages/mcp.js'
@@ -1586,7 +1587,7 @@ export class SessionManager {
         // event log like the credential. Claude Code never holds them (the
         // forwarder adds them), but a plugin could echo one in a tool result.
         secrets.push(...(forwarded?.secrets ?? []))
-        const memory = forwarded?.hindsight ? this.memoryHooks(forwarded.hindsight, secrets, userText, { session, turnId }) : undefined
+        const memory = forwarded?.hindsight ? await this.memoryHooks(forwarded.hindsight, secrets, userText, { session, turnId }) : undefined
         // Settings → plugin packages may switch it off (plugins/packages/builtins.ts).
         const ownPlugin =
           this.deps.ownPlugin !== undefined && (await ownPluginEnabled(this.deps.settings))
@@ -1882,13 +1883,16 @@ export class SessionManager {
    * (#818; hooks make no SDK message, so TurnAuditor never sees them). A
    * retain reports after the turn ended; both writes work then too, since
    * they need only the session row. A failure is logged by the hooks.
+   *
+   * The recall query's cap (`recallMaxQueryChars`) is read from Settings at
+   * each turn, so a change applies to the next one.
    */
-  private memoryHooks(
+  private async memoryHooks(
     plugin: CheckedPlugin,
     secrets: readonly string[],
     userText: string,
     turn: { session: SessionRecord; turnId: string },
-  ): MemoryHooks | undefined {
+  ): Promise<MemoryHooks | undefined> {
     const config = this.deps.memory
     if (config === false) return undefined
     const log = (line: string) => this.deps.stderr?.(line)
@@ -1900,9 +1904,10 @@ export class SessionManager {
       return undefined
     }
     const fixed = config?.hookConfig?.recallQuery
+    const recallMaxQueryChars = await turnRecallMaxQueryChars(this.deps.settings, config?.hookConfig)
     return createMemoryHooks({
       ...config,
-      hookConfig: { ...config?.hookConfig, recallQuery: fixed && fixed !== '$prompt' ? fixed : userText },
+      hookConfig: { ...config?.hookConfig, recallQuery: fixed && fixed !== '$prompt' ? fixed : userText, recallMaxQueryChars },
       client,
       secrets,
       log,

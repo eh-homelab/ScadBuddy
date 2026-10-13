@@ -17,6 +17,28 @@ FLOW_GRANT_APPROVE = "flow_grant_approve"
 FLOW_GRANT_WITHDRAW = "flow_grant_withdraw"
 #: The harness refused the grant's Update for good (not "not parked yet").
 GRANT_REFUSED = "GrantApprovalRefused"
+#: Escalation (#2482): a parked call's parent hop is over; a gated body reads its decision.
+FLOW_HOP_DUE = "flow_hop_due"
+FLOW_DECISION = "flow_decision"
+#: A narrowed decision whose input is not the one it approved: the body runs nothing.
+NARROWED_MISMATCH = "NarrowedInputMismatch"
+
+Hop = Literal["parent", "person"]
+HopAction = Literal["parked", "deny", "narrow", "pass_up", "timeout", "approve", "delivered"]
+
+
+class HopRecord(BaseModel):
+    """One thing that happened to a parked call on its way up (spec 2026-10-11 §4.6):
+    who did what at which hop. A narrowing's input is never here, only that there was
+    one (`workflow_run_proposals` holds it)."""
+
+    hop: Hop
+    action: HopAction
+    #: `flow` (the run parked it), `system` (a timer), `session:<id>` (the starter
+    #: session) or `browser`.
+    actor: str
+    at: datetime
+    reason: str | None = None
 
 
 class StepPolicy(BaseModel):
@@ -72,6 +94,15 @@ class FlowWaiting(BaseModel):
     resolved_at: int | None = None
     #: The execution whose write parked it, set by the store, as on `FlowStep`.
     workflow_run_id: str | None = None
+    #: An approval outside the run's grant (#2482): where it waits now, `parent` (the
+    #: starter session) until `hop_until`, then `person`; None for one parked before.
+    hop: Hop | None = None
+    hop_until: datetime | None = None
+    #: Why the grant did not admit it (`flow_grant_check`'s reason).
+    reason: str | None = None
+    #: Whether a parent's narrowing waits as a proposal for the person.
+    proposed: bool = False
+    hops: list[HopRecord] = []
 
 
 class ProjectionWrite(BaseModel):
@@ -137,6 +168,33 @@ class GrantVerdict(BaseModel):
     reason: str | None = None
     timeout_s: int = 0
     parent_hop: bool = False
+    #: With `parent_hop`, how long the call waits at the starter session (#2482): the
+    #: run's approval timeout, or `approval_expiry_seconds` when that is 0 (never).
+    hop_s: int = 0
+    #: A child's call: what the script said a call outside does (its step's policy).
+    on_outside: Literal["escalate", "deny"] = "escalate"
+
+
+class DecisionAsk(BaseModel):
+    """Which of the calling run's approved calls a gated body reads the decision of, and
+    what it runs: the host function, and for `tool` the agent tool, which the narrowed
+    input is hashed with. The run is the calling workflow's own."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    call_id: str
+    fn: str
+    tool: str | None = None
+
+
+class DecisionRead(BaseModel):
+    """What a gated body runs (#2482, plan Task B4): a narrowed decision's input, given
+    only when it hashes to the decision's own hash. `narrowed` with no `args` is a
+    narrowed decision that does not hold, and the body refuses."""
+
+    narrowed: bool = False
+    args: dict[str, Any] | None = None
+    narrowed_by: str | None = None
 
 
 class GrantApprove(BaseModel):

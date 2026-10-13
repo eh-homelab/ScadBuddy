@@ -356,6 +356,22 @@ export interface SessionLimits {
 }
 
 /**
+ * How many of the assistant's renders run at once (`GET/PUT /api/v1/ai/settings/render-limits`,
+ * agent `src/routes/renderLimits.ts`). Past a limit a render waits for a slot; nothing
+ * is refused for it. Read live by the agent, so a change applies to waiting renders too.
+ */
+export interface RenderLimits {
+  /** Each caller's renders at once, unless an override names it. */
+  per_principal: number
+  /** Every caller's together; 0 is no limit. */
+  global: number
+  /** Renders one caller may start in 10 minutes; 0 is no limit. */
+  per_window: number
+  /** By principal id: `browser` (you and your chats), `token:<id>`, `oidc:<issuer>#<sub>`, `anonymous` (every anonymous MCP session together). */
+  overrides: { principal: string; concurrent: number }[]
+}
+
+/**
  * Plan 5d — the mode a new assistant session gets when whoever starts it names none
  * (`GET/PUT /api/v1/ai/settings/session-mode`, agent `src/routes/sessionMode.ts`).
  * `durable_available` says whether a durable session could start now; when not, a
@@ -376,6 +392,18 @@ export interface SessionModeSetting {
 export interface ImageSettings {
   long_edge: number
   min: number
+  max: number
+}
+
+/**
+ * The longest automatic Hindsight recall query, in characters (`GET/PUT
+ * /api/v1/ai/settings/memory`, agent `src/routes/memorySettings.ts`): the Claude Code
+ * Hindsight plugin's `recallMaxQueryChars`. `0` sends the whole query; `default` and `max`
+ * come from the agent, and the PUT sends `recall_max_query_chars` only.
+ */
+export interface MemorySettings {
+  recall_max_query_chars: number
+  default: number
   max: number
 }
 

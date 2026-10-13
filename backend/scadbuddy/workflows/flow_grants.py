@@ -14,7 +14,7 @@ import logging
 import re
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote, unquote
 
 import httpx
@@ -28,14 +28,19 @@ from scadbuddy.flows.grants import CallFacts, Inside, match_grant
 from scadbuddy.flows.models import Decision, Run
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.workflows.flow_models import (
+    FLOW_DECISION,
     FLOW_GRANT_APPROVE,
     FLOW_GRANT_CHECK,
     FLOW_GRANT_WITHDRAW,
+    FLOW_HOP_DUE,
     GRANT_REFUSED,
+    DecisionAsk,
+    DecisionRead,
     GrantApproval,
     GrantApprove,
     GrantCheck,
     GrantVerdict,
+    HopRecord,
 )
 
 logger = logging.getLogger(__name__)
@@ -157,6 +162,7 @@ class FlowGrants:
         # (`flow:<run>:<workflow run>:`), a session's its own (`durable:<session>:…`),
         # in a flow turn of a step the run recorded talking to that session.
         narrowing = None
+        on_outside: Literal["escalate", "deny"] = "escalate"
         if req.session_id is None:
             own = _flow_request_prefix()
             if own is None or req.run_id != own[0] or not req.request_id.startswith(own[1]):
@@ -185,8 +191,10 @@ class FlowGrants:
                 or sent.policy is None
             ):
                 return GrantVerdict(verdict="outside", reason="not a flow turn of this run")
-            # The script's narrowing, as the run recorded the step (spec §3.4).
+            # The script's narrowing and `on_outside`, as the run recorded the step
+            # (spec §3.4, §4.3).
             narrowing = sent.policy.grant
+            on_outside = sent.policy.on_outside
         verdict = await match_grant(
             self._store,
             self.facts_of,
@@ -209,12 +217,54 @@ class FlowGrants:
                 input_hash=verdict.input_hash,
                 args=verdict.args,
             )
+        # A parent hop ends after the run's timeout, or `approval_expiry_seconds` for a run
+        # that never times out, so a starter session that never answers cannot hold the
+        # person's queue back (spec §4.6, Ruling 11).
+        hop_s = 0
+        if verdict.parent_hop:
+            hop_s = verdict.timeout_s or await self._store.approval_expiry_s()
         return GrantVerdict(
             verdict="outside",
             reason=verdict.reason,
             timeout_s=verdict.timeout_s,
             parent_hop=verdict.parent_hop,
+            hop_s=hop_s,
+            on_outside=on_outside,
         )
+
+    @activity.defn(name=FLOW_HOP_DUE)
+    async def hop_due(self, call_id: str) -> bool:
+        """The calling run's parked call waited its parent hop out: it passes up to the
+        person (a parent that never answers never denies; spec §4.6). False when it had
+        moved already (passed up, or decided)."""
+        own = _flow_request_prefix()
+        if own is None:
+            return False
+        record = HopRecord(hop="parent", action="timeout", actor="system", at=datetime.now(UTC))
+        return await self._store.move_hop(own[0], call_id, record) is not None
+
+    @activity.defn(name=FLOW_DECISION)
+    async def decision(self, ask: DecisionAsk) -> DecisionRead:
+        """What the calling run's approved call runs (#2482, plan Task B4): a narrowed
+        decision's input, only when it hashes to the hash the decision approved (#2318).
+        The decision is the calling workflow's own call's, never one named here."""
+        own = _flow_request_prefix()
+        if own is None:
+            return DecisionRead()
+        found = await self._store.get_decision(f"{own[1]}{ask.call_id}")
+        if found is None or found.outcome != "approved" or "args" not in found.response:
+            return DecisionRead()
+        args = found.response.get("args")
+        by = found.response.get("narrowed_by")
+        narrowed_by = by if isinstance(by, str) else None
+        if (
+            not isinstance(args, dict)
+            or self._hash_key is None
+            or found.input_hash is None
+            or self._hash(self._hash_key)(ask.fn, ask.tool, args) != found.input_hash
+        ):
+            return DecisionRead(narrowed=True, narrowed_by=narrowed_by)
+        return DecisionRead(narrowed=True, args=args, narrowed_by=narrowed_by)
 
     @activity.defn(name=FLOW_GRANT_APPROVE)
     async def approve(self, req: GrantApprove) -> GrantApproval:
@@ -239,7 +289,7 @@ class FlowGrants:
             # Not parked yet (the workflow starts the call as it schedules this), or
             # decided already: retried, and the workflow asks once the retries are spent.
             raise ApplicationError("the call is not parked")
-        call = _parked_call(parked.tool_name, parked.tool_input)
+        call = parked_call(parked.tool_name, parked.tool_input)
         use = await self._store.grant_use(request_id)
         if call is None or use is None or (call[0], call[1]) != (use.fn, use.tool):
             return "ask"
@@ -303,7 +353,7 @@ class FlowGrants:
         handle = AgentClient(client, run.workflow_id)
         released: list[str] = []
         for parked in await handle.get_pending_approvals():
-            call = _parked_call(parked.tool_name, parked.tool_input)
+            call = parked_call(parked.tool_name, parked.tool_input)
             if call is None:
                 continue
             fn, tool, args = call
@@ -359,7 +409,7 @@ class FlowGrants:
         return released
 
     def all(self) -> list[Callable[..., Any]]:
-        return [self.check, self.approve, self.withdraw]
+        return [self.check, self.approve, self.withdraw, self.hop_due, self.decision]
 
 
 _PRINT_PATH = re.compile(r"^/api/v1/print/(outputs|library)/([^/]+)/run$")
@@ -390,7 +440,7 @@ def _flow_request_prefix() -> tuple[str, str] | None:
     return run_id, f"flow:{run_id}:{info.workflow_run_id}:"
 
 
-def _parked_call(
+def parked_call(
     tool_name: str, tool_input: dict[str, Any]
 ) -> tuple[str, str | None, dict[str, Any]] | None:
     """A parked gated body's call as the grant sees it: `(fn, tool, args)` as the host
