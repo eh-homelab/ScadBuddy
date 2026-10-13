@@ -605,6 +605,29 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     expect(plain.body).not.toHaveProperty('print_sequence')
   })
 
+  it('sends supports when asked for, names them in its approval line, and omits them otherwise (#1899)', async () => {
+    const chosen: { body?: unknown } = {}
+    const off: { body?: unknown } = {}
+    const plain: { body?: unknown } = {}
+    const args = { output_id: OUT, printer_id: 2, filament_plan: { slots: [] }, nozzles: [{ size: '0.4' }], tier: 'standard', bed_type: 'Cool Plate' }
+    const t = tool('print_output')
+    server.use(...capturedRun(chosen))
+    await t.execute({ ...args, supports: { enabled: true, threshold_angle: 40 } }, ctx())
+    server.use(...capturedRun(off))
+    await t.execute({ ...args, supports: { enabled: false } }, ctx())
+    server.use(...capturedRun(plain))
+    await t.execute(args, ctx())
+    expect(chosen.body).toMatchObject({
+      supports: { enabled: true, type: 'tree', threshold_angle: 40, on_build_plate_only: false },
+    })
+    expect(off.body).toMatchObject({ supports: { enabled: false } })
+    expect(plain.body).not.toHaveProperty('supports')
+    expect(t.summarize({ ...args, supports: { enabled: true, type: 'normal', threshold_angle: 40, on_build_plate_only: true } })).toContain(
+      'with normal supports at 40° on the build plate only',
+    )
+    expect(t.summarize({ ...args, supports: { enabled: false } })).toContain('without supports')
+  })
+
   it('sends a new request_id per call, so the same choices again are a new print (#470)', async () => {
     const first: { body?: { request_id?: string } } = {}
     const second: { body?: { request_id?: string } } = {}
