@@ -1085,9 +1085,11 @@ process, over `/mcp` and as a Temporal activity, all sharing one limiter):
 - at most **4** of its renders in flight at once (an override per principal may change
   that), and optionally at most N of every principal's together, counted until the
   backend job settles (done, failed or cancelled). A render past either bound **waits**
-  for a slot, first come first served, until its caller aborts, rather than being
-  refused. At most **100** of one principal's renders may wait; past that a call is
-  refused. A render `render_model` hands back still running keeps its slot while the
+  for a slot, first come first served, rather than being refused, until its caller
+  aborts or the tool's own wait passes (`ACCEPTING_MS` + `renderWaitMs`, 14 minutes by
+  default). That wait ends before the tool's deadline, with "not rendered", nothing
+  submitted. At most **100** of one principal's renders may wait; past that a call is
+  refused. A render or arrange handed back still running keeps its slot while the
   agent polls the job in the background, for at most **30 minutes** (PR #752 review).
   Past 30 minutes the slot is freed even if the job still runs, so for a job that long
   this cap is best effort, and only the backend's shared render concurrency bounds it;
