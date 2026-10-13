@@ -224,8 +224,9 @@ function runJob(jobId: string): void {
         job.status = 'cancelled'
         job.error = fixtures.CANCELLED_ERROR
         job.log_tail = fixtures.CANCELLED_LOG_TAIL
-        // `core.events.JobKind` has no `job.cancelled`; `render/projection.py`'s
-        // `_FINISHED_KINDS` maps a job that ends `cancelled` to `job.superseded`.
+        // A newer render replaced it: `render/projection.py`'s `_settled_kind` announces
+        // `job.superseded` for that, and `job.cancelled` for a release with no
+        // replacement (#607).
         announce('job.superseded')
         return
       }

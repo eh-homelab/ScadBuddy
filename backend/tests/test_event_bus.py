@@ -201,6 +201,7 @@ def test_every_kind_from_the_spec_is_known() -> None:
         "job.progress",
         "job.failed",
         "job.superseded",
+        "job.cancelled",
         "model.created",
         "model.updated",
         "model.deleted",

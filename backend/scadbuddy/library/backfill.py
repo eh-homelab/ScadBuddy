@@ -65,7 +65,7 @@ def choose_output(job: Job, record: OutputRecord | None) -> PipelineOutput | Non
 
 
 #: The events that settle a job: its re-render is attached, or marked with why not.
-SETTLED = ("job.done", "job.failed", "job.superseded")
+SETTLED = ("job.done", "job.failed", "job.superseded", "job.cancelled")
 
 
 def attach_backfills(

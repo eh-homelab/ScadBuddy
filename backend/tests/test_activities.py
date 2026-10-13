@@ -807,7 +807,7 @@ async def test_project_cancelled_onto_a_running_job(
     assert stored.state == "cancelled"
     assert stored.error == "cancelled"
     assert stored.steps == _cancelled(job).steps
-    assert _kinds(pg_conninfo, job.id) == ["job.pending", "job.running", "job.superseded"]
+    assert _kinds(pg_conninfo, job.id) == ["job.pending", "job.running", "job.cancelled"]
 
 
 @pytest.mark.requires_postgres
@@ -824,7 +824,7 @@ async def test_project_cancelled_onto_a_job_the_api_cancelled_keeps_its_error(
     assert stored.state == "cancelled"
     assert stored.error == CANCELLED_ERROR
     assert stored.steps == _cancelled(job).steps
-    assert _kinds(pg_conninfo, job.id) == ["job.pending", "job.superseded"]
+    assert _kinds(pg_conninfo, job.id) == ["job.pending", "job.cancelled"]
 
 
 @pytest.mark.requires_postgres
