@@ -152,6 +152,23 @@ def test_the_preview_glb_is_served_with_the_gltf_media_type(client: TestClient, 
     assert response.content.startswith(b"glTF")
 
 
+def test_one_plate_of_a_render_is_its_own_preview(client: TestClient, model: str) -> None:
+    """#2731: the preview's plate picker shows one plate, read from the render's 3MF."""
+    job_id = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 1}}).json()[
+        "job_id"
+    ]
+    wait_for_job(client, job_id)
+
+    plate = client.get(f"/api/v1/jobs/{job_id}/preview.glb", params={"plate": 1})
+
+    assert plate.status_code == 200, plate.text
+    assert plate.headers["content-type"] == "model/gltf-binary"
+    assert plate.content.startswith(b"glTF")
+    whole = client.get(f"/api/v1/jobs/{job_id}/preview.glb")
+    assert plate.content != whole.content, "cut from the 3MF, not the whole preview"
+    assert client.get(f"/api/v1/jobs/{job_id}/preview.glb", params={"plate": 9}).status_code == 404
+
+
 def test_a_failed_job_has_no_preview(client: TestClient, model: str) -> None:
     job_id = client.post(
         f"/api/v1/models/{model}/render", json={"params": {"width": FAIL_WIDTH}}

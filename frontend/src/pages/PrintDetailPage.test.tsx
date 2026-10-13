@@ -185,7 +185,15 @@ describe('PrintDetailPage (#311)', () => {
         }),
       ),
     )
-    render(90)
+    const { user } = render(90)
+    // #2731 — the plate's image first: its mesh can be megabytes, loaded only when asked.
+    const plate = await section('Library file')
+    expect(within(plate).getByRole('img', { name: 'Plate 2 of the library file' })).toHaveAttribute(
+      'src',
+      '/api/v1/print/library/89/plates/2/thumbnail',
+    )
+    expect(screen.queryByTestId('preview')).not.toBeInTheDocument()
+    await user.click(within(plate).getByRole('button', { name: 'Show in 3D' }))
     expect(await screen.findByTestId('preview')).toHaveAttribute('data-url', preview)
     const files = await section('Files')
     expect(within(files).getByText('Library file')).toBeInTheDocument()

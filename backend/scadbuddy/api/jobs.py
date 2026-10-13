@@ -25,6 +25,7 @@ from scadbuddy.api.deps import (
     HistoryDep,
     JobIdPath,
     PathsDep,
+    ReadBudgetDep,
     RenderDep,
     SlugPath,
     StateDep,
@@ -38,6 +39,7 @@ from scadbuddy.api.operations import (
 )
 from scadbuddy.api.params import require_installed_fonts, require_valid_params, schema_of
 from scadbuddy.api.versions import require_history
+from scadbuddy.bambuddy.library_view import plate_glb
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import MODEL_META_NAME
 from scadbuddy.core.problems import ApiError
@@ -49,6 +51,7 @@ from scadbuddy.library.history import (
     RevisionNotFoundError,
 )
 from scadbuddy.render.diagnostics import Diagnostic
+from scadbuddy.render.geometry import NoSuchPlateError
 from scadbuddy.render.glb import BoundingBox, read_glb
 from scadbuddy.render.inputs import InputsError, legacy_inputs, normalize_inputs
 from scadbuddy.render.job_models import (
@@ -61,6 +64,7 @@ from scadbuddy.render.job_models import (
     QueueFullError,
 )
 from scadbuddy.render.jobs import SnapshotPendingError, SnapshotUnavailableError
+from scadbuddy.render.objects3mf import UnreadableObjectsError
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.submit import RenderService
 from scadbuddy.render.thumbnail import (
@@ -547,16 +551,41 @@ def get_job(job_id: JobIdPath, request: Request, render: RenderDep) -> JobStatus
     response_class=FileResponse,
     responses={200: {"content": {GLB_MEDIA_TYPE: {}}}},
     summary="Render job preview mesh",
+    description=(
+        "The render's preview mesh, every plate at once; with `plate`, that one plate of "
+        "its 3MF, where the file places it (#2731: the preview's plate picker, as an "
+        "output's `preview.glb?plate=` is). 404 for a plate the render lacks."
+    ),
 )
 async def get_job_preview(
-    job_id: JobIdPath, render: RenderDep, paths: PathsDep, state: StateDep
-) -> FileResponse:
+    job_id: JobIdPath,
+    render: RenderDep,
+    paths: PathsDep,
+    state: StateDep,
+    budget: ReadBudgetDep,
+    plate: Annotated[int | None, Query(ge=1)] = None,
+) -> Response:
     job = await asyncio.to_thread(require_job, render, job_id)
     if job.result is None:
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"job {job_id!r} is {job.state} and has no preview"
         )
     await materialize_result(state.store.blobs, job.result)
+    if plate is not None:
+        model = paths.root / job.result.model_3mf
+        try:
+            payload = await asyncio.to_thread(model.read_bytes)
+        except FileNotFoundError:
+            raise ApiError(
+                status.HTTP_404_NOT_FOUND, f"the 3MF of job {job_id!r} is gone"
+            ) from None
+        try:
+            data = await asyncio.to_thread(plate_glb, payload, plate, budget)
+        except NoSuchPlateError as error:
+            raise ApiError(status.HTTP_404_NOT_FOUND, str(error)) from None
+        except UnreadableObjectsError as error:
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+        return Response(data, media_type=GLB_MEDIA_TYPE)
     preview = paths.root / job.result.preview_glb
     if not preview.is_file():
         raise ApiError(status.HTTP_404_NOT_FOUND, f"the preview for job {job_id!r} is gone")

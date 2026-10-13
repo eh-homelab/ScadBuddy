@@ -282,14 +282,32 @@ function RenderSection({ print }: { print: PrintDetail }) {
       colors: output.data?.colors ?? null,
     }
   }, [glb, print.output_id, print.slug, print.library_file_id, output.data])
+  // #2731 — a library file's plate mesh is the whole file's geometry for that plate (11 MB
+  // for one print): its image first, and the mesh only when asked for.
+  const [meshAsked, setMeshAsked] = useState(false)
   if (!glb || !job) return null
+  const library = print.library_file_id
+  const plate = Number(new URL(glb.url, window.location.origin).searchParams.get('plate') ?? '1')
   return (
     <Section title={print.output_id !== null ? 'ScadBuddy render' : 'Library file'}>
-      <div className="aspect-[4/3] overflow-hidden rounded-[4px]">
-        {!output.loading && (
-          <Suspense fallback={null}>
-            <Preview job={job} rendering={false} />
-          </Suspense>
+      <div className="relative aspect-[4/3] overflow-hidden rounded-[4px]">
+        {library !== null && !meshAsked ? (
+          <>
+            <img
+              src={api.libraryPlateThumbnailUrl(library, plate)}
+              alt={`Plate ${plate} of the library file`}
+              className="size-full bg-surface-2 object-contain"
+            />
+            <Button size="sm" className="absolute right-2 bottom-2" onClick={() => setMeshAsked(true)}>
+              Show in 3D
+            </Button>
+          </>
+        ) : (
+          !output.loading && (
+            <Suspense fallback={null}>
+              <Preview job={job} rendering={false} />
+            </Suspense>
+          )
         )}
       </div>
     </Section>
