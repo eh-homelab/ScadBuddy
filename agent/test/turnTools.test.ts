@@ -257,7 +257,7 @@ describe('turn tools in a durable session', () => {
     }
     const { servers } = await turnServers({ remotePlugins: async () => forwarded })({
       session: SESSION,
-      owner: BROWSER as never,
+      owner: BROWSER,
       signal: new AbortController().signal,
       listing: true,
     })

@@ -47,7 +47,8 @@ REDACTED = "[redacted]"
 LAST = frozenset({"done", "error", "cancelled"})
 FOLLOW_HEARTBEAT = timedelta(seconds=30)
 
-#: The panel's risk labels (agent harness/permissions.ts `RiskTier`).
+#: The panel's risk labels (agent harness/permissions.ts `RiskTier`). Both sides are
+#: pinned to agent/test/fixtures/risk-tiers.json, so neither drifts alone (#3144).
 RISK_TIERS = frozenset({"read", "write", "outward"})
 
 
@@ -197,6 +198,9 @@ class SessionEvents:
         # A listed tier is the agent's free string: one that is not a tier is labelled
         # outward, as an unlisted tool is, rather than reaching the transcript as is (#2839).
         listed = {name: tier for name, tier in args.tiers.items() if tier in RISK_TIERS}
+        for name in args.tiers.keys() - listed.keys():
+            # The tool, never the value: the value is the agent's free string (#3144).
+            activity.logger.warning("tool %s was listed with no known tier: labelled outward", name)
         tiers = {e.name: e.tier for e in tools.manifest()} | listed
         at = [0]
         failed: str | None = None
