@@ -309,6 +309,8 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
         paths=SimpleNamespace(),
         settings_store=SimpleNamespace(load=lambda: None),
         uploads=None,
+        # #2718: the claims sweep prunes batch prints too.
+        components=SimpleNamespace(get=lambda key: SimpleNamespace(prune=slow_previews)),
     )
     state.paths.claims = None
 
