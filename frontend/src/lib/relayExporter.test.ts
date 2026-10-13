@@ -7,7 +7,7 @@ import {
 } from '@opentelemetry/sdk-trace-web'
 import { HttpResponse, delay, http } from 'msw'
 import { JsonTraceSerializer } from '@opentelemetry/otlp-transformer'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { server } from '../mocks/server'
 import {
   MAX_IN_FLIGHT_BYTES,
@@ -132,6 +132,7 @@ describe('RelayExporter', () => {
     const seen = acceptingRelay()
     // `keepalive` never reaches the wire, so msw's handler cannot see it: read it off the call.
     const sent = vi.spyOn(globalThis, 'fetch')
+    onTestFinished(() => sent.mockRestore())
     const result = await exportOnce(new RelayExporter(), spans(3))
     expect(result.code).toBe(ExportResultCode.SUCCESS)
     expect(sent).toHaveBeenCalledWith(RELAY_PATH, expect.objectContaining({ keepalive: true }))
