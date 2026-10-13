@@ -28,7 +28,7 @@ from scadbuddy.api.deps import (
     UploadsDep,
 )
 from scadbuddy.api.jobs import GLB_MEDIA_TYPE
-from scadbuddy.api.media import _receive
+from scadbuddy.api.media import receive_upload
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
     Claimed,
@@ -377,7 +377,7 @@ async def post_library_file(
     """Streams the ``file`` part to disk and uploads it through Bambuddy, to the folder
     in ``folder_id`` or the top level; its filename is the library name. The body may be
     as large as the library download cap (#2686)."""
-    received = await _receive(request, paths.cache, fields={"folder_id": 32})
+    received = await receive_upload(request, paths.cache, fields={"folder_id": 32})
     try:
         path = received.files.get("file")
         if path is None or received.sizes["file"] == 0:

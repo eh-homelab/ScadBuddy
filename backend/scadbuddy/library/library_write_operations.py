@@ -159,8 +159,9 @@ async def _to_top_level(
     (``backend/app/models/library.py`` line 104). A file trashed while still in the
     folder would be gone for good. Moved to the top level first, Undo restores it there.
 
-    A file Bambuddy will not move (its key's user did not add it: ``update_file``'s 403)
-    or no longer has (404) is skipped, and keeps its folder."""
+    A file Bambuddy will not move (its key's user did not add it: ``update_file``'s 403;
+    or any other refusal, such as a 422) or no longer has (404) is skipped, and keeps its
+    folder; the files moved before or after it are still moved and deleted."""
     gate = asyncio.Semaphore(READ_CONCURRENCY)
 
     async def one(entry: dict[str, Any]) -> SkippedLibraryFile | None:
@@ -168,12 +169,19 @@ async def _to_top_level(
             try:
                 await client.update_library_file(entry["id"], FileUpdate(folder_id=0))
             except ApiError as error:
-                if error.extensions.get("bambuddy_status") == status.HTTP_403_FORBIDDEN:
+                upstream = error.extensions.get("bambuddy_status")
+                if upstream == status.HTTP_403_FORBIDDEN:
                     reason = NOT_MOVED_OUT
                 elif error.status == status.HTTP_404_NOT_FOUND:
                     reason = "it is no longer in Bambuddy's library"
                 else:
-                    raise
+                    # Some files may have moved already: report this one rather than
+                    # abort with no account of where they went.
+                    reason = (
+                        f"Bambuddy refused to move it to the top level "
+                        f"(HTTP {upstream or error.status}: {error.detail}); it stayed in "
+                        "its folder, and the folder was kept"
+                    )
                 return SkippedLibraryFile(id=entry["id"], filename=entry["filename"], reason=reason)
         return None
 
@@ -313,7 +321,12 @@ def library_write_kinds(state: Core) -> list[OperationKind]:
                     continue
                 # Bambuddy's folder delete takes whatever the folder holds, its trash and
                 # its subfolders included, so anything that arrived after the check keeps
-                # the folder (and its ancestors).
+                # the folder (and its ancestors). These re-reads per node, just before
+                # its delete, ARE the guard against that (a folder made or a file trashed
+                # in the subtree mid-run): never hoist or cache them. The trash cannot be
+                # read for one folder: Bambuddy v1.2.5.5's ``GET /library/trash``
+                # (``routes/library_trash.py`` ``list_trash``, lines 88-150) takes only
+                # ``limit`` and ``offset``.
                 now = _by_id(await client.folders()).get(node["id"])
                 if now is None:
                     continue
@@ -359,22 +372,25 @@ def library_write_kinds(state: Core) -> list[OperationKind]:
     async def upload_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         body = LibraryFileUpload.model_validate(request)
         try:
-            data = await asyncio.to_thread(ClaimStore(state.paths.claims).get, body.claim)
+            # Streamed from the claim, never read whole: an upload may be 256 MB, and
+            # this worker runs inside the API process.
+            held = await asyncio.to_thread(ClaimStore(state.paths.claims).open, body.claim)
         except LookupError:
             raise ApiError(
                 status.HTTP_409_CONFLICT,
                 # Not "send it again": a re-send with the same key replays this answer.
                 "this request's upload is no longer held; upload the file again",
             ) from None
-        async with client_for(await settings()) as client:
-            made = await client.upload_library_file(
-                body.filename,
-                data,
-                folder_id=body.folder_id,
-                media_type="application/octet-stream",
-            )
+        with held:
+            async with client_for(await settings()) as client:
+                made = await client.upload_library_file(
+                    body.filename,
+                    held,
+                    folder_id=body.folder_id,
+                    media_type="application/octet-stream",
+                )
         return LibraryEntryUpdated(
-            id=made.id, filename=made.filename, folder_id=body.folder_id
+            id=made.id, filename=made.filename, folder_id=made.folder_id
         ).model_dump(mode="json")
 
     def kind(
