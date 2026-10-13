@@ -329,6 +329,19 @@ describe('PrintDetailPage (#311)', () => {
     server.events.removeAllListeners()
   })
 
+  it('offers no Print again while the print is still going (#2736)', async () => {
+    const done = prints.find((print) => print.archive_id === 35)!
+    server.use(
+      http.get('/api/v1/prints/35', () =>
+        HttpResponse.json({ ...done, status: 'printing', outcome: { ...done.outcome, status: 'printing' } }),
+      ),
+    )
+    render(35)
+    await section('Outcome')
+    expect(screen.queryByRole('button', { name: 'Print again' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Open in Bambuddy' })).toBeInTheDocument()
+  })
+
   it('says why Bambuddy would not queue it', async () => {
     server.use(
       http.post('/api/v1/prints/35/reprint', () =>
