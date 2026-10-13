@@ -189,6 +189,16 @@ describe('LibraryPage', () => {
       ),
     )
     const run = vi.spyOn(api, 'runLibraryPrint')
+    // MSW's answers to the run's POST and to the progress read the sent dialog makes,
+    // counted until the test ends (see below).
+    const answered: string[] = []
+    const onAnswer = ({ request }: { request: Request }) => {
+      answered.push(`${request.method} ${new URL(request.url).pathname}`)
+    }
+    server.events.on('response:mocked', onAnswer)
+    onTestFinished(() => {
+      server.events.removeListener('response:mocked', onAnswer)
+    })
     const { user } = renderPage(<LibraryPage />, { route: '/library' })
     await user.click(await screen.findByTestId('library-print-89'))
     const dialog = await screen.findByRole('dialog', { name: 'Print' })
@@ -206,6 +216,14 @@ describe('LibraryPage', () => {
         expect.any(Function),
       ),
     )
+    // Not ended with a request in flight: unmounting aborts it, and in CI the next
+    // test's listing read then bypassed MSW ("could not reach its server") and never
+    // showed its loading state (the #2944 shape). The run's POST, then the sent dialog's
+    // first progress read; its next is seconds away.
+    await waitFor(() => {
+      expect(answered).toContain('POST /api/v1/print/library/89/run')
+      expect(answered).toContain('GET /api/v1/print/library/89/progress')
+    })
     run.mockRestore()
   })
 
