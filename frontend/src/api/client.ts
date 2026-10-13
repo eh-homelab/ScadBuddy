@@ -92,6 +92,7 @@ import type {
   FlowRun,
   FlowRunStarted,
   FlowRunView,
+  FlowState,
   FlowSummary,
   FlowVersion,
   Operation,
@@ -699,7 +700,15 @@ export const api = {
 
   // #2350 — the Flows tab: every registered flow version, one with its script, and a
   // run started from it. #2487: its editor's Save, check, completion, diff and restore.
-  listFlows: () => request<FlowSummary[]>('/workflows'),
+  // #2485: archived and deleted flows too with `archived`.
+  listFlows: ({ archived = false }: { archived?: boolean } = {}) =>
+    request<FlowSummary[]>(`/workflows${archived ? '?archived=true' : ''}`),
+
+  /** #2485 — archive a flow (every version): hidden, and never started until unarchived. */
+  archiveFlow: (name: string) => request<FlowState>(`/workflows/names/${seg(name)}/archive`, { method: 'POST' }),
+  unarchiveFlow: (name: string) => request<FlowState>(`/workflows/names/${seg(name)}/unarchive`, { method: 'POST' }),
+  /** #2485 — a commit removing the flow's script; its history keeps every version, and a restore brings it back. */
+  deleteFlow: (name: string) => request<FlowState>(`/workflows/names/${seg(name)}`, { method: 'DELETE' }),
 
   /**
    * One flow's versions, newest first: the one place the page reads them from, its git

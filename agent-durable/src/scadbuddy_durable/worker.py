@@ -146,6 +146,7 @@ def build_worker(
         workflows=[DurableSession],
         activities=[
             gate.open_input,
+            gate.grant_input,
             gate.resolve_input,
             session.gate_settings,
             session.finish_turn,

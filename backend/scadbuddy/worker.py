@@ -91,6 +91,7 @@ from scadbuddy.workflows.client import (
     render_worker,
 )
 from scadbuddy.workflows.flow_activities import FlowActivities
+from scadbuddy.workflows.flow_grants import FlowGrants
 from scadbuddy.workflows.flow_routes import FlowRoutes, api_client
 from scadbuddy.workflows.flows_client import connect_flows
 from scadbuddy.workflows.operation_activities import operation_activities
@@ -884,9 +885,13 @@ async def run_projects_worker(
             settings_store,
             {kind.name: kind for kind in flow_kinds(store, keys[0], approval_key(settings))},
         )
-        routes = FlowRoutes(api_client(settings.api_internal_url))
+        api = api_client(settings.api_internal_url)
+        routes = FlowRoutes(api)
+        grants = FlowGrants(store, api, approval_key(settings))
         worker = projects_worker(
-            client, queue, [*FlowActivities(store).all(), *routes.all(), *decisions]
+            client,
+            queue,
+            [*FlowActivities(store).all(), *routes.all(), *grants.all(), *decisions],
         )
         server = (
             _health_server(settings, metrics, None, health_port, queue)

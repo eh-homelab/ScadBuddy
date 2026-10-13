@@ -53,7 +53,7 @@ import { QuestionService } from '../questions/service.js'
 import { attentionCard, attentionSpec, BACK_REPLIES, DEFAULT_REPLIES, IM_BACK, parseAttention, timedOutText } from '../harness/attention.js'
 import { isQuestionTool, type QuestionGate } from '../harness/questions.js'
 import { SERVER_NAME } from '../tools/projections.js'
-import type { TabWait, WaitForTab } from '../tools/registry.js'
+import type { FlowTurn, TabWait, WaitForTab } from '../tools/registry.js'
 import { type AuditContext, type AuditLog, type AuditSink, safeDetail } from '../audit/log.js'
 import { TurnAuditor, turnCostEntry } from '../audit/turn.js'
 import { UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
@@ -549,6 +549,8 @@ export type StartOptions = {
   images?: readonly UserImage[]
   /** With `prompt`: see SendOptions.tiers. */
   tiers?: readonly Tier[]
+  /** With `prompt`: see SendOptions.flow. */
+  flow?: FlowTurn
   /**
    * The session's mode. Named, it is kept or refused (`unavailable`). Omitted, the
    * `session_mode` setting's applies, and a durable one this service cannot run now
@@ -578,6 +580,12 @@ export type SendOptions = {
    * `harnessPrincipal`: everything for the browser user, `read` otherwise).
    */
   tiers?: readonly Tier[]
+  /**
+   * The flow run and step that send this turn (#2481), set only by the sessions tools
+   * from a flow activity's own context (ToolContext.flowTurn): a durable turn carries
+   * it, so the run's grant may cover its calls. A classic turn ignores it.
+   */
+  flow?: FlowTurn
 }
 
 /** Who a turn's in-process tools act for, beyond the session's owner (SendOptions.tiers). */
@@ -1202,6 +1210,7 @@ export class SessionManager {
       ...(options.context ? { context: options.context } : {}),
       ...(options.images?.length ? { images: options.images } : {}),
       ...(options.tiers ? { tiers: options.tiers } : {}),
+      ...(options.flow ? { flow: options.flow } : {}),
     })
     return { session: await this.get(id, principal), turn, ...said }
   }
@@ -1227,6 +1236,7 @@ export class SessionManager {
         images: options.images ?? [],
         systemAppend: systemAppend(),
         ...(options.tiers ? { tiers: options.tiers } : {}),
+        ...(options.flow ? { flow: options.flow } : {}),
       })
       if (!turn) throw await this.whyNotClaimed(id, principal, before)
       return turn

@@ -7,6 +7,7 @@ import {
 import { ApplicationFailure, WorkflowNotFoundError } from '@temporalio/common'
 import type { Sql } from 'postgres'
 import type { Tier } from '../auth/principal.js'
+import type { FlowTurn } from '../tools/registry.js'
 import { DurableGate, DurableUnavailable, sessionWorkflowId } from '../gate/durable.js'
 import { SessionBlobs, sentImageBlobs } from './blobs.js'
 import type { EventLog } from './eventLog.js'
@@ -77,7 +78,15 @@ export type SessionStart = {
 }
 
 /** The `send_message` Update's argument (models.py `Message`); each turn carries its own append (#2525). */
-export type DurableMessage = { turn_id: string; text: string; author: WireOwner; images: ImageRef[]; system_append: string | null }
+export type DurableMessage = {
+  turn_id: string
+  text: string
+  author: WireOwner
+  images: ImageRef[]
+  system_append: string | null
+  /** A turn a flow run sent (#2481, models.py `FlowTurn`); absent for any other. */
+  flow?: FlowTurn
+}
 type SendAnswer = { accepted: boolean; turn_id: string }
 
 /** One turn as SessionManager.send hands it over. */
@@ -93,6 +102,8 @@ export type DurableTurn = {
   systemAppend: string
   /** The sender's tiers, for a turn sent through the sessions_* tools (`turn_tiers`, #2320). */
   tiers?: readonly Tier[] | undefined
+  /** The flow run and step that send it (#2481, SendOptions.flow). */
+  flow?: FlowTurn | undefined
 }
 
 export type DurableTurnsDeps = {
@@ -265,6 +276,7 @@ export class DurableTurns {
       // The full images, which the segment runner reads by name (Ruling 5); the previews are the panel's.
       images: sent.map((s) => ({ name: s.name!, mediaType: s.mediaType! })),
       system_append: turn.systemAppend,
+      ...(turn.flow ? { flow: { run_id: turn.flow.run_id, call_id: turn.flow.call_id } } : {}),
     }
     const operation = new WithStartWorkflowOperation<(start: SessionStart) => Promise<void>>(DURABLE_WORKFLOW, {
       workflowId: sessionWorkflowId(session.id),

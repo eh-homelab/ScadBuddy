@@ -29,7 +29,7 @@ const BROWSER: Owner = { kind: 'browser', id: 'browser', label: 'You' }
 const BEARER: Owner = { kind: 'bearer', id: 'token:7', label: 'MCP token' }
 
 function seen(ctx: ToolContext) {
-  return json({ principal: ctx.principal, session: ctx.session, gate: ctx.gate ?? null })
+  return json({ principal: ctx.principal, session: ctx.session, gate: ctx.gate ?? null, flowTurn: ctx.flowTurn ?? null })
 }
 
 const whoami = defineTool({
@@ -138,6 +138,8 @@ describe('tool activities', () => {
     expect(text(content)).toContain('"session": "' + SESSION)
     expect(text(content)).toContain('"gate": "workflow"')
     expect(text(content)).toContain('"id": "browser"')
+    // A session's own call is no flow's: a turn it sends is never marked a flow turn (#2481).
+    expect(JSON.parse(text(content)).flowTurn).toBeNull()
     // The commit trailer names the session (authorship.ts, #252).
     expect(h.headers[0]!.get(AUTHOR_SESSION_HEADER)).toBe(SESSION)
     // What the session touched (#931), and the audit row the harness would write.
@@ -338,6 +340,8 @@ describe('flow runs in tool activities', () => {
     expect(text(content)).toContain('"id": "browser"')
     expect(text(content)).toContain('"gate": "workflow"')
     expect(text(content)).not.toContain('"session"')
+    // #2481: the run and its step, from the activity's own context, for a turn it sends.
+    expect(JSON.parse(text(content)).flowTurn).toEqual({ run_id: RUN, call_id: 'call_1' })
     expect(owners).toEqual([])
     expect(h.headers[0]!.get(AUTHOR_SESSION_HEADER)).toBeNull()
     expect(h.audits).toEqual([
@@ -380,6 +384,22 @@ describe('flow runs in tool activities', () => {
     const refused = await failure(env(FLOW, 'tool-call_ok').run(h.activities.send!, { to: 'elsewhere' }))
     expect(refused.nonRetryable).toBe(true)
     expect(refused.type).toBe('NotApproved')
+  })
+
+  it("refuses a grant's call as GrantRevoked once its grant was revoked or expired (#2481)", async () => {
+    const audits: unknown[] = []
+    const flows: FlowRuns = {
+      ...flowRuns(),
+      lapsed: async (requestId, inputHash) => requestId.endsWith(':call_lapsed') && inputHash === 'hash:send',
+    }
+    const h = harness({ flows, audit: { record: async (row) => void audits.push(row), hash: () => 'hash:send', summarise: (tool) => tool } })
+    const refused = await failure(env(FLOW, 'tool-call_lapsed').run(h.activities.send!, { to: 'printer' }))
+    expect(refused.nonRetryable).toBe(true)
+    expect(refused.type).toBe('GrantRevoked')
+    expect(refused.message).toContain("the run's grant was revoked or expired before this call ran")
+    expect(audits).toEqual([expect.objectContaining({ action: 'send', outcome: 'refused' })])
+    // Not approved and no grant behind it: still NotApproved.
+    expect((await failure(env(FLOW, 'tool-call_2').run(h.activities.send!, { to: 'printer' }))).type).toBe('NotApproved')
   })
 
   it("runs a token starter's call with the tiers its token holds now (#2320)", async () => {

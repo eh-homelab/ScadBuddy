@@ -3,13 +3,14 @@ import { Link, useNavigate, useParams } from 'react-router'
 import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
 import type { FlowDefinition, FlowGrantSpec, FlowRegister, FlowScriptProblem, FlowVersion } from '../api/types'
+import { FlowActions } from '../components/flows/FlowActions'
 import { FlowScript } from '../components/flows/FlowScript'
 import { GrantEditor } from '../components/flows/GrantEditor'
 import { Button } from '../components/ui/Button'
 import { Dialog } from '../components/ui/Dialog'
 import { Spinner } from '../components/ui/Spinner'
 import { timeAgo } from '../lib/format'
-import { actorText, flowPath, flowRunPath, FLOWS_PATH } from '../lib/flows'
+import { actorText, flowPath, flowRunPath, FLOWS_PATH, flowStateText } from '../lib/flows'
 import { useAsync } from '../lib/useAsync'
 import { useDebounced } from '../lib/useDebounced'
 import { PHONE_QUERY, useMediaQuery } from '../lib/useMediaQuery'
@@ -47,6 +48,10 @@ function approvalTimeout(seconds: number | null | undefined): Pick<FlowRegister,
  * Save registers a new version, one commit in the flow's git history (#2503), and
  * nothing is edited in place. Any two versions diff, and Restore makes an older one the
  * newest, again as a new version. On a phone the script and the diff are read only.
+ *
+ * #2485 — Archive (undone by Unarchive) and Delete, each confirmed first. An archived or
+ * deleted flow's runs never start; a deleted one's versions are still read from its
+ * history, and Restore brings back the version viewed as its next.
  */
 export function FlowPage() {
   const { id = '' } = useParams()
@@ -61,6 +66,8 @@ export function FlowPage() {
   // #2481: Start run with a grant, approved as sent; without one, every outward call asks.
   const [granting, setGranting] = useState(false)
   const viewed = versions.data?.find((v) => v.id === id)
+  const state = flow.data ? flowStateText(flow.data) : null
+  const deleted = flow.data?.deleted_at != null
 
   async function start(grant?: FlowGrantSpec) {
     setStarting(true)
@@ -111,13 +118,13 @@ export function FlowPage() {
           <div className="flex flex-col gap-4 md:flex-row-reverse md:items-start">
             <aside className="flex flex-col gap-4 md:w-60 md:shrink-0">
               <div className="flex flex-wrap gap-2">
-                <Button variant="primary" onClick={() => void start()} disabled={starting}>
+                <Button variant="primary" onClick={() => void start()} disabled={starting || state !== null}>
                   {starting ? <Spinner /> : 'Start run'}
                 </Button>
-                <Button onClick={() => setGranting(true)} disabled={starting} {...USER_ONLY}>
+                <Button onClick={() => setGranting(true)} disabled={starting || state !== null} {...USER_ONLY}>
                   Start with a grant…
                 </Button>
-                {!phone && viewed && !viewed.current && (
+                {!phone && !deleted && viewed && !viewed.current && (
                   <Button onClick={() => void restore(flow.data!.name, viewed)} disabled={restoring}>
                     {restoring ? <Spinner /> : `Restore v${viewed.version}`}
                   </Button>
@@ -146,6 +153,20 @@ export function FlowPage() {
                   </p>
                 )}
               </Dialog>
+              {state && (
+                <p className="rounded-[6px] border border-line bg-surface-2 px-2.5 py-1.5 text-[12.5px] text-muted">
+                  {state}, {timeAgo((flow.data.deleted_at ?? flow.data.archived_at)!)}.{' '}
+                  {deleted
+                    ? 'Its versions stay in its history: restore one to run it again.'
+                    : 'Unarchive it to run it again.'}
+                </p>
+              )}
+              <FlowActions
+                flow={flow.data}
+                onChanged={() => flow.refresh()}
+                onRestored={(restored) => void navigate(flowPath(restored.id))}
+                restore={viewed ? { commit: viewed.commit, version: viewed.version } : null}
+              />
               <p className="text-[12.5px] text-muted">
                 Registered by {actorText(flow.data.created_by)}, {timeAgo(flow.data.created_at)}.
               </p>

@@ -72,6 +72,25 @@ class ResolveInput:
     reason: str | None = None
 
 
+@dataclass(frozen=True)
+class GrantInput:
+    """A flow turn's call the run grant let through (#2481, spec 2026-10-11 §3.3):
+    recorded as approved with no entry ever opened."""
+
+    request_id: str
+    session_id: str
+    tool: str
+    summary: str
+    # describe_call's hash of the call: what the grant's recorded use must be for.
+    input_hash: str
+    grant_id: str
+    requested_by: dict[str, str]
+
+
+def run_grant_responder(grant_id: str) -> dict[str, str]:
+    return {"kind": "run_grant", "id": grant_id, "label": "Run grant"}
+
+
 def _event(body: dict[str, Any]) -> dict[str, Any]:
     return {"v": PROTOCOL_VERSION, **body}
 
@@ -377,6 +396,64 @@ async def open_input(conn: psycopg.AsyncConnection[Any], args: OpenInput) -> boo
             events.append(_event({"type": "session.status", "sessionId": sid, "status": status}))
         await _append(conn, sid, events)
         return True
+
+
+async def grant_input(conn: psycopg.AsyncConnection[Any], args: GrantInput) -> bool:
+    """Records the run grant's approval of a call, only if the backend recorded the
+    grant's use of this request id, by this session, for this very hash, and the grant
+    is in force: one transaction under the grant row's share lock, so a revocation lands
+    wholly before or after it (and the agent checks the grant again as the call runs).
+    Nothing of the verdict is taken on trust. False when it does not hold; the call
+    then parks. No entry, no events: nothing is listed and nobody is notified."""
+    responder = run_grant_responder(args.grant_id)
+    async with conn.transaction():
+        cur = await conn.execute(
+            """
+            SELECT 1 FROM flow_grants g JOIN flow_grant_uses u ON u.grant_id = g.id
+            WHERE g.id = %s AND u.request_id = %s AND u.session_id = %s
+              AND u.input_hash = %s AND g.status = 'approved' AND g.revoked_at IS NULL
+              AND now() < g.expires_at
+            FOR SHARE OF g
+            """,
+            (args.grant_id, args.request_id, args.session_id, args.input_hash),
+        )
+        if await cur.fetchone() is None:
+            return False
+        cur = await conn.execute(
+            """
+            INSERT INTO ai_input_responses (request_id, session_id, kind, outcome, responder)
+            VALUES (%s, %s, 'approval', 'approved', %s)
+            ON CONFLICT (request_id) DO NOTHING RETURNING request_id
+            """,
+            (args.request_id, args.session_id, json.dumps(responder)),
+        )
+        if await cur.fetchone() is None:
+            # A retried activity: the same grant's approval is there already.
+            cur = await conn.execute(
+                "SELECT outcome, responder FROM ai_input_responses WHERE request_id = %s",
+                (args.request_id,),
+            )
+            held = await cur.fetchone()
+            if held is None:
+                return False
+            body = held[1] if isinstance(held[1], dict) else json.loads(held[1])
+            return bool(held[0] == "approved" and body == responder)
+        await _audit(
+            conn,
+            {
+                "request_id": args.request_id,
+                "session_id": args.session_id,
+                "requested_by": args.requested_by,
+                "tool": args.tool,
+                "input_hash": args.input_hash,
+                "summary": args.summary,
+                "created_at": datetime.now(UTC),
+            },
+            "approved",
+            responder,
+            None,
+        )
+    return True
 
 
 async def resolve_input(conn: psycopg.AsyncConnection[Any], args: ResolveInput) -> bool:

@@ -14,6 +14,7 @@ from scadbuddy.core.events import Event, FlowRunEvent
 from scadbuddy.flows import store as flow_store
 from scadbuddy.flows.manifest import raise_tiers
 from scadbuddy.flows.models import RESULT_MAX
+from scadbuddy.flows.states import FlowStates
 from scadbuddy.flows.store import FlowStore, ResetBeforeFloorError, ResetSupersededError
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.workflows.flow_models import FlowRecord, FlowStep, FlowWaiting, ProjectionWrite
@@ -96,13 +97,13 @@ B = "b" * 40
 
 
 async def test_a_version_row_names_its_commit_and_the_list_has_the_newest(
-    store: FlowStore,
+    store: FlowStore, jobs: JobProjection
 ) -> None:
     """#2503: one row per version, each naming its commit (spec §6.2)."""
     store.insert_version("v1", "swap", 1, A, {"kind": "browser"}, approval_timeout_s=0)
     store.insert_version("v2", "swap", 2, B, {"kind": "browser"}, approval_timeout_s=None)
     store.insert_version("o1", "other", 1, A, {"kind": "browser"}, approval_timeout_s=None)
-    listed = await store.list_definitions()
+    listed = FlowStates(jobs.pool).newest(hidden=False)
     assert [(d.name, d.version, d.commit) for d in listed] == [("other", 1, A), ("swap", 2, B)]
     one = store.stored_definition("v1")
     assert one is not None and (one.commit, one.approval_timeout_s, one.script) == (A, 0, None)

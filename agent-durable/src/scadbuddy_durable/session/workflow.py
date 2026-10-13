@@ -53,7 +53,7 @@ with workflow.unsafe.imports_passed_through():
         RESPOND_UPDATE,
         refused_failure_type,
     )
-    from scadbuddy_durable.gate.store import SYSTEM, OpenInput, Outcome, ResolveInput
+    from scadbuddy_durable.gate.store import SYSTEM, GrantInput, OpenInput, Outcome, ResolveInput
     from scadbuddy_durable.gate.validate import (
         GateEntry,
         Principal,
@@ -66,6 +66,7 @@ with workflow.unsafe.imports_passed_through():
         BUDGET_EXHAUSTED,
         MAX_SEGMENTS,
         MESSAGE_MAX,
+        PROJECTS_QUEUE,
         SEGMENT_ATTEMPTS,
         SEGMENT_CONTEXT_QUERY,
         SEND_MESSAGE_UPDATE,
@@ -73,6 +74,7 @@ with workflow.unsafe.imports_passed_through():
         TURN_QUERY,
         WORKFLOW,
         FinishTurn,
+        FlowTurn,
         FollowArgs,
         GateSettings,
         MemoryRecalled,
@@ -118,6 +120,8 @@ FOLLOW_TIMEOUT = timedelta(days=30)
 FOLLOW_HEARTBEAT = timedelta(seconds=30)
 FOLLOW_DRAIN = timedelta(seconds=30)
 SHORT = timedelta(seconds=30)
+#: How long a flow turn's call waits for the run grant's verdict before it parks.
+GRANT_CHECK_WAIT = timedelta(minutes=1)
 IMAGES_NOTE = (
     "\n\n[The user attached {n} image{s} to this message. Call the view_user_images tool"
     " to see {them} before you answer.]"
@@ -130,6 +134,9 @@ NOBODY_ANSWERED = "nobody answered in time"
 STOPPED_BEFORE_RUN = "stop-before-run-skips-the-turn"
 SETTLE_PARKED = "turn-end-settles-resolving-entries"
 STOP_FIRST = "stop-cancels-the-run-first"
+# #2481: a flow turn's approval call is checked against the run's grant first.
+SESSION_FLOW_GRANT = "session-flow-grant"
+FLOW_GRANT_CHECK = "flow_grant_check"
 
 
 def prompt_of(message: Message) -> str:
@@ -153,6 +160,10 @@ class Parked:
     created_at: datetime
     expires_at: datetime
     attention: dict[str, Any] | None
+    # Whether open_input has written its row: answerable from the moment it is parked,
+    # resolved only once its row is there (or refused stale if the open failed).
+    opened: bool = False
+    open_failed: bool = False
 
     @property
     def kind(self) -> Literal["approval", "answer"]:
@@ -277,6 +288,7 @@ class DurableSession:
                     list(message.images),
                     message.system_append,
                     started_at=workflow.now().isoformat(),
+                    flow=message.flow,
                 )
                 await self._run_turn(prompt_of(message))
             self._turn = None
@@ -520,6 +532,38 @@ class DurableSession:
                 result_type=dict,
             )
             summary, input_hash = str(described["summary"]), str(described["input_hash"])
+        grant_timeout = 0
+        flow = self._turn.flow if self._turn is not None else None
+        if (
+            kind == "approval"
+            and flow is not None
+            and input_hash is not None
+            and workflow.patched(SESSION_FLOW_GRANT)
+        ):
+            verdict = await self._grant_verdict(rid, name, call, flow)
+            if verdict is not None and verdict.get("verdict") == "inside":
+                grant_id = str(verdict.get("grant_id") or "")
+                if grant_id and await workflow.execute_activity(
+                    "grant_input",
+                    GrantInput(
+                        request_id=rid,
+                        session_id=sid,
+                        tool=name,
+                        summary=summary,
+                        input_hash=input_hash,
+                        grant_id=grant_id,
+                        requested_by=_owner(author),
+                    ),
+                    start_to_close_timeout=SHORT,
+                    retry_policy=RetryPolicy(maximum_attempts=5),
+                    result_type=bool,
+                ):
+                    # Inside the run's grant (spec 2026-10-11 §3.3): no entry, nobody
+                    # asked; the tool's activity checks the grant again as it runs.
+                    self._agent.decide(str(call["id"]), True, approver=f"grant:{grant_id}")
+                    return
+            elif verdict is not None:
+                grant_timeout = int(verdict.get("timeout_s") or 0)
         try:
             built = build_entry(
                 request_id=rid,
@@ -536,7 +580,8 @@ class DurableSession:
             self._agent.decide(str(call["id"]), False, approver="scadbuddy")
             return
         if kind == "approval":
-            timeout = self._settings.approval_expiry_s
+            # A flow turn's call outside the grant waits as the run's own calls do.
+            timeout = grant_timeout or self._settings.approval_expiry_s
         elif name == ASK_USER:
             timeout = self._settings.question_expiry_s
         else:
@@ -553,29 +598,36 @@ class DurableSession:
             expires_at=now + timedelta(seconds=timeout),
             attention=built.attention,
         )
-        await workflow.execute_activity(
-            "open_input",
-            OpenInput(
-                request_id=rid,
-                session_id=sid,
-                workflow_id=workflow.info().workflow_id,
-                workflow_run_id=workflow.info().run_id,
-                kind=kind,
-                tool=name,
-                tool_use_id=parked.call_id,
-                summary=summary,
-                input_hash=input_hash,
-                prompt=built.prompt,
-                requested_by=parked.requested_by,
-                responders=["browser", "grant"] if kind == "approval" else ["browser"],
-                expires_at=_iso(parked.expires_at),
-                questions=built.questions,
-                attention=built.attention,
-            ),
-            start_to_close_timeout=SHORT,
-        )
-        # Answerable only once its row is there, so no response races the open.
+        # Parked before its row is opened, so a respond that reads the row as soon as it is
+        # written finds the call here; every resolution waits for the open (_resolve).
         self._parked[rid] = parked
+        try:
+            await workflow.execute_activity(
+                "open_input",
+                OpenInput(
+                    request_id=rid,
+                    session_id=sid,
+                    workflow_id=workflow.info().workflow_id,
+                    workflow_run_id=workflow.info().run_id,
+                    kind=kind,
+                    tool=name,
+                    tool_use_id=parked.call_id,
+                    summary=summary,
+                    input_hash=input_hash,
+                    prompt=built.prompt,
+                    requested_by=parked.requested_by,
+                    responders=["browser", "grant"] if kind == "approval" else ["browser"],
+                    expires_at=_iso(parked.expires_at),
+                    questions=built.questions,
+                    attention=built.attention,
+                ),
+                start_to_close_timeout=SHORT,
+            )
+        except BaseException:
+            parked.open_failed = True
+            self._parked.pop(rid, None)
+            raise
+        parked.opened = True
         try:
             await workflow.wait_condition(
                 lambda: parked.entry.state != "pending", timeout=timedelta(seconds=timeout)
@@ -589,6 +641,37 @@ class DurableSession:
                 await self._resolve(parked, "cancelled", SYSTEM, None, NOBODY_ANSWERED, timer=True)
             else:
                 await self._resolve(parked, "timed_out", SYSTEM, None, None, timer=True)
+
+    async def _grant_verdict(
+        self, rid: str, name: str, call: dict[str, Any], flow: FlowTurn
+    ) -> dict[str, Any] | None:
+        """The run's grant on a flow turn's call (`flow_grant_check` on the backend's
+        `projects` queue, spec 2026-10-11 §3.4). The backend finds the run from its own
+        record of the step that talks to this session; None when it could not answer,
+        which parks the call (fail toward asking)."""
+        try:
+            verdict: dict[str, Any] = await workflow.execute_activity(
+                FLOW_GRANT_CHECK,
+                {
+                    "run_id": flow.run_id,
+                    "request_id": rid,
+                    "fn": "tool",
+                    "tool": name,
+                    "args": call["input"],
+                    "session_id": self._start.session_id,
+                    "flow_call_id": flow.call_id,
+                },
+                task_queue=PROJECTS_QUEUE,
+                # No projects worker to answer (down, or a deployment without flows):
+                # the call parks after this, rather than waiting on it for ever.
+                schedule_to_close_timeout=GRANT_CHECK_WAIT,
+                start_to_close_timeout=SHORT,
+                retry_policy=RetryPolicy(maximum_attempts=3),
+                result_type=dict,
+            )
+        except FailureError:
+            return None
+        return verdict
 
     async def _outward(self, name: str, call: dict[str, Any]) -> bool:
         """Whether a turn tool's call is outward, by its input (turn_tool_tier). Only a
@@ -620,6 +703,14 @@ class DurableSession:
         *,
         timer: bool = False,
     ) -> bool:
+        # A response is written only after its entry's row: a call is parked (and so
+        # answerable) before open_input has written it. One whose open failed was never
+        # asked; its call is refused by _park_or_refuse.
+        if not (parked.opened or parked.open_failed):
+            await workflow.wait_condition(lambda: parked.opened or parked.open_failed)
+            # Another resolution may have run while this one waited.
+            if parked.open_failed or parked.entry.state != "pending":
+                return False
         parked.set_state("resolving")
         try:
             written: bool = await workflow.execute_activity(
@@ -704,6 +795,11 @@ class DurableSession:
         parked = self._parked.get(request.request_id)
         if parked is None:
             raise _refused("stale", f"no pending input {request.request_id}")
+        if not (parked.opened or parked.open_failed):
+            # Read from its row before open_input's result reached here: wait for it (_park).
+            await workflow.wait_condition(lambda: parked.opened or parked.open_failed)
+        if parked.open_failed:
+            raise _refused("stale", f"no pending input {request.request_id}")
         try:
             # The validator passed, but another handler may have moved the entry since.
             valid = validate_respond(parked.entry, request)
@@ -772,7 +868,9 @@ class DurableSession:
     def pending_input(self) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         for p in self._parked.values():
-            if p.entry.state == "resolved":
+            # Listed once its row is written, as the projection lists it; a respond is
+            # taken a moment sooner (_park).
+            if p.entry.state == "resolved" or not p.opened:
                 continue
             entry: dict[str, Any] = {
                 "id": p.entry.id,

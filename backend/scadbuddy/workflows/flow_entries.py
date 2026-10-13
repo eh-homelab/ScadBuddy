@@ -140,6 +140,14 @@ async def run_gated(
     after `timeout_s` seconds with the harness's own Update (0: never). `started` says
     the tool's body is running, so the call was approved and the timer is over."""
     call = asyncio.ensure_future(run_tool(call_id, tool, **kwargs))
+    return await await_gated(call, timeout_s, started, call_id=call_id)
+
+
+async def await_gated(
+    call: "asyncio.Future[Any]", timeout_s: float, started: Callable[[], bool], *, call_id: str
+) -> Any:
+    """`run_gated` for a call already started: wait for it, denying it after `timeout_s`
+    seconds while it waits for approval."""
     if timeout_s > 0:
         try:
             await workflow.wait_condition(

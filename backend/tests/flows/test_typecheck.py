@@ -79,6 +79,24 @@ async def test_an_image_is_a_typed_pointer() -> None:
     assert [p.line for p in problems] == [4]
 
 
+async def test_agent_and_ask_session_take_a_narrowing_and_on_outside() -> None:
+    """#2481 (spec §4.3, amendment Ruling 9): both optional, so the old arity checks too."""
+    narrowing = "{'rules': [{'fn': 'tool', 'tool': 'send_to_bambuddy', 'max_calls': 1}]}"
+    assert (
+        await check_script(
+            _script(
+                f"await agent('go', [], None, grant={narrowing}, on_outside='deny')",
+                f"await ask_session('s', 'more', None, {narrowing}, 'escalate')",
+                "await agent('go', [], None)",
+                "await ask_session('s', 'more')",
+            )
+        )
+        == []
+    )
+    problems = await check_script(_script("await agent('go', [], None, grant='all')"))
+    assert problems
+
+
 async def test_scripts_calling_the_with_images_names_still_check() -> None:
     """#2636: a script registered before `images` was optional keeps checking."""
     assert (

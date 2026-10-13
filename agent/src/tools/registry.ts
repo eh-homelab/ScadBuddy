@@ -142,10 +142,19 @@ export async function effectiveTool(tool: Tool, services: Pick<ToolServices, 'to
 /** A flow run's own images (#2477, temporal/flowBlobs.ts): what a `flow_image` reference names. */
 export type FlowImages = { get(name: string): Promise<StoredBlob | undefined> }
 
+/** A flow run's step that sends a session's turn (#2481; agent-durable models.py `FlowTurn`). */
+export type FlowTurn = { run_id: string; call_id: string }
+
 export type ToolContext = ToolServices & {
   principal: Principal
   /** In a flow run's call only: that run's images, by name. */
   flowImages?: FlowImages | undefined
+  /**
+   * In a flow run's call only (#2481): the run and the call, from the activity's own
+   * context (`flow-<run>`, `tool-<call id>`), never from its input. A turn the call
+   * sends (sessions_start, sessions_send) carries it, so the run's grant may cover it.
+   */
+  flowTurn?: FlowTurn | undefined
   /** The assistant session a harness call runs in (#252: its commits name it; authorship.ts). */
   session?: string | undefined
   /** The harness call's tool_use id, when Claude Code sent one (`_meta`, projections.ts). */

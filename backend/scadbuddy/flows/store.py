@@ -32,7 +32,6 @@ from scadbuddy.flows.models import (
     TERMINAL,
     BackfillRow,
     Decision,
-    DefinitionSummary,
     Run,
     StoredDefinition,
 )
@@ -43,7 +42,6 @@ _DECISION = (
     " input_hash, created_at"
 )
 _DEFINITION = "id, name, version, commit, script, approval_timeout_s, created_by, created_at"
-_SUMMARY = "id, name, version, commit, approval_timeout_s, created_by, created_at"
 _GRANT = (
     "id, run_id, status, spec, used, requested_by, approved_by, approved_at, revoked_by,"
     " revoked_at, expires_at, created_at"
@@ -195,10 +193,6 @@ class FlowStore:
             ).fetchone()
         return StoredDefinition.model_validate(row) if row else None
 
-    async def list_definitions(self) -> list[DefinitionSummary]:
-        """The newest version of each name, by name."""
-        return await asyncio.to_thread(self._list_definitions)
-
     # -- runs -------------------------------------------------------------------
 
     async def get_run(self, run_id: str) -> Run | None:
@@ -286,9 +280,22 @@ class FlowStore:
     async def get_decision(self, request_id: str) -> Decision | None:
         return await asyncio.to_thread(self._get_decision, request_id)
 
+    async def record_grant_decision(self, decision: Decision) -> bool:
+        """Record a run grant's approval of a call (#2481), only if the grant is in force
+        now and its recorded use of this request id is for this very input: one statement
+        under the grant row's lock, so a revocation lands wholly before or after it (and
+        the agent checks the grant again as the call runs). True when recorded, or when it
+        is there already; False otherwise."""
+        return await asyncio.to_thread(self._record_grant_decision, decision)
+
     async def delete_decision(self, request_id: str) -> None:
         """Undo a decision the harness refused: no `approved` row for a call it never ran."""
         await asyncio.to_thread(self._delete_decision, request_id)
+
+    async def withdraw_grant_decision(self, request_id: str) -> None:
+        """Remove a run grant's own decision for the call (responder `grant:<id>`), never a
+        person's: its approval never reached the harness, and a person decides it."""
+        await asyncio.to_thread(self._withdraw_grant_decision, request_id)
 
     # -- grants (#2481) -----------------------------------------------------------
 
@@ -336,6 +343,11 @@ class FlowStore:
         """The run ids of grants older than `older_than` whose run has no row: a start
         that failed after inserting its grant (the sweep checks the execution too)."""
         return await asyncio.to_thread(self._orphan_grants, older_than)
+
+    async def run_talking_to(self, session_id: str, call_id: str) -> Run | None:
+        """The run whose step `call_id` talks to session `session_id` (#2481, spec §3.4):
+        how a session's call finds its run, from the run's own record."""
+        return await asyncio.to_thread(self._run_talking_to, session_id, call_id)
 
     async def delete_grant(self, run_id: str) -> None:
         await asyncio.to_thread(self._delete_grant, run_id)
@@ -513,6 +525,15 @@ class FlowStore:
             ).fetchall()
         return [row["run_id"] for row in rows]
 
+    def _run_talking_to(self, session_id: str, call_id: str) -> Run | None:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT {_RUN} FROM workflow_runs WHERE steps @> %s LIMIT 2",
+                (Jsonb([{"call_id": call_id, "session_id": session_id}]),),
+            ).fetchall()
+        # A call id is a uuid4 the run drew: two runs naming it is no run's.
+        return Run.model_validate(rows[0]) if len(rows) == 1 else None
+
     def _delete_grant(self, run_id: str) -> None:
         with self._pool.connection() as conn:
             conn.execute("DELETE FROM flow_grants WHERE run_id = %s", (run_id,))
@@ -566,9 +587,54 @@ class FlowStore:
             ).fetchone()
         return Decision.model_validate(row) if row else None
 
+    def _record_grant_decision(self, decision: Decision) -> bool:
+        grant_id = decision.responder.removeprefix("grant:")
+        with self._pool.connection() as conn, conn.transaction():
+            held = conn.execute(
+                "SELECT 1 FROM flow_grants g JOIN flow_grant_uses u ON u.grant_id = g.id"
+                " WHERE g.id = %s AND g.run_id = %s AND u.request_id = %s"
+                " AND u.input_hash = %s AND g.status = 'approved' AND g.revoked_at IS NULL"
+                " AND now() < g.expires_at FOR SHARE OF g",
+                (grant_id, decision.run_id, decision.request_id, decision.input_hash),
+            ).fetchone()
+            if held is None:
+                return False
+            row = conn.execute(
+                "INSERT INTO workflow_run_decisions (request_id, run_id, workflow_run_id,"
+                " call_id, kind, outcome, response, responder, input_hash)"
+                " VALUES (%s, %s, %s, %s, 'approval', 'approved', '{}'::jsonb, %s, %s)"
+                " ON CONFLICT (request_id) DO NOTHING RETURNING request_id",
+                (
+                    decision.request_id,
+                    decision.run_id,
+                    decision.workflow_run_id,
+                    decision.call_id,
+                    decision.responder,
+                    decision.input_hash,
+                ),
+            ).fetchone()
+            if row is not None:
+                return True
+            existing = conn.execute(
+                "SELECT responder, input_hash FROM workflow_run_decisions WHERE request_id = %s",
+                (decision.request_id,),
+            ).fetchone()
+        return existing is not None and (existing["responder"], existing["input_hash"]) == (
+            decision.responder,
+            decision.input_hash,
+        )
+
     def _delete_decision(self, request_id: str) -> None:
         with self._pool.connection() as conn:
             conn.execute("DELETE FROM workflow_run_decisions WHERE request_id = %s", (request_id,))
+
+    def _withdraw_grant_decision(self, request_id: str) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "DELETE FROM workflow_run_decisions"
+                " WHERE request_id = %s AND starts_with(responder, 'grant:')",
+                (request_id,),
+            )
 
     def _announce(self, conn: Connection[DictRow], run: Run) -> None:
         if self.events is not None:
@@ -576,14 +642,6 @@ class FlowStore:
                 conn,
                 FlowRunEvent(run_id=run.id, definition_id=run.definition_id, status=run.status),
             )
-
-    def _list_definitions(self) -> list[DefinitionSummary]:
-        with self._pool.connection() as conn:
-            rows = conn.execute(
-                f"SELECT DISTINCT ON (name) {_SUMMARY} FROM workflow_definitions"
-                " ORDER BY name, version DESC"
-            ).fetchall()
-        return [DefinitionSummary.model_validate(row) for row in rows]
 
     def _get_run(self, run_id: str) -> Run | None:
         with self._pool.connection() as conn:
