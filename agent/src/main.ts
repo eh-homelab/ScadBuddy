@@ -512,6 +512,7 @@ const temporalWorker =
                 remotePlugins: durableRemotePlugins,
                 credentialSecrets: durableCredentialSecrets,
                 audit,
+                settings,
               })
             : {}),
           // A flow's agent(...) and ask_session(...) (#1057, 6g): beside the tools, never one.

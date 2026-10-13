@@ -2,6 +2,8 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import { ApiError, api } from '../api/client'
 import type { ModelPatch, ModelSummary, PrintRunRequest, Settings } from '../api/types'
 import { DEFAULT_NOZZLES } from '../lib/printChoices'
+import { verifiedFixDiagnostic } from './analyzers'
+import { setMockAnalyzerDiagnostics } from './features/analyzers'
 import { COPY, UPSTREAM, duplicateWithUpdate, ours, theirs } from '../test/upstream'
 import {
   BUILTIN_PREVIEW_ID,
@@ -1170,6 +1172,41 @@ describe('the print detail mock', () => {
     expect(part.status).toBe(206)
     expect(part.headers.get('Content-Range')).toMatch(/^bytes 4-7\/\d+$/)
     expect((await part.arrayBuffer()).byteLength).toBe(4)
+  })
+})
+
+describe('mock API: analyzer fixes', () => {
+  beforeEach(() => resetMockState())
+
+  it('lists what an apply still needs verified once each, as the preview does', async () => {
+    const fix = verifiedFixDiagnostic.fixes![0]!
+    const change = fix.changes[0]!
+    const unverified = { ...change, verified: false, to_verify: 'Whether the queue item takes it' }
+    setMockAnalyzerDiagnostics([
+      {
+        ...verifiedFixDiagnostic,
+        fixes: [{ ...fix, changes: [unverified, { ...unverified, setting: 'timelapse_type' }] }],
+      },
+    ])
+    const body = {
+      target: { output_id: outputs[0]!.id },
+      request: { plate_id: 1, all_plates: false },
+      diagnostic_key: verifiedFixDiagnostic.key,
+      fix_id: fix.id,
+      scope: null,
+    }
+    const preview = await api.previewFix(body)
+    expect(preview.blockers).toEqual(['Whether the queue item takes it'])
+    expect(preview.applicable).toBe(false)
+    await expect(
+      api.applyFix({ ...body, scope: preview.scope, fingerprint: preview.fingerprint, confirm: true }),
+    ).rejects.toMatchObject({
+      status: 409,
+      problem: {
+        type: 'https://scadbuddy.dev/problems/analyzer-fix-unverified',
+        to_verify: ['Whether the queue item takes it'],
+      },
+    })
   })
 })
 

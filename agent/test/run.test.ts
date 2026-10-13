@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { mkdtemp } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { createSdkMcpServer, type SDKMessage, type SDKResultMessage, tool } from '@anthropic-ai/claude-agent-sdk'
@@ -100,14 +100,16 @@ describe('buildHarnessOptions', () => {
     const options = buildHarnessOptions({ ...base, pluginPaths: ['../plugins/scadbuddy'] })
     expect(options.plugins).toEqual([{ type: 'local', path: path.resolve('../plugins/scadbuddy') }])
     expect(typeof options.canUseTool).toBe('function')
-    expect(options.hooks?.PreToolUse).toHaveLength(1)
+    // The permission seam, then WebFetch's egress check (webFetchEgress.ts).
+    expect(options.hooks?.PreToolUse).toHaveLength(2)
+    expect(options.hooks?.PreToolUse?.[1]?.matcher).toBe('WebFetch')
   })
 
   it('adds the trace hooks after the permission seam (#988)', () => {
     const traceHooks = { PreToolUse: [{ hooks: [() => Promise.resolve({})] }], PostToolUse: [{ hooks: [() => Promise.resolve({})] }] }
     const options = buildHarnessOptions({ ...base, traceHooks })
-    expect(options.hooks?.PreToolUse).toHaveLength(2)
-    expect(options.hooks?.PreToolUse?.[1]).toBe(traceHooks.PreToolUse[0])
+    expect(options.hooks?.PreToolUse).toHaveLength(3)
+    expect(options.hooks?.PreToolUse?.[2]).toBe(traceHooks.PreToolUse[0])
     expect(options.hooks?.PostToolUse).toEqual(traceHooks.PostToolUse)
   })
 
@@ -400,6 +402,37 @@ describe.skipIf(cliMissing !== undefined)(`the harness against a fake Anthropic 
     const followUp = fake.messageCalls().at(-1)
     expect(followUp && lastContent(followUp)).toMatch(/"is_error":true/)
     expect(decisions).toEqual([])
+  })
+
+  // Claude Code's own WebFetch connects wherever it is told (measured on 2.1.296: a
+  // call to 127.0.0.1:9 tried to connect). An approval does not let it reach a cloud
+  // metadata address: the egress hook denies the call before the gate is asked.
+  it("refuses an approved WebFetch to a metadata address before Claude Code fetches it", async () => {
+    script = (r) =>
+      lastContent(r).includes('tool_result')
+        ? { text: 'Refused.' }
+        : { toolUse: { name: 'WebFetch', input: { url: 'http://169.254.169.254/latest/meta-data/', prompt: 'keys?' } } }
+    const asked: string[] = []
+    // Built-ins are offered only beside a package an admin allowed as it is.
+    const allowed = path.join(stateDir, 'allowed')
+    await mkdir(path.join(allowed, '.claude-plugin'), { recursive: true })
+    await writeFile(path.join(allowed, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'fetcher' }))
+    const { result } = await collect({
+      paths: { stateDir },
+      credential: gateway(),
+      prompt: 'Fetch it',
+      model: 'claude-sonnet-4-5',
+      allowedPluginPaths: [allowed],
+      builtinTools: ['WebFetch'],
+      approvalGate: (request) => {
+        asked.push(request.toolName)
+        return Promise.resolve({ approved: true, input: request.input })
+      },
+    })
+    expect(result.subtype).toBe('success')
+    const followUp = fake.messageCalls().at(-1)
+    expect(followUp && lastContent(followUp)).toMatch(/WebFetch refused: url host 169\.254\.169\.254 resolves to 169\.254\.169\.254, a link-local/)
+    expect(asked).toEqual([])
   })
 
   it('stops at maxTurns', async () => {
