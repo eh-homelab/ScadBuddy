@@ -218,7 +218,7 @@ function ParamsDiff({ diff }: { diff: PrintSummary['params_diff'] }) {
         ))}
       </dl>
       {rest > 0 && (
-        <p className="px-1 py-0.5 text-faint" data-testid="params-more">
+        <p className="px-1 py-0.5 text-faint">
           +{rest} more
         </p>
       )}
