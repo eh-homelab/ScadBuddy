@@ -83,6 +83,7 @@ function harness(
     starterTiers?: Tier[]
     server?: (calls: string[]) => () => McpServer
     mayPark?: boolean
+    fixedTier?: (name: string) => RiskTier | undefined
     listingKey?: string
   } = {},
 ) {
@@ -99,6 +100,7 @@ function harness(
     ...(options.listingKey === undefined ? {} : { listingKey: options.listingKey }),
     tierOf,
     ...(options.mayPark === false ? {} : { mayPark }),
+    ...(options.fixedTier ? { fixedTier: options.fixedTier } : {}),
     ...(options.pinned ? { pinned: true } : {}),
   }
   const deps: TurnToolsDeps = {
@@ -170,6 +172,16 @@ describe('turn tools in a durable session', () => {
     expect(h.reported).toEqual(['plugin hindsight failed its check'])
   })
 
+  it("lists a tool's tier where it does not depend on the input, for the transcript's label", async () => {
+    const h = harness({ fixedTier: (name) => (name.endsWith('__read_note') ? 'read' : name.endsWith('__shot') ? 'write' : undefined) })
+    const { tools } = (await env(TURN_TOOLS_ACTIVITY).run(h.activities[TURN_TOOLS_ACTIVITY] as () => Promise<TurnToolsResult>)) as TurnToolsResult
+    const tiers = Object.fromEntries(tools.map((t) => [t.name, t.tier]))
+    expect(tiers['notes__read_note']).toBe('read')
+    expect(tiers['notes__shot']).toBe('write')
+    // post's tier is its method's: no fixed tier, so none is listed.
+    expect('tier' in tools.find((t) => t.name === 'notes__post')!).toBe(false)
+  })
+
   it('lists every tool of a server that cannot say which never park as may_park (fail toward asking)', async () => {
     const h = harness({ mayPark: false })
     const { tools } = (await env(TURN_TOOLS_ACTIVITY).run(h.activities[TURN_TOOLS_ACTIVITY] as () => Promise<TurnToolsResult>)) as TurnToolsResult
@@ -238,6 +250,9 @@ describe('turn tools in a durable session', () => {
     const parks = Object.fromEntries(tools.map((t) => [t.name, t.may_park]))
     expect(parks[`${HTTP_SERVER}__${HTTP_TOOL}`]).toBe(true)
     expect(parks[`${HTTP_SERVER}__${HTTP_READ_TOOL}`]).toBe(false)
+    const labels = Object.fromEntries(tools.map((t) => [t.name, t.tier]))
+    expect(labels[`${HTTP_SERVER}__${HTTP_TOOL}`]).toBeUndefined()
+    expect(labels[`${HTTP_SERVER}__${HTTP_READ_TOOL}`]).toBe('read')
     const tier = (input: unknown) =>
       env(TURN_TOOL_TIER_ACTIVITY).run(activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: `${HTTP_SERVER}__${HTTP_TOOL}`, input })
     expect(await tier({ url: 'http://example.test/', method: 'POST' })).toEqual({ tier: 'outward' })

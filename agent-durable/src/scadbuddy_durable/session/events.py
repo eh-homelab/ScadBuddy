@@ -191,7 +191,7 @@ class SessionEvents:
 
     @activity.defn(name="follow_session")
     async def follow_session(self, args: FollowArgs) -> FollowResult:
-        tiers = {e.name: e.tier for e in tools.manifest()}
+        tiers = {e.name: e.tier for e in tools.manifest()} | args.tiers
         at = [0]
         failed: str | None = None
         try:

@@ -18,6 +18,7 @@ const parts: FingerprintParts = {
   raisedTiers: [],
   httpRequest: true,
   builtinTools: [],
+  recallMaxQueryChars: null,
 }
 
 describe('fingerprint', () => {
@@ -47,6 +48,7 @@ describe('fingerprint', () => {
       raisedTiers: ['Bash=write'],
       httpRequest: false,
       builtinTools: ['Bash'],
+      recallMaxQueryChars: 12,
     }
     expect(Object.keys(changed).sort()).toEqual(Object.keys(parts).sort())
     for (const [k, v] of Object.entries(changed)) expect(fingerprint({ ...parts, [k]: v }), k).not.toBe(fingerprint(parts))

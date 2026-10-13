@@ -1,3 +1,5 @@
+import type { Resolver } from '../http/egress.js'
+import { webFetchEgressHook } from './webFetchEgress.js'
 import path from 'node:path'
 import {
   type CanUseTool,
@@ -217,6 +219,8 @@ export type HarnessRun = {
   stderr?: (line: string) => void
   /** Tests only: the SDK's own process hook, to count and inspect spawns (test/warm.sdk.test.ts). */
   spawnClaudeCodeProcess?: Options['spawnClaudeCodeProcess']
+  /** The resolver WebFetch's egress check uses (webFetchEgress.ts); the system's when omitted. */
+  resolve?: Resolver
 }
 
 /** The permission seam's PreToolUse hook first, then the memory hooks, then the trace hooks, by event. */
@@ -399,6 +403,9 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
         {
           PreToolUse: [
             makePreToolUseHook(tierOf, run.onDecision, gate),
+            // Claude Code's own WebFetch, which an allowed package may be given, fetches
+            // where the agent's egress check does not reach; this checks it first.
+            webFetchEgressHook(run.resolve),
             ...(questions ? [QUESTION_PROMPT_HOOK] : []),
           ],
         },
