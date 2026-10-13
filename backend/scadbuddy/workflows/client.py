@@ -140,7 +140,8 @@ def bambuddy_worker(
     a new activity name also needs ``patched``, or an old replica takes its task and
     fails it as unregistered.
 
-    ``tests/test_operation_replay.py`` does the same for ``Operation``.
+    ``tests/test_operation_replay.py`` replays committed ``OperationWorkflow`` histories
+    the same way.
 
     Versioned, a run moves to the new build on its next workflow task, so the new build
     replays every open run: a change to a workflow's commands goes behind ``patched``,
@@ -199,15 +200,23 @@ def print_deployment(build_id: str | None) -> WorkerDeploymentConfig | None:
 
 
 async def make_current(
-    client: Client, *, namespace: str, build_id: str, deployment_name: str = DEPLOYMENT_NAME
+    client: Client,
+    *,
+    namespace: str,
+    build_id: str,
+    deployment_name: str = DEPLOYMENT_NAME,
+    conflict_token: bytes = b"",
 ) -> None:
     """Make `build_id` the deployment's current version: a versioned worker takes new
-    workflows only once its version is current."""
+    workflows only once its version is current. With ``conflict_token`` (from
+    :func:`current_routing`), Temporal refuses the write if the deployment changed since
+    that read."""
     await client.workflow_service.set_worker_deployment_current_version(
         SetWorkerDeploymentCurrentVersionRequest(
             namespace=namespace,
             deployment_name=deployment_name,
             build_id=build_id,
+            conflict_token=conflict_token,
             ignore_missing_task_queues=True,
             allow_no_pollers=True,
         ),
@@ -215,16 +224,25 @@ async def make_current(
     )
 
 
-async def current_build(
+async def current_routing(
     client: Client, *, namespace: str, deployment_name: str = DEPLOYMENT_NAME
-) -> str | None:
-    """The deployment's current build, or None while it has none."""
+) -> tuple[str | None, bytes]:
+    """The deployment's current build (None while it has none), and the conflict token
+    a write conditional on it carries (#2538)."""
     response = await client.workflow_service.describe_worker_deployment(
         DescribeWorkerDeploymentRequest(namespace=namespace, deployment_name=deployment_name),
         timeout=RPC_TIMEOUT,
     )
     current = response.worker_deployment_info.routing_config.current_deployment_version
-    return current.build_id or None
+    return current.build_id or None, response.conflict_token
+
+
+async def current_build(
+    client: Client, *, namespace: str, deployment_name: str = DEPLOYMENT_NAME
+) -> str | None:
+    """The deployment's current build, or None while it has none."""
+    build, _ = await current_routing(client, namespace=namespace, deployment_name=deployment_name)
+    return build
 
 
 async def is_current(

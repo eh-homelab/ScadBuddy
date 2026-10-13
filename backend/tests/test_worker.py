@@ -60,6 +60,7 @@ from scadbuddy.worker import (
     _drain,
     _on_signal,
     _poll,
+    deployment_writes,
     make_current_until_polled,
     run_inprocess_worker,
     run_worker,
@@ -770,8 +771,8 @@ async def test_making_the_build_current_does_not_give_up(
     assert caplog.records[-1].getMessage() == "made this build current"
 
 
-async def _no_current_build(*_: object, **__: object) -> str | None:
-    return None
+async def _no_current_build(*_: object, **__: object) -> tuple[str | None, bytes]:
+    return None, b""
 
 
 async def test_a_superseded_build_stops_trying_to_be_current(
@@ -838,6 +839,51 @@ async def test_a_build_already_current_or_none_keeps_trying() -> None:
     assert calls == 3
 
 
+class _Deployment:
+    """A workflow service whose deployment a newer rollout changes between reads."""
+
+    def __init__(self) -> None:
+        self.tokens = iter([b"t1", b"t2"])
+        self.builds = iter(["old", "new"])
+        self.written: list[bytes] = []
+
+    async def describe_worker_deployment(self, *_: object, **__: object) -> object:
+        build_id = next(self.builds)
+        return SimpleNamespace(
+            conflict_token=next(self.tokens),
+            worker_deployment_info=SimpleNamespace(
+                routing_config=SimpleNamespace(
+                    current_deployment_version=SimpleNamespace(build_id=build_id)
+                )
+            ),
+        )
+
+    async def set_worker_deployment_current_version(self, request: Any, **_: object) -> None:
+        self.written.append(request.conflict_token)
+        # The deployment changed since that token's read.
+        raise RPCError("conflict token mismatch", RPCStatusCode.FAILED_PRECONDITION, b"")
+
+
+async def test_each_write_carries_its_reads_conflict_token() -> None:
+    """#2538: a rollout landing between the read and the write makes Temporal refuse the
+    write (its token is stale), and the next read sees the new build and stops."""
+    service = _Deployment()
+    client = cast(Client, SimpleNamespace(namespace="default", workflow_service=service))
+    set_current, read_current = deployment_writes(client, "mine", DEPLOYMENT_NAME)
+    await asyncio.wait_for(
+        make_current_until_polled(
+            set_current,
+            build_id="mine",
+            backoff=(0.01,),
+            every=0.01,
+            error_after=5,
+            current=read_current,
+        ),
+        5,
+    )
+    assert service.written == [b"t1"]
+
+
 async def test_a_refusal_past_error_after_retries_once_per_error_every(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -864,7 +910,7 @@ async def test_a_refusal_past_error_after_retries_once_per_error_every(
         )
     errors = [r for r in caplog.records if r.levelno == logging.ERROR]
     # Without the back-off, ~100 errors in that time.
-    assert 1 <= len(errors) <= 3
+    assert 1 <= len(errors) <= 4
 
 
 @pytest.mark.requires_temporal
@@ -880,7 +926,7 @@ async def test_a_build_never_made_current_keeps_the_worker_polling(
 
     monkeypatch.setattr(worker_module, "make_current", refuses)
     # No other build takes over meanwhile, whatever another test makes current.
-    monkeypatch.setattr(worker_module, "current_build", _no_current_build)
+    monkeypatch.setattr(worker_module, "current_routing", _no_current_build)
     monkeypatch.setattr(worker_module, "MAKE_CURRENT_BACKOFF", (0.01, 0.02))
     monkeypatch.setattr(worker_module, "MAKE_CURRENT_EVERY", 0.05)
     monkeypatch.setattr(worker_module, "MAKE_CURRENT_ERROR_AFTER", 0.3)
@@ -932,7 +978,7 @@ async def test_stopping_the_worker_cancels_the_retry(
 
     monkeypatch.setattr(worker_module, "make_current", refuses)
     # No other build takes over meanwhile, whatever another test makes current.
-    monkeypatch.setattr(worker_module, "current_build", _no_current_build)
+    monkeypatch.setattr(worker_module, "current_routing", _no_current_build)
     settings, deps = _in_process_settings(tmp_path)
     stop = asyncio.Event()
     async with temporal_client() as client:

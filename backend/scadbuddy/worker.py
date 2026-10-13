@@ -84,7 +84,7 @@ from scadbuddy.workflows.client import (
     PRINT_DEPLOYMENT_NAME,
     bambuddy_worker,
     connect,
-    current_build,
+    current_routing,
     drained,
     follow_worker,
     is_current,
@@ -280,6 +280,34 @@ async def _drain(
     return polling.result() if not polling.cancelled() else "stopped"
 
 
+def deployment_writes(
+    client: Client, build_id: str, deployment_name: str
+) -> tuple[Callable[[], Awaitable[None]], Callable[[], Awaitable[str | None]]]:
+    """``make_current_until_polled``'s write and read for this build. Each write carries
+    the conflict token of the last read that succeeded (#2538), so a rollout that lands
+    between the read and the write makes Temporal refuse it rather than be overwritten;
+    the next read then sees that rollout's build and the retry stops."""
+    token = b""
+
+    async def read() -> str | None:
+        nonlocal token
+        build, token = await current_routing(
+            client, namespace=client.namespace, deployment_name=deployment_name
+        )
+        return build
+
+    async def write() -> None:
+        await make_current(
+            client,
+            namespace=client.namespace,
+            build_id=build_id,
+            deployment_name=deployment_name,
+            conflict_token=token,
+        )
+
+    return write, read
+
+
 async def make_current_until_polled(
     set_current: Callable[[], Awaitable[None]],
     *,
@@ -296,9 +324,16 @@ async def make_current_until_polled(
 
     With ``current`` (the deployment's current build), it stops once a build other than
     this one and the one current when it began is made current (#2538): a newer
-    rollout's worker has taken over, and a late write here, which carries no conflict
-    token, would hand the deployment back to this old build, whose stop then skips its
-    drain because it is current."""
+    rollout's worker has taken over, and a late write here would hand the deployment
+    back to this old build, whose stop then skips its drain because it is current.
+    (``deployment_writes`` closes the gap between the read and the write with the
+    read's conflict token.)
+
+    The build current when it began is what it never takes over from. When that first
+    read fails, the first read that succeeds is taken instead: a newer rollout made
+    current in between is then indistinguishable from the old build, and this one may
+    still take the deployment back. Accepted: it needs a failed read and a rollout in
+    the same few seconds, and the next rollout's worker makes its own build current."""
     loop = asyncio.get_running_loop()
     escalate = loop.time() + error_after
     unread = object()
@@ -427,22 +462,16 @@ async def _serve_versioned(
             await running.enter_async_context(worker)
         # Phase 1 runs one replica: the newest worker is current. Entering the worker
         # started its polling, so the retry runs beside it; stop cancels the retry.
+        set_current, read_current = deployment_writes(client, build_id, deployment_name)
         current = asyncio.create_task(
             make_current_until_polled(
-                lambda: make_current(
-                    client,
-                    namespace=client.namespace,
-                    build_id=build_id,
-                    deployment_name=deployment_name,
-                ),
+                set_current,
                 build_id=build_id,
                 backoff=MAKE_CURRENT_BACKOFF,
                 every=MAKE_CURRENT_EVERY,
                 error_after=MAKE_CURRENT_ERROR_AFTER,
                 error_every=MAKE_CURRENT_ERROR_EVERY,
-                current=lambda: current_build(
-                    client, namespace=client.namespace, deployment_name=deployment_name
-                ),
+                current=read_current,
             )
         )
         stopped = asyncio.create_task(stop.wait())
