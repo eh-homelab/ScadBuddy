@@ -429,6 +429,7 @@ def _authors_3mf(tmp_path: Path) -> bytes:
             if name == PROJECT_SETTINGS_NAME:
                 settings = json.loads(data)
                 settings["printer_settings_id"] = "Bambu Lab H2C 0.4 nozzle"
+                settings["print_settings_id"] = "0.20mm Standard @BBL H2C"
                 data = json.dumps(settings).encode()
             archive.writestr(name, data)
     return buffer.getvalue()
