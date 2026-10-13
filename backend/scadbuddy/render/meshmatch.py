@@ -27,6 +27,15 @@ _CHUNK_PAIRS = 1 << 22
 CELL_CAP = 64
 
 
+class NearPairsExceeded(ValueError):  # noqa: N818 (named by the plan)
+    """`nearest_triangles` would measure more point and triangle pairs than its budget."""
+
+    def __init__(self, pairs: int, cap: int) -> None:
+        super().__init__(f"{pairs} candidate pairs to measure; the limit is {cap}")
+        self.pairs = pairs
+        self.cap = cap
+
+
 def match_points(source: FloatArray, query: FloatArray, tol: float) -> IntArray:
     """For each ``query`` point, the index of the nearest ``source`` point at most
     ``tol`` away, or -1. Points are binned into cells no smaller than ``tol``, so a
@@ -153,14 +162,17 @@ def _expand(counts: IntArray) -> tuple[IntArray, IntArray]:
 
 
 def nearest_triangles(
-    points: FloatArray, triangles: FloatArray, tol: float
+    points: FloatArray, triangles: FloatArray, tol: float, *, max_pairs: int = 20_000_000
 ) -> tuple[IntArray, FloatArray]:
     """For each point, the index of the nearest of ``triangles`` (shape (m, 3, 3)) at
     most ``tol`` away, or -1, and that distance (inf for -1). Triangles are binned in a
     uniform grid (cells of the median box extent, at least ``tol``), each in every cell
     its box grown by ``tol`` covers, so a point's candidates are its own cell's. A
     triangle covering more than ``CELL_CAP`` cells is "large": it is a candidate of
-    every point whose grown box holds it."""
+    every point whose grown box holds it. The work is bounded by a pair budget: the
+    candidate pairs (each point's cell's triangles, plus the large ones for every
+    point) are counted before any is measured, and more than ``max_pairs`` raises
+    ``NearPairsExceeded`` (carrying ``pairs`` and ``cap``) instead."""
     index = np.full(len(points), -1, dtype=np.int64)
     distance = np.full(len(points), np.inf)
     if len(points) == 0 or len(triangles) == 0:
@@ -192,6 +204,9 @@ def nearest_triangles(
     wanted = key(np.clip(home, 0, _CELLS - 1))
     begin = np.searchsorted(keys, wanted, side="left")
     end = np.where(inside, np.searchsorted(keys, wanted, side="right"), begin)
+    pairs = int((end - begin).sum()) + len(points) * len(large)
+    if pairs > max_pairs:
+        raise NearPairsExceeded(pairs, max_pairs)
     # Points in groups whose candidate pairs fit one chunk (a lone point may exceed it).
     ends = np.cumsum(end - begin)
     row = 0

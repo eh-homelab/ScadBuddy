@@ -9,7 +9,12 @@ import numpy as np
 import pytest
 import trimesh
 
-from scadbuddy.render.meshmatch import match_points, nearest_triangles, point_triangle_distance
+from scadbuddy.render.meshmatch import (
+    NearPairsExceeded,
+    match_points,
+    nearest_triangles,
+    point_triangle_distance,
+)
 
 
 def test_every_point_finds_its_source_within_the_tolerance() -> None:
@@ -98,9 +103,13 @@ def test_nearest_triangles_on_a_large_sphere_agrees_with_brute_force() -> None:
     direction = rng.normal(size=(10_000, 3))
     direction /= np.linalg.norm(direction, axis=1)[:, None]
     points = on + direction * rng.uniform(0, 0.009, (10_000, 1))
+    far = np.array([[50.0, 0.0, 0.0], [0.0, 0.0, 3.0], [-9.0, 9.0, 9.0]])
     began = time.perf_counter()
-    index, distance = nearest_triangles(points, triangles, 0.01)
+    index, distance = nearest_triangles(np.vstack([points, far]), triangles, 0.01)
     assert time.perf_counter() - began < 5
+    assert index[-3:].tolist() == [-1, -1, -1]
+    assert np.isinf(distance[-3:]).all()
+    index, distance = index[:-3], distance[:-3]
     for i in range(0, 10_000, 20):
         every = point_triangle_distance(
             np.repeat(points[i : i + 1], len(triangles), axis=0), triangles
@@ -118,3 +127,25 @@ def test_a_triangle_covering_many_cells_is_still_found() -> None:
     )
     index, _ = nearest_triangles(np.array([[10.0, 10.0, 0.005], [0.0, 0.0, 50.0]]), triangles, 0.01)
     assert index.tolist() == [0, 1]
+
+
+def test_a_dense_cluster_exceeds_the_pair_budget_without_measuring() -> None:
+    rng = np.random.default_rng(3)
+    corner = rng.uniform(0, 1, (3000, 1, 3))
+    triangles = corner + rng.uniform(0, 1, (3000, 3, 3))
+    points = rng.uniform(0, 1, (10_000, 3))
+    began = time.perf_counter()
+    with pytest.raises(NearPairsExceeded) as raised:
+        nearest_triangles(points, triangles, 0.01, max_pairs=100_000)
+    assert time.perf_counter() - began < 2
+    assert raised.value.cap == 100_000 and raised.value.pairs > raised.value.cap
+
+
+def test_mostly_large_triangles_exceed_the_pair_budget() -> None:
+    rng = np.random.default_rng(4)
+    tiny = rng.uniform(0, 100, (600, 1, 3)) + rng.uniform(0, 0.1, (600, 3, 3))
+    big = rng.uniform(0, 100, (400, 1, 3)) + rng.uniform(0, 100, (400, 3, 3))
+    triangles = np.vstack([tiny, big])
+    points = rng.uniform(0, 100, (1000, 3))
+    with pytest.raises(NearPairsExceeded):
+        nearest_triangles(points, triangles, 0.01, max_pairs=1000)
