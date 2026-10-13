@@ -151,9 +151,19 @@ def _solids_timeout(pieces: int = 1) -> timedelta:
     return _openscad_timeout() * max(1, pieces) + 3 * TRANSFER
 
 
+#: `render.jobs.MAX_PLATES` and `MAX_OBJECTS`, mirrored rather than imported into the
+#: workflow sandbox; a test holds them equal.
+PIECE_PLATES_CAP = 16
+PIECE_OBJECTS_CAP = 16
+
+
 def _pieces(main: RenderMainResult) -> int:
-    """How many plate-and-object renders the main render's layout asks for."""
-    return max(1, main.plates or 1) * max(1, main.objects or 1)
+    """How many plate-and-object renders the main render's layout asks for. The counts
+    are the template's own echoes, so each is capped at what the layout accepts (a
+    template past it fails there): a template cannot stretch the budget past that."""
+    plates = min(max(1, main.plates or 1), PIECE_PLATES_CAP)
+    objects = min(max(1, main.objects or 1), PIECE_OBJECTS_CAP)
+    return plates * objects
 
 
 def _prepare_timeout() -> timedelta:

@@ -18,6 +18,7 @@ from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.assets import AssetStore
+from scadbuddy.render import jobs
 from scadbuddy.render.job_models import PipelineOutput
 from scadbuddy.render.projection import workflow_id_for
 from scadbuddy.store.local import LocalBlobStore
@@ -259,6 +260,13 @@ def test_render_solids_has_an_openscad_budget_per_plate_and_object(
     assert pipelines._pieces(RenderMainResult(plates=2, objects=3)) == 6
     assert pipelines._solids_timeout(6) == 6 * openscad + 3 * pipelines.TRANSFER
     assert pipelines._solids_timeout() == openscad + 3 * pipelines.TRANSFER
+    # A template's echo cannot stretch the budget past what the layout accepts.
+    huge = RenderMainResult(plates=10**9, objects=10**9)
+    assert pipelines._pieces(huge) == jobs.MAX_PLATES * jobs.MAX_OBJECTS
+    assert (pipelines.PIECE_PLATES_CAP, pipelines.PIECE_OBJECTS_CAP) == (
+        jobs.MAX_PLATES,
+        jobs.MAX_OBJECTS,
+    )
 
 
 async def test_ctx_activity_passes_parts_and_returns_json(tmp_path: Path) -> None:
