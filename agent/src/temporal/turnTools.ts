@@ -17,6 +17,7 @@ import { endClient, type KeptClient, type KeptConnection, neverSent, type Sessio
 import {
   type ApprovalRecords,
   durableSession,
+  GRANT_REVOKED,
   NOT_APPROVED,
   type ResultBlobs,
   resultText,
@@ -406,6 +407,8 @@ type TurnCaller = {
   requestId: string
   tiers: readonly Tier[] | undefined
   approved(requestId: string, binding: { inputHash: string } | undefined): Promise<boolean>
+  /** Whether a call approved by a grant now revoked or expired would otherwise have run (#2871). */
+  lapsed(requestId: string, binding: { inputHash: string } | undefined): Promise<boolean>
 }
 
 async function turnCaller(deps: TurnToolsDeps, name: string, toolUseId: string): Promise<TurnCaller> {
@@ -427,6 +430,7 @@ async function turnCaller(deps: TurnToolsDeps, name: string, toolUseId: string):
       // A token starter's run acts with what its token holds now, as toolActivities' flowCaller.
       tiers: owner.kind === 'browser' ? undefined : await deps.currentTiers?.(owner),
       approved: (requestId, binding) => flows.approved(requestId, binding?.inputHash),
+      lapsed: async (requestId, binding) => (await flows.lapsed?.(requestId, binding?.inputHash)) ?? false,
     }
   }
   const { session, owner, turnTiers: sent, turnId } = await durableSession(name, deps.sessions)
@@ -437,6 +441,7 @@ async function turnCaller(deps: TurnToolsDeps, name: string, toolUseId: string):
     requestId: durableRequestId(session, runId, toolUseId),
     tiers: await turnTiers(owner, sent, deps),
     approved: async (requestId, binding) => (await deps.approvals?.approved(requestId, binding)) ?? false,
+    lapsed: async (requestId, binding) => (await deps.approvals?.lapsed?.(requestId, binding)) ?? false,
   }
 }
 
@@ -572,6 +577,10 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
       const binding = deps.audit ? { inputHash: deps.audit.hash(name, fields) } : undefined
       if (tier === 'outward') {
         if (!(await caller.approved(requestId, binding))) {
+          // As runAsActivity: a call its grant approved, revoked or expired since, says so.
+          if (await caller.lapsed(requestId, binding)) {
+            await refuse(`${name}: the run's grant was revoked or expired before this call ran`, GRANT_REVOKED)
+          }
           await refuse(`${name} needs an approval, and none is recorded for this call`, NOT_APPROVED)
         }
       }

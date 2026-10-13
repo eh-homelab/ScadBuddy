@@ -30,7 +30,7 @@ import { loadEnabledPlugins, PluginStore } from './plugins/registry.js'
 import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
 import { ApprovalActions } from './approvals/mcp.js'
-import { approvalHashKey } from './approvals/service.js'
+import { approvalHashKey, sweepErrorText } from './approvals/service.js'
 import { AuditLog } from './audit/log.js'
 import { auditedTokenStore } from './audit/writes.js'
 import { TabHub } from './bridge/hub.js'
@@ -351,7 +351,7 @@ const stopSessionWake =
   sessions && events && sessionEvents ? followSessionEvents(events, sessions.events, sessionEvents.replica) : undefined
 const stopSweeper = sessions?.approvals.startSweeper(APPROVAL_SWEEP_MS, {
   ...(database ? { ready: database.ready } : {}),
-  onError: (err) => console.error('approval expiry sweep failed:', (err as Error).message),
+  onError: (err) => console.error('approval expiry sweep failed:', sweepErrorText(err)),
 })
 // Questions past `question_expiry_seconds` whose turn is gone (spec §6.6): cancelled, never answered.
 const stopQuestionSweeper = sessions?.questions.startSweeper(APPROVAL_SWEEP_MS, {
