@@ -3621,3 +3621,31 @@ describe('PrintPicker · a sliced library file (#2671)', () => {
     expect(runs.bodies[0]).toMatchObject({ plate_id: 2, all_plates: false })
   })
 })
+
+describe('PrintPicker · a sliced file that does not fit is warned of, never held (#2671)', () => {
+  it('shows a nozzle or model mismatch as a warning, with Print enabled', async () => {
+    server.use(
+      http.post('/api/v1/print/library/104/check', () =>
+        HttpResponse.json({
+          errors: [],
+          warnings: [
+            {
+              kind: 'sliced-nozzle-missing',
+              slot_id: null,
+              message: 'Sliced for a 0.6 mm nozzle; 0.4 mm is mounted on H2C. Swap it before the print starts.',
+            },
+            { kind: 'sliced-other-model', slot_id: null, message: 'Sliced for a Bambu Lab X1 Carbon; H2C is a Bambu Lab H2C.' },
+          ],
+          rack: null,
+        }),
+      ),
+    )
+    renderPage(
+      <PrintPicker open source={{ kind: 'library', file: { id: 104, filename: 'clip.gcode.3mf' } }} onClose={vi.fn()} onRan={vi.fn()} />,
+    )
+    await loaded()
+    expect(await screen.findByText(/Sliced for a 0\.6 mm nozzle; 0\.4 mm is mounted/)).toBeInTheDocument()
+    expect(screen.getByText(/Sliced for a Bambu Lab X1 Carbon/)).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
+  })
+})

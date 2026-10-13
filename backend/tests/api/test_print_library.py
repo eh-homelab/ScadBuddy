@@ -520,27 +520,40 @@ def test_a_sliced_files_choices_say_what_it_was_sliced_for(client: TestClient) -
 
 @respx.mock
 @pytest.mark.parametrize(
-    ("content", "plate_id", "refusal"),
+    ("content", "plate_id", "kind", "warning", "queued_plate"),
     [
         pytest.param(
             sliced_3mf(printer_model="Bambu Lab X1 Carbon"),
             1,
-            "This file was sliced for a Bambu Lab X1 Carbon, and 3DP-31B-598 is a H2C.",
+            "sliced-other-model",
+            "Sliced for a Bambu Lab X1 Carbon; 3DP-31B-598 is a H2C.",
+            1,
             id="another-model",
         ),
         pytest.param(
             sliced_3mf(nozzle="0.6"),
             1,
-            "This file was sliced for a 0.6 mm nozzle, and 3DP-31B-598 has only 0.2, 0.4 mm.",
+            "sliced-nozzle-missing",
+            "Sliced for a 0.6 mm nozzle; 0.2, 0.4 mm is mounted on 3DP-31B-598."
+            " Swap it before the print starts.",
+            1,
             id="another-nozzle",
         ),
-        pytest.param(sliced_3mf(plates=(1,)), 2, "there is no plate 2", id="no-such-plate"),
+        pytest.param(
+            sliced_3mf(plates=(1,)),
+            2,
+            "sliced-plate-missing",
+            "This file holds no plate 2, so plate 1 is queued instead.",
+            1,
+            id="no-such-plate",
+        ),
     ],
 )
-def test_a_sliced_file_that_does_not_fit_the_printer_is_refused_before_anything_queues(
-    client: TestClient, content: bytes, plate_id: int, refusal: str
+def test_a_sliced_file_that_does_not_fit_still_queues_with_a_warning(
+    client: TestClient, content: bytes, plate_id: int, kind: str, warning: str, queued_plate: int
 ) -> None:
-    """#2671: only a real mismatch refuses, and it says which."""
+    """#2671: a sliced file is never refused. A mismatch is a warning in the check and
+    on the run, so the user sets it right before starting the print."""
     configure(client)
     sliced_file(104, content)
     run_routes()
@@ -549,19 +562,21 @@ def test_a_sliced_file_that_does_not_fit_the_printer_is_refused_before_anything_
     check = client.post(
         "/api/v1/print/library/104/check", json={**SLICED_RUN, "plate_id": plate_id}
     )
-    run = client.post("/api/v1/print/library/104/run", json={**SLICED_RUN, "plate_id": plate_id})
+    run = run_library(client, 104, json={**SLICED_RUN, "plate_id": plate_id})
 
     assert check.status_code == 200, check.text
-    assert any(refusal in error for error in check.json()["errors"]), check.json()
-    assert run.status_code == 422, run.text
-    assert refusal in run.json()["detail"]
-    assert not queued.called
+    assert check.json()["errors"] == []
+    assert {"kind": kind, "slot_id": None, "message": warning} in check.json()["warnings"]
+    assert run.status_code == 200, run.text
+    assert any(w["kind"] == kind and w["message"] == warning for w in run.json()["warnings"])
+    assert queued.call_count == 1
+    assert json.loads(queued.calls.last.request.content)["plate_id"] == queued_plate
 
 
 @respx.mock
 def test_a_sliced_file_that_fits_checks_clean(client: TestClient) -> None:
-    """#2671: an H2C file for the 0.4 the printer has, on a plate it holds: no refusal,
-    though the printer is not one ScadBuddy chooses presets for by name."""
+    """#2671: an H2C file for the 0.4 the printer has, on a plate it holds: nothing to
+    warn of, though the printer is not one ScadBuddy chooses presets for by name."""
     configure(client)
     sliced_file(104)
     run_routes()
@@ -570,6 +585,7 @@ def test_a_sliced_file_that_fits_checks_clean(client: TestClient) -> None:
 
     assert check.status_code == 200, check.text
     assert check.json()["errors"] == []
+    assert check.json()["warnings"] == []
 
 
 @respx.mock

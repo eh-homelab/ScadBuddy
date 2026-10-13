@@ -13,7 +13,7 @@ import logging
 import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 from fastapi import status
@@ -651,8 +651,9 @@ async def check_print(
     except RunRefusalError as refused:
         return PrintCheck(errors=[refused.detail])
     if source.is_sliced:
-        # Queued as it is (#2671): no nozzle plan, slots or rack side to judge before it.
-        return PrintCheck()
+        # Queued as it is, never refused (#2671): what to set right first is a warning,
+        # and there is no nozzle plan, slots or rack side to judge before it.
+        return PrintCheck(warnings=prepared.warnings)
     laid_out = await source.states_nozzles(client)
     nozzle_plan = (
         await plan_for(
@@ -941,6 +942,8 @@ class PreparedRun:
     #: when it was unreadable.
     printer_status: PrinterStatus | None
     printer_name: str | None = None
+    #: What a sliced file's run carries back instead of refusing (#2671).
+    warnings: list[FilamentWarning] = field(default_factory=list)
 
 
 async def prepare_run(
@@ -973,7 +976,26 @@ async def prepare_run(
         raise RunRefusalError(
             "This output's 3MF lays out no plates, so there is nothing to print.",
         )
-    if laid_out and request.plate_id not in laid_out and not request.all_plates:
+    plate_warnings: list[FilamentWarning] = []
+    if (
+        source.is_sliced
+        and laid_out
+        and request.plate_id not in laid_out
+        and not request.all_plates
+    ):
+        # A sliced file is never refused (#2671): the dialog offers only its plates, so
+        # a request for another one prints the file's first instead, and says so.
+        plate_ids = laid_out[:1]
+        plate_warnings.append(
+            FilamentWarning(
+                kind="sliced-plate-missing",
+                message=(
+                    f"This file holds no plate {request.plate_id}, so plate {laid_out[0]}"
+                    " is queued instead."
+                ),
+            )
+        )
+    elif laid_out and request.plate_id not in laid_out and not request.all_plates:
         # Bambuddy does not check it either: the run would upload, then fail in the
         # slicer with no reason given (#1320).
         count = f"{len(laid_out)} plate{'s' if len(laid_out) != 1 else ''}"
@@ -992,15 +1014,14 @@ async def prepare_run(
         printer = await _require_resolvable_printer(client, printer_id, any_model=True)
         printer_status = await read_status(client, printer_id)
         await record_seen(rack, printer_id, printer_status)
-        refused_sliced = sliced_refusal(source.sliced_profile, printer, printer_status, plate_ids)
-        if refused_sliced is not None:
-            raise RunRefusalError(refused_sliced)
         return PreparedRun(
             plate_ids=plate_ids,
             printer_id=printer_id,
             catalogue=None,
             printer_status=printer_status,
             printer_name=printer.name,
+            warnings=plate_warnings
+            + sliced_warnings(source.sliced_profile, printer, printer_status, plate_ids),
         )
     printer = await _require_resolvable_printer(client, printer_id)
     # Read once for every plate: the catalogue is ~4000 presets on the live instance.
@@ -1041,6 +1062,8 @@ class PreparedPlates(BaseModel):
     #: only into the database (spec 2026-10-01 §7, #1032). Nothing after the check
     #: needs one: the enqueue ranks the rack on a status it reads itself.
     printer_status: PrinterStatus | None = None
+    #: A sliced file's warnings (#2671), carried to the run's own.
+    warnings: list[FilamentWarning] = Field(default_factory=list)
 
     @field_validator("printer_status", mode="after")
     @classmethod
@@ -1056,6 +1079,7 @@ class PreparedPlates(BaseModel):
             plate_ids=prepared.plate_ids,
             printer_id=prepared.printer_id,
             printer_status=prepared.printer_status,
+            warnings=prepared.warnings,
         )
 
 
@@ -1394,7 +1418,8 @@ async def _plan_sliced(
             )
             for plate_id, options in zip(prepared.plate_ids, per_plate, strict=True)
         ],
-        warnings=_filament_warnings(
+        warnings=prepared.warnings
+        + _filament_warnings(
             [(options, []) for options in per_plate], request.filament_plan, copies
         ),
         rack_algorithm=request.rack_algorithm or settings.rack_algorithm(printer_id),
@@ -1474,34 +1499,44 @@ def _mounted_diameters(status: PrinterStatus | None) -> set[str]:
     }
 
 
-def sliced_refusal(
+def sliced_warnings(
     profile: SlicedProfile | None,
     printer: Printer,
     status: PrinterStatus | None,
     plate_ids: list[int],
-) -> str | None:
-    """Why a sliced file cannot print on ``printer`` as it is (#2671): sliced for another
-    model, or for a nozzle diameter the printer does not have. Only a known mismatch
-    refuses: a file whose profile could not be read, or a printer that reports no model
-    or no nozzles, is left to Bambuddy, which checks again at dispatch."""
+) -> list[FilamentWarning]:
+    """What to set right before a sliced file prints on ``printer`` (#2671): sliced for
+    another model, or for a nozzle diameter the printer does not have. Never a refusal:
+    it is queued as it is, and the user swaps the nozzle, or picks another printer,
+    before starting it. Only a known mismatch warns: an unread profile, or a printer that
+    reports no model or no nozzles, says nothing."""
     if profile is None:
-        return None
+        return []
+    warnings: list[FilamentWarning] = []
     wanted, have = model_key(profile.printer_model), model_key(printer.model)
     if wanted is not None and have is not None and wanted != have:
-        return (
-            f"This file was sliced for a {profile.printer_model}, and {printer.name} is "
-            f"a {printer.model}. Print it on a printer of that model, or slice the "
-            "original again for this one."
+        warnings.append(
+            FilamentWarning(
+                kind="sliced-other-model",
+                message=(
+                    f"Sliced for a {profile.printer_model}; {printer.name} is a {printer.model}."
+                ),
+            )
         )
     mounted = _mounted_diameters(status)
     missing = [size for size in profile.diameters_for(plate_ids) if size not in mounted]
     if mounted and missing:
-        return (
-            f"This file was sliced for a {' and '.join(missing)} mm nozzle, and "
-            f"{printer.name} has only {', '.join(sorted(mounted))} mm. Mount one, or "
-            "slice the original again for this nozzle."
+        warnings.append(
+            FilamentWarning(
+                kind="sliced-nozzle-missing",
+                message=(
+                    f"Sliced for a {' and '.join(missing)} mm nozzle; "
+                    f"{', '.join(sorted(mounted))} mm is mounted on {printer.name}."
+                    " Swap it before the print starts."
+                ),
+            )
         )
-    return None
+    return warnings
 
 
 async def _hardware_warnings(

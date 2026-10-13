@@ -362,8 +362,10 @@ browser, also lists STLs (printable, as one plate) and sliced `.gcode.3mf` files
 offers the plates it holds G-code for, the spools for its slots, the printer and the
 print options (a held manual start among them), and shows what it was sliced for —
 printer, nozzle, process and plate type — read-only, with Bambu Studio's own time and
-filament estimate. It refuses a printer of another model, or one without a nozzle of the
-diameter the file was sliced for, and says which. A sliced file cannot be arranged.
+filament estimate. A sliced file is never refused: a printer of another model, a nozzle
+diameter the printer has nowhere ("Sliced for a 0.6 mm nozzle; 0.4 mm is mounted"), or a
+plate the file does not hold (its first plate is queued instead) is a warning in Checks,
+so you can set it right before starting the print. A sliced file cannot be arranged.
 Printing a ScadBuddy copy again with the same presets queues the slice ScadBuddy already
 made of it, while Bambuddy still has that file, instead of slicing it again.
 
