@@ -23,14 +23,17 @@ const OLD = { name: 'BOSL2', url: URL_, ref: 'v2.0.700', commit: 'a1b2c3d4'.repe
 /** Every request the flow sends to a library route, in order. */
 function recorded() {
   const calls: { method: string; path: string; body: unknown }[] = []
-  server.events.on('request:start', ({ request }) => {
+  const record = ({ request }: { request: Request }) => {
     const path = new URL(request.url).pathname
     if (request.method === 'GET' || !path.includes('/libraries/')) return
     void request
       .clone()
       .json()
       .then((body: unknown) => calls.push({ method: request.method, path, body }))
-  })
+  }
+  server.events.on('request:start', record)
+  // Left on, it reads every later test's library writes too, a body-less DELETE included.
+  onTestFinished(() => server.events.removeListener('request:start', record))
   return calls
 }
 
