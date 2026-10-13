@@ -2,7 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
-import type { BatchChoice, PrintBatch } from '../api/types'
+import type { BatchChoice, PrintBatch, PrintRunRequest } from '../api/types'
 import { choicesView } from '../mocks/choices'
 import { libraryFiles } from '../mocks/features/library'
 import { resetMockState } from '../mocks/handlers'
@@ -182,7 +182,7 @@ describe('BatchPrintDialog (#2672)', () => {
     await user.click(within(screen.getByTestId('batch-row-0')).getByRole('button', { name: /^Edit / }))
     await step(1, 1)
     await loaded()
-    await waitFor(() => expect(Number(slot1().checked.value)).toBe(REQUEST.filament_plan.slots[0]?.spool_id))
+    await waitFor(() => expect(Number(slot1().checked.value)).toBe(REQUEST.filament_plan.slots?.[0]?.spool_id))
   })
 
   it('resumes where it was left after a reload', async () => {
@@ -209,7 +209,7 @@ describe('BatchPrintDialog (#2672)', () => {
 })
 
 /** A choice as a step saves one: slot 1 on a spool the mock's inventory has. */
-const REQUEST = {
+const REQUEST: PrintRunRequest = {
   printer_id: choicesView.printer_id ?? null,
   filament_plan: {
     slots: (choicesView.filaments.suggested ?? []).map((choice, at) =>
@@ -224,7 +224,7 @@ const REQUEST = {
     ),
     force_colour_match: false,
   },
-  choices: { nozzles: [{ size: '0.4', flow: 'standard' as const }], tier: 'standard' as const, bed_type: 'Textured PEI Plate' },
+  choices: { nozzles: [{ size: '0.4', flow: 'standard' }], tier: 'standard', bed_type: 'Textured PEI Plate' },
   plate_id: 1,
   all_plates: false,
 }
