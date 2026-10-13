@@ -1224,6 +1224,10 @@ and the metric panels are unaffected. CI's `lint` job checks the dashboard
 - `backend/` — FastAPI, `uv run --frozen pytest` (tests marked
   `requires_openscad` need a real `openscad`; the Dockerfile's `test` target
   is where they run in CI).
+- `test-fixtures/` — real 3MFs in Git LFS (~290 MB) for the tests marked
+  `requires_fixtures`, which skip without them. With git-lfs installed a plain
+  clone downloads them all; clone with `GIT_LFS_SKIP_SMUDGE=1 git clone …` and
+  `git lfs pull --include "test-fixtures/**"` only when you need them.
 - `frontend/` — Vite + React, `pnpm test`, `pnpm build`.
 - `agent/` — the AI agent service (Node 24, Hono, Claude Agent SDK),
   `pnpm test`, `pnpm build`; see "The agent sidecar" above.

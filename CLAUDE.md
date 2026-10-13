@@ -35,8 +35,12 @@ Tests marked `requires_fixtures` (#2146) use the real MakerWorld 3MFs in
 `test-fixtures/makerworld/` (Git LFS, ~290 MB; `git lfs pull --include "test-fixtures/**"`;
 `manifest.json` says what each covers) and skip, naming every missing file, without
 them; with `SCADBUDDY_TEST_FIXTURES` set (a directory holding `makerworld/`, as CI sets
-it) they fail instead. CI's `lfs-fixtures` job pulls them once into the Actions cache
-and each shard mounts them at `/app/test-fixtures`. Add or change a fixture only on a
+it) they fail instead. With git-lfs installed, a plain clone downloads all of them:
+clone with `GIT_LFS_SKIP_SMUDGE=1 git clone …` (or set
+`git config lfs.fetchexclude 'test-fixtures/**'` in a clone) and pull them only when
+you run those tests (#2489). CI's `lfs-fixtures` job pulls them once into the Actions
+cache and each shard mounts them at `/app/test-fixtures`; a shard whose restore misses
+pulls them itself (#2488). Add or change a fixture only on a
 branch of this repo: a fork's LFS objects live in the fork's store, which that job's
 `git lfs pull` cannot reach.
 Tests marked `requires_temporal` skip unless `SCADBUDDY_TEST_TEMPORAL_ADDRESS` names a
