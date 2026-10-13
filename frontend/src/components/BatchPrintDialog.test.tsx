@@ -156,8 +156,8 @@ describe('BatchPrintDialog (#2672)', () => {
     await user.click(screen.getByTestId('batch-queue-all'))
 
     await screen.findByRole('dialog', { name: 'Batch print queued' })
-    expect(await screen.findByTestId('batch-outcome-0')).toHaveTextContent('Queued in Bambuddy.')
-    expect(await screen.findByTestId('batch-outcome-2')).toHaveTextContent('Queued in Bambuddy.')
+    await waitFor(() => expect(screen.getByTestId('batch-outcome-0')).toHaveTextContent('Queued in Bambuddy.'))
+    await waitFor(() => expect(screen.getByTestId('batch-outcome-2')).toHaveTextContent('Queued in Bambuddy.'))
     expect(screen.queryByTestId('batch-outcome-1')).toBeNull()
   })
 
@@ -215,7 +215,7 @@ describe('BatchPrintDialog (#2672)', () => {
     )
     const { user } = renderPage(<BatchPrintDialog batchId={batch.id} onClose={vi.fn()} />)
     await user.click(await screen.findByTestId('batch-queue-all'))
-    expect(await screen.findByTestId('batch-outcome-0')).toHaveTextContent('Not queued: This file was sliced for a X1C.')
+    await waitFor(() => expect(screen.getByTestId('batch-outcome-0')).toHaveTextContent('Not queued: This file was sliced for a X1C.'))
     expect(screen.getByTestId('batch-outcome-1')).toHaveTextContent('Not queued: No choices were made')
     // Open still: a refused file can be edited and the batch sent again.
     expect(within(screen.getByTestId('batch-row-0')).getByRole('button', { name: /^Edit / })).toBeEnabled()
@@ -243,8 +243,8 @@ describe('BatchPrintDialog (#2672)', () => {
     const { user } = renderPage(<BatchPrintDialog batchId={batch.id} onClose={onClose} />)
     await user.click(await screen.findByTestId('batch-queue-all'))
 
-    const outcome = await screen.findByTestId('batch-outcome-0')
-    expect(outcome).toHaveTextContent('Still being checked')
+    await waitFor(() => expect(screen.getByTestId('batch-outcome-0')).toHaveTextContent('Still being checked'))
+    const outcome = screen.getByTestId('batch-outcome-0')
     expect(outcome).not.toHaveTextContent('Not queued')
     // It may be printing: no Edit into a second print, but Queue all again is offered.
     expect(within(screen.getByTestId('batch-row-0')).queryByRole('button', { name: /^Edit / })).toBeNull()
