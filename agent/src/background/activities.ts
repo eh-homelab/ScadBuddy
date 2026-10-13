@@ -4,6 +4,7 @@ import { ensureSessionDir } from '../harness/stateDirs.js'
 import { TASK_QUEUE } from '../temporal/names.js'
 import type { Resolver } from '../http/egress.js'
 import { wrapUntrustedText } from '../safety/untrusted.js'
+import { redact } from '../secrets.js'
 import { SessionError, type SessionManager } from '../sessions/manager.js'
 import { endNotice, eventNotice, type MonitorEnd, runCommand, runSocket, socketAddresses } from './monitor.js'
 import { nextFire } from './schedule.js'
@@ -71,6 +72,8 @@ export type BackgroundActivityDeps = {
   resolve?: Resolver | undefined
   /** The queue a WebSocket monitor runs on: any agent's (`agent-tools` unless set). */
   socketQueue?: string | undefined
+  /** What a tool result is redacted of (ToolServices.secrets): no monitor event shows one. */
+  secrets?: (() => Promise<readonly string[]>) | undefined
 }
 
 /** What the model reads beside a monitor's events. */
@@ -91,7 +94,7 @@ async function watched(t: BackgroundTask, store: BackgroundTaskStore, run: (sign
       if (!(await store.appendEvent(t.id, eventNotice(t.id, t.description, text)))) return false
       events += 1
       await ctx.client.workflow
-        .getHandle(backgroundWorkflowId(t.id))
+        .getHandle(backgroundWorkflowId(t.sessionId, t.id))
         .signal(BG_EVENTS_SIGNAL)
         .catch(() => {})
       return true
@@ -201,7 +204,9 @@ export function backgroundActivities(deps: BackgroundActivityDeps) {
       // What a command printed or a socket sent is data, never the user's words: the
       // notifications go in the untrusted-data envelope every tool result gets.
       const source = typeof t.spec.command === 'string' ? `the command ${JSON.stringify(t.spec.command)}` : `the WebSocket ${String((t.spec.ws as { url?: string }).url)}`
-      const sent = await deps.send(t, wrapUntrustedText('Monitor', source, pending.map((e) => e.text).join('\n\n')), eventsContext(t))
+      const secrets = (await deps.secrets?.()) ?? []
+      const text = redact(pending.map((e) => e.text).join('\n\n'), secrets)
+      const sent = await deps.send(t, wrapUntrustedText('Monitor', redact(source, secrets), text), eventsContext(t))
       if (sent.result === 'sent') {
         await deps.store.delivered(t.id, pending.at(-1)!.seq)
         return sent
