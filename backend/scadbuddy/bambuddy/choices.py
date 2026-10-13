@@ -226,6 +226,8 @@ async def _given(source: PrintSource) -> PrintSource:
 async def _record_seen(
     rack: RackUsage | None, printer_id: int, status: Awaitable[PrinterStatus | None]
 ) -> None:
+    """Awaits the shared status read directly, so a cancelled ``choices_for`` cancels
+    the read with it; ``filament_options``' wait only keeps its own cancellation out."""
     await record_seen(rack, printer_id, await status)
 
 
