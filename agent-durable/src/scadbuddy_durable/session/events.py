@@ -207,10 +207,13 @@ class SessionEvents:
         # A listed tier is the agent's free string, and a manifest's tier is the agent's
         # SCADBUDDY_DURABLE_TOOLS_JSON: one that is not a tier, from either, is labelled
         # outward, as an unlisted tool is, rather than reaching the transcript as is
-        # (#2839, #3245).
+        # (#2839, #3245). A listed tier that is not a tier labels the tool outward even
+        # when the manifest gives it one: the listing wins, and outward is the safe label.
+        # parse_manifest already said so of a manifest's own (#3581), so only a listed one
+        # is said here, once a turn.
         given = {e.name: e.tier for e in tools.manifest()} | args.tiers
         tiers = {name: tier for name, tier in given.items() if tier in RISK_TIERS}
-        for name in sorted(given.keys() - tiers.keys()):
+        for name in sorted(args.tiers.keys() - tiers.keys()):
             # The tool, never the value: the value is the agent's free string (#3144).
             activity.logger.warning("tool %s has no known tier: labelled outward", name)
         at = [0]
