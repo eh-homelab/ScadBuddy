@@ -353,6 +353,36 @@ describe('LibraryPage, item context (#975)', () => {
     expect(screen.getByTestId('library-folder-1')).toHaveAttribute('aria-selected', 'false')
   })
 
+  it('on a phone, folds the folder tree behind a button naming the open folder (#2368)', async () => {
+    vi.stubGlobal('matchMedia', (query: string) => ({
+      matches: query === '(max-width: 767.98px)',
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    }))
+    try {
+      const { user } = renderPage(<><LibraryPage /><Where /></>, { route: '/library/Spec/MakerWorld/Work' })
+      expect(await screen.findByTestId('library-file-120')).toBeInTheDocument()
+      // The files come first: no tree until it is asked for.
+      expect(screen.queryByRole('tree', { name: 'Library folders' })).toBeNull()
+      const toggle = screen.getByRole('button', { name: /^Folder: Spec \/ MakerWorld \/ Work/ })
+      expect(toggle).toHaveAttribute('aria-expanded', 'false')
+
+      await user.click(toggle)
+      expect(toggle).toHaveAttribute('aria-expanded', 'true')
+      const tree = screen.getByRole('tree', { name: 'Library folders' })
+      expect(toggle).toHaveAttribute('aria-controls', tree.parentElement?.id)
+      await user.click(within(tree).getByRole('treeitem', { name: 'Top level' }))
+
+      // Choosing a folder folds the tree away again.
+      expect(screen.getByTestId('where')).toHaveTextContent(/^\/library$/)
+      expect(screen.queryByRole('tree', { name: 'Library folders' })).toBeNull()
+      expect(await screen.findByRole('button', { name: /^Folder: Top level/ })).toHaveAttribute('aria-expanded', 'false')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('finds a linked file in its folder and highlights it, and a print link opens the dialog', async () => {
     renderPage(<><LibraryPage /><Where /></>, { route: '/library?print=67&file=67' })
     const card = await screen.findByTestId('library-file-67')
