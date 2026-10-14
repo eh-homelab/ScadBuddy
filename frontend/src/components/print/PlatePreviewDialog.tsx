@@ -70,6 +70,13 @@ function useToolpath(url: string | null): {
     return () => abort.abort()
   }, [url, attempt])
   const retry = useCallback(() => setAttempt((count) => count + 1), [])
+  // A failure is forgotten once its view is left: coming back reads again, and shows as
+  // loading meanwhile, not the old error with its Retry (state from the last render).
+  const [shownUrl, setShownUrl] = useState(url)
+  if (url !== shownUrl) {
+    setShownUrl(url)
+    if (url === null && loaded !== null && 'error' in loaded) setLoaded(null)
+  }
   if (url === null) return { toolpath: null, retry }
   // A failure is shown only for the attempt it was of: a Retry reads as loading again.
   if (loaded?.url !== url || ('error' in loaded && loaded.attempt !== attempt)) return { toolpath: 'loading', retry }
@@ -91,6 +98,9 @@ function background(): string {
  */
 export function PlatePreviewDialog({ open, onClose, url, label, colors, toolpathUrl = null }: Props) {
   const [view, setView] = useState<View>('colors')
+  // Speed and Movement are the slice's: one that goes away (a choice changed, so the
+  // slice is stale) puts the view back on Colors, never a disabled radio left checked.
+  if (toolpathUrl === null && (view === 'speed' || view === 'movement')) setView('colors')
   const [height, setHeight] = useState<number | null>(null)
   const [cut, setCut] = useState<number | null>(null)
   const [layer, setLayer] = useState<number | null>(null)

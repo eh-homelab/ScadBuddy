@@ -107,6 +107,32 @@ updates:
           - "ruff"
           - "mypy"
 
+  # Go (#2686): the two modules of the go.work workspace. A bump edits only
+  # the module's go.mod/go.sum; it does not run `go work vendor`, so the root
+  # vendor/ (and scadbuddy-client's own) lag until vendor-autofix.yml commits
+  # them, and the `go` job's drift check stays red until it does.
+  - package-ecosystem: "gomod"
+    directories:
+      - "/tools/go/scadbuddy-client"
+      - "/tools/go/bambuddy-fs"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "ElanHasson"
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    labels: ["dependencies", "gomod"]
+    groups:
+      # The Kiota runtime packages the generated client imports move together.
+      kiota:
+        patterns: ["github.com/microsoft/kiota-*"]
+      go-fuse:
+        patterns: ["github.com/hanwen/go-fuse/*"]
+
   - package-ecosystem: "npm"
     directory: "/frontend"
     schedule:

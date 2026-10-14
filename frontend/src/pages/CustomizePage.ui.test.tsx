@@ -496,6 +496,63 @@ describe('CustomizePage with a template UI', () => {
     expect(screen.queryByText(/^Saved /)).toBeNull()
   }, 20_000)
 
+  // #2464 — after a submit that failed (a 503 mid-deploy) the previous job is still on
+  // show; host.generate() waited only for "settled", so it saved that job for new values.
+  it('host.generate() waits for the render of the current values, not a stale one after a failed submit', async () => {
+    let down = false
+    const saved: string[] = []
+    server.use(
+      http.post('/api/v1/models/:slug/render', () =>
+        down ? new HttpResponse('upstream connect error', { status: 503 }) : undefined,
+      ),
+      http.post('/api/v1/models/:slug/outputs', async ({ request }) => {
+        const body = (await request.clone().json()) as { inputs?: { params?: Record<string, unknown> } }
+        saved.push(String(body.inputs?.params?.['name']))
+        return undefined
+      }),
+    )
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (_root: ShadowRoot, given: Host) => {
+        host = given
+      },
+    }))
+    open(UI_DEMO_SLUG)
+    await waitFor(() => expect(host).toBeDefined(), { timeout: 5000 })
+    await host!.generate()
+    expect(saved).toHaveLength(1)
+
+    down = true
+    const params = host!.inputs.get()['params'] as Record<string, unknown>
+    host!.inputs.set({ ...host!.inputs.get(), params: { ...params, name: 'Zed' } })
+    await screen.findByText(/not answering right now/, {}, { timeout: 5000 })
+    const run = host!.generate()
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    // Nothing saved for the stale job while the render of "Zed" has not happened.
+    expect(saved).toHaveLength(1)
+
+    down = false
+    await run
+    expect(saved).toEqual([saved[0], 'Zed'])
+  }, 30_000)
+
+  // A template UI may show no field called "Text size": the bar says what is wrong instead.
+  it("says why Generate is off in the value's own words, not as a field to fix", async () => {
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (_root: ShadowRoot, given: Host) => {
+        host = given
+      },
+    }))
+    open(UI_DEMO_SLUG)
+    await waitFor(() => expect(host).toBeDefined(), { timeout: 5000 })
+    const params = host!.inputs.get()['params'] as Record<string, unknown>
+    host!.inputs.set({ ...host!.inputs.get(), params: { ...params, text_size: 500 } })
+    const blocked = await screen.findByTestId('generate-blocked', {}, { timeout: 5000 })
+    expect(blocked).toHaveTextContent(/^Text size /)
+    expect(blocked).not.toHaveTextContent(/^Fix /)
+  }, 20_000)
+
   it('host.generate() does not call a current output superseded', async () => {
     let host: Host | undefined
     setUiModuleLoader(async () => ({

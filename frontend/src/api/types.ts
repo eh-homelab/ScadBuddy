@@ -135,6 +135,8 @@ export type FlowRun = Schemas['Run']
 export type FlowRunView = Schemas['RunView']
 export type FlowRunStatus = FlowRunView['status']
 export type FlowPending = Schemas['PendingEntry']
+/** #2482 — a parent's narrowing beside the call it narrows. */
+export type FlowProposal = Schemas['ProposalView']
 export type FlowStep = Schemas['FlowStep']
 export type FlowDecided = Schemas['Decided']
 /** #2350 — a registered flow version, with and without its script. */

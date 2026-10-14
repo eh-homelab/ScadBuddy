@@ -439,6 +439,12 @@ export function extractResultFromTranscript(entries: readonly TranscriptLine[]):
 
 // ------------------------------------------------------------------- hooks
 
+/**
+ * Automatic memory's hook knobs, as a session's turns take them (classic: SessionManager,
+ * durable: memoryActivities); `false` turns it off. main.ts builds one and gives both (#2420).
+ */
+export type MemoryOptions = Omit<MemoryHooksOptions, 'client' | 'secrets' | 'log' | 'sessionStore' | 'onActivity'> | false
+
 export type MemoryHooksOptions = {
   client: HindsightClient
   budget?: Budget

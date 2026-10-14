@@ -305,8 +305,31 @@ export class TabHub implements BrowserTabs {
    * goes stale as soon as another replica pairs the session elsewhere.
    */
   async sessionHasTab(sessionId: string): Promise<boolean> {
+    return (await this.sessionTab(sessionId)).connected
+  }
+
+  /**
+   * `sessionHasTab`, with the tab it asked about: `pairSessionIfStill` takes it back,
+   * so a pairing decided on this answer cannot overwrite a newer one (#2271).
+   */
+  async sessionTab(sessionId: string): Promise<{ tabId: string | undefined; connected: boolean }> {
     const tabId = (await this.#storedSessionTab(sessionId)) ?? this.#sessionTabs.get(sessionId)
-    if (tabId === undefined) return false
+    return { tabId, connected: tabId !== undefined && (await this.#tabConnected(tabId)) }
+  }
+
+  /**
+   * Pairs `sessionId` with `tabId` only if its tab is still `seen`, the tab a
+   * `sessionTab` answer named. Another socket may have paired the session while
+   * that answer was on its way (#2271): the newer pairing wins. Whether it paired.
+   */
+  async pairSessionIfStill(sessionId: string, tabId: string, seen: string | undefined): Promise<boolean> {
+    const now = (await this.#storedSessionTab(sessionId)) ?? this.#sessionTabs.get(sessionId)
+    if (now !== seen) return false
+    this.pairSession(sessionId, tabId)
+    return true
+  }
+
+  async #tabConnected(tabId: string): Promise<boolean> {
     if (this.#tabs.has(tabId)) return true
     if (!this.#relay) return false
     try {

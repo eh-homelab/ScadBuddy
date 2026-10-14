@@ -33,6 +33,7 @@ function ctx(overrides: Partial<ToolContext> = {}): ToolContext {
 const FARM_TOOLS = {
   list_print_queue: 'GET /api/v1/farm/queue',
   get_print_stats: 'GET /api/v1/farm/stats',
+  get_printers_now: 'GET /api/v1/print/printers/now',
   list_print_archives: 'GET /api/v1/farm/archives',
   get_spool_inventory: 'GET /api/v1/farm/inventory',
   get_spool_summary: 'GET /api/v1/farm/spools/{spool_id}/summary',
@@ -89,6 +90,15 @@ describe('farm-context tools (#1912)', () => {
     expect(result.isError).toBeFalsy()
     expect(Object.fromEntries(seen[0]!)).toEqual({ date_from: '2026-09-01', date_to: '2026-09-30' })
     expect(firstText(result)).toMatchObject({ total_prints: 104 })
+  })
+
+  it("reads what each printer is doing now, whoever started it (#2929)", async () => {
+    capture('/api/v1/print/printers/now', {
+      printers: [{ printer_id: 2, name: 'P2', activity: 'paused', job_name: 'Bracket', progress: 32, hms: [] }],
+    })
+    const result = await runTool(tool('get_printers_now'), {}, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(firstText(result)).toMatchObject({ printers: [{ printer_id: 2, activity: 'paused', job_name: 'Bracket' }] })
   })
 
   it('refuses a day that is not YYYY-MM-DD', () => {

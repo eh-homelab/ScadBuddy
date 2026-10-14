@@ -145,8 +145,15 @@ _FINAL = re.compile(
     re.IGNORECASE,
 )
 # Claude Code's own words when a segment reaches its max_budget_usd (the result's
-# subtype is error_max_budget_usd; its text is "Reached maximum budget ($N)").
-_BUDGET_REACHED = re.compile(r"Reached maximum budget|error_max_budget_usd")
+# subtype is error_max_budget_usd; its text is "Reached maximum budget ($N)"). Only those
+# words with the amount that follows, and only at the start: the SDK raises them as
+# "Claude Code returned an error result: Reached maximum budget ($N) (exit code: 1)"
+# (claude_agent_sdk _internal/query.py), the CLI's own errors first. The rest of an
+# error's text is the session's content, and one that quotes the subtype or the words,
+# even the whole phrase, is not the cap (#2675).
+_BUDGET_REACHED = re.compile(
+    r"(?:Claude Code returned an error result: )?Reached maximum budget \(\$"
+)
 # sessions/images.ts and routes/imageSettings.ts: what one message's images may be.
 IMAGES_MAX = 4
 IMAGE_BYTES_MAX = 5 * 1024 * 1024 * 3 // 4  # 5 MB of base64, the Messages API's limit
@@ -254,6 +261,7 @@ def declares_remote_servers(root: str) -> bool:
                 maps.append(read(entry, True))
             else:
                 maps.append(entry)
+    # PEP 758 (3.14): both types, unparenthesised; not Python 2's `except E, name`.
     except OSError, ValueError:
         return True
     for m in maps:
@@ -556,6 +564,7 @@ class ScadBuddyRunner:
             path = os.path.join(self._package_root, package.dir)
             try:
                 matches = hash_tree(path) == package.content_hash
+            # PEP 758 (3.14): both types, unparenthesised; not Python 2's `except E, name`.
             except OSError, PackageContentError:
                 matches = False
             if not matches:
@@ -613,7 +622,7 @@ class ScadBuddyRunner:
             )
             try:
                 out = await runner.run(inp, attempt)
-                if out.is_error and out.error and _BUDGET_REACHED.search(out.error):
+                if out.is_error and out.error and _BUDGET_REACHED.match(out.error):
                     # The plugin answers a segment that reached its cap with the error's
                     # text only: no subtype, and no cost. Claude Code stops only once the
                     # cost reached the cap, so at least what was left was spent; charged

@@ -94,5 +94,8 @@ def reconcile_locked(history: FlowHistory, store: FlowStore) -> list[FlowCommit]
             created_by(orphan.agent),
             approval_timeout_s=None,
             created_at=orphan.date,
+            # A register or restore after a delete that committed but never inserted: its
+            # flow is back in the tree, so it is no longer deleted (#2646).
+            revive=history.present(orphan.name),
         )
     return orphans

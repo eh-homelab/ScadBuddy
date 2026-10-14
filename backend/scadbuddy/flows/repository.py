@@ -229,6 +229,10 @@ class FlowHistory(GitRepo):
             counts[name] -= 1
         return numbered
 
+    def present(self, name: str) -> bool:
+        """Whether ``<name>/`` is in the tree: not deleted, as git has it."""
+        return bool(self._tracked(name))
+
     def versions(self, name: str) -> list[FlowCommit]:
         """The flow's versions, newest first."""
         return [c for c in self.commits() if c.name == name]

@@ -146,10 +146,10 @@ async function showAdvanced() {
   await screen.findByRole('group', { name: /nozzles/i })
 }
 
-/** Every request body of one kind under `/print/`, in order (`/analyzers/run` is not one). */
-/** The matching requests' URLs and bodies as they start, and how many have been
- *  answered: a test that ends on a request waits for its answer, or the request is
- *  aborted at teardown and the next test's fetch can miss MSW. */
+/** The matching requests' URLs and bodies as they start, in order, and how many have
+ *  been answered (under `/print/` by default; `/analyzers/run` is not one): a test that
+ *  ends on a request waits for its answer, or the request is aborted at teardown and
+ *  the next test's fetch can miss MSW. */
 function watch(method: string, suffix: string, prefix = '/api/v1/print/') {
   const seen = { bodies: [] as Record<string, unknown>[], urls: [] as string[], answered: 0 }
   const matches = (request: Request) => {
