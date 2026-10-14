@@ -1,5 +1,6 @@
 import { HttpResponse, http } from 'msw'
 import type { PreviewStarted, PrintRunRequest, SlicePreview, TrayAssigned } from '../../api/types'
+import { demoToolpath } from '../toolpath'
 import { H2C_FILE, assignH2cTray, h2cPlan, h2cSlice, resetH2c } from '../h2c'
 
 /**
@@ -26,6 +27,13 @@ export const handlers = [
 
   http.post(`${base}/print/library/:id/preview-slice`, async ({ params, request }) =>
     HttpResponse.json(start((await request.json()) as PrintRunRequest, Number(params['id']) === H2C_FILE)),
+  ),
+
+  // #2072 — a finished slice's toolpath.
+  http.get(`${base}/print/:kind/:id/preview-slices/:job/toolpath`, ({ params }) =>
+    jobs.has(Number(params['job']))
+      ? new HttpResponse(demoToolpath(), { headers: { 'Content-Type': 'application/octet-stream' } })
+      : HttpResponse.json({ detail: 'there is no background slice' }, { status: 404 }),
   ),
 
   http.get(`${base}/print/:kind/:id/preview-slices/:job`, ({ params }) => {
