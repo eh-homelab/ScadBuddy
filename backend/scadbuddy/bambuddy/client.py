@@ -632,11 +632,19 @@ class BambuddyClient:
         if not skip_invalid:
             return [ArchiveDetail.model_validate(row) for row in rows]
         parsed: list[ArchiveDetail] = []
+        unparsed = 0
         for row in rows:
             try:
                 parsed.append(ArchiveDetail.model_validate(row))
             except ValueError:
-                logger.info("an archive row did not parse; left out of the list read")
+                unparsed += 1
+        if unparsed:
+            # One line per read, not per row (#3477 review): each such archive falls
+            # back to its own single read.
+            logger.info(
+                "archive rows did not parse; left out of the list read",
+                extra={"rows": unparsed},
+            )
         return parsed
 
     async def _list_archives(

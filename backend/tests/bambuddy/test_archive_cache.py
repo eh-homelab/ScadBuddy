@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import date
 
 import httpx
@@ -234,6 +235,38 @@ async def test_a_row_that_does_not_parse_leaves_the_rows_that_do(clock: Clock) -
             True,
         ]
     assert not single.called
+
+
+@respx.mock
+async def test_a_wanted_archive_whose_row_does_not_parse_falls_back_to_its_single_read(
+    clock: Clock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#3477 review: a malformed row for an archive the page wants costs that archive a
+    single read, and the bad rows are logged once per list read, not once each."""
+    detail = recording("archive-detail.json")
+    respx.get(f"{BASE}/api/v1/archives/").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {**detail, "id": 37, "file_size": "not a size"},
+                {"id": "not-an-id"},
+                {**detail, "id": 35},
+            ],
+        )
+    )
+    single = respx.get(f"{BASE}/api/v1/archives/37").mock(
+        return_value=httpx.Response(200, json={**detail, "id": 37})
+    )
+    cache = ArchiveCache(30.0, clock=clock)
+    with caplog.at_level(logging.INFO, logger="scadbuddy.bambuddy.client"):
+        async with client() as bambuddy:
+            held = await cache.prime(bambuddy, [35, 37], date_from=None, date_to=None, limit=8)
+            assert held == Primed(missing=2, listed=1)
+            assert (await cache.archive(bambuddy, 37)) is not None
+    assert single.call_count == 1
+    unparsed = [r for r in caplog.records if "did not parse" in r.getMessage()]
+    assert len(unparsed) == 1
+    assert getattr(unparsed[0], "rows", None) == 2
 
 
 @respx.mock
