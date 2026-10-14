@@ -93,6 +93,12 @@ from scadbuddy.bambuddy.resolver import (
     resolve,
 )
 from scadbuddy.bambuddy.send import request_scope, resolve_print_options
+from scadbuddy.bambuddy.supports import (
+    SUPPORT_KEYS,
+    SupportsChoice,
+    support_overrides,
+    wanted_settings,
+)
 from scadbuddy.bambuddy.trays import colour_word, tray_colours, with_trays
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
@@ -184,6 +190,9 @@ class PrintRunRequest(BaseModel):
     #: and the user left them on. Their changes go over the template's
     #: ``print_settings`` and under ``print_sequence``.
     filament_profiles: list[str] = Field(default_factory=list, max_length=8)
+    #: Support structures for this print (#1899), over the template's
+    #: ``print_settings``. Omitted means whatever those and the process say.
+    supports: SupportsChoice | None = None
 
     @field_validator("filament_profiles")
     @classmethod
@@ -1236,9 +1245,10 @@ async def plan_run(
     printer_status = prepared.printer_status
     choices = request.choices
     catalogue = await _catalogue(client)
+    process = process_preset_for(choices, catalogue)
     # #717: a profile that cannot apply is skipped with a warning, never refused.
     from_profiles, profile_warnings = await profile_overrides(
-        client, process_preset_for(choices, catalogue), request.filament_profiles
+        client, process, request.filament_profiles
     )
     # The source places, recolors and uploads what it prints (#105, #126, #476), into
     # the project's folder when there is one (#79, #316).
@@ -1254,6 +1264,10 @@ async def plan_run(
         choices.nozzles,
         choices.sides,
         inventory=inventory,
+    )
+    # Never refused (#1899): a support setting that cannot be shaped is left out.
+    supports, support_warnings = await support_overrides(
+        client, process, wanted_settings(source.print_settings, request.supports)
     )
     printed = await source.file_to_print(
         client,
@@ -1321,7 +1335,8 @@ async def plan_run(
             bed_type=resolved.bed_type,
             process_overrides={
                 **from_profiles,
-                **source.print_settings,
+                **{k: v for k, v in source.print_settings.items() if k not in SUPPORT_KEYS},
+                **supports,
                 **(
                     {}
                     if request.print_sequence is None
@@ -1392,7 +1407,7 @@ async def plan_run(
             )
             for plate_id, options, _, plan, reused in planned
         ],
-        warnings=warnings + hardware + _reused_notes(planned),
+        warnings=warnings + hardware + support_warnings,
         rack_algorithm=request.rack_algorithm or settings.rack_algorithm(printer_id),
         rack_position=request.rack_position,
         # A readable status with no rack (any printer but an H2C) has nothing to pick: no

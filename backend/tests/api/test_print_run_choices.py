@@ -211,6 +211,10 @@ def test_a_templates_print_settings_reach_the_slice(
     declare_print_settings(paths, model, {"enable_support": "0", "enable_prime_tower": "1"})
     upload_route()
     run_routes()
+    # A support setting is written in the preset's shape, so the preset is read (#1899).
+    respx.get(f"{API}/slicer/preset-values").mock(
+        return_value=httpx.Response(200, json={"resolved": True, "values": {"enable_support": "0"}})
+    )
     sliced = slice_routes()
     queue_route()
 
