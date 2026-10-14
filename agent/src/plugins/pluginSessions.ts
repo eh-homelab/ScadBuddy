@@ -104,14 +104,22 @@ export async function sweepDeadReplicas(sql: Sql, liveReplicas: Set<string>, dep
   return rows.length
 }
 
+/** The database's clock, read once at start before anything can record a session: the line between this incarnation's rows and the last one's. */
+export async function startMark(sql: Sql): Promise<Date> {
+  const [row] = await sql<{ t: Date }[]>`SELECT now() AS t`
+  return row!.t
+}
+
 /**
  * At start, before the first sweep: ends the sessions this replica's previous incarnation left
- * (the hostname is reused across a restart, so the sweep would count them live). Failed DELETEs
- * are forgotten too: nothing would retry them.
+ * (the hostname is reused across a restart, so the sweep would count them live): its rows
+ * recorded before `mark` (`startMark`), never this incarnation's. Failed DELETEs are forgotten
+ * too: nothing would retry them.
  */
-export async function endOwnSessions(sql: Sql, self: string, deps: SweepDeps): Promise<number> {
+export async function endOwnSessions(sql: Sql, self: string, deps: SweepDeps, mark: Date): Promise<number> {
   const rows = await sql<Row[]>`
-    SELECT plugin_id, upstream_session_id, false AS old FROM ai_plugin_sessions WHERE replica = ${self}`
+    SELECT plugin_id, upstream_session_id, false AS old FROM ai_plugin_sessions
+    WHERE replica = ${self} AND created_at < ${mark}`
   await endSessions(sql, rows, deps, true)
   return rows.length
 }

@@ -21,7 +21,7 @@ import { ensureStateDirs, removeLegacyBrowserDir, StateDirError } from './harnes
 import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
 import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
-import { endOwnSessions, PluginSessions, replicaIdentity, runPluginSessionSweep } from './plugins/pluginSessions.js'
+import { endOwnSessions, PluginSessions, replicaIdentity, runPluginSessionSweep, startMark } from './plugins/pluginSessions.js'
 import { GitFetcher } from './plugins/packages/git.js'
 import { loadPackagesForRun, PackageInstaller } from './plugins/packages/install.js'
 import { PackageStore } from './plugins/packages/store.js'
@@ -200,6 +200,9 @@ const pluginForwarder = await PluginForwarder.start({
   ...(database ? { sessions: new PluginSessions(database.sql) } : {}),
   log: (message) => console.error(message),
 })
+// The database's clock the moment it is ready, before a turn can record a session: the pass at
+// start ends only this replica's rows older than it (plugins/pluginSessions.ts `endOwnSessions`).
+const pluginSessionMark = database ? database.ready().then((ok) => (ok ? startMark(database.sql) : undefined)) : undefined
 const backend = createBackendClient(config.backendUrl)
 
 // The event bus (spec §7, #264): LISTEN on `scadbuddy_events` on a connection
@@ -601,8 +604,9 @@ const stopPluginSessionSweep =
           if (!(await database.ready())) return
           // Once, first: what this hostname's previous incarnation left; nothing of this one's is live yet.
           if (!ownEnded) {
-            await endOwnSessions(database.sql, replicaIdentity(), deps)
-            ownEnded = true
+            const mark = await pluginSessionMark
+            if (mark) await endOwnSessions(database.sql, replicaIdentity(), deps, mark)
+            ownEnded = mark !== undefined
           }
           await runPluginSessionSweep({ sql: database.sql, client: temporalClient, ...deps })
         }

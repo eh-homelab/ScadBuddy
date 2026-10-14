@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from '../src/db.js'
-import { endOwnSessions, PluginSessions, runPluginSessionSweep, sweepDeadReplicas } from '../src/plugins/pluginSessions.js'
+import { endOwnSessions, PluginSessions, runPluginSessionSweep, startMark, sweepDeadReplicas } from '../src/plugins/pluginSessions.js'
 import { PluginStore } from '../src/plugins/registry.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { type FakeMcp, startFakeMcp } from './support/fakeMcp.js'
@@ -100,9 +100,19 @@ describe.skipIf(!TEST_DATABASE_URL)(
       await row('memory', 'old-me', 'me')
       await row('down', 'old-me-failing', 'me')
       await row('memory', 'other', 'other')
-      expect(await endOwnSessions(db.sql, 'me', { plugins: store, kek })).toBe(2)
+      const mark = await startMark(db.sql)
+      expect(await endOwnSessions(db.sql, 'me', { plugins: store, kek }, mark)).toBe(2)
       expect(fake.deletes.map((d) => d.sessionId)).toEqual(['old-me'])
       expect(await left()).toEqual(['memory/other'])
+    })
+
+    it("at start, keeps a row this incarnation recorded after the start mark", async () => {
+      await row('memory', 'before', 'me')
+      const mark = await startMark(db.sql)
+      await new PluginSessions(db.sql, 'me').seen('memory', 'after')
+      expect(await endOwnSessions(db.sql, 'me', { plugins: store, kek }, mark)).toBe(1)
+      expect(fake.deletes.map((d) => d.sessionId)).toEqual(['before'])
+      expect(await left()).toEqual(['memory/after'])
     })
 
     it("leaves a young row alone: its replica's worker may not poll yet", async () => {
