@@ -101,6 +101,13 @@ describe('PreviewPane: where the slice departs from the plan (#2449)', () => {
     expect(screen.getByTestId('slice-departures')).not.toHaveTextContent('Track Switch')
   })
 
+  it('does not warn about feeding for an older verdict without the Track Switch field (#2737 review)', () => {
+    const { track_switch: _omitted, ...older } = plan
+    pane(slice([{ slot_id: 1, grams: 14.5, side: 'R' }]), older as typeof plan)
+    expect(screen.getByTestId('slice-departures')).toHaveTextContent('not the left as planned')
+    expect(screen.getByTestId('slice-departures')).not.toHaveTextContent('Track Switch')
+  })
+
   it('says nothing when the slice follows the plan', () => {
     pane(
       slice([

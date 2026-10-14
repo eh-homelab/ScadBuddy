@@ -639,16 +639,24 @@ export function PrintPicker({
   const previewSlice = usePreviewSlice(source, sliceable && !sliced ? previewRequest : null)
   // #2703 — the slicer groups filaments itself, so once a slice of these choices for the
   // plate being printed has landed, its sides are the ones shown.
-  const slicedNow =
-    plate !== 'all' && previewPlate === plate && !previewSlice.stale && check.current
-      ? asSliced(check.verdict?.nozzle_plan, previewSlice.result)
-      : null
+  // Memoised: `asSliced` builds a new plan on every call, and the effect below stores it,
+  // so an unmemoised one re-rendered the dialog without end (#2737 review).
+  const slicedShown = plate !== 'all' && previewPlate === plate && !previewSlice.stale && check.current
+  const nozzlePlan = check.verdict?.nozzle_plan
+  const sliceResult = previewSlice.result
+  const slicedNow = useMemo(
+    () => (slicedShown ? asSliced(nozzlePlan, sliceResult) : null),
+    [slicedShown, nozzlePlan, sliceResult],
+  )
   // #2737 review: previewing another plate does not unsay it. The printed plate's slice
   // still holds for these choices, so its sides stay until the choices or the plate change.
-  const slicedFor = `${plate}|${currentKey}|${JSON.stringify(checkRequest)}`
+  const slicedFor = `${plate}|${currentKey}|${check.request}`
   const [lastSliced, setLastSliced] = useState<{ key: string; plan: NozzlePlanView } | null>(null)
   useEffect(() => {
-    if (slicedNow) setLastSliced({ key: slicedFor, plan: slicedNow })
+    if (!slicedNow) return
+    setLastSliced((last) =>
+      last?.key === slicedFor && last.plan === slicedNow ? last : { key: slicedFor, plan: slicedNow },
+    )
   }, [slicedNow, slicedFor])
   const slicedPlan =
     slicedNow ??

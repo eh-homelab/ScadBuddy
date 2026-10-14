@@ -55,7 +55,8 @@ function sliceDepartures(
       // #2737 review: without the Track Switch an AMS feeds one nozzle only, so a spool
       // moved off its planned side may have no path to the nozzle it was sliced for.
       notes.push(
-        plan.track_switch
+        // Only a plan that says there is no switch warns; an older verdict without the field does not.
+        plan.track_switch !== false
           ? moved
           : `${moved} Without the Filament Track Switch its AMS may not feed the ${SIDE[got.side]} nozzle: check where the spool is loaded before printing.`,
       )
