@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
 from dataclasses import replace
 from datetime import timedelta
-from typing import Any, NoReturn
+from typing import Any, Literal, NoReturn
 
 import psycopg
 import pytest
@@ -1102,10 +1102,10 @@ def _spy_cancel(
     return cancelled
 
 
-def _legacy(projection: JobProjection) -> Job:
+def _legacy(projection: JobProjection, kind: Literal["render", "arrange"] = "render") -> Job:
     """A pending row an older release inserted: its workflow `render-<id>`."""
     params: dict[str, ParamValue] = {"width": _w()}
-    job = Job(id=uuid.uuid4().hex, slug=SLUG, params=params, created_at=now())
+    job = Job(id=uuid.uuid4().hex, slug=SLUG, params=params, created_at=now(), kind=kind)
     return legacy_row(projection, job)
 
 
@@ -1116,7 +1116,7 @@ def test_an_arrange_the_api_settles_is_counted_as_arrange(
     (``RenderService._settled``) counts under ``kind="arrange"``; the render series
     stay where they were."""
     service = make_service(None, "unused")
-    arrange = _legacy(projection).model_copy(update={"kind": "arrange"})
+    arrange = _legacy(projection, kind="arrange")
 
     for outcome in ("superseded", "failed"):
         service._settled(arrange, outcome)
@@ -1143,16 +1143,16 @@ async def test_superseding_an_arrange_through_submit_counts_it_as_arrange(
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
         service = make_service(client, queue)
-        params: dict[str, ParamValue] = {"width": _w()}
-        arrange = legacy_row(
-            projection,
-            Job(id=uuid.uuid4().hex, slug=SLUG, params=params, created_at=now(), kind="arrange"),
-        )
+        arrange = _legacy(projection, kind="arrange")
         _spy_cancel(monkeypatch, client)
         async with _worker(client, queue, ProjectingActivities(deps)):
             await service.submit(SLUG, {"width": _w()}, supersedes=arrange.id)
         await service.aclose()
 
+    # The supersede itself, so the counts cannot pass by some other route to _settled.
+    dropped = await asyncio.to_thread(projection.read, arrange.id)
+    assert dropped is not None
+    assert dropped.state == "cancelled" and dropped.error == SUPERSEDED_ERROR
     sample = service.metrics.registry.get_sample_value
     superseded = {"kind": "arrange", "outcome": "superseded"}
     assert sample("scadbuddy_render_jobs_finished_total", superseded) == 1
