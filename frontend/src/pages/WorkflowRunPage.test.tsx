@@ -80,6 +80,31 @@ describe('WorkflowRunPage', () => {
     expect(screen.queryByLabelText('Your answer')).not.toBeInTheDocument()
   })
 
+  it('sends no blank answer, and shows the answer in flight (#2379)', async () => {
+    const { user } = render('run-ask')
+    const box = await screen.findByLabelText('Your answer')
+    const answer = screen.getByRole('button', { name: 'Answer' })
+    expect(answer).toBeDisabled()
+    await user.type(box, '   ')
+    expect(answer).toBeDisabled()
+    await user.type(box, '{Enter}')
+    let release!: () => void
+    const landed = new Promise<void>((resolve) => (release = resolve))
+    server.use(
+      http.post('*/api/v1/workflow-runs/run-ask/answer', async () => {
+        await landed
+        return HttpResponse.json({ detail: 'gone' }, { status: 409 })
+      }),
+    )
+    await user.clear(box)
+    await user.type(box, 'yes')
+    await user.click(answer)
+    expect(await screen.findByRole('button', { name: 'Sending…' })).toBeDisabled()
+    expect(flowRequests()).toEqual([])
+    release()
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Sending…' })).toBeNull())
+  })
+
   it('approves an outward call', async () => {
     const { user } = render('run-print')
     await user.click(await screen.findByRole('button', { name: 'Approve' }))
@@ -89,6 +114,67 @@ describe('WorkflowRunPage', () => {
       key: expect.stringMatching(KEY),
       body: { call_id: 'call-1', approved: true },
     })
+  })
+
+  // #2482 — a call outside the run's grant: where it waits, why, and its way up.
+  it('says a call waits at the starting session first, why it is outside the grant, and that you may decide now', async () => {
+    render('run-escalated')
+    const card = await screen.findByRole('region', { name: 'Waiting for approval: queue_print' })
+    expect(card).toHaveTextContent('With the session that started the run until')
+    expect(card).toHaveTextContent('Outside the grant: print limit reached')
+    expect(within(card).getByRole('button', { name: 'Approve' })).toBeInTheDocument()
+  })
+
+  it("shows a parent's proposal beside the call it narrows, and approves exactly what was shown", async () => {
+    const { user } = render('run-escalated')
+    const card = await screen.findByRole('region', { name: 'Waiting for approval: arrange' })
+    const proposal = await within(card).findByRole('table', { name: 'Proposed change' })
+    expect(within(proposal).getAllByRole('row').map((r) => r.textContent)).toEqual([
+      'FieldAs calledAs proposed',
+      'request.objects[0].count32',
+      'request.objects[1]{"output_id":"b"}(removed)',
+    ])
+    expect(card).toHaveTextContent('Narrowed by the starting session')
+    // A person's to see and to approve: the assistant can neither read nor click it.
+    expect(proposal.closest('[data-agent-user-only]')).not.toBeNull()
+    const approve = within(card).getByRole('button', { name: 'Approve as proposed' })
+    expect(approve.closest('[data-agent-user-only]')).not.toBeNull()
+    await user.click(approve)
+    await waitFor(() => expect(flowRequests()).toHaveLength(1))
+    expect(flowRequests()[0]?.body).toEqual({ call_id: 'call-narrowed', approved: true, proposal: true, proposal_hash: 'f'.repeat(64) })
+  })
+
+  it('sends the reason typed with an approval as proposed, as Approve and Deny do', async () => {
+    const { user } = render('run-escalated')
+    const card = await screen.findByRole('region', { name: 'Waiting for approval: arrange' })
+    await within(card).findByRole('table', { name: 'Proposed change' })
+    await user.type(within(card).getByLabelText('Reason (optional)'), 'smaller is fine')
+    await user.click(within(card).getByRole('button', { name: 'Approve as proposed' }))
+    await waitFor(() => expect(flowRequests()).toHaveLength(1))
+    expect(flowRequests()[0]?.body).toEqual({
+      call_id: 'call-narrowed',
+      approved: true,
+      reason: 'smaller is fine',
+      proposal: true,
+      proposal_hash: 'f'.repeat(64),
+    })
+  })
+
+  it("names each step's hop by where it was, whoever acted, its underscores spaced", async () => {
+    render('run-escalated')
+    const card = await screen.findByRole('region', { name: 'Waiting for approval: arrange' })
+    const steps = within(within(card).getByRole('list', { name: 'Its way here' })).getAllByRole('listitem')
+    expect(steps.map((s) => s.textContent)).toEqual([
+      expect.stringMatching(/^parked by .* \(at the starting session\)$/),
+      expect.stringMatching(/^narrow by .* \(at the starting session\)$/),
+      expect.stringMatching(/^pass up by .* \(at the person\)$/),
+    ])
+  })
+
+  it('keeps the approval of every outward call for the person', async () => {
+    render('run-print')
+    const approve = await screen.findByRole('button', { name: 'Approve' })
+    expect(approve.closest('[data-agent-user-only]')).not.toBeNull()
   })
 
   it('denies with a reason', async () => {

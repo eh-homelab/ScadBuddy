@@ -2,7 +2,7 @@
 # Render models/mesh-joint-demo with the defaults and with the leaves moved, and check
 # each 3MF has the two colours, one orange piece (the body) and two green ones (the neck
 # stub with its peg, and the leaves). A peg that came loose is an extra piece. Then check
-# leaves_x moved the leaves: one green piece 20 mm further along X, the other where it was
+# leaves_x moved the leaves: one green piece further along X by leaves-far's leaves_x less the default, the other where it was
 # (#2633), so an exposure that compiles but moves nothing fails.
 # With SCADBUDDY_PIPELINE_IMAGE set, also check model.scad is what scene.json compiles to.
 #
@@ -99,10 +99,21 @@ PY
 done
 
 echo "==> leaves_x moves the leaves"
-python3 - "$OUT/defaults.green.json" "$OUT/leaves-far.green.json" <<'PY' || status=1
+# By how much: leaves-far's leaves_x less model.scad's default, read from each, so a
+# changed default or case cannot leave the check comparing against the wrong offset.
+DEFAULT_X="$(sed -n 's/^leaves_x *= *\([0-9.-]*\) *;.*/\1/p' model.scad)"
+FAR_X=""
+for c in "${CASES[@]}"; do
+    [ "${c%%|*}" = leaves-far ] && FAR_X="${c#*leaves_x=}"
+done
+python3 - "$OUT/defaults.green.json" "$OUT/leaves-far.green.json" "$DEFAULT_X" "$FAR_X" <<'PY' || status=1
 import json, sys
 
-MOVED = 90 - 70  # leaves-far's leaves_x less model.scad's default
+try:
+    MOVED = float(sys.argv[4]) - float(sys.argv[3])
+except ValueError:
+    print("  FAIL  could not read leaves_x from model.scad (%r) or leaves-far (%r)" % tuple(sys.argv[3:5]))
+    sys.exit(1)
 try:
     before, after = (json.load(open(p)) for p in sys.argv[1:3])
 except (OSError, ValueError) as e:

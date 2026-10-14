@@ -36,6 +36,7 @@ from scadbuddy.flows.models import (
     Run,
     StoredDefinition,
 )
+from scadbuddy.flows.states import REVIVE
 from scadbuddy.workflows.flow_models import (
     FlowRecord,
     FlowStep,
@@ -170,10 +171,12 @@ class FlowStore:
         *,
         approval_timeout_s: int | None,
         created_at: datetime | None = None,
+        revive: bool = False,
     ) -> StoredDefinition:
         """A version's row, naming its commit, with the version number git gave it. Run
-        under the flows repository's write lock, after the commit."""
-        with self._pool.connection() as conn:
+        under the flows repository's write lock, after the commit. With `revive`, the flow
+        is no longer deleted, in the same transaction (`states.REVIVE`, #2646)."""
+        with self._pool.connection() as conn, conn.transaction():
             row = conn.execute(
                 "INSERT INTO workflow_definitions"
                 " (id, name, version, commit, approval_timeout_s, created_by, created_at)"
@@ -189,6 +192,8 @@ class FlowStore:
                     created_at,
                 ),
             ).fetchone()
+            if revive:
+                conn.execute(REVIVE, {"name": name})
         assert row is not None
         return StoredDefinition.model_validate(row)
 

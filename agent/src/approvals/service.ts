@@ -967,7 +967,17 @@ export class ApprovalService {
     const due = await this.deps.sql<{ id: string }[]>`
       SELECT id FROM ai_approvals WHERE decision IS NULL AND expires_at <= now() ORDER BY expires_at LIMIT 500`
     let n = 0
-    for (const { id } of due) if (await this.expire(id)) n += 1
+    // One approval that fails to expire never holds back the rest (#2382): the first
+    // failure is thrown once every other one has been tried.
+    let failure: unknown
+    for (const { id } of due) {
+      try {
+        if (await this.expire(id)) n += 1
+      } catch (err) {
+        failure ??= err
+      }
+    }
+    if (failure !== undefined) throw failure
     return n
   }
 
@@ -1292,12 +1302,32 @@ export class ApprovalService {
     options: { ready?: () => Promise<boolean>; onError?: (err: unknown) => void } = {},
   ): () => void {
     const ready = options.ready ?? (() => Promise.resolve(true))
+    // One sweep at a time: a slow one (a pod just started) is not joined by the next tick.
+    let running = false
     const timer = setInterval(() => {
+      if (running) return
+      running = true
       ready()
         .then((ok) => (ok ? this.expireDue() : 0))
         .catch(options.onError ?? (() => {}))
+        .finally(() => {
+          running = false
+        })
     }, intervalMs)
     timer.unref()
     return () => clearInterval(timer)
   }
+}
+
+/**
+ * A sweep's failure as its log line says it (#2382): the message, and for a Postgres
+ * error the statement it came from (whitespace folded, cut to 300 characters), so the
+ * next one names the query. Never the parameters: they can hold an input's summary.
+ */
+export function sweepErrorText(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err)
+  const query = (err as { query?: unknown } | null)?.query
+  if (typeof query !== 'string' || query.trim() === '') return message
+  const folded = query.replace(/\s+/g, ' ').trim()
+  return `${message} (in: ${folded.length > 300 ? `${folded.slice(0, 299)}…` : folded})`
 }

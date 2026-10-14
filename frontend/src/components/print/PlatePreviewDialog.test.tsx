@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, within } from '@testing-library/react'
-import { HttpResponse, http } from 'msw'
+import { HttpResponse, delay, http } from 'msw'
 import { useEffect } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import type { Toolpath } from '../../lib/toolpath'
@@ -50,7 +50,7 @@ function openSliced(body: ArrayBuffer | null = demoToolpath()) {
         : HttpResponse.json({ detail: 'nope' }, { status: 422 })
     }),
   )
-  render(
+  const { rerender } = render(
     <PlatePreviewDialog
       open
       onClose={vi.fn()}
@@ -60,8 +60,22 @@ function openSliced(body: ArrayBuffer | null = demoToolpath()) {
       toolpathUrl={TOOLPATH}
     />,
   )
+  rerenderWith = (toolpathUrl) =>
+    rerender(
+      <PlatePreviewDialog
+        open
+        onClose={vi.fn()}
+        url="/api/v1/outputs/abc/preview.glb"
+        label="Lid"
+        colors={new Map()}
+        toolpathUrl={toolpathUrl}
+      />,
+    )
   return read
 }
+
+/** The last `openSliced` dialog, given another toolpath URL. */
+let rerenderWith: (toolpathUrl: string | null) => void = () => {}
 
 function open(onClose = vi.fn()) {
   render(
@@ -178,6 +192,45 @@ describe('PlatePreviewDialog · the slice (#2072)', () => {
     fireEvent.click(screen.getByRole('radio', { name: 'Speed' }))
     expect(screen.getByTestId('toolpath')).toHaveAttribute('data-view', 'speed')
     expect(read).toHaveBeenCalledTimes(1)
+  })
+
+  it('reads again as loading, not the old error, when its view is left and come back to', async () => {
+    let fail = true
+    server.use(
+      http.get(TOOLPATH, async () => {
+        if (fail) return HttpResponse.json({ detail: 'nope' }, { status: 422 })
+        await delay('infinite')
+        return new HttpResponse(null)
+      }),
+    )
+    render(
+      <PlatePreviewDialog
+        open
+        onClose={vi.fn()}
+        url="/api/v1/outputs/abc/preview.glb"
+        label="Lid"
+        colors={new Map()}
+        toolpathUrl={TOOLPATH}
+      />,
+    )
+    fireEvent.click(screen.getByRole('radio', { name: 'Speed' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('nope')
+    fail = false
+    fireEvent.click(screen.getByRole('radio', { name: 'Colors' }))
+    fireEvent.click(screen.getByRole('radio', { name: 'Speed' }))
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.getByText(/Reading the slice's toolpaths/)).toBeInTheDocument()
+  })
+
+  it('goes back to Colors when the slice it draws goes away', async () => {
+    openSliced()
+    fireEvent.click(screen.getByRole('radio', { name: 'Speed' }))
+    await screen.findByTestId('toolpath')
+    // A choice changed: the slice on screen is no longer the dialog's.
+    rerenderWith(null)
+    expect(screen.getByRole('radio', { name: 'Colors' })).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByRole('radio', { name: 'Speed' })).toHaveAttribute('aria-checked', 'false')
+    expect(screen.getByTestId('scene')).toBeInTheDocument()
   })
 
   it('reads it again on Retry after a busy answer', async () => {

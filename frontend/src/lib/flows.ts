@@ -18,6 +18,57 @@ export function waitingText(entry: Pick<FlowPending, 'kind' | 'fn' | 'prompt'>):
     : `Waiting for approval: ${entry.fn}`
 }
 
+/** One difference between a call's arguments and a parent's proposal (#2482). */
+export type ProposalChange = { path: string; was: string; now: string }
+
+const shown = (value: unknown): string => (typeof value === 'string' ? value : JSON.stringify(value))
+const isObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
+
+/**
+ * #2482 — what a parent's proposal changes in the call, field by field, in order: a
+ * value changed, or a field or list item left out (`(removed)`) or added (`(added)`).
+ */
+export function proposalDiff(original: unknown, proposed: unknown, path = ''): ProposalChange[] {
+  if (Array.isArray(original) && Array.isArray(proposed)) {
+    const out: ProposalChange[] = []
+    for (let i = 0; i < Math.max(original.length, proposed.length); i++) {
+      const at = `${path}[${i}]`
+      if (i >= proposed.length) out.push({ path: at, was: shown(original[i]), now: '(removed)' })
+      else if (i >= original.length) out.push({ path: at, was: '(added)', now: shown(proposed[i]) })
+      else out.push(...proposalDiff(original[i], proposed[i], at))
+    }
+    return out
+  }
+  if (isObject(original) && isObject(proposed)) {
+    const keys = [...Object.keys(original), ...Object.keys(proposed).filter((k) => !(k in original))]
+    return keys.flatMap((k) => {
+      const at = path ? `${path}.${k}` : k
+      if (!(k in proposed)) return [{ path: at, was: shown(original[k]), now: '(removed)' }]
+      if (!(k in original)) return [{ path: at, was: '(added)', now: shown(proposed[k]) }]
+      return proposalDiff(original[k], proposed[k], at)
+    })
+  }
+  return JSON.stringify(original) === JSON.stringify(proposed) ? [] : [{ path, was: shown(original), now: shown(proposed) }]
+}
+
+/**
+ * #2482 — when a hop ends, as a person reads it: the time alone today, with the date
+ * otherwise, so a hop that runs past midnight never reads as already over.
+ */
+export function hopUntilText(iso: string, now: Date = new Date()): string {
+  const at = new Date(iso)
+  return at.toDateString() === now.toDateString() ? at.toLocaleTimeString() : at.toLocaleString()
+}
+
+/** #2482 — who did what to a call on its way up, as the run page lists it. */
+export function hopActor(actor: string): string {
+  if (actor === 'flow') return 'the flow'
+  if (actor === 'system') return 'ScadBuddy'
+  if (actor === 'browser') return 'you'
+  if (actor.startsWith('session:')) return 'the starting session'
+  return actor
+}
+
 /** The backend's 409 for an answer or decision the run has moved past (`flows/operations.py`). */
 export function isStaleEntry(error: unknown): boolean {
   return error instanceof ApiError && error.status === 409 && (error.problem.type ?? '').endsWith('/stale-entry')

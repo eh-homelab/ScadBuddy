@@ -7,6 +7,7 @@ import { ok } from './call.js'
 import { outputId, slug } from './common.js'
 import { defineTool, image, json, type Tool, type ToolContext, ToolError, toolErrorText } from './registry.js'
 import { page, PAGED, pageInput } from './pagination.js'
+import { uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 
 // Bambuddy (issue #251, spec D8): ScadBuddy's own tools over its backend's
 // Bambuddy client, so the API key stays server-side and the backend's
@@ -451,6 +452,141 @@ export const printTools: Tool[] = [
       json(
         await command(ctx, 'restore library files', (headers) =>
           ctx.backend.POST('/api/v1/print/library/restore', { body: { file_ids }, headers }),
+        ),
+      ),
+  }),
+
+  // #2686: the writes the Bambuddy filesystem mount makes.
+  defineTool({
+    name: 'upload_library_file',
+    description:
+      "Upload a file from your workspace into Bambuddy's library, at the top level or in `folder_id`. Give " +
+      '`workspace_path` with its `workspace_sha256`; save a file there first with workspace_save, http_request ' +
+      '`save_to_workspace` or workspace_write. The library name is `filename`, by default the workspace file\'s own ' +
+      'name. Returns the file\'s id, name and folder.',
+    input: z.object({
+      folder_id: z.number().int().positive().optional().describe('A folder id from list_library; omitted is the top level'),
+      filename: z.string().min(1).optional().describe('e.g. "cube.3mf"'),
+      workspace_path: workspacePathInput,
+      workspace_sha256: workspaceShaInput,
+    }),
+    risk: 'outward',
+    bambuddyScope: ['Manage Library'],
+    routes: ['POST /api/v1/print/library/files'],
+    summarize: ({ filename, workspace_path, folder_id }) =>
+      `Upload ${filename ?? workspace_path} to Bambuddy's library folder ${folder_id ?? 'top level'}`,
+    handler: async ({ folder_id, filename, workspace_path, workspace_sha256 }, ctx) => {
+      const info = await workspaceFile(ctx, { path: workspace_path, sha256: workspace_sha256 }, 'upload_library_file')
+      const name = filename ?? uploadName(info.path)
+      const answer = await command(ctx, `upload ${name}`, (headers) =>
+        ctx.backend.POST('/api/v1/print/library/files', {
+          body: { file: name, folder_id: folder_id ?? null },
+          ...uploadInit(
+            ctx,
+            { info },
+            { name: 'file', filename: name, type: 'application/octet-stream' },
+            headers,
+            folder_id === undefined ? {} : { folder_id: String(folder_id) },
+          ),
+        }),
+      )
+      return json(withSent(answer, info))
+    },
+  }),
+
+  defineTool({
+    name: 'update_library_file',
+    description:
+      "Rename a file in Bambuddy's library or move it to another folder (ids from list_library). Give " +
+      '`filename`, `folder_id` or both; `folder_id` 0 moves it to the top level.',
+    input: z.object({
+      file_id: libraryFileId,
+      filename: z.string().min(1).optional(),
+      folder_id: z.number().int().min(0).optional().describe('0 is the top level'),
+    }),
+    risk: 'outward',
+    bambuddyScope: ['Manage Library'],
+    routes: ['PATCH /api/v1/print/library/{file_id}'],
+    summarize: ({ file_id }) => `Rename/move library file ${file_id}`,
+    handler: async ({ file_id, filename, folder_id }, ctx) =>
+      json(
+        await command(ctx, `update library file ${file_id}`, (headers) =>
+          ctx.backend.PATCH('/api/v1/print/library/{file_id}', {
+            params: { path: { file_id } },
+            body: { filename, folder_id },
+            headers,
+          }),
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'create_library_folder',
+    description: "Make a folder in Bambuddy's library, at the top level or inside `parent_id`.",
+    input: z.object({
+      name: z.string().min(1),
+      parent_id: z.number().int().positive().optional().describe('A folder id from list_library; omitted is the top level'),
+    }),
+    risk: 'outward',
+    bambuddyScope: ['Manage Library'],
+    routes: ['POST /api/v1/print/library/folders'],
+    summarize: ({ name }) => `Create library folder ${name}`,
+    handler: async ({ name, parent_id }, ctx) =>
+      json(
+        await command(ctx, `create library folder ${name}`, (headers) =>
+          ctx.backend.POST('/api/v1/print/library/folders', { body: { name, parent_id }, headers }),
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'update_library_folder',
+    description:
+      "Rename a folder in Bambuddy's library or move it under another folder. Give `name`, `parent_id` or both; " +
+      '`parent_id` 0 moves it to the top level.',
+    input: z.object({
+      folder_id: z.number().int().positive(),
+      name: z.string().min(1).optional(),
+      parent_id: z.number().int().min(0).optional().describe('0 is the top level'),
+    }),
+    risk: 'outward',
+    bambuddyScope: ['Manage Library'],
+    routes: ['PATCH /api/v1/print/library/folders/{folder_id}'],
+    summarize: ({ folder_id }) => `Rename/move library folder ${folder_id}`,
+    handler: async ({ folder_id, name, parent_id }, ctx) =>
+      json(
+        await command(ctx, `update library folder ${folder_id}`, (headers) =>
+          ctx.backend.PATCH('/api/v1/print/library/folders/{folder_id}', {
+            params: { path: { folder_id } },
+            body: { name, parent_id },
+            headers,
+          }),
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'delete_library_folder',
+    description:
+      "Delete a folder from Bambuddy's library along with its files and subfolders. Managed files go to " +
+      "Bambuddy's trash (restore_library_files undoes that); a file linked from an external folder " +
+      '(`is_external`) is deleted for good. Answers 409, before anything is deleted, if a print waiting in ' +
+      "Bambuddy's queue names a file or Bambuddy's trash holds one of the folder's files, and 403 unless " +
+      "the API key's user holds `library:delete_all` (without it the key cannot see other users' trash). " +
+      'A file that could not be deleted is listed in `skipped`, and its ' +
+      'folder and that folder\'s parents stay.',
+    input: z.object({ folder_id: z.number().int().positive() }),
+    risk: 'outward',
+    bambuddyScope: ['Manage Library'],
+    routes: ['POST /api/v1/print/library/folders/{folder_id}/delete'],
+    summarize: ({ folder_id }) => `Delete library folder ${folder_id} and everything in it`,
+    handler: async ({ folder_id }, ctx) =>
+      json(
+        await command(ctx, `delete library folder ${folder_id}`, (headers) =>
+          ctx.backend.POST('/api/v1/print/library/folders/{folder_id}/delete', {
+            params: { path: { folder_id } },
+            headers,
+          }),
         ),
       ),
   }),
