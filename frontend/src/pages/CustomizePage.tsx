@@ -1200,11 +1200,7 @@ export function CustomizePage() {
               {uiOrigin}
             </div>
             {/* Capped: in full screen this row's height comes out of the template's own. */}
-            {unmigrated && (
-              <div className="max-h-[30vh] overflow-auto">
-                <RawInputs inputs={unmigrated.inputs} error={unmigrated.error} rows={4} />
-              </div>
-            )}
+            {unmigrated && <RawInputs inputs={unmigrated.inputs} error={unmigrated.error} rows={4} capped />}
           </div>
           {templateUi}
           {actionBar}

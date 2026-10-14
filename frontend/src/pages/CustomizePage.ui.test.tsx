@@ -804,6 +804,14 @@ describe('the page slot', () => {
     expect(saved.value).toContain('"name": "Old"')
     // Short, so the textarea scrolls rather than the capped row around it too.
     expect(saved).toHaveAttribute('rows', '4')
+    // #3074: the cap is on the alert, and only its error text scrolls; no scroll
+    // container around the textarea, and no overflow-hidden to clip a long error.
+    const alert = within(workspace).getByRole('alert')
+    expect(alert).toHaveClass('max-h-[30vh]')
+    expect(alert.querySelector('p')).toHaveClass('overflow-auto')
+    for (let node: HTMLElement | null = saved.parentElement; node && node !== workspace; node = node.parentElement) {
+      expect(node.className).not.toMatch(/overflow-(auto|hidden|scroll)/)
+    }
 
     await user.selectOptions(preset(), 'Current')
     await waitFor(() => expect(within(workspace).queryByRole('textbox', { name: 'Saved inputs' })).toBeNull())
