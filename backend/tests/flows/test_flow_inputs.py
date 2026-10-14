@@ -198,6 +198,61 @@ def test_a_stored_maxlength_above_the_cap_does_not_lift_it() -> None:
     assert resolve_inputs(schema, {"name": "a" * MAX_PATTERNED_LENGTH})["name"]
 
 
+def test_an_over_long_value_is_said_beside_every_other_problem() -> None:
+    """One 422 says them all: the over-long input, and what else is wrong, its pattern
+    never run."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "pattern": "^(a+)+$", "maxLength": 16},
+            "count": {"type": "integer"},
+        },
+        "required": ["count"],
+    }
+    started = time.monotonic()
+    with pytest.raises(InputsError) as err:
+        resolve_inputs(schema, {"name": "a" * 26 + "!", "count": "three"})
+    assert time.monotonic() - started < 0.5
+    assert err.value.problems == [
+        "name: is longer than its maxLength of 16",
+        "count: 'three' is not of type 'integer'",
+    ]
+
+
+def test_each_over_long_item_is_said() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "tags": {
+                "type": "array",
+                "items": {"type": "string", "pattern": "^a*$", "maxLength": 2},
+            }
+        },
+    }
+    with pytest.raises(InputsError) as err:
+        resolve_inputs(schema, {"tags": ["aaa", "a", "aaaa"]})
+    assert err.value.problems == [
+        "tags.0: is longer than its maxLength of 2",
+        "tags.2: is longer than its maxLength of 2",
+    ]
+
+
+def test_a_stored_schema_keeps_starting_under_the_rules_added_since() -> None:
+    """#2661's two rules are a registration's: a version registered before them still
+    starts (its pattern is capped as it runs; a required boolean is false when left out)."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "code": {"type": "string", "pattern": "^[a-z]+$"},
+            "on": {"type": "boolean"},
+        },
+        "required": ["on"],
+    }
+    assert len(schema_problems(schema)) == 2
+    assert schema_problems(schema, stored=True) == []
+    assert resolve_inputs(schema, {"code": "abc"}) == {"code": "abc", "on": False}
+
+
 def test_an_input_in_pydantics_protected_namespace_raises_no_warning() -> None:
     """#2661: pydantic's protected namespaces (`model_validate`, `model_dump`) are not the
     script's."""

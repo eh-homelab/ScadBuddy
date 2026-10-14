@@ -529,7 +529,7 @@ async def start_flow_run(
         return RunAnswer(id=existing.id, status=existing.status, repeated=True)
     _refuse_hidden(definition)
     client = _client(flows)
-    if problems := await check_script(definition.script, definition.inputs_schema):
+    if problems := await check_script(definition.script, definition.inputs_schema, stored=True):
         raise _script_problems(problems, "The flow no longer type-checks.")
     options = body or RunCreate()
     try:

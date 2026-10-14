@@ -23,6 +23,7 @@ import copy
 import json
 import keyword
 import re
+from collections.abc import Iterable
 from typing import Any, Final, Literal
 
 import jsonschema
@@ -62,8 +63,13 @@ class InputsError(Exception):
         self.problems = problems
 
 
-def schema_problems(schema: Any) -> list[str]:
-    """Everything wrong with ``schema`` as a flow's inputs; empty when it may be used."""
+def schema_problems(schema: Any, *, stored: bool = False) -> list[str]:
+    """Everything wrong with ``schema`` as a flow's inputs; empty when it may be used.
+
+    ``stored``: the schema of a version registered already, checked again as it starts.
+    The two rules #2661 added are a registration's only: a stored `pattern` with no
+    `maxLength` is capped as it runs (`_too_long_for_pattern`), and a stored required
+    boolean is harmless (it is false when left out), so neither stops it starting."""
     if not isinstance(schema, dict):
         return ["the inputs schema must be a JSON object"]
     if len(json.dumps(schema).encode()) > MAX_SCHEMA_BYTES:
@@ -83,17 +89,21 @@ def schema_problems(schema: Any) -> list[str]:
     if len(properties) > MAX_INPUTS:
         problems.append(f"at most {MAX_INPUTS} inputs")
     for name, prop in properties.items():
-        problems += [f"{name}: {p}" for p in _property_problems(name, prop)]
+        problems += [f"{name}: {p}" for p in _property_problems(name, prop, stored=stored)]
     for name in schema.get("required", []):
         if name not in properties:
             problems.append(f"required names {name!r}, which is not an input")
-        elif isinstance(properties[name], dict) and properties[name].get("type") == "boolean":
+        elif (
+            not stored
+            and isinstance(properties[name], dict)
+            and properties[name].get("type") == "boolean"
+        ):
             # Left out, a boolean is false (`_default`), so it is never missing (#2661).
             problems.append(f"required names {name!r}, a boolean, which is never missing")
     return problems
 
 
-def _property_problems(name: str, prop: Any) -> list[str]:
+def _property_problems(name: str, prop: Any, *, stored: bool = False) -> list[str]:
     if not _NAME.match(name) or keyword.iskeyword(name):
         return ["a name is lower-case letters, digits and _, starting with a letter"]
     if name in _RESERVED:
@@ -124,7 +134,10 @@ def _property_problems(name: str, prop: Any) -> list[str]:
         # And so is what it runs against: a short backtracking pattern on a long value is
         # still slow (#2661).
         length = where.get("maxLength")
-        if not isinstance(length, int) or isinstance(length, bool) or length > MAX_PATTERNED_LENGTH:
+        unbounded = (
+            not isinstance(length, int) or isinstance(length, bool) or length > MAX_PATTERNED_LENGTH
+        )
+        if unbounded and not stored:
             problems.append(f"a pattern needs a maxLength of at most {MAX_PATTERNED_LENGTH}")
     if "default" in prop and not problems:
         try:
@@ -170,11 +183,14 @@ def inputs_model(schema: dict[str, Any]) -> type[BaseModel]:
     return model
 
 
-def _too_long_for_pattern(properties: dict[str, Any], given: dict[str, Any]) -> list[str]:
-    """Each patterned string value longer than its maxLength, named by where it is but never
-    quoted. The limit is never above MAX_PATTERNED_LENGTH: a schema stored before #2661 may
-    have no maxLength, or one far larger, and either would let the pattern run on any value."""
-    problems: list[str] = []
+def _too_long_for_pattern(
+    properties: dict[str, Any], given: dict[str, Any]
+) -> dict[str, list[str]]:
+    """Each input with a patterned string value longer than its maxLength, and its problems,
+    named by where it is but never quoted. The limit is never above MAX_PATTERNED_LENGTH:
+    a schema stored before #2661 may have no maxLength, or one far larger, and either
+    would let the pattern run on any value."""
+    found: dict[str, list[str]] = {}
     for name, prop in properties.items():
         if not isinstance(prop, dict) or name not in given:
             continue
@@ -191,8 +207,22 @@ def _too_long_for_pattern(properties: dict[str, Any], given: dict[str, Any]) -> 
                 limit = MAX_PATTERNED_LENGTH
             limit = min(limit, MAX_PATTERNED_LENGTH)
             if len(one) > limit:
-                problems.append(f"{where}: is longer than its maxLength of {limit}")
-    return problems
+                found.setdefault(name, []).append(
+                    f"{where}: is longer than its maxLength of {limit}"
+                )
+    return found
+
+
+def _without_patterns(schema: dict[str, Any], names: Iterable[str]) -> dict[str, Any]:
+    """``schema`` with those inputs' patterns left out (and their items'), so the
+    validator still checks everything else about them."""
+    properties = dict(schema.get("properties", {}))
+    for name in names:
+        prop = {k: v for k, v in properties[name].items() if k != "pattern"}
+        if isinstance(prop.get("items"), dict):
+            prop["items"] = {k: v for k, v in prop["items"].items() if k != "pattern"}
+        properties[name] = prop
+    return {**schema, "properties": properties}
 
 
 def resolve_inputs(schema: dict[str, Any] | None, values: dict[str, Any] | None) -> dict[str, Any]:
@@ -209,16 +239,19 @@ def resolve_inputs(schema: dict[str, Any] | None, values: dict[str, Any] | None)
         has, default = _default(prop)
         if name not in given and has:
             given[name] = copy.deepcopy(default)
-    # Before the validator: it evaluates every keyword, so `pattern` would still run on a
-    # value its `maxLength` refuses, and maxLength is what bounds the pattern's work (#2661).
+    # The validator evaluates every keyword, so `pattern` would still run on a value its
+    # `maxLength` refuses, and maxLength is what bounds the pattern's work (#2661): an
+    # over-long input is said here, and checked for everything but its pattern.
     too_long = _too_long_for_pattern(properties, given)
-    if too_long:
-        raise InputsError(too_long)
-    checked = {**schema, "additionalProperties": False}
+    checked = {**_without_patterns(schema, too_long), "additionalProperties": False}
     validator = jsonschema.Draft202012Validator(checked)
-    problems = [
+    problems = [p for said in too_long.values() for p in said] + [
         f"{'.'.join(str(p) for p in err.absolute_path) or 'inputs'}: {err.message}"
         for err in sorted(validator.iter_errors(given), key=lambda e: list(e.absolute_path))
+        # Said above already, with its limit.
+        if not (
+            err.validator == "maxLength" and err.absolute_path and err.absolute_path[0] in too_long
+        )
     ]
     if problems:
         raise InputsError(problems)
