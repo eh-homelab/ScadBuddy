@@ -1722,6 +1722,7 @@ describe('PrintPicker · departures of a stale slice (#2702 review)', () => {
     await waitFor(() => expect(screen.queryByText(/isn't used by the sliced plate/)).toBeNull())
     release()
   }, 20000)
+})
 
 describe('PrintPicker · Filament profiles (#717)', () => {
   it('suggests Silk for a silk spool, shows its change against the preset, and prints without it when switched off', async () => {
