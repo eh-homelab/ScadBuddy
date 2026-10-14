@@ -41,6 +41,7 @@ import { ArchivedSessions } from './ArchivedSessions'
 import { SessionSwitcher } from './SessionSwitcher'
 import { useSkillMenu } from './SkillMenu'
 import { SessionFiles } from './SessionFiles'
+import { RunsWaiting } from './RunsWaiting'
 import { SessionFlowRuns } from './SessionFlowRuns'
 import { SessionTouched } from './SessionTouched'
 import { useDictation, useSpokenReplies } from './useVoice'
@@ -783,6 +784,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
         </section>
       )}
 
+      <RunsWaiting />
       {active && <SessionFlowRuns key={active.id} sessionId={active.id} />}
 
       <div

@@ -264,17 +264,29 @@ export class Escalations {
       // The claim and the turn are one transaction: a process that dies before the turn
       // started leaves nothing claimed, and the next tick sends them. A concurrent replica
       // skips the rows this one holds.
+      // A child's reasoning, read before the claim: a durable child's call whose
+      // `tool.call` is not logged yet (`follow_session` writes it a moment later) waits for
+      // a later tick rather than go up with none, since it is sent only once. The hop's
+      // own timer still bounds the wait.
+      const reasoning = new Map<string, string>()
+      await Promise.all(
+        calls.map(async (c) => {
+          if (c.child_session === undefined) return
+          const text = await childReasoning(this.#deps.sql, c.request_id)
+          if (text !== undefined) reasoning.set(c.request_id, text)
+        }),
+      )
+      const ready = calls.filter((c) => c.child_session === undefined || reasoning.has(c.request_id))
+      if (ready.length === 0) continue
       let claimed: Waiting[] = []
       try {
         await this.#deps.sql.begin(async (tx) => {
-          claimed = await this.#claim(tx, session, calls)
+          claimed = await this.#claim(tx, session, ready)
           if (claimed.length === 0) return
-          // A child's reasoning, read only for the calls this turn carries.
-          await Promise.all(
-            claimed.map(async (c) => {
-              if (c.child_session !== undefined) c.reasoning = await childReasoning(this.#deps.sql, c.request_id)
-            }),
-          )
+          for (const c of claimed) {
+            const text = reasoning.get(c.request_id)
+            if (text !== undefined) c.reasoning = text
+          }
           const text = `${DELIVERY_PREAMBLE}\n\n${wrapUntrustedText('escalation', 'flow runs this session started', JSON.stringify(claimed))}`
           await withinHold(send(session, owner.owner, text, owner.tiers), this.#deps.claimHoldMs ?? CLAIM_HOLD_MS)
         })

@@ -453,7 +453,8 @@ its child sessions' parked calls from flow turns, and a requested grant.
     latest running step whose `session_id` is the child's);
   - for a child's call, **the child's reasoning**: the text the child's model wrote in
     that turn before the call (`assistant.text.delta` events since the turn's start),
-    the last 2 KiB, shown as untrusted text, as every tool result is. It is read from
+    the last 2048 characters (`REASONING_MAX`), shown as untrusted text, as every tool
+    result is. It is read from
     `ai_session_events` when the queue is read (`flows/queue.ts` `childReasoning`): the
     deltas after the turn's `user.turn` and before the call's `tool.call`, so nothing
     in a workflow records it;

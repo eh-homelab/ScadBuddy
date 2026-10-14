@@ -120,10 +120,12 @@ export function childStep(steps: readonly StepRow[], sessionId: string): QueueSt
 /**
  * The text a child's model wrote in its turn before the call `requestId` names: the
  * `assistant.text.delta` events since the turn's `user.turn`, up to the call's
- * `tool.call` (spec §4.5), the last `REASONING_MAX` characters. Empty when the call is
- * not logged yet, or nothing was written.
+ * `tool.call` (spec §4.5), the last `REASONING_MAX` characters. Empty when nothing was
+ * written, or the call is no durable session's; undefined when its `tool.call` is not in
+ * the log's last `scan` events (not logged yet: `follow_session` writes it a moment
+ * after the call parks).
  */
-export async function childReasoning(sql: Sql, requestId: string, scan = REASONING_SCAN): Promise<string> {
+export async function childReasoning(sql: Sql, requestId: string, scan = REASONING_SCAN): Promise<string | undefined> {
   const parsed = parseRequestId(requestId)
   if (parsed?.store !== 'durable') return ''
   const { sessionId, toolUseId } = parsed
@@ -136,7 +138,7 @@ export async function childReasoning(sql: Sql, requestId: string, scan = REASONI
      WHERE session_id = ${sessionId}::uuid AND seq > ${floor} AND strpos(event, ${toolUseId}) > 0
        AND event::jsonb ->> 'type' = 'tool.call' AND event::jsonb ->> 'id' = ${toolUseId}
      ORDER BY seq DESC LIMIT 1`
-  if (!call) return ''
+  if (!call) return undefined
   const [start] = await sql<{ seq: string }[]>`
     SELECT seq FROM ai_session_events
      WHERE session_id = ${sessionId}::uuid AND seq > ${floor} AND seq < ${call.seq}
@@ -224,7 +226,9 @@ export class FlowQueue {
       SELECT request_id, kind, session_id::text, tool, summary, input_hash, hop, hop_until, outside_reason, hops,
              created_at, expires_at, (expires_at <= now()) AS expiring
         FROM ai_pending_input WHERE flow_run_id = ${run.id} ORDER BY created_at, request_id`
-    for (const c of children) {
+    // Side by side: the run page and the starter's panel both poll this.
+    const reasonings = await Promise.all(children.map((c) => childReasoning(this.#sql, c.request_id)))
+    for (const [i, c] of children.entries()) {
       entries.push({
         source: 'child',
         id: c.request_id,
@@ -241,7 +245,7 @@ export class FlowQueue {
         expires_at: c.expires_at.toISOString(),
         expiring: c.expiring,
         step: childStep(steps, c.session_id),
-        reasoning: await childReasoning(this.#sql, c.request_id),
+        reasoning: reasonings[i] ?? '',
       })
     }
     const [grant] = await this.#sql<{ id: string; created_at: Date }[]>`

@@ -171,8 +171,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow run queue${TEST_DATABASE_URL ? '' : ` 
       risk: 'outward',
     })
     expect(await childReasoning(db.sql, durableRequestId(child, 'run-1', short))).toBe('One.\n\nTwo.')
-    // Not logged yet: nothing.
-    expect(await childReasoning(db.sql, durableRequestId(child, 'run-1', 'toolu_unlogged'))).toBe('')
+    // Not logged yet: undefined, so a delivery waits for it rather than send none.
+    expect(await childReasoning(db.sql, durableRequestId(child, 'run-1', 'toolu_unlogged'))).toBeUndefined()
   })
 
   it("puts the run's own calls in the person's aggregate read, marked by run, and in no one else's", async () => {
@@ -234,7 +234,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow run queue${TEST_DATABASE_URL ? '' : ` 
     expect(await childReasoning(db.sql, id)).toBe('old\n\nnew')
     // A call before the window is not looked for.
     await log(child, text('m3', 'later'), text('m4', 'later still'))
-    expect(await childReasoning(db.sql, id, 2)).toBe('')
+    expect(await childReasoning(db.sql, id, 2)).toBeUndefined()
   })
 
   it("marks a child's call past its timer, which no one can decide any more", async () => {
@@ -261,6 +261,24 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow run queue${TEST_DATABASE_URL ? '' : ` 
     expect(res.status).toBe(200)
     const body = (await res.json()) as { entries: { id: string; run?: unknown }[] }
     expect(body.entries).toContainEqual(expect.objectContaining({ id: flowRequestId(RUN, 'wr1', 'c1'), run: expect.objectContaining({ id: RUN }) }))
+  })
+
+  // A deployment without flows has no `workflow_runs`: the badge's read still answers.
+  it('answers the GET with no run entries on a deployment without workflow_runs', async () => {
+    await db.sql`DROP TABLE workflow_runs CASCADE`
+    const app = new Hono()
+    registerPendingInputRoutes(app, {
+      sessions: manager({ sql: db.sql, paths: await tempPaths() }),
+      ready: () => Promise.resolve(true),
+      remoteAddress: () => '10.0.0.7',
+      origins: originPolicy('https://scadbuddy.example', '10.0.0.0/8'),
+    })
+    const res = await app.request('https://scadbuddy.example/api/v1/ai/pending-input', {
+      headers: { host: 'scadbuddy.example', 'x-forwarded-proto': 'https' },
+    })
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as { entries: unknown[] }).entries).toEqual([])
+    expect(await queue.forRun(RUN)).toBeUndefined()
   })
 })
 

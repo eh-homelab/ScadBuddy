@@ -89,6 +89,43 @@ async function withDeadline<T>(run: (signal: AbortSignal) => Promise<T | null>, 
   }
 }
 
+/** #2482 — a flow run with calls waiting for the person, and how many: what the badge counts for it. */
+export interface RunWaiting {
+  id: string
+  name: string
+  waiting: number
+}
+
+/**
+ * The flow runs whose own calls wait for the person, as the badge counts them: the panel
+ * lists them, since a run's calls are in no session's list (a browser-started run has
+ * none). Null when the agent did not answer. Never throws, and settles within `timeoutMs`.
+ */
+export function fetchRunsWaiting(timeoutMs = ATTENTION_TIMEOUT_MS): Promise<RunWaiting[] | null> {
+  return withDeadline(readRunsWaiting, timeoutMs)
+}
+
+async function readRunsWaiting(signal: AbortSignal): Promise<RunWaiting[] | null> {
+  try {
+    const response = await fetch(ATTENTION_PATH, { headers: { Accept: 'application/json' }, cache: 'no-store', signal })
+    if (!response.ok || !(response.headers.get('content-type') ?? '').includes('application/json')) return null
+    const parsed = PendingInputSchema.safeParse(await response.json())
+    if (!parsed.success) return null
+    const runs = new Map<string, RunWaiting>()
+    for (const entry of parsed.data.entries) {
+      const run = entry.run
+      // As `read` counts: never one expiring, nor one still with its starting session.
+      if (entry.expiring || !run?.id || run.hop === 'parent') continue
+      const seen = runs.get(run.id) ?? { id: run.id, name: run.name ?? run.id, waiting: 0 }
+      seen.waiting += 1
+      runs.set(run.id, seen)
+    }
+    return [...runs.values()]
+  } catch {
+    return null
+  }
+}
+
 async function read(signal: AbortSignal): Promise<PendingCounts | null> {
   try {
     const response = await fetch(ATTENTION_PATH, { headers: { Accept: 'application/json' }, cache: 'no-store', signal })

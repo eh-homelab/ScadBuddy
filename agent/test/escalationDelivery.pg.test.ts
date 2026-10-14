@@ -65,7 +65,14 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     return sid
   }
 
-  async function park(parentSession = parent, childSession = child, principal = TOKEN, toolUseId = `toolu_${randomUUID()}`): Promise<string> {
+  /** A child's call parked, and (`logged`) its `tool.call` in the child's log, as `follow_session` writes it. */
+  async function park(
+    parentSession = parent,
+    childSession = child,
+    principal = TOKEN,
+    toolUseId = `toolu_${randomUUID()}`,
+    logged = true,
+  ): Promise<string> {
     const id = durableRequestId(childSession, 'run-1', toolUseId)
     await db.sql`
       INSERT INTO ai_pending_input (request_id, session_id, workflow_id, workflow_run_id, kind, tool, summary, input_hash, prompt,
@@ -74,7 +81,15 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
       VALUES (${id}, ${childSession}, ${`session-${childSession}`}, 'run-1', 'approval', 'print_output', 'print box on printer 5', ${'a'.repeat(64)}, '',
               ${db.sql.json({ kind: 'flow', id: `flow:${RUN}`, label: 'Flow' })}, ${['browser']}, now() + interval '1 hour',
               ${RUN}, 'parent', now() + interval '10 minutes', ${parentSession}, ${principal}, 'printer 5 is not in the grant')`
+    if (logged) await logCall(childSession, toolUseId)
     return id
+  }
+
+  async function logCall(childSession: string, toolUseId: string): Promise<void> {
+    const event = JSON.stringify({ v: 1, sessionId: childSession, type: 'tool.call', id: toolUseId, name: 'print_output', input: {}, risk: 'outward' })
+    await db.sql`
+      INSERT INTO ai_session_events (session_id, seq, event)
+      SELECT ${childSession}, coalesce(max(seq), 0) + 1, ${event} FROM ai_session_events WHERE session_id = ${childSession}`
   }
 
   async function flowRun(parentSession = parent): Promise<string> {
@@ -305,9 +320,21 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     expect(await records()).toEqual([])
   })
 
+  // A durable child's tool.call reaches its log through follow_session, a moment after the
+  // call parks: sent before then, it would go up with no reasoning, and only once.
+  it("waits for a child's call to be logged before sending it", async () => {
+    const toolu = `toolu_${randomUUID()}`
+    const id = await park(parent, child, TOKEN, toolu, false)
+    expect(await escalations.deliver()).toBe(0)
+    expect(await hop(id)).toMatchObject({ hop: 'parent', delivered: false })
+    await logCall(child, toolu)
+    expect(await escalations.deliver()).toBe(1)
+    expect(await hop(id)).toMatchObject({ hop: 'parent', delivered: true })
+  })
+
   it("carries each call's step and a child's reasoning, inside the envelope", async () => {
     const toolu = `toolu_${randomUUID()}`
-    const id = await park(parent, child, TOKEN, toolu)
+    const id = await park(parent, child, TOKEN, toolu, false)
     const ownCall = await flowRun()
     const at = new Date().toISOString()
     await db.sql`UPDATE workflow_runs SET steps = ${db.sql.json([
