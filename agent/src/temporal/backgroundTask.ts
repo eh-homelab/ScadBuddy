@@ -127,8 +127,10 @@ async function monitor(taskId: string, retryMs: number): Promise<void> {
       await acts.bg_finish({ taskId, state: sent.state, detail: sent.reason })
       return
     }
-    // Busy: ask again after retryMs, events or not; delivered (or nothing): wait for the next.
+    // Busy: ask again after retryMs, events or not; delivered with more left: deliver
+    // again (busy until its turn ends); delivered (or nothing): wait for the next.
     waitingSince = sent.result === 'busy' ? (waitingSince ?? Date.now()) : undefined
+    if (sent.result === 'sent' && sent.more) pending = true
   }
   await acts.bg_monitor_end({ taskId, end: ended })
   const due = Date.now()

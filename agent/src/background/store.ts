@@ -35,6 +35,12 @@ export const MAX_EVENTS = 200
 export const EVENT_MAX_CHARS = 8000
 /** One recorded notice at most, wrapper included (the column's cap): its text is cut first (monitor.ts eventNotice). */
 export const NOTICE_MAX_CHARS = 16384
+/**
+ * One delivery's events at most, by their recorded text: MAX_EVENTS of NOTICE_MAX_CHARS
+ * would be ~3 MB in one message, past any context, and a classic session would then
+ * fail every turn after it on the same transcript. The rest go in the next delivery.
+ */
+export const DELIVER_MAX_CHARS = 64_000
 
 type Row = {
   id: string
@@ -154,10 +160,27 @@ export class BackgroundTaskStore {
     await this.#sql`INSERT INTO ai_background_events (task_id, text) VALUES (${taskId}, ${text.slice(0, NOTICE_MAX_CHARS)})`
   }
 
-  /** A task's events not yet sent to its session, oldest first. */
-  async pendingEvents(taskId: string): Promise<{ seq: string; text: string }[]> {
+  /**
+   * A task's events not yet sent to its session, oldest first, as many as fit in
+   * `maxChars` of text, and always the oldest one (a notice is at most NOTICE_MAX_CHARS).
+   */
+  async pendingEvents(taskId: string, maxChars = DELIVER_MAX_CHARS): Promise<{ seq: string; text: string }[]> {
     return this.#sql<{ seq: string; text: string }[]>`
-      SELECT seq::text AS seq, text FROM ai_background_events WHERE task_id = ${taskId} AND delivered_at IS NULL ORDER BY seq`
+      SELECT seq::text AS seq, text FROM (
+        SELECT seq, text,
+          sum(length(text)) OVER (ORDER BY seq) AS through,
+          row_number() OVER (ORDER BY seq) AS n
+        FROM ai_background_events WHERE task_id = ${taskId} AND delivered_at IS NULL
+      ) pending
+      WHERE n = 1 OR through <= ${maxChars}
+      ORDER BY seq`
+  }
+
+  /** How many of a task's events are not yet sent to its session. */
+  async pendingCount(taskId: string): Promise<number> {
+    const [row] = await this.#sql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM ai_background_events WHERE task_id = ${taskId} AND delivered_at IS NULL`
+    return row?.n ?? 0
   }
 
   async delivered(taskId: string, upTo: string): Promise<void> {
