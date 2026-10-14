@@ -162,8 +162,10 @@ def post(client: TestClient, body: dict[str, Any], key: str | None = None) -> An
 
 
 def follow(client: TestClient, op_id: str, timeout: float = 30) -> dict[str, Any]:
-    op: dict[str, Any] = client.get(f"/api/v1/operations/{op_id}").json()
-    return follow_operation(client, op, timeout)
+    # Read as `follow_operation` reads every later one: a 404 fails clearly (review #3007).
+    response = client.get(f"/api/v1/operations/{op_id}")
+    assert response.status_code == 200, response.text
+    return follow_operation(client, response.json(), timeout)
 
 
 def test_a_done_operation_answers_its_result(client: TestClient) -> None:
