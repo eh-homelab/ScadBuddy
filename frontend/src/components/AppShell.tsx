@@ -17,6 +17,7 @@ import {
   useAttention,
   useAttentionTitle,
   WORKING_LABEL,
+  RunsWaitingContext,
 } from '../agent/attention'
 import { useAiAvailability } from '../agent/chat/availability'
 import {
@@ -229,6 +230,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
 
   return (
     <AssistantOpenerContext.Provider value={opener}>
+      <RunsWaitingContext.Provider value={attention.counts?.runs ?? null}>
       <ModalCompanionContext.Provider value={shown && mounted && open ? panelElement : null}>
         <div className="flex h-full min-h-0 flex-col bg-bg text-ink">
           <header
@@ -380,6 +382,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
           </div>
         </div>
       </ModalCompanionContext.Provider>
+      </RunsWaitingContext.Provider>
     </AssistantOpenerContext.Provider>
   )
 }

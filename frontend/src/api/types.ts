@@ -530,6 +530,70 @@ export interface AiSessionView {
   offer?: { to: Pick<Owner, 'kind' | 'label'> & { id?: string }; until: string } | null
 }
 
+/** #2482 — a run's step, as a queue entry names it. */
+export interface FlowQueueStep {
+  seq: number
+  fn: string
+}
+
+/** #2482 — one hop action on an entry (`hops`), as the run page lists it. */
+export interface FlowQueueHop {
+  hop: string
+  action: string
+  actor: string
+  at: string
+  reason?: string | null
+}
+
+interface FlowQueueCommon {
+  id: string
+  hop: 'parent' | 'person' | null
+  hop_until: string | null
+  reason: string | null
+  hops: FlowQueueHop[]
+  step: FlowQueueStep | null
+}
+
+/**
+ * #2482 — one entry of a flow run's one queue (agent `flows/queue.ts` QueueEntry,
+ * `GET /api/v1/ai/flow-runs/:id/queue`): the run's own call, a child session's call
+ * (answered by `POST /api/v1/ai/pending-input/{id}`), or its requested grant. A child's
+ * `reasoning` is its model's text before the call: untrusted.
+ */
+export type FlowQueueEntry =
+  | (FlowQueueCommon & {
+      source: 'flow'
+      kind: 'approval' | 'answer'
+      call_id: string
+      fn: string
+      prompt: string | null
+      since: string | null
+      proposed: boolean
+    })
+  | (FlowQueueCommon & {
+      source: 'child'
+      kind: 'approval' | 'answer'
+      session_id: string
+      tool: string
+      summary: string
+      input_hash: string | null
+      created_at: string
+      expires_at: string
+      /** Past its timer, not yet resolved by its worker: no one can decide it now. */
+      expiring: boolean
+      reasoning: string
+    })
+  | { source: 'grant'; id: string; status: 'requested'; created_at: string }
+
+/** #2482 — a flow run's one queue (agent `flows/queue.ts` RunQueue). */
+export interface FlowRunQueue {
+  run_id: string
+  name: string
+  status: string
+  starter_session: string | null
+  entries: FlowQueueEntry[]
+}
+
 /**
  * #931 — one resource a session's tool call created, changed or deleted (agent
  * `sessions/touched.ts` TouchedRecord, `GET /api/v1/ai/sessions/:id/resources`).

@@ -99,6 +99,7 @@ import type {
   PrintRun,
   FlowDecided,
   FlowProposal,
+  FlowRunQueue,
   FlowDefinition,
   FlowGrantSpec,
   FlowGrantView,
@@ -724,6 +725,9 @@ export const api = {
         ...(proposalHash ? { proposal: true, proposal_hash: proposalHash } : {}),
       }),
     }),
+
+  /** #2482 — a run's one queue, from the agent: its own calls, its child sessions' and its grant request. */
+  getFlowRunQueue: (id: string) => request<FlowRunQueue>(`/ai/flow-runs/${seg(id)}/queue`),
 
   /** #2482 — a parent's proposal beside the call it narrows (the person's only). */
   getFlowProposal: (id: string, callId: string) =>

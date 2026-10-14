@@ -367,7 +367,10 @@ it off when approving the grant), an outside call goes there first.
 - **Delivery.** The agent's `EscalationService` (`agent/src/flows/escalations.ts`)
   sends the starter session a turn, authored `system:escalation`, listing every entry of
   that session's runs at hop `parent` that was not yet delivered: run, step, tool, the
-  scrubbed summary, the proposal, and for a child's call the child's reasoning (§4.5).
+  scrubbed summary, why it is outside the grant, and for a child's call the child's
+  reasoning (§4.5). There is no proposal to send: at hop `parent` nothing has narrowed
+  the call yet, since the starter session is the only parent that narrows (§4.1). A run's
+  own call has no scrubbed summary in its projection; its step and function stand in.
   It sends only to an idle session. A session in a turn gets the batch on a later
   tick of the agent's 30 s sweep, once the turn has ended. It goes through
   `SessionManager.send` (classic or durable), as the session's owner: the turn is the
@@ -424,6 +427,12 @@ its child sessions' parked calls from flow turns, and a requested grant.
   browser-started run, the badge. The badge counts every run-queue entry at hop
   `person` (10-01 §6.6's "Flow entries stay out of the assistant's reads" is replaced:
   they are now in the aggregate read, grouped by run).
+  - As built (#2482): the panel's `SessionFlowRuns` reads each open run's queue and lists
+    its entries under the run, each with where it waits and why, linking to the run's
+    page, where they are decided. Each aggregate-read entry of a run carries
+    `run: {id, hop, reason}`, and the badge skips one at hop `parent`. The run's own
+    calls are added to the aggregate read only by its HTTP route, the browser user's:
+    the `pending_input_list` tool and every other principal's read never list them.
 - **One read.** `GET /api/v1/ai/flow-runs/{run_id}/queue`, in the agent service, is the
   union of:
   - the run's own entries, from `workflow_runs.waiting_on` (which `ProjectWorkflow`
@@ -440,10 +449,15 @@ its child sessions' parked calls from flow turns, and a requested grant.
   it the call's raw input (10-01 §6.6):
   - the run, its flow's name and the commit it runs (§6), with a link to the script at
     that commit;
-  - the step (`steps[].seq`, `fn`), and for a child the step that drives it;
+  - the step (`steps[].seq`, `fn`), and for a child the step that drives it (the run's
+    latest running step whose `session_id` is the child's);
   - for a child's call, **the child's reasoning**: the text the child's model wrote in
     that turn before the call (`assistant.text.delta` events since the turn's start),
-    the last 2 KiB, shown as untrusted text, as every tool result is;
+    the last 2048 characters (`REASONING_MAX`), shown as untrusted text, as every tool
+    result is. It is read from
+    `ai_session_events` when the queue is read (`flows/queue.ts` `childReasoning`): the
+    deltas after the turn's `user.turn` and before the call's `tool.call`, so nothing
+    in a workflow records it;
   - the hop it came through, and the parent's action if it narrowed it ("narrowed by the
     starting session from 6 copies to 2");
   - why it is outside the grant (`flow_grant_check`'s `reason`: "printer 5 is not in the

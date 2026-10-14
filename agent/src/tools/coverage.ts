@@ -327,6 +327,12 @@ export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: str
       'sessions_approve / sessions_deny, which take every approval id, durable ones included.',
   },
   {
+    route: 'GET /api/v1/ai/flow-runs/{id}/queue',
+    reason:
+      "A flow run's queue is the person's (spec 2026-10-11 §4.2): no grant decides it. The starter session " +
+      'is sent the calls waiting for it in an escalation turn and answers with escalation_respond.',
+  },
+  {
     route: 'GET /api/v1/ai/settings/session-mode',
     reason:
       "Settings → Assistant's default session mode (plan 5d), for the user. An agent picks its own " +

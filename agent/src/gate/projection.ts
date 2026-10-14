@@ -12,6 +12,12 @@ import type { InputEntry, Owner } from '../sessions/protocol.js'
 export type PendingInputEntry = InputEntry & {
   /** A durable entry past its timer whose worker has not yet resolved it; not counted as waiting. */
   expiring?: true
+  /**
+   * A flow run's entry (#2482, spec 2026-10-11 §4.5): the run whose queue it is in, where
+   * it waits, and why the grant did not admit it. At hop `parent` it waits for the
+   * session that started the run, and the badge does not count it.
+   */
+  run?: { id: string; name?: string; hop: 'parent' | 'person' | null; reason: string | null; starter_session?: string | null }
 }
 
 /** A session as the gate needs it: its mode, and who owns and started it. */
@@ -32,6 +38,9 @@ type Row = {
   requested_by: Owner | null
   responders: ('browser' | 'grant')[]
   attention: { reason: string; on_timeout: string | null } | null
+  flow_run_id: string | null
+  hop: 'parent' | 'person' | null
+  outside_reason: string | null
   created_at: Date
   expires_at: Date
   expiring: boolean
@@ -58,7 +67,7 @@ export class PendingProjection {
     const owner = filter.ownedBy
     const rows = await sql<Row[]>`
       SELECT p.request_id, p.kind, p.session_id, p.tool, p.summary, p.input_hash, p.prompt, p.requested_by,
-             p.responders, p.attention, p.created_at, p.expires_at, (p.expires_at <= now()) AS expiring
+             p.responders, p.attention, p.flow_run_id, p.hop, p.outside_reason, p.created_at, p.expires_at, (p.expires_at <= now()) AS expiring
       FROM ai_pending_input p JOIN ai_sessions s ON s.id = p.session_id
       WHERE (${filter.sessionId ?? null}::uuid IS NULL OR p.session_id = ${filter.sessionId ?? null}::uuid)
         AND (${owner === undefined}
@@ -82,6 +91,7 @@ export class PendingProjection {
       expires_at: r.expires_at.toISOString(),
       ...(r.attention ? { attention: r.attention } : {}),
       ...(r.expiring ? { expiring: true as const } : {}),
+      ...(r.flow_run_id ? { run: { id: r.flow_run_id, hop: r.hop, reason: r.outside_reason } } : {}),
     }))
   }
 
