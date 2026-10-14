@@ -144,7 +144,8 @@ describe('SettingsPage section links (#1307, #2345, #2346)', () => {
       renderPage(<SettingsPage />, { route: '/settings#libraries' })
       await seeded()
       await waitFor(() => expect(scrolls).toContain(4992))
-      const settle = timeouts.mock.calls.find(([, ms]) => ms === SETTLE_MS)
+      // Ours, by what it does: another library may also schedule a SETTLE_MS-long timer.
+      const settle = timeouts.mock.calls.find(([fn, ms]) => ms === SETTLE_MS && String(fn).includes('disconnect'))
       expect(settle).toBeDefined()
       act(() => (settle![0] as () => void)())
       expect(observers[0]!.disconnected).toBe(true)
