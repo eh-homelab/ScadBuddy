@@ -73,8 +73,21 @@ describe.skipIf(!TEST_DATABASE_URL)(`PgFlowRuns${TEST_DATABASE_URL ? '' : ` (set
     expect(await flows.startedBy(id, 'wr1')).toEqual({ kind: 'browser', id: 'browser', label: 'You' })
     for (const status of ['succeeded', 'failed', 'terminated']) {
       await t.db.sql`UPDATE workflow_runs SET status = ${status} WHERE id = ${id}`
-      expect(await flows.startedBy(id, 'wr2'), status).toBeUndefined()
+      expect(await flows.startedBy(id, 'wr1'), status).toBeUndefined()
+      expect(await flows.startedBy(id, 'wr0'), status).toBeUndefined()
     }
+  })
+
+  // A Reset that landed although its call failed leaves the row closed while its new
+  // execution runs (backend _reset_run); its retry commits. Until then that execution's
+  // calls fail as a lookup does, which the activity retries, not as an unknown flow.
+  it("leaves a closed run's unrecorded execution to retry, as a Reset not yet committed", async () => {
+    const id = await run({ kind: 'browser' })
+    await t.db.sql`UPDATE workflow_runs SET status = 'succeeded' WHERE id = ${id}`
+    await expect(flows.startedBy(id, 'wr9')).rejects.toThrow(/has not recorded execution wr9 yet/)
+    // Once the Reset commits, the same execution is named.
+    await t.db.sql`UPDATE workflow_runs SET status = 'running', workflow_run_id = 'wr9', superseded_run_ids = '{wr1}' WHERE id = ${id}`
+    expect(await flows.startedBy(id, 'wr9')).toEqual({ kind: 'browser', id: 'browser', label: 'You' })
   })
 
   // A Reset of a closed run holds the row while it starts the new execution, and opens
@@ -93,9 +106,15 @@ describe.skipIf(!TEST_DATABASE_URL)(`PgFlowRuns${TEST_DATABASE_URL ? '' : ` (set
       await tx`UPDATE workflow_runs SET status = 'running', superseded_run_ids = '{wr1}', workflow_run_id = 'wr2' WHERE id = ${id}`
     })
     await isLocked
-    const starter = flows.startedBy(id, 'wr2')
-    // Still waiting on the reset's lock, not answered from the closed row.
-    expect(await Promise.race([starter.then(() => 'answered'), new Promise((r) => setTimeout(() => r('waiting'), 200))])).toBe('waiting')
+    let answered = false
+    const starter = flows.startedBy(id, 'wr2').finally(() => (answered = true))
+    // Seen waiting on a lock in Postgres itself, not inferred from a timer.
+    await expect
+      .poll(async () => (await t.db.sql`
+        SELECT 1 FROM pg_stat_activity
+         WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FOR SHARE%'`).length)
+      .toBe(1)
+    expect(answered).toBe(false)
     release()
     await reset
     expect(await starter).toEqual({ kind: 'browser', id: 'browser', label: 'You' })

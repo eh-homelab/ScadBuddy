@@ -63,18 +63,33 @@ async function allowed(deps: FlowSessionDeps, what: string, sessionId: unknown):
 function turnReader(sql: Sql, sessionId: string, turnId: string): () => Promise<ServerEvent[] | undefined> {
   let after: string | undefined
   const events: ServerEvent[] = []
+  // #2277: a session deleted mid-wait never logs the result; without this the step would
+  // wait out the whole turn timeout (backend workflows/flow_tools.py). Asked in the same
+  // query as each read, so a poll is one round trip.
+  const gone = () => refused(`session ${sessionId} is gone; its turn ${turnId} will not finish`)
   return async () => {
     if (after === undefined) {
-      const [start] = await sql<{ seq: string }[]>`
-        SELECT seq FROM ai_session_events
-         WHERE session_id = ${sessionId} AND event::jsonb->>'type' = 'user.turn' AND event::jsonb->>'turnId' = ${turnId}`
-      if (!start) return undefined
+      const [start] = await sql<{ here: boolean; seq: string | null }[]>`
+        SELECT EXISTS (SELECT 1 FROM ai_sessions WHERE id::text = ${sessionId}) AS here, e.seq
+          FROM (SELECT 1) AS one
+          LEFT JOIN ai_session_events e
+            ON e.session_id = ${sessionId} AND e.event::jsonb->>'type' = 'user.turn' AND e.event::jsonb->>'turnId' = ${turnId}`
+      if (!start?.here) throw gone()
+      if (start.seq === null) return undefined
       after = start.seq
     }
-    const rows = await sql<{ seq: string; event: string }[]>`
-      SELECT seq, event FROM ai_session_events WHERE session_id = ${sessionId} AND seq > ${after} ORDER BY seq`
-    for (const r of rows) events.push(JSON.parse(r.event) as ServerEvent)
-    if (rows.length > 0) after = rows.at(-1)!.seq
+    const rows = await sql<{ here: boolean; seq: string | null; event: string | null }[]>`
+      SELECT EXISTS (SELECT 1 FROM ai_sessions WHERE id::text = ${sessionId}) AS here, e.seq, e.event
+        FROM (SELECT 1) AS one
+        LEFT JOIN LATERAL (
+          SELECT seq, event FROM ai_session_events WHERE session_id = ${sessionId} AND seq > ${after} ORDER BY seq
+        ) e ON true`
+    if (!rows[0]?.here) throw gone()
+    for (const r of rows) {
+      if (r.seq === null || r.event === null) continue
+      events.push(JSON.parse(r.event) as ServerEvent)
+      after = r.seq
+    }
     return events
   }
 }
@@ -144,10 +159,6 @@ export function flowSessionActivities(deps: FlowSessionDeps): Record<string, (ar
       const scan: Scan = { from: 0 }
       for (;;) {
         context.heartbeat()
-        // #2277: a session deleted mid-wait never logs the result; without this the step
-        // would wait out the whole turn timeout (backend workflows/flow_tools.py).
-        const [here] = await deps.sql`SELECT 1 FROM ai_sessions WHERE id::text = ${sessionId}`
-        if (!here) throw refused(`session ${sessionId} is gone; its turn ${turn_id} will not finish`)
         const events = await read()
         const answer = events && settled(sessionId, turn_id, events, scan)
         if (answer) return answer

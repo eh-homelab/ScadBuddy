@@ -75,11 +75,19 @@ export class PgFlowRuns implements FlowRuns {
     // UPDATE while it starts the new execution, and opens it only after: the lock waits
     // for that, or the new execution's first call reads the old closed row and is
     // refused. It is taken by id alone, as a row a WHERE filters out is never waited on.
-    const [row] = await this.#sql<{ started_by: StartedBy; open: boolean }[]>`
+    const [row] = await this.#sql<{ started_by: StartedBy; open: boolean; unrecorded: boolean }[]>`
       SELECT started_by,
-             status IN ('running', 'waiting') AND NOT (${execution} = ANY(superseded_run_ids)) AS open
+             status IN ('running', 'waiting') AND NOT (${execution} = ANY(superseded_run_ids)) AS open,
+             workflow_run_id IS DISTINCT FROM ${execution} AND NOT (${execution} = ANY(superseded_run_ids)) AS unrecorded
         FROM workflow_runs WHERE id = ${runId}
          FOR SHARE`
+    if (row && !row.open && row.unrecorded) {
+      // Closed, and this execution is neither the row's nor one a Reset replaced: a Reset
+      // that started it and has not committed yet (_reset_run's "landed although this
+      // call failed" path, which its own retry commits). Thrown as a lookup failure, so
+      // the activity's retries wait for that commit rather than refusing for good.
+      throw new Error(`flow run ${runId} is closed and has not recorded execution ${execution} yet`)
+    }
     if (!row?.open) return undefined
     const by = row.started_by
     if (by.kind === 'browser') return { kind: 'browser', id: 'browser', label: 'You' }
