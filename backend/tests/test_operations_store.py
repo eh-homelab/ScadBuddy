@@ -186,12 +186,13 @@ async def test_running_executions_names_each_running_rows_execution(
 
 
 async def test_a_lost_operation_says_what_its_kind_says_to_check(store: OperationStore) -> None:
-    """#1174: a lost library operation points at the model, not Bambuddy."""
+    """#1174: a lost library operation points at the model, not Bambuddy; by the row's
+    own kind, not one read back out of its workflow ID (this one names another)."""
     async with temporal_client() as client:
         handle = await client.start_workflow(
             "Operation",
             "x",
-            id=f"op-model_upload-{uuid.uuid4().hex[:8]}",
+            id=f"op-send-model_upload-{uuid.uuid4().hex[:8]}",
             task_queue=f"unserved-{uuid.uuid4().hex[:8]}",
         )
         await handle.terminate("an operator ended it")

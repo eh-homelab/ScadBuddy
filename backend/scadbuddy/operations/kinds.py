@@ -60,10 +60,6 @@ class OperationKind:
         # Temporal reads `maximum_attempts=0` as unlimited (review #1063 fourth review 2).
         if self.run_attempts < 1:
             raise ValueError(f"{self.name!r}: run_attempts must be at least 1")
-        # The workflow ID is ``op-<kind>-<key>``, and the lost-operation sweep reads the
-        # kind back as the part before the next dash (`workflows.client.where_of`).
-        if "-" in self.name:
-            raise ValueError(f"{self.name!r}: a kind's name has no dash")
         if self.where is None:
             object.__setattr__(self, "where", WHERE[self.queue])
 

@@ -396,15 +396,13 @@ async def reconcile_lost_operations(
     kind's ``OperationKind.where``, what its problem says to check (#1174); Bambuddy
     for a kind not in it. Returns how many it ended."""
     rows = await store.running_executions(older_than)
-    workflow_of = {op_id: workflow_id for op_id, workflow_id, _ in rows}
-
-    def where_of(op_id: str) -> str:
-        # The workflow ID is ``op-<kind>-<key>``, and a kind's name has no dash.
-        kind = workflow_of[op_id].removeprefix("op-").split("-", 1)[0]
-        return (where or {}).get(kind, "Bambuddy")
 
     async def end(op_id: str) -> bool:
-        lost = operation_lost(where_of(op_id))
+        # The row's own kind, read only for a row being ended: few, and never parsed
+        # back out of the workflow ID.
+        row = await store.get(op_id)
+        kind = row.kind if row is not None else ""
+        lost = operation_lost((where or {}).get(kind, "Bambuddy"))
         return (await store.finish(op_id, error=lost)).status == "failed"
 
     return await _end_closed(client, rows, end, "operation")

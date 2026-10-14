@@ -548,17 +548,6 @@ async def test_a_failed_prelude_says_to_check_where_the_prelude_writes(
     assert "Check the model and its libraries before" in answer.operation.error.detail
 
 
-def test_a_kind_name_with_a_dash_is_refused() -> None:
-    """#1174 review: the lost-operation sweep reads a kind back out of ``op-<kind>-<key>``
-    up to the next dash, so a dash in the name would name the wrong kind's place."""
-
-    async def step(request: dict[str, Any], *_: Any) -> dict[str, Any]:
-        return {}
-
-    with pytest.raises(ValueError, match="no dash"):
-        OperationKind(name="foo-bar", check=step, run=step)
-
-
 async def test_an_operation_without_a_prelude_records_no_patch_marker(
     client: Client, worker: str, fake: Fake
 ) -> None:
