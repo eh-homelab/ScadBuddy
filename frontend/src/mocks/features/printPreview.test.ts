@@ -11,11 +11,12 @@ describe('preview-slice mock (#2824)', () => {
   it('answers 202 with its operation, as the backend does, and the client follows it', async () => {
     const statuses: number[] = []
     const followed: string[] = []
-    server.events.on('response:mocked', ({ request, response }) => {
+    const listener = ({ request, response }: { request: Request; response: Response }) => {
       const path = new URL(request.url).pathname
       if (path.endsWith('/preview-slice')) statuses.push(response.status)
       if (path.startsWith('/api/v1/operations/')) followed.push(`${response.status} ${path}`)
-    })
+    }
+    server.events.on('response:mocked', listener)
     try {
       const started = await api.previewSlice('out-1', { plate_id: 2 } as PrintRunRequest)
 
@@ -24,7 +25,8 @@ describe('preview-slice mock (#2824)', () => {
       expect(statuses).toEqual([202])
       expect(followed).toEqual([expect.stringMatching(/^200 \/api\/v1\/operations\//)])
     } finally {
-      server.events.removeAllListeners()
+      // Only this test's: another listener on the shared server stays (#3457).
+      server.events.removeListener('response:mocked', listener)
     }
   })
 
