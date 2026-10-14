@@ -39,8 +39,10 @@ const BEARER: Owner = { kind: 'bearer', id: 'token:7', label: 'MCP token' }
 const SECRET = 'sk-plugin-header-0123456789'
 const FLOW = '7c2d9a10-3b4e-4f5a-8b6c-1d2e3f4a5b6c'
 
-/** An `sql` for a test that saves no http body: a call (a read) throws, and so does any
- * property, `begin` included, which a save opens with. */
+/**
+ * An `sql` for a test that saves no http body: a call (a read) throws, and so does any
+ * property, `begin` included, which a save opens with.
+ */
 function noDatabase(): unknown {
   const refuse = () => {
     throw new Error('this test saves no http body: no database is set up for one')
