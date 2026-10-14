@@ -34,6 +34,8 @@ export type SessionEditsDeps = {
   audit?: AuditLog
   /** Ends a durable session's workflow (#1056); refuses when it cannot be told. */
   endDurable: (id: string) => Promise<void>
+  /** Ends a session's background tasks (src/background/) when it is archived or marked done. */
+  endBackground?: ((id: string, why: string) => Promise<unknown>) | undefined
   /** This replica's warm processes (warm.ts): a session marked done or archived loses its own. */
   warm?: Pick<WarmSessions, 'evict'>
 }
@@ -130,6 +132,8 @@ export class SessionEdits {
       return gone
     })
     if (logged) this.deps.events.committed(id, logged.events, logged.seqs)
+    // Its cron jobs, wakeups and monitors end with it: nothing fires into an archived or done chat.
+    if (archive || done) await this.deps.endBackground?.(id, archive ? 'the chat was archived' : 'the chat was marked done')
     if (done || archive) void this.deps.warm?.evict(id, done ? 'marked done' : 'archived')
     if (context) {
       const changes = [

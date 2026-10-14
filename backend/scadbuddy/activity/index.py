@@ -22,6 +22,7 @@ from scadbuddy.activity.models import FINISHED, ActivityRow, ActivityStatus
 from scadbuddy.core.authorship import current_author
 from scadbuddy.core.events import ActivityEvent
 from scadbuddy.core.metrics import Metrics
+from scadbuddy.core.pg_events import hold_event_log
 from scadbuddy.render.pg_store import TransactionalEvents
 
 logger = logging.getLogger(__name__)
@@ -190,7 +191,13 @@ class ActivityIndex:
         activity_id = row.id if isinstance(row, ActivityRow) else None
         try:
             with conn.transaction():
+                if self.events is not None:
+                    # The event log's lock before the row, as a transaction that has
+                    # already published holds it while it writes this row (#3221).
+                    hold_event_log(conn)
                 if not isinstance(row, ActivityRow):
+                    # Built under that lock, which every publisher waits on: a builder
+                    # must stay a short read of its source row, never a slow call.
                     row = row()
                 activity_id = row.id
                 values = row.model_dump(include=set(_WRITTEN))
@@ -274,6 +281,8 @@ class ActivityIndex:
         self, activity_id: str, principal: str, session: str | None, via_tool: str | None
     ) -> None:
         with self.pool.connection() as conn, conn.transaction():
+            if self.events is not None:
+                hold_event_log(conn)  # before the row, as upsert_in does
             conn.execute(
                 "INSERT INTO activity"
                 " (id, kind, principal, session, via_tool, status, title, source, source_id)"
@@ -462,6 +471,10 @@ class ActivityIndex:
             found = conn.execute(
                 self._missing(prefix, table, columns), {"window": window}
             ).fetchall()
+            # The pool is autocommit (the projection's), so each row's `upsert_in`
+            # commits on its own. Keep it so: a restore takes the event log's lock, which
+            # is held to commit, and one transaction over the whole pass would hold every
+            # publisher up until its end.
             for row in found:
                 restored += self.upsert_in(conn, partial(build, row), restore=True)
         return restored

@@ -298,6 +298,16 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   sweep for runs whose execution closed). Routes `api/flows.py`. An outward call's
   approval timeout resolves from the run, its flow, then `flow_approval_timeout_seconds`
   (0 is never).
+- `backend/scadbuddy/flow_triggers/` — runs started on a schedule or an event (#2484,
+  spec 2026-10-11 §12): `store.py` (`flow_triggers`, their standing grants and fires),
+  `fire.py` (the `flow_trigger_fire` activity on the `library` queue), `events.py` (the
+  event bus to `FlowTriggerFire`, one per trigger and event); the workflow and the
+  Schedules are `workflows/flow_triggers.py`, routes `api/flow_triggers.py`. A fire reads
+  everything from the trigger's row (the Schedule carries the trigger id only) and runs
+  as its creator, with a run grant only from a standing grant a person approved; never
+  take an author or a grant status from a body. A trigger pins a version; any edit
+  returns its standing grant to requested, and an approval names the state it saw
+  (`seen`); a fire is admitted, and a standing grant spent, under row locks.
 - `backend/scadbuddy/operations/` — the `operations` record (`store.py`, the table
   `operations`), `kinds.py` (`OperationKind`: a kind's check, its effect, its
   attempts, and its queue) and `component.py` (`OPERATIONS`, `OperationsDep`). A
@@ -333,7 +343,14 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   send the
   key, re-send it after an answer that never arrived, and follow a 202.
   `render_key` coalesces identical *jobs*; `piece_key` dedupes identical *openscad
-  renders* across jobs. Never swap them. Template pipelines (#427): `TemplatePipeline`
+  renders* across jobs. Never swap them. A third key, `geometry_key`
+  (`render/geometry_cache.py`, the `piece_geometry` table), is a mesh model's only: its
+  `scene.json` with each colour reduced to which colours are equal, its meshes and its
+  parameters, so a recolour edit (a new revision, a new piece key) keeps it. On a hit
+  `RenderPiece` runs `reuse_geometry` (the rendered piece's files copied, `layout.json`
+  and `preview.glb` recoloured) and then `finish_piece`, never openscad. A `.scad`
+  template gets no geometry key: its colours can flow into anything the program
+  computes, so only rendering it tells. Template pipelines (#427): `TemplatePipeline`
   runs a template's `pipeline/pipeline.py`, or the built-in default, `exec`'d in the
   workflow sandbox; `MigrateInputs`; `ctx.py` (the `ctx` a pipeline gets),
   `pipeline_activities.py` (`load_pipeline`, `pack`, `write_output`,
@@ -623,7 +640,12 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     WebFetch's model work as one-shot queries on the session's credential, the task
     list as a workspace file), each outward, and the listing's `system_note` tells the
     model; `src/builtins/schemas.json` is Claude Code's own input schemas
-    (`test/builtins.sdk.test.ts`, `UPDATE_BUILTIN_SCHEMAS=1`).
+    (`test/builtins.sdk.test.ts`, `UPDATE_BUILTIN_SCHEMAS=1`). `CronCreate`, `CronDelete`,
+    `CronList`, `ScheduleWakeup` and `TaskStop` are the session's own in both modes
+    (`src/background/`: `ai_background_tasks`, one `BackgroundTask` workflow per task on
+    `agent-tools` that sends the prompt when due and the session is idle; a classic turn
+    gets them as the in-process `builtin` server in place of Claude Code's, which end
+    with its process; the panel's list and cancel are `routes/backgroundTasks.ts`).
   - Tests never call Anthropic: `test/support/fakeAnthropic.ts` is a local Messages API
     (streaming SSE) that the real SDK and bundled CLI are pointed at as a gateway
     (`test/run.test.ts`). Postgres tests (`test/pg.test.ts`) skip unless

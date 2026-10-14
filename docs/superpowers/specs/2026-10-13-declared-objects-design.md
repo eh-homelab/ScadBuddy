@@ -25,7 +25,8 @@ for (i = [1 : count])
 - ScadBuddy renders object *k* with `-D $object=k`, splits it by colour and solidifies
   it as it does a plate. Its colour parts are the object's parts.
   Each object is a render of its own, so a layout of P plates and N objects is P × N
-  renders; the pipeline's `render_solids` budget scales with that count.
+  renders; the pipeline's `render_solids` budget scales with that count. P × N is at
+  most `MAX_RENDERS` (16), the bound a job had before objects (#3250).
 - **An object is drawn where it is**, not at the origin. Unlike plates, objects share
   a plate, and the spacing between them is what decides whether the toolhead clears
   them (§4). The `$object = 0` render, which the preview shows, is every object at once.
@@ -55,6 +56,15 @@ writer emits one assembly per object on each plate, each its own `<item>` in the
 and its own `<object>` in `model_settings.config`, with the plate's offset. A template
 with no declaration writes exactly what it does today. A packed plate (Arrange,
 `ctx.pack`) gives each placed copy its own object.
+
+A plate of several objects is named as a plate: its `plater_name` is the model's name,
+with ` (plate N)` when the file has several plates. A plate of one object leaves it
+empty, as the file always did. Bambu Studio reads the key as the plate's name
+([`bbs_3mf.cpp` `PLATER_NAME_ATTR`](https://github.com/bambulab/BambuStudio/blob/47a13eeb1d9af65ef2371e361c856e21d4f6ca72/src/libslic3r/Format/bbs_3mf.cpp#L4720-L4721)).
+It draws the name on the plate, shows it in the object list, and adds it to an exported
+G-code file's name
+([`Plater.cpp`](https://github.com/bambulab/BambuStudio/blob/47a13eeb1d9af65ef2371e361c856e21d4f6ca72/src/slic3r/GUI/Plater.cpp#L16581-L16588)).
+That is read from the source, not yet seen by opening a file in Studio (#259).
 
 ## 3. The print dialog
 

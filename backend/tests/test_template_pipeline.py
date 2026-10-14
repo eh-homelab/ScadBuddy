@@ -240,6 +240,7 @@ async def test_a_waiter_trusts_a_piece_for_its_whole_retried_budget(
     stages = [
         pipelines.CACHED_TIMEOUT,
         pipelines._prepare_timeout(),
+        pipelines.REUSE_TIMEOUT,
         pipelines._main_timeout(),
         pipelines._solids_timeout(),
         pipelines.FINISH_TIMEOUT,
@@ -262,11 +263,10 @@ def test_render_solids_has_an_openscad_budget_per_plate_and_object(
     assert pipelines._solids_timeout() == openscad + 3 * pipelines.TRANSFER
     # A template's echo cannot stretch the budget past what the layout accepts.
     huge = RenderMainResult(plates=10**9, objects=10**9)
-    assert pipelines._pieces(huge) == jobs.MAX_PLATES * jobs.MAX_OBJECTS
-    assert (pipelines.PIECE_PLATES_CAP, pipelines.PIECE_OBJECTS_CAP) == (
-        jobs.MAX_PLATES,
-        jobs.MAX_OBJECTS,
-    )
+    assert pipelines._pieces(huge) == jobs.MAX_RENDERS
+    # #3250: nor can plates and objects each under their cap multiply past it.
+    assert pipelines._pieces(RenderMainResult(plates=16, objects=16)) == jobs.MAX_RENDERS
+    assert pipelines.PIECE_RENDERS_CAP == jobs.MAX_RENDERS
 
 
 async def test_ctx_activity_passes_parts_and_returns_json(tmp_path: Path) -> None:

@@ -25,7 +25,7 @@ ARG BOSL2_COMMIT=f47030c41d88d0676bca73be1c6b7ba58564f9dd
 # A FROM line, not `COPY --from=ghcr.io/astral-sh/uv:...`, so Dependabot's
 # docker ecosystem sees the version and can bump it. The image is scratch-based
 # and holds nothing but the two static binaries.
-FROM ghcr.io/astral-sh/uv:0.13.0 AS uv
+FROM ghcr.io/astral-sh/uv:0.13.1 AS uv
 
 # ── base: OS packages, fonts, users ───────────────────────────────────────────
 # Pinned to a dated nightly by tag AND index digest (amd64 + arm64), so the base
@@ -181,8 +181,10 @@ RUN corepack enable
 # agent/pnpm-workspace.yaml holds `allowBuilds` (msw, a test dependency, has an
 # install script that is declined there); without it the frozen install fails
 # with ERR_PNPM_IGNORED_BUILDS, so copy it with the lockfile, as the frontend
-# stage does.
+# stage does. agent/patches holds the dependency patches pnpm-workspace.yaml names
+# (patchedDependencies, #3294); the frozen install fails without them.
 COPY agent/package.json agent/pnpm-lock.yaml agent/pnpm-workspace.yaml ./
+COPY agent/patches ./patches
 RUN pnpm install --frozen-lockfile
 
 COPY --from=api-spec /src/openapi.json /src/openapi.json
@@ -212,6 +214,7 @@ FROM node:24-bookworm-slim AS agent-deps
 WORKDIR /src/agent
 RUN corepack enable
 COPY agent/package.json agent/pnpm-lock.yaml agent/pnpm-workspace.yaml ./
+COPY agent/patches ./patches
 RUN pnpm install --frozen-lockfile --prod
 
 FROM node:24-bookworm-slim AS agent

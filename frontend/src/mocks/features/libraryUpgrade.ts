@@ -28,6 +28,21 @@ function commitOf(ref: string): string {
   return hash.toString(16).padStart(8, '0').repeat(5)
 }
 
+/**
+ * #2770 — checkouts on the volume that no model pins any more (an unpin keeps its checkout).
+ * The models' own pins are added to them for `GET /libraries/installed`. None by default,
+ * so a test that counts rows sees only what it seeds with `setMockUnusedCheckouts`.
+ */
+let unused: InstalledLibrary[] = []
+
+export function setMockUnusedCheckouts(rows: InstalledLibrary[]): void {
+  unused = [...rows]
+}
+
+export function reset(): void {
+  unused = []
+}
+
 /** Seeds a pin into a model, built-ins included, as if its model.json said so. */
 export function setMockLibraryPin(slug: string, pin: ModelLibrary): void {
   const model = mockModels().find((m) => m.slug === slug)
@@ -53,7 +68,26 @@ export const handlers = [
         installed.set(key, row)
       }
     }
+    for (const row of unused) {
+      const key = `${row.name}\u0000${row.commit}`
+      if (!installed.has(key)) installed.set(key, { ...row, used_by: [] })
+    }
     return HttpResponse.json([...installed.values()])
+  }),
+
+  // #2770: removes a checkout; refused while a model's pin still reads it, as the route does.
+  http.delete(`${base}/libraries/:name`, async ({ params, request }) => {
+    const name = String(params['name'])
+    const commit = new URL(request.url).searchParams.get('commit')
+    const users = mockModels()
+      .filter((m) => (m.libraries ?? []).some((pin) => pin.name === name && (commit === null || pin.commit === commit)))
+      .map((m) => m.slug)
+    if (users.length > 0) {
+      return problem(409, 'Conflict', `library '${name}' is still pinned by ${users.join(', ')}`)
+    }
+    await delay(50)
+    unused = unused.filter((row) => !(row.name === name && (commit === null || row.commit === commit)))
+    return new HttpResponse(null, { status: 204 })
   }),
 
   http.get(`${base}/libraries/:name/users`, ({ params }) => {

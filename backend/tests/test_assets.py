@@ -240,6 +240,16 @@ def _png_header(width: int, height: int) -> bytes:
     return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IEND", b"")
 
 
+def test_a_png_with_a_text_chunk_too_large_to_read_is_refused(store: AssetStore) -> None:
+    # Pillow raises ValueError for it, which was a 500.
+    info = PngImagePlugin.PngInfo()
+    info.add_text("comment", "x" * (PngImagePlugin.MAX_TEXT_CHUNK + 10), zip=True)
+    out = io.BytesIO()
+    Image.new("RGB", (4, 4)).save(out, format="PNG", pnginfo=info)
+    with pytest.raises(AssetRejectedError, match="metadata too large to read"):
+        store.put(out.getvalue(), "chatty.png")
+
+
 def test_a_png_pillow_refuses_as_a_bomb_is_refused_as_too_large(store: AssetStore) -> None:
     # Over twice Pillow's MAX_IMAGE_PIXELS: refused at open, before the pixel check.
     with pytest.raises(AssetRejectedError) as refused:

@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { ok } from './call.js'
 import { ACCEPTING_MS, command } from './command.js'
 import { outputId, slug } from './common.js'
-import { acquireRenderSlot, releaseWhenSettled, waitForJob } from './customizer.js'
+import { acquireRenderSlot, releaseWhenSettled, renderDeadline, waitForJob } from './customizer.js'
 import { slotChoice } from './print.js'
 import { defineTool, json, type Tool, ToolError } from './registry.js'
 
@@ -104,7 +104,8 @@ export const arrangeTools: Tool[] = [
     handler: async ({ objects, goal, printer_id, filament_plan, colours, name, slug, read_budget }, ctx) => {
       // A job on the render queue: under the same per-principal bounds as render_model,
       // its slot held until the job settles, past this call when it is handed back running.
-      const release = await acquireRenderSlot(ctx)
+      const deadline = renderDeadline(ctx)
+      const release = await acquireRenderSlot(ctx, deadline)
       let submitted: string | undefined
       let lastJob: { status: Awaited<ReturnType<typeof waitForJob>>['status'] } | undefined
       try {
@@ -138,7 +139,7 @@ export const arrangeTools: Tool[] = [
         const started = await ok(Promise.resolve(sent), 'arrange')
         submitted = started.id
         await ctx.progress(0, undefined, `arrange queued as ${started.id}`)
-        const job = await waitForJob(ctx, started.id)
+        const job = await waitForJob(ctx, started.id, deadline)
         lastJob = job
         if (job.status === 'failed' || job.status === 'cancelled') {
           throw new ToolError(`the arrange was ${job.status}${job.error ? `: ${job.error}` : ''}`)

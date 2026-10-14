@@ -41,6 +41,7 @@ from temporalio.claude_agent_sdk import (
     SegmentOutput,
     ToolOutcome,
 )
+from temporalio.claude_agent_sdk._events import emit
 from temporalio.claude_agent_sdk.testing import Final, HistoryItem, ScriptedClaude, ToolCall
 from temporalio.client import Client
 from temporalio.testing import ActivityEnvironment, WorkflowEnvironment
@@ -58,6 +59,7 @@ from scadbuddy_durable.session.runner import (
     PLUGIN_REJECTION,
     VIEW_IMAGES_TOOL,
     VIEW_TOOL_IMAGES_TOOL,
+    HeldText,
     Image,
     ScadBuddyRunner,
     TurnSettings,
@@ -675,9 +677,10 @@ class Refusing:
     """make_runner for the runner: a segment on a credential in ``refused`` raises
     ``error``; any other answers. Records each runner's token."""
 
-    def __init__(self, refused: set[str], error: BaseException) -> None:
+    def __init__(self, refused: set[str], error: BaseException, said: str | None = None) -> None:
         self.refused = refused
         self.error = error
+        self.said = said
         self.tokens: list[str] = []
         self.scripted = ScriptedClaude(lambda prompt, _: Final("done"), cost_per_segment=0.25)
 
@@ -685,10 +688,13 @@ class Refusing:
         token = kwargs["env"]["ANTHROPIC_AUTH_TOKEN"]
         self.tokens.append(token)
         if token in self.refused:
-            error = self.error
+            error, said = self.error, self.said
 
             class Raises:
                 async def run(self, inp: SegmentInput, attempt: int) -> SegmentOutput:
+                    if said is not None:
+                        # As Claude Code answers a refused request: the notice, then the error.
+                        emit({"type": "text", "text": said})
                     raise error
 
             return Raises()
@@ -729,6 +735,50 @@ async def test_a_refused_credential_falls_back_to_the_next(
         finally:
             await handle.terminate()
     assert refusing.tokens == [TOKEN, TOKEN + "-second"]
+
+
+async def test_a_refused_credentials_notice_never_reaches_the_transcript(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """#2945: the refused attempt's "session limit" text is dropped; the turn's answer,
+    on the next credential, is what the session log holds."""
+    await _two_credentials(agent_db)
+    notice = "You've hit your session limit · resets 6pm (UTC)"
+    refusing = Refusing(
+        {TOKEN}, _result_error("API Error: 429 rate limited", status=429), said=notice
+    )
+    runner = ScadBuddyRunner(connect, KEK, cwd=str(tmp_path), make_runner=refusing)
+    async with running(temporal_env, connect, runner) as (client, queue):
+        sid = await insert_session(agent_db)
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "hi")
+            assert await settled(connect, sid) == "idle"
+        finally:
+            await handle.terminate()
+    texts = [e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"]
+    assert texts == ["done"]
+    assert refusing.tokens == [TOKEN, TOKEN + "-second"]
+
+
+async def test_a_first_credentials_answer_still_reaches_the_transcript(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """#2945: a non-last credential's text is held, and flushed when it answers."""
+    await _two_credentials(agent_db)
+    refusing = Refusing(set(), _result_error("API Error: 429 rate limited", status=429))
+    runner = ScadBuddyRunner(connect, KEK, cwd=str(tmp_path), make_runner=refusing)
+    async with running(temporal_env, connect, runner) as (client, queue):
+        sid = await insert_session(agent_db)
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "hi")
+            assert await settled(connect, sid) == "idle"
+        finally:
+            await handle.terminate()
+    texts = [e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"]
+    assert texts == ["done"]
+    assert refusing.tokens == [TOKEN]
 
 
 async def test_a_failure_of_the_request_does_not_try_another_credential(
@@ -997,3 +1047,18 @@ async def test_an_error_that_names_max_budget_usd_fails_the_turn(
             await handle.terminate()
     [error] = [e for e in await events(agent_db, sid) if e["type"] == "error"]
     assert error["code"] == "turn_failed"
+
+
+def test_held_text_goes_out_in_order_before_the_next_other_event() -> None:
+    """#2945: text is only held, never reordered; a drop loses only what is held."""
+    out: list[dict[str, Any]] = []
+    held = HeldText(out.append)
+    held({"type": "text", "text": "a"})
+    held({"type": "tool_call", "id": "1"})
+    held({"type": "text", "text": "b"})
+    assert out == [{"type": "text", "text": "a"}, {"type": "tool_call", "id": "1"}]
+    held.drop()
+    held.flush()
+    held({"type": "text", "text": "c"})
+    held.flush()
+    assert [e.get("text", e["type"]) for e in out] == ["a", "tool_call", "c"]

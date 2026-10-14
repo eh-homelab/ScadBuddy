@@ -75,6 +75,7 @@ from scadbuddy.bambuddy.library_objects import (
     read_library_objects,
 )
 from scadbuddy.bambuddy.library_view import plate_glb
+from scadbuddy.bambuddy.print_source import ReadOutOfMemoryError
 from scadbuddy.bambuddy.project_file import (
     ProjectFile,
     ProjectFileRequest,
@@ -899,6 +900,11 @@ async def get_output_preview(
             raise ApiError(status.HTTP_404_NOT_FOUND, str(error)) from None
         except UnreadableObjectsError as error:
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+        except MemoryError:
+            # #2767: the refusal a library file's plate gives for the same read (library_view.py).
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, str(ReadOutOfMemoryError())
+            ) from None
         return Response(data, media_type=GLB_MEDIA_TYPE)
     path = outputs.directory(output_id) / PREVIEW_NAME
     if not path.is_file():

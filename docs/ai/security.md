@@ -705,12 +705,15 @@ A turn that loads an allowed pin also gets two more things:
   name in `allowed-tools` or `tools` (`review.builtin_tools`, for example `Bash`, `Read`
   or `Write`). They are offered beside the run's own `Skill` and `Agent` (`run.ts`
   `builtinTools`). They are not ScadBuddy's tools, so a model's call to one is
-  `outward`, and in a session it parks for a human. Claude Code's `WebFetch` fetches
-  inside Claude Code, outside the agent's egress checks, so a `PreToolUse` hook
-  (`harness/webFetchEgress.ts`) runs `assertHostAllowed` on its URL first, refuses the
-  pod's loopback as well (the agent's own services), and denies a call that fails,
-  approved or not. Claude Code resolves the name again when it connects, so a name
-  re-pointed in between is not caught (#2684). A durable session gets the same built-ins
+  `outward`, and in a session it parks for a human. Claude Code's own `WebFetch` is never
+  offered (#2684): it fetches inside Claude Code, outside the agent's egress checks, and
+  resolves the name again as it connects. A package that names it gets the agent's
+  (`builtins/web.ts`, the `builtin` server's `WebFetch`, `builtins/server.ts`
+  `classicBuiltinServer`), which connects only to the addresses its check passed, on every
+  hop, and refuses the pod's loopback (the agent's own services). The `PreToolUse` hook
+  `harness/webFetchEgress.ts` stays as a second line: a Claude Code `WebFetch` call, should
+  one ever be offered, is checked the same way first and denied, approved or not. WebSearch
+  stays Claude Code's: the API searches, not this pod. A durable session gets the same built-ins
   as the agent's `builtin` turn tools (#2393, [operating.md](operating.md)), on the
   session workspace instead of the pod's disk, each parked the same way; its `WebFetch`
   connects only to the addresses it checked, on every hop.
@@ -795,9 +798,12 @@ so a name re-pointed between check and connect reaches nothing new.
 - **Limits.** One deadline for the whole request, redirects included: `timeout_ms`,
   default 30 s, at most 120 s. At most 5 redirects. The body is read up to 20 MiB and
   returned inline up to 1 MiB (text only, cut on a UTF-8 boundary); a longer or binary
-  body is saved under the session's directory (`work/sessions/<id>/http/`, the 10
-  newest kept) and read in pages of up to 1 MiB, text as text and anything else as
-  base64. The UI can fetch a saved body whole (#1292,
+  body is saved with its session in Postgres (`ai_session_http_bodies`, the 10 newest
+  kept, deleted with the session; #2374), so any replica reads it, after a deploy
+  too. A flow run's, which has no session, is kept on the pod that ran the call
+  (`<state>/durable-turns/flow-<run>/http/`, swept with the run). Either is read in
+  pages of up to 1 MiB, text as text and anything else as base64. Like
+  `ai_session_blobs`, the bytes are plaintext. The UI can fetch a saved body whole (#1292,
   `GET /api/v1/ai/sessions/:id/http/:saved`): a UI read, gated by whether the
   principal may see the session, by the UUID the audit row names and nothing else.
   It is untrusted bytes from whatever server answered, so it is never rendered:

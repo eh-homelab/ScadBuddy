@@ -12,6 +12,7 @@ import type { AuditEntry, AuditSink } from '../src/audit/log.js'
 import {
   HTTP_READ_TOOL,
   HTTP_READ_TOOL_NAME,
+  dirBodies,
   HTTP_TOOL,
   HTTP_TOOL_NAME,
   type HttpRequestArgs,
@@ -70,7 +71,7 @@ class MemoryAudit implements AuditSink {
 
 async function context(overrides: Partial<HttpRequestContext> = {}): Promise<HttpRequestContext & { audit: MemoryAudit }> {
   return {
-    saveDir: path.join(await mkdtemp(path.join(os.tmpdir(), 'sb-http-')), 'http'),
+    saved: dirBodies(path.join(await mkdtemp(path.join(os.tmpdir(), 'sb-http-')), 'http')),
     secrets: () => [SECRET, PLUGIN_TOKEN],
     audit: new MemoryAudit(),
     actor: { kind: 'browser', id: 'user', label: 'User' },
@@ -363,7 +364,7 @@ describe('a saved body in the audit (#1292)', () => {
     expect(ctx.audit.entries).toHaveLength(2)
     expect(JSON.parse(ctx.audit.entries[0]!.inputSummary!)).not.toHaveProperty('saved')
     expect(JSON.parse(ctx.audit.entries[1]!.inputSummary!)).toMatchObject({ status: 200, saved })
-    expect(await savedBody(ctx.saveDir, saved)).toMatchObject({ meta: { content_type: 'application/octet-stream', size_bytes: 4 } })
+    expect(await savedBody(ctx.saved, saved)).toMatchObject({ meta: { content_type: 'application/octet-stream', size_bytes: 4 } })
   })
 
   it('names nothing when the body was returned inline', async () => {
@@ -378,7 +379,7 @@ describe('a saved body in the audit (#1292)', () => {
     // A directory that cannot be made: its parent is a regular file.
     const file = path.join(await mkdtemp(path.join(os.tmpdir(), 'sb-http-')), 'not-a-dir')
     await writeFile(file, '')
-    const ctx = await context({ saveDir: path.join(file, 'http') })
+    const ctx = await context({ saved: dirBodies(path.join(file, 'http')) })
     await expect(runHttpRequest(args({ url }), ctx)).rejects.toThrow()
     expect(ctx.audit.entries).toHaveLength(1)
     expect(JSON.parse(ctx.audit.entries[0]!.inputSummary!)).toMatchObject({ status: 200, size_bytes: 2 })
@@ -387,8 +388,8 @@ describe('a saved body in the audit (#1292)', () => {
 
   it('reads back only a saved response id in its directory', async () => {
     const ctx = await context()
-    expect(await savedBody(ctx.saveDir, '../../etc/passwd')).toBeUndefined()
-    expect(await savedBody(ctx.saveDir, '00000000-0000-4000-8000-000000000000')).toBeUndefined()
+    expect(await savedBody(ctx.saved, '../../etc/passwd')).toBeUndefined()
+    expect(await savedBody(ctx.saved, '00000000-0000-4000-8000-000000000000')).toBeUndefined()
   })
 })
 

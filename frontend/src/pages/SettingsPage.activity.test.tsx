@@ -5,7 +5,7 @@ import { renderPage } from '../test/utils'
 import { SettingsPage } from './SettingsPage'
 
 const region = () => {
-  const section = screen.getByText('Administration', { selector: 'h2' }).closest('section')
+  const section = screen.getByText('Administration', { selector: 'h2 button' }).closest('section')
   if (!section) throw new Error('no Administration section')
   return section
 }

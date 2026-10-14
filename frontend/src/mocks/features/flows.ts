@@ -6,6 +6,7 @@ import type {
   FlowHostInterface,
   FlowScriptProblem,
   FlowPending,
+  FlowQueueEntry,
   FlowResetPoints,
   FlowResetPreview,
   FlowRun,
@@ -165,7 +166,10 @@ function defaults(): FlowRun[] {
     // narrowed by it, waiting at the person as a proposal.
     run('run-escalated', {
       status: 'waiting',
-      steps: [step(1, 'queue_print', 'running', false), step(2, 'arrange', 'running', false)],
+      steps: [
+        { ...step(1, 'queue_print', 'running', false), call_id: 'call-parent' },
+        { ...step(2, 'arrange', 'running', false), call_id: 'call-narrowed' },
+      ],
       waiting_on: [
         {
           call_id: 'call-parent',
@@ -295,6 +299,45 @@ const offline = new Set<string>()
 /** Runs that exist only as an accepted start (`starting`, no row yet). */
 const starting = new Set<string>()
 let requests: { path: string; key: string | null; body: Record<string, unknown> }[] = []
+/** #2482: each run's child sessions' calls, as the agent's queue read lists them. */
+const children = new Map<string, Extract<FlowQueueEntry, { source: 'child' }>[]>()
+function defaultChildren(): void {
+  children.set('run-escalated', [
+    {
+      source: 'child',
+      id: 'durable:sess-child:wr-child:toolu_1',
+      kind: 'approval',
+      session_id: 'sess-child',
+      tool: 'print_output',
+      summary: 'print box on printer 5',
+      input_hash: 'a'.repeat(64),
+      hop: 'person',
+      hop_until: null,
+      reason: 'printer 5 is not in the grant',
+      hops: [
+        { hop: 'parent', action: 'parked', actor: 'flow', at: at(2), reason: 'printer 5 is not in the grant' },
+        { hop: 'parent', action: 'pass_up', actor: 'session:sess-escalated', at: at(3) },
+      ],
+      created_at: at(2),
+      expires_at: at(60),
+      expiring: false,
+      step: { seq: 3, fn: 'ask_session' },
+      reasoning: 'Printer 5 is idle, so I will print the box there.',
+    },
+  ])
+}
+defaultChildren()
+
+/** Tests: a run's child sessions' calls as the mock lists them now (#2482). */
+export function childEntries(id: string): Extract<FlowQueueEntry, { source: 'child' }>[] {
+  return children.get(id) ?? []
+}
+
+/** Tests: a run's child sessions' calls in its queue (#2482). */
+export function setFlowRunChildren(id: string, next: Extract<FlowQueueEntry, { source: 'child' }>[]): void {
+  children.set(id, next)
+}
+
 /** #2477: each run's images, as the view lists them. */
 const images = new Map<string, FlowRunView['images']>()
 /** One grey pixel, what every image route answers. */
@@ -309,6 +352,8 @@ export function reset(): void {
   offline.clear()
   starting.clear()
   images.clear()
+  children.clear()
+  defaultChildren()
   states.clear()
   requests = []
 }
@@ -873,6 +918,37 @@ export const handlers = [
   ),
   http.post('/api/v1/workflow-runs/:id/answer', respond(() => 'answered')),
   http.post('/api/v1/workflow-runs/:id/decide', respond((body) => (body['approved'] ? 'approved' : 'denied'))),
+  // #2482: the agent's read of a run's one queue (agent src/flows/queue.ts).
+  http.get('/api/v1/ai/flow-runs/:id/queue', ({ params }) => {
+    const found = runs.find((r) => r.id === params['id'])
+    if (!found) return HttpResponse.json({ detail: `no flow run ${String(params['id'])}` }, { status: 404 })
+    const own: FlowQueueEntry[] = found.waiting_on.map((w) => {
+      const s = found.steps.find((x) => x.call_id === w.call_id)
+      return {
+        source: 'flow',
+        id: `flow:${found.id}:${found.workflow_run_id}:${w.call_id}`,
+        kind: w.kind,
+        call_id: w.call_id,
+        fn: w.fn,
+        prompt: w.prompt ?? null,
+        since: w.since ?? null,
+        hop: w.hop ?? null,
+        hop_until: w.hop_until ?? null,
+        reason: w.reason ?? null,
+        proposed: w.proposed ?? false,
+        hops: w.hops ?? [],
+        step: s ? { seq: s.seq, fn: s.fn } : null,
+      }
+    })
+    const session = 'session' in found.started_by ? found.started_by.session : undefined
+    return HttpResponse.json({
+      run_id: found.id,
+      name: found.name,
+      status: found.status,
+      starter_session: typeof session === 'string' ? session : null,
+      entries: [...own, ...(children.get(found.id) ?? [])],
+    })
+  }),
   // #2482: a parent's proposal beside the call it narrows, for the person only.
   http.get('/api/v1/workflow-runs/:id/proposals/:callId', ({ params }) => {
     const found = runs.find((r) => r.id === params['id'])

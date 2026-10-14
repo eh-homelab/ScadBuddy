@@ -9,7 +9,9 @@ import { KEK_BYTES, type Kek, openBytes, type RandomSource, SealError, sealBytes
 // payload of a workflow `session-<uuid>` or `flow-<uuid>` is sealed under that subject's
 // own data key, a row of `ai_payload_keys`; deleting the row (forgetSubject) makes every
 // copy of the subject's payloads undecryptable: history, Visibility, Archival. Other
-// workflows' payloads (renders, prints, commands) pass through as they are.
+// workflows' payloads (renders, prints, commands) pass through as they are. A session's
+// background task (`bgtask-<session uuid>-<task id>`, background/service.ts) is sealed
+// under its session's key, so forgetting the session forgets its tasks' payloads too.
 //
 // The subject comes from the serialization context on encode (the workflow the payload
 // belongs to, `@temporalio/common` 1.24 gives it to every client and worker call), and
@@ -46,9 +48,14 @@ const SUBJECT = /^(session|flow)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 
+const BACKGROUND_TASK = /^bgtask-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-[0-9a-f]{8}$/
+
 /** The subject a workflow ID names, or undefined for a workflow that carries no conversation. */
 export function subjectOf(workflowId: string | undefined): string | undefined {
-  return workflowId !== undefined && SUBJECT.test(workflowId) ? workflowId : undefined
+  if (workflowId === undefined) return undefined
+  if (SUBJECT.test(workflowId)) return workflowId
+  const task = BACKGROUND_TASK.exec(workflowId)
+  return task ? `session-${task[1]}` : undefined
 }
 
 /** The context a subject's data key is sealed in under the KEK. */

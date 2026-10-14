@@ -29,6 +29,7 @@ from temporalio.client import ScheduleActionExecutionStartWorkflow, WorkflowFail
 from temporalio.exceptions import ApplicationError
 from temporalio.service import RPCError, RPCStatusCode
 
+from scadbuddy import main
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.paths import BUILTIN_PREFIX, DataPaths
 from scadbuddy.core.settings import Settings
@@ -36,7 +37,6 @@ from scadbuddy.main import create_app
 from scadbuddy.render.previews import PreviewScheduler
 from scadbuddy.render.runner import OpenSCADError
 from scadbuddy.workflows import housekeeping
-from scadbuddy.workflows.housekeeping import prune_schedule_id_for
 from scadbuddy.workflows.previews import (
     PREVIEW_BACKFILL_WORKFLOW,
     REFRESH_ACTIVITY,
@@ -733,15 +733,27 @@ def test_previews_off_leaves_no_backfill_schedule(
 ) -> None:
     monkeypatch.setattr(housekeeping, "BOOT_TRIGGER_WINDOW", 0.0)
     queue = settings.temporal_task_queue_library
+    # The first boot's prune run is still open when the second boots, as on a slow CI
+    # runner: its worker stopped mid-sweep. The second boot then starts no run of its
+    # own (#2975: never one beside an open one), so a wait for its run never ends.
+    prune = main._prune_jobs_logged
+    held = True
+
+    async def prune_jobs(state: AppState) -> None:
+        if held:
+            await asyncio.Event().wait()
+        await prune(state)
+
+    monkeypatch.setattr(main, "_prune_jobs_logged", prune_jobs)
     app, booted = _boot(settings, StubRender(paths))
     with TestClient(app) as client:
         backfilled(client, booted)
+    held = False
 
     app, off = _boot(settings.model_copy(update={"preview_renders": False}), StubRender(paths))
     with TestClient(app) as client:
-        # The preview Schedule is set up after the housekeeping ones (final review M3):
-        # once the prune's has this boot's run, the preview one is deleted shortly.
-        client.portal.call(_schedule_runs, off, prune_schedule_id_for(queue), 2)  # type: ignore[union-attr]
+        # The preview Schedule is set up after the housekeeping ones (final review M3),
+        # and deleted then: wait for that, not for a run the prune's may not start.
         client.portal.call(_schedule_gone, off, preview_schedule_id_for(queue))  # type: ignore[union-attr]
 
 

@@ -89,6 +89,8 @@ interface Props {
   diagnostic: AnalyzerDiagnostic
   fix: AnalyzerFix
   scopes: ScopeRef[]
+  /** Whether decisions are stored, and the report's reason when not (#2927). */
+  decisions: { available: boolean; reason: string | null }
   onApplied: () => void
   onClose: () => void
 }
@@ -115,6 +117,7 @@ export function FixPreviewCard({
   diagnostic,
   fix,
   scopes: offered,
+  decisions,
   onApplied,
   onClose,
 }: Props) {
@@ -193,9 +196,16 @@ export function FixPreviewCard({
       className="mt-2 space-y-2 rounded-[6px] border border-line bg-surface-2 p-2 text-[12px] text-muted"
     >
       <p className="text-ink">{fix.description}</p>
-      {scopes.length === 0 && (
+      {/* #2927: no scope is two cases. Without a store, the report says why. With one,
+          no scope this finding can be accepted at fits, and "not stored" would be false. */}
+      {scopes.length === 0 && !decisions.available && (
         <p data-testid="fix-no-store" className="text-faint">
-          Decisions are not stored here, so this fix can be previewed but not applied.
+          {decisions.reason ?? 'Decisions are not stored here.'} This fix can be previewed but not applied.
+        </p>
+      )}
+      {scopes.length === 0 && decisions.available && (
+        <p data-testid="fix-no-scope" className="text-faint">
+          No scope applies to this finding, so this fix can be previewed but not applied.
         </p>
       )}
       {scopes.length > 0 && (
