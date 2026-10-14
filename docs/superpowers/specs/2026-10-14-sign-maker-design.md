@@ -188,22 +188,23 @@ types; the coaster itself has neither.
   "units": {"display": "mm"},
   "bed": {"printer": "A1 mini", "w": 180, "h": 180},
   "facedown": true,
-  "plate": {"shape": "circle", "w": 99, "h": 99, "colour": "#FFFFFF", "height": 3,
+  "thickness": {"plate": 3, "text": 0.6, "shape": 0.4, "svg": 0.4, "hole": 1},
+  "plate": {"shape": "circle", "w": 99, "h": 99, "colour": "#FFFFFF",
             "border": {"enabled": true, "weight": "medium", "width": 2.0, "offset": 0, "colour": "#000000"},
             "svg": null},
   "elements": [
     {"id": "e1", "type": "vector", "name": "Mahjong art", "layers": [
        {"colour": "#050504", "svg": "layers/e1-0.svg"}, {"colour": "#E7232C", "svg": "layers/e1-1.svg"}],
      "transform": {"x": 0, "y": 8, "w": 90.5, "h": 60.4, "rotate": 0, "flip_x": false},
-     "z": {"base": 2, "height": 1}, "lock": false},
+     "depth": 1, "lock": false},
     {"id": "e2", "type": "text", "text": "MAHJONG", "font": {"family": "Roboto", "file": "fonts/Roboto-Bold.ttf", "weight": 700, "italic": false},
      "size": 14, "align": "center", "line_height": 1.16, "letter_spacing": 0, "curve": null, "colour": "#000000",
-     "transform": {"x": 0, "y": -15, "rotate": 0, "flip_x": false}, "z": {"base": 2.4, "height": 0.6},
+     "transform": {"x": 0, "y": -15, "rotate": 0, "flip_x": false},
      "expose": {"text": "title_text", "colour": "title_colour"}},
     {"id": "h1", "type": "hole", "kind": "inside", "position": "single_top", "size": "small", "d": 5,
      "transform": {"x": 0, "y": 42}}
   ],
-  "parameters": {"plate_colour": {"from": "plate.colour"}, "plate_height": {"from": "plate.height", "min": 0.6, "max": 10}}
+  "parameters": {"plate_colour": {"from": "plate.colour"}, "plate_height": {"from": "thickness.plate", "min": 0.6, "max": 10}}
 }
 ```
 
@@ -222,9 +223,12 @@ types; the coaster itself has neither.
 - **Coordinates:** the origin is the plate's centre, X right, Y up, in mm. Rotation is
   degrees counter-clockwise. The importer converts Fabric pixels with the editor's own
   scale (Appendix A.2).
-- **Heights:** `z.base` is where the element starts and `z.height` its thickness. The
-  defaults come from the document's per-type `thickness` block, as MakerWorld's do, and
-  an element may override them.
+- **Heights,** as MakerWorld stores them: one thickness per element type
+  (`thickness`, MakerWorld's `backdropHeight`, `textHeight`, `shapeHeight`,
+  `svgHeight`, `holeHeight`; icons use `text`, the border uses `shape`). An element
+  may override its own with `depth` (MakerWorld's `data.depth`). Each element's z range
+  is derived when the sign is compiled, never stored, so changing a thickness moves
+  every element of that type.
   - **Facedown** (`facedown: true`, MakerWorld's `flatMode`) sinks every element into
     the plate: its top is flush with the plate's top and the sign prints face down.
   - **No plate** (`plate.shape: "none"`, MakerWorld's `nonePlateMode`) leaves only the
@@ -326,7 +330,7 @@ These rules keep every colour attributed and every volume single-coloured:
   MakerWorld's build transform (§2.3), so the face prints on the bed with no slicer
   step. The border inlays the same way, to its own depth (§2.3 measured 0.4 mm).
 - **Without facedown, elements stand on the plate's top face** (z from
-  `plate.height` to `plate.height + z.height`).
+  `thickness.plate` to `thickness.plate` plus the element's depth).
 
 ### 5.3 Text
 
