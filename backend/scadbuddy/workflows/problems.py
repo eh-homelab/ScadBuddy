@@ -15,7 +15,7 @@ OPERATION_UNEXPECTED_DETAIL = "ScadBuddy failed unexpectedly while doing this; s
 
 #: An unexpected failure of an operation's effect (review #1063 second review 1): a crash
 #: or timeout may come after Bambuddy took the write, so it may have been done.
-def operation_unexpected_running_detail(where: str = "Bambuddy") -> str:
+def operation_unexpected_running_detail(where: str) -> str:
     """``where``: what to check, the kind's (``OperationKind.where``, #1174)."""
     return (
         "ScadBuddy failed unexpectedly while doing this, so it may have been done. "
@@ -23,7 +23,6 @@ def operation_unexpected_running_detail(where: str = "Bambuddy") -> str:
     )
 
 
-OPERATION_UNEXPECTED_RUNNING_DETAIL = operation_unexpected_running_detail()
 #: An operation's check that timed out as an activity (#2065): its own budget
 #: (``CHECK_BUDGET_SECONDS``) answers a slow check as a refusal, so this is the worker
 #: not answering at all, not the check being slow. Nothing was written.
@@ -42,7 +41,7 @@ OPERATION_CANCELLED = PrintRunError(
 
 #: An operation cancelled while its effect ran (review #1063 2): the effect may have
 #: happened before the cancel did. ``where`` is what to check, the kind's (#1174).
-def operation_cancelled_running(where: str = "Bambuddy") -> PrintRunError:
+def operation_cancelled_running(where: str) -> PrintRunError:
     return PrintRunError(
         status=409,
         title="Conflict",
@@ -55,7 +54,7 @@ def operation_cancelled_running(where: str = "Bambuddy") -> PrintRunError:
 
 #: An operation whose execution ended without recording an outcome (review #1063 1):
 #: terminated in the Temporal UI, say. Its effect may or may not have happened.
-def operation_lost(where: str = "Bambuddy") -> PrintRunError:
+def operation_lost(where: str) -> PrintRunError:
     return PrintRunError(
         status=500,
         title="Internal Server Error",
@@ -64,10 +63,6 @@ def operation_lost(where: str = "Bambuddy") -> PrintRunError:
             f"have been done. Check {where} before trying again."
         ),
     )
-
-
-OPERATION_CANCELLED_RUNNING = operation_cancelled_running()
-OPERATION_LOST = operation_lost()
 
 
 def problem_of(error: BaseException, *, unexpected: str = UNEXPECTED_DETAIL) -> PrintRunError:

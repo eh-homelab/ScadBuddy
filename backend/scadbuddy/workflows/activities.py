@@ -157,6 +157,24 @@ DETERMINISTIC = (
 )
 
 
+class IncompleteRenderError(Exception):
+    """The main render left a raw 3MF that is not a whole zip (a full disk, say). Not in
+    `DETERMINISTIC`, so the attempt is retried: a later stage's `zipfile.BadZipFile` on
+    a published 3MF is then a bad render, not a short write (#2997 review)."""
+
+
+def require_whole_3mf(path: Path) -> None:
+    """Raise `IncompleteRenderError` unless ``path`` opens as a zip whose members all
+    read back intact."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            broken = archive.testzip()
+    except (OSError, zipfile.BadZipFile, EOFError) as error:
+        raise IncompleteRenderError(f"{path.name} is not a whole 3MF: {error}") from None
+    if broken is not None:
+        raise IncompleteRenderError(f"{path.name} is not a whole 3MF: {broken} is corrupt")
+
+
 def _deterministic(error: Exception) -> ApplicationError:
     """Non-retryable, named by its own type: the workflow's failure says which stage
     raised what (`pipelines._failure_of`)."""
@@ -607,6 +625,8 @@ class RenderActivities:
             raise _failure(error) from None
         except AssetUnavailableError as error:
             raise _unavailable(error, missing) from None
+        # Never published short: what `render_solids` reads is then whole.
+        await asyncio.to_thread(require_whole_3mf, d.blobs.dir_for(req.piece_key) / RAW_RENDER_NAME)
         await _heartbeating(
             asyncio.create_task(
                 d.blobs.publish_fresh(

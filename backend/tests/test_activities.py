@@ -58,6 +58,7 @@ from scadbuddy.workflows import activities
 from scadbuddy.workflows import activities as activities_module
 from scadbuddy.workflows.activities import (
     PIECE_NAME,
+    IncompleteRenderError,
     RenderActivities,
     _heartbeating,
     _main_result,
@@ -340,6 +341,29 @@ async def test_a_stage_that_fails_the_same_every_time_is_not_retried(
     assert raised.value.non_retryable
     assert raised.value.type == type(error).__name__
     assert raised.value.message == str(error)
+
+
+async def test_a_main_render_that_left_a_short_3mf_is_retried_not_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2997 review: a truncated raw 3MF (a full disk, say) fails the attempt with a
+    retryable error, so `render_solids` never reads one and its parse errors stay a bad
+    render."""
+    acts = RenderActivities(worker_deps(tmp_path, demo_paths(tmp_path)))
+    env = ActivityEnvironment()
+    req = piece_request()
+    prepared = await env.run(acts.prepare, req)
+    real_main = jobs._render_main
+
+    async def short(*args: Any, **kwargs: Any) -> Any:
+        output = await real_main(*args, **kwargs)
+        raw = acts.deps.blobs.dir_for(req.piece_key) / jobs.RAW_RENDER_NAME
+        raw.write_bytes(raw.read_bytes()[:100])
+        return output
+
+    monkeypatch.setattr(jobs, "_render_main", short)
+    with pytest.raises(IncompleteRenderError):
+        await env.run(acts.render_main, req, prepared)
 
 
 async def test_a_failed_preview_keeps_its_openscad_diagnostics(tmp_path: Path) -> None:

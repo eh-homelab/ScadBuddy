@@ -942,7 +942,7 @@ async def _print_upkeep(state: AppState, stop: asyncio.Event) -> None:
     # timeout on a slow Temporal.
     handoff = asyncio.create_task(_hand_off_watches(state, client))
     try:
-        where = {name: kind.where or "Bambuddy" for name, kind in ops.kinds.items()}
+        where = {name: kind.where for name, kind in ops.kinds.items()}
         await _end_lost_runs_until(client, state.print_runs.store, ops.store, stop, where)
     finally:
         # A row whose follow did not start stays for the next boot.

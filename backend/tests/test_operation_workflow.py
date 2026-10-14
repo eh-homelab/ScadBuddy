@@ -39,10 +39,10 @@ from scadbuddy.workflows.operation_models import (
 from scadbuddy.workflows.print_models import FAILED, REFUSED
 from scadbuddy.workflows.problems import (
     OPERATION_CANCELLED,
-    OPERATION_CANCELLED_RUNNING,
     OPERATION_CHECK_TIMED_OUT,
     OPERATION_UNEXPECTED_DETAIL,
-    OPERATION_UNEXPECTED_RUNNING_DETAIL,
+    operation_cancelled_running,
+    operation_unexpected_running_detail,
     problem_of,
 )
 from tests.support.temporal import temporal_client
@@ -229,8 +229,8 @@ async def test_an_unexpected_effect_error_says_the_effect_may_have_happened(
     answer = await start(client, worker, arg)
     assert answer.operation is not None and answer.operation.error is not None
     assert answer.operation.error.status == 500
-    assert answer.operation.error.detail == OPERATION_UNEXPECTED_RUNNING_DETAIL
-    assert OPERATION_UNEXPECTED_RUNNING_DETAIL != OPERATION_UNEXPECTED_DETAIL
+    assert answer.operation.error.detail == operation_unexpected_running_detail("Bambuddy")
+    assert operation_unexpected_running_detail("Bambuddy") != OPERATION_UNEXPECTED_DETAIL
 
 
 async def test_the_run_activity_takes_the_kinds_attempts(
@@ -434,7 +434,7 @@ async def test_a_cancel_during_the_run_says_the_effect_may_have_happened(
     finally:
         fake.hold.set()
     assert answer.operation is not None
-    assert answer.operation.error == OPERATION_CANCELLED_RUNNING
+    assert answer.operation.error == operation_cancelled_running("Bambuddy")
     assert (await ended(client, arg)).status == "failed"
 
 
