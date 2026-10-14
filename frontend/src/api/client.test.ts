@@ -1627,3 +1627,27 @@ describe('MEDIA_THUMBNAIL_VERSION (#1691)', () => {
     })
   })
 })
+
+describe('queuePrintBatch (#2951)', () => {
+  it('calls no progress once aborted, though a 202 arrived (#2718 review)', async () => {
+    const run = new AbortController()
+    const batch = { id: 'b-1', status: 'open', items: [] }
+    // The dialog goes while the 202's body is read.
+    const fetched = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 202,
+      json: async () => {
+        run.abort()
+        return { batch, next_position: 1 }
+      },
+    } as unknown as Response)
+    const onProgress = vi.fn()
+    try {
+      await expect(api.queuePrintBatch('b-1', onProgress, run.signal)).rejects.toThrow()
+      expect(onProgress).not.toHaveBeenCalled()
+      expect(fetched).toHaveBeenCalledTimes(1)
+    } finally {
+      fetched.mockRestore()
+    }
+  })
+})

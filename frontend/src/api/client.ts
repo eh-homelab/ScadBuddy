@@ -1878,7 +1878,8 @@ export const api = {
       )
       if (answer.status !== 202) return answer.body as PrintBatch
       const progress = answer.body as BatchQueueProgress
-      onProgress?.(progress.batch)
+      // Not once the dialog is gone, though the 202 arrived (#2718 review).
+      if (!signal?.aborted) onProgress?.(progress.batch)
       from = progress.next_position
     }
   },
