@@ -1,6 +1,7 @@
 import { act, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { api } from '../../api/client'
 import { resetBambuddyLinks, setBambuddyLinks } from '../../lib/bambuddyLinks'
 import { PRINT_QUEUE, setPrintQueue } from '../../mocks/features/printQueue'
 import { server } from '../../mocks/server'
@@ -8,6 +9,7 @@ import { renderPage } from '../../test/utils'
 import { PrintQueue, QUEUE_POLL_MS, QUEUE_SHOWN } from './PrintQueue'
 
 afterEach(() => {
+  vi.restoreAllMocks()
   resetBambuddyLinks()
   vi.useRealTimers()
   Object.defineProperty(document, 'hidden', { value: false, configurable: true })
@@ -104,9 +106,12 @@ describe('PrintQueue (#2351)', () => {
         ),
       ),
     )
+    const read = vi.spyOn(api, 'getPrintQueue')
     renderPage(<PrintQueue />)
+    // Wait for the read to be refused and handled, not for a guess at how long that takes.
+    await waitFor(() => expect(read).toHaveBeenCalled())
     await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 50))
+      await read.mock.results[0]!.value.catch(() => {})
     })
     expect(screen.queryByTestId('print-queue')).toBeNull()
   })
