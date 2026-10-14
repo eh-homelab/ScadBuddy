@@ -295,56 +295,84 @@ class ContentStore:
         """The object's bytes, sha-checked at the end. On `BlobMissingError` the index
         row is kept; a caller that gets it should `forget` the key. With `downloads`
         (#2788) a blob another process put or got is read from there, and one downloaded
-        here is kept there."""
+        here is kept there. Only a bad download is `BlobCorruptError`: a cached copy
+        that is not its sha is dropped and the blob downloaded, in this same call, so
+        a fault in the cache never makes a caller forget or delete good content."""
         downloads = self.downloads
         if downloads is not None:
-            cached = await asyncio.to_thread(downloads.open, ref.sha256, what="blob")
-            if cached is not None:
-                async with aclosing(self._read_cached(downloads, ref, cached)) as chunks:
+            copy = await asyncio.to_thread(
+                downloads.private_copy, ref.sha256, downloads.root, what="blob"
+            )
+            if copy is not None:
+                async with aclosing(self._read_copy(copy)) as chunks:
                     async for chunk in chunks:
                         yield chunk
+                self._count("get", "ok")
                 return
-            try:
-                fill_cm = downloads.fill(ref.sha256)
-                fill = await asyncio.to_thread(fill_cm.__enter__)
-            except OSError:
-                logger.warning("could not start keeping a blob", extra={"sha256": ref.sha256})
-            else:
-                keeping = True
-                try:
-                    async with aclosing(self._download(ref)) as chunks:
-                        async for chunk in chunks:
-                            if keeping:
-                                try:
-                                    await asyncio.to_thread(fill.write, chunk)
-                                except TooLargeError:
-                                    keeping = False  # read on, keep nothing
-                            yield chunk
-                    if keeping:
-                        await asyncio.to_thread(fill.commit)
-                finally:
-                    await asyncio.to_thread(fill_cm.__exit__, None, None, None)
-                return
+            async with aclosing(self._download_keeping(downloads, ref)) as chunks:
+                async for chunk in chunks:
+                    yield chunk
+            return
         async with aclosing(self._download(ref)) as chunks:
             async for chunk in chunks:
                 yield chunk
 
-    async def _read_cached(
-        self, downloads: DownloadCache, ref: BlobRef, handle: BinaryIO
-    ) -> AsyncGenerator[bytes]:
-        digest = hashlib.sha256()
+    @staticmethod
+    async def _read_copy(copy: BinaryIO) -> AsyncGenerator[bytes]:
+        """A private, already-checked copy's bytes, closing it however the read ends."""
         try:
-            while chunk := await asyncio.to_thread(handle.read, 1024 * 1024):
-                digest.update(chunk)
+            while chunk := await asyncio.to_thread(copy.read, 1024 * 1024):
                 yield chunk
         finally:
-            await asyncio.to_thread(handle.close)
-        if digest.hexdigest() != ref.sha256:
-            self._count("get", "corrupt")
-            # Gone, so the retry this error asks for downloads it again.
-            await asyncio.to_thread(downloads.discard, ref.sha256)
-            raise BlobCorruptError(f"the cached copy of {ref.sha256} is not that sha256")
-        self._count("get", "ok")
+            await asyncio.to_thread(copy.close)
+
+    async def _download_keeping(
+        self, downloads: DownloadCache, ref: BlobRef
+    ) -> AsyncGenerator[bytes]:
+        """`_download`, its bytes also written into `downloads`. Keeping them is best
+        effort: a volume that fails or fills stops the copy, never the read."""
+        try:
+            fill_cm = downloads.fill(ref.sha256)
+            fill = await asyncio.to_thread(fill_cm.__enter__)
+        except OSError:
+            logger.warning(
+                "could not start keeping a blob", extra={"sha256": ref.sha256}, exc_info=True
+            )
+            async with aclosing(self._download(ref)) as chunks:
+                async for chunk in chunks:
+                    yield chunk
+            return
+        keeping = True
+        try:
+            async with aclosing(self._download(ref)) as chunks:
+                async for chunk in chunks:
+                    if keeping:
+                        try:
+                            await asyncio.to_thread(fill.write, chunk)
+                        except TooLargeError:
+                            keeping = False  # read on, keep nothing
+                        except OSError:
+                            keeping = False
+                            logger.warning(
+                                "could not keep a blob",
+                                extra={"sha256": ref.sha256},
+                                exc_info=True,
+                            )
+                    yield chunk
+            if keeping:
+                try:
+                    await asyncio.to_thread(fill.commit)
+                except OSError:
+                    logger.warning(
+                        "could not keep a blob", extra={"sha256": ref.sha256}, exc_info=True
+                    )
+        finally:
+            try:
+                await asyncio.to_thread(fill_cm.__exit__, None, None, None)
+            except OSError:
+                logger.warning(
+                    "could not close a blob's fill", extra={"sha256": ref.sha256}, exc_info=True
+                )
 
     async def _download(self, ref: BlobRef) -> AsyncGenerator[bytes]:
         digest = hashlib.sha256()

@@ -52,7 +52,13 @@ from scadbuddy.render.geometry import ANALYSIS_VERSION, GeometryAnalysis, analyz
 from scadbuddy.render.glb import write_glb
 from scadbuddy.render.objects3mf import PlateRead, UnreadableObjectsError, read_plate_parts
 from scadbuddy.render.read_budget import ReadBudget
-from scadbuddy.store.download_cache import DownloadCache, is_sha256, store_bytes, touch
+from scadbuddy.store.download_cache import (
+    RESERVE_BYTES,
+    DownloadCache,
+    is_sha256,
+    store_bytes,
+    touch,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +90,7 @@ SPOOL_DIRNAME = "library-spool"
 #: What a spooled download leaves free on its volume: a file of any size is read, but
 #: not by filling the volume that holds the models, outputs and their history. Checked
 #: before each 1 MiB chunk, so spools running at once may each go one chunk past it.
-SPOOL_RESERVE_BYTES = 1024**3
+SPOOL_RESERVE_BYTES = RESERVE_BYTES
 
 
 def _room(spool: Path) -> Callable[[], bool]:
@@ -117,20 +123,29 @@ async def spooled_3mf(
     if downloads is not None and source.file_type == "3mf" and is_sha256(file_hash):
         assert file_hash is not None
         spool = cache / SPOOL_DIRNAME
+        # Read from a checked private copy, never the shared entry itself. A fault in
+        # the cache reads as a miss.
+        copy = await asyncio.to_thread(
+            downloads.private_copy, file_hash, spool, what="library_file"
+        )
+        if copy is not None:
+            with copy:
+                yield copy
+            return
         await asyncio.to_thread(spool.mkdir, parents=True, exist_ok=True)
-        with await asyncio.to_thread(lambda: tempfile.TemporaryFile("w+b", dir=spool)) as out:
-            # Read from a checked private copy, never the shared entry itself.
-            if await asyncio.to_thread(
-                downloads.copy_verified, file_hash, out, what="library_file"
-            ):
-                yield out
-                return
         with await asyncio.to_thread(lambda: tempfile.TemporaryFile("w+b", dir=spool)) as out:
             # Downloaded into this read's own file, as without a cache; a copy is kept.
             # Bytes that are not the stated hash (the file changed since) are read all
-            # the same, and not kept.
+            # the same, and not kept. Keeping it is best effort: a volume that fails is
+            # a later miss, never a failed read.
             await source.write_3mf(client, out, budget, _room(spool))
-            await asyncio.to_thread(downloads.keep_file, file_hash, out)
+            try:
+                await asyncio.to_thread(downloads.keep_file, file_hash, out)
+            except OSError:
+                logger.warning(
+                    "could not keep a library file", extra={"sha256": file_hash}, exc_info=True
+                )
+            await asyncio.to_thread(out.seek, 0)
             yield out
         return
     spool = cache / SPOOL_DIRNAME

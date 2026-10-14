@@ -332,3 +332,18 @@ async def test_bytes_planted_under_a_files_hash_are_never_read(
     assert [part.colour for part in analysis.parts] == ["#FF0000", "#0000FF"]
     assert download.call_count == 1
     assert downloads.path(sha).read_bytes() == content
+
+
+@respx.mock
+async def test_a_download_cache_that_cannot_be_used_never_fails_the_read(
+    bambuddy: BambuddyClient, tmp_path: Path
+) -> None:
+    """Keeping a copy is best effort: a cache directory that cannot be written (a full
+    or unwritable volume) is a read without one, never a failed read (#2788 review)."""
+    content = two_colour_3mf(tmp_path)
+    download = library_file(7, content)
+    (tmp_path / "shared").write_bytes(b"not a directory")
+    downloads = DownloadCache(tmp_path / "shared", max_bytes=1 << 30)
+    analysis = await library_geometry(bambuddy, tmp_path / "a", 7, 1, downloads=downloads)
+    assert [part.colour for part in analysis.parts] == ["#FF0000", "#0000FF"]
+    assert download.call_count == 1

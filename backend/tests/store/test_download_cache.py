@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import os
 import time
@@ -12,8 +13,15 @@ from pathlib import Path
 import pytest
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from scadbuddy.store.content import BlobCorruptError, BlobScope, ContentStore
-from scadbuddy.store.download_cache import PARTIAL_MAX_AGE, DownloadCache, TooLargeError, prune
+from scadbuddy.store.content import BlobScope, ContentStore
+from scadbuddy.store.download_cache import (
+    PARTIAL_MAX_AGE,
+    DownloadCache,
+    Fill,
+    NoRoomError,
+    TooLargeError,
+    prune,
+)
 from scadbuddy.store.index import BlobIndex, Pool
 from scadbuddy.store.local import LocalContentBackend
 
@@ -172,6 +180,75 @@ def test_a_kept_file_is_a_copy_and_the_callers_file_is_left_at_its_start(
     assert not cache.has(_sha(b"y" * (1 << 19)))
 
 
+def test_a_fill_is_on_disk_before_it_is_renamed_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After a crash an entry is whole: its bytes are synced before it has a name."""
+    cache = DownloadCache(tmp_path, max_bytes=1 << 20)
+    data = b"the file"
+    synced: list[bool] = []
+    real_fsync = os.fsync
+
+    def fsync(fd: int) -> None:
+        synced.append(cache.has(_sha(data)))
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    cache.put(_sha(data), data)
+    assert synced == [False]
+    assert cache.has(_sha(data))
+
+
+def test_a_fill_stops_before_the_volumes_reserve(tmp_path: Path) -> None:
+    cache = DownloadCache(tmp_path, max_bytes=1 << 20, reserve_bytes=1 << 62)
+    data = b"the file"
+    with pytest.raises(NoRoomError), cache.fill(_sha(data)) as fill:
+        fill.write(data)
+    cache.put(_sha(data), data)
+    with (tmp_path.parent / f"{tmp_path.name}-mine").open("w+b") as mine:
+        mine.write(data)
+        cache.keep_file(_sha(data), mine)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_copy_that_would_eat_the_reserve_is_a_miss_and_the_entry_kept(
+    tmp_path: Path,
+) -> None:
+    cache = DownloadCache(tmp_path / "shared", max_bytes=1 << 20)
+    data = b"the file"
+    cache.put(_sha(data), data)
+    cache.reserve_bytes = 1 << 62
+    assert cache.private_copy(_sha(data), tmp_path / "spool", what="test") is None
+    assert cache.has(_sha(data))
+
+
+def test_a_private_copy_on_a_volume_that_fails_is_a_miss(tmp_path: Path) -> None:
+    cache = DownloadCache(tmp_path / "shared", max_bytes=1 << 20)
+    data = b"the file"
+    cache.put(_sha(data), data)
+    (tmp_path / "spool").write_bytes(b"not a directory")
+    assert cache.private_copy(_sha(data), tmp_path / "spool", what="test") is None
+    with cache.private_copy(_sha(data), tmp_path / "ok", what="test") as copy:  # type: ignore[union-attr]
+        assert copy.read() == data
+    assert list((tmp_path / "ok").iterdir()) == []
+
+
+def test_a_file_too_large_to_keep_is_not_written_out_to_find_that_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = DownloadCache(tmp_path / "shared", max_bytes=400)
+    big = b"y" * 101
+
+    def no_fill(_sha256: str) -> None:
+        raise AssertionError("a file past the limit was written into a fill")
+
+    monkeypatch.setattr(cache, "fill", no_fill)
+    with (tmp_path / "big").open("w+b") as source:
+        source.write(big)
+        cache.keep_file(_sha(big), source)
+        assert source.tell() == 0
+
+
 # --- through the content store: what one process put or got, another reads ----------
 
 
@@ -243,17 +320,66 @@ async def test_a_blob_downloaded_once_is_read_from_the_cache_after(
 
 
 @pytest.mark.requires_postgres
-async def test_a_cached_copy_that_is_not_its_sha_is_refused_and_dropped(
+async def test_a_cached_copy_that_is_not_its_sha_is_dropped_and_the_blob_downloaded(
     tmp_path: Path, pool: Pool
 ) -> None:
+    """A fault in the cache stays in the cache: the read that finds it downloads the
+    blob, in the same call, and is never `BlobCorruptError`, which callers answer by
+    forgetting or deleting the stored blob (#2788 review)."""
     store, backend = _process(tmp_path / "remote", tmp_path / "shared", pool)
     data = os.urandom(1 << 20)
     ref = await store.put("piece", data, name="p", scope=SCOPE)
     await _settled(store)
     (tmp_path / "shared" / ref.sha256).write_bytes(b"rot")
-    with pytest.raises(BlobCorruptError):
-        await store.read(ref)
-    # Gone, so the retry downloads it.
+    assert await store.read(ref) == data
+    assert backend.downloads == 1
+    assert (tmp_path / "shared" / ref.sha256).read_bytes() == data
+
+
+@pytest.mark.requires_postgres
+async def test_a_cached_copy_changed_after_it_was_checked_is_not_what_is_read(
+    tmp_path: Path, pool: Pool
+) -> None:
+    """The bytes a hit yields are a private copy checked before the first of them."""
+    store, backend = _process(tmp_path / "remote", tmp_path / "shared", pool)
+    data = os.urandom(3 << 20)
+    ref = await store.put("piece", data, name="p", scope=SCOPE)
+    await _settled(store)
+    chunks = store.get(ref)
+    first = await anext(chunks)
+    (tmp_path / "shared" / ref.sha256).write_bytes(b"x" * len(data))
+    rest = [chunk async for chunk in chunks]
+    assert first + b"".join(rest) == data
+    assert backend.downloads == 0
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.parametrize("failing", ["write", "commit"])
+async def test_a_volume_that_fails_while_keeping_a_blob_never_fails_the_read(
+    tmp_path: Path, pool: Pool, monkeypatch: pytest.MonkeyPatch, failing: str
+) -> None:
+    plain = ContentStore(LocalContentBackend(tmp_path / "remote"), BlobIndex(pool))
+    data = os.urandom(3 << 20)
+    ref = await plain.put("piece", data, name="p", scope=SCOPE)
+    store, _ = _process(tmp_path / "remote", tmp_path / "shared", pool)
+
+    def full(*_args: object) -> None:
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(Fill, failing, full)
+    assert await store.read(ref) == data
+    assert list((tmp_path / "shared").iterdir()) == []
+
+
+@pytest.mark.requires_postgres
+async def test_a_cache_directory_that_cannot_be_used_is_no_cache(
+    tmp_path: Path, pool: Pool
+) -> None:
+    plain = ContentStore(LocalContentBackend(tmp_path / "remote"), BlobIndex(pool))
+    data = os.urandom(1 << 20)
+    ref = await plain.put("piece", data, name="p", scope=SCOPE)
+    (tmp_path / "shared").write_bytes(b"not a directory")
+    store, backend = _process(tmp_path / "remote", tmp_path / "shared", pool)
     assert await store.read(ref) == data
     assert backend.downloads == 1
 

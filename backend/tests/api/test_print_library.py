@@ -1781,6 +1781,8 @@ def test_a_library_file_with_a_hash_is_downloaded_from_bambuddy_once(
 
     assert first.content == second.content == content
     assert second.headers["content-length"] == str(len(content))
+    # Served whole from the cache, a resume is still a ranged ask Bambuddy answers.
+    assert second.headers["accept-ranges"] == "bytes"
     assert download.call_count == 2
     assert download.calls[-1].request.headers["range"] == "bytes=0-3"
     assert ranged.status_code == 200
@@ -1808,9 +1810,10 @@ def test_a_cached_library_file_that_is_not_its_hash_is_never_served(
 
     assert client.get("/api/v1/print/library/89/file").content == content
     assert download.call_count == 1
-    assert not downloads.has(sha)
-    assert client.get("/api/v1/print/library/89/file").content == content
+    # The planted entry was dropped, and what was sent kept in its place.
     assert downloads.path(sha).read_bytes() == content
+    assert client.get("/api/v1/print/library/89/file").content == content
+    assert download.call_count == 1
     spool = state.paths.cache / "library-spool"
     assert not spool.exists() or list(spool.iterdir()) == []
 
@@ -1820,7 +1823,7 @@ def test_a_library_file_larger_than_its_stated_size_is_not_kept(
     client: TestClient, app: FastAPI
 ) -> None:
     """A size Bambuddy does not state, or understates, cannot fill the volume: the fill
-    stops at the cache's limit, keeps nothing, and the file streams as before."""
+    stops at the cache's limit and keeps nothing, while the one download streams on."""
     configure(client)
     content = library_3mf()
     download = library_file(89, content=content, file_hash=hashlib.sha256(content).hexdigest())
@@ -1830,8 +1833,62 @@ def test_a_library_file_larger_than_its_stated_size_is_not_kept(
     downloads.max_bytes = 4 * (len(content) - 1)
 
     assert client.get("/api/v1/print/library/89/file").content == content
-    assert download.call_count == 2  # the stopped fill, then the stream
+    assert download.call_count == 1
     assert list(downloads.root.iterdir()) == []
+
+
+@respx.mock
+def test_a_library_file_not_yet_kept_is_streamed_while_it_is_kept(
+    client: TestClient, app: FastAPI
+) -> None:
+    """A miss is not downloaded whole before its first byte is sent (#2788 review): one
+    download is both what is sent and what is kept, with Bambuddy's headers."""
+    configure(client)
+    content = library_3mf()
+    sha = hashlib.sha256(content).hexdigest()
+    respx.get(f"{API}/library/files/89").mock(
+        return_value=httpx.Response(
+            200, json={"id": 89, "filename": "a.3mf", "file_type": "3mf", "file_hash": sha}
+        )
+    )
+    download = respx.get(f"{API}/library/files/89/download").mock(
+        return_value=httpx.Response(
+            200,
+            content=content,
+            headers={"accept-ranges": "bytes", "etag": '"bambuddy"'},
+        )
+    )
+    state: AppState = getattr(app.state, STATE_ATTR)
+    downloads = state.store.downloads
+    assert downloads is not None
+
+    served = client.get("/api/v1/print/library/89/file")
+
+    assert served.content == content
+    assert served.headers["etag"] == '"bambuddy"'
+    assert download.call_count == 1
+    assert downloads.path(sha).read_bytes() == content
+
+
+@respx.mock
+def test_a_download_cache_that_cannot_be_used_still_serves_the_file(
+    client: TestClient, app: FastAPI
+) -> None:
+    """The cache is best effort: an unwritable directory, or a full volume, is the file
+    streamed from Bambuddy, never a 500 (#2788 review)."""
+    configure(client)
+    content = library_3mf()
+    library_file(89, content=content, file_hash=hashlib.sha256(content).hexdigest())
+    state: AppState = getattr(app.state, STATE_ATTR)
+    downloads = state.store.downloads
+    assert downloads is not None
+    downloads.root.parent.mkdir(parents=True, exist_ok=True)
+    downloads.root.write_bytes(b"not a directory")
+
+    for _ in range(2):
+        served = client.get("/api/v1/print/library/89/file")
+        assert served.status_code == 200, served.text
+        assert served.content == content
 
 
 @respx.mock

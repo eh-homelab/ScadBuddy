@@ -10,9 +10,11 @@ Content addressing is what makes sharing safe without an index:
 
 * An entry is only ever renamed in after its digest was checked against its name, so
   a changed file is a new name, not a stale entry.
-* Every read uses bytes whose digest it checked: ``ContentStore.get`` as it streams,
-  failing at the end like a bad download, and the library reads a private copy
-  (:meth:`DownloadCache.copy_verified`). An entry that is not its name is dropped.
+* Every read uses bytes whose digest it checked: a private copy of the entry
+  (:meth:`DownloadCache.private_copy`), made before the first byte is read, so nothing
+  that can write the shared directory can change them after the check. An entry that
+  is not its name is dropped and read as a miss: a fault in the cache stays in the
+  cache, never reported as a bad blob or a bad library file.
 * Two processes filling the same entry each write a file of their own beside it and
   rename it in; the second rename replaces identical bytes.
 * Eviction (:func:`prune`) drops the least recently used entries past a byte cap. An
@@ -31,6 +33,7 @@ import hashlib
 import logging
 import os
 import re
+import tempfile
 import time
 import uuid
 from collections.abc import Iterator
@@ -47,6 +50,11 @@ logger = logging.getLogger(__name__)
 DOWNLOADS_DIRNAME = "downloads"
 #: An unfinished fill older than this is a process that died mid-download: removed.
 PARTIAL_MAX_AGE = 3600.0
+#: Free space a fill or a private copy leaves on its volume: the cache is never what
+#: fills it (the library spool keeps the same reserve, #2788).
+RESERVE_BYTES = 1024**3
+#: How much a fill writes between two looks at the volume's free space.
+_ROOM_CHECK_BYTES = 8 * 1024 * 1024
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _CHUNK = 1024 * 1024
 
@@ -112,6 +120,16 @@ class TooLargeError(Exception):
     said its size was."""
 
 
+class NoRoomError(TooLargeError):
+    """A fill that would take the volume into :attr:`DownloadCache.reserve_bytes`: not
+    kept either, and handled where a fill too large is."""
+
+
+def _free(fd: int) -> int:
+    stat = os.fstatvfs(fd)
+    return stat.f_bavail * stat.f_frsize
+
+
 class Fill:
     """One download being written into the cache: :meth:`write` its bytes, then
     :meth:`commit`. The file is the cache's own until then, under a name no reader
@@ -124,14 +142,21 @@ class Fill:
         self.partial = partial
         self._digest = hashlib.sha256()
         self._size = 0
+        self._room_checked_at: int | None = None
         self.committed = False
 
     def write(self, chunk: bytes) -> int:
         """Counted against :attr:`DownloadCache.max_entry_bytes` as it is written, so a
-        size the source understated cannot fill the volume."""
+        size the source understated cannot fill the volume; and stopped as
+        :class:`NoRoomError` before it eats the volume's reserve."""
         self._size += len(chunk)
         if self._size > self.cache.max_entry_bytes:
             raise TooLargeError
+        checked = self._room_checked_at
+        if checked is None or self._size - checked >= _ROOM_CHECK_BYTES:
+            self._room_checked_at = self._size
+            if not self.cache.has_room(self.file.fileno(), _ROOM_CHECK_BYTES):
+                raise NoRoomError
         self._digest.update(chunk)
         return self.file.write(chunk)
 
@@ -147,6 +172,9 @@ class Fill:
         self.file.flush()
         if not self.matches():
             return False
+        # On disk before it has a name a reader finds: after a crash an entry is whole,
+        # never a renamed file whose last blocks were never written.
+        os.fsync(self.file.fileno())
         self.partial.replace(self.cache.path(self.sha256))
         self.committed = True
         self.cache.prune()
@@ -160,6 +188,8 @@ class DownloadCache:
     max_bytes: int
     #: Never evict an entry used this recently: a read of it may be under way.
     min_age: float = 600.0
+    #: Free space no fill or private copy takes (:data:`RESERVE_BYTES`).
+    reserve_bytes: int = RESERVE_BYTES
 
     @property
     def max_entry_bytes(self) -> int:
@@ -169,6 +199,10 @@ class DownloadCache:
 
     def path(self, sha256: str) -> Path:
         return self.root / sha256
+
+    def has_room(self, fd: int, size: int) -> bool:
+        """Whether ``size`` more bytes fit on ``fd``'s volume above the reserve."""
+        return _free(fd) - size >= self.reserve_bytes
 
     def open(self, sha256: str | None, *, what: str) -> BinaryIO | None:
         """The entry for ``sha256``, open at its start and marked used; None on a miss.
@@ -199,6 +233,9 @@ class DownloadCache:
         if handle is None:
             return False
         assert sha256 is not None
+        if not self.has_room(out.fileno(), os.fstat(handle.fileno()).st_size):
+            handle.close()
+            return False
         digest = hashlib.sha256()
         with handle:
             while chunk := handle.read(_CHUNK):
@@ -211,6 +248,28 @@ class DownloadCache:
             out.truncate()
             return False
         return True
+
+    def private_copy(self, sha256: str | None, directory: Path, *, what: str) -> BinaryIO | None:
+        """:meth:`copy_verified` into a file of its own under ``directory`` that has no
+        name, open at its start; the caller closes it. None on a miss, an entry that was
+        not its name, no room, or a volume that failed: a fault here is only ever a
+        miss, so the caller downloads as if there were no cache."""
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            # Dot-named in case it is ever given a name: then it is a fill to `prune`.
+            out = tempfile.TemporaryFile("w+b", dir=directory, prefix=".")  # noqa: SIM115
+        except OSError:
+            logger.warning("could not make a private copy", extra={"sha256": sha256}, exc_info=True)
+            return None
+        try:
+            if self.copy_verified(sha256, out, what=what):
+                return out
+        except OSError:
+            logger.warning(
+                "could not read a cached download", extra={"sha256": sha256}, exc_info=True
+            )
+        out.close()
+        return None
 
     def has(self, sha256: str) -> bool:
         return self.path(sha256).is_file()
@@ -239,10 +298,13 @@ class DownloadCache:
         """Keep ``data`` under ``sha256`` if it is that hash and small enough."""
         if not is_sha256(sha256) or self.has(sha256) or len(data) > self.max_entry_bytes:
             return
-        with self.fill(sha256) as fill:
-            for start in range(0, len(data), _CHUNK):
-                fill.write(data[start : start + _CHUNK])
-            fill.commit()
+        try:
+            with self.fill(sha256) as fill:
+                for start in range(0, len(data), _CHUNK):
+                    fill.write(data[start : start + _CHUNK])
+                fill.commit()
+        except NoRoomError:
+            pass
 
     def keep_file(self, sha256: str, source: BinaryIO) -> None:
         """Keep a copy of ``source``, the caller's own file, under ``sha256`` if it is that
@@ -250,7 +312,11 @@ class DownloadCache:
         its own file, never the entry: what is in the directory is only ever a copy."""
         if not is_sha256(sha256) or self.has(sha256):
             return
+        # Its size first: a file past the limit is not written out to find that out.
+        size = source.seek(0, os.SEEK_END)
         source.seek(0)
+        if size > self.max_entry_bytes:
+            return
         try:
             with self.fill(sha256) as fill:
                 while chunk := source.read(_CHUNK):

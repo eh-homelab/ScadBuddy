@@ -10,12 +10,11 @@ reaches the browser.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
 import os
-import tempfile
-from collections.abc import AsyncIterator
-from contextlib import aclosing
+from collections.abc import AsyncIterable, AsyncIterator
 from functools import partial
-from pathlib import Path as FsPath
 from typing import Annotated, BinaryIO
 
 from fastapi import APIRouter, Path, Query, Request, Response, status
@@ -106,9 +105,11 @@ from scadbuddy.operations.component import OperationsDep
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.render.geometry import NoSuchPlateError
 from scadbuddy.render.read_budget import ReadBudget
-from scadbuddy.store.download_cache import DownloadCache, TooLargeError, is_sha256
+from scadbuddy.store.download_cache import DownloadCache, Fill, TooLargeError, is_sha256
 from scadbuddy.workflows.component import FollowsDep
 from scadbuddy.workflows.print_models import SourceSpec
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/print/library", tags=["print"])
 
@@ -586,18 +587,30 @@ async def get_library_file(
     ScadBuddy's origin under the type Bambuddy names it could run script there.
 
     #2788: a whole-file ask for a file Bambuddy states a hash for is served from the
-    shared download cache, downloaded into it first when it is not there yet. A ranged
-    ask streams from Bambuddy as before."""
-    headers = {"content-disposition": "attachment", "x-content-type-options": "nosniff"}
-    if request.headers.get("range") is None:
-        copy = await _cached_library_file(store, downloads, paths, file_id)
-        if copy is not None:
-            size = await asyncio.to_thread(lambda: os.fstat(copy.fileno()).st_size)
-            return StreamingResponse(
-                _read_closing(copy),
-                media_type="application/octet-stream",
-                headers={**headers, "content-length": str(size)},
+    shared download cache when it is there, and streamed from Bambuddy while it is
+    kept there when it is not, so the first byte never waits on the whole download. A
+    ranged ask streams from Bambuddy as before."""
+    sha: str | None = None
+    if request.headers.get("range") is None and downloads is not None:
+        sha = await _cacheable_hash(store, downloads, file_id)
+        if sha is not None:
+            copy = await asyncio.to_thread(
+                downloads.private_copy, sha, paths.cache / SPOOL_DIRNAME, what="library_file"
             )
+            if copy is not None:
+                size = await asyncio.to_thread(lambda: os.fstat(copy.fileno()).st_size)
+                return StreamingResponse(
+                    _read_closing(copy),
+                    media_type="application/octet-stream",
+                    headers={
+                        "content-disposition": "attachment",
+                        "x-content-type-options": "nosniff",
+                        "content-length": str(size),
+                        # The bytes are whole here; a resumed download is a ranged ask,
+                        # which Bambuddy answers.
+                        "accept-ranges": "bytes",
+                    },
+                )
     response = await _proxy(
         store,
         request,
@@ -607,6 +620,9 @@ async def get_library_file(
     )
     response.headers["content-type"] = "application/octet-stream"
     response.headers["content-disposition"] = "attachment"
+    if sha is not None and downloads is not None and response.status_code == 200:
+        assert isinstance(response, StreamingResponse)
+        response.body_iterator = _kept_as_sent(downloads, sha, response.body_iterator)
     return response
 
 
@@ -620,44 +636,55 @@ async def _read_closing(copy: BinaryIO) -> AsyncIterator[bytes]:
         await asyncio.to_thread(copy.close)
 
 
-async def _cached_library_file(
-    store: SettingsStore, downloads: DownloadCache | None, paths: DataPaths, file_id: int
-) -> BinaryIO | None:
-    """A private, digest-checked copy of library file ``file_id`` from the shared
-    download cache, open at its start and with no name on disk; downloaded into the
-    cache first on a miss. None for a file to stream from Bambuddy as before: no cache,
-    no hash stated (#2160), a file larger than the cache keeps (by its stated size, or
-    by what actually came), or bytes that are not the stated hash."""
-    if downloads is None:
-        return None
+async def _cacheable_hash(
+    store: SettingsStore, downloads: DownloadCache, file_id: int
+) -> str | None:
+    """The hash library file ``file_id`` is kept under in the download cache; None for
+    one streamed from Bambuddy as before: no hash stated (#2160), or larger than the
+    cache keeps by its stated size."""
     async with client_for(store.load()) as client:
         file = await client.library_file(file_id)
-        sha = (file.file_hash or "").lower()
-        if not is_sha256(sha) or (file.file_size or 0) > downloads.max_entry_bytes:
-            return None
-        if not await asyncio.to_thread(downloads.has, sha):
+    sha = (file.file_hash or "").lower()
+    if not is_sha256(sha) or (file.file_size or 0) > downloads.max_entry_bytes:
+        return None
+    return sha
+
+
+async def _kept_as_sent(
+    downloads: DownloadCache, sha: str, chunks: AsyncIterable[str | bytes | memoryview]
+) -> AsyncIterator[bytes | str | memoryview]:
+    """``chunks``, sent as they come, also written into the download cache under
+    ``sha``. Kept only when the bytes are that hash and all of them were sent; past
+    the cache's limit, out of room or on a failing volume the copy stops and the
+    response goes on."""
+    try:
+        fill_cm = downloads.fill(sha)
+        fill: Fill | None = await asyncio.to_thread(fill_cm.__enter__)
+    except OSError:
+        logger.warning("could not start keeping a library file", extra={"sha256": sha})
+        fill = None
+    try:
+        async for chunk in chunks:
+            if fill is not None and isinstance(chunk, bytes):
+                try:
+                    await asyncio.to_thread(fill.write, chunk)
+                except (TooLargeError, OSError):
+                    await asyncio.to_thread(fill_cm.__exit__, None, None, None)
+                    fill = None
+            yield chunk
+        if fill is not None:
             try:
-                with downloads.fill(sha) as fill:
-                    async with aclosing(client.download_library_file(file_id)) as chunks:
-                        async for chunk in chunks:
-                            await asyncio.to_thread(fill.write, chunk)
-                    if not await asyncio.to_thread(fill.commit):
-                        return None
-            except TooLargeError:
-                return None
-    return await asyncio.to_thread(_private_copy, downloads, sha, paths.cache / SPOOL_DIRNAME)
-
-
-def _private_copy(downloads: DownloadCache, sha: str, spool: FsPath) -> BinaryIO | None:
-    """The entry copied, digest-checked, into a file under ``spool`` that only this
-    request reads and that has no name: the bytes served are the ones checked."""
-    spool.mkdir(parents=True, exist_ok=True)
-    # Handed to the response, which closes it (`_read_closing`).
-    out = tempfile.TemporaryFile("w+b", dir=spool)  # noqa: SIM115
-    if downloads.copy_verified(sha, out, what="library_file"):
-        return out
-    out.close()
-    return None
+                await asyncio.to_thread(fill.commit)
+            except OSError:
+                logger.warning("could not keep a library file", extra={"sha256": sha})
+    finally:
+        # The proxied body closes Bambuddy's response when it is closed.
+        close = getattr(chunks, "aclose", None)
+        if close is not None:
+            await close()
+        if fill is not None:
+            with contextlib.suppress(OSError):
+                await asyncio.to_thread(fill_cm.__exit__, None, None, None)
 
 
 @router.get(
