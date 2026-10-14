@@ -15,7 +15,7 @@ import trimesh
 
 from scadbuddy.core.paths import RENDERS_DIR_NAME
 from scadbuddy.library.deeplink import EDIT_NOTE, edit_url
-from scadbuddy.render import provenance
+from scadbuddy.render import provenance, zipcopy
 from scadbuddy.render.bambu3mf import (
     CORE_NS,
     PRODUCTION_NS,
@@ -141,10 +141,10 @@ def test_every_other_part_is_copied_as_its_compressed_bytes(tmp_path: Path) -> N
 
 
 def test_the_raw_copy_is_checked_on_this_python() -> None:
-    """#2910: _copy_raw writes through zipfile's private state. A Python minor bump fails
+    """#2910: copy_raw writes through zipfile's private state. A Python minor bump fails
     here until test_every_other_part_is_copied_as_its_compressed_bytes is run on it and
     RAW_COPY_CHECKED moved; until then the stamp reads and writes every entry again."""
-    assert sys.version_info[:2] == provenance.RAW_COPY_CHECKED
+    assert sys.version_info[:2] == zipcopy.RAW_COPY_CHECKED
 
 
 def test_an_unchecked_python_stamps_without_the_raw_copy(
@@ -157,12 +157,12 @@ def test_an_unchecked_python_stamps_without_the_raw_copy(
     with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("3D/3dmodel.model", f'<model xmlns="{CORE_NS}">\n<resources/>\n</model>')
         archive.writestr("3D/Objects/object_1.model", mesh)
-    monkeypatch.setattr(provenance, "RAW_COPY_CHECKED", (0, 0))
+    monkeypatch.setattr(zipcopy, "RAW_COPY_CHECKED", (0, 0))
 
-    def unused(*args: object) -> None:
-        raise AssertionError("_copy_raw ran on an unchecked Python")
+    def unused(*args: object, **kwargs: object) -> None:
+        raise AssertionError("copy_raw ran on an unchecked Python")
 
-    monkeypatch.setattr(provenance, "_copy_raw", unused)
+    monkeypatch.setattr(provenance, "copy_raw", unused)
     target = tmp_path / "model.3mf"
 
     stamp(target, PROVENANCE, source=source)
@@ -431,15 +431,15 @@ def test_a_failed_rewrite_leaves_the_original_3mf_alone(
     original = written.read_bytes()
     calls = {"n": 0}
     # Every entry but the root model is copied raw (#2755): fail the second of those.
-    real = provenance._copy_raw
+    real = zipcopy.copy_raw
 
-    def fail_partway(*args: Any) -> None:
+    def fail_partway(*args: Any, **kwargs: Any) -> None:
         calls["n"] += 1
         if calls["n"] > 1:
             raise OSError("no space left on device")
-        real(*args)
+        real(*args, **kwargs)
 
-    monkeypatch.setattr(provenance, "_copy_raw", fail_partway)
+    monkeypatch.setattr(provenance, "copy_raw", fail_partway)
     with pytest.raises(OSError, match="no space"):
         stamp(written, PROVENANCE)
 
