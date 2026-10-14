@@ -1162,6 +1162,31 @@ async def test_superseding_an_arrange_through_submit_counts_it_as_arrange(
     assert sample("scadbuddy_render_job_latency_seconds_count", as_render) == 0
 
 
+async def test_an_arrange_the_reconciler_fails_is_counted_as_arrange(
+    make_service: ServiceFactory, projection: JobProjection
+) -> None:
+    """#3464, #3487 review: the reconciler's fail path (``settle_legacy``) hands
+    ``_settled`` the arrange row itself, so its failure counts under
+    ``kind="arrange"``, not as a render."""
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
+        orphan = _legacy(projection, kind="arrange")
+        _aged(projection, orphan.id)
+        failed = await service.settle_legacy()
+        await service.aclose()
+
+    assert failed == [orphan.id]
+    stored = await asyncio.to_thread(projection.read, orphan.id)
+    assert (stored.state, stored.error) == ("failed", LEGACY_UNSTARTED_ERROR)
+    sample = service.metrics.registry.get_sample_value
+    as_arrange = {"kind": "arrange", "outcome": "failed"}
+    assert sample("scadbuddy_render_jobs_finished_total", as_arrange) == 1
+    assert sample("scadbuddy_render_job_latency_seconds_count", as_arrange) == 1
+    as_render = {"kind": "render", "outcome": "failed"}
+    assert sample("scadbuddy_render_jobs_finished_total", as_render) == 0
+    assert sample("scadbuddy_render_job_latency_seconds_count", as_render) == 0
+
+
 async def test_superseding_a_legacy_row_cancels_its_workflow_the_old_way(
     make_service: ServiceFactory,
     deps: WorkerDeps,
