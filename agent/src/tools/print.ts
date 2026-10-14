@@ -8,6 +8,7 @@ import { outputId, slug } from './common.js'
 import { defineTool, image, json, type Tool, type ToolContext, ToolError, toolErrorText } from './registry.js'
 import { page, PAGED, pageInput } from './pagination.js'
 import { uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
+import { errorName } from '../telemetry/scrub.js'
 
 // Bambuddy (issue #251, spec D8): ScadBuddy's own tools over its backend's
 // Bambuddy client, so the API key stays server-side and the backend's
@@ -284,7 +285,8 @@ export const printTools: Tool[] = [
         getChoices(ctx, source, args.printer_id),
         getPlates(ctx, source).catch((err: unknown) => {
           platesError = err instanceof ToolError ? toolErrorText(err, 'get_print_choices') : String(err)
-          console.warn(`get_print_choices: ${err instanceof Error ? err.message : String(err)}`)
+          // #1814: only the error's name; its message can quote a connection string (telemetry/scrub.ts).
+          console.warn(`get_print_choices: the plates could not be read (${errorName(err)})`)
           return []
         }),
       ])

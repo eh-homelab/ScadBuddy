@@ -1,6 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { z } from 'zod'
 import { type Principal, tiersUpTo, TIERS } from '../src/auth/principal.js'
 import { principalFor } from '../src/auth/tokens.js'
@@ -743,9 +743,13 @@ describe('waiting for the tab (#815)', () => {
     ['write', 'browser_set_param', { name: 'width', value: 10 }],
     ['outward', 'browser_open_print_dialog', {}],
   ] as const)('a %s call whose re-check fails still says it was not run', async (_tier, name, args) => {
+    const warned = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    onTestFinished(() => warned.mockRestore())
     const pairings: PairingStore = new InMemoryPairingStore()
     let lookups = 0
-    pairings.pairedTab = () => (++lookups === 1 ? Promise.resolve(undefined) : Promise.reject(new Error('pool is closed')))
+    const failure = new Error('connect ECONNREFUSED postgres://user:secret@db')
+    failure.name = 'PoolError'
+    pairings.pairedTab = () => (++lookups === 1 ? Promise.resolve(undefined) : Promise.reject(failure))
     const hub = new TabHub({ pairings })
     const agent: Principal = { id: 'tok-1', kind: 'bearer', tiers: tiersUpTo('outward') }
     const result = await runTool(tool(name), args, {
@@ -756,6 +760,22 @@ describe('waiting for the tab (#815)', () => {
     expect(lookups).toBe(2)
     expect(result.isError).toBe(true)
     expect(text(result)).toBe(tabBackNotRun(name, 'reconnected'))
+    // #1814: logged, by the error's name only, never its message.
+    expect(warned).toHaveBeenCalledWith('browser tools: re-checking the tab after its wait failed (PoolError)')
+    expect(warned.mock.calls.flat().join(' ')).not.toMatch(/secret/)
+  })
+
+  // #1814: status() rejects an aborted lookup as call() does, not with the signal's raw reason.
+  it('rejects a status check whose lookup is aborted with the call-cancelled error', async () => {
+    const { pairings } = hangingLookups()
+    pairings.pairedTab = (_principal, signal) =>
+      new Promise((_resolve, reject) => signal?.addEventListener('abort', () => reject(signal.reason), { once: true }))
+    const hub = new TabHub({ pairings })
+    const agent: Principal = { id: 'tok-1', kind: 'bearer', tiers: tiersUpTo('outward') }
+    const stop = new AbortController()
+    const status = hub.status({ principal: agent }, { signal: stop.signal })
+    stop.abort(new Error('the raw reason'))
+    await expect(status).rejects.toMatchObject({ name: 'AbortError', message: 'the call was cancelled' })
   })
 
   /** A pairing lookup that answers the first call and then hangs until its signal aborts. */
@@ -786,8 +806,9 @@ describe('waiting for the tab (#815)', () => {
     })
     expect(seen[1]).toBe(parked.signal)
     parked.abort(new Error('the wait ended'))
-    // Without the signal the lookup would never settle and this would time out.
-    await expect(check).rejects.toThrow('the wait ended')
+    // Without the signal the lookup would never settle and this would time out. It
+    // rejects as an aborted call does (#1814), whatever the signal's reason.
+    await expect(check).rejects.toThrow('the call was cancelled')
   })
 
   // #1410: TabHub.call() gives its own signal to the pairing lookup behind every browser_* call.
