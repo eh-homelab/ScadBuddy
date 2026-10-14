@@ -434,7 +434,9 @@ export function Preview({
                   <RenderMessages {...messages} sourceLink={sourceLink} overlay />
                 </div>
               ))}
-            {shown?.bbox && <Dimensions bbox={shown.bbox} plates={shown.plates} compact={compact} />}
+            {/* The measured box too (#2866): a library plate framed by it has a size to show.
+                `shown` is checked as well only for its plates: there is no box without it. */}
+            {shown && bbox && <Dimensions bbox={bbox} plates={shown.plates} compact={compact} />}
             {job && platesOfJob > 1 && (
               <PlatePicker
                 plates={plateIndices}
@@ -993,6 +995,8 @@ function PlateOutline({
         <edgesGeometry args={[outline]} attach="geometry" />
         <lineBasicMaterial color={theme.edge} attach="material" />
       </lineSegments>
+      {/* A DOM overlay, so `captureSnapshot` with `plate: true` draws the outlines without
+          these numbers (#2866). Nothing that snapshots a multi-plate row needs them yet. */}
       <Html position={[0, 0, depth / 2 + 6]} center zIndexRange={[10, 0]}>
         <span
           data-testid="plate-label"
@@ -1028,7 +1032,12 @@ function Model({
   const gltf = useLoader(GLTFLoader, url)
   const scene = useMemo(() => gltf.scene.clone(true), [gltf])
   // #2364 — a mesh that came with no box (a library file's plate, placed where the 3MF
-  // put it on the bed) is measured, so it is centred and framed like any other.
+  // put it on the bed) is measured, so it is centred and framed like any other. It is
+  // measured on the loader's own scene, never on the drawn clone (#3026 review): the
+  // clone is mounted under the offset group, whose world matrix can still hold the last
+  // render's offset until the next demand frame, and `setFromObject` reads it. The
+  // loader's scene is never mounted, so its box is model space; `clone(true)` copies the
+  // local transforms and shares the geometry, so it is the clone's box too.
   useEffect(() => {
     if (bbox) return
     const box = new THREE.Box3().setFromObject(gltf.scene)
