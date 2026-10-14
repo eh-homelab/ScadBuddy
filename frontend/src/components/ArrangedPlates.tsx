@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../api/client'
 import { useAsync } from '../lib/useAsync'
 
@@ -10,6 +11,8 @@ import { useAsync } from '../lib/useAsync'
  */
 export function ArrangedPlates({ outputId, size = 'md' }: { outputId: string; size?: 'sm' | 'md' }) {
   const read = useAsync(() => api.getOutputPlates(outputId), [outputId])
+  /** Plates whose picture failed to load: shown as the placeholder a plate with none gets. */
+  const [broken, setBroken] = useState<ReadonlySet<number>>(new Set())
   if (read.error) return <p className="mt-1.5 text-[12px] text-faint">Plates unavailable</p>
   const plates = read.data ?? []
   if (plates.length === 0) return null
@@ -24,11 +27,12 @@ export function ArrangedPlates({ outputId, size = 'md' }: { outputId: string; si
           const label = `Plate ${plate.index}${plate.name ? `: ${plate.name}` : ''}`
           return (
             <li key={plate.index} title={label}>
-              {plate.has_thumbnail ? (
+              {plate.has_thumbnail && !broken.has(plate.index) ? (
                 <img
                   src={api.outputPlateThumbnailUrl(outputId, plate.index)}
                   alt={label}
                   loading="lazy"
+                  onError={() => setBroken((was) => new Set(was).add(plate.index))}
                   className={`${box} rounded-[4px] border border-line bg-surface-2 object-contain`}
                 />
               ) : (
@@ -44,4 +48,30 @@ export function ArrangedPlates({ outputId, size = 'md' }: { outputId: string; si
       </ul>
     </figure>
   )
+}
+
+/** How far outside the viewport a row starts to read its plates. */
+const NEAR_VIEWPORT = '200px'
+
+/**
+ * #2754 review — {@link ArrangedPlates} once its place nears the viewport, so a long
+ * History does not read every arranged row's plates as it mounts. Without
+ * IntersectionObserver it reads at once.
+ */
+export function LazyArrangedPlates(props: { outputId: string; size?: 'sm' | 'md' }) {
+  const [near, setNear] = useState(() => typeof IntersectionObserver === 'undefined')
+  const spot = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const element = spot.current
+    if (near || !element) return
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) setNear(true)
+      },
+      { rootMargin: NEAR_VIEWPORT },
+    )
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [near])
+  return near ? <ArrangedPlates {...props} /> : <div ref={spot} data-testid="arranged-plates-pending" />
 }

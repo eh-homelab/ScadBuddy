@@ -18,6 +18,7 @@ import {
   type Arranged,
   type ArrangedJob,
   type OutputRef,
+  objectNames,
 } from '../lib/arrange'
 import { shortId } from '../lib/format'
 import { traceAction } from '../lib/traceAction'
@@ -39,26 +40,6 @@ type Props = {
 function rowsOf(outputs: Output[]) {
   return outputs.flatMap((output) =>
     (output.manifest ?? []).map((object) => ({ output, object, key: `${output.id}:${object.part}` })),
-  )
-}
-
-/**
- * #2285 — each object of `output` by name: its BOM piece, else the model it was rendered
- * from (never the template's file, "model.scad" for nearly every one). Two objects that
- * would read the same are numbered, so the rows can be told apart.
- */
-function objectNames(output: Output, modelName: (slug: string) => string): Map<string, string> {
-  const objects = output.manifest ?? []
-  const base = objects.map((object) => object.bom_piece ?? modelName(object.slug))
-  const seen = new Map<string, number>()
-  return new Map(
-    objects.map((object, index) => {
-      const name = base[index]!
-      if (base.filter((b) => b === name).length < 2) return [object.part, name]
-      const n = (seen.get(name) ?? 0) + 1
-      seen.set(name, n)
-      return [object.part, `${name} ${n}`]
-    }),
   )
 }
 
@@ -205,6 +186,13 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
     : ownTemplates
   /** A template by its name, as "File under" says it (#2284); its slug until the list is read. */
   const modelName = (slug: string) => models?.find((model) => model.slug === slug)?.name ?? slug
+  /** Each output's object names, worked out once per render rather than once per row. */
+  const names = new Map<string, Map<string, string>>()
+  const namesOf = (output: Output) => {
+    let found = names.get(output.id)
+    if (!found) names.set(output.id, (found = objectNames(output, modelName)))
+    return found
+  }
   /** #2285 — an output by its name, else the file it was added as, else its short id. */
   const outputName = (output: Output) => output.name ?? viaFile.get(output.id) ?? shortId(output.id)
   /** #2285 — an output as a note or a prompt names it: never by its raw 32-hex id. */
@@ -590,7 +578,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
           {[
             ...rows.map(({ output, object, key }) => ({
               key,
-              label: `${objectNames(output, modelName).get(object.part)} — ${outputName(output)}`,
+              label: `${namesOf(output).get(object.part)} — ${outputName(output)}`,
               count: object.count,
             })),
             ...fileRows.map(({ file, object, key }) => ({

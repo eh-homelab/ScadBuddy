@@ -5,7 +5,7 @@ import { ApiError, api } from '../api/client'
 import type { CustomizerSchema, LibraryCopy, ModelLibrary, Output } from '../api/types'
 import { ArrangeDialog } from '../components/ArrangeDialog'
 import { ArrangedNext } from '../components/ArrangedNext'
-import { ArrangedPlates } from '../components/ArrangedPlates'
+import { LazyArrangedPlates } from '../components/ArrangedPlates'
 import { BlobDownload } from '../components/BlobDownload'
 import { BomTable } from '../components/BomTable'
 import { ColorStrip } from '../components/ColorStrip'
@@ -490,7 +490,7 @@ function OutputRow({
           </p>
           <OutputLibraries libraries={output.libraries ?? []} pinned={pinned} />
           {/* #2282 — an arranged output's layout is what it is: its plates, on the row. */}
-          {arrangedFrom > 0 && !platesAbove && <ArrangedPlates outputId={output.id} size="sm" />}
+          {arrangedFrom > 0 && !platesAbove && <LazyArrangedPlates outputId={output.id} size="sm" />}
         </div>
 
         <div className="flex shrink-0 items-center gap-2">

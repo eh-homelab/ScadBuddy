@@ -4,7 +4,7 @@ import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 import { api, ApiError } from '../api/client'
 import type { LibraryEntry, Output } from '../api/types'
-import { fromFiles, fromOutputs } from '../lib/arrange'
+import { fromFiles, fromOutputs, objectNames } from '../lib/arrange'
 import { startTracing } from '../lib/tracing'
 import * as fixtures from '../mocks/fixtures'
 import { libraryFiles } from '../mocks/features/library'
@@ -693,6 +693,19 @@ describe('ArrangeDialog', () => {
       await user.selectOptions(select, 'name-keychain')
       expect(await screen.findByRole('checkbox', { name: /^Nova · .* ago · .*mm · needs a re-render$/ })).toBeInTheDocument()
     })
+
+    it('finds a model by its slug as well as its name (#2754 review)', async () => {
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={vi.fn()} />,
+      )
+      await user.click(await screen.findByRole('button', { name: 'Add from a model' }))
+      const select = await screen.findByLabelText('Model')
+      await waitFor(() => expect(within(select).getAllByRole('option').length).toBeGreaterThan(2))
+      // "Name Keychain" holds no hyphen: only its slug matches.
+      await user.type(screen.getByLabelText('Find a model'), 'name-keychain')
+      const found = within(select).getAllByRole('option').slice(1)
+      expect(found.map((o) => o.textContent)).toEqual(['Name Keychain'])
+    })
   })
 
   describe('controls (#2286)', () => {
@@ -1026,5 +1039,29 @@ describe('ArrangeDialog', () => {
     saved({ ...first, id: 'o-new' })
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(onArranged).not.toHaveBeenCalled()
+  })
+})
+
+describe('objectNames (#2754 review)', () => {
+  it('names a manifest in one pass, not one per object', () => {
+    const manifest = (parts: number) =>
+      ({
+        ...fixtures.outputs[0],
+        manifest: Array.from({ length: parts }, (_, i) => ({ part: `p${i}`, slug: 'same', bom_piece: null, count: 1 })),
+      }) as unknown as Output
+    const time = (parts: number) => {
+      const output = manifest(parts)
+      let best = Infinity
+      for (let i = 0; i < 3; i++) {
+        const began = performance.now()
+        objectNames(output, (slug) => slug)
+        best = Math.min(best, performance.now() - began)
+      }
+      return best
+    }
+    const names = objectNames(manifest(3), (slug) => slug)
+    expect([...names.values()]).toEqual(['same 1', 'same 2', 'same 3'])
+    // Four times the parts is about four times the work; a count per object is sixteen.
+    expect(time(16_000)).toBeLessThan(8 * time(4_000) + 20)
   })
 })

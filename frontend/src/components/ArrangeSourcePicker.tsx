@@ -146,7 +146,11 @@ export function AddFromModel(props: Props<Output>) {
   const unit = useDisplayUnit()
   const wanted = search.trim().toLowerCase()
   const shown = byName(models ?? []).filter(
-    (model) => !wanted || (model.name ?? model.slug).toLowerCase().includes(wanted) || model.slug === slug,
+    (model) =>
+      !wanted ||
+      // A model is found by its slug as well as its name: the slug is what a URL shows.
+      [model.name ?? '', model.slug].some((text) => text.toLowerCase().includes(wanted)) ||
+      model.slug === slug,
   )
   const [outputs, setOutputs] = useState<Output[] | null>(null)
   const [error, setError] = useState<string | null>(null)

@@ -327,3 +327,26 @@ export async function backfillOutputs(
   })
   return result
 }
+
+/**
+ * #2285 — each object of `output` by name: its BOM piece, else the model it was rendered
+ * from (never the template's file, "model.scad" for nearly every one). Two objects that
+ * would read the same are numbered, so the rows can be told apart.
+ */
+export function objectNames(output: Output, modelName: (slug: string) => string): Map<string, string> {
+  const objects = output.manifest ?? []
+  const base = objects.map((object) => object.bom_piece ?? modelName(object.slug))
+  // Counted once, not per object: a manifest runs to thousands of parts.
+  const uses = new Map<string, number>()
+  for (const name of base) uses.set(name, (uses.get(name) ?? 0) + 1)
+  const seen = new Map<string, number>()
+  return new Map(
+    objects.map((object, index) => {
+      const name = base[index]!
+      if ((uses.get(name) ?? 0) < 2) return [object.part, name]
+      const n = (seen.get(name) ?? 0) + 1
+      seen.set(name, n)
+      return [object.part, `${name} ${n}`]
+    }),
+  )
+}

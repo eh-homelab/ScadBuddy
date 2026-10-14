@@ -1,4 +1,4 @@
-import { act, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { delay, HttpResponse, http } from 'msw'
 import { Route, Routes, useLocation, useParams } from 'react-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -7,6 +7,7 @@ import { bbox, keychainSchema, models, outputs } from '../mocks/fixtures'
 import { addMockOutput, problem } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { setDisplayUnit } from '../lib/units'
+import { intersect } from '../test/intersection'
 import { renderPage } from '../test/utils'
 import { CustomizePage } from './CustomizePage'
 import { EditPage } from './EditPage'
@@ -629,6 +630,10 @@ describe('HistoryPage', () => {
     )
     render()
     const batch = await row('Batch')
+    // #2754 review — read once the row nears the viewport, not as it mounts.
+    expect(within(batch).getByTestId('arranged-plates-pending')).toBeInTheDocument()
+    expect(read).toEqual([])
+    intersect(batch)
     const plates = await within(batch).findByRole('figure', { name: 'Plates' })
     expect(plates).toHaveTextContent('2 plates')
     expect(within(plates).getByRole('img', { name: 'Plate 1' })).toHaveAttribute(
@@ -641,6 +646,21 @@ describe('HistoryPage', () => {
     // other tests they are read twice (CI, 2026-10-14), which is no part of what this
     // test is about.
     expect(new Set(read)).toEqual(new Set(['f'.repeat(32)]))
+  })
+
+  it('shows a plate whose picture fails to load as one with none (#2754 review)', async () => {
+    const arranged = { ...outputs[0], id: 'f'.repeat(32), name: 'Batch', arranged_from: ['a'.repeat(32), 'c'.repeat(32)] }
+    server.use(
+      http.get('/api/v1/models/name-keychain/outputs', () => HttpResponse.json([arranged])),
+      http.get('/api/v1/outputs/:id/plates', () => HttpResponse.json([{ index: 1, has_thumbnail: true }])),
+    )
+    render()
+    const batch = await row('Batch')
+    intersect(batch)
+    const plates = await within(batch).findByRole('figure', { name: 'Plates' })
+    fireEvent.error(within(plates).getByRole('img', { name: 'Plate 1' }))
+    expect(within(plates).queryByRole('img')).not.toBeInTheDocument()
+    expect(plates).toHaveTextContent('Plate 1')
   })
 })
 
