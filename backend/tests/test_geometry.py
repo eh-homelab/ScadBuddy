@@ -17,7 +17,7 @@ from pydantic import TypeAdapter
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.meshmodel import section
 from scadbuddy.meshmodel.edits import Edit
-from scadbuddy.render import geometry
+from scadbuddy.render import geometry, meshmatch
 from scadbuddy.render.bambu3mf import PlateParts, write_bambu_3mf, write_plates_3mf
 from scadbuddy.render.geometry import (
     MAX_REPORTED_EDGES,
@@ -587,6 +587,25 @@ def test_parts_match_points_refuses_are_not_joined(monkeypatch: pytest.MonkeyPat
     leaves = revolved([(0, 30), (3, 30), (3, 35), (7, 35), (7, 45), (0, 45)])
     analysis = analyze_geometry([_part(body, "#F08A24", 1), _part(leaves, "#3A7D2C", 2)])
     assert [j.parts for j in analysis.weak_joints] == [[2]]  # the leaves alone, not the pair
+
+
+def test_only_parts_whose_boxes_touch_are_matched(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Parts far apart share no point, so `match_points` is asked only of the pair whose
+    boxes (grown by the touch tolerance) meet, not of all n(n-1)/2."""
+    asked: list[tuple[int, int]] = []
+    real = meshmatch.match_points
+
+    def counting(source: Any, query: Any, tol: float) -> Any:
+        asked.append((len(source), len(query)))
+        return real(source, query, tol)
+
+    monkeypatch.setattr(geometry, "match_points", counting)
+    cubes = [_cube(10, (100.0 * i, 0, 0)) for i in range(8)]
+    cubes[1].apply_translation((-100.0 + 10.0, 0, 0))  # cube 1 now touches cube 0
+    welded = [(np.asarray(c.vertices), np.asarray(c.faces)) for c in cubes]
+    pieces = geometry._pieces(welded)
+    assert len(asked) == 1
+    assert sorted(members for members, _, _ in pieces) == [[0, 1], [2], [3], [4], [5], [6], [7]]
 
 
 def test_analysing_geometry_does_not_load_the_scene_edits() -> None:

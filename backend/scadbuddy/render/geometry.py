@@ -597,8 +597,8 @@ def _pieces(
     welded: Sequence[tuple[FloatArray, IntArray]],
 ) -> list[tuple[list[int], FloatArray, IntArray]]:
     """The pieces the parts print as: each part's islands, joined where islands of two
-    parts share a vertex. Each is the indices of its parts, and its own vertices and
-    faces, compacted. A part pair `match_points` refuses (too many distinct points in
+    parts share a vertex (parts whose boxes do not meet are not compared). Each is the
+    indices of its parts, and its own vertices and faces, compacted. A part pair `match_points` refuses (too many distinct points in
     a cell) is not joined: its islands stay pieces of their own."""
     labels = [_islands(len(vertices), faces) for vertices, faces in welded]
     nodes: dict[tuple[int, int], int] = {}
@@ -620,7 +620,17 @@ def _pieces(
             node = parent[node]
         return node
 
+    # Only parts whose boxes, grown by the tolerance, meet can share a point.
+    boxes = [
+        (vertices.min(axis=0) - TOUCH_MM, vertices.max(axis=0) + TOUCH_MM)
+        if len(vertices)
+        else None
+        for vertices, _ in welded
+    ]
     for i, j in itertools.combinations(range(len(welded)), 2):
+        a, b = boxes[i], boxes[j]
+        if a is None or b is None or (a[0] > b[1]).any() or (b[0] > a[1]).any():
+            continue
         try:
             hit = match_points(welded[i][0], welded[j][0], TOUCH_MM)
         except ValueError:
