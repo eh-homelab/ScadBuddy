@@ -306,7 +306,8 @@ translate([0, 0, plate_height]) rotate([0, 180, 0]) {
     cutters();
   }
   color(border_colour) difference() { translate([0, 0, plate_height - 0.4]) linear_extrude(0.4) border_ring(); cutters(); }
-  color("#050504") difference() { translate([0, 8, plate_height - 1]) linear_extrude(1) e1_0(); cutters(); }
+  // e2 overlaps e1 and is later in `elements`, so e1's block gives up e2's footprint
+  color("#050504") difference() { translate([0, 8, plate_height - 1]) linear_extrude(1) e1_0(); translate([0, -15, plate_height - 1]) linear_extrude(1) e2(); cutters(); }
   color(title_colour) difference() { translate([0, -15, plate_height - 0.6]) linear_extrude(0.6) e2(); cutters(); }
 }
 ```
@@ -375,14 +376,20 @@ These rules keep every colour attributed and every volume single-coloured:
   The emoji is then a live parameter too. The picker uses the same unicode-emoji-json
   catalogue and groups (Appendix A.1).
 - **Fonts for imports** come from the same CDN files MakerWorld uses
-  (`public-cdn.bblmw.com/content-generator/fonts/`, an allowlisted host for
-  `signs_fetch_assets`), or from the project's `.font` assets for a local font.
-  - Each font's licence is recorded in the template's `model.json`.
-  - A font whose licence the catalogue does not list as redistributable (the
-    "stylized" group, Appendix A.3) is fetched for rendering but kept out of the
-    generated template's committed files. The template then names the font, and
-    that file goes to the ScadBuddy font install path (`library/font_operations.py`)
-    instead.
+  (`public-cdn.bblmw.com/content-generator/fonts/`, one of the two hosts on
+  `signs_fetch_assets`' allowlist, §6.2), or from the project's `.font` assets for a
+  local font.
+  - Licences are decided per file, not per group. `signs/fonts/licences.json` lists
+    each catalogue file (Appendix A.3) with its licence and a link to where it was
+    checked. Only a file listed there as redistributable (for example OFL-1.1 or
+    Apache-2.0) is committed with a generated template, and each committed font's
+    licence is recorded in the template's `model.json`.
+  - Every other file is fetched for rendering but kept out of the committed files.
+    The template names the font, and the file goes to the ScadBuddy font install
+    path (`library/font_operations.py`) instead. That covers anything unchecked or
+    not redistributable, such as the stylized group, the Alibaba Health and
+    CalHenderson Braille files until their licences are checked, and the hidden
+    `times.ttf` (Fabric's `"times new roman"` default), which is never committed.
   - A missing local font falls back to NotoSansSC, as MakerWorld's
     `onFontMissing` does, with a warning naming it.
 
@@ -467,8 +474,8 @@ unversioned worker:
 |---|---|---|
 | `signs_import` | `{kind: "makerworld_make" \| "makerworld_template", content, assets, plate_svg?}` (blob pointers for large bytes) | `{sign, files: {path: Blob}, warnings}` |
 | `signs_normalise` | `{sign, files}` (an edited sign whose new uploads are raw) | `{sign, files, warnings}` |
-| `signs_compile` | `{sign, files}` | `{source, files, parameters, sha256}` |
-| `signs_fetch_assets` | `{urls}` (public `makerworld.bblmw.com` SVG asset URLs only; allowlisted host, capped size, no redirects off-host) | `{files: {name: Blob}}` |
+| `signs_compile` | `{sign, files}` (raw uploads allowed: it runs `signs_normalise`'s step first) | `{sign, source, files, parameters, sha256, warnings}` (`sign` is the normalised document) |
+| `signs_fetch_assets` | `{urls}` (public MakerWorld asset URLs only: `makerworld.bblmw.com` for SVG assets and `public-cdn.bblmw.com/content-generator/fonts/` for fonts; capped size, no redirects off-host) | `{files: {name: Blob}}` |
 
 Rules for the activities:
 
@@ -479,8 +486,9 @@ Rules for the activities:
   `SCADBUDDY_API_INTERNAL_URL` channel the print worker uses
   (`bambuddy/output_reader.py` `RemoteOutputs`).
 - **No credentials beyond the API's internal key.** The worker holds no Bambuddy key,
-  no KEK and no Claude credential. Its only outward reach is the
-  `makerworld.bblmw.com` asset fetch.
+  no KEK and no Claude credential. Its only outward reach is `signs_fetch_assets`,
+  to the two hosts its row names: `makerworld.bblmw.com` (SVG assets) and
+  `public-cdn.bblmw.com` (fonts, under `/content-generator/fonts/` only).
 - **Deterministic:** the same input gives the same bytes, which `signs_compile`'s
   tests pin.
 
@@ -534,13 +542,21 @@ Behaviour:
 - **Editing:** multi-select (Shift-click, Ctrl+A), align and distribute, layer order,
   flip, rotation with snap, arrow-key nudge, numeric size input, lock, undo/redo
   (command stack: add, modify, remove, batch remove).
-- **State:** the document is the template's UI state, in `inputs.sign` (scalars only
-  under `params`, so the 64 KB inputs cap holds). Uploaded bytes go to the asset store
-  (`library/assets.py`), and the document names them by asset id, never inline.
+- **State:** the document is not stored inline. `render/inputs.py` measures all of
+  `inputs` against `MAX_INPUTS_BYTES` (64 KB), and §4's caps allow a sign well past
+  that. So the UI uploads `sign.json` to the asset store (`library/assets.py`) on each
+  change (debounced), and `inputs.sign` holds only the pointer
+  `{"asset": <id>, "sha256": <hex>, "name": "sign.json", "mediaType": "application/json"}`.
+  The exposed parameters stay scalars under `params`. Uploaded SVGs and fonts go
+  to the asset store the same way, and the document names them by asset id, never
+  inline.
 - **Host API additions,** all minor (spec 2026-09-27 §8.1): `host.assets.upload(file)
   → {id, url}` and `host.signs.saveAsTemplate({name, description, tags}) → {slug}`. A
   template other than the Sign Maker cannot call the second: the route checks that
-  the template is a template maker, with `"maker": true` in `model.json`.
+  the template is a template maker, with `"maker": true` in `model.json`. That flag
+  is a template's claim about itself, so it is not a security boundary. It only
+  keeps other templates' UIs from offering the action. The route's authority is the
+  same as any library write (`model_create`), which the browser user already holds.
 
 ### 7.2 Preview and Generate
 
@@ -548,16 +564,21 @@ The Sign Maker's `pipeline/pipeline.py`:
 
 ```python
 async def run(ctx, inputs):
+    # inputs["sign"] is an asset pointer (§7.1); signs_compile reads it, normalises
+    # any raw uploads, and compiles, so the preview needs no separate normalise call.
     compiled = await ctx.service("signs_compile", {"sign": inputs["sign"]})
     part = await ctx.render("model.scad", files=compiled["files"])
-    await ctx.output(plates=[ctx.plate_of([part])], name=inputs["sign"].get("name"))
+    await ctx.output(plates=[ctx.plate_of([part])], name=compiled["sign"].get("name"))
 ```
 
 This adds two generic `ctx` primitives (spec 2026-09-27 §5.2, minor additions):
 
 - **`ctx.service(name, arg)`** runs a host service activity: a TypeScript activity on
-  its own queue, from an allowlist in `workflows/services.py`. Phase 1's list is the
-  `signs_*` activities. Template code cannot name an arbitrary activity or queue.
+  its own queue, from an allowlist in `workflows/services.py`. Phase 1's list is
+  exactly `signs_normalise` and `signs_compile`, which are pure functions of their
+  input and reach no network. `signs_import` and `signs_fetch_assets` are not on it:
+  only the `sign_import` operation (§8) calls them. Template code cannot name an
+  arbitrary activity or queue.
 - **`ctx.render(file, files=…, **params)`** overlays files onto the revision's snapshot
   for this piece. The compiled `model.scad` replaces the shim's, and `layers/` and
   `fonts/` are added. The piece key includes each overlay file's digest, so
