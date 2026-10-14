@@ -343,16 +343,31 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     await db.sql`
       INSERT INTO workflow_definitions (id, name, version, script, created_by)
       VALUES ('d1', 'swap', 1, 'x', '{"kind": "browser"}') ON CONFLICT DO NOTHING`
-    for (let i = 0; i < 200; i++) {
-      const old = randomUUID()
-      await db.sql`
-        INSERT INTO workflow_runs (id, definition_id, version, name, status, workflow_id, workflow_run_id, started_by, waiting_on, updated_at)
-        VALUES (${old}, 'd1', 1, 'swap', 'waiting', ${`flow-${old}`}, 'wr1',
-                ${db.sql.json({ kind: 'agent', principal: TOKEN, session: parent })}, ${db.sql.json(waiting as never)}, now() - interval '1 hour')`
-    }
+    // One statement, not 200: keeps this test quick under CI load.
+    await db.sql`
+      INSERT INTO workflow_runs (id, definition_id, version, name, status, workflow_id, workflow_run_id, started_by, waiting_on, updated_at)
+      SELECT id, 'd1', 1, 'swap', 'waiting', 'flow-' || id, 'wr1',
+             ${db.sql.json({ kind: 'agent', principal: TOKEN, session: parent })}, ${db.sql.json(waiting as never)}, now() - interval '1 hour'
+      FROM (SELECT gen_random_uuid()::text AS id FROM generate_series(1, 200)) runs`
     const newer = await flowRun()
     expect(await escalations.deliver()).toBe(1)
     expect(sent[0]!.text).toContain(newer)
+  })
+
+  // #3494 review: a malformed hop_until skips that call, never the scan of every run.
+  it('skips a call whose hop_until is malformed and still delivers the others', async () => {
+    await db.sql`
+      INSERT INTO workflow_definitions (id, name, version, script, created_by)
+      VALUES ('d1', 'swap', 1, 'x', '{"kind": "browser"}') ON CONFLICT DO NOTHING`
+    const bad = randomUUID()
+    const waiting = [{ call_id: 'c1', kind: 'approval', fn: 'queue_print', hop: 'parent', hop_until: 'not a time', hops: [] }]
+    await db.sql`
+      INSERT INTO workflow_runs (id, definition_id, version, name, status, workflow_id, workflow_run_id, started_by, waiting_on, updated_at)
+      VALUES (${bad}, 'd1', 1, 'swap', 'waiting', ${`flow-${bad}`}, 'wr1',
+              ${db.sql.json({ kind: 'agent', principal: TOKEN, session: parent })}, ${db.sql.json(waiting as never)}, now() - interval '1 hour')`
+    const good = await flowRun()
+    expect(await escalations.deliver()).toBe(1)
+    expect(sent[0]!.text).toContain(good)
   })
 
   it("judges a call's hop and its grace by Postgres's clock, not a skewed replica's (#3411)", async () => {

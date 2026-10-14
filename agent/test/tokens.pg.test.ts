@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { hashToken, liveTokenTiers, PostgresTokenStore, TOKEN_PREFIX } from '../src/auth/tokens.js'
 import { connectDatabase, type Database } from '../src/db.js'
 import { migrate } from '../src/db/migrations.js'
@@ -131,6 +131,16 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(await store.liveTier('not-a-uuid')).toBeNull()
       const tiers = liveTokenTiers(store)
       expect(await tiers({ kind: 'bearer', id: `token:${expiring.record.id}` })).toEqual([])
+
+      // #3494 review: with no `now`, expiry is Postgres's clock, not a skewed replica's.
+      const soon = await store.mint({ name: 's', tier: 'write', expiresAt: new Date(Date.now() + 5 * 60_000) })
+      vi.useFakeTimers({ toFake: ['Date'] })
+      vi.setSystemTime(Date.now() + 15 * 60_000)
+      try {
+        expect(await store.liveTier(soon.record.id)).toBe('write')
+      } finally {
+        vi.useRealTimers()
+      }
       expect(await tiers({ kind: 'oidc', id: 'oidc:https://idp.example/#alice' })).toBeUndefined()
     })
 
