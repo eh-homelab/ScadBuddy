@@ -174,12 +174,6 @@ func (c *cache) release(id int) {
 	c.mu.Unlock()
 }
 
-// has is whether a file's contents are cached.
-func (c *cache) has(f api.File) bool {
-	st, err := os.Stat(c.path(f.ID))
-	return err == nil && st.Size() == f.Size
-}
-
 // size is the bytes in the cache directory, for the cache gauge. The directory is
 // flat, so this is a listing and a stat per file at each collection (every minute).
 func (c *cache) size() int64 {

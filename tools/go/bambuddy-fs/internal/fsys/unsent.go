@@ -828,9 +828,10 @@ func (t *tree) send(ctx context.Context, e *entry) {
 // file may be the last attempt's, whose answer was lost: the same request is sent
 // again, and the route answers it with that file. If it answers with a new file
 // instead, the name is someone else's, and the new file is renamed to the conflict
-// copy. It returns the file and whether it is a conflict copy.
+// copy. A repeated request whose answer is no longer in the folder under the name
+// (deleted or renamed since) goes again under a new key. It returns the file and
+// whether it is a conflict copy.
 func (t *tree) sendOnce(ctx context.Context, e *entry, rec record) (api.File, bool, error) {
-	q := t.unsent
 	a := *rec.Attempt
 	name, conflict, others, err := t.target(ctx, rec.FolderID, rec.Name, rec.Bases, rec.SavedAt)
 	if err != nil {
@@ -840,14 +841,36 @@ func (t *tree) sendOnce(ctx context.Context, e *entry, rec record) (api.File, bo
 	if again {
 		name, conflict = rec.Name, false
 	}
-	if a.Name != name || a.FolderID != rec.FolderID {
-		if err := q.update(e, func(r *record) { r.Attempt = &attempt{Key: a.Key, FolderID: rec.FolderID, Name: name} }); err != nil {
-			slog.Error("updating an unsent write's record failed", "path", e.dir, "err", err)
-		}
+	repeat := a.Name == name && a.FolderID == rec.FolderID
+	if !repeat {
+		t.persistAttempt(e, attempt{Key: a.Key, FolderID: rec.FolderID, Name: name})
 	}
 	got, err := t.uploadFile(ctx, rec.FolderID, name, a.Key, e.contents())
 	if err != nil {
 		return api.File{}, false, err
+	}
+	if repeat {
+		// The route answers a repeated key with the file it made then, even if that
+		// file has since been deleted or renamed: then the write was never stored, and
+		// it goes again under a new key.
+		live, err := t.holds(ctx, rec.FolderID, name, got.ID)
+		if err != nil {
+			return api.File{}, false, err
+		}
+		if !live {
+			slog.Warn("the file a lost answer made is gone or renamed; the write is sent again",
+				"folder", rec.FolderID, "file", got.ID)
+			// The name is chosen again: the files that held it may be the ones gone.
+			if name, conflict, others, err = t.target(ctx, rec.FolderID, rec.Name, rec.Bases, rec.SavedAt); err != nil {
+				return api.File{}, false, err
+			}
+			again = false
+			a.Key = api.NewKey()
+			t.persistAttempt(e, attempt{Key: a.Key, FolderID: rec.FolderID, Name: name})
+			if got, err = t.uploadFile(ctx, rec.FolderID, name, a.Key, e.contents()); err != nil {
+				return api.File{}, false, err
+			}
+		}
 	}
 	if again && !slices.Contains(others, got.ID) {
 		conflict = true
@@ -864,6 +887,23 @@ func (t *tree) sendOnce(ctx context.Context, e *entry, rec record) (api.File, bo
 			"folder", rec.FolderID, "name", rec.Name, "others", others, "bases", ids(rec.Bases), "file", got.ID, "copy", got.Name)
 	}
 	return got, conflict, nil
+}
+
+func (t *tree) persistAttempt(e *entry, a attempt) {
+	if err := t.unsent.update(e, func(r *record) { r.Attempt = &a }); err != nil {
+		slog.Error("updating an unsent write's record failed", "path", e.dir, "err", err)
+	}
+}
+
+// holds reports whether a fresh listing of the folder has the file under the name.
+func (t *tree) holds(ctx context.Context, folderID int, name string, fileID int) (bool, error) {
+	l, err := t.lib.List(ctx, folderID, true)
+	if err != nil {
+		return false, err
+	}
+	return slices.ContainsFunc(l.Files, func(f api.File) bool {
+		return f.ID == fileID && f.Name == name && f.FolderID == folderID
+	}), nil
 }
 
 func (t *tree) uploadFile(ctx context.Context, folderID int, name, key, path string) (api.File, error) {

@@ -47,9 +47,10 @@ type fakeLibrary struct {
 	attempts  int
 	// loseAnswers is how many uploads succeed but answer a 502, as when a deploy cuts
 	// the connection after the upload ran. keyed is the file each Idempotency-Key, with
-	// its request, made: sent again, the route answers it without uploading again.
+	// its request, made, as answered then: sent again, the route answers it without
+	// uploading again, even if that file has since been deleted or renamed.
 	loseAnswers int
-	keyed       map[string]int
+	keyed       map[string]api.File
 	keys        []string
 }
 
@@ -64,7 +65,7 @@ type update struct {
 func newFakeLibrary() *fakeLibrary {
 	return &fakeLibrary{
 		files: map[int]api.File{}, data: map[int][]byte{}, nextID: 100,
-		deleted: map[int]bool{}, folderDeleted: map[int]bool{}, busy: map[int]bool{}, keyed: map[string]int{},
+		deleted: map[int]bool{}, folderDeleted: map[int]bool{}, busy: map[int]bool{}, keyed: map[string]api.File{},
 	}
 }
 
@@ -161,8 +162,8 @@ func (l *fakeLibrary) Upload(_ context.Context, folderID int, name, key string, 
 	defer l.mu.Unlock()
 	l.keys = append(l.keys, key)
 	request := key + "\x00" + strconv.Itoa(folderID) + "\x00" + name + "\x00" + string(data)
-	if id, ok := l.keyed[request]; ok && key != "" {
-		return l.files[id], nil
+	if f, ok := l.keyed[request]; ok && key != "" {
+		return f, nil
 	}
 	if l.down || l.failUploads > 0 {
 		if !l.down {
@@ -182,7 +183,7 @@ func (l *fakeLibrary) Upload(_ context.Context, folderID int, name, key string, 
 	f := api.File{ID: l.nextID, Name: name, FolderID: folderID, Size: int64(len(data)), Created: time.Now().UTC()}
 	l.files[f.ID] = f
 	l.data[f.ID] = data
-	l.keyed[request] = f.ID
+	l.keyed[request] = f
 	if l.loseAnswers > 0 {
 		l.loseAnswers--
 		return api.File{}, &api.Error{Op: "upload", Status: http.StatusBadGateway}

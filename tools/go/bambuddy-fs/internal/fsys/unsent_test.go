@@ -1039,3 +1039,46 @@ func TestAnOlderRecordGetsAKeyWhenLoaded(t *testing.T) {
 		}
 	})
 }
+
+// The file a lost answer made is deleted before the retry: the route answers the
+// repeated key with that gone file, so the write goes again under a new key and the
+// old file is replaced, never left as the only copy deleted (review N-1).
+func TestARetryWhoseLostUploadWasDeletedSendsAgain(t *testing.T) {
+	lib := newFakeLibrary()
+	lib.folder(4, "Top", 0)
+	lib.file(10, "X.3mf", 4, []byte("old"))
+	lib.loseAnswers = 1
+	lib.uploading = func(attempt int) {
+		if attempt != 2 {
+			return
+		}
+		var lost int
+		lib.locked(func() {
+			for id, f := range lib.files {
+				if f.Name == "X.3mf" && id != 10 {
+					lost = id
+				}
+			}
+		})
+		if err := lib.DeleteFiles(context.Background(), lost); err != nil {
+			t.Errorf("deleting the lost upload %d: %v", lost, err)
+		}
+	}
+	state := t.TempDir()
+	dir, released := retrying(t, lib, Options{StateDir: state})
+	logs(t)
+	if err := os.WriteFile(filepath.Join(dir, "Top", "X.3mf"), []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	waitRelease(t, released)
+	eventually(t, "the replace", func() bool { return libraryHas(lib, map[string]string{"4/X.3mf": "new"}) })
+	eventually(t, "the queue to empty", func() bool { return len(queued(t, state)) == 0 })
+	lib.locked(func() {
+		if lib.uploads != 2 || !lib.deleted[10] {
+			t.Fatalf("uploads %d, old deleted %v: %+v", lib.uploads, lib.deleted[10], lib.files)
+		}
+		if n := len(lib.keys); n < 3 || lib.keys[n-1] == lib.keys[0] {
+			t.Fatalf("keys: %q", lib.keys)
+		}
+	})
+}
