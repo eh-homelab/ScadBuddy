@@ -214,6 +214,61 @@ def test_a_spool_summary_counts_its_filament_and_prices_it(client: TestClient) -
 
 
 @respx.mock
+def test_no_grams_of_a_priced_spool_cost_nothing_not_null(client: TestClient) -> None:
+    """#2918: ``grams=0`` is a plate that uses none of it, which costs 0.0. Only a
+    missing price or a missing ``grams`` is ``null``."""
+    configure(client)
+    mock_inventory()
+
+    body = client.get("/api/v1/farm/spools/15/summary", params={"grams": 0}).json()
+
+    assert (body["grams"], body["grams_cost"]) == (0.0, 0.0)
+
+
+@respx.mock
+def test_the_price_per_gram_is_rounded_like_the_other_prices(client: TestClient) -> None:
+    """#2918: 15.96 per kg is 0.01596 per gram, to six places, not a float's tail."""
+    configure(client)
+    mock_inventory()
+
+    body = client.get("/api/v1/farm/spools/15/summary").json()
+
+    assert body["price_per_g"] == 0.01596
+    assert repr(body["price_per_g"]) == "0.01596"
+
+
+def _filament_rows(*spools: dict[str, object]) -> list[dict[str, object]]:
+    base = recording("inventory-spools.json")[0]
+    return [{**base, "archived_at": None, **spool} for spool in spools]
+
+
+@respx.mock
+def test_a_spool_known_by_rgba_and_one_known_by_name_are_different_filaments(
+    client: TestClient,
+) -> None:
+    """#2918: the colour is the ``rgba``, else the colour's name; a spool recorded one way
+    and one the other are never assumed to be one colour. Spools with neither are one
+    colourless filament of their material, subtype and brand."""
+    configure(client)
+    rows = _filament_rows(
+        {"id": 1, "rgba": "F5547CFF", "color_name": None},
+        {"id": 2, "rgba": None, "color_name": "Hot Pink"},
+        {"id": 3, "rgba": None, "color_name": None},
+        {"id": 4, "rgba": None, "color_name": None},
+    )
+    respx.get(f"{API}/inventory/spools").mock(return_value=httpx.Response(200, json=rows))
+    respx.get(f"{API}/inventory/assignments").mock(return_value=httpx.Response(200, json=[]))
+
+    def filament(spool_id: int) -> list[int]:
+        body = client.get(f"/api/v1/farm/spools/{spool_id}/summary").json()
+        return sorted(body["filament"]["spool_ids"])
+
+    assert filament(1) == [1]
+    assert filament(2) == [2]
+    assert filament(3) == [3, 4]
+
+
+@respx.mock
 def test_without_a_price_every_cost_is_null_not_a_guess(client: TestClient) -> None:
     configure(client)
     mock_inventory()
