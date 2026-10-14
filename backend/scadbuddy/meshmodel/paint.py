@@ -20,8 +20,8 @@ all 13,873 painted ones were carried; only 87 % fell in the same 1e-4 mm grid ce
 (OpenSCAD's 3MF import holds coordinates as 32-bit floats and its export writes 6
 decimals), and about two thirds started at another vertex. With the green anchor of
 `tests/test_mesh_models_fixtures.py` on the small carrot, every painted triangle clear of
-the anchor (5,639 of 6,319) was carried verbatim. `tests/test_mesh_models_paint.py`
-re-measures both in the image."""
+the anchor was carried verbatim (5,631 of 6,319 by the test's mask, 2026-10-14).
+`tests/test_mesh_models_paint.py` re-measures both in the image."""
 
 from __future__ import annotations
 

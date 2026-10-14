@@ -109,8 +109,9 @@ async def test_the_anchored_carrots_painted_leaves_print_green(tmp_path: Path) -
     expected = Counter(code for code, ok in zip(codes, clear, strict=True) if ok and code)
     _, palette = source_codes(directory, scene)
     printed = printed_codes(paths.root / result.model_3mf, palette)
-    # Measured 2026-10-13: exactly these 5,639 of the 6,319 painted faces.
-    assert sum(expected.values()) == 5_639
+    # Measured 2026-10-14 in the image: 5,631 of the 6,319 painted faces lie clear of the
+    # anchor by this mask (the plan's 5,639 used a looser one), and every one is carried.
+    assert sum(expected.values()) == 5_631
     assert not expected - printed
     assert sum(printed.values()) <= sum(1 for code in codes if code)
     assert printed["8"]  # whole-green leaf faces (extruder 2: green)
