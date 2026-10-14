@@ -80,6 +80,8 @@ function DiagnosticItem({ diagnostic, scopes, target, request, onChanged }: Item
       : undefined
   const fixes = diagnostic.status === 'accepted' ? [] : (diagnostic.fixes ?? [])
   const previewed = fixes.find((row) => row.id === previewing)
+  /** A preview changes nothing, so it needs no decisions store; only Apply does. */
+  const canPreview = target !== undefined && request !== null && fixes.length > 0
   return (
     <li
       data-testid={`diagnostic-${diagnostic.key}`}
@@ -115,18 +117,19 @@ function DiagnosticItem({ diagnostic, scopes, target, request, onChanged }: Item
           <RemoveDecision diagnostic={diagnostic} onChanged={onChanged} />
         </p>
       )}
-      {scopes.length > 0 && !suppressing && previewed === undefined && (
+      {!suppressing && previewed === undefined && (canPreview || scopes.length > 0) && (
         <div className="mt-1.5 flex flex-wrap gap-2">
-          {target !== undefined &&
-            request !== null &&
+          {canPreview &&
             fixes.map((fix) => (
               <Button key={fix.id} size="sm" onClick={() => setPreviewing(fix.id)}>
                 Preview fix: {fix.title}
               </Button>
             ))}
-          <Button size="sm" variant="ghost" onClick={() => setSuppressing(true)}>
-            Suppress…
-          </Button>
+          {scopes.length > 0 && (
+            <Button size="sm" variant="ghost" onClick={() => setSuppressing(true)}>
+              Suppress…
+            </Button>
+          )}
         </div>
       )}
       {previewed && target !== undefined && request !== null && (

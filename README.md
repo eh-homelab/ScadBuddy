@@ -293,7 +293,8 @@ on shutdown.
   `task_queue`, `worker_inprocess`).
 - `GET /metrics` serves Prometheus metrics: render queue depth and oldest wait
   (read from the store in Postgres, so across replicas), wait time and latency
-  (`scadbuddy_render_job_latency_seconds`, by outcome), per-stage render time, whether
+  (`scadbuddy_render_job_latency_seconds`, by `kind` (`render` or `arrange`) and
+  outcome), per-stage render time, whether
   the jobs table can be read (`scadbuddy_render_store_up`), whether the process's
   `LISTEN` connection is up (`scadbuddy_render_queue_listener_connected`,
   `scadbuddy_render_queue_listener_reconnects_total`), the SLO targets, the upload store's files and bytes against its caps
@@ -1229,6 +1230,10 @@ and the metric panels are unaffected. CI's `lint` job checks the dashboard
 - `backend/` — FastAPI, `uv run --frozen pytest` (tests marked
   `requires_openscad` need a real `openscad`; the Dockerfile's `test` target
   is where they run in CI).
+- `test-fixtures/` — real 3MFs in Git LFS (~290 MB) for the tests marked
+  `requires_fixtures`, which skip without them. With git-lfs installed a plain
+  clone downloads them all; clone with `GIT_LFS_SKIP_SMUDGE=1 git clone …` and
+  `git lfs pull --include "test-fixtures/**"` only when you need them.
 - `frontend/` — Vite + React, `pnpm test`, `pnpm build`.
 - `agent/` — the AI agent service (Node 24, Hono, Claude Agent SDK),
   `pnpm test`, `pnpm build`; see "The agent sidecar" above.

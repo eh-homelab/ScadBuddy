@@ -2,7 +2,8 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { describe, expect, it } from 'vitest'
-import { BytesInput } from './controls'
+import type { Settings } from '../../api/types'
+import { BytesInput, FieldRow, SourceBadge } from './controls'
 import { bestUnit, hasKey, inUnit } from './fields'
 
 // #322 review: a byte limit must never change unless its number is edited.
@@ -67,5 +68,54 @@ describe('hasKey', () => {
     expect(hasKey('bambuddy_api_key')).toBe('has_api_key')
     expect(hasKey('bambuddy_render_api_key')).toBe('has_render_api_key')
     expect(hasKey('google_fonts_api_key')).toBe('has_google_fonts_api_key')
+  })
+})
+
+// #2347 — a field's help and error describe its control; #2456 — Reset is named after the field.
+describe('FieldRow', () => {
+  it('describes the control by its help, and by its error too while there is one, keeping both shown', () => {
+    const { rerender } = render(
+      <FieldRow id="timeout" label="Render timeout" help="Seconds.">
+        <input id="timeout" aria-describedby="units" />
+      </FieldRow>,
+    )
+    const input = screen.getByLabelText('Render timeout')
+    expect(input).toHaveAttribute('aria-describedby', 'units timeout-help')
+    expect(input).toHaveAccessibleDescription('Seconds.')
+    expect(input).not.toHaveAttribute('aria-invalid')
+
+    rerender(
+      <FieldRow id="timeout" label="Render timeout" help="Seconds." error="Enter 0 or more.">
+        <input id="timeout" aria-describedby="units" />
+      </FieldRow>,
+    )
+    expect(input).toHaveAttribute('aria-describedby', 'units timeout-help timeout-error')
+    expect(input).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByText('Seconds.')).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('Enter 0 or more.')
+
+    rerender(
+      <FieldRow id="timeout" label="Render timeout" help="Seconds.">
+        <input id="timeout" aria-describedby="units" />
+      </FieldRow>,
+    )
+    expect(input).toHaveAttribute('aria-describedby', 'units timeout-help')
+    expect(input).not.toHaveAttribute('aria-invalid')
+  })
+
+  it("names a badge's Reset with its visible text first, then the field's label", () => {
+    const settings = { sources: { render_timeout: 'stored' } } as unknown as Settings
+    render(
+      <FieldRow
+        id="timeout"
+        label="Render timeout"
+        badge={<SourceBadge name="render_timeout" settings={settings} onReset={() => {}} resetting={false} />}
+      >
+        <input id="timeout" />
+      </FieldRow>,
+    )
+    expect(screen.getByRole('button', { name: 'Reset to deployment value: Render timeout' })).toHaveTextContent(
+      'Reset to deployment value',
+    )
   })
 })

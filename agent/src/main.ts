@@ -13,6 +13,7 @@ import { approvalGrantCheck, FailClosedTokenStore, liveTokenTiers, PostgresToken
 import { loadConfig } from './config.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
 import { CredentialPool } from './harness/fallback.js'
+import { nestedQueries } from './builtins/nested.js'
 import { connectDatabase } from './db.js'
 import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js'
 import { PgEventListener } from './events/pgListener.js'
@@ -75,6 +76,7 @@ import { Client, Connection } from '@temporalio/client'
 import { fileURLToPath } from 'node:url'
 import { AgentCommands } from './operations/run.js'
 import { OperationStore } from './operations/store.js'
+import { activityKindsOf, upsertActivityKinds } from './activity/kinds.js'
 import { packageKinds } from './plugins/packages/operations.js'
 import { operationActivities } from './temporal/operationActivities.js'
 import { PendingActionStore } from './tools/pending.js'
@@ -386,6 +388,15 @@ if (config.temporalAddress && !database) console.error('agent-tools worker: not 
 if (temporal) Runtime.install({ shutdownSignals: [] })
 const operationStore = temporal ? new OperationStore(temporal.sql) : undefined
 const commandKinds = pluginPackages ? packageKinds({ packages: pluginPackages, installer: packageInstaller }) : []
+// The agent's activity kinds are its command kinds (spec 2026-10-09 §4), read by the backend.
+if (database && commandKinds.length > 0) {
+  void database
+    .ready()
+    .then(async (ok) => {
+      if (ok) await upsertActivityKinds(database.sql, activityKindsOf(commandKinds))
+    })
+    .catch((err: unknown) => console.error('activity kinds: could not record them:', (err as Error).message))
+}
 // Durable subjects' payloads are sealed per subject (spec §6.5): every client and worker
 // that encodes or decodes them carries the codec, which needs the KEK. Without one, a
 // session or flow payload is never sealed here, so no durable session is started (5c Ruling 13).
@@ -461,6 +472,28 @@ const turnToolDeps = temporal
                 root: config.payloadDir ? path.join(config.payloadDir, SHARED_PACKAGES) : undefined,
                 localRoot: path.join(paths.stateDir, 'plugins-local'),
                 forward: (loaded) => forwardPackageServers(loaded, pluginForwarder),
+              },
+            }
+          : {}),
+        // An allowed package's other built-ins (#2393), on the session's workspace and credential.
+        ...(workspace && credentials
+          ? {
+              builtins: {
+                files: workspace,
+                audit,
+                nested: (context: { session: string; flow?: string }) =>
+                  nestedQueries({
+                    paths,
+                    credential: async () => (await new CredentialPool({ repo: credentials, kek, audit }).candidates())[0]!.credential,
+                    // Counted in the session's cost, which its budget reads, as a classic turn counts Claude Code's own calls.
+                    ...(context.flow
+                      ? {}
+                      : {
+                          spent: async (cost: number) => {
+                            await temporal.sql`UPDATE ai_sessions SET cost_usd = cost_usd + ${cost} WHERE id = ${context.session}`
+                          },
+                        }),
+                  }),
               },
             }
           : {}),

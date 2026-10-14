@@ -77,6 +77,16 @@ describe('TurnTrace', () => {
     expect(seg0.attributes).toMatchObject({ 'scadbuddy.outcome': 'success', 'scadbuddy.cost_usd': 0.02, 'scadbuddy.turns': 2 })
   })
 
+  it('#2376 — records the turn’s own cost and model turns, with the session’s totals beside them', async () => {
+    // A late turn of a long chat: the outcome carries the session's running totals.
+    new TurnTrace({ sessionId: 's-1', turnId: 't-9', parent: ROOT_CONTEXT, tierOf: () => 'outward', before: { costUsd: 3, turns: 25 } })
+      .finish({ kind: 'result', subtype: 'success', costUsd: 3.05, turns: 27 })
+    await flushTracing()
+    const attributes = one('agent.turn').attributes
+    expect(attributes['scadbuddy.cost_usd']).toBeCloseTo(0.05)
+    expect(attributes).toMatchObject({ 'scadbuddy.turns': 2, 'scadbuddy.session_cost_usd': 3.05, 'scadbuddy.session_turns': 27 })
+  })
+
   it('the decision starts agent.turn.resume, and the approved call runs inside it', async () => {
     const t = turn()
     const park = t.park('toolu_1', 'x')

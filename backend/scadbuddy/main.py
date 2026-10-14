@@ -21,6 +21,12 @@ from temporalio.worker import Worker
 
 import scadbuddy.api
 from scadbuddy import __version__
+from scadbuddy.activity.component import ACTIVITY
+from scadbuddy.activity.index import (
+    ACTIVITY_PRUNE_MARGIN,
+    ACTIVITY_REPAIR_WINDOW_DEFAULT,
+    ACTIVITY_TTL_DEFAULT,
+)
 from scadbuddy.api import (
     health,
     libraries,
@@ -48,6 +54,7 @@ from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.errors import NOT_CONFIGURED_PROBLEM
 from scadbuddy.bambuddy.follow import FollowActivities
+from scadbuddy.bambuddy.lost_slices import sweep_lost_slices
 from scadbuddy.bambuddy.output_reader import LocalOutputs
 from scadbuddy.bambuddy.preview import sweep_preview_slices
 from scadbuddy.bambuddy.print_source import MAX_DOWNLOAD_BYTES
@@ -96,6 +103,7 @@ from scadbuddy.workflows.client import (
 )
 from scadbuddy.workflows.follow import resume_followed
 from scadbuddy.workflows.housekeeping import (
+    ACTIVITY_SWEEP,
     BACKFILL_SWEEP,
     FLOWS_SWEEP,
     GIT_SWEEP,
@@ -487,6 +495,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def maintain_models_git() -> None:
         await _heartbeating(_maintain_models_git_logged(state))
 
+    @activity.defn(name=ACTIVITY_SWEEP)
+    async def sweep_activity() -> None:
+        await _heartbeating(_sweep_activity_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -498,7 +510,42 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         sweep_flow_runs,
         sweep_preview_slices,
         maintain_models_git,
+        sweep_activity,
     ]
+
+
+async def _sweep_activity_logged(state: AppState) -> None:
+    """Spec 2026-10-09 §6: repair what the sources' own writes missed, then prune. Repair
+    first, so a placeholder it can fill is filled before its time is up; prune runs
+    whatever repair did. The window stays an hour inside the TTL, or a pruned row could
+    be restored from its source on the next run: prune reads the row's own finished_at,
+    the moment it was written, and repair the source's, a little earlier."""
+    failed = False
+    try:
+        settings = await asyncio.to_thread(state.settings_store.load)
+    except Exception:
+        # The stored TTL is unknown, and the default may be shorter than the operator's:
+        # pruning with it would delete rows they chose to keep. Skip the run, which fails.
+        logger.warning("could not load the activity settings; skipping the sweep", exc_info=True)
+        raise
+    ttl = settings.activity_ttl_seconds or ACTIVITY_TTL_DEFAULT
+    window = min(
+        settings.activity_repair_window_seconds or ACTIVITY_REPAIR_WINDOW_DEFAULT,
+        ttl - ACTIVITY_PRUNE_MARGIN,
+    )
+    index = state.components.get(ACTIVITY).index
+    try:
+        await index.repair(window)
+    except Exception:
+        logger.exception("could not repair activity")
+        failed = True
+    try:
+        await index.prune(ttl, window)
+    except Exception:
+        logger.exception("could not prune activity")
+        failed = True
+    if failed:
+        raise RuntimeError("the activity sweep failed")
 
 
 async def _prune_jobs_logged(state: AppState) -> None:
@@ -547,6 +594,8 @@ async def _sweep_preview_slices_logged(state: AppState) -> None:
     try:
         async with client_for(settings) as client:
             removed = await sweep_preview_slices(client, state.uploads)
+            # #2715: and what print runs' lost slice starts left, on the same tick.
+            lost = await sweep_lost_slices(client, state.uploads)
     except ApiError as error:
         if error.type == NOT_CONFIGURED_PROBLEM:
             logger.debug("no background-slice sweep: Bambuddy is not set up")
@@ -558,6 +607,8 @@ async def _sweep_preview_slices_logged(state: AppState) -> None:
         raise
     if removed:
         logger.info("removed unprinted background slices", extra={"count": removed})
+    if lost:
+        logger.info("removed the files of lost slice starts", extra={"count": lost})
 
 
 async def _maintain_models_git_logged(state: AppState) -> None:

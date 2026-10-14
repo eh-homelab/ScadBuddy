@@ -29,6 +29,7 @@ from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
 
+from scadbuddy.bambuddy.catalogue import forget_catalogues
 from scadbuddy.core import settings as settings_module
 from scadbuddy.core.config import Config, load_config
 from scadbuddy.core.paths import DataPaths
@@ -67,6 +68,15 @@ def _clear_spans() -> Iterator[None]:
     for the whole session and would otherwise hold every span every test made."""
     yield
     _SPANS.clear()
+
+
+@pytest.fixture(autouse=True)
+def _forget_catalogues() -> Iterator[None]:
+    """The dialog keeps Bambuddy's preset catalogue in process (#2361); each test mocks
+    its own, so none outlives the test that read it."""
+    forget_catalogues()
+    yield
+    forget_catalogues()
 
 
 @pytest.fixture

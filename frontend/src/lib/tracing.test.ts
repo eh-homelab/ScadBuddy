@@ -6,6 +6,7 @@ import { AI_STATUS_PATH } from '../agent/chat/availability'
 import { api, printRunPoll } from '../api/client'
 import { queuedResult } from '../mocks/choices'
 import { server } from '../mocks/server'
+import { backfillOutputs, runArrange } from './arrange'
 import { RELAY_PATH } from './relayExporter'
 import { TRACER_NAME, messageTraceparent, traceAction } from './traceAction'
 import { startTracing } from './tracing'
@@ -183,6 +184,49 @@ describe('startTracing', () => {
     for (const header of seen) {
       expect(header).toMatch(TRACEPARENT)
       expect(header?.split('-')[1]).toBe(actionTrace)
+    }
+  })
+
+  it('parents an arrange’s re-render, start and save on the arrange action, but not its follows (#2292)', async () => {
+    const seen: Record<string, (string | null)[]> = {}
+    const note = (key: string, request: Request) => (seen[key] ??= []).push(request.headers.get('traceparent'))
+    server.use(
+      http.post('/api/v1/outputs/o1/backfill', ({ request }) => {
+        note('backfill', request)
+        return HttpResponse.json({ id: 'b1', status: 'done' })
+      }),
+      http.get('/api/v1/outputs/o1', ({ request }) => {
+        note('output', request)
+        return HttpResponse.json({ id: 'o1', slug: 'box', manifest: [{ part: 'Box', count: 1 }] })
+      }),
+      http.post('/api/v1/outputs/arrange', ({ request }) => {
+        note('arrange', request)
+        return HttpResponse.json({ id: 'a1', status: 'pending' })
+      }),
+      http.get('/api/v1/jobs/a1', ({ request }) => {
+        note('job', request)
+        return HttpResponse.json({ id: 'a1', status: 'done', plates: [] })
+      }),
+      http.post('/api/v1/models/box/outputs', ({ request }) => {
+        note('save', request)
+        return HttpResponse.json({ id: 'arranged' })
+      }),
+    )
+    stop = startTracing()
+    let actionTrace: string | undefined
+    await traceAction('arrange', {}, async (within) => {
+      actionTrace = trace.getActiveSpan()?.spanContext().traceId
+      await backfillOutputs([{ id: 'o1' }], { within, pollMs: 1 })
+      await runArrange('box', { objects: [], slug: 'box', goal: 'fewest_plates' }, { within, pollMs: 1 })
+    })
+    for (const key of ['backfill', 'arrange', 'save']) {
+      expect(seen[key]?.[0], key).toMatch(TRACEPARENT)
+      expect(seen[key]?.[0]?.split('-')[1], key).toBe(actionTrace)
+    }
+    // The follows are polls: unsampled, in no action's trace.
+    for (const key of ['output', 'job']) {
+      expect(seen[key]?.length, key).toBeGreaterThan(0)
+      for (const header of seen[key] ?? []) expect(header, key).toMatch(UNSAMPLED)
     }
   })
 

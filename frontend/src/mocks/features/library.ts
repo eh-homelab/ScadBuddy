@@ -6,11 +6,14 @@ import type {
   ProjectAttach,
   ChoicesView,
   FilamentOptions,
+  LibraryCopyResult,
   LibraryDeleteResult,
   LibraryEntry,
   LibraryFileObjects,
   LibraryFolderView,
   LibraryListing,
+  LibraryMoveResult,
+  LibraryRenameResult,
   LibraryRestoreResult,
   ModelPrintChoices,
   OutputPlate,
@@ -47,6 +50,8 @@ export const libraryFolders: LibraryFolderView[] = [
   { id: 3, name: 'Supplies', parent_id: null, depth: 0, file_count: 0 },
   { id: 4, name: 'Storage', parent_id: 3, depth: 1, file_count: 1 },
   { id: 9, name: 'Bulk', parent_id: null, depth: 0, file_count: 300 },
+  // #2670 — a folder linked to a Bambuddy project: a move out of it takes a file out of the project.
+  { id: 13, name: 'Lamp', parent_id: null, depth: 0, file_count: 1, project_id: 7, project_name: 'Desk lamp' },
   // #2165 — a name repeated under another folder, as the live library has it.
   { id: 10, name: 'Spec', parent_id: null, depth: 0, file_count: 0 },
   { id: 11, name: 'MakerWorld', parent_id: 10, depth: 1, file_count: 0 },
@@ -94,6 +99,8 @@ export const libraryFiles: LibraryEntry[] = [
   entry(121, 'alex-headphone-hook.3mf', '3mf', 12),
   entry(122, 'nas-share-bracket.3mf', '3mf', 12, { is_external: true }),
   ...Array.from({ length: 300 }, (_, n) => entry(2000 + n, `part-${n}.3mf`, '3mf', 9)),
+  // #2670 — the Desk lamp project's file.
+  entry(130, 'lamp-shade.3mf', '3mf', 13),
 ]
 
 /** The two-plate file; every other 3MF is one plate and an STL none. */
@@ -168,6 +175,58 @@ export const handlers = [
       result.deleted.push({ id: file.id, filename: file.filename, trashed: !file.is_external })
     }
     return HttpResponse.json(result)
+  }),
+
+  /** #2670 — a move keeps each id; Bambuddy skips the file another user added. */
+  http.post(`${base}/print/library/move`, async ({ request }) => {
+    const { file_ids, folder_id } = (await request.json()) as { file_ids: number[]; folder_id: number | null }
+    const target = folder_id ?? null
+    const project = (id: number | null) => libraryFolders.find((folder) => folder.id === id)
+    const result: LibraryMoveResult = { folder_id: target, moved: [], skipped: [] }
+    for (const id of new Set(file_ids)) {
+      const file = listedFiles().find((row) => row.id === id)
+      if (!file) return problem(404, 'Not Found', `library file ${id} is no longer in Bambuddy's library`)
+      if (file.id === NOT_OWNED) {
+        result.skipped.push({ id, filename: file.filename, reason: 'Bambuddy did not move it: not the file owner' })
+        continue
+      }
+      const from = project(file.folder_id ?? null)
+      const to = project(target)
+      const left = from?.project_id != null && from.project_id !== to?.project_id
+      moved.set(id, target)
+      result.moved.push({
+        id,
+        filename: file.filename,
+        left_project: left ? { id: from.project_id!, name: from.project_name ?? null } : null,
+      })
+    }
+    return HttpResponse.json(result)
+  }),
+
+  /** #2670 — each copy a new file, numbered after the mocked library's ids. */
+  http.post(`${base}/print/library/copy`, async ({ request }) => {
+    const { file_ids, folder_id } = (await request.json()) as { file_ids: number[]; folder_id: number | null }
+    const result: LibraryCopyResult = { folder_id: folder_id ?? null, copied: [], skipped: [] }
+    for (const id of new Set(file_ids)) {
+      const file = listedFiles().find((row) => row.id === id)
+      if (!file) return problem(404, 'Not Found', `library file ${id} is no longer in Bambuddy's library`)
+      const copy = { ...file, id: 9000 + copies.length, folder_id: folder_id ?? null, print_count: 0 }
+      copies.push(copy)
+      result.copied.push({ source_id: id, id: copy.id, filename: copy.filename })
+    }
+    return HttpResponse.json(result)
+  }),
+
+  /** #2670 — a new name under the same id; Bambuddy refuses one a printer's SD card would. */
+  http.post(`${base}/print/library/rename`, async ({ request }) => {
+    const { file_id, filename } = (await request.json()) as { file_id: number; filename: string }
+    const file = listedFiles().find((row) => row.id === file_id)
+    if (!file) return problem(404, 'Not Found', `library file ${file_id} is no longer in Bambuddy's library`)
+    if (/[<>:"|?*]/.test(filename)) {
+      return problem(400, 'Bad Request', `Filename contains characters a printer's SD card does not allow: ${filename}`)
+    }
+    renamed.set(file_id, filename)
+    return HttpResponse.json({ id: file_id, filename, previous: file.filename } satisfies LibraryRenameResult)
   }),
 
   http.post(`${base}/print/library/restore`, async ({ request }) => {
@@ -356,12 +415,26 @@ const removed = new Set<number>()
 /** The file Bambuddy's key may not delete: another user added it. */
 export const NOT_OWNED = 121
 
+/** #2670 — the mocked moves, renames and copies, laid over the fixed files. */
+const moved = new Map<number, number | null>()
+const renamed = new Map<number, string>()
+const copies: LibraryEntry[] = []
+
 function listedFiles(): LibraryEntry[] {
-  return libraryFiles.filter((file) => !trashed.has(file.id) && !removed.has(file.id))
+  return [...libraryFiles, ...copies]
+    .filter((file) => !trashed.has(file.id) && !removed.has(file.id))
+    .map((file) => ({
+      ...file,
+      folder_id: moved.has(file.id) ? moved.get(file.id)! : file.folder_id,
+      filename: renamed.get(file.id) ?? file.filename,
+    }))
 }
 
 export function reset(): void {
   lastQueued.clear()
   trashed.clear()
   removed.clear()
+  moved.clear()
+  renamed.clear()
+  copies.length = 0
 }

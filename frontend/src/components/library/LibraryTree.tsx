@@ -11,6 +11,10 @@ interface Props {
   folders: LibraryFolderView[]
   selected: number | null
   onSelect: (id: number | null) => void
+  /** The tree's accessible name; a second tree on the page (a folder picker) needs its own. */
+  label?: string
+  /** Prefixes each row's test id, so a picker's rows are not the sidebar's. */
+  testIdPrefix?: string
 }
 
 function fileCountLabel(folder: LibraryFolderView): string | undefined {
@@ -26,7 +30,13 @@ function fileCountLabel(folder: LibraryFolderView): string | undefined {
  * Right opens a folder (or moves into it), Left closes it (or moves to its parent),
  * Home and End go to the first and last, and Enter or Space selects.
  */
-export function LibraryTree({ folders, selected, onSelect }: Props) {
+export function LibraryTree({
+  folders,
+  selected,
+  onSelect,
+  label = 'Library folders',
+  testIdPrefix = 'library-folder',
+}: Props) {
   const children = useMemo(() => {
     const map = new Map<number | null, LibraryFolderView[]>()
     for (const folder of folders) {
@@ -140,7 +150,7 @@ export function LibraryTree({ folders, selected, onSelect }: Props) {
         aria-expanded={branch ? open : undefined}
         aria-label={fileCountLabel(folder)}
         tabIndex={tabStop === folder.id ? 0 : -1}
-        data-testid={`library-folder-${folder.id}`}
+        data-testid={`${testIdPrefix}-${folder.id}`}
         onKeyDown={(event) => onKeyDown(event, folder.id)}
         onFocus={(event) => {
           if (event.target === event.currentTarget) setFocused(folder.id)
@@ -156,7 +166,7 @@ export function LibraryTree({ folders, selected, onSelect }: Props) {
           {branch ? (
             <span
               aria-hidden
-              data-testid={`library-folder-toggle-${folder.id}`}
+              data-testid={`${testIdPrefix}-toggle-${folder.id}`}
               onClick={(event) => {
                 event.stopPropagation()
                 toggle(folder.id)
@@ -183,14 +193,14 @@ export function LibraryTree({ folders, selected, onSelect }: Props) {
   }
 
   return (
-    <ul ref={treeRef} role="tree" aria-label="Library folders" className="space-y-0.5 text-[13px]">
+    <ul ref={treeRef} role="tree" aria-label={label} className="space-y-0.5 text-[13px]">
       <li
         data-key={TOP}
         role="treeitem"
         aria-level={1}
         aria-selected={selectedKey === TOP}
         tabIndex={tabStop === TOP ? 0 : -1}
-        data-testid="library-folder-root"
+        data-testid={`${testIdPrefix}-root`}
         onKeyDown={(event) => onKeyDown(event, TOP)}
         onFocus={(event) => {
           if (event.target === event.currentTarget) setFocused(TOP)

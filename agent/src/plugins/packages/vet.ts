@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { isMap, isNode, isScalar, parseDocument, visit } from 'yaml'
-import { declaredConfigs, hookEvents, isInside, isOutsideProblem, pluginProblems } from '../../harness/plugins.js'
+import { declaredConfigs, hookEvents, isInside, isOutsideProblem, noCommand, pluginProblems } from '../../harness/plugins.js'
 import { PLUGIN_NAME_RE, RESERVED_PLUGIN_NAMES } from '../registry.js'
 
 // Vetting a plugin PACKAGE (issue #297, "Review before enable"), on top of the
@@ -469,7 +469,7 @@ export function vetPackage(root: string, fallbackName?: string): Vetting {
         )
       }
       if (config.headersHelper !== undefined) problems.push(`${where}: MCP server "${server}" has a headersHelper command`)
-      if (config.type !== NON_COMMAND_MCP_TYPE && config.type !== undefined && config.command === undefined) {
+      if (config.type !== NON_COMMAND_MCP_TYPE && config.type !== undefined && noCommand(config)) {
         problems.push(`${where}: MCP server "${server}" is "${String(config.type)}"; only Streamable HTTP ("http") is supported`)
       }
       if (typeof config.url === 'string') {

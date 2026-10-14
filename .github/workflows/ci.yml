@@ -1037,7 +1037,9 @@ jobs:
       - name: List the LFS fixtures
         id: lfs
         run: echo "key=$(git lfs ls-files --long --include 'test-fixtures/**' | sha256sum | cut -c1-64)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v6
+      # Restore and save as two steps (#2488): the save is a step of its own, in this
+      # job's log, not a post-step that can quietly not happen.
+      - uses: actions/cache/restore@v6
         id: cache
         with:
           path: .git/lfs/objects
@@ -1045,6 +1047,11 @@ jobs:
       - name: Fetch the LFS fixtures
         if: ${{ steps.cache.outputs.cache-hit != 'true' }}
         run: git lfs pull --include "test-fixtures/**"
+      - uses: actions/cache/save@v6
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: .git/lfs/objects
+          key: lfs-fixtures-${{ steps.lfs.outputs.key }}
 
   backend-pytest:
     name: Backend pytest (${{ matrix.group }}/4)
@@ -1075,13 +1082,20 @@ jobs:
           fetch-depth: 1
 
       # The real 3MFs under test-fixtures/ (Git LFS, ~290 MB, #2146), from the cache
-      # `lfs-fixtures` filled: no shard pulls from LFS itself. They are mounted into
-      # the test container below; no image carries them (.dockerignore).
+      # `lfs-fixtures` filled. They are mounted into the test container below; no image
+      # carries them (.dockerignore).
       - uses: actions/cache/restore@v6
+        id: lfs-cache
         with:
           path: .git/lfs/objects
           key: lfs-fixtures-${{ needs.lfs-fixtures.outputs.key }}
-          fail-on-cache-miss: true
+      # A miss is a cache hiccup, not a test failure (#2488): a save that never landed
+      # (two runs racing for a new key), or the entry evicted from the full Actions
+      # cache since. This shard pulls them itself; SCADBUDDY_TEST_FIXTURES below still
+      # fails a fixture that is missing even then.
+      - name: Fetch the LFS fixtures the cache missed
+        if: ${{ steps.lfs-cache.outputs.cache-hit != 'true' }}
+        run: git lfs pull --include "test-fixtures/**"
       - name: Check out the LFS fixtures
         run: git lfs checkout
 

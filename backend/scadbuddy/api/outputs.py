@@ -13,6 +13,9 @@ from fastapi import APIRouter, File, Query, Request, Response, UploadFile, statu
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from scadbuddy.activity.component import ACTIVITY, ActivityComponent
+from scadbuddy.activity.index import attribute_request
+from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import (
     AppState,
     AssetsDep,
@@ -80,6 +83,7 @@ from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.bambuddy.send import SendRequest, SendResult
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
 from scadbuddy.core.problems import DATABASE_ERRORS, PROBLEM_MEDIA_TYPE, ApiError
+from scadbuddy.core.tracing import span
 from scadbuddy.library.history import COMMIT_ID_PATTERN
 from scadbuddy.library.outputs import (
     MODEL_NAME,
@@ -229,13 +233,15 @@ async def _details(
 ) -> list[OutputDetail]:
     copies = await uploads.for_outputs(meta.id for meta in metas)
     failed = await _failed_before_queueing(runs, metas)
-    # The thumbnail check and params read are file IO: off the event loop.
-    return await asyncio.to_thread(
-        lambda: [
-            detail(store, meta, copies[meta.id], failed_before_queueing=meta.id in failed)
-            for meta in metas
-        ]
-    )
+    # The thumbnail check and params read are file IO: off the event loop. A span of
+    # their own (#2755): on the NAS share they were most of a listing's time.
+    with span("output.details", attributes={"scadbuddy.outputs": len(metas)}):
+        return await asyncio.to_thread(
+            lambda: [
+                detail(store, meta, copies[meta.id], failed_before_queueing=meta.id in failed)
+                for meta in metas
+            ]
+        )
 
 
 @router.post(
@@ -595,6 +601,7 @@ async def arrange_outputs(
     store: SettingsStoreDep,
     catalogue: CatalogueDep,
     state: StateDep,
+    activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
 ) -> JobStatus:
     body, plain = await resolve_library_files(uploads, outputs, body)
     stored = await asyncio.to_thread(store.load)
@@ -618,6 +625,7 @@ async def arrange_outputs(
         await asyncio.to_thread(require_model_exists, catalogue, slug)
     with submit_problems():
         job = await render.arrange(slug, inputs)
+    await attribute_request(activity.index, f"render:{job.id}")
     return _job_status(job, None)
 
 
@@ -643,6 +651,7 @@ async def backfill_output(
     assets: AssetsDep,
     fetcher: FetcherDep,
     fonts: FontsDep,
+    activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
 ) -> JobStatus:
     meta = await asyncio.to_thread(require_output, outputs, output_id)
     if await asyncio.to_thread(outputs.manifest, output_id):
@@ -700,6 +709,7 @@ async def backfill_output(
             assets,
             fetcher,
             fonts,
+            activity,
         )
     except ApiError as error:
         # Matched by its code, not its status: any other 409 passes through (#1849).

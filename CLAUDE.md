@@ -35,8 +35,12 @@ Tests marked `requires_fixtures` (#2146) use the real MakerWorld 3MFs in
 `test-fixtures/makerworld/` (Git LFS, ~290 MB; `git lfs pull --include "test-fixtures/**"`;
 `manifest.json` says what each covers) and skip, naming every missing file, without
 them; with `SCADBUDDY_TEST_FIXTURES` set (a directory holding `makerworld/`, as CI sets
-it) they fail instead. CI's `lfs-fixtures` job pulls them once into the Actions cache
-and each shard mounts them at `/app/test-fixtures`. Add or change a fixture only on a
+it) they fail instead. With git-lfs installed, a plain clone downloads all of them:
+clone with `GIT_LFS_SKIP_SMUDGE=1 git clone …` (or set
+`git config lfs.fetchexclude 'test-fixtures/**'` in a clone) and pull them only when
+you run those tests (#2489). CI's `lfs-fixtures` job pulls them once into the Actions
+cache and each shard mounts them at `/app/test-fixtures`; a shard whose restore misses
+pulls them itself (#2488). Add or change a fixture only on a
 branch of this repo: a fork's LFS objects live in the fork's store, which that job's
 `git lfs pull` cannot reach.
 Tests marked `requires_temporal` skip unless `SCADBUDDY_TEST_TEMPORAL_ADDRESS` names a
@@ -407,6 +411,24 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
 - A new backend service is a `Component` (`core/components.py`) in a `component.py`
   beside its feature (`scadbuddy/<feature>/component.py`, discovered), never a new
   `AppState` field; routes read it through `api/components.py` `component_dep` (#508).
+- Activity (principal jobs, spec `2026-10-09-principal-jobs-design.md`): the `activity`
+  table is one row per piece of background work, written by the sources (render, operation,
+  print run, agent operation) through `ActivityIndex.upsert_in` (`backend/scadbuddy/activity/`:
+  `index.py`, `kinds.py` the registry, `models.py`, `component.py` `ACTIVITY`), under a
+  savepoint so a failed write never fails the work. A feature registers kinds by exporting
+  `ACTIVITY_KINDS` from its `scadbuddy/<feature>/activity.py` (found like components;
+  `agent.*` keys are the agent's). A route attributes the job it starts with
+  `attribute_request(activity.index, "<source>:<id>")` (author headers, else `browser`), as
+  `render_model`, `post_run` and `arrange_outputs` do. `api/activity.py` serves
+  `/activity`, `/activity/facets` and `/activity/{id}`, and the realtime `activity` topic;
+  both read everything, as the browser does. The `housekeeping_activity` sweep (last in
+  `SWEEPS`, behind `workflow.patched("housekeeping-activity")`) repairs, then prunes, on the
+  prune Schedule (settings `activity_ttl_seconds`, `activity_repair_window_seconds`,
+  `activity_follow`). The agent: `src/activity/kinds.ts` (its kinds) and `tools/activity.ts`
+  (`activity_list`, `activity_get`, `activity_watch`), the tier boundary: a caller without
+  `outward` sees only its own principal's. Frontend: `pages/ActivityPage.tsx`,
+  `components/activity/` (table, filters, drawer, `ActivityBell`) and
+  `mocks/features/activity.ts`.
 - `frontend/src/` — React 19 + Vite; `src/mocks/` is the msw API used by vitest and
   the mocked e2e run. A new feature's mocks go under `src/mocks/features/`, in
   `<feature>.ts` or a `<feature>/` folder. Every `.ts` file there except tests is picked
@@ -592,8 +614,14 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     from `<payload dir>/plugins/<content hash>/` (`temporal/turnPackages.ts`), which the
     segment runner re-hashes (`agent-durable/.../session/package_hash.py`, the same hash
     as `hash.ts`); their MCP servers are turn tools (http ones, in both modes, through the
-    forwarder: `plugins/packages/mcp.ts`), and only `Bash`/`PowerShell` of an
-    allowed package's built-ins are offered there (each parked for approval).
+    forwarder: `plugins/packages/mcp.ts`). Of an allowed package's built-ins the engine
+    runs `Bash`/`PowerShell` (each parked for approval); the agent provides the rest as
+    the `builtin` turn tools (`src/builtins/`, #2393: the file tools on the session
+    workspace under `/workspace`, WebFetch through the egress check, WebSearch and
+    WebFetch's model work as one-shot queries on the session's credential, the task
+    list as a workspace file), each outward, and the listing's `system_note` tells the
+    model; `src/builtins/schemas.json` is Claude Code's own input schemas
+    (`test/builtins.sdk.test.ts`, `UPDATE_BUILTIN_SCHEMAS=1`).
   - Tests never call Anthropic: `test/support/fakeAnthropic.ts` is a local Messages API
     (streaming SSE) that the real SDK and bundled CLI are pointed at as a gateway
     (`test/run.test.ts`). Postgres tests (`test/pg.test.ts`) skip unless

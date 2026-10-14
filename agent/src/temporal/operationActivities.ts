@@ -50,6 +50,7 @@ export function operationActivities(kinds: readonly OperationKind[], store: Oper
         request: input.request,
         workflowId,
         workflowRunId: runId,
+        actor: input.actor,
       })
     },
     [FINISH_ACTIVITY]: async ({ operationId, result, error }: FinishInput): Promise<OperationRecord> =>

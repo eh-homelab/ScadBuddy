@@ -189,8 +189,27 @@ export function Preview({
   const [measuredBox, setMeasuredBox] = useState<{ url: string; bbox: BoundingBox }>()
   const onMeasured = useCallback((url: string, box: BoundingBox) => setMeasuredBox({ url, bbox: box }), [])
 
+  // #2731 — the one plate of a multi-plate render the viewer chose to see alone, for
+  // that render only; null shows them all.
+  const [chosen, setChosen] = useState<{ jobId: string; plate: number }>()
+  const platesOfJob = job?.status === 'done' ? (job.plates?.length ?? 0) : 0
+  const alone = chosen && job && chosen.jobId === job.id && chosen.plate <= platesOfJob ? chosen.plate : null
+
   useEffect(() => {
-    if (job?.status === 'done' && job.preview_url) {
+    if (job?.status === 'done' && job.preview_url && alone !== null) {
+      // That plate cut from the render's 3MF, where the file places it: it has no box of
+      // the render's, so it is measured when it loads (#2364).
+      setShown({
+        url: withPlate(job.preview_url, alone),
+        bbox: undefined,
+        colors: job.colors ?? [],
+        notes: job.notes ?? [],
+        warnings: job.warnings ?? [],
+        diagnostics: (job.diagnostics ?? []).filter((d) => d.severity !== 'trace'),
+        plates: 1,
+        plateBoxes: [],
+      })
+    } else if (job?.status === 'done' && job.preview_url) {
       setShown({
         url: job.preview_url,
         bbox: job.bbox_mm ?? undefined,
@@ -204,7 +223,7 @@ export function Preview({
         plateBoxes: (job.plates ?? []).map((plate) => plate.bbox_mm),
       })
     }
-  }, [job])
+  }, [job, alone])
   const bbox = shown?.bbox ?? (measuredBox?.url === shown?.url ? measuredBox?.bbox : undefined)
   const multiPlate = shown !== undefined && bbox !== undefined && shown.plateBoxes.length > 1
 
@@ -396,6 +415,14 @@ export function Preview({
                 </div>
               ))}
             {shown?.bbox && <Dimensions bbox={shown.bbox} plates={shown.plates} compact={compact} />}
+            {job && platesOfJob > 1 && (
+              <PlatePicker
+                plates={platesOfJob}
+                chosen={alone}
+                compact={compact}
+                onChoose={(plate) => setChosen(plate === null ? undefined : { jobId: job.id, plate })}
+              />
+            )}
           </div>
         )}
       </div>
@@ -418,6 +445,47 @@ export function Preview({
           Change a parameter to render.
         </p>
       )}
+    </div>
+  )
+}
+
+/** `url` asking for one plate: the job's and an output's `preview.glb` both take `plate`. */
+function withPlate(url: string, plate: number): string {
+  return `${url}${url.includes('?') ? '&' : '?'}plate=${plate}`
+}
+
+/** #2731 — every plate together, or one of them alone, as the 3MF's plate images show it. */
+function PlatePicker({
+  plates,
+  chosen,
+  compact,
+  onChoose,
+}: {
+  plates: number
+  chosen: number | null
+  compact: boolean
+  onChoose: (plate: number | null) => void
+}) {
+  const options: (number | null)[] = [null, ...Array.from({ length: plates }, (_, i) => i + 1)]
+  return (
+    <div
+      role="group"
+      aria-label="Plates shown"
+      data-overlay="chip"
+      className={`pointer-events-auto flex max-w-full flex-wrap gap-0.5 rounded-[6px] border border-line bg-surface/90 p-0.5 backdrop-blur-sm ${compact ? 'text-[11px]' : 'text-[12px]'}`}
+    >
+      {options.map((plate) => (
+        <button
+          key={plate ?? 'all'}
+          type="button"
+          aria-pressed={chosen === plate}
+          aria-label={plate === null ? 'All plates' : `Plate ${plate} alone`}
+          onClick={() => onChoose(plate)}
+          className={`sb-num rounded-[4px] px-2 py-0.5 ${chosen === plate ? 'bg-accent text-accent-ink' : 'text-muted hover:text-ink'}`}
+        >
+          {plate === null ? 'All' : plate}
+        </button>
+      ))}
     </div>
   )
 }
