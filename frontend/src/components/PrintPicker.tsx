@@ -5,6 +5,7 @@ import type {
   AnalysisRequest,
   AnalysisTarget,
   FilamentWarning,
+  NozzlePlan as NozzlePlanView,
   Output,
   PrintOptions,
   PrintOptionsState,
@@ -638,10 +639,20 @@ export function PrintPicker({
   const previewSlice = usePreviewSlice(source, sliceable && !sliced ? previewRequest : null)
   // #2703 — the slicer groups filaments itself, so once a slice of these choices for the
   // plate being printed has landed, its sides are the ones shown.
-  const slicedPlan =
+  const slicedNow =
     plate !== 'all' && previewPlate === plate && !previewSlice.stale && check.current
       ? asSliced(check.verdict?.nozzle_plan, previewSlice.result)
       : null
+  // #2737 review: previewing another plate does not unsay it. The printed plate's slice
+  // still holds for these choices, so its sides stay until the choices or the plate change.
+  const slicedFor = `${plate}|${currentKey}|${JSON.stringify(checkRequest)}`
+  const [lastSliced, setLastSliced] = useState<{ key: string; plan: NozzlePlanView } | null>(null)
+  useEffect(() => {
+    if (slicedNow) setLastSliced({ key: slicedFor, plan: slicedNow })
+  }, [slicedNow, slicedFor])
+  const slicedPlan =
+    slicedNow ??
+    (previewPlate !== plate && check.current && lastSliced?.key === slicedFor ? lastSliced.plan : null)
   /** #2164 — filled trays Bambuddy has no spool for, and the ones answered "no". */
   const trays = useDeclinedTrays(printerId, filaments?.trays ?? [])
   // #836 — a hand pick the current check no longer offers (no rack this time, or the

@@ -17,5 +17,6 @@ export function asSliced(plan: NozzlePlan | null | undefined, slice: SlicePrevie
     moved = true
     return { ...slot, side }
   })
-  return moved ? { ...plan, slots } : null
+  // The plan's summary names the planned sides; the sliced copy has none rather than a wrong one.
+  return moved ? { ...plan, slots, summary: '' } : null
 }

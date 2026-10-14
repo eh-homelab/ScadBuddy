@@ -33,6 +33,14 @@ describe('asSliced (#2703)', () => {
     ])
   })
 
+  it('drops the planned summary, which names the planned sides (#2737 review)', () => {
+    const sliced = asSliced(
+      { ...plan, summary: 'Inland Black → left · Insignia Black → right · Mistletoe Green → left' },
+      { job_id: 39, status: 'completed', slots: [{ slot_id: 1, grams: 60.6, side: 'R' }] },
+    )
+    expect(sliced?.summary).toBe('')
+  })
+
   it("keeps the planned side of a slot this plate's slice does not use (#2737 review)", () => {
     // A multi-plate file: this plate's slice uses slots 1 and 2 only, and moves slot 1.
     const sliced = asSliced(plan, {
