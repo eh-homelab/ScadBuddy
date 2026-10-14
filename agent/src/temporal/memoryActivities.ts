@@ -89,8 +89,11 @@ export function transcriptOf(events: readonly LoggedEvent[]): SessionStoreEntry[
     } else if (event.type === 'tool.call' && event.parent === undefined) {
       // Text the message goes on with after the call is a new line after it (#2419).
       // Clearing them all is right because the main agent streams one message at a
-      // time: only the one the call belongs to is open. Subagents' calls carry a
-      // `parent` and never reach here.
+      // time: only the one the call belongs to is open. That holds because the durable
+      // log's text comes from agent-durable's `translate` (session/events.py), which
+      // writes each text as a whole message of its own; a change there that streams two
+      // at once must revisit this (#3362). Subagents' calls carry a `parent` and never
+      // reach here.
       texts.clear()
       lines.push({ type: 'assistant', message: { content: [{ type: 'tool_use', name: event.name, input: event.input }] } })
     }
