@@ -256,8 +256,19 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     const first = await runIdOf(id)
     await handleOf(id).signal('interrupt', { reason: 'stop' })
     // A local activity holds its workflow task; past 80% of the task's 10 s the SDK hands the
-    // task back, and the Stop is delivered while the settings are still being read.
-    await new Promise((resolve) => setTimeout(resolve, 9_000))
+    // task back, and the next task, which carries the Stop, starts while the settings are still
+    // being read. Its start in the history, after the signal's event, is the condition to release
+    // on: the activation applies the signal before the settings' result.
+    await expect
+      .poll(
+        async () => {
+          const types = (JSON.parse(historyToJSON(await handleOf(id).fetchHistory())) as { events: { eventType: string }[] }).events.map((e) => e.eventType)
+          const signaled = types.lastIndexOf('EVENT_TYPE_WORKFLOW_EXECUTION_SIGNALED')
+          return signaled >= 0 && types.slice(signaled).includes('EVENT_TYPE_WORKFLOW_TASK_STARTED')
+        },
+        { timeout: 20_000, interval: 250 },
+      )
+      .toBe(true)
     slow.release()
     await poll(() => finished.map((f) => f.outcome), ['interrupted'])
     expect(turns).toEqual([])

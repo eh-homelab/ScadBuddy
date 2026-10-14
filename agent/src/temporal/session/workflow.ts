@@ -217,8 +217,6 @@ export async function AgentSession(start: SessionStart): Promise<void> {
     }
     if (message === undefined) {
       await condition(allHandlersFinished)
-      // An `end` handled during that wait is not lost.
-      if (ended && message === undefined) return
       if (message === undefined) {
         const next: SessionStart = { ...start, ...(home ? { host_queue: home } : {}) }
         delete next.turn
