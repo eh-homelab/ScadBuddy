@@ -19,9 +19,12 @@ numbers are handed out at insert and transactions commit in any order). Events a
 rare and each transaction is short, so serialising them costs nothing noticeable.
 
 **Lock order.** As the lock is held to commit, a transaction that publishes and then
-writes a row another publisher writes first can deadlock with it. A writer whose row
-another transaction may write after publishing takes the lock before that row:
-:func:`hold_event_log` (the activity index does, for every activity row).
+writes a row another publisher writes first can deadlock with it. That holds for any
+row, not only activity rows: a source row (``render_jobs``, ``operations``,
+``print_runs``) that one transaction writes after publishing while another writes it
+before publishing deadlocks the same way. A writer whose row another transaction may
+write after publishing takes the lock before that row: :func:`hold_event_log` (the
+activity index does, for every activity row).
 
 Two paths lead there:
 

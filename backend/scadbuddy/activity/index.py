@@ -196,6 +196,8 @@ class ActivityIndex:
                     # already published holds it while it writes this row (#3221).
                     hold_event_log(conn)
                 if not isinstance(row, ActivityRow):
+                    # Built under that lock, which every publisher waits on: a builder
+                    # must stay a short read of its source row, never a slow call.
                     row = row()
                 activity_id = row.id
                 values = row.model_dump(include=set(_WRITTEN))
@@ -469,6 +471,10 @@ class ActivityIndex:
             found = conn.execute(
                 self._missing(prefix, table, columns), {"window": window}
             ).fetchall()
+            # The pool is autocommit (the projection's), so each row's `upsert_in`
+            # commits on its own. Keep it so: a restore takes the event log's lock, which
+            # is held to commit, and one transaction over the whole pass would hold every
+            # publisher up until its end.
             for row in found:
                 restored += self.upsert_in(conn, partial(build, row), restore=True)
         return restored

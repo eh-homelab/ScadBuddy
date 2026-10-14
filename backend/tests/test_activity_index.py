@@ -188,12 +188,12 @@ def test_writers_of_one_activity_row_never_deadlock_on_the_event_log(
     index = ActivityIndex(pg_pool, events=bus, metrics=metrics)
     with pg_pool.connection() as conn:
         assert index.upsert_in(conn, row())
-    other_started = threading.Event()
+    other_pid: list[int] = []
     other_wrote: list[bool] = []
 
     def other() -> None:
         with pg_pool.connection() as conn, conn.transaction():
-            other_started.set()
+            other_pid.append(conn.info.backend_pid)
             other_wrote.append(index.upsert_in(conn, row(title="Render keychain again")))
 
     with pg_pool.connection() as conn, conn.transaction():
@@ -201,12 +201,25 @@ def test_writers_of_one_activity_row_never_deadlock_on_the_event_log(
         bus.publish_in(conn, JobEvent(kind="job.running", job_id="j1", slug="keychain"))
         thread = threading.Thread(target=other)
         thread.start()
-        other_started.wait(5)
-        time.sleep(0.5)  # the other writer reaches the row (and, before the fix, holds it)
+        # The other writer waits on the event log's lock, seen in Postgres itself: with
+        # the fix before the row, without it after taking the row, so this order meets it.
+        deadline = time.monotonic() + 10
+        with pg_pool.connection() as probe:
+            while not (
+                other_pid
+                and probe.execute(
+                    "SELECT 1 FROM pg_locks WHERE pid = %s AND locktype = 'advisory'"
+                    " AND NOT granted",
+                    (other_pid[0],),
+                ).fetchone()
+            ):
+                assert time.monotonic() < deadline, "the other writer never waited on the lock"
+                time.sleep(0.02)
         # ...then the activity row.
         assert index.upsert_in(conn, row(title="Render keychain, running"))
     thread.join(15)
 
+    assert not thread.is_alive(), "the other writer is still waiting"
     assert other_wrote == [True]
     assert metrics.registry.get_sample_value("scadbuddy_activity_write_failures_total") == 0
     dropped = metrics.registry.get_sample_value(
