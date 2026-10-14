@@ -469,7 +469,7 @@ const turnToolDeps = temporal
         ...(settings ? { settings } : {}),
         credentialSecrets: durableCredentialSecrets,
         // This pod's own disk, as a classic turn's: the calls are pinned here (hostQueue).
-        httpRequest: { saveRoot: path.join(paths.stateDir, DURABLE_TURNS_DIR), audit, ...(workspace ? { files: workspace } : {}) },
+        httpRequest: { saveRoot: path.join(paths.stateDir, DURABLE_TURNS_DIR), sql: temporal.sql, audit, ...(workspace ? { files: workspace } : {}) },
         // Shared with agent-durable on the payload volume, which its runner loads them from.
         ...(pluginPackages
           ? {
