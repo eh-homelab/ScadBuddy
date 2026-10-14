@@ -290,6 +290,31 @@ describe('Preview scene (#364)', () => {
     expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument()
   })
 
+  it('blames a plate only when its own mesh failed, not the one still on screen (#3036 review)', async () => {
+    const plates = [1, 2].map((index) => ({
+      index,
+      bbox_mm: box([0, 0, 0], [10, 10, 5]),
+      colors: ['#FF0000'],
+    }))
+    const alone = new THREE.Group()
+    alone.add(new THREE.Mesh(new THREE.BoxGeometry(10, 5, 10)))
+    scene.meshes.set('/api/v1/jobs/a/preview.glb?plate=2', alone)
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    const user = userEvent.setup()
+    render(<Preview job={job('a', box([0, 0, 0], [10, 10, 5]), { plates })} rendering={false} />)
+    // Every plate together fails just as plate 2 is picked: for that one render the
+    // all-plates mesh is still the one on screen, so it is what broke, not plate 2.
+    scene.failing.add('/api/v1/jobs/a/preview.glb')
+    onTestFinished(() => scene.failing.clear())
+
+    await user.click(screen.getByRole('button', { name: 'Plate 2 alone' }))
+
+    // Plate 2's own mesh loads, and stays chosen: it is not blamed, nor taken away.
+    await act(async () => {})
+    expect(screen.getByRole('button', { name: 'Plate 2 alone' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.queryByText(/could not be shown alone/)).not.toBeInTheDocument()
+  })
+
   it('offers no plate picker for a one-plate render', () => {
     render(<Preview job={job('a', box([-5, -5, 0], [5, 5, 5]))} rendering={false} />)
     expect(screen.queryByRole('radiogroup', { name: 'Plates shown' })).not.toBeInTheDocument()
