@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -29,7 +30,10 @@ from scadbuddy.render.job_models import Job, JobTableKind
 from scadbuddy.render.runner import ProcessOutput, RenderTimeoutError
 from scadbuddy.render.schema import source_sha256
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from scadbuddy.workflows import pipeline_activities
+from scadbuddy.workflows.models import OutputRequest
 from tests.api.conftest import PNG_BYTES, set_fake_env
+from tests.support.arrange import saved_output
 from tests.support.media import MemoryMediaStore
 from tests.support.operations import press
 
@@ -818,6 +822,50 @@ def test_deleting_a_model_cancels_its_arrange_and_a_render_started_meanwhile(
     assert response.status_code == 204, response.text
     assert cancelled == [("arrange-planted", "r"), ("render-late", "r")]
     assert not paths.model_source(model).is_file()
+
+
+def test_a_real_arrange_a_delete_cancels_settles_in_time_and_the_model_goes(
+    app: FastAPI,
+    client: TestClient,
+    paths: DataPaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3263: an arrange of the model's outputs, on the app's own worker, is held in
+    its write step; the delete's `handle.cancel()` reaches it, and its run settles the
+    row `cancelled` within the delete's wait, as a render's does."""
+    _, meta, written = asyncio.run(saved_output(tmp_path))
+    started, release = asyncio.Event(), tmp_path / "release"
+
+    async def held(req: OutputRequest, *_: object, **__: object) -> NoReturn:
+        started.set()
+        while not release.exists():
+            await asyncio.sleep(0.05)
+        raise AssertionError("the arrange was released, not cancelled")
+
+    monkeypatch.setattr(pipeline_activities, "build_output", held)
+    try:
+        accepted = client.post(
+            "/api/v1/outputs/arrange",
+            json={
+                "objects": [{"output_id": meta.id, "part": written.manifest[0].part, "count": 3}]
+            },
+        )
+        assert accepted.status_code == 202, accepted.text
+        job_id = accepted.json()["id"]
+        deadline = time.monotonic() + 30
+        while not started.is_set():
+            assert time.monotonic() < deadline, "the arrange never reached its write step"
+            time.sleep(0.05)
+        assert getattr(app.state, STATE_ATTR).projection.read(job_id).kind == "arrange"
+
+        response = client.delete(f"/api/v1/models/{meta.slug}", headers=press())
+
+        assert response.status_code == 204, response.text
+        assert client.get(f"/api/v1/jobs/{job_id}").json()["status"] == "cancelled"
+        assert not paths.model_source(meta.slug).is_file()
+    finally:
+        release.touch()
 
 
 def test_unknown_model_routes_answer_with_problem_details(client: TestClient) -> None:
