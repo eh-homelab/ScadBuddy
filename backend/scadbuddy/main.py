@@ -74,7 +74,7 @@ from scadbuddy.flow_triggers.events import listen_for_triggers
 from scadbuddy.flow_triggers.fire import TriggerFires, reconcile_trigger_schedules
 from scadbuddy.flows.component import FLOWS
 from scadbuddy.flows.sweep import sweep_flow_runs, sweep_orphan_grants
-from scadbuddy.library.assets import referenced_asset_ids
+from scadbuddy.library.assets import referenced_asset_ids, stopped
 from scadbuddy.library.backfill import attach_backfills, attach_job_backfills, follow_backfills
 from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
@@ -219,12 +219,12 @@ def sweep_assets(state: AppState, stop: threading.Event | None = None) -> list[s
     ``stop``, once set, ends it before its next asset (#2140), and before and after
     reading the references, which no per-asset check can interrupt (#2554).
     """
-    if stop is not None and stop.is_set():
+    if stopped(stop):
         return []
     jobs = state.render.store.list_jobs()
     params = [job.params for job in jobs] + state.presets.saved_params()
     referenced = referenced_asset_ids(state.paths, params)
-    if stop is not None and stop.is_set():
+    if stopped(stop):
         return []
     removed = state.assets.sweep(referenced, grace=state.config.asset_sweep_grace, stop=stop)
     state.metrics.assets_swept.inc(len(removed))

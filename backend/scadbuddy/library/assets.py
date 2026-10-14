@@ -625,7 +625,7 @@ class AssetStore:
         candidates = sorted((stale | (blobs.keys() - owned)) - set(referenced))
         removed: list[str] = []
         for done, asset_id in enumerate(candidates):
-            if stop is not None and stop.is_set():
+            if stopped(stop):
                 logger.info("asset sweep stopped early", extra={"left": len(candidates) - done})
                 break
             key = asset_lock_key(asset_id)
@@ -740,6 +740,12 @@ def _ids_in_archive(archive: Path) -> set[str]:
         return set()
     except (KeyError, zipfile.BadZipFile) as error:
         raise OSError(f"cannot read {archive} for the asset ids it names: {error}") from None
+
+
+def stopped(stop: threading.Event | None) -> bool:
+    """Whether a sweep's ``stop`` is set: the one check every stop point of the asset
+    sweep makes, so they cannot drift (#3513)."""
+    return stop is not None and stop.is_set()
 
 
 def referenced_asset_ids(
