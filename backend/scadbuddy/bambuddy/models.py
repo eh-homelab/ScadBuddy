@@ -748,7 +748,9 @@ class SliceRequest(BambuddyModel):
         )
         if self.process_overrides:
             key += "/" + ",".join(
-                f"{k}={'|'.join(v) if isinstance(v, list) else v}"
+                # A list in brackets, so ["50"] and "50" are different slices (#2804
+                # review).
+                f"{k}={'[' + '|'.join(v) + ']' if isinstance(v, list) else v}"
                 for k, v in sorted(self.process_overrides.items())
             )
         return key

@@ -25,7 +25,7 @@ from scadbuddy.bambuddy.dispatch import (
     wait_slice,
 )
 from scadbuddy.bambuddy.filaments import QueueFilaments
-from scadbuddy.bambuddy.models import PresetRef
+from scadbuddy.bambuddy.models import PresetRef, ProcessValue, SliceRequest
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.core.problems import ApiError
 from scadbuddy.rack.usage import PickedHotend
@@ -73,6 +73,25 @@ async def test_the_plan_is_what_is_sliced(bambuddy: BambuddyClient) -> None:
         "bed_type": "Supertack Plate",
         "plate": 2,
     }
+
+
+def test_a_list_override_and_its_single_value_are_different_slices() -> None:
+    """#2804 review: a per-extruder list was joined bare, so ``["50"]`` and ``"50"``
+    shared a key and one could be served as the other."""
+
+    def request(value: ProcessValue) -> SliceRequest:
+        return SliceRequest(
+            printer_preset=PresetRef(source="cloud", id="GM042"),
+            process_preset=PresetRef(source="cloud", id="GP243"),
+            process_overrides={"outer_wall_speed": value},
+        )
+
+    listed, single, pair = request(["50"]), request("50"), request(["50", "50"])
+
+    assert listed.preset_key != single.preset_key
+    assert listed.preset_key.endswith("/outer_wall_speed=[50]")
+    assert pair.preset_key.endswith("/outer_wall_speed=[50|50]")
+    assert single.preset_key.endswith("/outer_wall_speed=50")
 
 
 @respx.mock

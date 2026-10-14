@@ -137,6 +137,13 @@ CATALOGUE_VERSION = 1
 
 _ADAPTER = TypeAdapter(_Catalogue)
 
+
+async def read_catalogue(client: BambuddyClient) -> _Catalogue:
+    """The preset catalogue, read fresh from Bambuddy, as the check and the run read it;
+    :func:`cached_catalogue` is the print dialog's kept copy."""
+    return await _catalogue(client)
+
+
 #: The catalogue this process last parsed, by its file and that file's mtime: one
 #: entry, so a changed Bambuddy URL or key does not keep the old one alive (#3447).
 _parsed: dict[Path, tuple[int, _Catalogue]] = {}
