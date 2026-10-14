@@ -9,7 +9,7 @@ import httpx
 import pytest
 import respx
 
-from scadbuddy.bambuddy.archive_cache import TIMELAPSE_TTL, ArchiveCache
+from scadbuddy.bambuddy.archive_cache import FAILED_FRAMES_TTL, TIMELAPSE_TTL, ArchiveCache
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.core.problems import ApiError
 from tests.bambuddy.conftest import recording
@@ -208,13 +208,21 @@ async def test_a_timelapse_is_kept_for_hours_by_its_path(clock: Clock) -> None:
 
 
 @respx.mock
-async def test_a_failed_timelapse_read_is_not_kept(clock: Clock) -> None:
+async def test_a_failed_extraction_is_kept_a_minute(clock: Clock) -> None:
+    """#2903: Bambuddy runs ffmpeg for each read of the stills; one that always fails is
+    not run again on every view, only once the failure is a minute old."""
     route = respx.get(f"{BASE}/api/v1/archives/35/timelapse/thumbnails").mock(
-        return_value=httpx.Response(500)
+        side_effect=[
+            httpx.Response(500, json={"detail": "ffmpeg failed"}),
+            httpx.Response(200, json=recording("timelapse-thumbnails.json")),
+        ]
     )
     cache = ArchiveCache(30.0, clock=clock)
     async with client() as bambuddy:
-        with pytest.raises(ApiError):
-            await cache.timelapse_frames(bambuddy, 35, "a.mp4")
-        route.mock(return_value=httpx.Response(200, json=recording("timelapse-thumbnails.json")))
+        for _ in range(2):
+            with pytest.raises(ApiError):
+                await cache.timelapse_frames(bambuddy, 35, "a.mp4")
+        assert route.call_count == 1
+        clock.now = FAILED_FRAMES_TTL
         assert await cache.timelapse_frames(bambuddy, 35, "a.mp4")
+    assert route.call_count == 2

@@ -37,6 +37,9 @@ _ALL = 0
 #: ffmpeg on every read, 20-26 s for one print, and a timelapse does not change once
 #: made. They are kept by the timelapse's path, so a different one is read afresh.
 TIMELAPSE_TTL = 6 * 3600.0
+#: How long a failed extraction of a timelapse's stills is kept (#2903): Bambuddy runs
+#: ffmpeg for each read, and one that always fails would otherwise run on every view.
+FAILED_FRAMES_TTL = 60.0
 #: Enough for every print of a busy homelab several times over.
 MAX_ENTRIES = 4096
 
@@ -137,7 +140,12 @@ class ArchiveCache:
         self, client: BambuddyClient, archive_id: int, timelapse_path: str
     ) -> list[tuple[float, bytes]]:
         """The stills of the timelapse at ``timelapse_path``, each its time and its JPEG,
-        decoded once (#2512). A failed read raises and is not kept."""
+        decoded once (#2512). A failed read raises, and raises again without asking
+        Bambuddy for `FAILED_FRAMES_TTL` (#2903)."""
+        failed = self._key(client, f"timelapse_frames_failed:{timelapse_path}", archive_id)
+        hit = self._entries.get(failed)
+        if hit is not None and hit[0] > self._clock():
+            raise cast(ApiError, hit[1])
 
         async def load() -> list[tuple[float, bytes]]:
             frames = await client.timelapse_thumbnails(archive_id)
@@ -149,9 +157,13 @@ class ArchiveCache:
                     continue
             return decoded
 
-        return await self._get(
-            client, f"timelapse_frames:{timelapse_path}", archive_id, load, ttl=TIMELAPSE_TTL
-        )
+        try:
+            return await self._get(
+                client, f"timelapse_frames:{timelapse_path}", archive_id, load, ttl=TIMELAPSE_TTL
+            )
+        except ApiError as error:
+            self._put(failed, error, FAILED_FRAMES_TTL)
+            raise
 
     def forget(self, client: BambuddyClient, archive_id: int) -> None:
         """Drop everything kept for the archive, after ScadBuddy changed it."""
