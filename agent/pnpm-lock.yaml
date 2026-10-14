@@ -162,6 +162,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  postgres@3.4.9: 6a45711c0e240dcde8ee1036571fd604a2db454159817bd8d270323a3d68aa68
+
 importers:
 
   .:
@@ -231,7 +234,7 @@ importers:
         version: 0.17.0
       postgres:
         specifier: ^3.4.9
-        version: 3.4.9
+        version: 3.4.9(patch_hash=6a45711c0e240dcde8ee1036571fd604a2db454159817bd8d270323a3d68aa68)
       turndown:
         specifier: 7.2.4
         version: 7.2.4
@@ -4526,7 +4529,7 @@ snapshots:
       picocolors: 1.1.1
       source-map-js: 1.2.1
 
-  postgres@3.4.9: {}
+  postgres@3.4.9(patch_hash=6a45711c0e240dcde8ee1036571fd604a2db454159817bd8d270323a3d68aa68): {}
 
   prelude-ls@1.2.1: {}
 

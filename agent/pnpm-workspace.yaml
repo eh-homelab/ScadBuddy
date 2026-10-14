@@ -9,3 +9,12 @@ allowBuilds:
   '@swc/core': false
   msw: false
   protobufjs: false
+# #3294: postgres.js 3.4.9 writes a dead transaction's ROLLBACK/COMMIT on a closed
+# connection and throws uncaught; the patch fails that query instead. It covers only
+# a connection with no socket: if index.js onclose has already reconnected the same
+# Connection (queries were queued) when the callback settles, the stray ROLLBACK or
+# COMMIT goes out on the new session, as it did before the patch. The key pins the
+# exact version, so a postgres bump fails install on the unused patch: check whether
+# upstream fixed begin's scope, then port the patch or drop it.
+patchedDependencies:
+  postgres@3.4.9: patches/postgres@3.4.9.patch
