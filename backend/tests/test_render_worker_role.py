@@ -232,11 +232,11 @@ def test_the_grant_waits_for_another_replicas_lock(
                     "SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
                     " AND database = (SELECT oid FROM pg_database"
                     " WHERE datname = current_database())"
-                    " AND classid::bigint = %s AND objid::bigint = %s",
+                    " AND classid::bigint = %s AND objid::bigint = %s AND objsubid = 1",
                     (key >> 32, key & 0xFFFF_FFFF),
                 ).fetchone():
                     assert time.monotonic() < deadline, "the grant never waited on the lock"
-                    assert not granting.done()
+                    assert not granting.done(), f"granted without waiting: {granting.exception()}"
                     time.sleep(0.05)
             assert not granting.done()
             other.commit()
