@@ -56,6 +56,10 @@ import { PgFlowRuns } from './temporal/flowRuns.js'
 import { flowSessionActivities } from './temporal/flowSessions.js'
 import { gateActivities, PgApprovalRecords, PgSessionOwners, toolActivities } from './temporal/toolActivities.js'
 import { TASK_QUEUE } from './temporal/names.js'
+import { sessionFinishActivities } from './temporal/session/finishActivity.js'
+import { sessionGateActivities } from './temporal/session/gateActivities.js'
+import { SESSION_DEPLOYMENT, SESSION_SETTINGS_ACTIVITY, SESSION_QUEUE } from './temporal/session/names.js'
+import { readRuntimeSettings } from './sessions/runtimeSettings.js'
 import { memoryActivities } from './temporal/memoryActivities.js'
 import { SHARED_PACKAGES, sweepPackageCopies } from './temporal/turnPackages.js'
 import { forwardPackageServers } from './plugins/packages/mcp.js'
@@ -585,6 +589,9 @@ const temporalWorker =
             ...(payloadKeys ? { flowBlobs: new PgFlowBlobs(temporal.sql, payloadKeys) } : {}),
           }),
           ...gateActivities({ audit, sessions: new PgSessionOwners(temporal.sql), workspace }),
+          // AgentSession's gate writers and its turn end (unified runtime §5.1, flagged off until phase 6).
+          ...sessionGateActivities(temporal.sql),
+          ...(sessions ? sessionFinishActivities(temporal.sql, sessions.events) : {}),
           // A durable turn's plugin and http_request tools (#2320): listed per turn, and
           // each call the `default` activity `turn:<server>__<tool>`.
           ...turnToolActivities(turnToolDeps),
@@ -608,6 +615,25 @@ const temporalWorker =
         },
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
         // Bundled by `pnpm build` (scripts/bundle-workflows.mjs).
+        workflows: {
+          workflowBundle: { codePath: fileURLToPath(new URL('./temporal/workflow-bundle.js', import.meta.url)) },
+        },
+      })
+    : undefined
+// AgentSession (unified runtime spec 2026-10-13 §5.1): new durable sessions run here only
+// while `session_runtime` says `unified`; flagged off, nothing is ever started on this queue.
+// Versioned as the Deployment `scadbuddy-agent` (D4) when the build has an id (config.buildId),
+// else unversioned like the agent's other workers. `session_settings` is a local activity, so it
+// is served here. `session_turn` is Task 5.2's, on the host worker.
+const sessionWorker =
+  temporal && settings
+    ? AgentWorker.start({
+        address: temporal.address,
+        namespace: config.temporalNamespace,
+        taskQueue: SESSION_QUEUE,
+        activities: { [SESSION_SETTINGS_ACTIVITY]: () => readRuntimeSettings(settings) },
+        ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
+        ...(config.buildId ? { deployment: { name: SESSION_DEPLOYMENT, buildId: config.buildId } } : {}),
         workflows: {
           workflowBundle: { codePath: fileURLToPath(new URL('./temporal/workflow-bundle.js', import.meta.url)) },
         },
@@ -809,6 +835,7 @@ async function stop(): Promise<void> {
   await Promise.all([
     temporalWorker?.stop(),
     hostWorker?.stop(),
+    sessionWorker?.stop(),
     sessions?.stopTurns({ graceMs: TURN_DRAIN_MS, abortWaitMs: TURN_ABORT_WAIT_MS }),
   ])
   // Kept plugin MCP sessions end with their DELETE while the forwarder still routes it.

@@ -4,9 +4,19 @@
 
 export const SESSION_WORKFLOW = 'AgentSession'
 export const SESSION_QUEUE = 'agent-sessions'
+/** The Worker Deployment of the `agent-sessions` worker (D4). */
+export const SESSION_DEPLOYMENT = 'scadbuddy-agent'
 export const SESSION_TURN_ACTIVITY = 'session_turn'
 export const OPEN_INPUT_UPDATE = 'open_input'
 export const OWNER_CHANGED_SIGNAL = 'owner_changed'
+export const SEND_MESSAGE_UPDATE = 'send_message'
+export const TURN_QUERY = 'turn'
+/** A local activity on the `agent-sessions` worker: the runtime settings, read as each turn starts. */
+export const SESSION_SETTINGS_ACTIVITY = 'session_settings'
+/** The turn's end (events and status), on `agent-tools`; agent-durable's is `finish_turn`. */
+export const SESSION_FINISH_ACTIVITY = 'session.finish_turn'
+/** `ai_settings` key of the flag that starts new durable sessions on AgentSession; read, never written through a route, until phase 6. */
+export const SESSION_RUNTIME_SETTING = 'session_runtime'
 
 /**
  * The gate's activities (temporal/session/gate.ts). Under the agent's own `gate.` prefix, never

@@ -24,6 +24,12 @@ export type AgentWorkerOptions = {
   /** The AgentOperation workflow: the build's bundle, or its source in tests. */
   workflows?: Pick<WorkerOptions, 'workflowBundle' | 'workflowsPath'>
   dataConverter?: DataConverter
+  /**
+   * A Worker Deployment version (spec 2026-10-13 §5.1, D4): the worker is versioned, its
+   * workflows `AUTO_UPGRADE`, and once it polls its build is made the deployment's
+   * current version, which a versioned worker needs before it takes new workflows.
+   */
+  deployment?: { name: string; buildId: string }
   shutdownGraceMs?: number
   /** When the SDK gives up on running activities and the worker stops regardless. */
   shutdownForceMs?: number
@@ -75,6 +81,30 @@ export class AgentWorker {
     await this.#loop
   }
 
+  /** Retried until it takes or the worker stops: the deployment may not know this version until its first poll. */
+  async #makeCurrent(
+    connection: NativeConnection,
+    options: AgentWorkerOptions,
+    deployment: { name: string; buildId: string },
+    log: (message: string) => void,
+  ): Promise<void> {
+    while (!this.#stopping) {
+      try {
+        await connection.workflowService.setWorkerDeploymentCurrentVersion({
+          namespace: options.namespace,
+          deploymentName: deployment.name,
+          buildId: deployment.buildId,
+          ignoreMissingTaskQueues: true,
+          allowNoPollers: true,
+        })
+        return
+      } catch (err) {
+        log(`${options.taskQueue ?? TASK_QUEUE} worker: could not make build ${deployment.buildId} current yet (${(err as Error).message}); retrying`)
+        await sleep(options.retryMs ?? 5_000, undefined, { signal: this.#wake.signal }).catch(() => undefined)
+      }
+    }
+  }
+
   async #run(options: AgentWorkerOptions): Promise<void> {
     const log = options.log ?? ((message: string) => console.error(message))
     while (!this.#stopping) {
@@ -98,6 +128,15 @@ export class AgentWorker {
           activities: options.activities,
           ...options.workflows,
           ...(options.dataConverter ? { dataConverter: options.dataConverter } : {}),
+          ...(options.deployment
+            ? {
+                workerDeploymentOptions: {
+                  version: { deploymentName: options.deployment.name, buildId: options.deployment.buildId },
+                  useWorkerVersioning: true as const,
+                  defaultVersioningBehavior: 'AUTO_UPGRADE' as const,
+                },
+              }
+            : {}),
           shutdownGraceTime: options.shutdownGraceMs ?? 10_000,
           shutdownForceTime: options.shutdownForceMs ?? 15_000,
         })
@@ -105,6 +144,7 @@ export class AgentWorker {
         if (this.#stopping) break
         const run = worker.run()
         this.#state = 'ok'
+        if (options.deployment) void this.#makeCurrent(connection, options, options.deployment, log)
         await run
       } catch (err) {
         // Past shutdownForceTime the SDK gives up on the activities still running

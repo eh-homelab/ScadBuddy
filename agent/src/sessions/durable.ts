@@ -10,6 +10,7 @@ import type { Sql } from 'postgres'
 import type { Tier } from '../auth/principal.js'
 import type { FlowTurn } from '../tools/registry.js'
 import { DurableGate, DurableUnavailable, sessionWorkflowId } from '../gate/durable.js'
+import { SESSION_QUEUE, SESSION_RUNTIME_SETTING, SESSION_WORKFLOW } from '../temporal/session/names.js'
 import { SessionBlobs, sentImageBlobs } from './blobs.js'
 import type { EventLog } from './eventLog.js'
 import type { UserImage } from './images.js'
@@ -43,12 +44,20 @@ import { event, type Owner, type SentImage, type SessionStatus } from './protoco
 // - handoff: after the owner change is committed, `cancel_input`, best-effort; when
 //   it goes unanswered the `interrupt` Signal ends the parked calls (and the turn).
 //
+// Which workflow runs a session is its `runtime` column, fixed by its first send (unified
+// runtime spec 2026-10-13 §5.1): the setting `session_runtime = 'unified'` starts a NEW
+// session's workflow as AgentSession on `agent-sessions`; every other session, and every one
+// that has run a turn already, is a DurableSession on `agent`, for life. The gate calls, the
+// Updates after the first and the signals are by workflow id, the same for both types.
+//
 // The wire shapes are agent-durable's session/models.py (`SessionStart`, `Message`,
 // `ImageRef`, `Owner`). No prompt, image or tool content is logged or traced here.
 
 export const DURABLE_WORKFLOW = 'DurableSession'
 export const DURABLE_TASK_QUEUE = 'agent'
 export const SEND_MESSAGE_UPDATE = 'send_message'
+/** `ai_sessions.runtime`: the workflow type a session runs as. */
+export type SessionRuntime = 'durable' | 'unified'
 export const FORK_POINT_QUERY = 'fork_point'
 /** The most characters of entries one `fork_point` page carries: under Temporal's 512 KiB warning. */
 const FORK_PAGE_CHARS = 384 * 1024
@@ -141,6 +150,8 @@ export type DurableTurnsDeps = {
   events: EventLog
   /** Tests only: a queue other than `agent`. */
   taskQueue?: string
+  /** Tests only: a queue other than `agent-sessions`. */
+  sessionQueue?: string
   /** How long send waits for the `send_message` Update to be accepted (default 10 s); past it the outcome is unknown and the claim is kept. */
   sendTimeoutMs?: number
   /** How long `cancel_input` may take (DurableGate, default 10 s). */
@@ -164,6 +175,7 @@ export class DurableTurns {
   readonly #gate: DurableGate
   readonly #blobs: SessionBlobs
   readonly #taskQueue: string
+  readonly #sessionQueue: string
   readonly #sendTimeoutMs: number
   #ready: { until: number; why: string | undefined } | undefined
 
@@ -174,6 +186,7 @@ export class DurableTurns {
     this.#gate = new DurableGate(deps.client, deps.cancelTimeoutMs ? { cancelTimeoutMs: deps.cancelTimeoutMs } : {})
     this.#blobs = new SessionBlobs(deps.sql)
     this.#taskQueue = deps.taskQueue ?? DURABLE_TASK_QUEUE
+    this.#sessionQueue = deps.sessionQueue ?? SESSION_QUEUE
     this.#sendTimeoutMs = deps.sendTimeoutMs ?? 10_000
   }
 
@@ -224,13 +237,17 @@ export class DurableTurns {
     // The lock makes a concurrent claim read the committed `running`, so its guarded UPDATE matches nothing.
     // `archived_at` is tested here too: an archive that commits after the manager's check
     // must not let a turn start on a chat the panel no longer lists (#2118).
-    const [claimed] = await this.#sql.unsafe<{ prior_status: SessionStatus; durable_offset: string }[]>(
+    // The runtime is recorded by the first send: the flag for a session that has run nothing, else DurableSession.
+    const flagged = (await this.#sql<{ value: unknown }[]>`SELECT value FROM ai_settings WHERE key = ${SESSION_RUNTIME_SETTING}`)[0]?.value === 'unified'
+    const [claimed] = await this.#sql.unsafe<{ prior_status: SessionStatus; durable_offset: string; runtime: SessionRuntime }[]>(
       `WITH prior AS (SELECT status AS prior_status, durable_offset FROM ai_sessions WHERE id = $1 FOR UPDATE)
-       UPDATE ai_sessions SET status = 'running', turn_tiers = $4, durable_turn_id = $5, updated_at = now() FROM prior
+       UPDATE ai_sessions SET status = 'running', turn_tiers = $4, durable_turn_id = $5, updated_at = now(),
+         runtime = coalesce(runtime, CASE WHEN prior.durable_offset = 0 AND $6::boolean THEN 'unified' ELSE 'durable' END)
+       FROM prior
        WHERE id = $1 AND mode = 'durable' AND owner_kind = $2 AND owner_id = $3
          AND status NOT IN ('running', 'waiting_approval', 'waiting_input', 'done')
          AND archived_at IS NULL AND ${POOL_COST} < ${POOL_BUDGET}
-       RETURNING prior.prior_status, prior.durable_offset`,
+       RETURNING prior.prior_status, prior.durable_offset, ai_sessions.runtime`,
       // The turn's tool activities run with these, cut to what the owner holds then (#2320).
       [
         id,
@@ -239,6 +256,7 @@ export class DurableTurns {
         turn.tiers ? this.#sql.json({ by: { kind: turn.author.kind, id: turn.author.id }, tiers: [...turn.tiers] }) : null,
         // The running turn (#2320).
         turn.turnId,
+        flagged,
       ],
     )
     if (!claimed) return undefined
@@ -259,7 +277,7 @@ export class DurableTurns {
         event({ type: 'session.status', sessionId: id, status: 'running' }),
       ])
       seq = seqs.at(-1) ?? 0
-      await this.#sendMessage(session, turn, sent, Number(claimed.durable_offset) > 0)
+      await this.#sendMessage(session, turn, sent, Number(claimed.durable_offset) > 0, claimed.runtime)
     } catch (err) {
       if (err instanceof OutcomeUnknown) return this.#turn(id, turn.turnId, seq)
       // The refusal is what the caller hears, whatever the give-back meets.
@@ -290,7 +308,7 @@ export class DurableTurns {
    * workflow not found was removed by retention after it ended, and starting
    * `session-<id>` again would run the session's history-holding chat empty (#2078).
    */
-  async #sendMessage(session: SessionRecord, turn: DurableTurn, sent: readonly SentImage[], ranTurn: boolean): Promise<void> {
+  async #sendMessage(session: SessionRecord, turn: DurableTurn, sent: readonly SentImage[], ranTurn: boolean, runtime: SessionRuntime): Promise<void> {
     const start: SessionStart = {
       session_id: session.id,
       creator: wire(session.creator),
@@ -307,9 +325,10 @@ export class DurableTurns {
       system_append: turn.systemAppend,
       ...(turn.flow ? { flow: { run_id: turn.flow.run_id, call_id: turn.flow.call_id } } : {}),
     }
-    const operation = new WithStartWorkflowOperation<(start: SessionStart) => Promise<void>>(DURABLE_WORKFLOW, {
+    const unified = runtime === 'unified'
+    const operation = new WithStartWorkflowOperation<(start: SessionStart) => Promise<void>>(unified ? SESSION_WORKFLOW : DURABLE_WORKFLOW, {
       workflowId: sessionWorkflowId(session.id),
-      taskQueue: this.#taskQueue,
+      taskQueue: unified ? this.#sessionQueue : this.#taskQueue,
       args: [start],
       workflowIdConflictPolicy: 'USE_EXISTING',
       // A session whose workflow ended (failed, or terminated) lost its conversation:
@@ -352,6 +371,11 @@ export class DurableTurns {
    * count, and the read starts again.
    */
   async forkSource(sessionId: string): Promise<ForkSource | undefined> {
+    // Phase 6 forks an AgentSession session (its transcript is in ai_session_entries, not its workflow).
+    const [row] = await this.#sql<{ runtime: SessionRuntime | null }[]>`SELECT runtime FROM ai_sessions WHERE id = ${sessionId}`
+    if (row?.runtime === 'unified') {
+      throw new SessionError('invalid', `session ${sessionId} runs on the unified runtime, which cannot be forked yet; this is not supported until its fork lands`)
+    }
     const handle = this.#client.workflow.getHandle(sessionWorkflowId(sessionId))
     const page = (start: number) =>
       this.#client.withDeadline(Date.now() + this.#sendTimeoutMs, () =>
@@ -401,6 +425,8 @@ export class DurableTurns {
       system_append: null,
       agent,
     }
+    // Its workflow is a DurableSession whatever the flag says, so its first send must not pick the type again.
+    await this.#sql`UPDATE ai_sessions SET runtime = 'durable' WHERE id = ${child.id}`
     try {
       await this.#client.withDeadline(Date.now() + this.#sendTimeoutMs, () =>
         this.#client.workflow.start<(start: SessionStart) => Promise<void>>(DURABLE_WORKFLOW, {
