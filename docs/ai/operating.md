@@ -50,6 +50,11 @@ covers the same ground more briefly.
 - **Shutdown.** On `SIGTERM`/`SIGINT` the listener drains for up to 10 s, then the
   database pool closes. The exit code is non-zero if the drain timed out (`main.ts`;
   [`agent/src/shutdown.ts`](../../agent/src/shutdown.ts)).
+  A restart ends every turn the replica was running, and with it every question and
+  attention request those turns were waiting on: none is asked again. That includes an
+  attention request with `on_timeout: 'wait'`, which otherwise waits up to a day
+  (`WAIT_CEILING_S`, [`agent/src/harness/attention.ts`](../../agent/src/harness/attention.ts))
+  while holding the session's lease and its Claude Code process (#1220).
 
 ### 1.1 Routing the UI's origin to the agent
 

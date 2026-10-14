@@ -4,7 +4,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { type Context, context as otelContext, SpanStatusCode } from '@opentelemetry/api'
 import type { Principal } from '../auth/principal.js'
 import type { AuditLog } from '../audit/log.js'
-import { toolContextFor, withSpan } from '../telemetry/trace.js'
+import { TOOL_USE_META, toolContextFor, withSpan } from '../telemetry/trace.js'
 import { MCP_UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
 import { errorResult, parsedOrRaw, type Progress, type Risk, runTool, runToolWithOutcome, type Tool, type ToolRun, type ToolServices } from './registry.js'
 
@@ -60,9 +60,9 @@ function detailOf(run: ToolRun): { detail?: string } {
   return { detail: `run by confirm_action${run.detail === undefined ? '' : `: ${run.detail}`}` }
 }
 
-/** What Claude Code puts in an MCP call's `_meta` (measured on 2.1.283 and 2.1.287, harness/questions.ts). */
+/** What Claude Code puts in an MCP call's `_meta` (TOOL_USE_META, telemetry/trace.ts). */
 function toolUseIdFrom(extra: unknown): string | undefined {
-  const id = (extra as { _meta?: Record<string, unknown> } | undefined)?._meta?.['claudecode/toolUseId']
+  const id = (extra as { _meta?: Record<string, unknown> } | undefined)?._meta?.[TOOL_USE_META]
   return typeof id === 'string' && id ? id : undefined
 }
 
