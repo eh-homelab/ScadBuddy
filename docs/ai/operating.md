@@ -661,10 +661,10 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   only, through the agent's loopback server (`routes/subagentMcp.ts`), since the Temporal
   plugin refuses a subagent the turn's durable tools; and of the built-ins an
   `allow_refused` package names, a durable turn does not offer the ones that work in the
-  background of a classic turn's Claude Code and are not yet provided (`Monitor`, `Workflow`
-  and `PushNotification`), and says which it left out. Every other one is offered, each
+  background of a classic turn's Claude Code and are not yet provided (`Workflow` and
+  `PushNotification`), and says which it left out. Every other one is offered, each
   parked for approval (#2393, below); `CronCreate`, `CronDelete`, `CronList`,
-  `ScheduleWakeup` and `TaskStop` are the session's own in both modes (below). The worker check counts only a
+  `ScheduleWakeup`, `Monitor` and `TaskStop` are the session's own in both modes (below). The worker check counts only a
   poller Temporal saw in the last 70 s (it lists one for minutes after its worker has
   gone), so an `agent-durable` that died counts for at most about that long;
   and `mcp_oidc`, the
@@ -882,7 +882,7 @@ as a classic turn counts Claude Code's own calls. The inputs are Claude Code's o
 `test/builtins.sdk.test.ts`; `UPDATE_BUILTIN_SCHEMAS=1` rewrites it after a bump) and the
 answers its wording, measured in a classic turn on Claude Code 2.1.296.
 
-`CronCreate`, `CronDelete`, `CronList`, `ScheduleWakeup` and `TaskStop` are kept by the
+`CronCreate`, `CronDelete`, `CronList`, `ScheduleWakeup`, `Monitor` and `TaskStop` are kept by the
 session, in both modes (`agent/src/background/`). Claude Code keeps its own jobs in its
 process ("Session-only (not written to disk, dies when Claude exits)"), which a turn
 ends, so a classic turn gets these in place of its own too (`mcp__builtin__<Name>`, the
@@ -899,7 +899,30 @@ above the conversation and its owner cancels them (`routes/backgroundTasks.ts`).
 task's workflow is `bgtask-<session id>-<task id>`, which both payload codecs seal under
 the session's data key; archiving the chat or marking it done ends its tasks, and
 `forgetSubject` ends them and terminates their workflows before it deletes the key.
-`Monitor`, `Workflow` and `PushNotification` are not provided yet, and the session says so. The
+
+A `Monitor` is a task of the same kind whose source runs as one heartbeating activity
+where the session's Bash runs: a classic session's command in its session directory on
+the replica that ran the turn (`agent-tools.<hostname>`, `background/monitor.ts`), a
+durable session's in agent-durable's working directory (`scadbuddy_durable/background.py`,
+on the `agent` queue), a WebSocket on any agent (egress-checked, loopback refused, and connected only to the addresses the
+check passed, with no redirect). A line is cut at 8000 characters and the rest of it
+dropped, and so is a batch, so a command that never writes a newline holds no more. The
+command gets a shell's environment only (`PATH`, `HOME`, `LANG`, `LC_ALL`, `TZ`, `TERM`),
+never the service's. As Claude Code's: stdout lines within 200 ms are one event, exit ends
+the watch with its code, it expires after `timeout_ms` (default 5 minutes, at most 30),
+and more than 200 events stop it. Each event is a row of `ai_background_events`; the
+source signals the workflow, which sends the undelivered ones, as Claude Code's
+`<task-notification>` blocks, redacted of every saved credential and inside the
+untrusted-data envelope every tool result gets
+(what a command prints or a socket sends is data, never the user's words), as the
+session's next message once it is idle (Claude Code
+shows them mid-turn; here they wait for the turn to end), and the watch's end last.
+One message carries at most 64k characters of events (`DELIVER_MAX_CHARS`, `store.ts`)
+and says how many follow; the rest go in the next once the session is idle again.
+A classic session's command runs on one replica's queue, so a rollout that replaces that
+pod ends it as `failed` (its heartbeat stops and it is not retried): re-arm it after a
+deploy. A durable session's command and any WebSocket are not tied to one pod this way.
+`Workflow` and `PushNotification` are not provided yet, and the session says so. The
 Temporal plugin owns the engine's settings, so a durable turn cannot set
 `disableSkillShellExecution`, and skill shell injection follows Claude Code's default
 there. Only an allowed package can carry one (`vet.ts` refuses it everywhere else), and

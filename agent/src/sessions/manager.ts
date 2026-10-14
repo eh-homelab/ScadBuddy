@@ -701,7 +701,7 @@ export type SessionManagerDeps = {
    * name CronCreate and the rest gets the session's in place of Claude Code's own, which
    * end with the turn. Without it those are Claude Code's.
    */
-  background?: { tasks: BackgroundTasks; tz: string }
+  background?: { tasks: BackgroundTasks; tz: string; commandQueue?: string }
   run?: QueryRunner
   /** The session WebFetch's own model calls (builtins/nested.ts); a test's stand-in. */
   nestedQueries?: typeof nestedQueries
