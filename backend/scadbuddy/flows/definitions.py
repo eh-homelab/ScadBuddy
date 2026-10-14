@@ -39,6 +39,10 @@ class UnknownFlowError(Exception):
     """No version of a flow by this name."""
 
 
+class FlowDeletedError(Exception):
+    """The flow is deleted: restore a version first (#2646)."""
+
+
 class ScriptMissingError(Exception):
     """The commit a version names is not in the repository (a damaged volume)."""
 
@@ -120,10 +124,10 @@ class FlowDefinitions:
                     commit,
                     author,
                     approval_timeout_s=approval_timeout_s,
+                    # A new version of a deleted flow brings it back (#2485).
+                    revive=True,
                 )
             )
-            # A new version of a deleted flow brings it back (#2485).
-            self.states.revive(name)
 
         commit, _ = self.history.register(
             name,
@@ -151,7 +155,10 @@ class FlowDefinitions:
     def _archive(self, name: str, by: dict[str, Any]) -> FlowState:
         if not self.states.exists(name):
             raise UnknownFlowError(name)
-        return self.states.archive(name, by)
+        state = self.states.archive(name, by)
+        if state.deleted_at is not None:
+            raise FlowDeletedError(name)
+        return state
 
     async def unarchive(self, name: str) -> FlowState:
         return await asyncio.to_thread(self._unarchive, name)

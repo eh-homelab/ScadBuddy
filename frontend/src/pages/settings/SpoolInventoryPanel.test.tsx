@@ -2,6 +2,7 @@ import { screen, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it } from 'vitest'
 import { resetBambuddyLinks, setBambuddyLinks } from '../../lib/bambuddyLinks'
+import { SPOOL_INVENTORY } from '../../mocks/features/spoolInventory'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { SpoolInventoryPanel } from './SpoolInventoryPanel'
@@ -87,6 +88,47 @@ describe('SpoolInventoryPanel (#2351)', () => {
     expect(within(clear).getByTestId('clear-swatch')).toBeInTheDocument()
     expect(clear.querySelector('[title="#000000"]')).toBeNull()
     expect(within(screen.getByTestId('spool-2')).getByTitle('#F5547C')).toBeInTheDocument()
+  })
+
+  it('keeps the last table while a re-read is in flight, then shows the new one (#2971 review)', async () => {
+    const { user } = renderPage(<SpoolInventoryPanel />)
+    await screen.findByTestId('spool-15')
+    let answer = () => {}
+    server.use(
+      http.get('/api/v1/farm/inventory', async () => {
+        await new Promise<void>((resolve) => (answer = resolve))
+        return HttpResponse.json({ spools: [], slots: [] })
+      }),
+    )
+
+    await user.click(screen.getByRole('checkbox', { name: 'Include archived spools' }))
+    expect(screen.getByTestId('spool-15')).toBeInTheDocument()
+    expect(screen.queryByText("Reading Bambuddy's inventory…")).toBeNull()
+
+    answer()
+    expect(await screen.findByText('Bambuddy has no spools.')).toBeInTheDocument()
+    expect(screen.queryByRole('table')).toBeNull()
+  })
+
+  it('draws a spool with no colour recorded as unknown, not clear and not black (#2971 review)', async () => {
+    server.use(
+      http.get('/api/v1/farm/inventory', () =>
+        HttpResponse.json({
+          spools: [
+            { ...SPOOL_INVENTORY[0], id: 40, rgba: null },
+            { ...SPOOL_INVENTORY[0], id: 41, rgba: 'not a colour' },
+          ],
+          slots: [],
+        }),
+      ),
+    )
+    renderPage(<SpoolInventoryPanel />)
+    for (const id of [40, 41]) {
+      const row = await screen.findByTestId(`spool-${id}`)
+      expect(within(row).getByTestId('unknown-swatch')).toHaveAttribute('title', 'colour not recorded')
+      expect(within(row).queryByTestId('clear-swatch')).toBeNull()
+      expect(row.querySelector('[title="#000000"]')).toBeNull()
+    }
   })
 
   it('says a failed read', async () => {

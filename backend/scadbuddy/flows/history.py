@@ -30,6 +30,7 @@ from temporalio.api.workflowservice.v1 import GetWorkflowExecutionHistoryReverse
 from temporalio.client import Client
 
 from scadbuddy.flows.models import Run
+from scadbuddy.workflows.flow_activities import FLOW_CLOSE
 from scadbuddy.workflows.flow_models import FlowStep
 from scadbuddy.workflows.flow_tools import OUTWARD_PREFIX, TOOL_PREFIX, TURN_PREFIX
 
@@ -76,23 +77,40 @@ class ResetPoints(BaseModel):
 
 
 def points_of(
-    events: Iterable[HistoryEvent], steps: Sequence[FlowStep], *, floor: int | None = None
+    events: Iterable[HistoryEvent],
+    steps: Sequence[FlowStep],
+    *,
+    floor: int | None = None,
+    ended: bool = False,
 ) -> ResetPoints:
     """The valid points over one execution's whole history: a completed workflow task
-    after `execute` was accepted and before the last event, as `preview_of` says, and
-    past the run's `floor` (`FlowStore.reset_floor`), which a Reset refuses."""
+    after `execute` was accepted and before the last event, and for an `ended` run
+    before its last `flow_close` was scheduled, as `preview_of` says, and past the run's
+    `floor` (`FlowStore.reset_floor`), which a Reset refuses."""
     completed: list[int] = []
     started = False
     last = 0
+    closes = 0
     for event in events:
         last = event.event_id
         if _executes(event):
             started = True
         elif started and event.event_type == EventType.EVENT_TYPE_WORKFLOW_TASK_COMPLETED:
             completed.append(event.event_id)
+        elif (
+            event.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED
+            and event.activity_task_scheduled_event_attributes.activity_type.name == FLOW_CLOSE
+        ):
+            # The last one: an execution schedules exactly one `flow_close`. A second
+            # would move this past the first, and the points before it would be lost.
+            closes = event.event_id
     points = []
     for event_id in completed:
-        if event_id >= last or (floor is not None and event_id - 1 <= floor):
+        if (
+            event_id >= last
+            or (ended and event_id >= closes)
+            or (floor is not None and event_id - 1 <= floor)
+        ):
             continue
         # The Reset's task is done again: a step started in it or later runs again, and
         # one that ended in it or later is reopened (`FlowStore.reset`'s `redone`).
@@ -107,12 +125,17 @@ def points_of(
     return ResetPoints(as_of_event_id=last, points=points)
 
 
+def _ended(run: Run) -> bool:
+    """The run has recorded its end: a Reset must replay it (#2378)."""
+    return run.status in ("succeeded", "failed")
+
+
 async def reset_points(client: Client, run: Run, *, floor: int | None = None) -> ResetPoints:
     """The points of the run's current execution, read whole."""
     run_id = (await client.get_workflow_handle(run.workflow_id).describe()).run_id
     handle = client.get_workflow_handle(run.workflow_id, run_id=run_id)
     events = [e async for e in handle.fetch_history_events(page_size=PAGE_SIZE)]
-    found = points_of(events, run.steps, floor=floor)
+    found = points_of(events, run.steps, floor=floor, ended=_ended(run))
     found.workflow_run_id = run_id
     return found
 
@@ -133,13 +156,21 @@ def preview_of(
     event_id: int,
     outward_tools: Collection[str] = (),
     turns: Mapping[int, int] | None = None,
+    *,
+    ended: bool = False,
 ) -> ResetPreview:
     """The preview over one execution's events. `outward_tools` are the call ids of the
     run's outward `tool(...)` steps: their activity id alone does not say. `turns` maps
     an `agent`/`ask_session` turn's wait (scheduled event id) to the outward calls the
     turn made, once it answered; a turn not in it has not, so it may have made one, and
-    is listed."""
+    is listed.
+
+    `ended`: the run has recorded its end (`succeeded`/`failed`). Its last write and its
+    `flow_close` are commands of one workflow task, so a point after `flow_close` was
+    scheduled is past them: a Reset there replays the end without writing it, and the
+    run would read `running` for good (#2378). Such a point is not valid."""
     turns = turns or {}
+    closes_after = False
     last = 0
     valid = False
     started = False
@@ -157,6 +188,9 @@ def preview_of(
         if event.event_type != EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED:
             continue
         scheduled = event.activity_task_scheduled_event_attributes
+        if scheduled.activity_type.name == FLOW_CLOSE:
+            closes_after = True
+            continue
         activity_id = scheduled.activity_id
         if activity_id.startswith(OUTWARD_PREFIX):
             fn, _, call_id = activity_id.removeprefix(OUTWARD_PREFIX).partition("-")
@@ -172,7 +206,7 @@ def preview_of(
     return ResetPreview(
         event_id=event_id,
         as_of_event_id=last,
-        valid=valid and started and event_id < last,
+        valid=valid and started and event_id < last and (closes_after or not ended),
         calls=calls,
     )
 
@@ -188,7 +222,7 @@ async def outward_since(
     # Ascending, each once: the tail's last event can fall inside a short head.
     events = sorted({e.event_id: e for e in [*head, *tail]}.values(), key=lambda e: e.event_id)
     tools = {s.call_id for s in run.steps if s.outward and s.fn.startswith("tool:")}
-    preview = preview_of(events, event_id, tools, await _turns(client, tail))
+    preview = preview_of(events, event_id, tools, await _turns(client, tail), ended=_ended(run))
     preview.workflow_run_id = run_id
     return preview
 

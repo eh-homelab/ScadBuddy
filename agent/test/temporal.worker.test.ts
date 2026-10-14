@@ -143,7 +143,10 @@ describe.skipIf(!TEMPORAL_CLI)(`the agent-tools worker${TEMPORAL_SKIP}`, () => {
           approved: async () => false,
         },
         flowBlobs: {
-          put: async (subject, images) => void images.forEach((i) => kept.set(`${subject}/${i.name}`, i.bytes)),
+          put: async (subject, images) => {
+            images.forEach((i) => kept.set(`${subject}/${i.name}`, i.bytes))
+            return images.map((i) => i.name)
+          },
           get: async () => undefined,
         },
       }),

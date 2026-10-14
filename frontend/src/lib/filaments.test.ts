@@ -283,6 +283,24 @@ describe('checkPlan', () => {
     expect(checkPlan(unsliced, [{ slot_id: 1, spool_id: 1 }], 1000)).toEqual([])
   })
 
+  it('warns when slots sharing a spool need more of it between them than it holds (#2851)', () => {
+    const shared = options({
+      slots: [
+        { slot_id: 1, used_grams: 10 },
+        { slot_id: 2, used_grams: 10 },
+        { slot_id: 3, used_grams: 10 },
+        { slot_id: 4, used_grams: 0 },
+      ],
+      spools: [spool({ spool_id: 1, remaining_g: 25, loaded: loaded({}) })],
+    })
+    const plan = [1, 2, 3, 4].map((slot_id) => ({ slot_id, spool_id: 1 }))
+    const found = checkPlan(shared, plan, 1)
+    expect(found.map((w) => w.slot_id)).toEqual([1, 2, 3])
+    expect(found.every((w) => w.message.includes('slots 1, 2 and 3 need 30 g of it between them'))).toBe(true)
+    // Two of them: 20 g of 25.
+    expect(checkPlan(shared, plan.slice(0, 2), 1).filter((w) => w.kind === 'low-filament')).toEqual([])
+  })
+
   it('says so when a slot has nothing chosen', () => {
     expect(checkPlan(options(), [], 1).map((w) => w.kind)).toEqual(['no-choice'])
   })

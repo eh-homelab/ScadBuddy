@@ -94,7 +94,9 @@ describe('a colour from a filament (#1026)', () => {
     server.use(
       http.get('/api/v1/farm/inventory', async () => {
         await new Promise<void>((resolve) => (answer = resolve))
-        return undefined
+        // An explicit list, not a fall-through to the default handler, so what this
+        // test checks cannot change with that handler.
+        return HttpResponse.json({ spools: SPOOL_INVENTORY.filter((spool) => !spool.archived), slots: [] })
       }),
     )
     const { user } = setup()

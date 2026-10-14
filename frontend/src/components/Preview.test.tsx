@@ -162,6 +162,22 @@ describe('Preview', () => {
     expect(screen.queryByText('Change a parameter to render.')).not.toBeInTheDocument()
   })
 
+  // #2444 — "Change a parameter to render." read as if nothing were wrong while a
+  // parameter was the very reason nothing rendered.
+  it('says why nothing renders, in place of inviting a change', () => {
+    render(<Preview job={undefined} rendering={false} blocked="Letter size must be between 8 and 30." />)
+    expect(screen.queryByText('Change a parameter to render.')).not.toBeInTheDocument()
+    expect(screen.getByTestId('preview-blocked')).toHaveTextContent('Letter size must be between 8 and 30. Fix it to render.')
+  })
+
+  it('keeps the last render on show while a value blocks the next, and says it is the last one', () => {
+    render(<Preview job={job({})} rendering={false} blocked="Letter size must be between 8 and 30." />)
+    expect(screen.getByTestId('preview-blocked')).toHaveTextContent(
+      'Showing the last render. Letter size must be between 8 and 30. Fix it to render again.',
+    )
+    expect(screen.queryByText('Change a parameter to render.')).not.toBeInTheDocument()
+  })
+
   it('names the step a running render is on (#267)', () => {
     render(<Preview job={undefined} rendering stage="solids" />)
     expect(screen.getByTestId('render-stage')).toHaveTextContent('building each colour')

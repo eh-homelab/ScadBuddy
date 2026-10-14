@@ -45,6 +45,7 @@ vi.mock('../components/Preview', () => ({
     leading,
     controls,
     rejected,
+    blocked,
   }: {
     job?: Job
     rendering: boolean
@@ -52,9 +53,11 @@ vi.mock('../components/Preview', () => ({
     leading?: ReactNode
     controls?: ReactNode
     rejected?: boolean
+    blocked?: string
   }) => (
     <div data-testid="preview">
       {rejected && <span data-testid="preview-rejected" />}
+      {blocked && <span data-testid="preview-blocked" data-reason={blocked} />}
       {leading}
       {controls}
       {rendering && <span>rendering</span>}
@@ -946,6 +949,78 @@ describe('CustomizePage', () => {
     expect(sent).not.toContain(500)
     expect(sent.at(-1)).toBe(20)
   }, 20000)
+
+  // #2444 — the field that stops the render may be on another tab: the panel, the
+  // preview, Generate and the tab itself all say why.
+  it('says why nothing renders, wherever the out-of-range field is (#2444)', async () => {
+    const { user } = render()
+    await firstRender()
+    const size = screen.getByRole('spinbutton', { name: 'Text size value' })
+    const groups = screen.getByRole('tablist', { name: 'Parameter groups' })
+    const home = within(groups).getByRole('tab', { selected: true })
+    await user.clear(size)
+    await user.type(size, '500{Enter}')
+
+    const blocked = await screen.findByTestId('render-blocked')
+    expect(blocked).toHaveTextContent('Not rendering: Text size must be between 6 and 28.')
+    // The preview is told why (its wording: Preview.test.tsx), and keeps the last render.
+    expect(screen.getByTestId('preview-blocked')).toHaveAttribute('data-reason', 'Text size must be between 6 and 28.')
+    expect(screen.getByTestId('bbox')).toBeInTheDocument()
+    expect(screen.getByTestId('generate')).toBeDisabled()
+    expect(screen.getByTestId('generate-blocked')).toHaveTextContent('Fix Text size first')
+    expect(screen.getByTestId('generate')).toHaveAccessibleDescription('Fix Text size first')
+    expect(within(home).getByTestId('tab-flagged')).toBeInTheDocument()
+    expect(home).toHaveAccessibleName(/a value to fix/)
+
+    // From another tab, the notice is still there and leads back to the field.
+    await user.click(within(groups).getByRole('tab', { name: 'Colours' }))
+    expect(screen.queryByRole('spinbutton', { name: 'Text size value' })).not.toBeInTheDocument()
+    expect(within(groups).getByRole('tab', { name: 'Colours' })).not.toHaveAccessibleName(/a value to fix/)
+    await user.click(within(screen.getByTestId('render-blocked')).getByRole('button', { name: 'Show the field' }))
+    expect(home).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('spinbutton', { name: 'Text size value' })).toHaveValue(500)
+
+    const again = screen.getByRole('spinbutton', { name: 'Text size value' })
+    await user.clear(again)
+    await user.type(again, '20{Enter}')
+    await waitFor(() => expect(screen.queryByTestId('render-blocked')).not.toBeInTheDocument())
+    expect(screen.queryByTestId('preview-blocked')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('generate-blocked')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('tab-flagged')).not.toBeInTheDocument()
+  }, 20000)
+
+  // #2464 — a submit that failed (a 503 during a deploy) leaves the previous job on show;
+  // Generate must not save it for the new values, and the render is tried again on its own.
+  it('keeps Generate off while the job on show is not of the current values, and retries the render (#2464)', async () => {
+    let down = false
+    server.use(
+      http.post('/api/v1/models/:slug/render', () =>
+        down ? new HttpResponse('upstream connect error', { status: 503 }) : undefined,
+      ),
+    )
+    const renders = watchRenders()
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+
+    down = true
+    const before = renders.length
+    const size = screen.getByRole('spinbutton', { name: 'Text size value' })
+    await user.clear(size)
+    await user.type(size, '20{Enter}')
+    expect(await screen.findByText(/The server is not answering right now \(HTTP 503\)/, {}, { timeout: 4000 })).toBeInTheDocument()
+    // The previous render is on screen, but it is not of 20: nothing to generate.
+    expect(screen.getByTestId('bbox')).toBeInTheDocument()
+    expect(screen.getByTestId('generate')).toBeDisabled()
+
+    // Back up: the page sends it again by itself, and Generate comes back for 20.
+    down = false
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled(), { timeout: 15_000 })
+    const sent = (await Promise.all(renders.slice(before))).map((body) => body.inputs.params['text_size'])
+    expect(sent.length).toBeGreaterThanOrEqual(2)
+    expect(sent.at(-1)).toBe(20)
+    expect(screen.queryByText(/not answering right now/)).not.toBeInTheDocument()
+  }, 30000)
 
   it('links to the versions panel', async () => {
     render()

@@ -31,7 +31,7 @@ import { loadEnabledPlugins, PluginStore } from './plugins/registry.js'
 import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
 import { ApprovalActions } from './approvals/mcp.js'
-import { approvalHashKey } from './approvals/service.js'
+import { approvalHashKey, sweepErrorText } from './approvals/service.js'
 import { AuditLog } from './audit/log.js'
 import { auditedTokenStore } from './audit/writes.js'
 import { TabHub } from './bridge/hub.js'
@@ -43,7 +43,7 @@ import { CHAT_FRAME_MAX, startHeartbeat } from './routes/chat.js'
 import { storedModel } from './routes/model.js'
 import { followSessionEvents, SessionEventPublisher } from './sessions/busEvents.js'
 import { resolveTabWaits, SessionManager, SETTING_MODEL } from './sessions/manager.js'
-import { drainRetains } from './memory/hindsight.js'
+import { drainRetains, type MemoryOptions } from './memory/hindsight.js'
 import { shutdown } from './shutdown.js'
 import { shutdownTelemetry, traceListener } from './telemetry/runtime.js'
 import { harnessTools } from './tools/harness.js'
@@ -291,9 +291,15 @@ const sessionEvents = database ? new SessionEventPublisher(database.sql) : undef
 // and the `sessions_*` tools (tools/sessions.ts).
 // The approval routes and the expiry sweep also serve approvals left pending
 // by a restart.
+// Automatic Hindsight memory's hook knobs: one value for classic turns (SessionManager)
+// and durable ones (memoryActivities), so a knob set here applies to both (#2420).
+// Undefined: the defaults.
+const memory: MemoryOptions | undefined = undefined
+
 const sessions =
   database && credentials
     ? new SessionManager({
+        memory,
         sql: database.sql,
         paths,
         ...(settings ? { settings } : {}),
@@ -353,7 +359,7 @@ const stopSessionWake =
   sessions && events && sessionEvents ? followSessionEvents(events, sessions.events, sessionEvents.replica) : undefined
 const stopSweeper = sessions?.approvals.startSweeper(APPROVAL_SWEEP_MS, {
   ...(database ? { ready: database.ready } : {}),
-  onError: (err) => console.error('approval expiry sweep failed:', (err as Error).message),
+  onError: (err) => console.error('approval expiry sweep failed:', sweepErrorText(err)),
 })
 // Questions past `question_expiry_seconds` whose turn is gone (spec §6.6): cancelled, never answered.
 const stopQuestionSweeper = sessions?.questions.startSweeper(APPROVAL_SWEEP_MS, {
@@ -504,6 +510,8 @@ const turnToolDeps = temporal
       audit,
       currentTiers: liveTokenTiers(tokens),
       blobs: new SessionBlobs(temporal.sql),
+      // A flow's plugin and http_request calls keep their images as its own tools' do (#2578).
+      ...(payloadKeys ? { flowBlobs: new PgFlowBlobs(temporal.sql, payloadKeys) } : {}),
       ...(sessions
         ? {
             report: async (session: string, problems: readonly string[]) => {
@@ -551,6 +559,7 @@ const temporalWorker =
                 credentialSecrets: durableCredentialSecrets,
                 audit,
                 settings,
+                memory,
               })
             : {}),
           // A flow's agent(...) and ask_session(...) (#1057, 6g): beside the tools, never one.
