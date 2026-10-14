@@ -718,7 +718,8 @@ describe('useRenderAutoRetry', () => {
   function setup(values: unknown = { a: 1 }) {
     const retry = vi.fn()
     const view = renderHook(
-      ({ error, values }: { error: unknown; values: unknown }) => useRenderAutoRetry(error, false, retry, values),
+      ({ error, values, rendering = false }: { error: unknown; values: unknown; rendering?: boolean }) =>
+        useRenderAutoRetry(error, rendering, retry, values),
       { initialProps: { error: unanswered() as unknown, values } },
     )
     return { retry, view }
@@ -758,6 +759,25 @@ describe('useRenderAutoRetry', () => {
     view.rerender({ error: unanswered(), values: { a: 2 } })
     act(() => vi.advanceTimersByTime(RENDER_AUTO_RETRY_MS))
     expect(retry).toHaveBeenCalledTimes(RENDER_AUTO_RETRIES + 1)
+  })
+
+  it('keeps the count while a retry is in flight, and starts it over once a render goes through', () => {
+    const values = { a: 1 }
+    const { retry, view } = setup(values)
+    act(() => vi.advanceTimersByTime(RENDER_AUTO_RETRY_MS))
+    expect(retry).toHaveBeenCalledTimes(1)
+    // The retry is in flight (no error yet), then fails again: the second wait, doubled.
+    view.rerender({ error: undefined, values, rendering: true })
+    view.rerender({ error: unanswered(), values })
+    act(() => vi.advanceTimersByTime(RENDER_AUTO_RETRY_MS * 2 - 1))
+    expect(retry).toHaveBeenCalledTimes(1)
+    act(() => vi.advanceTimersByTime(1))
+    expect(retry).toHaveBeenCalledTimes(2)
+    // That retry goes through (no error, not rendering): the next failure waits the first wait.
+    view.rerender({ error: undefined, values })
+    view.rerender({ error: unanswered(), values })
+    act(() => vi.advanceTimersByTime(RENDER_AUTO_RETRY_MS))
+    expect(retry).toHaveBeenCalledTimes(3)
   })
 
   it('leaves an error a retry cannot fix alone', () => {
