@@ -102,3 +102,29 @@ def test_a_suggestion_cuts_a_moved_and_turned_object_at_the_joints_world_centroi
     [cut] = (op for op in split.objects[0].ops if hasattr(op, "point"))
     local = np.asarray([value(x) for x in cut.point])
     assert m @ local + t == pytest.approx(joint.centroid, abs=1e-6)
+
+
+@pytest.mark.parametrize("small_first", [False, True], ids=["big-first", "small-first"])
+def test_overlapping_boxes_name_the_object_whose_mesh_holds_the_point(
+    tmp_path: Path, small_first: bool
+) -> None:
+    """Two objects of similar size whose grown boxes overlap: a point inside the larger
+    one's mesh is also in the smaller one's box, and the smaller box must not win."""
+    scene = carrots(tmp_path, mesh=trimesh.creation.box((10, 10, 10)))
+    big = Transform(translate=(0.0, 0.0, 0.0))
+    small = Transform(translate=(9.6, 0.0, 0.0), scale=(0.9, 0.9, 0.9))
+    first, second = (small, big) if small_first else (big, small)
+    scene = scene.model_copy(
+        update={
+            "objects": [
+                scene.objects[0].model_copy(update={"transform": first}),
+                scene.objects[1].model_copy(update={"transform": second}),
+            ]
+        }
+    )
+    load = mesh_loader(tmp_path)
+    big_id, small_id = ("o2", "o1") if small_first else ("o1", "o2")
+    # Inside the big one's mesh (x -5..5), within the small one's box (x 4.6..14.6).
+    assert object_at(scene, load, (4.9, 0, 0)) == big_id
+    # Inside the small one's mesh (x 5.1..14.1), within the big one's box (x -5.5..5.5).
+    assert object_at(scene, load, (5.2, 0, 0)) == small_id
