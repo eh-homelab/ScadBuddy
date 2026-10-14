@@ -1,4 +1,4 @@
--- A finished piece's geometry, by a key its colour parameters do not enter
+-- A rendered mesh-model piece's geometry, by a key its colours do not enter
 -- (`render/geometry_cache.py` `geometry_key`): a later piece that differs only in colour
 -- copies that piece's meshes and is recoloured, instead of rendered again. `colours` is
 -- what the piece's colour classes were rendered in, `main` its `render_main` result.

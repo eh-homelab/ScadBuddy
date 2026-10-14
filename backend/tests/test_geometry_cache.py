@@ -1,5 +1,5 @@
-"""Geometry first, colours second (`render/geometry_cache.py`): the key, the recolour,
-and the activities that render a piece once and recolour the next."""
+"""Geometry first, colours second (`render/geometry_cache.py`): a mesh model's key, the
+recolour, and the activities that render a piece once and recolour the next."""
 
 from __future__ import annotations
 
@@ -13,90 +13,130 @@ import trimesh
 from temporalio.testing import ActivityEnvironment
 
 from scadbuddy.core.config import Config
+from scadbuddy.library.libraries import ModelLibrary
+from scadbuddy.meshmodel.compile import compile_scene
+from scadbuddy.meshmodel.scene import (
+    SCENE_NAME,
+    Add,
+    Exposed,
+    Part,
+    Scene,
+    SceneObject,
+    SceneSource,
+    Transform,
+    dump_scene,
+    text_sha256,
+)
 from scadbuddy.render.bambu3mf import PROJECT_SETTINGS_NAME
 from scadbuddy.render.geometry_cache import (
-    class_order,
-    colour_classes,
     geometry_key,
-    has_literal_colour,
+    mesh_scene,
     recolour_layout,
     reusable,
+    scene_classes,
 )
 from scadbuddy.render.glb import COLOUR_EXTRA
-from scadbuddy.render.jobs import LAYOUT_NAME, extruder_order
-from scadbuddy.render.schema import CustomizerSchema, Parameter, ParamValue
-from scadbuddy.render.split import ColourPart
+from scadbuddy.render.jobs import LAYOUT_NAME
+from scadbuddy.render.schema import ParamValue
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.geometry import GeometryIndex
 from scadbuddy.workflows.activities import PIECE_NAME, RenderActivities
 from scadbuddy.workflows.models import PieceRequest, piece_key
 from tests.conftest import PgPool
-from tests.support.activities import REVISION, demo_paths, worker_deps
+from tests.support.activities import demo_paths, worker_deps
 
-SCHEMA = CustomizerSchema(
-    parameters=[
-        Parameter(name="width", type="number", initial=10),
-        Parameter(name="body", type="color", initial="#FF0000"),
-        Parameter(name="trim", type="color", initial="#00FF00"),
-    ]
-)
+MESHES = ("meshes/o1-p1.3mf", "meshes/o1-p2.3mf")
 
 
-def _key(**params: ParamValue) -> str | None:
-    return geometry_key("demo", REVISION, "model.scad", SCHEMA, params)
+def _scene(body: str = "#FF0000", trim: str = "#00FF00", *, width: float = 10) -> Scene:
+    """A mesh model of two parts, ``width`` exposed, as `compile_scene` last wrote it."""
+    scene = Scene(
+        source=SceneSource(kind="upload", name="duck.3mf", sha256="0" * 64),
+        objects=[
+            SceneObject(
+                id="o1",
+                name="duck",
+                parts=[
+                    Part(id="p1", mesh=MESHES[0], colour=body),
+                    Part(id="p2", mesh=MESHES[1], colour=trim),
+                ],
+                transform=Transform(translate=(Exposed(expose="width", value=width), 0, 0)),
+            )
+        ],
+    )
+    return scene.model_copy(update={"generated_sha256": text_sha256(compile_scene(scene))})
+
+
+def _write_model(root: Path, scene: Scene) -> None:
+    (root / "meshes").mkdir(parents=True, exist_ok=True)
+    for index, mesh in enumerate(MESHES):
+        if not (root / mesh).exists():
+            (root / mesh).write_bytes(f"mesh {index}".encode())
+    (root / SCENE_NAME).write_text(dump_scene(scene), encoding="utf-8")
+    (root / "model.scad").write_text(compile_scene(scene), encoding="utf-8")
+
+
+def _key(root: Path, scene: Scene, **params: ParamValue) -> str:
+    return geometry_key("demo", "model.scad", root, scene, [], params)
 
 
 # ── the key ────────────────────────────────────────────────────────────────────
 
 
-def test_pieces_that_differ_only_in_colour_share_a_geometry_key() -> None:
-    assert _key(width=12, body="#0000FF") == _key(width=12, body="#123456", trim="#ABCDEF")
-    # A CSS name is the colour OpenSCAD renders it as.
-    assert _key(width=12, body="blue") == _key(width=12, body="#0000FF")
+def test_scenes_that_differ_only_in_colour_share_a_geometry_key(tmp_path: Path) -> None:
+    _write_model(tmp_path, _scene())
+    assert _key(tmp_path, _scene()) == _key(tmp_path, _scene("#0000FF", "#ABCDEF"))
+    assert scene_classes(_scene("#0000FF", "#ABCDEF")) == ["#0000FF", "#ABCDEF"]
 
 
-def test_a_geometry_change_is_another_geometry_key() -> None:
-    assert _key(width=12) != _key(width=13)
-    assert _key(width=12) != _key(width=12, extra=1)
-
-
-def test_colour_parameters_that_come_to_share_a_value_are_another_geometry_key() -> None:
+def test_parts_that_come_to_share_a_colour_are_another_geometry_key(tmp_path: Path) -> None:
     """They become one part, one solid and one extruder: different geometry."""
-    assert _key(body="#00FF00") != _key(body="#0000FF")
-    assert colour_classes(SCHEMA, {"body": "#00FF00"}) == ["#00FF00"]
-    assert colour_classes(SCHEMA, {"body": "#0000FF"}) == ["#0000FF", "#00FF00"]
+    _write_model(tmp_path, _scene())
+    assert _key(tmp_path, _scene("#00FF00")) != _key(tmp_path, _scene("#0000FF"))
+    assert scene_classes(_scene("#00FF00")) == ["#00FF00"]
 
 
-def test_a_colour_parameter_whose_value_is_not_a_colour_keeps_it_in_the_key() -> None:
-    assert _key(body="none") != _key(body="off")
-    assert _key(body="none") != _key(body="#0000FF")
+def test_an_add_or_peg_colour_is_a_class_too(tmp_path: Path) -> None:
+    scene = _scene()
+    obj = scene.objects[0]
+    added = obj.model_copy(
+        update={"ops": [Add(primitive="cube", size=(1, 1, 1), colour="#0000FF")]}
+    )
+    assert scene_classes(scene.model_copy(update={"objects": [added]})) == [
+        "#FF0000",
+        "#00FF00",
+        "#0000FF",
+    ]
 
 
-def test_a_template_without_colour_parameters_has_no_geometry_key() -> None:
-    schema = CustomizerSchema(parameters=[Parameter(name="width", type="number", initial=1)])
-    assert geometry_key("demo", REVISION, "model.scad", schema, {"width": 2}) is None
+def test_a_geometry_change_is_another_geometry_key(tmp_path: Path) -> None:
+    _write_model(tmp_path, _scene())
+    base = _key(tmp_path, _scene())
+    assert base != _key(tmp_path, _scene(width=11))
+    assert base != _key(tmp_path, _scene(), width=12)
+    assert base != geometry_key("other", "model.scad", tmp_path, _scene(), [], {})
+    library = ModelLibrary(
+        name="BOSL2", url="https://github.com/x/BOSL2", ref="v1", commit="a" * 40
+    )
+    assert base != geometry_key("demo", "model.scad", tmp_path, _scene(), [library], {})
+    (tmp_path / MESHES[0]).write_bytes(b"another mesh")
+    assert base != _key(tmp_path, _scene())
 
 
-def test_the_key_is_per_template_revision_and_file() -> None:
-    params: dict[str, ParamValue] = {"width": 1}
-    base = geometry_key("demo", REVISION, "model.scad", SCHEMA, params)
-    assert base != geometry_key("other", REVISION, "model.scad", SCHEMA, params)
-    assert base != geometry_key("demo", "f00d000", "model.scad", SCHEMA, params)
-    assert base != geometry_key("demo", REVISION, "parts/a.scad", SCHEMA, params)
-
-
-def test_a_literal_colour_in_the_templates_source_is_found(tmp_path: Path) -> None:
-    (tmp_path / "model.scad").write_text('body = "#FF0000"; // color\ncolor(body) cube();\n')
-    assert not has_literal_colour(tmp_path)
-    (tmp_path / "parts").mkdir()
-    (tmp_path / "parts" / "a.scad").write_text('color( "red") cube();\n')
-    assert has_literal_colour(tmp_path)
-    (tmp_path / "parts" / "a.scad").write_text("color(c = [1, 0, 0]) cube();\n")
-    assert has_literal_colour(tmp_path)
-    (tmp_path / "parts" / "a.scad").write_text('color(alpha=0.5, c="red") cube();\n')
-    assert has_literal_colour(tmp_path)
-    (tmp_path / "parts" / "a.scad").write_text("color(alpha=0.5, c=body) cube();\n")
-    assert not has_literal_colour(tmp_path)
+def test_only_a_mesh_models_compiled_scene_has_a_scene(tmp_path: Path) -> None:
+    (tmp_path / "model.scad").write_text('color("#FF0000") cube();\n', encoding="utf-8")
+    assert mesh_scene(tmp_path, "model.scad") is None  # a .scad template
+    _write_model(tmp_path, _scene())
+    assert mesh_scene(tmp_path, "model.scad") == _scene()
+    assert mesh_scene(tmp_path, "parts/a.scad") is None
+    # Edited by hand: no longer what the scene compiled.
+    with (tmp_path / "model.scad").open("a", encoding="utf-8") as source:
+        source.write("cube();\n")
+    assert mesh_scene(tmp_path, "model.scad") is None
+    # Ejected: the scene is gone.
+    _write_model(tmp_path, _scene())
+    (tmp_path / SCENE_NAME).unlink()
+    assert mesh_scene(tmp_path, "model.scad") is None
 
 
 # ── the recolour ───────────────────────────────────────────────────────────────
@@ -136,28 +176,12 @@ def test_only_a_layout_every_colour_of_which_is_a_class_is_reusable() -> None:
     assert reusable(_layout("#FF0000", uncoloured=True), ["#FF0000"])
 
 
-def test_class_order_is_extruder_order() -> None:
-    box = trimesh.creation.box()
-    parts = [
-        ColourPart(0, "Default", "#F9D72C", box),
-        ColourPart(1, "Color 1", "#00FF00", box),
-        ColourPart(2, "Color 2", "#FF0000", box),
-        ColourPart(3, "Color 3", "#ABCDEF", box),
-    ]
-    params: dict[str, ParamValue] = {"body": "#FF0000"}
-    expected = extruder_order(parts, SCHEMA, params)
-    assert class_order(parts, colour_classes(SCHEMA, params)) == expected
-    assert [p.colour for p in expected] == ["#FF0000", "#00FF00", "#F9D72C", "#ABCDEF"]
-
-
 # ── the activities ─────────────────────────────────────────────────────────────
 
-#: A template with two colour parameters, as the fake openscad draws it.
-SOURCE = 'width = 10;\nbody = "#FF0000"; // color\ntrim = "#00FF00"; // color\n'
-
-#: An openscad that exports `SOURCE`'s schema, and as its model one box per colour
-#: parameter in that colour (only the `_sb_targets` colour in a solid's wrapper
-#: render), logging every 3MF export so a test can count the renders.
+#: An openscad that exports the mesh model's one exposed number, and as its model one
+#: box per distinct colour its ``model.scad`` names (only the `_sb_targets` colour in a
+#: solid's wrapper render, which sits beside it), logging every 3MF export so a test
+#: can count the renders.
 FAKE = r"""#!/usr/bin/env python3
 import json, pathlib, re, sys, zipfile
 args = sys.argv[1:]
@@ -168,18 +192,16 @@ out = args[args.index("-o") + 1]
 defines = dict(args[i + 1].split("=", 1) for i, a in enumerate(args) if a == "-D")
 if out.endswith(".param"):
     pathlib.Path(out).write_text(json.dumps({"parameters": [
-        {"name": "width", "type": "number", "initial": 10},
-        {"name": "body", "type": "string", "initial": "#FF0000"},
-        {"name": "trim", "type": "string", "initial": "#00FF00"}]}))
+        {"name": "width", "type": "number", "initial": 10}]}))
     raise SystemExit(0)
 with open(here / "exports.log", "a") as log:
     log.write(" ".join(args) + "\n")
 width = float(defines.get("width", "10"))
+source = next(pathlib.Path(a) for a in args if a.endswith(".scad"))
 colours = []
-for name, default in (("body", "#FF0000"), ("trim", "#00FF00")):
-    c = json.loads(defines[name]) if name in defines else default
-    if c.upper() not in colours:
-        colours.append(c.upper())
+for c in re.findall(r'color\("(#[0-9A-F]{6})"\)', (source.parent / "model.scad").read_text()):
+    if c not in colours:
+        colours.append(c)
 targets = defines.get("_sb_targets")
 if targets is not None:
     wanted = {t.upper() for t in json.loads(targets)}
@@ -224,12 +246,24 @@ def _exports(binary: str) -> int:
     return len(log.read_text().splitlines()) if log.is_file() else 0
 
 
-def _request(**params: ParamValue) -> PieceRequest:
+def _piece(
+    acts: RenderActivities, edit: int, scene: Scene | None = None, **params: ParamValue
+) -> PieceRequest:
+    """A piece of the model after its ``edit``-th scene edit, a revision of its own
+    (an export, as `source_directory` reads one): ``scene`` compiled, or with None a
+    plain ``.scad`` template."""
+    revision = f"{edit:07x}"
+    root = acts.deps.paths.model_revision_dir("demo", revision)
+    root.mkdir(parents=True, exist_ok=True)
+    if scene is None:
+        (root / "model.scad").write_text('color("#FF0000") cube();\n', encoding="utf-8")
+    else:
+        _write_model(root, scene)
     return PieceRequest(
         slug="demo",
-        revision=REVISION,
+        revision=revision,
         params=dict(params),
-        piece_key=piece_key("demo", REVISION, "model.scad", params),
+        piece_key=piece_key("demo", revision, "model.scad", params),
     )
 
 
@@ -241,7 +275,7 @@ def _filaments(model_3mf: Path) -> list[str]:
 
 @pytest.fixture
 def geometry_acts(tmp_path: Path, pg_pool: PgPool) -> tuple[RenderActivities, str, GeometryIndex]:
-    paths = demo_paths(tmp_path, SOURCE)
+    paths = demo_paths(tmp_path)
     binary = _fake_openscad(tmp_path / "geometry-bin")
     index = GeometryIndex(pg_pool)
     deps = worker_deps(tmp_path, paths, refs=BlobRefs(pg_pool))
@@ -259,12 +293,12 @@ async def _render(acts: RenderActivities, req: PieceRequest) -> Any:
 
 
 @pytest.mark.requires_postgres
-async def test_a_piece_in_other_colours_is_recoloured_without_rendering(
+async def test_a_scene_in_other_colours_is_recoloured_without_rendering(
     geometry_acts: tuple[RenderActivities, str, GeometryIndex],
 ) -> None:
     acts, binary, index = geometry_acts
     env = ActivityEnvironment()
-    first = _request(width=12, body="#FF0000")
+    first = _piece(acts, 1, _scene(), width=12)
     prepared, main, _ = await _render(acts, first)
     assert prepared.geometry_key is not None
     assert prepared.colours == ["#FF0000", "#00FF00"]
@@ -273,7 +307,7 @@ async def test_a_piece_in_other_colours_is_recoloured_without_rendering(
     rendered = _exports(binary)
     assert rendered == 3  # the model, then one solid per colour
 
-    second = _request(width=12, body="#0000FF")
+    second = _piece(acts, 2, _scene("#0000FF"), width=12)
     assert await env.run(acts.cached_piece, second) is None
     again = await env.run(acts.prepare, second)
     assert again.geometry_key == prepared.geometry_key
@@ -306,8 +340,8 @@ async def test_a_piece_in_other_colours_is_recoloured_without_rendering(
     row = index.get(prepared.geometry_key)
     assert row is not None and row.piece_key == first.piece_key
 
-    # A third colour-only change is recoloured from the rendered piece, not the second.
-    third = _request(width=12, body="#FFFF00")
+    # A third colour edit is recoloured from the rendered piece, not the second.
+    third = _piece(acts, 3, _scene("#FFFF00"), width=12)
     prepared3 = await env.run(acts.prepare, third)
     reused3 = await env.run(acts.reuse_geometry, third, prepared3)
     assert reused3 is not None
@@ -327,17 +361,18 @@ async def test_a_piece_in_other_colours_is_recoloured_without_rendering(
 
 
 @pytest.mark.requires_postgres
-async def test_a_piece_with_other_geometry_is_not_recoloured(
+async def test_a_scene_with_other_geometry_is_not_recoloured(
     geometry_acts: tuple[RenderActivities, str, GeometryIndex],
 ) -> None:
     acts, _, _ = geometry_acts
     env = ActivityEnvironment()
-    await _render(acts, _request(width=12, body="#FF0000"))
-    for req in (
-        _request(width=13, body="#FF0000"),
-        # The same colour as `trim`: one part where the first had two.
-        _request(width=12, body="#00FF00"),
+    await _render(acts, _piece(acts, 1, _scene(), width=12))
+    for edit, scene, width in (
+        (2, _scene(), 13),
+        # The body in the trim's colour: one part where the first had two.
+        (3, _scene("#00FF00"), 12),
     ):
+        req = _piece(acts, edit, scene, width=width)
         prepared = await env.run(acts.prepare, req)
         assert await env.run(acts.reuse_geometry, req, prepared) is None
 
@@ -348,22 +383,20 @@ async def test_a_swept_source_piece_is_a_miss_and_forgotten(
 ) -> None:
     acts, _, index = geometry_acts
     env = ActivityEnvironment()
-    first = _request(width=12, body="#FF0000")
+    first = _piece(acts, 1, _scene(), width=12)
     prepared, _, _ = await _render(acts, first)
     acts.deps.blobs.remove(first.piece_key)
 
-    second = _request(width=12, body="#0000FF")
+    second = _piece(acts, 2, _scene("#0000FF"), width=12)
     again = await env.run(acts.prepare, second)
     assert await env.run(acts.reuse_geometry, second, again) is None
     assert prepared.geometry_key is not None and index.get(prepared.geometry_key) is None
 
 
 @pytest.mark.requires_postgres
-async def test_a_template_with_a_literal_colour_never_shares_its_geometry(
+async def test_a_scad_template_never_shares_its_geometry(
     geometry_acts: tuple[RenderActivities, str, GeometryIndex],
 ) -> None:
     acts, _, _ = geometry_acts
-    source = acts.deps.paths.model_source("demo")
-    source.write_text(SOURCE + 'color("#FF0000") cube();\n', encoding="utf-8")
-    prepared = await ActivityEnvironment().run(acts.prepare, _request(width=12))
+    prepared = await ActivityEnvironment().run(acts.prepare, _piece(acts, 1, width=12))
     assert prepared.geometry_key is None

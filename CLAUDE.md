@@ -309,12 +309,13 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   key, re-send it after an answer that never arrived, and follow a 202.
   `render_key` coalesces identical *jobs*; `piece_key` dedupes identical *openscad
   renders* across jobs. Never swap them. A third key, `geometry_key`
-  (`render/geometry_cache.py`, the `piece_geometry` table), is a piece's with its colour
-  parameters reduced to which of them share a value: on a hit `RenderPiece` runs
-  `reuse_geometry` (the earlier piece's files copied, `layout.json` and `preview.glb`
-  recoloured) and then `finish_piece`, never openscad. Read that module's docstring for
-  what reuse refuses (literal or derived colours) and what it assumes (a colour
-  parameter only colours). Template pipelines (#427): `TemplatePipeline`
+  (`render/geometry_cache.py`, the `piece_geometry` table), is a mesh model's only: its
+  `scene.json` with each colour reduced to which colours are equal, its meshes and its
+  parameters, so a recolour edit (a new revision, a new piece key) keeps it. On a hit
+  `RenderPiece` runs `reuse_geometry` (the rendered piece's files copied, `layout.json`
+  and `preview.glb` recoloured) and then `finish_piece`, never openscad. A `.scad`
+  template gets no geometry key: its colours can flow into anything the program
+  computes, so only rendering it tells. Template pipelines (#427): `TemplatePipeline`
   runs a template's `pipeline/pipeline.py`, or the built-in default, `exec`'d in the
   workflow sandbox; `MigrateInputs`; `ctx.py` (the `ctx` a pipeline gets),
   `pipeline_activities.py` (`load_pipeline`, `pack`, `write_output`,

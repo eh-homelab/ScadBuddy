@@ -30,9 +30,7 @@ from scadbuddy.library.assets import AssetStore, AssetUnavailableError, asset_id
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate
 from scadbuddy.render.geometry_cache import (
-    colour_classes,
-    geometry_key,
-    has_literal_colour,
+    mesh_geometry,
     recolour_piece,
     reusable,
 )
@@ -461,12 +459,16 @@ class RenderActivities:
         if problem is not None:
             raise _parameter_error(problem)
         if req.revision is not None:
-            root = model_dir(prepared.scad, req.file)
-            if not await asyncio.to_thread(has_literal_colour, root):
-                result.geometry_key = geometry_key(
-                    req.slug, req.revision, req.file, schema, req.params
-                )
-                result.colours = colour_classes(schema, req.params)
+            geometry = await asyncio.to_thread(
+                mesh_geometry,
+                req.slug,
+                req.file,
+                model_dir(prepared.scad, req.file),
+                prepared.libraries,
+                req.params,
+            )
+            if geometry is not None:
+                result.geometry_key, result.colours = geometry
         return result
 
     @activity.defn(name="reuse_geometry")

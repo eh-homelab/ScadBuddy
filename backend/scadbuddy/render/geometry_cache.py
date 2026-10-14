@@ -1,37 +1,28 @@
-"""Geometry first, colours second: a piece's meshes, keyed apart from its colours.
+"""Geometry first, colours second: a mesh model's meshes, keyed apart from its colours.
 
-A render depends on its colour parameters only through which of them share a value:
-`split_by_material` makes one part per distinct material colour, `render_solids`
-renders one closed solid per part, and `extruder_order` ranks the parts by the first
-colour parameter naming each. So `geometry_key` replaces every colour parameter's value
-with its *class*, the place its colour first appears among the colour parameters in
-declaration order (`colour_classes`). Two pieces that differ only in which colours
-those classes are share a geometry key, and the second is the first one's meshes with
-each class's colour swapped (`recolour_piece`), followed by the ordinary finish stage
-(the covers and the 3MF) in its own colours. Only the files a piece's colours are read
-from are rewritten: `layout.json` (which `PlateLayout.load` takes every part's colour
-from) and `preview.glb`. The copied `render.3mf` and `solid_*.3mf` keep the colours they
-were rendered in, and nothing reads a colour off them once the layout is written.
+Only a mesh model's geometry is shared. Its ``model.scad`` is compiled from
+``scene.json`` (`meshmodel/compile.py`), every colour is a literal ``color("#…")`` of a
+part, a peg or an add, and nothing in the scene reads a colour back, so the scene says
+exactly which geometry each colour covers. A ``.scad`` template's colour can flow into
+anything the program computes, and only rendering it tells, so it keeps only the
+piece cache.
 
-What a key cannot see, and so what reuse refuses or assumes:
+`geometry_key` hashes the scene's objects with each colour replaced by its *class*,
+the place it first appears in the scene (`scene_classes`), with the meshes' and paint
+codes' contents, the template file, the libraries and the parameters. Recolouring a
+part is a scene edit, a new revision and a new piece key, but the same geometry key
+while the colours that are equal stay equal: the piece is then the first one's meshes
+with each class's colour swapped (`recolour_piece`), followed by the ordinary finish
+stage (the covers and the 3MF) in its own colours. Only the files a piece's colours are
+read from are rewritten: `layout.json` (which `PlateLayout.load` takes every part's
+colour from) and `preview.glb`. The copied `render.3mf` and `solid_*.3mf` keep the
+colours they were rendered in, and nothing reads a colour off them once the layout is
+written; so only a piece that was rendered is recorded as a geometry's source
+(`RenderPiece` finishes a recoloured one without its key).
 
-- A colour no colour parameter names: a literal, one a library draws, or one computed
-  from a parameter. A layout holding one is never reused (`reusable`): a derived colour
-  would keep its old value. A template whose own source writes a literal colour gets no
-  key at all (`has_literal_colour`), because a parameter that happened to equal it was
-  merged with it into one part, which a recolour would then colour as a whole. A
-  library's literal is not scanned for; it is refused by `reusable` unless it happens
-  to equal a colour parameter's value at the first render.
-- A colour parameter read as anything but a colour (``if (c == "#000000")``) is assumed
-  not to change the geometry. Equality between two colour parameters is safe: the
-  classes keep it. A value that is not a colour (`colour_hex` is None) stays in the key
-  as it is.
-
-A recoloured piece is published only with its source's `RenderMainResult`: its log
-tail, diagnostics and notes are the source render's, so an `echo()` of a colour
-parameter shows the source's value. Only a piece that was rendered is recorded
-(`RenderPiece` finishes a recoloured one without its key), so a source's raw render
-always holds the colours its row lists.
+A model whose ``model.scad`` is not what its scene compiled (ejected, or edited by
+hand) has no key (`mesh_scene`). A recoloured piece is published with its source's
+`RenderMainResult`: its log tail, diagnostics and notes are the source render's.
 """
 
 from __future__ import annotations
@@ -44,71 +35,114 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from scadbuddy.render.colours import colour_hex
+from scadbuddy.core.paths import SOURCE_NAME
+from scadbuddy.library.libraries import ModelLibrary
+from scadbuddy.meshmodel.scene import (
+    SCENE_NAME,
+    Add,
+    Joint,
+    Scene,
+    load_scene,
+    mesh_files,
+    text_sha256,
+)
 from scadbuddy.render.glb import write_glb
-from scadbuddy.render.schema import CustomizerSchema, ParamValue
-from scadbuddy.render.solids import WRAPPER_PREFIX
+from scadbuddy.render.jobs import UNCOLOURED_MATERIAL_INDEX
+from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.split import ColourPart, split_by_material
 
 #: Part of every key: bump it when what a geometry key promises changes, so no older
 #: row is read under the new meaning.
-GEOMETRY_VERSION = 1
-#: Material 0 is OpenSCAD's "Default": geometry no `color()` call reached.
-UNCOLOURED_MATERIAL_INDEX = 0
-#: A `color()` call whose colour is a string or vector literal: first, or named ``c``.
-_LITERAL_COLOUR = re.compile(r"\bcolor\s*\(\s*(?:[^()]*?\bc\s*=\s*)?[\"\[]")
+GEOMETRY_VERSION = 2
 _HEX = re.compile(r"#[0-9A-Fa-f]{6}\b")
 
 
-def colour_classes(schema: CustomizerSchema, params: Mapping[str, ParamValue]) -> list[str]:
-    """Each distinct colour the colour parameters name, in declaration order of first
-    use: `extruder_order`'s ranking, which is why a class keeps its extruder."""
+def mesh_scene(root: Path, file: str) -> Scene | None:
+    """The scene ``root``'s ``file`` is compiled from, or None when it is not a mesh
+    model's ``model.scad`` exactly as its scene last compiled it."""
+    scene_path = root / SCENE_NAME
+    if file != SOURCE_NAME or not scene_path.is_file():
+        return None
+    scene = load_scene(scene_path.read_text(encoding="utf-8"))
+    source = (root / SOURCE_NAME).read_text(encoding="utf-8")
+    return scene if text_sha256(source) == scene.generated_sha256 else None
+
+
+def scene_classes(scene: Scene) -> list[str]:
+    """Each distinct colour the scene prints, first seen first: every printed part's,
+    then every peg's and add's that names one."""
     classes: list[str] = []
-    for parameter in schema.parameters:
-        if parameter.type != "color":
-            continue
-        colour = colour_hex(params.get(parameter.name, parameter.initial))
-        if colour is not None and colour not in classes:
-            classes.append(colour)
+    for obj in scene.objects:
+        found = [p.colour for p in obj.parts if not p.negative]
+        found += [op.colour for op in obj.ops if isinstance(op, Joint | Add) and op.colour]
+        for colour in found:
+            if colour not in classes:
+                classes.append(colour)
     return classes
+
+
+def _classed(item: Any, classes: Sequence[str]) -> Any:
+    """``item`` (a dumped scene) with every ``colour`` its class's index."""
+    if isinstance(item, dict):
+        return {
+            k: {"class": classes.index(v)}
+            if k == "colour" and v is not None
+            else _classed(v, classes)
+            for k, v in item.items()
+        }
+    if isinstance(item, list):
+        return [_classed(each, classes) for each in item]
+    return item
+
+
+def _file_digests(root: Path, scene: Scene) -> dict[str, str]:
+    return {
+        name: hashlib.sha256((root / name).read_bytes()).hexdigest()
+        for name in sorted(mesh_files(scene))
+    }
 
 
 def geometry_key(
     slug: str,
-    revision: str,
     file: str,
-    schema: CustomizerSchema,
+    root: Path,
+    scene: Scene,
+    libraries: Sequence[ModelLibrary],
     params: Mapping[str, ParamValue],
-) -> str | None:
-    """The key of the piece's geometry, or None for a template with no colour
-    parameter (its piece key already says everything)."""
-    colours = [p for p in schema.parameters if p.type == "color"]
-    if not colours:
-        return None
-    classes = colour_classes(schema, params)
-    tokens: list[Any] = []
-    for parameter in colours:
-        value = params.get(parameter.name, parameter.initial)
-        colour = colour_hex(value)
-        tokens.append({"class": classes.index(colour)} if colour is not None else {"value": value})
-    names = {p.name for p in colours}
-    shape = {name: value for name, value in params.items() if name not in names}
+) -> str:
+    """The key of the mesh model's geometry: the same for two scenes that differ only
+    in which colours their colour classes are."""
+    classes = scene_classes(scene)
+    objects = _classed(scene.model_dump(mode="json")["objects"], classes)
     raw = json.dumps(
-        [GEOMETRY_VERSION, slug, revision, file, shape, tokens],
+        [
+            GEOMETRY_VERSION,
+            slug,
+            file,
+            objects,
+            _file_digests(root, scene),
+            [library.model_dump(mode="json") for library in libraries],
+            dict(params),
+        ],
         sort_keys=True,
         separators=(",", ":"),
     )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def has_literal_colour(root: Path) -> bool:
-    """Whether a `.scad` of the template at ``root`` calls `color()` with a literal."""
-    for path in root.rglob("*.scad"):
-        if path.name.startswith(WRAPPER_PREFIX) or not path.is_file():
-            continue
-        if _LITERAL_COLOUR.search(path.read_text(encoding="utf-8", errors="replace")):
-            return True
-    return False
+def mesh_geometry(
+    slug: str,
+    file: str,
+    root: Path,
+    libraries: Sequence[ModelLibrary],
+    params: Mapping[str, ParamValue],
+) -> tuple[str, list[str]] | None:
+    """The piece's geometry key and its colour classes' colours, or None when its
+    geometry is never shared (`mesh_scene`). Reads files: run it off the loop."""
+    scene = mesh_scene(root, file)
+    if scene is None:
+        return None
+    return geometry_key(slug, file, root, scene, libraries, params), scene_classes(scene)
 
 
 def _layout_colours(layout: Mapping[str, Any]) -> set[str]:
@@ -152,20 +186,6 @@ def recolour_layout(layout: Mapping[str, Any], mapping: Mapping[str, str]) -> di
     }
 
 
-def class_order(parts: Sequence[ColourPart], classes: Sequence[str]) -> list[ColourPart]:
-    """``parts`` in extruder order (`render.jobs.extruder_order`): each part ranked by
-    its colour's class, then every part no class names, uncoloured geometry with them,
-    in OpenSCAD's material order."""
-    ranks = {colour.upper(): rank for rank, colour in enumerate(classes)}
-
-    def rank(part: ColourPart) -> int:
-        if part.material_index == UNCOLOURED_MATERIAL_INDEX:
-            return len(ranks)
-        return ranks.get(part.colour.upper(), len(ranks))
-
-    return sorted(parts, key=rank)
-
-
 def recolour_piece(
     source: Path,
     work: Path,
@@ -179,10 +199,11 @@ def recolour_piece(
     preview_name: str,
 ) -> None:
     """Make ``work`` ``source``'s geometry in ``colours``, class for class with
-    ``classes``: every file but the dot-named ones and ``skip`` (what the finish stage
-    writes, and the two rewritten here) copied as it is, then the recoloured layout and
-    a preview written from the raw render's split. ``work`` is emptied first: it may
-    hold an earlier attempt's files, and every file in it is published."""
+    ``classes`` (the source's `scene_classes`): every file but the dot-named ones and
+    ``skip`` (what the finish stage writes, and the two rewritten here) copied as it
+    is, then the recoloured layout and a preview written from the raw render's split.
+    ``work`` is emptied first: it may hold an earlier attempt's files, and every file
+    in it is published."""
     mapping = {old.upper(): new for old, new in zip(classes, colours, strict=True)}
     for path in work.iterdir():
         if path.name.startswith("."):
@@ -198,7 +219,9 @@ def recolour_piece(
 
     shutil.copytree(source, work, ignore=ignore, dirs_exist_ok=True)
     (work / layout_name).write_text(json.dumps(recolour_layout(layout, mapping)), encoding="utf-8")
-    parts = class_order(split_by_material(source / raw_name), classes)
+    # In the split's own order, as a mesh model's extruders are (`extruder_order`: it
+    # has no colour parameter to rank by).
+    parts = split_by_material(source / raw_name)
     write_glb(
         [
             ColourPart(
