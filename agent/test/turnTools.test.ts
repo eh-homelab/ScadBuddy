@@ -6,6 +6,7 @@ import { ApplicationFailure } from '@temporalio/common'
 import { MockActivityEnvironment } from '@temporalio/testing'
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
+import type { PluginsForRun } from '../src/plugins/forwarder.js'
 import type { AuditEntry } from '../src/audit/log.js'
 import type { Tier } from '../src/auth/principal.js'
 import type { RiskTier } from '../src/harness/permissions.js'
@@ -83,6 +84,7 @@ function harness(
     starterTiers?: Tier[]
     server?: (calls: string[]) => () => McpServer
     mayPark?: boolean
+    fixedTier?: (name: string) => RiskTier | undefined
     listingKey?: string
   } = {},
 ) {
@@ -99,6 +101,7 @@ function harness(
     ...(options.listingKey === undefined ? {} : { listingKey: options.listingKey }),
     tierOf,
     ...(options.mayPark === false ? {} : { mayPark }),
+    ...(options.fixedTier ? { fixedTier: options.fixedTier } : {}),
     ...(options.pinned ? { pinned: true } : {}),
   }
   const deps: TurnToolsDeps = {
@@ -114,13 +117,15 @@ function harness(
     approvals: { approved: async (requestId) => requestId.endsWith(':toolu_approved') },
     flows: {
       startedBy: async (run) => (run === FLOW ? (options.flowStarter ?? BROWSER) : undefined),
-      // Only the backend's workflow_run_decisions approves a flow's call.
-      approved: async (requestId) => requestId === `flow:${FLOW}:run-1:flow_approved`,
+      // Only the backend's workflow_run_decisions approves a flow's call, and only for the
+      // input it was decided on (PgFlowRuns refuses a call with no hash, #2728).
+      approved: async (requestId, inputHash) =>
+        requestId === `flow:${FLOW}:run-1:flow_approved` && inputHash === `hash:notes__post:${JSON.stringify({ method: 'POST', body: 'x' })}`,
     },
     currentTiers: async () => options.starterTiers,
     audit: {
       record: async (entry) => void audits.push(entry),
-      hash: (tool) => `hash:${tool}`,
+      hash: (tool, input) => `hash:${tool}:${JSON.stringify(input)}`,
       summarise: (tool) => `summary:${tool}`,
     },
     report: async (_session, problems) => void reported.push(...problems),
@@ -168,6 +173,16 @@ describe('turn tools in a durable session', () => {
     expect(tools[0]!.input_schema).toMatchObject({ type: 'object', properties: { id: { type: 'string' } } })
     // A configured server left out is said in the session, as a classic turn says it.
     expect(h.reported).toEqual(['plugin hindsight failed its check'])
+  })
+
+  it("lists a tool's tier where it does not depend on the input, for the transcript's label", async () => {
+    const h = harness({ fixedTier: (name) => (name.endsWith('__read_note') ? 'read' : name.endsWith('__shot') ? 'write' : undefined) })
+    const { tools } = (await env(TURN_TOOLS_ACTIVITY).run(h.activities[TURN_TOOLS_ACTIVITY] as () => Promise<TurnToolsResult>)) as TurnToolsResult
+    const tiers = Object.fromEntries(tools.map((t) => [t.name, t.tier]))
+    expect(tiers['notes__read_note']).toBe('read')
+    expect(tiers['notes__shot']).toBe('write')
+    // post's tier is its method's: no fixed tier, so none is listed.
+    expect('tier' in tools.find((t) => t.name === 'notes__post')!).toBe(false)
   })
 
   it('lists every tool of a server that cannot say which never park as may_park (fail toward asking)', async () => {
@@ -226,6 +241,33 @@ describe('turn tools in a durable session', () => {
     expect(await tier({ method: 'POST', body: '' })).toEqual({ tier: 'outward' })
   })
 
+  it("labels and parks a remote plugin's tools by their Settings tier, an unlisted one outward (#2838)", async () => {
+    const forwarded: PluginsForRun = {
+      plugins: [
+        {
+          name: 'notes',
+          url: 'http://127.0.0.1:9/forward/notes',
+          toolTiers: { search: 'read', save: 'write' },
+          disabledTools: [],
+        },
+      ],
+      problems: [],
+      secrets: [],
+      release: () => {},
+    }
+    const { servers } = await turnServers({ remotePlugins: async () => forwarded })({
+      session: SESSION,
+      owner: BROWSER,
+      signal: new AbortController().signal,
+      listing: true,
+    })
+    const notes = servers.find((s) => s.name === 'notes')!
+    const tier = (tool: string) => notes.fixedTier?.(`mcp__notes__${tool}`)
+    expect([tier('search'), tier('save'), tier('delete')]).toEqual(['read', 'write', 'outward'])
+    expect(['search', 'save', 'delete'].map((t) => notes.mayPark?.(`mcp__notes__${t}`))).toEqual([false, false, true])
+    expect(notes.tierOf('mcp__notes__delete', {})).toBe('outward')
+  })
+
   it("lists the real http_request as may_park, and tiers a POST outward and refuses it unapproved (review of #2324)", async () => {
     const saveRoot = await mkdtemp(path.join(os.tmpdir(), 'turn-http-'))
     const deps: TurnToolsDeps = {
@@ -238,6 +280,9 @@ describe('turn tools in a durable session', () => {
     const parks = Object.fromEntries(tools.map((t) => [t.name, t.may_park]))
     expect(parks[`${HTTP_SERVER}__${HTTP_TOOL}`]).toBe(true)
     expect(parks[`${HTTP_SERVER}__${HTTP_READ_TOOL}`]).toBe(false)
+    const labels = Object.fromEntries(tools.map((t) => [t.name, t.tier]))
+    expect(labels[`${HTTP_SERVER}__${HTTP_TOOL}`]).toBeUndefined()
+    expect(labels[`${HTTP_SERVER}__${HTTP_READ_TOOL}`]).toBe('read')
     const tier = (input: unknown) =>
       env(TURN_TOOL_TIER_ACTIVITY).run(activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: `${HTTP_SERVER}__${HTTP_TOOL}`, input })
     expect(await tier({ url: 'http://example.test/', method: 'POST' })).toEqual({ tier: 'outward' })
@@ -359,6 +404,10 @@ describe('turn tools in a durable session', () => {
       expect(refused.type).toBe('NotApproved')
       expect(h.calls).toEqual([])
       expect(await flowEnv('turn:notes__post', 'tool-flow_approved').run(h.call, { method: 'POST', body: 'x' })).toBe('posted x')
+      // #2728: the decision binds the input it approved; another input is refused.
+      const changed = await failure(flowEnv('turn:notes__post', 'tool-flow_approved').run(h.call, { method: 'POST', body: 'y' }))
+      expect(changed.type).toBe('NotApproved')
+      expect(h.calls).toEqual(['post x'])
     })
 
     it('holds a token starter to the tiers its token holds now', async () => {

@@ -106,6 +106,10 @@ class OutputRecord(BaseModel):
     plate_key: str
     #: The store refs (piece keys) of every Part it was built from.
     parts: list[str]
+    #: Which of its job's outputs it is (`ctx.output`'s index), recorded when an output is
+    #: saved: two outputs of one job built from the same Parts differ only in it
+    #: (#1007). None in a job's own record, and in outputs saved before it was recorded.
+    output_index: int | None = None
 
 
 #: An extra output file's name: plain, no path, no leading dot.

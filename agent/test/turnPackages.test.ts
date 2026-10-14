@@ -274,6 +274,33 @@ describe('plugin packages in a durable turn', () => {
     }
   })
 
+  it("never forwards a failed package's http server, nor puts its URL or token in secrets (#2620)", async () => {
+    const pkg = { ...(await fakePackage({ mcpServers: { api: { type: 'http', url: 'https://notes.example/mcp' } } })), allowed: true }
+    const load = async (): Promise<PackagesForRun> => ({ paths: [], allowedPaths: [pkg.dir], builtinTools: [], loaded: [pkg], problems: [], release: () => {} })
+    const URL = 'http://127.0.0.1:9/forward/notes-token-0123456789'
+    const handed: string[][] = []
+    const forward = async (loaded: readonly LoadedPackage[]): Promise<PackageServers> => {
+      handed.push(loaded.map((p) => p.name))
+      const plugins = loaded.map((p) => ({ name: `plugin_${p.name}_api`, url: URL, toolTiers: {}, disabledTools: [] }))
+      // As forwardPackageServers does: the header values and the forwarder URLs are its secrets.
+      return { plugins, problems: [], secrets: plugins.flatMap((p) => [p.url, 'notes-token-0123456789']), release: () => {} }
+    }
+    const signal = new AbortController().signal
+    const good = await mkdtemp(path.join(os.tmpdir(), 'turn-share-'))
+    // Shared, its http server is forwarded, and its URL and token are secrets.
+    const listed = await turnServers({ packages: { load, root: good, localRoot: good, forward } })({ session: 's', owner: OWNER, signal, listing: true })
+    expect(handed).toEqual([['notes']])
+    expect(listed.servers.map((x) => x.name)).toContain('plugin_notes_api')
+    expect(listed.secrets).toEqual(expect.arrayContaining([URL, 'notes-token-0123456789']))
+    // Failed to share: never handed to the forwarder, so no server, URL or token.
+    handed.length = 0
+    const failed = await turnServers({ packages: { load, root: undefined, localRoot: good, forward } })({ session: 's', owner: OWNER, signal, listing: true })
+    expect(handed).toEqual([[]])
+    expect(failed.servers.map((x) => x.name)).not.toContain('plugin_notes_api')
+    expect(failed.secrets).not.toContain(URL)
+    expect(failed.secrets).not.toContain('notes-token-0123456789')
+  })
+
   it('reads a null command as none, as the segment runner does (#2563)', async () => {
     const pkg = await fakePackage({ mcpServers: { api: { command: null, url: 'https://mcp.example.test/' } } })
     expect(declaresRemoteServers(pkg.dir)).toBe(true)

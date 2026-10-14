@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from scadbuddy.render.objects3mf import UnreadableObjectsError, read_objects
+from scadbuddy.render.objects3mf import read_objects
 from scadbuddy.render.read_budget import ReadBudget
 from tests.support.fixtures import makerworld, makerworld_path
 
@@ -26,22 +26,19 @@ def ids(entry: dict[str, Any]) -> str:
 @pytest.mark.requires_fixtures
 @pytest.mark.parametrize("entry", FIXTURES, ids=ids)
 def test_a_fixture_is_the_file_its_manifest_names(entry: dict[str, Any]) -> None:
-    data = makerworld_path(entry["file"]).read_bytes()
-    assert len(data) == entry["bytes"]
-    assert hashlib.sha256(data).hexdigest() == entry["sha256"]
+    # Hashed in chunks: the files run to 98 MB, and xdist workers each hold one (#2490).
+    path = makerworld_path(entry["file"])
+    assert path.stat().st_size == entry["bytes"]
+    with path.open("rb") as f:
+        assert hashlib.file_digest(f, "sha256").hexdigest() == entry["sha256"]
 
 
 @pytest.mark.requires_fixtures
 @pytest.mark.parametrize("entry", FIXTURES, ids=ids)
 def test_arranges_reader_reads_each_fixture_as_recorded(entry: dict[str, Any]) -> None:
+    # Every fixture reads since #2337; a refusal is the reader's own tests' to pin (#2490).
     expected = entry["arrange_reads"]
-    data = makerworld_path(entry["file"]).read_bytes()
-    if "refused" in expected:
-        with pytest.raises(UnreadableObjectsError) as refused:
-            read_objects(data, ReadBudget())
-        assert str(refused.value) == expected["refused"]
-        return
-    objects = read_objects(data, ReadBudget())
+    objects = read_objects(makerworld_path(entry["file"]).read_bytes(), ReadBudget())
     assert {
         "objects": len(objects),
         "copies": sum(o.count for o in objects),

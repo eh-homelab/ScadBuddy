@@ -21,6 +21,10 @@ class LibraryFolderView(BaseModel):
     #: How deep the folder sits, 0 at the top; the page indents by it.
     depth: int = 0
     file_count: int | None = None
+    #: The Bambuddy project this folder is linked to: the project lists the files directly
+    #: in it, so a move out of it takes a file out of the project (#2670).
+    project_id: int | None = None
+    project_name: str | None = None
 
 
 class LibraryEntry(BaseModel):
@@ -83,6 +87,8 @@ async def list_library(
             parent_id=folder.parent_id,
             depth=depth,
             file_count=folder.file_count,
+            project_id=folder.project_id,
+            project_name=folder.project_name,
         )
         for top in await client.folders()
         for depth, folder in top.walk_with_depth()

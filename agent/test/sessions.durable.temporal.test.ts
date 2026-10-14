@@ -11,6 +11,7 @@ import { ChatConnection } from '../src/routes/chat.js'
 import { sessionWorkflowId } from '../src/gate/durable.js'
 import { UNTRUSTED_CONTENT_POLICY } from '../src/safety/untrusted.js'
 import { DurableTurns } from '../src/sessions/durable.js'
+import { SessionFiles } from '../src/workspace/store.js'
 import { type DescribeSession, DurableRunningSweep, durableDescriber } from '../src/sessions/durableSweep.js'
 import type { EventLog } from '../src/sessions/eventLog.js'
 import type { UserImage } from '../src/sessions/images.js'
@@ -24,7 +25,7 @@ import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.j
 // The agent service's dispatch of a durable session (plan 5c PR 3, Rulings 7, 8, 13):
 // the mode set at insert, a send as claim + blobs + `user.turn` + update-with-start of
 // `send_message`, `done` read from the event log, interrupt and handoff through the
-// gate, fork refused. Against a stand-in DurableSession (support/durableSessionWorkflows.ts);
+// gate, and a fork (#2688). Against a stand-in DurableSession (support/durableSessionWorkflows.ts);
 // test/durable.e2e.test.ts runs the real one.
 
 const PG_SKIP = TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`
@@ -429,10 +430,110 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     expect((await m.handoff(session.id, browser, browser)).owner).toEqual(browser)
   }, 60_000)
 
-  it('refuses to fork a durable session', async () => {
+  // A durable parent's conversation as its workflow holds it (Claude Code transcript entries
+  // as JSON text), and the replies its log names (`durable-<offset>`, session/events.py).
+  const entry = (uuid: string, type: string, content: unknown) => ({ type, uuid, sessionId: 'claude-1', message: { role: type, content } })
+  const conversation = [
+    entry('u1', 'user', 'make a box'),
+    entry('a1', 'assistant', [{ type: 'text', text: 'a box' }]),
+    entry('u2', 'user', 'taller'),
+    entry('a2', 'assistant', [{ type: 'text', text: 'a taller box' }]),
+  ]
+  const reply = (messageId: string, delta: string) => [
+    { type: 'assistant.text.delta', messageId, delta },
+    { type: 'assistant.text.done', messageId },
+  ]
+
+  /** A durable session with two finished turns: its workflow holds `conversation`, its log the replies. */
+  async function twoTurns(m: SessionManager, options: { busy?: boolean } = {}) {
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
+    await finishTurn(session.id, [...reply('durable-3', 'a box'), { type: 'session.status', status: 'idle' }])
+    await turn!.done
+    const second = await m.send(session.id, browser, 'taller')
+    await finishTurn(session.id, [...reply('durable-7', 'a taller box'), { type: 'session.status', status: 'idle' }])
+    await second.done
+    await env.client.workflow.getHandle(sessionWorkflowId(session.id)).signal('set_conversation', {
+      session_id: 'claude-1',
+      checkpoint: 'a2',
+      conversation: conversation.map((e) => JSON.stringify(e)),
+      ...(options.busy ? { busy: true } : {}),
+    })
+    return session
+  }
+
+  const conversationOf = (start: Record<string, unknown>) =>
+    ((start.agent as { conversation: string[] }).conversation ?? []).map((t) => (JSON.parse(t) as { uuid: string }).uuid)
+
+  it("forks a durable session into a durable one whose workflow starts with the parent's conversation, workspace and lineage", async () => {
     const m = await durableManager()
-    const { session } = await m.start(browser, { origin: 'chat', prompt: 'hello' })
-    await expect(m.fork(session.id, browser)).rejects.toMatchObject({ code: 'invalid' })
+    const parent = await twoTurns(m)
+    const files = new SessionFiles(db.sql)
+    await files.write({ kind: 'session', sessionId: parent.id }, 'notes.txt', Buffer.from('hi'))
+    const child = await m.fork(parent.id, browser)
+    expect(child).toMatchObject({ mode: 'durable', parentId: parent.id, owner: browser, title: `${parent.title} (fork)` })
+    expect(child.id).not.toBe(parent.id)
+    // Spends from the parent's budget (#823).
+    const [lineage] = await db.sql<{ budget_root_id: string }[]>`SELECT budget_root_id FROM ai_sessions WHERE id = ${child.id}`
+    expect(lineage?.budget_root_id).toBe(parent.id)
+    // Its workflow runs already, with the parent's conversation as its agent's state.
+    const { start, messages } = await recorded(child.id)
+    expect(messages).toEqual([])
+    expect(start).toMatchObject({ session_id: child.id, owner: { kind: 'browser', id: 'browser' }, agent: { session_id: 'claude-1', checkpoint: 'a2' } })
+    expect(conversationOf(start)).toEqual(['u1', 'a1', 'u2', 'a2'])
+    // The panel's history, the workspace and the audit row, as a classic fork.
+    const log = (await m.events.read(child.id)).map((e) => e.event)
+    expect(log[0]).toMatchObject({ type: 'session.started', mode: 'durable' })
+    expect(log.filter((e) => e.type === 'user.turn').map((e) => (e as { text: string }).text)).toEqual(['make a box', 'taller'])
+    expect(log.filter((e) => e.type === 'assistant.text.delta').map((e) => (e as { delta: string }).delta)).toEqual(['a box', 'a taller box'])
+    expect(log.at(-1)).toMatchObject({ type: 'session.status', status: 'idle' })
+    expect((await files.list({ kind: 'session', sessionId: child.id })).map((f) => f.path)).toEqual(['notes.txt'])
+    // Its first message goes to the workflow the fork started (update-with-start, USE_EXISTING).
+    const turn = await m.send(child.id, browser, 'wider')
+    expect(turn.turnId).toBeTruthy()
+    const after = await recorded(child.id)
+    expect(after.messages.map((msg) => (msg as { text: string }).text)).toEqual(['wider'])
+    expect(conversationOf(after.start as Record<string, unknown>)).toEqual(['u1', 'a1', 'u2', 'a2'])
+    // A fork of the fork reads the conversation the fork's workflow holds.
+    await finishTurn(child.id, [{ type: 'session.status', status: 'idle' }])
+    await turn.done
+    const grandchild = await m.fork(child.id, browser)
+    expect(conversationOf((await recorded(grandchild.id)).start as Record<string, unknown>)).toEqual(['u1', 'a1', 'u2', 'a2'])
+  }, 60_000)
+
+  it('forks a durable session up to a reply, and a running one at its last finished reply', async () => {
+    const m = await durableManager()
+    const parent = await twoTurns(m)
+    const child = await m.fork(parent.id, browser, { upTo: 'durable-3' })
+    expect(conversationOf((await recorded(child.id)).start as Record<string, unknown>)).toEqual(['u1', 'a1'])
+    expect((await recorded(child.id)).start).toMatchObject({ agent: { checkpoint: 'a1' } })
+    const log = (await m.events.read(child.id)).map((e) => e.event)
+    expect(log.filter((e) => e.type === 'user.turn')).toHaveLength(1)
+    await expect(m.fork(parent.id, browser, { upTo: 'durable-99' })).rejects.toMatchObject({ code: 'invalid' })
+
+    const running = await twoTurns(m, { busy: true })
+    const atLast = await m.fork(running.id, browser)
+    expect((await recorded(atLast.id)).start).toMatchObject({ agent: { checkpoint: 'a2' } })
+  }, 60_000)
+
+  it('refuses to fork a durable session with no conversation yet, and leaves no child', async () => {
+    const m = await durableManager()
+    // No turn: no workflow.
+    const { session } = await m.start(browser, { origin: 'chat', title: 't' })
+    await expect(m.fork(session.id, browser)).rejects.toMatchObject({ code: 'no_transcript' })
+    // A workflow, but nothing committed.
+    const { session: started } = await m.start(browser, { origin: 'chat', prompt: 'hello' })
+    await expect(m.fork(started.id, browser)).rejects.toMatchObject({ code: 'no_transcript' })
+    expect(await db.sql`SELECT id FROM ai_sessions WHERE parent_id IS NOT NULL`).toHaveLength(0)
+  }, 60_000)
+
+  it("deletes a durable fork whose workflow could not be started", async () => {
+    const m = await durableManager()
+    const parent = await twoTurns(m)
+    // A queue no worker reads still starts; a client that cannot reach Temporal does not.
+    const turns = m.durableTurns!
+    vi.spyOn(turns, 'startFork').mockRejectedValueOnce(Object.assign(new Error('unreachable'), { code: 'unavailable' }))
+    await expect(m.fork(parent.id, browser)).rejects.toThrow('unreachable')
+    expect(await db.sql`SELECT id FROM ai_sessions WHERE parent_id = ${parent.id}`).toHaveLength(0)
   }, 60_000)
 
   it("refuses a send to a durable session when this service has no Temporal", async () => {

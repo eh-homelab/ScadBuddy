@@ -39,6 +39,9 @@ DEFAULTS: dict[str, object] = {
     "display_unit": "mm",
     "print_run_retention_seconds": None,
     "operation_retention_seconds": None,
+    "activity_ttl_seconds": None,
+    "activity_repair_window_seconds": None,
+    "activity_follow": None,
     "media_upload_max_bytes": 1024**3,
     "last_project_id": None,
     "temporal_ui_url": None,
@@ -527,3 +530,40 @@ def test_an_operation_retention_temporal_refuses_to_check_is_a_500(
     assert "may_have_started" not in response.json()
     assert "try again shortly" not in response.text
     assert read_stored(settings.database_url).get("operation_retention_seconds") is None
+
+
+def test_the_activity_settings_round_trip(client: TestClient, settings: Settings) -> None:
+    """Spec 2026-10-09 §6: the three stored settings are saved, read back and cleared."""
+    body = client.get("/api/v1/settings").json()
+    assert (
+        body["activity_ttl_seconds"],
+        body["activity_repair_window_seconds"],
+        body["activity_follow"],
+    ) == (None, None, None)
+    saved = client.put(
+        "/api/v1/settings",
+        json={
+            "activity_ttl_seconds": 7 * 86400,
+            "activity_repair_window_seconds": 3600,
+            "activity_follow": ["browser", "token:t1"],
+        },
+    )
+    assert saved.status_code == 200
+    assert saved.json()["activity_ttl_seconds"] == 7 * 86400
+    assert saved.json()["activity_repair_window_seconds"] == 3600
+    assert saved.json()["activity_follow"] == ["browser", "token:t1"]
+    assert read_stored(settings.database_url)["activity_follow"] == ["browser", "token:t1"]
+    assert client.get("/api/v1/settings").json()["activity_follow"] == ["browser", "token:t1"]
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"activity_ttl_seconds": 3600},
+        {"activity_repair_window_seconds": 60},
+        {"activity_repair_window_seconds": 8 * 86400},
+        {"activity_follow": ["x" * 257]},
+    ],
+)
+def test_a_bad_activity_setting_is_refused(client: TestClient, patch: dict[str, object]) -> None:
+    assert client.put("/api/v1/settings", json=patch).status_code == 422

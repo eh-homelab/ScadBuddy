@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import re
 import zipfile
 from pathlib import Path
+from typing import Any
 from xml.etree import ElementTree as ET
 
 import pytest
@@ -12,13 +14,20 @@ import trimesh
 
 from scadbuddy.core.paths import RENDERS_DIR_NAME
 from scadbuddy.library.deeplink import EDIT_NOTE, edit_url
-from scadbuddy.render.bambu3mf import CORE_NS, PRODUCTION_NS, write_bambu_3mf
+from scadbuddy.render import provenance
+from scadbuddy.render.bambu3mf import (
+    CORE_NS,
+    PRODUCTION_NS,
+    PROJECT_SETTINGS_NAME,
+    write_bambu_3mf,
+)
 from scadbuddy.render.provenance import (
     NS_PREFIX,
     PROVENANCE_KEY,
     ROOT_MODEL,
     SCADBUDDY_NS,
     Provenance,
+    content_key,
     read,
     source_version,
     stamp,
@@ -90,6 +99,44 @@ def test_every_other_part_survives_byte_for_byte(written: Path) -> None:
     assert {name: payload for name, payload in after.items() if name != "3D/3dmodel.model"} == {
         name: payload for name, payload in before.items() if name != "3D/3dmodel.model"
     }
+
+
+def _compressed(path: Path) -> dict[str, tuple[int, int, int, int]]:
+    with zipfile.ZipFile(path) as archive:
+        return {
+            info.filename: (info.compress_type, info.CRC, info.compress_size, info.file_size)
+            for info in archive.infolist()
+        }
+
+
+def test_every_other_part_is_copied_as_its_compressed_bytes(tmp_path: Path) -> None:
+    """#2755: the meshes are not inflated and deflated again. Written here at a
+    compression level the stamp would never choose, so a re-deflate would change
+    their compressed size."""
+    source = tmp_path / "source.3mf"
+    mesh = b"<vertex x='1' y='2' z='3'/>" * 20_000
+    with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
+        archive.writestr("3D/3dmodel.model", f'<model xmlns="{CORE_NS}">\n<resources/>\n</model>')
+        archive.writestr("3D/Objects/object_1.model", mesh)
+        archive.writestr(
+            zipfile.ZipInfo("Metadata/plate_1.png"), b"\x89PNG" + bytes(range(256)) * 4
+        )
+    before = _compressed(source)
+    target = tmp_path / "out" / "model.3mf"
+    target.parent.mkdir()
+
+    stamp(target, PROVENANCE, source=source)
+
+    after = _compressed(target)
+    assert list(after) == list(before)
+    for name in ("3D/Objects/object_1.model", "Metadata/plate_1.png"):
+        assert after[name] == before[name]
+    with zipfile.ZipFile(target) as archive:
+        assert archive.testzip() is None
+        assert archive.read("3D/Objects/object_1.model") == mesh
+    assert read(target) == PROVENANCE
+    # The source is the job's file, read and never written.
+    assert _compressed(source) == before and read(source) is None
 
 
 def test_bambu_studio_still_reads_the_root_model(written: Path) -> None:
@@ -349,15 +396,16 @@ def test_a_failed_rewrite_leaves_the_original_3mf_alone(
     """The 3MF is the deliverable; a half-written one is worse than an unstamped one."""
     original = written.read_bytes()
     calls = {"n": 0}
-    real = zipfile.ZipFile.writestr
+    # Every entry but the root model is copied raw (#2755): fail the second of those.
+    real = provenance._copy_raw
 
-    def fail_partway(self: zipfile.ZipFile, *args: object, **kwargs: object) -> None:
+    def fail_partway(*args: Any) -> None:
         calls["n"] += 1
         if calls["n"] > 1:
             raise OSError("no space left on device")
-        real(self, *args, **kwargs)  # type: ignore[arg-type]
+        real(*args)
 
-    monkeypatch.setattr(zipfile.ZipFile, "writestr", fail_partway)
+    monkeypatch.setattr(provenance, "_copy_raw", fail_partway)
     with pytest.raises(OSError, match="no space"):
         stamp(written, PROVENANCE)
 
@@ -398,3 +446,75 @@ def test_per_object_metadata_is_not_collateral(written: Path) -> None:
     with zipfile.ZipFile(written) as archive:
         xml = archive.read(ROOT_MODEL).decode("utf-8")
     assert "someone else" in xml
+
+
+def _project_settings(path: Path) -> dict[str, object]:
+    with zipfile.ZipFile(path) as archive:
+        loaded: dict[str, object] = json.loads(archive.read(PROJECT_SETTINGS_NAME))
+        return loaded
+
+
+def test_print_settings_are_stamped_as_edits_to_the_system_process(written: Path) -> None:
+    """#770, written when the output is saved (#2652), in the shape the maintainer's own
+    Bambu Studio save has: the process's edits, then one entry per filament and one for
+    the printer."""
+    before = _project_settings(written)
+
+    stamp(written, PROVENANCE, {"enable_prime_tower": "1", "wipe_tower_no_sparse_layers": "1"})
+
+    settings = _project_settings(written)
+    assert settings["enable_prime_tower"] == "1"
+    assert settings["wipe_tower_no_sparse_layers"] == "1"
+    assert settings["different_settings_to_system"] == [
+        "enable_prime_tower;wipe_tower_no_sparse_layers",
+        "",
+        "",
+    ]
+    added = {"enable_prime_tower", "wipe_tower_no_sparse_layers", "different_settings_to_system"}
+    assert {key: value for key, value in settings.items() if key not in added} == before
+    assert read(written) == PROVENANCE
+
+
+def test_print_settings_change_no_other_part(written: Path) -> None:
+    with zipfile.ZipFile(written) as archive:
+        before = {name: archive.read(name) for name in archive.namelist()}
+
+    stamp(written, PROVENANCE, {"enable_support": "0"})
+
+    with zipfile.ZipFile(written) as archive:
+        after = {name: archive.read(name) for name in archive.namelist()}
+    assert list(after) == list(before)
+    touched = {"3D/3dmodel.model", PROJECT_SETTINGS_NAME}
+    assert {name: data for name, data in after.items() if name not in touched} == {
+        name: data for name, data in before.items() if name not in touched
+    }
+
+
+def test_no_print_settings_leave_the_project_settings_alone(written: Path) -> None:
+    with zipfile.ZipFile(written) as archive:
+        before = archive.read(PROJECT_SETTINGS_NAME)
+    stamp(written, PROVENANCE, {})
+    with zipfile.ZipFile(written) as archive:
+        assert archive.read(PROJECT_SETTINGS_NAME) == before
+
+
+def test_the_content_key_leaves_out_the_stamp(written: Path) -> None:
+    """#2476: one render saved as two outputs differs only in the stamp."""
+    other = written.with_name("other.3mf")
+    other.write_bytes(written.read_bytes())
+    stamp(written, PROVENANCE)
+    stamp(other, PROVENANCE.model_copy(update={"output": "e" * 32, "edit_url": None}))
+
+    assert written.read_bytes() != other.read_bytes()
+    assert content_key(written.read_bytes()) == content_key(other.read_bytes())
+
+
+def test_the_content_key_tells_different_content_apart(tmp_path: Path) -> None:
+    keys = set()
+    for height in (4, 5):
+        out = tmp_path / f"box-{height}.3mf"
+        parts = [ColourPart(1, "C", "#FF6AC1", trimesh.creation.box(extents=(10, 10, height)))]
+        write_bambu_3mf(parts, out, thumbnails=None, model_name="box")
+        stamp(out, PROVENANCE)
+        keys.add(content_key(out.read_bytes()))
+    assert len(keys) == 2

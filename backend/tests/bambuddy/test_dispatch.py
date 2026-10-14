@@ -17,6 +17,7 @@ import respx
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import (
     RackChoice,
+    SliceLostError,
     SlicePlan,
     enqueue_plate,
     slice_and_queue,
@@ -154,6 +155,81 @@ async def test_wait_slice_raises_bambuddys_words_on_failure(bambuddy: BambuddyCl
     assert raised.value.status == 502
     assert "object floats above the bed" in raised.value.detail
     assert raised.value.extensions == {"slice_job_id": 9}
+
+
+@respx.mock
+async def test_a_slice_its_sidecar_died_under_is_lost(bambuddy: BambuddyClient) -> None:
+    """#2081: Bambuddy's ``SlicerApiUnavailableError``, as its job reports it. Nothing
+    was sliced, so the plate may be sliced again."""
+    respx.get(f"{API}/slice-jobs/9").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": 9,
+                "status": "failed",
+                "error_status": 502,
+                "error_detail": "Slicer sidecar unreachable: ConnectError: connection refused",
+            },
+        )
+    )
+    with pytest.raises(SliceLostError) as raised:
+        await wait_slice(bambuddy, 9)
+    assert "Slicer sidecar unreachable" in raised.value.detail
+    assert raised.value.extensions == {"slice_job_id": 9}
+
+
+@respx.mock
+async def test_a_slice_job_bambuddy_forgot_is_lost(bambuddy: BambuddyClient) -> None:
+    """Bambuddy keeps its slice jobs in memory: after a restart the job is a 404."""
+    respx.get(f"{API}/slice-jobs/9").mock(return_value=httpx.Response(404, json={"detail": "x"}))
+    with pytest.raises(SliceLostError, match="restarted while slicing"):
+        await wait_slice(bambuddy, 9)
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "job",
+    [
+        # The slicer's own refusal: slicing again would be refused again.
+        {"error_status": 502, "error_detail": "Slicer CLI failed (500): bad plate"},
+        {"error_status": 400, "error_detail": "Slicer rejected input (422): no such preset"},
+        # The slicer ran out of time and may still be slicing: a second slice waits on it.
+        {"error_status": 504, "error_detail": "Slicer timed out after 600s"},
+    ],
+)
+async def test_a_slice_the_slicer_refused_is_not_lost(
+    bambuddy: BambuddyClient, job: dict[str, object]
+) -> None:
+    respx.get(f"{API}/slice-jobs/9").mock(
+        return_value=httpx.Response(200, json={"id": 9, "status": "failed", **job})
+    )
+    with pytest.raises(ApiError) as raised:
+        await wait_slice(bambuddy, 9)
+    assert not isinstance(raised.value, SliceLostError)
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("answer", "lost"),
+    [
+        (httpx.ConnectError("refused"), True),
+        (httpx.Response(503, json={"detail": "restarting"}), True),
+        (httpx.Response(429, json={"detail": "slow down"}), True),
+        (httpx.Response(400, json={"detail": "plate 9 does not exist"}), False),
+        (httpx.Response(422, json={"detail": "bad presets"}), False),
+    ],
+)
+async def test_a_start_bambuddy_never_took_is_lost(
+    bambuddy: BambuddyClient, answer: httpx.Response | Exception, lost: bool
+) -> None:
+    route = respx.post(f"{API}/library/files/41/slice")
+    if isinstance(answer, Exception):
+        route.mock(side_effect=answer)
+    else:
+        route.mock(return_value=answer)
+    with pytest.raises(ApiError) as raised:
+        await start_slice(bambuddy, library_file_id=41, plan=PLAN)
+    assert isinstance(raised.value, SliceLostError) is lost
 
 
 @respx.mock

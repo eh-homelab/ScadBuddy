@@ -13,7 +13,8 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.models import ArchiveDetail, Printer, SlotMaterial
+from scadbuddy.bambuddy.models import ArchiveDetail, Printer, SlotMaterial, Spool
+from scadbuddy.core.problems import ApiError
 
 
 class ArchiveOutcome(BaseModel):
@@ -70,6 +71,8 @@ class InventorySpool(BaseModel):
     #: ``remaining_g`` is the reconciled figure.
     remaining_g: float
     storage_location: str | None = None
+    #: Price per kilogram, ``None`` when Bambuddy has none (#785).
+    cost_per_kg: float | None = None
     archived: bool = False
     loaded: SpoolPlace | None = None
 
@@ -156,6 +159,7 @@ async def inventory_view(
                         "label_weight",
                         "weight_used",
                         "storage_location",
+                        "cost_per_kg",
                     }
                 ),
                 remaining_g=spool.remaining_g,
@@ -169,4 +173,121 @@ async def inventory_view(
             for printer, remain in zip(active, remains, strict=True)
             for slot in sorted(remain.slot_materials, key=lambda s: s.global_tray_id)
         ],
+    )
+
+
+class LoadedSpool(SpoolPlace):
+    spool_id: int
+
+
+class FilamentStock(BaseModel):
+    """Every unarchived spool of one filament: the same material, subtype, brand and
+    colour (``rgba``, else the colour's name)."""
+
+    material: str
+    subtype: str | None = None
+    brand: str | None = None
+    color_name: str | None = None
+    rgba: str | None = None
+    spool_count: int
+    spool_ids: list[int] = Field(default_factory=list)
+    #: Sum of each spool's label weight less what Bambuddy counted as used.
+    remaining_g: float
+    #: Where the filament's spools are loaded, one row per loaded spool.
+    loaded: list[LoadedSpool] = Field(default_factory=list)
+
+
+class SpoolSummary(BaseModel):
+    """What a filament hover card shows for one spool (#785): its stock and price, and
+    the stock of every spool of the same filament. Prices are Bambuddy's ``cost_per_kg``
+    as entered there; every price and cost is ``None`` when it has none, never a guess."""
+
+    spool: InventorySpool
+    #: ``cost_per_kg`` / 1000.
+    price_per_g: float | None = None
+    #: What the filament left on this spool is worth.
+    remaining_value: float | None = None
+    #: ``grams`` x ``price_per_g``, when the caller asked about ``grams`` (a plate's use).
+    grams: float | None = None
+    grams_cost: float | None = None
+    filament: FilamentStock
+
+
+def _filament_key(spool: Spool) -> tuple[str, str, str, str]:
+    colour = (spool.rgba or spool.color_name or "").strip().upper()
+    return (
+        spool.material.strip().upper(),
+        (spool.subtype or "").strip().upper(),
+        (spool.brand or "").strip().upper(),
+        colour,
+    )
+
+
+def _money(value: float) -> float:
+    return round(value, 4)
+
+
+async def spool_summary(
+    client: BambuddyClient, spool_id: int, *, grams: float | None = None
+) -> SpoolSummary:
+    """One spool's stock and price, and its filament's stock across the inventory. An
+    archived spool is still summarised; its filament's stock counts unarchived spools."""
+    spools, assignments = await asyncio.gather(
+        client.spools(include_archived=True), client.spool_assignments()
+    )
+    spool = next((row for row in spools if row.id == spool_id), None)
+    if spool is None:
+        raise ApiError(404, f"spool {spool_id} is not in Bambuddy's inventory")
+    places = {
+        a.spool_id: SpoolPlace(
+            printer_id=a.printer_id, printer_name=a.printer_name, ams_id=a.ams_id, tray_id=a.tray_id
+        )
+        for a in assignments
+    }
+    key = _filament_key(spool)
+    same = [row for row in spools if row.archived_at is None and _filament_key(row) == key]
+    price_per_g = spool.cost_per_kg / 1000 if spool.cost_per_kg is not None else None
+    return SpoolSummary(
+        spool=InventorySpool(
+            **spool.model_dump(
+                include={
+                    "id",
+                    "material",
+                    "subtype",
+                    "brand",
+                    "color_name",
+                    "rgba",
+                    "label_weight",
+                    "weight_used",
+                    "storage_location",
+                    "cost_per_kg",
+                }
+            ),
+            remaining_g=spool.remaining_g,
+            archived=spool.archived_at is not None,
+            loaded=places.get(spool.id),
+        ),
+        price_per_g=price_per_g,
+        remaining_value=_money(spool.remaining_g * price_per_g)
+        if price_per_g is not None
+        else None,
+        grams=grams,
+        grams_cost=(
+            _money(grams * price_per_g) if grams is not None and price_per_g is not None else None
+        ),
+        filament=FilamentStock(
+            material=spool.material,
+            subtype=spool.subtype,
+            brand=spool.brand,
+            color_name=spool.color_name,
+            rgba=spool.rgba,
+            spool_count=len(same),
+            spool_ids=[row.id for row in same],
+            remaining_g=round(sum(row.remaining_g for row in same), 2),
+            loaded=[
+                LoadedSpool(spool_id=row.id, **place.model_dump())
+                for row in same
+                if (place := places.get(row.id)) is not None
+            ],
+        ),
     )

@@ -340,7 +340,7 @@ describe('the attention card (#815)', () => {
     const tomorrow = new Date(Date.now() + 86_400_000)
     const { unmount } = raise('wait', { attention: { reason: 'blocked', onTimeout: 'wait', expiresAt: tomorrow.toISOString() } })
     const day = tomorrow.toLocaleString([], { weekday: 'short' })
-    expect(screen.getByTestId('agent-attention-timer')).toHaveTextContent(new RegExp(`^It waits for you until ${day}.+, then stops\\.$`))
+    expect(screen.getByTestId('agent-attention-timer')).toHaveTextContent(new RegExp(`^It waits for you until ${day}.+, then stops\\. A restart of ScadBuddy stops it sooner\\.$`))
     unmount()
     raise('proceed', { attention: { reason: 'blocked', onTimeout: 'proceed', expiresAt: new Date(Date.now() + 60_000).toISOString() } })
     expect(screen.getByTestId('agent-attention-timer')).not.toHaveTextContent(day)

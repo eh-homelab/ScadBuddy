@@ -127,7 +127,7 @@ export function SpeakRepliesToggle() {
   const on = useSpeakReplies()
   if (!speechSynthesisSupported()) return null
   return (
-    <label className="flex items-center gap-1.5 text-[11.5px] text-muted" {...USER_ONLY}>
+    <label className="flex shrink-0 items-center gap-1.5 whitespace-nowrap text-[11.5px] text-muted" {...USER_ONLY}>
       <input type="checkbox" checked={on} onChange={(event) => setSpeakReplies(event.target.checked)} {...USER_ONLY} />
       Read replies aloud
     </label>
