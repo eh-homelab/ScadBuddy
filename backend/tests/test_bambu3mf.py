@@ -4,6 +4,7 @@ import io
 import json
 import math
 import os
+import time
 import tracemalloc
 import zipfile
 from collections.abc import Callable
@@ -51,7 +52,7 @@ from scadbuddy.render.geometry import parts_from_3mf
 from scadbuddy.render.jobs import MAX_PLATES
 from scadbuddy.render.objects3mf import read_objects
 from scadbuddy.render.plate import DEFAULT_PLATE, PlateFitError, PlateGeometry, plate_for
-from scadbuddy.render.split import ColourPart, Paint
+from scadbuddy.render.split import PAINT_ATTRIBUTE, ColourPart, Paint
 from scadbuddy.render.thumbnail import (
     PLATE_PNG_SIZE,
     PLATE_SMALL_PNG_SIZE,
@@ -1550,3 +1551,225 @@ def test_re_placing_two_objects_keeps_the_tower_their_painting_needs(
     moved = replate_3mf(out.read_bytes(), plate_for("Bambu Lab H2C"))
 
     assert ("wipe_tower_x" in _settings_of_bytes(moved)) is tower
+
+
+def _rewritten_objects(payload: bytes, change: Callable[[bytes], bytes]) -> bytes:
+    """``payload`` with every object file passed through ``change``."""
+    buffer = io.BytesIO()
+    with (
+        zipfile.ZipFile(io.BytesIO(payload)) as archive,
+        zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as out,
+    ):
+        for info in archive.infolist():
+            data = archive.read(info.filename)
+            if info.filename.startswith("3D/Objects/"):
+                data = change(data)
+            out.writestr(info, data)
+    return buffer.getvalue()
+
+
+def _painted_two_objects(tmp_path: Path) -> bytes:
+    left, right = _two_objects().parts
+    paint = Paint(("4",) * len(right.mesh.faces), ("#1F6FEB",))
+    painted = ColourPart(right.material_index, right.name, right.colour, right.mesh, paint=paint)
+    out = tmp_path / "painted-objects.3mf"
+    write_plates_3mf(
+        [PlateParts((left, painted), (1, 1), (1, 2))], ["#FF6AC1", "#1F6FEB"], out, thumbnails=None
+    )
+    return out.read_bytes()
+
+
+def test_re_placing_reads_its_own_object_files_without_parsing_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2877: a print's re-placement parsed every vertex and triangle of every object
+    file, through Python, to learn one box per plate; an 86 MB library file held the
+    print worker for 39 s. A file this writer wrote is read by pattern, and gives the
+    very bytes the parse gave."""
+    payload = _painted_two_objects(tmp_path)
+    parsed = replate_3mf(payload, plate_for("Bambu Lab H2C"))
+    real = bambu3mf.parse_model
+
+    def no_object_parse(archive: zipfile.ZipFile, name: str, *args: object, **kw: object) -> object:
+        assert not name.startswith("3D/Objects/"), f"{name} was parsed vertex by vertex"
+        return real(archive, name, *args, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(bambu3mf, "parse_model", no_object_parse)
+
+    assert replate_3mf(payload, plate_for("Bambu Lab H2C")) == parsed
+    assert "wipe_tower_x" in _settings_of_bytes(parsed)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        # Attributes in another order: not this writer's vertex.
+        lambda data: data.replace(b'<vertex x="', b'<vertex  x="'),
+        # A comment could hide a vertex the pattern would count.
+        lambda data: data.replace(b"<vertices>", b"<vertices><!-- a note -->"),
+        # The core namespace under a prefix the pattern does not name.
+        lambda data: data.replace(b"<vertex ", f'<m:vertex xmlns:m="{CORE_NS}" '.encode()),
+    ],
+    ids=["reordered", "comment", "prefixed"],
+)
+def test_an_object_file_written_otherwise_is_parsed_and_placed_the_same(
+    tmp_path: Path, change: Callable[[bytes], bytes]
+) -> None:
+    payload = _painted_two_objects(tmp_path)
+    other = _rewritten_objects(payload, change)
+
+    assert (
+        bambu3mf._written_extents(
+            zipfile.ZipFile(io.BytesIO(other)).read("3D/Objects/object_1.model")
+        )
+        is None
+    )
+    parsed, read = replate_3mf(other, plate_for("H2C")), replate_3mf(payload, plate_for("H2C"))
+    assert [item.get("transform") for item in _items(parsed)] == [
+        item.get("transform") for item in _items(read)
+    ]
+    # The painting's tower too, which the paint codes decide.
+    assert _settings_of_bytes(parsed) == _settings_of_bytes(read)
+    assert "wipe_tower_x" in _settings_of_bytes(parsed)
+
+
+def test_a_written_paint_code_past_its_cap_is_parsed_and_refused(tmp_path: Path) -> None:
+    from scadbuddy.render.paint import MAX_CODE_DIGITS
+
+    long = b'paint_color="' + b"4" * (MAX_CODE_DIGITS + 1) + b'"'
+    other = _rewritten_objects(
+        _painted_two_objects(tmp_path), lambda data: data.replace(b'paint_color="8"', long)
+    )
+    with pytest.raises(ValueError, match="paint_color"):
+        replate_3mf(other, plate_for("H2C"))
+
+
+def _object_bytes(
+    vertices: bytes,
+    triangles: bytes = b'<triangle v1="0" v2="1" v3="2"/>',
+    *,
+    head: bytes = b"",
+    tail: bytes = b"",
+) -> bytes:
+    """One object file in :func:`bambu3mf.object_model`'s shape, around ``vertices``
+    and ``triangles``; ``head`` and ``tail`` go inside the object, around its mesh."""
+    return (
+        b'<?xml version="1.0" encoding="UTF-8"?>\n<model xmlns="'
+        + CORE_NS.encode()
+        + b'"><resources><object id="1" type="model">'
+        + head
+        + b"<mesh><vertices>"
+        + vertices
+        + b"</vertices><triangles>"
+        + triangles
+        + b"</triangles></mesh>"
+        + tail
+        + b"</object></resources><build/></model>"
+    )
+
+
+_THREE = b'<vertex x="0" y="0" z="0"/><vertex x="1" y="0" z="0"/><vertex x="0" y="1" z="2"/>'
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        # #2024: a second <vertices> block, which the parse refuses.
+        _object_bytes(_THREE + b'</vertices><vertices><vertex x="9" y="9" z="9"/>'),
+        # A second <triangles> block.
+        _object_bytes(_THREE, b'<triangle v1="0" v2="1" v3="2"/></triangles><triangles>'),
+        # Two meshes in one object.
+        _object_bytes(
+            _THREE, tail=b'<mesh><vertices><vertex x="5" y="5" z="5"/></vertices></mesh>'
+        ),
+        # A second object.
+        _object_bytes(_THREE, tail=b'</object><object id="2" type="model">'),
+    ],
+    ids=["two-vertices", "two-triangles", "two-meshes", "two-objects"],
+)
+def test_other_than_one_object_mesh_and_block_is_left_to_the_parse(data: bytes) -> None:
+    assert bambu3mf._written_extents(_object_bytes(_THREE)) is not None
+    assert bambu3mf._written_extents(data) is None
+
+
+def test_a_second_vertices_block_is_refused_as_the_parse_refuses_it(tmp_path: Path) -> None:
+    second = b'</vertices>\n    <vertices><vertex x="9" y="9" z="9"/>'
+    other = _rewritten_objects(
+        _painted_two_objects(tmp_path), lambda data: data.replace(b"</vertices>", second, 1)
+    )
+    with pytest.raises(ValueError, match="more than one"):
+        replate_3mf(other, plate_for("H2C"))
+
+
+def test_a_processing_instruction_is_left_to_the_parse() -> None:
+    assert bambu3mf._written_extents(_object_bytes(_THREE)) is not None
+    assert bambu3mf._written_extents(_object_bytes(_THREE, head=b"<?note hi?>")) is None
+
+
+def test_a_paint_code_off_a_triangle_paints_nothing() -> None:
+    """The parse reads ``paint_color`` only on a ``<triangle>``; the pattern agrees."""
+    data = _object_bytes(_THREE, head=b"<metadata " + PAINT_ATTRIBUTE.encode() + b'="8"/>')
+    read = bambu3mf._written_extents(data)
+    assert read is None or read[1] == frozenset()
+
+
+def test_a_long_coordinate_is_not_copied_into_every_row() -> None:
+    """#2877 review: a numpy bytes array is as wide as its longest value, so one 2 MB
+    coordinate among a hundred short ones would have cost 600 MB to read a box. A
+    coordinate longer than the writer ever writes leaves the file to the parse."""
+    vertex = b'\n     <vertex x="1" y="2" z="3"/>'
+    long = b'\n     <vertex x="1.' + b"0" * 2_000_000 + b'" y="2" z="3"/>'
+    data = _object_bytes(vertex * 100 + long)
+    assert bambu3mf._written_extents(_object_bytes(vertex * 101)) is not None
+
+    tracemalloc.start()
+    try:
+        assert bambu3mf._written_extents(data) is None
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 20 * 1024 * 1024
+
+
+@pytest.mark.parametrize(
+    "junk",
+    [b"<triangle ", b'<triangle paint_color="'],
+    ids=["unterminated tags", "unterminated codes"],
+)
+def test_reading_paint_codes_is_one_pass_over_a_crafted_file(junk: bytes) -> None:
+    """Security review of #3254: an unbounded run inside the paint pattern rescanned to
+    the end of the file from every ``<triangle``, so 200 KB of them took 14 s. Bounded,
+    the scan is linear, and a code it cannot find leaves the file to the parse."""
+    data = junk * 40_000
+    began = time.perf_counter()
+    for _ in bambu3mf._PAINT_CODE.finditer(data):
+        pass
+    assert time.perf_counter() - began < 2
+
+
+def test_a_paint_code_longer_than_the_bounded_read_is_left_to_the_parse() -> None:
+    from scadbuddy.render.paint import MAX_CODE_DIGITS
+
+    painted = (
+        b'\n     <triangle v1="0" v2="1" v3="2" paint_color="'
+        + b"4" * (MAX_CODE_DIGITS + 10)
+        + b'"/>'
+    )
+    assert (
+        bambu3mf._written_extents(_object_bytes(b'<vertex x="1" y="2" z="3"/>' * 3, painted))
+        is None
+    )
+
+
+def test_written_extents_are_read_a_batch_at_a_time() -> None:
+    vertices = b"".join(
+        b'<vertex x="%d" y="%d" z="1"/>' % (i, -i) for i in range(bambu3mf._VERTEX_BATCH + 5)
+    )
+    data = _object_bytes(vertices)
+    box, painted = bambu3mf._written_extents(data) or (None, None)
+    assert box is not None
+    assert box.tolist() == [
+        [0, -(bambu3mf._VERTEX_BATCH + 4), 1],
+        [bambu3mf._VERTEX_BATCH + 4, 0, 1],
+    ]
+    assert painted == frozenset()
