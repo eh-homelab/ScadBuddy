@@ -1555,7 +1555,11 @@ def test_a_queue_without_a_service_name_stops_the_worker_saying_so(
     monkeypatch.setattr(asyncio, "run", past_the_guard)
 
     with pytest.raises(SystemExit, match="queue 'unnamed' has no service name"):
-        worker_module.main()
+        try:
+            worker_module.main()
+        except KeyError as error:
+            # The likelier failure of a regressed check: said as what it means (#3491 review).
+            raise AssertionError("main() went past the service-name check") from error
 
 
 def _transient() -> RPCError:
