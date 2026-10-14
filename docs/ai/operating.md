@@ -305,7 +305,11 @@ is `classifyFailure()` in
 No further attempt starts once the turn's `maxTurns` or budget is used up. A turn that
 fails mid-way (after tool calls ran) resumes the session on the next
 credential with a short "continue" prompt, so no tool runs twice and the prompt is not
-sent twice. Each credential is tried at most once per turn. Every disable, cooldown,
+sent twice. Each credential is tried at most once per turn. In a durable session,
+while another credential could still take the segment over, the assistant's text
+reaches the transcript only at the next tool call or at the end of the segment, not
+block by block, so a refused credential's notice never shows (#2945). Every disable,
+cooldown,
 recovery and fallback is an audit row of kind `credential` (`CredentialPool`), named
 like `credential 2 (API key …abcd)`, never with the secret. When no credential is
 usable, a turn fails with a message naming each one's state and the soonest time one

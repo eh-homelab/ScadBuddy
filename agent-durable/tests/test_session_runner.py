@@ -41,7 +41,7 @@ from temporalio.claude_agent_sdk import (
     SegmentOutput,
     ToolOutcome,
 )
-from temporalio.claude_agent_sdk._events import emit
+from temporalio.claude_agent_sdk._events import _EMIT, emit
 from temporalio.claude_agent_sdk.testing import Final, HistoryItem, ScriptedClaude, ToolCall
 from temporalio.client import Client
 from temporalio.testing import ActivityEnvironment, WorkflowEnvironment
@@ -759,6 +759,68 @@ async def test_a_refused_credentials_notice_never_reaches_the_transcript(
     texts = [e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"]
     assert texts == ["done"]
     assert refusing.tokens == [TOKEN, TOKEN + "-second"]
+
+
+class RefusesAfterSaying(ScriptedClaude):
+    """A scripted model whose answer is the refusal notice, published through the
+    plugin's own ``emit`` (as its runner publishes each ``TextBlock``), and which then
+    fails the way a refused credential does."""
+
+    def __init__(self, notice: str, error: BaseException) -> None:
+        super().__init__(lambda prompt, _: Final(notice))
+        self.error = error
+
+    async def run(self, inp: SegmentInput, attempt: int) -> SegmentOutput:
+        await super().run(inp, attempt)
+        raise self.error
+
+
+async def test_a_refused_credentials_scripted_notice_never_reaches_the_transcript(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """#3383: the same as above with the notice published by the plugin's ScriptedClaude,
+    not this test's own emit() call, so the hold covers the plugin's publishing."""
+    await _two_credentials(agent_db)
+    notice = "You've hit your session limit · resets 6pm (UTC)"
+    refusing = Refusing(set(), _result_error("API Error: 429 rate limited", status=429))
+    refused = RefusesAfterSaying(notice, refusing.error)
+
+    def make_runner(**kwargs: Any) -> Any:
+        if kwargs["env"]["ANTHROPIC_AUTH_TOKEN"] == TOKEN:
+            refusing.tokens.append(TOKEN)
+            return refused
+        return refusing(**kwargs)
+
+    runner = ScadBuddyRunner(connect, KEK, cwd=str(tmp_path), make_runner=make_runner)
+    async with running(temporal_env, connect, runner) as (client, queue):
+        sid = await insert_session(agent_db)
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "hi")
+            assert await settled(connect, sid) == "idle"
+        finally:
+            await handle.terminate()
+    texts = [e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"]
+    assert texts == ["done"]
+    assert refusing.tokens == [TOKEN, TOKEN + "-second"]
+
+
+def test_the_plugins_runner_publishes_text_through_the_held_contextvar() -> None:
+    """#3383: HeldText holds by setting the plugin's private ``_EMIT``. The plugin's real
+    runner publishes each ``TextBlock`` with ``emit`` (no Claude Code CLI runs here, so
+    this checks the path rather than driving it); a pin bump that moves that publishing
+    off ``_EMIT`` fails here, not silently in production."""
+    from temporalio.claude_agent_sdk import _runner as plugin_runner
+
+    publish = vars(plugin_runner)["emit"]  # what its TextBlock loop calls
+    assert publish is emit
+    seen: list[dict[str, Any]] = []
+    token = _EMIT.set(seen.append)
+    try:
+        publish({"type": "text", "text": "held"})
+    finally:
+        _EMIT.reset(token)
+    assert [e["text"] for e in seen] == ["held"]
 
 
 async def test_a_first_credentials_answer_still_reaches_the_transcript(

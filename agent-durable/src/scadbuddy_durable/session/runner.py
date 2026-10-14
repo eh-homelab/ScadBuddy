@@ -73,7 +73,9 @@ from temporalio.claude_agent_sdk import (
 
 # Private to the git-pinned plugin (#2945): the per-activity ContextVar its `emit` reads
 # as it publishes. A pin bump (ai-integrations#33 and after) must check it still is, or
-# HeldText stops holding anything, with no error.
+# HeldText stops holding anything, with no error. Guarded by the tests
+# test_the_plugins_runner_publishes_text_through_the_held_contextvar and
+# test_a_refused_credentials_scripted_notice_never_reaches_the_transcript (#3383).
 from temporalio.claude_agent_sdk._events import _EMIT
 from temporalio.exceptions import ApplicationError
 
@@ -716,6 +718,8 @@ class ScadBuddyRunner:
                 if token is not None:
                     _EMIT.reset(token)
                 if held is not None:
+                    # Not a leak: a failure that is not the credential's ends the turn on
+                    # this credential, so what it said is the turn's and is published.
                     held.flush()
         raise AssertionError("unreachable: the last credential returns or raises")
 
