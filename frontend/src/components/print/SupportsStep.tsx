@@ -50,7 +50,7 @@ export function SupportsStep({ value, onChange, templateSettings, fromFile = fal
       <legend className="px-1 text-[13px] text-ink">Supports</legend>
       <div className="mt-1.5 flex flex-col gap-1">
         <label htmlFor="supports-select" className="text-[12px] text-muted">
-          Supports
+          Support type
         </label>
         <select
           id="supports-select"
@@ -98,9 +98,11 @@ export function SupportsStep({ value, onChange, templateSettings, fromFile = fal
               onChange={(event) => {
                 const raw = event.target.value
                 setAngleText(raw)
+                // Digits only: a number field lets `1e1` through, which is no whole number
+                // of degrees as written (#3180).
                 const angle = Number(raw)
                 const { threshold_angle: _dropped, ...rest } = on
-                if (raw === '' || !Number.isInteger(angle) || angle < 0 || angle > 90) onChange(rest)
+                if (!/^\d+$/.test(raw) || angle > 90) onChange(rest)
                 else onChange({ ...rest, threshold_angle: angle })
               }}
               className="sb-field w-24"
