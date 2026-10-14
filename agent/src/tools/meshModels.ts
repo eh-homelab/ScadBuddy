@@ -104,7 +104,8 @@ export const meshModelTools: Tool[] = [
     description:
       "A mesh model's scene: its objects (ids o1, o2…), each object's colour parts, its ops in order (cut, joint, " +
       'add, subtract, custom) in the object\'s own frame, and its transform (translate, rotate in degrees X then Y ' +
-      'then Z, scale). hand_edited true means model.scad was edited directly; edit_scene is refused until eject_scene.',
+      'then Z, scale). notes say what reading the file dropped and where a painted object\'s painting is not carried whole ' +
+      '(a mirrored object). hand_edited true means model.scad was edited directly; edit_scene is refused until eject_scene.',
     input: z.object({ slug }),
     risk: 'read',
     source: 'scene data derived from a mesh file the user supplied or Bambuddy holds',
@@ -116,7 +117,7 @@ export const meshModelTools: Tool[] = [
   defineTool({
     name: 'edit_scene',
     description:
-      'Edit a mesh model as one revision (undo with restore_version); edits apply in order, so a later edit may name an ' +
+      'Edit a mesh model as one revision (undo with restore_version). Painting done in Bambu Studio is carried into every render and print. Edits apply in order, so a later edit may name an ' +
       'object an earlier one made (split_at_plane makes the top half the next id). Planes and `at` are world mm. ' +
       'split_at_plane with joint adds a keyed peg to one half and a socket with clearance to the other, sized from ' +
       'the section and refused when it would not fit. lay_flat turns a world direction (or the largest flat face, often ' +

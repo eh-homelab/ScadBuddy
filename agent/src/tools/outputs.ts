@@ -268,7 +268,11 @@ export const outputTools: Tool[] = [
     description:
       "Printability measurements of an output's closed per-colour solids: open and non-manifold edges with " +
       'their locations, bounding box, bed contact, height-to-base ratio, overhang area by angle, and ' +
-      'estimates of the thinnest wall and smallest feature (mm, Z up, model coordinates).',
+      'estimates of the thinnest wall and smallest feature (mm, Z up, model coordinates). weak_joints lists ' +
+      'level sections much narrower than the print 2 mm below or above them with at least 1 cm³ above, where ' +
+      "layer lines snap (a carrot's neck); each carries `suggestion`, an edit_scene split_at_plane edit that " +
+      'cuts there with a peg sized to the section (`joint` null where no peg fits). For a mesh model\'s render ' +
+      '`suggestion.object` names the scene object, so the edit can be sent as it is.',
     input: z.object({ output_id: outputId }),
     risk: 'read',
     routes: ['GET /api/v1/outputs/{output_id}/geometry'],
