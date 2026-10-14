@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import sys
@@ -16,6 +17,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import scadbuddy
+from scadbuddy import main
 from scadbuddy.api import components, deps
 from scadbuddy.api.components import component_dep, getter_for
 from scadbuddy.api.deps import STATE_ATTR
@@ -402,6 +404,51 @@ def test_a_core_close_that_raises_still_lets_the_rest_close(
 
     monkeypatch.setattr(state.render, "aclose", raises)
     with pytest.raises(RuntimeError, match="render pool lost"), TestClient(app):
+        pass
+    assert state.projection._pool.closed
+    assert state.settings_store._pool.closed
+
+
+def test_a_worker_that_fails_to_stop_still_lets_the_core_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pg_conninfo: str
+) -> None:
+    """#3125: stopping the in-process worker raising still closes the pools after it."""
+    for name in list(os.environ):
+        if name.startswith("SCADBUDDY_"):
+            monkeypatch.delenv(name)
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    app = create_app(
+        Settings(
+            openscad=str(tmp_path / "no-openscad"),
+            data_dir=tmp_path / "data",
+            seed_models_dir=seed,
+            frontend_dir=Path("/nonexistent"),
+            database_url=pg_conninfo,
+            temporal_address=UNUSED_TEMPORAL_ADDRESS,
+            preview_renders=False,
+        )
+    )
+    state = getattr(app.state, STATE_ATTR)
+
+    async def idles(
+        _settings: object, _deps: object, _temporal: object, stop: asyncio.Event
+    ) -> None:
+        await stop.wait()
+
+    async def fails_to_stop(*_args: object) -> None:
+        raise RuntimeError("the worker would not stop")
+
+    async def no_queue_workers(_state: object, stop: asyncio.Event, _name: str) -> None:
+        await stop.wait()
+
+    # Only the in-process render worker runs; the queue workers stand down.
+    monkeypatch.setattr(state, "temporal", object())
+    monkeypatch.setattr(main, "_connect_until", no_queue_workers)
+    monkeypatch.setattr(main, "worker_deps_from_state", lambda _state: None)
+    monkeypatch.setattr(main, "run_inprocess_worker", idles)
+    monkeypatch.setattr(main, "_stop_worker", fails_to_stop)
+    with pytest.raises(RuntimeError, match="would not stop"), TestClient(app):
         pass
     assert state.projection._pool.closed
     assert state.settings_store._pool.closed

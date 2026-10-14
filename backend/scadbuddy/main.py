@@ -1281,9 +1281,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         stop_printing.set()
         await _stop_queue_worker(printing, "print")
         await _stop_queue_worker(upkeep, "print upkeep")
-        if worker is not None:
-            stop.set()
-            await _stop_worker(state, *worker)
         # Each close runs even when one before it raises, so a component (or a pool)
         # failing on its way out cannot leak the pools and the bus's listener (#653).
         # The stack unwinds last-pushed first: pushed here in reverse of the order run.
@@ -1295,6 +1292,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             closing.push_async_callback(asyncio.to_thread, state.projection.close)
             closing.push_async_callback(state.render.aclose)
             closing.push_async_callback(components.aclose)
+            if worker is not None:
+                # Pushed last, so it runs first: the worker stops before the queue and
+                # the pools it uses close, and its failing still lets them close (#3125).
+                stop.set()
+                closing.push_async_callback(_stop_worker, state, *worker)
 
 
 def create_app(settings_override: Settings | None = None) -> FastAPI:

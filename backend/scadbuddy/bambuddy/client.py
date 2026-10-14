@@ -210,6 +210,12 @@ def _call_span(
     return span(name, kind=SpanKind.CLIENT, attributes=attributes)
 
 
+class BambuddyAnswerError(ApiError):
+    """What Bambuddy's answer did wrong, found while reading it inside
+    :meth:`BambuddyClient.stream`'s ``async with`` (a frame over its cap): it fails the
+    call's span, as a refusal does. Any other error the reader raises leaves it alone."""
+
+
 @dataclass(frozen=True)
 class BambuddyConfig:
     base_url: str
@@ -379,11 +385,13 @@ class BambuddyClient:
             operation="printers.camera.snapshot",
             what=what,
             params={"token": token},
+            # Nothing sends a Range here, so a 416 is no seek: map it, never a "frame".
+            pass_416=False,
         ) as response:
             async for chunk in response.aiter_bytes():
                 frame += chunk
                 if len(frame) > MAX_CAMERA_FRAME_BYTES:
-                    raise ApiError(
+                    raise BambuddyAnswerError(
                         status.HTTP_502_BAD_GATEWAY,
                         f"Bambuddy's frame was over {MAX_CAMERA_FRAME_BYTES} bytes when asked"
                         f" to {what}",
@@ -828,6 +836,7 @@ class BambuddyClient:
         range_header: str | None = None,
         if_range: str | None = None,
         params: Mapping[str, str] | None = None,
+        pass_416: bool = True,
     ) -> AsyncIterator[httpx.Response]:
         """``GET path`` without reading the body, for the media proxy (#307).
 
@@ -839,7 +848,8 @@ class BambuddyClient:
         frame's cap does. A failure is mapped
         as every other call's is, once its (small) body has been read, except a ``416``:
         that is the answer to a seek past the end, and its ``Content-Range`` carries the
-        length the media element needs, so it is passed through.
+        length the media element needs, so it is passed through. ``pass_416=False`` maps
+        it as any refusal, for a caller that sends no ``Range`` (#3397).
         """
         headers = dict(self._headers)
         if range_header is not None:
@@ -861,7 +871,7 @@ class BambuddyClient:
                 raise map_transport(error, what=what) from error
             current.set_attribute("http.response.status_code", response.status_code)
             try:
-                if not response.is_success and response.status_code != 416:
+                if not response.is_success and (response.status_code != 416 or not pass_416):
                     await response.aread()
                     raise map_response(response, scope=Scope.READ_STATUS, what=what)
                 try:
@@ -869,6 +879,8 @@ class BambuddyClient:
                 except httpx.HTTPError as error:
                     logger.warning("bambuddy request failed", extra={"method": "GET", "path": path})
                     raise map_transport(error, what=what) from error
+                except BambuddyAnswerError:
+                    raise
                 except Exception as error:
                     consumer_error = error
             finally:

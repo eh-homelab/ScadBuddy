@@ -23,8 +23,8 @@ from starlette.requests import ClientDisconnect
 
 from scadbuddy.api import printing
 from scadbuddy.api.deps import STATE_ATTR
-from scadbuddy.bambuddy.client import mjpeg_type
 from scadbuddy.bambuddy import client as bambuddy_client
+from scadbuddy.bambuddy.client import mjpeg_type
 from tests.api.test_send import API, configure
 
 
@@ -440,11 +440,29 @@ def test_a_mint_with_no_token_is_a_bad_gateway(client: TestClient) -> None:
 
 
 @respx.mock
+def test_a_snapshot_answered_416_is_refused_not_served_as_a_frame(client: TestClient) -> None:
+    """#3397: nothing asks the snapshot for a range, so a 416 is a refusal, never a frame."""
+    configure(client)
+    token_route()
+    respx.get(f"{API}/printers/7/camera/snapshot").mock(
+        return_value=httpx.Response(
+            416, content=JPEG, headers={"Content-Type": "image/jpeg", "Content-Range": "*/9"}
+        )
+    )
+
+    response = client.get("/api/v1/print/printers/7/camera")
+
+    assert response.status_code >= 400, response.status_code
+    assert response.content != JPEG
+
+
+@respx.mock
 def test_a_frame_past_the_cap_is_refused_before_it_is_all_read(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, spans: InMemorySpanExporter
 ) -> None:
     """#1006: the frame is read with a cap, not buffered whole: the read stops at the
-    chunk that passes it, and the chunks after it are never pulled."""
+    chunk that passes it, and the chunks after it are never pulled. #3397: an oversized
+    frame is Bambuddy's doing, so the snapshot call's span is failed."""
     monkeypatch.setattr(bambuddy_client, "MAX_CAMERA_FRAME_BYTES", 64)
     configure(client)
     token_route()
@@ -461,8 +479,15 @@ def test_a_frame_past_the_cap_is_refused_before_it_is_all_read(
         )
     )
 
+    spans.clear()
     response = client.get("/api/v1/print/printers/7/camera")
 
     assert response.status_code == 502
     assert "over 64 bytes" in response.json()["detail"]
     assert pulled == [0, 1], "the third and fourth chunks are never read"
+    (snapshot,) = (
+        s for s in spans.get_finished_spans() if s.name == "bambuddy.printers.camera.snapshot"
+    )
+    assert snapshot.status.status_code == StatusCode.ERROR, snapshot.status
+    # No message is recorded (`core/trace_scrub.py`): the detail names the printer.
+    assert not snapshot.status.description
