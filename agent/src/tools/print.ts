@@ -713,7 +713,9 @@ export const printTools: Tool[] = [
         ),
       supports: z
         .object({
-          enabled: z.boolean(),
+          enabled: z
+            .boolean()
+            .describe('false prints with no supports, and the other fields are then not sent; true adds them over the template'),
           type: z.enum(['tree', 'normal']).optional().describe("'tree' (Bambu's default, best on an H2C); omit for the template's, else tree"),
           threshold_angle: z
             .number()
@@ -836,16 +838,19 @@ export const printTools: Tool[] = [
           ? {}
           : {
               // Only what was asked for: a field left out keeps the template's (#2835 review).
-              supports: {
-                enabled: args.supports.enabled,
-                ...(args.supports.type === undefined ? {} : { type: args.supports.type }),
-                ...(args.supports.threshold_angle === undefined
-                  ? {}
-                  : { threshold_angle: args.supports.threshold_angle }),
-                ...(args.supports.on_build_plate_only === undefined
-                  ? {}
-                  : { on_build_plate_only: args.supports.on_build_plate_only }),
-              },
+              // With supports off, only that: the backend applies nothing else (#3179).
+              supports: !args.supports.enabled
+                ? { enabled: false }
+                : {
+                    enabled: true,
+                    ...(args.supports.type === undefined ? {} : { type: args.supports.type }),
+                    ...(args.supports.threshold_angle === undefined
+                      ? {}
+                      : { threshold_angle: args.supports.threshold_angle }),
+                    ...(args.supports.on_build_plate_only === undefined
+                      ? {}
+                      : { on_build_plate_only: args.supports.on_build_plate_only }),
+                  },
             }),
         request_id: requestId,
       }

@@ -614,12 +614,14 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     server.use(...capturedRun(chosen))
     await t.execute({ ...args, supports: { enabled: true, threshold_angle: 40 } }, ctx())
     server.use(...capturedRun(off))
-    await t.execute({ ...args, supports: { enabled: false } }, ctx())
+    // The other fields go unsent with supports off: the backend applies none of them (#3179).
+    await t.execute({ ...args, supports: { enabled: false, type: 'normal', threshold_angle: 40 } }, ctx())
     server.use(...capturedRun(plain))
     await t.execute(args, ctx())
     // Only what was asked for: the backend keeps the template's type and plate setting.
     expect((chosen.body as { supports?: unknown }).supports).toEqual({ enabled: true, threshold_angle: 40 })
     expect(off.body).toMatchObject({ supports: { enabled: false } })
+    expect((off.body as { supports: unknown }).supports).toEqual({ enabled: false })
     expect(plain.body).not.toHaveProperty('supports')
     expect(t.summarize({ ...args, supports: { enabled: true, type: 'normal', threshold_angle: 40, on_build_plate_only: true } })).toContain(
       'with normal supports at 40° on the build plate only',
