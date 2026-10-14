@@ -19,6 +19,7 @@ import { type GateEntry, type RefusalCode, RespondRefusal, type RespondRequest, 
 import { isUuid } from '../../harness/uuid.js'
 import type { InputEntry, InputOutcome, Owner } from '../../sessions/protocol.js'
 import { TASK_QUEUE } from '../names.js'
+import { SESSION_GATE_ACTIVITIES } from './names.js'
 
 // The session workflow's half of the tool-call gate (spec 2026-10-01 §6.6, phase 4 of the
 // unified runtime), ported whole from agent-durable's session/workflow.py, whose names it
@@ -53,17 +54,6 @@ const GRANT_CHECK_WAIT = '1m'
 const PROJECTS_QUEUE = 'projects'
 const SHORT = '30s'
 const SYSTEM: Responder = { kind: 'system', id: 'scadbuddy', label: 'ScadBuddy' }
-
-export const SESSION_GATE_ACTIVITIES = {
-  settings: 'gate_settings',
-  describe: 'gate.describe_call',
-  turnToolTier: 'turn_tool_tier',
-  grantCheck: 'flow_grant_check',
-  open: 'open_input',
-  grant: 'grant_input',
-  deny: 'deny_input',
-  resolve: 'resolve_input',
-} as const
 
 /** The timers of the session's entries (ai_settings), read when a turn starts. */
 export type GateSettings = { approvalExpiryS: number; questionExpiryS: number; toolTiers?: Record<string, string>; disabledTools?: string[] }
@@ -307,7 +297,7 @@ export class SessionGate {
           return settled(true, `grant:${grantId}`, { kind: 'approval', outcome: 'approved' })
         }
       } else if (verdict) {
-        grantTimeout = Number(verdict.timeout_s || 0)
+        grantTimeout = Math.trunc(Number(verdict.timeout_s || 0))
         outside = verdict
       }
     }
@@ -485,7 +475,8 @@ export class SessionGate {
       else if (parked.tool === ASK_USER) await this.#resolve(parked, 'cancelled', SYSTEM, undefined, NOBODY_ANSWERED, true)
       else await this.#resolve(parked, 'timed_out', SYSTEM, undefined, undefined, true)
     } catch (err) {
-      ignoreCancellation(err)
+      // A cancelled scope or a failed activity ends the timer, as Python's park task did.
+      if (!(err instanceof TemporalFailure)) throw err
     }
   }
 
