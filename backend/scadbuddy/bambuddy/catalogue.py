@@ -138,7 +138,11 @@ CATALOGUE_VERSION = 1
 _ADAPTER = TypeAdapter(_Catalogue)
 
 
-async def read_catalogue(client: BambuddyClient) -> _Catalogue:
+#: The public name for the catalogue a public caller holds (#3585 review).
+Catalogue = _Catalogue
+
+
+async def read_catalogue(client: BambuddyClient) -> Catalogue:
     """The preset catalogue, read fresh from Bambuddy, as the check and the run read it;
     :func:`cached_catalogue` is the print dialog's kept copy."""
     return await _catalogue(client)

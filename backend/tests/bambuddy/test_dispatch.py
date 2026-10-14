@@ -86,12 +86,18 @@ def test_a_list_override_and_its_single_value_are_different_slices() -> None:
             process_overrides={"outer_wall_speed": value},
         )
 
-    listed, single, pair = request(["50"]), request("50"), request(["50", "50"])
-
-    assert listed.preset_key != single.preset_key
-    assert listed.preset_key.endswith("/outer_wall_speed=[50]")
-    assert pair.preset_key.endswith("/outer_wall_speed=[50|50]")
-    assert single.preset_key.endswith("/outer_wall_speed=50")
+    # Pairs that keyed the same slice: a list and its one value; a list and the string
+    # its brackets spell; a list item holding the separator and two items (#3585 review).
+    pairs: list[tuple[ProcessValue, ProcessValue]] = [
+        (["50"], "50"),
+        (["50"], "[50]"),
+        (["50|60"], ["50", "60"]),
+        (["50]"], "[50]]"),
+    ]
+    for one, other in pairs:
+        assert request(one).preset_key != request(other).preset_key, (one, other)
+    assert request(["50", "60"]).preset_key.endswith('/outer_wall_speed=["50", "60"]')
+    assert request("50").preset_key.endswith('/outer_wall_speed="50"')
 
 
 @respx.mock
@@ -109,7 +115,7 @@ async def test_process_overrides_go_on_the_slice_and_into_its_key(
     sent = json.loads(sliced.calls[0].request.read())
     assert sent["process_overrides"] == {"enable_prime_tower": "1"}
     assert "process_overrides" not in json.loads(sliced.calls[1].request.read())
-    assert outcome.preset_key == f"{plain.preset_key}/enable_prime_tower=1"
+    assert outcome.preset_key == f'{plain.preset_key}/enable_prime_tower="1"'
 
 
 @respx.mock
