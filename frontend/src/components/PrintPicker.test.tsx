@@ -1783,6 +1783,13 @@ describe('PrintPicker · Print sequence (#1862)', () => {
     await waitFor(() => expect(previews.bodies.at(-1)).toMatchObject({ print_sequence: 'by object' }), {
       timeout: 5000,
     })
+
+    // And the run queues that slice (#2825): Print sends the sequence the last slice had.
+    const runs = watch('POST', '/run')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(runs.bodies).toHaveLength(1))
+    const last = previews.bodies.at(-1) as { print_sequence?: string }
+    expect(runs.bodies[0]).toMatchObject({ print_sequence: last.print_sequence })
   })
 
   it('does not carry over to another source', async () => {
@@ -2583,6 +2590,35 @@ describe('PrintPicker · Plates of a 3MF', () => {
     expect(reads.urls.at(-1)).toContain('plate_id=2')
     await waitFor(() => expect(screen.queryByTestId('filaments-unavailable')).toBeNull())
     await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
+  })
+
+  // #2823: without a plan the checks have nothing to judge, so they wait idle, not busy.
+  it('sends no analysis and shows no busy checks while the filament read has failed', async () => {
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: false },
+          { index: 2, has_thumbnail: true },
+        ]),
+      ),
+      http.get('/api/v1/print/outputs/:id/filaments', () =>
+        HttpResponse.json({ detail: 'Bambuddy is down.' }, { status: 503 }),
+      ),
+    )
+    const analyses = watch('POST', '/run', '/api/v1/analyzers/')
+    const { user } = renderPicker()
+    await loaded()
+    await waitFor(() => expect(screen.getByTestId('print-checks')).toHaveAttribute('aria-busy', 'false'))
+    const before = analyses.bodies.length
+
+    await user.click(within(await screen.findByTestId('plate-choice')).getByRole('radio', { name: /Plate 2/ }))
+    const warning = await screen.findByTestId('filaments-unavailable')
+    expect(within(warning).getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+
+    const checks = screen.getByTestId('print-checks')
+    await waitFor(() => expect(checks).toHaveAttribute('aria-busy', 'false'))
+    expect(checks.querySelector('.animate-spin')).toBeNull()
+    expect(analyses.bodies.slice(before)).toEqual([])
   })
 
   it("names a one-plate output's plate, with nothing to choose (#986)", async () => {
@@ -3552,5 +3588,100 @@ describe('PrintPicker · Slicer defaults from the template (#1294)', () => {
     await loaded()
     await showAdvanced()
     expect(screen.queryByRole('region', { name: 'Slicer defaults from this template' })).toBeNull()
+  })
+})
+
+describe('PrintPicker · a sliced library file (#2671)', () => {
+  const SLICED = { kind: 'library', file: { id: 104, filename: 'bag-clip.gcode.3mf' } } as const
+
+  function renderSliced() {
+    return renderPage(<PrintPicker open source={SLICED} onClose={vi.fn()} onRan={vi.fn()} />)
+  }
+
+  it('shows what it was sliced for, read-only, in place of the slicer steps', async () => {
+    const previews = watch('POST', '/preview-slice')
+    renderSliced()
+    await loaded()
+    const settings = await screen.findByTestId('sliced-settings')
+    expect(settings).toHaveTextContent('Bambu Lab H2C')
+    expect(settings).toHaveTextContent('0.4 mm')
+    expect(settings).toHaveTextContent('0.20mm Standard @BBL H2C')
+    expect(settings).toHaveTextContent('Textured PEI Plate')
+    // Advanced still offers the print options, project and copies, but no slicer step.
+    fireEvent.click(screen.getByRole('switch', { name: 'Advanced' }))
+    expect(await screen.findByLabelText('Copies')).toBeInTheDocument()
+    expect(screen.queryByRole('group', { name: /nozzles/i })).toBeNull()
+    expect(screen.queryByRole('group', { name: /quality/i })).toBeNull()
+    expect(screen.queryByTestId('plate-preview-open')).toBeNull()
+    // Bambu Studio's own estimate stands in for a background slice, which it never gets.
+    expect(await screen.findByTestId('slice-time')).toHaveTextContent('45')
+    expect(screen.getByTestId('run-print')).toBeEnabled()
+    expect(previews.urls).toEqual([])
+  })
+
+  it('prints through the library run with the spools chosen', async () => {
+    const runs = watch('POST', '/run', '/api/v1/print/library/')
+    const { user } = renderSliced()
+    await loaded()
+    await user.click(screen.getByTestId('run-print'))
+    await waitFor(() => expect(runs.urls).toHaveLength(1))
+    expect(runs.urls[0]).toContain('/print/library/104/run')
+    expect((runs.bodies[0]?.filament_plan as { slots: unknown[] }).slots.length).toBeGreaterThan(0)
+  })
+
+  it('offers only the plates it holds G-code for, and prints the first of them', async () => {
+    server.use(
+      http.get('/api/v1/print/library/104/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: true },
+          { index: 2, has_thumbnail: true, name: 'Lid' },
+        ]),
+      ),
+      http.get('/api/v1/print/library/104/choices', () =>
+        HttpResponse.json({
+          ...choicesView,
+          sliced: {
+            printer_model: 'Bambu Lab H2C',
+            nozzle_diameters: ['0.4'],
+            plates: [{ index: 2, print_seconds: 600, weight_g: 3 }],
+          },
+        }),
+      ),
+    )
+    const runs = watch('POST', '/run', '/api/v1/print/library/')
+    const { user } = renderSliced()
+    await loaded()
+    expect(await screen.findByTestId('single-plate')).toHaveTextContent('Lid')
+    await user.click(screen.getByTestId('run-print'))
+    await waitFor(() => expect(runs.bodies).toHaveLength(1))
+    expect(runs.bodies[0]).toMatchObject({ plate_id: 2, all_plates: false })
+  })
+})
+
+describe('PrintPicker · a sliced file that does not fit is warned of, never held (#2671)', () => {
+  it('shows a nozzle or model mismatch as a warning, with Print enabled', async () => {
+    server.use(
+      http.post('/api/v1/print/library/104/check', () =>
+        HttpResponse.json({
+          errors: [],
+          warnings: [
+            {
+              kind: 'sliced-nozzle-missing',
+              slot_id: null,
+              message: 'Sliced for a 0.6 mm nozzle; 0.4 mm is mounted on H2C. Held for a manual start: swap it before you start the print.',
+            },
+            { kind: 'sliced-other-model', slot_id: null, message: 'Sliced for a Bambu Lab X1 Carbon; H2C is a Bambu Lab H2C. Held for a manual start.' },
+          ],
+          rack: null,
+        }),
+      ),
+    )
+    renderPage(
+      <PrintPicker open source={{ kind: 'library', file: { id: 104, filename: 'clip.gcode.3mf' } }} onClose={vi.fn()} onRan={vi.fn()} />,
+    )
+    await loaded()
+    expect(await screen.findByText(/Sliced for a 0\.6 mm nozzle; 0\.4 mm is mounted/)).toBeInTheDocument()
+    expect(screen.getByText(/Sliced for a Bambu Lab X1 Carbon/)).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByTestId('run-print')).toBeEnabled())
   })
 })

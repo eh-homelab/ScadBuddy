@@ -117,6 +117,26 @@ describe('GET /healthz', () => {
 })
 
 describe('/api/v1/ai/credentials', () => {
+  // #2768: the single-credential routes are deprecated; every answer says so, and the
+  // routes that replace them do not.
+  it('marks every single-credential route deprecated, naming /entries, and only those', async () => {
+    const app = createApp(deps())
+    const legacy = [
+      await app.request('/api/v1/ai/credentials', { headers: UI }),
+      await put(app, { kind: 'anthropic_api_key', secret: SECRET }),
+      await app.request('/api/v1/ai/credentials/test', { method: 'POST', headers: UI }),
+      await app.request('/api/v1/ai/credentials', { method: 'DELETE', headers: UI }),
+    ]
+    for (const res of legacy) {
+      expect(res.headers.get('deprecation'), res.url).toBe('true')
+      expect(res.headers.get('link'), res.url).toBe('</api/v1/ai/credentials/entries>; rel="successor-version"')
+    }
+    const current = await app.request('/api/v1/ai/credentials/entries', { headers: UI })
+    expect(current.status).toBe(200)
+    expect(current.headers.get('deprecation')).toBeNull()
+    expect(current.headers.get('link')).toBeNull()
+  })
+
   it('reads as unconfigured, and says whether saving is possible', async () => {
     const res = await createApp(deps({ kek: noKek })).request('/api/v1/ai/credentials', { headers: UI })
     expect(res.status).toBe(200)

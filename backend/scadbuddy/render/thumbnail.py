@@ -175,7 +175,9 @@ def _rasterise(
 def _normals(corners: np.ndarray) -> np.ndarray:
     """Each triangle's unit normal, zero for a degenerate one: what trimesh's
     ``face_normals`` gives, computed for one chunk rather than cached on the mesh,
-    where it (and the triangles it is made from) would outlive the render."""
+    where it (and the triangles it is made from) would outlive the render. From the
+    triangles' winding, never from ``face_normals`` a loaded mesh carries: the two
+    agree for the meshes ScadBuddy writes (#2853)."""
     normals, valid = trimesh.triangles.normals(corners)
     if valid.all():
         return np.asarray(normals, dtype=np.float64)

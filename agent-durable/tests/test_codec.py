@@ -26,6 +26,7 @@ from scadbuddy_durable.codec import (
     payload_key_context,
     payload_key_lock,
     seal_payload,
+    subject_of,
 )
 from scadbuddy_durable.secrets import SealError, kek_from_base64, open_bytes
 
@@ -187,3 +188,9 @@ async def test_no_key_is_made_for_a_subject_whose_forget_commits_while_the_encod
             await making
     cur = await agent_db.execute("SELECT 1 FROM ai_payload_keys WHERE subject = %s", (subject,))
     assert await cur.fetchone() is None
+
+
+def test_a_background_task_is_sealed_under_its_session() -> None:
+    sid = "0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f60"
+    assert subject_of(f"bgtask-{sid}-ab12cd34") == f"session-{sid}"
+    assert subject_of("bgtask-ab12cd34") is None

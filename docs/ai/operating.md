@@ -342,9 +342,12 @@ confirmation; a form adds one last. The list is read again just after the earlie
 cooldown ends, since the status is worked out at read time. The `curl` below is the
 fallback when there is no UI.
 
-The routes without `/entries` are the single-credential routes from #1000: they act on
-the first credential by priority, for scripts written against them. The UI no longer
-uses them; the `/entries` and `/order` routes manage every credential (#1093).
+The routes without `/entries` are the single-credential routes from #1000. They act on
+the first credential by priority, for scripts written against them. They are
+**deprecated** (#2768): the UI no longer uses them, and every answer carries
+`Deprecation: true` and a `Link` header naming `/api/v1/ai/credentials/entries` as the
+successor. The `/entries` and `/order` routes manage every credential (#1093); use them
+in anything new.
 
 | Route | Guarded | What it does |
 |---|---|---|
@@ -368,13 +371,22 @@ The no-database `503` also carries
 `"code": "no_database"` (`NO_DATABASE_CODE`), which is what the Settings section hides on;
 the not-yet-migrated one has no `code`, and the section shows it with a Retry.
 
-Example, from a loopback shell on the pod (for instance through `kubectl port-forward`):
+Example, from a loopback shell on the pod (for instance through `kubectl port-forward`).
+It reads the new entry's `id` with `jq`; where the shell has no `jq`, read `id` from
+the `POST`'s JSON answer by hand. The `POST` adds a credential every time it runs, so
+running it again leaves a duplicate: to replace an existing key, `PUT` it to
+`/api/v1/ai/credentials/entries/{id}` instead, taking its `id` from
+`GET /api/v1/ai/credentials/entries`.
 
 ```bash
-curl -sS -X PUT http://localhost:8081/api/v1/ai/credentials \
+id=$(curl -sS -X POST http://localhost:8081/api/v1/ai/credentials/entries \
+  -H 'Origin: http://localhost:8081' -H 'Content-Type: application/json' \
+  -d '{"kind":"anthropic_api_key","secret":"sk-ant-…"}' | jq -r .id)
+curl -sS -X POST "http://localhost:8081/api/v1/ai/credentials/entries/$id/test" -H 'Origin: http://localhost:8081'
+# Replacing that key later, rather than adding another:
+curl -sS -X PUT "http://localhost:8081/api/v1/ai/credentials/entries/$id" \
   -H 'Origin: http://localhost:8081' -H 'Content-Type: application/json' \
   -d '{"kind":"anthropic_api_key","secret":"sk-ant-…"}'
-curl -sS -X POST http://localhost:8081/api/v1/ai/credentials/test -H 'Origin: http://localhost:8081'
 ```
 
 This works because the loopback pair is always accepted from a loopback peer
@@ -649,8 +661,10 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   only, through the agent's loopback server (`routes/subagentMcp.ts`), since the Temporal
   plugin refuses a subagent the turn's durable tools; and of the built-ins an
   `allow_refused` package names, a durable turn does not offer the ones that work in the
-  background of a classic turn's Claude Code (`CronCreate`, `CronDelete`, `CronList`, `ScheduleWakeup`, `Monitor`, `Workflow`, `TaskStop` and `PushNotification`), and says which it left out. Every
-  other one is offered, each parked for approval (#2393, below). The worker check counts only a
+  background of a classic turn's Claude Code and are not yet provided (`Monitor`, `Workflow`
+  and `PushNotification`), and says which it left out. Every other one is offered, each
+  parked for approval (#2393, below); `CronCreate`, `CronDelete`, `CronList`,
+  `ScheduleWakeup` and `TaskStop` are the session's own in both modes (below). The worker check counts only a
   poller Temporal saw in the last 70 s (it lists one for minutes after its worker has
   gone), so an `agent-durable` that died counts for at most about that long;
   and `mcp_oidc`, the
@@ -852,7 +866,9 @@ prompt names them (`turnServers.ts` `builtinNote`, carried as the listing's `sys
 - `WebFetch` fetches through `http_request`'s exchange (every hop egress-checked and
   pinned; a cross-host redirect is returned, as Claude Code returns it; http is not
   upgraded), converts the page with turndown and asks a small model (`haiku`) about it in
-  a one-shot Claude Code query with no tools, on the session's credential;
+  a one-shot Claude Code query with no tools, on the session's credential. A classic
+  turn gets this `WebFetch` too, as `mcp__builtin__WebFetch` in place of Claude Code's
+  (#2684), its model call counted in the turn's cost;
 - `WebSearch` runs Claude Code's own WebSearch in a one-shot query that may make only the
   search asked for, and returns its result as it is;
 - `TaskCreate`, `TaskGet`, `TaskList` and `TaskUpdate` keep the task list in the
@@ -864,9 +880,26 @@ The one-shot queries' cost is added to the session's `cost_usd`, which its budge
 as a classic turn counts Claude Code's own calls. The inputs are Claude Code's own
 (`src/builtins/schemas.json`, checked against the bundled binary by
 `test/builtins.sdk.test.ts`; `UPDATE_BUILTIN_SCHEMAS=1` rewrites it after a bump) and the
-answers its wording, measured in a classic turn on Claude Code 2.1.296. `CronCreate`, `CronDelete`, `CronList`, `ScheduleWakeup`, `Monitor`, `Workflow`, `TaskStop` and `PushNotification` work in the
-background of a classic turn's one Claude Code process and end with it; a durable turn is
-many processes, so they are not offered, and the session says so. The
+answers its wording, measured in a classic turn on Claude Code 2.1.296.
+
+`CronCreate`, `CronDelete`, `CronList`, `ScheduleWakeup` and `TaskStop` are kept by the
+session, in both modes (`agent/src/background/`). Claude Code keeps its own jobs in its
+process ("Session-only (not written to disk, dies when Claude exits)"), which a turn
+ends, so a classic turn gets these in place of its own too (`mcp__builtin__<Name>`, the
+`builtin` in-process server, `sessions/manager.ts`). Each task is a row of
+`ai_background_tasks` and a `BackgroundTask` workflow `bgtask-<id>` on `agent-tools`
+(`temporal/backgroundTask.ts`), which carries only the id: when the task is due it sends
+the prompt as the session's next message, as the one who made it and only while they
+still own the session, once the session is idle (asked again every 30 s; a cron
+occurrence is given up after an hour busy). Bounds: 10 active tasks per session;
+recurring cron jobs expire after 7 days, as Claude Code's; one wakeup at a time, clamped
+to [60, 3600] s. Cron times are in the agent's timezone (`TZ`, UTC unless the
+deployment sets one), which every answer names. The panel lists a session's running tasks
+above the conversation and its owner cancels them (`routes/backgroundTasks.ts`). A
+task's workflow is `bgtask-<session id>-<task id>`, which both payload codecs seal under
+the session's data key; archiving the chat or marking it done ends its tasks, and
+`forgetSubject` ends them and terminates their workflows before it deletes the key.
+`Monitor`, `Workflow` and `PushNotification` are not provided yet, and the session says so. The
 Temporal plugin owns the engine's settings, so a durable turn cannot set
 `disableSkillShellExecution`, and skill shell injection follows Claude Code's default
 there. Only an allowed package can carry one (`vet.ts` refuses it everywhere else), and

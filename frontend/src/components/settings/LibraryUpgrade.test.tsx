@@ -9,7 +9,9 @@ import {
   SLOW_REF,
   UNCHECKED_REF,
   setMockLibraryPin,
+  setMockUnusedCheckouts,
 } from '../../mocks/features/libraryUpgrade'
+import { printRunPoll } from '../../api/client'
 import { mockModels, problem, replaceMockModel, setMockInvalidLibraries } from '../../mocks/handlers'
 import { emitRealtime } from '../../mocks/realtime'
 import { server } from '../../mocks/server'
@@ -22,14 +24,17 @@ const OLD = { name: 'BOSL2', url: URL_, ref: 'v2.0.700', commit: 'a1b2c3d4'.repe
 /** Every request the flow sends to a library route, in order. */
 function recorded() {
   const calls: { method: string; path: string; body: unknown }[] = []
-  server.events.on('request:start', ({ request }) => {
+  const record = ({ request }: { request: Request }) => {
     const path = new URL(request.url).pathname
     if (request.method === 'GET' || !path.includes('/libraries/')) return
     void request
       .clone()
       .json()
       .then((body: unknown) => calls.push({ method: request.method, path, body }))
-  })
+  }
+  server.events.on('request:start', record)
+  // Left on, it reads every later test's library writes too, a body-less DELETE included.
+  onTestFinished(() => server.events.removeListener('request:start', record))
   return calls
 }
 
@@ -393,5 +398,90 @@ describe('LibraryUpgrade', () => {
     expect(within(builtin).queryByRole('checkbox')).toBeNull()
     await user.click(within(builtin).getByRole('button', { name: 'Check' }))
     expect(await within(builtin).findByTestId('library-check')).toHaveTextContent('Parses at v2.0.761')
+  })
+
+  // #2770: a checkout no live pin reads can be removed; a pinned one is not offered.
+  it('lists the checkouts no model uses, and removes one by its commit', async () => {
+    const stale = { name: 'BOSL2', commit: 'deadbeef'.repeat(5), used_by: [] }
+    setMockUnusedCheckouts([stale])
+    const sent: string[] = []
+    const record = ({ request }: { request: Request }) => {
+      if (request.method === 'DELETE') sent.push(new URL(request.url).pathname + new URL(request.url).search)
+    }
+    server.events.on('request:start', record)
+    onTestFinished(() => server.events.removeListener('request:start', record))
+    const { user } = renderPage(<LibraryUpgrade />)
+    const list = await screen.findByRole('list', { name: 'Checkouts no model uses' })
+    expect(within(list).getAllByRole('listitem').map((item) => item.getAttribute('aria-label'))).toEqual(['BOSL2 deadbee'])
+    await user.click(within(list).getByRole('button', { name: 'Remove BOSL2 deadbee' }))
+    await waitFor(() => expect(screen.queryByRole('list', { name: 'Checkouts no model uses' })).toBeNull())
+    expect(sent).toEqual([`/api/v1/libraries/BOSL2?commit=${stale.commit}`])
+  })
+
+  it('follows a removal answered 202 through its operation to the end', async () => {
+    const poll = printRunPoll.intervalMs
+    printRunPoll.intervalMs = 1
+    onTestFinished(() => {
+      printRunPoll.intervalMs = poll
+    })
+    setMockUnusedCheckouts([{ name: 'BOSL2', commit: 'deadbeef'.repeat(5), used_by: [] }])
+    const op = { id: 'op-remove', kind: 'library_remove', status: 'running', created_at: '2026-10-14T00:00:00Z' }
+    let reads = 0
+    server.use(
+      http.delete('/api/v1/libraries/:name', () => HttpResponse.json(op, { status: 202 })),
+      http.get('/api/v1/operations/op-remove', () => {
+        reads += 1
+        if (reads < 2) return HttpResponse.json(op)
+        setMockUnusedCheckouts([])
+        return HttpResponse.json({ ...op, status: 'succeeded', result: null })
+      }),
+    )
+    const { user } = renderPage(<LibraryUpgrade />)
+    const list = await screen.findByRole('list', { name: 'Checkouts no model uses' })
+    await user.click(within(list).getByRole('button', { name: 'Remove BOSL2 deadbee' }))
+    await waitFor(() => expect(screen.queryByRole('list', { name: 'Checkouts no model uses' })).toBeNull())
+    expect(reads).toBe(2)
+  })
+
+  // The reload after a removal re-lists the rows from scratch: a refusal shown beside
+  // another row is not kept next to a row that may now be removable.
+  it("drops another row's refusal once a removal goes through", async () => {
+    const [a, b] = ['deadbeef', 'feedface'].map((c) => ({ name: 'BOSL2', commit: c.repeat(5), used_by: [] }))
+    setMockUnusedCheckouts([a!, b!])
+    server.use(
+      http.delete('/api/v1/libraries/:name', ({ request }) => {
+        if (new URL(request.url).searchParams.get('commit') === a!.commit) {
+          return problem(409, 'Conflict', 'a running render reads BOSL2 deadbeef: job j1')
+        }
+        setMockUnusedCheckouts([a!])
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    const { user } = renderPage(<LibraryUpgrade />)
+    const list = await screen.findByRole('list', { name: 'Checkouts no model uses' })
+    await user.click(within(list).getByRole('button', { name: 'Remove BOSL2 deadbee' }))
+    expect(await within(list).findByRole('alert')).toHaveTextContent('a running render reads BOSL2 deadbeef')
+    await user.click(within(list).getByRole('button', { name: 'Remove BOSL2 feedfac' }))
+    // The reload shows its loading state first, which has no list at all: wait for the
+    // re-listed rows, not merely for the removed one to be gone.
+    await waitFor(() => {
+      const left = screen.getByRole('list', { name: 'Checkouts no model uses' })
+      expect(within(left).getAllByRole('listitem').map((item) => item.getAttribute('aria-label'))).toEqual([
+        'BOSL2 deadbee',
+      ])
+    })
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it("says why a removal was refused, and keeps the row", async () => {
+    setMockUnusedCheckouts([{ name: 'BOSL2', commit: 'deadbeef'.repeat(5), used_by: [] }])
+    server.use(
+      http.delete('/api/v1/libraries/:name', () => problem(409, 'Conflict', 'a running render reads BOSL2 deadbeef: job j1')),
+    )
+    const { user } = renderPage(<LibraryUpgrade />)
+    const list = await screen.findByRole('list', { name: 'Checkouts no model uses' })
+    await user.click(within(list).getByRole('button', { name: 'Remove BOSL2 deadbee' }))
+    expect(await within(list).findByRole('alert')).toHaveTextContent('a running render reads BOSL2 deadbeef: job j1')
+    expect(within(list).getByRole('listitem', { name: 'BOSL2 deadbee' })).toBeInTheDocument()
   })
 })

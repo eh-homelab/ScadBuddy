@@ -1,4 +1,4 @@
-import type { Context, Hono } from 'hono'
+import type { Context, Hono, MiddlewareHandler } from 'hono'
 import { z } from 'zod'
 import {
   type Credential,
@@ -28,10 +28,12 @@ import { ready, type RouteModule } from './module.js'
 // Two sets of routes over the same rows:
 //
 //   GET|PUT|DELETE /api/v1/ai/credentials, POST /api/v1/ai/credentials/test
-//     The single-credential routes #255 began with, kept for Settings as it is
-//     (#1000). They act on the FIRST credential by priority: PUT saves over it
-//     (creating one when there is none), DELETE removes it (so the next one
-//     moves up), test tests it.
+//     DEPRECATED (#2768): the single-credential routes #255 began with. Settings
+//     no longer calls them (it uses the routes below); they are kept for scripts
+//     written against them and answer with a `Deprecation` header (RFC 9745)
+//     naming `/entries` as the successor. They act on the FIRST credential by
+//     priority: PUT saves over it (creating one when there is none), DELETE
+//     removes it (so the next one moves up), test tests it.
 //
 //   /api/v1/ai/credentials/entries[/:id[/test|/reset]], /api/v1/ai/credentials/order
 //     Every credential (#1093): list, create, save, delete, test, reset, and
@@ -247,6 +249,14 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
   const limit = jsonBodyLimit(BODY_MAX)
 
   // --- The single-credential routes (#255): the first credential by priority.
+  // Deprecated (#2768): each answer says so, and names the routes that replace them.
+  const deprecated: MiddlewareHandler = async (c, next) => {
+    await next()
+    c.header('Deprecation', 'true')
+    c.header('Link', `<${entries}>; rel="successor-version"`)
+  }
+  app.on(['GET', 'PUT', 'DELETE'], base, deprecated)
+  app.post(`${base}/test`, deprecated)
 
   app.get(base, (c) => withStore(c, async (repo) => c.json(view(await repo.get(), kek))))
 

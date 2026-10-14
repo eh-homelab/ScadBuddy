@@ -80,6 +80,27 @@ describe('RemotePluginsPanel', () => {
     expect(await within(card).findByText('Enabled')).toBeInTheDocument()
   })
 
+  it('folds the tool review to its line once the tiers are saved, and opens it again (#2172)', async () => {
+    const { user } = renderPage(<RemotePluginsPanel />)
+    const card = await screen.findByRole('listitem', { name: 'Plugin endpoint hindsight' })
+    await user.click(within(card).getByRole('button', { name: 'Test connection' }))
+    const fold = await within(card).findByRole('button', { name: /connected; 3 tools/ })
+    expect(fold).toHaveAttribute('aria-expanded', 'true')
+    await user.selectOptions(within(card).getByLabelText('Tier of retain'), 'write')
+
+    // Folded by hand, an unsaved change is kept.
+    await user.click(fold)
+    expect(within(card).getByLabelText('Tier of retain')).not.toBeVisible()
+    await user.click(fold)
+    expect(within(card).getByLabelText('Tier of retain')).toHaveValue('write')
+
+    await user.click(within(card).getByRole('button', { name: 'Save tool settings' }))
+    await waitFor(() => expect(fold).toHaveAttribute('aria-expanded', 'false'))
+    expect(within(card).queryByRole('button', { name: 'Save tool settings' })).not.toBeInTheDocument()
+    await user.click(fold)
+    expect(within(card).getByRole('button', { name: 'Save tool settings' })).toBeInTheDocument()
+  })
+
   it('removes an endpoint after confirming', async () => {
     const { user } = renderPage(<RemotePluginsPanel />)
     const card = await screen.findByRole('listitem', { name: 'Plugin endpoint hindsight' })

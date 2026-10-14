@@ -38,6 +38,8 @@ type ChoicesView struct {
 	processes ChoicesView_processesable
 	// The rack_algorithm property
 	rack_algorithm *ChoicesView_rack_algorithm
+	// The sliced property
+	sliced SlicedProfileable
 	// The tiers property
 	tiers ChoicesView_tiersable
 }
@@ -451,6 +453,16 @@ func (m *ChoicesView) GetFieldDeserializers() map[string]func(i878a80d2330e89d26
 		}
 		return nil
 	}
+	res["sliced"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreateSlicedProfileFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetSliced(val.(SlicedProfileable))
+		}
+		return nil
+	}
 	res["tiers"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetObjectValue(CreateChoicesView_tiersFromDiscriminatorValue)
 		if err != nil {
@@ -522,6 +534,12 @@ func (m *ChoicesView) GetProcesses() ChoicesView_processesable {
 // returns a *ChoicesView_rack_algorithm when successful
 func (m *ChoicesView) GetRackAlgorithm() *ChoicesView_rack_algorithm {
 	return m.rack_algorithm
+}
+
+// GetSliced gets the sliced property value. The sliced property
+// returns a SlicedProfileable when successful
+func (m *ChoicesView) GetSliced() SlicedProfileable {
+	return m.sliced
 }
 
 // GetTiers gets the tiers property value. The tiers property
@@ -636,6 +654,12 @@ func (m *ChoicesView) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6
 		}
 	}
 	{
+		err := writer.WriteObjectValue("sliced", m.GetSliced())
+		if err != nil {
+			return err
+		}
+	}
+	{
 		err := writer.WriteObjectValue("tiers", m.GetTiers())
 		if err != nil {
 			return err
@@ -725,6 +749,11 @@ func (m *ChoicesView) SetRackAlgorithm(value *ChoicesView_rack_algorithm) {
 	m.rack_algorithm = value
 }
 
+// SetSliced sets the sliced property value. The sliced property
+func (m *ChoicesView) SetSliced(value SlicedProfileable) {
+	m.sliced = value
+}
+
 // SetTiers sets the tiers property value. The tiers property
 func (m *ChoicesView) SetTiers(value ChoicesView_tiersable) {
 	m.tiers = value
@@ -747,6 +776,7 @@ type ChoicesViewable interface {
 	GetPrinters() []Printerable
 	GetProcesses() ChoicesView_processesable
 	GetRackAlgorithm() *ChoicesView_rack_algorithm
+	GetSliced() SlicedProfileable
 	GetTiers() ChoicesView_tiersable
 	SetBedType(value *string)
 	SetBedTypeLabels(value ChoicesView_bed_type_labelsable)
@@ -762,5 +792,6 @@ type ChoicesViewable interface {
 	SetPrinters(value []Printerable)
 	SetProcesses(value ChoicesView_processesable)
 	SetRackAlgorithm(value *ChoicesView_rack_algorithm)
+	SetSliced(value SlicedProfileable)
 	SetTiers(value ChoicesView_tiersable)
 }

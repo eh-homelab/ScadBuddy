@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { createContext, useCallback, useEffect, useRef, useState } from 'react'
 import { z } from 'zod'
 import { isDoneSummary, PendingInputSchema } from './chat/protocol'
 
@@ -36,6 +36,8 @@ export interface PendingCounts {
    * `summaries` is a lower bound; undefined when the agent does not say (an older agent).
    */
   summariesTruncated?: boolean
+  /** #2482 — the browser-started runs whose own calls wait for you (`RunsWaitingContext`). */
+  runs?: RunWaiting[]
 }
 
 /** What waits on the user: everything but the done summaries. */
@@ -89,6 +91,36 @@ async function withDeadline<T>(run: (signal: AbortSignal) => Promise<T | null>, 
   }
 }
 
+/** #2482 — a flow run with calls waiting for the person, and how many: what the badge counts for it. */
+export interface RunWaiting {
+  id: string
+  name: string
+  waiting: number
+}
+
+/**
+ * #2482 — the flow runs started from the browser whose own calls wait for you, from the
+ * badge's one read: the panel lists them (`RunsWaiting`), since such a run has no session
+ * to list them under. A run a session started is listed under that session's runs
+ * (`SessionFlowRuns`). Null outside the shell, or before the agent answered.
+ */
+export const RunsWaitingContext = createContext<readonly RunWaiting[] | null>(null)
+
+/** The browser-started runs with calls waiting for you, as `read` counts them. */
+function runsWaiting(entries: readonly PendingEntry[]): RunWaiting[] {
+  const runs = new Map<string, RunWaiting>()
+  for (const entry of entries) {
+    const run = entry.run
+    if (entry.expiring || !run?.id || run.hop === 'parent' || run.starter_session) continue
+    const seen = runs.get(run.id) ?? { id: run.id, name: run.name ?? run.id, waiting: 0 }
+    seen.waiting += 1
+    runs.set(run.id, seen)
+  }
+  return [...runs.values()]
+}
+
+type PendingEntry = z.infer<typeof PendingInputSchema>['entries'][number]
+
 async function read(signal: AbortSignal): Promise<PendingCounts | null> {
   try {
     const response = await fetch(ATTENTION_PATH, { headers: { Accept: 'application/json' }, cache: 'no-store', signal })
@@ -98,6 +130,8 @@ async function read(signal: AbortSignal): Promise<PendingCounts | null> {
     const counts: PendingCounts = { approvals: 0, questions: 0, attention: 0, summaries: 0 }
     for (const entry of parsed.data.entries) {
       if (entry.expiring) continue
+      // #2482: a flow run's call still with the session that started it (spec 2026-10-11 §4.5).
+      if (entry.run?.hop === 'parent') continue
       // An approval is the call's decision; an answer is a question, or an attention request when it says so
       // (a summary when its reason is `done`).
       if (entry.kind === 'approval') counts.approvals += 1
@@ -106,6 +140,8 @@ async function read(signal: AbortSignal): Promise<PendingCounts | null> {
       else counts.attention += 1
     }
     if (parsed.data.summaries_truncated !== undefined) counts.summariesTruncated = parsed.data.summaries_truncated
+    const runs = runsWaiting(parsed.data.entries)
+    if (runs.length > 0) counts.runs = runs
     return counts
   } catch {
     return null
@@ -224,27 +260,15 @@ export function attentionDetail(c: PendingCounts | null): string {
 }
 
 /**
- * Puts the waiting count in front of the tab title (`(2) ScadBuddy`), so a background
- * tab shows it in the tab strip, and restores the title it found at zero. The title is
- * remembered rather than parsed back, so a page title that happens to start with
- * `(n) ` is never mistaken for this prefix. Off when embedded: inside Bambuddy's frame
- * the tab shows Bambuddy's title, and the frame's own is seen by nobody.
+ * The tab title: the page's own `title` (#2454, `usePageTitle`), with the waiting count
+ * in front of it (`(2) Library · ScadBuddy`), so a background tab shows it in the tab
+ * strip. Never prefixed when off, as embedded: inside Bambuddy's frame the tab shows
+ * Bambuddy's title, and the frame's own is seen by nobody. On unmount it leaves the
+ * last title it set, deliberately: AppShell, the root, is its only caller, and the next
+ * page's title replaces it.
  */
-export function useAttentionTitle(waiting: number | null, enabled: boolean): void {
-  const bare = useRef<string | null>(null)
+export function useAttentionTitle(waiting: number | null, enabled: boolean, title: string): void {
   useEffect(() => {
-    if (enabled && waiting !== null && waiting > 0) {
-      bare.current ??= document.title
-      document.title = `(${attentionCount(waiting)}) ${bare.current}`
-    } else if (bare.current !== null) {
-      document.title = bare.current
-      bare.current = null
-    }
-  }, [waiting, enabled])
-  useEffect(
-    () => () => {
-      if (bare.current !== null) document.title = bare.current
-    },
-    [],
-  )
+    document.title = enabled && waiting !== null && waiting > 0 ? `(${attentionCount(waiting)}) ${title}` : title
+  }, [waiting, enabled, title])
 }

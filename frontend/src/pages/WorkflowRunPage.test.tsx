@@ -10,11 +10,15 @@ import {
   setFlowRunImages,
   setFlowRunOffline,
   setFlowRunStarting,
+  childEntries,
+  setFlowRunChildren,
 } from '../mocks/features/flows'
 import { mockSettings, setMockSettings } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { WorkflowRunPage } from './WorkflowRunPage'
+import { ATTENTION_POLL_MS } from '../agent/attention'
+import { STALE_ENTRY_MESSAGE } from '../lib/flows'
 
 // #1057 — one flow run (plan 2026-10-09 Task F1): its steps, and its answers and
 // approvals, sent through `command()` with an Idempotency-Key.
@@ -156,6 +160,77 @@ describe('WorkflowRunPage', () => {
       expect.stringMatching(/^narrow by .* \(at the starting session\)$/),
       expect.stringMatching(/^pass up by .* \(at the person\)$/),
     ])
+  })
+
+  // #2482 — the run's one queue: a child session's call is in it too (spec 2026-10-11 §4.5).
+  it("shows a child session's call with its step, where it waits, why, and the session's own words", async () => {
+    render('run-escalated')
+    const card = await screen.findByRole('region', { name: 'Waiting for approval: print_output' })
+    expect(card).toHaveTextContent('print box on printer 5')
+    expect(card).toHaveTextContent('From a session the run talks to, at step 3 (ask_session)')
+    expect(card).toHaveTextContent('Outside the grant: printer 5 is not in the grant')
+    expect(within(card).getByRole('list', { name: 'Its way here' })).toHaveTextContent('pass up by the starting session')
+    const words = within(card).getByRole('figure', { name: 'What the session wrote before the call' })
+    expect(words).toHaveTextContent("These are the model's words, not ScadBuddy's")
+    expect(words).toHaveTextContent('Printer 5 is idle, so I will print the box there.')
+  })
+
+  it("decides a child session's call through the agent, and keeps that decision for the person", async () => {
+    const sent: { id: string; body: unknown }[] = []
+    server.use(
+      http.post('/api/v1/ai/pending-input/:id', async ({ params, request }) => {
+        sent.push({ id: String(params['id']), body: await request.json() })
+        return HttpResponse.json({ id: params['id'], kind: 'approval', outcome: 'denied' })
+      }),
+    )
+    const { user } = render('run-escalated')
+    const card = await screen.findByRole('region', { name: 'Waiting for approval: print_output' })
+    const deny = within(card).getByRole('button', { name: 'Deny' })
+    expect(deny.closest('[data-agent-user-only]')).not.toBeNull()
+    await user.click(deny)
+    await waitFor(() => expect(sent).toHaveLength(1))
+    expect(sent[0]).toEqual({ id: 'durable:sess-child:wr-child:toolu_1', body: { kind: 'approval', decision: 'deny' } })
+  })
+
+  it("says a child's call already decided is out of date, not the agent's raw refusal", async () => {
+    server.use(
+      http.post('/api/v1/ai/pending-input/:id', () =>
+        HttpResponse.json({ detail: 'durable:sess-child is no longer waiting', reason: 'it was already approved' }, { status: 409 }),
+      ),
+    )
+    const { user } = render('run-escalated')
+    const card = await screen.findByRole('region', { name: 'Waiting for approval: print_output' })
+    await user.click(within(card).getByRole('button', { name: 'Deny' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(STALE_ENTRY_MESSAGE)
+  })
+
+  it("re-reads the queue while a child's call shows, which no run topic announces", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      render('run-escalated')
+      await screen.findByRole('region', { name: 'Waiting for approval: print_output' })
+      setFlowRunChildren('run-escalated', [])
+      await act(() => vi.advanceTimersByTimeAsync(ATTENTION_POLL_MS))
+      await waitFor(() => expect(screen.queryByRole('region', { name: 'Waiting for approval: print_output' })).toBeNull())
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("offers no decision on a child's call past its timer", async () => {
+    const [entry] = childEntries('run-escalated')
+    setFlowRunChildren('run-escalated', [{ ...entry!, expiring: true }])
+    render('run-escalated')
+    const card = await screen.findByRole('region', { name: 'Waiting for approval: print_output' })
+    expect(card).toHaveTextContent('Its time is up: ScadBuddy is closing it.')
+    expect(within(card).queryByRole('button', { name: 'Approve' })).toBeNull()
+    expect(within(card).queryByRole('button', { name: 'Deny' })).toBeNull()
+  })
+
+  it("names the step of the run's own call", async () => {
+    render('run-escalated')
+    const card = await screen.findByRole('region', { name: 'Waiting for approval: queue_print' })
+    expect(card).toHaveTextContent('Step 1 (queue_print)')
   })
 
   it('keeps the approval of every outward call for the person', async () => {

@@ -657,7 +657,7 @@ func TestReadingAFileBeingCreated(t *testing.T) {
 	}
 	lib.locked(func() {
 		if lib.uploads != 1 || lib.downloads != 0 || string(lib.data[101]) != "abc" {
-			t.Fatalf("uploads %d downloads %d data %q", lib.uploads, lib.downloads, lib.data)
+			t.Fatalf("uploads %d downloads %d data %v", lib.uploads, lib.downloads, lib.data)
 		}
 	})
 }
@@ -691,7 +691,7 @@ func TestTwoHandlesOnANewFileShareOneWrite(t *testing.T) {
 	waitRelease(t, released)
 	lib.locked(func() {
 		if lib.uploads != 1 || len(lib.files) != 1 || string(lib.data[101]) != "abcXYZ" {
-			t.Fatalf("uploads %d files %v data %q", lib.uploads, lib.files, lib.data)
+			t.Fatalf("uploads %d files %v data %v", lib.uploads, lib.files, lib.data)
 		}
 	})
 }
@@ -726,7 +726,7 @@ func TestTwoHandlesOnAStoredFileReplaceItOnce(t *testing.T) {
 	waitRelease(t, released)
 	lib.locked(func() {
 		if lib.uploads != 1 || !lib.deleted[10] || len(lib.files) != 1 || string(lib.data[101]) != "JEllo" {
-			t.Fatalf("uploads %d files %v data %q", lib.uploads, lib.files, lib.data)
+			t.Fatalf("uploads %d files %v data %v", lib.uploads, lib.files, lib.data)
 		}
 	})
 }
@@ -745,7 +745,7 @@ func TestARefusedUploadIsRetriedOnRelease(t *testing.T) {
 	waitRelease(t, released)
 	lib.locked(func() {
 		if lib.uploads != 1 || string(lib.data[101]) != "abc" {
-			t.Fatalf("uploads %d data %q", lib.uploads, lib.data)
+			t.Fatalf("uploads %d data %v", lib.uploads, lib.data)
 		}
 	})
 }
@@ -911,7 +911,7 @@ func TestAHandleOpenedDuringTheLastRetryKeepsTheWrite(t *testing.T) {
 		err := f.Close()
 		lib.locked(func() {
 			if fails == 2 && (err != nil || lib.uploads != 1 || string(lib.data[101]) != "abcXYZ") {
-				t.Fatalf("recovered: close %v uploads %d data %q", err, lib.uploads, lib.data)
+				t.Fatalf("recovered: close %v uploads %d data %v", err, lib.uploads, lib.data)
 			}
 			if fails == 4 && (!errors.Is(err, syscall.EFBIG) || lib.uploads != 0) {
 				t.Fatalf("still failing: close %v uploads %d", err, lib.uploads)

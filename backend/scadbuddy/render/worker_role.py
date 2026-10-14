@@ -43,6 +43,9 @@ RENDER_GRANTS: Mapping[str, tuple[str, ...]] = {
     # `activity/index.py` `upsert_in`; ON CONFLICT and RETURNING principal read it).
     # Only `render:` rows: `RENDER_ROWS` holds the role to them.
     "activity": ("SELECT", "INSERT", "UPDATE"),
+    # A finished piece's geometry (`store/geometry.py`): read before rendering, written
+    # by `finish_piece`, and forgotten when the piece it names is gone.
+    "piece_geometry": ("SELECT", "INSERT", "UPDATE", "DELETE"),
     # The blob index (`store/index.py`): get, put, touch, and `forget` of a row whose
     # object is gone.
     "store_blobs": ("SELECT", "INSERT", "UPDATE", "DELETE"),

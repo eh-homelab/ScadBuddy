@@ -48,6 +48,18 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: 'A run grant is approved by the browser user only (amendment §3.2); the route refuses an agent-authored request.',
   },
   {
+    operation: 'POST /api/v1/flow-triggers/{trigger_id}/grant/approve',
+    reason:
+      "A trigger's standing grant is approved by the browser user only (amendment §12.4); the route refuses an " +
+      'agent-authored request.',
+  },
+  {
+    operation: 'POST /api/v1/flow-triggers/{trigger_id}/grant/decline',
+    reason:
+      "A trigger's standing grant is approved by the browser user only (amendment §12.4); the route refuses an " +
+      'agent-authored request.',
+  },
+  {
     operation: 'GET /api/v1/workflow-runs/{run_id}/proposals/{call_id}',
     reason:
       "A parent's narrowing beside the call it narrows, for the person to compare before approving it by " +
@@ -219,6 +231,21 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
         'elsewhere until it names the project; get_remembered_choices lists them as `model_projects`.',
     }),
   ),
+  ...(
+    [
+      'POST /api/v1/prints/{archive_id}/attachments',
+      'PATCH /api/v1/prints/{archive_id}/attachments/{attachment_id}',
+      'DELETE /api/v1/prints/{archive_id}/attachments/{attachment_id}',
+      'POST /api/v1/prints/{archive_id}/attachments/{attachment_id}/promote',
+      'GET /api/v1/prints/{archive_id}/attachments/{attachment_id}/file',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      "A print's own photos and videos of the finished object (#309): taken with the person's camera " +
+      'and added on the print detail page, which the agent has no file of; get_print lists them under ' +
+      '`media.attachments`. Captioning, removing and promoting them land UI-first with the upload.',
+  })),
   {
     operation: 'PUT /api/v1/print/printers/{printer_id}/rack-algorithm',
     reason:
@@ -259,6 +286,12 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "to the print dialog's question; an agent cannot see which spool is physically in the tray.",
   },
   {
+    operation: 'GET /api/v1/print/printers/{printer_id}/camera/stream',
+    reason:
+      "The Prints page's live camera view (#981): an MJPEG stream that never ends, for an <img>. An agent " +
+      'reads the camera a frame at a time through get_printer_camera.',
+  },
+  {
     operation: 'GET /api/v1/print/printers/{printer_id}/rack-usage',
     reason:
       "Settings' Hotend usage table (#1298). An agent already sees each rack position's prints, " +
@@ -292,6 +325,12 @@ export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: str
     reason:
       'Browser-only for `answer` kinds (only the user answers a question); an `approval` is decided through ' +
       'sessions_approve / sessions_deny, which take every approval id, durable ones included.',
+  },
+  {
+    route: 'GET /api/v1/ai/flow-runs/{id}/queue',
+    reason:
+      "A flow run's queue is the person's (spec 2026-10-11 §4.2): no grant decides it. The starter session " +
+      'is sent the calls waiting for it in an escalation turn and answers with escalation_respond.',
   },
   {
     route: 'GET /api/v1/ai/settings/session-mode',
