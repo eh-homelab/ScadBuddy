@@ -1376,3 +1376,19 @@ def test_every_queue_has_a_service_name() -> None:
     """#2894: a queue added without a ``service.name`` would fail the worker at start
     with a bare KeyError; here it fails in CI instead."""
     assert set(worker_module.SERVICE_NAMES) == set(get_args(worker_module.Queue))
+
+
+def test_a_queue_without_a_service_name_stops_the_worker_saying_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3020 review: an explicit exit, not an assert python -O would strip."""
+    monkeypatch.setattr(worker_module, "parse_queue", lambda: "unnamed")
+    monkeypatch.setattr(worker_module, "configure_logging", lambda level: None)
+    monkeypatch.setattr(
+        worker_module,
+        "Settings",
+        lambda: SimpleNamespace(log_level="INFO", version="", revision=""),
+    )
+
+    with pytest.raises(SystemExit, match="queue 'unnamed' has no service name"):
+        worker_module.main()

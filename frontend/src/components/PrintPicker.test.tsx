@@ -861,7 +861,7 @@ describe('PrintPicker', () => {
         await waitFor(() =>
           expect(
             tracing.exporter.getFinishedSpans().find((s) => s.name === 'arrange')?.attributes['scadbuddy.outcome'],
-          ).toBe('rerender_failed'),
+          ).toBe('nothing_arranged'),
         )
       } finally {
         tracing.uninstall()
