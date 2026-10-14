@@ -3852,6 +3852,16 @@ describe('PrintPicker · Slicer defaults from the template (#1294)', () => {
     expect(within(list).queryByText('brim_width')).toBeNull()
   })
 
+  it('names the support angle in degrees and the build-plate-only switch (#1899)', async () => {
+    renderPicker({ printSettings: { support_threshold_angle: '25', support_on_build_plate_only: '1' } })
+    await loaded()
+    await showAdvanced()
+    const list = screen.getByRole('region', { name: 'Slicer defaults from this template' })
+    expect(within(list).getByText('Support threshold angle').nextElementSibling).toHaveTextContent(/^25°$/)
+    expect(within(list).getByText('Supports on the build plate only').nextElementSibling).toHaveTextContent(/^On$/)
+    expect(within(list).queryByText('support_threshold_angle')).toBeNull()
+  })
+
   // #2112: a sequence picked in the step above replaces the template's, so the list says so.
   it("marks the template's print sequence overridden once one is picked above", async () => {
     const { user } = renderPicker({ printSettings: { print_sequence: 'by layer' } })

@@ -32,6 +32,7 @@ from scadbuddy.render.provenance import (
     read,
     source_version,
     stamp,
+    with_print_settings,
 )
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.render.split import ColourPart
@@ -507,6 +508,20 @@ def test_print_settings_are_stamped_as_edits_to_the_system_process(written: Path
     added = {"enable_prime_tower", "wipe_tower_no_sparse_layers", "different_settings_to_system"}
     assert {key: value for key, value in settings.items() if key not in added} == before
     assert read(written) == PROVENANCE
+
+
+def test_a_print_setting_takes_the_shape_the_project_stores_it_in() -> None:
+    """A key kept per extruder variant stays a list of that length; others stay scalars."""
+    project = json.dumps(
+        {"support_threshold_angle": ["30", "30"], "enable_support": "0", "filament_settings_id": []}
+    ).encode()
+
+    settings = json.loads(
+        with_print_settings(project, {"support_threshold_angle": "25", "enable_support": "1"})
+    )
+
+    assert settings["support_threshold_angle"] == ["25", "25"]
+    assert settings["enable_support"] == "1"
 
 
 def test_print_settings_change_no_other_part(written: Path) -> None:

@@ -16,7 +16,7 @@ const LABELS: Record<string, string> = {
   enable_support: 'Supports',
   support_type: 'Support type',
   support_threshold_angle: 'Support threshold angle',
-  support_on_build_plate_only: 'Supports on build plate only',
+  support_on_build_plate_only: 'Supports on the build plate only',
   brim_width: 'Brim width',
   brim_type: 'Brim',
   print_sequence: 'Print sequence',
@@ -25,6 +25,9 @@ const LABELS: Record<string, string> = {
 /** Keys whose value is a length in millimetres. */
 const MILLIMETRES = new Set(['brim_width'])
 
+/** Keys whose value is an angle in degrees. */
+const DEGREES = new Set(['support_threshold_angle'])
+
 /** Keys whose value is Bambu's `0` / `1` switch. */
 const SWITCHES = new Set([
   'enable_prime_tower',
@@ -32,9 +35,6 @@ const SWITCHES = new Set([
   'enable_support',
   'support_on_build_plate_only',
 ])
-
-/** Keys whose value is an angle in degrees (#1899). */
-const DEGREES = new Set(['support_threshold_angle'])
 
 function valueOf(key: string, value: string): string {
   if (SWITCHES.has(key) && (value === '0' || value === '1')) return value === '1' ? 'On' : 'Off'
