@@ -572,7 +572,11 @@ async def test_only_the_budgets_own_failure_ends_a_turn_as_the_budgets(
         await send(handle, f"fail: {error}")
         await settled(connect, sid)
     log = await events(agent_db, sid)
-    assert [e["code"] for e in log if e["type"] == "error"] == [code]
+    errors = [e for e in log if e["type"] == "error"]
+    assert [e["code"] for e in errors] == [code]
+    if code == "turn_failed":
+        # The session's own text survives in the failure, quote and all (#3568).
+        assert error in errors[0]["message"]
 
 
 async def test_a_send_while_a_turn_is_finishing_is_refused_busy(
