@@ -220,7 +220,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
    * keeps the key, so a save that did start is followed rather than made twice; any
    * change to the arrange is a new press with a new key.
    */
-  const attempt = useRef<{ key: string; body: string; arranged?: ArrangedJob } | null>(null)
+  const attempt = useRef<{ key: string; arrangeKey: string; body: string; arranged?: ArrangedJob } | null>(null)
   /** Whether the last failure is worth trying again as it is (not a refusal of the request). */
   const [retryable, setRetryable] = useState(false)
 
@@ -398,17 +398,21 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
             slug,
           }
           // Keyed by what the user chose, not by the generated name: that changes once the
-          // model list answers, and a "Try again" must keep its save key (#2749 review).
-          // The server joins a key to the save it already started (`run_operation`), so
-          // if the first attempt did start, its name, generated or blank, is the one kept.
+          // model list answers, and a "Try again" must keep its keys (#2749 review). The
+          // server joins a key to the start or save it already began (`run_operation`), so
+          // if the first attempt did start, its job and its name, generated or blank, are
+          // the ones kept.
           const signature = JSON.stringify({ ...body, name: name.trim() || null })
-          if (attempt.current?.body !== signature) attempt.current = { key: newRequestId(), body: signature }
+          if (attempt.current?.body !== signature) {
+            attempt.current = { key: newRequestId(), arrangeKey: newRequestId(), body: signature }
+          }
           const current = attempt.current
           const arranged = await runArrange(slug, body, {
             onProgress: say,
             within,
             signal: controller.signal,
             saveKey: current.key,
+            arrangeKey: current.arrangeKey,
             arranged: current.arranged,
             onArranged: (job) => (current.arranged = job),
           })
@@ -436,7 +440,10 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
       // the server may hold): then the same key follows it. A definite failure is recorded
       // under its key and would be answered again as it is, so the next press gets a new
       // one; the finished job is kept, since nothing of it was saved.
-      if (attempt.current && !mayHaveRun(cause)) attempt.current.key = newRequestId()
+      if (attempt.current && !mayHaveRun(cause)) {
+        attempt.current.key = newRequestId()
+        attempt.current.arrangeKey = newRequestId()
+      }
       // A save the server refused (a 4xx: the job pruned, say) cannot save that job again:
       // the next press arranges anew.
       if (attempt.current && cause instanceof ApiError && cause.status >= 400 && cause.status < 500) {
@@ -533,7 +540,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
                 size="sm"
                 variant="ghost"
                 aria-label={`Remove ${label}`}
-                disabled={busy}
+                disabled={busy || asking}
                 onClick={() => setRemoved((now) => [...now, key])}
               >
                 Remove
@@ -543,16 +550,16 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
         </ul>
         {/* #2286 — a mis-clicked Remove is undone here, not by closing and starting over. */}
         {removed.length > 0 && (
-          <Button size="sm" variant="ghost" className="self-start" onClick={() => setRemoved([])} disabled={busy}>
+          <Button size="sm" variant="ghost" className="self-start" onClick={() => setRemoved([])} disabled={busy || asking}>
             {`Restore ${removed.length} removed ${removed.length === 1 ? 'row' : 'rows'}`}
           </Button>
         )}
         {adding === null && (
           <div className="flex flex-wrap gap-2">
-            <Button size="sm" onClick={() => setAdding('files')} disabled={busy}>
+            <Button size="sm" onClick={() => setAdding('files')} disabled={busy || asking}>
               Add files
             </Button>
-            <Button size="sm" onClick={() => setAdding('model')} disabled={busy}>
+            <Button size="sm" onClick={() => setAdding('model')} disabled={busy || asking}>
               Add from a model
             </Button>
           </div>

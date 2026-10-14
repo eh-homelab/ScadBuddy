@@ -120,6 +120,11 @@ export async function runArrange(
     /** The save's key: a "Try again" passes the failed attempt's, so it saves one output. */
     saveKey?: string
     /**
+     * The arrange start's key, likewise (#3526): a "Try again" after a start whose answer
+     * was lost joins the job the server did start, not a second one.
+     */
+    arrangeKey?: string
+    /**
      * A job this arrange already finished: a "Try again" after only its save failed
      * saves that job again, under the same key, rather than arranging anew (a new job
      * is a new save, which the key could not tell from the first).
@@ -136,7 +141,7 @@ export async function runArrange(
   if (!done) {
     // #2283 — every stage says itself, so the last message never stands for the next one.
     opts.onProgress?.(ARRANGE_STAGES.starting)
-    const started = await within(() => api.arrangeOutputs(body, signal))
+    const started = await within(() => api.arrangeOutputs(body, signal, opts.arrangeKey))
     signal?.throwIfAborted()
     const job = await waitForJob(started.id, {
       pollMs: opts.pollMs ?? 1000,

@@ -502,6 +502,20 @@ describe('ArrangeDialog', () => {
       expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     })
 
+    it('keeps the rows as they are while the re-render question is open (#3528)', async () => {
+      const stale: Output = { ...nova, manifest: first.manifest }
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([first, stale])} onClose={vi.fn()} onArranged={vi.fn()} />,
+      )
+      const removes = await screen.findAllByRole('button', { name: /^Remove / })
+      await user.click(removes[0]!)
+      await user.click(screen.getByRole('button', { name: 'Arrange' }))
+      await screen.findByRole('group', { name: 'Re-render first' })
+      // Unanswered, the question is about this arrange: nothing changes it underneath.
+      expect(screen.getByRole('button', { name: /^Restore 1 removed row/ })).toBeDisabled()
+      expect(screen.getByRole('button', { name: 'Add from a model' })).toBeDisabled()
+    })
+
     it('stops polling when it is closed mid-re-render', async () => {
       server.use(
         http.get('/api/v1/jobs/:id', ({ params }) =>
@@ -774,6 +788,25 @@ describe('ArrangeDialog', () => {
     const [failed, again] = save.mock.calls
     expect(again![1]).toBe(failed![1])
     expect(again![5]).toBe(failed![5])
+  })
+
+  it('joins the arrange it started on Try again, under the same key (#3526)', async () => {
+    const arrange = vi
+      .spyOn(api, 'arrangeOutputs')
+      .mockRejectedValueOnce(
+        new ApiError({ title: 'No answer', status: 0, detail: 'The server did not answer.', may_have_started: true }),
+      )
+    const onArranged = vi.fn()
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={onArranged} />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await screen.findByRole('alert')
+    await user.click(screen.getByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(onArranged).toHaveBeenCalled())
+    const [failed, again] = arrange.mock.calls
+    expect(failed![2]).toBeTruthy()
+    expect(again![2]).toBe(failed![2])
   })
 
   it('offers no Try again for a request the server refused as it is', async () => {
