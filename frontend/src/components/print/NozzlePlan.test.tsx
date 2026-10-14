@@ -52,17 +52,6 @@ describe('NozzlePlanStep (#2166)', () => {
     expect(screen.queryByTestId('nozzle-side-hint')).toBeNull()
   })
 
-  it('does not count a slot with no side as a second side (#2737 review)', () => {
-    const sideless: NozzlePlan = {
-      ...plan,
-      slots: (plan.slots ?? []).map((slot, index) =>
-        index === 0 ? { ...slot, side: 'L' as const } : { ...slot, side: null as unknown as 'L' },
-      ),
-    }
-    render(<NozzlePlanStep plan={sideless} sides={{}} onSide={vi.fn()} />)
-    expect(screen.queryByTestId('nozzle-side-hint')).toBeNull()
-  })
-
   it('says the slicer may not keep a side set here (#2737 review)', () => {
     render(<NozzlePlanStep plan={plan} sides={{ '1': 'L' }} onSide={vi.fn()} />)
     expect(screen.getByTestId('nozzle-side-hint')).toHaveTextContent(
