@@ -1659,6 +1659,57 @@ describe('PrintPicker · grams from the background slice (#2365)', () => {
   }, 20000)
 })
 
+describe('PrintPicker · departures of a stale slice (#2702 review)', () => {
+  it("drops no slot for the plate just chosen while another plate's slice is still shown", async () => {
+    let release = () => {}
+    const plateTwo = new Promise<void>((resolve) => (release = resolve))
+    const planned = (slot_id: number, side: 'L' | 'R') => ({ slot_id, side, name: `Spool ${slot_id}`, by_hand: false })
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: false },
+          { index: 2, has_thumbnail: false },
+        ]),
+      ),
+      http.post('/api/v1/print/outputs/:id/preview-slice', async ({ request }) => {
+        const body = (await request.clone().json()) as { plate_id?: number }
+        if (body.plate_id === 2) await plateTwo
+        return HttpResponse.json({
+          job_id: 7700 + (body.plate_id ?? 1),
+          plate_id: body.plate_id ?? 1,
+          nozzle_plan: {
+            left_flow: 'standard',
+            right_flow: 'standard',
+            size: '0.4',
+            summary: 'Two nozzles',
+            track_switch: false,
+            slots: [planned(1, 'L'), planned(2, 'R')],
+          },
+        })
+      }),
+      // Plate 1's slice used slot 1 alone: on plate 1, slot 2 is truly dropped.
+      http.get('/api/v1/print/:kind/:id/preview-slices/:job', ({ params }) =>
+        HttpResponse.json({
+          job_id: Number(params['job']),
+          status: 'completed',
+          print_time_seconds: 600,
+          filament_used_g: 3,
+          slots: [{ slot_id: 1, grams: 3, side: 'L' }],
+        }),
+      ),
+    )
+    const { user } = renderPicker()
+    await loaded()
+    const notes = await screen.findByTestId('slice-departures', {}, { timeout: 8000 })
+    expect(notes).toHaveTextContent("Spool 2 (slot 2) isn't used by the sliced plate")
+
+    // Plate 2 is chosen; its slice is still on its way, so plate 1's stays shown, stale.
+    await user.click(within(await screen.findByTestId('plate-choice')).getByRole('radio', { name: /Plate 2/ }))
+    await waitFor(() => expect(screen.queryByText(/isn't used by the sliced plate/)).toBeNull())
+    release()
+  }, 20000)
+})
+
 describe('PrintPicker · Print sequence (#1862)', () => {
   const LIBRARY = { kind: 'library', file: { id: 89, filename: 'bag-clip.3mf' } } as const
 

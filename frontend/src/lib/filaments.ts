@@ -296,3 +296,19 @@ export function carriedPlan(options: FilamentOptions, carried: SlotChoice[]): Sl
     return choice ? [{ ...choice }] : []
   })
 }
+
+/**
+ * #2702 review — the background slice's plate's own slots, or `null` when the dialog
+ * does not hold them. The slice is always of one plate, while the dialog's slots are the
+ * chosen plate's, or every plate's under "All plates". So they are the sliced plate's
+ * only when that plate is the one chosen, or the file has one. `sliced` is the plate
+ * the shown slice was made for (`usePreviewSlice`'s `plateId`), not the one on screen:
+ * a stale slice stays shown while the next is sliced, and can be another plate's.
+ */
+export function slicedPlateSlots(
+  slots: readonly SlotNeed[],
+  { plates, chosen, sliced }: { plates: number; chosen: number | 'all'; sliced: number | null },
+): readonly SlotNeed[] | null {
+  if (plates <= 1) return slots
+  return chosen === sliced ? slots : null
+}
