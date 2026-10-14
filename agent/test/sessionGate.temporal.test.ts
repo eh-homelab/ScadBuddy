@@ -18,6 +18,7 @@ import type { DenyInput, GrantInput, OpenInput, ResolveInput } from '../src/gate
 import { validateRespond } from '../src/gate/validate.js'
 import type { InputEntry, Owner } from '../src/sessions/protocol.js'
 import { type GateSettings, NOBODY_ANSWERED } from '../src/temporal/session/gate.js'
+import { SESSION_GATE_ACTIVITIES as GATE } from '../src/temporal/session/names.js'
 import {
   callSignal,
   cancelAllUpdate,
@@ -85,35 +86,35 @@ class Fake {
   resolveAttempts = 0
 
   activities = {
-    gate_settings: async () => this.settings,
-    'gate.describe_call': async (args: unknown) => {
+    [GATE.settings]: async () => this.settings,
+    [GATE.describe]: async (args: unknown) => {
       this.described.push(args)
       if (this.describeFails) throw ApplicationFailure.nonRetryable('no key', 'ToolError')
       return { summary: '{"output_id":"o1"}', input_hash: this.hash }
     },
-    turn_tool_tier: async (args: unknown) => {
+    [GATE.turnToolTier]: async (args: unknown) => {
       this.tiered.push(args)
       if (this.tier === 'fail') throw ApplicationFailure.nonRetryable('plugin gone', 'ToolError')
       return { tier: this.tier }
     },
-    flow_grant_check: async (args: Record<string, unknown>) => {
+    [GATE.grantCheck]: async (args: Record<string, unknown>) => {
       this.checks.push(args)
       return this.verdict
     },
-    open_input: async (args: OpenInput) => {
+    [GATE.open]: async (args: OpenInput) => {
       this.opened.push(args)
       await this.openHeld
       return true
     },
-    grant_input: async (args: GrantInput) => {
+    [GATE.grant]: async (args: GrantInput) => {
       this.granted.push(args)
       return this.grantHolds
     },
-    deny_input: async (args: DenyInput) => {
+    [GATE.deny]: async (args: DenyInput) => {
       this.denied.push(args)
       return true
     },
-    resolve_input: async (args: ResolveInput) => {
+    [GATE.resolve]: async (args: ResolveInput) => {
       this.resolveAttempts++
       if (this.resolveFailures > 0) {
         this.resolveFailures--
@@ -452,6 +453,45 @@ describe.skipIf(!TEMPORAL_CLI)(`the session gate as workflow code${TEMPORAL_SKIP
       expect(state.resolutions[rid]).toEqual({ kind: 'approval', outcome: 'expired' })
     })
   })
+
+  it('a respond that is taken before the expiry wins it: the timer writes nothing', async () => {
+    const fake = new Fake()
+    const gate = held()
+    fake.resolveHeld = gate.promise
+    await using(await session({ settings: { approvalExpiryS: 5, questionExpiryS: 3600 } }, { fake }), async (s) => {
+      await s.call()
+      await s.parked()
+      const rid = await s.rid()
+      const answered = s.respond(decide(rid, 'approve'))
+      await expect.poll(() => s.pending().then((p) => p[0]?.expiring), { timeout: 15_000 }).toBe(true)
+      // The expiry passes while the respond's write is in flight.
+      await new Promise((resolve) => setTimeout(resolve, 7_000))
+      gate.release()
+      expect(await answered).toEqual({ kind: 'approval', outcome: 'approved' })
+      const state = await s.decided()
+      expect(fake.resolved.map((r) => r.outcome)).toEqual(['approved'])
+      expect(state.decisions).toEqual([{ callId: 'toolu_1', allow: true, approver: 'browser' }])
+      expect(state.resolutions[rid]).toEqual({ kind: 'approval', outcome: 'approved' })
+    })
+  }, 60_000)
+
+  it('an expiry that is being written wins a respond that lands then: the respond writes nothing', async () => {
+    const fake = new Fake()
+    const gate = held()
+    await using(await session({ settings: { approvalExpiryS: 5, questionExpiryS: 3600 } }, { fake }), async (s) => {
+      await s.call()
+      await s.parked()
+      const rid = await s.rid()
+      fake.resolveHeld = gate.promise
+      await expect.poll(() => s.pending().then((p) => p[0]?.expiring), { timeout: 30_000 }).toBe(true)
+      expect(await failureOf(s.respond(decide(rid, 'approve')))).toBe('GateRefused:resolving')
+      gate.release()
+      const state = await s.decided()
+      expect(fake.resolved.map((r) => r.outcome)).toEqual(['expired'])
+      expect(state.decisions).toEqual([{ callId: 'toolu_1', allow: false, approver: 'scadbuddy' }])
+      expect(state.resolutions[rid]).toEqual({ kind: 'approval', outcome: 'expired' })
+    })
+  }, 60_000)
 
   it('test_a_turn_tool_whose_call_is_read_runs_without_parking', async () => {
     const fake = new Fake()
