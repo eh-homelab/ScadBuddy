@@ -817,7 +817,9 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       server.use(handler)
       const result = await runTool({ ...tool('print_output'), gated: false }, args, ctx())
       expect(result.isError).toBe(true)
-      expect(firstText(result)).toContain("may still have started: check Bambuddy's queue")
+      // No run id to follow yet: the request id, and the queue to check (review #2849).
+      expect(firstText(result)).toContain(`may still have started (request ${ids[0]})`)
+      expect(firstText(result)).toContain("check Bambuddy's queue before printing again")
       expect(ids).toHaveLength(RUN_REATTEMPTS + 1)
       expect(new Set(ids).size).toBe(1)
     })
@@ -2746,6 +2748,56 @@ describe('a command the backend answers 202 accepting (#2795)', () => {
     const began = performance.now()
     const result = await runTool({ ...tool('delete_output'), gated: false }, { output_id: OUT }, ctx({ acceptingMs: 30 }))
     expect(result.isError).toBe(true)
+    // The budget fired, not RUN_REATTEMPTS: still-accepting answers never count as misses (review #2849).
+    expect(firstText(result)).toContain('ScadBuddy did not answer (HTTP 503)')
     expect(performance.now() - began).toBeLessThan(2_000)
+  })
+
+  it("never lets a follow's own re-sends run past the budget (review #2849)", async () => {
+    let follows = 0
+    server.use(
+      http.get(`${BACKEND}/api/v1/outputs/${OUT}`, () => HttpResponse.json({ slug: 'box' })),
+      http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () =>
+        HttpResponse.json(
+          { status: 'accepting', workflow_id: 'op-delete_output-x', update_id: 'k', follow_url: '/api/v1/commands/op-delete_output-x/updates/k', retry_after: 0 },
+          { status: 202 },
+        ),
+      ),
+      http.post(`${BACKEND}/api/v1/commands/op-delete_output-x/updates/k`, () => {
+        follows += 1
+        return new HttpResponse('bad gateway', { status: 502 })
+      }),
+    )
+    const began = performance.now()
+    const result = await runTool(
+      { ...tool('delete_output'), gated: false },
+      { output_id: OUT },
+      ctx({ acceptingMs: 1_000, pollIntervalMs: 400 }),
+    )
+    expect(result.isError).toBe(true)
+    // RUN_REATTEMPTS pauses of 400 ms would outlast the 1 s budget; the shared one stops them.
+    expect(follows).toBeLessThan(RUN_REATTEMPTS + 1)
+    expect(performance.now() - began).toBeLessThan(1_500)
+  })
+
+  it('refuses a follow URL that names another command than the 202 does (review #2849)', async () => {
+    let followed = false
+    server.use(
+      http.get(`${BACKEND}/api/v1/outputs/${OUT}`, () => HttpResponse.json({ slug: 'box' })),
+      http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () =>
+        HttpResponse.json(
+          { status: 'accepting', workflow_id: 'op-delete_output-x', update_id: 'k', follow_url: '/api/v1/commands/op-other-y/updates/z', retry_after: 0 },
+          { status: 202 },
+        ),
+      ),
+      http.post(`${BACKEND}/api/v1/commands/:wf/updates/:id`, () => {
+        followed = true
+        return HttpResponse.json({ deleted: OUT })
+      }),
+    )
+    const result = await runTool({ ...tool('delete_output'), gated: false }, { output_id: OUT }, ctx())
+    expect(result.isError).toBe(true)
+    expect(firstText(result)).toContain('does not name the command it answered')
+    expect(followed).toBe(false)
   })
 })

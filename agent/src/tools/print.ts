@@ -1064,7 +1064,8 @@ export const printTools: Tool[] = [
                 body,
               }),
         `print ${sourceName(args)}`,
-        " The print may still have started: check Bambuddy's queue before printing again.",
+        ` The print may still have started (request ${requestId}): it has no run id yet for get_print_run, ` +
+          "so check Bambuddy's queue before printing again; calling print_output again would be a second print.",
       )
       return runOutcome(await waitForRun(ctx, started), ctx)
     },

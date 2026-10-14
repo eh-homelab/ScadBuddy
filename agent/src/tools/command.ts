@@ -54,15 +54,23 @@ function unanswered(result: FetchResult<unknown>): boolean {
  * `send`'s result, sent again while it goes unanswered (a dropped connection, fetch's
  * `TypeError`, or a proxy's own 502/503/504/524). Safe only for a request keyed to its
  * effect, or one that only reads. A problem the backend wrote is never re-sent.
+ * `began` is the start of the budget it spends: a follow passes its own, so a nested
+ * call's re-sends and pauses never run past it (review #2849).
  */
 export async function answered<T>(
   ctx: ToolContext,
   send: () => Promise<FetchResult<T>>,
   what: string,
   gaveUp = '',
-): Promise<FetchResult<T>> {
   // Monotonic: the wall clock can step mid-wait (review #1066 (10)).
-  const began = performance.now()
+  began = performance.now(),
+): Promise<FetchResult<T>> {
+  const budget = ctx.acceptingMs ?? ACCEPTING_MS
+  // A pause that would end past the budget is not taken, whatever it waits on.
+  const pause = async (ms: number, why: string) => {
+    if (performance.now() - began + ms >= budget) throw new ToolError(`${what}: ScadBuddy did not answer (${why}).${gaveUp}`)
+    await sleep(ms, undefined, { signal: ctx.signal })
+  }
   // Only answers that never came count against RUN_REATTEMPTS; still-accepting is timed.
   for (let misses = 0; ; ) {
     let result: FetchResult<T>
@@ -71,17 +79,17 @@ export async function answered<T>(
     } catch (caught) {
       if (ctx.signal.aborted || !(caught instanceof TypeError)) throw caught
       if (misses++ >= RUN_REATTEMPTS) throw new ToolError(`${what}: ScadBuddy did not answer (${caught.message}).${gaveUp}`)
-      await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
+      await pause(ctx.pollIntervalMs, caught.message)
       continue
     }
     if (unanswered(result)) {
       const accepting = stillAccepting(result)
-      if (accepting ? performance.now() - began >= (ctx.acceptingMs ?? ACCEPTING_MS) : misses++ >= RUN_REATTEMPTS) {
+      if (accepting ? performance.now() - began >= budget : misses++ >= RUN_REATTEMPTS) {
         throw new ToolError(`${what}: ScadBuddy did not answer (HTTP ${result.response.status}).${gaveUp}`)
       }
       // The backend's Retry-After paces a re-send it answered (review #1061 4a).
       const after = Number(result.response.headers.get('Retry-After'))
-      await sleep(Math.max(ctx.pollIntervalMs, after > 0 ? after * 1000 : 0), undefined, { signal: ctx.signal })
+      await pause(Math.max(ctx.pollIntervalMs, after > 0 ? after * 1000 : 0), `HTTP ${result.response.status}`)
       continue
     }
     return result
@@ -128,7 +136,7 @@ export async function answeredFollowing<T>(
   gaveUp = '',
 ): Promise<FetchResult<T>> {
   const began = performance.now()
-  let result = await answered(ctx, send, what, gaveUp)
+  let result = await answered(ctx, send, what, gaveUp, began)
   for (let follows = 0, accepting = acceptingOf(result); accepting; accepting = acceptingOf(result), follows++) {
     if (performance.now() - began >= (ctx.acceptingMs ?? ACCEPTING_MS)) {
       throw new ToolError(`${what}: ScadBuddy is still starting it.${gaveUp}`)
@@ -143,8 +151,13 @@ export async function answeredFollowing<T>(
       await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
     }
     const { workflow_id, update_id } = accepting
-    // The follow URL's query (a render's `supersedes`) rides along.
-    const query = Object.fromEntries(new URL(accepting.follow_url, 'http://follow').searchParams)
+    // Followed by its ids, with the follow URL's query (a render's `supersedes`): the
+    // URL's path must name the same Update, or this would follow another one quietly.
+    const follow = new URL(accepting.follow_url, 'http://follow')
+    if (follow.pathname !== `/api/v1/commands/${encodeURIComponent(workflow_id)}/updates/${encodeURIComponent(update_id)}`) {
+      throw new ToolError(`${what}: ScadBuddy's follow URL does not name the command it answered.${gaveUp}`)
+    }
+    const query = Object.fromEntries(follow.searchParams)
     const followed = (await answered(
       ctx,
       () =>
@@ -154,8 +167,9 @@ export async function answeredFollowing<T>(
         }),
       what,
       gaveUp,
+      began,
     )) as FetchResult<T>
-    result = resendOf(followed) ? await answered(ctx, send, what, gaveUp) : followed
+    result = resendOf(followed) ? await answered(ctx, send, what, gaveUp, began) : followed
   }
   return result
 }
