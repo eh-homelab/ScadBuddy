@@ -96,4 +96,3 @@ describe('a waiting render (#1638)', () => {
     expect(formatElapsed(-3)).toBe('0:00')
   })
 })
-

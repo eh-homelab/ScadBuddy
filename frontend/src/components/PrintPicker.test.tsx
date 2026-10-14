@@ -3697,6 +3697,22 @@ describe('PrintPicker · Queue (#2288)', () => {
     expect(bodies[0]).not.toHaveProperty('options.manual_start')
   })
 
+  it('remembers a manual start chosen as Yes once it was changed (#2786 review)', async () => {
+    const { bodies } = watch('PUT', '/settings/print-options', '/api/v1/')
+    const { user } = renderPage(
+      <PrintPicker open queue source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />,
+    )
+    await loaded()
+    await showAdvanced()
+    await user.click(screen.getByText('Options'))
+    const start = await screen.findByLabelText('Wait for a manual start')
+    await user.selectOptions(start, 'false')
+    await user.selectOptions(start, 'true')
+    await user.click(screen.getByRole('button', { name: 'Remember' }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toMatchObject({ options: { manual_start: true } })
+  })
+
   it('hands the manual start back to the default when that is chosen (#2786 review)', async () => {
     const { bodies } = watch('POST', '/run')
     const { user } = renderPage(

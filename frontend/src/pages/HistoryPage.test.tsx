@@ -609,6 +609,33 @@ describe('HistoryPage', () => {
     expect(await within(row_).findByRole('link', { name: 'Last print: Failed' })).toBeInTheDocument()
   })
 
+  it("reads the prints again when one settles, not on its progress ticks (#2786 review)", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    onTestFinished(() => {
+      vi.useRealTimers()
+    })
+    const realtime = fakeRealtime({ confirm: false })
+    const reads: string[] = []
+    const listen = ({ request }: { request: Request }) => {
+      if (request.method === 'GET' && new URL(request.url).pathname === '/api/v1/prints') reads.push(request.url)
+    }
+    server.events.on('request:start', listen)
+    onTestFinished(() => {
+      server.events.removeListener('request:start', listen)
+    })
+    const nova = outputs.find((o) => o.name === 'Nova')!
+    render()
+    const row_ = await row('Nova')
+    expect(await within(row_).findByRole('link', { name: 'Last print: Printing' })).toBeInTheDocument()
+    await waitFor(() => expect(realtime.following()).toContain(`print:${nova.id}`))
+    const before = reads.length
+    await realtime.signal(`print:${nova.id}`, 'print.progress')
+    await realtime.signal(`print:${nova.id}`, 'print.progress')
+    expect(reads).toHaveLength(before)
+    await realtime.signal(`print:${nova.id}`, 'print.settled')
+    await waitFor(() => expect(reads).toHaveLength(before + 1))
+  })
+
   it('keeps the rows when the prints cannot be read (#2288)', async () => {
     server.use(http.get('/api/v1/prints', () => problem(503, 'Bambuddy is unreachable')))
     render()
@@ -668,6 +695,36 @@ describe('HistoryPage', () => {
     await user.clear(screen.getByRole('textbox', { name: 'Name for Shed sign' }))
     await user.click(screen.getByRole('button', { name: 'Save' }))
     expect(await screen.findByText(id.slice(0, 8))).toBeInTheDocument()
+  })
+
+  it('keeps a row deleted while a rename was in flight deleted (#2786 review)', async () => {
+    let answer!: () => void
+    const answered = new Promise<void>((resolve) => {
+      answer = resolve
+    })
+    const id = outputs.find((o) => o.name === 'Workshop')!.id
+    server.use(
+      http.patch('/api/v1/outputs/:id', async () => {
+        await answered
+        return HttpResponse.json({ ...outputs.find((o) => o.id === id)!, name: 'Shed sign' })
+      }),
+      http.delete('/api/v1/outputs/:id', () => new HttpResponse(null, { status: 204 })),
+    )
+    const { user } = render()
+    await user.click(within(await row('Workshop')).getByRole('button', { name: 'Rename Workshop' }))
+    const field = screen.getByRole('textbox', { name: 'Name for Workshop' })
+    await user.clear(field)
+    await user.type(field, 'Shed sign{Enter}')
+    await user.click(within(await row('Nova')).getByRole('button', { name: /^Delete / }))
+    await user.click(
+      within(await screen.findByRole('dialog', { name: 'Delete Nova?' })).getByRole('button', {
+        name: 'Delete output',
+      }),
+    )
+    await waitFor(() => expect(screen.queryAllByText('Nova')).toHaveLength(0))
+    answer()
+    expect(await row('Shed sign')).toBeInTheDocument()
+    expect(screen.queryAllByText('Nova')).toHaveLength(0)
   })
 
   it('keeps the name being typed and says why when a rename fails (#2288)', async () => {

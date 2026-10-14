@@ -282,6 +282,9 @@ export function PrintPicker({
     if (!queue) return setOptions(next)
     const { manual_start: start, ...rest } = next
     if (start === undefined) return setOptions({ ...rest, manual_start: null })
+    // A `true` while never chosen is the seed passing back through, not a choice. The
+    // select already shows Yes then, so picking Yes fires nothing either: to remember
+    // Yes, the user picks No and then Yes, and that one is kept.
     setOptions(start === true && options.manual_start === undefined ? rest : next)
   }
   /** What Remember saves: the user's edits, never Queue's seed or an unset. */

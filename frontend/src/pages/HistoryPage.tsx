@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { USER_ONLY } from '../agent/dom'
 import { ApiError, api } from '../api/client'
@@ -37,6 +37,12 @@ export function HistoryPage() {
   // #269 — live: outputs saved or deleted elsewhere show up here. Print progress is
   // on `print:<output id>`, which this list does not follow.
   const outputsState = useAsync(() => api.listOutputs(slug), [slug], [`model:${slug}`])
+  // The rows as they are now, for an edit that lands after an await (#2786 review): a
+  // rename or a delete answered late must not bring back what changed meanwhile.
+  const rows = useRef(outputsState.data)
+  useEffect(() => {
+    rows.current = outputsState.data
+  })
   // #89 — an output records Bambuddy's ids, never a URL, so the base to deep-link them
   // against comes from Settings. Until it answers, the ids still read as plain text.
   const settings = useAsync(() => api.getSettings(), []).data
@@ -63,12 +69,14 @@ export function HistoryPage() {
    * output whose last print is older than those falls back to its queue id, as if it
    * had not printed yet.
    */
-  // Read again when any listed output's print moves (#2786 review): a print that
-  // finishes while the page is open says so without a reload.
+  // Read again when any listed output's print starts or settles (#2786 review): a print
+  // that finishes while the page is open says so without a reload. Not on its progress
+  // ticks: each would be a read of Bambuddy's prints for an outcome that has not changed.
   const printsState = useAsync(
     () => api.listPrints({ slug }, { limit: 100 }).catch(() => ({ items: [], next_cursor: null })),
     [slug],
     (outputsState.data ?? []).map((output) => `print:${output.id}`),
+    (signal) => signal === 'resync' || signal.kind !== 'print.progress',
   )
   const lastPrints = new Map<string, PrintSummary>()
   // Newest first: the first one seen for an output is its last print.
@@ -87,7 +95,7 @@ export function HistoryPage() {
     try {
       // A user action of its own in Tempo (#2292), the delete its child.
       await traceAction('delete', { 'scadbuddy.output_id': id }, () => api.deleteOutput(id, deleteInboxCopies))
-      outputsState.setData((outputsState.data ?? []).filter((o) => o.id !== id))
+      outputsState.setData((rows.current ?? []).filter((o) => o.id !== id))
       setPicked((current) => current.filter((p) => p !== id))
       setConfirmFor(undefined)
     } finally {
@@ -201,7 +209,7 @@ export function HistoryPage() {
                   }}
                   onPreview={() => setPreviewFor(output)}
                   onRenamed={(renamed) =>
-                    outputsState.setData((outputsState.data ?? []).map((o) => (o.id === renamed.id ? renamed : o)))
+                    outputsState.setData((rows.current ?? []).map((o) => (o.id === renamed.id ? renamed : o)))
                   }
                   lastPrint={lastPrints.get(output.id)}
                   // Its plates show once, in the next-step card above (#2754 review).

@@ -571,7 +571,10 @@ class OutputStore:
 
     def rename(self, output_id: str, name: str | None) -> OutputMeta:
         """Give the output ``name``, or none (#2288). Only ``meta.json`` changes: the
-        3MF's provenance names the output by id, and a download is named at download."""
+        3MF's provenance names the output by id, and a download is named at download.
+
+        A read-modify-write with no lock: nothing else rewrites ``meta.json`` once the
+        output is saved. A second writer of it needs a lock here, or one rename loses."""
         directory = self._find_dir(output_id)
         meta = OutputMeta.model_validate_json((directory / META_NAME).read_text(encoding="utf-8"))
         renamed = meta.model_copy(update={"name": name or None})
