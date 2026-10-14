@@ -374,7 +374,8 @@ export function CustomizePage() {
     jobFor,
     stage: renderStage,
   } = useRenderJob(slug, settled && seed && !invalid ? debounced : undefined, version, extra)
-  useRenderAutoRetry(renderError, rendering, retryRender, debounced)
+  // Armed only while the values would render: retryRender does nothing without them.
+  useRenderAutoRetry(renderError, rendering, retryRender, debounced, Boolean(settled && seed && !invalid))
   // One object per refusal, so a font field's install error answers this one only (#2215).
   const fontRefusal = useMemo(() => missingFonts(renderError), [renderError])
   // #1293 — a render still running or one that failed links to its workflow in the
