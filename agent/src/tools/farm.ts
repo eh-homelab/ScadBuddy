@@ -39,6 +39,22 @@ export const farmTools: Tool[] = [
   }),
 
   defineTool({
+    name: 'get_printers_now',
+    description:
+      "What each active printer is doing now, whoever started it (#977): its activity (printing, paused, idle, " +
+      'finished, failed, offline or unknown), the job name, progress, layer and minutes left while it works, its ' +
+      "HMS errors, whether it waits for the plate to be cleared, and Bambuddy's archive of the job. A printer " +
+      'whose status cannot be read is listed with an error rather than dropped.',
+    input: z.object({}),
+    risk: 'read',
+    source: SOURCE,
+    bambuddyScope: ['Read Status'],
+    routes: ['GET /api/v1/print/printers/now'],
+    handler: async (_args, { backend }) =>
+      json(await ok(backend.GET('/api/v1/print/printers/now'), 'read what each printer is doing')),
+  }),
+
+  defineTool({
     name: 'get_print_stats',
     description:
       "The farm's print statistics from Bambuddy: prints by outcome (successful, failed, cancelled), total print " +

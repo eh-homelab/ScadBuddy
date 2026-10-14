@@ -26,6 +26,7 @@ from temporalio.client import Client, WorkflowHistory
 from scadbuddy.flows import history
 from scadbuddy.flows.history import outward_since, points_of, preview_of
 from scadbuddy.flows.models import Run
+from scadbuddy.workflows.flow_activities import FLOW_CLOSE
 from scadbuddy.workflows.flow_models import FlowStep
 from tests.flows.fake_api import PLAN, Outward
 from tests.flows.flows_support import script
@@ -96,6 +97,48 @@ def test_only_a_completed_workflow_task_before_the_end_is_valid() -> None:
     assert not preview_of(events, events[-1].event_id + 10).valid
 
 
+def _closes(events: list[HistoryEvent]) -> int:
+    return next(
+        e.event_id
+        for e in events
+        if e.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED
+        and e.activity_task_scheduled_event_attributes.activity_type.name == FLOW_CLOSE
+    )
+
+
+def test_a_finished_run_resets_only_to_a_point_before_it_recorded_its_end() -> None:
+    """#2378: the end's write and `flow_close` are one workflow task's commands. A point
+    after them replays the end without writing it, so the run would read `running`."""
+    events = _events()
+    closes = _closes(events)
+    before = _task_before(events, closes)
+    after = [
+        e.event_id
+        for e in events
+        if e.event_type == COMPLETED and closes < e.event_id < events[-1].event_id
+    ]
+    assert after
+    assert preview_of(events, before, ended=True).valid
+    for point in after:
+        assert not preview_of(events, point, ended=True).valid
+        assert preview_of(events, point).valid
+    offered = [p.event_id for p in points_of(events, [], ended=True).points]
+    assert offered == [
+        e.event_id for e in events if preview_of(events, e.event_id, ended=True).valid
+    ]
+    assert before in offered
+    assert not set(after) & set(offered)
+
+
+async def test_a_finished_runs_preview_refuses_a_point_after_its_end() -> None:
+    events = _events()
+    point = _task_before(events, events[-1].event_id)
+    for status, valid in (("waiting", True), ("succeeded", False), ("failed", False)):
+        run = cast(Run, SimpleNamespace(workflow_id="flow-two-prints", steps=[], status=status))
+        preview = await outward_since(cast(Client, _Served(events)), run, point, run_id="r1")
+        assert preview.valid is valid, status
+
+
 def test_only_the_execute_update_starts_the_script() -> None:
     """#2303: an Update other than `execute` (`send_agent_message`) accepted before the
     point does not make it valid."""
@@ -163,7 +206,7 @@ async def test_a_recent_point_reads_only_the_tail(monkeypatch: pytest.MonkeyPatc
     _, second = _sends(events)
     point = _task_before(events, second.event_id)
     served = _Served(events)
-    run = cast(Run, SimpleNamespace(workflow_id="flow-two-prints", steps=[]))
+    run = cast(Run, SimpleNamespace(workflow_id="flow-two-prints", steps=[], status="waiting"))
     preview = await outward_since(cast(Client, served), run, point, run_id="r1")
     whole = preview_of(events, point)
     assert (preview.valid, preview.calls, preview.as_of_event_id) == (
@@ -176,7 +219,7 @@ async def test_a_recent_point_reads_only_the_tail(monkeypatch: pytest.MonkeyPatc
 
 async def test_a_point_past_the_end_is_pinned_to_the_last_event() -> None:
     events = _events()
-    run = cast(Run, SimpleNamespace(workflow_id="flow-two-prints", steps=[]))
+    run = cast(Run, SimpleNamespace(workflow_id="flow-two-prints", steps=[], status="waiting"))
     preview = await outward_since(
         cast(Client, _Served(events)), run, events[-1].event_id + 10, run_id="r1"
     )

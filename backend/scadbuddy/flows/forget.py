@@ -47,7 +47,11 @@ async def forget_run(
             " ON CONFLICT (subject) DO NOTHING",
             (subject,),
         )
-        await conn.execute("DELETE FROM ai_flow_blobs WHERE subject = %s", (subject,))
+        # The agent's migration makes the table: before it ran there are no images, and the
+        # key is deleted all the same (#2578).
+        cur = await conn.execute("SELECT to_regclass('ai_flow_blobs') IS NOT NULL")
+        if (row := await cur.fetchone()) and row[0]:
+            await conn.execute("DELETE FROM ai_flow_blobs WHERE subject = %s", (subject,))
         cur = await conn.execute("DELETE FROM ai_payload_keys WHERE subject = %s", (subject,))
         key = cur.rowcount > 0
     try:

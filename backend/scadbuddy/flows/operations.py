@@ -678,7 +678,8 @@ def flow_kinds(
             raise ApiError(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
                 f"Event {event_id} is not a point a run resets to: name a completed"
-                " workflow task before the run's last event.",
+                " workflow task before the run's last event, and for a finished run,"
+                " one before it recorded its end.",
                 type_=RESET_POINT,
             )
         if any(c.scheduled_event_id > int(request["as_of_event_id"]) for c in preview.calls):

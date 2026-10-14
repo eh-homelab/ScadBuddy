@@ -43,7 +43,7 @@ import {
   HindsightClient,
   type MemoryActivity,
   type MemoryHooks,
-  type MemoryHooksOptions,
+  type MemoryOptions,
   hindsightTarget,
   turnRecallMaxQueryChars,
 } from '../memory/hindsight.js'
@@ -433,47 +433,47 @@ export async function recordMemoryActivity(
   a: MemoryActivity,
   secrets: readonly string[],
 ): Promise<void> {
-    const id = session.id
-    const summary = {
-      bank: a.bank,
-      ...(a.documentId ? { document_id: a.documentId } : {}),
-      ...(a.count === undefined ? {} : { results: a.count }),
-      ...(a.tool ? { tool: a.tool } : {}),
-    }
-    const detail = a.reason ? { detail: safeDetail(a.reason, secrets) } : {}
-    await Promise.all([
-      deps.audit?.record({
-        kind: 'memory',
-        action: a.action,
-        surface: 'harness',
-        actor: session.owner,
-        sessionId: id,
-        turnId,
-        ...(a.toolUseId ? { toolUseId: a.toolUseId } : {}),
-        inputSummary: JSON.stringify(summary),
-        outcome: a.outcome === 'ok' ? 'ok' : 'error',
-        ...detail,
-        startedAt: a.startedAt,
-        finishedAt: a.finishedAt,
-      }),
-      deps.events.append(id, [
-        scrubForLog(
-          event({
-            type: 'memory',
-            sessionId: id,
-            turnId,
-            action: a.action,
-            bank: a.bank,
-            outcome: a.outcome,
-            ...(a.count === undefined ? {} : { count: a.count }),
-            ...detail,
-            ...(a.input === undefined ? {} : { input: memoryText(a.input, secrets) }),
-            ...(a.memories === undefined ? {} : { memories: a.memories.map((m) => memoryText(m, secrets)) }),
-          }),
-          secrets,
-        ),
-      ]),
-    ])
+  const id = session.id
+  const summary = {
+    bank: a.bank,
+    ...(a.documentId ? { document_id: a.documentId } : {}),
+    ...(a.count === undefined ? {} : { results: a.count }),
+    ...(a.tool ? { tool: a.tool } : {}),
+  }
+  const detail = a.reason ? { detail: safeDetail(a.reason, secrets) } : {}
+  await Promise.all([
+    deps.audit?.record({
+      kind: 'memory',
+      action: a.action,
+      surface: 'harness',
+      actor: session.owner,
+      sessionId: id,
+      turnId,
+      ...(a.toolUseId ? { toolUseId: a.toolUseId } : {}),
+      inputSummary: JSON.stringify(summary),
+      outcome: a.outcome === 'ok' ? 'ok' : 'error',
+      ...detail,
+      startedAt: a.startedAt,
+      finishedAt: a.finishedAt,
+    }),
+    deps.events.append(id, [
+      scrubForLog(
+        event({
+          type: 'memory',
+          sessionId: id,
+          turnId,
+          action: a.action,
+          bank: a.bank,
+          outcome: a.outcome,
+          ...(a.count === undefined ? {} : { count: a.count }),
+          ...detail,
+          ...(a.input === undefined ? {} : { input: memoryText(a.input, secrets) }),
+          ...(a.memories === undefined ? {} : { memories: a.memories.map((m) => memoryText(m, secrets)) }),
+        }),
+        secrets,
+      ),
+    ]),
+  ])
 }
 
 export class SessionError extends Error {
@@ -694,7 +694,7 @@ export type SessionManagerDeps = {
    * its transcript retained to that plugin's bank. These are the hook knobs
    * (hooks.py `MemoryHookConfig` and friends); `false` turns it off.
    */
-  memory?: Omit<MemoryHooksOptions, 'client' | 'secrets' | 'log' | 'sessionStore' | 'onActivity'> | false
+  memory?: MemoryOptions | undefined
   /**
    * The assistant's `http_request` tool (#827, harness/httpRequest.ts). A
    * session's turns get it when this is set and the `http_request_enabled`
