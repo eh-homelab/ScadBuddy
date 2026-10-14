@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
 import { type AuditContext, type AuditSink, SYSTEM_ACTOR } from './audit/log.js'
+import { isRuntimeKey, notifyRuntimeSettings } from './sessions/runtimeSettings.js'
 import { evictsWarmOnWrite, notifyWarmEvict } from './sessions/warmEvict.js'
 import {
   type Envelope,
@@ -734,6 +735,8 @@ export class SettingsStore {
           ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`
       }
       if (Object.keys(values).some(evictsWarmOnWrite)) await notifyWarmEvict(tx, '*')
+      // The warm cache's size and idle time are re-read, not evicted for (sessions/runtimeSettings.ts).
+      if (Object.keys(values).some(isRuntimeKey)) await notifyRuntimeSettings(tx)
       return true
     })
   }

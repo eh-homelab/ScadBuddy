@@ -604,9 +604,9 @@ export type SettingsReader = { get<T>(key: string): Promise<T | undefined> }
  */
 export type QueryRunner = (run: HarnessRun) => AsyncIterable<SDKMessage>
 
-/** A warm process per replica past which the least recently used idle one goes (spec 2026-10-13 §5.3, D3), until Task 2.5 reads Settings. */
+/** A warm process per replica past which the least recently used idle one goes (spec 2026-10-13 §5.3, D3) (main.ts passes the stored `warm_max_per_replica`). */
 export const DEFAULT_WARM_MAX_ENTRIES = 8
-/** How long a warm process may sit idle (spec §5.3: the same 10 min as temporal/sessionClients.ts), until Task 2.5 reads Settings. */
+/** How long a warm process may sit idle (spec §5.3: the same 10 min as temporal/sessionClients.ts) (main.ts passes the stored `warm_idle_seconds`). */
 export const DEFAULT_WARM_IDLE_MS = 600_000
 
 const isWarmQuery = (stream: AsyncIterable<SDKMessage>): stream is WarmQuery =>

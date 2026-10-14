@@ -200,6 +200,8 @@ const credentialHash = (c: Credential) =>
  */
 export class WarmSessions {
   private readonly deps: WarmSessionsDeps
+  private maxEntries: number
+  private idleMs: number
   private readonly now: () => number
   private readonly log: (message: string) => void
   private readonly start: (run: HarnessRun) => WarmQuery
@@ -214,6 +216,8 @@ export class WarmSessions {
 
   constructor(deps: WarmSessionsDeps) {
     this.deps = deps
+    this.maxEntries = deps.maxEntries
+    this.idleMs = deps.idleMs
     this.now = deps.now ?? Date.now
     this.log = deps.log ?? (() => {})
     this.start = deps.start ?? runHarness
@@ -302,6 +306,20 @@ export class WarmSessions {
       else closing.push(this.drop(slot, reason))
     }
     return Promise.all(closing).then(() => {})
+  }
+
+  /**
+   * New `warm_max_per_replica` and `warm_idle_seconds` (in ms), applied to the
+   * entries there already are: idle ones past the new cap go, least recently
+   * used first, and the idle timers are set again. A running turn is never
+   * touched; at 0 its process goes when it settles.
+   */
+  resize(maxEntries: number, idleMs: number): void {
+    this.maxEntries = maxEntries
+    this.idleMs = idleMs
+    for (const slot of this.slots.values()) if (!slot.busy) this.arm(slot)
+    this.sweepIdle()
+    this.trim()
   }
 
   size(): number {
@@ -441,25 +459,25 @@ export class WarmSessions {
     const check = () => {
       if (slot.closed || slot.busy) return
       const idle = this.now() - slot.entry.lastUsedAt
-      if (idle >= this.deps.idleMs) void this.drop(slot, 'idle')
-      else schedule(this.deps.idleMs - idle)
+      if (idle >= this.idleMs) void this.drop(slot, 'idle')
+      else schedule(this.idleMs - idle)
     }
     const schedule = (ms: number) => {
       slot.timer = setTimeout(check, ms)
       slot.timer.unref()
     }
-    schedule(this.deps.idleMs)
+    schedule(this.idleMs)
   }
 
   private sweepIdle(): void {
     for (const slot of [...this.slots.values()]) {
-      if (!slot.busy && this.now() - slot.entry.lastUsedAt >= this.deps.idleMs) void this.drop(slot, 'idle')
+      if (!slot.busy && this.now() - slot.entry.lastUsedAt >= this.idleMs) void this.drop(slot, 'idle')
     }
   }
 
   /** Past `maxEntries`, the least recently used idle entries go; never one with a turn running. */
   private trim(): void {
-    while (this.slots.size > this.deps.maxEntries) {
+    while (this.slots.size > this.maxEntries) {
       let lru: Slot | undefined
       for (const slot of this.slots.values()) {
         if (!slot.busy && (!lru || slot.entry.lastUsedAt < lru.entry.lastUsedAt)) lru = slot

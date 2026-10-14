@@ -140,4 +140,55 @@ describe.skipIf(!TEST_DATABASE_URL)(`closing a warm process${TEST_DATABASE_URL ?
     warm!.leave(held.entry)
     expect(warm!.size()).toBe(0)
   })
+  describe('resize (warm_max_per_replica, warm_idle_seconds)', () => {
+    it('evicts idle entries down to a lowered max, least recently used first', async () => {
+      const [a, b] = [randomUUID(), randomUUID()]
+      await turn(a)
+      await turn(b)
+      expect(warm!.size()).toBe(2)
+      warm!.resize(1, 600_000)
+      await vi.waitFor(() => expect(warm!.size()).toBe(1))
+      const kept = await warm!.acquire(b, await assembled(), credential, 1 - 0.02)
+      expect(kept.outcome).toBe('hit')
+      warm!.leave(kept.entry)
+    })
+
+    it('never touches a running turn: with one running and one idle it evicts the idle one', async () => {
+      const [idle, running] = [randomUUID(), randomUUID()]
+      await turn(idle)
+      const held = await warm!.acquire(running, await assembled(), credential, 1)
+      held.entry.inbox.push(userMessage('hello'))
+      warm!.resize(1, 600_000)
+      await vi.waitFor(() => expect(warm!.size()).toBe(1))
+      expect((await warm!.acquire(idle, await assembled(), credential, 1)).outcome).toBe('miss')
+      const result = await nextResult(held.entry.iterator)
+      await warm!.settle(held.entry, result)
+      expect(held.entry.turn.release).not.toHaveBeenCalled()
+    })
+
+    it('0 evicts every idle entry, and from then on each turn is cold: its process goes when it settles', async () => {
+      const id = randomUUID()
+      const first = await turn(id)
+      warm!.resize(0, 600_000)
+      await vi.waitFor(() => expect(warm!.size()).toBe(0))
+      await vi.waitFor(() => expect(first.entry.turn.release).toHaveBeenCalledTimes(1))
+      const two = await turn(id, 1 - 0.02)
+      expect(two.outcome).toBe('miss')
+      await vi.waitFor(() => expect(warm!.size()).toBe(0))
+      await vi.waitFor(() => expect(two.entry.turn.release).toHaveBeenCalledTimes(1))
+      const three = await turn(id, 1 - 0.04)
+      expect(three.outcome).toBe('miss')
+      expect(scripted.runs).toHaveLength(3)
+    })
+
+    it('a raised max keeps what is there, and a shortened idle time ends an idle entry', async () => {
+      const id = randomUUID()
+      const one = await turn(id)
+      warm!.resize(2, 600_000)
+      expect(warm!.size()).toBe(1)
+      warm!.resize(2, 50)
+      await vi.waitFor(() => expect(warm!.size()).toBe(0), { timeout: 3000 })
+      await vi.waitFor(() => expect(one.entry.turn.release).toHaveBeenCalledTimes(1))
+    })
+  })
 })
