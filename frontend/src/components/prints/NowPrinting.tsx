@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import { api, ApiError } from '../../api/client'
 import type { PrinterNow } from '../../api/types'
@@ -223,21 +223,23 @@ function CameraDialog({ printer, onClose }: { printer: PrinterNow | null; onClos
   )
 }
 
-/**
- * Ends a live `<img>`'s request as it leaves (#3207): Chromium can keep a
- * `multipart/x-mixed-replace` image's request open for a while after the element is
- * removed, which would keep Bambuddy's stream subscribed after the dialog closed.
- * Emptying `src` aborts it.
- */
-function dropStreamOnUnmount(img: HTMLImageElement | null) {
-  return () => {
-    if (img) img.src = ''
-  }
-}
-
 function CameraView({ printer }: { printer: PrinterNow }) {
   const [live, setLive] = useState(true)
   const [at, setAt] = useState(() => Date.now())
+  const leaving = useRef(false)
+  /**
+   * Ends a live `<img>`'s request as it leaves (#3207): Chromium can keep a
+   * `multipart/x-mixed-replace` image's request open for a while after the element is
+   * removed, which would keep Bambuddy's stream subscribed after the dialog closed.
+   * Emptying `src` aborts it, and can fire `error`, which is then not a fallback.
+   */
+  const dropStreamOnUnmount = useCallback((img: HTMLImageElement | null) => {
+    leaving.current = false
+    return () => {
+      leaving.current = true
+      if (img) img.src = ''
+    }
+  }, [])
   return (
     <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_16rem]" data-testid="printer-camera">
       <div className="min-w-0">
@@ -248,6 +250,7 @@ function CameraView({ printer }: { printer: PrinterNow }) {
             alt={`Live camera of ${printer.name}`}
             className="w-full rounded-[6px] border border-line bg-surface-2"
             onError={() => {
+              if (leaving.current) return
               // A fresh snapshot each fallback: an old `?at=` may be a cached old frame.
               setAt(Date.now())
               setLive(false)

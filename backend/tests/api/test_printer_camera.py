@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 from opentelemetry import trace
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import StatusCode
+from starlette.requests import ClientDisconnect
 
 from scadbuddy.api import printing
 from scadbuddy.api.deps import STATE_ATTR
@@ -283,6 +284,58 @@ def test_a_viewer_leaving_ends_the_stream_span_cleanly(
     assert stream.status.status_code != StatusCode.ERROR, stream.status
     assert frames.closed
     assert printing._camera_streams[7] == 0
+
+
+@respx.mock
+def test_a_viewer_gone_before_the_first_byte_releases_the_stream(client: TestClient) -> None:
+    """#2752 review: a viewer who closes the dialog while the stream is still opening
+    fails the response's start, so the body never runs and Starlette skips any
+    ``background``. The stream slot and Bambuddy's stream are still released."""
+    configure(client)
+    store = getattr(client.app.state, STATE_ATTR).settings_store  # type: ignore[attr-defined]
+    token_route()
+    frames = Frames(count=1, hold=True)
+    respx.get(f"{API}/printers/7/camera/stream").mock(
+        return_value=httpx.Response(200, stream=frames, headers={"Content-Type": MJPEG})
+    )
+
+    async def receive() -> dict[str, object]:
+        await asyncio.sleep(60)
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict[str, object]) -> None:
+        raise OSError("the viewer is gone")
+
+    async def open_then_leave() -> None:
+        response = await printing.stream_printer_camera(7, store, fps=5)
+        assert printing._camera_streams[7] == 1
+        scope = {"type": "http", "asgi": {"spec_version": "2.4"}}
+        with pytest.raises(ClientDisconnect):
+            await response(scope, receive, send)  # type: ignore[arg-type]
+
+    asyncio.run(open_then_leave())
+
+    assert printing._camera_streams[7] == 0
+    assert frames.closed
+
+
+@pytest.mark.parametrize("answer", [{"json": {}}, {"content": b"not json"}])
+@pytest.mark.parametrize("path", ["/camera", "/camera/stream"])
+@respx.mock
+def test_a_token_answer_without_a_token_is_a_bad_gateway(
+    client: TestClient, answer: dict[str, object], path: str
+) -> None:
+    """#2752 review: an unexpected stream-token body is Bambuddy's fault, a 502, not a
+    bare ``KeyError`` from ScadBuddy."""
+    configure(client)
+    respx.post(f"{API}/printers/camera/stream-token").mock(
+        return_value=httpx.Response(200, **answer)  # type: ignore[arg-type]
+    )
+
+    response = client.get(f"/api/v1/print/printers/7{path}")
+
+    assert response.status_code == 502
+    assert "no camera token" in response.json()["detail"]
 
 
 @respx.mock

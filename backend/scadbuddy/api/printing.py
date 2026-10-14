@@ -22,7 +22,7 @@ from fastapi import APIRouter, Path, Query, Response, status
 from fastapi.responses import JSONResponse, StreamingResponse
 from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, Field
-from starlette.background import BackgroundTask
+from starlette.types import Receive, Scope, Send
 from temporalio.common import WorkflowIDReusePolicy
 
 from scadbuddy.activity.component import ACTIVITY, ActivityComponent
@@ -568,6 +568,7 @@ async def get_printer_camera(printer_id: int, store: SettingsStoreDep) -> Respon
 
 #: How many live streams of one printer's camera are served at once (#2752 review):
 #: each holds a Bambuddy connection and an HTTP client for as long as it is watched.
+#: The count is this process's, so with several API replicas the cap is per replica.
 CAMERA_STREAMS_PER_PRINTER = 4
 CAMERA_STREAMS_BUSY_PROBLEM = "https://scadbuddy.dev/problems/camera-streams-busy"
 #: Open streams per printer id; one event loop, so a plain counter is enough.
@@ -578,6 +579,25 @@ def _release_camera_stream(printer_id: int) -> None:
     _camera_streams[printer_id] -= 1
     if _camera_streams[printer_id] <= 0:
         del _camera_streams[printer_id]
+
+
+class _ClosingStreamingResponse(StreamingResponse):
+    """A stream that closes ``closing`` however the response ends (#2752 review).
+
+    A viewer gone before the first byte fails the response's start, so the body
+    generator never runs and Starlette skips ``background``: neither would release
+    the stream. Closing here does, whether the response finished, failed or was
+    cancelled; a stack the body already closed closes again as a no-op."""
+
+    def __init__(self, *args: Any, closing: AsyncExitStack, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._closing = closing
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await self._closing.aclose()
 
 
 @router.get(
@@ -643,7 +663,7 @@ async def stream_printer_camera(
             raise
         await stack.aclose()
 
-    return StreamingResponse(
+    return _ClosingStreamingResponse(
         body(),
         media_type=media_type,
         headers={
@@ -651,11 +671,7 @@ async def stream_printer_camera(
             "X-Content-Type-Options": "nosniff",
             "X-Accel-Buffering": "no",
         },
-        # Belt and braces for a response that ends without the generator closing the
-        # stack (a second close is a no-op). It is not the guarantee: on a disconnect
-        # mid-frame Starlette skips `background`, and Bambuddy's stream is closed when
-        # the abandoned generator is finalised, which runs its close.
-        background=BackgroundTask(stack.aclose),
+        closing=stack,
     )
 
 

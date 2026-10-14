@@ -334,6 +334,28 @@ class BambuddyClient:
         )
         return PrinterStatus.model_validate(response.json())
 
+    async def _camera_token(self, *, what: str) -> str:
+        """A camera stream token, minted under ``camera:view``. An answer without one is
+        a 502, as any unexpected body is (#2752 review)."""
+        minted = await self._send(
+            "POST",
+            "/printers/camera/stream-token",
+            scope=Scope.READ_STATUS,
+            operation="printers.camera.token",
+            what=what,
+        )
+        try:
+            body = minted.json()
+        except ValueError:
+            body = None
+        token = body.get("token") if isinstance(body, dict) else None
+        if not isinstance(token, str) or not token:
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Bambuddy answered no camera token when asked to {what}",
+            )
+        return token
+
     async def camera_snapshot(self, printer_id: int) -> bytes:
         """One JPEG frame from the printer's camera (#796).
 
@@ -343,20 +365,14 @@ class BambuddyClient:
         take Bambuddy up to 15 s; a camera that gives no frame is its 503.
         """
         what = f"capture the camera of printer {printer_id}"
-        minted = await self._send(
-            "POST",
-            "/printers/camera/stream-token",
-            scope=Scope.READ_STATUS,
-            operation="printers.camera.token",
-            what=what,
-        )
+        token = await self._camera_token(what=what)
         response = await self._send(
             "GET",
             f"/printers/{printer_id}/camera/snapshot",
             scope=Scope.READ_STATUS,
             operation="printers.camera.snapshot",
             what=what,
-            params={"token": minted.json()["token"]},
+            params={"token": token},
         )
         return response.content
 
@@ -376,13 +392,7 @@ class BambuddyClient:
         printer, an external camera's other viewers included. The token is minted
         here, as the snapshot's is, and never leaves the server."""
         what = f"stream the camera of printer {printer_id}"
-        minted = await self._send(
-            "POST",
-            "/printers/camera/stream-token",
-            scope=Scope.READ_STATUS,
-            operation="printers.camera.token",
-            what=what,
-        )
+        token = await self._camera_token(what=what)
         path = f"/printers/{printer_id}/camera/stream"
         with _call_span(
             "printers.camera.stream", "GET", Scope.READ_STATUS, detached=True
@@ -392,7 +402,7 @@ class BambuddyClient:
                     "GET",
                     self.config.url(path),
                     headers=self._headers,
-                    params={"token": minted.json()["token"], "fps": fps},
+                    params={"token": token, "fps": fps},
                     timeout=CAMERA_STREAM_TIMEOUT,
                 ) as response:
                     current.set_attribute("http.response.status_code", response.status_code)
