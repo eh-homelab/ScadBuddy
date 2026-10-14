@@ -291,6 +291,35 @@ def test_a_hand_edited_model_refuses_scene_edits(client: TestClient) -> None:
     assert client.get(f"/api/v1/models/{slug}/scene").json()["hand_edited"] is True
 
 
+def test_an_invalid_scene_is_a_422_naming_eject_and_eject_still_works(
+    client: TestClient, paths: DataPaths
+) -> None:
+    """#2631 — a scene.json a manual edit or a restore broke: a problem, not a 500, and
+    eject (which does not need the scene) gets the model out of it."""
+    slug = upload(client).json()["slug"]
+    (paths.model_dir(slug) / "scene.json").write_text('{"objects": "nope"}', encoding="utf-8")
+    read = client.get(f"/api/v1/models/{slug}/scene")
+    assert read.status_code == 422, read.text
+    assert "eject" in read.json()["detail"]
+    refused = edit(client, slug, {"edit": "rename", "object": "o1", "name": "x"})
+    assert refused.status_code == 422 and "eject" in refused.json()["detail"]
+    ejected = client.post(f"/api/v1/models/{slug}/scene/eject", headers=press())
+    assert ejected.status_code == 200, ejected.text
+    assert client.get(f"/api/v1/models/{slug}/scene").status_code == 404
+
+
+def test_a_missing_model_scad_reads_as_hand_edited(client: TestClient, paths: DataPaths) -> None:
+    """#2631 — model.scad gone between the model's existence check and the scene read (a
+    model without one is otherwise a 404): not what the scene compiled, never a 500."""
+    slug = upload(client).json()["slug"]
+    directory = paths.model_dir(slug)
+    scene = load_scene((directory / "scene.json").read_text(encoding="utf-8"))
+    assert mesh_operations.hand_edited(directory, scene) is False
+    (directory / "model.scad").unlink()
+    assert mesh_operations.hand_edited(directory, scene) is True
+    assert client.get(f"/api/v1/models/{slug}/scene").status_code == 404
+
+
 def test_removing_a_parameter_a_saved_preset_names_is_refused_unless_dropped(
     client: TestClient,
 ) -> None:
@@ -324,18 +353,18 @@ def test_a_preset_left_naming_a_removed_parameter_is_trimmed_by_the_next_edit(
     assert exposed.status_code == 200, exposed.text
     save_tall(client, slug)
     presets = client.app.state.scadbuddy.presets  # type: ignore[attr-defined]
-    real_update = presets.update
+    real_keep_only = presets.keep_only
 
     def fails(*args: object, **kwargs: object) -> object:
         raise RuntimeError("Postgres went away")
 
-    monkeypatch.setattr(presets, "update", fails)
+    monkeypatch.setattr(presets, "keep_only", fails)
     unexpose = {"edit": "unexpose", "object": "o1", "op": None, "field": "scale.2"}
     assert edit(client, slug, unexpose, drop=True).status_code >= 500
     # The revision committed: the scale is a plain number again.
     scene = client.get(f"/api/v1/models/{slug}/scene").json()["scene"]
     assert scene["objects"][0]["transform"]["scale"][2] == 1
-    monkeypatch.setattr(presets, "update", real_update)
+    monkeypatch.setattr(presets, "keep_only", real_keep_only)
     assert (
         edit(client, slug, {"edit": "rename", "object": "o1", "name": "Again"}).status_code == 200
     )

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from dataclasses import dataclass
 
 from pydantic import BaseModel, Field
@@ -108,3 +109,31 @@ async def _catalogue(client: BambuddyClient) -> _Catalogue:
     processes.extend(_local_choice(row) for row in local.process)
     filaments.extend(_local_choice(row) for row in local.filament)
     return _Catalogue(printer=printers, process=processes, filament=filaments)
+
+
+#: How long the dialog trusts a catalogue it read (#2361). Bambuddy's presets change
+#: only when someone imports or edits a profile there, and ``/slicer/presets`` takes
+#: seconds to answer, so every dialog open paid seconds for the same answer.
+CATALOGUE_TTL = 120.0
+
+_cached: dict[tuple[str, str | None], tuple[float, _Catalogue]] = {}
+
+
+async def cached_catalogue(client: BambuddyClient) -> _Catalogue:
+    """:func:`_catalogue`, kept for :data:`CATALOGUE_TTL` per Bambuddy (#2361).
+
+    Only the print dialog's choices read it: a profile imported in Bambuddy shows
+    there within the TTL, while the check and the run, which slice with what they
+    resolve, still read the catalogue fresh. A failed read is not kept."""
+    key = (client.config.base_url, client.config.api_key)
+    held = _cached.get(key)
+    if held is not None and time.monotonic() - held[0] < CATALOGUE_TTL:
+        return held[1]
+    catalogue = await _catalogue(client)
+    _cached[key] = (time.monotonic(), catalogue)
+    return catalogue
+
+
+def forget_catalogues() -> None:
+    """Drop every kept catalogue: each test starts with none."""
+    _cached.clear()

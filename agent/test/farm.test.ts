@@ -35,6 +35,7 @@ const FARM_TOOLS = {
   get_print_stats: 'GET /api/v1/farm/stats',
   list_print_archives: 'GET /api/v1/farm/archives',
   get_spool_inventory: 'GET /api/v1/farm/inventory',
+  get_spool_summary: 'GET /api/v1/farm/spools/{spool_id}/summary',
 } as const
 
 /** The query string each call sent, by path. */
@@ -165,6 +166,15 @@ describe('farm-context tools (#1912)', () => {
     await runTool(tool('get_spool_inventory'), {}, ctx())
     await runTool(tool('get_spool_inventory'), { include_archived: true, printer_id: 1 }, ctx())
     expect(seen.map((q) => Object.fromEntries(q))).toEqual([{}, { include_archived: 'true', printer_id: '1' }])
+  })
+
+  it('summarises one spool, pricing grams only when asked (#785)', async () => {
+    const seen = capture('/api/v1/farm/spools/15/summary', { spool: { id: 15 }, filament: { spool_count: 2 } })
+    const result = await runTool(tool('get_spool_summary'), { spool_id: 15 }, ctx())
+    await runTool(tool('get_spool_summary'), { spool_id: 15, grams: 12.5 }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(JSON.stringify(firstText(result))).toContain('spool_count')
+    expect(seen.map((q) => Object.fromEntries(q))).toEqual([{}, { grams: '12.5' }])
   })
 
   it("passes the backend's scope problem through", async () => {

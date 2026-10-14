@@ -34,7 +34,11 @@ export type OperationInput = {
   runAttempts: number
   runTimeoutS: number
   searchAttributes: boolean
+  /** Who started it (spec 2026-10-09 §4); recorded on the operation's row. */
+  actor?: OperationActor
 }
+
+export type OperationActor = { principal: string; session?: string; viaTool?: string }
 
 /** ai_operations' row as the workflow passes it (operations/store.ts `Operation`). */
 export type OperationRecord = {

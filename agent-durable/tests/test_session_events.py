@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import cast
 
 import psycopg
@@ -321,13 +322,16 @@ async def test_a_tool_result_names_the_images_its_call_produced(
         "SELECT event FROM ai_session_events WHERE session_id = %s", (sid,)
     )
     logged = "".join(str(r[0]) for r in await cur.fetchall())
-    assert base64.b64encode(PNG).decode()[:24] not in logged
-    assert PNG.hex()[:24] not in logged
+    assert base64.b64encode(PNG).decode() not in logged
+    assert PNG.hex() not in logged
 
 
 @pytest.mark.requires_postgres
 async def test_a_turn_tools_call_is_labelled_with_the_tier_the_listing_gave(
-    agent_db: Conn, connect: object, monkeypatch: pytest.MonkeyPatch
+    agent_db: Conn,
+    connect: object,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A plugin's tool is not in the manifest, so its calls read "outward" in the
     transcript whatever Settings tiered it; the turn's listing carries its tier."""
@@ -356,6 +360,8 @@ async def test_a_turn_tools_call_is_labelled_with_the_tier_the_listing_gave(
             tiers={
                 "playwright__browser_snapshot": "read",
                 "playwright__browser_navigate": "write",
+                # Not a tier (#2839): labelled outward, never passed through.
+                "other__unlisted": "<b>admin</b>",
             },
         ),
     )
@@ -365,3 +371,14 @@ async def test_a_turn_tools_call_is_labelled_with_the_tier_the_listing_gave(
         "playwright__browser_navigate": "write",
         "other__unlisted": "outward",
     }
+    # Said, naming the tool and never the agent's value (#3144).
+    assert "other__unlisted" in caplog.text
+    assert "admin" not in caplog.text
+
+
+def test_risk_tiers_are_the_agents() -> None:
+    """#3144: `RISK_TIERS` copies the agent's `RiskTier`; both are pinned to one file."""
+    fixture = (
+        Path(__file__).resolve().parents[2] / "agent" / "test" / "fixtures" / "risk-tiers.json"
+    )
+    assert frozenset(json.loads(fixture.read_text())) == events_module.RISK_TIERS

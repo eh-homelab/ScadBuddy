@@ -1,3 +1,5 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { assertPluginAllowed, PluginRefusedError, pluginProblems } from '../src/harness/plugins.js'
@@ -7,6 +9,21 @@ import { assertPluginAllowed, PluginRefusedError, pluginProblems } from '../src/
 const fixture = (name: string) => path.join(import.meta.dirname, 'fixtures', 'plugins', name)
 
 describe('plugin vetting (spec §8.6, "command hooks refused")', () => {
+  it('reads a remote server with a null command as no command, as the forwarder does (#2621)', () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'null-command-'))
+    try {
+      mkdirSync(path.join(dir, '.claude-plugin'))
+      writeFileSync(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'null-command' }))
+      writeFileSync(
+        path.join(dir, '.mcp.json'),
+        JSON.stringify({ mcpServers: { m: { type: 'http', url: 'https://mcp.example/mcp', command: null } } }),
+      )
+      expect(pluginProblems(dir)).toEqual([])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('allows skills, remote MCP servers and non-command hooks', () => {
     expect(pluginProblems(fixture('clean'))).toEqual([])
     expect(() => assertPluginAllowed(fixture('clean'))).not.toThrow()

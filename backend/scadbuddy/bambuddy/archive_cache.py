@@ -11,6 +11,8 @@ that miss on the same key while its read is in flight share that one read.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import date
@@ -25,13 +27,16 @@ from scadbuddy.bambuddy.models import (
     LibraryFile,
     Printer,
     TimelapseInfo,
-    TimelapseThumbnails,
 )
 from scadbuddy.core.problems import ApiError
 
 ARCHIVE_TTL = 30.0
 #: The key of a read that is of no one archive (the printers).
 _ALL = 0
+#: How long a timelapse's stills and probe are kept (#2360): Bambuddy extracts them with
+#: ffmpeg on every read, 20-26 s for one print, and a timelapse does not change once
+#: made. They are kept by the timelapse's path, so a different one is read afresh.
+TIMELAPSE_TTL = 6 * 3600.0
 #: Enough for every print of a busy homelab several times over.
 MAX_ENTRIES = 4096
 
@@ -92,7 +97,7 @@ class ArchiveCache:
             return
         for row in await client.archive_outcomes(date_from=date_from, date_to=date_to, limit=limit):
             if row.id in missing:
-                self._put(self._key(client, "archive", row.id), row)
+                self._put(self._key(client, "archive", row.id), row, self._ttl)
 
     async def printers(self, client: BambuddyClient) -> list[Printer]:
         """Bambuddy's printers: what the prints name a printer by (#2363)."""
@@ -115,30 +120,38 @@ class ArchiveCache:
     async def runs(self, client: BambuddyClient, archive_id: int) -> ArchiveRunList:
         return await self._get(client, "runs", archive_id, lambda: client.archive_runs(archive_id))
 
-    async def timelapse_info(self, client: BambuddyClient, archive_id: int) -> TimelapseInfo | None:
-        """None when Bambuddy cannot describe the video (its ffprobe failed, say):
-        the video itself still plays through the proxy."""
+    async def timelapse_info(
+        self, client: BambuddyClient, archive_id: int, timelapse_path: str
+    ) -> TimelapseInfo:
+        """Bambuddy's probe of the timelapse at ``timelapse_path``. A failed read raises
+        and is not kept: the caller shows the video without it."""
+        return await self._get(
+            client,
+            f"timelapse_info:{timelapse_path}",
+            archive_id,
+            lambda: client.timelapse_info(archive_id),
+            ttl=TIMELAPSE_TTL,
+        )
 
-        async def load() -> TimelapseInfo | None:
-            try:
-                return await client.timelapse_info(archive_id)
-            except ApiError:
-                return None
+    async def timelapse_frames(
+        self, client: BambuddyClient, archive_id: int, timelapse_path: str
+    ) -> list[tuple[float, bytes]]:
+        """The stills of the timelapse at ``timelapse_path``, each its time and its JPEG,
+        decoded once (#2512). A failed read raises and is not kept."""
 
-        return await self._get(client, "timelapse_info", archive_id, load)
+        async def load() -> list[tuple[float, bytes]]:
+            frames = await client.timelapse_thumbnails(archive_id)
+            decoded: list[tuple[float, bytes]] = []
+            for at, jpeg in zip(frames.timestamps, frames.thumbnails, strict=False):
+                try:
+                    decoded.append((at, base64.b64decode(jpeg, validate=True)))
+                except binascii.Error:
+                    continue
+            return decoded
 
-    async def timelapse_thumbnails(
-        self, client: BambuddyClient, archive_id: int
-    ) -> TimelapseThumbnails:
-        """No frames when Bambuddy cannot extract them."""
-
-        async def load() -> TimelapseThumbnails:
-            try:
-                return await client.timelapse_thumbnails(archive_id)
-            except ApiError:
-                return TimelapseThumbnails()
-
-        return await self._get(client, "timelapse_thumbnails", archive_id, load)
+        return await self._get(
+            client, f"timelapse_frames:{timelapse_path}", archive_id, load, ttl=TIMELAPSE_TTL
+        )
 
     def forget(self, client: BambuddyClient, archive_id: int) -> None:
         """Drop everything kept for the archive, after ScadBuddy changed it."""
@@ -158,6 +171,8 @@ class ArchiveCache:
         kind: str,
         archive_id: int,
         load: Callable[[], Awaitable[T]],
+        *,
+        ttl: float | None = None,
     ) -> T:
         key = self._key(client, kind, archive_id)
         hit = self._entries.get(key)
@@ -165,7 +180,7 @@ class ArchiveCache:
             return cast(T, hit[1])
         task = self._loading.get(key)
         if task is None:
-            task = asyncio.ensure_future(self._load(key, load))
+            task = asyncio.ensure_future(self._load(key, load, self._ttl if ttl is None else ttl))
             self._loading[key] = task
         # Shielded: one caller going away does not cancel the read the others wait on.
         return cast(T, await asyncio.shield(task))
@@ -174,7 +189,9 @@ class ArchiveCache:
     def _key(client: BambuddyClient, kind: str, archive_id: int) -> tuple[str, str, int]:
         return (client.config.base_url, kind, archive_id)
 
-    async def _load(self, key: tuple[str, str, int], load: Callable[[], Awaitable[T]]) -> T:
+    async def _load(
+        self, key: tuple[str, str, int], load: Callable[[], Awaitable[T]], ttl: float
+    ) -> T:
         task = asyncio.current_task()
         try:
             value = await load()
@@ -183,10 +200,10 @@ class ArchiveCache:
             if owned:
                 del self._loading[key]
         if owned:
-            self._put(key, value)
+            self._put(key, value, ttl)
         return value
 
-    def _put(self, key: tuple[str, str, int], value: object) -> None:
+    def _put(self, key: tuple[str, str, int], value: object, ttl: float) -> None:
         now = self._clock()
         self._entries.pop(key, None)
         if len(self._entries) >= self._max_entries:
@@ -195,4 +212,4 @@ class ArchiveCache:
         while len(self._entries) >= self._max_entries:
             # Oldest first: a dict keeps insertion order, and a refresh re-inserts.
             del self._entries[next(iter(self._entries))]
-        self._entries[key] = (now + self._ttl, value)
+        self._entries[key] = (now + ttl, value)

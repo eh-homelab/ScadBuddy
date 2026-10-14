@@ -1,7 +1,7 @@
 import { act, screen, waitFor, within } from '@testing-library/react'
 import { delay, HttpResponse, http } from 'msw'
 import { Route, Routes, useLocation, useParams } from 'react-router'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Output } from '../api/types'
 import { bbox, keychainSchema, models, outputs } from '../mocks/fixtures'
 import { addMockOutput, problem } from '../mocks/handlers'
@@ -10,8 +10,25 @@ import { setDisplayUnit } from '../lib/units'
 import { renderPage } from '../test/utils'
 import { CustomizePage } from './CustomizePage'
 import { EditPage } from './EditPage'
+import type * as TraceAction from '../lib/traceAction'
+
+/** The user actions started, by name (#2292): `traceAction` itself, recorded. */
+const actions = vi.hoisted(() => [] as string[])
+vi.mock('../lib/traceAction', async (importOriginal) => {
+  const actual = await importOriginal<typeof TraceAction>()
+  const traceAction: typeof actual.traceAction = (name, attributes, run) => {
+    actions.push(name)
+    return actual.traceAction(name, attributes, run)
+  }
+  return { ...actual, traceAction }
+})
 import { HistoryPage } from './HistoryPage'
 import { libraryLabel, pinChange } from '../lib/libraryPins'
+
+// Each test's actions only (#2892): `toContain` would otherwise pass on an earlier test's.
+beforeEach(() => {
+  actions.length = 0
+})
 
 function render() {
   return renderPage(
@@ -321,6 +338,7 @@ describe('HistoryPage', () => {
     )
     await waitFor(() => expect(screen.queryAllByText('Workshop')).toHaveLength(0))
     expect(screen.getByTestId('outputs').children).toHaveLength(2)
+    expect(actions).toContain('delete')
   })
 
   it('asks before deleting an output with copies in Bambuddy, and keeps project copies', async () => {

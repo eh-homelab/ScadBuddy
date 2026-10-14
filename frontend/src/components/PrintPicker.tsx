@@ -25,11 +25,12 @@ import {
   runArrange,
   type ArrangeGoal,
 } from '../lib/arrange'
+import { traceAction } from '../lib/traceAction'
 import { BackfillProgress, BackfillPrompt } from './BackfillPrompt'
 import { openExternal } from '../lib/embed'
 import { plateLabel } from '../lib/plate'
 import { resolvedColors } from '../lib/plateColors'
-import { checkPlan, withSlicedGrams } from '../lib/filaments'
+import { checkPlan, slicedPlateSlots, withSlicedGrams } from '../lib/filaments'
 import { printChoicesOf } from '../lib/printChoices'
 import { resolveOptions } from '../lib/printOptions'
 import {
@@ -458,43 +459,56 @@ export function PrintPicker({
     const controller = new AbortController()
     arrangeRun.current = controller
     try {
-      let from = target
-      if (backfill) {
-        const { ready, failed } = await backfillOutputs([target], {
-          signal: controller.signal,
-          onProgress: (output, message) => setBackfillProgress({ [output.id]: message }),
-        })
-        const read = ready[0]
-        if (!read) {
-          setArrangeError(backfillFailures(failed, 'Re-arrange'))
-          return
-        }
-        from = read
-        setBackfilled(read)
-        setFlaggedId(null)
-      }
-      const next = await runArrange(
-        from.slug,
-        {
-          objects: (from.manifest ?? []).map((object) => ({
-            output_id: from.id,
-            part: object.part,
-            count: object.count,
-          })),
-          goal: arrangeGoal,
-          printer_id: printerId,
-          filament_plan: { slots: plan, force_colour_match: false },
-          colours: from.colors ?? [],
-          name: arrangedName(from.name),
+      // One action from the re-render to the save, as the Arrange dialog's (#2292).
+      await traceAction(
+        'arrange',
+        // `scadbuddy.output_id` is the arranged output, as on the Arrange dialog's span
+        // (#2891); the output it was arranged from is its own attribute.
+        { 'scadbuddy.source_output_id': target.id, 'scadbuddy.rerendered': backfill ? 1 : 0 },
+        async (within, span) => {
+          let from = target
+          if (backfill) {
+            const { ready, failed } = await backfillOutputs([target], {
+              signal: controller.signal,
+              within,
+              onProgress: (output, message) => setBackfillProgress({ [output.id]: message }),
+            })
+            const read = ready[0]
+            if (!read) {
+              setArrangeError(backfillFailures(failed, 'Re-arrange'))
+              // Not a failure the span would see, nor a success (#2891).
+              span.setAttribute('scadbuddy.outcome', 'rerender_failed')
+              return
+            }
+            from = read
+            setBackfilled(read)
+            setFlaggedId(null)
+          }
+          const next = await runArrange(
+            from.slug,
+            {
+              objects: (from.manifest ?? []).map((object) => ({
+                output_id: from.id,
+                part: object.part,
+                count: object.count,
+              })),
+              goal: arrangeGoal,
+              printer_id: printerId,
+              filament_plan: { slots: plan, force_colour_match: false },
+              colours: from.colors ?? [],
+              name: arrangedName(from.name),
+            },
+            { signal: controller.signal, within },
+          )
+          span.setAttribute('scadbuddy.output_id', next.output.id)
+          // Closed while the output was being saved: it is saved, a normal output in
+          // History, but this dialog keeps the output it was opened for.
+          if (controller.signal.aborted) return
+          carry.set({ plan, ready: false })
+          setArranged(next.output)
+          setArrangeNote(arrangedNote(next.plates))
         },
-        { signal: controller.signal },
       )
-      // Closed while the output was being saved: it is saved, a normal output in
-      // History, but this dialog keeps the output it was opened for.
-      if (controller.signal.aborted) return
-      carry.set({ plan, ready: false })
-      setArranged(next.output)
-      setArrangeNote(arrangedNote(next.plates))
     } catch (cause) {
       if (controller.signal.aborted) return
       if (backfillIds(cause)) {
@@ -972,6 +986,17 @@ export function PrintPicker({
                             : plateLabel(picker.plates, plate === 'all' ? 1 : plate)
                       }
                       colors={previewColors}
+                      toolpathUrl={
+                        // #2072 — the background slice's toolpaths, while they are of the
+                        // choices on screen and of the plate this dialog shows. A multi-plate
+                        // output's dialog shows every plate, which no one plate's slice is.
+                        previewSlice.result &&
+                        !previewSlice.stale &&
+                        !(source.kind === 'output' && picker.plates.length > 1) &&
+                        previewPlate === (plate === 'all' ? 1 : plate)
+                          ? sourceApi(source).toolpathUrl(previewSlice.result.job_id)
+                          : null
+                      }
                     />
                   )}
                 </div>
@@ -1041,7 +1066,11 @@ export function PrintPicker({
                         />
                       )}
 
-                      <PrintSequenceStep value={printSequence} onChange={setPrintSequence} />
+                      <PrintSequenceStep
+                        value={printSequence}
+                        onChange={setPrintSequence}
+                        objects={check.current ? (check.verdict?.objects ?? null) : null}
+                      />
 
                       {given?.kind === 'output' && (
                         <SlicerDefaults
@@ -1102,6 +1131,12 @@ export function PrintPicker({
                 plan={plan}
                 colors={previewColors}
                 slice={previewSlice.result}
+                nozzlePlan={previewSlice.plan}
+                plateSlots={slicedPlateSlots(filaments?.slots ?? [], {
+                  plates: picker.plates.length,
+                  chosen: plate,
+                  sliced: previewSlice.plateId,
+                })}
                 stale={previewSlice.stale}
                 slicing={previewSlice.slicing}
                 sliceError={previewSlice.error}

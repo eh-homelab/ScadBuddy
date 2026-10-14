@@ -1,6 +1,7 @@
 import { Suspense, lazy, type ReactNode } from 'react'
 import { Navigate, Route, Routes } from 'react-router'
 import { AppShell } from './components/AppShell'
+import { ActivityPage } from './pages/ActivityPage'
 import { CataloguePage } from './pages/CataloguePage'
 import { CustomizePage } from './pages/CustomizePage'
 import { EditPage } from './pages/EditPage'
@@ -82,6 +83,7 @@ export function App() {
         <Route path="workflows/flows" element={<WorkflowsPage tab="flows" />} />
         <Route path="workflows/flows/:id" element={<FlowPage />} />
         <Route path="workflows/runs/:id" element={<WorkflowRunPage />} />
+        <Route path="activity" element={<ActivityPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>

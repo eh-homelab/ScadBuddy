@@ -56,7 +56,7 @@ export function printSlides(print: PrintDetail): Slide[] {
       key: 'timelapse',
       kind: 'video',
       src: media.timelapse.url,
-      poster: media.timelapse.poster_frames[0]?.data_url,
+      poster: media.timelapse.poster_url,
       alt: `${label}, timelapse`,
       caption: 'Timelapse',
       contentType: 'video/mp4',

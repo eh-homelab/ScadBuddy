@@ -123,6 +123,11 @@ class PrintSource(Protocol):
         which prints as it is."""
         ...
 
+    async def fetched_3mf(self, client: BambuddyClient) -> bytes | None:
+        """:meth:`fetch_3mf`, read once for the source and kept: what a check that also
+        reads the file (#956) reads, rather than download it again (#2976)."""
+        ...
+
     async def states_nozzles(self, client: BambuddyClient) -> bool:
         """Whether the file sliced states the side the slicer may use (#834) and each
         side's flow (#484), as chosen: anything but a 3MF nothing can be stated into
@@ -312,6 +317,9 @@ class PrintPipeline:
 
     async def states_nozzles(self: _Fetching, client: BambuddyClient) -> bool:
         return (await PrintPipeline._fetch(self, client)).stated
+
+    async def fetched_3mf(self: _Fetching, client: BambuddyClient) -> bytes | None:
+        return (await PrintPipeline._fetch(self, client)).payload
 
     async def file_to_read(self: _Fetching, client: BambuddyClient) -> ReadFile:
         uploads, settings = PrintPipeline._stores(self)

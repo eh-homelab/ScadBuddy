@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { callContext } from './callContext.js'
 import type { QuestionGate, UserQuestion } from './questions.js'
 
 // Attention requests (#815): the agent's `request_user_attention` tool, an
@@ -15,7 +16,10 @@ import type { QuestionGate, UserQuestion } from './questions.js'
 //     parks for its own approval (approvals/service.ts), so a timeout never lets
 //     anything outward run;
 //   - `wait`: it stays parked to the ceiling (WAIT_CEILING_S), then does what
-//     `stop` does;
+//     `stop` does. It takes no `timeout_s` (#1204). The wait holds the turn,
+//     its lease and its Claude Code process, and like every question it never
+//     outlives the turn: a restart or deploy ends it and nothing asks again
+//     (#1220; the durable path's workflow timer is what would lift that);
 //   - `stop`: the turn ends, as an interrupt ends it.
 // #815's `approval_pending` reason is refused as malformed: an approval is
 // already its own entry, with its own card, and must never time out to proceed.
@@ -145,6 +149,21 @@ export function parseAttention(input: unknown): { ok: true; input: AttentionInpu
       }
     }
   }
+  // #1204: `wait` parks to WAIT_CEILING_S whatever `timeout_s` says, so a model that
+  // named one would wait far longer than it asked. Refused, rather than dropped unsaid.
+  if (
+    typeof input === 'object' &&
+    input !== null &&
+    (input as { on_timeout?: unknown }).on_timeout === 'wait' &&
+    (input as { timeout_s?: unknown }).timeout_s !== undefined
+  ) {
+    return {
+      ok: false,
+      error:
+        `on_timeout 'wait' takes no timeout_s: it waits up to ${WAIT_CEILING_S / 3600} hours, then ends your turn. ` +
+        "Leave timeout_s out to wait that long, or use on_timeout 'stop' to end your turn after timeout_s.",
+    }
+  }
   const parsed = AttentionInputSchema.safeParse(input)
   return parsed.success ? { ok: true, input: parsed.data } : { ok: false, error: z.prettifyError(parsed.error) }
 }
@@ -199,32 +218,21 @@ export const RECONNECTED_TEXT =
   'not run since, and the page may have reloaded or changed while the tab was away: re-check it (browser_status, ' +
   'then browser_snapshot) before calling a browser_* tool that changes it again.'
 
-/** What Claude Code puts in an MCP call's `_meta` (measured on 2.1.283 and 2.1.287; questions.ts). */
-const TOOL_USE_ID_META = 'claudecode/toolUseId'
-
-const ExtraSchema = z.object({
-  signal: z.instanceof(AbortSignal),
-  _meta: z.object({ [TOOL_USE_ID_META]: z.string().min(1).optional() }).loose().optional(),
-})
-
 type ToolResult = { content: { type: 'text'; text: string }[]; isError?: boolean }
 
 const text = (t: string, isError = false): ToolResult => ({ content: [{ type: 'text', text: t }], ...(isError ? { isError } : {}) })
 
 /** request_user_attention's handler (exported for tests). `tool` is its harness name. */
 export async function attentionHandler(gate: QuestionGate, tool: string, args: unknown, extra: unknown): Promise<ToolResult> {
-  const context = ExtraSchema.safeParse(extra)
-  if (!context.success) {
-    return text(`The user was not asked: the call's context is not as expected (${z.prettifyError(context.error)}).`, true)
-  }
-  const toolUseId = context.data._meta?.[TOOL_USE_ID_META]
-  if (toolUseId === undefined) return text('The user was not asked: the call has no tool_use id.', true)
+  const call = callContext(extra)
+  if (!call.ok) return text(`The user was not asked: ${call.error}.`, true)
+  const { toolUseId } = call
   const parsed = parseAttention(args)
   if (!parsed.ok) return text(`The user was not asked: ${parsed.error}`, true)
   const card = attentionCard(parsed.input)
   const attention = attentionSpec(parsed.input)
   try {
-    const verdict = await gate({ tool, questions: [card], toolUseId, signal: context.data.signal, attention })
+    const verdict = await gate({ tool, questions: [card], toolUseId, signal: call.signal, attention })
     if (verdict.answered) return text(answeredText(verdict.answers[card.question] ?? ''))
     if (verdict.posted) return text(POSTED_TEXT)
     if (verdict.timedOut && attention.reason !== 'done') return text(timedOutText(attention.timeoutS))
@@ -247,4 +255,6 @@ export const ATTENTION_DESCRIPTION =
   'nothing, takes no options, timeout_s or on_timeout, and stays on the badge until the user dismisses it. ' +
   '`options` are up to four quick replies; the user may also type their own. After `timeout_s` (default 300) ' +
   '`on_timeout` decides: `proceed` (default) returns timed_out and you carry on with work that needs no ' +
-  'approval only; `wait` keeps waiting up to a day; `stop` ends your turn. A timeout never approves anything.'
+  'approval only; `wait` (which takes no timeout_s) keeps waiting up to a day, then ends your turn; `stop` ends ' +
+  'your turn. A wait holds your turn open: if ScadBuddy restarts meanwhile the turn ends and the user is not ' +
+  'asked again. A timeout never approves anything.'

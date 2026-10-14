@@ -14,7 +14,13 @@ from fastapi import APIRouter, Query
 
 from scadbuddy.api.deps import SettingsStoreDep
 from scadbuddy.bambuddy.client import client_for
-from scadbuddy.bambuddy.farm import ArchiveOutcome, InventoryView, inventory_view
+from scadbuddy.bambuddy.farm import (
+    ArchiveOutcome,
+    InventoryView,
+    SpoolSummary,
+    inventory_view,
+    spool_summary,
+)
 from scadbuddy.bambuddy.models import ArchiveStats, QueueItem
 
 router = APIRouter(prefix="/farm", tags=["farm"])
@@ -94,3 +100,25 @@ async def get_inventory(
         return await inventory_view(
             client, include_archived=include_archived, printer_id=printer_id
         )
+
+
+@router.get(
+    "/spools/{spool_id}/summary",
+    response_model=SpoolSummary,
+    summary="One spool's stock and price, and its filament's",
+)
+async def get_spool_summary(
+    spool_id: int,
+    store: SettingsStoreDep,
+    grams: Annotated[
+        float | None,
+        Query(ge=0, description="Grams to price at this spool's cost, e.g. a plate's use"),
+    ] = None,
+) -> SpoolSummary:
+    """What a filament hover card shows (#785): the spool's remaining grams, where it is
+    loaded and its price per kg, and every unarchived spool of the same filament
+    (material, subtype, brand and colour) with their total remaining grams and where
+    they are loaded. Prices are Bambuddy's own ``cost_per_kg``; with none, every price
+    and cost is ``null``."""
+    async with client_for(store.load()) as client:
+        return await spool_summary(client, spool_id, grams=grams)

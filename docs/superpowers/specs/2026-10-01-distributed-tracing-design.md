@@ -60,8 +60,10 @@ cluster does not run and which covers neither the browser nor Temporal context.
   well, not only the backend's own. Leaving the
   endpoint unset is the normal way to run without tracing. Clusters never
   sets this variable unless it is ruling the SDK out of an incident.
-- **Resource.** Each process sets `service.name`: `scadbuddy-api`,
-  `scadbuddy-worker`, `scadbuddy-agent`, `scadbuddy-web`. `service.version` is
+- **Resource.** Each process sets `service.name`: `scadbuddy-api`, each worker
+  its Deployment's name (`scadbuddy-render`, `scadbuddy-print`,
+  `scadbuddy-projects`, by `--queue`; one shared `scadbuddy-worker` until #2292),
+  `scadbuddy-agent`, `scadbuddy-web`. `service.version` is
   the build's version, and `service.instance.id` the process's host name
   (Python `socket.gethostname()`, Node `os.hostname()`), with the build's
   `SCADBUDDY_REVISION` as `scadbuddy.revision`. The in-process worker
@@ -629,7 +631,7 @@ hard-coded uids.
 
 - *Renders:* the existing Prometheus series (queue depth, wait, stage seconds,
   outcomes, SLOs), with a trace-search panel beside them:
-  `{resource.service.name="scadbuddy-worker" && name="render.render"}`, slowest
+  `{resource.service.name="scadbuddy-render" && name="render.render"}`, slowest
   and failed first.
 - *HTTP:* request rate and duration by route template (existing metrics), and
   a Tempo table of the slowest API traces.

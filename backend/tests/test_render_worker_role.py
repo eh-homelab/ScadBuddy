@@ -151,6 +151,66 @@ def test_the_role_holds_every_grant_and_cannot_read_the_settings_table(granted: 
                 conn.execute(sql.SQL("SELECT 1 FROM {}").format(sql.Identifier(table)))
 
 
+def test_the_role_reaches_only_render_activity_rows(owner: Pool, granted: Pool) -> None:
+    with owner.connection() as conn:
+        conn.execute(
+            "INSERT INTO activity (id, kind, status, title, source, source_id, principal)"
+            " VALUES ('operation:o1', 'model_import', 'running', 'Import', 'operations', 'o1',"
+            " 'token:t1')"
+        )
+    with granted.connection() as conn:
+        assert conn.execute("SELECT id FROM activity").fetchall() == []
+        conn.execute(
+            "INSERT INTO activity (id, kind, status, title, source, source_id)"
+            " VALUES ('render:r1', 'render', 'running', 'Render', 'render_jobs', 'r1')"
+        )
+        updated = conn.execute(
+            "UPDATE activity SET status = 'failed' WHERE id = 'operation:o1' RETURNING id"
+        ).fetchall()
+        assert updated == []
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            conn.execute(
+                "INSERT INTO activity (id, kind, status, title, source, source_id)"
+                " VALUES ('operation:o2', 'model_import', 'running', 'Import', 'operations', 'o2')"
+            )
+    with owner.connection() as conn:
+        rows = conn.execute("SELECT id, status FROM activity ORDER BY id").fetchall()
+    assert [(r["id"], r["status"]) for r in rows] == [
+        ("operation:o1", "running"),
+        ("render:r1", "running"),
+    ]
+
+
+def test_a_changed_row_predicate_replaces_the_old_policy(
+    owner: Pool, granted: Pool, role: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(worker_role, "RENDER_ROWS", {"activity": "id LIKE 'render:x%'"})
+    with owner.connection() as conn:
+        # af75581 named the policy without a suffix; it goes too.
+        conn.execute(
+            sql.SQL(
+                "CREATE POLICY {} ON activity AS RESTRICTIVE TO {} USING (id LIKE 'render:%')"
+            ).format(sql.Identifier(f"only_{role}"), sql.Identifier(role))
+        )
+        assert grant_render_role(conn, role)
+        conn.execute(
+            "INSERT INTO activity (id, kind, status, title, source, source_id) VALUES"
+            " ('render:a1', 'render', 'running', 'A', 'render_jobs', 'a1'),"
+            " ('render:x1', 'render', 'running', 'X', 'render_jobs', 'x1')"
+        )
+        mine = [
+            r["policyname"]
+            for r in conn.execute(
+                "SELECT policyname FROM pg_policies WHERE tablename = 'activity'"
+                " AND policyname LIKE %s",
+                (f"only_{role}%",),
+            )
+        ]
+    assert len(mine) == 1
+    with granted.connection() as conn:
+        assert [r["id"] for r in conn.execute("SELECT id FROM activity")] == ["render:x1"]
+
+
 def test_the_role_cannot_migrate(granted: Pool) -> None:
     with granted.connection() as conn, pytest.raises(psycopg.errors.InsufficientPrivilege):
         migrate(conn, (Migration("29991231T2359Z_later", "CREATE TABLE later (id int)"),))
@@ -430,5 +490,10 @@ async def test_the_worker_renders_as_its_own_role(
         refs = conn.execute(
             "SELECT count(*) AS n FROM blob_refs WHERE holder_id = %s", (job.id,)
         ).fetchone()
+        # Written by the worker as the role, not left to the repair pass.
+        activity = conn.execute(
+            "SELECT status FROM activity WHERE id = %s", (f"render:{job.id}",)
+        ).fetchone()
     assert {"job.running", "job.done"} <= kinds
     assert refs is not None and refs["n"] >= 1
+    assert activity is not None and activity["status"] == "succeeded"

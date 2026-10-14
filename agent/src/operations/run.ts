@@ -2,6 +2,7 @@ import type { Client } from '@temporalio/client'
 import { randomUUID } from 'node:crypto'
 import {
   OPERATION_LOST,
+  type OperationActor,
   type OperationAnswer,
   type OperationProblem,
   type OperationRecord,
@@ -38,7 +39,12 @@ export type CommandOutcome =
 
 /** What the routes run commands through; tests may stand in for it. */
 export interface Commands {
-  run(kind: string, request: Record<string, unknown>, idempotencyKey: string | undefined): Promise<CommandOutcome>
+  run(
+    kind: string,
+    request: Record<string, unknown>,
+    idempotencyKey: string | undefined,
+    actor?: OperationActor,
+  ): Promise<CommandOutcome>
   /** One operation; a running one whose execution has ended is recorded as lost. */
   get(id: string): Promise<Operation | undefined>
 }
@@ -93,7 +99,12 @@ export class AgentCommands implements Commands {
     this.#kinds = new Map(options.kinds.map((k) => [k.name, k]))
   }
 
-  async run(kindName: string, request: Record<string, unknown>, idempotencyKey: string | undefined): Promise<CommandOutcome> {
+  async run(
+    kindName: string,
+    request: Record<string, unknown>,
+    idempotencyKey: string | undefined,
+    actor?: OperationActor,
+  ): Promise<CommandOutcome> {
     const kind = this.#kinds.get(kindName)
     if (!kind) throw new Error(`no command kind ${kindName}`)
     const size = Buffer.byteLength(canonicalJson(request))
@@ -125,6 +136,7 @@ export class AgentCommands implements Commands {
           runAttempts: kind.runAttempts,
           runTimeoutS: kind.runTimeoutS,
           searchAttributes: this.#options.searchAttributes,
+          ...(actor ? { actor } : {}),
         },
         this.#options.deadlineMs,
       )

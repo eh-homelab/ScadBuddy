@@ -53,11 +53,25 @@ export function humanSize(bytes: number): string {
   const units = ['KB', 'MB', 'GB'] as const
   let n = bytes / 1024
   let unit = 0
-  while (n >= 1024 && unit < units.length - 1) {
+  // Rounded before the unit is chosen, so 1,048,575 bytes is "1.0 MB", never "1024.0 KB" (#2530).
+  while (Number(n.toFixed(1)) >= 1024 && unit < units.length - 1) {
     n /= 1024
     unit += 1
   }
   return `${n.toFixed(1)} ${units[unit]} (${exact})`
+}
+
+/**
+ * The input without a `workspace_size` of its own. The classic gate and its audit row
+ * get the SDK's unparsed input, so a size the model put there is dropped from both: the
+ * only size on a card is one withWorkspaceSize read, and the audit row never records
+ * a size nobody read (#2530).
+ */
+export function withoutWorkspaceSize(input: Record<string, unknown>): Record<string, unknown> {
+  if (!('workspace_size' in input)) return input
+  const own = { ...input }
+  delete own.workspace_size
+  return own
 }
 
 /**
@@ -79,10 +93,7 @@ export async function withWorkspaceSize(
   input: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
   const { workspace_path: path, workspace_sha256: digest } = input
-  // The classic gate gets the SDK's unparsed input: a `workspace_size` the model
-  // put there is never shown, so the only size on a card is one read here.
-  const own = { ...input }
-  delete own.workspace_size
+  const own = withoutWorkspaceSize(input)
   // The shape check keeps every call that uploads nothing off Postgres.
   if (files === undefined || ws === undefined || typeof path !== 'string' || typeof digest !== 'string') return own
   let info: WorkspaceFileInfo | undefined

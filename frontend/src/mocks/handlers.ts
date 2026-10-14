@@ -38,6 +38,7 @@ import type {
   PlateFit,
   PrintAgain,
   PrintDetail,
+  TimelapseFrames,
   PrintPage,
   PrintProgress,
   PrintRunRequest,
@@ -2984,7 +2985,11 @@ export const handlers = [
           ? print.media
           : {
               ...print.media,
-              timelapse: { url: `/api/v1/prints/${print.archive_id}/timelapse`, info: null, poster_frames: [] },
+              timelapse: {
+                url: `/api/v1/prints/${print.archive_id}/timelapse`,
+                poster_url: `/api/v1/prints/${print.archive_id}/timelapse/frames/0`,
+                frames_url: `/api/v1/prints/${print.archive_id}/timelapse/frames`,
+              },
             },
       printer_media:
         wantsPrinter && print.status !== 'deleted_in_bambuddy'
@@ -3025,6 +3030,21 @@ export const handlers = [
     }
     state.pulledTimelapses.set(print.archive_id, filename)
     return new HttpResponse(null, { status: 204 })
+  }),
+
+  // #2360 — the timelapse's stills and probe, read after the detail; #2512 — each a JPEG by URL.
+  http.get(`${base}/prints/:archiveId/timelapse/frames`, ({ params }) => {
+    const id = Number(params['archiveId'])
+    const print = fixtures.prints.find((p) => p.archive_id === id)
+    if (!print || (print.media.timelapse === null && !state.pulledTimelapses.has(id))) {
+      return problem(404, 'Not Found', `print ${String(params['archiveId'])} has no timelapse`)
+    }
+    return HttpResponse.json(fixtures.timelapseFrames[id] ?? ({ info: null, frames: [] } satisfies TimelapseFrames))
+  }),
+  http.get(`${base}/prints/:archiveId/timelapse/frames/:index`, ({ params }) => {
+    const frames = fixtures.timelapseFrames[Number(params['archiveId'])]?.frames ?? []
+    if (Number(params['index']) >= frames.length) return problem(404, 'Not Found', 'the timelapse has no such still')
+    return HttpResponse.arrayBuffer(mediaBytes('', '', 'image'), { headers: { 'Content-Type': 'image/png' } })
   }),
 
   // #307 — the timelapse, with Range as Bambuddy's FileResponse answers it.
