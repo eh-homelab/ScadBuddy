@@ -960,11 +960,10 @@ def test_a_reused_slice_deleted_before_it_is_queued_is_sliced_again(client: Test
         )
     )
     slice_kept(78)
+    accepted = queued.return_value
+    assert accepted is not None
     queued.mock(
-        side_effect=[
-            httpx.Response(400, json={"detail": "Library file not found"}),
-            queued.return_value,
-        ]
+        side_effect=[httpx.Response(400, json={"detail": "Library file not found"}), accepted]
     )
     second = run_library(client, 89, json={**request, "request_id": "second"})
 
@@ -974,6 +973,9 @@ def test_a_reused_slice_deleted_before_it_is_queued_is_sliced_again(client: Test
     sent = [json.loads(call.request.content)["library_file_id"] for call in queued.calls]
     assert sent == [77, 77, 78]
     assert sliced.call_count == 2
+    # Forgotten as soon as it is found gone, not on the next reprint (#3495 review).
+    copies = asyncio.run(_state(client).uploads.for_output("library:89"))
+    assert [s.id for c in copies for s in c.sliced] == [78]
 
 
 @respx.mock
@@ -2508,3 +2510,15 @@ def test_another_model_of_the_same_g_code_family_is_said_but_not_held() -> None:
     assert said.kind not in print_run.HELD_SLICED_KINDS
     assert held.kind == "sliced-other-model"
     assert held.kind in print_run.HELD_SLICED_KINDS
+
+
+def test_a_same_family_printer_known_by_its_device_code_is_named_by_its_model() -> None:
+    """#3495 review: Bambuddy may hold a printer's SSDP code ("C12"); the warning names
+    the model it stands for."""
+    profile = SlicedProfile(printer_model="Bambu Lab X1 Carbon")
+
+    [said] = print_run.sliced_warnings(profile, Printer(id=1, name="P", model="C12"), None, [1])
+
+    assert said.kind == "sliced-same-family"
+    assert "P is a P1S," in said.message
+    assert "C12" not in said.message

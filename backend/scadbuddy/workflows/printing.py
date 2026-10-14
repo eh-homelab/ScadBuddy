@@ -450,7 +450,14 @@ class PrintRunWorkflow:
                     "a reused slice is gone from Bambuddy; slicing the plate again",
                     extra={"plate_id": plate.plate_id, "sliced_library_file_id": sliced},
                 )
+                # The POST that said so queued nothing. On the first plate nothing is
+                # queued at all until the new slice is sent, so a cancel until then says
+                # so, as one before any POST does (#3495 review).
+                if index == 0:
+                    self.enqueue_attempted, self.enqueue_unstarted = False, True
+                self._stop_if_cancelled()
                 started, sliced = await self._slice(planned, plate)
+                self.enqueue_attempted, self.enqueue_unstarted = True, False
                 job_id, preset_key = started.job_id, started.preset_key
                 again = workflow.start_activity(
                     "print_enqueue",

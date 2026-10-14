@@ -1248,6 +1248,24 @@ async def test_a_reused_slice_gone_from_bambuddy_is_sliced_again_and_queued(
     assert (outcome.slice_job_id, outcome.sliced_library_file_id) == (9, 52)
 
 
+@pytest.mark.parametrize("activity_name", ["enqueue", "slice_wait"])
+async def test_a_cancel_around_slicing_a_gone_reused_slice_again_says_nothing_was_queued(
+    client: Client, worker: str, fake: Fake, activity_name: str
+) -> None:
+    """#3495 review: the POST /queue/ that found the reused slice gone queued nothing. A
+    cancel while it ran, or while the plate is sliced again, says so, and the run stops
+    before slicing or queueing anything more."""
+    fake.reused = 77
+    fake.enqueue_errors = [_gone()]
+    finished = await cancel_during(client, worker, fake, activity_name, window=600)
+
+    assert fake.enqueued == [77]
+    assert finished.status == "failed" and not finished.may_have_queued
+    assert fake.calls[-1] == f"fail:409:{CANCELLED_UNQUEUED.detail}:unqueued"
+    if activity_name == "enqueue":
+        assert fake.slice_starts == 0
+
+
 async def test_a_reused_slice_refused_for_another_reason_fails_the_run_unsliced(
     client: Client, quick: str, fake: Fake
 ) -> None:

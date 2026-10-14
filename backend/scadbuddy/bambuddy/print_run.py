@@ -1665,7 +1665,8 @@ def sliced_warnings(
             FilamentWarning(
                 kind="sliced-same-family",
                 message=(
-                    f"Sliced for a {profile.printer_model}; {printer.name} is a {printer.model},"
+                    # The short name: Bambuddy may hold an SSDP code ("C12") (#3495 review).
+                    f"Sliced for a {profile.printer_model}; {printer.name} is a {have},"
                     " whose G-code family takes it."
                 ),
             )

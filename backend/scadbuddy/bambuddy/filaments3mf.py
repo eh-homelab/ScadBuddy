@@ -85,7 +85,7 @@ _MODEL_ALIASES = {
 #: Models whose G-code Bambuddy dispatches to one another (``GCODE_COMPAT_FAMILIES``,
 #: same file): the X1 and P1 series, one 256 mm CoreXY single-nozzle family. Every
 #: other model takes only its own G-code.
-_MODEL_FAMILIES = (frozenset({"X1", "X1C", "X1E", "P1P", "P1S"}),)
+_X1_FAMILY = frozenset({"X1", "X1C", "X1E", "P1P", "P1S"})
 #: Where a plate's index sits in ``Metadata/plate_<n>.gcode``.
 _PLATE_PREFIX = len("Metadata/plate_")
 _GCODE_SUFFIX = -len(".gcode")
@@ -170,7 +170,7 @@ def model_key(model: str | None) -> str | None:
 def same_family(a: str | None, b: str | None) -> bool:
     """Whether two :func:`model_key` keys are different models whose G-code Bambuddy
     still dispatches across (#2956)."""
-    return a != b and any(a in family and b in family for family in _MODEL_FAMILIES)
+    return a != b and a in _X1_FAMILY and b in _X1_FAMILY
 
 
 class LocalFilaments(BaseModel):
