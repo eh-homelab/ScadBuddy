@@ -95,7 +95,7 @@ function supportsPhrase(
   return (
     (supports.type === undefined ? ', with supports' : `, with ${supports.type} supports`) +
     `${supports.threshold_angle === undefined ? '' : ` at ${supports.threshold_angle}°`}` +
-    `${supports.on_build_plate_only ? ' on the build plate only' : ''}`
+    `${supports.on_build_plate_only === true ? ' on the build plate only' : supports.on_build_plate_only === false ? ', from the model too' : ''}`
   )
 }
 
@@ -852,7 +852,7 @@ export const printTools: Tool[] = [
           enabled: z
             .boolean()
             .describe('false prints with no supports, and the other fields are then not sent; true adds them over the template'),
-          type: z.enum(['tree', 'normal']).optional().describe("'tree' (Bambu's default, best on an H2C); omit for the template's, else tree"),
+          type: z.enum(['tree', 'normal']).optional().describe("'tree' or 'normal'; omit for the template's, else tree"),
           threshold_angle: z
             .number()
             .int()

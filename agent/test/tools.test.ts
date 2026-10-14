@@ -620,13 +620,16 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     await t.execute(args, ctx())
     // Only what was asked for: the backend keeps the template's type and plate setting.
     expect((chosen.body as { supports?: unknown }).supports).toEqual({ enabled: true, threshold_angle: 40 })
-    expect(off.body).toMatchObject({ supports: { enabled: false } })
     expect((off.body as { supports: unknown }).supports).toEqual({ enabled: false })
     expect(plain.body).not.toHaveProperty('supports')
     expect(t.summarize({ ...args, supports: { enabled: true, type: 'normal', threshold_angle: 40, on_build_plate_only: true } })).toContain(
       'with normal supports at 40° on the build plate only',
     )
     expect(t.summarize({ ...args, supports: { enabled: false } })).toContain('without supports')
+    // Turning off a template's build-plate-only is said, not approved silently (#2840 review).
+    expect(t.summarize({ ...args, supports: { enabled: true, on_build_plate_only: false } })).toContain(
+      ', with supports, from the model too',
+    )
     // Only what was given is named: no type, angle or build-plate clause (#2840 review).
     expect(t.summarize({ ...args, supports: { enabled: true } })).toContain(', with supports')
     expect(t.summarize({ ...args, supports: { enabled: true } })).not.toMatch(/supports (at|on)|tree|normal/)
