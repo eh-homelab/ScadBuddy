@@ -5,6 +5,7 @@ import type {
   AnalysisRequest,
   AnalysisTarget,
   FilamentWarning,
+  NozzlePlan as NozzlePlanView,
   Output,
   PrintOptions,
   PrintOptionsState,
@@ -45,6 +46,7 @@ import { useAsync } from '../lib/useAsync'
 import { CarryBox, useFilamentPlan } from '../lib/useFilamentPlan'
 import { usePrintCheck } from '../lib/usePrintCheck'
 import { usePreviewSlice } from '../lib/usePreviewSlice'
+import { asSliced } from '../lib/slicedSides'
 import { usePrintChoices } from '../lib/usePrintChoices'
 import { usePrintProgress } from '../lib/usePrintProgress'
 import { useRunPrint } from '../lib/useRunPrint'
@@ -635,6 +637,30 @@ export function PrintPicker({
       ? { ...checkRequest, plate_id: previewPlate, all_plates: false }
       : checkRequest
   const previewSlice = usePreviewSlice(source, sliceable && !sliced ? previewRequest : null)
+  // #2703 — the slicer groups filaments itself, so once a slice of these choices for the
+  // plate being printed has landed, its sides are the ones shown.
+  // Memoised: `asSliced` builds a new plan on every call, and the effect below stores it,
+  // so an unmemoised one re-rendered the dialog without end (#2737 review).
+  const slicedShown = plate !== 'all' && previewPlate === plate && !previewSlice.stale && check.current
+  const nozzlePlan = check.verdict?.nozzle_plan
+  const sliceResult = previewSlice.result
+  const slicedNow = useMemo(
+    () => (slicedShown ? asSliced(nozzlePlan, sliceResult) : null),
+    [slicedShown, nozzlePlan, sliceResult],
+  )
+  // #2737 review: previewing another plate does not unsay it. The printed plate's slice
+  // still holds for these choices, so its sides stay until the choices or the plate change.
+  const slicedFor = `${plate}|${currentKey}|${check.request}`
+  const [lastSliced, setLastSliced] = useState<{ key: string; plan: NozzlePlanView } | null>(null)
+  useEffect(() => {
+    if (!slicedNow) return
+    setLastSliced((last) =>
+      last?.key === slicedFor && last.plan === slicedNow ? last : { key: slicedFor, plan: slicedNow },
+    )
+  }, [slicedNow, slicedFor])
+  const slicedPlan =
+    slicedNow ??
+    (previewPlate !== plate && check.current && lastSliced?.key === slicedFor ? lastSliced.plan : null)
   /** #2164 — filled trays Bambuddy has no spool for, and the ones answered "no". */
   const trays = useDeclinedTrays(printerId, filaments?.trays ?? [])
   // #836 — a hand pick the current check no longer offers (no rack this time, or the
@@ -894,7 +920,13 @@ export function PrintPicker({
                       gramsStale={slicedForSlots !== null && previewSlice.stale}
                     />
                   )}
-                  {!sliced && <NozzlePlanLine plan={check.verdict?.nozzle_plan} stale={!check.current} />}
+                  {!sliced && (
+                    <NozzlePlanLine
+                      plan={slicedPlan ?? check.verdict?.nozzle_plan}
+                      stale={!check.current}
+                      sliced={slicedPlan !== null}
+                    />
+                  )}
                   {target && known && (
                     <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2">
                       <legend className="px-1 text-[13px] text-ink">Arrange</legend>

@@ -8,6 +8,7 @@ import { analysisReport, openEdgesDiagnostic } from '../mocks/analyzers'
 import { choicesView, queuedResult } from '../mocks/choices'
 import * as fixtures from '../mocks/fixtures'
 import { MULTI_PLATE_FILE } from '../mocks/features/library'
+import { H2C_FILE, H2C_FILENAME } from '../mocks/h2c'
 import { lastArrangeRequest, problem, resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { normalizeHex } from '../lib/format'
@@ -1718,6 +1719,124 @@ describe('PrintPicker · departures of a stale slice (#2702 review)', () => {
     await user.click(within(await screen.findByTestId('plate-choice')).getByRole('radio', { name: /Plate 2/ }))
     await waitFor(() => expect(screen.queryByText(/isn't used by the sliced plate/)).toBeNull())
     release()
+  }, 20000)
+})
+
+describe('PrintPicker · the nozzles as sliced (#2703)', () => {
+  it('shows the sides the slicer used once a slice of these choices lands', async () => {
+    // The H2C plans Mistletoe Green → right and Inland Black → left; this slicer swaps them.
+    // The slice is held until the planned sides have been read (#2737 review: under load
+    // it could land first).
+    let land = () => {}
+    const held = new Promise<void>((resolve) => (land = resolve))
+    server.use(
+      http.get('/api/v1/print/:kind/:id/preview-slices/:job', async ({ params }) => {
+        await held
+        return HttpResponse.json({
+          job_id: Number(params['job']),
+          status: 'completed',
+          print_time_seconds: 2843,
+          filament_used_g: 15.5,
+          slots: [
+            { slot_id: 1, grams: 12.4, side: 'L' },
+            { slot_id: 2, grams: 3.1, side: 'R' },
+          ],
+          filament_changes: 1,
+        })
+      }),
+    )
+    renderPage(
+      <PrintPicker
+        open
+        source={{ kind: 'library', file: { id: H2C_FILE, filename: H2C_FILENAME } }}
+        onClose={vi.fn()}
+        onRan={vi.fn()}
+      />,
+    )
+    const line = await screen.findByTestId('nozzle-plan')
+    expect(line).toHaveTextContent('Nozzles:Mistletoe Green → right')
+    land()
+
+    await waitFor(() => expect(screen.getByTestId('nozzle-plan')).toHaveTextContent('Nozzles, as sliced:'), {
+      timeout: 8000,
+    })
+    expect(screen.getByTestId('nozzle-plan')).toHaveTextContent('Mistletoe Green → left')
+    expect(screen.getByTestId('nozzle-plan')).toHaveTextContent('Inland Black → right')
+    expect(screen.getByTestId('slice-departures')).toHaveTextContent('it groups filaments itself to cut purging')
+  }, 20000)
+
+  it('settles once the sides as sliced are shown, with no render loop (#2737 review)', async () => {
+    const errors = vi.spyOn(console, 'error')
+    server.use(
+      http.get('/api/v1/print/:kind/:id/preview-slices/:job', ({ params }) =>
+        HttpResponse.json({
+          job_id: Number(params['job']),
+          status: 'completed',
+          print_time_seconds: 2843,
+          filament_used_g: 15.5,
+          slots: [
+            { slot_id: 1, grams: 12.4, side: 'L' },
+            { slot_id: 2, grams: 3.1, side: 'R' },
+          ],
+          filament_changes: 1,
+        }),
+      ),
+    )
+    renderPage(
+      <PrintPicker
+        open
+        source={{ kind: 'library', file: { id: H2C_FILE, filename: H2C_FILENAME } }}
+        onClose={vi.fn()}
+        onRan={vi.fn()}
+      />,
+    )
+    await waitFor(() => expect(screen.getByTestId('nozzle-plan')).toHaveTextContent('Nozzles, as sliced:'), {
+      timeout: 8000,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    const loops = errors.mock.calls.filter((call) => String(call[0]).includes('Maximum update depth'))
+    errors.mockRestore()
+    expect(loops).toEqual([])
+  }, 20000)
+
+  it("keeps the printed plate's sides as sliced while another plate is previewed (#2737 review)", async () => {
+    server.use(
+      http.get('/api/v1/print/library/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: true },
+          { index: 2, has_thumbnail: true },
+        ]),
+      ),
+      http.get('/api/v1/print/:kind/:id/preview-slices/:job', ({ params }) =>
+        HttpResponse.json({
+          job_id: Number(params['job']),
+          status: 'completed',
+          print_time_seconds: 2843,
+          filament_used_g: 15.5,
+          slots: [
+            { slot_id: 1, grams: 12.4, side: 'L' },
+            { slot_id: 2, grams: 3.1, side: 'R' },
+          ],
+          filament_changes: 1,
+        }),
+      ),
+    )
+    const { user } = renderPage(
+      <PrintPicker
+        open
+        source={{ kind: 'library', file: { id: H2C_FILE, filename: H2C_FILENAME } }}
+        onClose={vi.fn()}
+        onRan={vi.fn()}
+      />,
+    )
+    await waitFor(() => expect(screen.getByTestId('nozzle-plan')).toHaveTextContent('Nozzles, as sliced:'), {
+      timeout: 8000,
+    })
+
+    await user.click(await screen.findByRole('button', { name: 'Preview Plate 2' }))
+    expect(screen.getByRole('button', { name: 'Preview Plate 2' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByTestId('nozzle-plan')).toHaveTextContent('Nozzles, as sliced:')
+    expect(screen.getByTestId('nozzle-plan')).toHaveTextContent('Mistletoe Green → left')
   }, 20000)
 })
 

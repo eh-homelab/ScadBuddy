@@ -47,8 +47,18 @@ function sliceDepartures(
         )
       }
     } else if (got.side && got.side !== planned.side) {
+      // #2703: the slicer groups filaments itself to cut purging, and a Manual map,
+      // planned or chosen by hand, does not steer it.
+      const moved = planned.by_hand
+        ? `The slicer put ${planned.name} (slot ${planned.slot_id}) on the ${SIDE[got.side]} nozzle, not the ${SIDE[planned.side]} you chose: it groups filaments itself to cut purging, so a side set by hand is not kept.`
+        : `The slicer put ${planned.name} (slot ${planned.slot_id}) on the ${SIDE[got.side]} nozzle, not the ${SIDE[planned.side]} as planned: it groups filaments itself to cut purging.`
+      // #2737 review: without the Track Switch an AMS feeds one nozzle only, so a spool
+      // moved off its planned side may have no path to the nozzle it was sliced for.
       notes.push(
-        `The slicer put ${planned.name} (slot ${planned.slot_id}) on the ${SIDE[got.side]} nozzle, not the ${SIDE[planned.side]} as planned.`,
+        // Only a plan that says there is no switch warns; an older verdict without the field does not.
+        plan.track_switch !== false
+          ? moved
+          : `${moved} Without the Filament Track Switch its AMS may not feed the ${SIDE[got.side]} nozzle: check where the spool is loaded before printing.`,
       )
     }
   }
