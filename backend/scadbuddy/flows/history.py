@@ -101,6 +101,8 @@ def points_of(
             event.event_type == EventType.EVENT_TYPE_ACTIVITY_TASK_SCHEDULED
             and event.activity_task_scheduled_event_attributes.activity_type.name == FLOW_CLOSE
         ):
+            # The last one: an execution schedules exactly one `flow_close`. A second
+            # would move this past the first, and the points before it would be lost.
             closes = event.event_id
     points = []
     for event_id in completed:

@@ -196,6 +196,9 @@ type Block = { type: string; text?: string; data?: unknown; mimeType?: unknown }
  * to keep: at most RESULT_IMAGES_MAX, each once. A block that is not one of the four
  * types, or not what it claims, or one past the cap, is UNUSABLE_IMAGE.
  */
+/** An image's placeholder in a result's text; flowResult finds a dropped one by it. */
+const imagePart = (name: string): string => `[image ${name}]`
+
 function namedImages(content: readonly Block[]): { parts: string[]; images: SessionImage[] } {
   const images: SessionImage[] = []
   const parts = content.map((block) => {
@@ -204,7 +207,7 @@ function namedImages(content: readonly Block[]): { parts: string[]; images: Sess
     const image = imageOfBlock({ type: 'image', source: { type: 'base64', media_type: block.mimeType, data: block.data } })
     if (!image || images.length >= RESULT_IMAGES_MAX) return UNUSABLE_IMAGE
     if (!images.some((i) => i.name === image.name)) images.push(image)
-    return `[image ${image.name}]`
+    return imagePart(image.name)
   })
   return { parts, images }
 }
@@ -259,7 +262,7 @@ export async function flowResult(
   const { parts, images } = namedImages(content)
   if (!images.length) return parts.join('\n')
   const kept = new Set(await keep.blobs.put(keep.subject, images))
-  const dropped = new Set(images.filter((i) => !kept.has(i.name)).map((i) => `[image ${i.name}]`))
+  const dropped = new Set(images.filter((i) => !kept.has(i.name)).map((i) => imagePart(i.name)))
   const text = parts.map((part) => (dropped.has(part) ? FLOW_IMAGES_FULL : part)).join('\n')
   const pointers = images.filter((i) => kept.has(i.name)).map(flowImageOf)
   return pointers.length ? { text, images: pointers } : text

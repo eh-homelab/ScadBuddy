@@ -506,6 +506,8 @@ def test_a_run_is_forgotten_before_the_agent_made_its_images_table(
     definition = register(client, script("return 1"))
     run_id = start(client, definition["id"], "early").json()["id"]
     until(client, run_id, lambda v: v["status"] == "succeeded")
+    # pg_conninfo is this test's own schema, created for it and dropped after it: a rename
+    # an interrupted test never undoes breaks no other test.
     with psycopg.connect(pg_conninfo, autocommit=True) as conn:
         conn.execute("ALTER TABLE ai_flow_blobs RENAME TO ai_flow_blobs_later")
         try:
