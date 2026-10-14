@@ -598,8 +598,9 @@ def _pieces(
 ) -> list[tuple[list[int], FloatArray, IntArray]]:
     """The pieces the parts print as: each part's islands, joined where islands of two
     parts share a vertex (parts whose boxes do not meet are not compared). Each is the
-    indices of its parts, and its own vertices and faces, compacted. A part pair `match_points` refuses (too many distinct points in
-    a cell) is not joined: its islands stay pieces of their own."""
+    indices of its parts, and its own vertices and faces, compacted. A part pair
+    `match_points` refuses (too many distinct points in a cell) is not joined: its
+    islands stay pieces of their own."""
     labels = [_islands(len(vertices), faces) for vertices, faces in welded]
     nodes: dict[tuple[int, int], int] = {}
     node_faces: list[IntArray] = []
