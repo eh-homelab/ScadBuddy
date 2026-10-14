@@ -12,7 +12,8 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from typing import Any, NoReturn
+from types import SimpleNamespace
+from typing import Any, NoReturn, cast
 from unittest import mock
 
 import psycopg
@@ -92,6 +93,7 @@ from scadbuddy.workflows.models import (
     Projection,
     ReleaseAnswer,
     RenderAnswer,
+    RenderStart,
 )
 from scadbuddy.workflows.pipelines import (
     ACCEPT_RETRY,
@@ -2525,3 +2527,52 @@ async def test_a_follow_and_its_release_stay_below_envoys_route_timeout(
         assert wait is not None
         total = wait.total_seconds() + CONNECT_MARGIN_SECONDS + submit_module.RELEASE_BOUND
         assert total < 15
+
+
+async def test_a_supersede_still_accepting_names_this_renders_execution(
+    make_service: ServiceFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #2805: a release past its bound raises for the superseded job's execution;
+    the submit's 202 follows this render's own, whose follow makes the release again."""
+    answered = Job(id="n" * 32, slug=SLUG, created_at=datetime.now(UTC), inputs={})
+    old = Job(
+        id="o" * 32, slug=SLUG, created_at=datetime.now(UTC), inputs={}, workflow_id="render-old"
+    )
+
+    async def accepted(*args: Any, **kwargs: Any) -> RenderAnswer:
+        return RenderAnswer(job=answered)
+
+    async with temporal_client() as client:
+        service = make_service(client, "unused")
+        monkeypatch.setattr(service, "_accepted", accepted)
+        monkeypatch.setattr(
+            service,
+            "_supersede",
+            mock.AsyncMock(side_effect=CommandStillAcceptingError("render-old")),
+        )
+        start = cast(RenderStart, SimpleNamespace(render_key="k" * 64))
+        with pytest.raises(CommandStillAcceptingError) as accepting:
+            await service._started(start, old, "req", timedelta(seconds=1))
+        await service.aclose()
+
+    assert accepting.value.args[0] == workflow_id_for_key("k" * 64)
+
+
+async def test_a_follow_of_an_arrange_is_not_answered_as_a_render(
+    make_service: ServiceFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #2805: an Arrange shares the `render-` prefix but answers `JobStatus`, and
+    never answers a 202 to follow; the render follow does not answer it as a render."""
+    arranged = Job(id="n" * 32, slug=SLUG, created_at=datetime.now(UTC), inputs={}, kind="arrange")
+
+    async def answer(*args: Any, **kwargs: Any) -> RenderAnswer:
+        return RenderAnswer(job=arranged)
+
+    monkeypatch.setattr(submit_module, "follow_update", answer)
+    async with temporal_client() as client:
+        service = make_service(client, "unused")
+        with pytest.raises(ApiError) as refused:
+            await service.follow("render-arr", "k", supersedes=None)
+        await service.aclose()
+
+    assert refused.value.status == 404

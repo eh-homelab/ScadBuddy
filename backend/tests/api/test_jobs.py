@@ -746,6 +746,24 @@ def test_a_followed_render_without_a_key_gets_one_to_follow(client: TestClient, 
     assert len(response.json()["update_id"]) == 32
 
 
+def test_a_supersede_without_a_key_is_refused_even_under_respond_async(
+    client: TestClient, model: str
+) -> None:
+    """Review #2805: the key a 202 needs is made only after this check, as a made key is
+    new on every send and would let each re-send release the superseded job again."""
+    submit = mock.AsyncMock()
+    with mock.patch.object(RenderService, "submit", submit):
+        response = client.post(
+            f"/api/v1/models/{model}/render",
+            json={"params": {"width": 12}, "supersedes": "a" * 32},
+            headers={"Prefer": "respond-async"},
+        )
+
+    assert response.status_code == 422, response.text
+    assert "Idempotency-Key" in response.json()["detail"]
+    submit.assert_not_awaited()
+
+
 def test_a_render_answered_at_once_is_its_job_under_respond_async(
     client: TestClient, model: str
 ) -> None:

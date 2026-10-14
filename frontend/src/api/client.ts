@@ -615,8 +615,9 @@ async function untilAccepted<T>(send: () => Promise<T | CommandAccepting>, signa
         detail: 'ScadBuddy is still starting this. It may start anyway.',
       })
     }
-    // Not `retry_after`: the follow is itself a long-poll that waits for the answer, so
-    // waiting first only delays it (review #2849). The first follow goes at once; after
+    // The server's `retry_after` is advisory here and not waited: the follow is itself
+    // a long-poll that waits for the answer, so waiting first only delays it (review
+    // #2849). The first follow goes at once; after
     // a follow that came back 202, `intervalMs` keeps a floor (review #2805).
     if (followed) {
       try {

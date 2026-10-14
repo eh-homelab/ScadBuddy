@@ -19,7 +19,7 @@ from temporalio.client import WorkflowUpdateFailedError
 
 from scadbuddy.activity.component import ACTIVITY, ActivityComponent
 from scadbuddy.activity.index import attribute_request
-from scadbuddy.api.accepting import accepting, prefers_async
+from scadbuddy.api.accepting import CommandAccepting, accepting, prefers_async
 from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import (
     HEX_ID_PATTERN,
@@ -354,6 +354,14 @@ def require_job(render: RenderService, job_id: str) -> Job:
     status_code=status.HTTP_202_ACCEPTED,
     summary="Queue a render",
     responses={
+        status.HTTP_202_ACCEPTED: {
+            "model": RenderAccepted | CommandAccepting,
+            "description": (
+                "`RenderAccepted`: the job. With `Prefer: respond-async`, a render not yet"
+                " accepted is `CommandAccepting` instead (`status: accepting`): follow it"
+                " at its `follow_url` (POST) to the job (spec 2026-10-13, review #2805)"
+            ),
+        },
         status.HTTP_409_CONFLICT: {
             "description": (
                 "the Bambuddy blob store has no commit of the template to snapshot for the"
@@ -407,16 +415,17 @@ async def render_model(
     respond_async: Annotated[bool, Depends(prefers_async)],
     idempotency_key: IdempotencyKey = None,
 ) -> RenderAccepted | JSONResponse:
-    if respond_async and idempotency_key is None:
-        # What the 202 follows is this request's Update, so it needs an id (#2340).
-        idempotency_key = uuid.uuid4().hex
     if body.supersedes is not None and idempotency_key is None:
         # A re-send without a key would release the job once more, and with it another
-        # request's claim (review #1066 2.1).
+        # request's claim (review #1066 2.1). Checked before a key is made below: a made
+        # one is new on every send, so it would let each re-send release again (#2805).
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "a render that supersedes another needs an Idempotency-Key header",
         )
+    if respond_async and idempotency_key is None:
+        # What the 202 follows is this request's Update, so it needs an id (#2340).
+        idempotency_key = uuid.uuid4().hex
     require_model_exists(catalogue, slug)
     requested = await _resolve_version(history, slug, body.version)
     source, schema = await schema_of(

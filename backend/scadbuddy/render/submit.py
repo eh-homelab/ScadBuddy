@@ -371,6 +371,11 @@ class RenderService:
             raise
         if answer.closing:
             raise CommandResendError(workflow_id)
+        if answer.job is not None and answer.job.kind != "render":
+            # An Arrange runs on `render-<key>` too, but answers `JobStatus` and never
+            # a 202 to follow: this route answers only what a render submit would
+            # (review #2805).
+            raise ApiError(status.HTTP_404_NOT_FOUND, f"no render {workflow_id!r} to follow")
         job, _ = await self._counted(answer, answer.job.kind if answer.job else "render")
         # Checked as the POST checks it (`_superseded`): the answered job's template, still
         # open, and neither that job nor its run (a submit that replaced its own render
@@ -438,7 +443,15 @@ class RenderService:
                 answer = await self._accepted(start, request_id, accept_within)
                 # Started first, so a refused submit supersedes nothing.
                 if answer.job is not None and previous is not None:
-                    await self._supersede(previous, request_id)
+                    try:
+                        await self._supersede(previous, request_id)
+                    except CommandStillAcceptingError as error:
+                        # Raised for the superseded job's execution: the 202 must name
+                        # this render's, whose follow answers it and makes the release
+                        # again, as the release is idempotent (review #2805).
+                        raise CommandStillAcceptingError(
+                            workflow_id_for_key(start.render_key)
+                        ) from error
         except TimeoutError as error:
             if not bound.expired():
                 raise
