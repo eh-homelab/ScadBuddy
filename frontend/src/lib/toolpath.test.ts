@@ -70,6 +70,8 @@ describe('toolpath (#2072)', () => {
     expect(layerDrawCount(upTo, 1)).toBe(10)
     // A slider past the top layer draws to the top one.
     expect(layerDrawCount(upTo, 9)).toBe(10)
+    // One below the first draws the first, not every line.
+    expect(layerDrawCount(upTo, -1)).toBe(6)
     expect(layerDrawCount(upTo, null)).toBe(Infinity)
     expect(layerDrawCount(null, 1)).toBe(Infinity)
     expect(layerDrawCount([], 0)).toBe(Infinity)
