@@ -101,7 +101,7 @@ function harness(
     fixedTier?: (name: string) => RiskTier | undefined
     listingKey?: string
     flowBlobs?: TurnToolsDeps['flowBlobs']
-    lapsed?: (requestId: string) => boolean
+    lapsed?: (requestId: string, inputHash: string | undefined) => boolean
   } = {},
 ) {
   const contexts: TurnContext[] = []
@@ -137,7 +137,9 @@ function harness(
         bindings.push(binding?.inputHash)
         return requestId.endsWith(':toolu_approved')
       },
-      ...(options.lapsed ? { lapsed: async (requestId: string) => options.lapsed!(requestId) } : {}),
+      ...(options.lapsed
+        ? { lapsed: async (requestId: string, binding?: { inputHash?: string }) => options.lapsed!(requestId, binding?.inputHash) }
+        : {}),
     },
     flows: {
       startedBy: async (run) => (run === FLOW ? (options.flowStarter ?? BROWSER) : undefined),
@@ -419,9 +421,17 @@ describe('turn tools in a durable session', () => {
   })
 
   it("refuses a session's call whose approval lapsed as GrantRevoked, before it runs (#2871)", async () => {
-    const h = harness({ lapsed: (requestId) => requestId.endsWith(':toolu_lapsed') })
+    const asked: (string | undefined)[] = []
+    const h = harness({
+      lapsed: (requestId, inputHash) => {
+        asked.push(inputHash)
+        return requestId.endsWith(':toolu_lapsed')
+      },
+    })
     const lapsed = await failure(env('turn:notes__post', 'tool-toolu_lapsed').run(h.call, { method: 'POST', body: 'x' }))
     expect(lapsed.type).toBe(GRANT_REVOKED)
+    // Bound to the call's input, as the approved check is (#3471 review).
+    expect(asked[0]).toBe(fakeHash('notes__post', { method: 'POST', body: 'x' }))
     const never = await failure(env('turn:notes__post', 'tool-toolu_other').run(h.call, { method: 'POST', body: 'x' }))
     expect(never.type).toBe('NotApproved')
     expect(h.calls).toEqual([])

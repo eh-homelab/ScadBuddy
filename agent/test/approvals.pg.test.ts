@@ -228,11 +228,25 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
   })
 
   // #2949 review: one sweep takes a bounded number of pages; the next takes the rest.
-  it('leaves what is past its page budget to the next sweep', async () => {
-    for (let i = 0; i < 5; i += 1) await orphan(i % 2 ? agentB : agentA)
-    await db.sql`UPDATE ai_approvals SET expires_at = now() - interval '1 second'`
-    expect(await m.approvals.expireDue(2, 2)).toBe(4)
-    expect(await m.approvals.expireDue(2, 2)).toBe(1)
+  it('leaves what is past its page budget to the next sweep, and says so', async () => {
+    const made = []
+    for (let i = 0; i < 5; i += 1) made.push(await orphan(i % 2 ? agentB : agentA))
+    // Oldest first: the last made is the newest due, and the one left over.
+    for (const [i, o] of made.entries()) {
+      await db.sql`UPDATE ai_approvals SET expires_at = now() - make_interval(secs => ${10 - i}) WHERE id = ${o.approval.id}`
+    }
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      expect(await m.approvals.expireDue(2, 2)).toBe(4)
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('stopped at its cap of 2 pages of 2'))
+      const pending = await db.sql<{ id: string }[]>`SELECT id FROM ai_approvals WHERE decision IS NULL`
+      expect(pending.map((r) => r.id)).toEqual([made[4]!.approval.id])
+      warn.mockClear()
+      expect(await m.approvals.expireDue(2, 2)).toBe(1)
+      expect(warn).not.toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('expires an orphan that nobody decided, and the session goes back to idle', async () => {

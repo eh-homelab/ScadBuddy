@@ -983,6 +983,7 @@ export class ApprovalService {
     // One approval that fails to expire never holds back the rest: the failures are
     // thrown once every other one has been tried, the first alone or all of them.
     const failures: unknown[] = []
+    let full = false
     for (let taken = 0; taken < pages; taken += 1) {
       const due = await this.deps.sql.unsafe<{ id: string }[]>(
         `SELECT id FROM ai_approvals
@@ -998,8 +999,11 @@ export class ApprovalService {
           failures.push(err)
         }
       }
-      if (due.length < page) break
+      full = due.length === page
+      if (!full) break
     }
+    // Said, so a backlog past the cap (rows that keep failing, say) is seen, not silent.
+    if (full) console.warn(`approval expiry sweep stopped at its cap of ${pages} pages of ${page}; the rest wait for the next sweep`)
     if (failures.length === 1) throw failures[0]
     if (failures.length > 1) throw new AggregateError(failures, `${failures.length} approvals failed to expire`)
     return n
