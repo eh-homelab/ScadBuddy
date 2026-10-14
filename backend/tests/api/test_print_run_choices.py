@@ -26,6 +26,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.api.operations import STILL_ACCEPTING_PROBLEM
+from scadbuddy.bambuddy import filaments, print_run
 from scadbuddy.bambuddy.extruders import LEFT, RIGHT, high_flow_warning
 from scadbuddy.bambuddy.models import FlowType
 from scadbuddy.core.paths import DataPaths
@@ -1536,23 +1537,35 @@ def test_the_check_refuses_and_warns_about_no_mounted_nozzle(
 
 
 @respx.mock
-def test_a_check_of_a_plan_with_no_slots_does_not_fail_on_the_inventory(
-    client: TestClient, model: str, paths: DataPaths
+def test_a_check_of_a_plan_with_no_slots_makes_no_read_of_its_own_for_spool_warnings(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """#2733 review: the spool warnings need the inventory only for a plan with slots, so
-    an empty plan's check does not fail when it cannot be read."""
+    the check reads it for them only then. (An output's slot refusals read the spools
+    themselves since #2720; that read is theirs, not this one.)"""
     output_id = two_colour_output(client, model, paths)
     upload_route()
     run_routes()
     _status(**WIRED)
-    respx.get(f"{API}/inventory/spools").mock(return_value=httpx.Response(500))
+    reads: list[object] = []
+    real = filaments.read_inventory
 
-    check = client.post(
+    async def counted(bambuddy: object) -> object:
+        reads.append(bambuddy)
+        return await real(bambuddy)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(print_run, "read_inventory", counted)
+
+    empty = client.post(
         f"/api/v1/print/outputs/{output_id}/check",
         json={**body(), "filament_plan": {"slots": []}},
     )
+    assert empty.status_code == 200, empty.text
+    assert reads == []
 
-    assert check.status_code == 200, check.text
+    planned = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+    assert planned.status_code == 200, planned.text
+    assert len(reads) == 1
 
 
 @respx.mock
