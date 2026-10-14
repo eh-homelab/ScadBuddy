@@ -121,7 +121,7 @@ async def add_attachment(
     idempotency_key: IdempotencyKey = None,
 ) -> PrintAttachment | JSONResponse:
     await _require_print(links, archive_id)
-    received = await media_api._receive(request, catalogue.paths.cache)
+    received = await media_api.receive_upload(request, catalogue.paths.cache)
     claims = ClaimStore(catalogue.paths.claims)
     held: list[Held] = []
     try:
