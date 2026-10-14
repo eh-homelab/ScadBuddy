@@ -916,6 +916,7 @@ def test_the_request_id_is_part_of_the_key_and_its_absence_keeps_the_old_key() -
                 "rack_algorithm",
                 "filament_profiles",
                 "supports",
+                "prime_tower",
             },
         ),
         sort_keys=True,
@@ -953,6 +954,18 @@ def test_supports_are_part_of_the_key_only_when_chosen() -> None:
     tree = PrintRunRequest.model_validate({**body(), "supports": {"enabled": True}})
     none = PrintRunRequest.model_validate({**body(), "supports": {"enabled": False}})
     assert len({run_key("a" * 32, r) for r in (plain, tree, none)}) == 3
+
+
+def test_the_prime_tower_is_part_of_the_key_only_when_chosen() -> None:
+    """#3628: no choice keeps the key from before the field existed, and each choice
+    is a print of its own."""
+    plain = PrintRunRequest.model_validate(body())
+    on = PrintRunRequest.model_validate({**body(), "prime_tower": {"enabled": True}})
+    sparse = PrintRunRequest.model_validate(
+        {**body(), "prime_tower": {"enabled": True, "no_sparse_layers": True}}
+    )
+    off = PrintRunRequest.model_validate({**body(), "prime_tower": {"enabled": False}})
+    assert len({run_key("a" * 32, r) for r in (plain, on, sparse, off)}) == 4
 
 
 def test_the_rack_pick_is_part_of_the_key_only_when_chosen() -> None:

@@ -13,6 +13,7 @@ import type {
   PrintRunResult,
   PrintSequence,
   SupportsChoice,
+  PrimeTowerChoice,
   RackAlgorithm,
 } from '../api/types'
 import {
@@ -70,6 +71,8 @@ import { PresetOverrides } from './print/PresetOverrides'
 import { FilamentProfilesStep } from './print/FilamentProfilesStep'
 import { PrintSequenceStep } from './print/PrintSequenceStep'
 import { SupportsStep } from './print/SupportsStep'
+import { PrimeTowerStep } from './print/PrimeTowerStep'
+import { overriddenTowerKeys } from '../lib/primeTower'
 import { overriddenSupportKeys } from '../lib/supports'
 import { SlicerDefaults } from './print/SlicerDefaults'
 import { SlicedSettings } from './print/SlicedSettings'
@@ -271,6 +274,8 @@ export function PrintPicker({
   const [printSequence, setPrintSequence] = useState<PrintSequence | null>(null)
   // #1899 — this print's supports; `null` leaves them to the template and the process.
   const [supports, setSupports] = useState<SupportsChoice | null>(null)
+  // #3628 — this print's prime tower; `null` leaves it to the template and the process.
+  const [primeTower, setPrimeTower] = useState<PrimeTowerChoice | null>(null)
   /**
    * #836 — the rack's ranking for this print (remembered per printer, so it opens on what
    * the choices read says) and a hand-picked position, `null` for Automatic. A hand pick
@@ -433,6 +438,7 @@ export function PrintPicker({
     options,
     printSequence,
     supports,
+    primeTower,
     filamentProfiles: filamentProfiles.active,
     rackPosition,
     rackAlgorithm: chosenAlgorithm,
@@ -484,6 +490,7 @@ export function PrintPicker({
     setOptions({})
     setPrintSequence(null)
     setSupports(null)
+    setPrimeTower(null)
   }, [currentKey, carry])
 
   /** Re-arrange the output in view; `backfill` (confirmed by the user) re-renders it first. */
@@ -629,7 +636,8 @@ export function PrintPicker({
           // slices; the check and the background slice must see it as the run does.
           // #1899, #717: supports and the profiles left on are process overrides too, and
           // Checks says when one can't apply.
-          ...sliceOverrides(printSequence, supports, filamentProfiles.active),
+          // #3628: and so is the prime tower.
+          ...sliceOverrides(printSequence, supports, filamentProfiles.active, primeTower),
         }
       : null
   const check = usePrintCheck(source, checkRequest)
@@ -746,6 +754,7 @@ export function PrintPicker({
     setOptions({})
     setPrintSequence(null)
     setSupports(null)
+    setPrimeTower(null)
     setRackPosition(null)
     // #1084: the algorithm chosen here, and a failed save of it, are this session's too.
     algorithmSession.current += 1
@@ -1160,12 +1169,21 @@ export function PrintPicker({
                             fromFile={given?.kind !== 'output'}
                           />
 
+                          <PrimeTowerStep
+                            value={primeTower}
+                            onChange={setPrimeTower}
+                            templateSettings={given?.kind === 'output' ? printSettings : undefined}
+                            fromFile={given?.kind !== 'output'}
+                            colours={(filaments?.slots ?? []).length}
+                          />
+
                           {given?.kind === 'output' && (
                             <SlicerDefaults
                               settings={printSettings}
                               overridden={[
                                 ...(printSequence !== null ? ['print_sequence'] : []),
                                 ...overriddenSupportKeys(supports),
+                                ...overriddenTowerKeys(primeTower),
                               ]}
                             />
                           )}

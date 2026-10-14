@@ -1929,6 +1929,90 @@ describe('PrintPicker · Filament profiles, checked and unchecked (#2804 review)
   })
 })
 
+describe('PrintPicker · Prime tower (#3628)', () => {
+  it('stays out of Simple mode, and sends nothing for Default', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    expect(screen.queryByLabelText('Prime tower')).not.toBeInTheDocument()
+    await showAdvanced()
+
+    const select = screen.getByLabelText('Prime tower')
+    expect(select).toHaveValue('default')
+    expect(within(select).getAllByRole('option').map((option) => option.textContent)).toEqual([
+      'Default (on with more than one filament)',
+      'On',
+      'Off',
+    ])
+    // Default is on, so No sparse layers is offered, and off.
+    expect(screen.getByRole('checkbox', { name: /No sparse layers/ })).not.toBeChecked()
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).not.toHaveProperty('prime_tower')
+  })
+
+  it('sends the tower on with No sparse layers', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+
+    await user.click(screen.getByRole('checkbox', { name: /No sparse layers/ }))
+    expect(screen.getByLabelText('Prime tower')).toHaveValue('on')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]?.['prime_tower']).toEqual({ enabled: true, no_sparse_layers: true })
+  })
+
+  it('sends the tower off as only `enabled: false`, and hides No sparse layers', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+
+    await user.click(screen.getByRole('checkbox', { name: /No sparse layers/ }))
+    await user.selectOptions(screen.getByLabelText('Prime tower'), 'off')
+    expect(screen.queryByRole('checkbox', { name: /No sparse layers/ })).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]?.['prime_tower']).toEqual({ enabled: false })
+  })
+
+  it('says what Default means for a template that declares the tower, and strikes it when overridden', async () => {
+    const { user } = renderPicker({
+      printSettings: { enable_prime_tower: '1', wipe_tower_no_sparse_layers: '1' },
+    })
+    await loaded()
+    await showAdvanced()
+
+    expect(screen.getByRole('option', { name: 'Default (template: on)' })).toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: /No sparse layers/ })).toBeChecked()
+    const list = screen.getByRole('region', { name: 'Slicer defaults from this template' })
+    const struck = (name: string) => within(list).getByText(name).nextElementSibling?.querySelector('del') !== null
+    expect(struck('No sparse layers on the prime tower')).toBe(false)
+    await user.selectOptions(screen.getByLabelText('Prime tower'), 'off')
+    expect(struck('Prime tower')).toBe(true)
+    expect(struck('No sparse layers on the prime tower')).toBe(true)
+  })
+
+  it('checks and reslices for the chosen tower, as the run will slice it', async () => {
+    const checks = watch('POST', '/check')
+    const previews = watch('POST', '/preview-slice')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+    await waitFor(() => expect(previews.bodies.length).toBeGreaterThan(0), { timeout: 5000 })
+    expect(checks.bodies.at(-1)).not.toHaveProperty('prime_tower')
+    expect(previews.bodies.at(-1)).not.toHaveProperty('prime_tower')
+
+    await user.click(screen.getByRole('checkbox', { name: /No sparse layers/ }))
+    const wanted = { prime_tower: { enabled: true, no_sparse_layers: true } }
+    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject(wanted))
+    await waitFor(() => expect(previews.bodies.at(-1)).toMatchObject(wanted), { timeout: 5000 })
+  })
+})
+
 describe('PrintPicker · Supports (#1899)', () => {
   it('offers Default, none, tree and normal, and sends nothing for Default', async () => {
     const { bodies } = watch('POST', '/run')

@@ -78,6 +78,7 @@ from scadbuddy.bambuddy.models import (
 )
 from scadbuddy.bambuddy.nozzle_plan import NozzlePlan, plan_for
 from scadbuddy.bambuddy.options import PrintOptions
+from scadbuddy.bambuddy.prime_tower import PrimeTowerChoice, prime_tower_overrides
 from scadbuddy.bambuddy.print_source import (
     FilamentReader,
     LibrarySource,
@@ -193,6 +194,10 @@ class PrintRunRequest(BaseModel):
     #: Support structures for this print (#1899), over the template's
     #: ``print_settings``. Omitted means whatever those and the process say.
     supports: SupportsChoice | None = None
+    #: The prime tower for this print (#3628), over the template's ``print_settings``.
+    #: Omitted means whatever those and the process say (on, unless the plate prints
+    #: one filament).
+    prime_tower: PrimeTowerChoice | None = None
 
     @field_validator("filament_profiles")
     @classmethod
@@ -1362,6 +1367,7 @@ async def plan_run(
                 **from_profiles,
                 **{k: v for k, v in source.print_settings.items() if k not in SUPPORT_KEYS},
                 **supports,
+                **prime_tower_overrides(request.prime_tower),
                 **(
                     {}
                     if request.print_sequence is None
