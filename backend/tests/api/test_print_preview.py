@@ -12,7 +12,6 @@ import io
 import json
 import struct
 import threading
-import time
 import tracemalloc
 import zipfile
 from collections.abc import AsyncIterator, Iterator
