@@ -57,6 +57,15 @@ and its own `<object>` in `model_settings.config`, with the plate's offset. A te
 with no declaration writes exactly what it does today. A packed plate (Arrange,
 `ctx.pack`) gives each placed copy its own object.
 
+A plate of several objects is named as a plate: its `plater_name` is the model's name,
+with ` (plate N)` when the file has several plates. A plate of one object leaves it
+empty, as the file always did. Bambu Studio reads the key as the plate's name
+([`bbs_3mf.cpp` `PLATER_NAME_ATTR`](https://github.com/bambulab/BambuStudio/blob/47a13eeb1d9af65ef2371e361c856e21d4f6ca72/src/libslic3r/Format/bbs_3mf.cpp#L4720-L4721)).
+It draws the name on the plate, shows it in the object list, and adds it to an exported
+G-code file's name
+([`Plater.cpp`](https://github.com/bambulab/BambuStudio/blob/47a13eeb1d9af65ef2371e361c856e21d4f6ca72/src/slic3r/GUI/Plater.cpp#L16581-L16588)).
+That is read from the source, not yet seen by opening a file in Studio (#259).
+
 ## 3. The print dialog
 
 The sequence picker (#1862) stays an Advanced step. It now says how many objects the

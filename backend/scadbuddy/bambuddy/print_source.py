@@ -637,10 +637,10 @@ class SpoolFullError(Exception):
 
 
 class ReadOutOfMemoryError(Exception):
-    """A library file this process ran out of memory reading. With no triangle limit
-    (the default) nothing refuses a file for its size, so a huge one can; the file is
-    not at fault and a smaller budget or more memory would read it, so this is never
-    kept as its refusal."""
+    """A 3MF (a library file, or an output's plate) this process ran out of memory
+    reading. With no triangle limit (the default) nothing refuses a file for its size,
+    so a huge one can; the file is not at fault and a smaller budget or more memory
+    would read it, so this is never kept as its refusal."""
 
     def __init__(self) -> None:
         super().__init__(

@@ -10,6 +10,7 @@ import {
 } from '../../api/aiPlugins'
 import { useAsync } from '../../lib/useAsync'
 import { Button } from '../ui/Button'
+import { Chevron } from '../ui/Chevron'
 import { Dialog } from '../ui/Dialog'
 import { Spinner } from '../ui/Spinner'
 
@@ -376,6 +377,11 @@ function ToolReview({
   )
 }
 
+/** A test's line: its result (with how many tools it listed) and the server it reached. */
+function testSummary(test: PluginTest): string {
+  return `${test.detail}${test.server ? ` (${test.server.name} ${test.server.version})` : ''}`
+}
+
 function RemoteCard({
   plugin,
   onChange,
@@ -388,6 +394,8 @@ function RemoteCard({
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [test, setTest] = useState<PluginTest | null>(null)
+  // #2172 — the tool review folds to its summary line once its tiers are saved.
+  const [reviewOpen, setReviewOpen] = useState(true)
   const [confirmDelete, setConfirmDelete] = useState(false)
 
   async function act(what: string, run: () => Promise<void>) {
@@ -431,7 +439,12 @@ function RemoteCard({
       <div className="mt-3 flex flex-wrap items-center gap-2">
         <Button
           size="sm"
-          onClick={() => void act('test', async () => setTest(await aiPlugins.testRemote(plugin.name)))}
+          onClick={() =>
+            void act('test', async () => {
+              setTest(await aiPlugins.testRemote(plugin.name))
+              setReviewOpen(true)
+            })
+          }
           disabled={busy !== null}
           aria-busy={busy === 'test'}
           {...USER_ONLY}
@@ -456,10 +469,34 @@ function RemoteCard({
       {test && (
         <div className="mt-2">
           <p role="status" className={`text-[12px] ${test.ok ? 'text-ok' : 'text-warn'}`}>
-            {test.detail}
-            {test.server && ` (${test.server.name} ${test.server.version})`}
+            {test.ok ? (
+              <button
+                type="button"
+                aria-expanded={reviewOpen}
+                aria-controls={`${plugin.name}-tool-review`}
+                onClick={() => setReviewOpen(!reviewOpen)}
+                className="inline-flex min-h-6 items-center gap-1.5 text-left"
+              >
+                <Chevron open={reviewOpen} />
+                {testSummary(test)}
+              </button>
+            ) : (
+              testSummary(test)
+            )}
           </p>
-          {test.ok && <ToolReview plugin={plugin} test={test} onSaved={onChange} />}
+          {test.ok && (
+            // Folded, not unmounted: tiers changed and not yet saved are kept.
+            <div id={`${plugin.name}-tool-review`} hidden={!reviewOpen}>
+              <ToolReview
+                plugin={plugin}
+                test={test}
+                onSaved={(saved) => {
+                  onChange(saved)
+                  setReviewOpen(false)
+                }}
+              />
+            </div>
+          )}
         </div>
       )}
       {error && (
