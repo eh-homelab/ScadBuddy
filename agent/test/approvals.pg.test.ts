@@ -227,6 +227,14 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     expect(row!.decision).toBe('expired')
   })
 
+  // #2949 review: one sweep takes a bounded number of pages; the next takes the rest.
+  it('leaves what is past its page budget to the next sweep', async () => {
+    for (let i = 0; i < 5; i += 1) await orphan(i % 2 ? agentB : agentA)
+    await db.sql`UPDATE ai_approvals SET expires_at = now() - interval '1 second'`
+    expect(await m.approvals.expireDue(2, 2)).toBe(4)
+    expect(await m.approvals.expireDue(2, 2)).toBe(1)
+  })
+
   it('expires an orphan that nobody decided, and the session goes back to idle', async () => {
     const { session, approval } = await orphan()
     expect(await m.approvals.expireDue()).toBe(0)

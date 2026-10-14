@@ -176,10 +176,16 @@ const STATUS_OF: Record<ApprovalErrorCode, 400 | 403 | 404 | 409 | 410> = {
   invalid: 400,
 }
 
-/** A refused approval operation; `status` is the HTTP status a route answers with. */
 /** How many due approvals one query of `expireDue` takes. */
 export const EXPIRE_PAGE = 500
 
+/**
+ * How many pages one `expireDue` sweep takes at most. The rest wait for the next tick, so
+ * a pathological backlog never holds one sweep open, nor grows its tried list, without end.
+ */
+export const EXPIRE_PAGES = 10
+
+/** A refused approval operation; `status` is the HTTP status a route answers with. */
 export class ApprovalError extends Error {
   override name = 'ApprovalError'
   readonly code: ApprovalErrorCode
@@ -968,15 +974,16 @@ export class ApprovalService {
   /**
    * Expires every pending approval past its time; returns how many. Taken `page` at a
    * time, oldest first, each page leaving out what this sweep already tried: a page of
-   * rows that keep failing never holds back the ones after it (#2382).
+   * rows that keep failing never holds back the ones after it (#2382). At most `pages`
+   * pages a sweep: the next sweep takes up what is left.
    */
-  async expireDue(page = EXPIRE_PAGE): Promise<number> {
+  async expireDue(page = EXPIRE_PAGE, pages = EXPIRE_PAGES): Promise<number> {
     let n = 0
     const tried: string[] = []
     // One approval that fails to expire never holds back the rest: the failures are
     // thrown once every other one has been tried, the first alone or all of them.
     const failures: unknown[] = []
-    for (;;) {
+    for (let taken = 0; taken < pages; taken += 1) {
       const due = await this.deps.sql.unsafe<{ id: string }[]>(
         `SELECT id FROM ai_approvals
          WHERE decision IS NULL AND expires_at <= now() AND NOT (id = ANY($1::uuid[]))
