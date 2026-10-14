@@ -193,7 +193,12 @@ class ActivityIndex:
             with conn.transaction():
                 if self.events is not None:
                     # The event log's lock before the row, as a transaction that has
-                    # already published holds it while it writes this row (#3221).
+                    # already published holds it while it writes this row (#3221). Taken
+                    # before knowing whether the write lands: a restore that finds a real
+                    # row, or a write the finished-row guard refuses, publishes nothing
+                    # but still holds it until the caller commits. Taking it only after a
+                    # write that landed would put the row before the lock, the inversion
+                    # this exists to prevent.
                     hold_event_log(conn)
                 if not isinstance(row, ActivityRow):
                     # Built under that lock, which every publisher waits on: a builder
