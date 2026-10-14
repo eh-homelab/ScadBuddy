@@ -14,6 +14,7 @@ import { loadConfig } from './config.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
 import { CredentialPool } from './harness/fallback.js'
 import { nestedQueries } from './builtins/nested.js'
+import { managerAgents } from './background/workflowAgents.js'
 import { backgroundActivities, managerSender } from './background/activities.js'
 import { agentTimezone } from './background/schedule.js'
 import { BackgroundTasks } from './background/service.js'
@@ -552,7 +553,15 @@ const turnToolDeps = temporal
 // One set of background-task activities (src/background/): the shared queue's, and the Monitor command this replica runs.
 const background =
   backgroundTasks && sessions
-    ? backgroundActivities({ store: backgroundTasks.store, send: managerSender(sessions), tz: agentTimezone(), paths, secrets: toolServices.secrets })
+    ? backgroundActivities({
+        store: backgroundTasks.store,
+        send: managerSender(sessions),
+        tz: agentTimezone(),
+        paths,
+        secrets: toolServices.secrets,
+        agents: managerAgents(sessions),
+        workspace,
+      })
     : undefined
 const temporalWorker =
   temporal && operationStore && turnToolDeps

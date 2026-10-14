@@ -3,6 +3,10 @@ import { CRON_EXPIRY_MS, CronError, describeCron, nextFire, timeOfDay, WAKEUP_MA
 import { checkSocketUrl, MONITOR_DEFAULT_MS, MONITOR_MAX_MS, shortDuration } from '../background/monitor.js'
 import { type BackgroundTask, MAX_ACTIVE } from '../background/store.js'
 import type { Owner } from '../sessions/protocol.js'
+import type { SessionFiles } from '../workspace/store.js'
+import { workflowScriptPath, workspaceRelative } from '../background/activities.js'
+import { readScript } from '../background/workflowRunner.js'
+import { WORKFLOW_CONCURRENCY, WORKFLOW_MAX_AGENTS } from '../background/workflowScript.js'
 import type { BuiltinResult } from './files.js'
 
 // Claude Code's background built-ins, as the session keeps them (src/background/):
@@ -24,6 +28,8 @@ export type BackgroundContext = {
    * that ran a classic turn, agent-durable's for a durable one). None: no commands.
    */
   commandQueue?: string | undefined
+  /** The session workspace: a Workflow's script is kept there, and a scriptPath read from it. */
+  workspace?: Pick<SessionFiles, 'read' | 'write'> | undefined
 }
 
 const error = (text: string): BuiltinResult => ({ text, isError: true })
@@ -177,5 +183,89 @@ export async function monitor(
       're-arm if you still need the watch). You will be notified on each event: the session sends its events to you as a new ' +
       'message once this turn has ended and it is idle. Keep working — do not poll or sleep. Events may arrive while you are ' +
       'waiting for the user — an event is not their reply.',
+  }
+}
+
+/** How long a Workflow may run before it is stopped. */
+export const WORKFLOW_EXPIRY_MS = 6 * 60 * 60 * 1000
+
+export async function workflow(
+  ctx: BackgroundContext,
+  input: { script?: string; scriptPath?: string; name?: string; args?: unknown; resumeFromRunId?: string },
+): Promise<BuiltinResult> {
+  const ws = { kind: 'session' as const, sessionId: ctx.sessionId }
+  let script = input.script
+  if (script === undefined && input.scriptPath !== undefined) {
+    const rel = workspaceRelative(input.scriptPath)
+    const file = rel && ctx.workspace ? await ctx.workspace.read(ws, rel) : undefined
+    if (!file) return error(`No workflow script at ${input.scriptPath}: give a path under /workspace, as a Workflow's result names it.`)
+    script = file.bytes.toString('utf8')
+  }
+  if (script === undefined) {
+    return error(
+      input.name !== undefined
+        ? `No saved workflow named "${input.name}": this session has no saved workflows; pass the script inline.`
+        : 'Give script (or scriptPath).',
+    )
+  }
+  let read: Awaited<ReturnType<typeof readScript>>
+  try {
+    read = await readScript(script)
+  } catch (err) {
+    return error((err as Error).message)
+  }
+  let resumeFrom: string | undefined
+  if (input.resumeFromRunId !== undefined) {
+    const id = /^wf_([0-9a-f]{8})$/.exec(input.resumeFromRunId)?.[1]
+    const prior = id ? await ctx.tasks.get(ctx.sessionId, id) : undefined
+    if (!prior || prior.kind !== 'workflow') return error(`No workflow run ${input.resumeFromRunId} in this session.`)
+    if (prior.state === 'active') return error(`Workflow run ${input.resumeFromRunId} is still running: stop it first (TaskStop ${prior.id}).`)
+    resumeFrom = prior.id
+  }
+  const { meta, body } = read
+  const t = await ctx.tasks.create({
+    sessionId: ctx.sessionId,
+    kind: 'workflow',
+    description: meta.description.slice(0, 500),
+    spec: {
+      name: meta.name,
+      description: meta.description,
+      ...(meta.phases ? { phases: meta.phases } : {}),
+      body,
+      ...(input.args === undefined ? {} : { args: input.args }),
+      ...(resumeFrom ? { resumeFrom } : {}),
+      scriptPath: '',
+    },
+    createdBy: ctx.owner,
+    expiresAt: new Date(ctx.now().getTime() + WORKFLOW_EXPIRY_MS),
+  })
+  if (!t) return full()
+  // Kept in the workspace, as Claude Code keeps it in its session dir, so it can be edited and run again.
+  const scriptPath = workflowScriptPath(meta.name, t.id)
+  let kept = false
+  if (ctx.workspace) {
+    try {
+      await ctx.workspace.write(ws, workspaceRelative(scriptPath)!, Buffer.from(script, 'utf8'))
+      await ctx.tasks.store.setSpec(t.id, { ...t.spec, scriptPath })
+      kept = true
+    } catch {
+      // The run does not need the copy; without it there is no scriptPath to give.
+    }
+  }
+  const runId = `wf_${t.id}`
+  return {
+    text:
+      `Workflow launched in background. Task ID: ${t.id}\nSummary: ${meta.description}\n` +
+      (kept
+        ? `Script file: ${scriptPath}\n(Edit this file with workspace_edit or workspace_write and re-invoke Workflow with {scriptPath: "${scriptPath}"} to iterate without resending the script.)\n`
+        : '') +
+      `Run ID: ${runId}\n` +
+      (kept
+        ? `To resume after editing the script: Workflow({scriptPath: "${scriptPath}", resumeFromRunId: "${runId}"}) — completed agents return cached results.\n`
+        : '') +
+      `\nEach agent() runs as a chat of its own under this one (at most ${WORKFLOW_CONCURRENCY} at once and ${WORKFLOW_MAX_AGENTS} in all), ` +
+      "spending from this session's budget; its tool calls ask the user as this session's do. You will be notified when it " +
+      'completes: the session sends the result to you as a new message once this turn has ended and it is idle. The ScadBuddy ' +
+      `panel shows its progress; TaskStop ${t.id} stops it.`,
   }
 }

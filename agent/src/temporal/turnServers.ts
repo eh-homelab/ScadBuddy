@@ -137,7 +137,7 @@ export function builtinNote(names: readonly string[]): string {
     'the same input and answer the same way. Every call of one asks the user first. Their files are the session workspace, ' +
     'shown under /workspace (the workspace_* tools see the same files), not a local disk.' +
     (names.some((n) => BACKGROUND_BUILTINS.includes(n))
-      ? ' The session keeps the jobs, wakeups and watches they start past this turn: each sends its prompt or events to the ' +
+      ? ' The session keeps the jobs, wakeups, watches and workflows they start past this turn: each sends its prompt, events or result to the ' +
         'session as a new message when it is due and the session is idle.'
       : '')
   )
@@ -296,6 +296,7 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
               tz: tasks.tz,
               now: tasks.now ?? (() => new Date()),
               commandQueue: tasks.commandQueue,
+              workspace: builtins.files,
             }
           : undefined
         servers.push({

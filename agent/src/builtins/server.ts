@@ -15,7 +15,7 @@ import {
 } from './session.js'
 import SCHEMAS from './schemas.json' with { type: 'json' }
 import { type WebContext, webFetch, webSearch } from './web.js'
-import { type BackgroundContext, cronCreate, cronDelete, cronList, monitor, scheduleWakeup, taskStop } from './background.js'
+import { type BackgroundContext, cronCreate, cronDelete, cronList, monitor, scheduleWakeup, taskStop, workflow } from './background.js'
 import { MAX_ACTIVE } from '../background/store.js'
 
 // A durable turn's Claude Code built-ins (#2393): the ones an allowed plugin package
@@ -37,7 +37,7 @@ export type BuiltinContext = {
 }
 
 /** The background built-ins: kept by the session past its turn (background.ts). */
-export const BACKGROUND_BUILTINS: readonly string[] = ['CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'Monitor', 'TaskStop']
+export const BACKGROUND_BUILTINS: readonly string[] = ['CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'Monitor', 'Workflow', 'TaskStop']
 
 const noTasks = (): BuiltinResult => ({ text: 'This session cannot keep background tasks.', isError: true })
 const withTasks =
@@ -223,8 +223,28 @@ export const BUILTINS: Record<string, Builtin> = {
     }),
     run: withTasks(monitor),
   },
+  Workflow: {
+    description:
+      "Claude Code's Workflow: runs a workflow script that orchestrates subagents in the background and returns at once with a " +
+      'task ID; its result arrives as a new message once the session is idle. The script is plain JavaScript beginning with ' +
+      '`export const meta = { name, description, phases? }` (a pure literal), then a body using agent(prompt, opts?), ' +
+      'parallel(thunks), pipeline(items, ...stages), phase(title), log(message), args and workflow({scriptPath}). Each agent() ' +
+      'runs as a chat of its own under this session (at most 4 at once, 50 in all), spending from its budget, with ' +
+      "opts.schema returning a checked object. Date.now(), new Date() and Math.random() throw. Run it only when the user asked " +
+      'for a workflow or multi-agent orchestration in their own words.',
+    input: z.object({
+      script: z.string().max(524_288).optional(),
+      scriptPath: z.string().optional(),
+      name: z.string().optional(),
+      args: z.unknown().optional(),
+      resumeFromRunId: z.string().optional(),
+      description: z.string().optional(),
+      title: z.string().optional(),
+    }),
+    run: withTasks(workflow),
+  },
   TaskStop: {
-    description: "Claude Code's TaskStop: stops one of this session's background tasks (a cron job, wakeup or monitor) by its ID.",
+    description: "Claude Code's TaskStop: stops one of this session's background tasks (a cron job, wakeup, monitor or workflow) by its ID.",
     input: z.object({ task_id: z.string().optional(), shell_id: z.string().optional() }),
     run: withTasks(taskStop),
   },
@@ -300,7 +320,7 @@ export function classicBuiltinServer(
 export function classicBuiltinNote(names: readonly string[]): string {
   const tools = names.map((n) => `${n} (mcp__${BUILTIN_SERVER}__${n})`).join(', ')
   const kept = names.some((n) => BACKGROUND_BUILTINS.includes(n))
-    ? ' The session keeps the jobs, wakeups and watches they start past this turn: each sends its prompt or events to the ' +
+    ? ' The session keeps the jobs, wakeups, watches and workflows they start past this turn: each sends its prompt, events or result to the ' +
       'session as a new message when it is due and the session is idle.'
     : ''
   return (

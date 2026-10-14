@@ -46,6 +46,7 @@ import type { PostgresSessionStore } from './store.js'
 import { NO_TURN, slotHooks, slotHttpContext, slotWebContext, type TurnSlot } from './turnSlot.js'
 import { PgHttpBodies } from './httpBodies.js'
 import { nestedQueries } from '../builtins/nested.js'
+import { loadAgentDefinitions } from '../harness/agentDefinitions.js'
 import { BACKGROUND_BUILTINS, BUILTIN_SERVER, CLASSIC_BUILTINS, classicBuiltinNote, classicBuiltinServer } from '../builtins/server.js'
 
 export type TurnRunnerDeps = Pick<
@@ -81,6 +82,9 @@ export type FingerprintParts = {
   credentialId: string
   credentialUpdatedAt: string
   model: string | null
+  /** A Workflow agent's chat (background/workflowAgents.ts): its own effort and subagent definition. */
+  effort: string | null
+  agentType: string | null
   ownPlugin: boolean
   /** Each plugin's configured endpoint, header version, tool tiers and disabled tools (forwarder.ts `pluginEndpoint`). */
   plugins: PluginEndpoint[]
@@ -160,6 +164,8 @@ export class TurnRunner {
     'resume',
     'sessionId',
     'model',
+    'effort',
+    'agent',
     'mcpServers',
     'pluginPaths',
     'allowedPluginPaths',
@@ -321,12 +327,15 @@ export class TurnRunner {
           }
         }
       }
-      const [cwd, resume, model, httpSetting] = await Promise.all([
+      const [cwd, resume, settingModel, httpSetting] = await Promise.all([
         ensureSessionDir(this.deps.paths, id),
         this.deps.store.exists(id),
         this.deps.settings?.get<string>(SETTING_MODEL),
         this.deps.httpRequest ? this.deps.settings?.get<unknown>(SETTING_HTTP_REQUEST) : undefined,
       ])
+      // A Workflow agent's chat (startChild): its own model, effort and subagent definition.
+      const model = session.agentModel ?? settingModel
+      const agentDefinition = session.agentType ? (await loadAgentDefinitions())[session.agentType] : undefined
       // The http_request tool (#827): on unless the setting is `false`. Its
       // saved bodies live in Postgres, so any replica serves them (#2374), and it
       // never sees the turn's secrets except to refuse a request that carries one.
@@ -384,6 +393,9 @@ export class TurnRunner {
         // First turn: the SDK session gets OUR id; later turns resume it.
         ...(resume ? { resume: id } : { sessionId: id }),
         ...(typeof model === 'string' && model ? { model } : {}),
+        ...(session.agentEffort ? { effort: session.agentEffort } : {}),
+        // The plugin's subagent of that name (its agents/<name>.md), as the turn's main thread.
+        ...(agentDefinition && session.agentType ? { agent: { name: session.agentType, definition: agentDefinition } } : {}),
         ...(this.deps.mcpServers || http || served.length
           ? {
               mcpServers: {
@@ -417,6 +429,7 @@ export class TurnRunner {
                                 now: () => new Date(),
                                 // A Monitor's command runs where this turn's Bash runs: this replica.
                                 commandQueue: this.deps.background.commandQueue,
+                                workspace: this.deps.files,
                               },
                             }
                           : {}),
@@ -463,6 +476,8 @@ export class TurnRunner {
         // The row's epoch moves with every new secret and reset (credentials.ts).
         credentialUpdatedAt: first ? String(first.epoch) : '',
         model: run.model ?? null,
+        effort: run.effort ?? null,
+        agentType: run.agent?.name ?? null,
         ownPlugin: ownPlugin !== undefined,
         // Each plugin's configured endpoint and header version, never the loopback
         // URL this assembly registered (forwarder.ts `pluginEndpoint`).

@@ -1,6 +1,8 @@
 import path from 'node:path'
 import {
+  type AgentDefinition,
   type CanUseTool,
+  type EffortLevel,
   type HookCallbackMatcher,
   type HookEvent,
   type McpHttpServerConfig,
@@ -105,6 +107,10 @@ export type HarnessRun = {
   prompt: string | AsyncIterable<SDKUserMessage>
   /** Claude model id or alias; the SDK's default when omitted. */
   model?: string
+  /** How much effort the model puts into its responses (a Workflow agent's chat); the SDK's default when omitted. */
+  effort?: EffortLevel
+  /** A subagent definition the turn's main thread runs as (a Workflow agent's chat, harness/agentDefinitions.ts). */
+  agent?: { name: string; definition: AgentDefinition }
   maxTurns?: number
   maxBudgetUsd?: number
   /**
@@ -422,6 +428,12 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
   const disallowed = [...remote.disallowedTools, ...(policy?.disallowed ?? [])]
   if (disallowed.length) options.disallowedTools = disallowed
   if (run.model !== undefined) options.model = run.model
+  if (run.effort !== undefined) options.effort = run.effort
+  if (run.agent !== undefined) {
+    // Claude Code takes the main thread's agent from `agents`, not from a plugin (measured on 2.1.296).
+    options.agents = { ...options.agents, [run.agent.name]: run.agent.definition }
+    options.agent = run.agent.name
+  }
   if (run.resume !== undefined) options.resume = run.resume
   if (run.sessionId !== undefined) options.sessionId = run.sessionId
   if (run.sessionStore !== undefined) {

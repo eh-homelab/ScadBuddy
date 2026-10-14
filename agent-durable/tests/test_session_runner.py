@@ -566,6 +566,7 @@ async def _segment_options(
     tmp_path: Path,
     *,
     plugin_dir: str | None = None,
+    agent: tuple[str | None, str | None, str | None] | None = None,
 ) -> dict[str, Any]:
     await insert_gateway(agent_db, KEK, "http://127.0.0.1:9")
     recording = Recording()
@@ -574,6 +575,12 @@ async def _segment_options(
     )
     async with running(temporal_env, connect, runner) as (client, queue):
         sid = await insert_session(agent_db)
+        if agent:
+            await agent_db.execute(
+                "UPDATE ai_sessions SET agent_model = %s, agent_effort = %s, agent_type = %s"
+                " WHERE id = %s",
+                (*agent, sid),
+            )
         handle = await start_session(client, sid, queue)
         try:
             await send(handle, "hi")
@@ -652,6 +659,20 @@ async def test_a_segment_runs_on_the_model_chosen_in_settings(
     await _setting(agent_db, "model", '"claude-sonnet-test"')
     made = await _segment_options(temporal_env, agent_db, connect, tmp_path)
     assert made["model"] == "claude-sonnet-test"
+
+
+async def test_a_workflow_agents_chat_runs_on_its_own_model_and_effort(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """#2393: agent() options kept on its chat (workflowAgents.ts) win over Settings'; a
+    subagent type with no definitions here is not passed on."""
+    await _setting(agent_db, "model", '"claude-sonnet-test"')
+    made = await _segment_options(
+        temporal_env, agent_db, connect, tmp_path, agent=("claude-haiku-test", "low", "nope")
+    )
+    assert made["model"] == "claude-haiku-test"
+    assert made["extra_options"]["effort"] == "low"
+    assert "extra_args" not in made["extra_options"]
 
 
 async def test_no_model_setting_leaves_the_engine_default(

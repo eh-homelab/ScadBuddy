@@ -192,4 +192,30 @@ export class BackgroundTaskStore {
     const [row] = await this.#sql<{ n: number }[]>`SELECT count(*)::int AS n FROM ai_background_events WHERE task_id = ${taskId}`
     return row?.n ?? 0
   }
+
+  /** Replaces a task's spec (a Workflow's, once its script is kept). */
+  async setSpec(id: string, spec: Record<string, unknown>): Promise<void> {
+    await this.#sql`UPDATE ai_background_tasks SET spec = ${this.#sql.json(spec as never)}, updated_at = now() WHERE id = ${id}`
+  }
+
+  /** A running task's latest progress (a Workflow's phase or log line), shown in the panel. */
+  async progress(id: string, detail: string): Promise<void> {
+    await this.#sql`UPDATE ai_background_tasks SET detail = ${detail}, updated_at = now() WHERE id = ${id} AND state = 'active'`
+  }
+
+  /** A Workflow's journalled agent() result (ai_workflow_calls), or undefined. */
+  async journalled(taskId: string, key: string, occurrence: number): Promise<{ result: unknown; ok: boolean } | undefined> {
+    const [row] = await this.#sql<{ result: { value: unknown }; ok: boolean }[]>`
+      SELECT result, ok FROM ai_workflow_calls WHERE task_id = ${taskId} AND call_key = ${key} AND occurrence = ${occurrence}`
+    // Kept as {value}, so a null result is a row too.
+    return row ? { result: row.result.value, ok: row.ok } : undefined
+  }
+
+  /** Records one agent() result in a Workflow's journal; a second write of the same call keeps the first. */
+  async journal(taskId: string, key: string, occurrence: number, entry: { result: unknown; ok: boolean; childId?: string | undefined }): Promise<void> {
+    await this.#sql`
+      INSERT INTO ai_workflow_calls (task_id, call_key, occurrence, result, ok, child_id)
+      VALUES (${taskId}, ${key}, ${occurrence}, ${this.#sql.json({ value: entry.result } as never)}, ${entry.ok}, ${entry.childId ?? null})
+      ON CONFLICT DO NOTHING`
+  }
 }

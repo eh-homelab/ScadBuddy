@@ -240,7 +240,7 @@ describe('plugin packages in a durable turn', () => {
     const client = await listing.servers[0]!.connect()
     expect((await client.listTools()).tools.map((t) => t.name)).toEqual(['CronCreate', 'ScheduleWakeup', 'TaskStop'])
     await client.close()
-    expect(listing.notes?.[0]).toContain('The session keeps the jobs, wakeups and watches')
+    expect(listing.notes?.[0]).toContain('The session keeps the jobs, wakeups, watches and workflows')
     expect(listing.problems).toEqual([])
     await listing.release()
     // Without them (no Temporal), they are left out, and said.
