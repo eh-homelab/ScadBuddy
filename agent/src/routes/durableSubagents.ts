@@ -1,8 +1,8 @@
-import { BlockList, isIP } from 'node:net'
+import { BlockList } from 'node:net'
 import type { Hono } from 'hono'
 import { z } from 'zod'
 import { UI_ACTOR } from '../audit/writes.js'
-import { OriginConfigError, type OriginPolicy, parseCidrList } from '../http/origins.js'
+import { OriginConfigError, type OriginPolicy, parseCidr, parseCidrList } from '../http/origins.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import type { SettingsRepo } from './httpRequest.js'
 import { ready, type RouteModule } from './module.js'
@@ -75,10 +75,9 @@ const MAPPED = { address: '::ffff:0:0', prefix: 96 } as const
 
 /** One address or range, as parseCidrList reads it, and no broader than MIN_PREFIX. */
 function isPeer(entry: string): boolean {
-  if (entry === '' || entry.includes(',') || peerList([entry]) === undefined) return false
-  const [address = '', prefixText] = entry.split('/')
-  const family = isIP(address) as 4 | 6
-  const prefix = prefixText === undefined ? (family === 4 ? 32 : 128) : Number(prefixText)
+  const cidr = entry.includes(',') ? undefined : parseCidr(entry)
+  if (!cidr) return false
+  const { address, prefix, family } = cidr
   if (family === 4) return prefix >= MIN_PREFIX[4]
   // An IPv6 range that overlaps the mapped block takes the IPv4 floor inside it (96 + 8).
   const overlapsMapped =

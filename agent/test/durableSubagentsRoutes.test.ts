@@ -98,6 +98,8 @@ describe('the durable subagents setting', () => {
     [{ url: null, peers: ['::/32'] }],
     [{ url: null, peers: ['::ffff:0.0.0.0/96'] }],
     [{ url: null, peers: ['::ffff:10.0.0.0/103'] }],
+    // Covers the mapped block without starting at `::`.
+    [{ url: null, peers: ['::fffe:0:0/95'] }],
   ])('refuses the body %j, and stores nothing', async (body) => {
     const { app, values } = setup()
     expect((await put(app, body)).status).toBe(400)

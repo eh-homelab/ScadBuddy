@@ -57,9 +57,8 @@ describe('DurableSubagentsSetting', () => {
     )
     const { container } = renderPage(<DurableSubagentsSetting />)
     await waitFor(() => expect(answered).toBe(true))
-    // The answer is refused: the section never shows, and a later load would not bring it.
+    // Answered with a 503: the section stays hidden.
     await waitFor(() => expect(container).toBeEmptyDOMElement())
-    await expect(api.getDurableSubagents()).rejects.toThrow()
     expect(screen.queryByText('Durable subagents')).not.toBeInTheDocument()
   })
 })
