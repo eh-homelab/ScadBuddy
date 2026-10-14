@@ -309,11 +309,16 @@ def normalise_png(data: bytes) -> tuple[bytes, int, int]:
         # Its own refusals (a ValueError too) pass through as they are.
         raise
     except ValueError as error:
-        # Pillow's limit on a decompressed text or ICC chunk (MAX_TEXT_CHUNK): metadata
-        # the upload keeps none of anyway, so re-exported without it the PNG reads.
         logger.info("a PNG upload could not be decoded", extra={"error": str(error)})
+        if PNG_CHUNK_LIMIT in str(error):
+            # Pillow's limit on a decompressed text or ICC chunk: metadata the upload
+            # keeps none of anyway, so re-exported without it the PNG reads.
+            raise AssetRejectedError(
+                "the PNG carries metadata too large to read; re-export it without metadata"
+            ) from None
+        # Any other ValueError Pillow raises while decoding is an unreadable PNG.
         raise AssetRejectedError(
-            "the PNG carries metadata too large to read; re-export it without metadata"
+            "the file is not a readable PNG; re-export it as PNG and try again"
         ) from None
     except (UnidentifiedImageError, OSError) as error:
         # Pillow's text names its stream object by address (#2383): for the log, not the user.
@@ -321,6 +326,11 @@ def normalise_png(data: bytes) -> tuple[bytes, int, int]:
         raise AssetRejectedError(
             "the file is not a readable PNG; re-export it as PNG and try again"
         ) from None
+
+
+#: In Pillow's ValueError for a text or ICC chunk over ``PngImagePlugin.MAX_TEXT_CHUNK``
+#: once decompressed (``_safe_zlib_decompress``): what tells it from another ValueError.
+PNG_CHUNK_LIMIT = "MAX_TEXT_CHUNK"
 
 
 def sniff(data: bytes) -> AssetKind:
