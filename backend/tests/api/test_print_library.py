@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.activity.index import ActivityIndex
 from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.bambuddy import clearance, print_run
 from scadbuddy.bambuddy.uploads import LibraryCopy, ProjectTarget
 from scadbuddy.render.bambu3mf import (
     MAX_SETTINGS_BYTES,
@@ -1447,6 +1448,39 @@ def test_a_by_object_check_warns_when_the_toolhead_would_hit_an_object(
     # #2976: by object or not, the file is downloaded as often: once for its slots, once
     # for the nozzle check, whose read the objects come from.
     assert download.call_count == 2
+
+
+@respx.mock
+def test_the_by_object_pairs_are_compared_off_the_event_loop(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3251: the pairwise comparison is quadratic in a file's objects, and ran on the
+    API's event loop, where a large one blocked every request until it finished."""
+    configure(client)
+    library_file(89, content=two_objects_3mf(tmp_path / "bins.3mf", apart=15))
+    run_routes()
+    slice_routes()
+    real = clearance.clearance_warnings
+    on_loop: list[bool] = []
+
+    def recorded(*args: Any, **kwargs: Any) -> Any:
+        try:
+            asyncio.get_running_loop()
+            on_loop.append(True)
+        except RuntimeError:
+            on_loop.append(False)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(clearance, "clearance_warnings", recorded)
+    monkeypatch.setattr(print_run, "clearance_warnings", recorded, raising=False)
+
+    check = client.post(
+        "/api/v1/print/library/89/check", json={**body(), "print_sequence": "by object"}
+    )
+
+    assert check.status_code == 200, check.text
+    assert "sequence-clearance" in [w["kind"] for w in check.json()["warnings"]]
+    assert on_loop == [False]
 
 
 @respx.mock

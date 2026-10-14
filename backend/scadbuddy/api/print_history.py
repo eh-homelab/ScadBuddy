@@ -16,6 +16,7 @@ and the archive's media through the proxy in `scadbuddy.api.prints`.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -482,7 +483,20 @@ def _cover(archive: ArchiveDetail) -> PrintCover | None:
 
 #: Bambuddy's statuses of a print that has not finished: it fills ``completed_at`` on
 #: one still printing, about when it created the archive (#2362).
+#:
+#: An archive's ``status`` is a free ``String(20)``, not an enum (``models/archive.py``
+#: L68 at v1.2.5.6). The one in-progress value Bambuddy writes on an archive is
+#: ``printing`` (``services/archive.py`` L1364-1365, ``main.py`` L3719 and L3937); its
+#: finished ones are ``completed``, ``failed``, ``cancelled`` and ``archived``. The other
+#: four are the queue's and the scheduler's in-progress states (``print_scheduler.py``
+#: L4765 ``running``, L4827 ``pending``), kept here so one carried onto an archive never
+#: reads as finished. Sources at
+#: https://github.com/maziggy/bambuddy/tree/d80414b518b602448192abd74506369b523cf29b/backend/app
+#: (v1.2.5.6); `test_every_recorded_archive_status_is_known` holds the list to the
+#: recordings (#2904).
 UNFINISHED_STATUSES = frozenset({"pending", "queued", "printing", "running", "paused"})
+#: The statuses of a print that has ended, from the same sources.
+FINISHED_STATUSES = frozenset({"completed", "failed", "cancelled", "archived", "aborted"})
 
 
 def _completed_at(archive: ArchiveDetail) -> datetime | None:
@@ -700,14 +714,21 @@ async def _named(
     names = await _printer_names(cache, client)
     return [
         item.model_copy(
-            update={"printer_name": names.get(item.printer_id) if item.printer_id else None}
+            update={
+                "printer_name": names.get(item.printer_id) if item.printer_id is not None else None
+            }
         )
         for item in items
     ]
 
 
 def _window(batch: Sequence[LinkedPrint]) -> tuple[date | None, date | None]:
-    """The days a batch's archives were created in, for one list read of them (#2359)."""
+    """The days a batch's archives were created in, for one list read of them (#2359).
+
+    Approximate: it is built from when ScadBuddy first saw each print, which for a
+    library-linked print can come long after Bambuddy created the archive. Those fall
+    outside the window and are read singly; ``prints.archive_window`` records how many
+    the list held (#2819)."""
     seen = [_utc(link.first_seen) for link in batch if link.first_seen is not None]
     if not seen:
         return None, None
@@ -850,13 +871,18 @@ async def list_prints(
             batch = await links.page(limit=wanted, before=before, subjects=subjects)
             scanned += len(batch)
             date_from, date_to = _window(batch)
-            await cache.prime(
-                client,
-                [link.archive_id for link in batch],
-                date_from=date_from,
-                date_to=date_to,
-                limit=min(ARCHIVE_WINDOW_ROWS * len(batch), MAX_ARCHIVE_WINDOW),
-            )
+            with span(
+                "prints.archive_window", attributes={"scadbuddy.archives": len(batch)}
+            ) as current:
+                # How many the list read held, so a trace shows its hit rate (#2819).
+                held = await cache.prime(
+                    client,
+                    [link.archive_id for link in batch],
+                    date_from=date_from,
+                    date_to=date_to,
+                    limit=min(ARCHIVE_WINDOW_ROWS * len(batch), MAX_ARCHIVE_WINDOW),
+                )
+                current.set_attribute("scadbuddy.archives_listed", held)
             archives = await _bounded(
                 [cache.archive(client, link.archive_id) for link in batch], READ_CONCURRENCY
             )
@@ -986,8 +1012,11 @@ def _output_files(outputs: OutputStore, meta: OutputMeta) -> list[PrintFile]:
     return files
 
 
-def _frame_url(archive_id: int, index: int) -> str:
-    return _prints_url(archive_id, f"timelapse/frames/{index}")
+def _frame_url(archive_id: int, index: int, timelapse_path: str) -> str:
+    """Versioned by the timelapse it is a still of (#2903): the browser keeps a still a
+    day, and a replaced timelapse must not show the old one's."""
+    version = hashlib.sha256(timelapse_path.encode()).hexdigest()[:12]
+    return _prints_url(archive_id, f"timelapse/frames/{index}?v={version}")
 
 
 def _media(link: LinkedPrint, archive: ArchiveDetail) -> PrintMedia:
@@ -995,7 +1024,7 @@ def _media(link: LinkedPrint, archive: ArchiveDetail) -> PrintMedia:
     if archive.timelapse_path is not None:
         timelapse = PrintTimelapse(
             url=_prints_url(archive.id, "timelapse"),
-            poster_url=_frame_url(archive.id, 0),
+            poster_url=_frame_url(archive.id, 0, archive.timelapse_path),
             frames_url=_prints_url(archive.id, "timelapse/frames"),
         )
     plate = archive.plate_id if archive.plate_id is not None else link.plate_id
@@ -1143,7 +1172,7 @@ async def get_print(
         # The name the list and the filter show, else the one Bambuddy recorded on the
         # print's runs, for a printer it has no longer (#2363).
         printers = await _printer_names(cache, client)
-        printer_name = printers.get(summary.printer_id) if summary.printer_id else None
+        printer_name = printers.get(summary.printer_id) if summary.printer_id is not None else None
         summary = summary.model_copy(update={"printer_name": printer_name or _printer_name(runs)})
         library = _library_files(link, archive, file) if meta is None else []
         files = await asyncio.to_thread(_files, outputs, meta, archive, library)
@@ -1175,7 +1204,8 @@ async def get_print(
     )
 
 
-#: A still is the same for as long as its timelapse is: the browser keeps it a day.
+#: A still is the same for as long as its timelapse is, which its URL's ``v`` names: the
+#: browser keeps it a day.
 FRAME_CACHE_CONTROL = "private, max-age=86400"
 
 
@@ -1230,7 +1260,7 @@ async def get_timelapse_frames(
     return TimelapseFrames(
         info=info,
         frames=[
-            TimelapseFrame(timestamp=at, url=_frame_url(archive_id, index))
+            TimelapseFrame(timestamp=at, url=_frame_url(archive_id, index, path))
             for index, (at, _) in enumerate(frames)
         ],
     )

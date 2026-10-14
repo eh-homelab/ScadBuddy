@@ -40,7 +40,8 @@ const standingGrant = z
   })
   .strict()
   .describe(
-    "A proposed standing grant: each fire's run gets a run grant with these rules (fresh limits per run). An " +
+    "A proposed standing grant: each fire's run gets a run grant with these rules. Its limits are shared: " +
+      "every run it starts under one approval spends from the same totals, not fresh limits per run. An " +
       "agent's is only requested: it does nothing until the user approves it on the flow's page.",
   )
 

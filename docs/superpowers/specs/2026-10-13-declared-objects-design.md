@@ -25,7 +25,8 @@ for (i = [1 : count])
 - ScadBuddy renders object *k* with `-D $object=k`, splits it by colour and solidifies
   it as it does a plate. Its colour parts are the object's parts.
   Each object is a render of its own, so a layout of P plates and N objects is P × N
-  renders; the pipeline's `render_solids` budget scales with that count.
+  renders; the pipeline's `render_solids` budget scales with that count. P × N is at
+  most `MAX_RENDERS` (16), the bound a job had before objects (#3250).
 - **An object is drawn where it is**, not at the origin. Unlike plates, objects share
   a plate, and the spacing between them is what decides whether the toolhead clears
   them (§4). The `$object = 0` render, which the preview shows, is every object at once.

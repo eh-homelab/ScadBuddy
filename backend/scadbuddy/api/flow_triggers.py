@@ -11,6 +11,7 @@ it (§12.4); approving or declining its standing grant is the browser's alone.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import uuid
 from datetime import UTC, datetime
@@ -65,6 +66,8 @@ TRIGGER_INVALID = "https://scadbuddy.dev/problems/flow-trigger-invalid"
 TRIGGER_CHANGED = "https://scadbuddy.dev/problems/flow-trigger-changed"
 TEMPORAL_DOWN = "https://scadbuddy.dev/problems/flow-trigger-schedule-unavailable"
 FIRES_SHOWN = 20
+#: The trigger list's views built at once.
+LIST_VIEWS_AT_ONCE = 8
 
 
 class StandingGrantView(BaseModel):
@@ -219,9 +222,11 @@ async def _check_grant(triggers: Triggers, spec: GrantSpec) -> None:
 
 
 async def _sync_schedule(triggers: Triggers, trigger: Trigger) -> None:
-    """The trigger's Schedule as its row says. Temporal refusing the spec is the
-    request's fault (422); Temporal away is 503, and the library worker's reconcile
-    (`reconcile_trigger_schedules`) puts the Schedule right within `RECONCILE_INTERVAL`."""
+    """The trigger's Schedule as ``trigger`` says. Temporal refusing the spec is the
+    request's fault (422); Temporal away is 503. A row saved before either is put right
+    by the library worker's reconcile (`reconcile_trigger_schedules`) within
+    `RECONCILE_INTERVAL`, unless Temporal refuses its spec: that one is logged on every
+    pass and never applied, so a route checks a new spec here before saving it."""
     try:
         await ensure_trigger_schedule(triggers.client, trigger, triggers.task_queue)
     except RPCError as err:
@@ -238,6 +243,17 @@ async def _sync_schedule(triggers: Triggers, trigger: Trigger) -> None:
             type_=TEMPORAL_DOWN,
             headers={"Retry-After": "5"},
         ) from err
+
+
+async def _sync_saved(triggers: Triggers, trigger: Trigger) -> None:
+    """The Schedule of a pause or resume already saved. Temporal away is not the request's
+    failure: the row took effect (a fire reads it), and the reconcile puts the Schedule
+    right within `RECONCILE_INTERVAL`. Answering 503 would say it had not."""
+    try:
+        await _sync_schedule(triggers, trigger)
+    except ApiError as err:
+        if err.status != status.HTTP_503_SERVICE_UNAVAILABLE:
+            raise
 
 
 def _grant_view(grant: StandingGrant | None) -> StandingGrantView | None:
@@ -271,7 +287,15 @@ async def list_flow_triggers(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> list[TriggerView]:
     """Newest first, at most `limit`."""
-    return [await _view(triggers, t) for t in await triggers.store.list_triggers(name, limit)]
+    listed = await triggers.store.list_triggers(name, limit)
+    # Each view is a Schedule describe and three queries: a few at a time, not in turn.
+    gate = asyncio.Semaphore(LIST_VIEWS_AT_ONCE)
+
+    async def one(trigger: Trigger) -> TriggerView:
+        async with gate:
+            return await _view(triggers, trigger)
+
+    return list(await asyncio.gather(*(one(t) for t in listed)))
 
 
 @router.get("/flow-triggers/{trigger_id}", response_model=TriggerView, summary="Get a flow trigger")
@@ -328,7 +352,8 @@ async def update_flow_trigger(
     """Any change returns the trigger's standing grant to `requested` (Ruling 20): a person
     approved it for what the trigger was. Runs already started keep their run grants, but
     those spend only under the approval that seeded them, so their outward calls wait; its
-    pause is kept."""
+    pause is kept. Its Schedule is set before the row is saved, so an edit Temporal refuses
+    (422) or cannot take now (503) changes nothing."""
     trigger = await _load(triggers, trigger_id)
     _creator_only(trigger)
     sent = body.model_fields_set
@@ -360,10 +385,16 @@ async def update_flow_trigger(
         fields["overlap"] = body.overlap
     if "approval_timeout" in sent:
         fields["approval_timeout_s"] = timeout_seconds(body.approval_timeout)
+    # The Schedule first, as the edit will make it: one Temporal refuses (422) or cannot
+    # take now (503) saves nothing, and the standing grant stays as it was.
+    proposed = Trigger.model_validate({**trigger.model_dump(), **fields})
+    await _sync_schedule(triggers, proposed)
     updated = await triggers.store.update(trigger_id, fields, _who(), f"edit by {_actor()}")
     if updated is None:
+        # Deleted meanwhile: the Schedule just made has no row to fire.
+        with contextlib.suppress(RPCError):
+            await delete_trigger_schedule(triggers.client, trigger_id)
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such trigger.")
-    await _sync_schedule(triggers, updated)
     return await _view(triggers, updated)
 
 
@@ -376,7 +407,7 @@ async def pause_flow_trigger(trigger_id: str, triggers: TriggersDep) -> TriggerV
     paused = await triggers.store.set_paused(trigger_id, True, _who(), None)
     if paused is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such trigger.")
-    await _sync_schedule(triggers, paused)
+    await _sync_saved(triggers, paused)
     return await _view(triggers, paused)
 
 
@@ -393,7 +424,7 @@ async def resume_flow_trigger(trigger_id: str, triggers: TriggersDep) -> Trigger
     resumed = await triggers.store.set_paused(trigger_id, False, None, None)
     if resumed is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such trigger.")
-    await _sync_schedule(triggers, resumed)
+    await _sync_saved(triggers, resumed)
     return await _view(triggers, resumed)
 
 
