@@ -19,7 +19,7 @@ import { type GateEntry, type RefusalCode, RespondRefusal, type RespondRequest, 
 import { isUuid } from '../../harness/uuid.js'
 import type { InputEntry, InputOutcome, Owner } from '../../sessions/protocol.js'
 import { TASK_QUEUE } from '../names.js'
-import { SESSION_GATE_ACTIVITIES } from './names.js'
+import { FLOW_GRANT_CHECK_ACTIVITY, SESSION_GATE_ACTIVITIES } from './names.js'
 
 // The session workflow's half of the tool-call gate (spec 2026-10-01 §6.6, phase 4 of the
 // unified runtime), ported whole from agent-durable's session/workflow.py, whose names it
@@ -485,7 +485,7 @@ export class SessionGate {
     // queue, spec 2026-10-11 §3.4). Undefined when it could not answer, which parks the
     // call (fail toward asking).
     try {
-      return (await this.#projects[SESSION_GATE_ACTIVITIES.grantCheck]!({
+      return (await this.#projects[FLOW_GRANT_CHECK_ACTIVITY]!({
         run_id: flow.runId,
         request_id: rid,
         fn: 'tool',

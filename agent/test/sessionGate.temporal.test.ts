@@ -18,7 +18,7 @@ import type { DenyInput, GrantInput, OpenInput, ResolveInput } from '../src/gate
 import { validateRespond } from '../src/gate/validate.js'
 import type { InputEntry, Owner } from '../src/sessions/protocol.js'
 import { type GateSettings, NOBODY_ANSWERED } from '../src/temporal/session/gate.js'
-import { SESSION_GATE_ACTIVITIES as GATE } from '../src/temporal/session/names.js'
+import { FLOW_GRANT_CHECK_ACTIVITY, SESSION_GATE_ACTIVITIES as GATE } from '../src/temporal/session/names.js'
 import {
   callSignal,
   cancelAllUpdate,
@@ -97,7 +97,7 @@ class Fake {
       if (this.tier === 'fail') throw ApplicationFailure.nonRetryable('plugin gone', 'ToolError')
       return { tier: this.tier }
     },
-    [GATE.grantCheck]: async (args: Record<string, unknown>) => {
+    [FLOW_GRANT_CHECK_ACTIVITY]: async (args: Record<string, unknown>) => {
       this.checks.push(args)
       return this.verdict
     },

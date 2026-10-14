@@ -22,6 +22,9 @@ const pythonNames = walk(path.join(here, '../../agent-durable/src'))
   .filter((f) => f.endsWith('.py'))
   .flatMap((f) => [...readFileSync(f, 'utf8').matchAll(/activity\.defn\(\s*name\s*=\s*"([^"]+)"/g)].map((m) => m[1]!))
 
+// `flow_grant_check` (FLOW_GRANT_CHECK_ACTIVITY) is deliberately left out: the gate calls it, and
+// the backend's projects worker serves it under that bare name, so TS registers nothing by it.
+
 /** Every activity name the agent's workers register by a constant in src/temporal, plus its tools. */
 const tsNames = [
   ...walk(path.join(here, '../src/temporal'))

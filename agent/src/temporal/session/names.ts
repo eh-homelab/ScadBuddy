@@ -18,9 +18,14 @@ export const SESSION_GATE_ACTIVITIES = {
   settings: 'gate.settings',
   describe: 'gate.describe_call',
   turnToolTier: 'turn_tool_tier',
-  grantCheck: 'gate.flow_grant_check',
   open: 'gate.open_input',
   grant: 'gate.grant_input',
   deny: 'gate.deny_input',
   resolve: 'gate.resolve_input',
 } as const
+
+/**
+ * CALLED by the gate, never registered by TS: the backend projects worker's activity on the
+ * `projects` queue (spec 2026-10-11 §3.4), so it keeps its own bare name.
+ */
+export const FLOW_GRANT_CHECK_ACTIVITY = 'flow_grant_check'
