@@ -26,9 +26,12 @@ jobs:
       # #anchors, in-repo ones included. 429 is a rate limit, not a dead link.
       # Excluded, each a live page that answers a bot with an error (#2622):
       #   npmjs.com and makerworld.com answer 403 to any client without a
-      #   browser's cookies (bot protection), whatever the page;
+      #   browser's cookies (bot protection), whatever the page. Nothing checks
+      #   those links now, so a renamed package or a removed MakerWorld model
+      #   (docs/user-guide.md) goes unflagged: check them by hand when editing;
       #   github.com/eh-homelab/clusters is a private repository, a 404 to an
-      #   unauthenticated request;
+      #   unauthenticated request. Only that repository: the pattern ends at a
+      #   path, query or fragment, so an eh-homelab/clusters-* one is checked;
       #   *.internal.nullreference.io are the homelab's LAN-only hosts, which a
       #   GitHub runner cannot reach (every one times out).
       - name: lychee
@@ -42,7 +45,7 @@ jobs:
             --accept '100..=103,200..=299,429'
             --exclude '^https://www\.npmjs\.com/'
             --exclude '^https://makerworld\.com/'
-            --exclude '^https://github\.com/eh-homelab/clusters'
+            --exclude '^https://github\.com/eh-homelab/clusters([/?#]|$)'
             --exclude '^https?://[^/]*\.internal\.nullreference\.io'
             'docs/**/*.md' README.md CLAUDE.md '**/SKILL.md'
           fail: true
