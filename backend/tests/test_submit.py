@@ -1127,8 +1127,9 @@ def test_an_arrange_the_api_settles_is_counted_as_arrange(
         assert sample("scadbuddy_render_jobs_finished_total", labels) == 1
         assert sample("scadbuddy_render_job_latency_seconds_count", labels) == 1
         rendered = {"kind": "render", "outcome": outcome}
-        assert (sample("scadbuddy_render_jobs_finished_total", rendered) or 0) == 0
-        assert (sample("scadbuddy_render_job_latency_seconds_count", rendered) or 0) == 0
+        # Registered at zero by Metrics, so == 0 also catches a series never registered.
+        assert sample("scadbuddy_render_jobs_finished_total", rendered) == 0
+        assert sample("scadbuddy_render_job_latency_seconds_count", rendered) == 0
 
 
 async def test_superseding_a_legacy_row_cancels_its_workflow_the_old_way(
