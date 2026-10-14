@@ -858,6 +858,7 @@ _VERTEX_BATCH = 65536
 #: so a file that puts its vertices in another namespace is left to the parse.
 _CORE_ROOT = re.compile(rb'<model\b[^>]{0,1024}?\sxmlns="%s"' % re.escape(CORE_NS.encode()))
 _ANY_DEFAULT_NAMESPACE = re.compile(rb"\sxmlns\s*=")
+_LEADING_SPACE = re.compile(rb"\s*")
 
 
 def _written_extents(data: bytes) -> tuple[np.ndarray, frozenset[int]] | None:
@@ -886,12 +887,13 @@ def _written_extents(data: bytes) -> tuple[np.ndarray, frozenset[int]] | None:
         return None
     if any(data.find(marker, start) != -1 for marker in (b"<?", b"<!--", b"<![CDATA[", b"&")):
         return None
-    # Matched at the first ``<model`` only: searched for, the bounded run would be
-    # retried from every ``<model`` in a file of them, 1 KB a time.
-    root = data.find(b"<model", start)
+    # Matched where the root element starts, the first thing after the declaration:
+    # a ``<model>`` inside some other root is not the 3MF's. Searched for instead, the
+    # bounded run would be retried from every ``<model`` in a file of them, 1 KB a time.
+    root = _LEADING_SPACE.match(data, start)
     if (
-        root == -1
-        or _CORE_ROOT.match(data, root) is None
+        root is None
+        or _CORE_ROOT.match(data, root.end()) is None
         or sum(1 for _ in _ANY_DEFAULT_NAMESPACE.finditer(data)) != 1
     ):
         return None

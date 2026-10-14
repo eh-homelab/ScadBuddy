@@ -5,7 +5,6 @@ import json
 import math
 import os
 import re
-import time
 import tracemalloc
 import zipfile
 from collections.abc import Callable
@@ -1775,29 +1774,18 @@ def test_a_long_coordinate_is_not_copied_into_every_row() -> None:
 )
 def test_reading_paint_codes_is_one_pass_over_a_crafted_file(junk: bytes) -> None:
     """Security review of #3254: an unbounded run inside the paint pattern rescanned to
-    the end of the file from every ``<triangle``, so 200 KB of them took 14 s. Bounded,
-    the scan is linear, and a code it cannot find leaves the file to the parse."""
-
-    def scan(repeats: int) -> float:
-        data = junk * repeats
-        best = float("inf")
-        for _ in range(3):
-            began = time.perf_counter()
-            for _ in bambu3mf._PAINT_CODE.finditer(data):
-                pass
-            best = min(best, time.perf_counter() - began)
-        return best
-
-    # Against its own scale, not a wall clock a loaded shard can miss (#3254 review):
-    # four times the input is about four times the scan, where a rescan per tag is
-    # sixteen.
-    assert scan(80_000) < 8 * scan(20_000) + 0.05
+    the end of the file from every ``<triangle``, so 200 KB of them took 14 s. Every run
+    in it is bounded, so no match reads further than a tag's worth of bytes; checked on
+    the pattern itself, not by a clock a loaded shard can skew (#3476 review)."""
+    assert not re.search(rb"(?<!\\)[*+]", bambu3mf._PAINT_CODE.pattern)
+    # A crafted file is read, whatever it then answers, without hanging on it.
+    bambu3mf._written_extents(_object_bytes(_THREE, junk * 40_000))
 
 
 def test_reading_a_box_makes_no_copy_of_the_file() -> None:
     """#3254 review: skipping the XML declaration by slicing copied the whole object
     file (86 MB on #2942's) just to look past it."""
-    padding = b'<metadata name="note">' + b"x" * 32_000_000 + b"</metadata>"
+    padding = b'<metadata name="note">' + b"x" * 4_000_000 + b"</metadata>"
     data = _object_bytes(_THREE, head=padding)
     tracemalloc.start()
     try:
@@ -1821,25 +1809,37 @@ def test_vertices_outside_the_core_namespace_are_left_to_the_parse(root: bytes) 
     assert bambu3mf._written_extents(data) is None
 
 
-def test_checking_the_root_namespace_is_one_pass_over_a_crafted_file() -> None:
+def test_checking_the_root_namespace_is_one_pass_over_a_crafted_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Security review of #3434's fix: a search for the root re-ran its bounded run
-    from every ``<model`` in a file made of them."""
+    from every ``<model`` in a file made of them. The pattern is tried once, where the
+    root starts; checked by what it is asked, not by a clock (#3476 review)."""
+    declaration = b'<?xml version="1.0"?>'
+    data = declaration + b"\n" + b"<model " * 400_000
+    asked: list[int] = []
+    real = bambu3mf._CORE_ROOT
 
-    data = b'<?xml version="1.0"?>' + b"<model " * 400_000
+    class Once:
+        def match(self, text: bytes, pos: int = 0) -> re.Match[bytes] | None:
+            asked.append(pos)
+            return real.match(text, pos)
 
-    def best(read: Callable[[], object]) -> float:
-        fastest = float("inf")
-        for _ in range(3):
-            began = time.perf_counter()
-            read()
-            fastest = min(fastest, time.perf_counter() - began)
-        return fastest
+        def search(self, *_: object) -> None:
+            raise AssertionError("the root is matched where it starts, never searched for")
 
-    # Against one plain pass over the same bytes, not a wall clock (#3254 review): a
-    # retry from every tag cost about 150 of them.
-    one_pass = best(lambda: sum(1 for _ in re.finditer(rb"<model ", data)))
+    monkeypatch.setattr(bambu3mf, "_CORE_ROOT", Once())
     assert bambu3mf._written_extents(data) is None
-    assert best(lambda: bambu3mf._written_extents(data)) < 10 * one_pass + 0.05
+    assert asked == [len(declaration) + 1]
+
+
+def test_a_core_model_inside_another_root_is_left_to_the_parse() -> None:
+    """#3476 review: the root is the first element, so a ``<model>`` nested in another
+    is not taken for the 3MF's."""
+    core = _object_bytes(_THREE)
+    head, body = core.split(b"?>", 1)
+    assert bambu3mf._written_extents(head + b"?><foo>" + body + b"</foo>") is None
+    assert bambu3mf._written_extents(core) is not None
 
 
 def test_a_paint_code_longer_than_the_bounded_read_is_left_to_the_parse() -> None:
