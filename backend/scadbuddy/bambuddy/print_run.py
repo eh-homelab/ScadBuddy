@@ -610,14 +610,19 @@ async def resolve_plates(
 
 
 async def _slot_errors(
-    client: BambuddyClient, source: PrintSource, request: PrintRunRequest, prepared: PreparedRun
+    client: BambuddyClient,
+    source: PrintSource,
+    request: PrintRunRequest,
+    prepared: PreparedRun,
+    *,
+    inventory: Inventory | None = None,
 ) -> list[str]:
     """The run's slot refusals for ``request``, judged before anything is uploaded for it
     (#1050): read from a copy Bambuddy already has, which has the same slots as the one
     the run prints, as :func:`filament_options` reads them. An output's slots and a
     library file's are read from the file itself (#2720, #2550); with neither and no copy
     there is nothing to read without an upload, and the run still judges the slots
-    after its own."""
+    after its own. ``inventory`` is the check's own read, when it made one (#2722)."""
     if source.is_sliced or prepared.catalogue is None:
         # Nothing resolves a preset for a sliced file (#2671); Bambuddy maps its slots.
         return []
@@ -631,6 +636,7 @@ async def _slot_errors(
         plate_ids=prepared.plate_ids,
         fallback_colours=list(source.colours),
         own_colours=read_file.own_colours,
+        inventory=inventory,
         known=known_slots(source),
     )
     per_plate = [
@@ -684,8 +690,8 @@ async def check_print(
         # and there is no nozzle plan, slots or rack side to judge before it.
         return PrintCheck(warnings=prepared.warnings)
     laid_out = await source.states_nozzles(client)
-    # One read of the inventory for the plan and the spool warnings (#2722); none for a
-    # plan with no slots, which has neither.
+    # One read of the inventory for the plan, the rack, the slot refusals and the spool
+    # warnings (#2722); none for a plan with no slots, whose slot refusals read their own.
     inventory = await read_inventory(client) if request.filament_plan.slots else None
     nozzle_plan = (
         await plan_for(
@@ -721,7 +727,7 @@ async def check_print(
     else:
         errors = []
     # The run's 422 after its upload (#1050): every slot refusal, joined as it joins them.
-    slot_errors = await _slot_errors(client, source, request, prepared)
+    slot_errors = await _slot_errors(client, source, request, prepared, inventory=inventory)
     if slot_errors:
         errors.append(" ".join(slot_errors))
     # The one mounted-nozzle advisory kept (#723, #797): a warning, never a refusal. Not
