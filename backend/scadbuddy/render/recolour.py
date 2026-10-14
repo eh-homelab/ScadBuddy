@@ -26,15 +26,16 @@ from scadbuddy.render.split import normalise_colour
 from scadbuddy.render.thumbnail import render_plate_thumbnails
 
 
-def _archive(entries: Sequence[tuple[str, bytes]]) -> bytes:
+def _archive(entries: Sequence[tuple[str, bytes]], *, stored: bool = False) -> bytes:
     """The writer's own policy, so a file recoloured to the colours it already had
-    comes back byte for byte."""
+    comes back byte for byte. ``stored`` deflates nothing: for a copy only read back
+    here, where deflating an 86 MB model is seconds of CPU for nothing (#2877)."""
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as out:
         for name, data in entries:
             info = zipfile.ZipInfo(name, date_time=ZIP_TIMESTAMP)
             info.compress_type = (
-                zipfile.ZIP_STORED if name.endswith(".png") else zipfile.ZIP_DEFLATED
+                zipfile.ZIP_STORED if stored or name.endswith(".png") else zipfile.ZIP_DEFLATED
             )
             out.writestr(info, data)
     return buffer.getvalue()
@@ -66,16 +67,17 @@ def recolour_3mf(payload: bytes, colours: Sequence[str]) -> bytes:
     ]
 
     names = {name for name, _ in entries}
+    covered = [index for index in plates if cover_names(index)[0] in names]
     covers: dict[str, bytes] = {}
     with tempfile.TemporaryDirectory() as scratch:
         # `parts_from_3mf` reads a path, and reading the recoloured archive is what
-        # gives each part its new colour through its extruder number.
+        # gives each part its new colour through its extruder number. Written only when
+        # a cover is to be drawn from it.
         path = Path(scratch) / "model.3mf"
-        path.write_bytes(_archive(entries))
-        for index in plates:
+        if covered:
+            path.write_bytes(_archive(entries, stored=True))
+        for index in covered:
             cover = cover_names(index)
-            if cover[0] not in names:
-                continue
             drawn = render_plate_thumbnails(parts_from_3mf(path, index))
             covers.update(
                 zip(cover, (drawn.plate, drawn.plate_small, drawn.top, drawn.pick), strict=True)

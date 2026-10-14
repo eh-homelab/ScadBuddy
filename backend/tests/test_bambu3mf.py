@@ -1513,3 +1513,90 @@ def test_re_placing_two_objects_keeps_the_tower_their_painting_needs(
     moved = replate_3mf(out.read_bytes(), plate_for("Bambu Lab H2C"))
 
     assert ("wipe_tower_x" in _settings_of_bytes(moved)) is tower
+
+
+def _rewritten_objects(payload: bytes, change: Callable[[bytes], bytes]) -> bytes:
+    """``payload`` with every object file passed through ``change``."""
+    buffer = io.BytesIO()
+    with (
+        zipfile.ZipFile(io.BytesIO(payload)) as archive,
+        zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as out,
+    ):
+        for info in archive.infolist():
+            data = archive.read(info.filename)
+            if info.filename.startswith("3D/Objects/"):
+                data = change(data)
+            out.writestr(info, data)
+    return buffer.getvalue()
+
+
+def _painted_two_objects(tmp_path: Path) -> bytes:
+    left, right = _two_objects().parts
+    paint = Paint(("4",) * len(right.mesh.faces), ("#1F6FEB",))
+    painted = ColourPart(right.material_index, right.name, right.colour, right.mesh, paint=paint)
+    out = tmp_path / "painted-objects.3mf"
+    write_plates_3mf(
+        [PlateParts((left, painted), (1, 1), (1, 2))], ["#FF6AC1", "#1F6FEB"], out, thumbnails=None
+    )
+    return out.read_bytes()
+
+
+def test_re_placing_reads_its_own_object_files_without_parsing_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2877: a print's re-placement parsed every vertex and triangle of every object
+    file, through Python, to learn one box per plate; an 86 MB library file held the
+    print worker for 39 s. A file this writer wrote is read by pattern, and gives the
+    very bytes the parse gave."""
+    payload = _painted_two_objects(tmp_path)
+    parsed = replate_3mf(payload, plate_for("Bambu Lab H2C"))
+    real = bambu3mf.parse_model
+
+    def no_object_parse(archive: zipfile.ZipFile, name: str, *args: object, **kw: object) -> object:
+        assert not name.startswith("3D/Objects/"), f"{name} was parsed vertex by vertex"
+        return real(archive, name, *args, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(bambu3mf, "parse_model", no_object_parse)
+
+    assert replate_3mf(payload, plate_for("Bambu Lab H2C")) == parsed
+    assert "wipe_tower_x" in _settings_of_bytes(parsed)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        # Attributes in another order: not this writer's vertex.
+        lambda data: data.replace(b'<vertex x="', b'<vertex  x="'),
+        # A comment could hide a vertex the pattern would count.
+        lambda data: data.replace(b"<vertices>", b"<vertices><!-- a note -->"),
+        # The core namespace under a prefix the pattern does not name.
+        lambda data: data.replace(b"<vertex ", f'<m:vertex xmlns:m="{CORE_NS}" '.encode()),
+    ],
+    ids=["reordered", "comment", "prefixed"],
+)
+def test_an_object_file_written_otherwise_is_parsed_and_placed_the_same(
+    tmp_path: Path, change: Callable[[bytes], bytes]
+) -> None:
+    payload = _painted_two_objects(tmp_path)
+    other = _rewritten_objects(payload, change)
+
+    assert (
+        bambu3mf._written_extents(
+            zipfile.ZipFile(io.BytesIO(other)).read("3D/Objects/object_1.model")
+        )
+        is None
+    )
+    assert [item.get("transform") for item in _items(replate_3mf(other, plate_for("H2C")))] == [
+        item.get("transform") for item in _items(replate_3mf(payload, plate_for("H2C")))
+    ]
+
+
+def test_a_written_paint_code_past_its_cap_is_parsed_and_refused(tmp_path: Path) -> None:
+    from scadbuddy.render.paint import MAX_CODE_DIGITS
+
+    long = b'paint_color="' + b"4" * (MAX_CODE_DIGITS + 1) + b'"'
+    other = _rewritten_objects(
+        _painted_two_objects(tmp_path), lambda data: data.replace(b'paint_color="8"', long)
+    )
+    with pytest.raises(ValueError, match="paint_color"):
+        replate_3mf(other, plate_for("H2C"))

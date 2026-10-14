@@ -796,22 +796,64 @@ def _attribute(tag: str, name: str) -> str | None:
     return match.group(1) if match else None
 
 
+#: A ``<vertex>`` exactly as :func:`object_model` writes one, and any tag named so: the
+#: two counted against each other, so a file written any other way is parsed instead.
+_WRITTEN_VERTEX = re.compile(rb'<vertex x="([^"]*)" y="([^"]*)" z="([^"]*)"/>')
+_ANY_VERTEX = re.compile(rb"<(?:[\w.-]+:)?vertex\b")
+_PAINT_CODE = re.compile(rb"\s" + PAINT_ATTRIBUTE.encode() + rb'="([^"]*)"')
+
+
+def _written_extents(data: bytes) -> tuple[np.ndarray, frozenset[int]] | None:
+    """The ``(2, 3)`` box and painted filaments of an object file :func:`object_model`
+    wrote, read off its bytes by pattern rather than parsed vertex by vertex (#2877):
+    a re-placed print only needs the box, and the parse of an 86 MB file held a worker
+    for 39 s. ``None`` when the file is not in that writer's shape (a vertex written
+    otherwise, a comment, an entity, no vertex at all, a code past its cap), which
+    :func:`_plate_geometry` then parses as it always has."""
+    if b"<!--" in data or b"<![CDATA[" in data or b"&" in data:
+        return None
+    found = _WRITTEN_VERTEX.findall(data)
+    if not found or len(found) != len(_ANY_VERTEX.findall(data)):
+        return None
+    try:
+        points = np.array(found, dtype=np.bytes_).astype(np.float64)
+    except ValueError:
+        return None
+    painted: set[int] = set()
+    for code in set(_PAINT_CODE.findall(data)):
+        if len(code) > MAX_CODE_DIGITS:
+            return None
+        if code:
+            painted.update(states(code.decode("ascii")))
+    return np.array([points.min(axis=0), points.max(axis=0)]), frozenset(painted)
+
+
 def _plate_geometry(
-    archive: zipfile.ZipFile, names: Sequence[str]
+    archive: zipfile.ZipFile, names: Sequence[str], entries: Mapping[str, bytes]
 ) -> tuple[np.ndarray, frozenset[int]]:
-    """The ``(2, 3)`` box of the object files ``names``, read back out of an archive,
-    and the filaments their painting uses (#1965): what a plate's tower counts beside
-    its parts' extruders (#2108), which ``model_settings.config`` does not state.
+    """The ``(2, 3)`` box of the object files ``names``, read back out of an archive
+    whose entries' bytes are ``entries``, and the filaments their painting uses
+    (#1965): what a plate's tower counts beside its parts' extruders (#2108), which
+    ``model_settings.config`` does not state.
 
     The component transforms this writer emits are the identity, so the vertex
     extents *are* the assembly's extents; the build item carries the whole
     placement. Reading them back rather than trusting a recorded plate size keeps
     :func:`replate_3mf` correct for files written before plates were per printer.
+    A file this writer wrote is read by pattern (:func:`_written_extents`, #2877);
+    any other is parsed.
     """
     lows: list[np.ndarray] = []
     highs: list[np.ndarray] = []
     painted: set[int] = set()
     for name in names:
+        written = _written_extents(entries[name])
+        if written is not None:
+            box, codes = written
+            lows.append(box[0])
+            highs.append(box[1])
+            painted.update(codes)
+            continue
         for mesh in parse_model(archive, name).meshes.values():
             points = mesh.vertices
             if points.size:
@@ -935,8 +977,9 @@ def replate_3mf(
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         entries = [(info.filename, archive.read(info.filename)) for info in archive.infolist()]
         laid_out = laid_out_plates(archive)
+        contents = dict(entries)
         geometry = {
-            each.assembly_id: _plate_geometry(archive, each.object_files)
+            each.assembly_id: _plate_geometry(archive, each.object_files, contents)
             for each in laid_out
             if each.object_files
         }
