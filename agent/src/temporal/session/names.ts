@@ -7,6 +7,27 @@ export const SESSION_QUEUE = 'agent-sessions'
 /** The Worker Deployment of the `agent-sessions` worker (D4). */
 export const SESSION_DEPLOYMENT = 'scadbuddy-agent'
 export const SESSION_TURN_ACTIVITY = 'session_turn'
+/**
+ * Session affinity (spec 2026-10-13 §5.2): `acquire_worker` on the shared `agent-tools` reserves
+ * a warm slot on whichever replica answers and returns that replica's session host queue;
+ * `release_worker` frees it there.
+ */
+export const ACQUIRE_WORKER_ACTIVITY = 'acquire_worker'
+export const RELEASE_WORKER_ACTIVITY = 'release_worker'
+/**
+ * A replica's own queue for `session_turn` and `release_worker`: `agent-sessions.<identity>`, the
+ * identity behind its `agent-tools.<identity>` (main.ts HOST_QUEUE). A queue of its own, not that
+ * one: `agent-tools.<identity>` carries DurableSession's pinned calls (#2320, #2581), so a shared
+ * activity limit would either starve them or let them make a live home look dead to a turn's
+ * 5 s schedule-to-start.
+ */
+export const sessionHostQueue = (identity: string): string => `${SESSION_QUEUE}.${identity}`
+/** `acquire_worker`'s refusal when every warm slot on its replica runs a turn: retryable, so another replica may answer. */
+export const NO_CAPACITY = 'NoCapacity'
+/** `session_turn`'s failure when its worker stops under it: retryable, the turn resumes on another replica. */
+export const SHUTTING_DOWN_FAILURE = 'ShuttingDown'
+/** `session_turn`'s failure when the session no longer runs this turn (it ended, or was forgotten). */
+export const SESSION_GONE = 'SessionGone'
 export const OPEN_INPUT_UPDATE = 'open_input'
 export const OWNER_CHANGED_SIGNAL = 'owner_changed'
 export const SEND_MESSAGE_UPDATE = 'send_message'

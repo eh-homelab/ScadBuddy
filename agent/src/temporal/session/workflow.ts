@@ -13,6 +13,7 @@ import {
   proxyActivities,
   proxyLocalActivities,
   setHandler,
+  TimeoutFailure,
 } from '@temporalio/workflow'
 import { ASK_USER } from '../../gate/entry.js'
 import { END_SIGNAL, INTERRUPT_SIGNAL } from '../../gate/names.js'
@@ -34,7 +35,17 @@ import {
   type TurnOutcome,
   type TurnStart,
 } from './models.js'
-import { SEND_MESSAGE_UPDATE, SESSION_FINISH_ACTIVITY, SESSION_SETTINGS_ACTIVITY, SESSION_TURN_ACTIVITY, TURN_QUERY } from './names.js'
+import {
+  ACQUIRE_WORKER_ACTIVITY,
+  NO_CAPACITY,
+  RELEASE_WORKER_ACTIVITY,
+  SEND_MESSAGE_UPDATE,
+  SESSION_FINISH_ACTIVITY,
+  SESSION_SETTINGS_ACTIVITY,
+  SESSION_TURN_ACTIVITY,
+  SHUTTING_DOWN_FAILURE,
+  TURN_QUERY,
+} from './names.js'
 
 // AgentSession (spec 2026-10-13 §5.1): the workflow that runs a session's turns as the
 // `session_turn` activity, the unified runtime's counterpart of agent-durable's
@@ -53,10 +64,18 @@ import { SEND_MESSAGE_UPDATE, SESSION_FINISH_ACTIVITY, SESSION_SETTINGS_ACTIVITY
 // write the turn's end (`session.finish_turn`); continue as new, so every turn runs the
 // build current then (D4: the workflow is AUTO_UPGRADE, and a change to this function
 // goes behind `patched()` with test/fixtures/agent_session_histories/ replaying).
-// Recovery of a lost worker (§5.2) and parks (§5.4) are Tasks 5.2 and 5.3: a turn that
-// ends `released` is failed here, and a timeout fails the turn.
+//
+// Affinity (§5.2), Go's Worker Sessions on worker-specific queues: `home` is the session host
+// queue (`agent-sessions.<identity>`) of the replica `acquire_worker` reserved a place on; each
+// turn runs there, and a turn whose home has gone (a timeout, ShuttingDown, NoCapacity) is placed
+// again: acquire on the shared `agent-tools`, then the turn on the new home, resumed from its
+// transcript (`restarted`), at most PLACEMENTS times. An interrupt never moves it. On `end` the
+// workflow releases its place on `home`. Parks (§5.4) are Task 5.3's: a turn that ends
+// `released` is failed here.
 
 const SHORT = '30s'
+/** How many times one turn is placed on a worker (§5.2 "Recovery"). */
+const PLACEMENTS = 3
 const NO_PARKS = 'the turn parked a call, which this build cannot wait for yet'
 
 const sendUpdate = defineUpdate<SendAnswer, [Message]>(SEND_MESSAGE_UPDATE)
@@ -68,6 +87,37 @@ type Activities = Record<string, (input?: unknown) => Promise<unknown>>
 
 const local = proxyLocalActivities<{ [SESSION_SETTINGS_ACTIVITY]: () => Promise<RuntimeSettings> }>({ startToCloseTimeout: '10s' })
 const finish = proxyActivities<Activities>({ taskQueue: TASK_QUEUE, startToCloseTimeout: SHORT, retry: { maximumInterval: '1m' } })
+
+const acquire = proxyActivities<Activities>({
+  taskQueue: TASK_QUEUE,
+  scheduleToCloseTimeout: '60s',
+  retry: { initialInterval: '1s', maximumInterval: '10s', maximumAttempts: 10 },
+})
+
+/** A failure that says the turn's worker is gone or cannot take it: place the turn elsewhere (§5.2). */
+export function movesWorker(err: unknown): boolean {
+  const cause = err instanceof ActivityFailure ? err.cause : err
+  if (cause instanceof TimeoutFailure) return true
+  return cause instanceof ApplicationFailure && (cause.type === SHUTTING_DOWN_FAILURE || cause.type === NO_CAPACITY)
+}
+
+/** Whether the turn's message had gone into Claude Code before its worker was lost (turnActivity.ts `TurnBeat`). */
+function pushedBefore(err: unknown): boolean {
+  const cause = err instanceof ActivityFailure ? err.cause : err
+  const beat = cause instanceof TimeoutFailure ? cause.lastHeartbeatDetails : cause instanceof ApplicationFailure ? cause.details?.[0] : undefined
+  return typeof beat === 'object' && beat !== null && (beat as { pushed?: unknown }).pushed === true
+}
+
+/**
+ * The continuation of a turn placed again after `err`: `restarted`, so the next worker resumes
+ * the transcript with the restart message, once the message had gone in; else the same one, so
+ * the message is sent. A parked continuation keeps its calls (Task 5.5 runs them first).
+ */
+export function mergeRestarted(continuation: Continuation | undefined, err: unknown): Continuation | undefined {
+  if (continuation?.kind === 'parked') return continuation
+  if (continuation?.kind === 'restarted' || pushedBefore(err)) return { kind: 'restarted' }
+  return continuation
+}
 
 const busy = (): ApplicationFailure => ApplicationFailure.nonRetryable('the session is running a turn', 'busy')
 
@@ -131,16 +181,47 @@ export async function AgentSession(start: SessionStart): Promise<void> {
   })
   setHandler(turnQuery, () => turn?.turn_id ?? message?.turn_id ?? null)
 
+  /**
+   * The turn on the session's home, acquired first when there is none; placed again when its
+   * worker is lost (`movesWorker`), never on that worker's queue (the affinity guide).
+   */
   async function placeTurn(input: SessionTurnInput, settings: RuntimeSettings): Promise<SessionTurnResult> {
-    const onHome = proxyActivities<Activities>({
-      taskQueue: home ?? TASK_QUEUE,
-      scheduleToStartTimeout: '5s',
-      heartbeatTimeout: '20s',
-      startToCloseTimeout: `${settings.turn_max_seconds}s`,
-      retry: { maximumAttempts: 1 },
-      cancellationType: ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
-    })
-    return (await onHome[SESSION_TURN_ACTIVITY]!(input)) as SessionTurnResult
+    let continuation = input.continuation
+    let last: unknown
+    for (let cycle = 0; cycle < PLACEMENTS; cycle++) {
+      if (!home) home = ((await acquire[ACQUIRE_WORKER_ACTIVITY]!({ sessionId: input.sessionId })) as { hostQueue: string }).hostQueue
+      const onHome = proxyActivities<Activities>({
+        taskQueue: home,
+        scheduleToStartTimeout: '5s',
+        heartbeatTimeout: '20s',
+        startToCloseTimeout: `${settings.turn_max_seconds}s`,
+        retry: { maximumAttempts: 1 },
+        cancellationType: ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
+      })
+      const { continuation: _previous, ...rest } = input
+      try {
+        return (await onHome[SESSION_TURN_ACTIVITY]!({ ...rest, ...(continuation ? { continuation } : {}) })) as SessionTurnResult
+      } catch (err) {
+        // An interrupt cancels the turn; it never moves the session (BudgetExhausted, CredentialRefused, SessionGone: the turn's end).
+        if (isCancellation(err) || interrupted !== undefined || !movesWorker(err)) throw err
+        last = err
+        home = undefined
+        continuation = mergeRestarted(continuation, err)
+      }
+    }
+    return { status: 'failed', hostQueue: '', error: `the turn could not be placed on a worker: ${failureText(last)}` }
+  }
+
+  /** `release_worker` on home (§5.2 "CompleteSession"): best-effort, a home that has gone took its place with it. */
+  async function releaseHome(): Promise<void> {
+    if (!home) return
+    const onHome = proxyActivities<Activities>({ taskQueue: home, scheduleToStartTimeout: '5s', startToCloseTimeout: SHORT, retry: { maximumAttempts: 1 } })
+    try {
+      await onHome[RELEASE_WORKER_ACTIVITY]!({ sessionId: start.session_id })
+    } catch (err) {
+      if (isCancellation(err)) throw err
+    }
+    home = undefined
   }
 
   async function runTurn(current: TurnStart, continuation: Continuation | undefined): Promise<{ outcome: TurnOutcome; message?: string }> {
@@ -194,7 +275,10 @@ export async function AgentSession(start: SessionStart): Promise<void> {
       continuation ??= { kind: 'restarted' }
     } else {
       await condition(() => message !== undefined || ended)
-      if (message === undefined) return
+      if (message === undefined) {
+        await releaseHome()
+        return
+      }
       turn = {
         turn_id: message.turn_id,
         author: message.author as Owner,
@@ -212,6 +296,7 @@ export async function AgentSession(start: SessionStart): Promise<void> {
     interrupted = undefined
     inTurn = false
     if (ended) {
+      await releaseHome()
       await condition(allHandlersFinished)
       return
     }

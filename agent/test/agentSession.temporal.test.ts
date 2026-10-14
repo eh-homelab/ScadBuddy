@@ -17,6 +17,8 @@ import { TASK_QUEUE } from '../src/temporal/names.js'
 import { sessionFinishActivities } from '../src/temporal/session/finishActivity.js'
 import type { FinishTurnInput, Message, SessionStart, SessionTurnInput, SessionTurnResult } from '../src/temporal/session/models.js'
 import {
+  ACQUIRE_WORKER_ACTIVITY,
+  RELEASE_WORKER_ACTIVITY,
   SEND_MESSAGE_UPDATE,
   SESSION_FINISH_ACTIVITY,
   SESSION_QUEUE,
@@ -24,6 +26,7 @@ import {
   SESSION_SETTINGS_ACTIVITY,
   SESSION_TURN_ACTIVITY,
   SESSION_WORKFLOW,
+  sessionHostQueue,
   TURN_QUERY,
 } from '../src/temporal/session/names.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -32,14 +35,17 @@ import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.j
 
 // AgentSession (unified runtime spec 2026-10-13 §5.1, plan Task 5.1) on a Temporal dev
 // server: send, busy, end, continue-as-new after each turn and the replay of recorded
-// histories; then DurableTurns routing a session by its recorded runtime. `session_turn`
-// is a stub (Task 5.2 writes the real one) and `session.finish_turn` records what it was
+// histories; then DurableTurns routing a session by its recorded runtime. `acquire_worker`,
+// `session_turn` and `release_worker` are stubs on one replica's queues (the real ones are
+// test/sessionAffinity.temporal.test.ts's) and `session.finish_turn` records what it was
 // sent, or is the real activity where a test reads the event log.
 
 const WORKFLOWS = fileURLToPath(new URL('../src/temporal/workflows.ts', import.meta.url))
 const STANDIN_WORKFLOWS = fileURLToPath(new URL('./support/durableSessionWorkflows.ts', import.meta.url))
 const FIXTURES = new URL('./fixtures/agent_session_histories/', import.meta.url)
 const STANDIN_QUEUE = 'durable-standin'
+/** The one replica's session host queue (spec §5.2), which `acquire_worker` hands out. */
+const HOST = sessionHostQueue('agent-session-test')
 const PG_SKIP = TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`
 const OWNER = { kind: 'browser', id: 'browser', label: 'You' } as const
 
@@ -64,6 +70,8 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
   let finish: (args: FinishTurnInput) => Promise<boolean>
   let settings: () => Promise<typeof RUNTIME_DEFAULTS>
   let settingsRead: number
+  let acquired: number
+  let released: string[]
 
   beforeAll(async () => {
     env = await localTemporal()
@@ -83,11 +91,24 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       await make(
         TASK_QUEUE,
         {
+          [ACQUIRE_WORKER_ACTIVITY]: async () => {
+            acquired++
+            return { hostQueue: HOST, identity: 'agent-session-test' }
+          },
+          [SESSION_FINISH_ACTIVITY]: async (args: FinishTurnInput) => finish(args),
+        },
+        {},
+      ),
+      await make(
+        HOST,
+        {
           [SESSION_TURN_ACTIVITY]: async (input: SessionTurnInput) => {
             turns.push(input)
             return runTurn(input)
           },
-          [SESSION_FINISH_ACTIVITY]: async (args: FinishTurnInput) => finish(args),
+          [RELEASE_WORKER_ACTIVITY]: async ({ sessionId }: { sessionId: string }) => {
+            released.push(sessionId)
+          },
         },
         {},
       ),
@@ -104,6 +125,8 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     turns = []
     finished = []
     settingsRead = 0
+    acquired = 0
+    released = []
     settings = async () => {
       settingsRead++
       return RUNTIME_DEFAULTS
@@ -145,8 +168,11 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     expect(turns).toEqual([{ sessionId: id, turnId: 't1', message: message('t1', 'make a bracket') }])
     expect(finished[0]).toEqual({ sessionId: id, turnId: 't1', outcome: 'done' })
     expect(await handleOf(id).describe().then((d) => d.type)).toBe(SESSION_WORKFLOW)
+    expect(acquired).toBe(1)
     await handleOf(id).signal('end')
     await handleOf(id).result()
+    // End releases its place on the home it acquired (§5.2 "CompleteSession").
+    expect(released).toEqual([id])
   })
 
   it('refuses a second send_message while a turn runs, `busy`, and holds the turn in its query', async () => {
@@ -201,7 +227,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
 
   it('continues as new after each turn: the run id changes, and the host queue is carried', async () => {
     const id = randomUUID()
-    runTurn = async () => ({ status: 'done', hostQueue: TASK_QUEUE })
+    runTurn = async () => ({ status: 'done', hostQueue: HOST })
     await send(env.client, id, message('t1'))
     const first = await runIdOf(id)
     await poll(async () => (await runIdOf(id)) !== first, true)
@@ -212,6 +238,8 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     const third = await runIdOf(id)
     expect(new Set([first, second, third]).size).toBe(3)
     expect(turns.map((t) => t.turnId)).toEqual(['t1', 't2'])
+    // Acquired for the first turn only: the home is carried across continue-as-new.
+    expect(acquired).toBe(1)
     // The carried start: no turn, no stop, and the queue the last turn ran on.
     const input = (await handleOf(id).describe()).raw.workflowExecutionInfo
     expect(input?.type?.name).toBe(SESSION_WORKFLOW)
@@ -352,7 +380,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
         settings: { get: <T>(key: string) => Promise.resolve((key === SETTING_SESSION_MODE ? 'durable' : undefined) as T) },
         run: scriptedRunner(() => ({ throws: 'a durable turn ran in the classic harness' })).runner,
       })
-      m.durableTurns = new DurableTurns({ client: env.client, sql: db.sql, events: m.events, taskQueue: STANDIN_QUEUE, sessionQueue: SESSION_QUEUE })
+      m.durableTurns = new DurableTurns({ client: env.client, sql: db.sql, events: m.events, taskQueue: STANDIN_QUEUE, sessionQueue: SESSION_QUEUE, sessionHostQueue: HOST })
       return m
     }
 

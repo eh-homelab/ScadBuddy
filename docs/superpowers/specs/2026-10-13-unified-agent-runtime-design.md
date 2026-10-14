@@ -155,7 +155,8 @@ permission layer. Durability is about *where* and *when* that turn runs:
   - A grep of `@temporalio/worker` and `@temporalio/workflow` 1.24.0 `lib/*.d.ts` finds no
     session API.
   - ScadBuddy already runs one unique queue per replica: `agent-tools.<hostname>`
-    (`agent/src/main.ts:426`, `530-539`).
+    (`agent/src/main.ts:426`, `530-539`). `AgentSession` gets a second one of the same
+    shape, `agent-sessions.<hostname>` (§5.2), served by a worker of its own.
 - **A Go worker is not worth it.** There is no Go Claude Agent SDK, so the turn itself
   would stay in a TypeScript process: `canUseTool`, the in-process MCP servers, the hooks
   and the tool registry. A Go worker would only add a third language and an IPC hop, to
@@ -215,7 +216,7 @@ browser / MCP / flow ──send──▶ SessionManager.send ──update-with-s
                                                                           (session-<id>, queue agent-sessions)
                                                                                    │
             ┌── acquire_worker on agent-tools (first turn / after a failure) → home ┘
-            ▼   session_turn on home = agent-tools.<hostname> (5 s schedule-to-start, 20 s heartbeat;
+            ▼   session_turn on home = agent-sessions.<hostname> (5 s schedule-to-start, 20 s heartbeat;
                 on timeout: acquire again, resume from the checkpoint)
    agent replica  ──▶ TurnHost.run(turn)
                        ├─ WarmSessions: reuse the live Claude Code process if its fingerprint
@@ -305,13 +306,20 @@ lack them (§2.3).
 | Go Sessions | `AgentSession` | Where |
 |---|---|---|
 | `workflow.CreateSession(ctx, SessionOptions{CreationTimeout, …})` | the `acquire_worker` activity on the shared queue `agent-tools`, with `scheduleToCloseTimeout: 60s` | any replica |
-| the session's worker-specific queue | `agent-tools.<hostname>`, returned by `acquire_worker` and stored as `home` | the replica that answered |
+| the session's worker-specific queue | `agent-sessions.<hostname>`, returned by `acquire_worker` and stored as `home` | the replica that answered |
 | `MaxConcurrentSessionExecutionSize` | `warm_max_per_replica` (§5.3): when a replica's cache is full `acquire_worker` evicts its least-recently-used *idle* slot rather than refusing; it refuses with `NoCapacity` (retryable) only when every slot is running a turn, so the retry lands on another replica (§6.10) | worker |
 | activities run under the session context | `session_turn` (and `release_worker`) scheduled on `home` | `home` |
 | the session heartbeat / `ErrSessionFailed` | `session_turn`'s `heartbeatTimeout: 20s` and `scheduleToStartTimeout: 5s`, both timeout failures the workflow catches | workflow |
 | `workflow.RecreateSession` | on a timeout: `acquire_worker` again, then `session_turn` with `continuation: restarted` (§5.5) | workflow |
 | `workflow.CompleteSession` | `release_worker` on `home`: evicts the warm entry and frees the slot. It runs on end, handoff, archive, forget, and when the workflow moves the session elsewhere | `home` |
 
+- **Why not `agent-tools.<hostname>`.** That queue carries `DurableSession`'s pinned calls
+  (`http_request`, the browser, kept plugin clients, and the `turn_tools` listing with its
+  5 s schedule-to-start and one attempt; #2320, #2581), so a shared activity limit would
+  either starve them (10 slots, `warm_max_per_replica + 2`, where they have the SDK's 100
+  today) or let them fill the queue and fake a dead home to a turn's 5 s schedule-to-start.
+  `home` is therefore a queue of its own, with the same identity
+  (`agent/src/temporal/session/hostWorkers.ts`).
 - **Acquire.** `acquire_worker({sessionId})` runs on whichever replica polls `agent-tools`.
   It reserves a slot in that replica's `WarmSessions` and returns `{hostQueue, identity}`.
   The reservation lapses after `warm_idle_seconds` like a warm entry. The workflow keeps
@@ -345,9 +353,16 @@ lack them (§2.3).
   its schedule-to-start; it is never picked up late by a stranger.
 - **The workers.**
   - `acquire_worker` is registered on the shared `agent-tools` worker.
-  - `session_turn` and `release_worker` are registered on the per-host worker only.
-  - The host worker's `maxConcurrentActivityTaskExecutions` is `warm_max_per_replica + 2`:
-    the slots, plus room for releases.
+  - `session_turn` and `release_worker` are registered only on a second per-host worker,
+    on `agent-sessions.<hostname>`. The `agent-tools.<hostname>` worker and its limit do not
+    change.
+  - The session host worker's `maxConcurrentActivityTaskExecutions` is
+    `warm_max_per_replica + 2`: the slots, plus room for releases.
+  - Both host workers are unversioned, as activity-only queues (no workflow is pinned to
+    them), and stop together on SIGTERM.
+  - A new unified session is ready (`DurableTurns.unready`) only with fresh pollers on the
+    `agent-sessions` workflow queue, the shared `agent-tools` activity queue and this
+    replica's own `agent-sessions.<hostname>`.
 - **Ownership.** The acquired slot plus the running activity *is* the turn's claim. The
   60 s row lease, its renew loop and the reaper retire (`manager.ts:351-354`, `1514-1530`,
   `2505-2538`):
@@ -682,7 +697,8 @@ All of these are classic's, because the turn is classic's:
   - spawn latency (p50/p95) by outcome;
   - releases per hour;
   - continued turns by kind.
-- **Temporal's own metrics** for `agent-sessions` (schedule-to-start, task latency) come
+- **Temporal's own metrics** for `agent-sessions` and the `agent-sessions.<hostname>` host
+  queues (schedule-to-start, task latency) come
   from the Temporal server's dashboards, as for other queues.
 
 ### 6.10 Scaling
@@ -889,7 +905,8 @@ done. Their conversation exists only in workflow state.
 - **D5. Turn wall clock.** `turn_max_seconds` defaults to 7200 (2 h) and is a setting
   (§5.2).
 - **D6. `RollingUpdate`**, once the pod's queues are versioned. Phase 11 versions them:
-  the agent's `agent-tools` and host queues, and the backend's `library` queue, which the
+  the agent's `agent-tools` and both host queues (`agent-tools.<hostname>`,
+  `agent-sessions.<hostname>`), and the backend's `library` queue, which the
   clusters manifest names as what blocks it (`scadbuddy.yaml:125-131`). The clusters PR
   then lands.
 - **D7. `ai_session_entries` is sealed** (§6.2).

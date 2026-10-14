@@ -1,3 +1,4 @@
+import type { Client } from '@temporalio/client'
 import { Hono } from 'hono'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AuditLog } from '../src/audit/log.js'
@@ -6,8 +7,10 @@ import type { Database } from '../src/db.js'
 import { originPolicy } from '../src/http/origins.js'
 import { registerSessionModeRoutes, SESSION_MODE_PATH } from '../src/routes/sessionMode.js'
 import { registerSessionRuntimeRoutes, SESSION_RUNTIME_PATH } from '../src/routes/sessionRuntime.js'
+import { DurableTurns } from '../src/sessions/durable.js'
 import { SESSION_RUNTIME_SETTING } from '../src/temporal/session/names.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
+import { manager, tempPaths } from './support/sessions.js'
 
 // The flag that starts new durable sessions on AgentSession (`ai_settings.session_runtime`,
 // unified runtime spec 2026-10-13 §5.1) is set in the database, never through a route, a
@@ -61,5 +64,48 @@ describe.skipIf(!TEST_DATABASE_URL)(`the session_runtime flag is not writable${T
   it('can still be read once set in the database', async () => {
     await db.sql`INSERT INTO ai_settings (key, value) VALUES (${SESSION_RUNTIME_SETTING}, ${db.sql.json('unified')})`
     expect(await store.get(SESSION_RUNTIME_SETTING)).toBe('unified')
+  })
+})
+
+// A new session's readiness (SessionManager.durableUnready, which start() and the mode route
+// ask) is checked for the runtime the flag would give it (spec 2026-10-13 §5.2): the queues an
+// AgentSession needs with the flag set, agent-durable's `agent` without it.
+describe.skipIf(!TEST_DATABASE_URL)(`a new session's readiness follows the flag${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
+  let db: Database
+  let drop: () => Promise<void>
+
+  beforeEach(async () => {
+    ;({ db, drop } = await throwawayDatabase())
+    expect(await db.ready()).toBe(true)
+  })
+  afterEach(async () => {
+    await drop()
+  })
+
+  async function asked(flag: string | undefined): Promise<string[]> {
+    if (flag) await db.sql`INSERT INTO ai_settings (key, value) VALUES (${SESSION_RUNTIME_SETTING}, ${db.sql.json(flag)})`
+    const queues: string[] = []
+    const client = {
+      options: { namespace: 'default' },
+      withDeadline: <R>(_deadline: number, fn: () => Promise<R>) => fn(),
+      workflowService: {
+        describeTaskQueue: ({ taskQueue, taskQueueType }: { taskQueue: { name: string }; taskQueueType: number }) => {
+          queues.push(`${taskQueue.name}/${taskQueueType}`)
+          return Promise.resolve({ pollers: [{ lastAccessTime: { seconds: Math.floor(Date.now() / 1000) } }] })
+        },
+      },
+    } as unknown as Client
+    const m = manager({ sql: db.sql, paths: await tempPaths() })
+    m.durableTurns = new DurableTurns({ client, sql: db.sql, events: m.events, sessionHostQueue: 'agent-sessions.here' })
+    expect(await m.durableUnready()).toBeUndefined()
+    return queues
+  }
+
+  it('is agent-durable`s queue for a DurableSession, the flag unset', async () => {
+    expect(await asked(undefined)).toEqual(['agent/1'])
+  })
+
+  it('is the three AgentSession queues with the flag set', async () => {
+    expect(await asked('unified')).toEqual(['agent-sessions/1', 'agent-tools/2', 'agent-sessions.here/2'])
   })
 })

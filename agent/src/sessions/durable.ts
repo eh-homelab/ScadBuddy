@@ -10,6 +10,7 @@ import type { Sql } from 'postgres'
 import type { Tier } from '../auth/principal.js'
 import type { FlowTurn } from '../tools/registry.js'
 import { DurableGate, DurableUnavailable, sessionWorkflowId } from '../gate/durable.js'
+import { TASK_QUEUE } from '../temporal/names.js'
 import { SESSION_QUEUE, SESSION_RUNTIME_SETTING, SESSION_WORKFLOW } from '../temporal/session/names.js'
 import { SessionBlobs, sentImageBlobs } from './blobs.js'
 import type { EventLog } from './eventLog.js'
@@ -77,6 +78,8 @@ const POLLER_FRESH_MS = 70_000
 const READY_DEADLINE_MS = 3_000
 /** temporal.api.enums.v1.TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW */
 const WORKFLOW_TASK_QUEUE = 1
+/** temporal.api.enums.v1.TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY */
+const ACTIVITY_TASK_QUEUE = 2
 
 /** What the workflow's validator refuses a second turn with (models.py, workflow.py). */
 const BUSY = 'busy'
@@ -152,6 +155,13 @@ export type DurableTurnsDeps = {
   taskQueue?: string
   /** Tests only: a queue other than `agent-sessions`. */
   sessionQueue?: string
+  /** Tests only: a queue other than `agent-tools`, where `acquire_worker` runs. */
+  toolsQueue?: string
+  /**
+   * This replica's session host queue (`agent-sessions.<identity>`, spec 2026-10-13 §5.2), when it
+   * serves AgentSession's turns; without it a unified session is not ready here.
+   */
+  sessionHostQueue?: string
   /** How long send waits for the `send_message` Update to be accepted (default 10 s); past it the outcome is unknown and the claim is kept. */
   sendTimeoutMs?: number
   /** How long `cancel_input` may take (DurableGate, default 10 s). */
@@ -176,8 +186,10 @@ export class DurableTurns {
   readonly #blobs: SessionBlobs
   readonly #taskQueue: string
   readonly #sessionQueue: string
+  readonly #toolsQueue: string
+  readonly #sessionHostQueue: string | undefined
   readonly #sendTimeoutMs: number
-  #ready: { until: number; why: string | undefined } | undefined
+  readonly #ready = new Map<SessionRuntime, { until: number; why: string | undefined }>()
 
   constructor(deps: DurableTurnsDeps) {
     this.#client = deps.client
@@ -187,40 +199,76 @@ export class DurableTurns {
     this.#blobs = new SessionBlobs(deps.sql)
     this.#taskQueue = deps.taskQueue ?? DURABLE_TASK_QUEUE
     this.#sessionQueue = deps.sessionQueue ?? SESSION_QUEUE
+    this.#toolsQueue = deps.toolsQueue ?? TASK_QUEUE
+    this.#sessionHostQueue = deps.sessionHostQueue
     this.#sendTimeoutMs = deps.sendTimeoutMs ?? 10_000
   }
 
+  /** The runtime a session that has run nothing would get at its first send: the `session_runtime` flag (spec 2026-10-13 §5.1). */
+  async newRuntime(): Promise<SessionRuntime> {
+    const [row] = await this.#sql<{ value: unknown }[]>`SELECT value FROM ai_settings WHERE key = ${SESSION_RUNTIME_SETTING}`
+    return row?.value === 'unified' ? 'unified' : 'durable'
+  }
+
   /**
-   * Why a new durable session could not run now, or undefined when it could (plan 5d
-   * Ruling 2): some agent-durable worker polls the `agent` queue. Until one does, a
-   * turn would wait on a queue no one reads, so the manager falls back or refuses at
-   * start instead. An answer from Temporal is reused for READY_TTL_MS, no answer for
-   * UNANSWERED_TTL_MS, so one blip does not refuse explicit durable starts for long.
-   * Only a poller seen within POLLER_FRESH_MS counts: Temporal keeps listing one for
-   * minutes after its worker has gone.
+   * Why a new durable session of `runtime` could not run now, or undefined when it could (plan
+   * 5d Ruling 2): a fresh poller on every queue its turns need. Until there is one, a turn
+   * would wait on a queue no one reads, so the manager falls back or refuses at start instead.
+   *
+   * - `durable` (DurableSession): agent-durable's workflow worker on `agent`.
+   * - `unified` (AgentSession, spec 2026-10-13 §5.1-5.2): the `agent-sessions` workflow worker;
+   *   the shared `agent-tools` activity worker, where `acquire_worker` places the turn; and this
+   *   replica's own `agent-sessions.<identity>`, the turn's host. Another replica's host queue
+   *   cannot be listed without knowing its identity; this one's stands for the build serving turns.
+   *
+   * An answer from Temporal is reused for READY_TTL_MS, no answer for UNANSWERED_TTL_MS, so one
+   * blip does not refuse explicit durable starts for long. Only a poller seen within
+   * POLLER_FRESH_MS counts: Temporal keeps listing one for minutes after its worker has gone.
    */
-  async unready(): Promise<string | undefined> {
-    const cached = this.#ready
+  async unready(runtime: SessionRuntime = 'durable'): Promise<string | undefined> {
+    const cached = this.#ready.get(runtime)
     if (cached && Date.now() < cached.until) return cached.why
     let why: string | undefined
     let answered = true
     try {
-      const { pollers } = await this.#client.withDeadline(Date.now() + READY_DEADLINE_MS, () =>
-        this.#client.workflowService.describeTaskQueue({
-          namespace: this.#client.options.namespace,
-          taskQueue: { name: this.#taskQueue },
-          taskQueueType: WORKFLOW_TASK_QUEUE,
-        }),
-      )
-      const now = Date.now()
-      const live = (pollers ?? []).filter((p) => now - seenAtMs(p.lastAccessTime) < POLLER_FRESH_MS)
-      if (!live.length) why = `no durable session worker (agent-durable) polls Temporal's "${this.#taskQueue}" queue`
+      if (runtime === 'durable') {
+        if (!(await this.#polled(this.#taskQueue, WORKFLOW_TASK_QUEUE))) {
+          why = `no durable session worker (agent-durable) polls Temporal's "${this.#taskQueue}" queue`
+        }
+      } else if (!this.#sessionHostQueue) {
+        why = 'this agent service runs no session host worker (agent-sessions.<identity>), so it cannot place a unified session\'s turns'
+      } else {
+        const needed: [string, number, string][] = [
+          [this.#sessionQueue, WORKFLOW_TASK_QUEUE, 'session workflow worker'],
+          [this.#toolsQueue, ACTIVITY_TASK_QUEUE, 'agent-tools worker'],
+          [this.#sessionHostQueue, ACTIVITY_TASK_QUEUE, 'session host worker'],
+        ]
+        for (const [queue, type, what] of needed) {
+          if (!(await this.#polled(queue, type))) {
+            why = `no ${what} polls Temporal's "${queue}" queue`
+            break
+          }
+        }
+      }
     } catch {
       why = 'Temporal did not answer'
       answered = false
     }
-    this.#ready = { until: Date.now() + (answered ? READY_TTL_MS : UNANSWERED_TTL_MS), why }
+    this.#ready.set(runtime, { until: Date.now() + (answered ? READY_TTL_MS : UNANSWERED_TTL_MS), why })
     return why
+  }
+
+  /** Whether a worker polled `queue` (of `type`) within POLLER_FRESH_MS. */
+  async #polled(queue: string, type: number): Promise<boolean> {
+    const { pollers } = await this.#client.withDeadline(Date.now() + READY_DEADLINE_MS, () =>
+      this.#client.workflowService.describeTaskQueue({
+        namespace: this.#client.options.namespace,
+        taskQueue: { name: queue },
+        taskQueueType: type,
+      }),
+    )
+    const now = Date.now()
+    return (pollers ?? []).some((p) => now - seenAtMs(p.lastAccessTime) < POLLER_FRESH_MS)
   }
 
   /**
@@ -238,7 +286,7 @@ export class DurableTurns {
     // `archived_at` is tested here too: an archive that commits after the manager's check
     // must not let a turn start on a chat the panel no longer lists (#2118).
     // The runtime is recorded by the first send: the flag for a session that has run nothing, else DurableSession.
-    const flagged = (await this.#sql<{ value: unknown }[]>`SELECT value FROM ai_settings WHERE key = ${SESSION_RUNTIME_SETTING}`)[0]?.value === 'unified'
+    const flagged = (await this.newRuntime()) === 'unified'
     const [claimed] = await this.#sql.unsafe<{ prior_status: SessionStatus; durable_offset: string; runtime: SessionRuntime }[]>(
       `WITH prior AS (SELECT status AS prior_status, durable_offset FROM ai_sessions WHERE id = $1 FOR UPDATE)
        UPDATE ai_sessions SET status = 'running', turn_tiers = $4, durable_turn_id = $5, updated_at = now(),

@@ -58,7 +58,11 @@ import { gateActivities, PgApprovalRecords, PgSessionOwners, toolActivities } fr
 import { TASK_QUEUE } from './temporal/names.js'
 import { sessionFinishActivities } from './temporal/session/finishActivity.js'
 import { sessionGateActivities } from './temporal/session/gateActivities.js'
-import { SESSION_DEPLOYMENT, SESSION_SETTINGS_ACTIVITY, SESSION_QUEUE } from './temporal/session/names.js'
+import { acquireActivities, releaseActivities } from './temporal/session/affinity.js'
+import { startHostWorkers } from './temporal/session/hostWorkers.js'
+import { SESSION_DEPLOYMENT, SESSION_SETTINGS_ACTIVITY, SESSION_QUEUE, sessionHostQueue } from './temporal/session/names.js'
+import { sessionTurnActivity } from './temporal/session/turnActivity.js'
+import { TurnHost } from './sessions/turnHost.js'
 import { readRuntimeSettings } from './sessions/runtimeSettings.js'
 import { memoryActivities } from './temporal/memoryActivities.js'
 import { SHARED_PACKAGES, sweepPackageCopies } from './temporal/turnPackages.js'
@@ -488,8 +492,13 @@ if (database) {
 // What a durable turn offers beside ScadBuddy's own tools (#2320): the servers a
 // classic turn would hand Claude Code, built again for every listing and call. One whose
 // state lives on this pod (http_request's saved bodies) runs its calls on this replica's
-// own queue, HOST_QUEUE, served by `hostWorker` below.
+// own queue, HOST_QUEUE, served by `hostWorkers` below.
 const HOST_QUEUE = `${TASK_QUEUE}.${replicaIdentity()}`
+// AgentSession's turns on this replica (unified runtime spec 2026-10-13 §5.2): its own queue,
+// `agent-sessions.<identity>`, beside HOST_QUEUE (temporal/session/hostWorkers.ts says why), on
+// this replica's warm processes. `acquire_worker` on agent-tools hands it out.
+const SESSION_HOST_QUEUE = sessionHostQueue(replicaIdentity())
+const turnHost = temporal && sessions ? new TurnHost({ core: sessions.turnCore, sql: temporal.sql, images: new SessionBlobs(temporal.sql), hostQueue: SESSION_HOST_QUEUE }) : undefined
 // The enabled remote plugins and every usable credential's secret, as a classic turn
 // reads them, for a durable turn's tools and its automatic memory.
 const durableRemotePlugins = plugins
@@ -592,6 +601,8 @@ const temporalWorker =
           // AgentSession's gate writers and its turn end (unified runtime §5.1, flagged off until phase 6).
           ...sessionGateActivities(temporal.sql),
           ...(sessions ? sessionFinishActivities(temporal.sql, sessions.events) : {}),
+          // A place in this replica's warm cache, and its session host queue (§5.2).
+          ...(sessions && turnHost ? acquireActivities({ warm: sessions.warm, hostQueue: SESSION_HOST_QUEUE, identity: replicaIdentity() }) : {}),
           // A durable turn's plugin and http_request tools (#2320): listed per turn, and
           // each call the `default` activity `turn:<server>__<tool>`.
           ...turnToolActivities(turnToolDeps),
@@ -639,15 +650,25 @@ const sessionWorker =
         },
       })
     : undefined
-// This replica's own queue: a pinned turn tool's calls (#2320). Its tools die with the
-// pod; a call scheduled after that fails at its schedule-to-close timeout.
-const hostWorker =
+// This replica's own queues (temporal/session/hostWorkers.ts): a pinned turn tool's calls
+// (#2320) on HOST_QUEUE, and AgentSession's turns on SESSION_HOST_QUEUE, limited to the warm
+// cache's slots plus two for releases. Their work dies with the pod; a call scheduled after
+// that fails at its schedule-to-start (a turn) or schedule-to-close (a pinned call) timeout.
+const hostWorkers =
   temporal && operationStore && turnToolDeps
-    ? AgentWorker.start({
+    ? startHostWorkers({
         address: temporal.address,
         namespace: config.temporalNamespace,
-        taskQueue: HOST_QUEUE,
-        activities: { ...turnToolActivities(turnToolDeps), default: turnToolActivity(turnToolDeps) },
+        identity: replicaIdentity(),
+        pinned: { ...turnToolActivities(turnToolDeps), default: turnToolActivity(turnToolDeps) },
+        ...(sessions && turnHost
+          ? {
+              sessions: {
+                activities: { ...sessionTurnActivity(turnHost), ...releaseActivities(sessions.warm) },
+                slots: runtime.warm_max_per_replica + 2,
+              },
+            }
+          : {}),
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
       })
     : undefined
@@ -665,7 +686,13 @@ if (sessions && temporalClient) sessions.durable = new DurableGate(temporalClien
 // A durable session's turns (plan 5c PR 3): only with the codec, so a session's
 // payloads are never sent to Temporal unsealed; without it a durable start is refused.
 if (sessions && temporalClient && payloadKeys && database) {
-  sessions.durableTurns = new DurableTurns({ client: temporalClient, sql: database.sql, events: sessions.events })
+  sessions.durableTurns = new DurableTurns({
+    client: temporalClient,
+    sql: database.sql,
+    events: sessions.events,
+    // This replica's host for AgentSession turns, which a unified session's readiness checks (§5.2).
+    ...(hostWorkers?.sessions ? { sessionHostQueue: SESSION_HOST_QUEUE } : {}),
+  })
 }
 // Every 30 s, beside the lease reaper: durable sessions left `running` whose workflow
 // has ended or never started (#2001); a durable turn takes no lease.
@@ -831,10 +858,13 @@ async function stop(): Promise<void> {
   // turns' pending approvals stay pending (approvals/service.ts).
   // The agent-tools worker at the same time: it stops polling, its running
   // activities get its 10 s grace and are then cancelled (a fetch's git is killed),
-  // and at 15 s it stops regardless: inside the turns' 17 s budget.
+  // and at 15 s it stops regardless: inside the turns' 17 s budget. Both host workers stop
+  // with it; an AgentSession turn cut by the stop fails ShuttingDown, so its workflow places
+  // it on another replica (temporal/session/turnActivity.ts).
+  turnHost?.drain()
   await Promise.all([
     temporalWorker?.stop(),
-    hostWorker?.stop(),
+    hostWorkers?.stop(),
     sessionWorker?.stop(),
     sessions?.stopTurns({ graceMs: TURN_DRAIN_MS, abortWaitMs: TURN_ABORT_WAIT_MS }),
   ])

@@ -30,6 +30,8 @@ export type AgentWorkerOptions = {
    * current version, which a versioned worker needs before it takes new workflows.
    */
   deployment?: { name: string; buildId: string }
+  /** The most activities it runs at once; the SDK's default (100) when omitted. */
+  maxConcurrentActivityTaskExecutions?: number
   shutdownGraceMs?: number
   /** When the SDK gives up on running activities and the worker stops regardless. */
   shutdownForceMs?: number
@@ -136,6 +138,9 @@ export class AgentWorker {
                   defaultVersioningBehavior: 'AUTO_UPGRADE' as const,
                 },
               }
+            : {}),
+          ...(options.maxConcurrentActivityTaskExecutions !== undefined
+            ? { maxConcurrentActivityTaskExecutions: options.maxConcurrentActivityTaskExecutions }
             : {}),
           shutdownGraceTime: options.shutdownGraceMs ?? 10_000,
           shutdownForceTime: options.shutdownForceMs ?? 15_000,

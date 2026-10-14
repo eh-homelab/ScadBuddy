@@ -218,6 +218,12 @@ export class WarmSessions {
   private readonly closing = new Map<string, Promise<void>>()
   /** Each session's acquire, one at a time: two would spawn two processes. */
   private readonly acquiring = new Map<string, Promise<unknown>>()
+  /**
+   * Places `reserve` promised to sessions that have no process here yet (spec 2026-10-13 §5.2,
+   * `acquire_worker`), by when: each counts against `maxEntries` until its session's process
+   * spawns, it is released, or it lapses after `idleMs` like an idle process.
+   */
+  private readonly reserved = new Map<string, number>()
 
   constructor(deps: WarmSessionsDeps) {
     this.deps = deps
@@ -379,12 +385,46 @@ export class WarmSessions {
     }
   }
 
+  /**
+   * A place for the session's process on this replica (`acquire_worker`, spec §5.2): kept for a
+   * session that has one already, else taken, evicting the least recently used idle process or
+   * reservation when the cache is full. `full` only when every process here is running a turn.
+   */
+  reserve(sessionId: string): 'reserved' | 'full' {
+    this.sweepIdle()
+    const now = this.now()
+    for (const [id, at] of [...this.reserved]) if (now - at >= this.idleMs || this.slots.has(id)) this.reserved.delete(id)
+    if (this.slots.has(sessionId)) return 'reserved'
+    if (!this.reserved.has(sessionId)) {
+      while (this.slots.size + this.reserved.size >= this.maxEntries) {
+        let lru: Slot | undefined
+        for (const slot of this.slots.values()) {
+          if (!slot.busy && (!lru || slot.entry.lastUsedAt < lru.entry.lastUsedAt)) lru = slot
+        }
+        let oldest: [string, number] | undefined
+        for (const held of this.reserved) if (!oldest || held[1] < oldest[1]) oldest = held
+        if (!lru && !oldest) return 'full'
+        if (oldest && (!lru || oldest[1] < lru.entry.lastUsedAt)) this.reserved.delete(oldest[0])
+        else void this.drop(lru!, 'lru')
+      }
+    }
+    this.reserved.set(sessionId, now)
+    return 'reserved'
+  }
+
+  /** Frees the session's place here (`release_worker`, spec §5.2): its reservation, and its process, once no turn runs on it. */
+  release(sessionId: string): Promise<void> {
+    this.reserved.delete(sessionId)
+    return this.evict(sessionId, 'released')
+  }
+
   size(): number {
     return this.slots.size
   }
 
   /** Closes every process (shutdown): an idle one may end on its own first; a running turn's is closed at once. */
   async close(): Promise<void> {
+    this.reserved.clear()
     const slots = [...this.slots.values()]
     await Promise.all(slots.map((slot) => this.drop(slot, 'shutdown', slot.busy ? 'close' : 'drain')))
     await Promise.all(slots.map((slot) => slot.mirror?.pending))
@@ -506,6 +546,8 @@ export class WarmSessions {
     }
     const hash = credentialHash(credential)
     const on = turn.candidates.find((c) => credentialHash(c.credential) === hash)
+    // Its reserved place (`reserve`) is the process's now.
+    this.reserved.delete(sessionId)
     this.slots.set(sessionId, {
       entry,
       credential: hash,
@@ -541,9 +583,9 @@ export class WarmSessions {
     }
   }
 
-  /** Past `maxEntries`, the least recently used idle entries go; never one with a turn running. */
+  /** Past `maxEntries` (reserved places counted), the least recently used idle entries go; never one with a turn running. */
   private trim(): void {
-    while (this.slots.size > this.maxEntries) {
+    while (this.slots.size + this.reserved.size > this.maxEntries) {
       let lru: Slot | undefined
       for (const slot of this.slots.values()) {
         if (!slot.busy && (!lru || slot.entry.lastUsedAt < lru.entry.lastUsedAt)) lru = slot
