@@ -476,8 +476,9 @@ export function PrintPicker({
             const read = ready[0]
             if (!read) {
               setArrangeError(backfillFailures(failed, 'Re-arrange'))
-              // Not a failure the span would see, nor a success (#2891).
-              span.setAttribute('scadbuddy.outcome', 'rerender_failed')
+              // Not a failure the span would see, nor a success (#2891): the same end
+              // state, and value, as the Arrange dialog's when nothing was arranged.
+              span.setAttribute('scadbuddy.outcome', 'nothing_arranged')
               return
             }
             from = read

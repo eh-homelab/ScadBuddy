@@ -409,7 +409,7 @@ class DurableSession:
             text = f"{err}: {err.cause}" if err.cause else str(err)
             if self._interrupted is not None:
                 outcome = "interrupted"
-            elif BUDGET_EXHAUSTED in text or "max_budget_usd" in text:
+            elif BUDGET_EXHAUSTED in text:
                 outcome = "budget_exhausted"
             else:
                 outcome, message = "failed", text[:MESSAGE_MAX]

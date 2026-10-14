@@ -6,13 +6,14 @@ import { MediaCarousel } from '../components/media/MediaCarousel'
 import { MediaLightbox } from '../components/media/MediaLightbox'
 import type { Slide } from '../components/media/slides'
 import { PrintAgainDialog } from '../components/PrintAgainDialog'
+import { PrintFiles } from '../components/prints/PrintFiles'
 import { libraryPrintsPath, printerLabel } from '../components/prints/prints'
 import { DELETED_STATUS, isUnfinished, statusLabel } from '../components/prints/status'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
 import { modelPath } from '../lib/deeplink'
 import { USER_ONLY } from '../agent/dom'
-import { DownloadBlockedError, downloadBlob, isEmbedded, openExternal } from '../lib/embed'
+import { isEmbedded, openExternal } from '../lib/embed'
 import { formatBytes, formatDuration, formatValue } from '../lib/format'
 import { useAsync } from '../lib/useAsync'
 import { fineLength, useDisplayUnit } from '../lib/units'
@@ -20,17 +21,9 @@ import { fineLength, useDisplayUnit } from '../lib/units'
 // The 3D viewer is three.js, the biggest thing in the bundle: loaded only when shown.
 const Preview = lazy(async () => ({ default: (await import('../components/Preview')).Preview }))
 
-type PrintFile = PrintDetail['files'][number]
 type Run = PrintDetail['outcome']['runs'][number]
 
 
-const FILE_LABELS: Record<PrintFile['kind'], string> = {
-  output_3mf: 'ScadBuddy 3MF',
-  preview_glb: 'Preview mesh',
-  sliced: 'Sliced file',
-  source: 'Source 3MF',
-  library_file: 'Library file',
-}
 
 function formatWhen(iso: string | null | undefined): string | null {
   if (!iso) return null
@@ -90,20 +83,6 @@ function gallerySlides(print: PrintDetail): Slide[] {
     })
   })
   return slides
-}
-
-/** Fetched as a blob and saved through `lib/embed`, so it works inside Bambuddy's iframe. */
-async function download(url: string, name: string): Promise<void> {
-  await downloadBlob(async () => {
-    const response = await fetch(url)
-    if (!response.ok) throw new Error(`HTTP ${response.status}`)
-    return await response.blob()
-  }, name)
-}
-
-function paramsFileName(print: PrintDetail): string {
-  const own = print.files.find((file) => file.kind === 'output_3mf')
-  return own ? `${own.name.replace(/\.3mf$/i, '')}-params.json` : `print-${print.archive_id}-params.json`
 }
 
 export function PrintDetailPage() {
@@ -730,76 +709,9 @@ function ProvenanceSection({ provenance }: { provenance: NonNullable<PrintDetail
 }
 
 function FilesSection({ print }: { print: PrintDetail }) {
-  const [busy, setBusy] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
-
-  async function save(file: PrintFile) {
-    setBusy(file.url)
-    setError(null)
-    try {
-      await download(file.url, file.name)
-    } catch (cause) {
-      setError(cause instanceof DownloadBlockedError ? cause.message : `Could not download ${file.name}.`)
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  async function saveParams() {
-    setError(null)
-    if (!print.provenance) return
-    const json = JSON.stringify(print.provenance.params, null, 2) + '\n'
-    try {
-      await downloadBlob(async () => new Blob([json], { type: 'application/json' }), paramsFileName(print))
-    } catch (cause) {
-      setError(cause instanceof DownloadBlockedError ? cause.message : 'Could not save the parameters.')
-    }
-  }
-
   return (
     <Section title="Files">
-      <ul className="space-y-1.5">
-        {print.files.map((file) => (
-          <li key={file.url} className="flex flex-wrap items-center gap-x-3 gap-y-1">
-            <span className="text-[13px] text-ink">{FILE_LABELS[file.kind]}</span>
-            <span className="sb-num min-w-0 truncate text-[12px] text-faint">{file.name}</span>
-            {file.size !== null && (
-              <span className="sb-num text-[12px] text-faint">{formatBytes(file.size)}</span>
-            )}
-            <Button
-              size="sm"
-              className="ml-auto"
-              aria-label={`Download ${file.name}`}
-              onClick={() => void save(file)}
-              disabled={busy !== null}
-            >
-              {busy === file.url && <Spinner />}
-              Download
-            </Button>
-          </li>
-        ))}
-        {print.provenance && (
-          <li className="flex flex-wrap items-center gap-x-3 gap-y-1">
-            <span className="text-[13px] text-ink">Parameters</span>
-            <span className="sb-num min-w-0 truncate text-[12px] text-faint">
-              {paramsFileName(print)}
-            </span>
-            <Button
-              size="sm"
-              className="ml-auto"
-              aria-label="Download parameters as JSON"
-              onClick={() => void saveParams()}
-            >
-              Download
-            </Button>
-          </li>
-        )}
-      </ul>
-      {error && (
-        <p role="alert" className="mt-2 text-[12px] text-warn">
-          {error}
-        </p>
-      )}
+      <PrintFiles print={print} />
     </Section>
   )
 }

@@ -12,6 +12,7 @@ import time
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import psycopg
@@ -24,6 +25,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.flows.images import blob_context
 from scadbuddy.flows.keys import payload_keys
 from scadbuddy.main import create_app
+from scadbuddy.workflows import payload_codec
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
 
@@ -332,6 +334,49 @@ def test_registering_a_deleted_name_brings_it_back(client: TestClient) -> None:
     assert register(client, script("return 3"))["archived_at"] is not None
 
 
+def test_a_deleted_flow_is_not_archived(client: TestClient) -> None:
+    """#2646: archiving a deleted flow is refused, and leaves it as it was."""
+    register(client, script("return 1"))
+    assert client.delete("/api/v1/workflows/names/swap").status_code == 200
+    refused = client.post("/api/v1/workflows/names/swap/archive")
+    assert (refused.status_code, refused.json()["type"].rsplit("/", 1)[1]) == (409, "flow-deleted")
+    # Restored, it comes back unarchived, as a deleted flow does.
+    assert register(client, script("return 2"))["archived_at"] is None
+
+
+def test_a_version_is_never_left_on_a_flow_still_marked_deleted(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    """#2646: the version's row and the flow's revival are one transaction. If the state
+    write fails, no row names the version, and the flow is still consistently deleted."""
+    register(client, script("return 1"))
+    assert client.delete("/api/v1/workflows/names/swap").status_code == 200
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute(
+            "CREATE FUNCTION refuse_state() RETURNS trigger LANGUAGE plpgsql AS"
+            " $$ BEGIN RAISE EXCEPTION 'state write refused'; END $$"
+        )
+        conn.execute(
+            "CREATE TRIGGER refuse_state BEFORE UPDATE ON workflow_flow_states"
+            " FOR EACH ROW EXECUTE FUNCTION refuse_state()"
+        )
+        try:
+            with pytest.raises(psycopg.errors.RaiseException):
+                client.post(
+                    "/api/v1/workflows",
+                    json={"name": "swap", "script": script("return 2")},
+                )
+        finally:
+            conn.execute("DROP TRIGGER refuse_state ON workflow_flow_states")
+            conn.execute("DROP FUNCTION refuse_state()")
+        assert conn.execute(
+            "SELECT count(*) FROM workflow_definitions WHERE name = 'swap'"
+        ).fetchone() == (1,)
+    assert listed(client) == []
+    again = register(client, script("return 3"))
+    assert (again["deleted_at"], listed(client)) == (None, [("swap", again["version"])])
+
+
 def test_the_approval_timeout_resolves_run_then_flow_then_setting(client: TestClient) -> None:
     inherits = register(client, script("return 1"), name="a")
     never = register(client, script("return 1"), name="b", approval_timeout="never")
@@ -426,6 +471,55 @@ def test_a_runs_images_are_listed_served_from_their_blobs_and_forgotten_with_it(
     assert client.get(f"/api/v1/workflow-runs/{run_id}/images/{name}").status_code == 404
 
 
+def test_an_image_whose_key_is_gone_is_404(
+    client: TestClient, settings: Settings, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2578: a row left behind a deleted key opens to nothing: 404, never a 500."""
+    definition = register(client, script("return 1"))
+    run_id = start(client, definition["id"], "gone").json()["id"]
+    until(client, run_id, lambda v: v["status"] == "succeeded")
+    subject = f"flow-{run_id}"
+    name = hashlib.sha256(PNG).hexdigest() + ".png"
+    keys = payload_keys(settings)
+    assert keys is not None
+    key = asyncio.run(keys[0].key_for(subject, False))
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO ai_flow_blobs (subject, name, media_type, size, data)"
+            " VALUES (%s, %s, 'image/png', %s, %s)",
+            (subject, name, len(PNG), seal_bytes(key, PNG, blob_context(subject, name))),
+        )
+        conn.execute("INSERT INTO ai_forgotten_subjects (subject) VALUES (%s)", (subject,))
+        conn.execute("DELETE FROM ai_payload_keys WHERE subject = %s", (subject,))
+    # Past the 30 s a process keeps a key it read (`PgPayloadKeys`).
+    later = time.monotonic() + 3600
+    monkeypatch.setattr(payload_codec, "time", SimpleNamespace(monotonic=lambda: later))
+    response = client.get(f"/api/v1/workflow-runs/{run_id}/images/{name}")
+    assert response.status_code == 404
+
+
+def test_a_run_is_forgotten_before_the_agent_made_its_images_table(
+    client: TestClient, pg_conninfo: str
+) -> None:
+    """#2578: the backend may deploy before the agent migrated; forgetting still deletes
+    the key and the run."""
+    definition = register(client, script("return 1"))
+    run_id = start(client, definition["id"], "early").json()["id"]
+    until(client, run_id, lambda v: v["status"] == "succeeded")
+    # pg_conninfo is this test's own schema, created for it and dropped after it: a rename
+    # an interrupted test never undoes breaks no other test.
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute("ALTER TABLE ai_flow_blobs RENAME TO ai_flow_blobs_later")
+        try:
+            assert client.delete(f"/api/v1/workflow-runs/{run_id}").status_code == 204
+        finally:
+            conn.execute("ALTER TABLE ai_flow_blobs_later RENAME TO ai_flow_blobs")
+        assert conn.execute(
+            "SELECT count(*) FROM ai_payload_keys WHERE subject = %s", (f"flow-{run_id}",)
+        ).fetchone() == (0,)
+    assert client.get(f"/api/v1/workflow-runs/{run_id}").status_code == 404
+
+
 class TestWithoutAKey:
     @pytest.fixture
     def settings(self, settings: Settings) -> Iterator[Settings]:
@@ -495,6 +589,17 @@ def test_an_answer_to_a_run_with_no_key_is_404(client: TestClient) -> None:
         headers={"Idempotency-Key": "n"},
     )
     assert response.status_code == 404
+
+
+@pytest.mark.parametrize("blank", ["", "  \n\t"])
+def test_a_blank_answer_is_422(client: TestClient, blank: str) -> None:
+    """#2379: a click on an empty box is not an answer."""
+    response = client.post(
+        f"/api/v1/workflow-runs/{uuid.uuid4()}/answer",
+        json={"call_id": "c", "answer": blank},
+        headers={"Idempotency-Key": "b"},
+    )
+    assert response.status_code == 422
 
 
 def test_an_answer_to_a_call_not_waiting_is_stale(client: TestClient) -> None:
