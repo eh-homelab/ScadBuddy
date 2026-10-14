@@ -19,6 +19,7 @@ from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.jobs import RENDER_UNSTARTABLE_PROBLEM, SNAPSHOT_UNAVAILABLE
 from scadbuddy.api.operations import STILL_ACCEPTING_PROBLEM, TEMPORAL_UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy import library_view
+from scadbuddy.bambuddy.print_source import ReadOutOfMemoryError
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.render.inputs import MAX_INPUTS_BYTES
@@ -231,6 +232,26 @@ def test_a_plate_of_an_unreadable_or_vanished_3mf(
     gone = client.get(f"/api/v1/jobs/{job_id}/preview.glb", params={"plate": 1})
     assert gone.status_code == 404, gone.text
     assert "is gone" in gone.json()["detail"]
+
+
+def test_a_plate_too_big_to_read_is_refused_as_an_outputs_plate_is(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3554: out of memory cutting a job's plate is the output route's 422, not a 500."""
+    monkeypatch.setattr(jobs_api, "_PLATE_GLBS", jobs_api._PlateCache(1 << 20))
+    job_id = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 4}}).json()[
+        "job_id"
+    ]
+    wait_for_job(client, job_id)
+
+    def oom(*_: object) -> object:
+        raise MemoryError
+
+    with monkeypatch.context() as patched:
+        patched.setattr(library_view, "read_plate_parts", oom)
+        refused = client.get(f"/api/v1/jobs/{job_id}/preview.glb", params={"plate": 1})
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["detail"] == str(ReadOutOfMemoryError())
 
 
 def test_a_failed_job_has_no_preview(client: TestClient, model: str) -> None:

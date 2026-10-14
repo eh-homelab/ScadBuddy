@@ -318,8 +318,13 @@ def _glb(read: PlateRead) -> bytes:
 def plate_glb(payload: bytes, plate: int, budget: ReadBudget | None = None) -> bytes:
     """Plate ``plate`` of a 3MF as a preview GLB, its parts in their colours (#2169: an
     output's plate in the print dialog's pane, as a library file's is). A plate the file
-    lacks is :class:`~scadbuddy.render.geometry.NoSuchPlateError`."""
-    return _glb(read_plate_parts(payload, plate, budget))
+    lacks is :class:`~scadbuddy.render.geometry.NoSuchPlateError`; running out of memory
+    reading it is :class:`ReadOutOfMemoryError`, as a library file's read is (#2767), so
+    no caller maps a bare :class:`MemoryError` itself."""
+    try:
+        return _glb(read_plate_parts(payload, plate, budget))
+    except MemoryError:
+        raise ReadOutOfMemoryError from None
 
 
 def _analysis(read: PlateRead, plate: int) -> GeometryAnalysis:
