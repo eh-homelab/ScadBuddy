@@ -85,6 +85,13 @@ The Debian package `fonts-lobster` provides a family called **"Lobster Two"**, a
 there is no family called "Lobster". If you ask for a family that doesn't exist,
 OpenSCAD silently uses a different font, and the text comes out a different size.
 
+OpenSCAD also leaves out, without a word, any character the font has no glyph for,
+such as an emoji. A render warns when a font parameter's family lacks a character
+used in the model's text parameters, and the font field says the same while you
+type. ScadBuddy cannot tell which text a font draws, so it checks every string
+parameter: a string that never reaches `text()`, such as a label or a file name,
+can raise the warning too.
+
 ### File parameters
 
 A parameter annotated `// file` takes a picture the viewer attaches in the

@@ -35,7 +35,12 @@ from scadbuddy.core.paths import (
 )
 from scadbuddy.core.tracing import failure_class, span
 from scadbuddy.library.assets import AssetStore, file_assets
-from scadbuddy.library.fonts import font_coverage, font_families, missing_glyphs
+from scadbuddy.library.fonts import (
+    GLYPH_CHECK_TIMEOUT,
+    font_coverage,
+    font_families,
+    missing_glyphs,
+)
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import (
     CheckoutFetcher,
@@ -104,11 +109,6 @@ def unreadable_colour_warnings(
     return warnings
 
 
-#: How long a render waits on fontconfig for one font's glyphs (#2358). The check is
-#: advisory: a wedged fontconfig costs the render this per font, and then no warning.
-GLYPH_CHECK_TIMEOUT = 5.0
-
-
 def missing_glyph_warnings(
     schema: CustomizerSchema,
     params: Mapping[str, ParamValue],
@@ -117,7 +117,9 @@ def missing_glyph_warnings(
     """A warning for each font parameter whose family has no glyph for characters in
     the model's text parameters (#2358): OpenSCAD's ``text()`` leaves those out without
     a word, so an emoji renders as a gap. Every text parameter is checked against every
-    font parameter, as nothing says which text a font draws."""
+    font parameter, as nothing says which text a font draws: a string that never
+    reaches ``text()`` (a label, a file name, a mode) can raise a warning too.
+    docs/user-guide.md says so."""
     texts = "".join(
         str(params.get(p.name, p.initial) or "") for p in schema.parameters if p.type == "string"
     )

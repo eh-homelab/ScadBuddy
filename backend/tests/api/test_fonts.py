@@ -434,10 +434,10 @@ def test_the_glyph_route_names_what_the_font_lacks(
 ) -> None:
     import scadbuddy.library.fonts as library_fonts
 
-    asked: list[str] = []
+    asked: list[tuple[str, float]] = []
 
-    def coverage(font: str, env: object) -> tuple[str, list[tuple[int, int]]]:
-        asked.append(font)
+    def coverage(font: str, env: object, timeout: float) -> tuple[str, list[tuple[int, int]]]:
+        asked.append((font, timeout))
         return "Lobster Two", [(0x20, 0x7E), (0xA0, 0xFF)]
 
     monkeypatch.setattr(library_fonts, "font_coverage", coverage)
@@ -446,7 +446,8 @@ def test_the_glyph_route_names_what_the_font_lacks(
     )
     assert response.status_code == 200
     assert response.json() == {"font": "Lobster Two:style=Bold", "missing": ["😀"]}
-    assert asked == ["Lobster Two:style=Bold"]
+    # The route waits on fontconfig as briefly as a render does: its answer is advisory.
+    assert asked == [("Lobster Two:style=Bold", library_fonts.GLYPH_CHECK_TIMEOUT)]
 
 
 def test_the_glyph_route_bounds_what_it_is_asked(

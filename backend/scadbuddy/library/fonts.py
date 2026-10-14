@@ -255,17 +255,27 @@ def _drawn(char: str) -> bool:
     return unicodedata.category(char) not in ("Cc", "Cf")
 
 
+#: How long a glyph check waits on fontconfig for one font's glyphs (#2358), in a render
+#: and in ``GET /fonts/glyphs`` alike. The check is advisory: a wedged fontconfig costs
+#: this per font, and then no warning, never the full ``FC_TIMEOUT``.
+GLYPH_CHECK_TIMEOUT = 5.0
+
+
 def font_coverage(
     font: str, env: Mapping[str, str], timeout: float = FC_TIMEOUT
 ) -> tuple[str, list[tuple[int, int]]] | None:
     """The family fontconfig gives ``font`` (an OpenSCAD font string) among the faces a
-    render can draw, and the code points it has glyphs for; None without fontconfig,
-    or when it takes longer than ``timeout``."""
-    output = _run_fc([FC_MATCH, "-f", "%{family}\n%{charset}", f"{font}{RENDERABLE}"], env, timeout)
+    render can draw, as its comma-separated list of names (a localized one included),
+    and the code points it has glyphs for; None without fontconfig, or when it takes
+    longer than ``timeout``. ``--`` ends the options, so a ``font`` that starts with
+    ``-`` is read as a pattern, never an option."""
+    output = _run_fc(
+        [FC_MATCH, "-f", "%{family}\n%{charset}", "--", f"{font}{RENDERABLE}"], env, timeout
+    )
     if output is None:
         return None
     family, _, charset = output.partition("\n")
-    return family.split(",")[0].strip(), parse_charset(charset)
+    return family.strip(), parse_charset(charset)
 
 
 def missing_glyphs(
@@ -275,9 +285,14 @@ def missing_glyphs(
     order they first appear (#2358). OpenSCAD's ``text()`` leaves them out without a
     word. None of them when the font is the default (it names no family), when
     fontconfig could not answer, or when it gave another family: a family that is not
-    installed is reported on its own (#1286), not character by character."""
+    installed is reported on its own (#1286), not character by character. Any of the
+    names fontconfig gives the family counts, so a font named by a secondary one (a
+    localized name, say) is checked too."""
     families = {normalise_family(family) for family in font_families(font)}
-    if not families or coverage is None or normalise_family(coverage[0]) not in families:
+    if not families or coverage is None:
+        return []
+    given = {normalise_family(name) for name in coverage[0].split(",") if name.strip()}
+    if not given & families:
         return []
     ranges = coverage[1]
     missing: list[str] = []
@@ -378,7 +393,7 @@ class FontService:
 
     def missing_glyphs(self, font: str, text: str) -> list[str]:
         """:func:`missing_glyphs` under the render's own environment."""
-        return missing_glyphs(font, text, font_coverage(font, self.env()))
+        return missing_glyphs(font, text, font_coverage(font, self.env(), GLYPH_CHECK_TIMEOUT))
 
     def refresh_cache(self) -> None:
         self._resolved = None

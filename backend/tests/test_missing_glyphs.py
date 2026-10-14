@@ -8,8 +8,14 @@ import subprocess
 
 import pytest
 
-from scadbuddy.library.fonts import FC_TIMEOUT, font_coverage, missing_glyphs, parse_charset
-from scadbuddy.render.jobs import GLYPH_CHECK_TIMEOUT, missing_glyph_warnings
+from scadbuddy.library.fonts import (
+    FC_TIMEOUT,
+    GLYPH_CHECK_TIMEOUT,
+    font_coverage,
+    missing_glyphs,
+    parse_charset,
+)
+from scadbuddy.render.jobs import missing_glyph_warnings
 from scadbuddy.render.schema import CustomizerSchema, Parameter
 
 #: Basic Latin, Latin-1 and the letters a lobster needs: no emoji, no CJK.
@@ -54,17 +60,27 @@ def test_the_coverage_asks_for_a_face_a_render_can_draw(monkeypatch: pytest.Monk
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     assert font_coverage("Lobster Two:style=Bold", {}) == (
-        "Lobster Two",
+        "Lobster Two,Lobster Two Bold",
         [(0x20, 0x7E), (0xA0, 0xFF)],
     )
+    # `--` ends the options: a font from the query string is never read as one.
     assert seen == [
         [
             "fc-match",
             "-f",
             "%{family}\n%{charset}",
+            "--",
             "Lobster Two:style=Bold:outline=true:scalable=true",
         ]
     ]
+
+
+def test_a_font_named_by_another_of_its_family_names_is_checked() -> None:
+    # fontconfig lists every name a family has, a localized one included.
+    coverage = ("Noto Sans,Noto Sans Regional", [(0x20, 0x7E)])
+    assert missing_glyphs("Noto Sans Regional", "A😀", coverage) == ["😀"]
+    assert missing_glyphs("Noto Sans", "A😀", coverage) == ["😀"]
+    assert missing_glyphs("DejaVu Sans", "A😀", coverage) == []
 
 
 def test_a_render_waits_on_fontconfig_only_briefly(monkeypatch: pytest.MonkeyPatch) -> None:
