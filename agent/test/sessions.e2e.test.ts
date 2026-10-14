@@ -15,7 +15,7 @@ import type { LoggedEvent } from '../src/sessions/eventLog.js'
 import type { SessionManager, SessionManagerDeps } from '../src/sessions/manager.js'
 import { PostgresSessionStore } from '../src/sessions/store.js'
 import { testPayloadKeys } from './support/payloadKeys.js'
-import { kekFromBase64 } from '../src/secrets.js'
+import { kekFromBase64, SealError } from '../src/secrets.js'
 import { evictOnNotify, WARM_EVICT_CHANNEL } from '../src/sessions/warmEvict.js'
 import {
   displayUpdates,
@@ -581,7 +581,9 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
 
     const keys = testPayloadKeys(db.sql)
     const asParent = new PostgresSessionStore(db.sql, { keys: { keyFor: (_subject, create) => keys.keyFor(`session-${parent.id}`, create) } })
-    await expect(asParent.load({ projectKey: '', sessionId: child.id })).rejects.toThrow()
+    await expect(asParent.load({ projectKey: '', sessionId: child.id })).rejects.toBeInstanceOf(SealError)
+    const asChild = new PostgresSessionStore(db.sql, { keys })
+    expect((await asChild.load({ projectKey: '', sessionId: child.id }))!.length).toBeGreaterThan(0)
 
     await (await a.send(child.id, browser, 'go left')).done
     const call = conversation(fake.messageCalls().at(-1))
