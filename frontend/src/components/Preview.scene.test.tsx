@@ -1,4 +1,5 @@
 import { act, render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import * as THREE from 'three'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { BoundingBox, Job } from '../api/types'
@@ -183,5 +184,42 @@ describe('Preview scene (#364)', () => {
     expect(outlines.map((group) => group.getAttribute('position'))).toEqual(
       plates.map((_, i) => `${-850 + i * 290 + 135},0.05,0`),
     )
+  })
+
+  it('shows one plate of a multi-plate render alone, then all of them again (#2731)', async () => {
+    const plates = [1, 2, 3].map((index) => ({
+      index,
+      bbox_mm: box([-450 + (index - 1) * 310, -100, 0], [-450 + (index - 1) * 310 + 280, 100, 5]),
+      colors: ['#FF0000'],
+    }))
+    const alone = new THREE.Group()
+    alone.add(new THREE.Mesh(new THREE.BoxGeometry(280, 5, 200)))
+    scene.meshes.set('/api/v1/jobs/a/preview.glb?plate=2', alone)
+    const user = userEvent.setup()
+    const { rerender } = render(<Preview job={job('a', box([-450, -100, 0], [450, 100, 5]), { plates })} rendering={false} />)
+    const picker = screen.getByRole('group', { name: 'Plates shown' })
+    expect(screen.getByRole('button', { name: 'All plates' })).toHaveAttribute('aria-pressed', 'true')
+    const all = scene.camera.position.length()
+
+    await user.click(screen.getByRole('button', { name: 'Plate 2 alone' }))
+
+    expect(screen.getByRole('button', { name: 'Plate 2 alone' })).toHaveAttribute('aria-pressed', 'true')
+    // Plate 2's own mesh (the only one with a 280 mm box), framed, with no outlines.
+    expect(scene.camera.position.length()).toBeLessThan(all / 2)
+    expect(screen.queryAllByTestId('plate-label')).toHaveLength(0)
+
+    await user.click(screen.getByRole('button', { name: 'All plates' }))
+    expect(screen.getAllByTestId('plate-label')).toHaveLength(3)
+
+    // A new render shows every plate again, whatever was chosen for the last one.
+    await user.click(screen.getByRole('button', { name: 'Plate 2 alone' }))
+    rerender(<Preview job={job('b', box([-450, -100, 0], [450, 100, 5]), { plates })} rendering={false} />)
+    expect(screen.getByRole('button', { name: 'All plates' })).toHaveAttribute('aria-pressed', 'true')
+    expect(picker).toBeInTheDocument()
+  })
+
+  it('offers no plate picker for a one-plate render', () => {
+    render(<Preview job={job('a', box([-5, -5, 0], [5, 5, 5]))} rendering={false} />)
+    expect(screen.queryByRole('group', { name: 'Plates shown' })).not.toBeInTheDocument()
   })
 })

@@ -299,8 +299,18 @@ def normalise_png(data: bytes) -> tuple[bytes, int, int]:
             out = io.BytesIO()
             picture.save(out, format="PNG")
             return out.getvalue(), picture.width, picture.height
-    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as error:
-        raise AssetRejectedError(f"the PNG could not be decoded: {error}") from None
+    except Image.DecompressionBombError:
+        # Pillow refuses at open what declares over twice its own pixel limit, before the
+        # pixel check above can run: it is that refusal, said the same way.
+        raise AssetRejectedError(
+            f"the PNG is too large; at most {MAX_PNG_PIXELS} pixels are read"
+        ) from None
+    except (UnidentifiedImageError, OSError) as error:
+        # Pillow's text names its stream object by address (#2383): for the log, not the user.
+        logger.info("a PNG upload could not be decoded", extra={"error": str(error)})
+        raise AssetRejectedError(
+            "the file is not a readable PNG; re-export it as PNG and try again"
+        ) from None
 
 
 def sniff(data: bytes) -> AssetKind:

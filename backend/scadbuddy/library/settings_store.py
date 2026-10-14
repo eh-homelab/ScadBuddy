@@ -35,7 +35,7 @@ import time
 import types
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, LiteralString, Self, Union, get_args, get_origin
+from typing import Annotated, Any, Literal, LiteralString, Self, Union, get_args, get_origin
 
 from psycopg import Connection
 from psycopg.rows import DictRow, dict_row
@@ -45,6 +45,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StringConstraints,
     ValidationError,
     ValidationInfo,
     field_validator,
@@ -237,6 +238,13 @@ class StoredSettings(BambuddyIds):
     #: retry whose row is gone while its closed execution is not answers 409 "may have
     #: been done" rather than its outcome (review #1063 8).
     operation_retention_seconds: float | None = None
+    #: How long a finished activity row is kept (spec 2026-10-09 §6). ``None``: 30 days.
+    activity_ttl_seconds: float | None = None
+    #: How far back the activity sweep looks for rows its sources wrote and it missed.
+    #: ``None``: 1 day.
+    activity_repair_window_seconds: float | None = None
+    #: The principals whose activity the assistant follows. ``None``: ``["browser"]``.
+    activity_follow: list[str] | None = None
     #: The domains `POST /models/{slug}/assets/fetch` may fetch from (#844), each with
     #: its subdomains. ``None`` is :data:`DEFAULT_ASSET_FETCH_DOMAINS`; ``[]`` is none.
     asset_fetch_domains: list[str] | None = None
@@ -382,6 +390,11 @@ class SettingsPatch(BaseModel):
     #: (or an operation) that succeeded into a second one (review #1061).
     print_run_retention_seconds: float | None = Field(default=None, ge=86400)
     operation_retention_seconds: float | None = Field(default=None, ge=86400)
+    activity_ttl_seconds: float | None = Field(default=None, ge=86400)
+    activity_repair_window_seconds: float | None = Field(default=None, ge=600, le=7 * 86400)
+    activity_follow: list[Annotated[str, StringConstraints(max_length=256)]] | None = Field(
+        default=None, max_length=50
+    )
     #: The project a send without one goes to, and where the project picker opens.
     last_project_id: int | None = None
     #: The asset allowlist (#844); ``null`` puts the defaults back. Only the user sets

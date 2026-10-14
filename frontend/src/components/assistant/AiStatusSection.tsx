@@ -31,8 +31,10 @@ export function AiStatusSection() {
   }
   return (
     <section className="mt-4 rounded-[6px] border border-line bg-surface" aria-labelledby="ai-status-heading">
+      {/* #2456 — not "Assistant": it sits inside the Assistant section, and two landmarks
+          of one name cannot be told apart. */}
       <h2 id="ai-status-heading" className="border-b border-line px-4 py-2.5 text-[13px] font-medium">
-        Assistant
+        Assistant status
       </h2>
       <div className="space-y-2 p-4 text-[13px]">
         <p aria-live="polite" data-testid="ai-status" data-state={state}>

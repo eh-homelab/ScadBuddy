@@ -293,7 +293,8 @@ on shutdown.
   `task_queue`, `worker_inprocess`).
 - `GET /metrics` serves Prometheus metrics: render queue depth and oldest wait
   (read from the store in Postgres, so across replicas), wait time and latency
-  (`scadbuddy_render_job_latency_seconds`, by outcome), per-stage render time, whether
+  (`scadbuddy_render_job_latency_seconds`, by `kind` (`render` or `arrange`) and
+  outcome), per-stage render time, whether
   the jobs table can be read (`scadbuddy_render_store_up`), whether the process's
   `LISTEN` connection is up (`scadbuddy_render_queue_listener_connected`,
   `scadbuddy_render_queue_listener_reconnects_total`), the SLO targets, the upload store's files and bytes against its caps
@@ -326,6 +327,12 @@ request's own origin (`Origin` equal to its scheme and `Host`) is also accepted,
 fresh install can be configured; that gives up DNS-rebinding protection until one
 of the two is set. The agent reads the same variable for its own origin check
 (below).
+
+## Mounting the library (bambuddy-fs)
+
+`tools/go/bambuddy-fs` mounts Bambuddy's print library, through ScadBuddy's API, as a
+FUSE filesystem, as a binary built from the workspace or as a container image. See
+[its README](tools/go/bambuddy-fs/README.md).
 
 ## Deploying
 
@@ -1058,8 +1065,11 @@ see the subagents bullet for what the second needs.
   subagents no ScadBuddy tools. The path is not under `/api/v1/ai/`, so the
   ingress never routes to it. The agent answers it on loopback only, unless
   Settings → Durable subagents (`/api/v1/ai/settings/durable-subagents`) lists
-  more addresses or CIDR ranges: a worker in its own pods needs its pod range
-  there, and a NetworkPolicy that admits only those pods to the agent's port.
+  more addresses or CIDR ranges (none broader than a /8, or an IPv6 /32): a
+  worker in its own pods needs its pod range there. A NetworkPolicy that admits
+  only those pods to the agent's port is then **required**, not optional: a pod
+  range also holds the ingress's pods, and without the policy the guard is only
+  the token and the ingress's `X-Forwarded-For`.
   Each call still needs a token minted under the KEK for one session, turn and
   owner, and is a request with no `X-Forwarded-For`. The same setting's URL,
   when set, replaces `SCADBUDDY_DURABLE_SUBAGENT_MCP_URL` (not `off`) from the
@@ -1223,6 +1233,10 @@ and the metric panels are unaffected. CI's `lint` job checks the dashboard
 - `backend/` — FastAPI, `uv run --frozen pytest` (tests marked
   `requires_openscad` need a real `openscad`; the Dockerfile's `test` target
   is where they run in CI).
+- `test-fixtures/` — real 3MFs in Git LFS (~290 MB) for the tests marked
+  `requires_fixtures`, which skip without them. With git-lfs installed a plain
+  clone downloads them all; clone with `GIT_LFS_SKIP_SMUDGE=1 git clone …` and
+  `git lfs pull --include "test-fixtures/**"` only when you need them.
 - `frontend/` — Vite + React, `pnpm test`, `pnpm build`.
 - `agent/` — the AI agent service (Node 24, Hono, Claude Agent SDK),
   `pnpm test`, `pnpm build`; see "The agent sidecar" above.

@@ -9,7 +9,7 @@ import httpx
 import pytest
 import respx
 
-from scadbuddy.bambuddy.archive_cache import ArchiveCache
+from scadbuddy.bambuddy.archive_cache import TIMELAPSE_TTL, ArchiveCache
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.core.problems import ApiError
 from tests.bambuddy.conftest import recording
@@ -179,3 +179,42 @@ async def test_the_printers_are_kept_for_the_ttl(clock: Clock) -> None:
         assert [p.name for p in await cache.printers(bambuddy)] == ["3DP-31B-598"]
         await cache.printers(bambuddy)
     assert route.call_count == 1
+
+
+@respx.mock
+async def test_a_timelapse_is_kept_for_hours_by_its_path(clock: Clock) -> None:
+    """#2360: Bambuddy runs ffmpeg/ffprobe on every read, 20-26 s for one print, and a
+    timelapse does not change once made; a different one is a different path."""
+    thumbnails = respx.get(f"{BASE}/api/v1/archives/35/timelapse/thumbnails").mock(
+        return_value=httpx.Response(200, json=recording("timelapse-thumbnails.json"))
+    )
+    info = respx.get(f"{BASE}/api/v1/archives/35/timelapse/info").mock(
+        return_value=httpx.Response(200, json=recording("timelapse-info.json"))
+    )
+    cache = ArchiveCache(30.0, clock=clock)
+    async with client() as bambuddy:
+        frames = await cache.timelapse_frames(bambuddy, 35, "a.mp4")
+        await cache.timelapse_info(bambuddy, 35, "a.mp4")
+        assert frames[0][1].startswith(b"\xff\xd8"), "decoded to the JPEG"
+        clock.now = TIMELAPSE_TTL - 1
+        await cache.timelapse_frames(bambuddy, 35, "a.mp4")
+        await cache.timelapse_info(bambuddy, 35, "a.mp4")
+        assert (thumbnails.call_count, info.call_count) == (1, 1)
+        await cache.timelapse_frames(bambuddy, 35, "b.mp4")
+        assert thumbnails.call_count == 2
+        clock.now = TIMELAPSE_TTL
+        await cache.timelapse_frames(bambuddy, 35, "a.mp4")
+    assert thumbnails.call_count == 3
+
+
+@respx.mock
+async def test_a_failed_timelapse_read_is_not_kept(clock: Clock) -> None:
+    route = respx.get(f"{BASE}/api/v1/archives/35/timelapse/thumbnails").mock(
+        return_value=httpx.Response(500)
+    )
+    cache = ArchiveCache(30.0, clock=clock)
+    async with client() as bambuddy:
+        with pytest.raises(ApiError):
+            await cache.timelapse_frames(bambuddy, 35, "a.mp4")
+        route.mock(return_value=httpx.Response(200, json=recording("timelapse-thumbnails.json")))
+        assert await cache.timelapse_frames(bambuddy, 35, "a.mp4")

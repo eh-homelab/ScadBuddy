@@ -11,7 +11,14 @@ import json
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    ValidatorFunctionWrapHandler,
+    field_validator,
+)
 
 PresetSource = Literal["orca_cloud", "cloud", "local", "standard"]
 SliceStatus = Literal["pending", "running", "completed", "failed"]
@@ -133,9 +140,31 @@ class Archive(BambuddyModel):
 FINISH_PHOTO_PREFIX = "finish_"
 
 
+class ArchiveFilamentSlot(BambuddyModel):
+    """One filament slot the sliced file used (``extra_data.filament_slots``, #1860)."""
+
+    slot_id: int
+    used_g: float | None = None
+    type: str | None = None
+    color: str | None = None
+
+
+class ArchiveExtra(BambuddyModel):
+    """What Bambuddy read out of the sliced file (``extra_data``), as far as it is not a
+    top-level field too (#1860). Its ``_print_data`` (the sender's address) is not read."""
+
+    printable_objects: dict[str, str] = Field(default_factory=dict)
+    filament_slots: list[ArchiveFilamentSlot] = Field(default_factory=list)
+    filament_used_mm: float | None = None
+
+
 class ArchiveDetail(Archive):
     """``GET /api/v1/archives/{id}`` (``ArchiveResponse``), as far as print history
-    needs it (#307). The media fields are names, not URLs: ScadBuddy proxies them."""
+    needs it (#307). The media fields are names, not URLs: ScadBuddy proxies them.
+    A field not named here is kept (``model_extra``): the print detail lists them all
+    (#1860), so a field Bambuddy adds is shown before ScadBuddy maps it."""
+
+    model_config = ConfigDict(extra="allow")
 
     filename: str | None = None
     file_size: int | None = None
@@ -160,6 +189,35 @@ class ArchiveDetail(Archive):
     successful_run_count: int = 0
     failed_run_count: int = 0
     last_run_at: datetime | None = None
+    # #1860 — the rest of what the print detail shows.
+    project_name: str | None = None
+    object_count: int | None = None
+    time_accuracy: float | None = None
+    total_layers: int | None = None
+    bed_temperature: float | None = None
+    nozzle_temperature: float | None = None
+    sliced_for_model: str | None = None
+    designer: str | None = None
+    makerworld_url: str | None = None
+    external_url: str | None = None
+    is_favorite: bool | None = None
+    energy_kwh: float | None = None
+    energy_cost: float | None = None
+    total_filament_actual_grams: float | None = None
+    extra_data: ArchiveExtra = Field(default_factory=ArchiveExtra)
+
+    @field_validator("extra_data", mode="wrap")
+    @classmethod
+    def _no_extra(cls, value: Any, handler: ValidatorFunctionWrapHandler) -> ArchiveExtra:
+        """Free-form in Bambuddy: one archive of an odd shape reads as having none,
+        rather than failing it, and with it every list of archives it is in."""
+        if not isinstance(value, dict):
+            return ArchiveExtra()
+        try:
+            extra: ArchiveExtra = handler(value)
+        except ValidationError:
+            return ArchiveExtra()
+        return extra
 
     @field_validator("photos", mode="before")
     @classmethod
@@ -360,6 +418,22 @@ class FilaSwitch(BambuddyModel):
     installed: bool = False
 
 
+class HmsError(BambuddyModel):
+    """One of ``status.hms_errors``: a Bambu HMS code with Bambuddy's description,
+    which is ``null`` for a code it has no text for (measured on the recordings)."""
+
+    code: str = ""
+    full_code: str = ""
+    severity: int | None = None
+    description: str | None = None
+    actions: list[str] = Field(default_factory=list)
+
+    @field_validator("actions", mode="before")
+    @classmethod
+    def _actions(cls, value: Any) -> Any:
+        return [str(action) for action in value or []]
+
+
 class PrinterStatus(BambuddyModel):
     """``GET /api/v1/printers/{id}/status`` — live MQTT state, 60-odd fields deep.
 
@@ -386,6 +460,19 @@ class PrinterStatus(BambuddyModel):
     ams_switch_inlet: dict[str, str] = Field(default_factory=dict)
     fila_switch: FilaSwitch | None = None
     current_plate_id: int | None = None
+    #: What the printer is doing now, whoever started it (#977). ``progress`` is a
+    #: percentage and ``remaining_time`` minutes, as Bambu's MQTT ``mc_percent`` and
+    #: ``mc_remaining_time`` are; ``current_archive_id`` is Bambuddy's archive of the job.
+    subtask_name: str | None = None
+    current_print: str | None = None
+    progress: float | None = None
+    remaining_time: int | None = None
+    layer_num: int | None = None
+    total_layers: int | None = None
+    current_archive_id: int | None = None
+    awaiting_plate_clear: bool = False
+    cover_url: str | None = None
+    hms_errors: list[HmsError] = Field(default_factory=list)
 
 
 class AvailableFilament(BambuddyModel):
@@ -446,6 +533,23 @@ class FolderCreate(BambuddyModel):
     project_id: int | None = None
 
 
+class FileUpdate(BambuddyModel):
+    """``PUT /api/v1/library/files/{id}``: a partial update. Only the fields given are
+    sent, and ``folder_id=0`` moves the file to the top level (Bambuddy's sentinel;
+    see `BambuddyClient.annotate_library_file`)."""
+
+    filename: str | None = None
+    folder_id: int | None = None
+
+
+class FolderUpdate(BambuddyModel):
+    """``PUT /api/v1/library/folders/{id}``: a partial update; ``parent_id=0`` moves the
+    folder to the top level."""
+
+    name: str | None = None
+    parent_id: int | None = None
+
+
 class LibraryFile(BambuddyModel):
     """``POST /api/v1/library/files`` (``FileUploadResponse``) — the uploaded file —
     and ``GET /api/v1/library/files/{id}`` (``FileResponse``). ``folder_id`` and
@@ -471,6 +575,16 @@ class LibraryFile(BambuddyModel):
     #: A file Bambuddy only indexes from an external folder: a delete drops its record
     #: for good instead of moving it to the trash (#2167).
     is_external: bool = False
+
+
+class TrashedLibraryFile(BambuddyModel):
+    """An item of ``GET /api/v1/library/trash`` (Bambuddy's ``TrashFile``, v1.2.5.5
+    ``backend/app/schemas/library_trash.py``). ``folder_id`` is the folder the file was
+    in when it was trashed, which Bambuddy's folder delete still cascades to."""
+
+    id: int
+    filename: str
+    folder_id: int | None = None
 
 
 class LibraryListRow(BambuddyModel):
@@ -654,6 +768,9 @@ class Spool(BambuddyModel):
     storage_location: str | None = None
     location_id: int | None = None
     archived_at: datetime | None = None
+    #: What the spool cost per kilogram, in Bambuddy's currency setting; ``None`` when
+    #: nobody entered a price (#785).
+    cost_per_kg: float | None = None
 
     @property
     def remaining_g(self) -> float:

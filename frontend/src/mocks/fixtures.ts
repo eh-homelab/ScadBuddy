@@ -19,6 +19,7 @@ import type {
   ParamPreset,
   Plate,
   PrintDetail,
+  TimelapseFrames,
   PrintProgress,
   PrintSummary,
   Settings,
@@ -937,6 +938,9 @@ export const settings: Settings = {
   last_project_id: null,
   render_timeout: 300,
   job_ttl: 3600,
+  activity_follow: null,
+  activity_ttl_seconds: null,
+  activity_repair_window_seconds: null,
   has_google_fonts_api_key: false,
   sources: {
     ...Object.fromEntries(Object.keys(settingsApplies).map((name) => [name, 'default' as const])),
@@ -1497,6 +1501,41 @@ function printOf(
       runs: [],
     },
     printer_media: null,
+    slicing: {
+      sliced_for_model: 'H2C',
+      bed_type: 'Textured PEI Plate',
+      layer_height_mm: 0.08,
+      total_layers: 86,
+      nozzle_diameter_mm: 0.4,
+      nozzle_temperature_c: 230,
+      bed_temperature_c: 70,
+      objects: ['name-keychain'],
+      filament_used_mm: 3572.29,
+      filament_slots: [
+        { slot_id: 1, used_grams: 11.34, filament_type: 'PLA', color: '#00629B' },
+        { slot_id: 2, used_grams: 5.02, filament_type: 'PLA', color: '#FF9425' },
+      ],
+    },
+    record: {
+      project_id: 1,
+      project_name: '3 keychains',
+      designer: 'ScadBuddy',
+      makerworld_url: null,
+      external_url: null,
+      notes: null,
+      tags: null,
+      is_favorite: false,
+      quantity: 1,
+      created_at: '2026-09-27T03:45:32.515537',
+      last_run_at: '2026-09-27T04:09:36.529201',
+      successful_run_count: 1,
+      failed_run_count: 0,
+      time_accuracy_percent: 87.7,
+      filament_actual_grams: 16.3,
+      energy_kwh: null,
+      energy_cost: null,
+      other: { original_archive_id: null, time_accuracy_source: null },
+    },
     links: { bambuddy_url: 'https://bambuddy.example/archives', customize_url: `/m/${output.slug}` },
     // The summary's own fields went in above; these are the detail's, a disjoint set.
     ...detail,
@@ -1556,8 +1595,8 @@ export const prints: PrintDetail[] = [
       photos: [],
       timelapse: {
         url: '/api/v1/prints/35/timelapse',
-        info: { duration: 5.208256, width: 1680, height: 1080, fps: 24, codec: 'h264', file_size: 2143595, has_audio: false },
-        poster_frames: [{ timestamp: 0, data_url: `data:image/png;base64,${MEDIA_PNG_BASE64}` }],
+        poster_url: '/api/v1/prints/35/timelapse/frames/0',
+        frames_url: '/api/v1/prints/35/timelapse/frames',
       },
       plate_thumbnails: [{ index: 1, url: '/api/v1/prints/35/plates/1/thumbnail', name: 'Keychain' }],
       attachments: [],
@@ -1569,6 +1608,14 @@ export const prints: PrintDetail[] = [
  * #311 — what each print's printer still holds (`printer_media`, plan A5): the failed
  * print 36 left a timelapse and a camera recording on the printer; the others nothing.
  */
+/** #2360 — each print's timelapse stills and probe, read after its detail. */
+export const timelapseFrames: Record<number, TimelapseFrames> = {
+  35: {
+    info: { duration: 5.208256, width: 1680, height: 1080, fps: 24, codec: 'h264', file_size: 2143595, has_audio: false },
+    frames: [{ timestamp: 0, url: '/api/v1/prints/35/timelapse/frames/0' }],
+  },
+}
+
 export const printerFiles: Record<number, NonNullable<PrintDetail['printer_media']>['remote_files']> = {
   36: [
     {

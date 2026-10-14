@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { cp, mkdir, readFile, rename, rm, utimes, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { declaredConfigs } from '../../harness/plugins.js'
+import { declaredConfigs, noCommand } from '../../harness/plugins.js'
 import { EgressError, type Resolver, systemResolver } from '../../http/egress.js'
 import type { HarnessPlugin, PluginForwarder } from '../forwarder.js'
 import {
@@ -126,11 +126,6 @@ export async function forwardPackageServers(
     }
   }
   return { plugins, problems, secrets, release: () => releases.forEach((r) => r()) }
-}
-
-/** No command: absent or null, as agent-durable's runner.py `_remote_entry` reads it (#2563). */
-function noCommand(config: Record<string, unknown>): boolean {
-  return config.command === undefined || config.command === null
 }
 
 /** Whether a server entry is reached by URL (http, sse): the forwarder's, never Claude Code's. */

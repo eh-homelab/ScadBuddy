@@ -43,7 +43,9 @@ export const printHistoryTools: Tool[] = [
     name: 'get_print',
     description:
       'One print: the output it came from (template, revision, exact parameters), its files, photos, timelapse, ' +
-      'outcome (status, failure reason, times, filament, cost) and runs. `printer_media: true` also lists the ' +
+      'outcome (status, failure reason, times, filament, cost), runs, the slicing (printer model, bed, layers, ' +
+      'nozzle, temperatures, filament per slot) and Bambuddy\'s record of it, with every other archive field. ' +
+      '`printer_media: true` also lists the ' +
       "recordings on the printer, which asks the printer.",
     input: z.object({ archive_id: archiveId, printer_media: z.boolean().optional() }),
     risk: 'read',

@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { useLocation } from 'react-router'
 import { useAiAvailability } from '../agent/chat/availability'
 import { USER_ONLY } from '../agent/dom'
 import { committed, touchAfterRender } from '../agent/highlight'
@@ -53,7 +52,9 @@ import {
 } from './settings/fields'
 import { HotendUsagePanel } from './settings/HotendUsagePanel'
 import { RememberedChoicesPanel } from './settings/RememberedChoicesPanel'
+import { SpoolInventoryPanel } from './settings/SpoolInventoryPanel'
 import { editedSince, pendingFields, seedDraft, type Draft, type Edits, type Seed } from './settings/seed'
+import { useSectionNav } from './settings/sectionNav'
 import { useLeaveGuard } from '../lib/useLeaveGuard'
 
 /** #296 — `used` of `limit`, where a limit of 0 means none. */
@@ -77,6 +78,7 @@ const HAND_LAID: Partial<Record<SectionId, FieldName[]>> = {
   // #426 — the blob store beside the inbox folder it needs.
   projects: ['library_folder_id', 'last_project_id', 'store_backend'],
   preview: ['display_unit', 'default_plate'],
+  administration: ['activity_follow', 'activity_ttl_seconds', 'activity_repair_window_seconds'],
 }
 
 const SPECS: Record<string, FieldSpec> = Object.fromEntries(RUNTIME_FIELDS.map((spec) => [spec.name, spec]))
@@ -119,14 +121,31 @@ const DAY_SECONDS = 86400
 /** The settings shown in days and stored in seconds; empty keeps every row. */
 const RETENTIONS: FieldName[] = ['print_run_retention_seconds', 'operation_retention_seconds']
 
+/**
+ * The stored activity settings (not env-seeded, so no badge or reset): empty is `null`,
+ * the default, shown as the placeholder. The bounds are the backend's
+ * (`settings_store.py`), checked here so a bad value is not a 422.
+ */
+const ACTIVITY_TTL = { min: 86400, default: 2_592_000 }
+const ACTIVITY_REPAIR = { min: 600, max: 7 * 86400, default: 86400 }
+/** `activity_follow` empty is the default (`["browser"]`); this word follows nobody (`[]`). */
+const FOLLOW_NOBODY = 'none'
+
 function baseline(settings: Settings, name: FieldName): string {
   if (name === 'display_unit') return settings.display_unit ?? 'mm'
+  if (name === 'activity_follow') {
+    const follow = settings.activity_follow
+    return follow == null ? '' : follow.length === 0 ? FOLLOW_NOBODY : follow.join(', ')
+  }
   if (RETENTIONS.includes(name)) {
     const seconds = settings[name as 'print_run_retention_seconds' | 'operation_retention_seconds']
     return seconds == null ? '' : String(seconds / DAY_SECONDS)
   }
   return serverValue(settings, name)
 }
+
+/** Each section's id, in page order: what the section nav marks as in view. */
+const SECTION_IDS: readonly string[] = SECTIONS.map((section) => section.id)
 
 type Problem = { problem: string }
 
@@ -141,12 +160,34 @@ function toPatchValue(name: FieldName, raw: string, settings: Settings): unknown
     if (!Number.isFinite(days) || days < 1) return { problem: 'Enter at least 1 day, or leave it empty to keep every one.' } satisfies Problem
     return days * DAY_SECONDS
   }
+  if (name === 'activity_follow') {
+    const items = raw.split(',').map((one) => one.trim()).filter((one) => one !== '')
+    if (items.length === 0) return null
+    if (items.length === 1 && items[0] === FOLLOW_NOBODY) return []
+    return items
+  }
+  if (name === 'activity_ttl_seconds' || name === 'activity_repair_window_seconds') {
+    if (raw.trim() === '') return null
+    const seconds = Number(raw)
+    const { min, max } = name === 'activity_ttl_seconds' ? { ...ACTIVITY_TTL, max: Infinity } : ACTIVITY_REPAIR
+    if (!Number.isFinite(seconds)) return { problem: 'Enter a number of seconds, or leave it empty for the default.' } satisfies Problem
+    if (seconds < min || seconds > max) {
+      return {
+        problem: max === Infinity ? `Enter at least ${min} seconds.` : `Enter ${min} to ${max} seconds.`,
+      } satisfies Problem
+    }
+    return seconds
+  }
   const kind = SPECS[name]?.kind ?? extraSpecs(settings).find((spec) => spec.name === name)?.kind
   if (kind === 'bool') return raw === 'true'
   if (kind === 'seconds' || kind === 'count' || kind === 'bytes') {
     if (raw.trim() === '') return { problem: 'Enter a value, or reset it to the deployment value.' } satisfies Problem
     const number = Number(raw)
     if (!Number.isFinite(number)) return { problem: 'Enter a number.' } satisfies Problem
+    // #2348 — none of them takes a negative, and a count is whole; the API checks each
+    // field's own bounds too and names the field it refuses.
+    if (number < 0) return { problem: 'Enter 0 or more.' } satisfies Problem
+    if (kind === 'count' && !Number.isInteger(number)) return { problem: 'Enter a whole number.' } satisfies Problem
     return number
   }
   // Text: empty clears it, which beats the deployment's value until it is reset.
@@ -223,13 +264,13 @@ export function SettingsPage() {
   }, [settings])
 
   // #1307 — a link to a section (`/settings#libraries`, the assistant's Touched list)
-  // opens Settings at it, once the sections are rendered.
-  const { hash } = useLocation()
+  // opens Settings at it, once the sections are rendered; #2345/#2346 — scrolling only
+  // the pane, kept in view while the sections above it load, and a section link moves
+  // focus to the section and puts it in the address.
+  const pane = useRef<HTMLDivElement>(null)
+  const sectionNav = useRef<HTMLElement>(null)
   const loaded = Boolean(settings)
-  useEffect(() => {
-    if (!loaded || hash.length < 2) return
-    document.getElementById(sectionId(hash))?.scrollIntoView?.({ block: 'start' })
-  }, [loaded, hash])
+  const { current: currentSection, go: goToSection } = useSectionNav(pane, sectionNav, SECTION_IDS, loaded)
 
   const value = (name: FieldName): string => draft[name] ?? (settings ? baseline(settings, name) : '')
   const setField = (name: FieldName, next: string) => {
@@ -619,8 +660,14 @@ export function SettingsPage() {
   const unit = value('display_unit') as DisplayUnit
 
   return (
-    <div className="sb-settings h-full overflow-y-auto">
-      <nav aria-label="Settings sections" className="sticky top-0 z-10 border-b border-line bg-bg/95 backdrop-blur">
+    // `relative`: the sr-only boxes inside are placed in the pane, not the document,
+    // which they otherwise made taller than the window, so the window scrolled (#2345).
+    <div ref={pane} className="sb-settings relative h-full overflow-y-auto">
+      <nav
+        ref={sectionNav}
+        aria-label="Settings sections"
+        className="sticky top-0 z-10 border-b border-line bg-bg/95 backdrop-blur"
+      >
         {/* #969: wraps from sm up so every section shows at a glance; on a phone it
             scrolls sideways, with a fade on the right edge to say there is more. */}
         <ul className="mx-auto flex max-w-5xl gap-1 overflow-x-auto px-4 py-2 text-[12px] [mask-image:linear-gradient(to_right,black_85%,transparent)] sm:flex-wrap sm:justify-center sm:overflow-visible sm:[mask-image:none]">
@@ -628,11 +675,12 @@ export function SettingsPage() {
             <li key={section.id} className="shrink-0">
               <a
                 href={`#${section.id}`}
+                aria-current={currentSection === section.id ? 'location' : undefined}
                 onClick={(event) => {
                   event.preventDefault()
-                  document.getElementById(section.id)?.scrollIntoView?.({ block: 'start', behavior: 'smooth' })
+                  goToSection(section.id)
                 }}
-                className="inline-flex items-center gap-1 rounded-[6px] px-2 py-1 text-muted hover:bg-surface-2 hover:text-ink"
+                className="inline-flex items-center gap-1 rounded-[6px] px-2 py-1 text-muted hover:bg-surface-2 hover:text-ink aria-[current=location]:bg-surface-2 aria-[current=location]:text-ink"
               >
                 {section.title}
                 {sectionDirty(section.id) && (
@@ -992,6 +1040,14 @@ export function SettingsPage() {
             </>,
           )}
 
+          <Section
+            id="inventory"
+            title={sectionTitle('inventory')}
+            description="Bambuddy's spools, read only: what is left on each, what it cost and where it is loaded. Spools are added, weighed and edited in Bambuddy."
+          >
+            <SpoolInventoryPanel />
+          </Section>
+
           {saved(
             'projects',
             <>
@@ -1265,6 +1321,63 @@ export function SettingsPage() {
           {saved(
             'administration',
             <>
+              <FieldRow
+                id="activity-follow"
+                label="Notify me about activity from"
+                help={`Principals whose finished activity rings the bell and shows a toast, comma-separated, as stored: "browser" is this browser; others look like "token:…" or an agent session's id. Empty is the default, "browser"; "${FOLLOW_NOBODY}" follows nobody.`}
+                error={errors.activity_follow}
+              >
+                <input
+                  id="activity-follow"
+                  type="text"
+                  placeholder="browser"
+                  value={value('activity_follow')}
+                  onChange={(event) => setField('activity_follow', event.target.value)}
+                  className="sb-field"
+                />
+              </FieldRow>
+              <details className="rounded-[6px] border border-line px-3 py-2">
+                <summary className="cursor-pointer text-[13px] text-muted">Advanced: activity retention</summary>
+                <div className="mt-3 space-y-4">
+                  <FieldRow
+                    id="activity-ttl"
+                    label="Keep activity for (seconds)"
+                    help="At least 86400 (a day). Empty is the default, 30 days."
+                    error={errors.activity_ttl_seconds}
+                  >
+                    <input
+                      id="activity-ttl"
+                      type="number"
+                      min={ACTIVITY_TTL.min}
+                      step={1}
+                      inputMode="numeric"
+                      placeholder={String(ACTIVITY_TTL.default)}
+                      value={value('activity_ttl_seconds')}
+                      onChange={(event) => setField('activity_ttl_seconds', event.target.value)}
+                      className="sb-field sb-num"
+                    />
+                  </FieldRow>
+                  <FieldRow
+                    id="activity-repair"
+                    label="Repair activity rows from the last (seconds)"
+                    help="600 to 604800. Empty is the default, one day."
+                    error={errors.activity_repair_window_seconds}
+                  >
+                    <input
+                      id="activity-repair"
+                      type="number"
+                      min={ACTIVITY_REPAIR.min}
+                      max={ACTIVITY_REPAIR.max}
+                      step={1}
+                      inputMode="numeric"
+                      placeholder={String(ACTIVITY_REPAIR.default)}
+                      value={value('activity_repair_window_seconds')}
+                      onChange={(event) => setField('activity_repair_window_seconds', event.target.value)}
+                      className="sb-field sb-num"
+                    />
+                  </FieldRow>
+                </div>
+              </details>
               {runtimeRows('administration')}
               {temporalUi && (
                 // Not ScadBuddy's page: a new tab, which also escapes Bambuddy's sandbox.
@@ -1373,15 +1486,3 @@ function UpstreamAnswerDetails({ answer }: { answer: NonNullable<ConnectionTest[
   )
 }
 
-/**
- * The section a URL hash names. A malformed escape (a truncated or hand-edited link,
- * `#%E0%A4%A`) makes `decodeURIComponent` throw, which inside the effect took the whole
- * page down (#2113); the raw text is used instead, which simply matches no section.
- */
-function sectionId(hash: string): string {
-  try {
-    return decodeURIComponent(hash.slice(1))
-  } catch {
-    return hash.slice(1)
-  }
-}

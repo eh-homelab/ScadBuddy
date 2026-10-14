@@ -65,6 +65,8 @@ const WARNING_TONE: Record<FilamentWarning['kind'], string> = {
   'rack-unsafe-material': 'text-warn',
   'rack-left-to-bambuddy': 'text-muted',
   'rack-manual-partial': 'text-muted',
+  // #956 — a by-object plate the toolhead or the gantry would hit; never a refusal.
+  'sequence-clearance': 'text-warn',
 }
 
 /**

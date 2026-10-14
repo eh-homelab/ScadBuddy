@@ -214,11 +214,14 @@ jobs:
         run: .github/scripts/fonts-probe.test.sh
 
       # The config lives in .hadolint.yaml so the same rules apply to a local
-      # `hadolint Dockerfile` as to this job.
+      # `hadolint Dockerfile` as to this job. `recursive` lints every file
+      # named `Dockerfile` (the action's `**/Dockerfile` glob): the root one and
+      # each Go CLI's, tools/go/<m>/Dockerfile (#2686).
       - name: hadolint
         uses: hadolint/hadolint-action@v3.5.0
         with:
           dockerfile: Dockerfile
+          recursive: true
           config: .hadolint.yaml
           failure-threshold: warning
 
@@ -231,10 +234,13 @@ jobs:
       # job runs, and a word-splitting bug in one is a check that silently
       # asserts something other than what it says.
       - name: shellcheck the CI scripts and the template verify scripts
-        run: shellcheck .github/scripts/*.sh models/*/verify.sh
+        run: shellcheck .github/scripts/*.sh scripts/*.sh models/*/verify.sh
 
       - name: Test the template selector
         run: .github/scripts/select-models.test.sh
+
+      - name: Test the Go selector
+        run: .github/scripts/select-go.test.sh
 
       # verify-models.sh reaps a timed-out template's containers by the
       # `scadbuddy-verify=<slug>` label (#302). An unlabelled `docker run` that
@@ -1031,7 +1037,9 @@ jobs:
       - name: List the LFS fixtures
         id: lfs
         run: echo "key=$(git lfs ls-files --long --include 'test-fixtures/**' | sha256sum | cut -c1-64)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache@v6
+      # Restore and save as two steps (#2488): the save is a step of its own, in this
+      # job's log, not a post-step that can quietly not happen.
+      - uses: actions/cache/restore@v6
         id: cache
         with:
           path: .git/lfs/objects
@@ -1039,6 +1047,11 @@ jobs:
       - name: Fetch the LFS fixtures
         if: ${{ steps.cache.outputs.cache-hit != 'true' }}
         run: git lfs pull --include "test-fixtures/**"
+      - uses: actions/cache/save@v6
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: .git/lfs/objects
+          key: lfs-fixtures-${{ steps.lfs.outputs.key }}
 
   backend-pytest:
     name: Backend pytest (${{ matrix.group }}/4)
@@ -1069,13 +1082,20 @@ jobs:
           fetch-depth: 1
 
       # The real 3MFs under test-fixtures/ (Git LFS, ~290 MB, #2146), from the cache
-      # `lfs-fixtures` filled: no shard pulls from LFS itself. They are mounted into
-      # the test container below; no image carries them (.dockerignore).
+      # `lfs-fixtures` filled. They are mounted into the test container below; no image
+      # carries them (.dockerignore).
       - uses: actions/cache/restore@v6
+        id: lfs-cache
         with:
           path: .git/lfs/objects
           key: lfs-fixtures-${{ needs.lfs-fixtures.outputs.key }}
-          fail-on-cache-miss: true
+      # A miss is a cache hiccup, not a test failure (#2488): a save that never landed
+      # (two runs racing for a new key), or the entry evicted from the full Actions
+      # cache since. This shard pulls them itself; SCADBUDDY_TEST_FIXTURES below still
+      # fails a fixture that is missing even then.
+      - name: Fetch the LFS fixtures the cache missed
+        if: ${{ steps.lfs-cache.outputs.cache-hit != 'true' }}
+        run: git lfs pull --include "test-fixtures/**"
       - name: Check out the LFS fixtures
         run: git lfs checkout
 
@@ -1354,6 +1374,49 @@ jobs:
         run: |
           echo "This change touches no template and no verify tooling; no verify.sh ran." | tee -a "$GITHUB_STEP_SUMMARY"
 
+  # ── The Go workspace (#2686) ────────────────────────────────────────────────
+  #
+  # go.work, the root vendor/ and the modules under tools/go/. Never path-gated:
+  # `go-select` reads this change's paths the way the `models` job does, and the
+  # `go` job always runs, checking nothing and saying so when no Go changed.
+  # Both are asserted by `CI Summary`. A push, the schedule, a dispatch, or a
+  # diff that cannot be computed checks everything.
+  go-select:
+    name: Select Go work
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.select.outputs.run }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+      - name: Did this change touch Go?
+        id: select
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          QUEUE_BASE: ${{ github.event.merge_group.base_sha }}
+        run: |
+          set -euo pipefail
+          run=true
+          if [ "$EVENT_NAME" = "pull_request" ] \
+            && git rev-parse -q --verify 'HEAD^2' >/dev/null \
+            && git diff --name-only 'HEAD^1' HEAD >"$RUNNER_TEMP/changed.txt"; then
+            run=$(.github/scripts/select-go.sh <"$RUNNER_TEMP/changed.txt")
+          elif [ "$EVENT_NAME" = "merge_group" ] \
+            && git fetch -q --depth=1 origin "$QUEUE_BASE" \
+            && git diff --name-only "$QUEUE_BASE" HEAD >"$RUNNER_TEMP/changed.txt"; then
+            run=$(.github/scripts/select-go.sh <"$RUNNER_TEMP/changed.txt")
+          fi
+          echo "run=$run" | tee -a "$GITHUB_OUTPUT"
+
+  go:
+    name: Go modules
+    needs: [go-select]
+    uses: ./.github/workflows/go-module-ci.yml
+    with:
+      run: ${{ needs.go-select.outputs.run }}
+
   # ── The API spec: deterministic export, its diff on the PR, the msw worker ─
   #
   # backend/openapi.json and both schema.d.ts files are generated at build and
@@ -1362,8 +1425,8 @@ jobs:
   # job could regenerate anything. The `frontend` and `agent` jobs now export
   # the spec and generate their clients themselves (`pnpm gen:api`, run by
   # typecheck, test and build), so a backend change that breaks a client reds
-  # those jobs directly. This job no longer regenerates or commits anything.
-  # It checks two things and reports a third:
+  # those jobs directly. The one thing this job regenerates and commits is the
+  # Go client (4. below). It checks two things and reports a third:
   #
   #   1. The export is deterministic. `scadbuddy.tools.export_openapi` builds
   #      the FastAPI app with `frontend_dir=/nonexistent` and dumps
@@ -1383,6 +1446,13 @@ jobs:
   #      edited in place on every push. Without a committed spec nothing in the
   #      PR's own diff shows a contract change, and review still needs to see
   #      it. Reported, never a failure: changing the API is allowed.
+  #
+  #   4. The Go client, tools/go/scadbuddy-client (#2686), which is committed
+  #      because a vendored Go module must build offline. Generated twice from this PR's spec
+  #      and compared, then against the tree. A stale one is regenerated and
+  #      pushed to the PR's branch with the app token (same-repo PRs only) and
+  #      fails this run; the push's own run checks the result. Its state is a
+  #      section of the API comment.
   #
   # Deliberately NOT covered:
   #   models/<slug>/model.json — hand-authored catalogue metadata (name,
@@ -1551,6 +1621,107 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # The Go client (tools/go/scadbuddy-client, #2686) IS committed: a
+      # vendored Go module must build offline. So it is generated here from the spec exported
+      # above, twice, and compared: Kiota's output must be a function of the
+      # spec. Skipped when neither the API nor the client or its generator
+      # changed. A missing API diff (main did not export) counts as changed.
+      - name: Set up Go for the client
+        if: ${{ steps.detect.outputs.backend == 'true' }}
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.work
+          cache-dependency-path: tools/go/*/go.sum
+
+      - name: Go client is deterministic and fresh
+        id: goclient
+        if: ${{ steps.detect.outputs.backend == 'true' }}
+        env:
+          LINES: ${{ steps.diff.outputs.changed_lines }}
+          # As go-module-ci.yml: a newer runner Go would write a different vendor/.
+          GOTOOLCHAIN: go1.25.6+auto
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          # `--quiet`, not a `| head -1` of the names: a long list SIGPIPEs git
+          # and pipefail fails the step.
+          if [ "$LINES" = "0" ] \
+            && git diff --quiet "$BASE_SHA" HEAD -- tools/go/scadbuddy-client scripts/generate-go-client.sh; then
+            echo "state=unchanged" | tee -a "$GITHUB_OUTPUT"; exit 0
+          fi
+          scripts/generate-go-client.sh --spec "$RUNNER_TEMP/head.json"
+          cp -a tools/go/scadbuddy-client/client "$RUNNER_TEMP/client-1"
+          scripts/generate-go-client.sh --spec "$RUNNER_TEMP/head.json"
+          if ! diff -r "$RUNNER_TEMP/client-1" tools/go/scadbuddy-client/client >/dev/null; then
+            echo "::error::Two generations of the Go client differ; Kiota output is not a function of the spec."
+            exit 1
+          fi
+          # All of tools/go: tidy can move the client's go.mod and go.sum.
+          if [ -z "$(git status --porcelain -- tools/go vendor go.work go.work.sum)" ]; then
+            echo "state=fresh" | tee -a "$GITHUB_OUTPUT"
+          else
+            # Staged so the stat counts new files as well as changed ones.
+            git add -A -- tools/go vendor go.work
+            git diff --cached --stat -- tools/go vendor go.work > "$RUNNER_TEMP/client.stat" || true
+            echo "state=stale" | tee -a "$GITHUB_OUTPUT"
+          fi
+
+      # On the head ref, in a worktree: `head.json` is the merge ref's spec, the
+      # API that will land, and generating from it on the head ref is the
+      # intended result. No token in this step: the generator runs Kiota and
+      # `go work vendor` from the PR's own tree. The fetch needs none (public).
+      - name: Commit the regenerated Go client
+        id: goclient-commit
+        if: ${{ steps.goclient.outputs.state == 'stale' && env.CAN_COMMENT == 'true' }}
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          GOTOOLCHAIN: go1.25.6+auto
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "refs/heads/${HEAD_REF}"
+          git worktree add -B regen "$RUNNER_TEMP/head" FETCH_HEAD
+          cd "$RUNNER_TEMP/head"
+          scripts/generate-go-client.sh --spec "$RUNNER_TEMP/head.json"
+          git add -A -- tools/go vendor go.work
+          if [ -e go.work.sum ]; then git add go.work.sum; fi
+          git -c user.name="scadbuddy-ci" -c user.email="ci@scadbuddy.invalid" \
+            commit -m "chore: regenerate Kiota client" -m "Generated by the freshness job from this PR's API spec."
+          echo "sha=$(git rev-parse --short HEAD)" | tee -a "$GITHUB_OUTPUT"
+
+      # Its own token, scoped to contents and minted only here, so no step that
+      # runs the PR's code ever holds a token that can write.
+      - name: Generate push token
+        id: push-token
+        if: ${{ steps.goclient-commit.outputs.sha != '' }}
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.RUNNER_APP_ID }}
+          private-key: ${{ secrets.RUNNER_APP_PRIVATE_KEY }}
+          permission-contents: write
+
+      # The app token, never GITHUB_TOKEN: a GITHUB_TOKEN push starts no
+      # workflow, so the PR would sit on a commit CI never checked. Only git
+      # runs here. The token is only ever in the URL, never in a remote's
+      # config, and the checkout's persisted GITHUB_TOKEN header is cleared,
+      # or git would send it instead. --no-verify skips git-lfs's pre-push hook,
+      # whose lock check refused the app token ("You must have push access to
+      # verify locks"); the commit is generated Go only, so there is no LFS
+      # object for the hook to upload.
+      - name: Push the regenerated Go client
+        id: goclient-push
+        if: ${{ steps.goclient-commit.outputs.sha != '' }}
+        working-directory: ${{ runner.temp }}/head
+        env:
+          GH_TOKEN: ${{ steps.push-token.outputs.token }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ steps.goclient-commit.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git -c "http.https://github.com/.extraheader=" \
+            push --no-verify "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:refs/heads/${HEAD_REF}"
+          echo "sha=${SHA}" | tee -a "$GITHUB_OUTPUT"
+
       - name: Upload the API diff
         if: ${{ steps.diff.outputs.changed_lines != '' && steps.diff.outputs.changed_lines != '0' }}
         uses: actions/upload-artifact@v7
@@ -1561,8 +1732,8 @@ jobs:
 
       # One comment per PR, found by its marker and edited in place, so a PR
       # pushed ten times carries one current diff and not ten stale ones. No
-      # comment is created for a PR that never changed the API; one that did
-      # and then reverted it is edited to say so.
+      # comment is created for a PR that never changed the API or regenerated
+      # the Go client; one that did and then reverted it is edited to say so.
       - name: Post the API diff on the PR
         if: ${{ env.CAN_COMMENT == 'true' && steps.diff.outputs.changed_lines != '' }}
         env:
@@ -1571,6 +1742,8 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           LINES: ${{ steps.diff.outputs.changed_lines }}
+          GO_STATE: ${{ steps.goclient.outputs.state }}
+          GO_SHA: ${{ steps.goclient-push.outputs.sha }}
         run: |
           set -euo pipefail
           marker='<!-- scadbuddy-api-diff -->'
@@ -1598,10 +1771,26 @@ jobs:
               echo
               echo "</details>"
             fi
+            if [ -n "$GO_STATE" ]; then echo; echo "### Go client"; echo; fi
+            case "$GO_STATE" in
+              fresh) echo "Up to date." ;;
+              unchanged) echo "Unchanged by this PR." ;;
+              stale)
+                echo "Regenerated in \`${GO_SHA}\`."
+                echo
+                echo "<details><summary>Changed files</summary>"
+                echo
+                echo '```'
+                head -c 20000 "$RUNNER_TEMP/client.stat"
+                echo '```'
+                echo
+                echo "</details>"
+                ;;
+            esac
           } > "$body"
           if [ -n "$existing" ]; then
             gh api -X PATCH "repos/$REPO/issues/comments/$existing" -F "body=@$body" >/dev/null
-          elif [ "$LINES" -ne 0 ]; then
+          elif [ "$LINES" -ne 0 ] || [ "$GO_STATE" = "stale" ]; then
             gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" -F "body=@$body" >/dev/null
           fi
 
@@ -1639,12 +1828,27 @@ jobs:
             exit 1
           fi
 
+      # Last, so a stale client does not hide the checks above. Red even after
+      # the push: this run checked the old commit, the push's own run checks
+      # the new one.
+      - name: Fail on a stale Go client
+        if: ${{ steps.goclient.outputs.state == 'stale' }}
+        env:
+          GO_SHA: ${{ steps.goclient-push.outputs.sha }}
+        run: |
+          if [ -n "$GO_SHA" ]; then
+            echo "::error::The Go client was stale; regenerated in ${GO_SHA}. The next run verifies it."
+          else
+            echo "::error::The Go client is stale. Run scripts/generate-go-client.sh and commit."
+          fi
+          exit 1
+
   # ── The required check ──────────────────────────────────────────────────────
   summary:
     # THIS display name is the required status-check context. Renaming it
     # silently unsatisfiable-ifies branch protection.
     name: CI Summary
-    needs: [layout, lint, frontend, agent, agent-durable, image, backend-pytest, backend-pytest-split, models, freshness]
+    needs: [layout, lint, frontend, agent, agent-durable, image, backend-pytest, backend-pytest-split, models, go-select, go, freshness]
     # `!cancelled()`, not a bare `needs:`. A bare `needs:` SKIPS this job when
     # an upstream job fails, and GitHub counts a SKIPPED REQUIRED CHECK AS
     # SATISFIED — a failing build would report green on the one check that
@@ -1676,6 +1880,8 @@ jobs:
           BACKEND_PYTEST_RESULT: ${{ needs.backend-pytest.result }}
           BACKEND_PYTEST_SPLIT_RESULT: ${{ needs.backend-pytest-split.result }}
           MODELS_RESULT: ${{ needs.models.result }}
+          GO_SELECT_RESULT: ${{ needs.go-select.result }}
+          GO_RESULT: ${{ needs.go.result }}
           FRESHNESS_RESULT: ${{ needs.freshness.result }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
@@ -1734,6 +1940,10 @@ jobs:
           assert "Backend pytest (every shard)"           "$BACKEND_PYTEST_RESULT" "$has_image"
           assert "Backend pytest shards cover the suite"  "$BACKEND_PYTEST_SPLIT_RESULT" "$has_image"
           assert "Template verify scripts"                "$MODELS_RESULT"   "$has_models"
+          # Always required: the `go` job runs on every commit and reports "No Go
+          # changes" itself when `go-select` found none, so a skip is a failure.
+          assert "Select Go work"                         "$GO_SELECT_RESULT" true
+          assert "Go modules"                             "$GO_RESULT"       true
 
           # `freshness` is PR-only — it diffs the API against the PR's base and
           # comments on the PR, and a push to main has neither. It is therefore
@@ -1765,7 +1975,7 @@ jobs:
   # deadlock, and even on hosted runners it is just a job that does nothing.
   dispatch-review:
     name: Dispatch Claude Code Review
-    needs: [lint, frontend, agent, image, backend-pytest, backend-pytest-split, models, summary]
+    needs: [lint, frontend, agent, image, backend-pytest, backend-pytest-split, models, go, summary]
     if: ${{ !cancelled() && github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

@@ -1,3 +1,4 @@
+import type { Sql } from 'postgres'
 import { Client } from '@temporalio/client'
 import { Context } from '@temporalio/activity'
 import type { TestWorkflowEnvironment } from '@temporalio/testing'
@@ -21,8 +22,8 @@ import { DurableTurns } from '../src/sessions/durable.js'
 import { SessionManager, SETTING_MODEL, SETTING_SESSION_BUDGET_USD } from '../src/sessions/manager.js'
 import type { Owner } from '../src/sessions/protocol.js'
 import { PgPayloadKeys, SubjectPayloadCodec } from '../src/temporal/payloadCodec.js'
-import { gateActivities, PgSessionOwners, toolActivities, type ToolActivity } from '../src/temporal/toolActivities.js'
-import { turnToolActivities, turnToolActivity } from '../src/temporal/turnTools.js'
+import { gateActivities, PgApprovalRecords, PgSessionOwners, toolActivities, type ToolActivity } from '../src/temporal/toolActivities.js'
+import { turnToolActivities, turnToolActivity, type TurnToolsDeps } from '../src/temporal/turnTools.js'
 import { AgentWorker } from '../src/temporal/worker.js'
 import { DURABLE_TOOLS, writeManifest } from '../src/tools/manifest.js'
 import { PendingActionStore } from '../src/tools/pending.js'
@@ -107,6 +108,10 @@ export type DurableStackOptions = {
   renderWaitMs?: number
   /** The durable worker's output, line by line. */
   stderr?: (line: string) => void
+  /** A turn's other tools (turnServers.ts), built on the stack's database and state dir; none by default. */
+  turnServers?: (deps: { sql: Sql; stateDir: string }) => TurnToolsDeps['servers']
+  /** How a parked approval is answered; every one is denied by default, as a careful user would. */
+  decide?: (tool: string) => 'approve' | 'deny'
 }
 
 export type DurableRunOptions = {
@@ -119,7 +124,7 @@ export type DurableRunOptions = {
 type Ran = { ok: boolean; result: string }
 
 export type DurableEvalStack = {
-  run(scenario: Scenario, options?: DurableRunOptions, backend?: ScenarioBackend): Promise<Outcome & { script: ScriptedTurn[] }>
+  run(scenario: Scenario, options?: DurableRunOptions, backend?: ScenarioBackend): Promise<Outcome & { script: ScriptedTurn[]; sessionId?: string }>
   close(): Promise<void>
 }
 
@@ -169,7 +174,12 @@ export async function startDurableStack(options: DurableStackOptions): Promise<D
     } satisfies ToolServices
     const sessions = new PgSessionOwners(db.sql)
     const audit = new AuditLog({ sql: db.sql, settings: () => settings, hashKey: randomBytes(32) })
-    const turnDeps = { sessions, servers: async () => ({ servers: [], problems: [], secrets: [], release: () => {} }) }
+    const turnDeps: TurnToolsDeps = {
+      sessions,
+      approvals: new PgApprovalRecords(db.sql),
+      audit,
+      servers: options.turnServers?.({ sql: db.sql, stateDir: dir }) ?? (async () => ({ servers: [], problems: [], secrets: [], release: () => {} })),
+    }
     const tools = AgentWorker.start({
       address: env.address,
       namespace: 'default',
@@ -214,15 +224,15 @@ export async function startDurableStack(options: DurableStackOptions): Promise<D
           const { session } = await manager.start(EVAL_OWNER, { origin: 'mcp', title: scenario.id, mode: 'durable', prompt })
           sessionId = session.id
           started.push(session.id)
-          const denied = new Set<string>()
+          const answered = new Set<string>()
           for (;;) {
             log = await events(db, session.id)
             if (ended(log)) break
             if (Date.now() > deadline) throw new Error('eval timed out')
             const pending = await gate.pendingInput(session.id).catch(() => [])
             for (const entry of pending) {
-              if (entry.kind !== 'approval' || denied.has(entry.id)) continue
-              denied.add(entry.id)
+              if (entry.kind !== 'approval' || answered.has(entry.id)) continue
+              answered.add(entry.id)
               const toolUseId = entry.id.slice(entry.id.lastIndexOf(':') + 1)
               const call = log.find((e) => e.type === 'tool.call' && e.id === toolUseId)
               approvals.push({
@@ -231,7 +241,8 @@ export async function startDurableStack(options: DurableStackOptions): Promise<D
                 toolUseId,
                 tier: (call?.risk as RiskTier | undefined) ?? 'outward',
               })
-              await gate.respond(session.id, { request_id: entry.id, response: { kind: 'approval', decision: 'deny' }, responder: EVAL_OWNER, role: 'browser' })
+              const decision = options.decide?.(entry.tool) ?? 'deny'
+              await gate.respond(session.id, { request_id: entry.id, response: { kind: 'approval', decision }, responder: EVAL_OWNER, role: 'browser' })
             }
             await new Promise((r) => setTimeout(r, 200))
           }
@@ -260,6 +271,7 @@ export async function startDurableStack(options: DurableStackOptions): Promise<D
           ...(error !== undefined ? { error: sessionId ? `${error} (session ${sessionId})` : error } : {}),
           durationMs: Date.now() - startedAt,
           script,
+          ...(sessionId ? { sessionId } : {}),
         }
       },
     }

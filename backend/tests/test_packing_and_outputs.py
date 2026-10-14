@@ -14,6 +14,7 @@ from temporalio.testing import ActivityEnvironment
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.outputs import OutputStore
+from scadbuddy.render.bambu3mf import laid_out_plates
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.job_models import BomEntry, Job, JobResult, ManifestObject, OutputRecord
 from scadbuddy.render.schema import ParamValue
@@ -250,6 +251,10 @@ async def test_a_packed_output_writes_every_plate_bom_and_files(tmp_path: Path) 
     model = paths.root / out.result.model_3mf
     with zipfile.ZipFile(model) as archive:
         assert "3D/3dmodel.model" in archive.namelist()
+        # #956: each packed copy is an object of its own, so a by-object print can
+        # finish one before starting the next: two of A and one of B, three objects.
+        placed = sum(len(plate.assembly_ids) for plate in laid_out_plates(archive))
+    assert placed == sum(len(plate.items) for plate in layout.plates) == 3
     assert (paths.blobs / "output-j1-1" / "files" / "guide.svg").read_text() == "<svg/>"
     assert out.bom[0].count == 2
     assert _refs(deps) == [("output-j1-1", "job", "j1")]

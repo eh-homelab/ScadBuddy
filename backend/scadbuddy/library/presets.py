@@ -655,6 +655,34 @@ class PresetStore:
         assert row is not None
         return self._view(row)
 
+    def keep_only(self, model_id: str, kept: Callable[[], Iterable[str]]) -> list[str]:
+        """Drop from each saved preset the parameters ``kept()`` does not name, reading and
+        rewriting them all under ``model_id``'s preset lock (#2631): a preset saved
+        meanwhile is trimmed from what it holds then, never overwritten from an earlier
+        read. ``kept`` is called under the lock. The ids of the presets it changed."""
+        with self._locked(model_id) as conn:
+            names = set(kept())
+            changed: list[str] = []
+            for row in self._saved(conn, model_id):
+                current = self._inputs(row)
+                if not set(current["params"]) - names:
+                    continue
+                params = {k: v for k, v in current["params"].items() if k in names}
+                inputs = normalize_inputs({**current, "params": params}, None).data
+                conn.execute(
+                    "UPDATE saved_presets SET params = %s, inputs = %s, updated_at = %s"
+                    " WHERE model_id = %s AND id = %s",
+                    (
+                        Jsonb(inputs["params"]),
+                        Jsonb(inputs),
+                        datetime.now(UTC),
+                        model_id,
+                        row["id"],
+                    ),
+                )
+                changed.append(row["id"])
+            return changed
+
     def delete(self, model_id: str, preset_id: str) -> None:
         with self._locked(model_id) as conn:
             deleted = conn.execute(

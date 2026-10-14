@@ -230,12 +230,13 @@ async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobRe
         for item in plate.items
     }
     for index, plate in enumerate(req.layout.plates):
-        by_colour: dict[str, list[trimesh.Trimesh]] = {}
-        names: dict[str, str] = {}
-        # Each painted copy is a part of its own: its faces are its painting's (#1965).
-        painted: list[ColourPart] = []
-        # Each copy's negative part, cut out of the plate's object by the slicer.
-        negatives: list[ColourPart] = []
+        # #956: each placed copy is an object of its own (and each object a copy's
+        # template declared), so a by-object print can finish one before the next. Within
+        # an object, a colour's meshes are still joined into one part.
+        plate_parts: list[ColourPart] = []
+        plate_extruders: list[int] = []
+        plate_objects: list[int] = []
+        number = 0
         for placed in plate.items:
             if placed.piece_key not in parts:
                 raise _unknown_piece(placed.piece_key)
@@ -246,39 +247,57 @@ async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobRe
                     PlateLayout.load, blobs.dir_for(placed.piece_key) / LAYOUT_NAME
                 )
             matrix = placement_matrix(parts[placed.piece_key].bbox, placed.x, placed.y, placed.rot)
-            for part in layouts[placed.piece_key].plates[0].parts:
-                mesh = part.mesh.copy()
-                mesh.apply_transform(matrix)
-                if part.negative:
-                    # Named no filament: it prints nothing.
-                    negatives.append(replace(part, mesh=mesh))
+            source = layouts[placed.piece_key].plates[0]
+            for owner in dict.fromkeys(source.objects):
+                by_colour: dict[str, list[trimesh.Trimesh]] = {}
+                names: dict[str, str] = {}
+                # Each painted part is a part of its own: its faces are its painting's (#1965).
+                painted: list[ColourPart] = []
+                # Its negative parts, cut out of this object by the slicer.
+                negatives: list[ColourPart] = []
+                for part, object_number in zip(source.parts, source.objects, strict=True):
+                    if object_number != owner:
+                        continue
+                    mesh = part.mesh.copy()
+                    mesh.apply_transform(matrix)
+                    if part.negative:
+                        # Named no filament: it prints nothing.
+                        negatives.append(replace(part, mesh=mesh))
+                        continue
+                    colour = part.colour.upper()
+                    for used in [colour, *(part.paint.used() if part.paint is not None else [])]:
+                        if used.upper() not in colours:
+                            colours.append(used.upper())
+                    if part.paint is not None:
+                        painted.append(
+                            ColourPart(colours.index(colour), part.name, colour, mesh, part.paint)
+                        )
+                        continue
+                    by_colour.setdefault(colour, []).append(mesh)
+                    names.setdefault(colour, part.name)
+                ordered = sorted(by_colour, key=colours.index)
+                joined = [
+                    ColourPart(colours.index(c), names[c], c, _joined(by_colour[c]))
+                    for c in ordered
+                ]
+                printed = (*joined, *painted)
+                if not printed:
                     continue
-                colour = part.colour.upper()
-                for used in [colour, *(part.paint.used() if part.paint is not None else [])]:
-                    if used.upper() not in colours:
-                        colours.append(used.upper())
-                if part.paint is not None:
-                    painted.append(
-                        ColourPart(colours.index(colour), part.name, colour, mesh, part.paint)
-                    )
-                    continue
-                by_colour.setdefault(colour, []).append(mesh)
-                names.setdefault(colour, part.name)
-        ordered = sorted(by_colour, key=colours.index)
-        joined = [ColourPart(colours.index(c), names[c], c, _joined(by_colour[c])) for c in ordered]
-        printed = (*joined, *painted)
-        extruders = tuple(colours.index(part.colour) + 1 for part in printed)
-        # A negative part takes the plate's first extruder: the slicer needs one, and it
-        # prints nothing with it.
-        cut = (
-            tuple(
-                replace(part, material_index=extruders[0] - 1, colour=colours[extruders[0] - 1])
-                for part in negatives
-            )
-            if printed
-            else ()
-        )
-        plates.append(PlateParts((*printed, *cut), (*extruders, *(extruders[0] for _ in cut))))
+                extruders = tuple(colours.index(part.colour) + 1 for part in printed)
+                # A negative part takes its object's first extruder: the slicer needs one,
+                # and it prints nothing with it.
+                cut = tuple(
+                    replace(part, material_index=extruders[0] - 1, colour=colours[extruders[0] - 1])
+                    for part in negatives
+                )
+                number += 1
+                plate_parts += [*printed, *cut]
+                plate_extruders += [*extruders, *(extruders[0] for _ in cut)]
+                plate_objects += [number] * (len(printed) + len(cut))
+        if not plate_parts:
+            # Skipped, it would renumber every later plate against the layout.
+            raise _refuse(f"plate {index + 1} of the layout has nothing to print")
+        plates.append(PlateParts(tuple(plate_parts), tuple(plate_extruders), tuple(plate_objects)))
         for done in [key for key in layouts if last[key] == index]:
             del layouts[done]
     if not plates:
@@ -289,6 +308,7 @@ async def _write_plates(req: OutputRequest, deps: WorkerDeps, key: str) -> JobRe
         PlateParts(
             tuple(p for p in plate.parts if not p.negative),
             tuple(e for p, e in zip(plate.parts, plate.extruders, strict=True) if not p.negative),
+            tuple(o for p, o in zip(plate.parts, plate.objects, strict=True) if not p.negative),
         )
         for plate in plates
     ]

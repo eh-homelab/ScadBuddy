@@ -44,9 +44,11 @@ import re
 from collections.abc import Callable, Sequence
 from typing import Literal
 
+from fastapi import status
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.concurrent import settled
 from scadbuddy.bambuddy.models import (
     FilamentRequirements,
     NozzleInfo,
@@ -56,6 +58,7 @@ from scadbuddy.bambuddy.models import (
     Spool,
     SpoolAssignment,
 )
+from scadbuddy.core.problems import ApiError
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +89,8 @@ WarningKind = Literal[
     "rack-unsafe-material",
     "rack-left-to-bambuddy",
     "rack-manual-partial",
+    # A by-object print whose objects the toolhead or the gantry would hit (#956).
+    "sequence-clearance",
 ]
 
 
@@ -198,7 +203,9 @@ class FilamentOptions(BaseModel):
     doing it in the browser would mean shipping every spool's history to do it.
     """
 
-    library_file_id: int
+    #: The library file the slots were read from; ``None`` for an output read from its
+    #: own 3MF, with no copy in Bambuddy yet (#2720).
+    library_file_id: int | None
     printer_id: int | None = None
     printer_name: str | None = None
     slots: list[SlotNeed] = Field(default_factory=list)
@@ -363,7 +370,7 @@ def seed_plan(options: FilamentOptions, remembered: Sequence[SlotChoice]) -> Fil
 
 def build_options(
     *,
-    library_file_id: int,
+    library_file_id: int | None,
     spools: list[Spool],
     assignments: list[SpoolAssignment],
     requirements: list[SlotNeed],
@@ -722,7 +729,7 @@ def queue_filaments(options: FilamentOptions, plan: FilamentPlan) -> QueueFilame
 async def gather_options(
     client: BambuddyClient,
     *,
-    library_file_id: int,
+    library_file_id: int | None,
     printer_id: int | None = None,
     plate_id: int | None = None,
     fallback_colours: list[str] | None = None,
@@ -749,15 +756,18 @@ Inventory = tuple[list[Spool], list[SpoolAssignment]]
 
 
 async def read_inventory(client: BambuddyClient) -> Inventory:
-    """The spools, then their assignments, in the order every reader reads them."""
-    spools = await client.spools()
-    return spools, await client.spool_assignments()
+    """The spools and their assignments, read together (#2354); a failure surfaces in
+    the order every reader once read them in, the spools' first."""
+    spools, assignments = await asyncio.gather(
+        client.spools(), client.spool_assignments(), return_exceptions=True
+    )
+    return settled(spools), settled(assignments)
 
 
 async def gather_plate_options(
     client: BambuddyClient,
     *,
-    library_file_id: int,
+    library_file_id: int | None,
     printer_id: int | None = None,
     plate_ids: Sequence[int | None],
     fallback_colours: list[str] | None = None,
@@ -782,19 +792,21 @@ async def gather_plate_options(
             _requirements(client, library_file_id, plate, fallback_colours, own_colours, known)
             for plate in plate_ids
         ),
+        *(
+            (client.printer(printer_id), client.inventory_remain(printer_id))
+            if printer_id is not None
+            else ()
+        ),
         return_exceptions=True,
     )
-    per_plate: list[list[SlotNeed]] = []
-    for answer in answers:
-        if isinstance(answer, BaseException):
-            raise answer
-        per_plate.append(answer)
+    per_plate: list[list[SlotNeed]] = [settled(answer) for answer in answers[: len(plate_ids)]]
 
     printer = None
     slot_materials: list[SlotMaterial] = []
     if printer_id is not None:
-        printer = await client.printer(printer_id)
-        slot_materials = (await client.inventory_remain(printer_id)).slot_materials
+        # Read beside the plates (#2354), and still failing after them.
+        printer = settled(answers[len(plate_ids)])
+        slot_materials = settled(answers[len(plate_ids) + 1]).slot_materials
 
     return [
         build_options(
@@ -811,7 +823,7 @@ async def gather_plate_options(
 
 async def _requirements(
     client: BambuddyClient,
-    library_file_id: int,
+    library_file_id: int | None,
     plate_id: int | None,
     fallback_colours: list[str] | None,
     own_colours: list[str] | None = None,
@@ -823,11 +835,18 @@ async def _requirements(
     ScadBuddy generated does carry. If it ever does not, the output's colour list is
     the same information in the same order, so the picker still opens.
     """
-    answer = (
-        known(plate_id)
-        if known is not None
-        else await client.filament_requirements(library_file_id, plate_id=plate_id)
-    )
+    if known is not None:
+        answer = known(plate_id)
+    else:
+        if library_file_id is None:
+            # Only a source that answered ReadFile(None) without reading its own slots
+            # reaches here; say so rather than fail on an assert.
+            raise ApiError(
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                f"plate {plate_id}'s slots were neither read from the file nor named by a"
+                " library file",
+            )
+        answer = await client.filament_requirements(library_file_id, plate_id=plate_id)
     slots = [
         SlotNeed(
             slot_id=filament.slot_id,
