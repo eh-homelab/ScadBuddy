@@ -247,7 +247,9 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   store's piece (`piece.json`), and nothing writes or prunes `models/<slug>/.renders/`
   any more (it stays hidden and git-ignored for volumes that still hold one).
 - `backend/scadbuddy/meshmodel/` — mesh models (#2146, spec 2026-10-11): `scene.py`,
-  `compile.py`, `edits.py`, `operations.py` (the `library` kinds), `paint.py` (paint
+  `compile.py`, `edits.py`, `shared.py` (what `edits` shares with the render and geometry
+  analysis, which must not import `edits`: `JointSpec`, `WALL`, `MeshOf`, `SceneEditError`,
+  `transform_matrix`), `operations.py` (the `library` kinds), `paint.py` (paint
   transfer: a painted part's `.paint.json` codes carried onto its rendered solid by the
   render's `paint` stage, `render/jobs.py` `paint_layout`; a layout part names its carried
   codes file, `PartSource.paint`), `locate.py` (the scene object a weak joint is in).
