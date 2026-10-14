@@ -30,14 +30,21 @@ import {
 // and each call, so a plugin disabled, removed or failing its egress check since is gone
 // at once, as it would be from a classic turn's next query.
 
-/** Under the state dir: a durable session's (or flow run's) saved http bodies, `<id>/http` (#2496). */
+/**
+ * Under the state dir: a flow run's saved http bodies, `flow-<id>/http` (#2496). A durable
+ * session's bodies are in Postgres since #2374; a bare `<id>` directory is one a pod left
+ * before that, cleared by the sweep and by forget.
+ */
 export const DURABLE_TURNS_DIR = 'durable-turns'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /** How long a flow run's saved bodies are kept: its run has no row here to outlive. */
 export const FLOW_BODIES_KEPT_MS = 7 * 24 * 3600_000
 
-/** Removes one subject's saved bodies on this pod (`session-<id>` or `flow-<id>`, forget.ts). */
+/**
+ * Removes one subject's saved bodies on this pod (`session-<id>` or `flow-<id>`, forget.ts).
+ * A session's is only a directory left by a pod that ran before #2374.
+ */
 export async function removeTurnDir(root: string, subject: string): Promise<void> {
   const name = subject.startsWith('session-') ? subject.slice('session-'.length) : subject
   if (!UUID.test(name) && !(name.startsWith('flow-') && UUID.test(name.slice('flow-'.length)))) return
@@ -45,9 +52,10 @@ export async function removeTurnDir(root: string, subject: string): Promise<void
 }
 
 /**
- * The saved bodies of durable sessions that no longer exist, and of flow runs older than
- * FLOW_BODIES_KEPT_MS, on this pod (#2496): each replica keeps its own (the server is
- * pinned), so each sweeps its own, whichever pod the session was forgotten on.
+ * The saved bodies of flow runs older than FLOW_BODIES_KEPT_MS on this pod (#2496), and
+ * the directories of durable sessions that no longer exist, which only a pod that ran
+ * before #2374 wrote: each replica keeps its own (the server is pinned), so each sweeps
+ * its own, whichever pod the session was forgotten on.
  */
 export async function sweepTurnDirs(root: string, sql: Sql, now = Date.now()): Promise<string[]> {
   const names = await readdir(root).catch((err: NodeJS.ErrnoException) => {

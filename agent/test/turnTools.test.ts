@@ -275,8 +275,15 @@ describe('turn tools in a durable session', () => {
     const saveRoot = await mkdtemp(path.join(os.tmpdir(), 'turn-http-'))
     const deps: TurnToolsDeps = {
       sessions: { ownerOf: async (id) => (id === SESSION ? (BROWSER as never) : undefined) },
-      // Its saved bodies are in Postgres; this test saves none.
-      servers: turnServers({ httpRequest: { saveRoot, sql: {} as never } }),
+      // Its saved bodies are in Postgres; this test saves none, and says so if it ever does.
+      servers: turnServers({
+        httpRequest: {
+          saveRoot,
+          sql: (() => {
+            throw new Error('this test saves no http body: no database is set up for one')
+          }) as never,
+        },
+      }),
       approvals: { approved: async () => false },
     }
     const activities = turnToolActivities(deps)
