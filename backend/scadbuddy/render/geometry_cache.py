@@ -176,12 +176,17 @@ def _layout_colours(layout: Mapping[str, Any]) -> set[str]:
     return found
 
 
+def painted(layout: Mapping[str, Any]) -> bool:
+    """Whether any part of the layout carries a painting (`PartSource.paint`)."""
+    return any("paint" in part for plate in layout["plates"] for part in plate["parts"])
+
+
 def reusable(layout: Mapping[str, Any], classes: Sequence[str]) -> bool:
     """Whether every colour the layout holds is one of its colour classes, and no part
     carries a painting: its ``paint-*.json`` keeps the palette it was painted in, which
     `recolour_layout` does not swap, so a painted colour that is also a class would no
     longer be a filament."""
-    if any("paint" in part for plate in layout["plates"] for part in plate["parts"]):
+    if painted(layout):
         return False
     return _layout_colours(layout) <= {colour.upper() for colour in classes}
 

@@ -31,6 +31,7 @@ from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate
 from scadbuddy.render.geometry_cache import (
     mesh_geometry,
+    painted,
     recolour_piece,
     reusable,
 )
@@ -654,8 +655,12 @@ class RenderActivities:
         if d.geometry is not None and prepared.geometry_key is not None:
             # A cache's hint, after the piece is published: losing it costs a later
             # recolour its shortcut, never this render. A recoloured piece comes with
-            # no key: its copied raw render keeps its source's colours.
+            # no key: its copied raw render keeps its source's colours. A painted piece
+            # is never a source (`reusable` refuses it), so no recolour fetches it.
             try:
+                layout = json.loads((work / LAYOUT_NAME).read_text(encoding="utf-8"))
+                if painted(layout):
+                    return piece
                 await asyncio.to_thread(
                     d.geometry.put,
                     prepared.geometry_key,
