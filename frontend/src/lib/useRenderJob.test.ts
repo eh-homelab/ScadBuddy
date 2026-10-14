@@ -6,9 +6,13 @@ import { fakeRealtime } from './realtime.fake'
 import {
   QUEUE_READ_MS,
   READ_RETRIES,
+  RENDER_AUTO_RETRIES,
+  RENDER_AUTO_RETRY_MAX_MS,
+  RENDER_AUTO_RETRY_MS,
   SNAPSHOT_PENDING_MAX_SECONDS,
   TRANSIENT_RETRIES,
   canRetry,
+  useRenderAutoRetry,
   useRenderJob,
 } from './useRenderJob'
 
@@ -696,5 +700,70 @@ describe('canRetry (review #1066 (13) 2)', () => {
     [new Error('openscad exited with 1'), false],
   ])('%#: %s is %s', (error, expected) => {
     expect(canRetry(error)).toBe(expected)
+  })
+})
+
+// #2464 — a submit a retry can fix is sent again on its own, with backoff and a cap.
+describe('useRenderAutoRetry', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  /** A failed submit, as a new error object each time, as each failed try gives. */
+  const unanswered = () => new ApiError({ type: UNANSWERED, title: 'No answer', status: 503 })
+
+  function setup(values: unknown = { a: 1 }) {
+    const retry = vi.fn()
+    const view = renderHook(
+      ({ error, values }: { error: unknown; values: unknown }) => useRenderAutoRetry(error, false, retry, values),
+      { initialProps: { error: unanswered() as unknown, values } },
+    )
+    return { retry, view }
+  }
+
+  it(`tries ${RENDER_AUTO_RETRIES} times, doubling the wait to at most a minute, then gives up`, () => {
+    // The same values throughout, as `debounced` keeps its identity until they change.
+    const values = { a: 1 }
+    const { retry, view } = setup(values)
+    for (let n = 0; n < RENDER_AUTO_RETRIES; n++) {
+      const wait = Math.min(RENDER_AUTO_RETRY_MS * 2 ** n, RENDER_AUTO_RETRY_MAX_MS)
+      act(() => vi.advanceTimersByTime(wait - 1))
+      expect(retry).toHaveBeenCalledTimes(n)
+      act(() => vi.advanceTimersByTime(1))
+      expect(retry).toHaveBeenCalledTimes(n + 1)
+      view.rerender({ error: unanswered(), values })
+    }
+    act(() => vi.advanceTimersByTime(RENDER_AUTO_RETRY_MAX_MS * 10))
+    act(() => window.dispatchEvent(new Event('online')))
+    expect(retry).toHaveBeenCalledTimes(RENDER_AUTO_RETRIES)
+  })
+
+  it('tries again at once when the browser comes back online', () => {
+    const { retry } = setup()
+    act(() => window.dispatchEvent(new Event('online')))
+    expect(retry).toHaveBeenCalledTimes(1)
+  })
+
+  it('starts the count over for new values that fail too', () => {
+    const values = { a: 1 }
+    const { retry, view } = setup(values)
+    for (let n = 0; n < RENDER_AUTO_RETRIES; n++) {
+      act(() => window.dispatchEvent(new Event('online')))
+      view.rerender({ error: unanswered(), values })
+    }
+    expect(retry).toHaveBeenCalledTimes(RENDER_AUTO_RETRIES)
+    view.rerender({ error: unanswered(), values: { a: 2 } })
+    act(() => vi.advanceTimersByTime(RENDER_AUTO_RETRY_MS))
+    expect(retry).toHaveBeenCalledTimes(RENDER_AUTO_RETRIES + 1)
+  })
+
+  it('leaves an error a retry cannot fix alone', () => {
+    const retry = vi.fn()
+    renderHook(() => useRenderAutoRetry(new Error('openscad exited with 1'), false, retry, {}))
+    act(() => vi.advanceTimersByTime(RENDER_AUTO_RETRY_MAX_MS * 10))
+    expect(retry).not.toHaveBeenCalled()
   })
 })
