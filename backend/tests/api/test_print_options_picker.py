@@ -15,7 +15,7 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from tests.api.test_print_filaments import slice_routes
+from tests.api.test_print_filaments import slice_kept, slice_routes
 from tests.api.test_print_run_choices import body, run_print, run_request, run_routes
 from tests.api.test_send import API, configure, make_output, upload_route
 from tests.bambuddy.conftest import recording
@@ -43,6 +43,7 @@ def _prepared(client: TestClient, model: str, *, printer_id: int = 1) -> str:
     upload_route()
     run_routes(printer_id=printer_id)
     slice_routes()
+    slice_kept()
     return output_id
 
 

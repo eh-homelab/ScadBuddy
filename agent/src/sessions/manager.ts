@@ -1,8 +1,6 @@
-import { nestedQueries } from '../builtins/nested.js'
-import { BACKGROUND_BUILTINS, BUILTIN_SERVER, CLASSIC_BUILTINS, classicBuiltinNote, classicBuiltinServer } from '../builtins/server.js'
+import type { nestedQueries } from '../builtins/nested.js'
 import type { BackgroundTasks } from '../background/service.js'
 import { randomUUID } from 'node:crypto'
-import path from 'node:path'
 import {
   type EffortLevel,
   forkSession as sdkForkSession,
@@ -20,44 +18,25 @@ import { redact } from '../secrets.js'
 import { describeApiFailure, type FailureEvidence, type ProbeVerdict } from '../harness/credentialErrors.js'
 import { carries, type CredentialSource, runWithFallback } from '../harness/fallback.js'
 import type { HarnessPaths } from '../harness/options.js'
-import type { RiskTier, TierResolver } from '../harness/permissions.js'
+import type { TierResolver } from '../harness/permissions.js'
 import type { BuiltInPolicy } from '../plugins/builtInTools.js'
 import {
   DEFAULT_MAX_BUDGET_USD,
   DEFAULT_MAX_TURNS,
-  harnessTierOf,
   type HarnessRun,
   runHarness,
 } from '../harness/run.js'
-import {
-  HTTP_SERVER,
-  type HttpLimits,
-  httpRequestEnabled,
-  httpRequestServer,
-  httpTierOf,
-  type SavedMeta,
-  savedBody,
-  SETTING_HTTP_REQUEST,
-} from '../harness/httpRequest.js'
+import { type HttpLimits, type SavedMeta, savedBody } from '../harness/httpRequest.js'
 import type { Resolver } from '../http/egress.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
-import type { CheckedPlugin } from '../plugins/registry.js'
-import {
-  createMemoryHooks,
-  HindsightClient,
-  type MemoryActivity,
-  type MemoryHooks,
-  type MemoryOptions,
-  hindsightTarget,
-  turnRecallMaxQueryChars,
-} from '../memory/hindsight.js'
+import type { MemoryActivity, MemoryOptions } from '../memory/hindsight.js'
 import type { LoadedPackage, PackagesForRun } from '../plugins/packages/install.js'
-import { type PackageServers, withoutRemoteServers } from '../plugins/packages/mcp.js'
-import { ensureSessionDir, isUuid, sessionWorkDir } from '../harness/stateDirs.js'
+import type { PackageServers } from '../plugins/packages/mcp.js'
+import { isUuid, sessionWorkDir } from '../harness/stateDirs.js'
 import { type ApprovalRecord, ApprovalService, type GrantCheck, type ResumeResult } from '../approvals/service.js'
 import { QuestionService } from '../questions/service.js'
 import { attentionCard, attentionSpec, BACK_REPLIES, DEFAULT_REPLIES, IM_BACK, parseAttention, timedOutText } from '../harness/attention.js'
-import { isQuestionTool, type QuestionGate } from '../harness/questions.js'
+import type { QuestionGate } from '../harness/questions.js'
 import { SERVER_NAME } from '../tools/projections.js'
 import type { FlowTurn, TabWait, WaitForTab } from '../tools/registry.js'
 import { type AuditContext, type AuditLog, type AuditSink, safeDetail } from '../audit/log.js'
@@ -93,8 +72,9 @@ import { type DurableGate, DurableUnavailable } from '../gate/durable.js'
 import type { DurableTurns, ForkedAgent } from './durable.js'
 import { PendingProjection } from '../gate/projection.js'
 import { Escalations } from '../flows/escalations.js'
-import { loadAgentDefinitions } from '../harness/agentDefinitions.js'
-import { ownPluginEnabled } from '../plugins/packages/builtins.js'
+import { type AssembledTurn, TurnAssemblyError, TurnRunner } from './turnRunner.js'
+import { createTurnSlot } from './turnSlot.js'
+import { FlowQueue } from '../flows/queue.js'
 
 // The session manager (#300, spec §6): durable, shared sessions that a human
 // in the browser, an external agent over /mcp, or an internal flow can start,
@@ -538,7 +518,7 @@ export type SessionRecord = {
  * Claude Code never priced (#991, the `unpriced_cost_usd` column): a resumed
  * query's `total_cost_usd` does not hold that part.
  */
-type ClaimedSession = SessionRecord & {
+export type ClaimedSession = SessionRecord & {
   unpricedCostUsd: number
   /** A Workflow agent's chat (startChild): its own model, effort and subagent definition. */
   agentModel: string | null
@@ -969,6 +949,8 @@ export class SessionManager {
   readonly projection: PendingProjection
   /** A flow run's calls waiting at the session that started it (#2482, flows/escalations.ts). */
   readonly escalations: Escalations
+  /** A flow run's one queue (#2482, spec 2026-10-11 §4.5). */
+  readonly queue: FlowQueue
   /** Renaming a session and marking it done (#795, edits.ts). */
   readonly edits: SessionEdits
   /**
@@ -994,6 +976,8 @@ export class SessionManager {
   /** The images tool results carried (#782), read by `blob`. */
   private readonly blobs: SessionBlobs
   private readonly files: SessionFiles
+  /** Assembles each turn's query options (turnRunner.ts). */
+  private readonly runner: TurnRunner
 
   constructor(deps: SessionManagerDeps) {
     this.deps = deps
@@ -1024,6 +1008,7 @@ export class SessionManager {
       ...(deps.settings ? { settings: deps.settings } : {}),
     })
     this.projection = new PendingProjection(deps.sql)
+    this.queue = new FlowQueue(deps.sql)
     this.escalations = new Escalations({
       sql: deps.sql,
       durable: () => this.durable,
@@ -1040,6 +1025,7 @@ export class SessionManager {
       endDurable: (id) => this.endDurable(id),
       endBackground: (id, why) => this.deps.background?.tasks.endSession(id, why) ?? Promise.resolve(0),
     })
+    this.runner = new TurnRunner({ ...deps, store: this.store, events: this.events, files: this.files })
     this.run = deps.run ?? runHarness
     this.leaseMs = deps.leaseMs ?? DEFAULT_LEASE_MS
     this.renewMs = deps.renewMs ?? DEFAULT_RENEW_MS
@@ -1557,19 +1543,10 @@ export class SessionManager {
     const { controller } = local
     const id = session.id
     const sql = this.deps.sql
-    const registryTierOf = this.deps.tierOf ?? (() => undefined)
-    // The http tools' tier depends on the method in their input (#827).
-    const tierOf: TierResolver = (name, input) => httpTierOf(name, input) ?? registryTierOf(name, input)
-    // Widened with the plugins' tiers once they are loaded below, so the
-    // panel shows a plugin tool at the tier the permission seam applies.
-    // Settings → Plugins' raised tiers (#1953), once read below, over every tier shown.
-    let builtIn: BuiltInPolicy | undefined
-    const raised = (name: string, tier: RiskTier | undefined) => (tier === undefined || !builtIn ? tier : builtIn.tierOf(name, tier))
-    let eventTierOf: TierResolver = (name, input) => raised(name, tierOf(name, input))
-    // AskUserQuestion and ask_user (#940) only ask the user: shown and audited as `read`, as the harness tiers them.
-    const asksUser = session.owner.kind === 'browser'
-    const shownTierOf: TierResolver = (name, input) =>
-      asksUser && isQuestionTool(name) ? 'read' : eventTierOf(name, input)
+    /** The turn's options (TurnRunner), once assembled: the tiers below read them. */
+    let turn: AssembledTurn | undefined
+    const eventTierOf: TierResolver = (name, input) => turn?.eventTierOf(name, input)
+    const shownTierOf: TierResolver = (name, input) => turn?.shownTierOf(name, input)
     const mapper = new SdkEventMapper(id, shownTierOf, this.deps.titleOf)
     const shownCalls = new ShownCalls()
     // The turn's trace (spec 2026-10-01 §5.4, telemetry/turn.ts): a child of
@@ -1591,9 +1568,7 @@ export class SessionManager {
     try {
       let lost = false
       /** Redacted from everything this turn writes to the durable event log. */
-      let secrets: string[] = []
-      // What the session's own WebFetch model calls cost this turn (classicBuiltinServer).
-      let nestedUsd = 0
+      let secrets: readonly string[] = []
       // One audit row per tool call of this turn (#258, audit/turn.ts).
       const auditor = this.deps.audit
         ? new TurnAuditor(this.deps.audit, {
@@ -1642,7 +1617,7 @@ export class SessionManager {
         if (auditor) for (const e of events) await auditor.observe(e)
       }
       const show = async (message: SDKMessage) => {
-        await pluginCheck?.(message)
+        await turn?.observe(message)
         let events = mapper.map(message)
         // A result's images are stored before the event that names them is
         // logged (#782), so no watcher sees a name it cannot load. If they cannot
@@ -1663,163 +1638,16 @@ export class SessionManager {
       const flushErrors = async () => {
         for (const m of heldErrors.splice(0)) await show(m)
       }
-      let forwarded: PluginsForRun | undefined
-      let packages: PackagesForRun | undefined
-      let packageServers: PackageServers | undefined
-      let pluginCheck: ((message: SDKMessage) => Promise<void>) | undefined
-      /** The in-process MCP servers this turn gives Claude Code (`run.mcpServers`), for pluginCheck. */
-      let inProcessServers: string[] = []
+      // What the assembled options' callbacks read as the turn (turnSlot.ts).
+      // Each turn has its own query, so its own slot, never cleared: a hook
+      // Claude Code fires after the result (a late Stop retain) still reaches
+      // this turn, as the closures it replaced did.
+      const slot = createTurnSlot()
+      // What the session's own WebFetch model calls cost this turn (classicBuiltinServer, through the slot).
+      const nested = { usd: 0 }
       try {
-        // The credentials first, and into `secrets` at once: whatever fails
-        // after this point is redacted before it reaches the event log. Every
-        // candidate's, since the turn may fall back to any of them.
-        const candidates = await this.deps.credentials.candidates()
-        secrets = candidates.map((c) => c.credential.secret)
-        builtIn = this.deps.builtInTools ? await this.deps.builtInTools() : undefined
-        forwarded = this.deps.remotePlugins ? await this.deps.remotePlugins() : undefined
-        const remotePlugins = [...(forwarded?.plugins ?? [])]
-        // Plugin header values (and their bare tokens) are redacted from the
-        // event log like the credential. Claude Code never holds them (the
-        // forwarder adds them), but a plugin could echo one in a tool result.
-        secrets.push(...(forwarded?.secrets ?? []))
-        const memory = forwarded?.hindsight ? await this.memoryHooks(forwarded.hindsight, secrets, userText, { session, turnId }) : undefined
-        // Settings → plugin packages may switch it off (plugins/packages/builtins.ts).
-        const ownPlugin =
-          this.deps.ownPlugin !== undefined && (await ownPluginEnabled(this.deps.settings))
-            ? this.deps.ownPlugin
-            : undefined
-        packages = this.deps.packagePlugins ? await this.deps.packagePlugins() : undefined
-        // Each loaded directory's package, by the path Claude Code is handed (a stripped copy's too).
-        const packageNames = new Map<string, string>()
-        if (packages) {
-          // Loaded without their own http MCP servers, which come through the forwarder
-          // below: a query with strictMcpConfig off would start them itself (run.ts).
-          const loaded = packages
-          const problems = [...loaded.problems]
-          // A package that cannot be stripped is left out and said, as one that cannot be loaded.
-          const stripped = async (dir: string): Promise<string | undefined> => {
-            const pkg = loaded.loaded.find((p) => p.dir === dir)
-            if (!pkg) return dir
-            try {
-              const loadedDir = await withoutRemoteServers(dir, pkg.contentHash, path.join(this.deps.paths.stateDir, 'plugins-local'))
-              packageNames.set(loadedDir, pkg.name)
-              return loadedDir
-            } catch (err) {
-              problems.push(`plugin package ${pkg.name} was not loaded: ${(err as Error).message}`)
-              return undefined
-            }
-          }
-          const kept = async (dirs: readonly string[]) => (await Promise.all(dirs.map(stripped))).filter((d): d is string => d !== undefined)
-          packages = { ...loaded, paths: await kept(loaded.paths), allowedPaths: await kept(loaded.allowedPaths), problems }
-        }
-        // Every package's http MCP servers, through the forwarder like a remote
-        // plugin's (#2320); Claude Code loads the packages without them (above).
-        packageServers =
-          packages && this.deps.packageServers
-            ? await this.deps.packageServers(packages.loaded)
-            : undefined
-        remotePlugins.push(...(packageServers?.plugins ?? []))
-        secrets.push(...(packageServers?.secrets ?? []))
-        const pluginTiers = harnessTierOf({
-          remotePlugins,
-          tierOf,
-          ...(ownPlugin !== undefined ? { ownPlugin } : {}),
-          pluginPaths: [...(this.deps.pluginPaths ?? []), ...(packages?.paths ?? [])],
-          allowedPluginPaths: packages?.allowedPaths ?? [],
-        })
-        eventTierOf = (name, input) => raised(name, pluginTiers(name, input))
-        // A plugin left out of this turn is said so in the session, not only in the log.
-        const unavailable = (message: string) =>
-          this.events.append(id, [
-            scrubForLog(event({ type: 'error', sessionId: id, code: 'plugin_unavailable', message }), secrets),
-          ])
-        for (const problem of forwarded?.problems ?? []) {
-          this.deps.stderr?.(`${problem}\n`)
-          await unavailable(problem)
-        }
-        for (const problem of [...(packages?.problems ?? []), ...(packageServers?.problems ?? [])]) {
-          this.deps.stderr?.(`${problem}\n`)
-          await unavailable(problem)
-        }
-        const pluginPaths = [...(this.deps.pluginPaths ?? []), ...(packages?.paths ?? [])]
-        const allowedPluginPaths = packages?.allowedPaths ?? []
-        pluginCheck = async (message: SDKMessage) => {
-          if (message.type !== 'system' || message.subtype !== 'init') return
-          // The SDK skips a plugin it cannot load; the init message lists what it did load
-          // (https://code.claude.com/docs/en/agent-sdk/plugins, "Verifying plugin installation").
-          const listed = (message as { plugins?: { path: string }[] }).plugins ?? []
-          const loaded = new Set(listed.map((p) => path.resolve(p.path)))
-          if (ownPlugin !== undefined && !loaded.has(path.resolve(ownPlugin))) {
-            await unavailable("ScadBuddy's own plugin was not loaded by Claude Code: its skills and subagents are unavailable")
-          }
-          for (const dir of [...(packages?.paths ?? []), ...allowedPluginPaths]) {
-            if (!loaded.has(path.resolve(dir))) {
-              await unavailable(`plugin package ${packageNames.get(dir) ?? path.basename(path.dirname(dir))} was not loaded by Claude Code`)
-            }
-          }
-          // #1255: Claude Code drops an in-process server it cannot connect, and every
-          // tool on it, logging that at debug level only. Say so in the session.
-          for (const name of inProcessServers) {
-            const status = message.mcp_servers.find((s) => s.name === name)?.status
-            if (status !== 'connected') {
-              await this.events.append(id, [
-                scrubForLog(
-                  event({
-                    type: 'error',
-                    sessionId: id,
-                    code: 'tools_unavailable',
-                    message: `the ${name} tools are not available in this turn: Claude Code reports their in-process MCP server as ${status ?? 'missing'}`,
-                  }),
-                  secrets,
-                ),
-              ])
-            }
-          }
-          for (const plugin of remotePlugins) {
-            const status = message.mcp_servers.find((s) => s.name === plugin.name)?.status
-            if (status !== 'connected') {
-              await unavailable(
-                `plugin ${plugin.name} is not available in this turn: its MCP server is ${status ?? 'missing'}`,
-              )
-            }
-          }
-        }
-        const [cwd, resume, settingModel, httpSetting] = await Promise.all([
-          ensureSessionDir(this.deps.paths, id),
-          this.store.exists(id),
-          this.deps.settings?.get<string>(SETTING_MODEL),
-          this.deps.httpRequest ? this.deps.settings?.get<unknown>(SETTING_HTTP_REQUEST) : undefined,
-        ])
-        // A Workflow agent's chat (startChild): its own model, effort and subagent definition.
-        const model = session.agentModel ?? settingModel
-        const agentDefinition = session.agentType ? (await loadAgentDefinitions())[session.agentType] : undefined
-        // The http_request tool (#827): on unless the setting is `false`. Its
-        // saved bodies live in the session's own directory, and it never sees
-        // the turn's secrets except to refuse a request that carries one.
-        const http =
-          this.deps.httpRequest && httpRequestEnabled(httpSetting)
-            ? httpRequestServer({
-                // In Postgres, so any replica serves it, after a deploy too (#2374).
-                saved: new PgHttpBodies(this.deps.sql, id),
-                // save_to_workspace (#2329): the body becomes one of the session's files.
-                workspace: { files: this.files, ref: { kind: 'session', sessionId: id } },
-                secrets: () => secrets,
-                audit: this.deps.audit,
-                actor: session.owner,
-                sessionId: id,
-                turnId,
-                signal: controller.signal,
-                ...(this.deps.httpRequest.resolve ? { resolve: this.deps.httpRequest.resolve } : {}),
-                ...(this.deps.httpRequest.limits ? { limits: this.deps.httpRequest.limits } : {}),
-              })
-            : undefined
-        // The built-ins the packages name that the session serves instead of Claude Code: the
-        // background ones, kept past the turn, and WebFetch, pinned to the addresses it checked (#2684).
-        const served = allowedPluginPaths.length
-          ? (packages?.builtinTools ?? []).filter(
-              (n) => CLASSIC_BUILTINS.includes(n) && (this.deps.background !== undefined || !BACKGROUND_BUILTINS.includes(n)),
-            )
-          : []
+        turn = await this.runner.assemble(session, principal, slot)
+        secrets = turn.secrets
         const gate = this.approvals.gate({
           sessionId: id,
           turnId,
@@ -1834,10 +1662,9 @@ export class SessionManager {
               return call ? log([call]) : Promise.resolve()
             }),
         })
-        // AskUserQuestion (#940): only the user in the panel answers, so only a
-        // session the browser user owns is given the tool. Any other owner's turn
-        // would wait on someone who is not asked.
-        const questionGate = asksUser
+        // AskUserQuestion (#940): the run has a question gate only in a session
+        // the browser user owns (TurnRunner), and this turn's answers it.
+        const questionGate = turn.run.questionGate
           ? this.questions.gate({
               sessionId: id,
               turnId,
@@ -1849,111 +1676,43 @@ export class SessionManager {
               turnStartedAt: session.claimedAt,
             })
           : undefined
-        const run: Omit<HarnessRun, 'credential'> = {
-          paths: this.deps.paths,
-          prompt,
-          cwd,
-          sessionStore: this.store,
-          includePartialMessages: true,
-          maxTurns: session.maxTurns,
-          maxBudgetUsd: Math.max(session.budgetUsd - session.costUsd, 0.000001),
-          signal: controller.signal,
-          tierOf,
-          ...(builtIn ? { builtInPolicy: builtIn } : {}),
+        const memory = turn.memory?.(userText, turnId)
+        slot.set({
+          turnId,
+          principal,
           approvalGate: auditor ? auditor.gate(gate, (toolUseId) => this.approvals.idForToolUse(id, toolUseId)) : gate,
-          ...(questionGate ? { questionGate } : {}),
-          systemPromptAppend: served.length ? `${systemAppend()}\n\n${classicBuiltinNote(served)}` : systemAppend(),
-          // First turn: the SDK session gets OUR id; later turns resume it.
-          ...(resume ? { resume: id } : { sessionId: id }),
-          ...(typeof model === 'string' && model ? { model } : {}),
-          ...(session.agentEffort ? { effort: session.agentEffort } : {}),
-          // The plugin's subagent of that name (its agents/<name>.md), as the turn's main thread.
-          ...(agentDefinition && session.agentType ? { agent: { name: session.agentType, definition: agentDefinition } } : {}),
-          ...(this.deps.mcpServers || http || served.length
+          ...(questionGate
             ? {
-                mcpServers: {
-                  ...(this.deps.mcpServers
-                    ? this.deps.mcpServers(
-                        session,
-                        principal,
-                        {
-                          ...(questionGate
-                            ? { waitForTab: waitForTab(questionGate, controller.signal, (questionId) => this.questions.reconnected(id, { questionId })) }
-                            : {}),
-                          turnContext: () => traced.context(),
-                          ...(builtIn ? { builtIn } : {}),
-                          // The turn's credentials and plugin tokens, which workspace_read redacts (#2329).
-                          secrets: () => secrets,
-                        },
-                      )
-                    : {}),
-                  ...(http ? { [HTTP_SERVER]: http } : {}),
-                  ...(served.length
-                    ? {
-                        [BUILTIN_SERVER]: classicBuiltinServer(served, {
-                          ...(this.deps.background
-                            ? {
-                                background: {
-                                  tasks: this.deps.background.tasks,
-                                  sessionId: id,
-                                  owner: session.owner,
-                                  tz: this.deps.background.tz,
-                                  now: () => new Date(),
-                                  // A Monitor's command runs where this turn's Bash runs: this replica.
-                                  commandQueue: this.deps.background.commandQueue,
-                                  workspace: this.files,
-                                },
-                              }
-                            : {}),
-                          web: {
-                            // The answer's model call, on the turn's first credential; its cost is the turn's.
-                            nested: (this.deps.nestedQueries ?? nestedQueries)({
-                              paths: this.deps.paths,
-                              credential: async () => candidates[0]!.credential,
-                              spent: async (cost) => {
-                                nestedUsd += cost
-                              },
-                            }),
-                            secrets: () => secrets,
-                            audit: this.deps.audit,
-                            actor: session.owner,
-                            sessionId: id,
-                            turnId,
-                            signal: controller.signal,
-                            ...(this.deps.httpRequest?.resolve ? { resolve: this.deps.httpRequest.resolve } : {}),
-                          },
-                        }),
-                      }
-                    : {}),
-                },
+                questionGate,
+                waitForTab: waitForTab(questionGate, controller.signal, (questionId) => this.questions.reconnected(id, { questionId })),
               }
             : {}),
-          ...(pluginPaths.length ? { pluginPaths } : {}),
-          ...(allowedPluginPaths.length
-            ? { allowedPluginPaths, builtinTools: (packages?.builtinTools ?? []).filter((n) => !served.includes(n)) }
-            : {}),
-          ...(ownPlugin !== undefined ? { ownPlugin } : {}),
-          ...(remotePlugins.length ? { remotePlugins } : {}),
-          ...(memory ? { memoryHooks: memory.hooks } : {}),
-          traceHooks: traced.hooks(),
-          ...(this.deps.stderr ? { stderr: this.deps.stderr } : {}),
-        }
-        inProcessServers = Object.keys(run.mcpServers ?? {})
-        const turn = runWithFallback(run, {
-          candidates,
-          report: this.deps.credentials.reporter({ sessionId: id, turnId }),
-          // Each attempt's query starts inside the turn's span (runHarness starts it at once).
-          run: (attempt) => otelContext.with(traced.context(), () => this.run(attempt)),
-          ...(this.deps.probe ? { probe: this.deps.probe } : {}),
-          // A resumed query's total includes what the session spent before
-          // (fallback.ts `Spend`), as far as Claude Code priced it (#991).
-          ...(resume ? { priorCostUsd: session.ownCostUsd - session.unpricedCostUsd } : {}),
-          onRefused: (evidence, judged) => {
-            refused = { evidence, ...judged }
-          },
-          onAttempt: () => unpriced.newAttempt(),
+          ...(auditor ? { auditor } : {}),
+          trace: traced,
+          http: { turnId, signal: controller.signal },
+          nested,
+          ...(memory ? { memory } : {}),
+          signalInterrupt: () => controller.abort(new Error('the turn was interrupted')),
         })
-        for await (const message of turn) {
+        const resume = turn.run.resume !== undefined
+        const attempts = runWithFallback(
+          { ...turn.run, prompt, signal: controller.signal },
+          {
+            candidates: turn.candidates,
+            report: this.deps.credentials.reporter({ sessionId: id, turnId }),
+            // Each attempt's query starts inside the turn's span (runHarness starts it at once).
+            run: (attempt) => otelContext.with(traced.context(), () => this.run(attempt)),
+            ...(this.deps.probe ? { probe: this.deps.probe } : {}),
+            // A resumed query's total includes what the session spent before
+            // (fallback.ts `Spend`), as far as Claude Code priced it (#991).
+            ...(resume ? { priorCostUsd: session.ownCostUsd - session.unpricedCostUsd } : {}),
+            onRefused: (evidence, judged) => {
+              refused = { evidence, ...judged }
+            },
+            onAttempt: () => unpriced.newAttempt(),
+          },
+        )
+        for await (const message of attempts) {
           unpriced.observe(message)
           if (message.type === 'assistant' && message.error) {
             heldErrors.push(message)
@@ -1970,18 +1729,19 @@ export class SessionManager {
         }
         await flushErrors()
       } catch (err) {
+        // An assembly that failed released what it held, and says which secrets it had read.
+        if (err instanceof TurnAssemblyError) secrets = err.secrets
+        const cause = err instanceof TurnAssemblyError ? err.cause : err
         if (!refused) await flushErrors().catch(() => {})
         // For an error result the SDK yields the result and then throws
         // ("Claude Code returned an error result", test/run.test.ts); the
         // result is what counts then.
         if (!result && !controller.signal.aborted) {
-          failure = redact(describe(err), secrets)
-          traced.fail(err)
+          failure = redact(describe(cause), secrets)
+          traced.fail(cause)
         }
       } finally {
-        forwarded?.release()
-        packageServers?.release()
-        packages?.release()
+        turn?.release()
         local.settling = true
         clearInterval(renew)
         await renewing
@@ -2011,7 +1771,7 @@ export class SessionManager {
         // Only a turn that did not end on its own can be cut off mid-request;
         // one that did has every request priced in its result. WebFetch's own
         // model calls are in no result, so they are added the same way.
-        (stopped !== undefined || !result ? unpriced.usd() : 0) + nestedUsd,
+        (stopped !== undefined || !result ? unpriced.usd() : 0) + nested.usd,
       )
       return outcome
     } catch (err) {
@@ -2020,60 +1780,6 @@ export class SessionManager {
     } finally {
       traced.finish(outcome, result)
     }
-  }
-
-  /**
-   * The turn's memory hooks, for the `hindsight` plugin this turn loaded (so
-   * only an enabled plugin whose endpoint passed its egress check this turn).
-   * Recall is against the user's words (`recallQuery`), not the page context
-   * appended after them, unless a fixed query is configured. Undefined when
-   * memory is off or the plugin's URL is not a bank endpoint (logged).
-   *
-   * Each recall and retain becomes an audit row and a `memory` panel event
-   * (#818; hooks make no SDK message, so TurnAuditor never sees them). A
-   * retain reports after the turn ended; both writes work then too, since
-   * they need only the session row. A failure is logged by the hooks.
-   *
-   * The recall query's cap (`recallMaxQueryChars`) is read from Settings at
-   * each turn, so a change applies to the next one.
-   */
-  private async memoryHooks(
-    plugin: CheckedPlugin,
-    secrets: readonly string[],
-    userText: string,
-    turn: { session: SessionRecord; turnId: string },
-  ): Promise<MemoryHooks | undefined> {
-    const config = this.deps.memory
-    if (config === false) return undefined
-    const log = (line: string) => this.deps.stderr?.(line)
-    let client: HindsightClient
-    try {
-      client = new HindsightClient(hindsightTarget(plugin))
-    } catch (err) {
-      log(`hindsight: automatic memory is off for this turn: ${describe(err)}\n`)
-      return undefined
-    }
-    const fixed = config?.hookConfig?.recallQuery
-    const recallMaxQueryChars = await turnRecallMaxQueryChars(this.deps.settings, config?.hookConfig)
-    return createMemoryHooks({
-      ...config,
-      hookConfig: { ...config?.hookConfig, recallQuery: fixed && fixed !== '$prompt' ? fixed : userText, recallMaxQueryChars },
-      client,
-      secrets,
-      log,
-      sessionStore: this.store,
-      onActivity: (activity) => this.recordMemory(turn.session, turn.turnId, activity, secrets),
-    })
-  }
-
-  /** One recall or retain: its audit row (never fails, audit/log.ts) and its panel event. */
-  private async recordMemory(
-    session: SessionRecord,
-    turnId: string,
-    a: MemoryActivity,
-    secrets: readonly string[],
-  ): Promise<void> {
-    await recordMemoryActivity({ audit: this.deps.audit, events: this.events }, session, turnId, a, secrets)
   }
 
   /**

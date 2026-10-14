@@ -308,6 +308,7 @@ def _kinds(core: Core, components: Components) -> list[OperationKind]:
     other core is refused here rather than failing inside an operation (review #1126 1.2)."""
     from scadbuddy.api.deps import AppState
     from scadbuddy.library.asset_operations import asset_kinds
+    from scadbuddy.library.attachment_operations import attachment_kinds
     from scadbuddy.library.font_operations import font_kinds
     from scadbuddy.library.library_file_moves import library_file_move_kinds
     from scadbuddy.library.library_file_operations import library_file_kinds
@@ -333,6 +334,7 @@ def _kinds(core: Core, components: Components) -> list[OperationKind]:
         *library_file_kinds(core),
         *library_file_move_kinds(core),
         *library_write_kinds(core),
+        *attachment_kinds(core, components),
     ]
 
 

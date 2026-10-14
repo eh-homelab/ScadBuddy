@@ -53,7 +53,8 @@ export const BUSY_GIVE_UP_MS = 60 * 60 * 1000
 
 export type NextStep = { at: number } | { end: string }
 export type FireResult =
-  | { result: 'sent' }
+  /** `more`: a monitor's delivery left events for the next one (store.ts DELIVER_MAX_CHARS). */
+  | { result: 'sent'; more?: boolean }
   | { result: 'busy' }
   /** A cron occurrence given up after BUSY_GIVE_UP_MS; the next one is still due. */
   | { result: 'skipped' }
@@ -278,12 +279,16 @@ export function backgroundActivities(deps: BackgroundActivityDeps) {
             ? `the command ${JSON.stringify(t.spec.command)}`
             : `the WebSocket ${String((t.spec.ws as { url?: string }).url)}`
       const secrets = (await deps.secrets?.()) ?? []
-      const text = redact(pending.map((e) => e.text).join('\n\n'), secrets)
+      // One delivery is at most DELIVER_MAX_CHARS of events; the rest wait for the next.
+      const left = (await deps.store.pendingCount(t.id)) - pending.length
+      const events = pending.map((e) => e.text)
+      if (left > 0) events.push(`(${left} more ${left === 1 ? 'event follows' : 'events follow'} in the next message)`)
+      const text = redact(events.join('\n\n'), secrets)
       const tool = t.kind === 'workflow' ? 'Workflow' : 'Monitor'
       const sent = await deps.send(t, wrapUntrustedText(tool, redact(source, secrets), text), eventsContext(t))
       if (sent.result === 'sent') {
         await deps.store.delivered(t.id, pending.at(-1)!.seq)
-        return sent
+        return left > 0 ? { result: 'sent', more: true } : sent
       }
       if (sent.result === 'busy' && input.waitedMs >= BUSY_GIVE_UP_MS) {
         return { result: 'end', state: 'done', reason: 'events not delivered: the session was busy for an hour' }

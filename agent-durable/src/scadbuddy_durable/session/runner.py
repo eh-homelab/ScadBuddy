@@ -70,6 +70,11 @@ from temporalio.claude_agent_sdk import (
     SegmentOutput,
     ToolOutcome,
 )
+
+# Private to the git-pinned plugin (#2945): the per-activity ContextVar its `emit` reads
+# as it publishes. A pin bump (ai-integrations#33 and after) must check it still is, or
+# HeldText stops holding anything, with no error.
+from temporalio.claude_agent_sdk._events import _EMIT
 from temporalio.exceptions import ApplicationError
 
 from scadbuddy_durable.credentials import Credential, credential_env, usable_credentials
@@ -478,6 +483,32 @@ def with_refusals(injected: dict[str, Any], refusals: dict[str, str]) -> dict[st
     return out
 
 
+class HeldText:
+    """A segment's live output with its ``text`` events held back until the next other
+    event, or until the attempt ends: then they go out in order (``flush``), unless the
+    attempt was refused and they are dropped (``drop``, #2945). A refused attempt's
+    text is the refusal notice, with nothing after it."""
+
+    def __init__(self, publish: Callable[[dict[str, Any]], None]) -> None:
+        self._publish = publish
+        self._held: list[dict[str, Any]] = []
+
+    def __call__(self, event: dict[str, Any]) -> None:
+        if event.get("type") == "text":
+            self._held.append(event)
+            return
+        self.flush()
+        self._publish(event)
+
+    def flush(self) -> None:
+        held, self._held = self._held, []
+        for event in held:
+            self._publish(event)
+
+    def drop(self) -> None:
+        self._held = []
+
+
 class ScadBuddyRunner:
     def __init__(
         self,
@@ -632,6 +663,13 @@ class ScadBuddyRunner:
                 extra_options=extra,
                 **({"model": settings.model} if settings.model else {}),
             )
+            # A credential Claude Code refuses answers as the assistant ("You've hit your
+            # session limit") before its ResultError, and the plugin publishes that text
+            # (#2945): held until the attempt is known not to be refused, while another
+            # credential could still take the segment over.
+            publish = _EMIT.get()
+            held = HeldText(publish) if publish is not None and i + 1 < len(credentials) else None
+            token = _EMIT.set(held) if held is not None else None
             try:
                 out = await runner.run(inp, attempt)
                 if out.is_error and out.error and _BUDGET_REACHED.match(out.error):
@@ -654,6 +692,11 @@ class ScadBuddyRunner:
                     len(error_text(err).encode()),
                 )
                 if credentials_fault(err) and i + 1 < len(credentials):
+                    if held is not None:
+                        # Mostly the refusal notice. A fault mid-segment also drops real
+                        # text since the last tool call, which the rerun on the next
+                        # credential writes again: dropped, never flushed.
+                        held.drop()
                     cost = _cost(err)
                     if cost > 0:
                         left -= cost
@@ -681,6 +724,11 @@ class ScadBuddyRunner:
                     error=bounded(str(err)),
                     cost_usd=_cost(err),
                 )
+            finally:
+                if token is not None:
+                    _EMIT.reset(token)
+                if held is not None:
+                    held.flush()
         raise AssertionError("unreachable: the last credential returns or raises")
 
     async def run(self, inp: SegmentInput, attempt: int) -> SegmentOutput:

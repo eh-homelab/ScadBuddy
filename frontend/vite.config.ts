@@ -65,5 +65,16 @@ export default defineConfig({
     // three.js dominates the bundle; the viewer is behind a dynamic import so it
     // lands in its own chunk rather than the entry.
     chunkSizeWarningLimit: 1000,
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          // src/lib/zodConfig.ts in zod's own chunk, run right after zod: zod reads
+          // `jitless` when a schema is built, and every chunk that builds one imports this
+          // chunk first. In the entry it ran only after the entry's static imports, which
+          // build schemas at import whenever the split puts them in a shared chunk.
+          groups: [{ name: 'zod', test: /[\\/]node_modules[\\/]zod[\\/]|[\\/]src[\\/]lib[\\/]zodConfig\.ts$/ }],
+        },
+      },
+    },
   },
 })

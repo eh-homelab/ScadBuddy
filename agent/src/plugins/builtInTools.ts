@@ -133,6 +133,8 @@ export type BuiltInPolicy = {
   disallowed: readonly string[]
   /** Whether `set`'s tool `tool` (bare name) is disabled. */
   isDisabled(set: string, tool: string): boolean
+  /** Every raised tier as `<harness name>=<tier>`, sorted: what a warm process's fingerprint covers (sessions/turnRunner.ts). */
+  raised: readonly string[]
 }
 
 export function builtInPolicy(entries: readonly { set: BuiltInToolSet; overrides: StoredOverrides }[]): BuiltInPolicy {
@@ -150,6 +152,7 @@ export function builtInPolicy(entries: readonly { set: BuiltInToolSet; overrides
     tierOf: (harnessName, tier) => raiseTier(tier, raised.get(harnessName)),
     disallowed,
     isDisabled: (set, tool) => disabled.has(`${set}\u0000${tool}`),
+    raised: [...raised].map(([name, tier]) => `${name}=${tier}`).sort(),
   }
 }
 

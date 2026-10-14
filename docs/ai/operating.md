@@ -342,9 +342,12 @@ confirmation; a form adds one last. The list is read again just after the earlie
 cooldown ends, since the status is worked out at read time. The `curl` below is the
 fallback when there is no UI.
 
-The routes without `/entries` are the single-credential routes from #1000: they act on
-the first credential by priority, for scripts written against them. The UI no longer
-uses them; the `/entries` and `/order` routes manage every credential (#1093).
+The routes without `/entries` are the single-credential routes from #1000. They act on
+the first credential by priority, for scripts written against them. They are
+**deprecated** (#2768): the UI no longer uses them, and every answer carries
+`Deprecation: true` and a `Link` header naming `/api/v1/ai/credentials/entries` as the
+successor. The `/entries` and `/order` routes manage every credential (#1093); use them
+in anything new.
 
 | Route | Guarded | What it does |
 |---|---|---|
@@ -368,13 +371,22 @@ The no-database `503` also carries
 `"code": "no_database"` (`NO_DATABASE_CODE`), which is what the Settings section hides on;
 the not-yet-migrated one has no `code`, and the section shows it with a Retry.
 
-Example, from a loopback shell on the pod (for instance through `kubectl port-forward`):
+Example, from a loopback shell on the pod (for instance through `kubectl port-forward`).
+It reads the new entry's `id` with `jq`; where the shell has no `jq`, read `id` from
+the `POST`'s JSON answer by hand. The `POST` adds a credential every time it runs, so
+running it again leaves a duplicate: to replace an existing key, `PUT` it to
+`/api/v1/ai/credentials/entries/{id}` instead, taking its `id` from
+`GET /api/v1/ai/credentials/entries`.
 
 ```bash
-curl -sS -X PUT http://localhost:8081/api/v1/ai/credentials \
+id=$(curl -sS -X POST http://localhost:8081/api/v1/ai/credentials/entries \
+  -H 'Origin: http://localhost:8081' -H 'Content-Type: application/json' \
+  -d '{"kind":"anthropic_api_key","secret":"sk-ant-…"}' | jq -r .id)
+curl -sS -X POST "http://localhost:8081/api/v1/ai/credentials/entries/$id/test" -H 'Origin: http://localhost:8081'
+# Replacing that key later, rather than adding another:
+curl -sS -X PUT "http://localhost:8081/api/v1/ai/credentials/entries/$id" \
   -H 'Origin: http://localhost:8081' -H 'Content-Type: application/json' \
   -d '{"kind":"anthropic_api_key","secret":"sk-ant-…"}'
-curl -sS -X POST http://localhost:8081/api/v1/ai/credentials/test -H 'Origin: http://localhost:8081'
 ```
 
 This works because the loopback pair is always accepted from a loopback peer
@@ -905,6 +917,11 @@ untrusted-data envelope every tool result gets
 (what a command prints or a socket sends is data, never the user's words), as the
 session's next message once it is idle (Claude Code
 shows them mid-turn; here they wait for the turn to end), and the watch's end last.
+One message carries at most 64k characters of events (`DELIVER_MAX_CHARS`, `store.ts`)
+and says how many follow; the rest go in the next once the session is idle again.
+A classic session's command runs on one replica's queue, so a rollout that replaces that
+pod ends it as `failed` (its heartbeat stops and it is not retried): re-arm it after a
+deploy. A durable session's command and any WebSocket are not tied to one pod this way.
 A `Workflow` is a task of the same kind too (Claude Code's tool, its texts measured on
 2.1.296). Its script runs as one heartbeating activity on any agent (`wf_run`), in
 QuickJS compiled to WebAssembly (`background/workflowRunner.ts`), never in the service's

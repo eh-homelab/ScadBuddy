@@ -33,6 +33,7 @@ from scadbuddy.bambuddy.dispatch import QueueOutcome
 from scadbuddy.bambuddy.filaments import FilamentPlan, normalise_colour
 from scadbuddy.bambuddy.filaments3mf import (
     LocalFilaments,
+    SlicedProfile,
     UnreadableFilamentsError,
     read_filaments,
 )
@@ -118,6 +119,31 @@ class PrintSource(Protocol):
         (:attr:`~scadbuddy.bambuddy.dispatch.SlicePlan.whole_file`, #2180)."""
         ...
 
+    @property
+    def is_sliced(self) -> bool:
+        """A file sliced already (#2671): queued as it is, with nothing laid out, sliced
+        or chosen for the slicer."""
+        ...
+
+    @property
+    def sliced_profile(self) -> SlicedProfile | None:
+        """What :attr:`is_sliced` file was sliced for, as far as it could be read."""
+        ...
+
+    async def recorded_slice(
+        self, client: BambuddyClient, library_file_id: int, preset_key: str
+    ) -> int | None:
+        """A slice ScadBuddy already made of copy ``library_file_id`` with these presets
+        (:meth:`record`) that Bambuddy still has, newest first: queued in place of
+        slicing again (#2671). ``None`` when there is none.
+
+        Matched on ``preset_key``, which leaves the filament colours out: a copy left
+        uncoloured is shared by prints of other spools, so a reused slice keeps the
+        colour metadata of the spools it was sliced for. That is #2169's trade-off for
+        the background slice too: colours change no toolpath, and the queue carries
+        the spools chosen now."""
+        ...
+
     async def fetch_3mf(self, client: BambuddyClient) -> bytes | None:
         """The 3MF to lay out and slice: the one thing that differs between an output
         and a library file (#1752). ``None`` when there are no bytes to lay out: a
@@ -179,6 +205,11 @@ class PrintSource(Protocol):
         """After a print into a project: what the next Generate into it lays its file
         out for (#317), its nozzle plan too (#2166)."""
         ...
+
+
+MAX_RECORDED_SLICES = 3
+"""How many of ScadBuddy's recorded slices of a copy a print checks for one Bambuddy
+still has, newest first (#2955): past that it slices again."""
 
 
 class _Fetching(Protocol):
@@ -322,6 +353,40 @@ class PrintPipeline:
 
     async def fetched_3mf(self: _Fetching, client: BambuddyClient) -> bytes | None:
         return (await PrintPipeline._fetch(self, client)).payload
+
+    async def recorded_slice(
+        self: _Fetching, client: BambuddyClient, library_file_id: int, preset_key: str
+    ) -> int | None:
+        if self.uploads is None:
+            return None
+        recorded = await self.uploads.slices_of(
+            self.subject.run_subject, library_file_id, preset_key
+        )
+        # Bambuddy hands a deleted file's id to the next file, so an id alone could
+        # queue another model's G-code (#2691 review): a slice is reused only while the
+        # file at its id has the hash it was recorded with. One recorded with none
+        # (its read failed, or it predates the check) is never reused.
+        known = [sliced for sliced in recorded if sliced.file_hash is not None]
+        # Only the newest few: each is a GET, one after another, and rows of slices
+        # Bambuddy deleted since are never pruned (#2955).
+        for sliced in known[:MAX_RECORDED_SLICES]:
+            try:
+                file = await client.library_file(sliced.id)
+            except ApiError as error:
+                # Deleted in Bambuddy since, or unreadable: only a slice saved, so the
+                # print slices again rather than fail over it.
+                logger.info(
+                    "a recorded slice is not reused",
+                    extra={"library_file_id": sliced.id, "status": error.status},
+                )
+                continue
+            if is_sliced(file.file_type) and file.file_hash == sliced.file_hash:
+                return sliced.id
+            logger.info(
+                "a recorded slice's id now holds another file; it is not reused",
+                extra={"library_file_id": sliced.id},
+            )
+        return None
 
     async def file_to_read(self: _Fetching, client: BambuddyClient) -> ReadFile:
         uploads, settings = PrintPipeline._stores(self)
@@ -500,6 +565,14 @@ class OutputSource(PrintPipeline):
             self._payload = await read_3mf(self.store, self.meta)
         return self._payload
 
+    @property
+    def is_sliced(self) -> bool:
+        return False
+
+    @property
+    def sliced_profile(self) -> SlicedProfile | None:
+        return None
+
     async def plate_ids(self, client: BambuddyClient) -> list[int]:
         payload = await self._own_3mf()
         return [plate.index for plate in plates_of(io.BytesIO(payload))]
@@ -536,12 +609,12 @@ class OutputSource(PrintPipeline):
         return self.local
 
 
+#: A sliced file: queued as it is, never sliced again (#2671).
+SLICED_TYPE = "gcode.3mf"
 #: The ``file_type`` values the dialog prints from the library (spec 2026-09-28 §2). An
 #: STL is one plate of one filament; Bambuddy's slice route takes it (the #313 probe,
-#: recordings/README.md).
-PRINTABLE_TYPES: frozenset[str] = frozenset({"3mf", "stl"})
-#: A sliced file: printed from Bambuddy directly, never through the dialog.
-SLICED_TYPE = "gcode.3mf"
+#: recordings/README.md). A sliced file is queued as it is (#2671).
+PRINTABLE_TYPES: frozenset[str] = frozenset({"3mf", "stl", SLICED_TYPE})
 #: The color of the one filament of a file Bambuddy reads none from (an STL, a 3MF
 #: without slice metadata). ``normalise_colour`` reads it as unknown.
 UNKNOWN_COLOUR = ""
@@ -564,10 +637,10 @@ class SpoolFullError(Exception):
 
 
 class ReadOutOfMemoryError(Exception):
-    """A library file this process ran out of memory reading. With no triangle limit
-    (the default) nothing refuses a file for its size, so a huge one can; the file is
-    not at fault and a smaller budget or more memory would read it, so this is never
-    kept as its refusal."""
+    """A 3MF (a library file, or an output's plate) this process ran out of memory
+    reading. With no triangle limit (the default) nothing refuses a file for its size,
+    so a huge one can; the file is not at fault and a smaller budget or more memory
+    would read it, so this is never kept as its refusal."""
 
     def __init__(self) -> None:
         super().__init__(
@@ -580,9 +653,11 @@ def printable(file_type: str | None) -> bool:
     return (file_type or "").lower() in PRINTABLE_TYPES
 
 
+def is_sliced(file_type: str | None) -> bool:
+    return (file_type or "").lower() == SLICED_TYPE
+
+
 def _refusal(file: LibraryFile) -> str:
-    if (file.file_type or "").lower() == SLICED_TYPE:
-        return f"{file.filename} is sliced already. Print it from Bambuddy."
     kind = file.file_type or "file of unknown type"
     return (
         f"ScadBuddy prints only 3MF and STL files from the library, and "
@@ -692,8 +767,10 @@ class LibrarySource(PrintPipeline):
         # No plate metadata is one plate, and no filaments is one of unknown color: a
         # file laid out that way still has something on the bed to print.
         source.colours = colours or [UNKNOWN_COLOUR]
-        source.plates = plates or [1]
         source.local = local
+        held = source.sliced_profile
+        # A sliced file prints only the plates it holds G-code for (#2671).
+        source.plates = ([plate.index for plate in held.plates] if held else []) or plates or [1]
         return source
 
     async def _own_filaments(
@@ -702,13 +779,19 @@ class LibrarySource(PrintPipeline):
         """The slots read from the bytes this source prints, downloaded once and kept for
         the print (:meth:`PrintPipeline._fetch`); ``None`` for a file they cannot be read
         from (an STL, one past :data:`MAX_DOWNLOAD_BYTES`, an unreadable 3MF)."""
-        if self.file_type != "3mf":
+        if self.is_sliced:
+            # Never laid out, so not fetched for the print (:meth:`fetch_3mf`): read here.
+            payload = await self.download(client)
+        elif self.file_type == "3mf":
+            payload = (await PrintPipeline._fetch(self, client)).payload
+        else:
             return None
-        payload = (await PrintPipeline._fetch(self, client)).payload
         if payload is None:
             return None
         try:
-            return await asyncio.to_thread(read_filaments, io.BytesIO(payload))
+            return await asyncio.to_thread(
+                partial(read_filaments, sliced=self.is_sliced), io.BytesIO(payload)
+            )
         except UnreadableFilamentsError as error:
             logger.info(
                 "could not read the library file's filament slots; Bambuddy is asked instead",
@@ -719,6 +802,14 @@ class LibrarySource(PrintPipeline):
     @property
     def subject(self) -> PrintSubject:
         return PrintSubject.library(self.file_id)
+
+    @property
+    def is_sliced(self) -> bool:
+        return self.file_type == SLICED_TYPE
+
+    @property
+    def sliced_profile(self) -> SlicedProfile | None:
+        return self.local.profile if self.is_sliced and self.local is not None else None
 
     @property
     def options_scope(self) -> str | None:
@@ -747,7 +838,10 @@ class LibrarySource(PrintPipeline):
         return list(self.plates)
 
     async def fetch_3mf(self, client: BambuddyClient) -> bytes | None:
-        """The file's bytes, an STL wrapped in a 3MF of ScadBuddy's own (#1752)."""
+        """The file's bytes, an STL wrapped in a 3MF of ScadBuddy's own (#1752). None for
+        a sliced file, which is queued as it is (#2671)."""
+        if self.is_sliced:
+            return None
         payload = await self.download(client)
         if payload is None or self.file_type != "stl":
             return payload

@@ -9,7 +9,7 @@ import type { AgentResult } from '../src/background/workflowAgents.js'
 import { BACKGROUND_WORKFLOW, BackgroundTasks, backgroundWorkflowId } from '../src/background/service.js'
 import { eventNotice } from '../src/background/monitor.js'
 import { unwrapUntrusted } from '../src/safety/untrusted.js'
-import { BackgroundTaskStore } from '../src/background/store.js'
+import { BackgroundTaskStore, DELIVER_MAX_CHARS } from '../src/background/store.js'
 import { temporalTaskRunner } from '../src/background/temporal.js'
 import type { Database } from '../src/db.js'
 import { TASK_QUEUE } from '../src/temporal/names.js'
@@ -140,6 +140,52 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a background task's workfl
     expect(await store.pendingEvents(t.id)).toEqual([])
     expect(await store.get(t.id)).toMatchObject({ state: 'done', detail: 'exited' })
   }, 60_000)
+
+  it('sends a backlog past one delivery\'s budget over several messages, none past it', async () => {
+    // 12 events of ~7000 characters each, recorded while the session is busy: ~84k
+    // characters, more than DELIVER_MAX_CHARS, wait for one idle delivery.
+    const t = (await store.create({
+      sessionId,
+      kind: 'monitor',
+      description: 'chatty',
+      spec: {
+        description: 'chatty',
+        command: "for i in $(seq 1 12); do echo \"line$i $(head -c 7000 /dev/zero | tr '\\0' x)\"; sleep 0.25; done",
+        queue: TASK_QUEUE,
+        timeoutMs: 20_000,
+      },
+      createdBy: browser,
+    }))!
+    answers = Array.from({ length: 25 }, () => ({ result: 'busy' }) as const)
+    await (
+      await env.client.workflow.start(BACKGROUND_WORKFLOW, {
+        workflowId: backgroundWorkflowId(sessionId, t.id),
+        taskQueue: TASK_QUEUE,
+        args: [{ taskId: t.id, kind: 'monitor', retryMs: 200 }],
+      })
+    ).result()
+    const texts = sent.map((m) => unwrapUntrusted(m))
+    expect(texts.length).toBeGreaterThan(1)
+    for (const text of texts) expect(text.length).toBeLessThanOrEqual(DELIVER_MAX_CHARS + 200)
+    expect(texts[0]).toMatch(/\(\d+ more events follow in the next message\)$/)
+    const all = texts.join('\n\n')
+    for (let i = 1; i <= 12; i++) expect(all).toContain(`line${i} `)
+    expect(await store.pendingEvents(t.id)).toEqual([])
+  }, 60_000)
+
+  it('takes the oldest pending event even when it alone is past the budget', async () => {
+    const t = (await store.create({
+      sessionId,
+      kind: 'monitor',
+      description: 'm',
+      spec: { description: 'm', command: 'true', queue: TASK_QUEUE, timeoutMs: 20_000 },
+      createdBy: browser,
+    }))!
+    for (const c of ['a', 'b', 'c']) await store.appendEvent(t.id, c.repeat(100))
+    expect((await store.pendingEvents(t.id, 50)).map((e) => e.text[0])).toEqual(['a'])
+    expect((await store.pendingEvents(t.id, 200)).map((e) => e.text[0])).toEqual(['a', 'b'])
+    expect(await store.pendingCount(t.id)).toBe(3)
+  })
 
   const runWorkflow = async (body: string, extra: Record<string, unknown> = {}, expiresAt?: Date) => {
     const t = (await store.create({

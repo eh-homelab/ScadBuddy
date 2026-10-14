@@ -15,6 +15,7 @@ the worker's: that holds the database URL and the key file's path.
 from __future__ import annotations
 
 import asyncio
+import codecs
 import contextlib
 import os
 import signal
@@ -162,6 +163,9 @@ class MonitorActivities:
             nonlocal too_many
             assert proc.stdout is not None
             splitter = LineSplitter()
+            # Incremental, so a character split across two reads is kept whole, as the
+            # agent's setEncoding('utf8') keeps it.
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
             batch: list[str] = []
             chars = 0
             dropped = 0
@@ -194,6 +198,7 @@ class MonitorActivities:
                     chunk = None
                 if chunk is None or chunk == b"":
                     if chunk == b"":
+                        splitter.push(decoder.decode(b"", final=True))
                         splitter.end()
                     for line in splitter.take():
                         add(line)
@@ -203,7 +208,7 @@ class MonitorActivities:
                     if chunk == b"":
                         return
                     continue
-                splitter.push(chunk.decode("utf-8", "replace"))
+                splitter.push(decoder.decode(chunk))
                 for line in splitter.take():
                     add(line)
                     if deadline is None:
@@ -218,19 +223,23 @@ class MonitorActivities:
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(proc.pid, signal.SIGKILL)
 
+        async def watch() -> int | None:
+            await read()
+            # A command that closed its stdout but runs on still ends at the deadline.
+            return None if too_many else await proc.wait()
+
         beating = asyncio.create_task(beat())
         try:
             try:
-                await asyncio.wait_for(read(), timeout_s)
+                code = await asyncio.wait_for(watch(), timeout_s)
             except TimeoutError:
                 kill()
                 await proc.wait()
                 return {"end": {"outcome": "expired"}, "events": events}
-            if too_many:
+            if code is None:
                 kill()
                 await proc.wait()
                 return {"end": {"outcome": "too_many"}, "events": events}
-            code = await proc.wait()
             end: dict[str, Any] = (
                 {"outcome": "exited", "code": code}
                 if code >= 0

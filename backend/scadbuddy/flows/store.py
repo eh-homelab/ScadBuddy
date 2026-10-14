@@ -26,7 +26,7 @@ from psycopg_pool import ConnectionPool
 
 from scadbuddy.bambuddy.runs import TransactionalEvents
 from scadbuddy.core.events import FlowRunEvent
-from scadbuddy.flows.grants import Consumption, Grant, GrantSpec, GrantStatus, GrantUse
+from scadbuddy.flows.grants import Consumption, Grant, GrantSpec, GrantStatus, GrantUse, RuleUse
 from scadbuddy.flows.models import (
     RESULT_MAX,
     TERMINAL,
@@ -538,6 +538,32 @@ class FlowStore:
         self, run_id: str, request_id: str, pick: Callable[[Grant], Consumption | str]
     ) -> GrantUse | str:
         with self._pool.connection() as conn, conn.transaction():
+            # A run grant a trigger's standing grant seeded (#2484, §12.4) spends the
+            # standing grant's limits, across every run it seeded: its row is locked first
+            # (as a revocation locks it before the run grants), and its counters are the
+            # ones the rules are checked against.
+            # It spends only under the very approval that seeded it: one re-approved
+            # since (after an edit, maybe with other rules) is another approval, whose
+            # counters it may not reach and whose rules it never had.
+            seeded = conn.execute(
+                "SELECT standing_grant_id, standing_approval_id FROM flow_grants WHERE run_id = %s",
+                (run_id,),
+            ).fetchone()
+            standing = None
+            if seeded is not None and seeded["standing_grant_id"] is not None:
+                standing = conn.execute(
+                    "SELECT id, used, approval_id, (status = 'approved' AND revoked_at IS NULL"
+                    " AND expires_at > now()) AS in_force"
+                    " FROM flow_trigger_grants WHERE id = %s FOR UPDATE",
+                    (seeded["standing_grant_id"],),
+                ).fetchone()
+                if (
+                    standing is None
+                    or not standing["in_force"]
+                    or standing["approval_id"] is None
+                    or standing["approval_id"] != seeded["standing_approval_id"]
+                ):
+                    return "the trigger's standing grant is not in force for this run"
             grant = self._locked_grant(conn, run_id)
             if grant is None:
                 return "no grant in force"
@@ -547,19 +573,39 @@ class FlowStore:
             ).fetchone()
             if prior is not None:
                 return GrantUse.model_validate(prior)
-            taken = pick(grant)
+            approval = standing["approval_id"] if standing is not None else ""
+            shared = dict(standing["used"].get(approval, {})) if standing is not None else {}
+            checked = grant
+            if standing is not None:
+                # Its narrowings' counters stay the run's own.
+                mine = {k: v for k, v in grant.used.items() if "/" in k}
+                rules = {k: RuleUse.model_validate(v) for k, v in shared.items()}
+                checked = grant.model_copy(update={"used": {**mine, **rules}})
+            taken = pick(checked)
             if isinstance(taken, str):
                 return taken
             use = taken.use
-            used = {k: v.model_dump() for k, v in grant.used.items()}
-            for key in filter(None, (str(taken.rule_index), taken.narrowed_key)):
-                was = used.get(key, {"prints": 0, "filament_g": 0.0, "calls": 0})
-                used[key] = {
-                    "prints": was["prints"] + use.prints,
-                    "filament_g": was["filament_g"] + use.filament_g,
-                    "calls": was["calls"] + 1,
-                }
+
+            def spend(counters: dict[str, Any], keys: list[str]) -> dict[str, Any]:
+                out = dict(counters)
+                for key in keys:
+                    was = out.get(key, {"prints": 0, "filament_g": 0.0, "calls": 0})
+                    out[key] = {
+                        "prints": was["prints"] + use.prints,
+                        "filament_g": was["filament_g"] + use.filament_g,
+                        "calls": was["calls"] + 1,
+                    }
+                return out
+
+            keys = [k for k in (str(taken.rule_index), taken.narrowed_key) if k]
+            used = spend({k: v.model_dump() for k, v in grant.used.items()}, keys)
             conn.execute("UPDATE flow_grants SET used = %s WHERE id = %s", (Jsonb(used), grant.id))
+            if standing is not None:
+                counters = {**standing["used"], approval: spend(shared, [str(taken.rule_index)])}
+                conn.execute(
+                    "UPDATE flow_trigger_grants SET used = %s WHERE id = %s",
+                    (Jsonb(counters), standing["id"]),
+                )
             row = conn.execute(
                 "INSERT INTO flow_grant_uses (request_id, grant_id, run_id, fn, tool,"
                 " input_hash, rule_index, prints, filament_g, session_id, narrowed_by, pins)"

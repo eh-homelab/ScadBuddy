@@ -1260,7 +1260,7 @@ describe('library print', () => {
     const plain = await api.listLibrary({ folderId: null, all: false })
     const every = await api.listLibrary({ folderId: null, all: true })
     expect(plain.files?.map((file) => file.id)).toEqual([89, 91])
-    expect(every.files?.find((file) => file.id === 104)?.printable).toBe(false)
+    expect(every.files?.find((file) => file.id === 104)).toMatchObject({ printable: true, sliced: true })
     expect(plain.hidden).toBe(1)
   })
 
@@ -1283,8 +1283,8 @@ describe('library print', () => {
     expect((await api.getLibraryChoices(89)).model_choices?.printer_id ?? null).toBeNull()
   })
 
-  it('refuses a sliced file and a missing one', async () => {
-    await expect(api.runLibraryPrint(104, runBody)).rejects.toMatchObject({ status: 422 })
+  it('runs a sliced file and refuses a missing one', async () => {
+    await expect(api.runLibraryPrint(104, runBody)).resolves.toMatchObject({ library_file_id: 104 })
     await expect(api.runLibraryPrint(999, runBody)).rejects.toMatchObject({ status: 404 })
   })
 })

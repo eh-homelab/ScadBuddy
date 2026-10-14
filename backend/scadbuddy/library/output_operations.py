@@ -129,7 +129,10 @@ def output_kinds(state: AppState) -> list[OperationKind]:
                 )
             files_dir = blobs.dir_for(chosen.files_key) / "files"
         public_url = (await asyncio.to_thread(state.settings_store.load)).public_url
-        # Written into the saved 3MF, which a download then serves as it is (#2652).
+        # Written into the saved 3MF, which a download then serves as it is (#2652). A
+        # model.json made invalid since the render fails the save on purpose (#2868):
+        # saved without them, the file would open in Bambu Studio missing the template's
+        # settings and nothing would say so. ``answered_as_routes`` answers it as a 409.
         print_settings = await asyncio.to_thread(state.catalogue.print_settings, job.slug)
         # The Parts outlive the job that rendered them: Arrange reads them later (§7).
         # They are held before the write, so a failed hold leaves nothing saved to retry

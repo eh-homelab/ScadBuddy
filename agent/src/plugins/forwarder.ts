@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash, createHmac, randomBytes } from 'node:crypto'
 import {
   createServer,
   type IncomingHttpHeaders,
@@ -487,8 +487,44 @@ export type HarnessPlugin = {
   disabledTools: string[]
 }
 
+/** Keys `headerVersion`; random per process, since a version is only ever compared in the process that made it. */
+const HEADER_VERSION_KEY = randomBytes(32)
+
+/**
+ * A plugin as a warm process's fingerprint names it (sessions/turnRunner.ts
+ * `FingerprintParts`): its configured endpoint, never the per-run loopback URL;
+ * an HMAC of its header that moves when the header (name or secret) does and
+ * not otherwise; and its tool tiers and disabled tools, which decide what the
+ * process permits. Not the route's `pluginFingerprint`, which also moves with
+ * the address a lookup returned, so a round-robin name would change it every turn.
+ */
+export type PluginEndpoint = {
+  id: string
+  url: string
+  headerVersion: string
+  /** `<tool>=<tier>`, sorted. */
+  toolTiers: string[]
+  /** Sorted. */
+  disabledTools: string[]
+}
+
+export function pluginEndpoint(plugin: Pick<RemotePlugin, 'name' | 'url' | 'header' | 'toolTiers' | 'disabledTools'>): PluginEndpoint {
+  const { header } = plugin
+  return {
+    id: plugin.name,
+    url: plugin.url,
+    headerVersion: header
+      ? createHmac('sha256', HEADER_VERSION_KEY).update(JSON.stringify([header.name, header.value])).digest('base64url')
+      : '',
+    toolTiers: Object.entries(plugin.toolTiers).map(([tool, tier]) => `${tool}=${tier}`).sort(),
+    disabledTools: [...plugin.disabledTools].sort(),
+  }
+}
+
 export type PluginsForRun = {
   plugins: HarnessPlugin[]
+  /** Each plugin's `pluginEndpoint`, in `plugins` order (forwardForRun sets it). */
+  endpoints?: PluginEndpoint[]
   problems: string[]
   /** Header values and their bare tokens, for redaction. */
   secrets: string[]
@@ -530,6 +566,7 @@ export function forwardForRun(loaded: LoadedPlugins, forwarder: PluginForwarder)
       toolTiers: plugin.toolTiers,
       disabledTools: plugin.disabledTools,
     })),
+    endpoints: registrations.map(({ plugin }) => pluginEndpoint(plugin)),
     problems: loaded.problems,
     secrets: loaded.plugins.flatMap(({ plugin }) => (plugin.header ? headerSecretVariants(plugin.header.value) : [])),
     ...(hindsight ? { hindsight } : {}),

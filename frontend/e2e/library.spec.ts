@@ -28,12 +28,13 @@ test.describe('library', () => {
     await expect(dialog.getByRole('radio', { name: /0\.2 mm/ })).toBeChecked()
   })
 
-  test('Advanced lists a sliced file without Print, and is remembered', async ({ page }) => {
+  test('Advanced lists a sliced file with Print, and is remembered', async ({ page }) => {
     await page.goto('/library')
     await page.getByRole('switch', { name: 'Advanced' }).click()
     const sliced = page.getByTestId('library-file-104')
-    await expect(sliced).toContainText('Print it from Bambuddy')
-    await expect(sliced.getByRole('button', { name: 'Print' })).toHaveCount(0)
+    // #2671 — a sliced file prints as it is.
+    await expect(sliced.getByRole('button', { name: /^Print / })).toBeVisible()
+    await expect(sliced).not.toContainText('Print it from Bambuddy')
 
     await page.reload()
     await expect(page.getByTestId('library-file-104')).toBeVisible()

@@ -33,6 +33,8 @@ type LibraryEntry struct {
 	print_count *int32
 	// The printable property
 	printable *bool
+	// The sliced property
+	sliced *bool
 }
 
 // LibraryEntry_LibraryEntry_created_at composed type wrapper for classes i336074805fc853987abe6f7fe3ad97a6a6f3077a16391fec744f671a015fbd7e.Time, LibraryEntry_created_atMember1able
@@ -421,6 +423,8 @@ func NewLibraryEntry() *LibraryEntry {
 	m.SetIsExternal(&is_externalValue)
 	print_countValue := int32(0)
 	m.SetPrintCount(&print_countValue)
+	slicedValue := false
+	m.SetSliced(&slicedValue)
 	return m
 }
 
@@ -556,6 +560,16 @@ func (m *LibraryEntry) GetFieldDeserializers() map[string]func(i878a80d2330e89d2
 		}
 		return nil
 	}
+	res["sliced"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetBoolValue()
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetSliced(val)
+		}
+		return nil
+	}
 	return res
 }
 
@@ -617,6 +631,12 @@ func (m *LibraryEntry) GetPrintable() *bool {
 // returns a *int32 when successful
 func (m *LibraryEntry) GetPrintCount() *int32 {
 	return m.print_count
+}
+
+// GetSliced gets the sliced property value. The sliced property
+// returns a *bool when successful
+func (m *LibraryEntry) GetSliced() *bool {
+	return m.sliced
 }
 
 // Serialize serializes information the current object
@@ -683,6 +703,12 @@ func (m *LibraryEntry) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e
 	}
 	{
 		err := writer.WriteInt32Value("print_count", m.GetPrintCount())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteBoolValue("sliced", m.GetSliced())
 		if err != nil {
 			return err
 		}
@@ -756,6 +782,11 @@ func (m *LibraryEntry) SetPrintCount(value *int32) {
 	m.print_count = value
 }
 
+// SetSliced sets the sliced property value. The sliced property
+func (m *LibraryEntry) SetSliced(value *bool) {
+	m.sliced = value
+}
+
 type LibraryEntryable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.AdditionalDataHolder
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
@@ -770,6 +801,7 @@ type LibraryEntryable interface {
 	GetOutputId() LibraryEntry_LibraryEntry_output_idable
 	GetPrintable() *bool
 	GetPrintCount() *int32
+	GetSliced() *bool
 	SetCreatedAt(value LibraryEntry_LibraryEntry_created_atable)
 	SetFilename(value *string)
 	SetFileSize(value LibraryEntry_LibraryEntry_file_sizeable)
@@ -781,4 +813,5 @@ type LibraryEntryable interface {
 	SetOutputId(value LibraryEntry_LibraryEntry_output_idable)
 	SetPrintable(value *bool)
 	SetPrintCount(value *int32)
+	SetSliced(value *bool)
 }

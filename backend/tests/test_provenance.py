@@ -15,7 +15,7 @@ import trimesh
 
 from scadbuddy.core.paths import RENDERS_DIR_NAME
 from scadbuddy.library.deeplink import EDIT_NOTE, edit_url
-from scadbuddy.render import provenance
+from scadbuddy.render import provenance, zipcopy
 from scadbuddy.render.bambu3mf import (
     CORE_NS,
     PRODUCTION_NS,
@@ -141,10 +141,10 @@ def test_every_other_part_is_copied_as_its_compressed_bytes(tmp_path: Path) -> N
 
 
 def test_the_raw_copy_is_checked_on_this_python() -> None:
-    """#2910: _copy_raw writes through zipfile's private state. A Python minor bump fails
+    """#2910: copy_raw writes through zipfile's private state. A Python minor bump fails
     here until test_every_other_part_is_copied_as_its_compressed_bytes is run on it and
     RAW_COPY_CHECKED moved; until then the stamp reads and writes every entry again."""
-    assert sys.version_info[:2] == provenance.RAW_COPY_CHECKED
+    assert sys.version_info[:2] == zipcopy.RAW_COPY_CHECKED
 
 
 def test_an_unchecked_python_stamps_without_the_raw_copy(
@@ -157,12 +157,12 @@ def test_an_unchecked_python_stamps_without_the_raw_copy(
     with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("3D/3dmodel.model", f'<model xmlns="{CORE_NS}">\n<resources/>\n</model>')
         archive.writestr("3D/Objects/object_1.model", mesh)
-    monkeypatch.setattr(provenance, "RAW_COPY_CHECKED", (0, 0))
+    monkeypatch.setattr(zipcopy, "RAW_COPY_CHECKED", (0, 0))
 
-    def unused(*args: object) -> None:
-        raise AssertionError("_copy_raw ran on an unchecked Python")
+    def unused(*args: object, **kwargs: object) -> None:
+        raise AssertionError("copy_raw ran on an unchecked Python")
 
-    monkeypatch.setattr(provenance, "_copy_raw", unused)
+    monkeypatch.setattr(provenance, "copy_raw", unused)
     target = tmp_path / "model.3mf"
 
     stamp(target, PROVENANCE, source=source)
@@ -431,15 +431,15 @@ def test_a_failed_rewrite_leaves_the_original_3mf_alone(
     original = written.read_bytes()
     calls = {"n": 0}
     # Every entry but the root model is copied raw (#2755): fail the second of those.
-    real = provenance._copy_raw
+    real = zipcopy.copy_raw
 
-    def fail_partway(*args: Any) -> None:
+    def fail_partway(*args: Any, **kwargs: Any) -> None:
         calls["n"] += 1
         if calls["n"] > 1:
             raise OSError("no space left on device")
-        real(*args)
+        real(*args, **kwargs)
 
-    monkeypatch.setattr(provenance, "_copy_raw", fail_partway)
+    monkeypatch.setattr(provenance, "copy_raw", fail_partway)
     with pytest.raises(OSError, match="no space"):
         stamp(written, PROVENANCE)
 
@@ -507,6 +507,33 @@ def test_print_settings_are_stamped_as_edits_to_the_system_process(written: Path
     added = {"enable_prime_tower", "wipe_tower_no_sparse_layers", "different_settings_to_system"}
     assert {key: value for key, value in settings.items() if key not in added} == before
     assert read(written) == PROVENANCE
+
+
+def test_print_settings_list_one_entry_per_filament_of_a_multi_filament_project() -> None:
+    """#2869: ``different_settings_to_system`` is the process's edits, then one empty
+    entry per ``filament_settings_id``, then the printer's, however many filaments."""
+    before = {
+        "filament_settings_id": ["Bambu PLA Basic @BBL H2C"] * 3,
+        "layer_height": "0.2",
+        "print_settings_id": "0.20mm Standard @BBL H2C",
+    }
+
+    settings = json.loads(
+        provenance.with_print_settings(
+            json.dumps(before).encode(), {"enable_prime_tower": "1", "wall_loops": "3"}
+        )
+    )
+
+    assert settings["different_settings_to_system"] == [
+        "enable_prime_tower;wall_loops",
+        "",
+        "",
+        "",
+        "",
+    ]
+    assert (settings["enable_prime_tower"], settings["wall_loops"]) == ("1", "3")
+    added = {"enable_prime_tower", "wall_loops", "different_settings_to_system"}
+    assert {key: value for key, value in settings.items() if key not in added} == before
 
 
 def test_print_settings_change_no_other_part(written: Path) -> None:

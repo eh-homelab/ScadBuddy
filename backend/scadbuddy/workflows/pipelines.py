@@ -177,12 +177,15 @@ def _prepare_timeout() -> timedelta:
 CACHED_TIMEOUT = SHORT + TRANSFER
 #: `finish_piece`: the piece fetched, the short stage, the piece published.
 FINISH_TIMEOUT = SHORT + 2 * TRANSFER
+#: `reuse_geometry`: the earlier piece fetched, its files copied and the preview
+#: rewritten, the piece published.
+REUSE_TIMEOUT = SHORT + 2 * TRANSFER
 
 
 def _waiter_recheck() -> timedelta:
     """How long a waiting job trusts a running piece before looking again: the piece's
-    worst case with every retry (`cached_piece`, `prepare`, the two openscad
-    activities and `finish_piece`, each at its bound), plus one `SHORT` of slack. A
+    worst case with every retry (`cached_piece`, `prepare`, `reuse_geometry`, the two
+    openscad activities and `finish_piece`, each at its bound), plus one `SHORT` of slack. A
     live piece is then never re-checked, however many retries it needs, so a waiter
     never restarts a render another job is still paying for. Not covered: time a task
     sits queued for a busy worker, which no activity timeout bounds; a re-check then is
@@ -190,6 +193,7 @@ def _waiter_recheck() -> timedelta:
     return (
         _retried(CACHED_TIMEOUT)
         + _retried(_prepare_timeout())
+        + _retried(REUSE_TIMEOUT)
         + _retried(_main_timeout())
         # One piece's budget: a layout of many outlasts it, and the re-check that
         # follows is harmless (below), so the wait is not stretched for the rare one.
@@ -221,6 +225,7 @@ FAILURE_TYPES = ("OpenSCADError", "ParameterError", "TemplateActivityError")
 _STAGES = {
     "cached_piece": "looking up the finished piece",
     "prepare": "preparing the template's source",
+    "reuse_geometry": "recolouring an earlier render's geometry",
     "render_main": "rendering the model",
     "render_solids": "building the per-colour solids",
     "finish_piece": "writing the 3MF and previews",
@@ -301,6 +306,29 @@ class RenderPiece:
             heartbeat_timeout=HEARTBEAT,
             retry_policy=RETRY,
         )
+        # Geometry first, colours second: a piece whose geometry an earlier piece in
+        # other colours already has is that piece's meshes recoloured, then finished.
+        # Only a shortcut: when it fails, the piece is rendered as if it had missed.
+        if prepared.geometry_key is not None:
+            reused: RenderMainResult | None = None
+            try:
+                reused = await workflow.execute_activity(
+                    "reuse_geometry",
+                    args=[req, prepared],
+                    result_type=RenderMainResult,
+                    start_to_close_timeout=REUSE_TIMEOUT,
+                    heartbeat_timeout=HEARTBEAT,
+                    retry_policy=RETRY,
+                )
+            except ActivityError as error:
+                if is_cancelled_exception(error):
+                    raise
+                workflow.logger.warning("reusing the geometry failed; rendering it: %s", error)
+            if reused is not None:
+                # Unrecorded: the row must name a piece that was rendered, whose raw
+                # render holds the colours the row lists.
+                unrecorded = prepared.model_copy(update={"geometry_key": None})
+                return await self._finish(req, unrecorded, reused)
         main: RenderMainResult = await workflow.execute_activity(
             "render_main",
             args=[req, prepared],
@@ -316,6 +344,11 @@ class RenderPiece:
             heartbeat_timeout=HEARTBEAT,
             retry_policy=RETRY,
         )
+        return await self._finish(req, prepared, main)
+
+    async def _finish(
+        self, req: PieceRequest, prepared: PrepareResult, main: RenderMainResult
+    ) -> PieceResult:
         result: PieceResult = await workflow.execute_activity(
             "finish_piece",
             args=[req, prepared, main],
