@@ -349,9 +349,10 @@ def _cap_output(tmp_path: Path) -> tuple[trimesh.Trimesh, Source]:
 def test_too_many_candidate_pairs_leave_the_own_colour_and_say_so(tmp_path: Path) -> None:
     shifted, source = _cap_output(tmp_path)
     problems: list[str] = []
-    codes, _, verbatim = transfer(shifted, source, problems, max_pairs=1)
+    codes, _, verbatim = transfer(shifted, source, problems, max_pairs=1, label="o1 p1")
     assert verbatim == 0 and set(codes) == {""}
     assert len(problems) == 1 and "own colour" in problems[0]
+    assert problems[0].startswith("o1 p1: ")
     # Within the budget the same faces take their sources' whole colours.
     assert any(transfer(shifted, source, [])[0])
 
@@ -366,9 +367,10 @@ def test_a_crowded_cell_carries_no_painting_and_says_so(
 
     monkeypatch.setattr(paint_module, "match_points", crowded)
     problems: list[str] = []
-    codes, _, verbatim = transfer(shifted, source, problems)
+    codes, _, verbatim = transfer(shifted, source, problems, label="o1 p1")
     assert verbatim == 0 and set(codes) == {""}
     assert len(problems) == 1 and "not carried" in problems[0]
+    assert problems[0].startswith("o1 p1: ")
 
 
 def test_touching_parts_still_carry_every_code_verbatim(tmp_path: Path) -> None:
@@ -427,3 +429,17 @@ def test_a_bad_painting_on_one_object_leaves_the_others_painted(tmp_path: Path) 
     half = len(codes)
     assert carried.paint.codes[half:] == codes
     assert not any(carried.paint.codes[:half])
+
+
+def test_a_transfers_warnings_name_the_scene_parts_they_are_about(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scene = written(tmp_path, body())
+    output = rendered(tmp_path, scene, ORANGE)
+
+    def crowded(*_: object) -> np.ndarray:
+        raise ValueError("a cell holds 65 distinct points")
+
+    monkeypatch.setattr(paint_module, "match_points", crowded)
+    _, warnings = carry_paint(tmp_path, {}, [ColourPart(1, "Body", ORANGE, output)])
+    assert len(warnings) == 1 and warnings[0].startswith("o1 p1: ")

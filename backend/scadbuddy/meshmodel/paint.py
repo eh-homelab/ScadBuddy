@@ -147,12 +147,14 @@ def transfer(
     problems: list[str],
     *,
     max_pairs: int = MAX_NEAR_PAIRS,
+    label: str = "",
 ) -> tuple[list[str], IntArray, int]:
     """Each of ``output``'s faces' code and turn, by the module docstring's rules, and
     how many faces were carried verbatim. Work past a bound never fails the render: a
     source with too many distinct points in one cell carries nothing, and more than
     ``max_pairs`` candidate pairs leaves the non-verbatim faces in the part's own
-    colour; each is appended to ``problems``."""
+    colour; each is appended to ``problems``, led by ``label`` (the scene parts) if given."""
+    lead = f"{label}: " if label else ""
     vertices = np.asarray(output.vertices, dtype=np.float64)
     faces = np.asarray(output.faces, dtype=np.int64)
     codes = [""] * len(faces)
@@ -162,7 +164,9 @@ def transfer(
     try:
         ids = match_points(source.vertices, vertices, VERBATIM_MM)[faces]
     except ValueError as error:
-        problems.append(f"its painting is not carried, so it prints in its own colour: {error}")
+        problems.append(
+            f"{lead}its painting is not carried, so it prints in its own colour: {error}"
+        )
         return codes, turns, 0
     whole = np.flatnonzero((ids >= 0).all(axis=1))
     found = np.full(len(faces), -1, dtype=np.int64)
@@ -204,7 +208,7 @@ def transfer(
             )
         except NearPairsExceeded as error:
             problems.append(
-                f"{len(rest)} faces are not its painting's own, and finding their colours "
+                f"{lead}{len(rest)} faces are not its painting's own, and finding their colours "
                 f"would take too long ({error}), so they print in the part's own colour"
             )
             return codes, turns, len(verbatim)
@@ -296,7 +300,8 @@ def carry_paint(
             continue
         source, problems = _source(directory, members, mesh_of)
         warnings += problems
-        codes, turns, _ = transfer(part.mesh, source, warnings)
+        label = ", ".join(f"{obj.id} {p.id}" for obj, p in members if p.painted)
+        codes, turns, _ = transfer(part.mesh, source, warnings, label=label)
         if any(codes):
             carried[index] = CarriedPaint(Paint(tuple(codes), source.palette), turns)
     return carried, warnings
