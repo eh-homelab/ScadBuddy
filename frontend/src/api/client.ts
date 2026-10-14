@@ -23,6 +23,7 @@ import type {
   FilamentOptions,
   FontCatalogue,
   FontFamily,
+  GlyphCoverage,
   HttpRequestSetting,
   ModelSetting,
   PrinterCameraSetting,
@@ -1825,6 +1826,10 @@ export const api = {
     }),
 
   listFonts: () => request<FontFamily[]>('/fonts'),
+
+  /** #2358 — the characters of `text` the font has no glyph for, which a render leaves out. */
+  getGlyphs: (font: string, text: string) =>
+    request<GlyphCoverage>(`/fonts/glyphs?${new URLSearchParams({ font, text })}`),
 
   /** The Google Fonts catalogue, fetched and cached server-side — no API key in the browser. */
   listFontCatalogue: (query: { q?: string; category?: string; limit?: number } = {}) => {
