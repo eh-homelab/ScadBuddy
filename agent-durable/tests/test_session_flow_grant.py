@@ -168,6 +168,25 @@ async def test_a_flow_turns_plugin_tool_call_inside_the_grant_runs_with_no_entry
     await base._replays(harness, handle)
 
 
+async def test_a_grant_used_for_another_input_does_not_admit_a_plugin_tools_call(
+    harness: base.Harness, agent_db: Conn, granted: GrantCheck
+) -> None:
+    """#2649: the recorded use must be for this call's own input hash; a verdict for
+    another input parks the turn tool's call, as it does ScadBuddy's own."""
+    harness.stand_in.turn_offered = [base.NOTES_POST]
+    harness.stand_in.input_hashes["notes__post"] = "d" * 64
+    granted.use_hash = "e" * 64
+    sid, handle = await harness.session(agent_db)
+    await send_flow(handle, "post it")
+    [entry] = await base._parked(handle)
+    assert entry["kind"] == "approval"
+    assert harness.stand_in.ran == []
+    cur = await agent_db.execute(
+        "SELECT count(*) FROM ai_input_responses WHERE session_id = %s", (sid,)
+    )
+    assert await cur.fetchone() == (0,)
+
+
 async def test_a_turn_the_person_sends_is_no_flow_turn(
     harness: base.Harness, agent_db: Conn, granted: GrantCheck
 ) -> None:
