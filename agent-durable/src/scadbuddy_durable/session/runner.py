@@ -103,6 +103,22 @@ def _http_url(value: object) -> TypeGuard[str]:
     return parts.scheme in ("http", "https") and bool(parts.hostname)
 
 
+#: Schemes a refused URL may be named by. Any other "scheme" may be part of the URL:
+#: urlsplit reads ``localhost:8081/mcp``'s host as its scheme.
+NAMED_SCHEMES = frozenset({"file", "javascript", "data", "ftp", "mailto", "ws", "wss"})
+
+
+def _url_problem(value: str) -> str:
+    """Why :func:`_http_url` refused ``value``, naming nothing of the URL but its scheme."""
+    try:
+        parts = urllib.parse.urlsplit(value)
+    except ValueError:
+        return "unparseable"
+    if parts.scheme not in ("http", "https"):
+        return f"scheme {parts.scheme!r}" if parts.scheme in NAMED_SCHEMES else "no scheme"
+    return "no host"
+
+
 IMAGES_SERVER = "scadbuddy_images"
 VIEW_IMAGES = "view_user_images"
 VIEW_IMAGES_TOOL = f"mcp__{IMAGES_SERVER}__{VIEW_IMAGES}"
@@ -524,6 +540,8 @@ class ScadBuddyRunner:
         self._plugin_dir = plugin_dir
         self._package_root = package_root
         self._subagent_url = subagent_url
+        # The refused stored URL last warned of: warned once, not on every segment.
+        self._refused_url: str | None = None
         # Read once, at the first segment that gives subagents: the files are the image's.
         self._agents_dir = agents_dir
         self._agents: dict[str, AgentDefinition] | None = None
@@ -574,8 +592,18 @@ class ScadBuddyRunner:
         url = stored.get("url") if isinstance(stored, dict) else None
         if not _http_url(url):
             # The agent's route stores only an http(s) URL; a row written any other way
-            # does not reach the subagents' definitions (#2883).
+            # does not reach the subagents' definitions (#2883). Said, so an operator
+            # sees why the setting has no effect; the URL itself is never logged (#3054).
+            if isinstance(url, str) and url and url != self._refused_url:
+                self._refused_url = url
+                logger.warning(
+                    "the stored subagent server URL is not an http(s) URL with a host (%s);"
+                    " using the worker's own",
+                    _url_problem(url),
+                )
             url = self._subagent_url
+        else:
+            self._refused_url = None
         if self._agents is None:
             self._agents = subagents.load_agents(self._agents_dir)
         token = subagents.token_for(self._kek, session, str(row[2]), row[0], row[1])
