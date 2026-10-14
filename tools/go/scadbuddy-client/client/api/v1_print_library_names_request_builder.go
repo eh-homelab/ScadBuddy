@@ -14,7 +14,7 @@ type V1PrintLibraryNamesRequestBuilder struct {
 	i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.BaseRequestBuilder
 }
 
-// V1PrintLibraryNamesRequestBuilderGetQueryParameters each file's name and folder, in the order asked (a repeated id once), read fromBambuddy one file at a time, so a page that labels a few ids (Settings → Rememberedchoices, #2349) need not list the whole library. A file Bambuddy no longer has is“name: null“; any other failure is the route's.
+// V1PrintLibraryNamesRequestBuilderGetQueryParameters each file's name and folder, in the order asked (a repeated id once), read fromBambuddy one file at a time, so a page that labels a few ids (Settings → Rememberedchoices, #2349) need not list the whole library. A file Bambuddy no longer has is“name: null“; any other failure is the route's, and cancels the other reads beforethe client closes. When several files are asked and Bambuddy has none of them, thatreads as a misrouted base URL rather than every file deleted, so it is a 502: a pagethen shows the ids, never "deleted file" on every row, which invites a wrong Forget.
 type V1PrintLibraryNamesRequestBuilderGetQueryParameters struct {
 	Ids []int32 "uriparametername:\"ids\""
 }
@@ -44,7 +44,7 @@ func NewV1PrintLibraryNamesRequestBuilder(rawUrl string, requestAdapter i2ae4187
 	return NewV1PrintLibraryNamesRequestBuilderInternal(urlParams, requestAdapter)
 }
 
-// Get each file's name and folder, in the order asked (a repeated id once), read fromBambuddy one file at a time, so a page that labels a few ids (Settings → Rememberedchoices, #2349) need not list the whole library. A file Bambuddy no longer has is“name: null“; any other failure is the route's.
+// Get each file's name and folder, in the order asked (a repeated id once), read fromBambuddy one file at a time, so a page that labels a few ids (Settings → Rememberedchoices, #2349) need not list the whole library. A file Bambuddy no longer has is“name: null“; any other failure is the route's, and cancels the other reads beforethe client closes. When several files are asked and Bambuddy has none of them, thatreads as a misrouted base URL rather than every file deleted, so it is a 502: a pagethen shows the ids, never "deleted file" on every row, which invites a wrong Forget.
 // returns a []LibraryFileNameable when successful
 // returns a HTTPValidationError error when the service returns a 422 status code
 func (m *V1PrintLibraryNamesRequestBuilder) Get(ctx context.Context, requestConfiguration *V1PrintLibraryNamesRequestBuilderGetRequestConfiguration) ([]i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.LibraryFileNameable, error) {
@@ -68,7 +68,7 @@ func (m *V1PrintLibraryNamesRequestBuilder) Get(ctx context.Context, requestConf
 	return val, nil
 }
 
-// ToGetRequestInformation each file's name and folder, in the order asked (a repeated id once), read fromBambuddy one file at a time, so a page that labels a few ids (Settings → Rememberedchoices, #2349) need not list the whole library. A file Bambuddy no longer has is“name: null“; any other failure is the route's.
+// ToGetRequestInformation each file's name and folder, in the order asked (a repeated id once), read fromBambuddy one file at a time, so a page that labels a few ids (Settings → Rememberedchoices, #2349) need not list the whole library. A file Bambuddy no longer has is“name: null“; any other failure is the route's, and cancels the other reads beforethe client closes. When several files are asked and Bambuddy has none of them, thatreads as a misrouted base URL rather than every file deleted, so it is a 502: a pagethen shows the ids, never "deleted file" on every row, which invites a wrong Forget.
 // returns a *RequestInformation when successful
 func (m *V1PrintLibraryNamesRequestBuilder) ToGetRequestInformation(ctx context.Context, requestConfiguration *V1PrintLibraryNamesRequestBuilderGetRequestConfiguration) (*i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestInformation, error) {
 	requestInfo := i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewRequestInformationWithMethodAndUrlTemplateAndPathParameters(i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.GET, m.BaseRequestBuilder.UrlTemplate, m.BaseRequestBuilder.PathParameters)
