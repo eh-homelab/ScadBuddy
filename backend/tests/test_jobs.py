@@ -1291,7 +1291,10 @@ async def test_the_last_stage_warns_of_a_glyph_the_font_lacks(
         )
 
     assert "font 'Lobster Two' has no glyph for 😀; the text leaves them out" in result.warnings
-    assert asked == [("Lobster Two", GLYPH_CHECK_TIMEOUT)]
+    # What is left of the one shared wait, which starts at the short advisory timeout.
+    [(font, timeout)] = asked
+    assert font == "Lobster Two"
+    assert 0 < timeout <= GLYPH_CHECK_TIMEOUT
 
 
 async def test_render_job_reads_the_schema_once_under_its_lease(paths: DataPaths) -> None:

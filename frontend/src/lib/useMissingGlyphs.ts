@@ -68,12 +68,14 @@ export function askMissingGlyphs(font: string, text: string): Promise<string[]> 
 /**
  * #2358 — the characters of `text` the installed font `font` has no glyph for, which
  * OpenSCAD's `text()` leaves out without a word. Empty until the server answers, for the
- * default font, and when it cannot say. The browser cannot tell: it draws a missing
- * glyph in a fallback font, so every font looks as if it had it.
+ * default font, and when it cannot say. While a new font or text waits on the debounce
+ * and the server, the last answer stays, so the warning does not blink off at every
+ * keystroke. The browser cannot tell: it draws a missing glyph in a fallback font, so
+ * every font looks as if it had it.
  */
 export function useMissingGlyphs(font: string, text: string, enabled = true): string[] {
   const asked = useDebounced(`${font}\n${text}`, GLYPH_CHECK_DEBOUNCE_MS)
-  const [answer, setAnswer] = useState<{ asked: string; missing: string[] }>()
+  const [answer, setAnswer] = useState<string[]>([])
   const ask = enabled && parseFontValue(font).family !== '' && text.trim() !== ''
   useEffect(() => {
     if (!ask) return
@@ -83,11 +85,11 @@ export function useMissingGlyphs(font: string, text: string, enabled = true): st
     const askedText = asked.slice(cut + 1)
     let current = true
     void askMissingGlyphs(askedFont, askedText).then((missing) => {
-      if (current) setAnswer({ asked, missing })
+      if (current) setAnswer(missing)
     })
     return () => {
       current = false
     }
   }, [ask, asked])
-  return ask && answer?.asked === `${font}\n${text}` ? answer.missing : []
+  return ask ? answer : []
 }

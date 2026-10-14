@@ -116,25 +116,35 @@ def unreadable_colour_warnings(
 def missing_glyph_warnings(
     schema: CustomizerSchema,
     params: Mapping[str, ParamValue],
-    coverage: Callable[[str], tuple[str, list[tuple[int, int]]] | None],
+    coverage: Callable[[str, float], tuple[str, list[tuple[int, int]]] | None],
+    budget: float = GLYPH_CHECK_TIMEOUT,
+    clock: Callable[[], float] = time.monotonic,
 ) -> list[str]:
     """A warning for each font parameter whose family has no glyph for characters in
     the model's text parameters (#2358): OpenSCAD's ``text()`` leaves those out without
     a word, so an emoji renders as a gap. Every text parameter is checked against every
     font parameter, as nothing says which text a font draws: a string that never
     reaches ``text()`` (a label, a file name, a mode) can raise a warning too.
-    docs/user-guide.md says so."""
+    docs/user-guide.md says so. ``coverage`` is given what is left of ``budget``, one
+    wait shared by every font, so a wedged fontconfig costs the render ``budget`` once,
+    not per font; a font past it gets no check."""
     texts = "".join(
         str(params.get(p.name, p.initial) or "") for p in schema.parameters if p.type == "string"
     )
     if not texts:
         return []
     warnings: list[str] = []
+    deadline = clock() + budget
     for parameter in schema.parameters:
         if parameter.type != "font":
             continue
         font = str(params.get(parameter.name, parameter.initial) or "")
-        missing = missing_glyphs(font, texts, coverage(font) if font_families(font) else None)
+        if not font_families(font):
+            continue
+        left = deadline - clock()
+        if left <= 0:
+            break
+        missing = missing_glyphs(font, texts, coverage(font, left))
         if missing:
             warnings.append(
                 f"font {font!r} has no glyph for {' '.join(missing)}; the text leaves them out"
@@ -1165,7 +1175,7 @@ async def finish_piece_stage(
         missing_glyph_warnings,
         schema,
         params,
-        lambda font: font_coverage(font, fonts_env, GLYPH_CHECK_TIMEOUT),
+        lambda font, timeout: font_coverage(font, fonts_env, timeout),
     )
 
     model_3mf = work / MODEL_NAME
