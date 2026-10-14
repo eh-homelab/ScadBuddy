@@ -43,7 +43,7 @@ import { CHAT_FRAME_MAX, startHeartbeat } from './routes/chat.js'
 import { storedModel } from './routes/model.js'
 import { followSessionEvents, SessionEventPublisher } from './sessions/busEvents.js'
 import { resolveTabWaits, SessionManager, SETTING_MODEL } from './sessions/manager.js'
-import { drainRetains } from './memory/hindsight.js'
+import { drainRetains, type MemoryOptions } from './memory/hindsight.js'
 import { shutdown } from './shutdown.js'
 import { shutdownTelemetry, traceListener } from './telemetry/runtime.js'
 import { harnessTools } from './tools/harness.js'
@@ -291,9 +291,15 @@ const sessionEvents = database ? new SessionEventPublisher(database.sql) : undef
 // and the `sessions_*` tools (tools/sessions.ts).
 // The approval routes and the expiry sweep also serve approvals left pending
 // by a restart.
+// Automatic Hindsight memory's hook knobs: one value for classic turns (SessionManager)
+// and durable ones (memoryActivities), so a knob set here applies to both (#2420).
+// Undefined: the defaults.
+const memory: MemoryOptions | undefined = undefined
+
 const sessions =
   database && credentials
     ? new SessionManager({
+        memory,
         sql: database.sql,
         paths,
         ...(settings ? { settings } : {}),
@@ -553,6 +559,7 @@ const temporalWorker =
                 credentialSecrets: durableCredentialSecrets,
                 audit,
                 settings,
+                memory,
               })
             : {}),
           // A flow's agent(...) and ask_session(...) (#1057, 6g): beside the tools, never one.
