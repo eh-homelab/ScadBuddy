@@ -1132,6 +1132,36 @@ def test_an_arrange_the_api_settles_is_counted_as_arrange(
         assert sample("scadbuddy_render_job_latency_seconds_count", rendered) == 0
 
 
+async def test_superseding_an_arrange_through_submit_counts_it_as_arrange(
+    make_service: ServiceFactory,
+    deps: WorkerDeps,
+    projection: JobProjection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3464: the public supersede path hands ``_settled`` the arrange row itself, so
+    its supersede counts under ``kind="arrange"``, not as a render."""
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        params: dict[str, ParamValue] = {"width": _w()}
+        arrange = legacy_row(
+            projection,
+            Job(id=uuid.uuid4().hex, slug=SLUG, params=params, created_at=now(), kind="arrange"),
+        )
+        _spy_cancel(monkeypatch, client)
+        async with _worker(client, queue, ProjectingActivities(deps)):
+            await service.submit(SLUG, {"width": _w()}, supersedes=arrange.id)
+        await service.aclose()
+
+    sample = service.metrics.registry.get_sample_value
+    superseded = {"kind": "arrange", "outcome": "superseded"}
+    assert sample("scadbuddy_render_jobs_finished_total", superseded) == 1
+    assert sample("scadbuddy_render_job_latency_seconds_count", superseded) == 1
+    as_render = {"kind": "render", "outcome": "superseded"}
+    assert sample("scadbuddy_render_jobs_finished_total", as_render) == 0
+    assert sample("scadbuddy_render_job_latency_seconds_count", as_render) == 0
+
+
 async def test_superseding_a_legacy_row_cancels_its_workflow_the_old_way(
     make_service: ServiceFactory,
     deps: WorkerDeps,
