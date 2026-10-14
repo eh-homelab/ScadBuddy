@@ -4,6 +4,7 @@ import type {
   AnalysisRun,
   AnalyzerDecision,
   ArrangeRequest,
+  BackgroundTask,
   DecisionCreate,
   FixApply,
   FixPreview,
@@ -1958,6 +1959,13 @@ export const api = {
   /** #2329 — deletes one file from a session's workspace. */
   deleteAiSessionFile: (id: string, path: string) =>
     request<void>(sessionFilePath(id, path), { method: 'DELETE' }),
+
+  /** A session's background tasks (CronCreate, ScheduleWakeup): the active ones first, then the last ended. */
+  listAiBackgroundTasks: (id: string) => request<{ tasks: BackgroundTask[] }>(`/ai/sessions/${seg(id)}/background-tasks`),
+
+  /** Cancels one; the session's owner only. */
+  cancelAiBackgroundTask: (id: string, taskId: string) =>
+    request<{ task: BackgroundTask }>(`/ai/sessions/${seg(id)}/background-tasks/${seg(taskId)}`, { method: 'DELETE' }),
 
   /** Plan 5d — the mode new assistant sessions get by default, served by the agent service. */
   getSessionMode: () => request<SessionModeSetting>('/ai/settings/session-mode'),

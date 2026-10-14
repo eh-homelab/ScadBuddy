@@ -623,7 +623,12 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     WebFetch's model work as one-shot queries on the session's credential, the task
     list as a workspace file), each outward, and the listing's `system_note` tells the
     model; `src/builtins/schemas.json` is Claude Code's own input schemas
-    (`test/builtins.sdk.test.ts`, `UPDATE_BUILTIN_SCHEMAS=1`).
+    (`test/builtins.sdk.test.ts`, `UPDATE_BUILTIN_SCHEMAS=1`). `CronCreate`, `CronDelete`,
+    `CronList`, `ScheduleWakeup` and `TaskStop` are the session's own in both modes
+    (`src/background/`: `ai_background_tasks`, one `BackgroundTask` workflow per task on
+    `agent-tools` that sends the prompt when due and the session is idle; a classic turn
+    gets them as the in-process `builtin` server in place of Claude Code's, which end
+    with its process; the panel's list and cancel are `routes/backgroundTasks.ts`).
   - Tests never call Anthropic: `test/support/fakeAnthropic.ts` is a local Messages API
     (streaming SSE) that the real SDK and bundled CLI are pointed at as a gateway
     (`test/run.test.ts`). Postgres tests (`test/pg.test.ts`) skip unless

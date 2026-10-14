@@ -793,7 +793,9 @@ subagents, the model setting, credential fallback and MCP sender tiers. The pari
 
 The differences left between the modes: a durable
 subagent has ScadBuddy's own tools only; and of an `allow_refused` package's named
-built-ins, the background ones (`CronCreate`, `CronDelete`, `CronList`, `ScheduleWakeup`, `Monitor`, `Workflow`, `TaskStop` and `PushNotification`) are not offered.
+built-ins, `Monitor`, `Workflow` and `PushNotification` are not offered yet. `CronCreate`,
+`CronDelete`, `CronList`, `ScheduleWakeup` and `TaskStop` are the session's own in both
+modes, each a `BackgroundTask` workflow on `agent-tools` (`docs/ai/operating.md`).
 
 ### 6.4 Human-in-the-loop
 

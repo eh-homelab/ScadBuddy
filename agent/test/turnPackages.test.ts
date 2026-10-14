@@ -1,3 +1,4 @@
+import type { BackgroundTasks } from '../src/background/service.js'
 import { mkdir, mkdtemp, readdir, readFile, symlink, utimes, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -223,6 +224,35 @@ describe('plugin packages in a durable turn', () => {
     const flow = await servers({ session: 'flow-x', flow: 'x', owner: OWNER, signal })
     expect(flow.servers).toEqual([])
     await flow.release()
+  })
+
+  it('offers CronCreate and the rest only where the session keeps background tasks', async () => {
+    const pkg = { ...(await fakePackage(undefined)), allowed: true, builtinTools: ['CronCreate', 'ScheduleWakeup', 'TaskStop'] }
+    const root = await mkdtemp(path.join(os.tmpdir(), 'turn-share-'))
+    const load = async (): Promise<PackagesForRun> => ({ paths: [], allowedPaths: [pkg.dir], builtinTools: pkg.builtinTools, loaded: [pkg], problems: [], release: () => {} })
+    const nested = { ask: async () => '', search: async () => ({ text: '' }) }
+    const signal = new AbortController().signal
+    const kept = turnServers({
+      packages: { load, root, localRoot: root, forward: none },
+      builtins: { files: {} as SessionFiles, nested: () => nested, background: { tasks: {} as BackgroundTasks, tz: 'UTC' } },
+    })
+    const listing = await kept({ session: 's', owner: OWNER, signal, listing: true })
+    const client = await listing.servers[0]!.connect()
+    expect((await client.listTools()).tools.map((t) => t.name)).toEqual(['CronCreate', 'ScheduleWakeup', 'TaskStop'])
+    await client.close()
+    expect(listing.notes?.[0]).toContain('The session keeps the jobs and wakeups')
+    expect(listing.problems).toEqual([])
+    await listing.release()
+    // Without them (no Temporal), they are left out, and said.
+    const without = await turnServers({ packages: { load, root, localRoot: root, forward: none }, builtins: { files: {} as SessionFiles, nested: () => nested } })({
+      session: 's',
+      owner: OWNER,
+      signal,
+      listing: true,
+    })
+    expect(without.servers).toEqual([])
+    expect(without.problems).toEqual([expect.stringContaining('names CronCreate, ScheduleWakeup, TaskStop')])
+    await without.release()
   })
 
   it("offers no server of a package that failed to share, on the listing (#2563)", async () => {
