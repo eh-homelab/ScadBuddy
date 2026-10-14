@@ -205,8 +205,8 @@ describe('LibraryPage', () => {
       ),
     )
     const run = vi.spyOn(api, 'runLibraryPrint')
-    // MSW's answers to the run's POST and to the progress read the sent dialog makes,
-    // counted until the test ends (see below).
+    // MSW's answers to the run's POST, the choices it remembers and the progress read
+    // the sent dialog makes, counted until the test ends (see below).
     const answered: string[] = []
     const onAnswer = ({ request }: { request: Request }) => {
       answered.push(`${request.method} ${new URL(request.url).pathname}`)
@@ -234,10 +234,11 @@ describe('LibraryPage', () => {
     )
     // Not ended with a request in flight: unmounting aborts it, and in CI the next
     // test's listing read then bypassed MSW ("could not reach its server") and never
-    // showed its loading state (the #2944 shape). The run's POST, then the sent dialog's
-    // first progress read; its next is seconds away.
+    // showed its loading state (the #2944 shape). The run's POST, the choices it
+    // remembers, then the sent dialog's first progress read; its next is seconds away.
     await waitFor(() => {
       expect(answered).toContain('POST /api/v1/print/library/89/run')
+      expect(answered).toContain('PUT /api/v1/print/library/89/choices')
       expect(answered).toContain('GET /api/v1/print/library/89/progress')
     })
     run.mockRestore()
