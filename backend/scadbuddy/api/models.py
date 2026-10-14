@@ -1343,7 +1343,12 @@ async def delete_model(
 
 async def delete_template(slug: str, force: bool, state: AppState) -> None:
     """The ``model_delete`` operation's run (#1054). The model's unfinished renders are
-    cancelled first (#2387); one that has not settled after the wait still refuses."""
+    cancelled first (#2387); one that has not settled after the wait still refuses. A
+    delete the run refuses for another reason (a duplicate made since the check, the
+    model no longer the caller's) cancels nothing: that half is asked first."""
+    await asyncio.to_thread(
+        refuse_delete, slug, state.catalogue, state.render, force, renders=False
+    )
     await state.render.cancel_renders_of(slug)
     output_ids = await asyncio.to_thread(
         _delete_model, slug, state.catalogue, state.render, state.outputs, force

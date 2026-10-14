@@ -25,7 +25,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.catalogue import Catalogue, ModelMeta
 from scadbuddy.library.history import GitError
 from scadbuddy.library.presets import PresetStore
-from scadbuddy.render.job_models import Job
+from scadbuddy.render.job_models import Job, JobTableKind
 from scadbuddy.render.runner import ProcessOutput, RenderTimeoutError
 from scadbuddy.render.schema import source_sha256
 from scadbuddy.render.solids import WRAPPER_PREFIX
@@ -645,10 +645,17 @@ class _Handle:
             self.settle()
 
 
-def _plant_running(app: FastAPI, model: str, workflow_id: str = "render-planted") -> Job:
+def _plant_running(
+    app: FastAPI,
+    model: str,
+    workflow_id: str = "render-planted",
+    *,
+    job_id: str = "a" * 32,
+    kind: JobTableKind = "render",
+) -> Job:
     projection = getattr(app.state, STATE_ATTR).projection
-    job = Job(id="a" * 32, slug=model, created_at=datetime.now(UTC))
-    projection.accept(job, "planted", workflow_id=workflow_id, run_id="r")
+    job = Job(id=job_id, slug=model, created_at=datetime.now(UTC), kind=kind)
+    projection.accept(job, workflow_id, workflow_id=workflow_id, run_id="r")
     assert projection.mark_started(job.id) is not None
     return job
 
@@ -748,6 +755,69 @@ def test_a_real_render_a_delete_cancels_settles_in_time_and_the_model_goes(
         assert not paths.model_source(model).is_file()
     finally:
         release.touch()
+
+
+def test_a_delete_its_run_refuses_for_another_reason_cancels_nothing(
+    app: FastAPI,
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A duplicate made between the operation's check and its run refuses the delete
+    there: the render the user still wants is left running."""
+    state = getattr(app.state, STATE_ATTR)
+    _plant_running(app, model)
+    cancelled = _cancels(app, monkeypatch, None)
+    asked: list[str] = []
+
+    def duplicates_of(slug: str) -> list[str]:
+        asked.append(slug)
+        # None at the check, one by the time the run looks again.
+        return [] if len(asked) == 1 else ["late-copy"]
+
+    monkeypatch.setattr(state.catalogue, "duplicates_of", duplicates_of)
+
+    response = client.delete(f"/api/v1/models/{model}", headers=press())
+
+    assert response.status_code == 409, response.text
+    assert response.json()["slugs"] == ["late-copy"]
+    assert cancelled == []
+    assert paths.model_source(model).is_file()
+
+
+def test_deleting_a_model_cancels_its_arrange_and_a_render_started_meanwhile(
+    app: FastAPI,
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An arrange of the model's outputs is cancelled as a render is (the same
+    pipeline settles both), and a render the still-open page starts while the delete
+    waits is cancelled on the next look rather than waited out."""
+    projection = getattr(app.state, STATE_ATTR).projection
+    arrange = _plant_running(app, model, "arrange-planted", kind="arrange")
+    late = Job(id="b" * 32, slug=model, created_at=datetime.now(UTC))
+    settled: list[str] = []
+
+    def settle() -> None:
+        settled.append("x")
+        if len(settled) == 1:
+            # The arrange's cancel: it settles, and the page starts a new preview.
+            projection.release_claim(arrange.id, slug=model)
+            projection.accept(late, "render-late", workflow_id="render-late", run_id="r")
+            assert projection.mark_started(late.id) is not None
+        else:
+            projection.release_claim(late.id, slug=model)
+
+    cancelled = _cancels(app, monkeypatch, settle)
+
+    response = client.delete(f"/api/v1/models/{model}", headers=press())
+
+    assert response.status_code == 204, response.text
+    assert cancelled == [("arrange-planted", "r"), ("render-late", "r")]
+    assert not paths.model_source(model).is_file()
 
 
 def test_unknown_model_routes_answer_with_problem_details(client: TestClient) -> None:

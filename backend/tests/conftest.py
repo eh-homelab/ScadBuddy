@@ -347,6 +347,7 @@ import os
 import pathlib
 import shutil
 import sys
+import time
 
 args = sys.argv[1:]
 # Test settings sit beside the binary: the backend passes openscad no FAKE_* variable.
@@ -413,7 +414,6 @@ if out is not None and out.endswith(".3mf"):
     hold = settings.get("FAKE_HOLD")
     if hold:
         # A render that runs until the test lets it go (or 60 s pass).
-        import time
         pathlib.Path(hold["started"]).touch()
         for _ in range(1200):
             if pathlib.Path(hold["release"]).exists():
