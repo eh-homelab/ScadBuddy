@@ -11,6 +11,7 @@ import {
   MIN_APPROVAL_EXPIRY_SECONDS,
   SETTING_APPROVAL_EXPIRY_SECONDS,
   summariseInput,
+  sweepErrorText,
 } from '../src/approvals/service.js'
 import { AuditLog } from '../src/audit/log.js'
 import { SettingsStore } from '../src/credentials.js'
@@ -58,6 +59,22 @@ describe('input binding', () => {
   it('summarises through scrubForLog: secrets and secret-named arguments never reach the summary', () => {
     const summary = summariseInput('mcp__x__send', { job: 'box', api_key: 'k-123', note: 'with sk-live-999' }, ['sk-live-999'])
     expect(summary).toBe('{"job":"box","api_key":"[redacted]","note":"with [redacted]"}')
+  })
+})
+
+// #2382: a failed sweep names the statement it came from, never its parameters.
+describe('sweepErrorText', () => {
+  it('names the query of a Postgres error, folded and cut, and nothing else of it', () => {
+    const err = Object.assign(new Error('invalid input syntax for type uuid: "f"'), {
+      query: `UPDATE ai_approvals\n   SET decision = $2\n WHERE id = $1`,
+      parameters: ['secret-ish', 'expired'],
+    })
+    expect(sweepErrorText(err)).toBe('invalid input syntax for type uuid: "f" (in: UPDATE ai_approvals SET decision = $2 WHERE id = $1)')
+    expect(sweepErrorText(err)).not.toContain('secret-ish')
+    const long = Object.assign(new Error('x'), { query: 'SELECT '.repeat(100) })
+    expect(sweepErrorText(long).length).toBeLessThan(320)
+    expect(sweepErrorText(new Error('plain'))).toBe('plain')
+    expect(sweepErrorText('text')).toBe('text')
   })
 })
 
@@ -125,6 +142,32 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     })
     const [raw] = await db.sql`SELECT row_to_json(a)::text AS row FROM ai_approvals a WHERE id = ${approval.id}`
     expect(String(raw?.row)).not.toContain('hunter2-long-secret')
+  })
+
+  // #2382: while one row throws, no other due approval must stay unexpired.
+  it('expires every other due approval when one of them fails, and reports the failure', async () => {
+    const first = await orphan()
+    const second = await orphan(agentB)
+    await db.sql`UPDATE ai_approvals SET expires_at = now() - interval '1 second'`
+    const boom = new Error('invalid input syntax for type uuid: "f"')
+    const append = m.events.append.bind(m.events)
+    let failed = false
+    m.events.append = async (sessionId, events, tx) => {
+      if (sessionId === first.session.id && !failed) {
+        failed = true
+        throw boom
+      }
+      return append(sessionId, events, tx)
+    }
+    await expect(m.approvals.expireDue()).rejects.toBe(boom)
+    const decisions = async () =>
+      Object.fromEntries(
+        (await db.sql<{ id: string; decision: string | null }[]>`SELECT id, decision FROM ai_approvals`).map((r) => [r.id, r.decision]),
+      )
+    expect(await decisions()).toEqual({ [first.approval.id]: null, [second.approval.id]: 'expired' })
+    // The failed one is tried again on the next sweep.
+    expect(await m.approvals.expireDue()).toBe(1)
+    expect((await decisions())[first.approval.id]).toBe('expired')
   })
 
   it('expires an orphan that nobody decided, and the session goes back to idle', async () => {
