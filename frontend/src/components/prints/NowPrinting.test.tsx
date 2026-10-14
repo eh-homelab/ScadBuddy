@@ -169,6 +169,19 @@ describe('NowPrinting (#977)', () => {
     await waitFor(() => expect(screen.queryByRole('img', { name: /Live camera/ })).toBeNull())
   })
 
+  it('empties the live image as the dialog closes, so the browser drops the stream (#3207)', async () => {
+    const { user } = renderPage(<NowPrinting />)
+    await screen.findByTestId('printer-now-2')
+    await user.click(screen.getByRole('button', { name: 'Camera of Workshop' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Workshop camera' })
+    const live = within(dialog).getByRole('img', { name: 'Live camera of Workshop' }) as HTMLImageElement
+    expect(live.getAttribute('src')).toContain('/camera/stream')
+
+    await user.click(within(dialog).getByRole('button', { name: 'Close' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Workshop camera' })).toBeNull())
+    expect(live.getAttribute('src')).toBe('')
+  })
+
   it('falls back to a snapshot with Refresh when the stream fails (#981)', async () => {
     const { user } = renderPage(<NowPrinting />)
     await screen.findByTestId('printer-now-2')

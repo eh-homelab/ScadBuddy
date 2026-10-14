@@ -223,6 +223,18 @@ function CameraDialog({ printer, onClose }: { printer: PrinterNow | null; onClos
   )
 }
 
+/**
+ * Ends a live `<img>`'s request as it leaves (#3207): Chromium can keep a
+ * `multipart/x-mixed-replace` image's request open for a while after the element is
+ * removed, which would keep Bambuddy's stream subscribed after the dialog closed.
+ * Emptying `src` aborts it.
+ */
+function dropStreamOnUnmount(img: HTMLImageElement | null) {
+  return () => {
+    if (img) img.src = ''
+  }
+}
+
 function CameraView({ printer }: { printer: PrinterNow }) {
   const [live, setLive] = useState(true)
   const [at, setAt] = useState(() => Date.now())
@@ -231,6 +243,7 @@ function CameraView({ printer }: { printer: PrinterNow }) {
       <div className="min-w-0">
         {live ? (
           <img
+            ref={dropStreamOnUnmount}
             src={api.printerCameraStreamUrl(printer.printer_id)}
             alt={`Live camera of ${printer.name}`}
             className="w-full rounded-[6px] border border-line bg-surface-2"

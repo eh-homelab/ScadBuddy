@@ -7,15 +7,21 @@ with ``can_read_status``. Both calls stay server-side; the browser sees a JPEG."
 
 from __future__ import annotations
 
+import asyncio
 from collections import Counter
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
+from typing import cast
 
 import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
+from opentelemetry import trace
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
 
 from scadbuddy.api import printing
+from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.bambuddy.client import mjpeg_type
 from tests.api.test_send import API, configure
 
@@ -102,9 +108,13 @@ class Frames(httpx.AsyncByteStream):
     """Bambuddy's MJPEG stream: a few frames, and whether ScadBuddy closed it. With
     ``fail``, the read raises it after the frames, as a stalled camera does."""
 
-    def __init__(self, count: int = 3, fail: Exception | None = None) -> None:
+    def __init__(
+        self, count: int = 3, fail: Exception | None = None, *, hold: bool = False
+    ) -> None:
         self.count = count
         self.fail = fail
+        #: After the frames, wait as a live camera does, until the viewer leaves.
+        self.hold = hold
         self.closed = False
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
@@ -117,6 +127,8 @@ class Frames(httpx.AsyncByteStream):
             )
         if self.fail is not None:
             raise self.fail
+        if self.hold:
+            await asyncio.sleep(60)
 
     async def aclose(self) -> None:
         self.closed = True
@@ -225,6 +237,51 @@ def test_a_stream_gives_its_place_back_however_it_ends(
     for _ in range(3):
         client.get("/api/v1/print/printers/7/camera/stream")
 
+    assert printing._camera_streams[7] == 0
+
+
+@pytest.mark.parametrize("leaves", ["closed", "cancelled"])
+@respx.mock
+def test_a_viewer_leaving_ends_the_stream_span_cleanly(
+    client: TestClient, spans: InMemorySpanExporter, leaves: str
+) -> None:
+    """#3206: a viewer closing the dialog ends the body mid-stream. Starlette closes the
+    generator (``GeneratorExit``) or cancels its task (``CancelledError``). That is the
+    normal end of a live view, never a failed Bambuddy call on the dashboards. Driven on
+    the route's own body, as the server would, because a test client's close never
+    reaches it."""
+    configure(client)
+    store = getattr(client.app.state, STATE_ATTR).settings_store  # type: ignore[attr-defined]
+    token_route()
+    frames = Frames(count=1, hold=True)
+    respx.get(f"{API}/printers/7/camera/stream").mock(
+        return_value=httpx.Response(200, stream=frames, headers={"Content-Type": MJPEG})
+    )
+    spans.clear()
+
+    async def watch_then_leave() -> None:
+        response = await printing.stream_printer_camera(7, store, fps=5)
+        body = cast(AsyncGenerator[bytes, None], response.body_iterator)
+        assert b"--frame" in await anext(body)
+        if leaves == "closed":
+            await body.aclose()
+            return
+        reading = asyncio.ensure_future(anext(body))
+        await asyncio.sleep(0.05)
+        reading.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await reading
+        await body.aclose()
+
+    # The request's own span, as the HTTP middleware would open it: the sampler follows it.
+    with trace.get_tracer(__name__).start_as_current_span("GET camera stream"):
+        asyncio.run(watch_then_leave())
+
+    (stream,) = [
+        s for s in spans.get_finished_spans() if s.name == "bambuddy.printers.camera.stream"
+    ]
+    assert stream.status.status_code != StatusCode.ERROR, stream.status
+    assert frames.closed
     assert printing._camera_streams[7] == 0
 
 
