@@ -19,7 +19,7 @@ import { editPath, editTargetFor, modelPath, type EditNavigationState } from '..
 import { arrangedSources, fromOutputs, savedNote, type Arranged } from '../lib/arrange'
 import { traceAction } from '../lib/traceAction'
 import { wasSent } from '../lib/sent'
-import { formatBbox, formatValue, outputFileName, shortId, timeAgo } from '../lib/format'
+import { formatBbox, formatValue, shortId, timeAgo } from '../lib/format'
 import { plateLabel } from '../lib/plate'
 import { useDisplayUnit } from '../lib/units'
 import { diffFromDefaults } from '../lib/params'
@@ -662,7 +662,8 @@ function OutputRow({
           </Button>
           <BlobDownload
             url={api.downloadUrl(output.id)}
-            filename={outputFileName(output)}
+            // The server names it (`download_filename`), as every other download of it.
+            filename={`${output.slug}-${output.id}.3mf`}
             className="text-[13px] text-accent underline"
           >
             Download 3MF

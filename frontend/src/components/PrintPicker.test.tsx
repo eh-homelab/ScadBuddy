@@ -3680,6 +3680,40 @@ describe('PrintPicker · Queue (#2288)', () => {
     expect(bodies[0]).toMatchObject({ options: { manual_start: false } })
   })
 
+  it('never remembers the Queue\'s own manual start (#2786 review)', async () => {
+    const { bodies } = watch('PUT', '/settings/print-options', '/api/v1/')
+    const { user } = renderPage(
+      <PrintPicker open queue source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />,
+    )
+    await loaded()
+    await showAdvanced()
+    await user.click(screen.getByText('Options'))
+    await user.selectOptions(await screen.findByLabelText('Timelapse'), 'true')
+    await user.click(screen.getByRole('button', { name: 'Remember' }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    // What the user set is saved; the seed every Queue starts with is not, or every
+    // later Print at that scope would wait for a manual start.
+    expect(bodies[0]).toMatchObject({ options: { timelapse: true } })
+    expect(bodies[0]).not.toHaveProperty('options.manual_start')
+  })
+
+  it('hands the manual start back to the default when that is chosen (#2786 review)', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPage(
+      <PrintPicker open queue source={{ kind: 'output', output }} onClose={vi.fn()} onRan={vi.fn()} />,
+    )
+    await loaded()
+    await showAdvanced()
+    await user.click(screen.getByText('Options'))
+    const start = await screen.findByLabelText('Wait for a manual start')
+    await user.selectOptions(start, 'false')
+    await user.selectOptions(start, '')
+    expect(start).toHaveValue('')
+    await user.click(screen.getByTestId('run-print'))
+    await screen.findByTestId('queued-items')
+    expect((bodies[0]?.options as Record<string, unknown> | undefined)?.manual_start ?? null).toBeNull()
+  })
+
   it('leaves the manual start to the remembered options for Print', async () => {
     const { bodies } = watch('POST', '/run')
     const { user } = renderPicker()

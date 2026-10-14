@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import { bbox } from '../mocks/fixtures'
 import {
   formatBbox,
-  outputFileName,
   formatBytes,
   formatDuration,
   formatElapsed,
@@ -98,20 +97,3 @@ describe('a waiting render (#1638)', () => {
   })
 })
 
-describe('outputFileName (#2288)', () => {
-  const id = 'a'.repeat(32)
-
-  it('saves an output under its name', () => {
-    expect(outputFileName({ slug: 'name-keychain', name: 'Reagan', id })).toBe('name-keychain-Reagan.3mf')
-  })
-
-  it('turns what a file system would refuse into a dash', () => {
-    expect(outputFileName({ slug: 'bin', name: 'a/b: "c"\\d*?<e>|\u0007', id })).toBe('bin-a-b- -c-d-e-.3mf')
-  })
-
-  it('falls back to the id with no name, or nothing left of one', () => {
-    expect(outputFileName({ slug: 'bin', name: null, id })).toBe(`bin-${id}.3mf`)
-    expect(outputFileName({ slug: 'bin', name: ' / ', id })).toBe(`bin-${id}.3mf`)
-    expect(outputFileName({ slug: 'bin', name: '..', id })).toBe(`bin-${id}.3mf`)
-  })
-})
