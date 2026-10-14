@@ -399,9 +399,8 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
           }
           // Keyed by what the user chose, not by the generated name: that changes once the
           // model list answers, and a "Try again" must keep its save key (#2749 review).
-          // The generated name is left out of the key, so "Try again" keeps it. The
-          // server joins a key to the save it already started (`run_operation`), so if
-          // the first attempt did start, its name, generated or blank, is the one kept.
+          // The server joins a key to the save it already started (`run_operation`), so
+          // if the first attempt did start, its name, generated or blank, is the one kept.
           const signature = JSON.stringify({ ...body, name: name.trim() || null })
           if (attempt.current?.body !== signature) attempt.current = { key: newRequestId(), body: signature }
           const current = attempt.current
