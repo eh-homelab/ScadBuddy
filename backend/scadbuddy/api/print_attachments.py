@@ -10,10 +10,7 @@ read.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import re
-import uuid
-from pathlib import Path as FilePath
 from typing import Annotated
 
 from fastapi import APIRouter, Path, Request, Response, status
@@ -23,9 +20,7 @@ from pydantic import BaseModel, Field
 from scadbuddy.api import media as media_api
 from scadbuddy.api.deps import (
     CatalogueDep,
-    PrintAttachmentsDep,
     PrintLinksDep,
-    SettingsStoreDep,
 )
 from scadbuddy.api.models import require_model_exists
 from scadbuddy.api.operations import (
@@ -38,17 +33,14 @@ from scadbuddy.api.operations import (
 )
 from scadbuddy.api.print_history import PrintAttachment, attachment_view
 from scadbuddy.api.prints import ArchiveIdPath, require_linked_archive
-from scadbuddy.bambuddy.attachments import Attachment, file_path
-from scadbuddy.bambuddy.client import client_for
+from scadbuddy.attachments.component import PrintAttachmentsDep
+from scadbuddy.bambuddy.attachments import Attachment
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.attachment_operations import already_promoted
 from scadbuddy.library.catalogue import ModelRecord
 from scadbuddy.library.media import (
     MAX_CAPTION_CHARS,
-    MAX_IMAGE_BYTES,
-    MEDIA_UPLOAD_PREFIX,
-    SNIFF_BYTES,
     content_type_of,
-    sniff_kind,
 )
 from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationsDep
@@ -251,89 +243,33 @@ async def promote_attachment(
     links: PrintLinksDep,
     attachments: PrintAttachmentsDep,
     catalogue: CatalogueDep,
-    store: SettingsStoreDep,
     ops: OperationsDep,
     idempotency_key: IdempotencyKey = None,
 ) -> ModelRecord | JSONResponse:
     await _require_print(links, archive_id)
     require_model_exists(catalogue, body.slug)
-    found = await attachments.get(archive_id, attachment_id)
-    if found is None:
-        raise _no_attachment(archive_id, attachment_id)
-    if body.slug in found.promoted_to:
-        raise ApiError(
-            status.HTTP_409_CONFLICT,
-            f"this attachment is in {body.slug}'s gallery already",
-        )
-    staged = catalogue.paths.cache / f"{MEDIA_UPLOAD_PREFIX}{uuid.uuid4().hex}"
-    claims = ClaimStore(catalogue.paths.claims)
-    held: list[Held] = []
-    try:
-        digest, size = await _download(store, found, staged)
-        with staged.open("rb") as handle:
-            sniffed = sniff_kind(handle.read(SNIFF_BYTES))
-        if sniffed is None:
-            raise ApiError(
-                status.HTTP_415_UNSUPPORTED_MEDIA_TYPE, f"the attachment is no longer {ACCEPTED}"
-            )
-        media_kind, extension, _ = sniffed
-        if media_kind == "image" and size > MAX_IMAGE_BYTES:
-            raise ApiError(
-                status.HTTP_413_CONTENT_TOO_LARGE,
-                f"a template's image is at most {MAX_IMAGE_BYTES // (1024 * 1024)} MB",
-            )
-        request = {
-            "slug": body.slug,
-            "file": digest,
-            "kind": media_kind,
-            "extension": extension,
-            "poster": None,
-            "poster_extension": None,
-            "caption": found.caption or "",
-        }
-        kind = ops.kinds["model_media_upload"]
-        if (
-            await recorded(
-                ops, kind=kind, subject=body.slug, request=request, idempotency_key=idempotency_key
-            )
-            is None
-        ):
-            held.append(await asyncio.to_thread(claims.hold_file, staged, digest))
-    finally:
-        staged.unlink(missing_ok=True)
+
+    async def refuse() -> None:
+        # Only a new request: a keyed repeat of a finished promote is its first answer,
+        # not "already in the gallery" (§4.2, #2831 review).
+        found = await attachments.get(archive_id, attachment_id)
+        if found is None:
+            raise _no_attachment(archive_id, attachment_id)
+        if body.slug in found.promoted_to:
+            raise already_promoted(body.slug)
+
+    # The copy runs, and is marked, in the operation (attachment_operations.py): one that
+    # answers 202 is still marked once it lands.
     result = await run_operation(
         ops,
         response,
-        kind=kind,
-        subject=body.slug,
-        request=request,
+        kind=ops.kinds["print_attachment_promote"],
+        subject=f"archive:{archive_id}",
+        request={"archive_id": archive_id, "attachment_id": attachment_id, "slug": body.slug},
         idempotency_key=idempotency_key,
-        claimed=Claimed(claims, held),
+        before_start=refuse,
     )
-    answer = operation_answer(result, ModelRecord)
-    if isinstance(answer, ModelRecord):
-        await attachments.promoted(archive_id, attachment_id, body.slug)
-    return answer
-
-
-async def _download(
-    store: SettingsStoreDep, attachment: Attachment, to: FilePath
-) -> tuple[str, int]:
-    """The attachment's bytes, streamed from Bambuddy to ``to``: their sha256 and size."""
-    path = file_path(attachment)
-    digest = hashlib.sha256()
-    size = 0
-    to.parent.mkdir(parents=True, exist_ok=True)
-    async with (
-        client_for(store.load()) as client,
-        client.stream(path, operation="media.attachment", what="copy the attachment") as upstream,
-    ):
-        with to.open("xb") as out:
-            async for chunk in upstream.aiter_bytes():
-                await asyncio.to_thread(out.write, chunk)
-                digest.update(chunk)
-                size += len(chunk)
-    return digest.hexdigest(), size
+    return operation_answer(result, ModelRecord)
 
 
 def _no_attachment(archive_id: int, attachment_id: int) -> ApiError:

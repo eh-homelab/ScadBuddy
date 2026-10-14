@@ -47,6 +47,13 @@ MEDIA_FOLDER = "Media"
 ARCHIVE_PHOTO_NAME = re.compile(r"^[A-Za-z0-9_-]+\.(jpg|jpeg|png|webp)$")
 #: The most attachments one print keeps: a page of them, not a library.
 MAX_ATTACHMENTS = 100
+#: The first key of ``pg_advisory_xact_lock(int, int)`` that serialises one print's
+#: attachment inserts ("SBPA"), so concurrent uploads cannot pass the cap together.
+ATTACHMENT_LOCK_CLASS = 0x5342_5041
+
+
+class TooManyAttachmentsError(Exception):
+    """The print already keeps ``MAX_ATTACHMENTS``."""
 
 
 class Attachment(BaseModel):
@@ -104,7 +111,18 @@ class AttachmentStore:
         await asyncio.to_thread(self._remove, attachment_id)
 
     def _add(self, attachment: Attachment) -> Attachment:
-        with self._pool.connection() as conn:
+        with self._pool.connection() as conn, conn.transaction():
+            # The cap holds at insert, not only in the operation's check (#2831 review).
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s, %s)",
+                (ATTACHMENT_LOCK_CLASS, attachment.archive_id),
+            )
+            counted = conn.execute(
+                "SELECT count(*) AS n FROM print_attachments WHERE archive_id = %s",
+                (attachment.archive_id,),
+            ).fetchone()
+            if counted is not None and counted["n"] >= MAX_ATTACHMENTS:
+                raise TooManyAttachmentsError
             row = conn.execute(
                 "INSERT INTO print_attachments (archive_id, kind, archive_photo,"
                 " library_file_id, filename, size_bytes, caption)"
@@ -225,13 +243,20 @@ async def upload(
 ) -> tuple[str | None, int | None]:
     """Put the file in Bambuddy: ``(archive photo name, library file id)``. The folder is
     found (or made) first, so a key or a Bambuddy that cannot give one posts nothing; a
-    photo whose library copy fails is taken off the archive again. Either way nothing
-    half-attached is left without a row naming it."""
+    photo whose library copy fails is taken off the archive again. A photo Bambuddy names in
+    a shape ScadBuddy does not take is left on the archive, and logged with its archive."""
     folder_id = await media_folder(client, archive, inbox_folder_id)
     photo: str | None = None
     if kind == "photo":
         answer = await client.upload_archive_photo(archive.id, filename, file)
         if not ARCHIVE_PHOTO_NAME.fullmatch(answer.filename):
+            # Not deleted: the name is what failed the check, and would go into the path.
+            # Named here so it can be found and taken off by hand.
+            logger.warning(
+                "Bambuddy named an attachment's photo in a shape ScadBuddy does not take; "
+                "it is left on the archive",
+                extra={"archive_id": archive.id, "archive_photo": answer.filename},
+            )
             raise ApiError(
                 status.HTTP_502_BAD_GATEWAY,
                 "Bambuddy named the photo in a way ScadBuddy does not take, so it was not kept",

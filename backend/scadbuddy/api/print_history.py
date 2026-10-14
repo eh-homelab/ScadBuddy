@@ -37,7 +37,6 @@ from scadbuddy.api.deps import (
     HistoryDep,
     OutputsDep,
     PathsDep,
-    PrintAttachmentsDep,
     PrintLinksDep,
     SettingsStoreDep,
     UploadsDep,
@@ -51,6 +50,7 @@ from scadbuddy.api.operations import (
 )
 from scadbuddy.api.params import schema_of
 from scadbuddy.api.prints import PHOTO_NAME, ArchiveIdPath
+from scadbuddy.attachments.component import PrintAttachmentsDep
 from scadbuddy.bambuddy.archive_cache import ArchiveCache
 from scadbuddy.bambuddy.attachments import Attachment, AttachmentStore
 from scadbuddy.bambuddy.client import BambuddyClient, client_for

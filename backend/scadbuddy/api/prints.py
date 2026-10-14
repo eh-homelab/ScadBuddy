@@ -23,7 +23,7 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Depends, Path, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 
-from scadbuddy.api.deps import PrintAttachmentsDep, PrintLinksDep, SettingsStoreDep
+from scadbuddy.api.deps import PrintLinksDep, SettingsStoreDep
 from scadbuddy.api.media import (
     CARD_SIDE,
     IMMUTABLE_CACHE_CONTROL,
@@ -32,6 +32,7 @@ from scadbuddy.api.media import (
     THUMBNAIL_VERSION,
     _shrink,
 )
+from scadbuddy.attachments.component import PrintAttachmentsDep
 from scadbuddy.bambuddy.attachments import file_path as attachment_file_path
 from scadbuddy.bambuddy.client import Operation, client_for
 from scadbuddy.core.problems import ApiError

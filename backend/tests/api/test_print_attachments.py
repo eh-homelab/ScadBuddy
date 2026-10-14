@@ -4,7 +4,12 @@ only; ScadBuddy keeps which files they are and their captions (plan §2.5)."""
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
+import time
+from datetime import timedelta
+from functools import partial
 from typing import Any
 
 import httpx
@@ -12,6 +17,11 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.api import operations as operations_api
+from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.attachments.component import PRINT_ATTACHMENTS
+from scadbuddy.bambuddy.attachments import MAX_ATTACHMENTS, Attachment
+from scadbuddy.workflows.commands import start_command
 from tests.api.conftest import PNG_BYTES
 from tests.api.test_media import WEBM
 from tests.api.test_print_history import link, mock_archive
@@ -302,11 +312,88 @@ def test_promote_copies_an_attachment_into_the_template_gallery(
 
 
 @respx.mock
-def test_a_photo_name_bambuddy_answers_that_could_leave_its_folder_is_not_kept(
+def test_a_promote_sent_again_with_its_key_is_its_first_answer(
     client: TestClient, model: str
 ) -> None:
+    """#2831 review: a browser re-sending a promote whose answer it lost gets the record
+    it made, not "already in the gallery"."""
+    linked(client, model)
+    Bambuddy(media_exists=True)
+    attachment = attach(client, "p.png", PNG, "Real print").json()
+    download = respx.get(f"{API}/library/files/501/download").mock(
+        return_value=httpx.Response(200, content=PNG)
+    )
+    url = f"{URL}/{attachment['id']}/promote"
+    key = press()
+
+    first = client.post(url, json={"slug": model}, headers=key)
+    again = client.post(url, json={"slug": model}, headers=key)
+
+    assert first.status_code == 200, first.text
+    assert again.status_code == 200, again.text
+    assert again.json() == first.json()
+    # Answered from the record: nothing read from Bambuddy, nothing copied again.
+    assert download.call_count == 1
+    assert len(client.get(f"/api/v1/models/{model}").json()["media"]) == 1
+
+
+@respx.mock
+def test_a_promote_answered_202_is_marked_once_it_lands(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2831 review: the mark is the operation's, so a promote past the answer deadline
+    still says where it went, and a second press is refused, not a second copy."""
+    linked(client, model)
+    Bambuddy(media_exists=True)
+    attachment = attach(client, "p.png", PNG, "Real print").json()
+
+    respx.get(f"{API}/library/files/501/download").mock(
+        return_value=httpx.Response(200, content=PNG)
+    )
+    # The copy outlives the answer deadline: a commit on a slow volume, say.
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    catalogue = state.catalogue
+    add_media = catalogue.add_media
+
+    def slowly(*args: Any, **kwargs: Any) -> Any:
+        time.sleep(3)
+        return add_media(*args, **kwargs)
+
+    monkeypatch.setattr(catalogue, "add_media", slowly)
+    monkeypatch.setattr(
+        operations_api, "start_command", partial(start_command, deadline=timedelta(seconds=1))
+    )
+    url = f"{URL}/{attachment['id']}/promote"
+    key = press()
+    started = client.post(url, json={"slug": model}, headers=key)
+    resend_until = time.monotonic() + 60
+    while started.json().get("type") == operations_api.STILL_ACCEPTING_PROBLEM:
+        assert time.monotonic() < resend_until, started.text
+        started = client.post(url, json={"slug": model}, headers=key)
+    assert started.status_code == 202, started.text
+
+    deadline = time.monotonic() + 60
+    while (op := client.get(f"/api/v1/operations/{started.json()['id']}").json())[
+        "status"
+    ] == "running":
+        assert time.monotonic() < deadline, op
+        time.sleep(0.2)
+    assert op["status"] == "succeeded", op
+    detail = client.get("/api/v1/prints/35").json()
+    assert detail["media"]["attachments"][0]["promoted_to"] == [model]
+    again = client.post(url, json={"slug": model}, headers=press())
+    assert again.status_code == 409, again.text
+    assert len(client.get(f"/api/v1/models/{model}").json()["media"]) == 1
+
+
+@respx.mock
+def test_a_photo_name_bambuddy_answers_that_could_leave_its_folder_is_not_kept(
+    client: TestClient, model: str, caplog: pytest.LogCaptureFixture
+) -> None:
     """The name goes into the proxy's path to Bambuddy, so only Bambuddy's own shape of
-    name is kept; anything else is refused before a row names it."""
+    name is kept; anything else is refused before a row names it, and the photo left on
+    the archive is logged with it (#2831 review)."""
+    caplog.set_level(logging.WARNING, logger="scadbuddy.bambuddy.attachments")
     linked(client, model)
     bambuddy = Bambuddy(media_exists=True)
     bambuddy.photo.mock(
@@ -320,3 +407,44 @@ def test_a_photo_name_bambuddy_answers_that_could_leave_its_folder_is_not_kept(
     assert refused.status_code == 502, refused.text
     assert not bambuddy.library.called
     assert client.get("/api/v1/prints/35").json()["attachment_count"] == 0
+    left = [r for r in caplog.records if "left on the archive" in r.getMessage()]
+    assert [(r.archive_id, r.archive_photo) for r in left] == [  # type: ignore[attr-defined]
+        (35, "../../library/files/1/download")
+    ]
+
+
+@respx.mock
+def test_the_attachment_cap_holds_at_insert_and_the_late_upload_is_taken_off(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2831 review: two uploads with different keys can both pass the check; the insert
+    refuses the one past the cap, and its files come off Bambuddy again."""
+    linked(client, model)
+    bambuddy = Bambuddy(media_exists=True)
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    store = state.components.get(PRINT_ATTACHMENTS)
+    for n in range(MAX_ATTACHMENTS):
+        asyncio.run(
+            store.add(
+                Attachment(
+                    id=0,
+                    archive_id=35,
+                    kind="video",
+                    library_file_id=1000 + n,
+                    filename=f"{n}.webm",
+                    size_bytes=1,
+                )
+            )
+        )
+
+    async def none_yet(archive_id: int) -> list[Attachment]:
+        return []
+
+    # The check ran before the others landed.
+    monkeypatch.setattr(store, "for_archive", none_yet)
+
+    refused = attach(client, "p.png", PNG)
+
+    assert refused.status_code == 409, refused.text
+    assert f"at most {MAX_ATTACHMENTS}" in refused.json()["detail"]
+    assert bambuddy.photo_delete.called and bambuddy.library_delete.called
