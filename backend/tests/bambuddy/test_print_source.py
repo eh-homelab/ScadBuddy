@@ -771,3 +771,21 @@ async def test_a_recorded_slice_whose_id_holds_another_file_is_forgotten_and_one
 
     assert await _library(uploads).recorded_slice(bambuddy, 11, "key") is None
     assert uploads.forgotten == [100]
+
+
+class _ForgetFails(_ManySlices):
+    async def forget_slice(self, output_id: str, sliced_id: int) -> None:
+        raise RuntimeError("the database is down")
+
+
+@respx.mock
+async def test_a_recorded_slice_that_cannot_be_forgotten_still_plans(
+    bambuddy: BambuddyClient,
+) -> None:
+    """#3495 review: forgetting only spares a later reprint a read, so a failure to
+    forget never fails this plan."""
+    respx.get(url__regex=rf"{API}/library/files/1\d\d$").mock(
+        return_value=httpx.Response(404, json={"detail": "File not found"})
+    )
+
+    assert await _library(_ForgetFails()).recorded_slice(bambuddy, 11, "key") is None

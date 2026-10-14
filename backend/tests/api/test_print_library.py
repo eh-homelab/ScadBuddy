@@ -32,7 +32,7 @@ from scadbuddy.bambuddy import clearance, print_run
 from scadbuddy.bambuddy.filaments3mf import SlicedProfile
 from scadbuddy.bambuddy.models import NozzleInfo, Printer, PrinterStatus
 from scadbuddy.bambuddy.print_run import PreparedPlates, PrintRunRequest
-from scadbuddy.bambuddy.uploads import LibraryCopy, ProjectTarget
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy, ProjectTarget
 from scadbuddy.render.bambu3mf import (
     MAX_SETTINGS_BYTES,
     laid_out_plates,
@@ -928,11 +928,21 @@ def test_a_recorded_slice_bambuddy_no_longer_has_is_sliced_again(client: TestCli
 
 
 @respx.mock
-def test_a_reused_slice_deleted_before_it_is_queued_is_sliced_again(client: TestClient) -> None:
+@pytest.mark.parametrize("prune_fails", [False, True], ids=["pruned", "prune-fails"])
+def test_a_reused_slice_deleted_before_it_is_queued_is_sliced_again(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, prune_fails: bool
+) -> None:
     """#2955: the recorded slice was still in Bambuddy when the reprint was planned, and
     gone by its POST /queue/, which Bambuddy answers 400 "Library file not found"
     (``print_queue.py`` at maziggy/bambuddy@943f3587). Read back, it is a 404, so the
-    plate is sliced again and that slice queued; the run does not fail on it."""
+    plate is sliced again and that slice queued; the run does not fail on it, even when
+    forgetting the gone slice fails (#3495 review)."""
+    if prune_fails:
+
+        async def down(*_: object) -> None:
+            raise RuntimeError("the database is down")
+
+        monkeypatch.setattr(BambuddyUploadStore, "forget_gone_slice", down)
     configure(client)
     one_color(89)
     upload = flow_copy_routes()
@@ -975,7 +985,7 @@ def test_a_reused_slice_deleted_before_it_is_queued_is_sliced_again(client: Test
     assert sliced.call_count == 2
     # Forgotten as soon as it is found gone, not on the next reprint (#3495 review).
     copies = asyncio.run(_state(client).uploads.for_output("library:89"))
-    assert [s.id for c in copies for s in c.sliced] == [78]
+    assert [s.id for c in copies for s in c.sliced] == ([77, 78] if prune_fails else [78])
 
 
 @respx.mock
@@ -2520,5 +2530,5 @@ def test_a_same_family_printer_known_by_its_device_code_is_named_by_its_model() 
     [said] = print_run.sliced_warnings(profile, Printer(id=1, name="P", model="C12"), None, [1])
 
     assert said.kind == "sliced-same-family"
-    assert "P is a P1S," in said.message
+    assert said.message.startswith("Sliced for a X1C; P is a P1S,")
     assert "C12" not in said.message

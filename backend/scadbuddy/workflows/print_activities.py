@@ -343,7 +343,16 @@ class PrintActivities:
                     )
                 except ApiError as error:
                     if await _reused_slice_gone(client, input, error):
-                        await self.d.uploads.forget_gone_slice(input.sliced)
+                        try:
+                            await self.d.uploads.forget_gone_slice(input.sliced)
+                        except Exception:
+                            # Only a later reprint's read saved: never in place of the
+                            # reslice SLICE_GONE asks for (#3495 review).
+                            logger.warning(
+                                "could not forget a gone slice",
+                                extra={"sliced_library_file_id": input.sliced},
+                                exc_info=True,
+                            )
                         raise ApplicationError(
                             f"The earlier slice of plate {input.plate.plate_id} (library file"
                             f" {input.sliced}) is gone from Bambuddy.",
