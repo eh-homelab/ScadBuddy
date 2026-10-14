@@ -11,6 +11,7 @@ import { buildHarnessOptions } from '../src/harness/run.js'
 import { PluginRefusedError } from '../src/harness/plugins.js'
 import { localPackageServers, PACKAGE_COPY_KEPT_MS, sharePackage, sharedName, sweepPackageCopies } from '../src/temporal/turnPackages.js'
 import { builtinNote, turnServers } from '../src/temporal/turnServers.js'
+import { BUILTIN_SERVER } from '../src/builtins/server.js'
 import type { SessionFiles } from '../src/workspace/store.js'
 import { connectHttp } from '../src/temporal/turnTools.js'
 import { startFakeMcp } from './support/fakeMcp.js'
@@ -306,7 +307,19 @@ describe('plugin packages in a durable turn', () => {
       const call = await turnServers({ packages: { load, root: undefined, localRoot: good, forward } })({ session: 's', owner: OWNER, signal, listing: false })
       expect(handed).toEqual([[]])
       expect(call.servers.map((x) => x.name)).not.toContain('plugin_notes_api')
+      expect(call.secrets).not.toContain(URL)
       expect(call.secrets).not.toContain('notes-token-0123456789')
+      // Nor the built-ins it names: a listing with no payload volume offers none (#3522).
+      const named = { ...pkg, builtinTools: ['Read', 'WebFetch'] }
+      const loadNamed = async (): Promise<PackagesForRun> => ({ ...(await load()), builtinTools: named.builtinTools, loaded: [named] })
+      const builtins = { files: {} as SessionFiles, nested: () => ({ ask: async () => '', search: async () => ({ text: '' }) }) }
+      const bare = await turnServers({ packages: { load: loadNamed, root: undefined, localRoot: good, forward }, builtins })({
+        session: 's',
+        owner: OWNER,
+        signal,
+        listing: false,
+      })
+      expect(bare.servers.map((x) => x.name)).not.toContain(BUILTIN_SERVER)
     } finally {
       await rm(good, { recursive: true, force: true })
     }

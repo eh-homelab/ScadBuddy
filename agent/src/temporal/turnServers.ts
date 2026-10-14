@@ -239,9 +239,10 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
       // A listing shares each package first: one that fails to share (or to be stripped
       // of its http servers) is not loaded, so its servers are not offered either (#2563).
       let offered = loaded.loaded
+      // Read once: the listing and a call decide on the same root (#3523).
+      const { root, localRoot } = deps.packages!
       if (context.listing) {
         shared = []
-        const root = deps.packages!.root
         const failed = new Set<string>()
         for (const pkg of loaded.loaded) {
           if (root === undefined) {
@@ -252,7 +253,7 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
             continue
           }
           try {
-            const turnPackage = await sharePackage(pkg, root, deps.packages!.localRoot)
+            const turnPackage = await sharePackage(pkg, root, localRoot)
             const dark = unparkableBuiltins(turnPackage, provided)
             if (dark.length) {
               problems.push(
@@ -268,7 +269,7 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
           }
         }
         offered = loaded.loaded.filter((pkg) => !failed.has(pkg.name))
-      } else if (deps.packages!.root === undefined) {
+      } else if (root === undefined) {
         // With no payload volume a listing shares nothing, so a call builds nothing
         // either, whatever it names (#3072).
         offered = []
