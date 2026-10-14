@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, suppress
 from datetime import datetime, timedelta
@@ -45,6 +46,7 @@ from scadbuddy.api.deps import (
 from scadbuddy.api.models import require_model_exists
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
+    PROBLEM_SCHEMA,
     RETRY_FOLLOWS,
     STILL_ACCEPTING_PROBLEM,
     IdempotencyKey,
@@ -84,7 +86,12 @@ from scadbuddy.bambuddy.projects import (
 )
 from scadbuddy.bambuddy.runs import UNEXPECTED_DETAIL, PrintRun, newest_failure, run_key
 from scadbuddy.bambuddy.subject import PrintSubject
-from scadbuddy.core.problems import DATABASE_ERRORS, DATABASE_UNAVAILABLE_PROBLEM, ApiError
+from scadbuddy.core.problems import (
+    DATABASE_ERRORS,
+    DATABASE_UNAVAILABLE_PROBLEM,
+    PROBLEM_MEDIA_TYPE,
+    ApiError,
+)
 from scadbuddy.library.catalogue import InvalidModelMetaError
 from scadbuddy.library.outputs import require_output
 from scadbuddy.library.presets import TEMPLATE_ID_PREFIX
@@ -559,15 +566,37 @@ async def get_printer_camera(printer_id: int, store: SettingsStoreDep) -> Respon
     )
 
 
+#: How many live streams of one printer's camera are served at once (#2752 review):
+#: each holds a Bambuddy connection and an HTTP client for as long as it is watched.
+CAMERA_STREAMS_PER_PRINTER = 4
+CAMERA_STREAMS_BUSY_PROBLEM = "https://scadbuddy.dev/problems/camera-streams-busy"
+#: Open streams per printer id; one event loop, so a plain counter is enough.
+_camera_streams: Counter[int] = Counter()
+
+
+def _release_camera_stream(printer_id: int) -> None:
+    _camera_streams[printer_id] -= 1
+    if _camera_streams[printer_id] <= 0:
+        del _camera_streams[printer_id]
+
+
 @router.get(
     "/printers/{printer_id}/camera/stream",
     response_class=StreamingResponse,
-    responses={200: {"content": {MJPEG_TYPE: {}}, "description": "The live camera, as MJPEG"}},
+    responses={
+        200: {"content": {MJPEG_TYPE: {}}, "description": "The live camera, as MJPEG"},
+        429: {
+            "content": {PROBLEM_MEDIA_TYPE: {"schema": PROBLEM_SCHEMA}},
+            "description": f"`{CAMERA_STREAMS_BUSY_PROBLEM}`, with `Retry-After`: this"
+            " printer's camera already has as many live viewers as it serves.",
+        },
+    },
     summary="The printer's live camera",
     description=(
         "Bambuddy's MJPEG stream of the printer's camera (#981), for an `<img>`: open "
         "until the viewer leaves, which closes Bambuddy's stream too. `fps` is capped "
-        "at 15. Read only: nothing here controls the printer or the camera."
+        "at 15, and a printer serves at most 4 streams at once (429 past that). Read "
+        "only: nothing here controls the printer or the camera."
     ),
 )
 async def stream_printer_camera(
@@ -575,7 +604,19 @@ async def stream_printer_camera(
     store: SettingsStoreDep,
     fps: Annotated[int, Query(ge=1, le=15)] = 5,
 ) -> StreamingResponse:
+    if _camera_streams[printer_id] >= CAMERA_STREAMS_PER_PRINTER:
+        raise ApiError(
+            429,
+            f"This printer's camera already has {CAMERA_STREAMS_PER_PRINTER} live viewers;"
+            " close one, or use the snapshot.",
+            title="Too Many Requests",
+            type_=CAMERA_STREAMS_BUSY_PROBLEM,
+            headers={"Retry-After": "5"},
+        )
     stack = AsyncExitStack()
+    _camera_streams[printer_id] += 1
+    # Released with the stack, however the stream ends: the stack is closed once.
+    stack.callback(_release_camera_stream, printer_id)
     try:
         client = await stack.enter_async_context(client_for(store.load()))
         media_type, chunks = await stack.enter_async_context(

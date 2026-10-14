@@ -206,6 +206,33 @@ describe('NowPrinting (#977)', () => {
     now.mockRestore()
   })
 
+  it("opens another printer's camera live, never first as the last one's snapshot (#2752 review)", async () => {
+    const { user } = renderPage(<NowPrinting />)
+    await screen.findByTestId('printer-now-2')
+    await user.click(screen.getByRole('button', { name: 'Camera of Workshop' }))
+    const workshop = await screen.findByRole('dialog', { name: 'Workshop camera' })
+    fireEvent.error(within(workshop).getByRole('img', { name: 'Live camera of Workshop' }))
+    expect(within(workshop).getByRole('img', { name: 'Camera snapshot of Workshop' })).toBeInTheDocument()
+    await user.click(within(workshop).getByRole('button', { name: 'Close' }))
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Workshop camera' })).toBeNull())
+
+    const shown: string[] = []
+    const observer = new MutationObserver((records) => {
+      for (const record of records)
+        for (const node of record.addedNodes)
+          if (node instanceof Element)
+            for (const img of [node, ...node.querySelectorAll('img')])
+              if (img instanceof HTMLImageElement) shown.push(img.alt)
+    })
+    observer.observe(document.body, { childList: true, subtree: true })
+    await user.click(screen.getByRole('button', { name: 'Camera of 3DP-31B-598' }))
+    const other = await screen.findByRole('dialog', { name: '3DP-31B-598 camera' })
+    observer.disconnect()
+
+    expect(within(other).getByRole('img', { name: 'Live camera of 3DP-31B-598' })).toBeInTheDocument()
+    expect(shown.filter((alt) => alt.startsWith('Camera snapshot'))).toEqual([])
+  })
+
   it('closes the camera of a printer that drops out, and does not reopen it when it is back (#2752 review)', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     const { user } = renderPage(<NowPrinting />)

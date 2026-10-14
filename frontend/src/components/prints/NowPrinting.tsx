@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react'
-import { Button } from '../ui/Button'
-import { Dialog } from '../ui/Dialog'
 import { Link } from 'react-router'
 import { api, ApiError } from '../../api/client'
 import type { PrinterNow } from '../../api/types'
 import { bambuddyLink } from '../../lib/bambuddyLinks'
 import { formatDuration } from '../../lib/format'
+import { Button } from '../ui/Button'
+import { Dialog } from '../ui/Dialog'
 
 /** How often the printers are read while the page is visible. */
 export const NOW_POLL_MS = 15_000
@@ -198,16 +198,12 @@ function JobStatus({ printer }: { printer: PrinterNow }) {
 /**
  * #981 — the printer's live camera, with what it is printing beside it. The stream is
  * Bambuddy's MJPEG through ScadBuddy, open only while this dialog is: closing it drops
- * the image, which ends the request and so Bambuddy's stream. A stream that fails or
- * stalls falls back to a snapshot with Refresh. Read only.
+ * the image, which ends the request and so Bambuddy's stream. A stream that is refused
+ * or fails falls back to a snapshot with Refresh. One that stalls mid-stream is ended
+ * cleanly by the backend, which browsers do not report as an error, so it keeps its
+ * last frame; Close and reopen to try again. Read only.
  */
 function CameraDialog({ printer, onClose }: { printer: PrinterNow | null; onClose: () => void }) {
-  const [live, setLive] = useState(true)
-  const [at, setAt] = useState(() => Date.now())
-  const id = printer?.printer_id ?? null
-  useEffect(() => {
-    setLive(true)
-  }, [id])
   return (
     <Dialog
       open={printer !== null}
@@ -220,45 +216,53 @@ function CameraDialog({ printer, onClose }: { printer: PrinterNow | null; onClos
         </Button>
       }
     >
-      {printer && (
-        <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_16rem]" data-testid="printer-camera">
-          <div className="min-w-0">
-            {live ? (
-              <img
-                src={api.printerCameraStreamUrl(printer.printer_id)}
-                alt={`Live camera of ${printer.name}`}
-                className="w-full rounded-[6px] border border-line bg-surface-2"
-                onError={() => {
-                  // A fresh snapshot each fallback: an old `?at=` may be a cached old frame.
-                  setAt(Date.now())
-                  setLive(false)
-                }}
-              />
-            ) : (
-              <>
-                <img
-                  src={api.printerCameraUrl(printer.printer_id, at)}
-                  alt={`Camera snapshot of ${printer.name}`}
-                  className="w-full rounded-[6px] border border-line bg-surface-2"
-                />
-                <p className="mt-2 flex flex-wrap items-center gap-2 text-[12px] text-muted" role="status">
-                  The live stream stopped; this is a snapshot.
-                  <Button variant="ghost" size="sm" onClick={() => setAt(Date.now())}>
-                    Refresh
-                  </Button>
-                  <Button variant="ghost" size="sm" onClick={() => setLive(true)}>
-                    Try live again
-                  </Button>
-                </p>
-              </>
-            )}
-          </div>
-          <div className="min-w-0 text-[12.5px]" data-testid="printer-camera-status">
-            <p className="font-medium text-ink">{ACTIVITY[printer.activity].label}</p>
-            <JobStatus printer={printer} />
-          </div>
-        </div>
-      )}
+      {/* Keyed per printer, so another printer's camera starts live, never in the last
+          one's snapshot mode (which would fetch a snapshot first). */}
+      {printer && <CameraView key={printer.printer_id} printer={printer} />}
     </Dialog>
+  )
+}
+
+function CameraView({ printer }: { printer: PrinterNow }) {
+  const [live, setLive] = useState(true)
+  const [at, setAt] = useState(() => Date.now())
+  return (
+    <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_16rem]" data-testid="printer-camera">
+      <div className="min-w-0">
+        {live ? (
+          <img
+            src={api.printerCameraStreamUrl(printer.printer_id)}
+            alt={`Live camera of ${printer.name}`}
+            className="w-full rounded-[6px] border border-line bg-surface-2"
+            onError={() => {
+              // A fresh snapshot each fallback: an old `?at=` may be a cached old frame.
+              setAt(Date.now())
+              setLive(false)
+            }}
+          />
+        ) : (
+          <>
+            <img
+              src={api.printerCameraUrl(printer.printer_id, at)}
+              alt={`Camera snapshot of ${printer.name}`}
+              className="w-full rounded-[6px] border border-line bg-surface-2"
+            />
+            <p className="mt-2 flex flex-wrap items-center gap-2 text-[12px] text-muted" role="status">
+              The live stream stopped; this is a snapshot.
+              <Button variant="ghost" size="sm" onClick={() => setAt(Date.now())}>
+                Refresh
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => setLive(true)}>
+                Try live again
+              </Button>
+            </p>
+          </>
+        )}
+      </div>
+      <div className="min-w-0 text-[12.5px]" data-testid="printer-camera-status">
+        <p className="font-medium text-ink">{ACTIVITY[printer.activity].label}</p>
+        <JobStatus printer={printer} />
+      </div>
+    </div>
   )
 }

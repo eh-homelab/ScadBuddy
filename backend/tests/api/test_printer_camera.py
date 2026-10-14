@@ -7,6 +7,7 @@ with ``can_read_status``. Both calls stay server-side; the browser sees a JPEG."
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import AsyncIterator
 
 import httpx
@@ -14,6 +15,7 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.api import printing
 from scadbuddy.bambuddy.client import mjpeg_type
 from tests.api.test_send import API, configure
 
@@ -171,6 +173,59 @@ def test_a_camera_that_stalls_mid_stream_ends_it_and_closes_bambuddys_stream(
     assert response.content.count(b"--frame") == 2
     assert frames.closed
     assert any(record.message == "camera stream ended" for record in caplog.records)
+
+
+@respx.mock
+def test_a_printer_serves_a_few_streams_at_once_and_refuses_more(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2752 review: each stream holds a Bambuddy connection for as long as it is
+    watched, so past the cap a viewer is told so, and Bambuddy is never asked."""
+    configure(client)
+    monkeypatch.setattr(
+        printing, "_camera_streams", Counter({7: printing.CAMERA_STREAMS_PER_PRINTER})
+    )
+    minted = token_route()
+    stream = respx.get(f"{API}/printers/7/camera/stream")
+
+    response = client.get("/api/v1/print/printers/7/camera/stream")
+
+    assert response.status_code == 429
+    assert response.json()["type"] == printing.CAMERA_STREAMS_BUSY_PROBLEM
+    assert response.headers["retry-after"] == "5"
+    assert not minted.called and not stream.called
+    # Another printer's camera is not held up by this one's viewers.
+    other = respx.get(f"{API}/printers/8/camera/stream").mock(
+        return_value=httpx.Response(200, stream=Frames(), headers={"Content-Type": MJPEG})
+    )
+    assert client.get("/api/v1/print/printers/8/camera/stream").status_code == 200
+    assert other.called
+
+
+@respx.mock
+def test_a_stream_gives_its_place_back_however_it_ends(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Served to the end, stalled, or refused by Bambuddy: none keeps a place."""
+    configure(client)
+    monkeypatch.setattr(printing, "_camera_streams", Counter())
+    token_route()
+    respx.get(f"{API}/printers/7/camera/stream").mock(
+        side_effect=[
+            httpx.Response(200, stream=Frames(), headers={"Content-Type": MJPEG}),
+            httpx.Response(
+                200,
+                stream=Frames(count=1, fail=httpx.ReadTimeout("stalled")),
+                headers={"Content-Type": MJPEG},
+            ),
+            httpx.Response(404, json={"detail": "Printer not found"}),
+        ]
+    )
+
+    for _ in range(3):
+        client.get("/api/v1/print/printers/7/camera/stream")
+
+    assert printing._camera_streams[7] == 0
 
 
 @respx.mock
