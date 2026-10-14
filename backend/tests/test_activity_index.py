@@ -1,13 +1,24 @@
 """Activity (spec 2026-10-09): the record, its event and topic."""
 
+import threading
+import time
+
 import pytest
 from psycopg import Connection, errors
 
 from scadbuddy.activity.index import ActivityIndex
 from scadbuddy.activity.models import ActivityRow
 from scadbuddy.api.realtime import topics_of, valid_topic
-from scadbuddy.core.events import ActivityEvent, AgentOperationEvent, decode_event, encode_event
+from scadbuddy.core.events import (
+    ActivityEvent,
+    AgentOperationEvent,
+    JobEvent,
+    decode_event,
+    encode_event,
+)
 from scadbuddy.core.metrics import Metrics
+from scadbuddy.core.pg_events import PgNotifyEventBus
+from scadbuddy.core.pg_listener import PgListener
 from tests.conftest import PgPool
 
 
@@ -162,3 +173,43 @@ def test_migration_checks_reject_bad_status_and_inconsistent_finished_at(pg_pool
     ):
         with pg_pool.connection() as conn, pytest.raises(errors.CheckViolation):
             conn.execute(insert.replace("{}", finished), (activity_id, status))
+
+
+@pytest.mark.requires_postgres
+def test_writers_of_one_activity_row_never_deadlock_on_the_event_log(
+    pg_pool: PgPool, pg_conninfo: str
+) -> None:
+    """The render projection publishes its job event, taking the event log's lock to
+    commit, and then writes the job's activity row; every other activity write did the
+    row first and then the lock. Two such transactions on one row deadlocked, and
+    Postgres aborted one: its event or its activity write was lost (#3221)."""
+    metrics = Metrics()
+    bus = PgNotifyEventBus(pg_conninfo, listener=PgListener(pg_conninfo), metrics=metrics)
+    index = ActivityIndex(pg_pool, events=bus, metrics=metrics)
+    with pg_pool.connection() as conn:
+        assert index.upsert_in(conn, row())
+    other_started = threading.Event()
+    other_wrote: list[bool] = []
+
+    def other() -> None:
+        with pg_pool.connection() as conn, conn.transaction():
+            other_started.set()
+            other_wrote.append(index.upsert_in(conn, row(title="Render keychain again")))
+
+    with pg_pool.connection() as conn, conn.transaction():
+        # As render/projection.py `_announce` does: the event first, holding the lock...
+        bus.publish_in(conn, JobEvent(kind="job.running", job_id="j1", slug="keychain"))
+        thread = threading.Thread(target=other)
+        thread.start()
+        other_started.wait(5)
+        time.sleep(0.5)  # the other writer reaches the row (and, before the fix, holds it)
+        # ...then the activity row.
+        assert index.upsert_in(conn, row(title="Render keychain, running"))
+    thread.join(15)
+
+    assert other_wrote == [True]
+    assert metrics.registry.get_sample_value("scadbuddy_activity_write_failures_total") == 0
+    dropped = metrics.registry.get_sample_value(
+        "scadbuddy_events_dropped_total", {"reason": "error"}
+    )
+    assert not dropped
