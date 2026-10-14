@@ -1572,6 +1572,12 @@ export const api = {
   getPrintProgress: (outputId: string) =>
     request<PrintProgress | null>(`/print/outputs/${seg(outputId)}/progress`),
 
+  /** #981 — the printer's live camera, Bambuddy's MJPEG for an `<img>`: closing the
+   * image (unmounting it) ends the stream. */
+  printerCameraStreamUrl: (printerId: number) => `${API_BASE}/print/printers/${printerId}/camera/stream`,
+  /** #796 — one camera frame; `at` makes each refresh a new request. */
+  printerCameraUrl: (printerId: number, at: number) => `${API_BASE}/print/printers/${printerId}/camera?at=${at}`,
+
   /** #977 — every active printer's live state, whoever started its job. */
   getPrintersNow: () => request<PrintersNow>('/print/printers/now'),
 
