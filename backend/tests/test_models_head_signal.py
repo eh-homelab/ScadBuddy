@@ -9,6 +9,7 @@ that directory -- the revalidation the follower makes on hearing A's commit.
 from __future__ import annotations
 
 import asyncio
+import gc
 import logging
 import os
 import threading
@@ -230,8 +231,50 @@ def test_a_change_too_large_to_name_says_why_everything_is_refreshed(
 
 
 class _NoListener:
+    def __init__(self, check_interval: float = 30.0) -> None:
+        self.check_interval = check_interval
+
     def listen(self, channel: str, **_: Any) -> None:
         pass
+
+
+def test_a_refresh_is_slow_past_its_listeners_liveness_interval(paths: DataPaths) -> None:
+    """#2617 review: the warning threshold is the interval of the check it holds up."""
+    history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX)
+    follower = ModelsHeadFollower(paths, history, cast(PgListener, _NoListener(check_interval=7.5)))
+    assert follower.slow_after == 7.5
+
+
+async def test_a_cancelled_refresh_retrieves_its_walks_failure(paths: DataPaths) -> None:
+    """#2617 review: a listener cancelled mid-walk leaves the walk running; its failure
+    is retrieved then, not reported as never retrieved."""
+    history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX)
+    follower = ModelsHeadFollower(paths, history, cast(PgListener, _NoListener()))
+    follower.slow_after = 5.0
+    entered = threading.Event()
+
+    def revalidate(model_ids: list[str] | None) -> None:
+        entered.set()
+        time.sleep(0.2)
+        raise OSError("stale NFS file handle")
+
+    follower.revalidate = revalidate  # type: ignore[method-assign]
+    loop = asyncio.get_running_loop()
+    reported: list[dict[str, Any]] = []
+    loop.set_exception_handler(lambda _loop, context: reported.append(context))
+    try:
+        refreshing = asyncio.create_task(follower.refresh(["keychain"]))
+        await asyncio.to_thread(entered.wait, PROMPTLY)
+        refreshing.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await refreshing
+        del refreshing
+        await asyncio.sleep(0.4)  # the walk ends, failing
+        gc.collect()
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(None)
+    assert [c["message"] for c in reported] == []
 
 
 async def test_the_follower_refreshes_off_the_loop_and_moves_head_after(
@@ -289,6 +332,8 @@ async def test_a_slow_refresh_is_said_while_it_runs_and_when_it_ends(
 
     caplog.clear()
     delay = 0.0
+    # Generous: a thread-pool round trip on a loaded worker can outlast 0.05 s.
+    follower.slow_after = 5.0
     with caplog.at_level(logging.DEBUG, logger="scadbuddy.library.repo_signal"):
         await follower.refresh(["keychain"])
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [

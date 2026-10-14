@@ -38,7 +38,7 @@ import time
 from pathlib import Path
 
 from scadbuddy.core.paths import DataPaths, revalidate_dirs
-from scadbuddy.core.pg_listener import DEFAULT_CHECK_INTERVAL, PgListener
+from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.repo_lock import HEAD_CHANNEL, decode_change
@@ -56,8 +56,9 @@ class ModelsHeadFollower:
         self.history = history
         self.catalogue: Catalogue | None = None
         #: A refresh slower than this is logged as a warning, and said while it runs: it
-        #: holds up every channel on the shared listener (pg_listener.py).
-        self.slow_after: float = DEFAULT_CHECK_INTERVAL
+        #: holds up every channel on the shared listener, and that listener's own
+        #: liveness check (pg_listener.py), so it is that check's interval.
+        self.slow_after: float = listener.check_interval
         #: The last HEAD announced here.
         self.head: str | None = None
         listener.listen(HEAD_CHANNEL, on_notify=self._received, on_connect=self._connected)
@@ -88,6 +89,11 @@ class ModelsHeadFollower:
         walk = asyncio.ensure_future(asyncio.to_thread(self.revalidate, model_ids))
         try:
             await asyncio.wait_for(asyncio.shield(walk), self.slow_after)
+        except asyncio.CancelledError:
+            # The walk outlives the cancelled listener; whatever it raises then is
+            # retrieved here, not reported as never retrieved at shutdown.
+            walk.add_done_callback(_settled)
+            raise
         except TimeoutError:
             # No limit on the walk itself: moving on before it ends would name a HEAD
             # this replica has not revalidated for (#2617). A hung hard-mounted NFS is
@@ -97,7 +103,11 @@ class ModelsHeadFollower:
                 " and the listener's liveness check wait for it",
                 extra={"models": _count(model_ids), "seconds": self.slow_after},
             )
-            await walk
+            try:
+                await walk
+            except asyncio.CancelledError:
+                walk.add_done_callback(_settled)
+                raise
         if self.catalogue is not None:
             self.catalogue.forget(model_ids)
         took = round(time.monotonic() - started, 3)
@@ -133,3 +143,9 @@ def _template_dirs(parent: Path) -> list[Path]:
             ]
     except OSError:
         return []
+
+
+def _settled(walk: asyncio.Future[None]) -> None:
+    """Retrieve an orphaned walk's outcome: it failed after its refresh was cancelled."""
+    if not walk.cancelled() and (exc := walk.exception()) is not None:
+        logger.debug("a cancelled models library refresh's walk failed", exc_info=exc)
