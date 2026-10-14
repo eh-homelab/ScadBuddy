@@ -53,10 +53,11 @@ describe('NozzlePlanStep (#2166)', () => {
   })
 
   it('does not count a slot with no side as a second side (#2737 review)', () => {
-    const slots = plan.slots ?? []
-    const sideless = {
+    const sideless: NozzlePlan = {
       ...plan,
-      slots: [{ ...slots[0], side: 'L' as const }, { ...slots[1], side: null as unknown as 'L' }],
+      slots: (plan.slots ?? []).map((slot, index) =>
+        index === 0 ? { ...slot, side: 'L' as const } : { ...slot, side: null as unknown as 'L' },
+      ),
     }
     render(<NozzlePlanStep plan={sideless} sides={{}} onSide={vi.fn()} />)
     expect(screen.queryByTestId('nozzle-side-hint')).toBeNull()
