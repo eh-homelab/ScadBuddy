@@ -86,6 +86,19 @@ export function sourceName(args: { output_id?: string | undefined; library_file_
   return args.library_file_id !== undefined ? `library file ${args.library_file_id}` : `output ${args.output_id ?? ''}`
 }
 
+/** #1899 — a print's supports, as its approval line names them. */
+function supportsPhrase(
+  supports: { enabled: boolean; type?: string; threshold_angle?: number; on_build_plate_only?: boolean } | undefined,
+): string {
+  if (supports === undefined) return ''
+  if (!supports.enabled) return ', without supports'
+  return (
+    (supports.type === undefined ? ', with supports' : `, with ${supports.type} supports`) +
+    `${supports.threshold_angle === undefined ? '' : ` at ${supports.threshold_angle}°`}` +
+    `${supports.on_build_plate_only ? ' on the build plate only' : ''}`
+  )
+}
+
 /** The folder a library move or copy names, in its approval line (#2670). */
 function folderName(folderId: number | undefined, folderPath: string | undefined): string {
   if (folderId !== undefined) return `library folder ${folderId}`
@@ -834,6 +847,26 @@ export const printTools: Tool[] = [
             "Never applied unless named here. One that cannot apply to this print is skipped, never refused: " +
             "the run's warnings say so (profile-not-applied) and it prints with the preset as it is.",
         ),
+      supports: z
+        .object({
+          enabled: z
+            .boolean()
+            .describe('false prints with no supports, and the other fields are then not sent; true adds them over the template'),
+          type: z.enum(['tree', 'normal']).optional().describe("'tree' (Bambu's default, best on an H2C); omit for the template's, else tree"),
+          threshold_angle: z
+            .number()
+            .int()
+            .min(0)
+            .max(90)
+            .optional()
+            .describe('Degrees from vertical; omit for the template\'s, else the preset\'s'),
+          on_build_plate_only: z.boolean().optional().describe("Omit for the template's, else the preset's"),
+        })
+        .optional()
+        .describe(
+          'Support structures for this print (#1899), over what the template declares. Omit to keep the ' +
+            "template's. A setting the slicer's preset cannot take is left out with a warning on the result; never a refusal.",
+        ),
     }),
     risk: 'outward',
     bambuddyScope: ['Read Status', 'Manage Library', 'Manage Queue'],
@@ -858,6 +891,7 @@ export const printTools: Tool[] = [
         `${process_name ? `, process "${process_name}"` : tier ? `, ${tier} quality` : ''}` +
         `${printer_id !== undefined ? ` on printer ${printer_id}` : ''}` +
         `${args.filament_profiles?.length ? `, with the ${args.filament_profiles.join(', ')} profile` : ''}` +
+        `${supportsPhrase(args.supports)}` +
         `${defaulted ? ' (other choices as the print dialog opens)' : ''}`
       )
     },
@@ -936,6 +970,24 @@ export const printTools: Tool[] = [
         // The same for a library file as for an output (#907, #1756).
         ...(args.print_sequence === undefined ? {} : { print_sequence: args.print_sequence }),
         ...(args.filament_profiles?.length ? { filament_profiles: args.filament_profiles } : {}),
+        ...(args.supports === undefined
+          ? {}
+          : {
+              // Only what was asked for: a field left out keeps the template's (#2835 review).
+              // With supports off, only that: the backend applies nothing else (#3179).
+              supports: !args.supports.enabled
+                ? { enabled: false }
+                : {
+                    enabled: true,
+                    ...(args.supports.type === undefined ? {} : { type: args.supports.type }),
+                    ...(args.supports.threshold_angle === undefined
+                      ? {}
+                      : { threshold_angle: args.supports.threshold_angle }),
+                    ...(args.supports.on_build_plate_only === undefined
+                      ? {}
+                      : { on_build_plate_only: args.supports.on_build_plate_only }),
+                  },
+            }),
         request_id: requestId,
       }
       const started = await reattach(
