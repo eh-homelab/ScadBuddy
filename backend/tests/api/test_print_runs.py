@@ -29,6 +29,7 @@ from fastapi.testclient import TestClient
 from temporalio.api.enums.v1 import EventType
 from temporalio.service import RPCError, RPCStatusCode
 
+from scadbuddy.api import commands as commands_api
 from scadbuddy.api import operations as operations_api
 from scadbuddy.api import printing as printing_api
 from scadbuddy.api.accepting import COMMAND_RESEND_PROBLEM
@@ -1346,11 +1347,13 @@ def test_only_a_press_with_a_request_id_is_offered_the_202(
     assert pressed.json()["update_id"] == "r" * 32
 
 
+@pytest.mark.parametrize("request_id", ["press/1", ".", ".."])
 def test_a_request_id_a_follow_url_cannot_carry_keeps_the_resend(
-    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch, request_id: str
 ) -> None:
     """#3078: the `request_id` is the follow URL's last segment, and Starlette asserts on a
-    `/` in one, so such a press is the 503 re-send it was, not a 500."""
+    `/` in one, so such a press is the 503 re-send it was, not a 500. A dot-only one is
+    collapsed out of the path by clients and proxies (review #2834)."""
     output_id = prepared(client, model)
 
     async def slow(*args: Any, **kwargs: Any) -> AcceptAnswer:
@@ -1359,12 +1362,42 @@ def test_a_request_id_a_follow_url_cannot_carry_keeps_the_resend(
     monkeypatch.setattr(printing_api, "start_command", slow)
     response = client.post(
         f"/api/v1/print/outputs/{output_id}/run",
-        json={**body(), "request_id": "press/1"},
+        json={**body(), "request_id": request_id},
         headers={"Prefer": "respond-async"},
     )
 
     assert response.status_code == 503, response.text
     assert response.json()["type"] == operations_api.STILL_ACCEPTING_PROBLEM
+
+
+def test_a_followed_run_is_the_whole_run_and_attributed_as_the_route_does(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review #2834: the follow answers a `PrintRun` with every field (not some other
+    member of its response union), and attributes it in Activity as the run route does."""
+    run = PrintRun(
+        id="run-followed",
+        subject="output:x",
+        status="succeeded",
+        created_at=datetime.now(UTC),
+        finished_at=datetime.now(UTC),
+    )
+
+    async def answered(*args: Any, **kwargs: Any) -> AcceptAnswer:
+        return AcceptAnswer(run=run)
+
+    attributed: list[str] = []
+
+    async def attribute(index: object, activity_id: str) -> None:
+        attributed.append(activity_id)
+
+    monkeypatch.setattr(printing_api, "follow_update", answered)
+    monkeypatch.setattr(commands_api, "attribute_request", attribute)
+    response = client.post("/api/v1/commands/print-x/updates/r1")
+
+    assert response.status_code == 200, response.text
+    assert response.json() == run.model_dump(mode="json")
+    assert attributed == ["print_run:run-followed"]
 
 
 def test_following_a_refused_run_answers_the_refusal(

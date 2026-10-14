@@ -137,8 +137,9 @@ from scadbuddy.workflows.print_models import (
 logger = logging.getLogger(__name__)
 
 #: The `request_id`s a follow URL can carry as its Update id: the web client's hex and the
-#: agent's UUIDs both match.
-_FOLLOWABLE_ID = re.compile(r"[A-Za-z0-9_.-]+")
+#: agent's UUIDs both match. Not `.` or `..`, which a client or proxy collapses out of a
+#: path as a dot segment (review #2834).
+_FOLLOWABLE_ID = re.compile(r"(?!\.{1,2}$)[A-Za-z0-9_.-]+")
 
 #: ``TemporalRefusedError``. Not "nothing was queued": some refusals come after the start
 #: was persisted, and the same request sent again follows it (review #1316 4).

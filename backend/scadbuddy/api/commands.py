@@ -66,20 +66,22 @@ async def follow_command(
     202 would have: a render's job (`RenderAccepted`) or a print's run (`PrintRun`),
     or the refusal. An answer is always **200**: a print run answers 200 here whether
     its own route would have said 202 (a new run) or 200 (a repeat); its ``repeated``
-    says which. ``supersedes`` is a render's only (§5.3). A render's job is attributed
-    in Activity as its route attributes it, since that route answered 202 first and
-    attributed nothing."""
+    says which. ``supersedes`` is a render's only (§5.3). The answer is attributed in
+    Activity as the route attributes it, since that route answered 202 first and
+    attributed nothing (#2805, #2834)."""
     if workflow_id.startswith(PRINT_PREFIX):
         if supersedes is not None:
             raise ApiError(
                 status.HTTP_422_UNPROCESSABLE_CONTENT, "only a render's follow supersedes a job"
             )
         try:
-            return await follow_run(runs, workflow_id, update_id)
+            run = await follow_run(runs, workflow_id, update_id)
         except CommandStillAcceptingError:
             return accepting(request, workflow_id, update_id)
         except CommandResendError:
             raise resend() from None
+        await attribute_request(activity.index, f"print_run:{run.id}")
+        return run
     if not workflow_id.startswith(RENDER_PREFIX):
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no command {workflow_id!r} to follow")
     with submit_problems():
