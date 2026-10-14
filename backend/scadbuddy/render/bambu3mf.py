@@ -806,7 +806,16 @@ _WRITTEN_VERTEX = re.compile(
     rb'<vertex x="([^"]{1,%d})" y="([^"]{1,%d})" z="([^"]{1,%d})"/>' % ((_MAX_WRITTEN_NUMBER,) * 3)
 )
 _ANY_VERTEX = re.compile(rb"<(?:[\w.-]+:)?vertex\b")
-_PAINT_CODE = re.compile(rb"\s" + PAINT_ATTRIBUTE.encode() + rb'="([^"]*)"')
+#: A triangle's paint code, as the parse reads it (a ``<triangle>``'s attribute), and
+#: the attribute anywhere: the two counted against each other.
+_PAINT_CODE = re.compile(rb"<triangle\b[^>]*?\s" + PAINT_ATTRIBUTE.encode() + rb'="([^"]*)"')
+_ANY_PAINT = re.compile(rb"\s" + PAINT_ATTRIBUTE.encode() + rb'="')
+#: The elements :func:`object_model` writes exactly one of; another count is the shape
+#: the parse refuses or reads otherwise (#2024), so it is left to the parse.
+_ONE_EACH = tuple(
+    re.compile(rb"<(?:[\w.-]+:)?%s\b" % tag)
+    for tag in (b"object", b"mesh", b"vertices", b"triangles")
+)
 #: Vertices turned into numbers at a time, so the copy never costs more than a batch.
 _VERTEX_BATCH = 65536
 
@@ -817,13 +826,19 @@ def _written_extents(data: bytes) -> tuple[np.ndarray, frozenset[int]] | None:
     a re-placed print only needs the box, and the parse of an 86 MB file held a worker
     for 39 s. ``None`` when the file is not in that writer's shape (a vertex written
     otherwise or with a coordinate past :data:`_MAX_WRITTEN_NUMBER`, a comment, an
-    entity, no vertex at all, a code past its cap), which :func:`_plate_geometry` then
-    parses as it always has.
+    entity, a processing instruction, no vertex at all, other than one object, mesh,
+    ``<vertices>`` and ``<triangles>``, a paint code off a triangle or past its cap),
+    which :func:`_plate_geometry` then parses as it always has.
 
     Every value is bounded before it is copied: no entity is expanded (none is
     accepted), coordinates are read a batch at a time into rows of at most
     :data:`_MAX_WRITTEN_NUMBER` bytes, and a paint code is measured before it is kept."""
-    if b"<!--" in data or b"<![CDATA[" in data or b"&" in data:
+    # The writer's one processing instruction is its XML declaration; any other, like a
+    # comment, CDATA or an entity, is something the pattern does not read as XML does.
+    body = data[data.index(b"?>") + 2 :] if data.startswith(b"<?xml ") and b"?>" in data else data
+    if any(marker in body for marker in (b"<?", b"<!--", b"<![CDATA[", b"&")):
+        return None
+    if any(sum(1 for _ in tag.finditer(data)) != 1 for tag in _ONE_EACH):
         return None
     low = np.full(3, np.inf)
     high = np.full(3, -np.inf)
@@ -849,11 +864,15 @@ def _written_extents(data: bytes) -> tuple[np.ndarray, frozenset[int]] | None:
     if not count or count != sum(1 for _ in _ANY_VERTEX.finditer(data)):
         return None
     codes: set[bytes] = set()
+    found = 0
     for match in _PAINT_CODE.finditer(data):
         code = match.group(1)
         if len(code) > MAX_CODE_DIGITS or not code.isascii():
             return None
         codes.add(code)
+        found += 1
+    if found != sum(1 for _ in _ANY_PAINT.finditer(data)):
+        return None
     painted: set[int] = set()
     for code in codes:
         if code:
