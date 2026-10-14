@@ -217,6 +217,13 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   and its `.renders/<key>` cache are gone (#546): the Temporal path's cache is the blob
   store's piece (`piece.json`), and nothing writes or prunes `models/<slug>/.renders/`
   any more (it stays hidden and git-ignored for volumes that still hold one).
+- `backend/scadbuddy/meshmodel/` — mesh models (#2146, spec 2026-10-11): `scene.py`,
+  `compile.py`, `edits.py`, `operations.py` (the `library` kinds), `paint.py` (paint
+  transfer: a painted part's `.paint.json` codes carried onto its rendered solid by the
+  render's `paint` stage, `render/jobs.py` `paint_layout`; a layout part names its carried
+  codes file, `PartSource.paint`), `locate.py` (the scene object a weak joint is in).
+  `render/geometry.py` `weak_joints` finds where a print snaps; `render/meshmatch.py`
+  matches points and triangles in numpy (trimesh's proximity needs rtree, not installed).
 - `backend/scadbuddy/workflows/arrange.py` — Arrange's packer (spec 2026-09-27 §7): goals,
   quarter turns, filament signatures, every plate checked with `plate.fit_problem`;
   `Arrange` in `workflows/pipelines.py` runs a `kind='arrange'` row (`POST /outputs/arrange`).
