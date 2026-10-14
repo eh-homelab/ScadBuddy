@@ -215,6 +215,10 @@ types; the coaster itself has neither.
     `SvgShapeElement`)
   - `svg` (an uploaded SVG; each fill colour is a layer: `SvgImageElement`)
   - `vector` (a vectorized image, one layer per colour and depth: `VectorizeElement`)
+
+    Both `svg` and `vector` take `overlap: "occlude" | "stack"`, default `occlude`
+    (§5.2). `stack` is ScadBuddy's own option: overlapping colours print as thin
+    blended layers. An import always sets `occlude`.
   - `hole` (`inside` | `boundary` | `back`, in MakerWorld's sizes and positions:
     `BaseHoleElement`)
 
@@ -318,6 +322,13 @@ These rules keep every colour attributed and every volume single-coloured:
 - **Overlaps resolve by z-order.** Where two elements overlap, the upper one (later in
   `elements`) owns the shared volume; the lower one is `difference()`d by the upper
   one's footprint over the shared height. No volume ever has two colours.
+- **Colours inside one SVG or vector element follow its `overlap` setting:**
+  - `occlude` (the default, as MakerWorld draws it): a later colour is cut out of the
+    earlier ones, so each point of the element shows one colour.
+  - `stack`: each colour keeps its whole outline, and the colours are stacked in paint
+    order at successive heights within the element's depth. Where they overlap, the
+    print has thin layers of each filament, and the layers blend. Each height band
+    still holds one colour, so no volume has two.
 - **Facedown inlays every element from the plate's top face down to its own depth,**
   clamped to the plate's height, as MakerWorld clamps it (`min(backdropHeight, h)`,
   Appendix A.3).
