@@ -1862,13 +1862,19 @@ export const api = {
    * request answers in time rather than for every file: a 202 says where to go on from,
    * and this follows it to the end (#2951), handing each step's batch to `onProgress`.
    */
-  queuePrintBatch: async (batchId: string, onProgress?: (batch: PrintBatch) => void): Promise<PrintBatch> => {
+  queuePrintBatch: async (
+    batchId: string,
+    onProgress?: (batch: PrintBatch) => void,
+    signal?: AbortSignal,
+  ): Promise<PrintBatch> => {
     let from = 0
     for (;;) {
+      // Aborted (the dialog closed): send none of the rest; the next Queue all does.
+      signal?.throwIfAborted()
       const query = from === 0 ? '' : `?from_position=${from}`
       const answer = await requestWithStatus<PrintBatch | BatchQueueProgress>(
         `/print/batches/${seg(batchId)}/queue${query}`,
-        { method: 'POST' },
+        { method: 'POST', signal },
       )
       if (answer.status !== 202) return answer.body as PrintBatch
       const progress = answer.body as BatchQueueProgress

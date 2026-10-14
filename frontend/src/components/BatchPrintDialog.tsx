@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { USER_ONLY } from '../agent/dom'
 import { api, ApiError, printRunPoll } from '../api/client'
 import type { BatchItem, PrintBatch, PrintRun } from '../api/types'
@@ -62,6 +62,10 @@ export function BatchPrintDialog({ batchId, onClose }: Props) {
   const [queueing, setQueueing] = useState(false)
   /** Each started run as it stands, by id: the per-file result after Queue all. */
   const [runs, setRuns] = useState<Record<string, PrintRun>>({})
+
+  /** The Queue all in flight, stopped when the dialog goes (#2718 review). */
+  const queueRun = useRef<AbortController | null>(null)
+  useEffect(() => () => queueRun.current?.abort(), [])
 
   useEffect(() => {
     let live = true
@@ -263,14 +267,17 @@ export function BatchPrintDialog({ batchId, onClose }: Props) {
   const sentBefore = items.some((item) => item.outcome)
 
   async function queueAll() {
+    const run = new AbortController()
+    queueRun.current = run
     setQueueing(true)
     setError(null)
     try {
-      setBatch(await api.queuePrintBatch(batchId, setBatch))
+      setBatch(await api.queuePrintBatch(batchId, setBatch, run.signal))
     } catch (cause) {
+      if (run.signal.aborted) return
       setError(cause instanceof ApiError ? cause.detail : 'Could not queue the batch print.')
     } finally {
-      setQueueing(false)
+      if (!run.signal.aborted) setQueueing(false)
     }
   }
 

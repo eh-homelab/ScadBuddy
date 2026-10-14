@@ -202,6 +202,76 @@ def test_queue_all_answers_in_time_and_is_followed_from_where_it_stopped(
     assert client.post(queue, params={"from_position": -1}).status_code == 422
 
 
+@pytest.mark.parametrize(
+    ("took", "budget", "next_position"),
+    [
+        # Each start takes 8 s, reckoned at 10: after two (16 s) a third would end at 26.
+        pytest.param(8.0, 25.0, 2, id="two-fit"),
+        # A start that took 20 s (a download first) is what the next is reckoned at:
+        # 20 + 20 > 35, though 20 + ACCEPT_BUDGET would fit.
+        pytest.param(20.0, 35.0, 1, id="a-slow-start-is-measured"),
+    ],
+)
+@respx.mock
+def test_queue_all_reckons_each_start_at_the_slowest_so_far(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    took: float,
+    budget: float,
+    next_position: int,
+) -> None:
+    """#2718 review: a file is started only while ``ACCEPT_BUDGET``, or the slowest start
+    so far when one took longer, still fits in ``QUEUE_BUDGET_S``."""
+    clock = [0.0]
+    monkeypatch.setattr(print_batches, "time", type("Clock", (), {"monotonic": lambda: clock[0]}))
+    monkeypatch.setattr(print_batches, "ACCEPT_BUDGET", 10.0)
+    monkeypatch.setattr(print_batches, "QUEUE_BUDGET_S", budget)
+    real = library_print.post_library_run
+
+    async def timed(*args: Any) -> Any:
+        clock[0] += took
+        return await real(*args)
+
+    monkeypatch.setattr(print_batches, "post_library_run", timed)
+    configure(client)
+    for file_id in (104, 105, 106):
+        sliced_file(file_id)
+    run_routes()
+    queue_route()
+    batch = new_batch(client, 104, 105, 106)
+    for position in range(3):
+        choose(client, batch["id"], position, request=SLICED_RUN)
+
+    first = client.post(f"{BATCHES}/{batch['id']}/queue")
+
+    assert first.status_code == 202, first.text
+    assert first.json()["next_position"] == next_position
+
+
+@respx.mock
+def test_an_unchosen_file_costs_no_time_against_queue_all(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2718 review: a file with no choices starts nothing, so with no time left the one
+    request still records it and starts the chosen file after it."""
+    monkeypatch.setattr(print_batches, "QUEUE_BUDGET_S", 0.0)
+    configure(client)
+    sliced_file(104)
+    run_routes()
+    queue_route()
+    batch = new_batch(client, 105, 106, 104)
+    choose(client, batch["id"], 2, request=SLICED_RUN)
+
+    done = client.post(f"{BATCHES}/{batch['id']}/queue")
+
+    assert done.status_code == 200, done.text
+    assert [i["outcome"]["status"] for i in done.json()["items"]] == [
+        "unchosen",
+        "unchosen",
+        "started",
+    ]
+
+
 @respx.mock
 def test_queue_all_sent_again_queues_nothing_twice(client: TestClient) -> None:
     """A Queue all retried (a reload mid-request, a second press) leaves a started file

@@ -401,6 +401,31 @@ describe('BatchPrintDialog (#2672)', () => {
     expect(sent).toEqual([null, '1'])
   })
 
+  it('stops following a Queue all once the dialog is gone (#2718 review)', async () => {
+    const batch = await newBatch(89, 91)
+    for (const position of [0, 1])
+      await api.putPrintBatchItem(batch.id, position, { request: { ...REQUEST }, skipped: false, removed: false })
+    const chosen = await api.putPrintBatchStep(batch.id, 2)
+    const sent: (string | null)[] = []
+    let answer: () => void = () => {}
+    const answered = new Promise<void>((resolve) => (answer = resolve))
+    server.use(
+      http.post(`/api/v1/print/batches/${batch.id}/queue`, async ({ request }) => {
+        sent.push(new URL(request.url).searchParams.get('from_position'))
+        await answered
+        return HttpResponse.json({ batch: chosen, next_position: 1 }, { status: 202 })
+      }),
+    )
+    const { user, unmount } = renderPage(<BatchPrintDialog batchId={batch.id} onClose={vi.fn()} />)
+    await user.click(await screen.findByTestId('batch-queue-all'))
+    await waitFor(() => expect(sent).toEqual([null]))
+
+    unmount()
+    answer()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(sent).toEqual([null])
+  })
+
   it('forgets the batch on Cancel', async () => {
     const onClose = vi.fn()
     const batch = await newBatch(89, 91)

@@ -190,7 +190,10 @@ async def put_batch_item(
 #: How long one Queue all request goes on starting files (#2951). Each file's start can
 #: take up to ``ACCEPT_BUDGET``, and a batch holds up to ``MAX_BATCH_FILES``, so one
 #: request for them all could outlast a proxy's timeout while the server went on queueing.
-#: A file is started only while its start still fits, and every request starts one.
+#: A file is started only while its start still fits, and every request starts one. A
+#: start is reckoned at ``ACCEPT_BUDGET``, or at the slowest start so far when one took
+#: longer: reading a file's filament slots can download it before that deadline begins
+#: (#2718 review).
 QUEUE_BUDGET_S = 30.0
 
 
@@ -248,13 +251,17 @@ async def post_batch_queue(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "Every file is skipped or removed, so there is nothing to queue.",
         )
-    began, sent = time.monotonic(), 0
+    began, sent, slowest = time.monotonic(), 0, ACCEPT_BUDGET
     for item in batch.items:
         if item.position < from_position or item.skipped or item.removed:
             continue
         if item.outcome is not None and item.outcome.status == "started":
             continue
-        if sent and time.monotonic() - began + ACCEPT_BUDGET > QUEUE_BUDGET_S:
+        if item.request is None:
+            # Nothing to start, so it costs no time against the budget (#2718 review).
+            await batches.record_outcome(batch_id, item.position, UNCHOSEN, if_unchanged=item)
+            continue
+        if sent and time.monotonic() - began + slowest > QUEUE_BUDGET_S:
             # Its start might not fit: answer now, and the next request starts it.
             progress = BatchQueueProgress(
                 batch=await _batch(batches, batch_id), next_position=item.position
@@ -269,13 +276,18 @@ async def post_batch_queue(
         sending = BatchOutcome(status="pending", attempt=attempt)
         if not await batches.record_outcome(batch_id, item.position, sending, if_unchanged=item):
             continue  # its choices changed since the read: the next Queue all sends them
+        starting = time.monotonic()
         outcome = await _queue_one(batch_id, item, attempt, runs, activity, store, paths, budget)
+        slowest = max(slowest, time.monotonic() - starting)
         await batches.record_outcome(batch_id, item.position, outcome)
     done = await _batch(batches, batch_id)
     if not _settled(done):
         return done
     await batches.mark_queued(batch_id)
     return await _batch(batches, batch_id)
+
+
+UNCHOSEN = BatchOutcome(status="unchosen", detail="No choices were made for this file.")
 
 
 def _attempt(item: BatchItem) -> int:
@@ -296,7 +308,7 @@ async def _queue_one(
     budget: ReadBudgetDep,
 ) -> BatchOutcome:
     if item.request is None:
-        return BatchOutcome(status="unchosen", detail="No choices were made for this file.")
+        return UNCHOSEN
     request_id = batch_request_id(batch_id, item, attempt)
     request = item.request.model_copy(update={"request_id": request_id})
     try:
