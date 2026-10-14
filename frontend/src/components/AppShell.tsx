@@ -232,7 +232,9 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
     <AssistantOpenerContext.Provider value={opener}>
       <ModalCompanionContext.Provider value={shown && mounted && open ? panelElement : null}>
         <div className="flex h-full min-h-0 flex-col bg-bg text-ink">
-          {/* #2454 — past the logo and the whole nav to the page, as the first Tab stop. */}
+          {/* #2454 — past the logo and the whole nav to the page, as the first Tab stop.
+              Kept when embedded in Bambuddy's frame too: the header is shorter there, but a
+              keyboard user still tabs through its nav and the assistant's opener first. */}
           <a
             href="#main"
             onClick={(event) => {
