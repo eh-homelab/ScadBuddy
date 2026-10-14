@@ -4,23 +4,30 @@ any print is (#1752): only how its 3MF is obtained differs from an output's."""
 from __future__ import annotations
 
 import asyncio
+import gzip
 import hashlib
 import io
 import json
 import time
 import zipfile
+from collections.abc import AsyncIterator
+from contextlib import aclosing
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+import anyio
 import httpx
 import pytest
 import respx
 import trimesh
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from scadbuddy.activity.index import ActivityIndex
+from scadbuddy.api import library_print
 from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.api.library_print import _kept_as_sent
 from scadbuddy.bambuddy import clearance, print_run
 from scadbuddy.bambuddy.filaments3mf import SlicedProfile
 from scadbuddy.bambuddy.models import NozzleInfo, Printer, PrinterStatus
@@ -33,6 +40,7 @@ from scadbuddy.render.bambu3mf import (
     write_bambu_3mf,
 )
 from scadbuddy.render.split import ColourPart
+from scadbuddy.store.download_cache import DownloadCache, TooLargeError
 from tests.api.test_print_filaments import queue_route, slice_kept, slice_routes
 from tests.api.test_print_progress import watched as watched  # the fixture, shared
 from tests.api.test_print_run_choices import body, follow_run, run_routes
@@ -1729,13 +1737,29 @@ def test_the_library_file_itself_is_served(client: TestClient) -> None:
 
 
 @respx.mock
-def test_the_library_file_is_always_a_download_never_a_page(client: TestClient) -> None:
-    """Whatever type Bambuddy names, the file is never rendered on ScadBuddy's origin."""
+@pytest.mark.parametrize("hashed", [False, True], ids=["streamed", "from-the-cache"])
+def test_the_library_file_is_always_a_download_never_a_page(
+    client: TestClient, hashed: bool
+) -> None:
+    """Whatever type Bambuddy names, the file is never rendered on ScadBuddy's origin,
+    streamed from Bambuddy or served from the download cache (#2788)."""
     configure(client)
+    content = b"<svg onload='alert(1)'/>"
+    respx.get(f"{API}/library/files/89").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": 89,
+                "filename": "x.svg",
+                "file_type": "svg",
+                "file_hash": hashlib.sha256(content).hexdigest() if hashed else None,
+            },
+        )
+    )
     respx.get(f"{API}/library/files/89/download").mock(
         return_value=httpx.Response(
             200,
-            content=b"<svg onload='alert(1)'/>",
+            content=content,
             headers={"content-type": "image/svg+xml", "content-disposition": "inline"},
         )
     )
@@ -1743,9 +1767,365 @@ def test_the_library_file_is_always_a_download_never_a_page(client: TestClient) 
     served = client.get("/api/v1/print/library/89/file")
 
     assert served.status_code == 200, served.text
+    assert served.content == content
     assert served.headers["content-type"] == "application/octet-stream"
     assert served.headers["content-disposition"].startswith("attachment")
     assert served.headers["x-content-type-options"] == "nosniff"
+
+
+@respx.mock
+def test_a_library_file_with_a_hash_is_downloaded_from_bambuddy_once(
+    client: TestClient, app: FastAPI
+) -> None:
+    """#2788: the second whole-file ask is served from the download cache; a ranged ask
+    is still Bambuddy's to answer."""
+    configure(client)
+    content = library_3mf()
+    download = library_file(89, content=content, file_hash=hashlib.sha256(content).hexdigest())
+
+    first = client.get("/api/v1/print/library/89/file")
+    second = client.get("/api/v1/print/library/89/file")
+    ranged = client.get("/api/v1/print/library/89/file", headers={"range": "bytes=0-3"})
+
+    assert first.content == second.content == content
+    assert second.headers["content-length"] == str(len(content))
+    # Served whole from the cache, a resume is still a ranged ask Bambuddy answers.
+    assert second.headers["accept-ranges"] == "bytes"
+    # Its hash names the bytes, so a browser can revalidate it (#2821 review).
+    assert second.headers["etag"] == f'"{hashlib.sha256(content).hexdigest()}"'
+    assert download.call_count == 2
+    assert download.calls[-1].request.headers["range"] == "bytes=0-3"
+    assert ranged.status_code == 200
+    state: AppState = getattr(app.state, STATE_ATTR)
+    downloads = state.store.downloads
+    assert downloads is not None and downloads.has(hashlib.sha256(content).hexdigest())
+
+
+@respx.mock
+def test_a_cached_library_file_that_is_not_its_hash_is_never_served(
+    client: TestClient, app: FastAPI
+) -> None:
+    """Bytes planted under a file's hash in the shared directory are dropped, and the
+    file is served as Bambuddy has it (#2788). Each served copy is the request's own,
+    removed once sent."""
+    configure(client)
+    content = library_3mf()
+    sha = hashlib.sha256(content).hexdigest()
+    download = library_file(89, content=content, file_hash=sha)
+    state: AppState = getattr(app.state, STATE_ATTR)
+    downloads = state.store.downloads
+    assert downloads is not None
+    downloads.root.mkdir(parents=True, exist_ok=True)
+    downloads.path(sha).write_bytes(b"planted")
+
+    assert client.get("/api/v1/print/library/89/file").content == content
+    assert download.call_count == 1
+    # The planted entry was dropped, and what was sent kept in its place.
+    assert downloads.path(sha).read_bytes() == content
+    assert client.get("/api/v1/print/library/89/file").content == content
+    assert download.call_count == 1
+    spool = state.paths.cache / "library-spool"
+    assert not spool.exists() or list(spool.iterdir()) == []
+
+
+@respx.mock
+def test_a_library_file_larger_than_its_stated_size_is_not_kept(
+    client: TestClient, app: FastAPI
+) -> None:
+    """A size Bambuddy does not state, or understates, cannot fill the volume: the fill
+    stops at the cache's limit and keeps nothing, while the one download streams on."""
+    configure(client)
+    content = library_3mf()
+    download = library_file(89, content=content, file_hash=hashlib.sha256(content).hexdigest())
+    state: AppState = getattr(app.state, STATE_ATTR)
+    downloads = state.store.downloads
+    assert downloads is not None
+    downloads.max_bytes = 4 * (len(content) - 1)
+
+    assert client.get("/api/v1/print/library/89/file").content == content
+    assert download.call_count == 1
+    assert list(downloads.root.iterdir()) == []
+
+
+@respx.mock
+def test_a_library_file_not_yet_kept_is_streamed_while_it_is_kept(
+    client: TestClient, app: FastAPI
+) -> None:
+    """A miss is not downloaded whole before its first byte is sent (#2788 review): one
+    download is both what is sent and what is kept, with Bambuddy's headers."""
+    configure(client)
+    content = library_3mf()
+    sha = hashlib.sha256(content).hexdigest()
+    respx.get(f"{API}/library/files/89").mock(
+        return_value=httpx.Response(
+            200, json={"id": 89, "filename": "a.3mf", "file_type": "3mf", "file_hash": sha}
+        )
+    )
+    download = respx.get(f"{API}/library/files/89/download").mock(
+        return_value=httpx.Response(
+            200,
+            content=content,
+            headers={"accept-ranges": "bytes", "etag": '"bambuddy"'},
+        )
+    )
+    state: AppState = getattr(app.state, STATE_ATTR)
+    downloads = state.store.downloads
+    assert downloads is not None
+
+    served = client.get("/api/v1/print/library/89/file")
+
+    assert served.content == content
+    assert served.headers["etag"] == '"bambuddy"'
+    assert download.call_count == 1
+    assert downloads.path(sha).read_bytes() == content
+
+
+@respx.mock
+def test_a_library_file_bambuddy_sends_encoded_is_never_kept(
+    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A body sent with a Content-Encoding is not the bytes the hash names (#2821
+    review): it is passed on as Bambuddy sent it, and no fill is started for it."""
+    configure(client)
+    content = library_3mf()
+    sha = hashlib.sha256(content).hexdigest()
+    respx.get(f"{API}/library/files/89").mock(
+        return_value=httpx.Response(
+            200, json={"id": 89, "filename": "a.3mf", "file_type": "3mf", "file_hash": sha}
+        )
+    )
+    encoded = gzip.compress(content)
+    respx.get(f"{API}/library/files/89/download").mock(
+        return_value=httpx.Response(200, content=encoded, headers={"content-encoding": "gzip"})
+    )
+    state: AppState = getattr(app.state, STATE_ATTR)
+    downloads = state.store.downloads
+    assert downloads is not None
+    fills: list[str] = []
+    real_fill = downloads.fill
+
+    def fill(sha256: str) -> Any:
+        fills.append(sha256)
+        return real_fill(sha256)
+
+    monkeypatch.setattr(downloads, "fill", fill)
+
+    served = client.get("/api/v1/print/library/89/file")
+
+    assert served.status_code == 200, served.text
+    assert served.headers["content-encoding"] == "gzip"
+    assert served.content == content
+    assert fills == []
+    assert not downloads.has(sha)
+
+
+@respx.mock
+def test_a_kept_file_too_large_to_copy_first_is_streamed_from_bambuddy(
+    client: TestClient, app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hit is copied whole before its first byte (#2821 review): past
+    CACHED_COPY_MAX_BYTES the file streams from Bambuddy instead, and is not kept again."""
+    configure(client)
+    content = library_3mf()
+    sha = hashlib.sha256(content).hexdigest()
+    download = library_file(89, content=content, file_hash=sha)
+    state: AppState = getattr(app.state, STATE_ATTR)
+    downloads = state.store.downloads
+    assert downloads is not None
+    downloads.put(sha, content)
+    assert downloads.has(sha)
+    monkeypatch.setattr(library_print, "CACHED_COPY_MAX_BYTES", len(content) - 1)
+    fills: list[str] = []
+    real_fill = downloads.fill
+
+    def fill(sha256: str) -> Any:
+        fills.append(sha256)
+        return real_fill(sha256)
+
+    monkeypatch.setattr(downloads, "fill", fill)
+
+    served = client.get("/api/v1/print/library/89/file")
+
+    assert served.content == content
+    assert download.call_count == 1
+    assert fills == []
+
+
+@respx.mock
+def test_the_hash_read_before_a_download_is_its_own_span(
+    client: TestClient, spans: InMemorySpanExporter
+) -> None:
+    """The extra call to Bambuddy before every whole-file download shows in a trace,
+    with whether it found a hash to keep the file under (#2821 review)."""
+    configure(client)
+    content = library_3mf()
+    library_file(89, content=content, file_hash=hashlib.sha256(content).hexdigest())
+
+    assert client.get("/api/v1/print/library/89/file").status_code == 200
+
+    (read,) = [s for s in spans.get_finished_spans() if s.name == "library.file_hash"]
+    assert read.attributes is not None
+    assert read.attributes["scadbuddy.library.file_id"] == 89
+    assert read.attributes["scadbuddy.cache.cacheable"] is True
+
+
+@respx.mock
+def test_a_failed_read_of_the_files_hash_is_a_miss_and_the_file_still_served(
+    client: TestClient, app: FastAPI
+) -> None:
+    """The hash read is only for the cache (#2821 review): when it fails, the download
+    is still tried, not failed before it starts."""
+    configure(client)
+    content = library_3mf()
+    respx.get(f"{API}/library/files/89").mock(return_value=httpx.Response(503))
+    download = respx.get(f"{API}/library/files/89/download").mock(
+        return_value=httpx.Response(200, content=content)
+    )
+
+    served = client.get("/api/v1/print/library/89/file")
+
+    assert served.status_code == 200, served.text
+    assert served.content == content
+    assert download.call_count == 1
+
+
+async def test_a_streamed_file_sent_as_memoryviews_is_kept_whole(tmp_path: Path) -> None:
+    """Every chunk goes into the fill, not only `bytes` ones (#2821 review): a
+    memoryview left out would leave it short of its hash, and nothing kept."""
+    downloads = DownloadCache(tmp_path / "downloads", max_bytes=1 << 20)
+    content = b"first half|second half"
+    sha = hashlib.sha256(content).hexdigest()
+
+    async def chunks() -> AsyncIterator[str | bytes | memoryview]:
+        yield memoryview(content[:10])
+        yield content[10:]
+
+    sent = [
+        chunk.encode() if isinstance(chunk, str) else bytes(chunk)
+        async for chunk in _kept_as_sent(downloads, sha, chunks())
+    ]
+
+    assert b"".join(sent) == content
+    assert downloads.path(sha).read_bytes() == content
+
+
+async def test_a_fill_given_up_is_closed_once_even_when_the_send_is_cancelled() -> None:
+    """#2821 review: the fill was closed in a thread after a chunk past the limit, and
+    `fill` was still set while that ran; a cancel then made the `finally` close it again
+    with the thread still inside it. It is cleared first and closed once."""
+    exits: list[float] = []
+
+    class TooFull:
+        def write(self, chunk: bytes) -> int:
+            raise TooLargeError
+
+    class SlowClose:
+        def __enter__(self) -> TooFull:
+            return TooFull()
+
+        def __exit__(self, *_: object) -> None:
+            exits.append(time.monotonic())
+            time.sleep(0.3)
+
+    class Downloads:
+        def fill(self, sha256: str) -> SlowClose:
+            return SlowClose()
+
+    async def chunks() -> AsyncIterator[bytes]:
+        yield b"too much"
+        await anyio.sleep(10)
+
+    async def send() -> None:
+        sent = _kept_as_sent(cast(DownloadCache, Downloads()), "0" * 64, chunks())
+        async with aclosing(sent):
+            async for _ in sent:
+                pass
+
+    async with anyio.create_task_group() as group:
+        group.start_soon(send)
+        await anyio.sleep(0.1)
+        group.cancel_scope.cancel()
+
+    assert len(exits) == 1
+
+
+async def test_a_browser_gone_midway_leaves_no_partial_behind(tmp_path: Path) -> None:
+    """A dropped download is a cancelled scope, where every await raises again (#2821
+    review): the fill is closed before anything is awaited, so its partial goes with it
+    rather than waiting for a prune."""
+    downloads = DownloadCache(tmp_path / "downloads", max_bytes=1 << 20)
+    content = b"first half|second half"
+    sha = hashlib.sha256(content).hexdigest()
+
+    async def chunks() -> AsyncIterator[bytes]:
+        try:
+            yield content[:10]
+            yield content[10:]
+        finally:
+            # Closing Bambuddy's response is awaited, and is where the cancel lands.
+            await asyncio.sleep(0)
+
+    with anyio.CancelScope() as scope:
+        async with aclosing(_kept_as_sent(downloads, sha, chunks())) as sent:
+            async for _ in sent:
+                scope.cancel()
+                break
+
+    assert scope.cancelled_caught
+    assert list(downloads.root.iterdir()) == []
+
+
+@respx.mock
+def test_a_download_cache_that_cannot_be_used_still_serves_the_file(
+    client: TestClient, app: FastAPI
+) -> None:
+    """The cache is best effort: an unwritable directory, or a full volume, is the file
+    streamed from Bambuddy, never a 500 (#2788 review)."""
+    configure(client)
+    content = library_3mf()
+    library_file(89, content=content, file_hash=hashlib.sha256(content).hexdigest())
+    state: AppState = getattr(app.state, STATE_ATTR)
+    downloads = state.store.downloads
+    assert downloads is not None
+    downloads.root.parent.mkdir(parents=True, exist_ok=True)
+    downloads.root.write_bytes(b"not a directory")
+
+    for _ in range(2):
+        served = client.get("/api/v1/print/library/89/file")
+        assert served.status_code == 200, served.text
+        assert served.content == content
+
+
+@respx.mock
+def test_a_library_file_too_large_to_keep_is_streamed_as_before(
+    client: TestClient, app: FastAPI
+) -> None:
+    configure(client)
+    content = library_3mf()
+    respx.get(f"{API}/library/files/89").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": 89,
+                "filename": "big.3mf",
+                "file_type": "3mf",
+                "file_size": len(content),
+                "file_hash": hashlib.sha256(content).hexdigest(),
+            },
+        )
+    )
+    download = respx.get(f"{API}/library/files/89/download").mock(
+        return_value=httpx.Response(200, content=content)
+    )
+    state: AppState = getattr(app.state, STATE_ATTR)
+    downloads = state.store.downloads
+    assert downloads is not None
+    # A quarter of the cap is the most one file may take of it.
+    downloads.max_bytes = 4 * len(content) - 4
+
+    assert client.get("/api/v1/print/library/89/file").content == content
+    assert client.get("/api/v1/print/library/89/file").content == content
+    assert download.call_count == 2
 
 
 def two_plate_3mf() -> bytes:

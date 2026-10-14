@@ -17,6 +17,7 @@ from scadbuddy.core.config import (
     DEFAULT_CHECK_CONCURRENCY,
     DEFAULT_DATA_DIR,
     DEFAULT_DATABASE_POOL_SIZE,
+    DEFAULT_DOWNLOAD_CACHE_MAX_BYTES,
     DEFAULT_DUPLICATE_STAGING_MAX_AGE,
     DEFAULT_EVENT_LOG_RETENTION_ROWS,
     DEFAULT_EVENT_LOG_RETENTION_SECONDS,
@@ -149,6 +150,10 @@ class Settings(BaseSettings):
     store_max_total_bytes: int = DEFAULT_STORE_MAX_TOTAL_BYTES
     store_max_count: int = DEFAULT_STORE_MAX_COUNT
     worker_cache_max_bytes: int = DEFAULT_WORKER_CACHE_MAX_BYTES
+    # #2788: whole Bambuddy downloads by sha256. Unset, the API keeps them under its data
+    # volume's cache/downloads and a worker keeps none.
+    download_cache_dir: Path | None = None
+    download_cache_max_bytes: int = Field(default=DEFAULT_DOWNLOAD_CACHE_MAX_BYTES, ge=0)
     # The URL Bambuddy should point its sidebar entry at; usually ScadBuddy's own
     # ingress, which the server cannot infer from a request behind a proxy.
     public_url: str | None = None
@@ -423,6 +428,8 @@ class Settings(BaseSettings):
             store_max_total_bytes=self.store_max_total_bytes,
             store_max_count=self.store_max_count,
             worker_cache_max_bytes=self.worker_cache_max_bytes,
+            download_cache_dir=self.download_cache_dir,
+            download_cache_max_bytes=self.download_cache_max_bytes,
         )
 
     def resolve_seed_models_dir(self) -> Path | None:
@@ -534,6 +541,15 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
         "api_internal_url": (
             "Where the print and projects workers reach the API inside the cluster: the"
             " deployment's Service, read only by those workers."
+        ),
+        "download_cache_dir": (
+            "Where this process keeps whole Bambuddy downloads (#2788): a directory of the"
+            " deployment's volume. Render workers run template code, so the deployment gives"
+            " them none of the API's."
+        ),
+        "download_cache_max_bytes": (
+            "Paired with the download cache's directory: a budget of the volume the"
+            " deployment mounts it from."
         ),
         "revision": "A build stamp that /healthz reports, not a setting.",
         "version": "A build stamp that /healthz reports, not a setting.",

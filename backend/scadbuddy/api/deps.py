@@ -75,6 +75,7 @@ from scadbuddy.render.read_budget import (
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.render.submit import RenderService
 from scadbuddy.store import BlobRefs, BlobStore
+from scadbuddy.store.download_cache import DownloadCache
 from scadbuddy.store.factory import StoreBundle
 from scadbuddy.workflows.client import connect_lazily
 
@@ -500,6 +501,17 @@ def get_config(state: StateDep) -> Config:
     return state.config
 
 
+def downloads_of(state: AppState) -> DownloadCache | None:
+    """The shared cache of Bambuddy downloads (#2788); None before the store is built,
+    or when this process keeps none."""
+    bundle: StoreBundle | None = getattr(state, "store", None)
+    return bundle.downloads if bundle is not None else None
+
+
+def get_downloads(state: StateDep) -> DownloadCache | None:
+    return downloads_of(state)
+
+
 def get_paths(state: StateDep) -> DataPaths:
     return state.paths
 
@@ -582,6 +594,7 @@ def get_checkouts(state: StateDep) -> CheckoutGate:
 
 ConfigDep = Annotated[Config, Depends(get_config)]
 PathsDep = Annotated[DataPaths, Depends(get_paths)]
+DownloadsDep = Annotated[DownloadCache | None, Depends(get_downloads)]
 CatalogueDep = Annotated[Catalogue, Depends(get_catalogue)]
 HistoryDep = Annotated[ModelHistory, Depends(get_history)]
 OutputsDep = Annotated[OutputStore, Depends(get_outputs)]
