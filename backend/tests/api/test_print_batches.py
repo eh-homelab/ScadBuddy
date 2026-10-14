@@ -432,3 +432,49 @@ async def test_queue_all_counts_as_touching_the_batch(client: TestClient) -> Non
     await store.record_outcome(batch["id"], 0, BatchOutcome(status="unchosen"))
 
     assert await store.prune(BATCH_TTL) == 0
+
+
+@respx.mock
+def test_a_run_that_fails_after_the_batch_is_queued_reopens_it_to_edit_and_send_again(
+    client: TestClient,
+) -> None:
+    """#2718 review (Blocking): Queue all marks the batch queued once every run has its
+    202, long before a slice can fail. A run failing after that left the batch queued,
+    so its file could not be edited (409) or sent again, and the dialog showed Done."""
+    configure(client)
+    sliced_file(104)
+    run_routes()
+    queued = queue_route()
+    batch = new_batch(client, 104)
+    choose(client, batch["id"], 0, request=SLICED_RUN)
+    first = client.post(f"{BATCHES}/{batch['id']}/queue").json()
+    assert first["status"] == "queued"
+    run_id = first["items"][0]["outcome"]["run_id"]
+    follow_run(client, run_id)
+    _fail_run(client, run_id, may_have_queued=False)
+
+    read = client.get(f"{BATCHES}/{batch['id']}").json()
+
+    assert read["status"] == "open"
+    assert read["items"][0]["outcome"]["status"] == "failed"
+    choose(client, batch["id"], 0, request=SLICED_RUN)
+    again = client.post(f"{BATCHES}/{batch['id']}/queue").json()
+    assert again["items"][0]["outcome"]["status"] == "started"
+    assert again["items"][0]["outcome"]["run_id"] != run_id
+    assert again["status"] == "queued"
+    follow_run(client, again["items"][0]["outcome"]["run_id"])
+    assert queued.call_count == 2
+
+
+def test_queue_all_with_every_file_left_out_queues_nothing(client: TestClient) -> None:
+    """#2718 review: with every file skipped or removed, Queue all marked a batch with
+    nothing in it queued."""
+    batch = new_batch(client, 104, 105)
+    choose(client, batch["id"], 0, skipped=True)
+    choose(client, batch["id"], 1, removed=True)
+
+    response = client.post(f"{BATCHES}/{batch['id']}/queue")
+
+    assert response.status_code == 422, response.text
+    assert "nothing to queue" in response.json()["detail"]
+    assert client.get(f"{BATCHES}/{batch['id']}").json()["status"] == "open"

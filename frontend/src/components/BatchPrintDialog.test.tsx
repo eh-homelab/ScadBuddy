@@ -323,7 +323,12 @@ describe('BatchPrintDialog (#2672)', () => {
     await api.putPrintBatchItem(batch.id, 0, { request: { ...REQUEST }, skipped: false, removed: false })
     const chosen = await api.putPrintBatchStep(batch.id, 1)
     const detail = "Bambuddy's slice failed."
-    const started = { ...chosen, items: [{ ...chosen.items[0], outcome: { status: 'started', run_id: 'run-9', detail: null } }] }
+    // Every run had its 202, so the batch is queued; the failure comes after (#2718 review).
+    const started = {
+      ...chosen,
+      status: 'queued',
+      items: [{ ...chosen.items[0], outcome: { status: 'started', run_id: 'run-9', detail: null } }],
+    }
     let failed = false
     server.use(
       http.post(`/api/v1/print/batches/${batch.id}/queue`, () => HttpResponse.json(started)),
@@ -349,6 +354,8 @@ describe('BatchPrintDialog (#2672)', () => {
     const { user } = renderPage(<BatchPrintDialog batchId={batch.id} onClose={vi.fn()} />)
     await user.click(await screen.findByTestId('batch-queue-all'))
 
+    // The server opens the batch again for the failed file: the dialog follows it.
+    await screen.findByRole('dialog', { name: 'Review 1 files' })
     const row = screen.getByTestId('batch-row-0')
     await waitFor(() => expect(within(row).getByRole('button', { name: /^Edit / })).toBeEnabled())
     expect(screen.getByTestId('batch-outcome-0')).toHaveTextContent(`Not queued: ${detail}`)

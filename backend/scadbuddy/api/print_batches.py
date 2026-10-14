@@ -106,7 +106,11 @@ async def _read_runs(
             detail=run.error.detail if run.error is not None else None,
             attempt=outcome.attempt,
         )
-        changed |= await batches.record_outcome(batch.id, item.position, failed, if_unchanged=item)
+        # The batch may be queued already (every run had its 202): open it again, so
+        # the file can be edited and sent again (#2718 review).
+        changed |= await batches.record_outcome(
+            batch.id, item.position, failed, if_unchanged=item, reopen=True
+        )
     return await _batch(batches, batch.id) if changed else batch
 
 
@@ -201,8 +205,17 @@ async def post_batch_queue(
     choices are unchanged re-attaches to its run rather than queueing it twice.
 
     The batch stays open, so it can be sent again and its refused files edited, until
-    every file kept has a started run."""
+    every file kept has a started run; a run that fails after that opens it again. A
+    queued batch is not refused here, so a retried Queue all (a reload mid-request)
+    answers with the batch as it stands rather than a 409: every started file is left
+    as it is, so it queues nothing twice. A batch with every file skipped or removed has
+    nothing to queue (422)."""
     batch = await _read_runs(batches, runs.store, await _batch(batches, batch_id))
+    if all(item.skipped or item.removed for item in batch.items):
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "Every file is skipped or removed, so there is nothing to queue.",
+        )
     for item in batch.items:
         if item.skipped or item.removed:
             continue

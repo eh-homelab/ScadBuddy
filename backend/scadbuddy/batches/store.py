@@ -140,12 +140,14 @@ class PrintBatchStore:
         outcome: BatchOutcome,
         *,
         if_unchanged: BatchItem | None = None,
+        reopen: bool = False,
     ) -> bool:
         """Record what Queue all did with a file; with ``if_unchanged``, only while the
         file is still as that read of it (its choices and outcome), else ``False``
-        (#2718 review)."""
+        (#2718 review). With ``reopen``, a write that lands also opens the batch again: a
+        file whose run failed after Queue all can then be edited and sent again."""
         return await asyncio.to_thread(
-            self._record_outcome, batch_id, position, outcome, if_unchanged
+            self._record_outcome, batch_id, position, outcome, if_unchanged, reopen
         )
 
     async def mark_queued(self, batch_id: str) -> None:
@@ -246,6 +248,7 @@ class PrintBatchStore:
         position: int,
         outcome: BatchOutcome,
         if_unchanged: BatchItem | None,
+        reopen: bool = False,
     ) -> bool:
         guard = ""
         params: list[Any] = [Jsonb(outcome.model_dump(mode="json")), batch_id, position]
@@ -268,7 +271,11 @@ class PrintBatchStore:
                 params,
             ).rowcount
             # The prune counts from the last Queue all too, not only the last choice.
-            conn.execute("UPDATE print_batches SET updated_at = now() WHERE id = %s", (batch_id,))
+            conn.execute(
+                "UPDATE print_batches SET updated_at = now(),"
+                " status = CASE WHEN %s THEN 'open' ELSE status END WHERE id = %s",
+                (reopen and updated == 1, batch_id),
+            )
         return updated == 1
 
     def _mark_queued(self, batch_id: str) -> None:
