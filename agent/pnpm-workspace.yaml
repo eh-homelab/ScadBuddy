@@ -9,3 +9,5 @@ allowBuilds:
   '@swc/core': false
   msw: false
   protobufjs: false
+patchedDependencies:
+  postgres@3.4.9: patches/postgres@3.4.9.patch

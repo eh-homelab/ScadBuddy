@@ -181,8 +181,10 @@ RUN corepack enable
 # agent/pnpm-workspace.yaml holds `allowBuilds` (msw, a test dependency, has an
 # install script that is declined there); without it the frozen install fails
 # with ERR_PNPM_IGNORED_BUILDS, so copy it with the lockfile, as the frontend
-# stage does.
+# stage does. agent/patches holds the dependency patches pnpm-workspace.yaml names
+# (patchedDependencies, #3294); the frozen install fails without them.
 COPY agent/package.json agent/pnpm-lock.yaml agent/pnpm-workspace.yaml ./
+COPY agent/patches ./patches
 RUN pnpm install --frozen-lockfile
 
 COPY --from=api-spec /src/openapi.json /src/openapi.json
@@ -212,6 +214,7 @@ FROM node:24-bookworm-slim AS agent-deps
 WORKDIR /src/agent
 RUN corepack enable
 COPY agent/package.json agent/pnpm-lock.yaml agent/pnpm-workspace.yaml ./
+COPY agent/patches ./patches
 RUN pnpm install --frozen-lockfile --prod
 
 FROM node:24-bookworm-slim AS agent
