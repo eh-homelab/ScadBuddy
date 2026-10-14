@@ -147,17 +147,25 @@ async function showAdvanced() {
 }
 
 /** Every request body of one kind under `/print/`, in order (`/analyzers/run` is not one). */
+/** The matching requests' URLs and bodies as they start, and how many have been
+ *  answered: a test that ends on a request waits for its answer, or the request is
+ *  aborted at teardown and the next test's fetch can miss MSW. */
 function watch(method: string, suffix: string, prefix = '/api/v1/print/') {
-  const bodies: Record<string, unknown>[] = []
-  const urls: string[] = []
-  server.events.on('request:start', async ({ request }) => {
+  const seen = { bodies: [] as Record<string, unknown>[], urls: [] as string[], answered: 0 }
+  const matches = (request: Request) => {
     const path = new URL(request.url).pathname
-    if (request.method === method && path.startsWith(prefix) && path.endsWith(suffix)) {
-      urls.push(request.url)
-      if (method !== 'GET') bodies.push((await request.clone().json()) as Record<string, unknown>)
+    return request.method === method && path.startsWith(prefix) && path.endsWith(suffix)
+  }
+  server.events.on('request:start', async ({ request }) => {
+    if (matches(request)) {
+      seen.urls.push(request.url)
+      if (method !== 'GET') seen.bodies.push((await request.clone().json()) as Record<string, unknown>)
     }
   })
-  return { bodies, urls }
+  server.events.on('response:mocked', ({ request }) => {
+    if (matches(request)) seen.answered += 1
+  })
+  return seen
 }
 
 beforeEach(() => resetMockState())
@@ -559,6 +567,9 @@ describe('PrintPicker', () => {
       expect(within(screen.getByTestId('filament-slot-1')).getByTestId(`spool-${spool}`)).toBeChecked(),
     )
     expect(screen.getByLabelText('Process')).toHaveValue('0.24mm Standard @BBL H2C')
+    // The new output is checked again first; Print is disabled until it is, and a click
+    // on it then does nothing (seen under load: the run was never sent).
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled())
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await screen.findByTestId('queued-items')
     expect(bodies[0]).toMatchObject({
@@ -3472,6 +3483,7 @@ describe('PrintPicker · rack nozzle (#836)', () => {
 
     await waitFor(() => expect(runs.bodies.length).toBe(1))
     expect(runs.bodies[0]).toMatchObject({ rack_position: null })
+    await waitFor(() => expect(runs.answered).toBe(1))
   })
 })
 
