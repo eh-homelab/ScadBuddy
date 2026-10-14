@@ -713,7 +713,8 @@ function SettingsSections() {
                 onClick={(event) => {
                   event.preventDefault()
                   reveal(section.id)
-                  goToSection(section.id)
+                  goToSection(section.id, { inPlace: dirty })
+
                 }}
                 className="inline-flex items-center gap-1 rounded-[6px] px-2 py-1 text-muted hover:bg-surface-2 hover:text-ink aria-[current=location]:bg-surface-2 aria-[current=location]:text-ink"
               >
