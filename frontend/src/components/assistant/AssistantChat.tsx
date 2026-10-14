@@ -676,13 +676,11 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
           <Button
             variant="ghost"
             size="sm"
-            disabled={!hasReply || durable}
+            disabled={!hasReply}
             title={
-              durable
-                ? 'A durable session cannot be forked: its conversation is held by its workflow'
-                : hasReply
-                  ? 'Copy this chat into a new one and continue there; this one stays as it is'
-                  : 'No reply to fork yet: wait for the assistant to answer'
+              hasReply
+                ? 'Copy this chat into a new one and continue there; this one stays as it is'
+                : 'No reply to fork yet: wait for the assistant to answer'
             }
             data-agent-user-only=""
             onClick={() => fork(active.id)}
@@ -823,8 +821,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
                 sessionId={active.id}
                 askedBy={block.item.kind === 'question' ? askedBy(active.items, block.item) : undefined}
                 onForkHere={
-                  // A durable session refuses a fork (Ruling 7b), from any point.
-                  !durable && forkPoints.has(`${block.item.kind}:${block.item.id}`)
+                  forkPoints.has(`${block.item.kind}:${block.item.id}`)
                     ? () => fork(active.id, forkPoints.get(`${block.item.kind}:${block.item.id}`) ?? {})
                     : undefined
                 }

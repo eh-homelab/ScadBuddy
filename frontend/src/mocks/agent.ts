@@ -65,8 +65,7 @@ export interface MockAgentOptions {
   durableAvailable?: boolean
   /**
    * Plan 5d — the mode a chat that names none gets. Classic here (the agent's default is
-   * durable) because the mock's scripts are classic sessions: they fork, which a durable
-   * session refuses.
+   * durable) because the mock's scripts are classic sessions.
    */
   defaultMode?: SessionMode
 }
@@ -649,11 +648,13 @@ export function createMockAgentTransport({
         costUsd: 0,
         budgetUsd,
         parentId: parent.sessionId,
+        // A fork runs in its parent's mode (#2688).
+        ...(parent.mode ? { mode: parent.mode } : {}),
       }
       sessions.set(child.sessionId, child)
       const conversation = new Set(['user.turn', 'assistant.text.delta', 'assistant.text.done', 'tool.call', 'tool.result'])
       child.log.push(
-        { v: PROTOCOL_VERSION, type: 'session.started', sessionId: child.sessionId, origin: child.origin, owner: BROWSER_USER, title: child.title, budgetUsd },
+        { v: PROTOCOL_VERSION, type: 'session.started', sessionId: child.sessionId, origin: child.origin, owner: BROWSER_USER, title: child.title, budgetUsd, ...(child.mode ? { mode: child.mode } : {}) },
         ...parent.log
           .slice(0, cut)
           .filter((e) => conversation.has(e.type))

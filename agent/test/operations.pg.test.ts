@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from '../src/db.js'
 import { canonicalJson, operationKey, OperationStore } from '../src/operations/store.js'
+import { until } from './support/until.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 
 // ai_operations, the agent's command record (spec 2026-10-01 §4.2, #1055).
@@ -45,6 +46,21 @@ describe.skipIf(!TEST_DATABASE_URL)(`ai_operations${TEST_DATABASE_URL ? '' : ` (
     expect(again).toEqual(first)
     expect(first).toMatchObject({ id: 'a', status: 'running', result: null, error: null, finished_at: null })
     expect(await store.get('b')).toBeUndefined()
+  })
+
+  it('records who started it and announces it on the bus', async () => {
+    const heard: string[] = []
+    const listener = await db.sql.listen('scadbuddy_events', (payload) => heard.push(payload))
+    try {
+      const started = await store.insert({ ...op('a1', 'r1', 'k1'), actor: { principal: 'browser', viaTool: 'plugin_install' } })
+      const [row] = await db.sql`SELECT principal, session, via_tool FROM ai_operations WHERE id = ${started.id}`
+      expect(row).toEqual({ principal: 'browser', session: null, via_tool: 'plugin_install' })
+      await until(() => heard.some((p) => JSON.parse(p).kind === 'ai_operation.changed'))
+      await store.finish(started.id, { result: null })
+      await until(() => heard.filter((p) => JSON.parse(p).operation_id === started.id).length === 2)
+    } finally {
+      await listener.unlisten()
+    }
   })
 
   it('ends a running operation once', async () => {

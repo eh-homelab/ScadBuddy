@@ -10,16 +10,21 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import struct
+import time
 import zipfile
+from collections.abc import Iterator
 from datetime import timedelta
+from typing import Any
 
 import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.bambuddy import preview
 from scadbuddy.bambuddy.client import client_for
-from scadbuddy.bambuddy.preview import PREVIEW_GRACE, sweep_preview_slices
+from scadbuddy.bambuddy.preview import _TOOLPATHS, PREVIEW_GRACE, sweep_preview_slices
 from scadbuddy.core.paths import DataPaths
 from tests.api.test_print_filaments import prepared, queue_route
 from tests.api.test_print_run_choices import body, run_print, run_routes, two_plate_output
@@ -35,6 +40,25 @@ SLICED = 77
 #: The copy the run uploads (``upload_route``), which the slice job slices.
 COPY = 41
 CREATED = "2026-10-10T23:40:00.123456"
+
+
+def start_slice(client: TestClient, output_id: str, json: dict[str, Any]) -> dict[str, Any]:
+    """Start the background slice and follow it: the route answers 202 with the running
+    operation as soon as it is recorded, never after the slice (#2462), which used to
+    hold every start for the whole 10 s command deadline."""
+    started = client.post(
+        f"/api/v1/print/outputs/{output_id}/preview-slice", json=json, headers=press()
+    )
+    assert started.status_code == 202, started.text
+    op: dict[str, Any] = started.json()
+    assert op["status"] == "running"
+    deadline = time.monotonic() + 30
+    while op["status"] == "running" and time.monotonic() < deadline:
+        time.sleep(0.1)
+        op = client.get(f"/api/v1/operations/{op['id']}").json()
+    assert op["status"] == "succeeded", op
+    result: dict[str, Any] = op["result"]
+    return result
 
 
 class Job:
@@ -95,12 +119,9 @@ def test_a_background_slice_is_read_back_and_a_run_of_the_same_choices_queues_it
     sliced_routes()
     queued = queue_route()
 
-    started = client.post(
-        f"/api/v1/print/outputs/{output_id}/preview-slice", json=body(), headers=press()
-    )
+    started = start_slice(client, output_id, body())
 
-    assert started.status_code == 200, started.text
-    assert started.json()["job_id"] == 9
+    assert started["job_id"] == 9
     assert sliced.call_count == 1
     assert not queued.called
 
@@ -135,13 +156,8 @@ def test_a_background_slice_with_a_project_chosen_files_nothing_in_the_project(
     Job().routes()
     sliced_routes()
 
-    started = client.post(
-        f"/api/v1/print/outputs/{output_id}/preview-slice",
-        json={**body(), "project_id": 7},
-        headers=press(),
-    )
+    start_slice(client, output_id, {**body(), "project_id": 7})
 
-    assert started.status_code == 200, started.text
     assert upload.call_count == 1
     assert upload.calls.last.request.url.params.get("folder_id") != "9"
     assert not folder.called
@@ -155,6 +171,102 @@ def test_an_unknown_background_slice_is_a_404(client: TestClient, model: str) ->
     assert client.get("/api/v1/print/library/5/preview-slices/12345").status_code == 404
 
 
+@pytest.fixture(autouse=True)
+def _no_toolpaths_kept() -> Iterator[None]:
+    """Toolpaths are kept per process by the slice's row id, which each test's fresh
+    database hands out again."""
+    _TOOLPATHS.clear()
+    yield
+    _TOOLPATHS.clear()
+
+
+TOOLPATH_GCODE = (
+    b"G28\nM83\n; CHANGE_LAYER\n; Z_HEIGHT: 0.2\nG1 Z0.2 F600\n; FEATURE: Outer wall\n"
+    b"G1 X10 Y0 E1 F3000\nG1 X10 Y10 E1\n"
+)
+
+
+def _toolpath_slice(
+    client: TestClient, model: str, gcode: bytes = TOOLPATH_GCODE
+) -> tuple[str, Job, respx.Route]:
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    job = Job()
+    job.routes()
+    sliced_file_route()
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w") as zipped:
+        zipped.writestr("Metadata/plate_1.gcode", gcode)
+    download = respx.get(f"{API}/library/files/{SLICED}/download").mock(
+        return_value=httpx.Response(200, content=archive.getvalue())
+    )
+    start_slice(client, output_id, body())
+    return output_id, job, download
+
+
+@respx.mock
+def test_a_finished_background_slice_answers_its_toolpath_read_once(
+    client: TestClient, model: str
+) -> None:
+    """#2072: the plate's G-code as segments, for the preview's Speed, Movement and
+    Layers views; read from the sliced file once, then from memory."""
+    output_id, _, download = _toolpath_slice(client, model)
+    url = f"/api/v1/print/outputs/{output_id}/preview-slices/9/toolpath"
+
+    first = client.get(url)
+
+    assert first.status_code == 200, first.text
+    assert first.headers["content-type"] == "application/octet-stream"
+    (size,) = struct.unpack_from("<I", first.content)
+    header = json.loads(first.content[4 : 4 + size])
+    assert header["features"] == ["Outer wall"]
+    assert header["layers"] == [{"z": 0.2, "first_segment": 0}]
+    # The Z move, then the two walls.
+    assert header["segment_count"] == 3
+    assert len(first.content) == 4 + size + 3 * 32
+    calls = download.call_count
+    assert client.get(url).content == first.content
+    assert download.call_count == calls, "read once"
+
+
+@respx.mock
+def test_a_toolpath_waits_for_the_slice_and_needs_its_g_code(
+    client: TestClient, model: str
+) -> None:
+    output_id, job, _ = _toolpath_slice(client, model, gcode=b"")
+    url = f"/api/v1/print/outputs/{output_id}/preview-slices/9/toolpath"
+    job.body = {**job.body, "status": "running", "result": None}
+    assert client.get(url).status_code == 409
+
+    job.body = Job().body
+    respx.get(f"{API}/library/files/{SLICED}/download").mock(
+        return_value=httpx.Response(200, content=b"not a zip")
+    )
+    refused = client.get(url)
+    assert refused.status_code == 422, refused.text
+
+    assert (
+        client.get(f"/api/v1/print/outputs/{output_id}/preview-slices/123/toolpath").status_code
+        == 404
+    )
+    assert client.get("/api/v1/print/library/5/preview-slices/9/toolpath").status_code == 404
+
+
+@respx.mock
+def test_a_toolpath_read_with_no_turn_free_is_told_to_come_back(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reads are bounded: one that cannot get a turn soon is a 503, not a queue."""
+    output_id, _, _ = _toolpath_slice(client, model)
+    monkeypatch.setattr(preview, "TOOLPATH_WAIT_SECONDS", 0.05)
+    monkeypatch.setattr(preview, "_READING_TOOLPATHS", asyncio.Semaphore(0))
+
+    busy = client.get(f"/api/v1/print/outputs/{output_id}/preview-slices/9/toolpath")
+
+    assert busy.status_code == 503, busy.text
+
+
 def _preview_then_change(client: TestClient, model: str, change: str) -> tuple[str, respx.Route]:
     """A background slice, then Bambuddy's job 9 or its file changed by ``change``."""
     output_id = prepared(client, model)
@@ -164,10 +276,7 @@ def _preview_then_change(client: TestClient, model: str, change: str) -> tuple[s
     sliced = job.routes()
     sliced_routes()
     queue_route()
-    started = client.post(
-        f"/api/v1/print/outputs/{output_id}/preview-slice", json=body(), headers=press()
-    )
-    assert started.status_code == 200, started.text
+    start_slice(client, output_id, body())
     if change == "another-file":
         job.body = {**job.body, "source_id": 999}
     elif change == "restart":
@@ -281,10 +390,7 @@ def _previewed(client: TestClient, model: str) -> tuple[str, Job, respx.Route]:
     deleted = respx.delete(f"{API}/library/files/{SLICED}").mock(
         return_value=httpx.Response(200, json={"trashed": True})
     )
-    started = client.post(
-        f"/api/v1/print/outputs/{output_id}/preview-slice", json=body(), headers=press()
-    )
-    assert started.status_code == 200, started.text
+    start_slice(client, output_id, body())
     return output_id, job, deleted
 
 

@@ -9,6 +9,23 @@ import { resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { LibraryPage } from './LibraryPage'
+import type * as TraceAction from '../lib/traceAction'
+
+// Each test's actions only (#2892): `toContain` would otherwise pass on an earlier test's.
+beforeEach(() => {
+  actions.length = 0
+})
+
+/** The user actions started, by name (#2292): `traceAction` itself, recorded. */
+const actions = vi.hoisted(() => [] as string[])
+vi.mock('../lib/traceAction', async (importOriginal) => {
+  const actual = await importOriginal<typeof TraceAction>()
+  const traceAction: typeof actual.traceAction = (name, attributes, run) => {
+    actions.push(name)
+    return actual.traceAction(name, attributes, run)
+  }
+  return { ...actual, traceAction }
+})
 
 describe('LibraryPage', () => {
   beforeEach(() => {
@@ -28,7 +45,7 @@ describe('LibraryPage', () => {
     const { user } = renderPage(<LibraryPage />, { route: '/library' })
     const arrange = await screen.findByRole('button', { name: 'Arrange selected (0)' })
     expect(arrange).toBeDisabled()
-    await user.click(within(screen.getByTestId('library-file-89')).getByRole('checkbox', { name: /^Select bag-clip/ }))
+    await user.click(within(await screen.findByTestId('library-file-89')).getByRole('checkbox', { name: /^Select bag-clip/ }))
     // Picks are kept across folders: one file here, one in MakerWorld.
     await user.click(screen.getByTestId('library-folder-1'))
     await user.click(await screen.findByRole('checkbox', { name: "Select Clara's Wand.3mf" }))
@@ -107,6 +124,44 @@ describe('LibraryPage', () => {
     expect(await screen.findByRole('dialog', { name: 'Print' })).toBeInTheDocument()
   })
 
+  it("reads the dialog's choices, plates, projects and options once per open (#2361)", async () => {
+    const asked: string[] = []
+    const analysed: unknown[] = []
+    const listen = ({ request }: { request: Request }) => {
+      const url = new URL(request.url)
+      asked.push(`${request.method} ${url.pathname}${url.search}`)
+      if (url.pathname === '/api/v1/analyzers/run') {
+        void request
+          .clone()
+          .json()
+          .then((body: unknown) => analysed.push(body))
+      }
+    }
+    server.events.on('request:start', listen)
+    try {
+      const { user } = renderPage(<LibraryPage />, { route: '/library' })
+      await user.click(await screen.findByTestId('library-print-89'))
+      const dialog = await screen.findByRole('dialog', { name: 'Print' })
+      await within(dialog).findByTestId('filament-slot-1')
+      await waitFor(() => expect(analysed.length).toBeGreaterThan(0))
+      await waitFor(() => expect(within(dialog).getByRole('button', { name: /^Print$/ })).toBeEnabled())
+
+      const count = (path: string) => asked.filter((line) => line === `GET ${path}`).length
+      expect(count('/api/v1/print/library/89/choices')).toBe(1)
+      expect(count('/api/v1/print/library/89/plates')).toBe(1)
+      expect(count('/api/v1/print/projects')).toBe(1)
+      expect(count('/api/v1/settings/print-options')).toBe(1)
+      // The file the page listed is not read again to open its dialog.
+      expect(asked.filter((line) => line.includes('file_id='))).toEqual([])
+      // No analysis of an empty plan before the suggested spools are set.
+      for (const body of analysed) {
+        expect((body as { request: { filament_plan: { slots: unknown[] } } }).request.filament_plan.slots).not.toEqual([])
+      }
+    } finally {
+      server.events.removeListener('request:start', listen)
+    }
+  })
+
   it('prints a file in Simple mode under the last project printed to (#768)', async () => {
     server.use(
       http.get('/api/v1/print/projects', () =>
@@ -141,8 +196,8 @@ describe('LibraryPage', () => {
     server.use(http.get('/api/v1/print/library', () => delay('infinite')))
     await user.click(screen.getByTestId('library-folder-9'))
 
-    await waitFor(() => expect(screen.queryByTestId('library-print-89')).toBeNull())
-    expect(screen.getByText(/Reading the Bambuddy library/)).toBeInTheDocument()
+    expect(await screen.findByText(/Reading the Bambuddy library/)).toBeInTheDocument()
+    expect(screen.queryByTestId('library-print-89')).toBeNull()
   })
 
   it('cuts a name with an early dot in the middle, keeping only its end whole (#935)', async () => {
@@ -211,11 +266,11 @@ describe('LibraryPage, item context (#975)', () => {
     const tree = screen.getByRole('tree', { name: 'Library folders' })
     expect(within(tree).getByRole('treeitem', { name: 'Top level' })).toHaveAttribute('aria-selected', 'true')
 
-    const bulk = within(tree).getByRole('treeitem', { name: 'Bulk, 300 files' })
+    const bulk = within(tree).getByRole('treeitem', { name: 'Bulk 300 files' })
     await user.click(bulk)
     expect(bulk).toHaveAttribute('aria-selected', 'true')
     expect(within(tree).getByRole('treeitem', { name: 'Top level' })).toHaveAttribute('aria-selected', 'false')
-    expect(within(tree).getByRole('treeitem', { name: 'MakerWorld, 2 files' })).toBeInTheDocument()
+    expect(within(tree).getByRole('treeitem', { name: 'MakerWorld 2 files' })).toBeInTheDocument()
   })
 
   it('opens and closes folders with the keyboard, others starting closed (#2165)', async () => {
@@ -281,6 +336,8 @@ describe('LibraryPage, item context (#975)', () => {
     await user.click(within(toast).getByRole('button', { name: 'Undo' }))
     expect(await within(toast).findByText('Restored 1 file.')).toBeInTheDocument()
     expect(await screen.findByTestId('library-file-120')).toBeInTheDocument()
+    // Each a user action of its own in Tempo (#2292).
+    expect(actions).toEqual(expect.arrayContaining(['library_delete', 'library_restore']))
   })
 
   it('deletes the selection, warns of an external file, and reports the one skipped (#2167)', async () => {
@@ -303,6 +360,99 @@ describe('LibraryPage, item context (#975)', () => {
     expect(await screen.findByRole('button', { name: 'Delete selected (1)' })).toBeEnabled()
     await waitFor(() => expect(screen.queryByTestId('library-file-122')).toBeNull())
     expect(screen.getByTestId('library-file-121')).toBeInTheDocument()
+  })
+
+  it('moves a file from its actions menu, keeping it under its id (#2670)', async () => {
+    let sent: unknown
+    server.events.on('request:start', async ({ request }) => {
+      if (request.url.endsWith('/print/library/move')) sent = await request.clone().json()
+    })
+    const { user } = renderPage(<LibraryPage />, { route: '/library' })
+    await user.click((await screen.findAllByRole('button', { name: /^More actions for bag-clip/ }))[0]!)
+    await user.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Move to…' }))
+    const dialog = await screen.findByRole('dialog', { name: /^Move bag-clip.*to…$/ })
+    // It starts on the folder the file is in, which a move cannot go to.
+    expect(within(dialog).getByTestId('library-move-staying')).toHaveTextContent('It is in Top level already.')
+    expect(within(dialog).getByTestId('library-move-confirm')).toBeDisabled()
+    await user.click(within(dialog).getByTestId('library-move-folder-1'))
+    // MakerWorld is no project's folder, and the file was in none: nothing to warn of.
+    expect(within(dialog).queryByTestId('library-move-project-loss')).toBeNull()
+    await user.click(within(dialog).getByRole('button', { name: 'Move to MakerWorld' }))
+    const toast = await screen.findByTestId('library-done')
+    expect(toast).toHaveTextContent('Moved 1 file to MakerWorld.')
+    expect(sent).toEqual({ file_ids: [89], folder_id: 1 })
+    await waitFor(() => expect(screen.queryByTestId('library-file-89')).toBeNull())
+    await user.click(screen.getByTestId('library-folder-1'))
+    expect(await screen.findByTestId('library-file-89')).toBeInTheDocument()
+  })
+
+  it("warns before a move takes a file out of a project's folder, and says so after (#2670)", async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library/Lamp' })
+    await user.click(await screen.findByRole('checkbox', { name: 'Select lamp-shade.3mf' }))
+    await user.click(screen.getByRole('button', { name: 'Move selected (1)' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Move lamp-shade.3mf to…' })
+    expect(within(dialog).queryByTestId('library-move-project-loss')).toBeNull()
+    await user.click(within(dialog).getByTestId('library-move-folder-root'))
+    expect(within(dialog).getByTestId('library-move-project-loss')).toHaveTextContent(
+      'The project Desk lamp will lose lamp-shade.3mf',
+    )
+    await user.click(within(dialog).getByRole('button', { name: 'Move to Top level' }))
+    const toast = await screen.findByTestId('library-done')
+    expect(toast).toHaveTextContent('Moved 1 file to Top level.')
+    expect(toast).toHaveTextContent('The project Desk lamp no longer lists lamp-shade.3mf.')
+  })
+
+  it('copies the selection into a nested folder, and reports a skipped move (#2670)', async () => {
+    let sent: unknown
+    server.events.on('request:start', async ({ request }) => {
+      if (request.url.endsWith('/print/library/copy')) sent = await request.clone().json()
+    })
+    const { user } = renderPage(<LibraryPage />, { route: '/library' })
+    await screen.findByTestId('library-file-89')
+    for (const card of ['library-file-89', 'library-file-91']) {
+      await user.click(within(screen.getByTestId(card)).getByRole('checkbox'))
+    }
+    await user.click(screen.getByRole('button', { name: 'Copy selected (2)' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Copy 2 files to…' })
+    await user.click(within(dialog).getByTestId('library-copy-folder-toggle-3'))
+    await user.click(within(dialog).getByTestId('library-copy-folder-4'))
+    await user.click(within(dialog).getByRole('button', { name: 'Copy to Supplies / Storage' }))
+    expect(await screen.findByTestId('library-done')).toHaveTextContent('Copied 2 files to Supplies / Storage.')
+    expect(sent).toEqual({ file_ids: [89, 91], folder_id: 4 })
+    // The originals stay where they were.
+    expect(screen.getByTestId('library-file-89')).toBeInTheDocument()
+  })
+
+  it('reports a file Bambuddy would not move (#2670)', async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library/Spec/MakerWorld/Work' })
+    await user.click(await screen.findByRole('checkbox', { name: 'Select alex-headphone-hook.3mf' }))
+    await user.click(screen.getByRole('button', { name: 'Move selected (1)' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Move alex-headphone-hook.3mf to…' })
+    await user.click(within(dialog).getByTestId('library-move-folder-root'))
+    await user.click(within(dialog).getByRole('button', { name: 'Move to Top level' }))
+    const toast = await screen.findByTestId('library-done')
+    expect(toast).toHaveTextContent('Nothing was moved.')
+    expect(within(toast).getByTestId('library-done-skipped')).toHaveTextContent('alex-headphone-hook.3mf')
+  })
+
+  it('renames a file, keeping its extension, and shows a name Bambuddy refuses (#2670)', async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library/MakerWorld' })
+    await user.click(await screen.findByRole('button', { name: "More actions for Clara's Wand.3mf" }))
+    await user.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Rename…' }))
+    const dialog = await screen.findByRole('dialog', { name: "Rename Clara's Wand.3mf" })
+    const input = within(dialog).getByRole('textbox', { name: 'New name' })
+    expect(input).toHaveValue("Clara's Wand")
+    expect(within(dialog).getByRole('button', { name: 'Rename' })).toBeDisabled()
+    await user.clear(input)
+    await user.type(input, 'Wand?')
+    await user.click(within(dialog).getByRole('button', { name: 'Rename' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent("printer's SD card")
+    await user.clear(input)
+    await user.type(input, 'Wand for Clara{Enter}')
+    expect(await screen.findByTestId('library-done')).toHaveTextContent(
+      "Renamed Clara's Wand.3mf to Wand for Clara.3mf.",
+    )
+    expect(await within(screen.getByTestId('library-file-67')).findByTitle('Wand for Clara.3mf')).toBeInTheDocument()
   })
 })
 

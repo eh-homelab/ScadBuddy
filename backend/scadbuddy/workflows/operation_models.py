@@ -34,6 +34,8 @@ class OperationAuthor(BaseModel):
 
     principal: str | None = None
     session: str | None = None
+    #: The agent tool that made the call, for activity.
+    tool: str | None = None
 
 
 class PreludeStep(BaseModel):
@@ -63,6 +65,9 @@ class OperationInput(BaseModel):
     prelude: PreludeStep | None = None
     #: The client's ``Idempotency-Key``, when it sent one (review #1126 1.3).
     idempotency_key: str | None = None
+    #: The kind's ``answers_running`` (#2462): the Update answers with the running
+    #: record, not the finished one.
+    answer_running: bool = False
 
 
 class OperationAnswer(BaseModel):

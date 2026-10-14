@@ -30,7 +30,7 @@ from scadbuddy.render.jobs import (
     SnapshotUnavailableError as SnapshotUnavailableError,  # defined beside resolve_source
 )
 from scadbuddy.render.jobs import export_revision, touch_export
-from scadbuddy.store.archive import pack_dir, unpack_dir
+from scadbuddy.store.archive import staged_pack, unpack_dir
 from scadbuddy.store.content import (
     BlobCorruptError,
     BlobMissingError,
@@ -239,14 +239,14 @@ class SnapshotStore:
             if self.history is None:
                 raise SnapshotUnavailableError(f"no snapshot of {slug}@{revision} and no history")
             await asyncio.to_thread(export_revision, self.history, slug, revision, directory)
-        data = await asyncio.to_thread(pack_dir, directory)
-        await self.content.put(
-            "snapshot",
-            data,
-            name=f"src-{revision[:12]}.zip",
-            scope=BlobScope(slug=slug, title=template_title(directory, slug)),
-            key=key,
-        )
+        async with staged_pack(directory) as data:
+            await self.content.put(
+                "snapshot",
+                data,
+                name=f"src-{revision[:12]}.zip",
+                scope=BlobScope(slug=slug, title=template_title(directory, slug)),
+                key=key,
+            )
 
     async def _stored(self, key: str) -> bool:
         """Whether the index holds ``key``; a hit is touched, as a use."""

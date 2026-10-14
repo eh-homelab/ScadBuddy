@@ -128,8 +128,12 @@ export async function sessionPendingInput(
   if (session.mode === 'durable') {
     if (!sessions.durable) throw new DurableUnavailable("durable sessions need Temporal, and this agent service has none configured")
     const entries = await sessions.durable.pendingInput(sessionId)
-    // A grant holder that does not own the session sees its approvals only, as in the aggregate.
-    return { entries: principal.kind === 'browser' || own ? entries : entries.filter((e) => e.kind === 'approval'), summaries_truncated: false }
+    if (principal.kind === 'browser' || own) return { entries, summaries_truncated: false }
+    // A grant holder that does not own the session sees its approvals only, as in the
+    // aggregate, and none of a flow run's, which are the person's (#2482).
+    const visible: PendingInputEntry[] = []
+    for (const e of entries) if (e.kind === 'approval' && !(await sessions.projection.inRun(e.id))) visible.push(e)
+    return { entries: visible, summaries_truncated: false }
   }
   return pendingInput(sessions, principal, { sessionId })
 }
@@ -316,9 +320,14 @@ async function respondDurable(
 ): Promise<RespondResult> {
   const session = await sessions.projection.session(parsed.sessionId)
   if (!session || session.mode !== 'durable') throw stale
-  if (!sessions.durable) throw new RespondError(503, 'durable sessions need Temporal, and this agent service has none configured')
   const grant = principal.kind !== 'browser' && (await sessions.approvals.holdsGrant(principal))
   const role = roleOf(principal, session, grant)
+  // A flow run's calls are the person's (#2482, spec 2026-10-11 §4.2): no approval grant
+  // decides one. The workflow's validator refuses it too; this answers before asking it.
+  if (role === 'grant' && (await sessions.projection.inRun(requestId))) {
+    throw new RespondError(403, "a flow run's calls are decided by the person in the ScadBuddy UI, never by an approval grant")
+  }
+  if (!sessions.durable) throw new RespondError(503, 'durable sessions need Temporal, and this agent service has none configured')
   if (!role) {
     throw new RespondError(
       403,

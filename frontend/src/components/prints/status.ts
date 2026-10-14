@@ -20,3 +20,10 @@ export function statusLabel(status: string): string {
   const words = status.replace(/_/g, ' ')
   return words.charAt(0).toUpperCase() + words.slice(1)
 }
+
+/** #2736 — Bambuddy's statuses of a print that has no outcome yet. */
+const UNFINISHED_STATUSES = new Set(['pending', 'queued', 'printing', 'running', 'paused'])
+
+export function isUnfinished(status: string): boolean {
+  return UNFINISHED_STATUSES.has(status)
+}

@@ -5,10 +5,12 @@ import { describe, expect, it, vi } from 'vitest'
 import { api, ApiError } from '../api/client'
 import type { LibraryEntry, Output } from '../api/types'
 import { fromFiles, fromOutputs } from '../lib/arrange'
+import { startTracing } from '../lib/tracing'
 import * as fixtures from '../mocks/fixtures'
 import { libraryFiles } from '../mocks/features/library'
 import { addMockOutput, lastArrangeRequest, problem } from '../mocks/handlers'
 import { server } from '../mocks/server'
+import { installTestTracing } from '../test/tracing'
 import { renderPage } from '../test/utils'
 import { ArrangeDialog } from './ArrangeDialog'
 
@@ -210,6 +212,35 @@ describe('ArrangeDialog', () => {
     })
   })
 
+  it('is one traced action from the arrange to its save (#2292)', async () => {
+    const seen: { method: string; path: string; traceparent: string | null }[] = []
+    const listen = ({ request }: { request: Request }) => {
+      seen.push({
+        method: request.method,
+        path: new URL(request.url).pathname,
+        traceparent: request.headers.get('traceparent'),
+      })
+    }
+    server.events.on('request:start', listen)
+    const stop = startTracing()
+    try {
+      const onArranged = vi.fn()
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={onArranged} />,
+      )
+      await user.click(await screen.findByRole('button', { name: 'Arrange' }))
+      await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+    } finally {
+      server.events.removeListener('request:start', listen)
+      await stop()
+    }
+    const arrange = seen.find((call) => call.method === 'POST' && call.path === '/api/v1/outputs/arrange')
+    const save = seen.find((call) => call.method === 'POST' && /^\/api\/v1\/models\/[^/]+\/outputs$/.test(call.path))
+    expect(arrange?.traceparent).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/)
+    // The save follows an await: it joins the arrange's trace only through the action.
+    expect(save?.traceparent?.split('-')[1]).toBe(arrange?.traceparent?.split('-')[1])
+  })
+
   it('passes no name, never a slug, when the model list cannot be read (#2541)', async () => {
     let failed = false
     server.use(
@@ -355,14 +386,23 @@ describe('ArrangeDialog', () => {
       )
       const arrange = vi.spyOn(api, 'arrangeOutputs')
       const onArranged = vi.fn()
-      const { user } = renderPage(
-        <ArrangeDialog open sources={fromOutputs([nova])} onClose={vi.fn()} onArranged={onArranged} />,
-      )
-      await user.click(screen.getByRole('button', { name: 'Arrange' }))
-      await user.click(screen.getByRole('button', { name: 'Re-render' }))
-      expect(await screen.findByRole('alert', {}, { timeout: 5000 })).toHaveTextContent(
-        'Nova could not be re-rendered: openscad exited with 1. Nothing was arranged.',
-      )
+      const tracing = installTestTracing()
+      try {
+        const { user } = renderPage(
+          <ArrangeDialog open sources={fromOutputs([nova])} onClose={vi.fn()} onArranged={onArranged} />,
+        )
+        await user.click(screen.getByRole('button', { name: 'Arrange' }))
+        await user.click(screen.getByRole('button', { name: 'Re-render' }))
+        expect(await screen.findByRole('alert', {}, { timeout: 5000 })).toHaveTextContent(
+          'Nova could not be re-rendered: openscad exited with 1. Nothing was arranged.',
+        )
+        // #2892: the span says nothing was arranged, not an ordinary arrange.
+        const span = tracing.exporter.getFinishedSpans().find((s) => s.name === 'arrange')
+        expect(span?.attributes['scadbuddy.outcome']).toBe('nothing_arranged')
+        expect(span?.attributes['scadbuddy.output_id']).toBeUndefined()
+      } finally {
+        tracing.uninstall()
+      }
       expect(arrange).not.toHaveBeenCalled()
       expect(onArranged).not.toHaveBeenCalled()
     })

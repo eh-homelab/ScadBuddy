@@ -217,6 +217,9 @@ export type LibraryEntry = Schemas['LibraryEntry']
 export type LibraryFolderView = Schemas['LibraryFolderView']
 export type LibraryDeleteResult = Schemas['LibraryDeleteResult']
 export type LibraryRestoreResult = Schemas['LibraryRestoreResult']
+export type LibraryMoveResult = Schemas['LibraryMoveResult']
+export type LibraryCopyResult = Schemas['LibraryCopyResult']
+export type LibraryRenameResult = Schemas['LibraryRenameResult']
 /** #1863 — the objects Arrange reads from a library file ScadBuddy did not make. */
 export type LibraryFileObjects = Schemas['LibraryFileObjects']
 export type LibraryFileObject = Schemas['LibraryFileObject']
@@ -228,11 +231,26 @@ export type LibraryFileObject = Schemas['LibraryFileObject']
  * than string literals of their own: the backend's vocabulary is the contract, and a
  * hand-kept copy would drift the moment it gains a state.
  */
+/** #2351 — Bambuddy's spool inventory and loaded slots, read through `/farm/inventory`. */
+export type InventoryView = Schemas['InventoryView']
+export type InventorySpool = Schemas['InventorySpool']
 export type PrintProgress = Schemas['PrintProgress']
+/** #977 — what each printer is doing now, whoever started it. */
+export type PrintersNow = Schemas['PrintersNow']
+/** #2351 — Bambuddy's print queue and the farm's totals, read through `/farm`. */
+export type QueueItem = Schemas['QueueItem']
+export type ArchiveStats = Schemas['ArchiveStats']
+export type PrinterNow = Schemas['PrinterNow']
 /** #308 — ScadBuddy's print history: one linked Bambuddy archive per print. */
 export type PrintSummary = Schemas['PrintSummary']
 export type PrintPage = Schemas['PrintPage']
+/** The API's `ActivityItem`: the backend's `ActivityRow` as answered (advanced fields only with `?advanced=1`). */
+export type Activity = Schemas['ActivityItem']
+export type ActivityPage = Schemas['ActivityPage']
+export type ActivityFacets = Schemas['ActivityFacets']
+export type ActivityDetail = Schemas['ActivityDetail']
 export type PrintDetail = Schemas['PrintDetail']
+export type TimelapseFrames = Schemas['TimelapseFrames']
 /** #311 — the print detail page's two writes. */
 export type PrintAgain = Schemas['PrintAgain']
 export type PrinterMedia = Schemas['PrinterMedia']
@@ -357,8 +375,10 @@ export interface SessionLimits {
 
 /**
  * How many of the assistant's renders run at once (`GET/PUT /api/v1/ai/settings/render-limits`,
- * agent `src/routes/renderLimits.ts`). Past a limit a render waits for a slot; nothing
- * is refused for it. Read live by the agent, so a change applies to waiting renders too.
+ * agent `src/routes/renderLimits.ts`). Past a concurrency limit a render waits for a slot,
+ * up to the tool's own wait; a call is refused past 100 waiting per caller, or past
+ * `per_window`, which counts waiting renders. Read live by the agent, so a change
+ * applies to waiting renders too.
  */
 export interface RenderLimits {
   /** Each caller's renders at once, unless an override names it. */
@@ -382,6 +402,17 @@ export interface SessionModeSetting {
   mode: 'classic' | 'durable'
   durable_available: boolean
   durable_unavailable_reason?: string
+}
+
+/**
+ * Where a durable segment's subagents reach ScadBuddy's tools
+ * (`GET/PUT /api/v1/ai/settings/durable-subagents`, agent `src/routes/durableSubagents.ts`).
+ * `url` replaces agent-durable's own (null: the pod's loopback); `peers` are the addresses or
+ * CIDR ranges besides loopback the agent answers on that route (empty: loopback only).
+ */
+export interface DurableSubagentsSetting {
+  url: string | null
+  peers: string[]
 }
 
 /**

@@ -10,6 +10,7 @@ The worker never migrates; it waits until the API has (`wait_until_ready`).
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from collections.abc import Callable, Mapping
@@ -38,6 +39,10 @@ RENDER_GRANTS: Mapping[str, tuple[str, ...]] = {
     # The job.* events, written in the row's transaction (`core/pg_events.py`
     # `write_event`; RETURNING seq reads).
     "events": ("SELECT", "INSERT"),
+    # The job's activity row (`render/projection.py` `_announce` through
+    # `activity/index.py` `upsert_in`; ON CONFLICT and RETURNING principal read it).
+    # Only `render:` rows: `RENDER_ROWS` holds the role to them.
+    "activity": ("SELECT", "INSERT", "UPDATE"),
     # The blob index (`store/index.py`): get, put, touch, and `forget` of a row whose
     # object is gone.
     "store_blobs": ("SELECT", "INSERT", "UPDATE", "DELETE"),
@@ -55,6 +60,14 @@ RENDER_GRANTS: Mapping[str, tuple[str, ...]] = {
     "render_settings": ("SELECT",),
     # Whether the API has migrated to this build's schema (`wait_until_ready`).
     "scadbuddy_migrations": ("SELECT",),
+}
+
+#: Tables the role may reach only some rows of, and which: a restrictive row policy
+#: for the role beside a permissive one for everyone else, so every other role reads
+#: and writes as before (the owner, which migrates, bypasses row security anyway).
+RENDER_ROWS: Mapping[str, str] = {
+    # Every principal's jobs are listed there; the worker writes its renders' rows only.
+    "activity": "id LIKE 'render:%'",
 }
 
 #: Seconds between looks while the worker waits for the API's migrations or grants.
@@ -87,7 +100,50 @@ def grant_render_role(conn: Connection[Any], role: str | None = None) -> bool:
                     sql.Identifier(role),
                 )
             )
+        for table, rows in RENDER_ROWS.items():
+            _hold_to_rows(conn, role, table, rows)
     return True
+
+
+def _hold_to_rows(conn: Connection[Any], role: str, table: str, rows: str) -> None:
+    """Hold ``role`` to ``rows`` of ``table``. Enabling row security takes effect because
+    the API's role owns the table (it migrates) and so bypasses it; `everyone`, the
+    permissive policy, keeps every other non-owner role (a separately credentialed print
+    or projects worker) unrestricted, since with row security on and no policy a role
+    sees no row. The role's policy is named by its predicate, so a changed predicate
+    replaces the old one rather than leaving it in force."""
+    existing = {
+        row[0]
+        for row in conn.cursor(row_factory=tuple_row).execute(
+            "SELECT policyname FROM pg_policies WHERE schemaname = current_schema()"
+            " AND tablename = %s",
+            (table,),
+        )
+    }
+    conn.execute(sql.SQL("ALTER TABLE {} ENABLE ROW LEVEL SECURITY").format(sql.Identifier(table)))
+    if "everyone" not in existing:
+        conn.execute(
+            sql.SQL("CREATE POLICY everyone ON {} USING (true) WITH CHECK (true)").format(
+                sql.Identifier(table)
+            )
+        )
+    prefix = f"only_{role}_"
+    policy = prefix + hashlib.sha256(rows.encode()).hexdigest()[:8]
+    for stale in sorted(p for p in existing if p.startswith(prefix) and p != policy):
+        conn.execute(
+            sql.SQL("DROP POLICY {} ON {}").format(sql.Identifier(stale), sql.Identifier(table))
+        )
+    if policy not in existing:
+        conn.execute(
+            sql.SQL(
+                "CREATE POLICY {} ON {} AS RESTRICTIVE TO {} USING ({rows}) WITH CHECK ({rows})"
+            ).format(
+                sql.Identifier(policy),
+                sql.Identifier(table),
+                sql.Identifier(role),
+                rows=sql.SQL(rows),
+            )
+        )
 
 
 def grant_at_start(pool: ConnectionPool[Any]) -> None:

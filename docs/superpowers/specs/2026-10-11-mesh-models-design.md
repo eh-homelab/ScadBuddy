@@ -228,8 +228,13 @@ Measuring (sections, inscribed circles, faces) runs in `asyncio.to_thread` under
 runs to its end (`operations.kinds.to_thread_to_end`), so a run past its timeout whose
 commit lands still announces it.
 
-`scene_eject`: deletes `scene.json`, one commit (`model.json` keeps `mesh_source`). The
-model is then an ordinary template whose source imports `meshes/`.
+`scene_eject`: deletes `scene.json`, one commit (`model.json` keeps `mesh_source`, and
+`meshes/` stays: the ejected source imports it). The model is then an ordinary template
+whose source imports `meshes/`.
+
+A `scene_edit` removes the files under `meshes/` that no part uses any more, such as a
+deleted object's (`operations.py` `unused_meshes`, #2632); `restore_version` brings them
+back with the scene that used them.
 
 ## 6. Temporal, operations, flows and pipelines
 

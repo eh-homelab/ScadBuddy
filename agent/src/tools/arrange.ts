@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { ok } from './call.js'
 import { ACCEPTING_MS, command } from './command.js'
 import { outputId, slug } from './common.js'
-import { acquireRenderSlot, waitForJob } from './customizer.js'
+import { acquireRenderSlot, releaseWhenSettled, waitForJob } from './customizer.js'
 import { slotChoice } from './print.js'
 import { defineTool, json, type Tool, ToolError } from './registry.js'
 
@@ -102,8 +102,11 @@ export const arrangeTools: Tool[] = [
     // Its own wait for the render, after the backend has accepted it.
     waitsMs: (_, ctx) => ACCEPTING_MS + ctx.renderWaitMs,
     handler: async ({ objects, goal, printer_id, filament_plan, colours, name, slug, read_budget }, ctx) => {
-      // A job on the render queue: under the same per-principal bounds as render_model.
+      // A job on the render queue: under the same per-principal bounds as render_model,
+      // its slot held until the job settles, past this call when it is handed back running.
       const release = await acquireRenderSlot(ctx)
+      let submitted: string | undefined
+      let lastJob: { status: Awaited<ReturnType<typeof waitForJob>>['status'] } | undefined
       try {
         const sent = await ctx.backend.POST('/api/v1/outputs/arrange', {
           body: {
@@ -133,8 +136,10 @@ export const arrangeTools: Tool[] = [
           )
         }
         const started = await ok(Promise.resolve(sent), 'arrange')
+        submitted = started.id
         await ctx.progress(0, undefined, `arrange queued as ${started.id}`)
         const job = await waitForJob(ctx, started.id)
+        lastJob = job
         if (job.status === 'failed' || job.status === 'cancelled') {
           throw new ToolError(`the arrange was ${job.status}${job.error ? `: ${job.error}` : ''}`)
         }
@@ -155,7 +160,7 @@ export const arrangeTools: Tool[] = [
         )
         return json({ job_id: job.id, slug: job.slug, plates: Math.max(1, (job.plates ?? []).length), output })
       } finally {
-        release()
+        releaseWhenSettled(ctx, submitted, lastJob, release)
       }
     },
   }),

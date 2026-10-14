@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import gc
 import json
+import weakref
 import zipfile
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -17,11 +20,13 @@ from scadbuddy.library.outputs import OutputStore, hold_parts, release_parts
 from scadbuddy.render.bambu3mf import PROJECT_SETTINGS_NAME, write_bambu_3mf
 from scadbuddy.render.glb import BoundingBox, bounding_box
 from scadbuddy.render.job_models import ManifestObject
+from scadbuddy.render.jobs import PlateLayout, plates_thumbnails
 from scadbuddy.render.objects3mf import read_objects
 from scadbuddy.render.split import ColourPart
 from scadbuddy.store import sweep_blobs
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.store.refs import BlobRefs
+from scadbuddy.workflows import outputs
 from scadbuddy.workflows.arrange import part_of
 from scadbuddy.workflows.models import (
     Layout,
@@ -461,3 +466,80 @@ async def test_no_copy_is_packed_where_a_neighbours_negative_part_reaches(tmp_pa
     apart_x = abs(first.x - second.x) >= 35 and first.rot == second.rot == 0
     apart_y = abs(first.y - second.y) >= min(box.size[1], box.size[0])
     assert apart_x or apart_y
+
+
+async def test_each_pieces_meshes_are_let_go_after_its_last_plate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2573: an arrange of many library pieces was OOM-killed holding every piece's
+    meshes until the output was written. A piece is let go once its last copy is
+    placed: the first piece is gone while the second plate is laid out, and when the
+    covers are drawn."""
+    deps, _ = _deps(tmp_path)
+    entries, reads = [], []
+    for index, colour in enumerate(["#FF0000", "#0000FF"]):
+        out = tmp_path / f"piece-{index}.3mf"
+        mesh = trimesh.creation.box(extents=(10, 10, 4 + index))
+        write_bambu_3mf([ColourPart(1, "Body", colour, mesh)], out, thumbnails=None)
+        read = read_objects(out.read_bytes())
+        box = bounding_box(read[0].parts)
+        entries.append(
+            ManifestObject(
+                part=piece_key(f"{index}a" * 32, 0),
+                file=read[0].name,
+                slug="demo",
+                revision=None,
+                bbox=box,
+                footprint=(box.size[0], box.size[1]),
+                colours=[colour],
+                count=1,
+                library_file_id=90 + index,
+            )
+        )
+        reads.append(read[0])
+    await publish_library_pieces(deps.blobs, entries, reads)
+    first, second = (part_of(entry) for entry in entries)
+
+    loaded: dict[str, weakref.ref[PlateLayout]] = {}
+    alive_at_load: list[list[str]] = []
+    real_load = PlateLayout.load
+
+    def load(path: Path) -> PlateLayout:
+        gc.collect()
+        alive_at_load.append([key for key, ref in loaded.items() if ref() is not None])
+        layout = real_load(path)
+        loaded[path.parent.name] = weakref.ref(layout)
+        return layout
+
+    alive_at_covers: list[str] = []
+    real_covers = plates_thumbnails
+
+    async def covers(*args: Any, **kwargs: Any) -> Any:
+        gc.collect()
+        alive_at_covers.extend(key for key, ref in loaded.items() if ref() is not None)
+        return await real_covers(*args, **kwargs)
+
+    monkeypatch.setattr(PlateLayout, "load", staticmethod(load))
+    monkeypatch.setattr(outputs, "plates_thumbnails", covers)
+    req = OutputRequest(
+        job_id="j9",
+        index=0,
+        slug="demo",
+        layout=Layout(
+            plates=[
+                LayoutPlate(items=[Placed(piece_key=first.piece_key, x=0, y=0)]),
+                LayoutPlate(items=[Placed(piece_key=second.piece_key, x=0, y=0)]),
+            ]
+        ),
+        parts=[first, second],
+        name=None,
+        bom=[],
+        files={},
+        record=_record([first.piece_key, second.piece_key]),
+        provenance={entry.part: entry for entry in entries},
+    )
+    written = await ActivityEnvironment().run(PipelineActivities(deps).write_output, req)
+
+    assert len(written.result.plates or []) == 2
+    assert alive_at_load == [[], []]
+    assert first.piece_key not in alive_at_covers

@@ -68,6 +68,9 @@ def test_choices_offer_every_size_the_rack_and_the_last_plate(
     }
     assert "0.08mm High Quality @BBL H2C" in body["processes"]["0.4"]
     assert body["last_bed_type"] == "Textured PEI Plate"
+    # #2366: the H2C's own plates, once each, by Bambu Studio's labels.
+    assert body["bed_types"] == ["Engineering Plate", "Textured PEI Plate", "Supertack Plate"]
+    assert body["bed_type_labels"]["Supertack Plate"] == "Bambu Cool Plate SuperTack"
     assert body["filaments"]["slots"]
 
 

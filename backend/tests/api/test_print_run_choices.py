@@ -1584,6 +1584,26 @@ def test_the_check_gives_the_runs_printer_refusal_word_for_word(
     assert not uploaded.called
 
 
+@pytest.mark.parametrize("plate", ["Cool Plate", "Smooth PEI Plate", "High Temp Plate"])
+@respx.mock
+def test_the_check_warns_of_a_plate_the_printer_does_not_take(
+    client: TestClient, model: str, plate: str
+) -> None:
+    """#2366: the check answered nothing for a plate the H2C does not take."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body(bed_type=plate))
+
+    assert check.status_code == 200, check.text
+    assert [w["kind"] for w in check.json()["warnings"]].count("plate-not-listed") == 1
+    fine = client.post(
+        f"/api/v1/print/outputs/{output_id}/check", json=body(bed_type="Supertack Plate")
+    )
+    assert "plate-not-listed" not in [w["kind"] for w in fine.json()["warnings"]]
+
+
 @respx.mock
 def test_a_422_bambuddy_answers_on_a_read_fails_the_check_rather_than_refusing(
     client: TestClient, model: str

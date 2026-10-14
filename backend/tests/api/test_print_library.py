@@ -19,6 +19,7 @@ import trimesh
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from scadbuddy.activity.index import ActivityIndex
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.bambuddy.uploads import LibraryCopy, ProjectTarget
 from scadbuddy.render.bambu3mf import (
@@ -375,6 +376,24 @@ def test_a_deleted_files_choices_are_its_404_whatever_else_fails(client: TestCli
 
 
 @respx.mock
+def test_an_unprintable_files_choices_are_its_422_whatever_else_fails(client: TestClient) -> None:
+    """#2532: as the 404 above, an unprintable file's 422 beats the printers' and the
+    presets' failures, though they are read beside it."""
+    configure(client)
+    library_file(105, file_type="step")
+    respx.get(f"{API}/printers/").mock(return_value=httpx.Response(500))
+    respx.get(f"{API}/slicer/presets").mock(return_value=httpx.Response(500))
+    respx.get(f"{API}/local-presets/").mock(return_value=httpx.Response(500))
+
+    response = client.get("/api/v1/print/library/105/choices")
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == (
+        "ScadBuddy prints only 3MF and STL files from the library, and file-105.step is a step."
+    )
+
+
+@respx.mock
 def test_a_sliced_file_is_a_422_before_anything_is_sliced(client: TestClient) -> None:
     configure(client)
     library_file(104, file_type="gcode.3mf")
@@ -548,6 +567,31 @@ def test_the_check_refuses_a_library_file_nothing_on_the_mounted_nozzles(
 
 
 @respx.mock
+def test_a_library_run_is_attributed_to_who_started_it(
+    client: TestClient, gate: Gate, activity_index: ActivityIndex
+) -> None:
+    configure(client)
+    one_color(89)
+    flow_copy_routes()
+    library_file(89)
+    run_routes()
+    gated_slice_routes(gate)
+    queue_route()
+    request = {**body(), "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]}}
+
+    response = client.post(
+        "/api/v1/print/library/89/run",
+        json=request,
+        headers={"X-ScadBuddy-Agent-Author": "token:t9"},
+    )
+
+    assert response.status_code == 202, response.text
+    got = asyncio.run(activity_index.get(f"print_run:{response.json()['id']}"))
+    gate.open()
+    assert got is not None and got.principal == "token:t9"
+
+
+@respx.mock
 def test_a_library_run_answers_202_before_the_slice_finishes_and_a_retry_is_its_run(
     client: TestClient, gate: Gate
 ) -> None:
@@ -646,7 +690,11 @@ def test_a_library_file_s_print_is_in_the_history_once_bambuddy_archives_it(
     assert summary["output_name"] == "Bambu Spool Lock or shim UPDATED"
     assert summary["status"] == "printing"
     assert summary["params_diff"] is None
-    assert summary["cover"] == {"kind": "thumbnail", "url": "/api/v1/prints/90/thumbnail"}
+    assert summary["cover"] == {
+        "kind": "thumbnail",
+        "url": "/api/v1/prints/90/thumbnail",
+        "full_url": "/api/v1/prints/90/thumbnail",
+    }
 
     # It opens, and its media is served, like an output's print.
     detail = client.get("/api/v1/prints/90")

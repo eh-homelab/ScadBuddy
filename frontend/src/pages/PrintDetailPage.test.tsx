@@ -76,6 +76,20 @@ describe('PrintDetailPage (#311)', () => {
     expect(runs).toHaveTextContent('Cancelled')
   })
 
+  it('numbers a printer Bambuddy gave no name for as the list does (#2363)', async () => {
+    const done = prints.find((print) => print.archive_id === 35)!
+    server.use(
+      http.get('/api/v1/prints/:id', () =>
+        HttpResponse.json({ ...done, printer_id: 3, printer_name: null, outcome: { ...done.outcome, printer_id: 3, printer_name: null } }),
+      ),
+    )
+    render(35)
+    const outcome = await section('Outcome')
+    const facts = within(outcome.querySelector('dl') as HTMLElement)
+    expect(facts.getByText('Printer 3')).toBeInTheDocument()
+    expect(facts.queryByText('#3')).not.toBeInTheDocument()
+  })
+
   it('marks a run whose filament reading is not believed (#950)', async () => {
     const done = prints.find((print) => print.archive_id === 35)!
     const [, last] = done.outcome.runs
@@ -171,7 +185,15 @@ describe('PrintDetailPage (#311)', () => {
         }),
       ),
     )
-    render(90)
+    const { user } = render(90)
+    // #2731 — the plate's image first: its mesh can be megabytes, loaded only when asked.
+    const plate = await section('Library file')
+    expect(within(plate).getByRole('img', { name: 'Plate 2 of the library file' })).toHaveAttribute(
+      'src',
+      '/api/v1/print/library/89/plates/2/thumbnail',
+    )
+    expect(screen.queryByTestId('preview')).not.toBeInTheDocument()
+    await user.click(within(plate).getByRole('button', { name: 'Show in 3D' }))
     expect(await screen.findByTestId('preview')).toHaveAttribute('data-url', preview)
     const files = await section('Files')
     expect(within(files).getByText('Library file')).toBeInTheDocument()
@@ -232,10 +254,41 @@ describe('PrintDetailPage (#311)', () => {
     expect(video).toHaveAttribute('src', '/api/v1/prints/35/timelapse')
     expect(video).toHaveAttribute('controls')
     expect(video).toHaveAttribute('playsinline')
-    expect(video.getAttribute('poster')).toMatch(/^data:image\//)
+    // #2512 — the still by URL, never base64 in the detail's JSON.
+    expect(video).toHaveAttribute('poster', '/api/v1/prints/35/timelapse/frames/0')
     video.currentTime = 3
-    await user.click(within(timelapse).getByRole('button', { name: 'Go to 0:00' }))
+    await user.click(await within(timelapse).findByRole('button', { name: 'Go to 0:00' }))
     expect(video.currentTime).toBe(0)
+    expect(within(timelapse).getByText(/1680×1080/)).toBeInTheDocument()
+  })
+
+  it('shows the print before the timelapse stills arrive, then shows them (#2360)', async () => {
+    let release: () => void = () => undefined
+    const arrived = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http.get('/api/v1/prints/:archiveId/timelapse/frames', async () => {
+        await arrived
+        return HttpResponse.json({
+          info: null,
+          frames: [
+            { timestamp: 0, url: '/api/v1/prints/35/timelapse/frames/0' },
+            { timestamp: 2, url: '/api/v1/prints/35/timelapse/frames/1' },
+          ],
+        })
+      }),
+    )
+    render(35)
+    const timelapse = await section('Timelapse')
+    expect(timelapse.querySelector('video')).toHaveAttribute('poster', '/api/v1/prints/35/timelapse/frames/0')
+    expect(within(timelapse).queryByRole('list', { name: 'Timelapse frames' })).not.toBeInTheDocument()
+    release()
+    const strip = await within(timelapse).findByRole('list', { name: 'Timelapse frames' })
+    expect(within(strip).getByRole('button', { name: 'Go to 0:02' }).querySelector('img')).toHaveAttribute(
+      'src',
+      '/api/v1/prints/35/timelapse/frames/1',
+    )
   })
 
   it('lists every file with its size and downloads it as a blob', async () => {
@@ -313,6 +366,19 @@ describe('PrintDetailPage (#311)', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Open in queue' }))
     expect(openExternal).toHaveBeenCalledWith('https://bambuddy.example/queue')
     server.events.removeAllListeners()
+  })
+
+  it('offers no Print again while the print is still going (#2736)', async () => {
+    const done = prints.find((print) => print.archive_id === 35)!
+    server.use(
+      http.get('/api/v1/prints/35', () =>
+        HttpResponse.json({ ...done, status: 'printing', outcome: { ...done.outcome, status: 'printing' } }),
+      ),
+    )
+    render(35)
+    await section('Outcome')
+    expect(screen.queryByRole('button', { name: 'Print again' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Open in Bambuddy' })).toBeInTheDocument()
   })
 
   it('says why Bambuddy would not queue it', async () => {

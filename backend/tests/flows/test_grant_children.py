@@ -23,7 +23,6 @@ from tests.flows.test_grant_gate import api_client_of
 pytestmark = [pytest.mark.requires_temporal, pytest.mark.requires_postgres]
 
 # The agent's stand-ins (sessions_start, sessions_send, flow_session_turn) on a test queue.
-manifest = host.manifest
 sessions = host.sessions
 
 SEND = {"output_id": "o1", "printer_id": 3}

@@ -5,7 +5,7 @@ grant with the hash of the call as it runs; a call outside it parks as before.""
 import asyncio
 import dataclasses
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any, NamedTuple
 
@@ -21,13 +21,12 @@ from temporalio.worker import Worker
 from scadbuddy.core.problems import ApiError
 from scadbuddy.flows.approval_hash import input_hash
 from scadbuddy.flows.grants import GrantSpec
-from scadbuddy.flows.manifest import use_manifest
 from scadbuddy.flows.models import Decision
 from scadbuddy.flows.operations import FLOW_DECIDE, STALE_ENTRY, flow_kinds, request_id
 from scadbuddy.workflows.flow_grants import FlowGrants
 from scadbuddy.workflows.flow_models import GrantApprove, GrantCheck, GrantVerdict
 from tests.flows.fake_api import PLAN, FakeApi, Outward
-from tests.flows.flows_support import HASH_KEY, Keys, script
+from tests.flows.flows_support import HASH_KEY, AgentTiers, Keys, script
 
 pytestmark = [pytest.mark.requires_temporal, pytest.mark.requires_postgres]
 
@@ -180,18 +179,14 @@ class Tools:
         return [send_to_bambuddy]
 
 
-@pytest.fixture(autouse=True)
-def manifest() -> Iterator[None]:
-    use_manifest({"send_to_bambuddy": "outward"})
-    yield
-    use_manifest({})
-
-
 @pytest.fixture
 async def tools(outward: Outward) -> AsyncIterator[tuple[Tools, str]]:
     served = Tools()
     queue = f"agent-tools-{uuid.uuid4().hex[:8]}"
-    async with Worker(outward.client, task_queue=queue, activities=served.all()):
+    agent = AgentTiers({"send_to_bambuddy": "outward"})
+    async with Worker(
+        outward.client, task_queue=queue, activities=[*served.all(), agent.activity()]
+    ):
         yield served, queue
 
 

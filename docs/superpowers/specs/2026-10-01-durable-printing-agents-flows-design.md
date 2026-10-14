@@ -787,8 +787,11 @@ subagents, the model setting, credential fallback and MCP sender tiers. The pari
 - **A package's other built-ins** (#2393): the agent's `builtin` turn tools
   (`agent/src/builtins/`), Claude Code's inputs and wording on the session's workspace and
   credential, each outward; the turn's system prompt names them.
+- **Fork** (#2688): a durable session forks into a durable child whose workflow starts
+  with a copy of the parent's committed conversation (`fork_point`), from the same points
+  as a classic fork.
 
-The differences left between the modes: a durable session cannot be forked; a durable
+The differences left between the modes: a durable
 subagent has ScadBuddy's own tools only; and of an `allow_refused` package's named
 built-ins, `Monitor`, `Workflow` and `PushNotification` are not offered yet. `CronCreate`,
 `CronDelete`, `CronList`, `ScheduleWakeup` and `TaskStop` are the session's own in both

@@ -1,9 +1,14 @@
 import { randomUUID } from 'node:crypto'
 import { readdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { ApplicationFailure } from '@temporalio/common'
+import { MockActivityEnvironment } from '@temporalio/testing'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { z } from 'zod'
 import { flowRequestId } from '../src/gate/ids.js'
 import { PgFlowRuns } from '../src/temporal/flowRuns.js'
+import { connectInProcess, turnToolActivity } from '../src/temporal/turnTools.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase, type Throwaway } from './support/postgres.js'
 
 // A flow run's starter and decisions, read from the backend's own tables (#1057, plan
@@ -106,5 +111,53 @@ describe.skipIf(!TEST_DATABASE_URL)(`PgFlowRuns${TEST_DATABASE_URL ? '' : ` (set
     await t.db.sql`UPDATE flow_grants SET revoked_at = NULL, expires_at = now() - interval '1 second' WHERE id = 'g1'`
     expect(await flows.approved(c1, 'h1')).toBe(false)
     expect(await flows.lapsed(c1, 'h1')).toBe(true)
+  })
+
+  // #2728: a flow's outward turn tool runs with its recorded approval, bound to the input.
+  it('runs an approved outward turn tool in a flow, and refuses another input', async () => {
+    const id = await run({ kind: 'browser' })
+    const calls: string[] = []
+    const server = () => {
+      const s = new McpServer({ name: 'notes', version: '1' })
+      s.registerTool('post', { description: 'posts', inputSchema: { body: z.string() } }, async ({ body }) => {
+        calls.push(body)
+        return { content: [{ type: 'text', text: `posted ${body}` }] }
+      })
+      return s
+    }
+    const hash = (tool: string, input: Record<string, unknown>) => `${tool}:${JSON.stringify(input)}`
+    const call = turnToolActivity({
+      sessions: { ownerOf: async () => undefined },
+      servers: async () => ({
+        servers: [{ name: 'notes', connect: () => connectInProcess(server), tierOf: () => 'outward' }],
+        problems: [],
+        secrets: [],
+        release: () => {},
+      }),
+      hostQueue: 'agent-tools.host-1',
+      flows,
+      audit: { record: async () => {}, hash, summarise: (tool) => tool },
+    })
+    await t.db.sql`
+      INSERT INTO workflow_run_decisions (request_id, run_id, workflow_run_id, call_id, kind, outcome, responder, input_hash)
+      VALUES (${flowRequestId(id, 'wr1', 'c1')}, ${id}, 'wr1', 'c1', 'approval', 'approved', 'browser',
+        ${hash('notes__post', { body: 'x' })})`
+    const env = () =>
+      new MockActivityEnvironment({
+        activityId: 'tool-c1',
+        activityType: 'turn:notes__post',
+        workflowExecution: { workflowId: `flow-${id}`, runId: 'wr1' },
+        taskQueue: 'agent-tools',
+      })
+    expect(await env().run(call, { body: 'x' })).toBe('posted x')
+    const refused = await env()
+      .run(call, { body: 'y' })
+      .then(
+        () => undefined,
+        (e: unknown) => e,
+      )
+    expect(refused).toBeInstanceOf(ApplicationFailure)
+    expect((refused as ApplicationFailure).type).toBe('NotApproved')
+    expect(calls).toEqual(['x'])
   })
 })

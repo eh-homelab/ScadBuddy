@@ -436,11 +436,18 @@ def _authors_3mf(tmp_path: Path) -> bytes:
 
 
 def _sliced_3mf() -> bytes:
+    """The same bytes on every call: a name alone stamps each entry with the current
+    time, so two calls a second apart differed and a test comparing them flaked."""
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("3D/3dmodel.model", "<model/>")
-        archive.writestr(PROJECT_SETTINGS_NAME, '{"filament_colour": ["#FFFFFF"]}')
-        archive.writestr("Metadata/plate_1.gcode", "; sliced\n")
+        for name, text in (
+            ("3D/3dmodel.model", "<model/>"),
+            (PROJECT_SETTINGS_NAME, '{"filament_colour": ["#FFFFFF"]}'),
+            ("Metadata/plate_1.gcode", "; sliced\n"),
+        ):
+            entry = zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))
+            entry.compress_type = zipfile.ZIP_DEFLATED
+            archive.writestr(entry, text)
     return buffer.getvalue()
 
 

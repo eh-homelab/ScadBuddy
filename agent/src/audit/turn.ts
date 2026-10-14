@@ -2,6 +2,7 @@ import type { ApprovalGate, ApprovalVerdict, RiskTier, TierResolver } from '../h
 import type { TurnOutcome } from '../sessions/manager.js'
 import type { ServerEvent } from '../sessions/protocol.js'
 import { unwrapUntrusted } from '../safety/untrusted.js'
+import { withoutWorkspaceSize } from '../workspace/store.js'
 import { type AuditActor, type AuditEntry, type AuditLog, type AuditOutcome, safeDetail } from './log.js'
 
 // The harness half of the audit log (#258): one `tool_call` row per tool call
@@ -151,7 +152,7 @@ export class TurnAuditor {
       toolUseId,
       tier: call.tier,
       inputHash: this.audit.hash(call.name, call.input),
-      inputSummary: this.audit.summarise(call.name, call.input, secrets),
+      inputSummary: this.audit.summarise(call.name, withoutWorkspaceSize(call.input), secrets),
       approvalId: verdict?.approvalId,
       outcome,
       ...(outcome === 'ok' ? {} : { detail: safeDetail(summary, secrets) }),

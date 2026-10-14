@@ -12,6 +12,7 @@ import { DURABLE_ONLY_NAMES } from '../tools/answerTools.js'
 import { turnPrincipal } from '../tools/harness.js'
 import { type FlowBlobStore, type FlowImage, flowImageOf } from './flowBlobs.js'
 import { flowOf, type FlowRuns } from './flowRuns.js'
+import { FLOW_TOOL_TIER_ACTIVITY, flowToolTierActivity } from './flowTools.js'
 import { type SessionFiles, withWorkspaceSize } from '../workspace/store.js'
 
 // Every tool as an activity on `agent-tools` (spec 2026-10-01 §6.3, #1055), registered
@@ -282,7 +283,11 @@ function failureText(run: ToolRun): string {
 export function toolActivities(tools: readonly Tool[], deps: ToolActivityDeps): Record<string, ToolActivity> {
   const byName = new Map(tools.map((t) => [t.name, t]))
   const lookup = (name: string): Tool | undefined => byName.get(name)
-  return Object.fromEntries(tools.map((tool) => [tool.name, (input: unknown) => runAsActivity(tool, input, deps, lookup)]))
+  return {
+    ...Object.fromEntries(tools.map((tool) => [tool.name, (input: unknown) => runAsActivity(tool, input, deps, lookup)])),
+    // A flow's tool(...) asks each tool's tier from here before it may run or park (#2704).
+    [FLOW_TOOL_TIER_ACTIVITY]: flowToolTierActivity(tools, deps.services),
+  }
 }
 
 /** The durable session the current activity's workflow is, and its owner; refused otherwise. */

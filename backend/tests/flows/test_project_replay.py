@@ -10,7 +10,9 @@ The histories were recorded on 6b's workflow (`SCADBUDDY_RECORD_HISTORIES=1`): `
 (two `sleep`s, a result), `answered` (a `wait_for_human` answered) and `restarted` (a
 `sleep` its worker was stopped during, finished by a new worker); `printed` on 6c's
 (`render`, `save_output` and an approved `queue_print`, recorded by
-`test_outward_host_functions.py::test_printed`). Never re-record them.
+`test_outward_host_functions.py::test_printed`); `tooled` on the workflow before #2704
+(a read `tool(...)` and an approved outward one at the tiers the run started with,
+recorded by `test_tool_host_function.py::test_tooled`). Never re-record them.
 Their payloads are sealed under `flows_support.Keys`, a key derived from each subject.
 """
 
@@ -35,7 +37,7 @@ from scadbuddy.workflows.projects_worker import projects_runner, projects_worker
 from tests.flows.flows_support import Flows, Keys, script
 
 HISTORIES = Path(__file__).parent.parent / "fixtures" / "project_workflow_histories"
-NAMES = ["slept", "answered", "restarted", "printed"]
+NAMES = ["slept", "answered", "restarted", "printed", "tooled"]
 RECORD = os.environ.get("SCADBUDDY_RECORD_HISTORIES") == "1"
 
 
