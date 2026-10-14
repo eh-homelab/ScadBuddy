@@ -1431,7 +1431,10 @@ ReadPresetValues = Callable[[PresetRef], Awaitable[PresetValues]]
 def read_once(client: BambuddyClient) -> ReadPresetValues:
     """``client.preset_values``, read at most once per preset by whoever shares it
     (#2804 review): a print's filament profiles and its supports change the same process
-    preset. A failed read fails the same way for every one of them."""
+    preset. A failed read fails the same way for every one of them.
+
+    It assumes its callers take turns, as ``check_print`` and ``plan_run`` do: two reads
+    of the same preset gathered concurrently would both miss and both read."""
     read: dict[tuple[str, str], PresetValues | ApiError] = {}
 
     async def values(process: PresetRef) -> PresetValues:
