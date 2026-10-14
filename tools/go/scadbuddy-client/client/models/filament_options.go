@@ -12,7 +12,7 @@ type FilamentOptions struct {
 	// Stores additional data not described in the OpenAPI description found when deserializing. Can be used for serialization as well.
 	additionalData map[string]any
 	// The library_file_id property
-	library_file_id *int32
+	library_file_id FilamentOptions_FilamentOptions_library_file_idable
 	// The nozzles property
 	nozzles []NozzleInfoable
 	// The printer_id property
@@ -31,6 +31,92 @@ type FilamentOptions struct {
 	trays []UnknownTrayable
 	// The warnings property
 	warnings []FilamentWarningable
+}
+
+// FilamentOptions_FilamentOptions_library_file_id composed type wrapper for classes FilamentOptions_library_file_idMember1able, int32
+type FilamentOptions_FilamentOptions_library_file_id struct {
+	// Composed type representation for type FilamentOptions_library_file_idMember1able
+	filamentOptions_library_file_idMember1 FilamentOptions_library_file_idMember1able
+	// Composed type representation for type int32
+	integer *int32
+}
+
+// NewFilamentOptions_FilamentOptions_library_file_id instantiates a new FilamentOptions_FilamentOptions_library_file_id and sets the default values.
+func NewFilamentOptions_FilamentOptions_library_file_id() *FilamentOptions_FilamentOptions_library_file_id {
+	m := &FilamentOptions_FilamentOptions_library_file_id{}
+	return m
+}
+
+// CreateFilamentOptions_FilamentOptions_library_file_idFromDiscriminatorValue creates a new instance of the appropriate class based on discriminator value
+// returns a Parsable when successful
+func CreateFilamentOptions_FilamentOptions_library_file_idFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
+	result := NewFilamentOptions_FilamentOptions_library_file_id()
+	if parseNode != nil {
+		if val, err := parseNode.GetInt32Value(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetInteger(val)
+		} else if val, err := parseNode.GetObjectValue(CreateFilamentOptions_library_file_idMember1FromDiscriminatorValue); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			if cast, ok := val.(FilamentOptions_library_file_idMember1able); ok {
+				result.SetFilamentOptionsLibraryFileIdMember1(cast)
+			}
+		}
+	}
+	return result, nil
+}
+
+// GetFieldDeserializers the deserialization information for the current model
+// returns a map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error when successful
+func (m *FilamentOptions_FilamentOptions_library_file_id) GetFieldDeserializers() map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+	return make(map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error)
+}
+
+// GetFilamentOptionsLibraryFileIdMember1 gets the FilamentOptions_library_file_idMember1 property value. Composed type representation for type FilamentOptions_library_file_idMember1able
+// returns a FilamentOptions_library_file_idMember1able when successful
+func (m *FilamentOptions_FilamentOptions_library_file_id) GetFilamentOptionsLibraryFileIdMember1() FilamentOptions_library_file_idMember1able {
+	return m.filamentOptions_library_file_idMember1
+}
+
+// GetInteger gets the integer property value. Composed type representation for type int32
+// returns a *int32 when successful
+func (m *FilamentOptions_FilamentOptions_library_file_id) GetInteger() *int32 {
+	return m.integer
+}
+
+// GetIsComposedType determines if the current object is a wrapper around a composed type
+// returns a bool when successful
+func (m *FilamentOptions_FilamentOptions_library_file_id) GetIsComposedType() bool {
+	return true
+}
+
+// Serialize serializes information the current object
+func (m *FilamentOptions_FilamentOptions_library_file_id) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
+	if m.GetInteger() != nil {
+		err := writer.WriteInt32Value("", m.GetInteger())
+		if err != nil {
+			return err
+		}
+	} else if m.GetFilamentOptionsLibraryFileIdMember1() != nil {
+		err := writer.WriteObjectValue("", m.GetFilamentOptionsLibraryFileIdMember1())
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetFilamentOptionsLibraryFileIdMember1 sets the FilamentOptions_library_file_idMember1 property value. Composed type representation for type FilamentOptions_library_file_idMember1able
+func (m *FilamentOptions_FilamentOptions_library_file_id) SetFilamentOptionsLibraryFileIdMember1(value FilamentOptions_library_file_idMember1able) {
+	m.filamentOptions_library_file_idMember1 = value
+}
+
+// SetInteger sets the integer property value. Composed type representation for type int32
+func (m *FilamentOptions_FilamentOptions_library_file_id) SetInteger(value *int32) {
+	m.integer = value
 }
 
 // FilamentOptions_FilamentOptions_printer_id composed type wrapper for classes FilamentOptions_printer_idMember1able, int32
@@ -205,6 +291,14 @@ func (m *FilamentOptions_FilamentOptions_printer_name) SetString(value *string) 
 	m.string = value
 }
 
+type FilamentOptions_FilamentOptions_library_file_idable interface {
+	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
+	GetFilamentOptionsLibraryFileIdMember1() FilamentOptions_library_file_idMember1able
+	GetInteger() *int32
+	SetFilamentOptionsLibraryFileIdMember1(value FilamentOptions_library_file_idMember1able)
+	SetInteger(value *int32)
+}
+
 type FilamentOptions_FilamentOptions_printer_idable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetFilamentOptionsPrinterIdMember1() FilamentOptions_printer_idMember1able
@@ -247,12 +341,12 @@ func (m *FilamentOptions) GetAdditionalData() map[string]any {
 func (m *FilamentOptions) GetFieldDeserializers() map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 	res := make(map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error)
 	res["library_file_id"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
-		val, err := n.GetInt32Value()
+		val, err := n.GetObjectValue(CreateFilamentOptions_FilamentOptions_library_file_idFromDiscriminatorValue)
 		if err != nil {
 			return err
 		}
 		if val != nil {
-			m.SetLibraryFileId(val)
+			m.SetLibraryFileId(val.(FilamentOptions_FilamentOptions_library_file_idable))
 		}
 		return nil
 	}
@@ -386,8 +480,8 @@ func (m *FilamentOptions) GetFieldDeserializers() map[string]func(i878a80d2330e8
 }
 
 // GetLibraryFileId gets the library_file_id property value. The library_file_id property
-// returns a *int32 when successful
-func (m *FilamentOptions) GetLibraryFileId() *int32 {
+// returns a FilamentOptions_FilamentOptions_library_file_idable when successful
+func (m *FilamentOptions) GetLibraryFileId() FilamentOptions_FilamentOptions_library_file_idable {
 	return m.library_file_id
 }
 
@@ -448,7 +542,7 @@ func (m *FilamentOptions) GetWarnings() []FilamentWarningable {
 // Serialize serializes information the current object
 func (m *FilamentOptions) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
 	{
-		err := writer.WriteInt32Value("library_file_id", m.GetLibraryFileId())
+		err := writer.WriteObjectValue("library_file_id", m.GetLibraryFileId())
 		if err != nil {
 			return err
 		}
@@ -558,7 +652,7 @@ func (m *FilamentOptions) SetAdditionalData(value map[string]any) {
 }
 
 // SetLibraryFileId sets the library_file_id property value. The library_file_id property
-func (m *FilamentOptions) SetLibraryFileId(value *int32) {
+func (m *FilamentOptions) SetLibraryFileId(value FilamentOptions_FilamentOptions_library_file_idable) {
 	m.library_file_id = value
 }
 
@@ -610,7 +704,7 @@ func (m *FilamentOptions) SetWarnings(value []FilamentWarningable) {
 type FilamentOptionsable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.AdditionalDataHolder
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
-	GetLibraryFileId() *int32
+	GetLibraryFileId() FilamentOptions_FilamentOptions_library_file_idable
 	GetNozzles() []NozzleInfoable
 	GetPrinterId() FilamentOptions_FilamentOptions_printer_idable
 	GetPrinterName() FilamentOptions_FilamentOptions_printer_nameable
@@ -620,7 +714,7 @@ type FilamentOptionsable interface {
 	GetTrackSwitch() *bool
 	GetTrays() []UnknownTrayable
 	GetWarnings() []FilamentWarningable
-	SetLibraryFileId(value *int32)
+	SetLibraryFileId(value FilamentOptions_FilamentOptions_library_file_idable)
 	SetNozzles(value []NozzleInfoable)
 	SetPrinterId(value FilamentOptions_FilamentOptions_printer_idable)
 	SetPrinterName(value FilamentOptions_FilamentOptions_printer_nameable)
