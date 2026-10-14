@@ -132,15 +132,20 @@ describe('extrudersIn', () => {
     )
   })
 
-  it('says nothing about a colour that is not hex, which the render reports resolved', () => {
+  it('reads a colour name as its hex, as the render reports it resolved', () => {
     // The backend resolves CSS names; the render reports "red" as #FF0000.
     const named = { ...values, body_color: 'red' }
     expect(extrudersIn(keychainSchema, named, ['#FF0000', '#E8532F'], named)).toEqual(
       new Map([
-        ['body_color', undefined],
+        ['body_color', 1],
         ['text_color', 2],
       ]),
     )
+  })
+
+  it('says nothing about a value that is no colour', () => {
+    const odd = { ...values, body_color: 'not-a-colour' }
+    expect(extrudersIn(keychainSchema, odd, ['#E8532F'], odd).get('body_color')).toBeUndefined()
   })
 })
 

@@ -77,8 +77,9 @@ export function extrudersOf(schema: CustomizerSchema, values: ParamValues): Map<
  * parameters, since a hard-coded colour can take the slot its position would suggest.
  *
  * The render can only speak for the values it ran with (`renderedValues`): a colour
- * changed since, or one that is not hex (the backend resolves CSS names, so the render
- * reports `red` as `#FF0000`), gets no label (undefined) rather than a wrong one.
+ * changed since, or a value that is no colour, gets no label (undefined) rather than a
+ * wrong one. A CSS name is its hex (`colourHex`), as the backend resolves it: the
+ * render reports `red` as `#FF0000`.
  */
 export function extrudersIn(
   schema: CustomizerSchema,
@@ -89,16 +90,16 @@ export function extrudersIn(
   const rendered = colors.map((colour) => normalizeHex(colour))
   const extruders = new Map<string, number | null | undefined>()
   for (const name of colorParamNames(schema)) {
-    const value = String(values[name] ?? '')
-    const ran = String(renderedValues[name] ?? '')
-    // #1686 — hex compared as colours: `#e8532f` is the colour the render ran with as
-    // `#E8532F`, not a change. normalizeHex drops alpha on purpose, as the materials
-    // do, so `#E8532F80` is that colour too.
-    if (!HEX.test(value.trim()) || !HEX.test(ran.trim()) || normalizeHex(value) !== normalizeHex(ran)) {
+    // #1686 — compared as colours: `#e8532f` is the colour the render ran with as
+    // `#E8532F`, not a change, and `red` is `#FF0000`. Alpha is dropped on purpose, as
+    // the materials do, so `#E8532F80` is that colour too.
+    const value = colourHex(String(values[name] ?? ''))
+    const ran = colourHex(String(renderedValues[name] ?? ''))
+    if (value === null || value !== ran) {
       extruders.set(name, undefined)
       continue
     }
-    const index = rendered.indexOf(normalizeHex(value))
+    const index = rendered.indexOf(value)
     extruders.set(name, index < 0 ? null : index + 1)
   }
   return extruders
@@ -177,7 +178,7 @@ export function rangeProblem(param: Param, value: ParamValue | undefined): strin
   // The model's own default is left to the model, as it always rendered.
   if (param.type === 'color') {
     if (value === undefined || value === param.initial || colourHex(String(value)) !== null) return null
-    return `${param.caption || param.name} must be a colour: a hex such as #FF8800, or a name such as red.`
+    return `${param.caption ?? param.name} must be a colour: a hex such as #FF8800, or a name such as red.`
   }
   if (param.type !== 'number' && param.type !== 'integer' && param.type !== 'slider') return null
   if (typeof value !== 'number' || !Number.isFinite(value)) return null

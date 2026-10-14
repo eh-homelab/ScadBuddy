@@ -8,8 +8,8 @@ import { CSS_COLOURS } from './cssColours'
 // what the field shows (#2357).
 describe('CSS_COLOURS', () => {
   it("is the backend's table, entry for entry", () => {
-    // Vitest runs from frontend/.
-    const source = readFileSync(path.resolve(process.cwd(), '../backend/scadbuddy/render/colours.py'), 'utf8')
+    // Relative to this file, so the test reads the same file from any working directory.
+    const source = readFileSync(path.resolve(import.meta.dirname, '../../../backend/scadbuddy/render/colours.py'), 'utf8')
     const backend = Object.fromEntries(
       [...source.matchAll(/^\s+"([a-z]+)": "(#[0-9A-F]{6})",$/gm)].map((m) => [m[1], m[2]]),
     )

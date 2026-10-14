@@ -4,7 +4,11 @@ import { colourHex, rangeProblem } from '../../lib/params'
 import { Field } from './Field'
 import { FilamentColourPicker } from './FilamentColourPicker'
 
-/** A whole `#RRGGBB` as typed: taken at once, before the field loses focus. */
+/**
+ * A whole `#RRGGBB` as typed: taken at once, before the field loses focus. An 8-digit
+ * `#RRGGBBAA` therefore sends one render at its sixth digit; the value on blur is still
+ * the whole one, so that render is only an extra step on the way.
+ */
 const WHOLE_HEX = /^#?[0-9a-f]{6}$/i
 
 export function ColorWidget({
