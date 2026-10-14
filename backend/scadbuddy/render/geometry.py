@@ -74,8 +74,9 @@ Methods and their limits
 
     *Weak joints* (spec 2026-10-11 §9). The parts are taken as *pieces*: each part's
     islands, joined across parts where they share a vertex (two colours printed as one).
-    Each piece is cut level every :data:`WEAK_LAYER_MM` up its height
-    (`meshmodel/section.py` `layer_areas`); a layer whose section is under
+    Each piece is cut level every :data:`WEAK_LAYER_MM` up its height, thinner on a piece
+    that would need over :data:`MAX_WEAK_LAYERS` layers (`meshmodel/section.py`
+    `layer_areas`); a layer whose section is under
     :data:`WEAK_RATIO` of the larger of the sections :data:`WEAK_WINDOW_MM` below and
     above it, with at least :data:`WEAK_MIN_VOLUME_MM3` of the piece above it (the layer
     areas above it times the layer height), is weak. Weak layers less than the window
@@ -691,7 +692,8 @@ def weak_joints(
     neighbours first, at most :data:`MAX_WEAK_JOINTS`. Parts whose mesh is the open
     split are left out: a section of an open mesh is not one. A piece under
     :data:`WEAK_MIN_VOLUME_MM3`, or too short to have a layer a window clear of both its
-    ends, cannot hold a joint and is skipped; at most :data:`MAX_WEAK_PIECES` are
+    ends, cannot hold a joint and is skipped; only layers with a full window of the piece
+    below them are candidates; at most :data:`MAX_WEAK_PIECES` are
     examined, the largest first, and at most :data:`MAX_WEAK_ATTEMPTS` sections measured,
     weakest first. A weak layer whose section is several loops (a row of pegs, a ring)
     has its centroid outside the section and is dropped, like a cup's wall."""
@@ -727,8 +729,14 @@ def weak_joints(
         below, above = padded[:count], padded[2 * window : 2 * window + count]
         neighbour = np.maximum(below, above)
         volume_above = (areas[::-1].cumsum()[::-1] - areas) * layer
+        # A layer needs a full window of the piece below it: nearer the bottom the
+        # neighbour is only the section above, and a ball's first layer is "narrow".
+        # (Near the top the volume above is what rules a tip out.)
         weak = np.flatnonzero(
-            (areas > 0) & (areas < WEAK_RATIO * neighbour) & (volume_above >= WEAK_MIN_VOLUME_MM3)
+            (areas > 0)
+            & (areas < WEAK_RATIO * neighbour)
+            & (volume_above >= WEAK_MIN_VOLUME_MM3)
+            & (np.arange(count) >= window)
         )
         if len(weak) == 0:
             continue

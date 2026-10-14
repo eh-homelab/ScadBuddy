@@ -488,6 +488,31 @@ def test_a_small_tip_is_no_weak_joint() -> None:
     assert analyze_geometry([_part(cone)]).weak_joints == []
 
 
+def _bed_to_z(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+    mesh.apply_translation((0, 0, -mesh.bounds[0][2]))
+    return mesh
+
+
+@pytest.mark.parametrize(
+    "mesh",
+    [
+        trimesh.creation.icosphere(subdivisions=4, radius=20),
+        trimesh.creation.capsule(height=30, radius=10),
+        revolved([(0, 0), (20, 0), (0, 40)]),
+    ],
+    ids=["sphere", "capsule", "cone-tip-up"],
+)
+def test_a_curved_end_is_no_weak_joint(mesh: trimesh.Trimesh) -> None:
+    """The layers within a window of an end have no full window on one side, so a
+    tapering end is not a narrow layer (measured: a sphere reported z=0.1)."""
+    assert analyze_geometry([_part(_bed_to_z(mesh))]).weak_joints == []
+
+
+def test_a_cone_tip_down_is_no_weak_joint() -> None:
+    cone = revolved([(0, 0), (0, 40), (20, 40)])
+    assert analyze_geometry([_part(_bed_to_z(cone))]).weak_joints == []
+
+
 def test_a_thin_wall_on_a_floor_is_no_weak_joint() -> None:
     """A cup: its walls are an eighth of the floor below them, but the section is a
     ring, whose centre is outside it (measured: a planter in file 688)."""
