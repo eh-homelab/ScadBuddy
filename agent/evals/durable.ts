@@ -18,9 +18,9 @@ import { OWN_PLUGIN_DIR } from '../src/harness/ownPlugin.js'
 import type { RiskTier } from '../src/harness/permissions.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { kekFromBase64 } from '../src/secrets.js'
-import { DurableTurns } from '../src/sessions/durable.js'
+import { DurableTurns, SETTLED } from '../src/sessions/durable.js'
 import { SessionManager, SETTING_MODEL, SETTING_SESSION_BUDGET_USD } from '../src/sessions/manager.js'
-import type { Owner } from '../src/sessions/protocol.js'
+import type { Owner, SessionStatus } from '../src/sessions/protocol.js'
 import { PgPayloadKeys, SubjectPayloadCodec } from '../src/temporal/payloadCodec.js'
 import { gateActivities, PgApprovalRecords, PgSessionOwners, toolActivities, type ToolActivity } from '../src/temporal/toolActivities.js'
 import { turnToolActivities, turnToolActivity, type TurnToolsDeps } from '../src/temporal/turnTools.js'
@@ -343,8 +343,6 @@ export function timedOut(polled: Polled): string {
   return polled.gateError === undefined ? 'eval timed out' : `eval timed out; the gate's pending input last failed: ${polled.gateError}`
 }
 
-/** A turn's own statuses, around a parked call: they do not end it. */
-const IN_TURN = new Set(['running', 'waiting'])
 
 /** The session's events as an Outcome's tool calls, final text and result. */
 export function foldEvents(log: Logged[], ran: ReadonlyMap<string, Ran>): Pick<Outcome, 'toolCalls' | 'finalText' | 'result'> {
@@ -390,7 +388,9 @@ export function foldEvents(log: Logged[], ran: ReadonlyMap<string, Ran>): Pick<O
     } else if (e.type === 'error') {
       turnError = `error: ${String(e.code)}: ${String(e.message ?? '')}`
       if (result && turnResult) result = { ...result, subtype: turnError }
-    } else if (e.type === 'session.status' && !IN_TURN.has(String(e.status))) {
+    } else if (e.type === 'session.status' && SETTLED.includes(e.status as SessionStatus)) {
+      // Only a settled status ends the turn, as `DurableTurns` reads it: a park
+      // (`waiting_approval`, `waiting_input`) and `running` are the turn's own (#2970).
       turnError = undefined
       turnResult = false
     }

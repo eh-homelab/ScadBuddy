@@ -8,6 +8,7 @@ import { collectRenders, keychainProblems, KEYCHAIN_HEIGHTS } from '../evals/ren
 import { foldEvents, type Logged, pollPending, type Polled, timedOut } from '../evals/durable.js'
 import { collectWithin, evalModes } from '../evals/runner.js'
 import { createBackendClient } from '../src/api/backend.js'
+import type { SessionStatus } from '../src/sessions/protocol.js'
 import { readBambu3mf, readZip, writeZip } from '../evals/threemf.js'
 
 // The two scorers #1924 adds to the evals (docs/ai/evals.md, "Citation
@@ -337,8 +338,10 @@ describe('the durable run: gate failures and turn errors (#2465)', () => {
   })
 
   it("keeps a turn's error across its own park, before its result", () => {
-    const running: Logged = { ...base, type: 'session.status', status: 'running' }
-    const waiting: Logged = { ...base, type: 'session.status', status: 'waiting' }
-    expect(fold([failed, waiting, running, result, status])).toBe('error: turn_failed: boom')
+    // Typed, so a status the stack never logs does not compile (review #2970).
+    const at = (s: SessionStatus): Logged => ({ ...base, type: 'session.status', status: s })
+    for (const park of ['waiting_approval', 'waiting_input'] as const) {
+      expect(fold([failed, at(park), at('running'), result, status])).toBe('error: turn_failed: boom')
+    }
   })
 })

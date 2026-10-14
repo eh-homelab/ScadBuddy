@@ -163,8 +163,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       # The durable mode (#2320, evals/durable.ts) runs agent-durable's worker under
-      # uv and starts its own Temporal dev server from this CLI; without them it
-      # skips. uv is pinned as in ci.yml's `agent` job; bump together.
+      # uv; without it it skips. uv is pinned as in ci.yml's `agent` job; bump together.
       - name: Set up uv
         if: ${{ steps.key.outputs.present == 'true' && inputs.mode != 'classic' }}
         uses: astral-sh/setup-uv@v10.3.0
@@ -172,15 +171,17 @@ jobs:
           enable-cache: true
           cache-dependency-glob: agent-durable/uv.lock
 
-      # Copied out of the test image built above (#2467), so the Dockerfile's
+      # The durable mode starts its own Temporal dev server from this CLI. Copied out
+      # of the test image built above (#2467), so the Dockerfile's
       # TEMPORAL_CLI_VERSION stays the only pin.
       - name: Take the Temporal CLI from the test image
         if: ${{ steps.key.outputs.present == 'true' && inputs.mode != 'classic' }}
         run: |
           set -euo pipefail
           id="$(docker create scadbuddy:evals-test)"
+          # Removed however the copy ends (review #2970).
+          trap 'docker rm "$id" >/dev/null' EXIT
           docker cp "$id:/usr/local/bin/temporal" "$RUNNER_TEMP/temporal"
-          docker rm "$id" >/dev/null
           "$RUNNER_TEMP/temporal" --version
 
       # `inputs.model` and `inputs.mode` reach the run as environment variables,
