@@ -1,5 +1,8 @@
 import type {
   InventoryView,
+  PrintChoices,
+  FilamentProfile,
+  ProfilePreview,
   AnalysisReport,
   AnalysisRun,
   AnalyzerDecision,
@@ -1505,6 +1508,16 @@ export const api = {
     const suffix = search.size > 0 ? `?${search}` : ''
     return request<ChoicesView>(`/print/outputs/${seg(outputId)}/choices${suffix}`)
   },
+
+  /** #717 — every filament profile, with what it changes and why. */
+  listFilamentProfiles: () => request<FilamentProfile[]>('/print/filament-profiles'),
+
+  /** #717 — each profile's changes against the process preset these choices resolve to. */
+  previewFilamentProfiles: (choices: PrintChoices, profiles: string[]) =>
+    request<ProfilePreview[]>('/print/filament-profiles/preview', {
+      method: 'POST',
+      body: JSON.stringify({ choices, profiles }),
+    }),
 
   /**
    * spec 2026-09-27 §4 — the spool-first run: no pipeline is named, every slicer preset

@@ -24,7 +24,7 @@ from scadbuddy.bambuddy.clearance import (
     check_plates,
     clearance_for,
 )
-from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
+from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, read_once
 from scadbuddy.bambuddy.concurrent import settled
 from scadbuddy.bambuddy.dispatch import (
     QueueOutcome,
@@ -45,6 +45,7 @@ from scadbuddy.bambuddy.extruders import (
     slicer_volume_types,
     with_sides,
 )
+from scadbuddy.bambuddy.filament_profiles import profile_overrides, unknown_profiles
 from scadbuddy.bambuddy.filaments import (
     FilamentOptions,
     FilamentPlan,
@@ -88,9 +89,16 @@ from scadbuddy.bambuddy.resolver import (
     PrintChoices,
     Resolved,
     choice_errors,
+    process_preset_for,
     resolve,
 )
 from scadbuddy.bambuddy.send import request_scope, resolve_print_options
+from scadbuddy.bambuddy.supports import (
+    SUPPORT_KEYS,
+    SupportsChoice,
+    support_overrides,
+    wanted_settings,
+)
 from scadbuddy.bambuddy.trays import colour_word, tray_colours, with_trays
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
@@ -178,6 +186,21 @@ class PrintRunRequest(BaseModel):
     #: How to rank the rack for this print (#836). Omitted means the printer's remembered
     #: algorithm, else Least used.
     rack_algorithm: RackAlgorithm | None = None
+    #: Filament profiles this print applies (#717), by id, as the dialog suggested them
+    #: and the user left them on. Their changes go over the template's
+    #: ``print_settings`` and under ``print_sequence``.
+    filament_profiles: list[str] = Field(default_factory=list, max_length=8)
+    #: Support structures for this print (#1899), over the template's
+    #: ``print_settings``. Omitted means whatever those and the process say.
+    supports: SupportsChoice | None = None
+
+    @field_validator("filament_profiles")
+    @classmethod
+    def _known_profiles(cls, ids: list[str]) -> list[str]:
+        unknown = unknown_profiles(ids)
+        if unknown:
+            raise ValueError(f"no filament profile {', '.join(map(repr, unknown))}")
+        return list(dict.fromkeys(ids))
 
 
 class RackOption(BaseModel):
@@ -696,6 +719,14 @@ async def check_print(
     # for the rack side when the preview picks it a hotend (#1238).
     rack_picked = rack_view is not None and rack_view.position is not None
     objects, clearance = await _sequence_clearance(client, source, request, prepared)
+    # One read of the preset's values for the profiles and the supports (#2804 review).
+    # A sliced file, the one with no catalogue, has returned above (#2671).
+    process = (
+        process_preset_for(request.choices, prepared.catalogue)
+        if prepared.catalogue is not None
+        else None
+    )
+    read = read_once(client)
     return PrintCheck(
         errors=errors,
         objects=objects,
@@ -714,6 +745,17 @@ async def check_print(
                     request.choices.bed_type, PRINTER_MODEL, prepared.printer_name
                 )
             ),
+            # #717: what the run will say of a profile it cannot apply.
+            *(await profile_overrides(client, process, request.filament_profiles, read=read))[1],
+            # #1899: and of a support setting it cannot apply.
+            *(
+                await support_overrides(
+                    client,
+                    process,
+                    wanted_settings(source.print_settings, request.supports),
+                    read=read,
+                )
+            )[1],
         ],
         rack=rack_view,
         nozzle_plan=nozzle_plan,
@@ -1216,6 +1258,13 @@ async def plan_run(
     printer_status = prepared.printer_status
     choices = request.choices
     catalogue = await _catalogue(client)
+    process = process_preset_for(choices, catalogue)
+    # #717: a profile that cannot apply is skipped with a warning, never refused.
+    # One read of the preset's values for the profiles and the supports (#2804 review).
+    read = read_once(client)
+    from_profiles, profile_warnings = await profile_overrides(
+        client, process, request.filament_profiles, read=read
+    )
     # The source places, recolors and uploads what it prints (#105, #126, #476), into
     # the project's folder when there is one (#79, #316).
     project_id = chosen_project(request, settings)
@@ -1230,6 +1279,10 @@ async def plan_run(
         choices.nozzles,
         choices.sides,
         inventory=inventory,
+    )
+    # Never refused (#1899): a support setting that cannot be shaped is left out.
+    supports, support_warnings = await support_overrides(
+        client, process, wanted_settings(source.print_settings, request.supports), read=read
     )
     printed = await source.file_to_print(
         client,
@@ -1295,11 +1348,16 @@ async def plan_run(
             filament_presets=resolved.filament_presets,
             filament_colours=resolved.filament_colours,
             bed_type=resolved.bed_type,
-            process_overrides=(
-                source.print_settings
-                if request.print_sequence is None
-                else {**source.print_settings, "print_sequence": request.print_sequence}
-            ),
+            process_overrides={
+                **from_profiles,
+                **{k: v for k, v in source.print_settings.items() if k not in SUPPORT_KEYS},
+                **supports,
+                **(
+                    {}
+                    if request.print_sequence is None
+                    else {"print_sequence": request.print_sequence}
+                ),
+            },
         )
         ready.append((plate_id, options, resolved, plan))
     if errors:
@@ -1331,7 +1389,7 @@ async def plan_run(
         laid_out=await source.states_nozzles(client),
         sides=nozzle_plan.sides if nozzle_plan is not None else None,
     )
-    warnings = _filament_warnings(
+    warnings = profile_warnings + _filament_warnings(
         [(options, resolved.warnings) for _, options, resolved, _, _ in planned],
         request.filament_plan,
         copies,
@@ -1354,7 +1412,7 @@ async def plan_run(
             )
             for plate_id, options, _, plan, reused in planned
         ],
-        warnings=warnings + hardware + _reused_notes(planned),
+        warnings=warnings + hardware + support_warnings + _reused_notes(planned),
         rack_algorithm=request.rack_algorithm or settings.rack_algorithm(printer_id),
         rack_position=request.rack_position,
         # A readable status with no rack (any printer but an H2C) has nothing to pick: no

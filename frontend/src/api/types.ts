@@ -58,6 +58,8 @@ export type VersionFile = Schemas['VersionFile']
 export type VersionDiff = Schemas['VersionDiff']
 
 export type Job = Schemas['JobStatus']
+/** #1899 — a print's own support structures, over the template's `print_settings`. */
+export type SupportsChoice = Schemas['SupportsChoice']
 export type JobState = Job['status']
 export type BoundingBox = Schemas['BoundingBox']
 export type PartInfo = Schemas['PartInfo']
@@ -181,6 +183,9 @@ export type OperationAccepted = Schemas['OperationAccepted']
 /** spec 2026-09-27 — the spool-first print dialog's own choices. */
 export type ChoicesView = Schemas['ChoicesView']
 export type PrintChoices = Schemas['PrintChoices']
+/** #717 — filament profiles: cited process changes suggested for a spool. */
+export type FilamentProfile = Schemas['FilamentProfile']
+export type ProfilePreview = Schemas['ProfilePreview']
 export type NozzleChoice = Schemas['NozzleChoice']
 export type InstalledNozzle = Schemas['InstalledNozzle']
 export type TierOption = Schemas['TierOption']
