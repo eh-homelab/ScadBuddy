@@ -220,12 +220,15 @@ class JobProjection:
         return listener
 
     def _announce(self, conn: Connection[Any], job_id: str, slug: str, kind: JobKind) -> None:
-        if self.events is not None:
-            self.events.publish_in(conn, JobEvent(kind=kind, job_id=job_id, slug=slug))
+        # The activity row before the event: a publish holds the event log's lock to
+        # commit, and a row written after it waits on others' rows while holding it
+        # (a deadlock with the activity row's own publish).
         if self.activity is not None:
             from scadbuddy.render.activity import row_of  # activity imports this module
 
             self.activity.upsert_in(conn, lambda: row_of(self._read_in(conn, job_id)))
+        if self.events is not None:
+            self.events.publish_in(conn, JobEvent(kind=kind, job_id=job_id, slug=slug))
 
     def _read_in(self, conn: Connection[Any], job_id: str) -> Job:
         columns = ", ".join(PROJECTION_COLUMNS)
