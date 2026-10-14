@@ -45,6 +45,19 @@ export function amsUnitLabel(amsId: number): string {
 }
 
 /**
+ * An AMS tray as Bambuddy names it, "AMS-A · slot 4", with the printer first when
+ * asked ("3DP-31B-598 · AMS-A · slot 4"): on a farm two printers each have an AMS-A
+ * slot 1. The one wording for a loaded spool, in the print dialog and Settings alike.
+ */
+export function trayPlace(
+  loaded: { printer_id: number; printer_name?: string | null; ams_id: number; tray_id: number },
+  { printer = false }: { printer?: boolean } = {},
+): string {
+  const place = `${amsUnitLabel(loaded.ams_id)} · slot ${loaded.tray_id + 1}`
+  return printer ? `${loaded.printer_name ?? `Printer ${loaded.printer_id}`} · ${place}` : place
+}
+
+/**
  * Where a spool physically is, or `null` when it is on the shelf.
  *
  * `tray_id` is the printer's 0-based index while Bambu's own UI counts AMS slots from
@@ -60,7 +73,7 @@ export function amsUnitLabel(amsId: number): string {
 export function loadedLabel(spool: SpoolOption, printerId?: number | null): string | null {
   const loaded = spool.loaded
   if (!loaded) return null
-  let where = `${amsUnitLabel(loaded.ams_id)} · slot ${loaded.tray_id + 1}`
+  let where = trayPlace(loaded)
   if (printerId !== null && printerId !== undefined && loaded.printer_id !== printerId) {
     where += ` · on ${loaded.printer_name ?? 'another printer'}`
   }
