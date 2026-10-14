@@ -322,8 +322,14 @@ async def test_a_tool_result_names_the_images_its_call_produced(
         "SELECT event FROM ai_session_events WHERE session_id = %s", (sid,)
     )
     logged = "".join(str(r[0]) for r in await cur.fetchall())
-    assert base64.b64encode(PNG).decode() not in logged
-    assert PNG.hex() not in logged
+    # Whole and in part: a truncated copy of the bytes is still a leak. The first 24
+    # characters are the header every PNG shares, so a slice from the middle and the
+    # end are checked too (#3214 review).
+    for encoded in (base64.b64encode(PNG).decode(), PNG.hex()):
+        middle = len(encoded) // 2
+        assert encoded not in logged
+        for window in (encoded[:24], encoded[middle - 12 : middle + 12], encoded[-24:]):
+            assert window not in logged
 
 
 @pytest.mark.requires_postgres
