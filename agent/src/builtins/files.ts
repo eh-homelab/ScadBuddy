@@ -260,9 +260,11 @@ function matchesOf(text: string, re: RegExp, deadline: number): { index: number;
 
 export function grep(ctx: FileToolContext, input: GrepInput): Promise<BuiltinResult> {
   return guarded(async () => {
-    let flags = 'g'
+    // ripgrep matches line by line, so ^ and $ anchor at every line (m); multiline adds
+    // only s, letting . cross a newline.
+    let flags = 'gm'
     if (input['-i']) flags += 'i'
-    if (input.multiline) flags += 'ms'
+    if (input.multiline) flags += 's'
     let re: RegExp
     try {
       re = new RegExp(input.pattern, flags)
