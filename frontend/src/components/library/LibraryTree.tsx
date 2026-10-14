@@ -189,7 +189,12 @@ export function LibraryTree({
           )}
           <span className="truncate">{folder.name}</span>
           {folder.project_id != null && (
-            <span className="shrink-0 text-[11px] text-faint" aria-hidden>
+            <span
+              className="shrink-0 text-[11px] text-faint"
+              aria-hidden
+              // The name is in the treeitem's for a screen reader; this is for the eye (#3113).
+              title={`Project ${folder.project_name ?? folder.project_id}`}
+            >
               project
             </span>
           )}

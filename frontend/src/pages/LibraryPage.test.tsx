@@ -1,6 +1,6 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, delay, http } from 'msw'
-import { useLocation } from 'react-router'
+import { useLocation, useNavigate } from 'react-router'
 import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { api } from '../api/client'
 import { libraryFiles } from '../mocks/features/library'
@@ -205,6 +205,26 @@ describe('LibraryPage', () => {
     expect(screen.getByTestId('library-project')).toHaveTextContent('Also linked to it: Raegan spares.')
     await user.click(screen.getByTestId('library-project-folder-15'))
     await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent('/library/Raegan%20spares'))
+  })
+
+  it('follows and drops a second link to the project already open (#3112)', async () => {
+    const { user } = renderPage(<><LibraryPage /><Where /><Relink /></>, { route: '/library?project=1' })
+    await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent(/^\/library\/Raegan$/))
+    await user.click(screen.getByTestId('relink'))
+    await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent(/^\/library\/Raegan$/))
+  })
+
+  it("names the project on the tree's marker, and gives no Select all hint in an empty project folder (#3112, #3113)", async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library' })
+    const spares = await screen.findByTestId('library-folder-15')
+    expect(within(spares).getByTitle('Project Reagan Keychain')).toHaveTextContent('project')
+    await user.click(spares)
+    const line = await screen.findByTestId('library-project')
+    expect(line).toHaveTextContent('Project Reagan Keychain')
+    expect(line).not.toHaveTextContent('Select all')
+    await user.click(screen.getByTestId('library-project-folder-14'))
+    await screen.findByTestId('library-file-140')
+    expect(screen.getByTestId('library-project')).toHaveTextContent('Select all, then Print')
   })
 
   it('says a project with no linked folder has no files to list, until dismissed (#2724)', async () => {
@@ -668,6 +688,12 @@ describe('LibraryPage, item context (#975)', () => {
     )
   })
 })
+
+/** A same-page link back to project 1, as a project page's would be. */
+function Relink() {
+  const navigate = useNavigate()
+  return <button type="button" data-testid="relink" onClick={() => navigate('/library/Raegan?project=1')} />
+}
 
 function Where() {
   const location = useLocation()

@@ -343,9 +343,10 @@ export function LibraryPage() {
     next.delete('project')
     const rest = next.toString()
     navigate({ pathname: libraryPath(tree, projectFolder.id), search: rest ? `?${rest}` : '' }, { replace: true })
-    // Once per project link: the link is dropped as it is followed.
+    // Once per project link: the link is dropped as it is followed. Keyed on the link
+    // too, so a link to the folder already followed is dropped as well (#3112).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectFolder?.id])
+  }, [projectParam, projectFolder?.id])
   const currentFolder = tree?.find((folder) => folder.id === folderId)
   /** The project's other linked folders, beside the one open (#2757 review). */
   const otherProjectFolders =
@@ -493,7 +494,8 @@ export function LibraryPage() {
           {currentFolder?.project_id != null && (
             <p className="text-[13px] text-muted" data-testid="library-project">
               {`Project ${currentFolder.project_name ?? currentFolder.project_id}: this folder is its file list. `}
-              Select all, then Print, to print them in one batch.
+              {/* Not in an empty folder, where Select all is disabled (#3112). */}
+              {listedPrintable.length > 0 && 'Select all, then Print, to print them in one batch.'}
               {otherProjectFolders.length > 0 && (
                 <>
                   {' Also linked to it: '}
