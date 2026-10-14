@@ -21,6 +21,7 @@ from opentelemetry.trace import StatusCode
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.assets import AssetStore
+from scadbuddy.library.fonts import GLYPH_CHECK_TIMEOUT
 from scadbuddy.library.libraries import CheckoutGate, LibraryNotInstalledError
 from scadbuddy.render import jobs
 from scadbuddy.render import solids as solids_module
@@ -1242,6 +1243,55 @@ async def test_the_layout_round_trips_and_the_last_stage_works_from_it_alone(
     fields = set(JobResult.model_fields) - {"model_3mf", "preview_glb"}
     assert result.model_dump(include=fields) == expected.model_dump(include=fields)
     assert _entries(work / MODEL_NAME) == _entries(paths.root / expected.model_3mf)
+
+
+async def test_the_last_stage_warns_of_a_glyph_the_font_lacks(
+    paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2358: ``finish_piece_stage`` gives the missing-glyph warning, asking fontconfig
+    with the short advisory timeout."""
+    paths.model_dir("demo").mkdir(parents=True)
+    paths.model_source("demo").write_text("// stand-in\n", encoding="utf-8")
+    schema = CustomizerSchema(
+        parameters=[
+            Parameter(name="word", type="string", initial="Hi 😀"),
+            Parameter(name="font", type="font", initial="Lobster Two"),
+        ]
+    )
+    asked: list[tuple[str, float]] = []
+
+    def coverage(font: str, env: object, timeout: float) -> tuple[str, list[tuple[int, int]]]:
+        asked.append((font, timeout))
+        return "Lobster Two", [(0x20, 0x7E)]
+
+    monkeypatch.setattr(jobs, "font_coverage", coverage)
+    assets = AssetStore(paths.assets)
+    work = paths.root / "blob"
+
+    with _stage_patches(_stage_openscad({0: [TRAY]}, None)):
+        prepared, config = await prepare_source(
+            "demo", None, config=CONFIG, paths=paths, history=None, fetcher=None
+        )
+        output = await render_main(
+            prepared, {}, work, config=config, assets=assets, checkouts=None, holder="piece"
+        )
+        await render_solids_stage(
+            prepared, {}, work, output, config=config, assets=assets, checkouts=None, holder="piece"
+        )
+        result = await finish_piece_stage(
+            prepared,
+            {},
+            work,
+            output,
+            config=config,
+            paths=paths,
+            slug="demo",
+            thumbnail_executor=None,
+            schema=schema,
+        )
+
+    assert "font 'Lobster Two' has no glyph for 😀; the text leaves them out" in result.warnings
+    assert asked == [("Lobster Two", GLYPH_CHECK_TIMEOUT)]
 
 
 async def test_render_job_reads_the_schema_once_under_its_lease(paths: DataPaths) -> None:

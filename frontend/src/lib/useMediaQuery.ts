@@ -2,6 +2,8 @@ import { useCallback, useSyncExternalStore } from 'react'
 
 /** #1741 — the `phone` variant in index.css: below Tailwind's `sm`. */
 export const PHONE_QUERY = '(max-width: 639.98px)'
+/** Below Tailwind's `md`: where a side column stacks above the content. */
+export const NARROW_QUERY = '(max-width: 767.98px)'
 
 function list(query: string): MediaQueryList | undefined {
   return typeof window.matchMedia === 'function' ? window.matchMedia(query) : undefined

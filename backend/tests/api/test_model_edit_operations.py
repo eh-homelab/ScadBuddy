@@ -7,7 +7,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import threading
-import time
 import uuid
 from collections.abc import Callable
 from datetime import timedelta
@@ -26,6 +25,7 @@ from scadbuddy.library.upstream import MergeConflictError, MergePlan, MergePrevi
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.component import OPERATIONS
 from scadbuddy.workflows.commands import start_command
+from tests.api.conftest import follow_operation
 from tests.api.test_model_operations import (
     _claims,
     _commits,
@@ -199,11 +199,7 @@ def test_a_slow_save_answers_202_and_its_operation_ends_with_the_model(
         f"/api/v1/models/{slug}/source", json={"source": "cube(4);\n"}, headers=press()
     )
     assert started.status_code == 202, started.text
-    op = started.json()
-    deadline = time.monotonic() + 60
-    while op["status"] == "running" and time.monotonic() < deadline:
-        time.sleep(0.2)
-        op = client.get(f"/api/v1/operations/{op['id']}").json()
+    op = follow_operation(client, started.json())
     assert op["status"] == "succeeded", op
     assert op["result"]["slug"] == slug
 
@@ -215,14 +211,6 @@ def _operation_ids(app: FastAPI, kind: str) -> list[str]:
             "SELECT id FROM operations WHERE kind = %s ORDER BY created_at", (kind,)
         ).fetchall()
     return [str(row["id"]) for row in rows]
-
-
-def _follow(client: TestClient, op: dict[str, Any]) -> dict[str, Any]:
-    deadline = time.monotonic() + 60
-    while op["status"] == "running" and time.monotonic() < deadline:
-        time.sleep(0.2)
-        op = client.get(f"/api/v1/operations/{op['id']}").json()
-    return op
 
 
 @pytest.mark.parametrize("route", ["put", "patch"])
@@ -260,7 +248,7 @@ def test_a_stale_base_the_run_finds_after_a_202_carries_current(
         moved = _state(app).catalogue.write_source(slug, "cube(7);\n")
     finally:
         release.set()
-    op = _follow(client, started.json())
+    op = follow_operation(client, started.json())
     assert op["status"] == "failed", op
     assert op["error"]["status"] == 409
     assert op["error"]["extensions"]["current"] == moved.version
@@ -293,7 +281,7 @@ def test_a_stale_base_a_sibling_write_finds_in_its_run_carries_current(
         moved = _state(app).catalogue.write_source(slug, "cube(7);\n")
     finally:
         release.set()
-    op = _follow(client, started.json())
+    op = follow_operation(client, started.json())
     assert op["status"] == "failed", op
     assert op["error"]["status"] == 409
     assert op["error"]["extensions"]["current"] == moved.version

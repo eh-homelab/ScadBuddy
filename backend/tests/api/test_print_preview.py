@@ -12,7 +12,6 @@ import io
 import json
 import struct
 import threading
-import time
 import tracemalloc
 import zipfile
 from collections.abc import AsyncIterator, Iterator
@@ -31,6 +30,7 @@ from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.preview import _TOOLPATHS, PREVIEW_GRACE, sweep_preview_slices
 from scadbuddy.bambuddy.print_source import ReadOutOfMemoryError
 from scadbuddy.core.paths import DataPaths
+from tests.api.conftest import follow_operation
 from tests.api.test_print_filaments import prepared, queue_route
 from tests.api.test_print_run_choices import body, run_print, run_routes, two_plate_output
 from tests.api.test_send import BASE, configure, upload_route
@@ -57,10 +57,7 @@ def start_slice(client: TestClient, output_id: str, json: dict[str, Any]) -> dic
     assert started.status_code == 202, started.text
     op: dict[str, Any] = started.json()
     assert op["status"] == "running"
-    deadline = time.monotonic() + 30
-    while op["status"] == "running" and time.monotonic() < deadline:
-        time.sleep(0.1)
-        op = client.get(f"/api/v1/operations/{op['id']}").json()
+    op = follow_operation(client, op, timeout=30)
     assert op["status"] == "succeeded", op
     result: dict[str, Any] = op["result"]
     return result

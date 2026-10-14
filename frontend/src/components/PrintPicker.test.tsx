@@ -7,7 +7,9 @@ import type { AnalysisRequest, Output, PrintRunResult } from '../api/types'
 import { analysisReport, openEdgesDiagnostic } from '../mocks/analyzers'
 import { choicesView, queuedResult } from '../mocks/choices'
 import * as fixtures from '../mocks/fixtures'
+import { setSilkPreview, silkPreview } from '../mocks/features/filamentProfiles'
 import { MULTI_PLATE_FILE } from '../mocks/features/library'
+import { H2C_FILE, H2C_FILENAME } from '../mocks/h2c'
 import { lastArrangeRequest, problem, resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { normalizeHex } from '../lib/format'
@@ -313,6 +315,8 @@ describe('PrintPicker', () => {
       rack_position: null,
       // Not chosen in this dialog, so the backend applies the printer's remembered one.
       rack_algorithm: null,
+      // Slot 1's spool is Bambu PLA Silk, so the Silk profile is suggested and on (#717).
+      filament_profiles: ['silk-pla'],
       request_id: expect.stringMatching(/^[0-9a-f]{32}$/),
     })
   })
@@ -1715,10 +1719,417 @@ describe('PrintPicker · departures of a stale slice (#2702 review)', () => {
     expect(notes).toHaveTextContent("Spool 2 (slot 2) isn't used by the sliced plate")
 
     // Plate 2 is chosen; its slice is still on its way, so plate 1's stays shown, stale.
-    await user.click(within(await screen.findByTestId('plate-choice')).getByRole('radio', { name: /Plate 2/ }))
-    await waitFor(() => expect(screen.queryByText(/isn't used by the sliced plate/)).toBeNull())
-    release()
+    // #3209: released however the assertions end, so a failure is not hidden by the
+    // plate-2 request hanging until the test times out.
+    try {
+      await user.click(within(await screen.findByTestId('plate-choice')).getByRole('radio', { name: /Plate 2/ }))
+      await waitFor(() => expect(screen.queryByText(/isn't used by the sliced plate/)).toBeNull())
+    } finally {
+      release()
+    }
   }, 20000)
+})
+
+describe('PrintPicker · the nozzles as sliced (#2703)', () => {
+  it('shows the sides the slicer used once a slice of these choices lands', async () => {
+    // The H2C plans Mistletoe Green → right and Inland Black → left; this slicer swaps them.
+    // The slice is held until the planned sides have been read (#2737 review: under load
+    // it could land first).
+    let land = () => {}
+    const held = new Promise<void>((resolve) => (land = resolve))
+    server.use(
+      http.get('/api/v1/print/:kind/:id/preview-slices/:job', async ({ params }) => {
+        await held
+        return HttpResponse.json({
+          job_id: Number(params['job']),
+          status: 'completed',
+          print_time_seconds: 2843,
+          filament_used_g: 15.5,
+          slots: [
+            { slot_id: 1, grams: 12.4, side: 'L' },
+            { slot_id: 2, grams: 3.1, side: 'R' },
+          ],
+          filament_changes: 1,
+        })
+      }),
+    )
+    renderPage(
+      <PrintPicker
+        open
+        source={{ kind: 'library', file: { id: H2C_FILE, filename: H2C_FILENAME } }}
+        onClose={vi.fn()}
+        onRan={vi.fn()}
+      />,
+    )
+    const line = await screen.findByTestId('nozzle-plan')
+    expect(line).toHaveTextContent('Nozzles:Mistletoe Green → right')
+    land()
+
+    await waitFor(() => expect(screen.getByTestId('nozzle-plan')).toHaveTextContent('Nozzles, as sliced:'), {
+      timeout: 8000,
+    })
+    expect(screen.getByTestId('nozzle-plan')).toHaveTextContent('Mistletoe Green → left')
+    expect(screen.getByTestId('nozzle-plan')).toHaveTextContent('Inland Black → right')
+    expect(screen.getByTestId('slice-departures')).toHaveTextContent('it groups filaments itself to cut purging')
+  }, 20000)
+
+  it('settles once the sides as sliced are shown, with no render loop (#2737 review)', async () => {
+    const errors = vi.spyOn(console, 'error')
+    server.use(
+      http.get('/api/v1/print/:kind/:id/preview-slices/:job', ({ params }) =>
+        HttpResponse.json({
+          job_id: Number(params['job']),
+          status: 'completed',
+          print_time_seconds: 2843,
+          filament_used_g: 15.5,
+          slots: [
+            { slot_id: 1, grams: 12.4, side: 'L' },
+            { slot_id: 2, grams: 3.1, side: 'R' },
+          ],
+          filament_changes: 1,
+        }),
+      ),
+    )
+    renderPage(
+      <PrintPicker
+        open
+        source={{ kind: 'library', file: { id: H2C_FILE, filename: H2C_FILENAME } }}
+        onClose={vi.fn()}
+        onRan={vi.fn()}
+      />,
+    )
+    await waitFor(() => expect(screen.getByTestId('nozzle-plan')).toHaveTextContent('Nozzles, as sliced:'), {
+      timeout: 8000,
+    })
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    const loops = errors.mock.calls.filter((call) => String(call[0]).includes('Maximum update depth'))
+    errors.mockRestore()
+    expect(loops).toEqual([])
+  }, 20000)
+
+  it("keeps the printed plate's sides as sliced while another plate is previewed (#2737 review)", async () => {
+    server.use(
+      http.get('/api/v1/print/library/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: true },
+          { index: 2, has_thumbnail: true },
+        ]),
+      ),
+      http.get('/api/v1/print/:kind/:id/preview-slices/:job', ({ params }) =>
+        HttpResponse.json({
+          job_id: Number(params['job']),
+          status: 'completed',
+          print_time_seconds: 2843,
+          filament_used_g: 15.5,
+          slots: [
+            { slot_id: 1, grams: 12.4, side: 'L' },
+            { slot_id: 2, grams: 3.1, side: 'R' },
+          ],
+          filament_changes: 1,
+        }),
+      ),
+    )
+    const { user } = renderPage(
+      <PrintPicker
+        open
+        source={{ kind: 'library', file: { id: H2C_FILE, filename: H2C_FILENAME } }}
+        onClose={vi.fn()}
+        onRan={vi.fn()}
+      />,
+    )
+    await waitFor(() => expect(screen.getByTestId('nozzle-plan')).toHaveTextContent('Nozzles, as sliced:'), {
+      timeout: 8000,
+    })
+
+    await user.click(await screen.findByRole('button', { name: 'Preview Plate 2' }))
+    expect(screen.getByRole('button', { name: 'Preview Plate 2' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByTestId('nozzle-plan')).toHaveTextContent('Nozzles, as sliced:')
+    expect(screen.getByTestId('nozzle-plan')).toHaveTextContent('Mistletoe Green → left')
+  }, 20000)
+})
+
+describe('PrintPicker · Filament profiles (#717)', () => {
+  it('suggests Silk for a silk spool, shows its change against the preset, and prints without it when switched off', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+
+    const step = await screen.findByTestId('filament-profile-silk-pla')
+    expect(step).toHaveTextContent('Silk PLA for slot 1 (Bambu Lab PLA Silk)')
+    const checkbox = within(step).getByRole('checkbox', { name: /Silk PLA/ })
+    expect(checkbox).toBeChecked()
+    // Each distinct value the H2C preset has per extruder variant, then the profile's.
+    expect(await within(step).findByText('Outer wall speed: 200 / 500 → 50 mm/s')).toBeInTheDocument()
+    // Every page cited, once, with each passage it is cited for (#2804 review).
+    const wiki = within(step).getByRole('link', { name: /Why: Bambu PLA Silk/ })
+    expect(wiki).toHaveAttribute('href', 'https://wiki.bambulab.com/en/x1/manual/printing-with-silk-filaments')
+    expect(wiki.getAttribute('title')).toContain('Try 50 mm/s first.')
+    expect(wiki.getAttribute('title')).toContain('235℃')
+    expect(within(step).getByRole('link', { name: /Why: Bambu Studio PrintConfig\.cpp/ })).toHaveAttribute(
+      'href',
+      expect.stringContaining('PrintConfig.cpp'),
+    )
+    expect(within(step).getAllByRole('link')).toHaveLength(2)
+    expect(step).toHaveTextContent('235 °C')
+
+    await user.click(checkbox)
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+    expect(bodies[0]).not.toHaveProperty('filament_profiles')
+  })
+
+  it("says why a profile can't apply, and leaves it off", async () => {
+    setSilkPreview(silkPreview({ applicable: false, reason: "couldn't read the preset's outer wall speed (Bambuddy's slicer is not reachable)", changes: [] }))
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+
+    const step = await screen.findByTestId('filament-profile-silk-pla')
+    expect(await within(step).findByRole('status')).toHaveTextContent(
+      "Not applied: couldn't read the preset's outer wall speed (Bambuddy's slicer is not reachable). The print uses the preset as it is.",
+    )
+    const checkbox = within(step).getByRole('checkbox', { name: /Silk PLA/ })
+    expect(checkbox).not.toBeChecked()
+    expect(checkbox).toBeDisabled()
+
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+    expect(bodies[0]).not.toHaveProperty('filament_profiles')
+  })
+})
+
+describe('PrintPicker · Filament profiles, checked and unchecked (#2804 review)', () => {
+  it('sends the profiles left on with the check, so Checks can say one will not apply', async () => {
+    const checks = watch('POST', '/check')
+    const { user } = renderPicker()
+    await loaded()
+    const step = await screen.findByTestId('filament-profile-silk-pla')
+    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ filament_profiles: ['silk-pla'] }))
+
+    await user.click(within(step).getByRole('checkbox', { name: /Silk PLA/ }))
+    await waitFor(() => expect(checks.bodies.at(-1)).not.toHaveProperty('filament_profiles'))
+  })
+
+  it("says the change wasn't checked when the preview can't be read", async () => {
+    server.use(
+      http.post('/api/v1/print/filament-profiles/preview', () =>
+        HttpResponse.json({ detail: 'Bambuddy is unreachable' }, { status: 502 }),
+      ),
+    )
+    renderPicker()
+    await loaded()
+
+    const step = await screen.findByTestId('filament-profile-silk-pla')
+    expect(
+      await within(step).findByText(/Couldn't read the preset, so this wasn't checked against this print/),
+    ).toBeInTheDocument()
+    // No "current →" claim it never read; the profile stays on, and the run reports it.
+    expect(within(step).getByText('Outer wall speed: → 50 mm/s')).toBeInTheDocument()
+    expect(within(step).getByRole('checkbox', { name: /Silk PLA/ })).toBeChecked()
+  })
+})
+
+describe('PrintPicker · Supports (#1899)', () => {
+  it('offers Default, none, tree and normal, and sends nothing for Default', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+
+    const select = screen.getByLabelText('Support type')
+    expect(select).toHaveValue('default')
+    expect(within(select).getAllByRole('option').map((option) => option.textContent)).toEqual([
+      'Default (process)',
+      'No supports',
+      'Tree supports',
+      'Normal supports',
+    ])
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).not.toHaveProperty('supports')
+  })
+
+  it('sends tree supports with an angle and on the build plate only', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+
+    await user.selectOptions(screen.getByLabelText('Support type'), 'tree')
+    await user.type(screen.getByLabelText('Threshold angle (°)'), '40')
+    await user.click(screen.getByLabelText('On build plate only'))
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toMatchObject({
+      supports: { enabled: true, type: 'tree', threshold_angle: 40, on_build_plate_only: true },
+    })
+  })
+
+  it('leaves an angle out of range out of the print, says why, and clears it with supports off', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+
+    await user.selectOptions(screen.getByLabelText('Support type'), 'normal')
+    await user.type(screen.getByLabelText('Threshold angle (°)'), '95')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]?.['supports']).toEqual({ enabled: true, type: 'normal', on_build_plate_only: false })
+
+    // The typed value stays, with why it is not sent (#2837 review).
+    expect(screen.getByLabelText('Threshold angle (°)')).toHaveValue(95)
+    expect(screen.getByLabelText('Threshold angle (°)')).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByText(/A whole number of degrees from 0 to 90/)).toBeInTheDocument()
+
+    await user.selectOptions(screen.getByLabelText('Support type'), 'off')
+    expect(screen.queryByLabelText('Threshold angle (°)')).toBeNull()
+    await user.selectOptions(screen.getByLabelText('Support type'), 'tree')
+    expect(screen.getByLabelText('Threshold angle (°)')).toHaveValue(null)
+  })
+
+  it("calls a library file's Default the file's or the process's, which the dialog cannot read (#2837 review)", async () => {
+    // A library file's check and analyzer runs start after the dialog settles: waited
+    // for below, or they land in the next test and its own fetch misses MSW (#3381).
+    const check = watch('POST', '/check')
+    const analyzers = watch('POST', '/run', '/api/v1/analyzers/')
+    const { user } = renderPage(
+      <PrintPicker
+        open
+        source={{ kind: 'library', file: { id: 89, filename: 'bag-clip.3mf' } }}
+        onClose={vi.fn()}
+        onRan={vi.fn()}
+      />,
+    )
+    await loaded()
+    await showAdvanced()
+    expect(within(screen.getByLabelText('Support type')).getAllByRole('option')[0]).toHaveTextContent(
+      'Default (file or process)',
+    )
+    // The file may carry its own angle, so the empty field does not say "Preset" either.
+    await user.selectOptions(screen.getByLabelText('Support type'), 'tree')
+    expect(screen.getByLabelText('Threshold angle (°)')).toHaveAttribute('placeholder', 'Default')
+    await waitFor(() => {
+      expect(check.answered).toBeGreaterThan(0)
+      expect(check.answered).toBe(check.urls.length)
+      expect(analyzers.answered).toBeGreaterThan(0)
+      expect(analyzers.answered).toBe(analyzers.urls.length)
+    })
+  })
+
+  it('takes only digits for the angle: an exponent form is not a whole number of degrees (#3180)', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+
+    await user.selectOptions(screen.getByLabelText('Support type'), 'tree')
+    fireEvent.change(screen.getByLabelText('Threshold angle (°)'), { target: { value: '1e1' } })
+    expect(screen.getByLabelText('Threshold angle (°)')).toHaveAttribute('aria-invalid', 'true')
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]?.['supports']).not.toHaveProperty('threshold_angle')
+  })
+
+  it('prints with no supports as only `enabled: false` (#2837 review)', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+
+    await user.selectOptions(screen.getByLabelText('Support type'), 'off')
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]?.['supports']).toEqual({ enabled: false })
+  })
+
+  it('starts On build plate only at the template’s, and keeps it when only the type changes', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker({ printSettings: { support_on_build_plate_only: '1' } })
+    await loaded()
+    await showAdvanced()
+
+    await user.selectOptions(screen.getByLabelText('Support type'), 'normal')
+    expect(screen.getByLabelText('On build plate only')).toBeChecked()
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toMatchObject({ supports: { enabled: true, type: 'normal', on_build_plate_only: true } })
+  })
+
+  it('says what Default means for a template that declares supports, and strikes it when overridden', async () => {
+    const { user } = renderPicker({
+      printSettings: { enable_support: '1', support_type: 'tree(auto)', support_threshold_angle: '25' },
+    })
+    await loaded()
+    await showAdvanced()
+
+    expect(screen.getByRole('option', { name: 'Default (template: tree supports, 25°)' })).toBeInTheDocument()
+    expect(screen.getByText('25°')).toBeInTheDocument()
+    await user.selectOptions(screen.getByLabelText('Support type'), 'off')
+    expect(screen.getByText('25°').tagName).toBe('DEL')
+  })
+
+  it('strikes the template’s angle only once a print angle replaces it (#2837 review)', async () => {
+    const { user } = renderPicker({
+      printSettings: { enable_support: '1', support_type: 'tree(auto)', support_threshold_angle: '25' },
+    })
+    await loaded()
+    await showAdvanced()
+
+    await user.selectOptions(screen.getByLabelText('Support type'), 'normal')
+    expect(screen.getByText('25°').tagName).not.toBe('DEL')
+    await user.type(screen.getByLabelText('Threshold angle (°)'), '40')
+    expect(screen.getByText('25°').tagName).toBe('DEL')
+  })
+
+  it('sends nothing once set back to Default', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+
+    await user.selectOptions(screen.getByLabelText('Support type'), 'tree')
+    await user.selectOptions(screen.getByLabelText('Support type'), 'default')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).not.toHaveProperty('supports')
+  })
+
+  it('does not carry over to another output', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user, rerender } = renderPicker()
+    await loaded()
+    await showAdvanced()
+    await user.selectOptions(screen.getByLabelText('Support type'), 'off')
+
+    const second = fixtures.outputs[1] as Output
+    rerender(<PrintPicker open source={{ kind: 'output', output: second }} onClose={vi.fn()} onRan={vi.fn()} />)
+    await loaded()
+    if (!screen.queryByLabelText('Support type')) await showAdvanced()
+    expect(screen.getByLabelText('Support type')).toHaveValue('default')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).not.toHaveProperty('supports')
+  })
+
+  it('is not remembered: a reopened dialog is back on Default', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderReopenable()
+    await loaded()
+    await showAdvanced()
+    await user.selectOptions(screen.getByLabelText('Support type'), 'off')
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await user.click(screen.getByRole('button', { name: 'Reopen' }))
+    await loaded()
+    if (!screen.queryByLabelText('Support type')) await showAdvanced()
+    expect(screen.getByLabelText('Support type')).toHaveValue('default')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).not.toHaveProperty('supports')
+  })
 })
 
 describe('PrintPicker · Print sequence (#1862)', () => {
@@ -1790,6 +2201,23 @@ describe('PrintPicker · Print sequence (#1862)', () => {
     await waitFor(() => expect(runs.bodies).toHaveLength(1))
     const last = previews.bodies.at(-1) as { print_sequence?: string }
     expect(runs.bodies[0]).toMatchObject({ print_sequence: last.print_sequence })
+  })
+
+  it('checks and reslices for the chosen supports, as the run will slice them (#2804 review)', async () => {
+    const checks = watch('POST', '/check')
+    const previews = watch('POST', '/preview-slice')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+    await waitFor(() => expect(previews.bodies.length).toBeGreaterThan(0), { timeout: 5000 })
+    expect(checks.bodies.at(-1)).not.toHaveProperty('supports')
+    expect(previews.bodies.at(-1)).not.toHaveProperty('supports')
+
+    await user.selectOptions(screen.getByLabelText('Support type'), 'off')
+    await waitFor(() => expect(checks.bodies.at(-1)).toMatchObject({ supports: { enabled: false } }))
+    await waitFor(() => expect(previews.bodies.at(-1)).toMatchObject({ supports: { enabled: false } }), {
+      timeout: 5000,
+    })
   })
 
   it('does not carry over to another source', async () => {
@@ -3549,6 +3977,16 @@ describe('PrintPicker · Slicer defaults from the template (#1294)', () => {
     const list = screen.getByRole('region', { name: 'Slicer defaults from this template' })
     expect(within(list).getByText('Brim width').nextElementSibling).toHaveTextContent('5 mm')
     expect(within(list).queryByText('brim_width')).toBeNull()
+  })
+
+  it('names the support angle in degrees and the build-plate-only switch (#1899)', async () => {
+    renderPicker({ printSettings: { support_threshold_angle: '25', support_on_build_plate_only: '1' } })
+    await loaded()
+    await showAdvanced()
+    const list = screen.getByRole('region', { name: 'Slicer defaults from this template' })
+    expect(within(list).getByText('Support threshold angle').nextElementSibling).toHaveTextContent(/^25°$/)
+    expect(within(list).getByText('Supports on the build plate only').nextElementSibling).toHaveTextContent(/^On$/)
+    expect(within(list).queryByText('support_threshold_angle')).toBeNull()
   })
 
   // #2112: a sequence picked in the step above replaces the template's, so the list says so.

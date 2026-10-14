@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import AsyncGenerator, AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import date
@@ -54,6 +54,8 @@ from scadbuddy.bambuddy.models import (
     LocalPresetCatalogue,
     MoveResult,
     PresetCatalogue,
+    PresetRef,
+    PresetValues,
     Printer,
     PrinterMedia,
     PrinterStatus,
@@ -181,6 +183,7 @@ Operation = Literal[
     "slice.job.status",
     "slice.start",
     "slicer.local_presets",
+    "slicer.preset_values",
     "slicer.presets",
     "spools.assign",
     "spools.assignments",
@@ -457,6 +460,20 @@ class BambuddyClient:
         )
         # 1 MB of JSON: parsed off the event loop, which every other request shares (#2978).
         return await asyncio.to_thread(PresetCatalogue.model_validate_json, response.content)
+
+    async def preset_values(self, ref: PresetRef) -> PresetValues:
+        """``GET /slicer/preset-values`` — a process preset's effective values, flattened
+        by Bambuddy's slicer sidecar, so a change can be shown against the value it
+        replaces and written in the shape the preset stores it (#717)."""
+        response = await self._send(
+            "GET",
+            "/slicer/preset-values",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="slicer.preset_values",
+            what=f"read the values of process preset {ref.id}",
+            params={"source": ref.source, "id": ref.id, "slot": "process"},
+        )
+        return PresetValues.model_validate(response.json())
 
     async def local_presets(self) -> LocalPresetCatalogue:
         """``GET /api/v1/local-presets/`` — OrcaSlicer profiles imported into Bambuddy.
@@ -1404,3 +1421,32 @@ async def client_for(settings: StoredSettings) -> AsyncIterator[BambuddyClient]:
     """A client built from the stored settings, or a 409 saying what is missing."""
     async with BambuddyClient(BambuddyConfig.from_settings(settings)) as client:
         yield client
+
+
+#: Reads a process preset's values (#717); :func:`read_once` makes one that reads each
+#: preset at most once.
+ReadPresetValues = Callable[[PresetRef], Awaitable[PresetValues]]
+
+
+def read_once(client: BambuddyClient) -> ReadPresetValues:
+    """``client.preset_values``, read at most once per preset by whoever shares it
+    (#2804 review): a print's filament profiles and its supports change the same process
+    preset. A failed read fails the same way for every one of them.
+
+    It assumes its callers take turns, as ``check_print`` and ``plan_run`` do: two reads
+    of the same preset gathered concurrently would both miss and both read."""
+    read: dict[tuple[str, str], PresetValues | ApiError] = {}
+
+    async def values(process: PresetRef) -> PresetValues:
+        key = (process.source, process.id)
+        if key not in read:
+            try:
+                read[key] = await client.preset_values(process)
+            except ApiError as error:
+                read[key] = error
+        answer = read[key]
+        if isinstance(answer, ApiError):
+            raise answer
+        return answer
+
+    return values

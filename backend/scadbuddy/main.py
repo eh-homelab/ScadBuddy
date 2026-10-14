@@ -336,6 +336,7 @@ async def _sweep_blobs_logged(state: AppState) -> None:
                 sweep_blobs, state.blobs, state.refs, grace=state.config.job_ttl
             )
         else:
+            failed = False
             try:
                 removed = await sweep_content(
                     state.store.content, state.refs, grace=state.config.job_ttl
@@ -345,12 +346,25 @@ async def _sweep_blobs_logged(state: AppState) -> None:
                     # #701: an upload whose process died before its row was written.
                     cutoff = datetime.now(UTC) - timedelta(seconds=state.config.job_ttl)
                     removed += await backend.sweep_unrecorded(cutoff=cutoff)
+            except BaseException:
+                # BaseException on purpose: a cancelled sweep must stay cancelled, not be
+                # replaced by the trim's own failure below.
+                failed = True
+                raise
             finally:
                 # Both steps above need Bambuddy (a stale blob's release is a round
                 # trip too): one that is down must not stop the local cache being
                 # trimmed, or it grows for as long as Bambuddy stays down (#2115).
                 if isinstance(state.store.blobs, CachedBlobStore):
-                    await asyncio.to_thread(state.store.blobs.evict)
+                    try:
+                        await asyncio.to_thread(state.store.blobs.evict)
+                    except Exception:
+                        # Under a Bambuddy failure, logged on its own and that failure
+                        # goes on (#2560): raised here it would replace it, left only
+                        # as __context__. Alone, it is the sweep's failure.
+                        if not failed:
+                            raise
+                        logger.exception("could not trim the worker cache")
     except Exception:
         logger.exception("could not sweep unreferenced blobs")
         raise
@@ -604,24 +618,36 @@ async def _sweep_flow_runs_logged(state: AppState) -> None:
 
 async def _sweep_preview_slices_logged(state: AppState) -> None:
     settings = await asyncio.to_thread(state.settings_store.load)
+    # Each its own, as the flow sweeps: one failing never skips the other or its log
+    # (#2912); the first failure is raised once both have run.
+    failed: Exception | None = None
     try:
         async with client_for(settings) as client:
-            removed = await sweep_preview_slices(client, state.uploads)
-            # #2715: and what print runs' lost slice starts left, on the same tick.
-            lost = await sweep_lost_slices(client, state.uploads)
+            try:
+                removed = await sweep_preview_slices(client, state.uploads)
+            except Exception as err:
+                logger.exception("could not sweep the print dialog's background slices")
+                failed = err
+            else:
+                if removed:
+                    logger.info("removed unprinted background slices", extra={"count": removed})
+            try:
+                # #2715: and what print runs' lost slice starts left, on the same tick.
+                lost = await sweep_lost_slices(client, state.uploads)
+            except Exception as err:
+                logger.exception("could not sweep the files of lost slice starts")
+                failed = failed or err
+            else:
+                if lost:
+                    logger.info("removed the files of lost slice starts", extra={"count": lost})
     except ApiError as error:
         if error.type == NOT_CONFIGURED_PROBLEM:
             logger.debug("no background-slice sweep: Bambuddy is not set up")
             return
-        logger.exception("could not sweep the print dialog's background slices")
+        logger.exception("could not reach Bambuddy to sweep slices")
         raise
-    except Exception:
-        logger.exception("could not sweep the print dialog's background slices")
-        raise
-    if removed:
-        logger.info("removed unprinted background slices", extra={"count": removed})
-    if lost:
-        logger.info("removed the files of lost slice starts", extra={"count": lost})
+    if failed is not None:
+        raise failed
 
 
 async def _maintain_models_git_logged(state: AppState) -> None:

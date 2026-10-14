@@ -91,6 +91,11 @@ WarningKind = Literal[
     "rack-manual-partial",
     # A by-object print whose objects the toolhead or the gantry would hit (#956).
     "sequence-clearance",
+    # #717: a filament profile left on that could not apply; the print goes ahead.
+    "profile-not-applied",
+    # #1899: a support setting left out because the preset's shape for it is unknown:
+    # its values could not be read, or it has no value (or an empty one) for that key.
+    "supports-not-applied",
     # A sliced file queued as it is (#2671), never refused: what to set right first.
     "sliced-other-model",
     "sliced-nozzle-missing",

@@ -8,7 +8,7 @@ export function temporalTaskRunner(client: Client, taskQueue: string): TaskRunne
       await client.workflow.start(BACKGROUND_WORKFLOW, {
         workflowId: backgroundWorkflowId(task.sessionId, task.id),
         taskQueue,
-        args: [{ taskId: task.id }],
+        args: [{ taskId: task.id, kind: task.kind }],
       })
     },
     async cancel(task) {

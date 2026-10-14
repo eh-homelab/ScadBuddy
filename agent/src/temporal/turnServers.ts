@@ -123,7 +123,7 @@ export type TurnServerDeps = {
         audit?: AuditSink | undefined
         resolve?: Resolver
         /** The session's background tasks (CronCreate, ScheduleWakeup, TaskStop); without them those are not offered. */
-        background?: { tasks: BackgroundTasks; tz: string; now?: () => Date } | undefined
+        background?: { tasks: BackgroundTasks; tz: string; now?: () => Date; commandQueue?: string } | undefined
       }
     | undefined
 }
@@ -137,8 +137,8 @@ export function builtinNote(names: readonly string[]): string {
     'the same input and answer the same way. Every call of one asks the user first. Their files are the session workspace, ' +
     'shown under /workspace (the workspace_* tools see the same files), not a local disk.' +
     (names.some((n) => BACKGROUND_BUILTINS.includes(n))
-      ? ' The session keeps the jobs and wakeups they schedule past this turn: each sends its prompt to the session as a new ' +
-        'message when it is due and the session is idle.'
+      ? ' The session keeps the jobs, wakeups, watches and workflows they start past this turn: each sends its prompt, events or result to the ' +
+        'session as a new message when it is due and the session is idle.'
       : '')
   )
 }
@@ -289,7 +289,15 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
         }
         const tasks = builtins.background
         const background = tasks
-          ? { tasks: tasks.tasks, sessionId: context.session, owner: context.owner, tz: tasks.tz, now: tasks.now ?? (() => new Date()) }
+          ? {
+              tasks: tasks.tasks,
+              sessionId: context.session,
+              owner: context.owner,
+              tz: tasks.tz,
+              now: tasks.now ?? (() => new Date()),
+              commandQueue: tasks.commandQueue,
+              workspace: builtins.files,
+            }
           : undefined
         servers.push({
           name: BUILTIN_SERVER,

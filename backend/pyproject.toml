@@ -36,6 +36,7 @@ dependencies = [
     "jsonschema>=4.23",
     # Imported directly for the error an unresolvable `$ref` raises (flow_tools `_answer`).
     "referencing>=0.28",
+    "regex>=2024.11.6",
 ]
 
 [build-system]
@@ -64,6 +65,7 @@ dev = [
     "types-lxml>=2026.2.16",
     "pytest-split>=0.11",
     "types-jsonschema>=4.26.0.20261006",
+    "types-regex>=2026.9.29.20261005",
 ]
 
 [tool.ruff]

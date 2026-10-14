@@ -5,12 +5,14 @@ import type {
   AnalysisRequest,
   AnalysisTarget,
   FilamentWarning,
+  NozzlePlan as NozzlePlanView,
   Output,
   PrintOptions,
   PrintOptionsState,
   PrintRunRequest,
   PrintRunResult,
   PrintSequence,
+  SupportsChoice,
   RackAlgorithm,
 } from '../api/types'
 import {
@@ -31,6 +33,7 @@ import { openExternal } from '../lib/embed'
 import { plateLabel } from '../lib/plate'
 import { resolvedColors } from '../lib/plateColors'
 import { checkPlan, slicedPlateSlots, withSlicedGrams } from '../lib/filaments'
+import { useFilamentProfiles } from '../lib/filamentProfiles'
 import { printChoicesOf, sliceOverrides } from '../lib/printChoices'
 import { resolveOptions } from '../lib/printOptions'
 import {
@@ -45,6 +48,7 @@ import { useAsync } from '../lib/useAsync'
 import { CarryBox, useFilamentPlan } from '../lib/useFilamentPlan'
 import { usePrintCheck } from '../lib/usePrintCheck'
 import { usePreviewSlice } from '../lib/usePreviewSlice'
+import { asSliced } from '../lib/slicedSides'
 import { usePrintChoices } from '../lib/usePrintChoices'
 import { usePrintProgress } from '../lib/usePrintProgress'
 import { useRunPrint } from '../lib/useRunPrint'
@@ -63,7 +67,10 @@ import { PlatePreviewDialog } from './print/PlatePreviewDialog'
 import { PlatesToPrint } from './print/PlatesToPrint'
 import { PlateStep } from './print/PlateStep'
 import { PresetOverrides } from './print/PresetOverrides'
+import { FilamentProfilesStep } from './print/FilamentProfilesStep'
 import { PrintSequenceStep } from './print/PrintSequenceStep'
+import { SupportsStep } from './print/SupportsStep'
+import { overriddenSupportKeys } from '../lib/supports'
 import { SlicerDefaults } from './print/SlicerDefaults'
 import { SlicedSettings } from './print/SlicedSettings'
 import { slicedEstimate } from '../lib/slicedEstimate'
@@ -262,6 +269,8 @@ export function PrintPicker({
    * never remembered (until #1754 decides remembered choices by subject).
    */
   const [printSequence, setPrintSequence] = useState<PrintSequence | null>(null)
+  // #1899 — this print's supports; `null` leaves them to the template and the process.
+  const [supports, setSupports] = useState<SupportsChoice | null>(null)
   /**
    * #836 — the rack's ranking for this print (remembered per printer, so it opens on what
    * the choices read says) and a hand-picked position, `null` for Automatic. A hand pick
@@ -405,6 +414,13 @@ export function PrintPicker({
     project?.onCreating?.(creating)
   }
 
+  // #717 — profiles the chosen spools match, each on unless switched off.
+  const filamentProfiles = useFilamentProfiles({
+    spools: filaments?.spools,
+    plan,
+    choices: printChoicesOf(selection),
+  })
+
   const runPrint = useRunPrint({
     source,
     choices,
@@ -416,6 +432,8 @@ export function PrintPicker({
     projectId,
     options,
     printSequence,
+    supports,
+    filamentProfiles: filamentProfiles.active,
     rackPosition,
     rackAlgorithm: chosenAlgorithm,
     onRan,
@@ -465,6 +483,7 @@ export function PrintPicker({
     if (carry.get()) return
     setOptions({})
     setPrintSequence(null)
+    setSupports(null)
   }, [currentKey, carry])
 
   /** Re-arrange the output in view; `backfill` (confirmed by the user) re-renders it first. */
@@ -608,7 +627,9 @@ export function PrintPicker({
           rack_algorithm: chosenAlgorithm,
           // #2367: the sequence is a process override, so it changes what the run
           // slices; the check and the background slice must see it as the run does.
-          ...sliceOverrides(printSequence),
+          // #1899, #717: supports and the profiles left on are process overrides too, and
+          // Checks says when one can't apply.
+          ...sliceOverrides(printSequence, supports, filamentProfiles.active),
         }
       : null
   const check = usePrintCheck(source, checkRequest)
@@ -635,6 +656,30 @@ export function PrintPicker({
       ? { ...checkRequest, plate_id: previewPlate, all_plates: false }
       : checkRequest
   const previewSlice = usePreviewSlice(source, sliceable && !sliced ? previewRequest : null)
+  // #2703 — the slicer groups filaments itself, so once a slice of these choices for the
+  // plate being printed has landed, its sides are the ones shown.
+  // Memoised: `asSliced` builds a new plan on every call, and the effect below stores it,
+  // so an unmemoised one re-rendered the dialog without end (#2737 review).
+  const slicedShown = plate !== 'all' && previewPlate === plate && !previewSlice.stale && check.current
+  const nozzlePlan = check.verdict?.nozzle_plan
+  const sliceResult = previewSlice.result
+  const slicedNow = useMemo(
+    () => (slicedShown ? asSliced(nozzlePlan, sliceResult) : null),
+    [slicedShown, nozzlePlan, sliceResult],
+  )
+  // #2737 review: previewing another plate does not unsay it. The printed plate's slice
+  // still holds for these choices, so its sides stay until the choices or the plate change.
+  const slicedFor = `${plate}|${currentKey}|${check.request}`
+  const [lastSliced, setLastSliced] = useState<{ key: string; plan: NozzlePlanView } | null>(null)
+  useEffect(() => {
+    if (!slicedNow) return
+    setLastSliced((last) =>
+      last?.key === slicedFor && last.plan === slicedNow ? last : { key: slicedFor, plan: slicedNow },
+    )
+  }, [slicedNow, slicedFor])
+  const slicedPlan =
+    slicedNow ??
+    (previewPlate !== plate && check.current && lastSliced?.key === slicedFor ? lastSliced.plan : null)
   /** #2164 — filled trays Bambuddy has no spool for, and the ones answered "no". */
   const trays = useDeclinedTrays(printerId, filaments?.trays ?? [])
   // #836 — a hand pick the current check no longer offers (no rack this time, or the
@@ -700,6 +745,7 @@ export function PrintPicker({
     setOwnProjectId(null)
     setOptions({})
     setPrintSequence(null)
+    setSupports(null)
     setRackPosition(null)
     // #1084: the algorithm chosen here, and a failed save of it, are this session's too.
     algorithmSession.current += 1
@@ -894,7 +940,13 @@ export function PrintPicker({
                       gramsStale={slicedForSlots !== null && previewSlice.stale}
                     />
                   )}
-                  {!sliced && <NozzlePlanLine plan={check.verdict?.nozzle_plan} stale={!check.current} />}
+                  {!sliced && (
+                    <NozzlePlanLine
+                      plan={slicedPlan ?? check.verdict?.nozzle_plan}
+                      stale={!check.current}
+                      sliced={slicedPlan !== null}
+                    />
+                  )}
                   {target && known && (
                     <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2">
                       <legend className="px-1 text-[13px] text-ink">Arrange</legend>
@@ -945,6 +997,11 @@ export function PrintPicker({
                         </p>
                       )}
                     </fieldset>
+                  )}
+
+                  {/* #717: outside Advanced, since a suggested profile is on until switched off. */}
+                  {!sliced && (
+                    <FilamentProfilesStep suggestions={filamentProfiles.suggestions} onToggle={filamentProfiles.toggle} />
                   )}
 
                   {picker.advanced && !sliced && filaments && (filaments.slots ?? []).length > 0 && (
@@ -1096,10 +1153,20 @@ export function PrintPicker({
                             objects={check.current ? (check.verdict?.objects ?? null) : null}
                           />
 
+                          <SupportsStep
+                            value={supports}
+                            onChange={setSupports}
+                            templateSettings={given?.kind === 'output' ? printSettings : undefined}
+                            fromFile={given?.kind !== 'output'}
+                          />
+
                           {given?.kind === 'output' && (
                             <SlicerDefaults
                               settings={printSettings}
-                              overridden={printSequence !== null ? ['print_sequence'] : []}
+                              overridden={[
+                                ...(printSequence !== null ? ['print_sequence'] : []),
+                                ...overriddenSupportKeys(supports),
+                              ]}
                             />
                           )}
                         </>

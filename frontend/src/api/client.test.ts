@@ -1584,10 +1584,13 @@ describe('MEDIA_THUMBNAIL_VERSION (#1691)', () => {
       // would, so the test cannot pass by counting arrivals as calls. The hold works only
       // because `send` reads `globalThis.fetch` on every call (client.ts), not once.
       const realFetch = globalThis.fetch
-      let fetches = 0
+      let settingsSent = 0
       const fetched = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
-        fetches += 1
-        if (fetches === 1) await new Promise((resolve) => setTimeout(resolve, 20))
+        // Only the settings reads count: another request first would take the hold (#3398).
+        const url = input instanceof Request ? input.url : String(input)
+        if (new URL(url, 'http://x').pathname === '/api/v1/settings' && ++settingsSent === 1) {
+          await new Promise((resolve) => setTimeout(resolve, 20))
+        }
         return realFetch(input, init)
       })
       const now = vi.spyOn(Date, 'now').mockReturnValue(1_000)
@@ -1613,6 +1616,9 @@ describe('MEDIA_THUMBNAIL_VERSION (#1691)', () => {
         await expect(stuck).resolves.toMatchObject({ n: 1 })
         await expect(joined).resolves.toMatchObject({ n: 1 })
         expect(reads).toBe(2)
+        // The hold saw both reads sent (the joined caller sent none), so it cannot go
+        // quietly inert if `send` ever stops calling the global fetch (#3398).
+        expect(settingsSent).toBe(2)
       } finally {
         release()
         now.mockRestore()

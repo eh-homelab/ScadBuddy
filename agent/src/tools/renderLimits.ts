@@ -1,4 +1,5 @@
 import { ToolError } from './registry.js'
+import { errorName } from '../telemetry/scrub.js'
 
 // A bound on the renders an agent starts (#252, "Guardrails": "A render
 // timeout and resource limits"). The backend already bounds each render: the
@@ -261,7 +262,8 @@ export class RenderLimiter {
       this.current = await this.source()
     } catch (err) {
       // The last limits read stand: a settings read that fails must not stop renders.
-      console.warn(`render limits: could not read the settings, keeping the last: ${(err as Error).message}`)
+      // #1814: only the error's name; its message can quote a connection string or a query.
+      console.warn(`render limits: could not read the settings, keeping the last (${errorName(err)})`)
     }
     return this.current
   }

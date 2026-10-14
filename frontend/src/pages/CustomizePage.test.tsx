@@ -194,6 +194,19 @@ describe('CustomizePage', () => {
     expect(within(dialog).getByLabelText('Add images or videos')).toBeInTheDocument()
   })
 
+  it('opens the README of a template that has one (#1074)', async () => {
+    const { user } = render()
+    await user.click(await screen.findByRole('button', { name: 'README' }))
+    const dialog = screen.getByRole('dialog', { name: 'README' })
+    expect(await within(dialog).findByText(/A name in raised letters on a base plate/)).toBeInTheDocument()
+  })
+
+  it('offers no README for a template without one (#1074)', async () => {
+    render(`/m/${encodeURIComponent(BUILTIN_SLUG)}`)
+    expect(await screen.findByRole('button', { name: 'Media' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'README' })).not.toBeInTheDocument()
+  })
+
   it("opens a built-in's media to add to, what it ships read-only (#279, #722)", async () => {
     const { user } = render(`/m/${encodeURIComponent(BUILTIN_SLUG)}`)
     await user.click(await screen.findByRole('button', { name: 'Media' }))
@@ -1021,6 +1034,35 @@ describe('CustomizePage', () => {
     expect(sent.at(-1)).toBe(20)
     expect(screen.queryByText(/not answering right now/)).not.toBeInTheDocument()
   }, 30000)
+
+  it('flags a colour that is no colour on its field and neither renders nor generates it (#2357)', async () => {
+    const renders = watchRenders()
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    const before = renders.length
+
+    await user.click(screen.getByRole('tab', { name: 'Colours' }))
+    const hex = screen.getByRole('textbox', { name: 'Text hex' })
+    await user.tripleClick(hex)
+    await user.keyboard('#RREEDD')
+    await user.tab()
+
+    expect(hex).toHaveValue('#RREEDD')
+    expect(hex).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByTestId('generate')).toBeDisabled()
+    await new Promise((resolve) => setTimeout(resolve, RENDER_DEBOUNCE_MS * 2))
+    expect(renders.length).toBe(before)
+
+    await user.tripleClick(hex)
+    await user.keyboard('red')
+    await user.tab()
+    expect(hex).toHaveValue('#FF0000')
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled(), { timeout: 4000 })
+    const sent = (await Promise.all(renders.slice(before))).map((body) => body.inputs.params['text_color'])
+    expect(sent).not.toContain('#RREEDD')
+    expect(sent.at(-1)).toBe('#FF0000')
+  }, 20000)
 
   it('links to the versions panel', async () => {
     render()
@@ -2207,6 +2249,47 @@ describe('template inputs (spec 2026-09-27 §4.3)', () => {
     expect(screen.getByRole('textbox', { name: 'Saved inputs' })).toHaveAttribute('readonly')
     // The schema default, as before the output was reopened.
     expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Reagan')
+  })
+
+  it("dismisses a preset's unmigrated inputs on Reset to defaults (#3074)", async () => {
+    const keychain = fixtures.models.find((m) => m.slug === 'name-keychain')
+    setMockPresets('name-keychain', [
+      {
+        id: 'e'.repeat(32),
+        name: 'Old',
+        description: '',
+        tags: [],
+        origin: 'mine',
+        params: { name: 'Old' },
+        inputs: { params: { name: 'Old' }, v: 0 },
+        updated_at: '2026-09-20T10:00:00Z',
+      },
+    ])
+    server.use(
+      http.get('/api/v1/models/name-keychain', () => HttpResponse.json({ ...keychain, inputs_version: 1 })),
+      http.post('/api/v1/models/name-keychain/inputs/migrate', () =>
+        HttpResponse.json(
+          { title: 'Unprocessable Content', status: 422, detail: 'defines no migrate' },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const { user } = render('/m/name-keychain')
+    const name = await screen.findByRole('textbox', { name: 'Name on the tag' })
+    // Off the defaults, or Reset is disabled.
+    await user.clear(name)
+    await user.type(name, 'Edited')
+    const select = screen.getByLabelText('Preset')
+    await waitFor(() => expect(within(select).getByRole('option', { name: 'Old' })).toBeInTheDocument())
+    await user.selectOptions(select, 'Old')
+    await user.click(await screen.findByRole('button', { name: 'Replace my changes' }))
+    expect(await screen.findByRole('textbox', { name: 'Saved inputs' })).toHaveAttribute('readonly')
+    // A preset that cannot be migrated keeps the values on screen.
+    expect(name).toHaveValue('Edited')
+
+    await user.click(screen.getByRole('button', { name: 'Reset to defaults' }))
+    await waitFor(() => expect(screen.queryByRole('textbox', { name: 'Saved inputs' })).toBeNull())
+    expect(name).toHaveValue('Reagan')
   })
 
   it('migrates a preset from its stored inputs before cutting them to the schema', async () => {

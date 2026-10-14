@@ -45,13 +45,25 @@ export function taskView(t: BackgroundTask): BackgroundTaskView {
       ? `${describeCron(String(t.spec.cron))}${t.spec.recurring === false ? ', once' : ''}`
       : t.kind === 'wakeup'
         ? `once, ${String(t.spec.delaySeconds)} s after it was set`
-        : t.kind
+        : t.kind === 'monitor'
+          ? 'monitor'
+          : t.kind === 'workflow'
+            ? `workflow ${String(t.spec.name)}`
+            : t.kind
   return {
     id: t.id,
     kind: t.kind,
     description: t.description,
     schedule,
-    prompt: typeof t.spec.prompt === 'string' ? t.spec.prompt : '',
+    // A monitor's "prompt" is what it watches: its command, or its socket's URL; a workflow's, its description.
+    prompt:
+      typeof t.spec.prompt === 'string'
+        ? t.spec.prompt
+        : t.kind === 'workflow'
+          ? String(t.spec.description ?? '')
+        : typeof t.spec.command === 'string'
+          ? t.spec.command
+          : String((t.spec.ws as { url?: string } | undefined)?.url ?? ''),
     state: t.state,
     next_at: t.nextAt?.toISOString() ?? null,
     fired: t.fired,

@@ -147,7 +147,9 @@ async def choices_for(
     surfaces as it did when the reads ran one by one: the source's, then the printers',
     the presets' and the filament step's. So a library file that is gone or unprintable
     still answers its 404 or 422, though the printers have been read beside it by then:
-    a few wasted reads on a rare path, for not waiting on the file every time."""
+    a few wasted reads on a rare path, for not waiting on the file every time. The
+    rack's state is recorded by the second wave, so a failed catalogue read raises after
+    it is written, not before (#2907)."""
     presets = asyncio.ensure_future(cached_catalogue(client, cache))
     try:
         return await _choices(

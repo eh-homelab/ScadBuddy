@@ -103,10 +103,10 @@ function harness(overrides: Partial<ToolActivityDeps> = {}, tools: readonly Tool
   return { activities: toolActivities(tools, deps), audits, touched, headers }
 }
 
-function env(workflowId = `session-${SESSION}`, activityId = 'tool-toolu_01') {
+function env(workflowId = `session-${SESSION}`, activityId = 'tool-toolu_01', runId = 'run-1') {
   return new MockActivityEnvironment({
     activityId,
-    workflowExecution: { workflowId, runId: 'run-1' },
+    workflowExecution: { workflowId, runId },
     activityType: 'whoami',
     taskQueue: 'agent-tools',
   })
@@ -424,6 +424,15 @@ describe('flow runs in tool activities', () => {
     expect(unknown.type).toBe('UnknownFlow')
     const unread = await failure(env(FLOW, 'tool-call_1').run(harness().activities.whoami!, {}))
     expect(unread.type).toBe('UnknownFlow')
+  })
+
+  // #2258: without the execution's run id no decision could match, so it is not refused NotApproved unexplained.
+  it('fails a flow call that carries no workflow execution run id, naming it, and runs nothing', async () => {
+    const h = harness({ flows: flowRuns(BROWSER) })
+    const missing = await failure(env(FLOW, 'tool-call_ok', '').run(h.activities.send!, { to: 'printer' }))
+    expect([missing.type, missing.nonRetryable]).toEqual(['UnknownFlow', true])
+    expect(missing.message).toMatch(/carries no workflow execution run id/)
+    expect(h.audits).toEqual([])
   })
 
   it('refuses the browser and answer tools: a flow has no tab and no session', async () => {

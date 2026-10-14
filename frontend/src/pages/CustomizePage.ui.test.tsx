@@ -500,11 +500,14 @@ describe('CustomizePage with a template UI', () => {
   // show; host.generate() waited only for "settled", so it saved that job for new values.
   it('host.generate() waits for the render of the current values, not a stale one after a failed submit', async () => {
     let down = false
+    let refused = 0
     const saved: string[] = []
     server.use(
-      http.post('/api/v1/models/:slug/render', () =>
-        down ? new HttpResponse('upstream connect error', { status: 503 }) : undefined,
-      ),
+      http.post('/api/v1/models/:slug/render', () => {
+        if (!down) return undefined
+        refused += 1
+        return new HttpResponse('upstream connect error', { status: 503 })
+      }),
       http.post('/api/v1/models/:slug/outputs', async ({ request }) => {
         const body = (await request.clone().json()) as { inputs?: { params?: Record<string, unknown> } }
         saved.push(String(body.inputs?.params?.['name']))
@@ -526,8 +529,11 @@ describe('CustomizePage with a template UI', () => {
     const params = host!.inputs.get()['params'] as Record<string, unknown>
     host!.inputs.set({ ...host!.inputs.get(), params: { ...params, name: 'Zed' } })
     await screen.findByText(/not answering right now/, {}, { timeout: 5000 })
+    const tried = refused
     const run = host!.generate()
-    await new Promise((resolve) => setTimeout(resolve, 300))
+    // #3342: wait for the page's own retry of "Zed", refused too. A stale save would go
+    // out at once, long before that retry, so by then it would have landed.
+    await waitFor(() => expect(refused).toBeGreaterThan(tried), { timeout: 15_000 })
     // Nothing saved for the stale job while the render of "Zed" has not happened.
     expect(saved).toHaveLength(1)
 
@@ -777,6 +783,47 @@ describe('the page slot', () => {
     await waitFor(() => expect(shadowText()).toMatch(/^custom /))
   })
 
+  it("shows a preset's inputs read-only when they cannot be migrated, until another preset is applied (#1811)", async () => {
+    withRecord(UI_DEMO_SLUG, { ui: { module: 'ui/index.js', slot: 'page', api: 1 }, inputs_version: 1 })
+    setMockPresets(UI_DEMO_SLUG, [
+      { id: 'e'.repeat(32), name: 'Old', origin: 'mine', params: { name: 'Old' }, inputs: { params: { name: 'Old' }, v: 0 }, description: '', tags: [] },
+      { id: 'f'.repeat(32), name: 'Current', origin: 'mine', params: { name: 'Now' }, inputs: { params: { name: 'Now' }, v: 1 }, description: '', tags: [] },
+    ])
+    server.use(
+      http.post(`/api/v1/models/${UI_DEMO_SLUG}/inputs/migrate`, () =>
+        HttpResponse.json(
+          { title: 'Unprocessable Content', status: 422, detail: 'defines no migrate' },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const { user } = open(UI_DEMO_SLUG)
+    const preset = () => screen.getByRole('combobox', { name: 'Preset' })
+    await waitFor(() => expect(within(preset()).getByRole('option', { name: 'Old' })).toBeInTheDocument(), { timeout: 5000 })
+    await user.selectOptions(preset(), 'Old')
+
+    const workspace = screen.getByTestId('workspace')
+    const saved = await within(workspace).findByRole<HTMLTextAreaElement>('textbox', { name: 'Saved inputs' })
+    // The textarea's own alert, not whichever alert the row holds (a render error may be another).
+    const alert = saved.closest<HTMLElement>('[role="alert"]')
+    expect(alert).toHaveTextContent('could not be brought up to this template version: defines no migrate')
+    expect(saved).toHaveAttribute('readonly')
+    // Its value, what the user sees; textContent is only the initial value React mirrored.
+    expect(saved.value).toContain('"name": "Old"')
+    // Short, so the textarea scrolls rather than the capped row around it too.
+    expect(saved).toHaveAttribute('rows', '4')
+    // #3074: the cap is on the alert, and only its error text scrolls; no scroll
+    // container around the textarea, and no overflow-hidden to clip a long error.
+    expect(alert).toHaveClass('max-h-[30vh]')
+    expect(alert?.querySelector('p')).toHaveClass('overflow-auto')
+    for (let node: HTMLElement | null = saved.parentElement; node && node !== workspace; node = node.parentElement) {
+      expect(node.className).not.toMatch(/overflow-(auto|hidden|scroll)/)
+    }
+
+    await user.selectOptions(preset(), 'Current')
+    await waitFor(() => expect(within(workspace).queryByRole('textbox', { name: 'Saved inputs' })).toBeNull())
+  })
+
   it('covers the frame in full screen where the Fullscreen API is refused, with no flyout button', async () => {
     Object.defineProperty(document, 'fullscreenEnabled', { configurable: true, value: false })
     setUiModuleLoader(async () => ({
@@ -810,12 +857,14 @@ describe('the page slot', () => {
       release = resolve
     })
     let schemaServed = false
+    let recordAsked = false
     server.use(
       http.get('/api/v1/models/:slug/schema', () => {
         schemaServed = true
         return HttpResponse.json(keychainSchema)
       }),
       http.get('/api/v1/models/:slug', async () => {
+        recordAsked = true
         await held
         return HttpResponse.json({ ...model, ui: { module: 'ui/index.js', slot: 'page', api: 1 } })
       }),
@@ -837,7 +886,9 @@ describe('the page slot', () => {
     await import('../components/Preview')
     previews.mounts = 0
     open(UI_DEMO_SLUG)
-    await waitFor(() => expect(schemaServed).toBe(true))
+    // #3342: both asked, so the wait below starts once the page has all it gets before
+    // the record lands, not while the schema is still on its way.
+    await waitFor(() => expect(schemaServed && recordAsked).toBe(true))
     await new Promise((resolve) => setTimeout(resolve, 300))
     expect(screen.queryByText('Loading the viewer')).toBeNull()
     expect(screen.queryByTestId('preview')).toBeNull()
