@@ -91,6 +91,7 @@ from scadbuddy.store.bambuddy import BambuddyContentBackend, RenderSettingsSourc
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.content import sweep_content
 from scadbuddy.store.factory import build_store
+from scadbuddy.store.geometry import GeometryIndex
 from scadbuddy.worker import run_inprocess_worker, worker_deps_from_state
 from scadbuddy.workflows.activities import WorkerDeps
 from scadbuddy.workflows.client import (
@@ -349,6 +350,12 @@ async def _sweep_blobs_logged(state: AppState) -> None:
         raise
     if removed:
         logger.info("removed unreferenced blobs", extra={"count": len(removed)})
+        # A swept piece is no geometry's source any more (`store/geometry.py`).
+        try:
+            await asyncio.to_thread(GeometryIndex(state.refs.pool).forget_pieces, removed)
+        except Exception:
+            logger.exception("could not forget swept pieces' geometry")
+            raise
 
 
 async def _backfill_store_logged(

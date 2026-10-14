@@ -451,3 +451,13 @@ async def test_a_scad_template_never_shares_its_geometry(
     acts, _, _ = geometry_acts
     prepared = await ActivityEnvironment().run(acts.prepare, _piece(acts, 1, width=12))
     assert prepared.geometry_key is None
+
+
+@pytest.mark.requires_postgres
+def test_a_swept_pieces_rows_are_forgotten(pg_pool: PgPool) -> None:
+    geometry = GeometryIndex(pg_pool)
+    geometry.put("g1", "piece-a", ["#FF0000"], {})
+    geometry.put("g2", "piece-b", ["#FF0000"], {})
+    geometry.forget_pieces(["piece-a", "piece-c"])
+    assert geometry.get("g1") is None
+    assert geometry.get("g2") is not None

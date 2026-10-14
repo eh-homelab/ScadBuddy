@@ -21,7 +21,9 @@ class GeometryRow:
 class GeometryIndex:
     """`piece_geometry`: the finished piece whose meshes a geometry key's pieces can be
     recoloured from (`render/geometry_cache.py`). A hint, never a reference: it keeps no
-    blob alive, and a row naming a swept piece is a miss its reader forgets.
+    blob alive. The blob sweep drops the rows of the pieces it removes
+    (`forget_pieces`), and a row naming a piece swept otherwise is a miss its reader
+    forgets.
 
     The pool must be autocommit, as the render queue's is (`BlobRefs`)."""
 
@@ -58,3 +60,10 @@ class GeometryIndex:
                 "DELETE FROM piece_geometry WHERE geometry_key = %s AND piece_key = %s",
                 (geometry_key, piece_key),
             )
+
+    def forget_pieces(self, piece_keys: list[str]) -> None:
+        """Drop every row naming one of these pieces: they are gone."""
+        if not piece_keys:
+            return
+        with self._pool.connection() as conn:
+            conn.execute("DELETE FROM piece_geometry WHERE piece_key = ANY(%s)", (piece_keys,))
