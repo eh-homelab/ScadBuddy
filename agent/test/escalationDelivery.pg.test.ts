@@ -242,13 +242,14 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     let release!: (err: Error) => void
     const stuck = new Promise<never>((_, reject) => (release = reject))
     const hanging = new Escalations({ sql: db.sql, durable: () => undefined, send: async () => stuck, claimHoldMs: 200 })
-    const running = hanging.deliver().catch(() => undefined)
+    // A slow start, not a crash: the tick ends without a failure to report.
+    const running = hanging.deliver()
     // Another replica skips the held row at first, and takes it once the hold ends.
     expect(await escalations.deliver()).toBe(0)
     await vi.waitFor(async () => expect(await escalations.deliver()).toBe(1), { timeout: 5000, interval: 100 })
     expect(await hop(id)).toMatchObject({ hop: 'parent', delivered: true })
+    expect(await running).toBe(0)
     release(new Error('gone'))
-    await running
   })
 
   it("a busy session's backlog does not keep another session's call out of the batch", async () => {
@@ -271,6 +272,24 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     } finally {
       stop()
     }
+  })
+
+  it("runs whose calls were all delivered already do not keep a newer run's call out of the batch", async () => {
+    const waiting = [{ call_id: 'c1', kind: 'approval', fn: 'queue_print', hop: 'parent', hop_until: new Date(Date.now() + 600_000).toISOString(), hops: [] }]
+    await db.sql`
+      INSERT INTO workflow_definitions (id, name, version, script, created_by)
+      VALUES ('d1', 'swap', 1, 'x', '{"kind": "browser"}') ON CONFLICT DO NOTHING`
+    for (let i = 0; i < 200; i++) {
+      const old = randomUUID()
+      await db.sql`
+        INSERT INTO workflow_runs (id, definition_id, version, name, status, workflow_id, workflow_run_id, started_by, waiting_on, updated_at)
+        VALUES (${old}, 'd1', 1, 'swap', 'waiting', ${`flow-${old}`}, 'wr1',
+                ${db.sql.json({ kind: 'agent', principal: TOKEN, session: parent })}, ${db.sql.json(waiting as never)}, now() - interval '1 hour')`
+      await db.sql`INSERT INTO ai_escalation_deliveries (request_id, session_id) VALUES (${flowRequestId(old, 'wr1', 'c1')}, ${parent}::uuid)`
+    }
+    const newer = await flowRun()
+    expect(await escalations.deliver()).toBe(1)
+    expect(sent[0]!.text).toContain(newer)
   })
 
   it("forgets a run's own call's delivery once the call no longer waits at the starter session", async () => {

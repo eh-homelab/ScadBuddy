@@ -189,6 +189,7 @@ function defaults(): FlowRun[] {
           hops: [
             { hop: 'parent', action: 'parked', actor: 'flow', at: at(2), reason: 'no rule admits it' },
             { hop: 'parent', action: 'narrow', actor: 'session:sess-escalated', at: at(3), reason: 'no rule admits it' },
+            { hop: 'person', action: 'pass_up', actor: 'system', at: at(3) },
           ],
         },
       ],

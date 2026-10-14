@@ -99,7 +99,9 @@ type Entry = {
 async function withinHold(started: Promise<void>, ms: number): Promise<void> {
   let timer: NodeJS.Timeout | undefined
   const late = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`the delivery turn did not start within ${ms} ms`)), ms)
+    // A slow start, not a crash: `unavailable`, so the tick leaves the calls for the next
+    // one rather than report a sweep failure.
+    timer = setTimeout(() => reject(new SessionError('unavailable', `the delivery turn did not start within ${ms} ms`)), ms)
   })
   started.catch(() => {})
   try {
@@ -289,8 +291,16 @@ export class Escalations {
     let rows: { id: string; workflow_run_id: string; started_by: { session?: unknown; principal?: unknown }; waiting_on: { call_id: string; kind: string; fn: string; hop?: string | null; hop_until?: string | null; reason?: string | null }[] }[]
     try {
       rows = await this.#deps.sql`
-        SELECT id, workflow_run_id, started_by, waiting_on FROM workflow_runs
+        SELECT id, workflow_run_id, started_by, waiting_on FROM workflow_runs r
         WHERE status = 'waiting' AND waiting_on @> '[{"hop": "parent"}]'::jsonb
+          -- Before the limit: runs whose calls were all delivered already, still at hop
+          -- parent, never keep a newer run's calls out of the 200.
+          AND EXISTS (
+            SELECT 1 FROM jsonb_array_elements(r.waiting_on) w
+            WHERE w->>'hop' = 'parent' AND w->>'kind' = 'approval'
+              AND NOT EXISTS (
+                SELECT 1 FROM ai_escalation_deliveries d
+                WHERE d.request_id = 'flow:' || r.id || ':' || r.workflow_run_id || ':' || (w->>'call_id')))
         ORDER BY updated_at LIMIT 200`
     } catch (err) {
       // A deployment without flows has no `workflow_runs`: nothing of its own waits.

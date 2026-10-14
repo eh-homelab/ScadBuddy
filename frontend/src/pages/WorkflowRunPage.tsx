@@ -225,7 +225,7 @@ function PendingCard({ entry, runId, respond }: CardProps) {
       ) : (
         <div className="flex flex-col gap-2">
           <Escalation entry={entry} />
-          {entry.proposed && <Proposal runId={runId} callId={entry.call_id} busy={busy} act={act} />}
+          {entry.proposed && <Proposal runId={runId} callId={entry.call_id} reason={text} busy={busy} act={act} />}
           <input
             aria-label="Reason (optional)"
             value={text}
@@ -275,7 +275,7 @@ function Escalation({ entry }: { entry: FlowPending }) {
         <ol aria-label="Its way here" className="mt-1 list-inside list-decimal">
           {entry.hops.map((h, i) => (
             <li key={i}>
-              {h.action.replace('_', ' ')} by {hopActor(h.actor)} ({h.hop === 'parent' ? 'starting session' : 'you'})
+              {h.action.replaceAll('_', ' ')} by {hopActor(h.actor)} ({h.hop === 'parent' ? 'at the starting session' : 'at the person'})
             </li>
           ))}
         </ol>
@@ -287,6 +287,8 @@ function Escalation({ entry }: { entry: FlowPending }) {
 interface ProposalProps {
   runId: string
   callId: string
+  /** The card's "Reason (optional)": sent with this approval as with Approve and Deny. */
+  reason: string
   busy: boolean
   act: (send: () => Promise<unknown>) => Promise<void>
 }
@@ -297,7 +299,7 @@ interface ProposalProps {
  * refused. Both are the person's only (USER_ONLY): the assistant neither reads nor
  * approves it.
  */
-function Proposal({ runId, callId, busy, act }: ProposalProps) {
+function Proposal({ runId, callId, reason, busy, act }: ProposalProps) {
   const proposal = useAsync(() => api.getFlowProposal(runId, callId), [runId, callId])
   const data = proposal.data
   return (
@@ -330,7 +332,7 @@ function Proposal({ runId, callId, busy, act }: ProposalProps) {
             variant="primary"
             size="sm"
             disabled={busy}
-            onClick={() => void act(() => api.decideFlowRun(runId, callId, true, undefined, data.proposal_hash))}
+            onClick={() => void act(() => api.decideFlowRun(runId, callId, true, reason || undefined, data.proposal_hash))}
           >
             Approve as proposed
           </Button>

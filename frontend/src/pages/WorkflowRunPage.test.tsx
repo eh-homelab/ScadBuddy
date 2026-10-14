@@ -106,6 +106,33 @@ describe('WorkflowRunPage', () => {
     expect(flowRequests()[0]?.body).toEqual({ call_id: 'call-narrowed', approved: true, proposal: true, proposal_hash: 'f'.repeat(64) })
   })
 
+  it('sends the reason typed with an approval as proposed, as Approve and Deny do', async () => {
+    const { user } = render('run-escalated')
+    const card = await screen.findByRole('region', { name: 'Waiting for approval: arrange' })
+    await within(card).findByRole('table', { name: 'Proposed change' })
+    await user.type(within(card).getByLabelText('Reason (optional)'), 'smaller is fine')
+    await user.click(within(card).getByRole('button', { name: 'Approve as proposed' }))
+    await waitFor(() => expect(flowRequests()).toHaveLength(1))
+    expect(flowRequests()[0]?.body).toEqual({
+      call_id: 'call-narrowed',
+      approved: true,
+      reason: 'smaller is fine',
+      proposal: true,
+      proposal_hash: 'f'.repeat(64),
+    })
+  })
+
+  it("names each step's hop by where it was, whoever acted, its underscores spaced", async () => {
+    render('run-escalated')
+    const card = await screen.findByRole('region', { name: 'Waiting for approval: arrange' })
+    const steps = within(within(card).getByRole('list', { name: 'Its way here' })).getAllByRole('listitem')
+    expect(steps.map((s) => s.textContent)).toEqual([
+      expect.stringMatching(/^parked by .* \(at the starting session\)$/),
+      expect.stringMatching(/^narrow by .* \(at the starting session\)$/),
+      expect.stringMatching(/^pass up by .* \(at the person\)$/),
+    ])
+  })
+
   it('keeps the approval of every outward call for the person', async () => {
     render('run-print')
     const approve = await screen.findByRole('button', { name: 'Approve' })
