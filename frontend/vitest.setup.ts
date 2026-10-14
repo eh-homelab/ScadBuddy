@@ -41,6 +41,8 @@ afterEach(() => {
   resetDisplayUnit()
   resetRealtime()
   resetAiAvailability()
+  // #2372 — the assistant panel remembers per tab; every test starts in a fresh one.
+  window.sessionStorage.clear()
 })
 afterAll(() => server.close())
 
