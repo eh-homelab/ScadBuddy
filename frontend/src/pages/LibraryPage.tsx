@@ -341,7 +341,9 @@ export function LibraryPage() {
   // The params as they are when the effect runs, not as the render that keyed it saw: a
   // `?batch=` set in the same render as the tree loads is kept (#2757 review).
   const searchNow = useRef(search)
-  searchNow.current = search
+  useEffect(() => {
+    searchNow.current = search
+  })
   useEffect(() => {
     if (!projectFolder || !tree) return
     const next = new URLSearchParams(searchNow.current)
