@@ -40,7 +40,7 @@ github.com/microsoft/kiota-abstractions-go
 github.com/microsoft/kiota-abstractions-go/authentication
 github.com/microsoft/kiota-abstractions-go/serialization
 github.com/microsoft/kiota-abstractions-go/store
-# github.com/microsoft/kiota-http-go v1.5.6
+# github.com/microsoft/kiota-http-go v1.5.7
 ## explicit; go 1.25.0
 github.com/microsoft/kiota-http-go
 # github.com/microsoft/kiota-serialization-form-go v1.1.3
