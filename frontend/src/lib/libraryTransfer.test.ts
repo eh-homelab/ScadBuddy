@@ -22,6 +22,7 @@ const file = (id: number, folderId: number | null): LibraryEntry => ({
   has_thumbnail: false,
   is_external: false,
   print_count: 0,
+  sliced: false,
 })
 
 describe('projectLosses', () => {

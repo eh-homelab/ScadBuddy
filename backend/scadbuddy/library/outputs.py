@@ -89,7 +89,8 @@ class PlateSend(BaseModel):
 
     plate_id: int
     queue_item_id: int
-    slice_job_id: int
+    #: ``None`` for a plate queued with no slice (#2671).
+    slice_job_id: int | None = None
 
 
 class BackfillState(BaseModel):
@@ -571,6 +572,8 @@ class OutputStore:
     def delete(self, output_id: str) -> None:
         directory = self._find_dir(output_id)
         shutil.rmtree(directory, ignore_errors=True)
+        # A long-lived process would otherwise keep every deleted id's entry (#2909).
+        self._dirs.pop(output_id, None)
         self.forget_plate_cover(directory.parent.name)
         self._changed(directory.parent.name)
 

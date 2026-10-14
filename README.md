@@ -405,11 +405,15 @@ Both call `deploy.reusable.yml`, which:
    file must have exactly one such image line and one of each annotation, before
    and after the rewrite, or the deploy stops. In the same PR it moves the
    dashboard's pin in `clusters/prod/scadbuddy/kustomization.yaml`, the line
-   `- https://github.com/eh-homelab/ScadBuddy//deploy/grafana?ref=<40-hex SHA>`, to
-   the same revision. That line is optional: an overlay that does not mention
+   `- https://github.com/eh-homelab/ScadBuddy//deploy/grafana?ref=<40-hex SHA>`,
+   optionally followed by exactly `&timeout=<n>s|m|h`, to the same revision,
+   keeping that suffix as it is. The suffix raises kustomize's 27s default git
+   timeout, which a checkout of this repo (with its LFS test fixtures) now
+   outlasts. That line is optional: an overlay that does not mention
    `eh-homelab/ScadBuddy//deploy/grafana` at all deploys the images alone with a
    notice; one that mentions it in any other form (a short SHA, a branch, a
-   comment, other casing or spacing) or twice stops the deploy;
+   comment, other casing or spacing, any other query parameter) or twice stops
+   the deploy;
 3. opens **one** PR, `deploy(scadbuddy): <version>`, on the fixed branch
    `deploy/scadbuddy`, and arms `gh pr merge --auto --squash`. A newer deploy
    closes an older open one and replaces the branch; this one job carries a

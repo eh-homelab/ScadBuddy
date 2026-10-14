@@ -129,8 +129,33 @@ describe('AnalyzerPanel · fixes', () => {
     await user.click(within(row).getByRole('button', { name: 'Preview fix: Record a timelapse' }))
     const preview = await within(row).findByTestId('fix-preview-timelapse-on')
     expect(await within(preview).findByTestId('change-timelapse')).toBeInTheDocument()
-    expect(within(preview).getByTestId('fix-no-store')).toBeInTheDocument()
+    // The report's own reason, not a generic sentence (#2927).
+    expect(within(preview).getByTestId('fix-no-store')).toHaveTextContent(
+      'Decisions need Postgres. This fix can be previewed but not applied.',
+    )
+    expect(within(preview).queryByTestId('fix-no-scope')).not.toBeInTheDocument()
     expect(within(preview).queryByLabelText('Accept for')).not.toBeInTheDocument()
+    expect(within(preview).getByRole('button', { name: 'Apply' })).toBeDisabled()
+  })
+
+  it('says no scope applies, not that decisions are not stored, when the store is up (#2927)', async () => {
+    setMockAnalyzerDiagnostics([verifiedFixDiagnostic])
+    server.use(
+      http.post('/api/v1/analyzers/run', async ({ request: sent }) => {
+        const body = (await sent.json()) as { request: AnalysisRequest }
+        return HttpResponse.json({
+          ...analysisReport(output, body.request, [verifiedFixDiagnostic]),
+          decisions_available: true,
+          scopes: [],
+        })
+      }),
+    )
+    const { user } = renderPanel()
+    const row = await screen.findByTestId('diagnostic-SB9901')
+    await user.click(within(row).getByRole('button', { name: 'Preview fix: Record a timelapse' }))
+    const preview = await within(row).findByTestId('fix-preview-timelapse-on')
+    expect(within(preview).getByTestId('fix-no-scope')).toHaveTextContent('No scope applies to this finding')
+    expect(within(preview).queryByTestId('fix-no-store')).not.toBeInTheDocument()
     expect(within(preview).getByRole('button', { name: 'Apply' })).toBeDisabled()
   })
 
@@ -163,6 +188,8 @@ describe('AnalyzerPanel · fixes', () => {
     await user.click(within(alert).getByRole('button', { name: 'Preview again' }))
     expect(await within(preview).findByTestId('change-timelapse')).toBeInTheDocument()
     expect(calls).toBe(2)
+    // The first attempt's error is gone beside the preview that worked (#2928).
+    expect(within(preview).queryByRole('alert')).not.toBeInTheDocument()
   })
 
   it('offers a finding about some slots no material scope to accept at', async () => {

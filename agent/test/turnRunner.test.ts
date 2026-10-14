@@ -4,7 +4,8 @@ import { ROOT_CONTEXT } from '@opentelemetry/api'
 import { createTurnSlot, slotHttpContext, type TurnContext } from '../src/sessions/turnSlot.js'
 import { type FingerprintParts, TurnRunner } from '../src/sessions/turnRunner.js'
 import { TurnTrace } from '../src/telemetry/turn.js'
-import { turnRunnerForTest, type TurnRunnerTestOptions } from './support/turnRunner.js'
+import { PgHttpBodies } from '../src/sessions/httpBodies.js'
+import { turnRunnerForTest, type TurnRunnerTestOptions, unusedSql } from './support/turnRunner.js'
 
 // TurnRunner (unified runtime plan, Task 1.2; spec 2026-10-13 §5.3): every
 // callback it assembles reads the current turn from the slot, so the options
@@ -91,7 +92,7 @@ describe('TurnRunner', () => {
 
   it("gives the http tool the slot's turn id and signal as each request reads them, and an aborted signal between turns", () => {
     const slot = createTurnSlot()
-    const context = slotHttpContext({ saveDir: '/tmp/http', secrets: () => [], actor: { kind: 'browser', id: 'browser', label: 'You' } }, slot)
+    const context = slotHttpContext({ saved: new PgHttpBodies(unusedSql, 'unused'), secrets: () => [], actor: { kind: 'browser', id: 'browser', label: 'You' } }, slot)
     expect(context.turnId).toBeUndefined()
     expect(context.signal?.aborted).toBe(true)
     expect((context.signal?.reason as Error).message).toBe('no turn is running')

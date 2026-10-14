@@ -171,10 +171,10 @@ def test_a_seek_past_the_end_comes_back_as_416_with_the_length(client: TestClien
 
 
 def test_no_route_serves_an_arbitrary_library_file(client: TestClient) -> None:
-    # Attachments (#309) come with their own check; until then the library is not
-    # reachable through the print proxy.
+    # An attachment's file (#309) is served only when it is recorded as one of the
+    # print's: an id that names no attachment of it reaches nothing in the library.
     configure(client)
-    assert client.get("/api/v1/prints/35/attachments/77").status_code == 404
+    assert client.get("/api/v1/prints/35/attachments/77/file").status_code == 404
 
 
 @respx.mock

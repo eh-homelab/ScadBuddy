@@ -5,7 +5,7 @@ import { assertHttpUrl, type Resolver } from '../http/egress.js'
 import { wrapUntrustedText } from '../safety/untrusted.js'
 import type { BuiltinResult } from './files.js'
 
-// Claude Code's WebFetch and WebSearch for a durable turn (#2393).
+// Claude Code's WebFetch and WebSearch for a durable turn (#2393); WebFetch for a classic turn too (#2684).
 //
 // WebFetch is Claude Code's, as its description says it, done here: the URL fetched as
 // given through http_request's exchange (every hop egress-checked and connected to the
@@ -13,8 +13,9 @@ import type { BuiltinResult } from './files.js'
 // turndown, then a small fast model answers `prompt` against it on the session's
 // credential (the caller's `ask`, a one-shot Claude Code query with no tools). Claude
 // Code upgrades http to https; here http stays, as http_request reaches http hosts by the
-// owner's decision (#827). A classic turn's WebFetch fetches inside Claude Code, without
-// the egress check (measured: a call to 127.0.0.1:9 there tried to connect).
+// owner's decision (#827). Claude Code's own fetches inside Claude Code, without the egress
+// check (measured: a call to 127.0.0.1:9 there tried to connect), so a classic turn is given
+// this one too, in its place (#2684, builtins/server.ts `classicBuiltinServer`).
 //
 // WebSearch is a model call with the API's web search tool, which Claude Code makes
 // itself; the caller's `search` runs Claude Code's own WebSearch in a one-shot query and
@@ -71,7 +72,6 @@ async function page(url: URL, ctx: WebContext): Promise<{ markdown: string; fina
       timeout_ms: FETCH_TIMEOUT_MS,
     },
     {
-      saveDir: '',
       secrets: ctx.secrets,
       audit: ctx.audit,
       actor: ctx.actor,

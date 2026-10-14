@@ -17,6 +17,7 @@ import {
   useAttention,
   useAttentionTitle,
   WORKING_LABEL,
+  RunsWaitingContext,
 } from '../agent/attention'
 import { useAiAvailability } from '../agent/chat/availability'
 import {
@@ -35,6 +36,7 @@ import { LiveUpdatesIndicator } from './LiveUpdatesIndicator'
 import { ActivityBell } from './activity/ActivityBell'
 import { Toasts } from './ui/Toasts'
 import { Button } from './ui/Button'
+import { Spinner } from './ui/Spinner'
 import { useLoadBambuddyLinks } from '../lib/bambuddyLinks'
 import { useLoadDisplayUnit } from '../lib/units'
 import { leaveFullscreen } from '../lib/useFullscreen'
@@ -228,6 +230,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
 
   return (
     <AssistantOpenerContext.Provider value={opener}>
+      <RunsWaitingContext.Provider value={attention.counts?.runs ?? null}>
       <ModalCompanionContext.Provider value={shown && mounted && open ? panelElement : null}>
         <div className="flex h-full min-h-0 flex-col bg-bg text-ink">
           <header
@@ -345,7 +348,10 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
                 resetKey={location.pathname}
                 fallback={() => <PageFailed />}
               >
-                <Outlet />
+                {/* #2356 — a page's own chunk loading. */}
+                <Suspense fallback={<PageLoading />}>
+                  <Outlet />
+                </Suspense>
               </ErrorBoundary>
             </main>
             <Toasts />
@@ -376,7 +382,16 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
           </div>
         </div>
       </ModalCompanionContext.Provider>
+      </RunsWaitingContext.Provider>
     </AssistantOpenerContext.Provider>
+  )
+}
+
+function PageLoading() {
+  return (
+    <p role="status" className="flex h-full items-center justify-center gap-2 text-[13px] text-muted">
+      <Spinner /> Loading
+    </p>
   )
 }
 

@@ -246,6 +246,14 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   delete_flow: () => [],
   // A run's grant (#2481) is the run's: its page shows who revoked it, and when.
   revoke_flow_grant: () => [],
+  // A flow's triggers (#2484) are the flow's: its page lists them, with who made each.
+  create_flow_trigger: () => [],
+  update_flow_trigger: () => [],
+  pause_flow_trigger: () => [],
+  resume_flow_trigger: () => [],
+  delete_flow_trigger: () => [],
+  attach_flow_trigger_grant: () => [],
+  revoke_flow_trigger_grant: () => [],
   // A starting session's answer to its run's call (#2482) is recorded on the call's hops.
   escalation_respond: () => [],
   // Models.

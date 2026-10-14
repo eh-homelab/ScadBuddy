@@ -1,5 +1,6 @@
+import type { nestedQueries } from '../builtins/nested.js'
+import type { BackgroundTasks } from '../background/service.js'
 import { randomUUID } from 'node:crypto'
-import path from 'node:path'
 import {
   forkSession as sdkForkSession,
   type McpSdkServerConfigWithInstance,
@@ -56,6 +57,7 @@ import {
   type SessionStatus,
 } from './protocol.js'
 import { SessionBlobs, sentImageBlobs, type StoredBlob } from './blobs.js'
+import { PgHttpBodies } from './httpBodies.js'
 import { SessionFiles } from '../workspace/store.js'
 import { SessionEdits } from './edits.js'
 import { blobNames, durableReplies, entriesThrough, forkHistory, transcriptCut } from './forkPoint.js'
@@ -71,6 +73,7 @@ import { PendingProjection } from '../gate/projection.js'
 import { Escalations } from '../flows/escalations.js'
 import { type AssembledTurn, TurnAssemblyError, TurnRunner } from './turnRunner.js'
 import { createTurnSlot } from './turnSlot.js'
+import { FlowQueue } from '../flows/queue.js'
 
 // The session manager (#300, spec §6): durable, shared sessions that a human
 // in the browser, an external agent over /mcp, or an internal flow can start,
@@ -693,7 +696,15 @@ export type SessionManagerDeps = {
    * `settings`) when omitted.
    */
   workspace?: SessionFiles
+  /**
+   * A session's background tasks (src/background/): a classic turn whose allowed packages
+   * name CronCreate and the rest gets the session's in place of Claude Code's own, which
+   * end with the turn. Without it those are Claude Code's.
+   */
+  background?: { tasks: BackgroundTasks; tz: string }
   run?: QueryRunner
+  /** The session WebFetch's own model calls (builtins/nested.ts); a test's stand-in. */
+  nestedQueries?: typeof nestedQueries
   /** Per-token approval grants (spec §6); nobody but the browser user may approve without one. */
   approvalGrants?: GrantCheck
   /**
@@ -928,6 +939,8 @@ export class SessionManager {
   readonly projection: PendingProjection
   /** A flow run's calls waiting at the session that started it (#2482, flows/escalations.ts). */
   readonly escalations: Escalations
+  /** A flow run's one queue (#2482, spec 2026-10-11 §4.5). */
+  readonly queue: FlowQueue
   /** Renaming a session and marking it done (#795, edits.ts). */
   readonly edits: SessionEdits
   /**
@@ -985,6 +998,7 @@ export class SessionManager {
       ...(deps.settings ? { settings: deps.settings } : {}),
     })
     this.projection = new PendingProjection(deps.sql)
+    this.queue = new FlowQueue(deps.sql)
     this.escalations = new Escalations({
       sql: deps.sql,
       durable: () => this.durable,
@@ -999,6 +1013,7 @@ export class SessionManager {
       get: (id, principal) => this.get(id, principal),
       ...(deps.audit ? { audit: deps.audit } : {}),
       endDurable: (id) => this.endDurable(id),
+      endBackground: (id, why) => this.deps.background?.tasks.endSession(id, why) ?? Promise.resolve(0),
     })
     this.runner = new TurnRunner({ ...deps, store: this.store, events: this.events, files: this.files })
     this.run = deps.run ?? runHarness
@@ -1049,7 +1064,7 @@ export class SessionManager {
   /** `id` is the saved response's id as `savedBody` checked it: a UUID, safe in a header or a path. */
   async httpBody(id: string, saved: string, principal: Owner): Promise<{ id: string; meta: SavedMeta; bytes: Buffer }> {
     await this.get(id, principal)
-    const body = await savedBody(path.join(sessionWorkDir(this.deps.paths, id), 'http'), saved)
+    const body = await savedBody(new PgHttpBodies(this.deps.sql, id), saved)
     if (!body) throw new SessionError('not_found', `no saved response ${saved} in session ${id}`)
     return { id: saved, ...body }
   }
@@ -1586,6 +1601,8 @@ export class SessionManager {
       // Claude Code fires after the result (a late Stop retain) still reaches
       // this turn, as the closures it replaced did.
       const slot = createTurnSlot()
+      // What the session's own WebFetch model calls cost this turn (classicBuiltinServer, through the slot).
+      const nested = { usd: 0 }
       try {
         turn = await this.runner.assemble(session, principal, slot)
         secrets = turn.secrets
@@ -1631,6 +1648,7 @@ export class SessionManager {
           ...(auditor ? { auditor } : {}),
           trace: traced,
           http: { turnId, signal: controller.signal },
+          nested,
           ...(memory ? { memory } : {}),
           signalInterrupt: () => controller.abort(new Error('the turn was interrupted')),
         })
@@ -1709,8 +1727,9 @@ export class SessionManager {
         failure,
         secrets,
         // Only a turn that did not end on its own can be cut off mid-request;
-        // one that did has every request priced in its result.
-        stopped !== undefined || !result ? unpriced.usd() : 0,
+        // one that did has every request priced in its result. WebFetch's own
+        // model calls are in no result, so they are added the same way.
+        (stopped !== undefined || !result ? unpriced.usd() : 0) + nested.usd,
       )
       return outcome
     } catch (err) {
@@ -1736,7 +1755,10 @@ export class SessionManager {
     refused: Refused | undefined,
     failure: string | undefined,
     secrets: readonly string[],
-    /** What the request the turn was cut off in used, which no result prices (#991, unpricedSpend.ts). */
+    /**
+     * What the turn spent that no result prices: the request it was cut off in (#991,
+     * unpricedSpend.ts), and its WebFetch's own model calls, in every outcome (#2684).
+     */
     cutUsd: number,
   ): Promise<TurnOutcome> {
     const id = session.id
@@ -1793,7 +1815,8 @@ export class SessionManager {
       tail.push(event({ type: 'error', sessionId: id, code: 'interrupted', message: interrupted ?? 'the turn was interrupted' }))
       outcome = { kind: 'interrupted' }
     } else if (result) {
-      costUsd = fromTotal(result.total_cost_usd)
+      // WebFetch's own model calls (the only spend in `cutUsd` of a turn that ended on its own) are in no result.
+      costUsd = fromTotal(result.total_cost_usd) + cutUsd
       if (refused) {
         // Claude Code reports a refused request as a `success` result with
         // `is_error` set, and its "API Error: …" text as a synthetic reply

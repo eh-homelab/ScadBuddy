@@ -37,7 +37,8 @@ logger = logging.getLogger(__name__)
 class QueueOutcome(BaseModel):
     """What the slice-and-queue route produced, in the shape the run route reports."""
 
-    slice_job_id: int
+    #: ``None`` for a plate queued with no slice (a sliced file, #2671).
+    slice_job_id: int | None = None
     sliced_library_file_id: int
     #: :attr:`SliceRequest.preset_key` of the slice, recorded with the sliced file (#316).
     preset_key: str | None = None

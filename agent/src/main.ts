@@ -14,6 +14,11 @@ import { loadConfig } from './config.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
 import { CredentialPool } from './harness/fallback.js'
 import { nestedQueries } from './builtins/nested.js'
+import { backgroundActivities, managerSender } from './background/activities.js'
+import { agentTimezone } from './background/schedule.js'
+import { BackgroundTasks } from './background/service.js'
+import { BackgroundTaskStore } from './background/store.js'
+import { temporalTaskRunner } from './background/temporal.js'
 import { connectDatabase } from './db.js'
 import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js'
 import { PgEventListener } from './events/pgListener.js'
@@ -286,6 +291,19 @@ const tokens =
 // consumer (below) wakes its followers for sessions other replicas write.
 const sessionEvents = database ? new SessionEventPublisher(database.sql) : undefined
 
+// A session's background tasks (CronCreate, ScheduleWakeup, TaskStop), in either mode:
+// each a `BackgroundTask` workflow on agent-tools that sends its prompt when due. Its
+// payloads are task ids only, so its client has no codec.
+const backgroundTasks =
+  config.temporalAddress && database
+    ? new BackgroundTasks({
+        store: new BackgroundTaskStore(database.sql),
+        runner: temporalTaskRunner(
+          new Client({ connection: Connection.lazy({ address: config.temporalAddress }), namespace: config.temporalNamespace }),
+          TASK_QUEUE,
+        ),
+      })
+    : undefined
 // Sessions (#300) and their approvals (#258): started from the assistant
 // panel's socket (routes/chat.ts), the session routes (routes/sessions.ts)
 // and the `sessions_*` tools (tools/sessions.ts).
@@ -335,6 +353,8 @@ const sessions =
         httpRequest: {},
         // The workspace http_request's save_to_workspace writes, and a fork copies (#2329).
         ...(workspace ? { workspace } : {}),
+        // Claude Code's CronCreate and the rest, kept past the turn (src/background/).
+        ...(backgroundTasks ? { background: { tasks: backgroundTasks, tz: agentTimezone() } } : {}),
         // Every usable credential in priority order, with fallback; disables,
         // cooldowns, recoveries and fallbacks are audited (#1093).
         credentials: new CredentialPool({ repo: credentials, kek, audit }),
@@ -469,7 +489,7 @@ const turnToolDeps = temporal
         ...(settings ? { settings } : {}),
         credentialSecrets: durableCredentialSecrets,
         // This pod's own disk, as a classic turn's: the calls are pinned here (hostQueue).
-        httpRequest: { saveRoot: path.join(paths.stateDir, DURABLE_TURNS_DIR), audit, ...(workspace ? { files: workspace } : {}) },
+        httpRequest: { saveRoot: path.join(paths.stateDir, DURABLE_TURNS_DIR), sql: temporal.sql, audit, ...(workspace ? { files: workspace } : {}) },
         // Shared with agent-durable on the payload volume, which its runner loads them from.
         ...(pluginPackages
           ? {
@@ -487,6 +507,7 @@ const turnToolDeps = temporal
               builtins: {
                 files: workspace,
                 audit,
+                ...(backgroundTasks ? { background: { tasks: backgroundTasks, tz: agentTimezone() } } : {}),
                 nested: (context: { session: string; flow?: string }) =>
                   nestedQueries({
                     paths,
@@ -565,6 +586,9 @@ const temporalWorker =
           // A flow's agent(...) and ask_session(...) (#1057, 6g): beside the tools, never one.
           ...flowSessionActivities({ sql: temporal.sql, flows: new PgFlowRuns(temporal.sql) }),
           ...operationActivities(commandKinds, operationStore),
+          ...(backgroundTasks && sessions
+            ? backgroundActivities({ store: backgroundTasks.store, send: managerSender(sessions), tz: agentTimezone() })
+            : {}),
         },
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
         // Bundled by `pnpm build` (scripts/bundle-workflows.mjs).
@@ -656,6 +680,8 @@ const app = createApp({
   ...(attachments ? { attachments } : {}),
   // The panel's Files (#2329, routes/sessionFiles.ts).
   ...(workspace ? { workspace } : {}),
+  // The panel's background tasks (routes/backgroundTasks.ts).
+  ...(backgroundTasks ? { backgroundTasks } : {}),
   ...(audit ? { audit } : {}),
   upgradeWebSocket,
   tabs,
