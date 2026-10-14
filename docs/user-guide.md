@@ -386,7 +386,7 @@ placement, and only its settings state the choices. A file nothing can be stated
 (a 3MF from another slicer) is sliced as it is, taken as Standard flow.
 
 A folder linked to a Bambuddy project is marked "project" in the folder tree, and is
-that project's file list (#2724): it says which project it is, and **Select all** ticks
+that project's file list (#2724): it says which project it is, and **Select all in folder** ticks
 every listed printable file (sliced ones too, under **Advanced**) for **Print N files**.
 `/library?project=<id>` opens a project's folder directly.
 

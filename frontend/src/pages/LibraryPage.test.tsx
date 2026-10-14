@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, delay, http } from 'msw'
 import { useLocation, useNavigate } from 'react-router'
 import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
@@ -195,6 +195,18 @@ describe('LibraryPage', () => {
     expect(screen.getByTestId('library-select-all')).toHaveTextContent('Select all in folder (0)')
   })
 
+  it('adds each file once, however fast Select all in folder is pressed (#2757 review)', async () => {
+    renderPage(<LibraryPage />, { route: '/library?project=1' })
+    await screen.findByTestId('library-file-140')
+    const button = screen.getByTestId('library-select-all')
+    // Both presses before a render: the second sees the first one's files as unticked.
+    act(() => {
+      button.click()
+      button.click()
+    })
+    expect(await screen.findByTestId('library-print-selected')).toHaveTextContent('Print 2 files')
+  })
+
   it('opens a project on its linked folder, and says when it has none (#2724)', async () => {
     const batch = await api.createPrintBatch([{ library_file_id: 140, filename: 'keychain-reagan.3mf', sliced: false }])
     const { user } = renderPage(<><LibraryPage /><Where /></>, { route: `/library?project=1&batch=${batch.id}` })
@@ -224,7 +236,7 @@ describe('LibraryPage', () => {
     expect(line).not.toHaveTextContent('Select all')
     await user.click(screen.getByTestId('library-project-folder-14'))
     await screen.findByTestId('library-file-140')
-    expect(screen.getByTestId('library-project')).toHaveTextContent('Select all, then Print')
+    expect(screen.getByTestId('library-project')).toHaveTextContent('Select all in folder, then Print')
   })
 
   it('says a project with no linked folder has no files to list, until dismissed (#2724)', async () => {

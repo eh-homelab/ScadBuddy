@@ -334,12 +334,17 @@ export function LibraryPage() {
     card.scrollIntoView?.({ block: 'center' })
   }, [fileParam, listing])
   // #2724 — `?project=` opens the folder linked to that project: its file list. Bambuddy
-  // may link several; the first in the tree's order opens, and the page names the rest.
+  // may link several; the first the tree lists opens, whatever order that is, and the
+  // page names the rest.
   const projectFolder = projectParam === null ? undefined : tree?.find((folder) => folder.project_id === projectParam)
   const projectMissing = projectParam !== null && tree !== null && projectFolder === undefined
+  // The params as they are when the effect runs, not as the render that keyed it saw: a
+  // `?batch=` set in the same render as the tree loads is kept (#2757 review).
+  const searchNow = useRef(search)
+  searchNow.current = search
   useEffect(() => {
     if (!projectFolder || !tree) return
-    const next = new URLSearchParams(search)
+    const next = new URLSearchParams(searchNow.current)
     next.delete('project')
     const rest = next.toString()
     navigate({ pathname: libraryPath(tree, projectFolder.id), search: rest ? `?${rest}` : '' }, { replace: true })
@@ -454,7 +459,7 @@ export function LibraryPage() {
               variant="ghost"
               data-testid="library-select-all"
               disabled={unpicked.length === 0}
-              onClick={() => setPicked((now) => [...now, ...unpicked])}
+              onClick={() => setPicked((now) => [...now, ...unpicked.filter((file) => !now.some((p) => p.id === file.id))])}
             >
               {/* What it adds: this folder's unticked files, whatever is ticked elsewhere. */}
               Select all in folder ({unpicked.length})
@@ -495,7 +500,7 @@ export function LibraryPage() {
             <p className="text-[13px] text-muted" data-testid="library-project">
               {`Project ${currentFolder.project_name ?? currentFolder.project_id}: this folder is its file list. `}
               {/* Not in an empty folder, where Select all is disabled (#3112). */}
-              {listedPrintable.length > 0 && 'Select all, then Print, to print them in one batch.'}
+              {listedPrintable.length > 0 && 'Select all in folder, then Print, to print them in one batch.'}
               {otherProjectFolders.length > 0 && (
                 <>
                   {' Also linked to it: '}
