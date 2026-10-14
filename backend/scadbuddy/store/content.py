@@ -367,8 +367,10 @@ class ContentStore:
                         "could not keep a blob", extra={"sha256": ref.sha256}, exc_info=True
                     )
         finally:
+            # Not awaited: a consumer gone is a cancelled scope, where an await raises
+            # again before the partial is removed (as in `_kept_as_sent`).
             try:
-                await asyncio.to_thread(fill_cm.__exit__, None, None, None)
+                fill_cm.__exit__(None, None, None)
             except OSError:
                 logger.warning(
                     "could not close a blob's fill", extra={"sha256": ref.sha256}, exc_info=True

@@ -620,7 +620,10 @@ async def get_library_file(
                         # The bytes are whole here; a resumed download is a ranged ask,
                         # which Bambuddy answers.
                         "accept-ranges": "bytes",
-                        # The hash names these bytes, so it is their validator.
+                        # The hash names these bytes, so it is their validator. A miss
+                        # keeps Bambuddy's own instead, on purpose: a resume is a ranged
+                        # ask Bambuddy answers, and only its validator can match there,
+                        # so a resume of a hit restarts whole rather than risk mixed bytes.
                         "etag": f'"{sha}"',
                     },
                 )
@@ -704,8 +707,12 @@ async def _kept_as_sent(
                 try:
                     await asyncio.to_thread(fill.write, data)
                 except (TooLargeError, OSError):
-                    await asyncio.to_thread(fill_cm.__exit__, None, None, None)
+                    # Cleared first and closed here, not awaited: a cancel inside an
+                    # awaited close left `fill` set, and the `finally` closed it again
+                    # while the thread was still in it.
                     fill = None
+                    with contextlib.suppress(OSError):
+                        fill_cm.__exit__(None, None, None)
             yield chunk
         if fill is not None:
             try:

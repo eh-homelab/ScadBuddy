@@ -13,7 +13,7 @@ import zipfile
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import anyio
 import httpx
@@ -40,7 +40,7 @@ from scadbuddy.render.bambu3mf import (
     write_bambu_3mf,
 )
 from scadbuddy.render.split import ColourPart
-from scadbuddy.store.download_cache import DownloadCache
+from scadbuddy.store.download_cache import DownloadCache, TooLargeError
 from tests.api.test_print_filaments import queue_route, slice_kept, slice_routes
 from tests.api.test_print_progress import watched as watched  # the fixture, shared
 from tests.api.test_print_run_choices import body, follow_run, run_routes
@@ -2007,6 +2007,46 @@ async def test_a_streamed_file_sent_as_memoryviews_is_kept_whole(tmp_path: Path)
 
     assert b"".join(sent) == content
     assert downloads.path(sha).read_bytes() == content
+
+
+async def test_a_fill_given_up_is_closed_once_even_when_the_send_is_cancelled() -> None:
+    """#2821 review: the fill was closed in a thread after a chunk past the limit, and
+    `fill` was still set while that ran; a cancel then made the `finally` close it again
+    with the thread still inside it. It is cleared first and closed once."""
+    exits: list[float] = []
+
+    class TooFull:
+        def write(self, chunk: bytes) -> int:
+            raise TooLargeError
+
+    class SlowClose:
+        def __enter__(self) -> TooFull:
+            return TooFull()
+
+        def __exit__(self, *_: object) -> None:
+            exits.append(time.monotonic())
+            time.sleep(0.3)
+
+    class Downloads:
+        def fill(self, sha256: str) -> SlowClose:
+            return SlowClose()
+
+    async def chunks() -> AsyncIterator[bytes]:
+        yield b"too much"
+        await anyio.sleep(10)
+
+    async def send() -> None:
+        sent = _kept_as_sent(cast(DownloadCache, Downloads()), "0" * 64, chunks())
+        async with aclosing(sent):
+            async for _ in sent:
+                pass
+
+    async with anyio.create_task_group() as group:
+        group.start_soon(send)
+        await anyio.sleep(0.1)
+        group.cancel_scope.cancel()
+
+    assert len(exits) == 1
 
 
 async def test_a_browser_gone_midway_leaves_no_partial_behind(tmp_path: Path) -> None:

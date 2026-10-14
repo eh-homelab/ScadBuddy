@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import errno
 import hashlib
 import os
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterator
+from contextlib import aclosing
 from pathlib import Path
 
+import anyio
 import pytest
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
@@ -429,6 +432,37 @@ async def test_a_read_stopped_early_keeps_nothing(tmp_path: Path, pool: Pool) ->
     chunks = store.get(ref)
     await anext(chunks)
     await chunks.aclose()
+    assert list((tmp_path / "shared").iterdir()) == []
+
+
+@pytest.mark.requires_postgres
+async def test_a_read_cancelled_midway_leaves_no_partial(
+    tmp_path: Path, pool: Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A consumer gone is a cancelled scope, where every await raises again (#2821
+    review): the fill is closed without one, so its partial is gone when the read is,
+    not left to a close still running in a thread (or to the hour-old prune)."""
+    plain = ContentStore(LocalContentBackend(tmp_path / "remote"), BlobIndex(pool))
+    ref = await plain.put("piece", os.urandom(3 << 20), name="p", scope=SCOPE)
+    store, _ = _process(tmp_path / "remote", tmp_path / "shared", pool)
+    downloads = store.downloads
+    assert downloads is not None
+    real_fill = downloads.fill
+
+    @contextlib.contextmanager
+    def slow_to_close(sha256: str) -> Iterator[Fill]:
+        with real_fill(sha256) as fill:
+            try:
+                yield fill
+            finally:
+                time.sleep(0.3)  # a slow volume's close
+
+    monkeypatch.setattr(downloads, "fill", slow_to_close)
+    with anyio.CancelScope() as scope:
+        async with aclosing(store.get(ref)) as chunks:
+            async for _ in chunks:
+                scope.cancel()
+                break
     assert list((tmp_path / "shared").iterdir()) == []
 
 
