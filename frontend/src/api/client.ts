@@ -1843,6 +1843,9 @@ export const api = {
   /** #2672 — a batch print as it was left, to resume it. */
   getPrintBatch: (batchId: string) => request<PrintBatch>(`/print/batches/${seg(batchId)}`),
 
+  /** #2718 review — batches kept with a file still being checked, to resume one. */
+  listPendingPrintBatches: () => request<PrintBatch[]>('/print/batches'),
+
   /** #2672 — the step in view: a file's position, or the file count for the review. */
   putPrintBatchStep: (batchId: string, step: number) =>
     request<PrintBatch>(`/print/batches/${seg(batchId)}/step`, {

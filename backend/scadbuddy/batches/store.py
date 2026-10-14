@@ -122,8 +122,16 @@ class PrintBatchStore:
     async def create(self, files: list[NewBatchFile]) -> PrintBatch:
         return await asyncio.to_thread(self._create, files)
 
-    async def get(self, batch_id: str) -> PrintBatch | None:
-        return await asyncio.to_thread(self._get, batch_id)
+    async def get(self, batch_id: str, *, touch: bool = False) -> PrintBatch | None:
+        """The batch; with ``touch``, a read that counts as using it, so a batch kept
+        open on its review is not pruned as untouched (#2718 review)."""
+        return await asyncio.to_thread(self._get, batch_id, touch)
+
+    async def with_pending(self) -> list[PrintBatch]:
+        """Every open batch with a file still being checked (``pending``), newest first:
+        one closed then is kept so Queue all can follow that run, and this is how it is
+        found again (#2718 review)."""
+        return await asyncio.to_thread(self._with_pending)
 
     async def set_step(self, batch_id: str, step: int) -> PrintBatch | None:
         return await asyncio.to_thread(self._set_step, batch_id, step)
@@ -150,8 +158,11 @@ class PrintBatchStore:
             self._record_outcome, batch_id, position, outcome, if_unchanged, reopen
         )
 
-    async def mark_queued(self, batch_id: str) -> None:
-        await asyncio.to_thread(self._mark_queued, batch_id)
+    async def mark_queued(self, batch_id: str) -> bool:
+        """Queued, only if every file kept has a started run as this write lands: a
+        failed run that reopened the batch since the caller looked keeps it open
+        (#2718 review)."""
+        return await asyncio.to_thread(self._mark_queued, batch_id)
 
     async def prune(self, older_than: timedelta) -> int:
         """Forgets every batch nobody has touched for ``older_than``: one closed without
@@ -186,12 +197,26 @@ class PrintBatchStore:
         assert found is not None
         return found
 
-    def _get(self, batch_id: str) -> PrintBatch | None:
+    def _with_pending(self) -> list[PrintBatch]:
         with self._pool.connection() as conn:
-            batch = conn.execute(
-                "SELECT id, status, step, created_at FROM print_batches WHERE id = %s",
-                (batch_id,),
-            ).fetchone()
+            ids = conn.execute(
+                "SELECT b.id FROM print_batches b WHERE b.status = 'open' AND EXISTS ("
+                "SELECT 1 FROM print_batch_items i WHERE i.batch_id = b.id"
+                " AND NOT i.removed AND i.outcome->>'status' = 'pending')"
+                " ORDER BY b.created_at DESC"
+            ).fetchall()
+        batches = [self._get(row["id"]) for row in ids]
+        return [batch for batch in batches if batch is not None]
+
+    def _get(self, batch_id: str, touch: bool = False) -> PrintBatch | None:
+        with self._pool.connection() as conn:
+            read = (
+                "UPDATE print_batches SET updated_at = now() WHERE id = %s"
+                " RETURNING id, status, step, created_at"
+                if touch
+                else "SELECT id, status, step, created_at FROM print_batches WHERE id = %s"
+            )
+            batch = conn.execute(read, (batch_id,)).fetchone()
             if batch is None:
                 return None
             rows = conn.execute(
@@ -278,11 +303,18 @@ class PrintBatchStore:
             )
         return updated == 1
 
-    def _mark_queued(self, batch_id: str) -> None:
+    def _mark_queued(self, batch_id: str) -> bool:
         with self._pool.connection() as conn:
-            conn.execute(
-                "UPDATE print_batches SET status = 'queued', updated_at = now() WHERE id = %s",
-                (batch_id,),
+            return (
+                conn.execute(
+                    "UPDATE print_batches SET status = 'queued', updated_at = now()"
+                    " WHERE id = %s AND status = 'open' AND NOT EXISTS ("
+                    "SELECT 1 FROM print_batch_items WHERE batch_id = %s"
+                    " AND NOT (skipped OR removed)"
+                    " AND (outcome IS NULL OR outcome->>'status' IS DISTINCT FROM 'started'))",
+                    (batch_id, batch_id),
+                ).rowcount
+                == 1
             )
 
     def _delete(self, batch_id: str) -> bool:

@@ -27,6 +27,7 @@ from scadbuddy.api.deps import (
     DownloadsDep,
     OutputsDep,
     PathsDep,
+    PrintCommands,
     PrintLinksDep,
     PrintProgressDep,
     PrintRunsDep,
@@ -893,6 +894,33 @@ async def post_library_run(
     run's ``subject`` is ``library:<file id>``, and so is its ``output_id``, which older
     clients read. The file's filament slots go with the run, read from the file as
     ``/choices`` read them (#2550)."""
+    return await start_library_run(
+        file_id,
+        body,
+        runs=runs,
+        activity=activity,
+        store=store,
+        paths=paths,
+        budget=budget,
+        response=response,
+    )
+
+
+async def start_library_run(
+    file_id: int,
+    body: PrintRunRequest,
+    *,
+    runs: PrintCommands,
+    activity: ActivityComponent,
+    store: SettingsStore,
+    paths: DataPaths,
+    budget: ReadBudget,
+    response: Response | None = None,
+) -> PrintRun:
+    """A library file's run, as ``POST /print/library/{file_id}/run`` starts it: the route
+    and a batch's Queue all both start one here, so neither depends on the other's
+    signature (#2718 review). ``response`` takes the route's status code; a caller with
+    no response of its own reads the run's ``status`` instead."""
 
     async def prepare(source: SourceSpec) -> SourceSpec:
         filaments = await _run_filaments(store, paths, budget, file_id, downloads)
@@ -900,7 +928,7 @@ async def post_library_run(
 
     return await accept_run(
         runs,
-        response,
+        response if response is not None else Response(),
         subject=PrintSubject.library(file_id),
         slug=library_slug(PrintSubject.library(file_id)),
         request=body,

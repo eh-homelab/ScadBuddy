@@ -295,6 +295,7 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   ...(
     [
       'POST /api/v1/print/batches',
+      'GET /api/v1/print/batches',
       'GET /api/v1/print/batches/{batch_id}',
       'PUT /api/v1/print/batches/{batch_id}/step',
       'PUT /api/v1/print/batches/{batch_id}/items/{position}',

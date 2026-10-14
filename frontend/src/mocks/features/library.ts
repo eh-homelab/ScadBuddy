@@ -465,6 +465,14 @@ function batchHandlers() {
       batches.set(batch.id, batch)
       return HttpResponse.json(batch, { status: 201 })
     }),
+    http.get(`${base}/print/batches`, () =>
+      HttpResponse.json(
+        [...batches.values()].filter(
+          (batch) =>
+            batch.status === 'open' && batch.items.some((item) => !item.removed && item.outcome?.status === 'pending'),
+        ),
+      ),
+    ),
     http.get(`${base}/print/batches/:id`, ({ params }) => {
       const batch = found(params['id'])
       return batch ? HttpResponse.json(batch) : missing()

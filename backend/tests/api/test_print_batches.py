@@ -18,6 +18,7 @@ from scadbuddy.api.operations import STILL_ACCEPTING_PROBLEM
 from scadbuddy.api.print_batches import batch_request_id
 from scadbuddy.api.printing import STILL_CHECKING_DETAIL
 from scadbuddy.bambuddy.print_run import PrintRunRequest
+from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.batches.component import PRINT_BATCHES
 from scadbuddy.batches.store import BatchChoice, BatchItem, BatchOutcome
 from scadbuddy.core.problems import ApiError
@@ -226,13 +227,13 @@ def test_queue_all_reckons_each_start_at_the_slowest_so_far(
     monkeypatch.setattr(print_batches, "time", type("Clock", (), {"monotonic": lambda: clock[0]}))
     monkeypatch.setattr(print_batches, "ACCEPT_BUDGET", 10.0)
     monkeypatch.setattr(print_batches, "QUEUE_BUDGET_S", budget)
-    real = library_print.post_library_run
+    real = library_print.start_library_run
 
-    async def timed(*args: Any) -> Any:
+    async def timed(*args: Any, **kwargs: Any) -> Any:
         clock[0] += took
-        return await real(*args)
+        return await real(*args, **kwargs)
 
-    monkeypatch.setattr(print_batches, "post_library_run", timed)
+    monkeypatch.setattr(print_batches, "start_library_run", timed)
     configure(client)
     for file_id in (104, 105, 106):
         sliced_file(file_id)
@@ -307,16 +308,16 @@ def test_still_checking_is_pending_and_queue_all_follows_the_same_run(
     queued = queue_route()
     batch = new_batch(client, 104)
     choose(client, batch["id"], 0, request=SLICED_RUN)
-    real = library_print.post_library_run
+    real = library_print.start_library_run
     sent: list[str | None] = []
 
-    async def still_checking_once(file_id: int, request: PrintRunRequest, *rest: Any) -> Any:
+    async def still_checking_once(file_id: int, request: PrintRunRequest, **rest: Any) -> Any:
         sent.append(request.request_id)
         if len(sent) == 1:
             raise ApiError(503, STILL_CHECKING_DETAIL, type_=STILL_ACCEPTING_PROBLEM)
-        return await real(file_id, request, *rest)
+        return await real(file_id, request, **rest)
 
-    monkeypatch.setattr(print_batches, "post_library_run", still_checking_once)
+    monkeypatch.setattr(print_batches, "start_library_run", still_checking_once)
 
     first = client.post(f"{BATCHES}/{batch['id']}/queue").json()
 
@@ -341,15 +342,17 @@ def test_still_checking_is_pending_and_queue_all_follows_the_same_run(
         (ApiError(500, "Temporal refused.", may_have_started=True), "pending"),
         (ApiError(500, "Temporal refused.", may_have_started=False), "refused"),
         (ApiError(422, "No such plate."), "refused"),
+        # Not an answer at all: pending, so the rest of the batch still goes (#2718 review).
+        (RuntimeError("the run store went away"), "pending"),
     ],
 )
 async def test_only_an_answer_that_is_not_a_refusal_is_pending(
-    monkeypatch: pytest.MonkeyPatch, error: ApiError, outcome: str
+    monkeypatch: pytest.MonkeyPatch, error: Exception, outcome: str
 ) -> None:
-    async def answers(*_: Any) -> Any:
+    async def answers(*_: Any, **__: Any) -> Any:
         raise error
 
-    monkeypatch.setattr(print_batches, "post_library_run", answers)
+    monkeypatch.setattr(print_batches, "start_library_run", answers)
     item = BatchItem(
         position=0,
         library_file_id=104,
@@ -454,14 +457,14 @@ def test_a_run_that_failed_after_the_202_can_be_edited_and_sent_again_as_a_new_r
     queued = queue_route()
     batch = new_batch(client, 104, 105)
     choose(client, batch["id"], 0, request=SLICED_RUN)
-    real = library_print.post_library_run
+    real = library_print.start_library_run
     sent: list[str | None] = []
 
-    async def recorded(file_id: int, request: PrintRunRequest, *rest: Any) -> Any:
+    async def recorded(file_id: int, request: PrintRunRequest, **rest: Any) -> Any:
         sent.append(request.request_id)
-        return await real(file_id, request, *rest)
+        return await real(file_id, request, **rest)
 
-    monkeypatch.setattr(print_batches, "post_library_run", recorded)
+    monkeypatch.setattr(print_batches, "start_library_run", recorded)
     first = client.post(f"{BATCHES}/{batch['id']}/queue").json()
     run_id = first["items"][0]["outcome"]["run_id"]
     follow_run(client, run_id)
@@ -546,6 +549,98 @@ async def test_queue_all_counts_as_touching_the_batch(client: TestClient) -> Non
     await store.record_outcome(batch["id"], 0, BatchOutcome(status="unchosen"))
 
     assert await store.prune(BATCH_TTL) == 0
+
+
+async def test_reading_a_batch_counts_as_touching_it(client: TestClient) -> None:
+    """#2718 review: a batch someone keeps reopening on its review, changing nothing,
+    was pruned as untouched."""
+    batch = new_batch(client, 104)
+    store = _state(client).components.get(PRINT_BATCHES)
+    with store._pool.connection() as conn:
+        conn.execute(
+            "UPDATE print_batches SET updated_at = now() - %s WHERE id = %s",
+            (BATCH_TTL + timedelta(hours=1), batch["id"]),
+        )
+
+    assert client.get(f"{BATCHES}/{batch['id']}").status_code == 200
+
+    assert await store.prune(BATCH_TTL) == 0
+
+
+async def test_a_batch_is_queued_only_while_every_kept_file_has_started(
+    client: TestClient,
+) -> None:
+    """#2718 review: Queue all checked the batch settled, then marked it queued. A failed
+    run reopening it in between was overwritten; the mark now checks as it lands."""
+    batch = new_batch(client, 104, 105)
+    store = _state(client).components.get(PRINT_BATCHES)
+    started = BatchOutcome(status="started", run_id="r1")
+    await store.record_outcome(batch["id"], 0, started)
+    await store.record_outcome(batch["id"], 1, BatchOutcome(status="failed", run_id="r2"))
+
+    assert not await store.mark_queued(batch["id"])
+    assert (await store.get(batch["id"])).status == "open"  # type: ignore[union-attr]
+
+    await store.record_outcome(batch["id"], 1, started.model_copy(update={"run_id": "r3"}))
+    assert await store.mark_queued(batch["id"])
+    assert (await store.get(batch["id"])).status == "queued"  # type: ignore[union-attr]
+
+
+async def test_a_batchs_started_runs_are_read_in_one_go(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2718 review: one read for every started run, not one each per GET or save."""
+    batch = new_batch(client, 104, 105)
+    store = _state(client).components.get(PRINT_BATCHES)
+    for position in (0, 1):
+        await store.record_outcome(
+            batch["id"], position, BatchOutcome(status="started", run_id=f"run-{position}")
+        )
+    asked: list[list[str]] = []
+
+    async def get_many(self: Any, run_ids: list[str]) -> dict[str, Any]:
+        asked.append(run_ids)
+        return {}
+
+    async def get(self: Any, run_id: str) -> None:
+        raise AssertionError("read one at a time")
+
+    monkeypatch.setattr(PrintRunStore, "get_many", get_many)
+    monkeypatch.setattr(PrintRunStore, "get", get)
+
+    assert client.get(f"{BATCHES}/{batch['id']}").status_code == 200
+    assert asked == [["run-0", "run-1"]]
+
+
+async def test_a_batch_kept_for_a_pending_file_is_listed_to_resume(client: TestClient) -> None:
+    """#2718 review: Cancel keeps a batch with a file still being checked, so Queue all
+    can follow its run; this list is how the Library finds it again. A batch with
+    nothing pending, or queued, is not listed."""
+    kept = new_batch(client, 104, 105)
+    new_batch(client, 106)  # nothing sent yet
+    store = _state(client).components.get(PRINT_BATCHES)
+    await store.record_outcome(kept["id"], 1, BatchOutcome(status="pending"))
+
+    listed = client.get(BATCHES)
+
+    assert listed.status_code == 200, listed.text
+    assert [batch["id"] for batch in listed.json()] == [kept["id"]]
+
+
+def test_a_removed_files_step_cannot_be_shown(client: TestClient) -> None:
+    """#2718 review: the strip no longer shows a removed file, so its step is refused,
+    on its own or moved with a choice, and so is the step of the file a choice removes."""
+    batch = new_batch(client, 104, 105, 106)
+    choose(client, batch["id"], 1, removed=True)
+    step = f"{BATCHES}/{batch['id']}/step"
+
+    assert client.put(step, json={"step": 1}).status_code == 422
+    assert client.put(f"{BATCHES}/{batch['id']}/items/0", json={"step": 1}).status_code == 422
+    assert (
+        client.put(f"{BATCHES}/{batch['id']}/items/2", json={"removed": True, "step": 2})
+    ).status_code == 422
+    assert client.put(step, json={"step": 2}).status_code == 200
+    assert client.put(step, json={"step": 3}).status_code == 200  # the review
 
 
 @respx.mock

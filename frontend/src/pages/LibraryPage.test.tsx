@@ -126,6 +126,27 @@ describe('LibraryPage', () => {
     expect(screen.getByRole('button', { name: 'Arrange selected (1)' })).toBeEnabled()
   })
 
+  it('offers a batch kept for a file still being checked, to resume (#2718 review)', async () => {
+    const batch = await api.createPrintBatch([
+      { library_file_id: 89, filename: 'a.3mf', sliced: false },
+      { library_file_id: 91, filename: 'b.3mf', sliced: false },
+    ])
+    const pending = { status: 'pending', run_id: null, detail: null, attempt: 0 }
+    server.use(
+      http.get('/api/v1/print/batches', () =>
+        HttpResponse.json([{ ...batch, items: [batch.items[0], { ...batch.items[1], outcome: pending }] }]),
+      ),
+    )
+    const { user } = renderPage(<><LibraryPage /><Where /></>, { route: '/library' })
+
+    const offer = await screen.findByTestId(`library-kept-batch-${batch.id}`)
+    expect(offer).toHaveTextContent('A batch print of 2 files has a file still being checked.')
+    await user.click(within(offer).getByRole('button', { name: 'Resume it' }))
+
+    await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent(`?batch=${batch.id}`))
+    expect(screen.queryByTestId(`library-kept-batch-${batch.id}`)).toBeNull()
+  })
+
   it('prints the ticked files as one batch, and a reload resumes it (#2672)', async () => {
     const { user, unmount } = renderPage(<LibraryPage />, { route: '/library' })
     await screen.findByTestId('library-file-89')

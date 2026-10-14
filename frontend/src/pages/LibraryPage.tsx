@@ -9,6 +9,7 @@ import type {
   LibraryListing,
   LibraryMoveResult,
   LibraryRenameResult,
+  PrintBatch,
 } from '../api/types'
 import { ArrangeDialog } from '../components/ArrangeDialog'
 import { ArrangedNext } from '../components/ArrangedNext'
@@ -224,6 +225,27 @@ export function LibraryPage() {
     setSearch(next, { replace: true })
   }
 
+  // #2718 review — a batch closed while a file was still being checked is kept, so its
+  // Queue all follows that run rather than a new batch queueing the file twice. Read
+  // whenever no batch is open, so a batch just closed shows here.
+  const [kept, setKept] = useState<PrintBatch[]>([])
+  useEffect(() => {
+    if (batchParam !== null) return
+    let live = true
+    api
+      .listPendingPrintBatches()
+      .then((list) => live && setKept(list))
+      .catch(() => undefined)
+    return () => {
+      live = false
+    }
+  }, [batchParam])
+  function resumeBatch(batchId: string) {
+    const next = new URLSearchParams(search)
+    next.set('batch', batchId)
+    setSearch(next)
+  }
+
   async function deleteFiles(files: LibraryEntry[]) {
     const ids = files.map((file) => file.id)
     // Library actions are user actions in Tempo (#2292), each request its child.
@@ -434,6 +456,16 @@ export function LibraryPage() {
               {batchError}
             </p>
           )}
+          {batchParam === null &&
+            kept.map((batch) => (
+              <p key={batch.id} className="text-[13px] text-muted" data-testid={`library-kept-batch-${batch.id}`}>
+                {`A batch print of ${batch.items.filter((item) => !item.removed).length} files has a file still being checked. `}
+                <button type="button" className="text-accent underline" onClick={() => resumeBatch(batch.id)}>
+                  Resume it
+                </button>
+                {' to follow that file, rather than starting it again.'}
+              </p>
+            ))}
 
           {missing && (
             <p role="alert" className="text-[13px] text-warn">

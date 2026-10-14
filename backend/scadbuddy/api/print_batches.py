@@ -11,17 +11,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 from typing import Annotated
 
-from fastapi import APIRouter, Path, Query, Response, status
+from fastapi import APIRouter, Path, Query, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from scadbuddy.activity.component import ACTIVITY, ActivityComponent
 from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import PathsDep, PrintRunsDep, ReadBudgetDep, SettingsStoreDep
-from scadbuddy.api.library_print import post_library_run
+from scadbuddy.api.library_print import start_library_run
 from scadbuddy.api.operations import MAY_HAVE_STARTED
 from scadbuddy.api.printing import ACCEPT_BUDGET
 from scadbuddy.bambuddy.runs import PrintRunStore
@@ -38,6 +39,7 @@ from scadbuddy.core.problems import ApiError
 
 ActivityDep = Annotated[ActivityComponent, component_dep(ACTIVITY)]
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/print/batches", tags=["print"])
 
 #: Most files one batch takes: each is a step a person walks through.
@@ -55,8 +57,8 @@ class BatchStep(BaseModel):
     step: int = Field(ge=0)
 
 
-async def _batch(store: PrintBatchStore, batch_id: str) -> PrintBatch:
-    batch = await store.get(batch_id)
+async def _batch(store: PrintBatchStore, batch_id: str, *, touch: bool = False) -> PrintBatch:
+    batch = await store.get(batch_id, touch=touch)
     if batch is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, "There is no such batch print.")
     return batch
@@ -95,12 +97,21 @@ async def _read_runs(
     ``failed``: it can be edited and sent again, as a new run (#2718 review). A run that
     failed after it tried to queue (``may_have_queued``) stays started, as it may be on
     Bambuddy's queue, and sending it again could print it twice."""
+    started = {
+        item.position: item.outcome.run_id
+        for item in batch.items
+        if item.outcome is not None
+        and item.outcome.status == "started"
+        and item.outcome.run_id is not None
+    }
+    # One read for every started run, not one each (#2718 review).
+    read = await runs.get_many(list(started.values()))
     changed = False
     for item in batch.items:
         outcome = item.outcome
-        if outcome is None or outcome.status != "started" or outcome.run_id is None:
+        if item.position not in started or outcome is None:
             continue
-        run = await runs.get(outcome.run_id)
+        run = read.get(started[item.position])
         if run is None or run.status != "failed" or run.may_have_queued:
             continue
         failed = BatchOutcome(
@@ -115,6 +126,17 @@ async def _read_runs(
             batch.id, item.position, failed, if_unchanged=item, reopen=True
         )
     return await _batch(batches, batch.id) if changed else batch
+
+
+def _step(batch: PrintBatch, step: int, *, removing: int | None = None) -> None:
+    """A step the dialog can show: a kept file's, or the review's (the file count). A
+    removed file's step is not on the strip, so it is refused (#2718 review), and so is
+    the step of the file this write removes."""
+    if step == len(batch.items):
+        return
+    item = next((i for i in batch.items if i.position == step), None)
+    if item is None or item.removed or step == removing:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "The batch print has no such step.")
 
 
 def _open(batch: PrintBatch) -> None:
@@ -138,11 +160,24 @@ async def post_batch(body: NewBatch, batches: PrintBatchesDep) -> PrintBatch:
     return await batches.create(body.files)
 
 
+@router.get(
+    "",
+    response_model=list[PrintBatch],
+    summary="Batch prints kept with a file still being checked",
+)
+async def get_pending_batches(batches: PrintBatchesDep) -> list[PrintBatch]:
+    """Every open batch with a ``pending`` file, newest first. One closed while a file
+    was still being checked is kept, so its Queue all follows that run rather than a new
+    batch queueing the file twice; the Library offers these again (#2718 review)."""
+    return await batches.with_pending()
+
+
 @router.get("/{batch_id}", response_model=PrintBatch, summary="A batch print, to resume it")
 async def get_batch(
     batch_id: BatchIdPath, batches: PrintBatchesDep, runs: PrintRunsDep
 ) -> PrintBatch:
-    return await _read_runs(batches, runs.store, await _batch(batches, batch_id))
+    # A read keeps the batch from the prune, as a change does (#2718 review).
+    return await _read_runs(batches, runs.store, await _batch(batches, batch_id, touch=True))
 
 
 @router.put("/{batch_id}/step", response_model=PrintBatch, summary="The step a batch print shows")
@@ -153,8 +188,7 @@ async def put_batch_step(
     batch's step no longer moves, as its files no longer change."""
     batch = await _batch(batches, batch_id)
     _open(batch)
-    if body.step > len(batch.items):
-        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "The batch print has no such step.")
+    _step(batch, body.step)
     updated = await batches.set_step(batch_id, body.step)
     assert updated is not None
     return updated
@@ -178,8 +212,8 @@ async def put_batch_item(
     batch = await _read_runs(batches, runs.store, await _batch(batches, batch_id))
     _open(batch)
     _changeable(_item(batch, position))
-    if body.step is not None and body.step > len(batch.items):
-        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "The batch print has no such step.")
+    if body.step is not None:
+        _step(batch, body.step, removing=position if body.removed else None)
     updated = await batches.choose(batch_id, position, body)
     if updated is None:
         # Queue all marked it pending, or started it, since the read above.
@@ -283,6 +317,7 @@ async def post_batch_queue(
     done = await _batch(batches, batch_id)
     if not _settled(done):
         return done
+    # Queued only if no failed run has reopened it since that read (#2718 review).
     await batches.mark_queued(batch_id)
     return await _batch(batches, batch_id)
 
@@ -312,8 +347,14 @@ async def _queue_one(
     request_id = batch_request_id(batch_id, item, attempt)
     request = item.request.model_copy(update={"request_id": request_id})
     try:
-        run = await post_library_run(
-            item.library_file_id, request, Response(), runs, activity, store, paths, budget
+        run = await start_library_run(
+            item.library_file_id,
+            request,
+            runs=runs,
+            activity=activity,
+            store=store,
+            paths=paths,
+            budget=budget,
         )
     except ApiError as error:
         # Not a refusal: ScadBuddy still checking (503) or Temporal down, when the run
@@ -323,6 +364,16 @@ async def _queue_one(
         ):
             return BatchOutcome(status="pending", detail=error.detail, attempt=attempt)
         return BatchOutcome(status="refused", detail=error.detail, attempt=attempt)
+    except Exception:
+        # Not an answer at all: the run may have started, so the file is pending, and
+        # the same request_id sent again follows it. The rest of the batch still goes
+        # out, and the next Queue all retries this one (#2718 review).
+        logger.exception("batch %s file %s: starting its run failed", batch_id, item.position)
+        return BatchOutcome(
+            status="pending",
+            detail="ScadBuddy could not start this file's print. Queue all again to retry.",
+            attempt=attempt,
+        )
     return BatchOutcome(status="started", run_id=run.id, attempt=attempt)
 
 

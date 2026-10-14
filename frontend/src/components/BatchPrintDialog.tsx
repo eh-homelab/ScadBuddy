@@ -168,7 +168,7 @@ export function BatchPrintDialog({ batchId, onClose }: Props) {
   const after = (position: number) => items.find((item) => item.position > position)?.position ?? total
   const before = (position: number) => [...items].reverse().find((item) => item.position < position)?.position
 
-  const strip = (
+  const strip = (go: (step: number) => void) => (
     <nav aria-label="Batch files" className="mb-3 flex flex-wrap gap-1.5" data-testid="batch-strip">
       {items.map((item, at) => {
         const state = stateOf(item)
@@ -182,7 +182,7 @@ export function BatchPrintDialog({ batchId, onClose }: Props) {
             data-testid={`batch-step-${item.position}`}
             data-state={state}
             disabled={busy || batch.status === 'queued'}
-            onClick={() => goTo(item.position)}
+            onClick={() => go(item.position)}
             className={`max-w-48 truncate rounded border px-2 py-0.5 text-[12px] ${
               here ? 'border-accent text-ink' : 'border-line text-muted'
             } ${state === 'flagged' ? 'text-warn' : ''} ${state === 'skipped' ? 'line-through' : ''}`}
@@ -197,7 +197,7 @@ export function BatchPrintDialog({ batchId, onClose }: Props) {
         aria-current={reviewing ? 'step' : undefined}
         data-testid="batch-step-review"
         disabled={busy || batch.status === 'queued'}
-        onClick={() => goTo(total)}
+        onClick={() => go(total)}
         className={`rounded border px-2 py-0.5 text-[12px] ${reviewing ? 'border-accent text-ink' : 'border-line text-muted'}`}
       >
         Review
@@ -220,9 +220,9 @@ export function BatchPrintDialog({ batchId, onClose }: Props) {
         onRan={() => undefined}
         batch={{
           title: `File ${at + 1} of ${items.length} — ${current.filename}`,
-          strip: (
+          strip: (jump) => (
             <>
-              {strip}
+              {strip(jump)}
               {error && (
                 <p role="alert" className="mb-2 text-[13px] text-warn">
                   {error}
@@ -253,6 +253,13 @@ export function BatchPrintDialog({ batchId, onClose }: Props) {
                 step: after(current.position),
               }),
             ),
+          // Left through the strip: the choices go with the step, as with Next (#2718 review).
+          onJump: (step, choice) =>
+            choice
+              ? void save(() =>
+                  api.putPrintBatchItem(batchId, current.position, { ...choice, skipped: current.skipped, removed: false, step }),
+                )
+              : goTo(step),
           last: after(current.position) === total,
           busy,
         }}
@@ -326,7 +333,7 @@ export function BatchPrintDialog({ batchId, onClose }: Props) {
         )
       }
     >
-      {strip}
+      {strip(goTo)}
       {error && (
         <p role="alert" className="mb-2 text-[13px] text-warn">
           {error}

@@ -503,7 +503,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
 
     @activity.defn(name=SWEEPS[4])
     async def sweep_claims() -> None:
-        await _heartbeating(_sweep_claims_logged(state))
+        await _heartbeating(_sweep_claims_and_batches_logged(state))
 
     @activity.defn(name=BACKFILL_SWEEP)
     async def sweep_backfills() -> None:
@@ -589,7 +589,11 @@ async def _prune_jobs_logged(state: AppState) -> None:
         raise
 
 
-async def _sweep_claims_logged(state: AppState) -> None:
+async def _sweep_claims_and_batches_logged(state: AppState) -> None:
+    """The claims sweep, which also forgets batch prints left untouched for `BATCH_TTL`:
+    both are a delete on the prune cadence (`PRUNE_SWEEPS`), so the batch prune rides
+    this activity rather than adding a sweep a replica on an older build could not run
+    (#2718 review). Its failure is logged as the batch prune's own."""
     # Each its own: one failing never starves the other, as the flow sweeps.
     failed: Exception | None = None
     try:

@@ -426,6 +426,25 @@ describe('BatchPrintDialog (#2672)', () => {
     expect(sent).toEqual([null])
   })
 
+  it("saves a step's choices when it is left through the strip (#2718 review)", async () => {
+    const saved = watchItems()
+    const batch = await newBatch(89, 91)
+    const { user } = renderPage(<BatchPrintDialog batchId={batch.id} onClose={vi.fn()} />)
+    await step(1, 2)
+    await loaded()
+    await user.click(screen.getByTestId('change-slot-1'))
+    const spool = Number(slot1().other.value)
+    await user.click(slot1().other)
+
+    await user.click(screen.getByTestId('batch-step-1'))
+
+    await step(2, 2)
+    await waitFor(() => expect(saved).toHaveLength(1))
+    expect(saved[0]).toMatchObject({ step: 1, skipped: false })
+    expect(saved[0]?.request?.filament_plan?.slots).toContainEqual(expect.objectContaining({ slot_id: 1, spool_id: spool }))
+    expect(screen.getByTestId('batch-step-0')).toHaveAttribute('data-state', 'chosen')
+  })
+
   it('forgets the batch on Cancel', async () => {
     const onClose = vi.fn()
     const batch = await newBatch(89, 91)

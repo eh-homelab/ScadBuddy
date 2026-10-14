@@ -128,10 +128,19 @@ const NOZZLE_WARNINGS: ReadonlySet<FilamentWarning['kind']> = new Set(['not-inst
  * #2672 — the dialog as one step of a batch print: Back, Skip and Next in place of Print,
  * the step strip above the choices, and the choices it opens on.
  */
+/** What a batch step saves: its run request, what the review lists, what the check refuses. */
+export interface BatchStepChoice {
+  request: PrintRunRequest
+  summary: BatchSummary
+  problems: string[]
+}
+
 export interface BatchStep {
   /** "File 2 of 5 — name". */
   title: string
-  strip: ReactNode
+  /** The files strip, given `jump`: a strip button leaves through it, so the step's
+   * choices are saved as Next saves them (#2718 review). */
+  strip: (jump: (step: number) => void) => ReactNode
   /**
    * What the step opens on: this file's own saved choices, or the last file's carried
    * forward. A carried printer always applies; the spools, nozzles, quality and options
@@ -144,7 +153,9 @@ export interface BatchStep {
   seedSlots: string[]
   onBack: (() => void) | null
   onSkip: () => void
-  onNext: (choice: { request: PrintRunRequest; summary: BatchSummary; problems: string[] }) => void
+  onNext: (choice: BatchStepChoice) => void
+  /** A strip button: to `step`, with this step's choices when it has any to save. */
+  onJump: (step: number, choice: BatchStepChoice | null) => void
   /** The last file: Next goes to the review. */
   last: boolean
   /** A step's save in flight. */
@@ -832,9 +843,9 @@ export function PrintPicker({
     setPlate,
   ])
 
-  /** #2672 — Next: this step's run request, what the review lists, and what the check refuses. */
-  function nextStep() {
-    if (!batch || !printChoices) return
+  /** #2672 — this step's run request, what the review lists, and what the check refuses. */
+  function stepChoice(): BatchStepChoice | null {
+    if (!batch || !printChoices) return null
     const request = printRunBody({
       printerId,
       plan,
@@ -864,7 +875,12 @@ export function PrintPicker({
     }
     // A sliced file is never refused (#2671): what its check says is only ever a warning.
     const problems = check.current && !sliced ? (check.verdict?.errors ?? []) : []
-    batch.onNext({ request, summary, problems })
+    return { request, summary, problems }
+  }
+
+  function nextStep() {
+    const choice = stepChoice()
+    if (batch && choice) batch.onNext(choice)
   }
 
   function close() {
@@ -998,7 +1014,7 @@ export function PrintPicker({
         </p>
       ) : (
         <>
-          {batch?.strip}
+          {batch?.strip((step) => batch.onJump(step, stepChoice()))}
           {loading && !choices && (
             <p className="flex items-center gap-2 text-[13px] text-muted">
               <Spinner /> Reading the printer and the inventory
