@@ -8,6 +8,7 @@ import * as fixtures from '../mocks/fixtures'
 import { resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
+import { NARROW_QUERY } from '../lib/useMediaQuery'
 import { LibraryPage } from './LibraryPage'
 import type * as TraceAction from '../lib/traceAction'
 
@@ -387,7 +388,7 @@ describe('LibraryPage, item context (#975)', () => {
 
   it('on a phone, folds the folder tree behind a button naming the open folder (#2368)', async () => {
     vi.stubGlobal('matchMedia', (query: string) => ({
-      matches: query === '(max-width: 767.98px)',
+      matches: query === NARROW_QUERY,
       media: query,
       addEventListener: () => {},
       removeEventListener: () => {},
@@ -406,10 +407,17 @@ describe('LibraryPage, item context (#975)', () => {
       expect(toggle).toHaveAttribute('aria-controls', tree.parentElement?.id)
       await user.click(within(tree).getByRole('treeitem', { name: 'Top level' }))
 
-      // Choosing a folder folds the tree away again.
+      // Choosing a folder folds the tree away again, and focus goes back to the button
+      // rather than falling to the page (#3315).
       expect(screen.getByTestId('where')).toHaveTextContent(/^\/library$/)
       expect(screen.queryByRole('tree', { name: 'Library folders' })).toBeNull()
-      expect(await screen.findByRole('button', { name: /^Folder: Top level/ })).toHaveAttribute('aria-expanded', 'false')
+      const folded = await screen.findByRole('button', { name: /^Folder: Top level/ })
+      expect(folded).toHaveAttribute('aria-expanded', 'false')
+      expect(folded).toHaveFocus()
+      // What it controls is there while folded too, only hidden.
+      const controls = document.getElementById(folded.getAttribute('aria-controls') ?? '')
+      expect(controls).not.toBeNull()
+      expect(controls).not.toBeVisible()
     } finally {
       vi.unstubAllGlobals()
     }
