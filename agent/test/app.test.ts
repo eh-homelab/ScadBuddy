@@ -134,6 +134,7 @@ describe('/api/v1/ai/credentials', () => {
     const current = await app.request('/api/v1/ai/credentials/entries', { headers: UI })
     expect(current.status).toBe(200)
     expect(current.headers.get('deprecation')).toBeNull()
+    expect(current.headers.get('link')).toBeNull()
   })
 
   it('reads as unconfigured, and says whether saving is possible', async () => {

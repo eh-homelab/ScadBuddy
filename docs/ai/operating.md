@@ -366,13 +366,22 @@ The no-database `503` also carries
 `"code": "no_database"` (`NO_DATABASE_CODE`), which is what the Settings section hides on;
 the not-yet-migrated one has no `code`, and the section shows it with a Retry.
 
-Example, from a loopback shell on the pod (for instance through `kubectl port-forward`):
+Example, from a loopback shell on the pod (for instance through `kubectl port-forward`).
+It reads the new entry's `id` with `jq`; where the shell has no `jq`, read `id` from
+the `POST`'s JSON answer by hand. The `POST` adds a credential every time it runs, so
+running it again leaves a duplicate: to replace an existing key, `PUT` it to
+`/api/v1/ai/credentials/entries/{id}` instead, taking its `id` from
+`GET /api/v1/ai/credentials/entries`.
 
 ```bash
 id=$(curl -sS -X POST http://localhost:8081/api/v1/ai/credentials/entries \
   -H 'Origin: http://localhost:8081' -H 'Content-Type: application/json' \
   -d '{"kind":"anthropic_api_key","secret":"sk-ant-…"}' | jq -r .id)
 curl -sS -X POST "http://localhost:8081/api/v1/ai/credentials/entries/$id/test" -H 'Origin: http://localhost:8081'
+# Replacing that key later, rather than adding another:
+curl -sS -X PUT "http://localhost:8081/api/v1/ai/credentials/entries/$id" \
+  -H 'Origin: http://localhost:8081' -H 'Content-Type: application/json' \
+  -d '{"kind":"anthropic_api_key","secret":"sk-ant-…"}'
 ```
 
 This works because the loopback pair is always accepted from a loopback peer
