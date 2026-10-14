@@ -35,13 +35,17 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+
 from scadbuddy.core.paths import SOURCE_NAME
 from scadbuddy.library.libraries import ModelLibrary
 from scadbuddy.meshmodel.scene import (
     SCENE_NAME,
     Add,
     Joint,
+    Op,
     Scene,
+    SceneObject,
     load_scene,
     mesh_files,
     text_sha256,
@@ -51,9 +55,10 @@ from scadbuddy.render.jobs import UNCOLOURED_MATERIAL_INDEX
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.split import ColourPart, split_by_material
 
-#: Part of every key: bump it when what a geometry key promises changes, so no older
-#: row is read under the new meaning.
-GEOMETRY_VERSION = 2
+#: Part of every key: bump it when what a geometry key promises changes, or when what a
+#: row holds does (`RenderMainResult`, a piece's files), so no older row is read under
+#: the new meaning.
+GEOMETRY_VERSION = 3
 _HEX = re.compile(r"#[0-9A-Fa-f]{6}\b")
 
 
@@ -63,36 +68,54 @@ def mesh_scene(root: Path, file: str) -> Scene | None:
     scene_path = root / SCENE_NAME
     if file != SOURCE_NAME or not scene_path.is_file():
         return None
-    scene = load_scene(scene_path.read_text(encoding="utf-8"))
+    try:
+        scene = load_scene(scene_path.read_text(encoding="utf-8"))
+    except ValidationError:
+        return None  # Rendered from model.scad as it is; only its geometry is unshared.
     source = (root / SOURCE_NAME).read_text(encoding="utf-8")
     return scene if text_sha256(source) == scene.generated_sha256 else None
 
 
+def _default_colour(obj: SceneObject) -> str:
+    """What an op without a colour of its own prints in (`compile._apply`)."""
+    return next((p.colour for p in obj.parts if not p.negative), obj.parts[0].colour)
+
+
+def _printed(op: Op) -> bool:
+    """Whether ``op`` adds a colour's volume: a peg or an add (a socket is cut)."""
+    return isinstance(op, Add) or (isinstance(op, Joint) and op.role == "peg")
+
+
 def scene_classes(scene: Scene) -> list[str]:
     """Each distinct colour the scene prints, first seen first: every printed part's,
-    then every peg's and add's that names one."""
+    then every peg's and add's (its own, or its object's default)."""
     classes: list[str] = []
     for obj in scene.objects:
+        default = _default_colour(obj)
         found = [p.colour for p in obj.parts if not p.negative]
-        found += [op.colour for op in obj.ops if isinstance(op, Joint | Add) and op.colour]
+        found += [
+            op.colour or default for op in obj.ops if isinstance(op, Joint | Add) and _printed(op)
+        ]
         for colour in found:
             if colour not in classes:
                 classes.append(colour)
     return classes
 
 
-def _classed(item: Any, classes: Sequence[str]) -> Any:
-    """``item`` (a dumped scene) with every ``colour`` its class's index."""
-    if isinstance(item, dict):
-        return {
-            k: {"class": classes.index(v)}
-            if k == "colour" and v is not None
-            else _classed(v, classes)
-            for k, v in item.items()
-        }
-    if isinstance(item, list):
-        return [_classed(each, classes) for each in item]
-    return item
+def _classed(scene: Scene, classes: Sequence[str]) -> list[dict[str, Any]]:
+    """The scene's objects, dumped, with each printed colour its class's index and
+    every colour that prints nothing (a negative part's, a socket's) dropped."""
+    objects: list[dict[str, Any]] = scene.model_dump(mode="json")["objects"]
+    for obj, dumped in zip(scene.objects, objects, strict=True):
+        default = _default_colour(obj)
+        for part, entry in zip(obj.parts, dumped["parts"], strict=True):
+            entry["colour"] = None if part.negative else {"class": classes.index(part.colour)}
+        for op, entry in zip(obj.ops, dumped["ops"], strict=True):
+            if isinstance(op, Joint | Add):
+                entry["colour"] = (
+                    {"class": classes.index(op.colour or default)} if _printed(op) else None
+                )
+    return objects
 
 
 def _file_digests(root: Path, scene: Scene) -> dict[str, str]:
@@ -112,8 +135,7 @@ def geometry_key(
 ) -> str:
     """The key of the mesh model's geometry: the same for two scenes that differ only
     in which colours their colour classes are."""
-    classes = scene_classes(scene)
-    objects = _classed(scene.model_dump(mode="json")["objects"], classes)
+    objects = _classed(scene, scene_classes(scene))
     raw = json.dumps(
         [
             GEOMETRY_VERSION,

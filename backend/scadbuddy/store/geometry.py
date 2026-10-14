@@ -12,7 +12,7 @@ from psycopg_pool import ConnectionPool
 @dataclass(frozen=True)
 class GeometryRow:
     piece_key: str
-    #: What the piece's colour classes were rendered in (`colour_classes`).
+    #: What the piece's colour classes were rendered in (`scene_classes`).
     colours: list[str]
     #: The piece's `RenderMainResult`, as JSON.
     main: dict[str, Any]

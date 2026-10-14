@@ -19,6 +19,7 @@ from scadbuddy.meshmodel.scene import (
     SCENE_NAME,
     Add,
     Exposed,
+    Joint,
     Part,
     Scene,
     SceneObject,
@@ -109,6 +110,52 @@ def test_an_add_or_peg_colour_is_a_class_too(tmp_path: Path) -> None:
     ]
 
 
+def _with(scene: Scene, *parts: Part, ops: list[Any]) -> Scene:
+    obj = scene.objects[0]
+    return scene.model_copy(
+        update={"objects": [obj.model_copy(update={"parts": [*obj.parts, *parts], "ops": ops})]}
+    )
+
+
+def test_a_colour_that_prints_nothing_is_no_class_and_no_part_of_the_key(
+    tmp_path: Path,
+) -> None:
+    """A negative part's and a socket's colour fill no volume: a key, whatever they are."""
+    _write_model(tmp_path, _scene())
+    (tmp_path / "meshes" / "o1-p3.3mf").write_bytes(b"cutter")
+
+    def scene(cutter: str, socket: str) -> Scene:
+        return _with(
+            _scene(),
+            Part(id="p3", mesh="meshes/o1-p3.3mf", colour=cutter, negative=True),
+            ops=[
+                Joint(
+                    at=(0, 0, 0),
+                    axis=(0, 0, 1),
+                    diameter=4,
+                    depth=3,
+                    clearance=0.2,
+                    role="socket",
+                    colour=socket,
+                )
+            ],
+        )
+
+    first = scene("#123456", "#654321")
+    assert scene_classes(first) == ["#FF0000", "#00FF00"]
+    assert _key(tmp_path, first) == _key(tmp_path, scene("#ABCDEF", "#FEDCBA"))
+
+
+def test_an_op_without_a_colour_is_in_its_objects_default_class(tmp_path: Path) -> None:
+    """An uncoloured add prints in the object's first printed part's colour, so it is
+    the same geometry as one that names that colour."""
+    _write_model(tmp_path, _scene())
+    plain = _with(_scene(), ops=[Add(primitive="cube", size=(1, 1, 1))])
+    named = _with(_scene(), ops=[Add(primitive="cube", size=(1, 1, 1), colour="#FF0000")])
+    assert scene_classes(plain) == scene_classes(named) == ["#FF0000", "#00FF00"]
+    assert _key(tmp_path, plain) == _key(tmp_path, named)
+
+
 def test_a_geometry_change_is_another_geometry_key(tmp_path: Path) -> None:
     _write_model(tmp_path, _scene())
     base = _key(tmp_path, _scene())
@@ -132,6 +179,10 @@ def test_only_a_mesh_models_compiled_scene_has_a_scene(tmp_path: Path) -> None:
     # Edited by hand: no longer what the scene compiled.
     with (tmp_path / "model.scad").open("a", encoding="utf-8") as source:
         source.write("cube();\n")
+    assert mesh_scene(tmp_path, "model.scad") is None
+    # A scene that no longer loads: rendered from model.scad, its geometry unshared.
+    _write_model(tmp_path, _scene())
+    (tmp_path / SCENE_NAME).write_text("{}", encoding="utf-8")
     assert mesh_scene(tmp_path, "model.scad") is None
     # Ejected: the scene is gone.
     _write_model(tmp_path, _scene())
