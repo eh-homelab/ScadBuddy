@@ -525,6 +525,19 @@ def test_without_the_preference_an_operation_under_the_deadline_answers_its_body
     assert response.status_code == 200, response.text
 
 
+def test_with_the_preference_a_fast_operation_is_its_body_at_once(client: TestClient) -> None:
+    """Review #2836: the preference alone never turns an answer inside `FAST_ACCEPT` into
+    a 202: the route's own 200, and no `Preference-Applied`."""
+    response = client.post(
+        "/api/v1/test-op",
+        json={},
+        headers={"Idempotency-Key": uuid.uuid4().hex, "Prefer": "respond-async"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {"done": True, "n": 1}
+    assert "Preference-Applied" not in response.headers
+
+
 def test_following_an_operation_temporal_does_not_know_is_a_resend(client: TestClient) -> None:
     response = client.post(f"/api/v1/commands/op-test-{'0' * 64}/updates/{uuid.uuid4().hex}")
     assert response.status_code == 409, response.text
@@ -560,19 +573,23 @@ def test_a_followed_done_kind_still_running_is_its_operation_to_follow(
     assert answer.status_code == 202, answer.text
     running = answer.json()
     assert running["status"] == "running" and running["repeated"] is False
+    # The route's own header for it too (review #2836).
+    assert answer.headers["Activity-Location"] == operations_api.activity_location(running["id"])
     op = follow(client, running["id"], timeout=60)
     assert op["status"] == "succeeded" and op["result"] == {"done": True, "n": 1}
 
 
 @pytest.mark.usefixtures("short_waits")
-def test_a_key_the_follow_url_cannot_carry_keeps_the_resend(client: TestClient) -> None:
+@pytest.mark.parametrize("key", ["a/b", ".", ".."])
+def test_a_key_the_follow_url_cannot_carry_keeps_the_resend(client: TestClient, key: str) -> None:
     """Review #2836: a key with a `/` cannot be a path segment of the follow URL, so it
     is never offered the 202 (that was a 500 after the operation had started); it is
-    answered as without the preference."""
+    answered as without the preference. A dot-only key is collapsed out of the path as
+    a dot segment, so it is not offered one either."""
     response = client.post(
         "/api/v1/test-op?kind=test_unhurried",
         json={},
-        headers={"Idempotency-Key": "a/b", "Prefer": "respond-async"},
+        headers={"Idempotency-Key": key, "Prefer": "respond-async"},
     )
     assert response.status_code == 200, response.text
     assert response.json()["done"] is True

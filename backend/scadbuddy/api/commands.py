@@ -14,7 +14,7 @@ from scadbuddy.api.accepting import CommandAccepting, accepting, resend
 from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import PrintRunsDep, RenderDep
 from scadbuddy.api.jobs import RenderAccepted, submit_problems
-from scadbuddy.api.operations import follow_operation
+from scadbuddy.api.operations import ACTIVITY_LOCATION, activity_location, follow_operation
 from scadbuddy.api.printing import follow_run
 from scadbuddy.bambuddy.runs import PrintRun
 from scadbuddy.core.problems import ApiError
@@ -94,11 +94,17 @@ async def follow_command(
             return accepting(request, workflow_id, update_id)
         except CommandResendError:
             raise resend() from None
+        # The headers the route sets as it answers (its 202's Activity location), not
+        # the empty sub-response's own length (review #2836).
+        headers = {k: v for k, v in response.headers.items() if k != "content-length"}
         if isinstance(result, OperationAccepted):
+            headers[ACTIVITY_LOCATION.lower()] = activity_location(result.id)
             return JSONResponse(
-                result.model_dump(mode="json"), status_code=status.HTTP_202_ACCEPTED
+                result.model_dump(mode="json"),
+                status_code=status.HTTP_202_ACCEPTED,
+                headers=headers,
             )
-        return JSONResponse(result)
+        return JSONResponse(result, headers=headers)
     if workflow_id.startswith(PRINT_PREFIX):
         try:
             run = await follow_run(runs, workflow_id, update_id)

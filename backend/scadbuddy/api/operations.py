@@ -28,7 +28,12 @@ from temporalio.client import WorkflowExecutionStatus
 from temporalio.common import WorkflowIDReusePolicy
 from temporalio.service import RPCError, RPCStatusCode
 
-from scadbuddy.api.accepting import AcceptingAnswer, accepting, respond_async_request
+from scadbuddy.api.accepting import (
+    AcceptingAnswer,
+    CommandAccepting,
+    accepting,
+    respond_async_request,
+)
 from scadbuddy.api.deps import OperationIdPath
 from scadbuddy.core.authorship import current_author
 from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE, ApiError, Problem
@@ -510,7 +515,9 @@ def _outcome(answer: OperationAnswer, response: Response) -> dict[str, Any] | Op
 
 
 #: An `Idempotency-Key` the 202's follow URL can carry in its path.
-_URL_SAFE_KEY = re.compile(r"[A-Za-z0-9_.~-]+")
+#: Not `.` or `..`: a client or proxy collapses those out of a path as dot segments
+#: (review #2836).
+_URL_SAFE_KEY = re.compile(r"(?!\.{1,2}$)[A-Za-z0-9_.~-]+")
 
 #: An operation's execution id (`_run_operation`): its kind, then its 64-hex key.
 _OPERATION_ID = re.compile(r"op-.+-(?P<key>[0-9a-f]{64})")
@@ -556,7 +563,14 @@ def operation_answer[M: BaseModel](
 
 #: What a route that runs an operation documents beside its own answer.
 OPERATION_RESPONSES: dict[int | str, dict[str, Any]] = {
-    202: {"model": OperationAccepted, "description": "Still running: follow GET /operations/{id}"},
+    202: {
+        "model": OperationAccepted | CommandAccepting,
+        "description": (
+            "`OperationAccepted`: still running, follow GET /operations/{id}. With `Prefer:"
+            " respond-async`, a start not yet accepted is `CommandAccepting` instead"
+            " (`status: accepting`): follow its `follow_url` (POST) (review #2836)"
+        ),
+    },
     413: {
         "description": f"The request, less what goes by claim, is past {MAX_REQUEST_BYTES} "
         "bytes; nothing was started"
