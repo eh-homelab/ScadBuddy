@@ -21,7 +21,7 @@ import {
   objectNames,
 } from '../lib/arrange'
 import { shortId } from '../lib/format'
-import { traceAction } from '../lib/traceAction'
+import { traceAction, type Within } from '../lib/traceAction'
 import { AddFiles, AddFromModel } from './ArrangeSourcePicker'
 import { BackfillProgress, BackfillPrompt } from './BackfillPrompt'
 import { Button } from './ui/Button'
@@ -348,6 +348,23 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
     setObjects((known) => Object.fromEntries(Object.entries(known).filter(([, value]) => !('error' in value))))
   }
 
+  /**
+   * Re-render `stale` and take in what came back: a ready output stands in for its stale
+   * self and is no longer flagged. Shared by a row's Re-render and Arrange's (#3553).
+   */
+  async function rerenderAll(stale: Output[], signal: AbortSignal, within: Within) {
+    say(rerenderStage(stale.length))
+    const result = await backfillOutputs(stale.map(refOf), {
+      signal,
+      within,
+      onProgress: (ref, message) => setBackfill((shown) => ({ ...shown, [ref.id]: message })),
+    })
+    const { ready } = result
+    setRefreshed((known) => ({ ...known, ...Object.fromEntries(ready.map((o) => [o.id, o])) }))
+    setFlagged((ids) => ids.filter((id) => !ready.some((o) => o.id === id)))
+    return result
+  }
+
   /** #2285 — re-render one output from its row, without arranging yet. */
   async function rerender(output: Output) {
     setBusy(true)
@@ -357,17 +374,10 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
     const controller = new AbortController()
     running.current = controller
     try {
-      say(rerenderStage(1))
       // One action, as Arrange's re-renders are (#2292): its start is the action's child.
-      const { ready, failed } = await traceAction('rerender', { 'scadbuddy.output_id': output.id }, (within) =>
-        backfillOutputs([refOf(output)], {
-          signal: controller.signal,
-          within,
-          onProgress: (ref, message) => setBackfill((shown) => ({ ...shown, [ref.id]: message })),
-        }),
+      const { failed } = await traceAction('rerender', { 'scadbuddy.output_id': output.id }, (within) =>
+        rerenderAll([output], controller.signal, within),
       )
-      setRefreshed((known) => ({ ...known, ...Object.fromEntries(ready.map((o) => [o.id, o])) }))
-      setFlagged((ids) => ids.filter((id) => !ready.some((o) => o.id === id)))
       if (failed.length > 0) setFailures(backfillFailures(failed))
     } catch (cause) {
       if (controller.signal.aborted) return
@@ -408,14 +418,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
           let usable = outputs.filter((output) => !stale.includes(output))
           let skipped: string | undefined
           if (rerendering.length > 0) {
-            say(rerenderStage(rerendering.length))
-            const { ready, failed } = await backfillOutputs(rerendering.map(refOf), {
-              signal: controller.signal,
-              within,
-              onProgress: (output, message) => setBackfill((shown) => ({ ...shown, [output.id]: message })),
-            })
-            setRefreshed((known) => ({ ...known, ...Object.fromEntries(ready.map((o) => [o.id, o])) }))
-            setFlagged((ids) => ids.filter((id) => !ready.some((o) => o.id === id)))
+            const { ready, failed } = await rerenderAll(rerendering, controller.signal, within)
             const why = backfillFailures(failed)
             // Every output that can be arranged is, the ones that never needed a re-render too.
             if (ready.length === 0 && usable.length === 0 && fileRows.length === 0) {
@@ -578,7 +581,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
           {[
             ...rows.map(({ output, object, key }) => ({
               key,
-              label: `${namesOf(output).get(object.part)} — ${outputName(output)}`,
+              label: `${namesOf(output).get(object.part) ?? object.bom_piece ?? object.file} — ${outputName(output)}`,
               count: object.count,
             })),
             ...fileRows.map(({ file, object, key }) => ({
@@ -618,14 +621,14 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
                 <span className="min-w-0 flex-1">
                   {label} <span className="text-[12px] text-warn">needs a re-render</span>
                 </span>
-                <Button size="sm" aria-label={`Re-render ${label}`} disabled={busy} onClick={() => void rerender(output)}>
+                <Button size="sm" aria-label={`Re-render ${label}`} disabled={busy || asking} onClick={() => void rerender(output)}>
                   Re-render
                 </Button>
                 <Button
                   size="sm"
                   variant="ghost"
                   aria-label={`Remove ${label}`}
-                  disabled={busy}
+                  disabled={busy || asking}
                   onClick={() => setRemoved((now) => [...now, `output:${output.id}`])}
                 >
                   Remove

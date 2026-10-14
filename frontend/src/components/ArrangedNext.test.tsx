@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as embed from '../lib/embed'
@@ -54,6 +54,21 @@ describe('ArrangedNext (#2287)', () => {
     renderPage(<ArrangedNext output={output} sent={false} onPrint={vi.fn()} />)
     expect(await screen.findByText('Plates unavailable')).toBeInTheDocument()
     expect(screen.queryByRole('figure', { name: 'Plates' })).not.toBeInTheDocument()
+  })
+
+  it('shows a plate picture again for the next output after one failed (#3555)', async () => {
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () => HttpResponse.json([{ index: 1, has_thumbnail: true }])),
+    )
+    const other = { ...output, id: 'e'.repeat(32) }
+    const { rerender } = renderPage(<ArrangedNext output={output} sent={false} onPrint={vi.fn()} />)
+    fireEvent.error(await screen.findByRole('img', { name: 'Plate 1' }))
+    expect(screen.queryByRole('img', { name: 'Plate 1' })).not.toBeInTheDocument()
+    rerender(<ArrangedNext output={other} sent={false} onPrint={vi.fn()} />)
+    expect(await screen.findByRole('img', { name: 'Plate 1' })).toHaveAttribute(
+      'src',
+      `/api/v1/outputs/${other.id}/plates/1/thumbnail`,
+    )
   })
 
   it('shows the plates of the arranged result before its next step (#2282)', async () => {

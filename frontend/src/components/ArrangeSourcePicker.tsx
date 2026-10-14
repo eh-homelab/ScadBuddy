@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { api, ApiError } from '../api/client'
 import type { LibraryEntry, LibraryListing, ModelSummary, Output } from '../api/types'
 import { needsBackfill } from '../lib/arrange'
@@ -145,7 +145,9 @@ export function AddFromModel(props: Props<Output>) {
   const [search, setSearch] = useState('')
   const unit = useDisplayUnit()
   const wanted = search.trim().toLowerCase()
-  const shown = byName(models ?? []).filter(
+  // Sorted once per list, not on every keystroke in the search (#3556).
+  const sorted = useMemo(() => byName(models ?? []), [models])
+  const shown = sorted.filter(
     (model) =>
       !wanted ||
       // A model is found by its slug as well as its name: the slug is what a URL shows.

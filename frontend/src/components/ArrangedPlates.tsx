@@ -11,8 +11,15 @@ import { useAsync } from '../lib/useAsync'
  */
 export function ArrangedPlates({ outputId, size = 'md' }: { outputId: string; size?: 'sm' | 'md' }) {
   const read = useAsync(() => api.getOutputPlates(outputId), [outputId])
-  /** Plates whose picture failed to load: shown as the placeholder a plate with none gets. */
-  const [broken, setBroken] = useState<ReadonlySet<number>>(new Set())
+  /**
+   * Plates whose picture failed to load: shown as the placeholder a plate with none gets.
+   * Kept per output, so a component reused for another output starts clean (#3555).
+   */
+  const [failed, setFailed] = useState<{ outputId: string; plates: ReadonlySet<number> }>({
+    outputId,
+    plates: new Set(),
+  })
+  const broken = failed.outputId === outputId ? failed.plates : new Set<number>()
   if (read.error) return <p className="mt-1.5 text-[12px] text-faint">Plates unavailable</p>
   const plates = read.data ?? []
   if (plates.length === 0) return null
@@ -32,7 +39,12 @@ export function ArrangedPlates({ outputId, size = 'md' }: { outputId: string; si
                   src={api.outputPlateThumbnailUrl(outputId, plate.index)}
                   alt={label}
                   loading="lazy"
-                  onError={() => setBroken((was) => new Set(was).add(plate.index))}
+                  onError={() =>
+                    setFailed((was) => ({
+                      outputId,
+                      plates: new Set(was.outputId === outputId ? was.plates : []).add(plate.index),
+                    }))
+                  }
                   className={`${box} rounded-[4px] border border-line bg-surface-2 object-contain`}
                 />
               ) : (
