@@ -479,12 +479,14 @@ export function PrintPicker({
   // usePrintChoices' reset on the same `sourceKey` — except to the output a re-arrange
   // made of it, which keeps the dialog's settings.
   const { sourceKey: currentKey } = picker
+  const { reset: resetProfiles } = filamentProfiles
   useEffect(() => {
     if (carry.get()) return
     setOptions({})
     setPrintSequence(null)
     setSupports(null)
-  }, [currentKey, carry])
+    resetProfiles()
+  }, [currentKey, carry, resetProfiles])
 
   /** Re-arrange the output in view; `backfill` (confirmed by the user) re-renders it first. */
   async function rearrange(backfill: boolean) {
@@ -746,6 +748,7 @@ export function PrintPicker({
     setOptions({})
     setPrintSequence(null)
     setSupports(null)
+    filamentProfiles.reset()
     setRackPosition(null)
     // #1084: the algorithm chosen here, and a failed save of it, are this session's too.
     algorithmSession.current += 1

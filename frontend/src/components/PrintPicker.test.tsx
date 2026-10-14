@@ -1878,6 +1878,19 @@ describe('PrintPicker · Filament profiles (#717)', () => {
     expect(bodies[0]).not.toHaveProperty('filament_profiles')
   })
 
+  it('turns a profile switched off for one output back on for the next (#2804 review)', async () => {
+    const { user, rerender } = renderPicker()
+    await loaded()
+    await user.click(within(await screen.findByTestId('filament-profile-silk-pla')).getByRole('checkbox', { name: /Silk PLA/ }))
+    expect(within(screen.getByTestId('filament-profile-silk-pla')).getByRole('checkbox', { name: /Silk PLA/ })).not.toBeChecked()
+
+    const second = fixtures.outputs[1] as Output
+    rerender(<PrintPicker open source={{ kind: 'output', output: second }} onClose={vi.fn()} onRan={vi.fn()} />)
+    await loaded()
+    const step = await screen.findByTestId('filament-profile-silk-pla')
+    await waitFor(() => expect(within(step).getByRole('checkbox', { name: /Silk PLA/ })).toBeChecked())
+  })
+
   it("says why a profile can't apply, and leaves it off", async () => {
     setSilkPreview(silkPreview({ applicable: false, reason: "couldn't read the preset's outer wall speed (Bambuddy's slicer is not reachable)", changes: [] }))
     const { bodies } = watch('POST', '/run')

@@ -748,7 +748,9 @@ class SliceRequest(BambuddyModel):
         )
         if self.process_overrides:
             key += "/" + ",".join(
-                f"{k}={'|'.join(v) if isinstance(v, list) else v}"
+                # Each value as JSON, so a list and a string, or a value holding a
+                # separator, can never key the same slice (#2804, #3585 review).
+                f"{k}={json.dumps(v)}"
                 for k, v in sorted(self.process_overrides.items())
             )
         return key
