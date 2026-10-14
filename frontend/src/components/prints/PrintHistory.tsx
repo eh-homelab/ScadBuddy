@@ -1,4 +1,4 @@
-import { type Ref, type RefObject, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { type Ref, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { useLatest } from '../../lib/useLatest'
 import { api } from '../../api/client'
@@ -18,6 +18,7 @@ import { timeAgo } from '../../lib/format'
 import { libraryOptionsScope } from '../../lib/printSource'
 import { useAsync } from '../../lib/useAsync'
 import { usePrintProgress } from '../../lib/usePrintProgress'
+import { useSeen } from '../../lib/useSeen'
 import { MediaLightbox } from '../media/MediaLightbox'
 import type { Slide } from '../media/slides'
 import { Button } from '../ui/Button'
@@ -430,25 +431,6 @@ function OutputWaitingRow({ output }: { output: Output }) {
   return (
     <WaitingRow ref={row} name={output.name ?? output.id.slice(0, 8)} progress={progress} generated={output.created_at} />
   )
-}
-
-/** Whether the element has come into view (within a little of it), once and for good.
- * Without an IntersectionObserver every element counts as seen. */
-function useSeen(element: RefObject<Element | null>): boolean {
-  const [seen, setSeen] = useState(() => typeof IntersectionObserver === 'undefined')
-  useEffect(() => {
-    const target = element.current
-    if (seen || !target) return
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) setSeen(true)
-      },
-      { rootMargin: '200px' },
-    )
-    observer.observe(target)
-    return () => observer.disconnect()
-  }, [element, seen])
-  return seen
 }
 
 function WaitingRow({

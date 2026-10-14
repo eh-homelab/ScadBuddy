@@ -41,4 +41,16 @@ describe('ReadmeButton (#1074)', () => {
     await user.click(screen.getByRole('button', { name: 'README' }))
     expect(await screen.findByText('This template has no README.')).toBeInTheDocument()
   })
+
+  it('says why when the README cannot be read', async () => {
+    server.use(
+      http.get('/api/v1/models/:slug/readme', () =>
+        HttpResponse.json({ status: 500, title: 'Internal Server Error', detail: 'disk gone' }, { status: 500 }),
+      ),
+    )
+    const { user } = renderPage(<ReadmeButton slug="plain" />)
+
+    await user.click(screen.getByRole('button', { name: 'README' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not load the README: disk gone')
+  })
 })
