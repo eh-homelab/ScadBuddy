@@ -7,7 +7,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/hanwen/go-fuse/v2 v2.12.0
 	github.com/microsoft/kiota-abstractions-go v1.11.1
-	github.com/microsoft/kiota-http-go v1.5.6
+	github.com/microsoft/kiota-http-go v1.5.7
 	github.com/microsoft/kiota-serialization-json-go v1.1.4
 	go.opentelemetry.io/otel v1.46.0
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp v1.46.0
