@@ -597,8 +597,17 @@ def test_installing_a_font_publishes_font_installed(
 ) -> None:
     service = FakeBackedService(data_dir, client=FakeClient())
     app.dependency_overrides[get_fonts] = lambda: service
-    _ok(client.post("/api/v1/fonts/install", json={"family": "Pacifico"}, headers=press()))
+    # The install runs as an operation, which reads the state's, not the dependency
+    # (#1054): without this the real client downloaded Pacifico from GitHub (#3264).
+    getattr(app.state, STATE_ATTR).fonts = service
+    # No request leaves the test: respx refuses any httpx call it was not told about.
+    with respx.mock:
+        _ok(client.post("/api/v1/fonts/install", json={"family": "Pacifico"}, headers=press()))
     assert published(events, "font.installed") == [{"kind": "font.installed", "family": "Pacifico"}]
+    # The fake's bytes, not a real font's.
+    assert (service.family_dir("Pacifico") / "Pacifico-Regular.ttf").read_bytes() == (
+        b"\x00\x01\x00\x00"
+    )
 
 
 def test_a_broken_bus_never_fails_the_request(
