@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import cast
@@ -377,9 +378,55 @@ async def test_a_turn_tools_call_is_labelled_with_the_tier_the_listing_gave(
         "playwright__browser_navigate": "write",
         "other__unlisted": "outward",
     }
-    # Said, naming the tool and never the agent's value (#3144).
-    assert "other__unlisted" in caplog.text
-    assert "admin" not in caplog.text
+    # Said, naming the tool and never the agent's value (#3144). The record itself, so
+    # a warning that never reached caplog cannot pass (#3245).
+    [warned] = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert "other__unlisted" in warned.getMessage()
+    assert "admin" not in warned.getMessage()
+
+
+@pytest.mark.requires_postgres
+async def test_a_manifest_tier_that_is_not_a_tier_is_labelled_outward(
+    agent_db: Conn,
+    connect: object,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#3245: the manifest's own tiers were used as they were, so one that is not a tier
+    reached the transcript's label."""
+    monkeypatch.setattr(
+        tools,
+        "_MANIFEST",
+        (
+            *MANIFEST,
+            tools.ManifestEntry("odd_tool", "odd", {"type": "object"}, "<b>admin</b>", None),
+        ),
+    )
+    sid = await insert_session(agent_db)
+    stream = [
+        {"type": "prompt", "text": "go", "offset": 0},
+        {"type": "tool_call", "id": "a", "name": "odd_tool", "offset": 1},
+        {"type": "tool_call", "id": "b", "name": MANIFEST[0].name, "offset": 2},
+        {"type": "done", "result": "", "offset": 3},
+    ]
+
+    async def follow(*_: object, **__: object) -> AsyncIterator[dict[str, object]]:
+        for e in stream:
+            yield dict(e)
+
+    monkeypatch.setattr(events_module, "follow_agent", follow)
+    env = ActivityEnvironment(client=cast(Client, object()))
+    acts = SessionEvents(connect)  # type: ignore[arg-type]
+    with caplog.at_level(logging.WARNING):
+        await env.run(
+            acts.follow_session,
+            FollowArgs(session_id=sid, workflow_id=f"session-{sid}", prompted=True),
+        )
+    risks = {e["name"]: e["risk"] for e in await events(agent_db, sid) if e["type"] == "tool.call"}
+    assert risks == {"odd_tool": "outward", MANIFEST[0].name: MANIFEST[0].tier}
+    [warned] = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert "odd_tool" in warned.getMessage()
+    assert "admin" not in warned.getMessage()
 
 
 def test_risk_tiers_are_the_agents() -> None:
