@@ -806,9 +806,17 @@ _WRITTEN_VERTEX = re.compile(
     rb'<vertex x="([^"]{1,%d})" y="([^"]{1,%d})" z="([^"]{1,%d})"/>' % ((_MAX_WRITTEN_NUMBER,) * 3)
 )
 _ANY_VERTEX = re.compile(rb"<(?:[\w.-]+:)?vertex\b")
+#: How far into a ``<triangle>`` tag its paint code is looked for: the writer puts it after
+#: three vertex indices, well inside this.
+_MAX_TRIANGLE_LEAD = 256
 #: A triangle's paint code, as the parse reads it (a ``<triangle>``'s attribute), and
-#: the attribute anywhere: the two counted against each other.
-_PAINT_CODE = re.compile(rb"<triangle\b[^>]*?\s" + PAINT_ATTRIBUTE.encode() + rb'="([^"]*)"')
+#: the attribute anywhere: the two counted against each other. Both runs are bounded, so
+#: a file of unterminated tags or quotes costs a pass, not a pass per tag (quadratic: 200
+#: KB took 14 s); a code they miss leaves the counts unequal, and the file to the parse.
+_PAINT_CODE = re.compile(
+    rb"<triangle\b[^>]{0,%d}?\s%s=\"([^\"]{0,%d})\""
+    % (_MAX_TRIANGLE_LEAD, PAINT_ATTRIBUTE.encode(), MAX_CODE_DIGITS + 1)
+)
 _ANY_PAINT = re.compile(rb"\s" + PAINT_ATTRIBUTE.encode() + rb'="')
 #: The elements :func:`object_model` writes exactly one of; another count is the shape
 #: the parse refuses or reads otherwise (#2024), so it is left to the parse.

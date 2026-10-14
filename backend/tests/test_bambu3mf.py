@@ -4,6 +4,7 @@ import io
 import json
 import math
 import os
+import time
 import tracemalloc
 import zipfile
 from collections.abc import Callable
@@ -1691,6 +1692,36 @@ def test_a_long_coordinate_is_not_copied_into_every_row() -> None:
     finally:
         tracemalloc.stop()
     assert peak < 20 * 1024 * 1024
+
+
+@pytest.mark.parametrize(
+    "junk",
+    [b"<triangle ", b'<triangle paint_color="'],
+    ids=["unterminated tags", "unterminated codes"],
+)
+def test_reading_paint_codes_is_one_pass_over_a_crafted_file(junk: bytes) -> None:
+    """Security review of #3254: an unbounded run inside the paint pattern rescanned to
+    the end of the file from every ``<triangle``, so 200 KB of them took 14 s. Bounded,
+    the scan is linear, and a code it cannot find leaves the file to the parse."""
+    data = junk * 40_000
+    began = time.perf_counter()
+    for _ in bambu3mf._PAINT_CODE.finditer(data):
+        pass
+    assert time.perf_counter() - began < 2
+
+
+def test_a_paint_code_longer_than_the_bounded_read_is_left_to_the_parse() -> None:
+    from scadbuddy.render.paint import MAX_CODE_DIGITS
+
+    painted = (
+        b'\n     <triangle v1="0" v2="1" v3="2" paint_color="'
+        + b"4" * (MAX_CODE_DIGITS + 10)
+        + b'"/>'
+    )
+    assert (
+        bambu3mf._written_extents(_object_bytes(b'<vertex x="1" y="2" z="3"/>' * 3, painted))
+        is None
+    )
 
 
 def test_written_extents_are_read_a_batch_at_a_time() -> None:
