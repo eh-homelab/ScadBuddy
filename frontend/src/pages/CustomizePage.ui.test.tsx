@@ -798,9 +798,10 @@ describe('the page slot', () => {
 
     const workspace = screen.getByTestId('workspace')
     expect(await within(workspace).findByRole('alert')).toHaveTextContent('could not be brought up to this template version: defines no migrate')
-    const saved = within(workspace).getByRole('textbox', { name: 'Saved inputs' })
+    const saved = within(workspace).getByRole<HTMLTextAreaElement>('textbox', { name: 'Saved inputs' })
     expect(saved).toHaveAttribute('readonly')
-    expect(saved).toHaveTextContent('"name": "Old"')
+    // Its value, what the user sees; textContent is only the initial value React mirrored.
+    expect(saved.value).toContain('"name": "Old"')
     // Short, so the textarea scrolls rather than the capped row around it too.
     expect(saved).toHaveAttribute('rows', '4')
 
