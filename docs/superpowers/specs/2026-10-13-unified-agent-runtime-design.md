@@ -349,10 +349,13 @@ lack them (§2.3).
   - **Placements are fenced.** Each placement carries an attempt id (the run id and the
     cycle), which `session_turn` writes to `ai_sessions.turn_attempt` as it claims the turn.
     A placement the workflow gave up on may still run (a stalled heartbeat on a live
-    replica). It checks the row every second and is cut off once another placement holds
-    it or the turn is no longer the row's: its process is closed, its transcript appends
-    and events are dropped, and its spend writes are refused by the row. A new placement on
-    the same replica cuts an older one of the session first, so the warm process is free.
+    replica). Each of its event and transcript appends checks `turn_attempt` in the
+    append's own transaction, so none lands once another placement has claimed the turn.
+    It also checks the row every second and is cut off once another placement holds it or
+    the turn is no longer the row's: its process is closed. Its spend is never fenced: its
+    requests are its own, so writing them cannot count anything twice, and the budget holds
+    whichever replicas ran the turn. A new placement on the same replica cuts an older one
+    of the session first, so the warm process is free.
   - **Spend is written as it goes.** A placement adds what its model requests cost at the
     table's prices (each finished request, and every second) to `cost_usd` and
     `unpriced_cost_usd`, so the budget sees a placement that dies before its result. At its

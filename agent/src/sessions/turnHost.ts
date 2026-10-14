@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { SDKResultMessage } from '@anthropic-ai/claude-agent-sdk'
 import { ApplicationFailure } from '@temporalio/common'
-import type { Sql } from 'postgres'
+import type { Sql, TransactionSql } from 'postgres'
 import { turnCostEntry } from '../audit/turn.js'
 import type { SessionTurnInput, SessionTurnResult } from '../temporal/session/models.js'
 import { SESSION_GONE, SHUTTING_DOWN_FAILURE } from '../temporal/session/names.js'
@@ -26,10 +26,13 @@ import type { WarmEntry } from './warm.js'
 //      (`tail`) are the workflow's `session.finish_turn`.
 //
 // Placements (§5.2 "Recovery"). A placement the workflow gave up on may still run here (its
-// heartbeat stalled, it ran past `turn_max_seconds`): every FENCE_MS it reads the row, and once
-// another placement holds it, or the turn is no longer the row's, it is cut off: its process
-// closed, its transcript appends and events dropped, its spend writes refused by the row. A new
-// placement here for the same session cuts an older one first, so the warm process is free.
+// heartbeat stalled, it ran past `turn_max_seconds`). Each of its event appends and transcript
+// appends checks, in its own transaction, that the row is still this placement's
+// (`turn_attempt`), so none lands once another has claimed the turn. Every FENCE_MS it also reads
+// the row, and once another placement holds it, or the turn is no longer the row's, it is cut
+// off: its process closed. Its spend is always written: its requests are its own, never the
+// next placement's, so the budget counts every replica that ran the turn, once. A new placement
+// here for the same session cuts an older one first, so the warm process is free.
 //
 // A `restarted` continuation (§5.5) is decided from the transcript, not from the workflow's
 // word: the first placement marks the main transcript's last entry (`turn_mark`), and a later
@@ -191,7 +194,15 @@ export class TurnHost {
       const why = cutBy()
       return why !== undefined && why !== 'shutdown'
     }
-    const spend = new Spend(sql, id, attempt)
+    const spend = new Spend(sql, id)
+    /** This placement still holds its turn: checked, row locked, in each write's own transaction. */
+    const holds = async (tx: TransactionSql, lock: 'share' | 'update') => {
+      const rows = lock === 'share'
+        ? await tx`SELECT 1 FROM ai_sessions WHERE id = ${id} AND turn_attempt = ${attempt} FOR SHARE`
+        : await tx`SELECT 1 FROM ai_sessions WHERE id = ${id} AND turn_attempt = ${attempt} FOR UPDATE`
+      return rows.length > 0
+    }
+    const events = this.#deps.core.events
     const core: CoreTurn = new CoreTurn(this.#deps.core, {
       session,
       turnId,
@@ -207,6 +218,8 @@ export class TurnHost {
       // The prompt goes in right after the acquire.
       onAcquired: ({ entry }) => {
         entries.push(entry)
+        // Its transcript appends only while this placement holds the turn.
+        this.#deps.core.warm.fence(entry, (tx) => holds(tx, 'share'))
         if (fenced()) void this.#deps.core.warm.cut(entry, 'the placement was cut off')
         control.heartbeat({ pushed: true })
       },
@@ -214,6 +227,12 @@ export class TurnHost {
         if (message.type === 'stream_event' && message.event.type === 'message_stop') spend.flush(core.runningUsd())
       },
       mayWrite: () => !fenced(),
+      // Its events only while this placement holds the turn, checked with the append.
+      appendEvents: async (batch) => {
+        const written = await sql.begin(async (tx) => ((await holds(tx, 'update')) ? await events.append(id, batch, tx) : undefined))
+        if (written) events.committed(id, batch, written)
+        return written !== undefined
+      },
     })
     // The fence: still the row's placement and turn, and what it has spent so far written.
     const fence = setInterval(() => {
@@ -309,10 +328,9 @@ export class TurnHost {
 
   /**
    * The turn's spend and turns on the row (manager.ts `finish`'s columns), as increments over
-   * what it wrote as it ran, and its audit row: only while the row is still this placement's
-   * (`turn_attempt`), so a placement cut off by another writes nothing. Whether or not the row
-   * still runs this turn: a placement the workflow ended (its StartToClose) ends after
-   * `session.finish_turn`, and what it spent is still the session's.
+   * what it wrote as it ran, and its audit row. Whether or not the row still runs this turn or
+   * this placement: a placement the workflow ended (its StartToClose) or replaced spent what it
+   * spent, on requests no other placement made, and the budget counts it.
    */
   async #write(session: ClaimedSession, turnId: string, tally: TurnTally, end: TallyInput, spend: Spend, runningUsd: number): Promise<void> {
     // With a result, Claude Code's price; without one (cut, failed), what its requests cost at the
@@ -324,7 +342,7 @@ export class TurnHost {
       UPDATE ai_sessions
       SET cost_usd = cost_usd + ${spent - wrote}, turns = turns + ${tally.turns - session.turns},
           unpriced_cost_usd = unpriced_cost_usd + ${estimated - wrote}, updated_at = now()
-      WHERE id = ${session.id} AND turn_attempt = ${spend.attempt}
+      WHERE id = ${session.id}
       RETURNING id`
     if (!written) return
     // #1922: what the turn cost, as its own audit row (audit/turn.ts turnCostEntry).
@@ -356,20 +374,18 @@ export class TurnHost {
 /**
  * What a placement has spent so far, on the row as it goes: each write adds what the turn's
  * requests cost since the last (CoreTurn.runningUsd, the table's prices), to `cost_usd` and to
- * `unpriced_cost_usd` (Claude Code has priced none of it yet), only while the row is this
- * placement's. The end (`TurnHost#write`) replaces it with the turn's own reckoning.
+ * `unpriced_cost_usd` (Claude Code has priced none of it yet), whether or not the row is still
+ * this placement's. The end (`TurnHost#write`) replaces it with the turn's own reckoning.
  */
 class Spend {
   readonly sql: Sql
   readonly id: string
-  readonly attempt: string
   #written = 0
   #chain: Promise<void> = Promise.resolve()
 
-  constructor(sql: Sql, id: string, attempt: string) {
+  constructor(sql: Sql, id: string) {
     this.sql = sql
     this.id = id
-    this.attempt = attempt
   }
 
   flush(runningUsd: number): void {
@@ -378,7 +394,7 @@ class Spend {
       if (delta <= 0) return
       const [row] = await this.sql<{ id: string }[]>`
         UPDATE ai_sessions SET cost_usd = cost_usd + ${delta}, unpriced_cost_usd = unpriced_cost_usd + ${delta}, updated_at = now()
-        WHERE id = ${this.id} AND turn_attempt = ${this.attempt}
+        WHERE id = ${this.id}
         RETURNING id`
       if (row) this.#written += delta
     }).catch(() => {})

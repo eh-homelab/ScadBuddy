@@ -16,7 +16,7 @@ import type { Credential } from '../credentials.js'
 import { carries } from '../harness/fallback.js'
 import { Inbox } from '../harness/inbox.js'
 import { type HarnessRun, runHarness } from '../harness/run.js'
-import type { PostgresSessionStore } from './store.js'
+import type { AppendFence, PostgresSessionStore } from './store.js'
 import type { AssembledTurn, FingerprintParts } from './turnRunner.js'
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json }
@@ -145,6 +145,12 @@ class MirroredTranscript {
   foreign = false
   /** Cut off (`WarmSessions.cut`): a placement the workflow gave up on; nothing more of it is written. */
   fenced = false
+  /**
+   * The condition the turn holding the process writes under (`WarmSessions.fence`), checked in
+   * each append's own transaction: an AgentSession placement that still holds its turn. Once an
+   * append is refused, the process writes nothing more.
+   */
+  fence: AppendFence | undefined
 
   constructor(inner: SessionStore, tail: string | null, readTail: () => Promise<string | null>) {
     this.lastUuid = tail
@@ -158,7 +164,11 @@ class MirroredTranscript {
           const tail = await readTail().catch(() => undefined)
           if (tail !== this.lastUuid) this.foreign = true
         }
-        await inner.append(key, entries)
+        const fence = this.fence
+        const fenced = fence && 'appendIf' in inner ? (inner as PostgresSessionStore).appendIf.bind(inner) : undefined
+        if (fence && fenced) {
+          if (!(await fenced(key, entries, fence))) this.fenced = true
+        } else await inner.append(key, entries)
       })
       this.pending = write.then(
         () => {
@@ -438,6 +448,16 @@ export class WarmSessions {
   /** Whether a turn holds the session's process here now. */
   busy(sessionId: string): boolean {
     return this.slots.get(sessionId)?.busy === true
+  }
+
+  /**
+   * What the process's transcript appends are written under from now on (an AgentSession
+   * placement's hold on its turn, sessions/turnHost.ts): each append checks it in its own
+   * transaction, so a placement another has replaced writes nothing even before it is cut.
+   */
+  fence(entry: WarmEntry, fence: AppendFence | undefined): void {
+    const slot = this.slots.get(entry.sessionId)
+    if (slot?.entry === entry && slot.mirror) slot.mirror.fence = fence
   }
 
   /**

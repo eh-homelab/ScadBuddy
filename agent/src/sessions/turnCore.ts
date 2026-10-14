@@ -34,7 +34,7 @@ export type Refused = { evidence: FailureEvidence; probe?: ProbeVerdict['verdict
 export type TurnCoreDeps = {
   runner: Pick<TurnRunner, 'assemble'>
   warm: WarmSessions
-  events: Pick<EventLog, 'append'>
+  events: Pick<EventLog, 'append' | 'committed'>
   blobs: Pick<SessionBlobs, 'put'>
   credentials: CredentialSource
   probe?: (credential: Credential, model: string | undefined) => Promise<ProbeVerdict>
@@ -80,6 +80,11 @@ export type CoreTurnArgs = {
   onMessage?: (message: SDKMessage) => void
   /** False once the turn may write nothing more (an AgentSession placement cut off): its events and images are dropped. */
   mayWrite?: () => boolean
+  /**
+   * How the turn's events are appended, when not `deps.events.append` (an AgentSession placement:
+   * only while it holds its turn, checked in the append's transaction). False when refused.
+   */
+  appendEvents?: (events: ServerEvent[]) => Promise<boolean>
 }
 
 /** How the turn's stream ended. */
@@ -169,7 +174,12 @@ export class CoreTurn {
     const mayWrite = this.#args.mayWrite ?? (() => true)
     const log = async (events: ServerEvent[]) => {
       if (!mayWrite()) return
-      if (events.length) await deps.events.append(id, events.map((e) => scrubForLog(e, secrets)))
+      if (events.length) {
+        const scrubbed = events.map((e) => scrubForLog(e, secrets))
+        if (this.#args.appendEvents) {
+          if (!(await this.#args.appendEvents(scrubbed))) return
+        } else await deps.events.append(id, scrubbed)
+      }
       for (const e of events) traced.observe(e)
       if (auditor) for (const e of events) await auditor.observe(e)
     }

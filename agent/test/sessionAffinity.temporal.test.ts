@@ -182,6 +182,8 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
       dead?: boolean
       /** session_turn never hears its cancellation (its worker cut off from Temporal): only the row can tell it. */
       deaf?: boolean
+      /** How often its placements read the row (TurnHost FENCE_MS by default). */
+      fenceMs?: number
     } = {},
   ): Promise<Replica> {
     const paths = await tempPaths()
@@ -215,7 +217,13 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
       ...options.extra,
     })
     r.m.durableTurns = new DurableTurns({ client: env.client, sql: pool.sql, events: r.m.events, sessionHostQueue: hostQueue })
-    r.turnHost = new TurnHost({ core: r.m.turnCore, sql: pool.sql, images: new SessionBlobs(pool.sql), hostQueue })
+    r.turnHost = new TurnHost({
+      core: r.m.turnCore,
+      sql: pool.sql,
+      images: new SessionBlobs(pool.sql),
+      hostQueue,
+      ...(options.fenceMs ? { fenceMs: options.fenceMs } : {}),
+    })
     const acquire = acquireActivities({ warm: r.m.warm, hostQueue, identity: name })[ACQUIRE_WORKER_ACTIVITY]
     r.tools = AgentWorker.start({
       address: env.address,
@@ -484,8 +492,9 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
   it('a placement lost before its prompt landed: the next sends the message itself, once, whatever the beat said (I1)', async () => {
     const a = await replica('a', { dead: true })
     const { id, turn } = await startOn(a, 'the only copy')
-    // A pushed the message into a process that never answers, and its beat says so.
-    await pollUntil(async () => ((await beatOnServer(id)) as { pushed?: boolean } | undefined)?.pushed === true, true)
+    // A pushed the message into a process that never answers, and its beat says so (the SDK
+    // throttles beats to 80% of the 20 s heartbeat timeout, so this can take a while).
+    await pollUntil(async () => ((await beatOnServer(id)) as { pushed?: boolean } | undefined)?.pushed === true, true, 60_000)
     a.frozen = true
     await a.tools.stop()
     const b = await replica('b')
@@ -499,11 +508,11 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     // A was cut off once B held the turn: its process is gone and it wrote nothing.
     await pollUntil(() => a.turnHost.active, 0)
     expect(a.m.warm.size()).toBe(0)
-    // One request, billed once: the row and B's turn.
+    // One request, billed once: the row, B's turn, and A's cut placement at nothing.
     const row = await recorded(id)
     expect(row.costUsd).toBeCloseTo(REPLY_COST_USD, 12)
     expect(row.turns).toBe(1)
-    expect(await turnCosts(id)).toEqual([expect.closeTo(REPLY_COST_USD, 12)])
+    expect((await turnCosts(id)).sort((x, y) => x - y)).toEqual([0, expect.closeTo(REPLY_COST_USD, 12)])
   })
 
   it('a placement lost after its prompt landed: the next resumes with the restart message, never the message again (I1)', async () => {
@@ -533,7 +542,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     expect(row.costUsd).toBeCloseTo(2 * REPLY_COST_USD, 12)
     expect(row.unpricedUsd).toBeCloseTo(REPLY_COST_USD, 12)
     expect(row.turns).toBe(1)
-    expect(await turnCosts(id)).toEqual([expect.closeTo(REPLY_COST_USD, 12)])
+    expect(await turnCosts(id)).toEqual([expect.closeTo(REPLY_COST_USD, 12), expect.closeTo(REPLY_COST_USD, 12)])
     hold.release()
   })
 
@@ -566,13 +575,48 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     expect(fake.messageCalls()).toHaveLength(calls)
     expect(calls).toBe(2)
     expect(slowCalls).toBe(1)
-    // A's request and B's, each once: on the row, and in each placement's own cost row (A's only
-    // when it ended still holding the row: told by its worker, before B took it).
+    // A's request and B's, each once: on the row, and in each placement's own cost row.
     const row = await recorded(id)
     expect(row.costUsd).toBeCloseTo(2 * REPLY_COST_USD, 12)
     expect(row.turns).toBe(1)
-    const costs = await turnCosts(id)
-    expect(costs).toEqual(deaf ? [expect.closeTo(REPLY_COST_USD, 12)] : [expect.closeTo(REPLY_COST_USD, 12), expect.closeTo(REPLY_COST_USD, 12)])
+    expect(await turnCosts(id)).toEqual([expect.closeTo(REPLY_COST_USD, 12), expect.closeTo(REPLY_COST_USD, 12)])
+  })
+
+  it('a replaced placement`s writes are refused at the write, before its tick: no event, no transcript entry, and its spend still counts', async () => {
+    const hold = latch()
+    slowGate = hold.promise
+    script = (r) =>
+      conversation(r).includes('slow done')
+        ? { text: 'late from A' }
+        : conversation(r).includes(RESTARTED_PROMPT)
+          ? { text: 'carried on' }
+          : { toolUse: { name: 'mcp__stub__slow', input: { q: 'x' } } }
+    // A never hears the move: deaf to its activity's cancel, and its row check never comes round.
+    const a = await replica('a', { deaf: true, fenceMs: 3_600_000 })
+    const { id, turn } = await startOn(a, 'do the slow thing')
+    await pollUntil(() => slowCalls, 1)
+    a.frozen = true
+    await pollUntil(() => a.refused >= 1, true, 60_000)
+    await a.tools.stop()
+    const b = await replica('b')
+    expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    await settled(id)
+    expect(b.acquired).toBe(1)
+    const entries = async () =>
+      Number((await db.sql<{ n: string }[]>`SELECT count(*)::text AS n FROM ai_session_entries WHERE session_id = ${id} AND subpath = ''`)[0]!.n)
+    const before = { events: (await a.m.events.read(id, 0, 10_000)).length, entries: await entries() }
+    // B holds the turn now. A's call answers, and A carries on: its tool result, a model request, its reply.
+    hold.release()
+    await pollUntil(() => a.turnHost.active, 0)
+    expect(fake.messageCalls().filter((r) => conversation(r).includes('slow done'))).toHaveLength(1)
+    // Its spend counts: N = 2 requests on A (the tool call, the late reply), M = 1 on B.
+    const row = await recorded(id)
+    expect(row.costUsd).toBeCloseTo(3 * REPLY_COST_USD, 12)
+    expect((await turnCosts(id)).sort((x, y) => x - y)).toEqual([expect.closeTo(REPLY_COST_USD, 12), expect.closeTo(2 * REPLY_COST_USD, 12)])
+    // None of its writes landed: no event, no transcript entry.
+    expect(await said(a, id, 'late from A')).toBe(false)
+    expect(await said(a, id, 'slow done')).toBe(false)
+    expect({ events: (await a.m.events.read(id, 0, 10_000)).length, entries: await entries() }).toEqual(before)
   })
 
   it('warm_max_per_replica 0: a turn is admitted and runs cold to its end (I2)', async () => {
