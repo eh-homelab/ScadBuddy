@@ -1542,6 +1542,14 @@ def test_a_queue_without_a_service_name_stops_the_worker_saying_so(
         lambda: SimpleNamespace(log_level="INFO", version="", revision=""),
     )
 
+    def past_the_guard(*_: object, **__: object) -> None:
+        raise AssertionError("main() went past the service-name check")
+
+    # Should the check regress, the test fails here rather than starting a worker
+    # (#3354): tracing and the worker's run are where main() goes next.
+    monkeypatch.setattr(worker_module, "configure_tracing", past_the_guard)
+    monkeypatch.setattr(asyncio, "run", past_the_guard)
+
     with pytest.raises(SystemExit, match="queue 'unnamed' has no service name"):
         worker_module.main()
 
