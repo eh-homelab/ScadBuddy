@@ -1581,7 +1581,8 @@ describe('MEDIA_THUMBNAIL_VERSION (#1691)', () => {
       // The order fetches reach the handler is not the order they were made in: msw runs
       // undici over its sockets, and a pooled socket an earlier test left behind can
       // send a later fetch first. The first fetch is held back here as such a socket
-      // would, so the test cannot pass by counting arrivals as calls.
+      // would, so the test cannot pass by counting arrivals as calls. The hold works only
+      // because `send` reads `globalThis.fetch` on every call (client.ts), not once.
       const realFetch = globalThis.fetch
       let fetches = 0
       const fetched = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
@@ -1592,8 +1593,18 @@ describe('MEDIA_THUMBNAIL_VERSION (#1691)', () => {
       const now = vi.spyOn(Date, 'now').mockReturnValue(1_000)
       try {
         const stuck = api.getSettings()
-        // The hung read must be the first to arrive before the next caller asks.
-        await first
+        // The hung read must be the first to arrive before the next caller asks; if it
+        // never does, say so rather than wait out the test's timeout.
+        let timer: ReturnType<typeof setTimeout> | undefined
+        await Promise.race([
+          first,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error('the first settings read never reached the handler')),
+              2_000,
+            )
+          }),
+        ]).finally(() => clearTimeout(timer))
         now.mockReturnValue(1_000 + SETTINGS_SHARE_MS - 1)
         const joined = api.getSettings()
         now.mockReturnValue(1_000 + SETTINGS_SHARE_MS)
