@@ -1,5 +1,5 @@
 import { act, screen, waitFor, within } from '@testing-library/react'
-import { http, HttpResponse } from 'msw'
+import { delay, http, HttpResponse } from 'msw'
 import { Route, Routes } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { fakeRealtime } from '../lib/realtime.fake'
@@ -228,9 +228,17 @@ describe('WorkflowRunPage', () => {
   })
 
   it("names the step of the run's own call", async () => {
+    // #3493: the step comes from the agent's queue, a read apart from the run's, so the
+    // card can render first. Answered late here, as a slow runner does.
+    server.use(
+      http.get('/api/v1/ai/flow-runs/:id/queue', async () => {
+        await delay(50)
+        return undefined
+      }),
+    )
     render('run-escalated')
     const card = await screen.findByRole('region', { name: 'Waiting for approval: queue_print' })
-    expect(card).toHaveTextContent('Step 1 (queue_print)')
+    await waitFor(() => expect(card).toHaveTextContent('Step 1 (queue_print)'))
   })
 
   it('keeps the approval of every outward call for the person', async () => {
