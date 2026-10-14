@@ -1,5 +1,5 @@
 import { HttpResponse, http } from 'msw'
-import type { PreviewStarted, PrintRunRequest, SlicePreview, TrayAssigned } from '../../api/types'
+import type { Operation, OperationAccepted, PreviewStarted, PrintRunRequest, SlicePreview, TrayAssigned } from '../../api/types'
 import { demoToolpath } from '../toolpath'
 import { H2C_FILE, assignH2cTray, h2cPlan, h2cSlice, resetH2c } from '../h2c'
 
@@ -20,13 +20,32 @@ function start(request: PrintRunRequest, h2c: boolean): PreviewStarted {
   return { job_id: jobId, plate_id: request.plate_id ?? 1, nozzle_plan: h2c ? h2cPlan(request) : null }
 }
 
+/**
+ * Since #2700 the backend answers a preview-slice start 202 with its running operation as
+ * soon as it is recorded, and the dialog's `command()` follows it (#2824). Each start's
+ * operation, finished with the slice's `PreviewStarted` on its first read.
+ */
+const operations = new Map<string, Operation>()
+let nextOperation = 0
+
+function accepted(subject: string, result: PreviewStarted): HttpResponse<OperationAccepted> {
+  const created = new Date().toISOString()
+  const id = `preview${(++nextOperation).toString(16).padStart(30, '0')}`
+  const op = { id, kind: 'preview_slice', subject, status: 'running', created_at: created } as const
+  operations.set(id, { ...op, status: 'succeeded', finished_at: created, result: { ...result } })
+  return HttpResponse.json({ ...op, repeated: false }, { status: 202 })
+}
+
 export const handlers = [
-  http.post(`${base}/print/outputs/:id/preview-slice`, async ({ request }) =>
-    HttpResponse.json(start((await request.json()) as PrintRunRequest, false)),
+  http.post(`${base}/print/outputs/:id/preview-slice`, async ({ params, request }) =>
+    accepted(`output:${String(params['id'])}`, start((await request.json()) as PrintRunRequest, false)),
   ),
 
   http.post(`${base}/print/library/:id/preview-slice`, async ({ params, request }) =>
-    HttpResponse.json(start((await request.json()) as PrintRunRequest, Number(params['id']) === H2C_FILE)),
+    accepted(
+      `library:${String(params['id'])}`,
+      start((await request.json()) as PrintRunRequest, Number(params['id']) === H2C_FILE),
+    ),
   ),
 
   // #2072 — a finished slice's toolpath.
@@ -35,6 +54,18 @@ export const handlers = [
       ? new HttpResponse(demoToolpath(), { headers: { 'Content-Type': 'application/octet-stream' } })
       : HttpResponse.json({ detail: 'there is no background slice' }, { status: 404 }),
   ),
+
+  // The operations the starts above recorded; no other mock records one.
+  http.get(`${base}/operations/:id`, ({ params }) => {
+    const op = operations.get(String(params['id']))
+    if (!op) {
+      return HttpResponse.json(
+        { title: 'Not Found', status: 404, detail: `there is no operation ${String(params['id'])}` },
+        { status: 404, headers: { 'Content-Type': 'application/problem+json' } },
+      )
+    }
+    return HttpResponse.json(op)
+  }),
 
   http.get(`${base}/print/:kind/:id/preview-slices/:job`, ({ params }) => {
     const jobId = Number(params['job'])
@@ -71,5 +102,6 @@ export const handlers = [
 
 export function reset(): void {
   jobs.clear()
+  operations.clear()
   resetH2c()
 }

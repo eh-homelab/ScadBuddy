@@ -1490,6 +1490,22 @@ async def test_too_many_objects_fails_the_job(tmp_path: Path) -> None:
         await _object_layout(tmp_path, {(None, None): [TRAY]}, objects=jobs.MAX_OBJECTS + 1)
 
 
+async def test_plates_times_objects_past_the_render_cap_fails_before_rendering(
+    tmp_path: Path,
+) -> None:
+    """#3250: each count was capped on its own, so 16 plates of 16 objects ran 256
+    OpenSCAD renders in one job. The renders a job runs are capped as a whole."""
+    plates, objects = 2, jobs.MAX_RENDERS // 2 + 1
+    assert plates <= jobs.MAX_PLATES and objects <= jobs.MAX_OBJECTS
+    # Every plate draws every object, so nothing but the cap stops the layout.
+    drawn: dict[tuple[int | None, int | None], list[tuple[str, str, trimesh.Trimesh]]] = {
+        (p, o): [TRAY] for p in range(1, plates + 1) for o in range(1, objects + 1)
+    }
+    drawn[(None, None)] = [TRAY]
+    with pytest.raises(OpenSCADError, match=f"{plates} plates of {objects} objects"):
+        await _object_layout(tmp_path, drawn, plates=plates, objects=objects)
+
+
 async def test_a_layouts_objects_survive_saving_it(tmp_path: Path) -> None:
     layout, _, _ = await _object_layout(
         tmp_path, {(None, None): [TRAY, LID], (None, 1): [TRAY], (None, 2): [LID]}, objects=2

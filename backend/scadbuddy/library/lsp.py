@@ -51,8 +51,10 @@ so each one is logged with how many are still unreaped.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
+import os
 import signal
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -86,6 +88,22 @@ KILL_WAIT = 5.0
 #: Killed servers that outlived ``KILL_WAIT``, each with the task still waiting on it;
 #: the task drops its server out once asyncio reaps it.
 _unreaped: dict[asyncio.subprocess.Process, asyncio.Task[int]] = {}
+
+
+def kill(process: asyncio.subprocess.Process) -> None:
+    """SIGKILL a server asyncio has not seen exit, leaving its exit status for asyncio.
+
+    Never ``process.kill()``: ``Popen.send_signal`` polls first, and a server that has
+    already exited but whose exit asyncio's child watcher has not read yet is reaped
+    there. The watcher then finds nothing to read and reports 255 for it, so a crash's
+    own status was lost (#1613). An exited server keeps its pid as a zombie until it is
+    reaped, and only asyncio reaps it here, handing the status on in the next pass of
+    the loop; a server reaped in that gap is the ``ProcessLookupError``. That relies on
+    asyncio's pidfd child watcher (Python 3.12's default on Linux, where this runs), whose
+    reap runs on the loop itself: under ``ThreadedChildWatcher`` a thread reaps it, and a
+    pid freed there could be reused before ``returncode`` is set."""
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(process.pid, signal.SIGKILL)
 
 
 def reap_later(process: asyncio.subprocess.Process) -> None:
@@ -302,7 +320,7 @@ async def serve(
         # down, the test client), and an interrupted cleanup leaves the process behind.
         with anyio.CancelScope(shield=True):
             if process.returncode is None:
-                process.kill()
+                kill(process)
             with anyio.move_on_after(KILL_WAIT) as waiting:
                 await process.wait()
             if waiting.cancelled_caught:

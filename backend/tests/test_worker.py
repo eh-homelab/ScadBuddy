@@ -69,6 +69,7 @@ from scadbuddy.workflows.activities import WorkerDeps
 from scadbuddy.workflows.client import (
     DEPLOYMENT_NAME,
     connect_lazily,
+    current_routing,
     drained,
     is_current,
     make_current,
@@ -450,12 +451,102 @@ async def test_is_current_names_the_deployments_current_build() -> None:
         assert not await _is_current_answer(client, "other")
 
 
+async def _routing_once_current(
+    client: Client, deployment: str, build_id: str
+) -> tuple[str | None, bytes]:
+    """`current_routing` once it names ``build_id``: just after a write the deployment's
+    own workflow is still propagating it (see `_is_current_answer`)."""
+    for attempt in range(IS_CURRENT_ATTEMPTS):
+        try:
+            build, token = await current_routing(
+                client, namespace=client.namespace, deployment_name=deployment
+            )
+        except RPCError as error:
+            if error.status not in IS_CURRENT_TRANSIENT:
+                raise
+        else:
+            if build == build_id:
+                return build, token
+        await asyncio.sleep(min(2.0**attempt * 0.5, IS_CURRENT_MAX_WAIT))
+    raise AssertionError(f"{build_id} never became current")
+
+
+@pytest.mark.requires_temporal
+async def test_temporal_refuses_a_write_with_a_stale_conflict_token() -> None:
+    """#2538: what `deployment_writes` relies on. A token read before another build was
+    made current is refused; the token read since is accepted."""
+    deployment = f"d-{uuid.uuid4().hex[:8]}"
+    old, new = f"old-{uuid.uuid4().hex[:8]}", f"new-{uuid.uuid4().hex[:8]}"
+
+    def versioned(client: Client, build_id: str) -> Worker:
+        return Worker(
+            client,
+            task_queue=f"t-{uuid.uuid4().hex[:8]}",
+            workflows=[_BlocksUntilReleased],
+            workflow_runner=UnsandboxedWorkflowRunner(),
+            deployment_config=WorkerDeploymentConfig(
+                version=WorkerDeploymentVersion(deployment_name=deployment, build_id=build_id),
+                use_worker_versioning=True,
+                default_versioning_behavior=VersioningBehavior.PINNED,
+            ),
+        )
+
+    async def made_current(client: Client, build_id: str, token: bytes = b"") -> None:
+        await make_current(
+            client,
+            namespace=client.namespace,
+            build_id=build_id,
+            deployment_name=deployment,
+            conflict_token=token,
+        )
+
+    async def polled_then_current(client: Client, build_id: str) -> bytes:
+        await asyncio.wait_for(
+            make_current_until_polled(
+                lambda: made_current(client, build_id),
+                build_id=build_id,
+                backoff=MAKE_CURRENT_BACKOFF,
+                every=MAKE_CURRENT_EVERY,
+                error_after=MAKE_CURRENT_ERROR_AFTER,
+            ),
+            MAKE_CURRENT_WITHIN,
+        )
+        return (await _routing_once_current(client, deployment, build_id))[1]
+
+    async def write_refusal(client: Client, build_id: str, token: bytes) -> RPCStatusCode | None:
+        """The write's refusal, or None when it is accepted; asked again while the server
+        is busy, the way `_is_current_answer` is, so a transient error is never read as
+        the conflict (or as the acceptance) the test is about."""
+        for attempt in range(IS_CURRENT_ATTEMPTS):
+            try:
+                await made_current(client, build_id, token)
+            except RPCError as error:
+                if error.status not in IS_CURRENT_TRANSIENT or attempt == IS_CURRENT_ATTEMPTS - 1:
+                    return error.status
+                await asyncio.sleep(min(2.0**attempt * 0.5, IS_CURRENT_MAX_WAIT))
+            else:
+                return None
+        raise AssertionError("unreachable")
+
+    async with temporal_client() as client, versioned(client, old), versioned(client, new):
+        stale = await polled_then_current(client, old)
+        fresh = await polled_then_current(client, new)
+
+        assert await write_refusal(client, old, stale) == STALE_TOKEN_REFUSAL
+        assert (await _routing_once_current(client, deployment, new))[0] == new
+        assert await write_refusal(client, old, fresh) is None
+        await _routing_once_current(client, deployment, old)
+
+
 #: How long a healthy worker start takes to make its build current, with room: the
 #: test's own bound, not the worker's logging policy (`MAKE_CURRENT_ERROR_AFTER`).
 MAKE_CURRENT_WITHIN = 60.0
 #: `is_current`'s attempts and the longest wait between two (`_is_current_answer`).
 IS_CURRENT_ATTEMPTS = 12
 IS_CURRENT_MAX_WAIT = 5.0
+#: How Temporal refuses a deployment write carrying a conflict token read before another
+#: write (#2538): what `deployment_writes` relies on.
+STALE_TOKEN_REFUSAL = RPCStatusCode.FAILED_PRECONDITION
 #: What a busy server answers meanwhile; anything else is a real error, raised at once.
 IS_CURRENT_TRANSIENT = frozenset(
     {
@@ -1378,3 +1469,19 @@ def test_every_queue_has_a_service_name() -> None:
     """#2894: a queue added without a ``service.name`` would fail the worker at start
     with a bare KeyError; here it fails in CI instead."""
     assert set(worker_module.SERVICE_NAMES) == set(get_args(worker_module.Queue))
+
+
+def test_a_queue_without_a_service_name_stops_the_worker_saying_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#3020 review: an explicit exit, not an assert python -O would strip."""
+    monkeypatch.setattr(worker_module, "parse_queue", lambda: "unnamed")
+    monkeypatch.setattr(worker_module, "configure_logging", lambda level: None)
+    monkeypatch.setattr(
+        worker_module,
+        "Settings",
+        lambda: SimpleNamespace(log_level="INFO", version="", revision=""),
+    )
+
+    with pytest.raises(SystemExit, match="queue 'unnamed' has no service name"):
+        worker_module.main()

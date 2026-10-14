@@ -1,4 +1,4 @@
-import { screen, within } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { renderPage } from '../test/utils'
@@ -59,5 +59,39 @@ describe('the shell’s page boundary (#361, #1446)', () => {
     await user.click(within(nav).getByRole('link', { name: 'Prints' }))
     expect(await within(main).findByText('prints page')).toBeInTheDocument()
     expect(within(main).queryByRole('alert')).not.toBeInTheDocument()
+  })
+})
+
+describe('the shell’s orientation (#2454)', () => {
+  it('names the tab after the page’s heading, and follows navigation', async () => {
+    const { user } = renderPage(
+      <Routes>
+        <Route element={<AppShell embedded={false} tabLink={null} />}>
+          <Route path="/" element={<h1>Models</h1>} />
+          <Route path="/prints" element={<h1>Print history</h1>} />
+        </Route>
+      </Routes>,
+    )
+    await waitFor(() => expect(document.title).toBe('Models · ScadBuddy'))
+    const nav = screen.getByRole('navigation', { name: 'Main' })
+    await user.click(within(nav).getByRole('link', { name: 'Prints' }))
+    await waitFor(() => expect(document.title).toBe('Print history · ScadBuddy'))
+  })
+
+  it('offers a skip link first, to the page, and names the logo link by its text', async () => {
+    const { user } = renderPage(
+      <Routes>
+        <Route element={<AppShell embedded={false} tabLink={null} />}>
+          <Route path="*" element={<h1>Models</h1>} />
+        </Route>
+      </Routes>,
+    )
+    await user.tab()
+    const skip = screen.getByRole('link', { name: 'Skip to main content' })
+    expect(skip).toHaveFocus()
+    await user.click(skip)
+    expect(screen.getByRole('main')).toHaveFocus()
+    // Its visible text, not a shorter label (axe label-content-name-mismatch).
+    expect(screen.getByRole('link', { name: /^ScadBuddy/ })).toHaveAccessibleName('ScadBuddy OpenSCAD customizer')
   })
 })

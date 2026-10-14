@@ -26,7 +26,13 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, client_for
-from scadbuddy.bambuddy.dispatch import SliceLostError, SliceStarted, start_slice, wait_slice
+from scadbuddy.bambuddy.dispatch import (
+    QueueOutcome,
+    SliceLostError,
+    SliceStarted,
+    start_slice,
+    wait_slice,
+)
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.output_reader import OutputReader, invalid_meta, require
 from scadbuddy.bambuddy.preview import reusable_slice
@@ -321,7 +327,7 @@ class PrintActivities:
         spec = input.source
         try:
             source = await self._recording_source(spec)
-            return await source.record(
+            sends = await source.record(
                 input.library_file_id,
                 input.plate_id,
                 input.outcome,
@@ -331,6 +337,31 @@ class PrintActivities:
             )
         except ApiError as error:
             raise raised_as(error, FAILED) from None
+        await self._keep_slice_hash(source.subject, input.outcome)
+        return sends
+
+    async def _keep_slice_hash(self, subject: PrintSubject, outcome: QueueOutcome) -> None:
+        """The hash of the file a plate's slice made, kept with it: a later print reuses
+        the slice only while the file at its id still has it, as Bambuddy hands a
+        deleted file's id to the next file (#2691 review). Best effort: the plate is
+        queued already, so a failed read only leaves the slice unreused, never fails
+        the run."""
+        if outcome.slice_job_id is None:
+            return  # nothing sliced: a sliced file queued as it is (#2671)
+        sliced_id = outcome.sliced_library_file_id
+        try:
+            async with client_for(self._settings()) as client:
+                file_hash = (await client.library_file(sliced_id)).file_hash
+        except Exception:
+            # Whatever went wrong, the plate is on Bambuddy's queue: its record stands.
+            logger.warning(
+                "a slice's hash could not be read; it will not be reused",
+                extra={"library_file_id": sliced_id},
+                exc_info=True,
+            )
+            return
+        if file_hash is not None:
+            await self.d.uploads.record_slice_hash(subject.run_subject, sliced_id, file_hash)
 
     @activity.defn(name="print_finish")
     async def finish(self, input: FinishInput) -> PrintRunResult:

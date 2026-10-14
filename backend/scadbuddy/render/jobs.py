@@ -84,6 +84,10 @@ MISSING_FILE_FAILED_WARNING = "OpenSCAD could not open {name}"
 MAX_PLATES = 16
 #: Most objects a template may declare with `echo(objects = N)` (#956): each is a render.
 MAX_OBJECTS = 16
+#: Most OpenSCAD renders one layout runs, plates times objects (#3250), each with a solid
+#: render per colour: the bound a job had before objects, so 16 plates of 16 objects
+#: cannot run 256.
+MAX_RENDERS = 16
 
 
 def unreadable_colour_warnings(
@@ -384,6 +388,12 @@ async def plate_layout(
     if objects > MAX_OBJECTS:
         raise OpenSCADError(
             f"the template asks for {objects} objects; ScadBuddy renders at most {MAX_OBJECTS}",
+            [],
+        )
+    if count * objects > MAX_RENDERS:
+        raise OpenSCADError(
+            f"the template asks for {count} plates of {objects} objects, {count * objects}"
+            f" renders; ScadBuddy renders at most {MAX_RENDERS} per job",
             [],
         )
 

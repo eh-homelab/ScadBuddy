@@ -13,7 +13,7 @@ import logging
 import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 from fastapi import status
@@ -21,13 +21,18 @@ from pydantic import BaseModel, Field, field_validator
 
 from scadbuddy.bambuddy.catalogue import _Catalogue, _catalogue
 from scadbuddy.bambuddy.clearance import (
+    check_plates,
     clearance_for,
-    clearance_warnings,
-    placed_objects_by_plate,
 )
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.concurrent import settled
-from scadbuddy.bambuddy.dispatch import QueueOutcome, RackChoice, SlicePlan, enqueue_plate
+from scadbuddy.bambuddy.dispatch import (
+    QueueOutcome,
+    RackChoice,
+    SlicePlan,
+    enqueue_plate,
+    slice_request,
+)
 from scadbuddy.bambuddy.errors import not_configured
 from scadbuddy.bambuddy.extruders import (
     RACK_SIDE,
@@ -53,6 +58,7 @@ from scadbuddy.bambuddy.filaments import (
     queue_filaments,
     read_inventory,
 )
+from scadbuddy.bambuddy.filaments3mf import SlicedProfile, diameter, model_key
 from scadbuddy.bambuddy.hardware import (
     installed_nozzles,
     last_bed_type,
@@ -583,6 +589,9 @@ async def _slot_errors(
     library file's are read from the file itself (#2720, #2550); with neither and no copy
     there is nothing to read without an upload, and the run still judges the slots
     after its own."""
+    if source.is_sliced or prepared.catalogue is None:
+        # Nothing resolves a preset for a sliced file (#2671); Bambuddy maps its slots.
+        return []
     read_file = await source.file_read_already(client)
     if read_file is None:
         return []
@@ -641,6 +650,10 @@ async def check_print(
         )
     except RunRefusalError as refused:
         return PrintCheck(errors=[refused.detail])
+    if source.is_sliced:
+        # Queued as it is, never refused (#2671): what to set right first is a warning,
+        # and there is no nozzle plan, slots or rack side to judge before it.
+        return PrintCheck(warnings=prepared.warnings)
     laid_out = await source.states_nozzles(client)
     nozzle_plan = (
         await plan_for(
@@ -728,23 +741,14 @@ async def _sequence_clearance(
         payload = await source.fetched_3mf(client)
         if payload is None:
             return None, []
-        # One read of the file for every plate (#2875 review), against one budget.
-        by_plate = await asyncio.to_thread(placed_objects_by_plate, payload, prepared.plate_ids)
+        # One read of the file for every plate (#2875 review), against one budget, and
+        # its pairs compared in the same thread, never on the event loop (#3251).
+        by_plate, warnings = await asyncio.to_thread(
+            check_plates, payload, prepared.plate_ids, clearance
+        )
         per_plate = [(plate_id, by_plate[plate_id]) for plate_id in prepared.plate_ids]
     except (ValueError, zipfile.BadZipFile, ET.ParseError):
         return None, []
-    several = len(per_plate) > 1
-    warnings = (
-        [
-            warning
-            for plate_id, objects in per_plate
-            for warning in clearance_warnings(
-                objects, clearance, plate=plate_id if several else None
-            )
-        ]
-        if clearance is not None
-        else []
-    )
     # One count only for one plate: the dialog says "this plate" (#2976).
     return len(per_plate[0][1]) if len(per_plate) == 1 else None, warnings
 
@@ -931,12 +935,15 @@ class PreparedRun:
 
     plate_ids: list[int]
     printer_id: int
-    #: Read once, before the 202, and reused by the run rather than read again.
-    catalogue: _Catalogue
+    #: Read once, before the 202, and reused by the run rather than read again; ``None``
+    #: for a sliced file, which takes no presets (#2671).
+    catalogue: _Catalogue | None
     #: The printer's live status, read once for the run's hardware warnings; ``None``
     #: when it was unreadable.
     printer_status: PrinterStatus | None
     printer_name: str | None = None
+    #: What a sliced file's run carries back instead of refusing (#2671).
+    warnings: list[FilamentWarning] = field(default_factory=list)
 
 
 async def prepare_run(
@@ -969,7 +976,26 @@ async def prepare_run(
         raise RunRefusalError(
             "This output's 3MF lays out no plates, so there is nothing to print.",
         )
-    if laid_out and request.plate_id not in laid_out and not request.all_plates:
+    plate_warnings: list[FilamentWarning] = []
+    if (
+        source.is_sliced
+        and laid_out
+        and request.plate_id not in laid_out
+        and not request.all_plates
+    ):
+        # A sliced file is never refused (#2671): the dialog offers only its plates, so
+        # a request for another one prints the file's first instead, and says so.
+        plate_ids = laid_out[:1]
+        plate_warnings.append(
+            FilamentWarning(
+                kind="sliced-plate-missing",
+                message=(
+                    f"This file holds no plate {request.plate_id}, so plate {laid_out[0]}"
+                    " is queued instead."
+                ),
+            )
+        )
+    elif laid_out and request.plate_id not in laid_out and not request.all_plates:
         # Bambuddy does not check it either: the run would upload, then fail in the
         # slicer with no reason given (#1320).
         count = f"{len(laid_out)} plate{'s' if len(laid_out) != 1 else ''}"
@@ -981,6 +1007,21 @@ async def prepare_run(
     if printer_id is None:
         raise not_configured(
             "no printer is chosen and none is configured, so there is nothing to print on"
+        )
+    if source.is_sliced:
+        # Nothing is sliced, so no preset need resolve (#2671): any active printer the
+        # file was sliced for prints it.
+        printer = await _require_resolvable_printer(client, printer_id, any_model=True)
+        printer_status = await read_status(client, printer_id)
+        await record_seen(rack, printer_id, printer_status)
+        return PreparedRun(
+            plate_ids=plate_ids,
+            printer_id=printer_id,
+            catalogue=None,
+            printer_status=printer_status,
+            printer_name=printer.name,
+            warnings=plate_warnings
+            + sliced_warnings(source.sliced_profile, printer, printer_status, plate_ids),
         )
     printer = await _require_resolvable_printer(client, printer_id)
     # Read once for every plate: the catalogue is ~4000 presets on the live instance.
@@ -1021,6 +1062,8 @@ class PreparedPlates(BaseModel):
     #: only into the database (spec 2026-10-01 §7, #1032). Nothing after the check
     #: needs one: the enqueue ranks the rack on a status it reads itself.
     printer_status: PrinterStatus | None = None
+    #: A sliced file's warnings (#2671), carried to the run's own.
+    warnings: list[FilamentWarning] = Field(default_factory=list)
 
     @field_validator("printer_status", mode="after")
     @classmethod
@@ -1036,6 +1079,7 @@ class PreparedPlates(BaseModel):
             plate_ids=prepared.plate_ids,
             printer_id=prepared.printer_id,
             printer_status=prepared.printer_status,
+            warnings=prepared.warnings,
         )
 
 
@@ -1043,7 +1087,11 @@ class PlatePlan(BaseModel):
     """One plate, resolved and ready to slice and queue."""
 
     plate_id: int
-    plan: SlicePlan
+    #: ``None`` when nothing is sliced (:attr:`sliced_file_id`).
+    plan: SlicePlan | None = None
+    #: The sliced file queued as it is, with no slice (#2671): a sliced library file
+    #: itself, or ScadBuddy's own earlier slice of the same copy with the same presets.
+    sliced_file_id: int | None = None
     filaments: QueueFilaments | None = None
     #: Each slot's chosen spool, for the rack's Glow test (#836, spec §3).
     spools: dict[int, SpoolOption] = Field(default_factory=dict)
@@ -1137,8 +1185,14 @@ async def plan_run(
     settings: StoredSettings,
     request: PrintRunRequest,
     prepared: PreparedPlates,
+    *,
+    reuse_slices: bool = True,
 ) -> PlannedRun:
     """Upload, then resolve every plate, before anything is sliced (spec §4).
+
+    With ``reuse_slices``, a plate ScadBuddy sliced before with the same presets queues
+    that slice (#2671). The dialog's background slice passes ``False``: it slices to
+    show the toolpath, and a lookup there only costs GETs (#2691 review).
 
     A print into a project also records its printer and nozzle for that project
     (:meth:`PrintSource.remember_project`, in the ``print_finish`` activity), which is what the
@@ -1153,6 +1207,8 @@ async def plan_run(
     Bambuddy already has (``ensure_uploaded``), so running this again uploads nothing
     new.
     """
+    if source.is_sliced:
+        return await _plan_sliced(client, source, settings, request, prepared)
     plate_ids = prepared.plate_ids
     printer_id = prepared.printer_id
     printer_status = prepared.printer_status
@@ -1203,7 +1259,7 @@ async def plan_run(
     # Each plate's slots are read on their own: a plate uses only some of the project's
     # filaments (#83). The one plan applies to every plate because a slot is a project
     # filament, not a plate position (#180), so slot 2 is the same colour on every plate.
-    planned: list[tuple[int, FilamentOptions, Resolved, SlicePlan]] = []
+    ready: list[tuple[int, FilamentOptions, Resolved, SlicePlan]] = []
     per_plate = await gather_plate_options(
         client,
         library_file_id=library_file_id,
@@ -1243,9 +1299,26 @@ async def plan_run(
                 else {**source.print_settings, "print_sequence": request.print_sequence}
             ),
         )
-        planned.append((plate_id, options, resolved, plan))
+        ready.append((plate_id, options, resolved, plan))
     if errors:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(errors))
+    # ScadBuddy's own slice of this copy with these presets, when it has one (#2671):
+    # every plate's looked up together, each a few GETs (#2691 review).
+    reused: list[int | None] = (
+        list(
+            await asyncio.gather(
+                *(
+                    source.recorded_slice(
+                        client, library_file_id, slice_request(plan, plate_id).preset_key
+                    )
+                    for plate_id, _, _, plan in ready
+                )
+            )
+        )
+        if reuse_slices
+        else [None] * len(ready)
+    )
+    planned = [(*plate, sliced) for plate, sliced in zip(ready, reused, strict=True)]
 
     hardware = await _hardware_warnings(
         client, printer_id, choices, printer_status, printer_name=planned[0][1].printer_name
@@ -1256,21 +1329,11 @@ async def plan_run(
         laid_out=await source.states_nozzles(client),
         sides=nozzle_plan.sides if nozzle_plan is not None else None,
     )
-    warnings: list[FilamentWarning] = []
-    for _, options, resolved, _ in planned:
-        for warning in [*resolved.warnings, *check(options, request.filament_plan, copies=copies)]:
-            # Checked once below, against what every plate needs together.
-            if warning.kind != "low-filament" and warning not in warnings:
-                warnings.append(warning)
-    warnings += [
-        warning
-        for warning in check(
-            across_plates([options for _, options, _, _ in planned]),
-            request.filament_plan,
-            copies=copies,
-        )
-        if warning.kind == "low-filament"
-    ]
+    warnings = _filament_warnings(
+        [(options, resolved.warnings) for _, options, resolved, _, _ in planned],
+        request.filament_plan,
+        copies,
+    )
     return PlannedRun(
         library_file_id=library_file_id,
         folder_id=printed.folder_id,
@@ -1283,12 +1346,13 @@ async def plan_run(
             PlatePlan(
                 plate_id=plate_id,
                 plan=plan,
+                sliced_file_id=reused,
                 filaments=queue_filaments(options, request.filament_plan),
                 spools=_spools_by_slot(options, request.filament_plan),
             )
-            for plate_id, options, _, plan in planned
+            for plate_id, options, _, plan, reused in planned
         ],
-        warnings=warnings + hardware,
+        warnings=warnings + hardware + _reused_notes(planned),
         rack_algorithm=request.rack_algorithm or settings.rack_algorithm(printer_id),
         rack_position=request.rack_position,
         # A readable status with no rack (any printer but an H2C) has nothing to pick: no
@@ -1296,6 +1360,109 @@ async def plan_run(
         # unreadable status still tries, since the pick reads a fresh one (#1043).
         has_rack=printer_status is None or bool(rack_positions(printer_status.nozzle_rack)),
         nozzle_plan=nozzle_plan,
+    )
+
+
+def _reused_notes(
+    planned: list[tuple[int, FilamentOptions, Resolved, SlicePlan, int | None]],
+) -> list[FilamentWarning]:
+    """Say which plates queue an earlier slice rather than slicing again (#2955): the
+    run's ``slice_job_id`` is ``None`` then, which would otherwise read as a slice
+    skipped by mistake."""
+    return [
+        FilamentWarning(
+            kind="slice-reused",
+            message=f"Plate {plate_id} queues ScadBuddy's earlier slice of the same choices;"
+            " nothing was sliced again.",
+        )
+        for plate_id, _, _, _, reused in planned
+        if reused is not None
+    ]
+
+
+def _filament_warnings(
+    plates: list[tuple[FilamentOptions, list[FilamentWarning]]],
+    plan: FilamentPlan,
+    copies: int,
+) -> list[FilamentWarning]:
+    """Each plate's warnings (``plates`` pairs its options with the resolver's), once
+    each, then low filament judged against what every plate needs together."""
+    warnings: list[FilamentWarning] = []
+    for options, resolved in plates:
+        for warning in [*resolved, *check(options, plan, copies=copies)]:
+            # Checked once below, against what every plate needs together.
+            if warning.kind != "low-filament" and warning not in warnings:
+                warnings.append(warning)
+    warnings += [
+        warning
+        for warning in check(across_plates([options for options, _ in plates]), plan, copies=copies)
+        if warning.kind == "low-filament"
+    ]
+    return warnings
+
+
+async def _plan_sliced(
+    client: BambuddyClient,
+    source: PrintSource,
+    settings: StoredSettings,
+    request: PrintRunRequest,
+    prepared: PreparedPlates,
+) -> PlannedRun:
+    """:func:`plan_run` for a sliced file (#2671): nothing is uploaded, resolved or
+    sliced. Each plate queues the file itself, with the spools chosen for its slots as
+    any print's are, and with the options remembered for it, held for a manual start
+    among them. A file sliced for another model or a nozzle the printer lacks is held
+    for a manual start whatever was remembered (#2954): Bambuddy would otherwise start
+    it as soon as the printer is idle, before anyone read the warning."""
+    printer_id = prepared.printer_id
+    project_id = chosen_project(request, settings)
+    profile = source.sliced_profile
+    nozzle_size = sliced_nozzle_size(profile, prepared, request)
+    printed = await source.file_to_print(
+        client,
+        printer_id=printer_id,
+        nozzle_size=nozzle_size,
+        plan=request.filament_plan,
+        project_id=project_id,
+    )
+    per_plate = await gather_plate_options(
+        client,
+        library_file_id=printed.id,
+        printer_id=printer_id,
+        plate_ids=prepared.plate_ids,
+        fallback_colours=list(source.colours),
+        known=known_slots(source),
+    )
+    per_plate = [with_trays(options, prepared.printer_status, printer_id) for options in per_plate]
+    print_options = resolve_print_options(
+        settings, source.options_scope, printer_id, request_scope(request.copies, request.options)
+    ).model_copy(update={"project_id": None})
+    if any(warning.kind in HELD_SLICED_KINDS for warning in prepared.warnings):
+        print_options = print_options.model_copy(update={"manual_start": True})
+    copies = print_options.quantity or 1
+    status = prepared.printer_status
+    return PlannedRun(
+        library_file_id=printed.id,
+        project_id=project_id,
+        printer_id=printer_id,
+        nozzle_size=nozzle_size,
+        copies=copies,
+        options=print_options,
+        plates=[
+            PlatePlan(
+                plate_id=plate_id,
+                sliced_file_id=printed.id,
+                filaments=queue_filaments(options, request.filament_plan),
+                spools=_spools_by_slot(options, request.filament_plan),
+            )
+            for plate_id, options in zip(prepared.plate_ids, per_plate, strict=True)
+        ],
+        warnings=prepared.warnings
+        + _filament_warnings(
+            [(options, []) for options in per_plate], request.filament_plan, copies
+        ),
+        rack_algorithm=request.rack_algorithm or settings.rack_algorithm(printer_id),
+        has_rack=status is None or bool(rack_positions(status.nozzle_rack)),
     )
 
 
@@ -1334,11 +1501,14 @@ def finish_run(
     )
 
 
-async def _require_resolvable_printer(client: BambuddyClient, printer_id: int) -> Printer:
+async def _require_resolvable_printer(
+    client: BambuddyClient, printer_id: int, *, any_model: bool = False
+) -> Printer:
     """A 422 before anything is uploaded or sliced when the resolver cannot serve this
     printer: one Bambuddy does not list, one it has deactivated (#479; the dialog never
     offers those), or any model but the H2C, whose presets are the only ones the
-    resolver knows (``PRINTER_MODEL``)."""
+    resolver knows (``PRINTER_MODEL``). ``any_model``: nothing is resolved (a sliced
+    file, #2671), so any model will do."""
     printer = next((row for row in await client.printers() if row.id == printer_id), None)
     if printer is None:
         raise RunRefusalError(
@@ -1349,12 +1519,95 @@ async def _require_resolvable_printer(client: BambuddyClient, printer_id: int) -
             f"{printer.name} is deactivated in Bambuddy. Activate it there, or pick "
             "another printer.",
         )
-    if (printer.model or "").upper() != PRINTER_MODEL:
+    if not any_model and (printer.model or "").upper() != PRINTER_MODEL:
         raise RunRefusalError(
             f"ScadBuddy can only choose slicer presets for a Bambu Lab {PRINTER_MODEL} so "
             f"far, and {printer.name}'s model is {printer.model or 'not reported'}.",
         )
     return printer
+
+
+def sliced_nozzle_size(
+    profile: SlicedProfile | None, prepared: PreparedPlates, request: PrintRunRequest
+) -> str:
+    """The nozzle a sliced file's run records: the file's own, else the printer's. The
+    dialog's choice is hidden for a sliced file and says nothing of it (#2691 review),
+    so it is taken only when neither is known."""
+    sizes = profile.diameters_for(prepared.plate_ids) if profile is not None else []
+    if sizes:
+        return sizes[0]
+    mounted = sorted(_mounted_diameters(prepared.printer_status))
+    return mounted[0] if mounted else request.choices.nozzles[0].size
+
+
+def _mounted_diameters(status: PrinterStatus | None) -> set[str]:
+    """Every nozzle diameter the printer reports, mounted or in its rack."""
+    if status is None:
+        return set()
+    return {
+        size
+        for nozzle in [*status.nozzles, *status.nozzle_rack]
+        if (size := diameter(nozzle.nozzle_diameter)) is not None
+    }
+
+
+HELD_SLICED_KINDS = frozenset({"sliced-other-model", "sliced-nozzle-missing"})
+"""Sliced-file warnings that hold the print for a manual start (#2954)."""
+
+
+def sliced_warnings(
+    profile: SlicedProfile | None,
+    printer: Printer,
+    status: PrinterStatus | None,
+    plate_ids: list[int],
+) -> list[FilamentWarning]:
+    """What to set right before a sliced file prints on ``printer`` (#2671): sliced for
+    another model, or for a nozzle diameter the printer does not have. Never a refusal:
+    it is queued as it is, held for a manual start (:data:`HELD_SLICED_KINDS`), and the
+    user swaps the nozzle, or picks another printer, before starting it. Only a known
+    mismatch warns, and an unread profile, or a printer that reports no model, says
+    nothing; a printer that reports no nozzles is said to leave the nozzle unchecked."""
+    if profile is None:
+        return []
+    warnings: list[FilamentWarning] = []
+    wanted, have = model_key(profile.printer_model), model_key(printer.model)
+    if wanted is not None and have is not None and wanted != have:
+        warnings.append(
+            FilamentWarning(
+                kind="sliced-other-model",
+                message=(
+                    f"Sliced for a {profile.printer_model}; {printer.name} is a {printer.model}."
+                    " Held for a manual start."
+                ),
+            )
+        )
+    mounted = _mounted_diameters(status)
+    wanted_sizes = profile.diameters_for(plate_ids)
+    if wanted_sizes and not mounted:
+        # Unchecked is not the same as fine: say so, and hold it (#2691 review).
+        warnings.append(
+            FilamentWarning(
+                kind="sliced-nozzle-missing",
+                message=(
+                    f"Sliced for a {' and '.join(wanted_sizes)} mm nozzle; {printer.name}"
+                    " reports no nozzle, so it could not be checked."
+                    " Held for a manual start: check the nozzle before you start the print."
+                ),
+            )
+        )
+    missing = [size for size in wanted_sizes if size not in mounted]
+    if mounted and missing:
+        warnings.append(
+            FilamentWarning(
+                kind="sliced-nozzle-missing",
+                message=(
+                    f"Sliced for a {' and '.join(missing)} mm nozzle; "
+                    f"{', '.join(sorted(mounted))} mm is mounted on {printer.name}."
+                    " Held for a manual start: swap it before you start the print."
+                ),
+            )
+        )
+    return warnings
 
 
 async def _hardware_warnings(

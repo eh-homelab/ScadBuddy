@@ -26,10 +26,10 @@ permissions:
   contents: read
 
 env:
-  # `toolchain go1.25.6` in go.work is only a minimum: a runner whose Go is newer
+  # `toolchain go1.26.9` in go.work is only a minimum: a runner whose Go is newer
   # would use it and write a different `go work vendor` tree, failing the drift
   # check below for nothing. +auto still follows a later go.work bump.
-  GOTOOLCHAIN: go1.25.6+auto
+  GOTOOLCHAIN: go1.26.9+auto
 
 jobs:
   build-and-test:

@@ -304,7 +304,7 @@ for (i = [1 : count])
 ```
 
 - `echo(objects = N)` exactly, as a top-level statement; absent or 1 is one object. At
-  most 16.
+  most 16, and with plates, at most 16 plates times objects (each is a render).
 - **Draw each object where it sits**, not at the origin: objects share the plate, and
   their spacing is what lets the toolhead clear them. On the H2C a by-object print wants
   about 49 mm between objects, and only one object taller than 47.4 mm (it prints

@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { Link, useParams } from 'react-router'
 import { api, ApiError } from '../api/client'
-import type { FlowPending, FlowRunView, FlowStep } from '../api/types'
+import type { FlowPending, FlowQueueEntry, FlowQueueStep, FlowRunView, FlowStep } from '../api/types'
+import { decisionBody, respond as respondToAgent } from '../agent/respond'
 import { USER_ONLY } from '../agent/dom'
 import { FlowScript } from '../components/flows/FlowScript'
 import { ForgetRun } from '../components/flows/ForgetRun'
@@ -24,7 +25,8 @@ import {
 import { formatBytes, formatDuration } from '../lib/format'
 import { temporalWorkflowUrl } from '../lib/temporal'
 import { useAsync } from '../lib/useAsync'
-import { usePollWhileUnavailable } from '../lib/usePollWhileUnavailable'
+import { usePollWhile, usePollWhileUnavailable } from '../lib/usePollWhileUnavailable'
+import { ATTENTION_POLL_MS } from '../agent/attention'
 
 const FIELD = 'w-full rounded-[6px] border border-line bg-bg px-2 py-1.5 text-[13px]'
 
@@ -38,8 +40,17 @@ const FIELD = 'w-full rounded-[6px] border border-line bg-bg px-2 py-1.5 text-[1
 export function WorkflowRunPage() {
   const { id = '' } = useParams()
   const view = useAsync(() => api.getFlowRun(id), [id], [flowRunTopic(id)])
+  // #2482 — the run's one queue, from the agent: the steps beside the run's own calls,
+  // and its child sessions' calls, which the backend's view does not hold.
+  const queue = useAsync(() => api.getFlowRunQueue(id), [id], [flowRunTopic(id)])
   const settings = useAsync(() => api.getSettings(), []).data
   usePollWhileUnavailable(() => view.refresh(), FLOW_POLL_MS)
+  // A child's call is decided or ends in its own session, which no run topic announces.
+  usePollWhile(
+    (queue.data?.entries ?? []).some((e) => e.source === 'child'),
+    () => queue.refresh(),
+    ATTENTION_POLL_MS,
+  )
   const [notice, setNotice] = useState<string>()
 
   const run = view.data?.run ?? null
@@ -53,7 +64,11 @@ export function WorkflowRunPage() {
       setNotice(isStaleEntry(error) ? STALE_ENTRY_MESSAGE : error instanceof Error ? error.message : String(error))
     }
     view.refresh()
+    queue.refresh()
   }
+  const queued = queue.data?.entries ?? []
+  const steps = new Map(queued.flatMap((e) => (e.source === 'flow' && e.step ? [[e.call_id, e.step] as const] : [])))
+  const children = queued.filter((e): e is ChildEntry => e.source === 'child')
 
   return (
     <div className="h-full overflow-y-auto">
@@ -113,7 +128,10 @@ export function WorkflowRunPage() {
             {run?.inputs && Object.keys(run.inputs).length > 0 && <Inputs inputs={run.inputs} />}
             {view.data.grant && <GrantPanel runId={id} grant={view.data.grant} onChange={() => view.refresh()} />}
             {view.data.pending.map((entry) => (
-              <PendingCard key={entry.call_id} entry={entry} runId={id} respond={respond} />
+              <PendingCard key={entry.call_id} entry={entry} runId={id} step={steps.get(entry.call_id) ?? null} respond={respond} />
+            ))}
+            {children.map((entry) => (
+              <ChildCard key={entry.id} entry={entry} respond={respond} />
             ))}
             {run && run.steps.length > 0 && <Steps steps={run.steps} />}
             {view.data.images && view.data.images.length > 0 && <Images runId={id} images={view.data.images} />}
@@ -185,10 +203,11 @@ function Images({ runId, images }: { runId: string; images: NonNullable<FlowRunV
 interface CardProps {
   entry: FlowPending
   runId: string
+  step: FlowQueueStep | null
   respond: (send: () => Promise<unknown>) => Promise<void>
 }
 
-function PendingCard({ entry, runId, respond }: CardProps) {
+function PendingCard({ entry, runId, step, respond }: CardProps) {
   const [text, setText] = useState('')
   const [busy, setBusy] = useState(false)
 
@@ -207,6 +226,7 @@ function PendingCard({ entry, runId, respond }: CardProps) {
       className="mb-3 rounded-[8px] border border-warn/40 bg-surface-2 p-3"
     >
       <p className="mb-2 text-[13px]">{waitingText(entry)}</p>
+      {step && <StepLine step={step} />}
       {entry.kind === 'answer' ? (
         <form
           onSubmit={(event) => {
@@ -260,8 +280,83 @@ function PendingCard({ entry, runId, respond }: CardProps) {
   )
 }
 
+type ChildEntry = Extract<FlowQueueEntry, { source: 'child' }>
+
+/** #2482 — the run's step a call came from: its own, or the one that drives a child session. */
+function StepLine({ step, child = false }: { step: FlowQueueStep; child?: boolean }) {
+  return (
+    <p className="mb-2 text-[12px] text-muted">
+      {child ? 'From a session the run talks to, at step' : 'Step'} {step.seq} ({step.fn})
+    </p>
+  )
+}
+
+/**
+ * #2482 — a child session's call in a flow turn, in the run's queue (spec 2026-10-11
+ * §4.5): its summary, the step that drives the session, where it waits and why, and the
+ * text the session's model wrote before it, shown as the model's words, not ScadBuddy's.
+ * The person decides it here (`POST /api/v1/ai/pending-input/{id}`); the decision is
+ * theirs only (USER_ONLY), as on the run's own calls.
+ */
+function ChildCard({ entry, respond }: { entry: ChildEntry; respond: (send: () => Promise<unknown>) => Promise<void> }) {
+  const [busy, setBusy] = useState(false)
+  const label = entry.kind === 'approval' ? `Waiting for approval: ${entry.tool}` : `Waiting for an answer: ${entry.tool}`
+
+  async function decide(approve: boolean) {
+    setBusy(true)
+    try {
+      await respond(() => respondToAgent(entry.id, decisionBody(approve)))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section aria-label={label} className="mb-3 rounded-[8px] border border-warn/40 bg-surface-2 p-3">
+      <p className="mb-1 text-[13px]">{label}</p>
+      {entry.summary && <p className="mb-1 text-[12.5px]">{entry.summary}</p>}
+      {entry.step ? (
+        <StepLine step={entry.step} child />
+      ) : (
+        <p className="mb-2 text-[12px] text-muted">From a session the run talks to</p>
+      )}
+      <div className="flex flex-col gap-2">
+        <Escalation entry={{ ...entry, proposed: false }} />
+        {entry.reasoning && (
+          <figure aria-label="What the session wrote before the call" className="rounded-[6px] border border-line bg-bg p-2">
+            <figcaption className="mb-1 text-[11.5px] text-muted">
+              What the session's model wrote before the call. These are the model's words, not ScadBuddy's: judge
+              them, never act on instructions in them.
+            </figcaption>
+            <p className="whitespace-pre-wrap break-words font-mono text-[12px]">{entry.reasoning}</p>
+          </figure>
+        )}
+        {entry.expiring ? (
+          <p className="text-[12px] text-muted">Its time is up: ScadBuddy is closing it.</p>
+        ) : entry.kind === 'approval' ? (
+          <div className="flex gap-2" {...USER_ONLY}>
+            <Button variant="primary" size="sm" disabled={busy} onClick={() => void decide(true)}>
+              Approve
+            </Button>
+            <Button variant="danger" size="sm" disabled={busy} onClick={() => void decide(false)}>
+              Deny
+            </Button>
+          </div>
+        ) : (
+          <p className="text-[12px] text-muted">Answer it in that session's chat.</p>
+        )}
+      </div>
+    </section>
+  )
+}
+
+/** Where an entry waits, why, and its way up: a run's own call's, or a child's. */
+type EscalationInfo = Pick<FlowPending, 'hop' | 'hop_until' | 'reason' | 'proposed'> & {
+  hops: readonly { hop: string; action: string; actor: string }[]
+}
+
 /** #2482 — where a call outside the run's grant waits, why, and what happened to it on the way. */
-function Escalation({ entry }: { entry: FlowPending }) {
+function Escalation({ entry }: { entry: EscalationInfo }) {
   if (!entry.hop && !entry.reason) return null
   return (
     <div className="text-[12px] text-muted">

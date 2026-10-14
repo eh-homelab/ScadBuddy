@@ -47,7 +47,7 @@ from scadbuddy.workflows.commands import (
 )
 from scadbuddy.workflows.print_models import AcceptAnswer
 from scadbuddy.workflows.printing import CANCELLED_QUEUEING, CANCELLED_UNQUEUED
-from tests.api.test_print_filaments import prepared, queue_route, slice_routes
+from tests.api.test_print_filaments import prepared, queue_route, slice_kept, slice_routes
 from tests.api.test_print_run_choices import (
     API,
     body,
@@ -94,6 +94,8 @@ def gated_slice_routes(gate: Gate) -> respx.Route:
         return_value=httpx.Response(200, json={"job_id": 9, "status": "pending"})
     )
     respx.get(f"{API}/slice-jobs/9").mock(side_effect=gate.slice_job)
+    # The sliced file, read once it is queued for the hash a reuse checks (#2691 review).
+    slice_kept()
     return posted
 
 
@@ -249,6 +251,7 @@ def test_a_deliberate_reprint_with_the_same_choices_is_a_new_print(
     upload_route()
     run_routes()
     gated_slice_routes(gate)
+    slice_kept()
     queued = queue_route()
     gate.open()
 
@@ -270,6 +273,7 @@ def test_another_request_for_the_same_output_is_another_run(
     upload_route()
     run_routes()
     gated_slice_routes(gate)
+    slice_kept()
     queued = queue_route()
     gate.open()
 
@@ -512,6 +516,7 @@ def test_a_later_plate_failing_after_an_earlier_one_queued_holds_the_key(
             200, json={"id": 9, "status": "completed", "result": {"library_file_id": 52}}
         )
     )
+    slice_kept(52)
     respx.get(f"{API}/slice-jobs/10").mock(
         return_value=httpx.Response(200, json={"id": 10, "status": "failed", "error": "no fit"})
     )
@@ -1150,6 +1155,7 @@ def test_a_cancel_after_plate_1_is_queued_says_it_may_be_queued_and_queues_no_mo
             200, json={"id": 9, "status": "completed", "result": {"library_file_id": 52}}
         )
     )
+    slice_kept(52)
     respx.get(f"{API}/slice-jobs/10").mock(side_effect=gate.slice_job)
     queued = queue_route()
 

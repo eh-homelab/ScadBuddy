@@ -10,7 +10,7 @@ import type {
   RackAlgorithm,
   SlotChoice,
 } from '../api/types'
-import { printChoicesOf } from './printChoices'
+import { printChoicesOf, sliceOverrides } from './printChoices'
 import { sourceApi, type PrintSource } from './printSource'
 import { traceAction } from './traceAction'
 import type { PrintSelection } from './usePrintChoices'
@@ -170,7 +170,7 @@ export function useRunPrint({
         all_plates: plate === 'all',
         ...(projectId === undefined ? {} : { project_id: projectId }),
         options,
-        ...(printSequence === null ? {} : { print_sequence: printSequence }),
+        ...sliceOverrides(printSequence),
         rack_position: rackPosition,
         rack_algorithm: rackAlgorithm,
         // One per press: the same choices printed again are a new print, while

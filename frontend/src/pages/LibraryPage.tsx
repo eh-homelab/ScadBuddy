@@ -62,9 +62,10 @@ function plural(count: number, word: string): string {
 /**
  * #313 — Bambuddy's library by folder. Each unsliced 3MF has Print, which opens the same
  * spool-first dialog an output uses; the file is sliced as it stands in Bambuddy.
- * Advanced also lists sliced files and STLs; a sliced file is printed from Bambuddy.
+ * Advanced also lists sliced files and STLs. A sliced file's Print queues it as it is,
+ * with no slice (#2671).
  * #1864 — each file has a tick, kept across folders; Arrange selected opens Arrange on
- * the ticked printable files.
+ * the ticked printable files that are not sliced already.
  * #2165 — the folders are a tree, and the URL says where the page is:
  * `/library/<folder path>` the folder, `?file=<id>` a file highlighted (its folder found
  * when the path names none), `?print=<id>` its print dialog open. Back and forward move
@@ -94,8 +95,17 @@ export function LibraryPage() {
   // A print link to a file the listing on screen already holds (Print pressed on its
   // card) finds nothing new: reading it again would empty the listing, closing and
   // reopening the dialog on a fresh copy of the file, which then reads everything
-  // twice (#2361).
-  const printListed = printParam !== null && (listing?.files ?? []).some((file) => file.id === printParam)
+  // twice (#2361). While a listing is read again (Advanced, a reload) there is none on
+  // screen, so the last one's answer holds; else the file alone is read meanwhile (#2822).
+  const [listedPrint, setListedPrint] = useState<number | null>(null)
+  const seenPrint =
+    listing === null
+      ? listedPrint
+      : printParam !== null && (listing.files ?? []).some((file) => file.id === printParam)
+        ? printParam
+        : null
+  if (seenPrint !== listedPrint) setListedPrint(seenPrint)
+  const printListed = printParam !== null && seenPrint === printParam
   const linked = fileParam ?? (printListed ? null : printParam)
   const [error, setError] = useState<string | null>(null)
   const [reload, setReload] = useState(0)
@@ -251,7 +261,8 @@ export function LibraryPage() {
 
   const files = listing?.files ?? []
   const hidden = listing?.hidden ?? 0
-  const printable = picked.filter((file) => file.printable)
+  // #2671 — a sliced file prints, but has no objects to arrange.
+  const printable = picked.filter((file) => file.printable && !file.sliced)
   const printing = printParam === null ? null : (files.find((file) => file.id === printParam) ?? null)
   const folderId = wanted?.fileId !== undefined ? (listing?.folder_id ?? null) : (wanted?.folderId ?? null)
 
@@ -461,11 +472,7 @@ export function LibraryPage() {
                       Print
                     </Button>
                   ) : (
-                    <p className="text-[12px] text-faint">
-                      {file.file_type?.toLowerCase() === 'gcode.3mf'
-                        ? 'Sliced already. Print it from Bambuddy.'
-                        : 'ScadBuddy cannot print this file type.'}
-                    </p>
+                    <p className="text-[12px] text-faint">ScadBuddy cannot print this file type.</p>
                   )}
                   <div className="flex items-center justify-between gap-2 text-[12px]">
                     {file.printable ? (
