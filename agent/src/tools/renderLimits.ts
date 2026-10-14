@@ -193,6 +193,10 @@ export class RenderLimiter {
     // First come, first served: nothing overtakes a render of its own principal
     // already waiting, nor, under a global bound, a waiting render that could
     // start now (one held only by its own principal's bound is not ahead).
+    // Intended, and not strict FIFO under the global bound (#2847): a waiter held
+    // only by its own principal's bound is passed over, and in the gap between a
+    // release and `pump()` re-reading the limits, a freed waiter is free but not
+    // yet granted, so a newcomer queues behind it rather than taking its slot.
     const ahead =
       own > 0 || (limits.global > 0 && this.waiting.some((w) => this.free(w.principal, limits)))
     if (!ahead && this.free(principal, limits)) return this.start(principal)

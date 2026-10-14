@@ -100,6 +100,19 @@ describe('ParameterPanel', () => {
         expect(tab).toHaveAttribute('aria-controls', panel.id)
       }
     })
+
+    it('keeps the panel’s parameters a list, item per parameter (#2455)', async () => {
+      const user = userEvent.setup()
+      render(<Harness />)
+      await user.click(screen.getByRole('tab', { name: 'Plate' }))
+
+      const panel = screen.getByRole('tabpanel', { name: 'Plate' })
+      const items = within(within(panel).getByRole('list')).getAllByRole('listitem')
+      expect(items.length).toBeGreaterThan(0)
+      expect(items.map((item) => item.dataset.param)).toEqual(
+        [...panel.querySelectorAll('[data-param]')].map((item) => (item as HTMLElement).dataset.param),
+      )
+    })
   })
 
   it('pins a Global group above every tab', async () => {

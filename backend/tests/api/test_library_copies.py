@@ -22,7 +22,12 @@ from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.plate import DEFAULT_PLATE
-from tests.api.test_print_filaments import queue_route, slice_routes, slots_from_bambuddy
+from tests.api.test_print_filaments import (
+    queue_route,
+    slice_kept,
+    slice_routes,
+    slots_from_bambuddy,
+)
 from tests.api.test_print_run_choices import allow_reprints, body, run_print, run_routes
 from tests.api.test_send import BASE, configure, make_output
 from tests.support.operations import press
@@ -115,6 +120,7 @@ def set_up(client: TestClient, model: str) -> str:
     run_routes()
     project_routes()
     slice_routes()
+    slice_kept()
     queue_route()
     allow_reprints(client)
     return make_output(client, model)

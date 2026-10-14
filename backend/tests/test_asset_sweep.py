@@ -99,6 +99,36 @@ async def test_both_blob_sweeps_keep_an_unreferenced_piece_for_the_job_ttl(
     assert graces == [86400]
 
 
+_forgotten: list[list[str]] = []
+
+
+class _Geometry:
+    """A geometry index that only records the pieces it is told are gone."""
+
+    def __init__(self, pool: Any) -> None:
+        pass
+
+    def forget_pieces(self, piece_keys: list[str]) -> None:
+        _forgotten.append(piece_keys)
+
+
+async def test_the_blob_sweep_forgets_the_geometry_of_the_pieces_it_removes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A swept piece is no geometry's source: its `piece_geometry` row goes with it."""
+    monkeypatch.setattr(main, "sweep_blobs", lambda blobs, refs, *, grace: ["p1", "p2"])
+    monkeypatch.setattr(main, "GeometryIndex", _Geometry)
+    _forgotten.clear()
+    state = SimpleNamespace(
+        store=SimpleNamespace(content=None),
+        blobs=object(),
+        refs=SimpleNamespace(pool=object()),
+        config=SimpleNamespace(job_ttl=86400),
+    )
+    await main._sweep_blobs_logged(state)  # type: ignore[arg-type]
+    assert _forgotten == [["p1", "p2"]]
+
+
 class _Bambuddy(BambuddyContentBackend):
     """A Bambuddy backend that only records the reconcile it is asked for."""
 
@@ -121,10 +151,11 @@ async def test_the_blob_sweep_reconciles_unrecorded_work_files_on_bambuddy_only(
         return []
 
     monkeypatch.setattr(main, "sweep_content", sweep_content)
+    monkeypatch.setattr(main, "GeometryIndex", _Geometry)
     backend: Any = _Bambuddy() if on_bambuddy else object()
     state = SimpleNamespace(
         store=SimpleNamespace(content=SimpleNamespace(backend=backend), blobs=object()),
-        refs=object(),
+        refs=SimpleNamespace(pool=object()),
         config=SimpleNamespace(job_ttl=86400),
     )
     before = datetime.now(UTC)

@@ -98,6 +98,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`the warm cache's resync${TEST_DATABASE_URL 
         builtinTools: [],
         recallMaxQueryChars: null,
         transientRetries: null,
+        servedBuiltins: [],
+        backgroundTasks: false,
       },
       slot: createTurnSlot(),
       secrets: [],

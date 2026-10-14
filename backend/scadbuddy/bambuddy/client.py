@@ -21,12 +21,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from contextlib import AbstractContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import date
 from types import TracebackType
-from typing import Any, BinaryIO, Literal, Self
+from typing import IO, Any, Literal, Self
 
 import httpx
 from fastapi import status
@@ -91,11 +92,31 @@ TRASH_PAGE = 500
 #: The Bambuddy permission that shows a caller every user's trash (``Permission``,
 #: ``backend/app/core/permissions.py`` line 62 at v1.2.5.5).
 LIBRARY_DELETE_ALL = "library:delete_all"
+#: A live camera stream never ends, so it has no total timeout; a camera that sends no
+#: frame for ``read`` seconds has stalled, and the stream ends.
+CAMERA_STREAM_TIMEOUT = httpx.Timeout(10.0, read=30.0)
+#: What Bambuddy's ``/camera/stream`` answers with.
+MJPEG_TYPE = "multipart/x-mixed-replace; boundary=frame"
+#: A multipart MJPEG type with a plain boundary token: the only type a stream is
+#: served as, since ScadBuddy's origin would otherwise serve whatever Bambuddy (or an
+#: external camera behind it) labels the bytes, ``text/html`` included.
+_MJPEG = re.compile(
+    r"multipart/x-mixed-replace;\s*boundary=\"?([A-Za-z0-9'()+_,.\-]{1,70})\"?", re.I
+)
+
+
+def mjpeg_type(upstream: str | None) -> str:
+    """The content type to serve a camera stream as: ``multipart/x-mixed-replace`` with
+    the upstream's boundary, since the parts are split on it; :data:`MJPEG_TYPE` when the
+    upstream names no usable boundary. Never the upstream's type itself."""
+    match = _MJPEG.fullmatch((upstream or "").strip())
+    return f"multipart/x-mixed-replace; boundary={match.group(1)}" if match else MJPEG_TYPE
 
 
 #: What a Bambuddy call does, which names its span (``bambuddy.<operation>``, spec
 #: 2026-10-01 §4). A closed set, so a span name never carries an id or free text.
 Operation = Literal[
+    "media.attachment",
     "archives.list",
     "archives.photo.delete",
     "archives.photo.upload",
@@ -142,6 +163,7 @@ Operation = Literal[
     "media.timelapse",
     "printers.available_filaments",
     "printers.camera.snapshot",
+    "printers.camera.stream",
     "printers.camera.token",
     "printers.inventory_remain",
     "printers.list",
@@ -313,6 +335,28 @@ class BambuddyClient:
         )
         return PrinterStatus.model_validate(response.json())
 
+    async def _camera_token(self, *, what: str) -> str:
+        """A camera stream token, minted under ``camera:view``. An answer without one is
+        a 502, as any unexpected body is (#2752 review)."""
+        minted = await self._send(
+            "POST",
+            "/printers/camera/stream-token",
+            scope=Scope.READ_STATUS,
+            operation="printers.camera.token",
+            what=what,
+        )
+        try:
+            body = minted.json()
+        except ValueError:
+            body = None
+        token = body.get("token") if isinstance(body, dict) else None
+        if not isinstance(token, str) or not token:
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Bambuddy answered no camera token when asked to {what}",
+            )
+        return token
+
     async def camera_snapshot(self, printer_id: int) -> bytes:
         """One JPEG frame from the printer's camera (#796).
 
@@ -322,22 +366,54 @@ class BambuddyClient:
         take Bambuddy up to 15 s; a camera that gives no frame is its 503.
         """
         what = f"capture the camera of printer {printer_id}"
-        minted = await self._send(
-            "POST",
-            "/printers/camera/stream-token",
-            scope=Scope.READ_STATUS,
-            operation="printers.camera.token",
-            what=what,
-        )
+        token = await self._camera_token(what=what)
         response = await self._send(
             "GET",
             f"/printers/{printer_id}/camera/snapshot",
             scope=Scope.READ_STATUS,
             operation="printers.camera.snapshot",
             what=what,
-            params={"token": minted.json()["token"]},
+            params={"token": token},
         )
         return response.content
+
+    @asynccontextmanager
+    async def camera_stream(
+        self, printer_id: int, *, fps: int
+    ) -> AsyncIterator[tuple[str, AsyncIterator[bytes]]]:
+        """The printer's live camera as Bambuddy's MJPEG stream (#981): its content type
+        (``multipart/x-mixed-replace; boundary=frame``) and its bytes, open until the
+        context exits. A refusal (no printer, no camera) raises before anything is
+        yielded, so a caller can still answer it as an error.
+
+        Leaving the context closes the connection, and that is the whole release:
+        Bambuddy fans one camera out to every viewer and stops it 5 s after the last
+        one disconnects (``camera.py``'s broadcaster). ``/camera/stop`` is never
+        called: once no subscriber is counted it force-stops every stream of the
+        printer, an external camera's other viewers included. The token is minted
+        here, as the snapshot's is, and never leaves the server."""
+        what = f"stream the camera of printer {printer_id}"
+        token = await self._camera_token(what=what)
+        path = f"/printers/{printer_id}/camera/stream"
+        with _call_span(
+            "printers.camera.stream", "GET", Scope.READ_STATUS, detached=True
+        ) as current:
+            try:
+                async with self._http.stream(
+                    "GET",
+                    self.config.url(path),
+                    headers=self._headers,
+                    params={"token": token, "fps": fps},
+                    timeout=CAMERA_STREAM_TIMEOUT,
+                ) as response:
+                    current.set_attribute("http.response.status_code", response.status_code)
+                    if not response.is_success:
+                        await response.aread()
+                        raise map_response(response, scope=Scope.READ_STATUS, what=what)
+                    yield mjpeg_type(response.headers.get("content-type")), response.aiter_bytes()
+            except httpx.HTTPError as error:
+                logger.warning("bambuddy request failed", extra={"method": "GET", "path": path})
+                raise map_transport(error, what=what) from error
 
     async def available_filaments(
         self, model: str, *, location: str | None = None
@@ -379,7 +455,8 @@ class BambuddyClient:
             operation="slicer.presets",
             what="list the slicer presets",
         )
-        return PresetCatalogue.model_validate(response.json())
+        # 1 MB of JSON: parsed off the event loop, which every other request shares (#2978).
+        return await asyncio.to_thread(PresetCatalogue.model_validate_json, response.content)
 
     async def local_presets(self) -> LocalPresetCatalogue:
         """``GET /api/v1/local-presets/`` — OrcaSlicer profiles imported into Bambuddy.
@@ -668,10 +745,11 @@ class BambuddyClient:
         )
 
     async def upload_archive_photo(
-        self, archive_id: int, filename: str, content: bytes
+        self, archive_id: int, filename: str, content: bytes | IO[bytes]
     ) -> ArchivePhotoUpload:
         """Bambuddy takes only ``.jpg``, ``.jpeg``, ``.png`` and ``.webp`` here, and
-        renames the file; the answer's ``filename`` is the name to keep."""
+        renames the file; the answer's ``filename`` is the name to keep. A file object
+        is streamed from where it is, never read whole (#309)."""
         response = await self._send(
             "POST",
             f"/archives/{archive_id}/photos",
@@ -784,7 +862,7 @@ class BambuddyClient:
     async def upload_library_file(
         self,
         filename: str,
-        content: bytes | BinaryIO,
+        content: bytes | IO[bytes],
         *,
         folder_id: int | None = None,
         media_type: str = THREE_MF_MEDIA_TYPE,

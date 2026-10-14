@@ -49,19 +49,30 @@ async function getJob(ctx: ToolContext, id: string) {
 }
 
 /**
+ * When a render_model or arrange call's own waits end (`waitsMs`: ACCEPTING_MS +
+ * renderWaitMs), as one deadline taken when the call starts (#2846). The slot wait and
+ * the job's wait (`renderWaitMs` at most) both spend from it, so a slot granted late
+ * leaves the job less time rather than running the call past `TOOL_DEADLINE_MS`, where
+ * it would be answered as "may have taken effect". Only the submit's own accepting wait
+ * (ACCEPTING_MS at most, under `TOOL_DEADLINE_MS`) can still run past it.
+ */
+export function renderDeadline(ctx: ToolContext): number {
+  return performance.now() + ACCEPTING_MS + ctx.renderWaitMs
+}
+
+/**
  * A slot under the per-principal render bounds (renderLimits.ts, #252) for a job
  * the agent puts on the render queue (render_model, arrange). Past the bound this
- * waits for a slot rather than refusing, for at most the tool's own waits
- * (`waitsMs`: ACCEPTING_MS + renderWaitMs), so a long queue is answered "not
- * rendered" with nothing submitted, before the tool's deadline (registry.ts
- * `TOOL_DEADLINE_MS` past its waits) would answer it as "may have taken effect".
+ * waits for a slot rather than refusing, until `deadline` (`renderDeadline`), so a
+ * long queue is answered "not rendered" with nothing submitted, before the tool's
+ * deadline would answer it as "may have taken effect".
  * Hand the returned function to `releaseWhenSettled`.
  */
-export function acquireRenderSlot(ctx: ToolContext): Promise<() => void> {
+export function acquireRenderSlot(ctx: ToolContext, deadline: number): Promise<() => void> {
   const limiter = ctx.renderLimiter ?? DEFAULT_RENDER_LIMITER
   return limiter.acquire(renderPrincipal(ctx.principal), {
     signal: ctx.signal,
-    maxWaitMs: ACCEPTING_MS + ctx.renderWaitMs,
+    maxWaitMs: Math.max(0, deadline - performance.now()),
     onWait: (ahead) => {
       ctx.progress(0, undefined, `waiting for a render slot (${ahead} ahead of this one)`).catch(() => {})
     },
@@ -86,12 +97,14 @@ export function releaseWhenSettled(
 }
 
 /**
- * Polls a render until it settles or `renderWaitMs` passes, reporting each
- * poll as progress so a streaming client sees the job move (spec §5.1: the
- * tool "submits a render and streams progress until it settles").
+ * Polls a render until it settles, for `renderWaitMs` but never past `deadline` (the
+ * call's `renderDeadline`, so a slot granted late leaves the job less), reporting each
+ * poll as progress so a streaming client sees the job move (spec §5.1: the tool
+ * "submits a render and streams progress until it settles"). It always polls once, so
+ * a job already settled is answered.
  */
-export async function waitForJob(ctx: ToolContext, id: string): Promise<JobStatus> {
-  const deadline = performance.now() + ctx.renderWaitMs
+export async function waitForJob(ctx: ToolContext, id: string, callDeadline: number): Promise<JobStatus> {
+  const deadline = Math.min(callDeadline, performance.now() + ctx.renderWaitMs)
   for (let step = 1; ; step++) {
     const job = await getJob(ctx, id)
     const lastLine = job.log_tail?.at(-1)
@@ -222,7 +235,8 @@ export const customizerTools: Tool[] = [
         )
       }
       // Held until the backend job settles, past this call when it hands the job back running.
-      const release = await acquireRenderSlot(ctx)
+      const deadline = renderDeadline(ctx)
+      const release = await acquireRenderSlot(ctx, deadline)
       let submitted: string | undefined
       let job: JobStatus | undefined
       try {
@@ -242,7 +256,7 @@ export const customizerTools: Tool[] = [
         )
         submitted = accepted.job_id
         await ctx.progress(0, undefined, `render queued as ${accepted.job_id}`)
-        job = await waitForJob(ctx, accepted.job_id)
+        job = await waitForJob(ctx, accepted.job_id, deadline)
       } catch (err) {
         if (submitted === undefined) throw err
         // The job exists however the wait ended (#1072): answer its id, so the model

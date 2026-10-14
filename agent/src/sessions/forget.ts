@@ -1,11 +1,14 @@
 import type { Client } from '@temporalio/client'
 import { WorkflowNotFoundError } from '@temporalio/common'
 import type { Sql } from 'postgres'
+import { backgroundWorkflowId } from '../background/service.js'
 import { payloadKeyLock, subjectOf } from '../temporal/payloadCodec.js'
 import { notifyWarmEvict } from './warmEvict.js'
 
 // forgetSubject (spec 2026-10-01 §6.5, plan 5c Ruling 12): the one operation every
 // deletion of a durable session or a flow run goes through. In this order:
+//   0. a session's background tasks (src/background/) end: their rows, then their
+//      workflows `bgtask-<session>-<id>`, terminated, so none encodes again under the key;
 //   1. delete the subject's `ai_payload_keys` row and record it in
 //      `ai_forgotten_subjects`, so no key is ever made for it again: from then on every
 //      copy of its payloads (history, Visibility, Archival) is undecryptable, whatever
@@ -48,9 +51,23 @@ function notFound(err: unknown): boolean {
   return err instanceof WorkflowNotFoundError || (err as { code?: unknown } | null)?.code === 5
 }
 
+async function endBackgroundTasks(deps: ForgetDeps, sessionId: string): Promise<void> {
+  const ended = await deps.sql<{ id: string }[]>`
+    UPDATE ai_background_tasks SET state = 'cancelled', detail = 'the chat was forgotten', next_at = NULL, updated_at = now()
+     WHERE session_id = ${sessionId} AND state = 'active' RETURNING id`
+  for (const { id } of ended) {
+    try {
+      await deps.client?.workflow.getHandle(backgroundWorkflowId(sessionId, id)).terminate('forgotten (forgetSubject)')
+    } catch (err) {
+      if (!notFound(err)) throw err
+    }
+  }
+}
+
 export async function forgetSubject(deps: ForgetDeps, subject: string): Promise<Forgotten> {
-  if (subjectOf(subject) === undefined) throw new Error(`${subject} is not a session-<uuid> or flow-<uuid> subject`)
+  if (subjectOf(subject) !== subject) throw new Error(`${subject} is not a session-<uuid> or flow-<uuid> subject`)
   deps.keys?.forget(subject)
+  if (subject.startsWith('session-')) await endBackgroundTasks(deps, subject.slice('session-'.length))
   // The tombstone with the deletion: no encoder still running for the subject (a
   // workflow task or an activity before the termination below) can make it a new key.
   const keys = await deps.sql.begin(async (tx) => {

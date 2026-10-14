@@ -39,7 +39,7 @@ RenderOutcome = Literal["done", "failed", "superseded"]
 #: Which workflow a queue job runs, ``render.job_models.JobTableKind`` (spec 2026-09-27
 #: §7): spelled out here, not imported, so the metrics never load the render stack.
 RenderKind = Literal["render", "arrange"]
-RenderStage = Literal["source", "render", "split", "solids", "thumbnail", "write"]
+RenderStage = Literal["source", "render", "split", "solids", "thumbnail", "write", "recolour"]
 #: What a `render_jobs` call that failed was doing: the per-scrape read of the
 #: queue gauges, a render's start (Temporal unavailable, or the start refused or
 #: unstartable; one still accepting is `render_accept_pending`), or releasing or
