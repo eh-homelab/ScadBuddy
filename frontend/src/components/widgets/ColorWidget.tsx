@@ -42,7 +42,11 @@ export function ColorWidget({
   function commit(text: string) {
     setDraft(null)
     // Typed without its `#`, a hex is still taken as one; the value sent always has it.
-    onChange(colourHex(text) ?? colourHex(`#${text.trim()}`) ?? text.trim())
+    const next = colourHex(text) ?? colourHex(`#${text.trim()}`) ?? text.trim()
+    // The same colour as the value, only spelt otherwise (a focus and blur of `#ff0000`):
+    // not sent, or a lowercase default would read as a change from it.
+    if (colour !== null && next === colour) return
+    onChange(next)
   }
 
   return (
