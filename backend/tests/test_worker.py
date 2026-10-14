@@ -511,14 +511,28 @@ async def test_temporal_refuses_a_write_with_a_stale_conflict_token() -> None:
         )
         return (await _routing_once_current(client, deployment, build_id))[1]
 
+    async def write_refusal(client: Client, build_id: str, token: bytes) -> RPCStatusCode | None:
+        """The write's refusal, or None when it is accepted; asked again while the server
+        is busy, the way `_is_current_answer` is, so a transient error is never read as
+        the conflict (or as the acceptance) the test is about."""
+        for attempt in range(IS_CURRENT_ATTEMPTS):
+            try:
+                await made_current(client, build_id, token)
+            except RPCError as error:
+                if error.status not in IS_CURRENT_TRANSIENT or attempt == IS_CURRENT_ATTEMPTS - 1:
+                    return error.status
+                await asyncio.sleep(min(2.0**attempt * 0.5, IS_CURRENT_MAX_WAIT))
+            else:
+                return None
+        raise AssertionError("unreachable")
+
     async with temporal_client() as client, versioned(client, old), versioned(client, new):
         stale = await polled_then_current(client, old)
         fresh = await polled_then_current(client, new)
 
-        with pytest.raises(RPCError):
-            await made_current(client, old, stale)
+        assert await write_refusal(client, old, stale) == STALE_TOKEN_REFUSAL
         assert (await _routing_once_current(client, deployment, new))[0] == new
-        await made_current(client, old, fresh)
+        assert await write_refusal(client, old, fresh) is None
         await _routing_once_current(client, deployment, old)
 
 
@@ -528,6 +542,9 @@ MAKE_CURRENT_WITHIN = 60.0
 #: `is_current`'s attempts and the longest wait between two (`_is_current_answer`).
 IS_CURRENT_ATTEMPTS = 12
 IS_CURRENT_MAX_WAIT = 5.0
+#: How Temporal refuses a deployment write carrying a conflict token read before another
+#: write (#2538): what `deployment_writes` relies on.
+STALE_TOKEN_REFUSAL = RPCStatusCode.FAILED_PRECONDITION
 #: What a busy server answers meanwhile; anything else is a real error, raised at once.
 IS_CURRENT_TRANSIENT = frozenset(
     {
