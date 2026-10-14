@@ -564,9 +564,9 @@ def paint_layout(
         return layout
     try:
         return _painted(layout, scad, params, work)
-    except (OSError, ValueError) as error:
-        # A scene.json or mesh file that cannot be read (pydantic's ValidationError,
-        # UnicodeDecodeError and SceneEditError are ValueErrors) costs the painting,
+    except Exception as error:
+        # Whatever a scene.json or mesh file's damage raises (OSError, pydantic's
+        # ValidationError, a zip's BadZipFile, trimesh's KeyError) costs the painting,
         # never the render.
         logger.warning(
             "could not carry the painting of %s: %s", scad.parent.name, type(error).__name__

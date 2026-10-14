@@ -1597,12 +1597,19 @@ def _delete_meshes(model_dir: Path) -> None:
         file.unlink()
 
 
+def _garble_meshes(model_dir: Path) -> None:
+    for file in model_dir.rglob("*.3mf"):
+        file.write_bytes(b"not a zip")
+
+
 def _break_scene(model_dir: Path) -> None:
     (model_dir / SCENE_NAME).write_text('{"objects": 3', encoding="utf-8")
 
 
 @pytest.mark.parametrize(
-    "sabotage", [_delete_meshes, _break_scene], ids=["no-mesh-file", "bad-scene"]
+    "sabotage",
+    [_delete_meshes, _garble_meshes, _break_scene],
+    ids=["no-mesh-file", "garbled-mesh", "bad-scene"],
 )
 async def test_an_unreadable_painting_costs_the_painting_not_the_render(
     paths: DataPaths, sabotage: Callable[[Path], None]
