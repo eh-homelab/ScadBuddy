@@ -107,8 +107,8 @@ import numpy.typing as npt
 import trimesh
 from pydantic import BaseModel, Field
 
-from scadbuddy.meshmodel.edits import WALL, JointSpec
 from scadbuddy.meshmodel.section import Section, layer_areas, measure
+from scadbuddy.meshmodel.shared import WALL, JointSpec
 from scadbuddy.render.bambu3mf import (
     CORE_NS,
     MODEL_SETTINGS_NAME,

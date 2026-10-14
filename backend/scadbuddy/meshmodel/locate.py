@@ -13,11 +13,11 @@ import numpy as np
 import trimesh
 
 from scadbuddy.core.paths import SOURCE_NAME
-from scadbuddy.meshmodel.edits import MeshOf
 from scadbuddy.meshmodel.frames import unit
 from scadbuddy.meshmodel.meshes import mesh_loader
 from scadbuddy.meshmodel.paint import placement
 from scadbuddy.meshmodel.scene import SCENE_NAME, Cut, Scene, load_scene, text_sha256, value
+from scadbuddy.meshmodel.shared import MeshOf
 from scadbuddy.render.geometry import GeometryAnalysis
 from scadbuddy.render.meshmatch import point_triangle_distance
 

@@ -27,7 +27,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import ModelExistsError, ModelMeta, UnsafeModelPathError
 from scadbuddy.library.operations import PIN_TIMEOUT, answered_as_routes
 from scadbuddy.meshmodel.compile import compile_scene
-from scadbuddy.meshmodel.edits import Edit, SceneEditError, apply_edits, removed_parameters
+from scadbuddy.meshmodel.edits import Edit, apply_edits, removed_parameters
 from scadbuddy.meshmodel.ingest import scene_from_objects
 from scadbuddy.meshmodel.meshes import mesh_loader
 from scadbuddy.meshmodel.scene import (
@@ -42,6 +42,7 @@ from scadbuddy.meshmodel.scene import (
     source_name,
     text_sha256,
 )
+from scadbuddy.meshmodel.shared import SceneEditError
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import (
     KindsBuild,

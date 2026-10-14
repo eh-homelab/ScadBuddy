@@ -10,7 +10,7 @@ from pathlib import Path
 
 import trimesh
 
-from scadbuddy.meshmodel.edits import MeshOf, SceneEditError
+from scadbuddy.meshmodel.shared import MeshOf, SceneEditError
 
 
 def mesh_loader(directory: Path) -> MeshOf:

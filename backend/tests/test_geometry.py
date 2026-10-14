@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import math
 import shutil
+import subprocess
+import sys
 import time
 import zipfile
 from pathlib import Path
@@ -585,3 +587,15 @@ def test_parts_match_points_refuses_are_not_joined(monkeypatch: pytest.MonkeyPat
     leaves = revolved([(0, 30), (3, 30), (3, 35), (7, 35), (7, 45), (0, 45)])
     analysis = analyze_geometry([_part(body, "#F08A24", 1), _part(leaves, "#3A7D2C", 2)])
     assert [j.parts for j in analysis.weak_joints] == [[2]]  # the leaves alone, not the pair
+
+
+def test_analysing_geometry_does_not_load_the_scene_edits() -> None:
+    """`render.geometry` needs the joint spec and the section maths, not `edits` (the
+    scene's whole edit vocabulary), so a plain render's analysis stays off that stack."""
+    code = (
+        "import sys, scadbuddy.render.geometry; print('scadbuddy.meshmodel.edits' in sys.modules)"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    ).stdout
+    assert out.strip() == "False"

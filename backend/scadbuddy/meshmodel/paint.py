@@ -36,7 +36,6 @@ import numpy.typing as npt
 import trimesh
 
 from scadbuddy.core.paths import SOURCE_NAME
-from scadbuddy.meshmodel.edits import MeshOf, transform_matrix
 from scadbuddy.meshmodel.meshes import mesh_loader
 from scadbuddy.meshmodel.scene import (
     SCENE_NAME,
@@ -46,6 +45,7 @@ from scadbuddy.meshmodel.scene import (
     load_scene,
     text_sha256,
 )
+from scadbuddy.meshmodel.shared import MeshOf, transform_matrix
 from scadbuddy.render.meshmatch import NearPairsExceeded, match_points, nearest_triangles
 from scadbuddy.render.paint import single_code, uniform_state
 from scadbuddy.render.schema import ParamValue
