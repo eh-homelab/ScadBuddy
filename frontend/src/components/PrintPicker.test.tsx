@@ -1805,6 +1805,196 @@ describe('PrintPicker · Filament profiles, checked and unchecked (#2804 review)
   })
 })
 
+describe('PrintPicker · Supports (#1899)', () => {
+  it('offers Default, none, tree and normal, and sends nothing for Default', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+
+    const select = screen.getByLabelText('Support type')
+    expect(select).toHaveValue('default')
+    expect(within(select).getAllByRole('option').map((option) => option.textContent)).toEqual([
+      'Default (process)',
+      'No supports',
+      'Tree supports',
+      'Normal supports',
+    ])
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).not.toHaveProperty('supports')
+  })
+
+  it('sends tree supports with an angle and on the build plate only', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+
+    await user.selectOptions(screen.getByLabelText('Support type'), 'tree')
+    await user.type(screen.getByLabelText('Threshold angle (°)'), '40')
+    await user.click(screen.getByLabelText('On build plate only'))
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toMatchObject({
+      supports: { enabled: true, type: 'tree', threshold_angle: 40, on_build_plate_only: true },
+    })
+  })
+
+  it('leaves an angle out of range out of the print, says why, and clears it with supports off', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+
+    await user.selectOptions(screen.getByLabelText('Support type'), 'normal')
+    await user.type(screen.getByLabelText('Threshold angle (°)'), '95')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]?.['supports']).toEqual({ enabled: true, type: 'normal', on_build_plate_only: false })
+
+    // The typed value stays, with why it is not sent (#2837 review).
+    expect(screen.getByLabelText('Threshold angle (°)')).toHaveValue(95)
+    expect(screen.getByLabelText('Threshold angle (°)')).toHaveAttribute('aria-invalid', 'true')
+    expect(screen.getByText(/A whole number of degrees from 0 to 90/)).toBeInTheDocument()
+
+    await user.selectOptions(screen.getByLabelText('Support type'), 'off')
+    expect(screen.queryByLabelText('Threshold angle (°)')).toBeNull()
+    await user.selectOptions(screen.getByLabelText('Support type'), 'tree')
+    expect(screen.getByLabelText('Threshold angle (°)')).toHaveValue(null)
+  })
+
+  it("calls a library file's Default the file's or the process's, which the dialog cannot read (#2837 review)", async () => {
+    renderPage(
+      <PrintPicker
+        open
+        source={{ kind: 'library', file: { id: 89, filename: 'bag-clip.3mf' } }}
+        onClose={vi.fn()}
+        onRan={vi.fn()}
+      />,
+    )
+    await loaded()
+    await showAdvanced()
+    expect(within(screen.getByLabelText('Support type')).getAllByRole('option')[0]).toHaveTextContent(
+      'Default (file or process)',
+    )
+  })
+
+  it('takes only digits for the angle: an exponent form is not a whole number of degrees (#3180)', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+
+    await user.selectOptions(screen.getByLabelText('Support type'), 'tree')
+    fireEvent.change(screen.getByLabelText('Threshold angle (°)'), { target: { value: '1e1' } })
+    expect(screen.getByLabelText('Threshold angle (°)')).toHaveAttribute('aria-invalid', 'true')
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]?.['supports']).not.toHaveProperty('threshold_angle')
+  })
+
+  it('prints with no supports as only `enabled: false` (#2837 review)', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+
+    await user.selectOptions(screen.getByLabelText('Support type'), 'off')
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]?.['supports']).toEqual({ enabled: false })
+  })
+
+  it('starts On build plate only at the template’s, and keeps it when only the type changes', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker({ printSettings: { support_on_build_plate_only: '1' } })
+    await loaded()
+    await showAdvanced()
+
+    await user.selectOptions(screen.getByLabelText('Support type'), 'normal')
+    expect(screen.getByLabelText('On build plate only')).toBeChecked()
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toMatchObject({ supports: { enabled: true, type: 'normal', on_build_plate_only: true } })
+  })
+
+  it('says what Default means for a template that declares supports, and strikes it when overridden', async () => {
+    const { user } = renderPicker({
+      printSettings: { enable_support: '1', support_type: 'tree(auto)', support_threshold_angle: '25' },
+    })
+    await loaded()
+    await showAdvanced()
+
+    expect(screen.getByRole('option', { name: 'Default (template: tree supports, 25°)' })).toBeInTheDocument()
+    expect(screen.getByText('25°')).toBeInTheDocument()
+    await user.selectOptions(screen.getByLabelText('Support type'), 'off')
+    expect(screen.getByText('25°').tagName).toBe('DEL')
+  })
+
+  it('strikes the template’s angle only once a print angle replaces it (#2837 review)', async () => {
+    const { user } = renderPicker({
+      printSettings: { enable_support: '1', support_type: 'tree(auto)', support_threshold_angle: '25' },
+    })
+    await loaded()
+    await showAdvanced()
+
+    await user.selectOptions(screen.getByLabelText('Support type'), 'normal')
+    expect(screen.getByText('25°').tagName).not.toBe('DEL')
+    await user.type(screen.getByLabelText('Threshold angle (°)'), '40')
+    expect(screen.getByText('25°').tagName).toBe('DEL')
+  })
+
+  it('sends nothing once set back to Default', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+
+    await user.selectOptions(screen.getByLabelText('Support type'), 'tree')
+    await user.selectOptions(screen.getByLabelText('Support type'), 'default')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).not.toHaveProperty('supports')
+  })
+
+  it('does not carry over to another output', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user, rerender } = renderPicker()
+    await loaded()
+    await showAdvanced()
+    await user.selectOptions(screen.getByLabelText('Support type'), 'off')
+
+    const second = fixtures.outputs[1] as Output
+    rerender(<PrintPicker open source={{ kind: 'output', output: second }} onClose={vi.fn()} onRan={vi.fn()} />)
+    await loaded()
+    if (!screen.queryByLabelText('Supports')) await showAdvanced()
+    expect(screen.getByLabelText('Support type')).toHaveValue('default')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).not.toHaveProperty('supports')
+  })
+
+  it('is not remembered: a reopened dialog is back on Default', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderReopenable()
+    await loaded()
+    await showAdvanced()
+    await user.selectOptions(screen.getByLabelText('Support type'), 'off')
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await user.click(screen.getByRole('button', { name: 'Reopen' }))
+    await loaded()
+    if (!screen.queryByLabelText('Supports')) await showAdvanced()
+    expect(screen.getByLabelText('Support type')).toHaveValue('default')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).not.toHaveProperty('supports')
+  })
+})
+
 describe('PrintPicker · Print sequence (#1862)', () => {
   const LIBRARY = { kind: 'library', file: { id: 89, filename: 'bag-clip.3mf' } } as const
 
