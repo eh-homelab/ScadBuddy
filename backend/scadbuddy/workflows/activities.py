@@ -658,7 +658,9 @@ class RenderActivities:
             # no key: its copied raw render keeps its source's colours. A painted piece
             # is never a source (`reusable` refuses it), so no recolour fetches it.
             try:
-                layout = json.loads((work / LAYOUT_NAME).read_text(encoding="utf-8"))
+                layout = json.loads(
+                    await asyncio.to_thread((work / LAYOUT_NAME).read_text, "utf-8")
+                )
                 if painted(layout):
                     return piece
                 await asyncio.to_thread(

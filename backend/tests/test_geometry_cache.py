@@ -37,7 +37,7 @@ from scadbuddy.render.geometry_cache import (
     scene_classes,
 )
 from scadbuddy.render.glb import COLOUR_EXTRA
-from scadbuddy.render.jobs import LAYOUT_NAME
+from scadbuddy.render.jobs import LAYOUT_NAME, finish_piece_stage
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.geometry import GeometryIndex
@@ -446,10 +446,9 @@ async def test_a_painted_piece_is_never_recorded_as_a_geometry_source(
 ) -> None:
     """`reusable` would refuse it, but only after a recolour fetched it: no row, no fetch."""
     acts, _, index = geometry_acts
-    real = activities_module.finish_piece_stage
 
     async def painted(*args: Any, **kwargs: Any) -> Any:
-        result = await real(*args, **kwargs)
+        result = await finish_piece_stage(*args, **kwargs)
         # As `paint_layout` leaves a piece whose painting it carried.
         path = args[2] / LAYOUT_NAME
         layout = json.loads(path.read_text())
