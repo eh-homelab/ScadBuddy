@@ -229,6 +229,19 @@ describe('settings tools', () => {
     expect(JSON.stringify(form)).not.toContain('pipeline_id')
   })
 
+  it("unfolds a folded section to show the agent's edit (#3414)", async () => {
+    localStorage.setItem('scadbuddy.settings.collapsed', JSON.stringify(['preview']))
+    try {
+      await seeded()
+      expect(screen.getByLabelText('Show dimensions in')).not.toBeVisible()
+      await bridge.call('set_field', { field: 'display_unit', value: 'in' })
+      await waitFor(() => expect(screen.getByLabelText('Show dimensions in')).toBeVisible())
+      expect(screen.getByLabelText('Show dimensions in')).toHaveValue('in')
+    } finally {
+      localStorage.clear()
+    }
+  })
+
   it('tests the stored connection, and refuses while the form is unsaved', async () => {
     const put = vi.spyOn(api, 'putSettings')
     await seeded()

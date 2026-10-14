@@ -6,9 +6,15 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { cn } from '@/lib/utils'
 import { CollapseContext, foldsAround, readCollapsed, useCollapsible, useReveal, writeCollapsed } from './collapseState'
 
-/** The Settings page's folded sections and sub-sections, remembered per browser. */
-export function SettingsCollapseProvider({ children }: { children: ReactNode }) {
+/**
+ * The Settings page's folded sections and sub-sections, remembered per browser. With
+ * `known`, the stored list keeps only those ids, so a renamed or removed fold's id does
+ * not stay in it forever (#3415). It is every fold the page can render, not those it
+ * renders now: a group shown only with the agent's database keeps its fold without it.
+ */
+export function SettingsCollapseProvider({ children, known }: { children: ReactNode; known?: readonly string[] }) {
   const [collapsed, setCollapsed] = useState(readCollapsed)
+  const knownIds = useMemo(() => (known ? new Set(known) : undefined), [known])
   const [empty, setEmptyIds] = useState<ReadonlySet<string>>(new Set())
   const setOpen = useCallback((id: string, open: boolean) => {
     setCollapsed((current) => {
@@ -16,10 +22,10 @@ export function SettingsCollapseProvider({ children }: { children: ReactNode }) 
       const next = new Set(current)
       if (open) next.delete(id)
       else next.add(id)
-      writeCollapsed(next)
+      writeCollapsed(knownIds ? new Set([...next].filter((fold) => knownIds.has(fold))) : next)
       return next
     })
-  }, [])
+  }, [knownIds])
   const setEmpty = useCallback((id: string, isEmpty: boolean) => {
     setEmptyIds((current) => {
       if (current.has(id) === isEmpty) return current

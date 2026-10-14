@@ -223,7 +223,7 @@ function isProblem(value: unknown): value is Problem {
 
 export function SettingsPage() {
   return (
-    <SettingsCollapseProvider>
+    <SettingsCollapseProvider known={FOLD_IDS}>
       <TipProvider>
         <SettingsSections />
       </TipProvider>
@@ -242,6 +242,9 @@ const ASSISTANT_GROUPS = [
   { id: 'assistant-plugins', title: 'Plugins & memory' },
   { id: 'assistant-audit', title: 'Audit log' },
 ] as const
+
+/** Every fold the page can render, kept in the stored folded list (#3415). */
+const FOLD_IDS: readonly string[] = [...SECTION_IDS, ...ASSISTANT_GROUPS.map((group) => group.id)]
 
 const groupTitle = (id: (typeof ASSISTANT_GROUPS)[number]['id']): string =>
   ASSISTANT_GROUPS.find((group) => group.id === id)?.title ?? id
@@ -556,6 +559,8 @@ function SettingsSections() {
           )
         }
         setField(field, next)
+        // A folded section's field is hidden: unfold it first, so the edit is seen (#3414).
+        reveal(form[field])
         touchAfterRender(() => document.getElementById(form[field]))
         await committed(() => live.current()[field] === next)
         return { field, value: next, saved: false, note: "The user saves each section with its own Save button." }
