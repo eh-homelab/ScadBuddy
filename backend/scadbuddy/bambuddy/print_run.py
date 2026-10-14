@@ -862,7 +862,15 @@ def plan_warnings(
     ``nozzle_plan`` puts them so; with no plan, or one that shares a side between
     families (a hand-picked side can), it says only that they mix (#2733 review)."""
     spools, assignments = inventory
-    chosen = [slot for slot in plan.slots if tray_of_spool_id(slot.spool_id) is None]
+    # A tray chosen as itself, by slot: its material from the printer's status (None
+    # when the status is not known). The one place a slot is told to be a tray, so the
+    # not-loaded check and the families below cannot disagree on it (#2733 review).
+    trays = {
+        slot.slot_id: tray_material_colour(slot.spool_id, status)
+        for slot in plan.slots
+        if tray_of_spool_id(slot.spool_id) is not None
+    }
+    chosen = [slot for slot in plan.slots if slot.slot_id not in trays]
     # No file: only the spools are judged here, so there are no grams or slots of a file.
     options = build_options(
         library_file_id=None,
@@ -879,9 +887,12 @@ def plan_warnings(
     families: list[str] = []
     families_on: dict[str | None, set[str]] = {}
     for slot in plan.slots:
-        tray = tray_material_colour(slot.spool_id, status)
-        option = by_id.get(slot.spool_id)
-        material = tray[0] if tray else option.material if option else None
+        if slot.slot_id in trays:
+            tray = trays[slot.slot_id]
+            material = tray[0] if tray else None
+        else:
+            option = by_id.get(slot.spool_id)
+            material = option.material if option else None
         named_family = family(material) if material else None
         if not named_family:
             continue
