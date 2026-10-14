@@ -446,7 +446,13 @@ async def get_library_choices(
             filaments=partial(library_filaments, client, paths.cache, budget=budget),
         )
         return await choices_for(
-            client, source, settings, remembered=remembered, printer_id=printer_id, rack=rack
+            client,
+            source,
+            settings,
+            remembered=remembered,
+            printer_id=printer_id,
+            cache=paths.cache,
+            rack=rack,
         )
 
 

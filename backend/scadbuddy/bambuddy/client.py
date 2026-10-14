@@ -365,7 +365,8 @@ class BambuddyClient:
             operation="slicer.presets",
             what="list the slicer presets",
         )
-        return PresetCatalogue.model_validate(response.json())
+        # 1 MB of JSON: parsed off the event loop, which every other request shares (#2978).
+        return await asyncio.to_thread(PresetCatalogue.model_validate_json, response.content)
 
     async def local_presets(self) -> LocalPresetCatalogue:
         """``GET /api/v1/local-presets/`` — OrcaSlicer profiles imported into Bambuddy.

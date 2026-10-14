@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable
+from pathlib import Path
 
 from pydantic import BaseModel, Field
 
@@ -131,17 +132,18 @@ async def choices_for(
     *,
     remembered: ModelPrintChoices | None,
     printer_id: int | None,
+    cache: Path,
     rack: RackUsage | None = None,
 ) -> ChoicesView:
     """The dialog's choices, read in two waves (#2504): ``source`` and the printers
     together, then everything that needs the chosen printer together, its status read
     once. The preset catalogue is read beside both waves, never waited on before the
-    second (#2354), and kept between opens (#2361). A failure surfaces as it did when
-    the reads ran one by one: the source's, then the printers', the presets' and the
-    filament step's. So a library file that is gone or unprintable still answers its
-    404 or 422, though the printers have been read beside it by then: a few wasted
-    reads on a rare path, for not waiting on the file every time."""
-    presets = asyncio.ensure_future(cached_catalogue(client))
+    second (#2354), and kept between opens under ``cache`` (#2361, #2978). A failure
+    surfaces as it did when the reads ran one by one: the source's, then the printers',
+    the presets' and the filament step's. So a library file that is gone or unprintable
+    still answers its 404 or 422, though the printers have been read beside it by then:
+    a few wasted reads on a rare path, for not waiting on the file every time."""
+    presets = asyncio.ensure_future(cached_catalogue(client, cache))
     try:
         return await _choices(
             client,
@@ -254,6 +256,7 @@ async def choices_for_output(
     settings: StoredSettings,
     *,
     printer_id: int | None,
+    cache: Path,
     rack: RackUsage | None = None,
 ) -> ChoicesView:
     return await choices_for(
@@ -262,6 +265,7 @@ async def choices_for_output(
         settings,
         remembered=settings.model_print_choices.get(meta.slug),
         printer_id=printer_id,
+        cache=cache,
         rack=rack,
     )
 
