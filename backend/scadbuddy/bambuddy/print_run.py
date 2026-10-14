@@ -676,7 +676,9 @@ async def check_print(
     run's own refusals (:class:`RunRefusalError`) and slot refusals become ``errors``: a
     failed read of Bambuddy, the slot reads included, fails the check, as it would fail
     the run. With no printer chosen or configured there is nothing to judge, and the
-    run says why."""
+    run says why. For a plan with slots that includes the inventory read (#2722): a
+    failed spool or assignment read fails the check, where the rack preview alone used
+    to swallow it and preview nothing, since the run would fail on the same read."""
     if (request.printer_id or settings.printer_id) is None:
         return PrintCheck()
     try:
@@ -838,8 +840,9 @@ def plan_warnings(
     by its "a plate change seeds only slots new to it" test)."""
     spools, assignments = inventory
     chosen = [slot for slot in plan.slots if tray_of_spool_id(slot.spool_id) is None]
+    # No file: only the spools are judged here, so there are no grams or slots of a file.
     options = build_options(
-        library_file_id=0,
+        library_file_id=None,
         spools=list(spools),
         assignments=list(assignments),
         requirements=[SlotNeed(slot_id=slot.slot_id) for slot in chosen],
@@ -850,23 +853,24 @@ def plan_warnings(
         if warning.kind == "not-loaded"
     ]
     by_id = {option.spool_id: option for option in options.spools}
-    materials: list[str] = []
-    families: set[str] = set()
+    families: list[str] = []
     for slot in plan.slots:
         tray = tray_material_colour(slot.spool_id, status)
         option = by_id.get(slot.spool_id)
         material = tray[0] if tray else option.material if option else None
-        if material and family(material) not in families:
-            materials.append(material)
-            families.add(family(material))
-    if len(materials) > 1:
-        named = ", ".join(family(material) for material in materials[:-1])
+        named_family = family(material) if material else None
+        if named_family and named_family not in families:
+            families.append(named_family)
+    if len(families) > 1:
         found.append(
             FilamentWarning(
                 kind="mixed-materials",
+                # "A nozzle of its own" holds for the H2C's two nozzles, the one
+                # PRINTER_MODEL resolves for (resolver.py); say it differently before a
+                # printer with one nozzle, or more than two, is planned for.
                 message=(
-                    f"This print mixes {named} and {family(materials[-1])}. Each prints "
-                    "from a nozzle of its own; check that is what you meant."
+                    f"This print mixes {', '.join(families[:-1])} and {families[-1]}. Each "
+                    "prints from a nozzle of its own; check that is what you meant."
                 ),
             )
         )
