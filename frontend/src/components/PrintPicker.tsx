@@ -1165,7 +1165,8 @@ export function PrintPicker({
                 slice={sliced ? slicedEstimate(sliced, previewPlate, filaments, plate) : previewSlice.result}
                 nozzlePlan={previewSlice.plan}
                 plateSlots={slicedPlateSlots(filaments?.slots ?? [], {
-                  plates: picker.plates.length,
+                  // The plates offered: a sliced file's own, not every plate Bambuddy lists.
+                  plates: plates.length,
                   chosen: plate,
                   sliced: previewSlice.plateId,
                 })}

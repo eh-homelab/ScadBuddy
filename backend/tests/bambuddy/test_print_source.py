@@ -712,8 +712,10 @@ async def test_a_library_files_filament_step_reads_the_file_itself_until_a_copy_
 class _ManySlices(_Copies):
     """Ten recorded slices of the copy, newest first, none of which Bambuddy still has."""
 
-    async def slices_of(self, output_id: str, library_file_id: int, preset_key: str) -> list[int]:
-        return list(range(100, 110))
+    async def slices_of(
+        self, output_id: str, library_file_id: int, preset_key: str
+    ) -> list[SlicedCopy]:
+        return [SlicedCopy(id=i, file_hash=f"{i:064x}") for i in range(100, 110)]
 
 
 @respx.mock

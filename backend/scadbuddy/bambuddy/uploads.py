@@ -224,10 +224,12 @@ class BambuddyUploadStore:
         """
         await asyncio.to_thread(self._record_sliced, output_id, library_file_id, sliced)
 
-    async def slices_of(self, output_id: str, library_file_id: int, preset_key: str) -> list[int]:
+    async def slices_of(
+        self, output_id: str, library_file_id: int, preset_key: str
+    ) -> list[SlicedCopy]:
         """The sliced files recorded against copy ``library_file_id`` with these presets
-        (:meth:`record_sliced`), newest first: what a print may queue rather than slice
-        the same again (#2671)."""
+        (:meth:`record_sliced`), newest first, each with the hash it was recorded with:
+        what a print may queue rather than slice the same again (#2671)."""
         return await asyncio.to_thread(self._slices_of, output_id, library_file_id, preset_key)
 
     async def record_preview(self, preview: PreviewSlice) -> None:
@@ -701,15 +703,22 @@ class BambuddyUploadStore:
                 },
             )
 
-    def _slices_of(self, output_id: str, library_file_id: int, preset_key: str) -> list[int]:
+    def _slices_of(self, output_id: str, library_file_id: int, preset_key: str) -> list[SlicedCopy]:
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT sliced_library_file_id FROM output_bambuddy_slices"
+                "SELECT sliced_library_file_id, preset_key, file_hash FROM output_bambuddy_slices"
                 " WHERE output_id = %s AND source_library_file_id = %s AND preset_key = %s"
                 " ORDER BY created_at DESC, sliced_library_file_id DESC",
                 (output_id, library_file_id, preset_key),
             ).fetchall()
-        return [row["sliced_library_file_id"] for row in rows]
+        return [
+            SlicedCopy(
+                id=row["sliced_library_file_id"],
+                preset_key=row["preset_key"],
+                file_hash=row["file_hash"],
+            )
+            for row in rows
+        ]
 
     def _record_slice_hash(self, output_id: str, sliced_id: int, file_hash: str) -> None:
         with self._pool.connection() as conn:

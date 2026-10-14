@@ -1185,8 +1185,14 @@ async def plan_run(
     settings: StoredSettings,
     request: PrintRunRequest,
     prepared: PreparedPlates,
+    *,
+    reuse_slices: bool = True,
 ) -> PlannedRun:
     """Upload, then resolve every plate, before anything is sliced (spec §4).
+
+    With ``reuse_slices``, a plate ScadBuddy sliced before with the same presets queues
+    that slice (#2671). The dialog's background slice passes ``False``: it slices to
+    show the toolpath, and a lookup there only costs GETs (#2691 review).
 
     A print into a project also records its printer and nozzle for that project
     (:meth:`PrintSource.remember_project`, in the ``print_finish`` activity), which is what the
@@ -1298,11 +1304,19 @@ async def plan_run(
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(errors))
     # ScadBuddy's own slice of this copy with these presets, when it has one (#2671):
     # every plate's looked up together, each a few GETs (#2691 review).
-    reused = await asyncio.gather(
-        *(
-            source.recorded_slice(client, library_file_id, slice_request(plan, plate_id).preset_key)
-            for plate_id, _, _, plan in ready
+    reused: list[int | None] = (
+        list(
+            await asyncio.gather(
+                *(
+                    source.recorded_slice(
+                        client, library_file_id, slice_request(plan, plate_id).preset_key
+                    )
+                    for plate_id, _, _, plan in ready
+                )
+            )
         )
+        if reuse_slices
+        else [None] * len(ready)
     )
     planned = [(*plate, sliced) for plate, sliced in zip(ready, reused, strict=True)]
 
@@ -1403,8 +1417,7 @@ async def _plan_sliced(
     printer_id = prepared.printer_id
     project_id = chosen_project(request, settings)
     profile = source.sliced_profile
-    sizes = profile.diameters_for(prepared.plate_ids) if profile is not None else []
-    nozzle_size = sizes[0] if sizes else request.choices.nozzles[0].size
+    nozzle_size = sliced_nozzle_size(profile, prepared, request)
     printed = await source.file_to_print(
         client,
         printer_id=printer_id,
@@ -1514,6 +1527,19 @@ async def _require_resolvable_printer(
     return printer
 
 
+def sliced_nozzle_size(
+    profile: SlicedProfile | None, prepared: PreparedPlates, request: PrintRunRequest
+) -> str:
+    """The nozzle a sliced file's run records: the file's own, else the printer's. The
+    dialog's choice is hidden for a sliced file and says nothing of it (#2691 review),
+    so it is taken only when neither is known."""
+    sizes = profile.diameters_for(prepared.plate_ids) if profile is not None else []
+    if sizes:
+        return sizes[0]
+    mounted = sorted(_mounted_diameters(prepared.printer_status))
+    return mounted[0] if mounted else request.choices.nozzles[0].size
+
+
 def _mounted_diameters(status: PrinterStatus | None) -> set[str]:
     """Every nozzle diameter the printer reports, mounted or in its rack."""
     if status is None:
@@ -1539,8 +1565,8 @@ def sliced_warnings(
     another model, or for a nozzle diameter the printer does not have. Never a refusal:
     it is queued as it is, held for a manual start (:data:`HELD_SLICED_KINDS`), and the
     user swaps the nozzle, or picks another printer, before starting it. Only a known
-    mismatch warns: an unread profile, or a printer that reports no model or no nozzles,
-    says nothing."""
+    mismatch warns, and an unread profile, or a printer that reports no model, says
+    nothing; a printer that reports no nozzles is said to leave the nozzle unchecked."""
     if profile is None:
         return []
     warnings: list[FilamentWarning] = []
@@ -1556,7 +1582,20 @@ def sliced_warnings(
             )
         )
     mounted = _mounted_diameters(status)
-    missing = [size for size in profile.diameters_for(plate_ids) if size not in mounted]
+    wanted_sizes = profile.diameters_for(plate_ids)
+    if wanted_sizes and not mounted:
+        # Unchecked is not the same as fine: say so, and hold it (#2691 review).
+        warnings.append(
+            FilamentWarning(
+                kind="sliced-nozzle-missing",
+                message=(
+                    f"Sliced for a {' and '.join(wanted_sizes)} mm nozzle; {printer.name}"
+                    " reports no nozzle, so it could not be checked."
+                    " Held for a manual start: check the nozzle before you start the print."
+                ),
+            )
+        )
+    missing = [size for size in wanted_sizes if size not in mounted]
     if mounted and missing:
         warnings.append(
             FilamentWarning(

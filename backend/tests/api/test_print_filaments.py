@@ -60,15 +60,24 @@ def slice_routes(*, sliced_id: int = 77, job_id: int = 9) -> respx.Route:
             },
         )
     )
+    # The sliced file, read once it is queued for the hash a reuse checks (#2691 review).
+    slice_kept(sliced_id)
     return posted
 
 
-def slice_kept(sliced_id: int = 77) -> respx.Route:
+def slice_kept(sliced_id: int = 77, file_hash: str | None = None) -> respx.Route:
     """The sliced file a run recorded, still in Bambuddy, so a later print of the same
-    copy with the same presets queues it rather than slicing again (#2671)."""
+    copy with the same presets queues it rather than slicing again (#2671). Its hash is
+    what the run records and a reuse checks (#2691 review)."""
     return respx.get(f"{API}/library/files/{sliced_id}").mock(
         return_value=httpx.Response(
-            200, json={"id": sliced_id, "filename": "sliced.gcode.3mf", "file_type": "gcode.3mf"}
+            200,
+            json={
+                "id": sliced_id,
+                "filename": "sliced.gcode.3mf",
+                "file_type": "gcode.3mf",
+                "file_hash": file_hash or f"{sliced_id:064x}",
+            },
         )
     )
 

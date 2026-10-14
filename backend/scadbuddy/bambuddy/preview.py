@@ -109,7 +109,10 @@ async def start_preview(
         )
     request = request.model_copy(update={"project_id": None})
     prepared = await prepare_run(client, source, settings, request, refuse_manual_pick=False)
-    planned = await plan_run(client, source, settings, request, PreparedPlates.of(prepared))
+    # It slices to show the toolpath: no earlier slice is looked up (#2691 review).
+    planned = await plan_run(
+        client, source, settings, request, PreparedPlates.of(prepared), reuse_slices=False
+    )
     if not planned.plates:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "There is no plate to slice.")
     plate = planned.plates[0]

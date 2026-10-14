@@ -362,21 +362,30 @@ class PrintPipeline:
         recorded = await self.uploads.slices_of(
             self.subject.run_subject, library_file_id, preset_key
         )
+        # Bambuddy hands a deleted file's id to the next file, so an id alone could
+        # queue another model's G-code (#2691 review): a slice is reused only while the
+        # file at its id has the hash it was recorded with. One recorded with none
+        # (its read failed, or it predates the check) is never reused.
+        known = [sliced for sliced in recorded if sliced.file_hash is not None]
         # Only the newest few: each is a GET, one after another, and rows of slices
         # Bambuddy deleted since are never pruned (#2955).
-        for sliced_id in recorded[:MAX_RECORDED_SLICES]:
+        for sliced in known[:MAX_RECORDED_SLICES]:
             try:
-                file = await client.library_file(sliced_id)
+                file = await client.library_file(sliced.id)
             except ApiError as error:
                 # Deleted in Bambuddy since, or unreadable: only a slice saved, so the
                 # print slices again rather than fail over it.
                 logger.info(
                     "a recorded slice is not reused",
-                    extra={"library_file_id": sliced_id, "status": error.status},
+                    extra={"library_file_id": sliced.id, "status": error.status},
                 )
                 continue
-            if is_sliced(file.file_type):
-                return sliced_id
+            if is_sliced(file.file_type) and file.file_hash == sliced.file_hash:
+                return sliced.id
+            logger.info(
+                "a recorded slice's id now holds another file; it is not reused",
+                extra={"library_file_id": sliced.id},
+            )
         return None
 
     async def file_to_read(self: _Fetching, client: BambuddyClient) -> ReadFile:
