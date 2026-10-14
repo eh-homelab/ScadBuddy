@@ -1,4 +1,4 @@
-import { type BlockList, isIP } from 'node:net'
+import { BlockList, isIP } from 'node:net'
 import type { Hono } from 'hono'
 import { z } from 'zod'
 import { UI_ACTOR } from '../audit/writes.js'
@@ -69,12 +69,27 @@ const PutBody = z.strictObject({
     .max(MAX_PEERS),
 })
 
+// IPv4-mapped IPv6 (`::ffff:a.b.c.d`). A BlockList's IPv6 subnet that covers part of it also
+// matches those IPv4 peers, so `::/32` or `::ffff:0.0.0.0/96` would admit every IPv4 peer.
+const MAPPED = { address: '::ffff:0:0', prefix: 96 } as const
+
 /** One address or range, as parseCidrList reads it, and no broader than MIN_PREFIX. */
 function isPeer(entry: string): boolean {
   if (entry === '' || entry.includes(',') || peerList([entry]) === undefined) return false
-  const [address = '', prefix] = entry.split('/')
+  const [address = '', prefixText] = entry.split('/')
   const family = isIP(address) as 4 | 6
-  return prefix === undefined || Number(prefix) >= MIN_PREFIX[family]
+  const prefix = prefixText === undefined ? (family === 4 ? 32 : 128) : Number(prefixText)
+  if (family === 4) return prefix >= MIN_PREFIX[4]
+  // An IPv6 range that overlaps the mapped block takes the IPv4 floor inside it (96 + 8).
+  const overlapsMapped =
+    prefix <= MAPPED.prefix ? inRange(address, prefix, MAPPED.address) : inRange(MAPPED.address, MAPPED.prefix, address)
+  return prefix >= (overlapsMapped ? MAPPED.prefix + MIN_PREFIX[4] : MIN_PREFIX[6])
+}
+
+function inRange(network: string, prefix: number, address: string): boolean {
+  const list = new BlockList()
+  list.addSubnet(network, prefix, 'ipv6')
+  return list.check(address, 'ipv6')
 }
 
 /** The stored peers as a list, or undefined when any entry is not an address or range. */

@@ -57,8 +57,9 @@ describe('DurableSubagentsSetting', () => {
     )
     const { container } = renderPage(<DurableSubagentsSetting />)
     await waitFor(() => expect(answered).toBe(true))
-    // A settled 503 leaves nothing rendered, not a section waiting on its data.
-    await new Promise((r) => setTimeout(r, 0))
-    expect(container).toBeEmptyDOMElement()
+    // The answer is refused: the section never shows, and a later load would not bring it.
+    await waitFor(() => expect(container).toBeEmptyDOMElement())
+    await expect(api.getDurableSubagents()).rejects.toThrow()
+    expect(screen.queryByText('Durable subagents')).not.toBeInTheDocument()
   })
 })

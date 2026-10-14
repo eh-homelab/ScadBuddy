@@ -64,7 +64,7 @@ describe('the durable subagents setting', () => {
 
   it('takes ranges as broad as a /8 or an IPv6 /32, and single addresses', async () => {
     const { app, values } = setup()
-    const peers = ['10.0.0.0/8', 'fd00::/32', '10.42.1.5', 'fd00::1']
+    const peers = ['10.0.0.0/8', 'fd00::/32', '10.42.1.5', 'fd00::1', '::ffff:10.0.0.0/104', '::ffff:10.42.1.5']
     expect((await put(app, { url: null, peers })).status).toBe(200)
     expect(values.get(SETTING_DURABLE_SUBAGENTS)).toEqual({ url: null, peers })
   })
@@ -94,6 +94,10 @@ describe('the durable subagents setting', () => {
     [{ url: null, peers: ['10.0.0.0/7'] }],
     [{ url: null, peers: ['::/0'] }],
     [{ url: null, peers: ['fd00::/31'] }],
+    // IPv6 ranges over the IPv4-mapped block would admit every IPv4 peer.
+    [{ url: null, peers: ['::/32'] }],
+    [{ url: null, peers: ['::ffff:0.0.0.0/96'] }],
+    [{ url: null, peers: ['::ffff:10.0.0.0/103'] }],
   ])('refuses the body %j, and stores nothing', async (body) => {
     const { app, values } = setup()
     expect((await put(app, body)).status).toBe(400)
@@ -136,6 +140,7 @@ describe('subagentPeers', () => {
     expect(await subagentPeers(repo({ url: null, peers: [] }).settings)).toBeUndefined()
     expect(await subagentPeers(repo({ url: null, peers: ['10.42.0.0/16', 'bogus'] }).settings)).toBeUndefined()
     expect(await subagentPeers(repo({ url: null, peers: ['0.0.0.0/0'] }).settings)).toBeUndefined()
+    expect(await subagentPeers(repo({ url: null, peers: ['::ffff:0.0.0.0/96'] }).settings)).toBeUndefined()
     expect(await subagentPeers(repo({ url: null, peers: ['10.42.0.0/16,10.43.0.0/16'] }).settings)).toBeUndefined()
   })
 
