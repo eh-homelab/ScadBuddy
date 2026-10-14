@@ -323,7 +323,10 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
             return 0
 
     state.settings_store = SimpleNamespace(load=StoredSettings)
-    state.components = SimpleNamespace(get=lambda key: SimpleNamespace(index=SlowIndex()))
+    # #2718: the claims sweep's batch-print store, beside the library index.
+    state.components = SimpleNamespace(
+        get=lambda key: SimpleNamespace(index=SlowIndex(), prune=slow_previews)
+    )
     activities = dict(zip(SWEEPS, main._housekeeping_activities(state), strict=True))  # type: ignore[arg-type]
     beats: list[object] = []
     env = ActivityEnvironment()

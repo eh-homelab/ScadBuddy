@@ -16,6 +16,8 @@ from typing import Annotated
 from fastapi import APIRouter, Path, Response, status
 from pydantic import BaseModel, Field
 
+from scadbuddy.activity.component import ACTIVITY, ActivityComponent
+from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import PathsDep, PrintRunsDep, ReadBudgetDep, SettingsStoreDep
 from scadbuddy.api.library_print import post_library_run
 from scadbuddy.api.operations import MAY_HAVE_STARTED
@@ -30,6 +32,8 @@ from scadbuddy.batches.store import (
     PrintBatchStore,
 )
 from scadbuddy.core.problems import ApiError
+
+ActivityDep = Annotated[ActivityComponent, component_dep(ACTIVITY)]
 
 router = APIRouter(prefix="/print/batches", tags=["print"])
 
@@ -185,6 +189,7 @@ async def post_batch_queue(
     batch_id: BatchIdPath,
     batches: PrintBatchesDep,
     runs: PrintRunsDep,
+    activity: ActivityDep,
     store: SettingsStoreDep,
     paths: PathsDep,
     budget: ReadBudgetDep,
@@ -209,7 +214,7 @@ async def post_batch_queue(
         sending = BatchOutcome(status="pending", attempt=attempt)
         if not await batches.record_outcome(batch_id, item.position, sending, if_unchanged=item):
             continue  # its choices changed since the read: the next Queue all sends them
-        outcome = await _queue_one(batch_id, item, attempt, runs, store, paths, budget)
+        outcome = await _queue_one(batch_id, item, attempt, runs, activity, store, paths, budget)
         await batches.record_outcome(batch_id, item.position, outcome)
     done = await _batch(batches, batch_id)
     if not _settled(done):
@@ -230,6 +235,7 @@ async def _queue_one(
     item: BatchItem,
     attempt: int,
     runs: PrintRunsDep,
+    activity: ActivityDep,
     store: SettingsStoreDep,
     paths: PathsDep,
     budget: ReadBudgetDep,
@@ -240,7 +246,7 @@ async def _queue_one(
     request = item.request.model_copy(update={"request_id": request_id})
     try:
         run = await post_library_run(
-            item.library_file_id, request, Response(), runs, store, paths, budget
+            item.library_file_id, request, Response(), runs, activity, store, paths, budget
         )
     except ApiError as error:
         # Not a refusal: ScadBuddy still checking (503) or Temporal down, when the run
