@@ -68,6 +68,8 @@ const WARNING_TONE: Record<FilamentWarning['kind'], string> = {
   // #956 — a by-object plate the toolhead or the gantry would hit; never a refusal.
   'sequence-clearance': 'text-warn',
   'profile-not-applied': 'text-warn',
+  // #1899 — supports asked for and left out: the print differs from what was chosen.
+  'supports-not-applied': 'text-warn',
 }
 
 /**

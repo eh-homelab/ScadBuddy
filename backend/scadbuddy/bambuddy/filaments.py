@@ -91,6 +91,9 @@ WarningKind = Literal[
     "sequence-clearance",
     # #717: a filament profile left on that could not apply; the print goes ahead.
     "profile-not-applied",
+    # #1899: a support setting left out because the preset's shape for it is unknown:
+    # its values could not be read, or it has no value (or an empty one) for that key.
+    "supports-not-applied",
 ]
 
 

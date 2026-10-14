@@ -169,11 +169,11 @@ def run_key(output_id: str, request: PrintRunRequest) -> str:
     """The run subject (``PrintSubject.run_subject``) plus the request as parsed, so key
     order and spacing do not matter.
 
-    ``request_id``, ``print_sequence``, ``rack_position``, ``rack_algorithm`` and
-    ``filament_profiles`` are part of it when sent; without them the key is what it was
-    before the fields existed.
+    ``request_id``, ``print_sequence``, ``rack_position``, ``rack_algorithm``,
+    ``filament_profiles`` and ``supports`` (#1899) are part of it when sent; without
+    them the key is what it was before the fields existed.
     """
-    optional = ("request_id", "print_sequence", "rack_position", "rack_algorithm")
+    optional = ("request_id", "print_sequence", "rack_position", "rack_algorithm", "supports")
     exclude = {name for name in optional if getattr(request, name) is None}
     # #717: no profiles is the key from before the field existed.
     if not request.filament_profiles:
