@@ -305,6 +305,7 @@ def root_model(
     plates: Sequence[PlateParts],
     model_name: str,
     offsets: Sequence[Sequence[float]],
+    *,
     assemblies_by_plate: Sequence[Sequence[_Assembly]] | None = None,
 ) -> str:
     objects: list[str] = []
@@ -758,7 +759,10 @@ def write_plates_3mf(
         for name, payload in (
             ("[Content_Types].xml", _content_types(covers=covers)),
             ("_rels/.rels", _package_rels(covers=covers)),
-            (ROOT_MODEL_NAME, root_model(plates, model_name, offsets, assemblies)),
+            (
+                ROOT_MODEL_NAME,
+                root_model(plates, model_name, offsets, assemblies_by_plate=assemblies),
+            ),
             ("3D/_rels/3dmodel.model.rels", _model_rels(ids[-1].stop - 1)),
             *(
                 (f"3D/Objects/object_{index}.model", object_model(part, index))

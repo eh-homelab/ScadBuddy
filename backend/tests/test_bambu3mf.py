@@ -1491,6 +1491,16 @@ def test_a_plate_of_several_objects_is_named_as_a_plate(tmp_path: Path) -> None:
     write_plates_3mf([single_plate(_parts())], ["#FF6AC1", "#1F6FEB"], one, thumbnails=None)
 
     assert [plate.name for plate in plates_of(many)] == ["Bins"]
+    # With several plates, each is numbered.
+    two = tmp_path / "two.3mf"
+    write_plates_3mf(
+        [PlateParts(parts[:2], (1, 1), (1, 2)), PlateParts(parts[2:4], (1, 1), (1, 2))],
+        ["#FF6AC1"],
+        two,
+        thumbnails=None,
+        model_name="Bins",
+    )
+    assert [plate.name for plate in plates_of(two)] == ["Bins (plate 1)", "Bins (plate 2)"]
     with zipfile.ZipFile(one) as archive:
         assert (
             '<metadata key="plater_name" value=""/>'
