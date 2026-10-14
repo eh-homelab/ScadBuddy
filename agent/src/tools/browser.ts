@@ -3,6 +3,7 @@ import { PairingError } from '../bridge/pairings.js'
 import { type BrowserStatus, type BrowserTarget, CALL_TIMEOUT_MS, type HubErrorCode } from '../bridge/hub.js'
 import { TAB_WAIT_S } from '../sessions/manager.js'
 import { type BambuddyScope, defineTool, json, type Risk, type Tool, type ToolContext, ToolError } from './registry.js'
+import { errorName } from '../telemetry/scrub.js'
 
 // The browser_* tools (#254, spec §5.2 and §8.5): the user's own open
 // ScadBuddy tab, driven through the same handlers user input goes through
@@ -168,7 +169,7 @@ async function statusHere(ctx: ToolContext): Promise<BrowserStatus | undefined> 
     if (ctx.signal.aborted) throw err
     // #1814: a pool that keeps failing re-checks shows in the logs. Only the error's
     // name: its message can quote a connection string or a query (telemetry/scrub.ts).
-    console.warn(`browser tools: re-checking the tab after its wait failed (${err instanceof Error ? err.name : typeof err})`)
+    console.warn(`browser tools: re-checking the tab after its wait failed (${errorName(err)})`)
     return undefined
   }
 }
