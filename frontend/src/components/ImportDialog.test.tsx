@@ -185,6 +185,10 @@ describe('ImportDialog (#1295)', () => {
       fireEvent.submit(form)
       await answer.catch(() => {})
       await Promise.resolve()
+      // The precondition, checked rather than assumed (#3582): the render on screen is
+      // still the in-flight one. A scheduling change that flushed the refusal first would
+      // fail here instead of quietly testing the ref.
+      expect(screen.getByRole('button', { name: 'Importing' })).toBeInTheDocument()
       fireEvent.submit(form)
     })
     expect(await screen.findByRole('alert')).toHaveTextContent('try again soon')
