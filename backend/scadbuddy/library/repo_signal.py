@@ -82,7 +82,10 @@ class ModelsHeadFollower:
         """Revalidate the repository and the templates ``model_ids`` -- every one for
         None -- and forget what is cached about them. The revalidation walks and opens
         directories over NFS, so it runs on a thread (#2617): a large library or a slow
-        mount holds up this channel, never the event loop."""
+        mount holds up this channel, never the event loop.
+
+        The cache is forgotten even when the walk raises (#3375), so a failed revalidation
+        never leaves stale revisions cached; it is not when the refresh is cancelled."""
         # Not cancellable: a listener cancelled at shutdown leaves the walk running on
         # the default executor until it ends, and the loop's close joins it.
         started = time.monotonic()
@@ -111,11 +114,16 @@ class ModelsHeadFollower:
                 except asyncio.CancelledError:
                     walk.add_done_callback(_settled)
                     raise
-        finally:
+        except asyncio.CancelledError:
+            # The walk is still running: a read between a forget now and its end would
+            # cache the state from before it again, so nothing is forgotten (#3496).
+            raise
+        except BaseException:
             # Even when the walk failed (#3375): `head` stays where it was, but what is
-            # cached about these templates may be stale, so it goes either way.
-            if self.catalogue is not None:
-                self.catalogue.forget(model_ids)
+            # cached about these templates may be stale.
+            self._forget(model_ids)
+            raise
+        self._forget(model_ids)
         took = round(time.monotonic() - started, 3)
         logger.log(
             logging.WARNING if took > self.slow_after else logging.DEBUG,
@@ -124,6 +132,10 @@ class ModelsHeadFollower:
             # the same refresh, so one stuck mount is not counted twice (#3375).
             extra={"models": _count(model_ids), "seconds": took, "stalled": stalled},
         )
+
+    def _forget(self, model_ids: list[str] | None) -> None:
+        if self.catalogue is not None:
+            self.catalogue.forget(model_ids)
 
     def revalidate(self, model_ids: list[str] | None) -> None:
         """Have the NFS client revalidate the repository and those templates."""
