@@ -72,7 +72,7 @@ const WORKFLOW_TASK_QUEUE = 1
 /** What the workflow's validator refuses a second turn with (models.py, workflow.py). */
 const BUSY = 'busy'
 const RUNNING: readonly SessionStatus[] = ['running', 'waiting_approval', 'waiting_input']
-const SETTLED: readonly SessionStatus[] = ['idle', 'failed', 'done']
+export const SETTLED: readonly SessionStatus[] = ['idle', 'failed', 'done']
 
 type WireOwner = { kind: string; id: string; label: string }
 type ImageRef = { name: string; mediaType: string }

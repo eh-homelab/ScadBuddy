@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import asyncio
 import contextlib
 import json
@@ -29,7 +30,7 @@ from scadbuddy.editor.component import (
     LSP_SESSIONS_PER_CLIENT,
     LanguageServerClients,
 )
-from scadbuddy.library import lsp
+from scadbuddy.library import lsp, lsp_diagnostics
 from scadbuddy.library.lsp import DEFAULT_CLIENT_ROOT, frame, read_message
 from scadbuddy.main import create_app
 from tests.conftest import MODEL_SLUG
@@ -368,11 +369,49 @@ def test_a_server_that_crashes_is_logged(
         with pytest.raises(WebSocketDisconnect):
             session.receive_json()
 
-    # 3 is the status the fake server exits with. 255 is what asyncio reports when
-    # something else in the process reaped the pid first ("exit status already
-    # read"), which happens here only under the test harness; see #1613 for the
-    # suspected stale-pid reap. Either way the crash must be logged as an exit.
-    assert re.search(r"openscad-lsp exited with status (3|255)\b", caplog.text)
+    # 3 is the status the fake server exits with, never asyncio's 255 for a pid
+    # something else reaped first (#1613, `test_kill_leaves_an_exited_servers_status_to_asyncio`).
+    assert re.search(r"openscad-lsp exited with status 3\b", caplog.text)
+
+
+@pytest.mark.skipif(platform.system() != "Linux", reason="reads /proc/<pid>/stat")
+async def test_kill_leaves_an_exited_servers_status_to_asyncio() -> None:
+    """#1613: a server that exited before asyncio's child watcher read it is killed
+    without being reaped, so asyncio still reads its own status. `process.kill()` reaped
+    it in `Popen.send_signal`'s poll, and asyncio then reported 255."""
+    process = await asyncio.create_subprocess_exec(sys.executable, "-c", "raise SystemExit(3)")
+    killed = False
+    try:
+        # Not yielding to the loop: the child is a zombie its watcher has not read yet.
+        stat = Path(f"/proc/{process.pid}/stat")
+        deadline = time.monotonic() + 10
+        while stat.read_text().rsplit(")", 1)[1].split()[0] != "Z":
+            assert time.monotonic() < deadline, "the child never exited"
+            time.sleep(0.01)
+        assert process.returncode is None
+        lsp.kill(process)
+        killed = True
+        assert await process.wait() == 3
+    finally:
+        if not killed:  # a failed poll: reap the child here, not in the next test
+            lsp.kill(process)
+            await process.wait()
+
+
+@pytest.mark.parametrize("module", [lsp, lsp_diagnostics], ids=lambda m: m.__name__)
+def test_the_language_server_is_only_killed_through_lsp_kill(module: Any) -> None:
+    """#1613 review: ``process.kill()`` / ``terminate()`` / ``send_signal()`` poll, and
+    reap a server asyncio has not read yet; only ``lsp.kill`` (``os.kill``) may signal it."""
+    tree = ast.parse(Path(module.__file__).read_text())
+    calls = [
+        f"{node.lineno}: .{node.func.attr}()"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in {"kill", "terminate", "send_signal"}
+        and not (isinstance(node.func.value, ast.Name) and node.func.value.id in {"os", "lsp"})
+    ]
+    assert calls == []
 
 
 @pytest.mark.parametrize(

@@ -18,9 +18,9 @@ import { OWN_PLUGIN_DIR } from '../src/harness/ownPlugin.js'
 import type { RiskTier } from '../src/harness/permissions.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { kekFromBase64 } from '../src/secrets.js'
-import { DurableTurns } from '../src/sessions/durable.js'
+import { DurableTurns, SETTLED } from '../src/sessions/durable.js'
 import { SessionManager, SETTING_MODEL, SETTING_SESSION_BUDGET_USD } from '../src/sessions/manager.js'
-import type { Owner } from '../src/sessions/protocol.js'
+import type { Owner, SessionStatus } from '../src/sessions/protocol.js'
 import { PgPayloadKeys, SubjectPayloadCodec } from '../src/temporal/payloadCodec.js'
 import { gateActivities, PgApprovalRecords, PgSessionOwners, toolActivities, type ToolActivity } from '../src/temporal/toolActivities.js'
 import { turnToolActivities, turnToolActivity, type TurnToolsDeps } from '../src/temporal/turnTools.js'
@@ -225,11 +225,12 @@ export async function startDurableStack(options: DurableStackOptions): Promise<D
           sessionId = session.id
           started.push(session.id)
           const answered = new Set<string>()
+          const polled: Polled = {}
           for (;;) {
             log = await events(db, session.id)
             if (ended(log)) break
-            if (Date.now() > deadline) throw new Error('eval timed out')
-            const pending = await gate.pendingInput(session.id).catch(() => [])
+            if (Date.now() > deadline) throw new Error(timedOut(polled))
+            const pending = await pollPending(gate, session.id, polled)
             for (const entry of pending) {
               if (entry.kind !== 'approval' || answered.has(entry.id)) continue
               answered.add(entry.id)
@@ -301,7 +302,7 @@ function recording(activities: Record<string, ToolActivity>, ran: Map<string, Ra
   )
 }
 
-type Logged = { type: string; [key: string]: unknown }
+export type Logged = { type: string; [key: string]: unknown }
 
 async function events(db: Database, sessionId: string): Promise<Logged[]> {
   const rows = await db.sql<{ event: string }[]>`SELECT event FROM ai_session_events WHERE session_id = ${sessionId} ORDER BY seq`
@@ -314,12 +315,49 @@ function ended(log: Logged[]): boolean {
   return result >= 0 && log.slice(result).some((e) => e.type === 'session.status')
 }
 
+/** What the last poll of the gate's pending input saw: its failure, while the gate keeps failing. */
+export type Polled = { gateError?: string }
+
+/**
+ * The session's pending input, or none when the gate cannot be read (#2465). The poll
+ * goes on, as a later read may answer, but the failure is kept: a gate that never
+ * answers leaves a parked call undenied, and the run then ends only at its deadline.
+ */
+export async function pollPending(
+  gate: Pick<DurableGate, 'pendingInput'>,
+  sessionId: string,
+  polled: Polled,
+): Promise<Awaited<ReturnType<DurableGate['pendingInput']>>> {
+  try {
+    const pending = await gate.pendingInput(sessionId)
+    delete polled.gateError
+    return pending
+  } catch (err) {
+    polled.gateError = err instanceof Error ? err.message : String(err)
+    return []
+  }
+}
+
+/** The deadline's error, naming the gate's failure when the last poll had one. */
+export function timedOut(polled: Polled): string {
+  return polled.gateError === undefined ? 'eval timed out' : `eval timed out; the gate's pending input last failed: ${polled.gateError}`
+}
+
+
 /** The session's events as an Outcome's tool calls, final text and result. */
 export function foldEvents(log: Logged[], ran: ReadonlyMap<string, Ran>): Pick<Outcome, 'toolCalls' | 'finalText' | 'result'> {
   const toolCalls: ToolCall[] = []
   let finalText = ''
   const texts = new Map<string, string>()
   let result: RunResult | undefined
+  // A turn's `error` and `session.result` are matched within the turn, which its
+  // settled `session.status` closes, in either order. finish_turn logs the error after
+  // the result today (agent-durable session/activities.py `turn_events`); a reorder must
+  // not score a failed turn as a success (#2465). The gate also logs `running` and
+  // `waiting` partway through a turn, around a parked call (gate/store.py); those do
+  // not close it, so an error logged before a park still counts.
+  let turnError: string | undefined
+  let turnResult = false
   for (const e of log) {
     if (e.type === 'tool.call' && typeof e.id === 'string' && typeof e.name === 'string') {
       toolCalls.push({
@@ -342,12 +380,19 @@ export function foldEvents(log: Logged[], ran: ReadonlyMap<string, Ran>): Pick<O
       if (text.trim()) finalText = text
     } else if (e.type === 'session.result') {
       result = {
-        subtype: 'success',
+        subtype: turnError ?? 'success',
         ...(typeof e.costUsd === 'number' ? { total_cost_usd: e.costUsd } : {}),
         ...(typeof e.turns === 'number' ? { num_turns: e.turns } : {}),
       }
-    } else if (e.type === 'error' && result) {
-      result = { ...result, subtype: `error: ${String(e.code)}: ${String(e.message ?? '')}` }
+      turnResult = true
+    } else if (e.type === 'error') {
+      turnError = `error: ${String(e.code)}: ${String(e.message ?? '')}`
+      if (result && turnResult) result = { ...result, subtype: turnError }
+    } else if (e.type === 'session.status' && SETTLED.includes(e.status as SessionStatus)) {
+      // Only a settled status ends the turn, as `DurableTurns` reads it: a park
+      // (`waiting_approval`, `waiting_input`) and `running` are the turn's own (#2970).
+      turnError = undefined
+      turnResult = false
     }
   }
   return { toolCalls, finalText, ...(result ? { result } : {}) }

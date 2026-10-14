@@ -12,7 +12,7 @@ import { defineTool, json, text, ToolError, type Tool } from './registry.js'
 // registered by name and run durably as a ProjectWorkflow. Routes:
 // backend/scadbuddy/api/flows.py. Deleting a run is a person's (coverage.ts).
 
-const definitionId = z
+export const definitionId = z
   .string()
   .uuid()
   .describe('A flow version id, as register_flow, list_flows or list_flow_versions returns it')
@@ -22,7 +22,7 @@ const flowCommit = z
   .regex(/^[0-9a-f]{7,40}$/)
   .describe("One of the flow's versions' commits, as list_flow_versions returns it")
 const runId = z.string().uuid().describe('A flow run id, as start_flow_run returns it')
-const grantRule = z
+export const grantRule = z
   .object({
     fn: z.enum(['queue_print', 'arrange', 'tool']),
     tool: z.string().optional().describe("For fn `tool`: the outward tool's name"),
@@ -58,13 +58,13 @@ const inputsSchema = z
       'boolean or array of one of them, with an optional `description`, `default` and its type\'s constraints ' +
       '(a string or integer may be an `enum`). The script reads them with `inputs()`, typed by it.',
   )
-const runInputs = z
+export const runInputs = z
   .record(z.string(), z.unknown())
   .describe(
     "The run's inputs by name, as the flow's `inputs_schema` (get_flow) declares them; one left out takes " +
       'its default. Refused (422 with `problems`) when they do not fit, or for a flow with no inputs schema.',
   )
-const approvalTimeout = z
+export const approvalTimeout = z
   .union([z.number().int().min(10).max(2_592_000), z.literal('never')])
   .describe('Seconds an outward host call waits for a person to approve it before it is denied, or "never"')
 

@@ -56,3 +56,31 @@ async def test_a_moved_or_deleted_output_is_looked_for_again(
     shutil.rmtree(moved)
     with pytest.raises(OutputNotFoundError):
         store.directory(meta.id)
+
+
+async def test_a_cached_directory_left_without_its_record_is_not_found(tmp_path: Path) -> None:
+    """#2909: a half-finished delete, or a directory made again, keeps the directory but
+    not its meta.json; the cached path is not taken for the output then. This guards
+    _find_dir's ``is_file()`` re-check, which main already had, not delete's pop."""
+    paths, meta, _ = await saved_output(tmp_path)
+    store = OutputStore(paths)
+    directory = store.directory(meta.id)
+    (directory / "meta.json").unlink()
+
+    assert directory.is_dir()
+    with pytest.raises(OutputNotFoundError):
+        store.get(meta.id)
+
+
+async def test_a_deleted_output_leaves_no_cached_directory(tmp_path: Path) -> None:
+    """#2909: delete forgets the output's directory, so the map does not only grow."""
+    paths, meta, _ = await saved_output(tmp_path)
+    store = OutputStore(paths)
+    store.directory(meta.id)
+
+    store.delete(meta.id)
+
+    with pytest.raises(OutputNotFoundError):
+        store.directory(meta.id)
+    # A lookup searches again either way; only the map shows the entry was forgotten.
+    assert len(store._dirs) == 0

@@ -13,7 +13,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.models import ArchiveDetail, Printer, SlotMaterial, Spool
+from scadbuddy.bambuddy.models import ArchiveDetail, Printer, SlotMaterial, Spool, SpoolAssignment
 from scadbuddy.core.problems import ApiError
 
 
@@ -135,39 +135,10 @@ async def inventory_view(
     active = [printer for printer in printers if printer.is_active]
     remains = await asyncio.gather(*(client.inventory_remain(p.id) for p in active))
 
-    places = {
-        assignment.spool_id: SpoolPlace(
-            printer_id=assignment.printer_id,
-            printer_name=assignment.printer_name,
-            ams_id=assignment.ams_id,
-            tray_id=assignment.tray_id,
-        )
-        for assignment in assignments
-    }
+    places = _places(assignments)
     in_slot = {(a.printer_id, a.ams_id, a.tray_id): a.spool_id for a in assignments}
     return InventoryView(
-        spools=[
-            InventorySpool(
-                **spool.model_dump(
-                    include={
-                        "id",
-                        "material",
-                        "subtype",
-                        "brand",
-                        "color_name",
-                        "rgba",
-                        "label_weight",
-                        "weight_used",
-                        "storage_location",
-                        "cost_per_kg",
-                    }
-                ),
-                remaining_g=spool.remaining_g,
-                archived=spool.archived_at is not None,
-                loaded=places.get(spool.id),
-            )
-            for spool in spools
-        ],
+        spools=[_inventory_spool(spool, places.get(spool.id)) for spool in spools],
         slots=[
             _slot(printer, slot, in_slot.get((printer.id, slot.ams_id, slot.tray_id)))
             for printer, remain in zip(active, remains, strict=True)
@@ -203,7 +174,7 @@ class SpoolSummary(BaseModel):
     as entered there; every price and cost is ``None`` when it has none, never a guess."""
 
     spool: InventorySpool
-    #: ``cost_per_kg`` / 1000.
+    #: ``cost_per_kg`` / 1000, to six places.
     price_per_g: float | None = None
     #: What the filament left on this spool is worth.
     remaining_value: float | None = None
@@ -214,6 +185,12 @@ class SpoolSummary(BaseModel):
 
 
 def _filament_key(spool: Spool) -> tuple[str, str, str, str]:
+    """Which spools are one filament: the same material, subtype and brand, and the same
+    colour, which is the ``rgba`` when the spool has one and its colour's name only when
+    it has not (#2918). That is deliberate: a spool recorded by ``rgba`` and one recorded
+    only by name are never assumed to be the same colour, since nothing says they are,
+    and every spool with neither is the one colourless filament of its material, subtype
+    and brand."""
     colour = (spool.rgba or spool.color_name or "").strip().upper()
     return (
         spool.material.strip().upper(),
@@ -227,6 +204,46 @@ def _money(value: float) -> float:
     return round(value, 4)
 
 
+def _per_gram(cost_per_kg: float) -> float:
+    """``cost_per_kg`` / 1000 to six places (#2918): a per-kg price has two decimals, so
+    this is exact, where four (``_money``) would lose a price under 0.1 per kg's digits."""
+    return round(cost_per_kg / 1000, 6)
+
+
+def _places(assignments: list[SpoolAssignment]) -> dict[int, SpoolPlace]:
+    """Each loaded spool's printer and AMS slot, by spool id."""
+    return {
+        a.spool_id: SpoolPlace(
+            printer_id=a.printer_id, printer_name=a.printer_name, ams_id=a.ams_id, tray_id=a.tray_id
+        )
+        for a in assignments
+    }
+
+
+def _inventory_spool(spool: Spool, loaded: SpoolPlace | None) -> InventorySpool:
+    """``spool`` as the inventory and a spool's summary both show it: one field list, so a
+    field added to one cannot be missed in the other (#2918)."""
+    return InventorySpool(
+        **spool.model_dump(
+            include={
+                "id",
+                "material",
+                "subtype",
+                "brand",
+                "color_name",
+                "rgba",
+                "label_weight",
+                "weight_used",
+                "storage_location",
+                "cost_per_kg",
+            }
+        ),
+        remaining_g=spool.remaining_g,
+        archived=spool.archived_at is not None,
+        loaded=loaded,
+    )
+
+
 async def spool_summary(
     client: BambuddyClient, spool_id: int, *, grams: float | None = None
 ) -> SpoolSummary:
@@ -238,35 +255,12 @@ async def spool_summary(
     spool = next((row for row in spools if row.id == spool_id), None)
     if spool is None:
         raise ApiError(404, f"spool {spool_id} is not in Bambuddy's inventory")
-    places = {
-        a.spool_id: SpoolPlace(
-            printer_id=a.printer_id, printer_name=a.printer_name, ams_id=a.ams_id, tray_id=a.tray_id
-        )
-        for a in assignments
-    }
+    places = _places(assignments)
     key = _filament_key(spool)
     same = [row for row in spools if row.archived_at is None and _filament_key(row) == key]
-    price_per_g = spool.cost_per_kg / 1000 if spool.cost_per_kg is not None else None
+    price_per_g = _per_gram(spool.cost_per_kg) if spool.cost_per_kg is not None else None
     return SpoolSummary(
-        spool=InventorySpool(
-            **spool.model_dump(
-                include={
-                    "id",
-                    "material",
-                    "subtype",
-                    "brand",
-                    "color_name",
-                    "rgba",
-                    "label_weight",
-                    "weight_used",
-                    "storage_location",
-                    "cost_per_kg",
-                }
-            ),
-            remaining_g=spool.remaining_g,
-            archived=spool.archived_at is not None,
-            loaded=places.get(spool.id),
-        ),
+        spool=_inventory_spool(spool, places.get(spool.id)),
         price_per_g=price_per_g,
         remaining_value=_money(spool.remaining_g * price_per_g)
         if price_per_g is not None

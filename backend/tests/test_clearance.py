@@ -204,3 +204,36 @@ def test_a_component_naming_a_file_the_archive_lacks_is_a_value_error() -> None:
 
     with pytest.raises(ValueError, match="does not hold"):
         placed_objects(buffer.getvalue(), 1)
+
+
+def _repeated_items_3mf(items: int) -> bytes:
+    """One small object placed ``items`` times by repeated build items (#3251)."""
+    core = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+    model = (
+        f'<model xmlns="{core}" unit="millimeter"><resources>'
+        '<object id="1" type="model"><mesh><vertices>'
+        '<vertex x="0" y="0" z="0"/><vertex x="10" y="0" z="0"/><vertex x="0" y="10" z="5"/>'
+        '</vertices><triangles><triangle v1="0" v2="1" v3="2"/></triangles></mesh></object>'
+        f"</resources><build>{'<item objectid="1"/>' * items}</build></model>"
+    )
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("3D/3dmodel.model", model)
+    return buffer.getvalue()
+
+
+def test_each_build_item_costs_a_visit_though_its_box_is_read_once() -> None:
+    """#3251: the box read is cached, so only the first of many items naming one object
+    was charged, and the rest were free."""
+    assert len(placed_objects(_repeated_items_3mf(5), 1, ReadBudget(max_visits=10))) == 5
+    with pytest.raises(ValueError, match="read budget"):
+        placed_objects(_repeated_items_3mf(50), 1, ReadBudget(max_visits=10))
+
+
+def test_a_file_placing_more_objects_than_the_budget_is_not_checked() -> None:
+    """#3251: every placed item is an object the pairwise check compares with every
+    other, so a file is held to the read budget's object count too."""
+    most = ReadBudget().max_objects
+    assert len(placed_objects(_repeated_items_3mf(most), 1)) == most
+    with pytest.raises(ValueError, match="read budget"):
+        placed_objects(_repeated_items_3mf(most + 1), 1)

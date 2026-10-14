@@ -59,6 +59,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`closing a warm process${TEST_DATABASE_URL ?
         builtinTools: [],
         recallMaxQueryChars: null,
         transientRetries: null,
+        servedBuiltins: [],
+        backgroundTasks: false,
       },
       slot: createTurnSlot(),
       secrets: [],

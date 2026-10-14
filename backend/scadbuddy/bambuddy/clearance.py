@@ -234,7 +234,17 @@ def _placed_by_plate(
         bounds = _Bounds(archive, budget)
         placed: dict[int, list[PlacedObject]] = {plate: [] for plate in plates}
         root = bounds.model(ROOT_MODEL_NAME)
+        # Each item is an object the pairwise check compares with every other, so the
+        # file is held to the budget's object count (#3251).
+        most = budget.limit("max_objects")
         for number, item in enumerate(root.root.iter(f"{{{CORE_NS}}}item"), start=1):
+            if most is not None and number > most:
+                raise _OverBudgetError(f"places more than {most:,} objects")
+            # A visit per item, not only per distinct object: an item naming an object
+            # already read costs no box read, but is placed all the same (#3251).
+            bounds.visits -= 1
+            if bounds.visits < 0:
+                raise _OverBudgetError("places more objects than its read budget")
             object_id = item.get("objectid", "")
             wanted = [
                 plate
@@ -256,6 +266,27 @@ def _placed_by_plate(
             for plate in wanted:
                 placed[plate].append(found)
     return placed
+
+
+def check_plates(
+    payload: bytes, plates: Sequence[int], clearance: Clearance | None
+) -> tuple[dict[int, list[PlacedObject]], list[FilamentWarning]]:
+    """Each of ``plates``' placed objects and, with a ``clearance``, what a by-object
+    print of each would hit, naming the plate when there are several. The file is read
+    and its pairs compared in one call, made off the event loop (#3251): the pairs are
+    quadratic in a plate's objects. Raises as :func:`placed_objects_by_plate`."""
+    by_plate = placed_objects_by_plate(payload, plates)
+    if clearance is None:
+        return by_plate, []
+    several = len(plates) > 1
+    warnings = [
+        warning
+        for plate in plates
+        for warning in clearance_warnings(
+            by_plate[plate], clearance, plate=plate if several else None
+        )
+    ]
+    return by_plate, warnings
 
 
 def _gap(a: PlacedObject, b: PlacedObject) -> float:

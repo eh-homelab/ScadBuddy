@@ -45,7 +45,10 @@ import {
 import { event } from './protocol.js'
 import { scrubForLog } from './sdkEvents.js'
 import type { PostgresSessionStore } from './store.js'
-import { createTurnSlot, NO_TURN, slotHooks, slotHttpContext, type TurnSlot } from './turnSlot.js'
+import { createTurnSlot, NO_TURN, slotHooks, slotHttpContext, slotWebContext, type TurnSlot } from './turnSlot.js'
+import { PgHttpBodies } from './httpBodies.js'
+import { nestedQueries } from '../builtins/nested.js'
+import { BACKGROUND_BUILTINS, BUILTIN_SERVER, CLASSIC_BUILTINS, classicBuiltinNote, classicBuiltinServer } from '../builtins/server.js'
 
 export type TurnRunnerDeps = Pick<
   SessionManagerDeps,
@@ -62,6 +65,9 @@ export type TurnRunnerDeps = Pick<
   | 'packageServers'
   | 'memory'
   | 'httpRequest'
+  | 'sql'
+  | 'background'
+  | 'nestedQueries'
   | 'audit'
   | 'stderr'
 > & {
@@ -92,6 +98,10 @@ export type FingerprintParts = {
   /** Whether the run has the http_request tool (#827). */
   httpRequest: boolean
   builtinTools: string[]
+  /** The package built-ins the session serves in place of Claude Code's (#2684): background ones and WebFetch. */
+  servedBuiltins: string[]
+  /** Whether the session keeps background tasks (src/background/), which decides which built-ins it serves. */
+  backgroundTasks: boolean
   /**
    * The memory hooks' recall query cap (#2655, Settings `memory_recall_max_query_chars`),
    * read at assembly; null when the run has no memory hooks.
@@ -371,14 +381,14 @@ export class TurnRunner {
         this.deps.httpRequest ? this.deps.settings?.get<unknown>(SETTING_HTTP_REQUEST) : undefined,
       ])
       // The http_request tool (#827): on unless the setting is `false`. Its
-      // saved bodies live in the session's own directory, and it never sees
-      // the turn's secrets except to refuse a request that carries one.
+      // saved bodies live in Postgres, so any replica serves them (#2374), and it
+      // never sees the turn's secrets except to refuse a request that carries one.
       const http =
         this.deps.httpRequest && httpRequestEnabled(httpSetting)
           ? httpRequestServer(
               slotHttpContext(
                 {
-                  saveDir: path.join(cwd, 'http'),
+                  saved: new PgHttpBodies(this.deps.sql, id),
                   // save_to_workspace (#2329): the body becomes one of the session's files.
                   workspace: { files: this.deps.files, ref: { kind: 'session', sessionId: id } },
                   secrets: () => secrets,
@@ -392,6 +402,13 @@ export class TurnRunner {
               ),
             )
           : undefined
+      // The built-ins the packages name that the session serves instead of Claude Code: the
+      // background ones, kept past the turn, and WebFetch, pinned to the addresses it checked (#2684).
+      const served = allowedPluginPaths.length
+        ? (packages?.builtinTools ?? []).filter(
+            (n) => CLASSIC_BUILTINS.includes(n) && (this.deps.background !== undefined || !BACKGROUND_BUILTINS.includes(n)),
+          )
+        : []
       const run: AssembledTurn['run'] = {
         paths: this.deps.paths,
         cwd,
@@ -416,11 +433,11 @@ export class TurnRunner {
               },
             }
           : {}),
-        systemPromptAppend: systemAppend(),
+        systemPromptAppend: served.length ? `${systemAppend()}\n\n${classicBuiltinNote(served)}` : systemAppend(),
         // First turn: the SDK session gets OUR id; later turns resume it.
         ...(resume ? { resume: id } : { sessionId: id }),
         ...(typeof model === 'string' && model ? { model } : {}),
-        ...(this.deps.mcpServers || http
+        ...(this.deps.mcpServers || http || served.length
           ? {
               mcpServers: {
                 ...(this.deps.mcpServers
@@ -440,11 +457,48 @@ export class TurnRunner {
                     })
                   : {}),
                 ...(http ? { [HTTP_SERVER]: http } : {}),
+                ...(served.length
+                  ? {
+                      [BUILTIN_SERVER]: classicBuiltinServer(served, {
+                        ...(this.deps.background
+                          ? {
+                              background: {
+                                tasks: this.deps.background.tasks,
+                                sessionId: id,
+                                owner: session.owner,
+                                tz: this.deps.background.tz,
+                                now: () => new Date(),
+                              },
+                            }
+                          : {}),
+                        web: slotWebContext(
+                          {
+                            // The answer's model call, on the turn's first credential; its cost is the turn's.
+                            nested: (this.deps.nestedQueries ?? nestedQueries)({
+                              paths: this.deps.paths,
+                              credential: async () => candidates[0]!.credential,
+                              spent: async (cost) => {
+                                if (slot.current?.nested) slot.current.nested.usd += cost
+                              },
+                            }),
+                            secrets: () => secrets,
+                            audit: this.deps.audit,
+                            actor: session.owner,
+                            sessionId: id,
+                            ...(this.deps.httpRequest?.resolve ? { resolve: this.deps.httpRequest.resolve } : {}),
+                          },
+                          slot,
+                        ),
+                      }),
+                    }
+                  : {}),
               },
             }
           : {}),
         ...(pluginPaths.length ? { pluginPaths } : {}),
-        ...(allowedPluginPaths.length ? { allowedPluginPaths, builtinTools: packages?.builtinTools ?? [] } : {}),
+        ...(allowedPluginPaths.length
+          ? { allowedPluginPaths, builtinTools: (packages?.builtinTools ?? []).filter((n) => !served.includes(n)) }
+          : {}),
         ...(ownPlugin !== undefined ? { ownPlugin } : {}),
         ...(remotePlugins.length ? { remotePlugins } : {}),
         // Shaped like any turn's memory hooks (the same config gives the same
@@ -474,6 +528,8 @@ export class TurnRunner {
         raisedTiers: [...(builtIn?.raised ?? [])],
         httpRequest: http !== undefined,
         builtinTools: run.builtinTools ?? [],
+        servedBuiltins: served,
+        backgroundTasks: this.deps.background !== undefined,
         recallMaxQueryChars: memory?.recallMaxQueryChars ?? null,
         transientRetries: null,
       }

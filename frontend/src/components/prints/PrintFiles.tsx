@@ -14,7 +14,7 @@ const Preview = lazy(async () => ({ default: (await import('../Preview')).Previe
 type PrintFile = PrintDetail['files'][number]
 
 /** What a row of the panel is: a file of the print, its parameters, or its media (#894). */
-type Kind = PrintFile['kind'] | 'parameters' | 'photo' | 'timelapse'
+type Kind = PrintFile['kind'] | 'parameters' | 'photo' | 'video' | 'timelapse'
 
 /** Every file has its bytes at a URL but the parameters, which are the print's own JSON. */
 type Entry = { key: string; name: string; size: number | null } & (
@@ -31,6 +31,7 @@ const FILE_LABELS: Record<Kind, string> = {
   library_file: 'Library file',
   parameters: 'Parameters',
   photo: 'Photo',
+  video: 'Video',
   timelapse: 'Timelapse',
 }
 
@@ -61,6 +62,16 @@ function entries(print: PrintDetail): Entry[] {
   const { media } = print
   for (const photo of [...(media.finish_photo ? [media.finish_photo] : []), ...media.photos]) {
     rows.push({ key: photo.url, kind: 'photo', name: photo.name, size: null, url: photo.url })
+  }
+  // #309 — the photos and videos added in ScadBuddy.
+  for (const attachment of media.attachments) {
+    rows.push({
+      key: attachment.url,
+      kind: attachment.kind,
+      name: attachment.filename,
+      size: attachment.size_bytes,
+      url: attachment.url,
+    })
   }
   if (media.timelapse) {
     rows.push({
@@ -93,6 +104,12 @@ function FileIcon({ kind }: { kind: Kind }) {
         <rect x="2.5" y="4.5" width="15" height="11" rx="1.5" />
         <circle cx="7" cy="9" r="1.5" />
         <path d="m4 15 4-4 3 3 2-2 4 3" />
+      </>
+    ),
+    video: (
+      <>
+        <rect x="2.5" y="4.5" width="15" height="11" rx="1.5" />
+        <path d="m8.5 7.5 4 2.5-4 2.5Z" />
       </>
     ),
     timelapse: (
@@ -228,6 +245,7 @@ function FileView({ print, entry }: { print: PrintDetail; entry: Entry }) {
       return <ParametersView print={print} />
     case 'photo':
       return <img src={entry.url} alt={entry.name} className="max-h-[70vh] w-full object-contain" />
+    case 'video':
     case 'timelapse':
       return (
         <video
@@ -235,7 +253,7 @@ function FileView({ print, entry }: { print: PrintDetail; entry: Entry }) {
           controls
           playsInline
           preload="metadata"
-          aria-label="Timelapse"
+          aria-label={FILE_LABELS[entry.kind]}
           className="max-h-[70vh] w-full bg-black"
         />
       )

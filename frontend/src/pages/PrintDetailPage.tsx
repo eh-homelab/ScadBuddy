@@ -6,6 +6,7 @@ import { MediaCarousel } from '../components/media/MediaCarousel'
 import { MediaLightbox } from '../components/media/MediaLightbox'
 import type { Slide } from '../components/media/slides'
 import { PrintAgainDialog } from '../components/PrintAgainDialog'
+import { PrintAttachments } from '../components/prints/PrintAttachments'
 import { PrintFiles } from '../components/prints/PrintFiles'
 import { libraryPrintsPath, printerLabel } from '../components/prints/prints'
 import { DELETED_STATUS, isUnfinished, statusLabel } from '../components/prints/status'
@@ -34,6 +35,11 @@ function formatWhen(iso: string | null | undefined): string | null {
 function clock(seconds: number): string {
   const whole = Math.max(0, Math.floor(seconds))
   return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, '0')}`
+}
+
+/** A video attachment's type, from the extension its bytes gave it (#309). */
+function videoType(filename: string): string {
+  return filename.toLowerCase().endsWith('.webm') ? 'video/webm' : 'video/mp4'
 }
 
 /** The print's photos, timelapse, plate image and attachments, in that order. */
@@ -80,6 +86,7 @@ function gallerySlides(print: PrintDetail): Slide[] {
       src: attachment.url,
       alt: attachment.caption ?? `Attachment ${index + 1}`,
       caption: attachment.caption ?? undefined,
+      contentType: attachment.kind === 'video' ? videoType(attachment.filename) : undefined,
     })
   })
   return slides
@@ -183,6 +190,11 @@ function PrintView({ print, reload }: { print: PrintDetail; reload: () => void }
           {!deleted && <GallerySection print={print} />}
           <RenderSection print={print} />
           {!deleted && <TimelapseSection print={print} onPulled={reload} />}
+          {!deleted && (
+            <Section title="Photos and videos">
+              <PrintAttachments print={print} onChanged={reload} />
+            </Section>
+          )}
           <OutcomeSection print={print} />
           {print.provenance ? (
             <ProvenanceSection provenance={print.provenance} />

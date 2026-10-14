@@ -36,6 +36,8 @@ function assembly(): AssembledTurn {
       builtinTools: [],
       recallMaxQueryChars: null,
       transientRetries: null,
+      servedBuiltins: [],
+      backgroundTasks: false,
     },
     slot: createTurnSlot(),
     secrets: [],

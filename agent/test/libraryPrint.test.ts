@@ -215,7 +215,20 @@ describe('the library routes', () => {
     expect(plate).toBe('2')
     expect(preview.content).toContainEqual({
       type: 'resource',
-      resource: { uri: `scadbuddy://print/library/${FILE}/preview.glb`, mimeType: 'model/gltf-binary', blob: 'AQI=' },
+      resource: { uri: `scadbuddy://print/library/${FILE}/preview.glb?plate=2`, mimeType: 'model/gltf-binary', blob: 'AQI=' },
+    })
+    const plateLink = await tool('get_output_preview').execute({ library_file_id: FILE, plate: 2 }, ctx({ maxInlineBytes: 1 }))
+    expect(plateLink.content[0]).toMatchObject({
+      type: 'resource_link',
+      uri: `/api/v1/print/library/${FILE}/preview.glb?plate=2`,
+      name: `library-${FILE}-plate-2.glb`,
+    })
+    // No plate is plate 1, under plate 1's one name.
+    const first = await tool('get_output_preview').execute({ library_file_id: FILE }, ctx({ maxInlineBytes: 1 }))
+    expect(plate).toBe('1')
+    expect(first.content[0]).toMatchObject({
+      uri: `/api/v1/print/library/${FILE}/preview.glb?plate=1`,
+      name: `library-${FILE}-plate-1.glb`,
     })
     const file = await tool('download_3mf').execute({ library_file_id: FILE }, ctx({ maxInlineBytes: 16 }))
     expect(file.content).toContainEqual({
@@ -239,7 +252,11 @@ describe('the library routes', () => {
       resource: { uri: `scadbuddy://outputs/${OUT}/preview.glb?plate=2`, mimeType: 'model/gltf-binary', blob: 'AQI=' },
     })
     const link = await tool('get_output_preview').execute({ output_id: OUT, plate: 2 }, ctx({ maxInlineBytes: 1 }))
-    expect(link.content[0]).toMatchObject({ type: 'resource_link', uri: `/api/v1/outputs/${OUT}/preview.glb?plate=2` })
+    expect(link.content[0]).toMatchObject({
+      type: 'resource_link',
+      uri: `/api/v1/outputs/${OUT}/preview.glb?plate=2`,
+      name: `${OUT}-plate-2.glb`,
+    })
   })
 
   it('lists one folder of the library, paged', async () => {

@@ -1,5 +1,6 @@
+import type { nestedQueries } from '../builtins/nested.js'
+import type { BackgroundTasks } from '../background/service.js'
 import { randomUUID } from 'node:crypto'
-import path from 'node:path'
 import {
   forkSession as sdkForkSession,
   type McpSdkServerConfigWithInstance,
@@ -51,6 +52,7 @@ import {
   type SessionStatus,
 } from './protocol.js'
 import { SessionBlobs, sentImageBlobs, type StoredBlob } from './blobs.js'
+import { PgHttpBodies } from './httpBodies.js'
 import { SessionFiles } from '../workspace/store.js'
 import { SessionEdits } from './edits.js'
 import { blobNames, durableReplies, entriesThrough, forkHistory, transcriptCut } from './forkPoint.js'
@@ -68,6 +70,7 @@ import { type AssembledTurn, TurnAssemblyError, TurnRunner } from './turnRunner.
 import { type WarmEntry, type WarmQuery, WarmSessions, type WarmTurn } from './warm.js'
 import { notifyWarmEvict } from './warmEvict.js'
 import { continuationMemory, warmAttempts, type WarmTurnRun } from './warmTurn.js'
+import { FlowQueue } from '../flows/queue.js'
 
 // The session manager (#300, spec §6): durable, shared sessions that a human
 // in the browser, an external agent over /mcp, or an internal flow can start,
@@ -738,6 +741,12 @@ export type SessionManagerDeps = {
    * `settings`) when omitted.
    */
   workspace?: SessionFiles
+  /**
+   * A session's background tasks (src/background/): a classic turn whose allowed packages
+   * name CronCreate and the rest gets the session's in place of Claude Code's own, which
+   * end with the turn. Without it those are Claude Code's.
+   */
+  background?: { tasks: BackgroundTasks; tz: string }
   run?: QueryRunner
   /**
    * The warm process cache's limits (warm.ts; spec 2026-10-13 §5.3),
@@ -745,6 +754,8 @@ export type SessionManagerDeps = {
    * it says why each process went.
    */
   warm?: { maxEntries?: number; idleMs?: number; log?: (message: string) => void }
+  /** The session WebFetch's own model calls (builtins/nested.ts); a test's stand-in. */
+  nestedQueries?: typeof nestedQueries
   /** Per-token approval grants (spec §6); nobody but the browser user may approve without one. */
   approvalGrants?: GrantCheck
   /**
@@ -979,6 +990,8 @@ export class SessionManager {
   readonly projection: PendingProjection
   /** A flow run's calls waiting at the session that started it (#2482, flows/escalations.ts). */
   readonly escalations: Escalations
+  /** A flow run's one queue (#2482, spec 2026-10-11 §4.5). */
+  readonly queue: FlowQueue
   /** Renaming a session and marking it done (#795, edits.ts). */
   readonly edits: SessionEdits
   /**
@@ -1049,6 +1062,7 @@ export class SessionManager {
       ...(deps.run ? { start: startedQuery(deps.run) } : {}),
       ...(deps.warm?.log ? { log: deps.warm.log } : {}),
     })
+    this.queue = new FlowQueue(deps.sql)
     this.escalations = new Escalations({
       sql: deps.sql,
       durable: () => this.durable,
@@ -1064,6 +1078,7 @@ export class SessionManager {
       ...(deps.audit ? { audit: deps.audit } : {}),
       endDurable: (id) => this.endDurable(id),
       warm: this.warm,
+      endBackground: (id, why) => this.deps.background?.tasks.endSession(id, why) ?? Promise.resolve(0),
     })
     this.runner = new TurnRunner({ ...deps, store: this.store, events: this.events, files: this.files })
     this.leaseMs = deps.leaseMs ?? DEFAULT_LEASE_MS
@@ -1134,7 +1149,7 @@ export class SessionManager {
   /** `id` is the saved response's id as `savedBody` checked it: a UUID, safe in a header or a path. */
   async httpBody(id: string, saved: string, principal: Owner): Promise<{ id: string; meta: SavedMeta; bytes: Buffer }> {
     await this.get(id, principal)
-    const body = await savedBody(path.join(sessionWorkDir(this.deps.paths, id), 'http'), saved)
+    const body = await savedBody(new PgHttpBodies(this.deps.sql, id), saved)
     if (!body) throw new SessionError('not_found', `no saved response ${saved} in session ${id}`)
     return { id: saved, ...body }
   }
@@ -1676,6 +1691,8 @@ export class SessionManager {
       let attempts: WarmTurnRun | undefined
       /** Whether the attempt about to start continues an earlier one with CONTINUE_PROMPT (fallback.ts): no recall again (#1896). */
       let continuing = false
+      // What the session's own WebFetch model calls cost this turn (classicBuiltinServer, through the slot).
+      const nested = { usd: 0 }
       try {
         turn = await this.runner.assemble(session, principal)
         secrets = turn.secrets
@@ -1730,6 +1747,7 @@ export class SessionManager {
             ...(auditor ? { auditor } : {}),
             trace: traced,
             http: { turnId, signal: controller.signal },
+            nested,
             ...(memory ? { memory: continuing ? continuationMemory(memory) : memory } : {}),
             signalInterrupt: () => controller.abort(new Error('the turn was interrupted')),
           })
@@ -1831,8 +1849,9 @@ export class SessionManager {
         secrets,
         attempts?.spentUsd() ?? 0,
         // Only a turn that did not end on its own can be cut off mid-request;
-        // one that did has every request priced in its result.
-        stopped !== undefined || !result ? unpriced.usd() : 0,
+        // one that did has every request priced in its result. WebFetch's own
+        // model calls are in no result, so they are added the same way.
+        (stopped !== undefined || !result ? unpriced.usd() : 0) + nested.usd,
       )
       return outcome
     } catch (err) {
@@ -1873,6 +1892,10 @@ export class SessionManager {
      */
     turnUsd: number,
     /** What the request the turn was cut off in used, which no result prices (#991, unpricedSpend.ts). */
+    /**
+     * What the turn spent that no result prices: the request it was cut off in (#991,
+     * unpricedSpend.ts), and its WebFetch's own model calls, in every outcome (#2684).
+     */
     cutUsd: number,
   ): Promise<TurnOutcome> {
     const id = session.id
@@ -1916,7 +1939,8 @@ export class SessionManager {
       tail.push(event({ type: 'error', sessionId: id, code: 'interrupted', message: interrupted ?? 'the turn was interrupted' }))
       outcome = { kind: 'interrupted' }
     } else if (result) {
-      costUsd = session.ownCostUsd + turnUsd
+      // WebFetch's own model calls (the only spend in `cutUsd` of a turn that ended on its own) are in no result.
+      costUsd = session.ownCostUsd + turnUsd + cutUsd
       if (refused) {
         // Claude Code reports a refused request as a `success` result with
         // `is_error` set, and its "API Error: …" text as a synthetic reply

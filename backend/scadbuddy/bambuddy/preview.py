@@ -102,12 +102,27 @@ async def start_preview(
     change, and a copy filed in a project's folder is that project's record, never
     removed (#317), so trying spools would fill the project. A print into the project
     then slices its own copy."""
+    if source.is_sliced:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "This file is sliced already, so there is nothing to slice: it prints as it is.",
+        )
     request = request.model_copy(update={"project_id": None})
     prepared = await prepare_run(client, source, settings, request, refuse_manual_pick=False)
-    planned = await plan_run(client, source, settings, request, PreparedPlates.of(prepared))
+    # It slices to show the toolpath: no earlier slice is looked up (#2691 review).
+    planned = await plan_run(
+        client, source, settings, request, PreparedPlates.of(prepared), reuse_slices=False
+    )
     if not planned.plates:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "There is no plate to slice.")
     plate = planned.plates[0]
+    if plate.plan is None:
+        # Only a sliced file's plates have no plan, and those are refused above; said
+        # rather than asserted, which python -O strips (#2691 review).
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "This plate prints a file sliced already, so there is nothing to slice.",
+        )
     key = slice_request(plate.plan, plate.plate_id).preset_key
     job_id = await reusable_slice(client, uploads)(planned.library_file_id, key)
     if job_id is None:
@@ -273,6 +288,9 @@ async def read_toolpath(
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE, "other toolpaths are being read; try again"
         ) from None
+    # The turn is the parse's as well as the request's: a request cancelled while the
+    # thread parses hands it to the thread, which gives it back when it is done (#2886).
+    handed_off = False
     try:
         if (cached := _TOOLPATHS.get(key)) is not None:
             return cached
@@ -288,14 +306,25 @@ async def read_toolpath(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
                 "the sliced file has no G-code for this plate that can be read",
             )
-        encoded = (await asyncio.to_thread(toolpath.parse, gcode)).encode()
+        parsing = asyncio.ensure_future(asyncio.to_thread(_encode_toolpath, gcode))
         del gcode
+        try:
+            encoded = await asyncio.shield(parsing)
+        except asyncio.CancelledError:
+            parsing.add_done_callback(lambda _: _READING_TOOLPATHS.release())
+            handed_off = True
+            raise
         _TOOLPATHS[key] = encoded
         while len(_TOOLPATHS) > TOOLPATHS_KEPT:
             _TOOLPATHS.popitem(last=False)
         return encoded
     finally:
-        _READING_TOOLPATHS.release()
+        if not handed_off:
+            _READING_TOOLPATHS.release()
+
+
+def _encode_toolpath(gcode: bytes) -> bytes:
+    return toolpath.parse(gcode).encode()
 
 
 def _total_grams(slots: list[PreviewSlot], reported: float | None) -> float | None:
@@ -328,7 +357,11 @@ async def _plate_gcode(client: BambuddyClient, sliced: int, plate_id: int) -> by
                 data += chunk
                 if len(data) > MAX_SLICED_BYTES:
                     return None
-        with zipfile.ZipFile(io.BytesIO(bytes(data))) as archive:
+        # One copy of the archive, not two (#2886): ``bytes`` copies it, and the
+        # downloaded buffer goes before the G-code member is read beside it.
+        payload = bytes(data)
+        data.clear()
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
             names = [
                 name
                 for name in archive.namelist()

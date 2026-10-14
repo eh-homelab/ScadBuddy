@@ -65,12 +65,14 @@ interface ItemProps {
   diagnostic: AnalyzerDiagnostic
   /** Where a decision can be stored; empty when no decision can be (no store). */
   scopes: ScopeRef[]
+  /** Whether decisions are stored at all, and why not when they are not (#2927). */
+  decisions: { available: boolean; reason: string | null }
   target: AnalysisTarget | undefined
   request: AnalysisRequest | null
   onChanged: () => void
 }
 
-function DiagnosticItem({ diagnostic, scopes, target, request, onChanged }: ItemProps) {
+function DiagnosticItem({ diagnostic, scopes, decisions, target, request, onChanged }: ItemProps) {
   const [suppressing, setSuppressing] = useState(false)
   const [previewing, setPreviewing] = useState<string | null>(null)
   const applied = diagnostic.decision
@@ -139,6 +141,7 @@ function DiagnosticItem({ diagnostic, scopes, target, request, onChanged }: Item
           diagnostic={diagnostic}
           fix={previewed}
           scopes={scopes}
+          decisions={decisions}
           onClose={() => setPreviewing(null)}
           onApplied={() => {
             setPreviewing(null)
@@ -322,6 +325,7 @@ export function AnalyzerPanel({ target, request, allPlates = false, children }: 
                 key={diagnostic.key}
                 diagnostic={diagnostic}
                 scopes={decidable && report ? scopesForFinding(report.scopes, diagnostic) : []}
+                decisions={{ available: decidable, reason: report?.decisions_reason ?? null }}
                 target={target}
                 request={request}
                 onChanged={reload}
