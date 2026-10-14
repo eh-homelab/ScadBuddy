@@ -80,14 +80,16 @@ def test_a_suggestion_cuts_a_moved_and_turned_object_at_the_joints_world_centroi
 ) -> None:
     """The suggestion is in world coordinates; applied to an object that is turned and
     moved, the cut must land on the weak joint, not on the object's own frame's z."""
-    scene = carrots(tmp_path, count=1, mesh=carrot())
+    # Off its own axis, so the turn about z moves the neck: a cut that ignored the
+    # rotation would land 12 mm away.
+    scene = carrots(tmp_path, count=1, mesh=carrot().apply_translation((12.0, 0.0, 0.0)))
     moved = scene.objects[0].model_copy(
         update={"transform": Transform(translate=(40.0, -15.0, 3.0), rotate=(0.0, 0.0, 90.0))}
     )
     scene = scene.model_copy(update={"objects": [moved]})
     m, t = placement(moved)
     load = mesh_loader(tmp_path)
-    # The carrot turned about its axis and raised: its neck (object z 30..35) is world z 33..38.
+    # Turned about the object's z and raised: the neck (object z 30..35) is world z 33..38.
     world = trimesh.Trimesh(
         vertices=np.asarray(load(moved.parts[0].mesh).vertices) @ m.T + t,
         faces=load(moved.parts[0].mesh).faces,

@@ -399,3 +399,31 @@ def test_importing_paint_does_not_load_the_render_or_the_api() -> None:
     )
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+def test_a_bad_painting_on_one_object_leaves_the_others_painted(tmp_path: Path) -> None:
+    mesh, codes = painted_box()
+    other = mesh.copy().apply_translation((20.0, 0.0, 0.0))
+    read = [
+        ReadObject(
+            name=name,
+            count=1,
+            parts=[ColourPart(0, "Body", ORANGE, m, Paint(codes, (ORANGE, GREEN)))],
+        )
+        for name, m in (("Left", mesh), ("Right", other))
+    ]
+    scene = written(tmp_path, read)
+    assert [o.parts[0].mesh for o in scene.objects] == ["meshes/o1-p1.3mf", "meshes/o2-p1.3mf"]
+    output = rendered(tmp_path, scene, ORANGE)
+    path = tmp_path / "meshes" / "o1-p1.paint.json"
+    document = json.loads(path.read_text())
+    path.write_text(json.dumps({**document, "colours": document["colours"][:1]}))
+    found, warnings = carry_paint(tmp_path, {}, [ColourPart(1, "Body", ORANGE, output)])
+    assert len(warnings) == 1 and "o1 p1" in warnings[0] and "own colour" in warnings[0]
+    [carried] = found
+    assert carried is not None
+    # o1's faces come first in the render and print in the part's own colour; o2 keeps
+    # every code.
+    half = len(codes)
+    assert carried.paint.codes[half:] == codes
+    assert not any(carried.paint.codes[:half])
