@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Tier } from '../src/auth/principal.js'
 import type { Database } from '../src/db.js'
-import { Escalations, type EscalationSend } from '../src/flows/escalations.js'
+import { Escalations, UNLOGGED_GRACE_MS, type EscalationSend } from '../src/flows/escalations.js'
 import { durableRequestId, flowRequestId } from '../src/gate/ids.js'
 import { SessionError } from '../src/sessions/manager.js'
 import type { Owner } from '../src/sessions/protocol.js'
@@ -330,6 +330,20 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     await logCall(child, toolu)
     expect(await escalations.deliver()).toBe(1)
     expect(await hop(id)).toMatchObject({ hop: 'parent', delivered: true })
+  })
+
+  // Never logged, or scrolled out of the scanned window: re-read every tick until the hop
+  // timed out, it would lose the escalation for want of reasoning it will never find.
+  it('sends a call still not logged past the grace period, with no reasoning', async () => {
+    const id = await park(parent, child, TOKEN, `toolu_${randomUUID()}`, false)
+    expect(await escalations.deliver()).toBe(0)
+    const parked = `${UNLOGGED_GRACE_MS + 1000} milliseconds`
+    await db.sql`UPDATE ai_pending_input SET created_at = now() - ${parked}::interval WHERE request_id = ${id}`
+    expect(await escalations.deliver()).toBe(1)
+    expect(await hop(id)).toMatchObject({ hop: 'parent', delivered: true })
+    const text = sent[0]!.text
+    const data = JSON.parse(text.slice(text.indexOf('{'))) as { untrusted_data: { content: { request_id: string; reasoning?: string }[] } }
+    expect(data.untrusted_data.content.find((c) => c.request_id === id)).toMatchObject({ reasoning: '' })
   })
 
   it("carries each call's step and a child's reasoning, inside the envelope", async () => {

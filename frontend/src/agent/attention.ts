@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { createContext, useCallback, useEffect, useRef, useState } from 'react'
 import { z } from 'zod'
 import { isDoneSummary, PendingInputSchema } from './chat/protocol'
 
@@ -36,6 +36,8 @@ export interface PendingCounts {
    * `summaries` is a lower bound; undefined when the agent does not say (an older agent).
    */
   summariesTruncated?: boolean
+  /** #2482 — the browser-started runs whose own calls wait for you (`RunsWaitingContext`). */
+  runs?: RunWaiting[]
 }
 
 /** What waits on the user: everything but the done summaries. */
@@ -97,34 +99,27 @@ export interface RunWaiting {
 }
 
 /**
- * The flow runs whose own calls wait for the person, as the badge counts them: the panel
- * lists them, since a run's calls are in no session's list (a browser-started run has
- * none). Null when the agent did not answer. Never throws, and settles within `timeoutMs`.
+ * #2482 — the flow runs started from the browser whose own calls wait for you, from the
+ * badge's one read: the panel lists them (`RunsWaiting`), since such a run has no session
+ * to list them under. A run a session started is listed under that session's runs
+ * (`SessionFlowRuns`). Null outside the shell, or before the agent answered.
  */
-export function fetchRunsWaiting(timeoutMs = ATTENTION_TIMEOUT_MS): Promise<RunWaiting[] | null> {
-  return withDeadline(readRunsWaiting, timeoutMs)
+export const RunsWaitingContext = createContext<readonly RunWaiting[] | null>(null)
+
+/** The browser-started runs with calls waiting for you, as `read` counts them. */
+function runsWaiting(entries: readonly PendingEntry[]): RunWaiting[] {
+  const runs = new Map<string, RunWaiting>()
+  for (const entry of entries) {
+    const run = entry.run
+    if (entry.expiring || !run?.id || run.hop === 'parent' || run.starter_session) continue
+    const seen = runs.get(run.id) ?? { id: run.id, name: run.name ?? run.id, waiting: 0 }
+    seen.waiting += 1
+    runs.set(run.id, seen)
+  }
+  return [...runs.values()]
 }
 
-async function readRunsWaiting(signal: AbortSignal): Promise<RunWaiting[] | null> {
-  try {
-    const response = await fetch(ATTENTION_PATH, { headers: { Accept: 'application/json' }, cache: 'no-store', signal })
-    if (!response.ok || !(response.headers.get('content-type') ?? '').includes('application/json')) return null
-    const parsed = PendingInputSchema.safeParse(await response.json())
-    if (!parsed.success) return null
-    const runs = new Map<string, RunWaiting>()
-    for (const entry of parsed.data.entries) {
-      const run = entry.run
-      // As `read` counts: never one expiring, nor one still with its starting session.
-      if (entry.expiring || !run?.id || run.hop === 'parent') continue
-      const seen = runs.get(run.id) ?? { id: run.id, name: run.name ?? run.id, waiting: 0 }
-      seen.waiting += 1
-      runs.set(run.id, seen)
-    }
-    return [...runs.values()]
-  } catch {
-    return null
-  }
-}
+type PendingEntry = z.infer<typeof PendingInputSchema>['entries'][number]
 
 async function read(signal: AbortSignal): Promise<PendingCounts | null> {
   try {
@@ -145,6 +140,8 @@ async function read(signal: AbortSignal): Promise<PendingCounts | null> {
       else counts.attention += 1
     }
     if (parsed.data.summaries_truncated !== undefined) counts.summariesTruncated = parsed.data.summaries_truncated
+    const runs = runsWaiting(parsed.data.entries)
+    if (runs.length > 0) counts.runs = runs
     return counts
   } catch {
     return null

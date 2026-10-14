@@ -129,16 +129,21 @@ export async function childReasoning(sql: Sql, requestId: string, scan = REASONI
   const parsed = parseRequestId(requestId)
   if (parsed?.store !== 'durable') return ''
   const { sessionId, toolUseId } = parsed
-  // The window's floor, from the log's last seq (a backward step on its primary key).
-  const [top] = await sql<{ floor: string }[]>`
-    SELECT coalesce(max(seq), 0) - ${scan} AS floor FROM ai_session_events WHERE session_id = ${sessionId}::uuid`
-  const floor = top?.floor ?? '0'
-  const [call] = await sql<{ seq: string }[]>`
-    SELECT seq FROM ai_session_events
-     WHERE session_id = ${sessionId}::uuid AND seq > ${floor} AND strpos(event, ${toolUseId}) > 0
-       AND event::jsonb ->> 'type' = 'tool.call' AND event::jsonb ->> 'id' = ${toolUseId}
-     ORDER BY seq DESC LIMIT 1`
-  if (!call) return undefined
+  // The window's floor, from the log's last seq (a backward step on its primary key), and
+  // the call's `tool.call` above it, in one query: a call not logged yet costs one read a
+  // tick, not three (#2842).
+  const [found] = await sql<{ floor: string; seq: string | null }[]>`
+    WITH top AS (
+      SELECT coalesce(max(seq), 0) - ${scan} AS floor FROM ai_session_events WHERE session_id = ${sessionId}::uuid)
+    SELECT top.floor, (
+      SELECT seq FROM ai_session_events
+       WHERE session_id = ${sessionId}::uuid AND seq > top.floor AND strpos(event, ${toolUseId}) > 0
+         AND event::jsonb ->> 'type' = 'tool.call' AND event::jsonb ->> 'id' = ${toolUseId}
+       ORDER BY seq DESC LIMIT 1) AS seq
+      FROM top`
+  if (!found?.seq) return undefined
+  const floor = found.floor
+  const call = { seq: found.seq }
   const [start] = await sql<{ seq: string }[]>`
     SELECT seq FROM ai_session_events
      WHERE session_id = ${sessionId}::uuid AND seq > ${floor} AND seq < ${call.seq}

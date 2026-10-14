@@ -179,6 +179,8 @@ export const PendingInputSchema = z.object({
           hop: z.enum(['parent', 'person']).nullable(),
           id: z.string().optional(),
           name: z.string().optional(),
+          /** The session that started the run; null for one started from the browser. */
+          starter_session: z.string().nullable().optional(),
         })
         .optional(),
       attention: z

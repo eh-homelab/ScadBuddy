@@ -51,6 +51,14 @@ export type EscalationDeps = {
 
 export const CLAIM_HOLD_MS = 30_000
 
+/**
+ * How long a child's parked call may wait for its `tool.call` to be logged before it goes
+ * up with no reasoning. `follow_session` logs it a moment after the call parks; past this
+ * it is never coming, or has scrolled out of the scanned window, and re-reading it each
+ * tick until the hop times out would only cost queries and lose the escalation (#2842).
+ */
+export const UNLOGGED_GRACE_MS = 60_000
+
 /** What one delivery lists of a waiting call: all of it scrubbed, none of it raw input. */
 type Waiting = {
   request_id: string
@@ -204,6 +212,7 @@ export class Escalations {
       bySession.set(session, [...(bySession.get(session) ?? []), { principal, call }])
     }
     const stepsOf = new Map<string, Awaited<ReturnType<FlowQueue['steps']>>>()
+    const parkedAt = new Map<string, Date>()
     // Each session's oldest entry before any session's second: a backlog of one busy
     // session's entries never holds another session's out of the batch.
     for (const r of await this.#deps.sql<
@@ -214,12 +223,13 @@ export class Escalations {
         summary: string
         outside_reason: string | null
         hop_until: Date
+        created_at: Date
         session_id: string
         parent_session: string
         parent_principal: string
       }[]
     >`
-      SELECT request_id, flow_run_id, tool, summary, outside_reason, hop_until, session_id::text, parent_session::text, parent_principal
+      SELECT request_id, flow_run_id, tool, summary, outside_reason, hop_until, created_at, session_id::text, parent_session::text, parent_principal
       FROM (
         SELECT *, row_number() OVER (PARTITION BY parent_session ORDER BY created_at) AS nth
         FROM ai_pending_input
@@ -228,6 +238,7 @@ export class Escalations {
       ORDER BY nth, created_at LIMIT 200`) {
       const steps = stepsOf.get(r.flow_run_id) ?? (await this.#queue.steps(r.flow_run_id))
       stepsOf.set(r.flow_run_id, steps)
+      parkedAt.set(r.request_id, r.created_at)
       add(r.parent_session, r.parent_principal, {
         request_id: r.request_id,
         run_id: r.flow_run_id,
@@ -266,14 +277,16 @@ export class Escalations {
       // skips the rows this one holds.
       // A child's reasoning, read before the claim: a durable child's call whose
       // `tool.call` is not logged yet (`follow_session` writes it a moment later) waits for
-      // a later tick rather than go up with none, since it is sent only once. The hop's
-      // own timer still bounds the wait.
+      // a later tick rather than go up with none, since it is sent only once. Past
+      // `UNLOGGED_GRACE_MS` it goes up with none: the log has moved on without it.
       const reasoning = new Map<string, string>()
+      const graceFrom = Date.now() - UNLOGGED_GRACE_MS
       await Promise.all(
         calls.map(async (c) => {
           if (c.child_session === undefined) return
           const text = await childReasoning(this.#deps.sql, c.request_id)
           if (text !== undefined) reasoning.set(c.request_id, text)
+          else if ((parkedAt.get(c.request_id)?.getTime() ?? 0) < graceFrom) reasoning.set(c.request_id, '')
         }),
       )
       const ready = calls.filter((c) => c.child_session === undefined || reasoning.has(c.request_id))
