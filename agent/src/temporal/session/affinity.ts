@@ -1,5 +1,6 @@
 import { ApplicationFailure } from '@temporalio/common'
 import type { WarmSessions } from '../../sessions/warm.js'
+import type { AcquireInput } from './models.js'
 import { ACQUIRE_WORKER_ACTIVITY, NO_CAPACITY, RELEASE_WORKER_ACTIVITY } from './names.js'
 
 // Session affinity (spec 2026-10-13 §5.2), Go's Worker Sessions built from worker-specific
@@ -12,16 +13,19 @@ import { ACQUIRE_WORKER_ACTIVITY, NO_CAPACITY, RELEASE_WORKER_ACTIVITY } from '.
 // acquire_worker reserves a place in the answering replica's warm cache (warm.ts `reserve`),
 // which evicts that replica's least recently used idle process when it is full, and refuses
 // with the retryable NoCapacity only when every process there runs a turn, so its retry
-// may land on another replica.
+// may land on another replica. A replica the turn was lost on (`exclude`) refuses it the same way.
 
-export type AcquireInput = { sessionId: string }
 export type Acquired = { hostQueue: string; identity: string }
 export type ReleaseInput = { sessionId: string }
 
 /** `acquire_worker`, for the shared `agent-tools` worker: this replica's place and queue. */
 export function acquireActivities(deps: { warm: Pick<WarmSessions, 'reserve'>; hostQueue: string; identity: string }) {
   return {
-    [ACQUIRE_WORKER_ACTIVITY]: async ({ sessionId }: AcquireInput): Promise<Acquired> => {
+    [ACQUIRE_WORKER_ACTIVITY]: async ({ sessionId, exclude }: AcquireInput): Promise<Acquired> => {
+      // The turn was lost here already (a stalled heartbeat, a shutdown): its retry goes to another replica.
+      if (exclude?.includes(deps.hostQueue)) {
+        throw ApplicationFailure.retryable(`session ${sessionId}'s turn was lost on ${deps.identity}`, NO_CAPACITY)
+      }
       if (deps.warm.reserve(sessionId) === 'full') {
         throw ApplicationFailure.retryable(`every warm session on ${deps.identity} is running a turn`, NO_CAPACITY)
       }

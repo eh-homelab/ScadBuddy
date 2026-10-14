@@ -1,0 +1,178 @@
+import { OriginConfigError, originPolicy } from './http/origins.js'
+
+// The agent service's whole environment surface. Design spec §9
+// (docs/superpowers/specs/2026-09-27-ai-integration-design.md): "There are no
+// AI-*configuration* env vars ... infrastructure bootstrap variables still
+// reach the agent container, because Settings itself needs them to exist."
+// Every AI-specific setting (credentials, MCP auth mode, plugins) lives in the
+// database and is edited in Settings, so do not add a variable here for one.
+//
+// What is here is infrastructure: where the database and backend are, the
+// key-encryption key (and the previous one while rotating it), and how the pod
+// is reached (its public URL and the proxies in front of it). The last two
+// cannot live in Settings: they decide which requests may change Settings.
+// The Temporal address and namespace are where the
+// `agent-tools` worker polls (#1055), infrastructure like the database URL.
+
+export type Config = {
+  /** Postgres URL shared with the backend (#241). Unset → AI features are disabled. */
+  databaseUrl: string | undefined
+  /** Where the Python backend listens; the sidecar reaches it over the pod's localhost (spec §4.3). */
+  backendUrl: string
+  /** Key-encryption key file for envelope encryption (spec §9); format and loading in secrets.ts. */
+  secretKeyFile: string | undefined
+  /** The key being rotated away from; rows sealed under it are re-wrapped at start (spec §9). */
+  previousSecretKeyFile: string | undefined
+  /**
+   * The UI's public URL, the same SCADBUDDY_PUBLIC_URL the backend reads
+   * (backend/scadbuddy/core/settings.py `public_url`). Its origin is the one
+   * accepted on writes (src/http/origins.ts). Unset → loopback only.
+   */
+  publicUrl: string | undefined
+  /**
+   * Comma-separated origins the UI is also served under (the LAN hostname beside
+   * an SSO proxy, say), accepted on writes like the public URL's; the backend
+   * reads the same variable for its realtime socket. Unset → the public URL only.
+   */
+  allowedOrigins: string | undefined
+  /** CIDR list of proxies whose X-Forwarded-* headers are believed. Unset → none. */
+  trustedProxies: string | undefined
+  /**
+   * The Temporal frontend's host:port, the same SCADBUDDY_TEMPORAL_ADDRESS the backend
+   * reads. The `agent-tools` worker and the commands run on it (spec 2026-10-01 §6.3,
+   * #1055). Unset → neither: /healthz says so, and plugin installs answer 503.
+   */
+  temporalAddress: string | undefined
+  /** The backend's SCADBUDDY_TEMPORAL_NAMESPACE (default `scadbuddy`). */
+  temporalNamespace: string
+  /**
+   * The backend's SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES: upsert §4.2's Search Attributes,
+   * once the deployment has registered them.
+   */
+  temporalSearchAttributes: boolean
+  /**
+   * SCADBUDDY_PAYLOAD_DIR: where a durable session's large Temporal payloads are kept,
+   * on the data share agent-durable mounts at the same path (#2243). Unset → none are
+   * stored, and a stored one cannot be read.
+   */
+  payloadDir: string | undefined
+  /**
+   * The build the `agent-sessions` worker is versioned as (unified runtime spec 2026-10-13
+   * §5.1, D4): SCADBUDDY_BUILD_ID, else the image's tag, SCADBUDDY_VERSION (the Dockerfile's
+   * `dev` default is no tag). Neither → that worker runs unversioned.
+   */
+  buildId: string | undefined
+}
+
+export const DEFAULT_BACKEND_URL = 'http://127.0.0.1:8080'
+/** The backend's `DEFAULT_TEMPORAL_NAMESPACE` (backend/scadbuddy/core/config.py). */
+export const DEFAULT_TEMPORAL_NAMESPACE = 'scadbuddy'
+
+/** The only variable names this service reads. Tests assert nothing else is consulted. */
+export const ENV_VARS = [
+  'SCADBUDDY_DATABASE_URL',
+  'SCADBUDDY_BACKEND_URL',
+  'SCADBUDDY_SECRET_KEY_FILE',
+  'SCADBUDDY_SECRET_KEY_PREVIOUS_FILE',
+  'SCADBUDDY_PUBLIC_URL',
+  'SCADBUDDY_ALLOWED_ORIGINS',
+  'SCADBUDDY_AGENT_TRUSTED_PROXIES',
+  'SCADBUDDY_TEMPORAL_ADDRESS',
+  'SCADBUDDY_TEMPORAL_NAMESPACE',
+  'SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES',
+  'SCADBUDDY_PAYLOAD_DIR',
+  'SCADBUDDY_BUILD_ID',
+  'SCADBUDDY_VERSION',
+] as const
+
+type Env = Readonly<Partial<Record<(typeof ENV_VARS)[number], string>>>
+
+export class ConfigError extends Error {
+  override name = 'ConfigError'
+}
+
+/** Empty and whitespace-only values count as unset, the way a blank Helm value arrives. */
+function present(value: string | undefined): string | undefined {
+  const trimmed = value?.trim()
+  return trimmed ? trimmed : undefined
+}
+
+/** A Temporal value has no whitespace inside, as the backend's settings require. */
+function temporalValue(name: string, value: string | undefined): string | undefined {
+  if (value !== undefined && /\s/.test(value)) throw new ConfigError(`${name} must not contain whitespace`)
+  return value
+}
+
+/** A boolean as pydantic reads the backend's same variable. */
+function flag(name: string, value: string | undefined): boolean {
+  if (value === undefined) return false
+  const lower = value.toLowerCase()
+  if (['true', '1', 'yes', 'on'].includes(lower)) return true
+  if (['false', '0', 'no', 'off'].includes(lower)) return false
+  throw new ConfigError(`${name} must be true or false, not ${value}`)
+}
+
+function imageTag(value: string | undefined): string | undefined {
+  const tag = present(value)
+  return tag === undefined || tag === 'dev' || /\s/.test(tag) ? undefined : tag
+}
+
+export function loadConfig(env: Env = process.env): Config {
+  const databaseUrl = present(env.SCADBUDDY_DATABASE_URL)
+  if (databaseUrl !== undefined) {
+    let scheme: string
+    try {
+      scheme = new URL(databaseUrl).protocol
+    } catch {
+      // The URL itself is not echoed: it normally carries the password.
+      throw new ConfigError('SCADBUDDY_DATABASE_URL is not a valid URL')
+    }
+    if (scheme !== 'postgres:' && scheme !== 'postgresql:') {
+      throw new ConfigError(
+        `SCADBUDDY_DATABASE_URL must be a postgres:// or postgresql:// URL, not ${scheme}//`,
+      )
+    }
+  }
+
+  const backendUrl = present(env.SCADBUDDY_BACKEND_URL) ?? DEFAULT_BACKEND_URL
+  let parsed: URL
+  try {
+    parsed = new URL(backendUrl)
+  } catch {
+    throw new ConfigError(`SCADBUDDY_BACKEND_URL is not a valid URL: ${backendUrl}`)
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new ConfigError(`SCADBUDDY_BACKEND_URL must be http(s), not ${parsed.protocol}//`)
+  }
+
+  const publicUrl = present(env.SCADBUDDY_PUBLIC_URL)
+  const allowedOrigins = present(env.SCADBUDDY_ALLOWED_ORIGINS)
+  const trustedProxies = present(env.SCADBUDDY_AGENT_TRUSTED_PROXIES)
+  try {
+    originPolicy(publicUrl, trustedProxies, allowedOrigins)
+  } catch (err) {
+    if (err instanceof OriginConfigError) throw new ConfigError(err.message)
+    throw err
+  }
+
+  return {
+    databaseUrl,
+    // No trailing slash, so `${backendUrl}/api/v1/...` never doubles it.
+    backendUrl: backendUrl.replace(/\/+$/, ''),
+    secretKeyFile: present(env.SCADBUDDY_SECRET_KEY_FILE),
+    previousSecretKeyFile: present(env.SCADBUDDY_SECRET_KEY_PREVIOUS_FILE),
+    publicUrl,
+    allowedOrigins,
+    trustedProxies,
+    temporalAddress: temporalValue('SCADBUDDY_TEMPORAL_ADDRESS', present(env.SCADBUDDY_TEMPORAL_ADDRESS)),
+    temporalNamespace:
+      temporalValue('SCADBUDDY_TEMPORAL_NAMESPACE', present(env.SCADBUDDY_TEMPORAL_NAMESPACE)) ??
+      DEFAULT_TEMPORAL_NAMESPACE,
+    temporalSearchAttributes: flag(
+      'SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES',
+      present(env.SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES),
+    ),
+    payloadDir: present(env.SCADBUDDY_PAYLOAD_DIR),
+    buildId: temporalValue('SCADBUDDY_BUILD_ID', present(env.SCADBUDDY_BUILD_ID)) ?? imageTag(env.SCADBUDDY_VERSION),
+  }
+}

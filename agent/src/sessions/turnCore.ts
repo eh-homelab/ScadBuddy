@@ -76,6 +76,10 @@ export type CoreTurnArgs = {
   onSettling?: () => void
   /** Each acquire of the warm process, before the prompt goes in. */
   onAcquired?: (acquired: WarmTurn) => void
+  /** Each message of the turn's stream, as it comes (an AgentSession placement's running spend). */
+  onMessage?: (message: SDKMessage) => void
+  /** False once the turn may write nothing more (an AgentSession placement cut off): its events and images are dropped. */
+  mayWrite?: () => boolean
 }
 
 /** How the turn's stream ended. */
@@ -117,6 +121,8 @@ export class CoreTurn {
   /** The assembly whose process serves the turn: the turn's own until the cache answers with a process spawned from another. */
   #turn: AssembledTurn | undefined
   readonly #served: WarmEntry[] = []
+  /** The model requests of the turn's stream, priced at the table as they go (#991). */
+  readonly #unpriced = new UnpricedSpend()
 
   constructor(deps: TurnCoreDeps, args: CoreTurnArgs) {
     this.#deps = deps
@@ -151,7 +157,7 @@ export class CoreTurn {
     let result: SDKResultMessage | undefined
     let failure: string | undefined
     /** The model request the turn is cut off in, if it is: Claude Code never prices it (#991). */
-    const unpriced = new UnpricedSpend()
+    const unpriced = this.#unpriced
     /** The failed model request the turn ended on, as fallback.ts judged it (`onRefused`). */
     let refused: Refused | undefined
     /**
@@ -160,7 +166,9 @@ export class CoreTurn {
      * says it, and they are dropped; otherwise they are shown as they came.
      */
     const heldErrors: SDKMessage[] = []
+    const mayWrite = this.#args.mayWrite ?? (() => true)
     const log = async (events: ServerEvent[]) => {
+      if (!mayWrite()) return
       if (events.length) await deps.events.append(id, events.map((e) => scrubForLog(e, secrets)))
       for (const e of events) traced.observe(e)
       if (auditor) for (const e of events) await auditor.observe(e)
@@ -172,7 +180,7 @@ export class CoreTurn {
       // logged (#782), so no watcher sees a name it cannot load. If they cannot
       // be, the event goes without them: the call is still shown.
       const images = mapper.takeImages()
-      if (images.length) {
+      if (images.length && mayWrite()) {
         try {
           await deps.blobs.put(id, images)
         } catch (err) {
@@ -267,6 +275,7 @@ export class CoreTurn {
       )
       for await (const message of stream) {
         unpriced.observe(message)
+        this.#args.onMessage?.(message)
         if (message.type === 'assistant' && message.error) {
           heldErrors.push(message)
           continue
@@ -311,6 +320,15 @@ export class CoreTurn {
   }
 
   /**
+   * What the turn's model requests have cost so far at the table's prices, finished or still
+   * open: an AgentSession placement's running spend (turnHost.ts), written as it goes so a
+   * placement that dies before its result still counts against the budget.
+   */
+  runningUsd(): number {
+    return this.#unpriced.completedUsd() + this.#unpriced.usd()
+  }
+
+  /**
    * The turn has finished, its events written: its span ends, and a hook its
    * process fires from now on finds no turn (turnSlot.ts). Only this turn's
    * slot: the next one may already have set it for itself.
@@ -321,6 +339,21 @@ export class CoreTurn {
       if (entry.turn.slot.current?.turnId === this.#args.turnId) entry.turn.slot.clear()
     }
   }
+}
+
+/**
+ * A turn's closing events (`tallyTurn`'s `tail`) worded once the row says what the lineage has
+ * spent and what its budget is now (#823): the meter's numbers, and the budget's message.
+ */
+export function wordTail(tail: readonly ServerEvent[], now: { spentUsd: number; budgetUsd: number; turns?: number }): ServerEvent[] {
+  const usd = (amount: number): string => `$${amount.toFixed(2)}`
+  return tail.map((e): ServerEvent => {
+    if (e.type === 'session.result') return { ...e, costUsd: now.spentUsd, budgetUsd: now.budgetUsd, ...(now.turns !== undefined ? { turns: now.turns } : {}) }
+    if (e.type === 'error' && e.code === 'error_max_budget_usd') {
+      return { ...e, message: `this chat used its ${usd(now.budgetUsd)} budget (${usd(now.spentUsd)} spent)` }
+    }
+    return e
+  })
 }
 
 /** What a turn's end comes to: the session's cost and turns, its status, its outcome and its closing events. */

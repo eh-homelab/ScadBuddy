@@ -1,4 +1,4 @@
-import type { Owner } from '../../sessions/protocol.js'
+import type { Owner, ServerEvent } from '../../sessions/protocol.js'
 import type { FlowTurn } from '../../tools/registry.js'
 import type { Resolution } from './gate.js'
 
@@ -56,6 +56,11 @@ export type SessionStart = {
 export type SessionTurnInput = {
   sessionId: string
   turnId: string
+  /**
+   * This placement of the turn (the workflow's run id and cycle, §5.2): written on the row as it
+   * claims the turn, so an earlier placement that still runs sees it has been replaced and stops.
+   */
+  attempt?: string
   message?: Message
   continuation?: Continuation
   traceparent?: string
@@ -67,6 +72,11 @@ export type SessionTurnResult = {
   parked?: string[]
   error?: string
   /**
+   * The turn's closing events as a classic turn builds them (turnCore.ts `tallyTurn`), scrubbed:
+   * what `session.finish_turn` writes, worded with the row's spend and budget (`wordTail`).
+   */
+  tail?: ServerEvent[]
+  /**
    * The `error` event's code a classic turn would write for this end (turnCore.ts `tallyTurn`):
    * `api_error`, a result subtype such as `error_max_turns`, or `turn_failed`. With `done` the
    * session stays idle and the error is still said (classic's `error_max_turns`).
@@ -76,8 +86,14 @@ export type SessionTurnResult = {
 
 export type TurnOutcome = 'done' | 'interrupted' | 'budget_exhausted' | 'failed'
 
-/** `code` and `message`: the turn's `error` event as classic writes it (`SessionTurnResult.code`); with `done`, said before the idle status. */
-export type FinishTurnInput = { sessionId: string; turnId: string; outcome: TurnOutcome; message?: string; code?: string }
+/**
+ * `tail`: the turn's own closing events (`SessionTurnResult.tail`), when its activity ended it;
+ * else `code` and `message`, the `error` event of an end the workflow decided (the time cap).
+ */
+export type FinishTurnInput = { sessionId: string; turnId: string; outcome: TurnOutcome; message?: string; code?: string; tail?: ServerEvent[] }
+
+/** `acquire_worker`'s argument: the session, and the session host queues its turn was lost on (never placed there again). */
+export type AcquireInput = { sessionId: string; exclude?: string[] }
 
 /** The `error` code of a turn cut at `turn_max_seconds` (the activity's StartToClose): the session stays idle, as after classic's `error_max_turns`. */
 export const TURN_MAX_SECONDS = 'turn_max_seconds'

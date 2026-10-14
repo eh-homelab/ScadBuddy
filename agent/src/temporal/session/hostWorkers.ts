@@ -9,8 +9,9 @@ import { sessionHostQueue } from './names.js'
 //   agent-tools.<identity>     DurableSession's pinned calls (#2320, #2581): http_request, the
 //                              browser and kept plugin clients, and the `turn_tools` listing,
 //                              which gets 5 s to start and one attempt. The SDK's default limit.
-//   agent-sessions.<identity>  `session_turn` and `release_worker` only, limited to the warm
-//                              cache's slots plus two for releases (`warm_max_per_replica + 2`).
+//   agent-sessions.<identity>  `session_turn` and `release_worker` only, limited to the largest
+//                              warm cache the setting allows plus two for releases (main.ts
+//                              SESSION_HOST_SLOTS), with the turns' shutdown grace.
 //
 // Apart, because a turn holds its slot for the whole turn: on one queue with one limit, the
 // replica's turns would starve the pinned calls (10 slots where they have 100 today), and pinned
@@ -28,8 +29,11 @@ export type HostWorkersOptions = {
   dataConverter?: DataConverter
   /** The pinned calls' activities, on `agent-tools.<identity>`. */
   pinned: Activities
-  /** `session_turn` and `release_worker`, on `agent-sessions.<identity>`, and how many may run at once. */
-  sessions?: { activities: Activities; slots: number }
+  /**
+   * `session_turn` and `release_worker`, on `agent-sessions.<identity>`, how many may run at once,
+   * and its own shutdown grace: a turn's (TurnHost.stop), longer than the pinned calls'.
+   */
+  sessions?: { activities: Activities; slots: number; shutdownGraceMs?: number; shutdownForceMs?: number }
   shutdownGraceMs?: number
 }
 
@@ -49,6 +53,8 @@ export function startHostWorkers(options: HostWorkersOptions): HostWorkers {
         taskQueue: sessionHostQueue(options.identity),
         activities: options.sessions.activities,
         maxConcurrentActivityTaskExecutions: options.sessions.slots,
+        ...(options.sessions.shutdownGraceMs !== undefined ? { shutdownGraceMs: options.sessions.shutdownGraceMs } : {}),
+        ...(options.sessions.shutdownForceMs !== undefined ? { shutdownForceMs: options.sessions.shutdownForceMs } : {}),
       })
     : undefined
   return {

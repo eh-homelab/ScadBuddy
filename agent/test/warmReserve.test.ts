@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { HarnessRun } from '../src/harness/run.js'
 import type { AssembledTurn } from '../src/sessions/turnRunner.js'
 import { createTurnSlot } from '../src/sessions/turnSlot.js'
-import { type WarmQuery, WarmSessions } from '../src/sessions/warm.js'
+import { RESERVATION_HOLD_MS, type WarmQuery, WarmSessions } from '../src/sessions/warm.js'
 import { acquireActivities, releaseActivities } from '../src/temporal/session/affinity.js'
 import { ACQUIRE_WORKER_ACTIVITY, NO_CAPACITY, RELEASE_WORKER_ACTIVITY } from '../src/temporal/session/names.js'
 
@@ -89,7 +89,7 @@ function cache(maxEntries: number) {
     const { entry } = await warm.acquire(id, assembly(), credential, 1)
     return { entry, left: () => warm.leave(entry) }
   }
-  return { warm, spawned, running, tick: () => (clock += 10) }
+  return { warm, spawned, running, tick: (ms = 10) => (clock += ms) }
 }
 
 describe('WarmSessions.reserve and release', () => {
@@ -99,10 +99,45 @@ describe('WarmSessions.reserve and release', () => {
     expect(warm.reserve('a')).toBe('reserved')
     tick()
     expect(warm.reserve('b')).toBe('reserved')
-    // Full of reservations: a third takes the oldest one's place.
+    // Full of reservations still being placed (their turns on the way): a third is refused.
     tick()
+    expect(warm.reserve('c')).toBe('full')
+    // Past the hold, the oldest one's place is given up for it.
+    tick(RESERVATION_HOLD_MS)
     expect(warm.reserve('c')).toBe('reserved')
+    expect(warm.reserve('b')).toBe('reserved')
+  })
+
+  it('warm_max_per_replica 0 admits every session: its turns run cold', async () => {
+    const { warm, spawned, running } = cache(0)
     expect(warm.reserve('a')).toBe('reserved')
+    const acquire = acquireActivities({ warm, hostQueue: 'agent-sessions.r', identity: 'r' })[ACQUIRE_WORKER_ACTIVITY]
+    await expect(acquire({ sessionId: 'b' })).resolves.toEqual({ hostQueue: 'agent-sessions.r', identity: 'r' })
+    // The turn's process is spawned, and closed once the turn leaves it.
+    const turn = await running('a')
+    turn.left()
+    await vi.waitFor(() => expect(spawned.get('a')?.closed()).toBe(true), { timeout: 5_000 })
+    expect(warm.size()).toBe(0)
+  })
+
+  it('refuses a session whose turn was lost here (exclude), so its retry lands elsewhere', async () => {
+    const { warm } = cache(2)
+    const acquire = acquireActivities({ warm, hostQueue: 'agent-sessions.r', identity: 'r' })[ACQUIRE_WORKER_ACTIVITY]
+    await expect(acquire({ sessionId: 'a', exclude: ['agent-sessions.r'] })).rejects.toMatchObject({ type: NO_CAPACITY, nonRetryable: false })
+    await expect(acquire({ sessionId: 'a', exclude: ['agent-sessions.other'] })).resolves.toEqual({ hostQueue: 'agent-sessions.r', identity: 'r' })
+  })
+
+  it('cut closes a placement`s process at once, busy or not, and frees its place', async () => {
+    const { warm, spawned, running } = cache(1)
+    const cutOff = await running('a')
+    expect(warm.busy('a')).toBe(true)
+    await warm.cut(cutOff.entry, 'moved')
+    expect(spawned.get('a')?.closed()).toBe(true)
+    expect(warm.busy('a')).toBe(false)
+    expect(warm.size()).toBe(0)
+    // The turn's own end afterwards finds nothing to give back.
+    cutOff.left()
+    expect(warm.size()).toBe(0)
   })
 
   it('a full replica evicts its least recently used idle process, never one running a turn', async () => {

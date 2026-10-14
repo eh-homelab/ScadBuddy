@@ -165,7 +165,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     const answer = await send(env.client, id, message('t1', 'make a bracket'))
     expect(answer).toEqual({ accepted: true, turn_id: 't1' })
     await poll(() => finished.map((f) => f.outcome), ['done'])
-    expect(turns).toEqual([{ sessionId: id, turnId: 't1', message: message('t1', 'make a bracket') }])
+    expect(turns).toEqual([{ sessionId: id, turnId: 't1', attempt: expect.stringMatching(/:0$/), message: message('t1', 'make a bracket') }])
     expect(finished[0]).toEqual({ sessionId: id, turnId: 't1', outcome: 'done' })
     expect(await handleOf(id).describe().then((d) => d.type)).toBe(SESSION_WORKFLOW)
     expect(acquired).toBe(1)

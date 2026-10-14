@@ -1,0 +1,87 @@
+import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk'
+import type { Context } from '@opentelemetry/api'
+import { harnessPrincipal, hasTier, type Principal, TIERS } from '../auth/principal.js'
+import type { TierResolver } from '../harness/permissions.js'
+import type { BuiltInPolicy } from '../plugins/builtInTools.js'
+import { OWN_PLUGIN_NAME } from '../plugins/packages/vet.js'
+import type { TurnPrincipal } from '../sessions/manager.js'
+import type { TitleResolver } from '../sessions/sdkEvents.js'
+import type { Owner } from '../sessions/protocol.js'
+import { ALL_TOOLS } from './index.js'
+import { createHarnessServer, SERVER_NAME } from './projections.js'
+import type { Tool, ToolServices, WaitForTab } from './registry.js'
+
+// The registry's harness side, as the session manager takes it
+// (sessions/manager.ts SessionManagerDeps `tierOf` and `mcpServers`), so that
+// main.ts wires it in one line. Spec §5.1 and D3: the harness gets the same
+// tools as /mcp, in-process, as `mcp__scadbuddy__<name>`
+// (https://code.claude.com/docs/en/agent-sdk/custom-tools).
+//
+//   - `tierOf` maps those names to each tool's `risk` (as index.ts `tierOf`
+//     does for ALL_TOOLS), for the permission seam
+//     (harness/permissions.ts): read and write tools run within the
+//     principal's tiers, outward ones park for a human approval (#258). Any
+//     other name (a plugin's tool) stays unknown, and so `outward` (spec §8.1).
+//   - `mcpServers` builds one in-process server per turn, bound to the
+//     session owner's principal (auth/principal.ts `harnessPrincipal`), with
+//     only the tools that principal's tiers allow: a tool it could never run
+//     is not offered, so no human is asked to approve a call that `runTool`
+//     would then refuse for want of the tier. A turn sent over /mcp
+//     (tools/sessions.ts, #300) carries the sender's tiers, which replace the
+//     `read` default of a non-browser owner.
+
+export type HarnessTools = {
+  tierOf: TierResolver
+  /** Each call's title for the panel (#782, registry.ts `ToolSpec.title`); undefined for any other name. */
+  titleOf: TitleResolver
+  mcpServers: (
+    session: { id?: string; owner: Owner },
+    turn?: TurnPrincipal,
+    extras?: { waitForTab?: WaitForTab; turnContext?: () => Context; builtIn?: BuiltInPolicy; secrets?: () => readonly string[] },
+  ) => Record<string, McpSdkServerConfigWithInstance>
+}
+
+export function harnessTools(services: ToolServices, tools: readonly Tool[] = ALL_TOOLS): HarnessTools {
+  const byName = new Map(tools.map((t) => [`mcp__${SERVER_NAME}__${t.name}`, t]))
+  return {
+    tierOf: (name) => byName.get(name)?.risk,
+    titleOf: (name, input) => byName.get(name)?.title(input),
+    mcpServers: (session, turn, extras) => {
+      const principal = turnPrincipal(session.owner, turn)
+      // Settings → Plugins (#1953): a disabled tool is not offered, and one raised
+      // past the principal's tiers is not either.
+      const builtIn = extras?.builtIn
+      const seamTierOf = (t: Tool) => (builtIn ? builtIn.tierOf(`mcp__${SERVER_NAME}__${t.name}`, t.risk) : t.risk)
+      const allowed = tools.filter((t) =>
+        builtIn ? !builtIn.isDisabled(OWN_PLUGIN_NAME, t.name) && hasTier(principal, seamTierOf(t)) : hasTier(principal, t.risk),
+      )
+      // The turn's own secrets (its credentials and plugin tokens) beside every
+      // saved credential's, for workspace_read to redact (#2329).
+      const turnSecrets = extras?.secrets
+      const withSecrets: ToolServices = turnSecrets
+        ? { ...services, secrets: async () => [...((await services.secrets?.()) ?? []), ...turnSecrets()] }
+        : services
+      // The browser_* tools reach the tab this session is paired with (#254, bridge/hub.ts).
+      const bound =
+        withSecrets.browser && session.id !== undefined
+          ? {
+              ...withSecrets,
+              browser: withSecrets.browser.forSession(session.id),
+              // #815 §2: a call that finds no tab may wait for it (browser.ts).
+              ...(extras?.waitForTab ? { waitForTab: extras.waitForTab } : {}),
+            }
+          : withSecrets
+      // The session id too, so its commits name it (authorship.ts, #252).
+      // The turn's context, for a call whose span is not found (telemetry/trace.ts toolContextFor).
+      return { [SERVER_NAME]: createHarnessServer(allowed, bound, principal, session.id, extras?.turnContext, seamTierOf) }
+    },
+  }
+}
+
+/** The owner's harness principal, with a non-browser sender's own tiers when the turn carries them. */
+export function turnPrincipal(owner: Owner, turn?: TurnPrincipal): Principal {
+  const base = harnessPrincipal(owner)
+  if (owner.kind === 'browser' || !turn?.tiers) return base
+  const tiers = turn.tiers
+  return { ...base, tiers: TIERS.filter((t) => tiers.includes(t)) }
+}

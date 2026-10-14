@@ -108,6 +108,12 @@ const MIN_CAP_USD = 0.000001
  * those are lost (the flake behind #1093's fallback test).
  */
 const DRAIN_MS = 2_000
+/**
+ * How long a reservation (`reserve`) is its session's alone: its `session_turn` may still be
+ * on its way (the workflow's 5 s schedule-to-start, then the spawn), so it is not given up for
+ * another session's until then (spec 2026-10-13 §5.2).
+ */
+export const RESERVATION_HOLD_MS = 30_000
 
 /** `acquire` while a turn holds the session's entry: the caller runs one turn per session at a time, so this is its bug. */
 export class WarmBusyError extends Error {
@@ -137,6 +143,8 @@ class MirroredTranscript {
   pending: Promise<void> = Promise.resolve()
   /** Another write landed in the main transcript between two of this process's own. */
   foreign = false
+  /** Cut off (`WarmSessions.cut`): a placement the workflow gave up on; nothing more of it is written. */
+  fenced = false
 
   constructor(inner: SessionStore, tail: string | null, readTail: () => Promise<string | null>) {
     this.lastUuid = tail
@@ -144,6 +152,7 @@ class MirroredTranscript {
       const main = (key.subpath ?? '') === ''
       const uuid = main ? entries.findLast((e) => typeof e.uuid === 'string')?.uuid : undefined
       const write = this.pending.then(async () => {
+        if (this.fenced) return
         if (typeof uuid === 'string' && !this.foreign) {
           // A failed read cannot tell: taken as moved, which only costs a respawn.
           const tail = await readTail().catch(() => undefined)
@@ -391,6 +400,9 @@ export class WarmSessions {
    * reservation when the cache is full. `full` only when every process here is running a turn.
    */
   reserve(sessionId: string): 'reserved' | 'full' {
+    // No warm processes at all (`warm_max_per_replica` 0): every turn runs cold, and is admitted;
+    // the session host worker's slots bound how many run at once.
+    if (this.maxEntries <= 0) return 'reserved'
     this.sweepIdle()
     const now = this.now()
     for (const [id, at] of [...this.reserved]) if (now - at >= this.idleMs || this.slots.has(id)) this.reserved.delete(id)
@@ -401,8 +413,9 @@ export class WarmSessions {
         for (const slot of this.slots.values()) {
           if (!slot.busy && (!lru || slot.entry.lastUsedAt < lru.entry.lastUsedAt)) lru = slot
         }
+        // A reservation still being placed (its turn on the way) is not given up.
         let oldest: [string, number] | undefined
-        for (const held of this.reserved) if (!oldest || held[1] < oldest[1]) oldest = held
+        for (const held of this.reserved) if (now - held[1] >= RESERVATION_HOLD_MS && (!oldest || held[1] < oldest[1])) oldest = held
         if (!lru && !oldest) return 'full'
         if (oldest && (!lru || oldest[1] < lru.entry.lastUsedAt)) this.reserved.delete(oldest[0])
         else void this.drop(lru!, 'lru')
@@ -420,6 +433,22 @@ export class WarmSessions {
 
   size(): number {
     return this.slots.size
+  }
+
+  /** Whether a turn holds the session's process here now. */
+  busy(sessionId: string): boolean {
+    return this.slots.get(sessionId)?.busy === true
+  }
+
+  /**
+   * Cuts off a placement the workflow gave up on (spec §5.2, a stalled heartbeat): its
+   * transcript appends from now on are dropped, and its process is closed at once, busy or not.
+   */
+  cut(entry: WarmEntry, reason: string): Promise<void> {
+    const slot = this.slots.get(entry.sessionId)
+    if (!slot || slot.entry !== entry) return Promise.resolve()
+    if (slot.mirror) slot.mirror.fenced = true
+    return this.drop(slot, `cut off: ${reason}`, 'close')
   }
 
   /** Closes every process (shutdown): an idle one may end on its own first; a running turn's is closed at once. */

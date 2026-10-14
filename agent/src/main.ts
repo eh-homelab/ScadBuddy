@@ -63,7 +63,7 @@ import { startHostWorkers } from './temporal/session/hostWorkers.js'
 import { SESSION_DEPLOYMENT, SESSION_SETTINGS_ACTIVITY, SESSION_QUEUE, sessionHostQueue } from './temporal/session/names.js'
 import { sessionTurnActivity } from './temporal/session/turnActivity.js'
 import { TurnHost } from './sessions/turnHost.js'
-import { readRuntimeSettings } from './sessions/runtimeSettings.js'
+import { readRuntimeSettings, RUNTIME_BOUNDS } from './sessions/runtimeSettings.js'
 import { memoryActivities } from './temporal/memoryActivities.js'
 import { SHARED_PACKAGES, sweepPackageCopies } from './temporal/turnPackages.js'
 import { forwardPackageServers } from './plugins/packages/mcp.js'
@@ -577,6 +577,15 @@ const turnToolDeps = temporal
         : {}),
     }
   : undefined
+// AgentSession's turns are hosted here only with both halves (§5.2): acquire_worker on agent-tools
+// hands out SESSION_HOST_QUEUE, so it is offered only where the session host worker below serves it.
+const sessionHosting = turnHost && sessions && operationStore && turnToolDeps ? { turnHost, warm: sessions.warm } : undefined
+/**
+ * The session host worker's slots, fixed when it starts: the most warm processes
+ * `warm_max_per_replica` may be set to (RUNTIME_BOUNDS), which can change while it runs, plus two
+ * for releases. The warm cache's `reserve` is what holds a replica to its setting.
+ */
+const SESSION_HOST_SLOTS = RUNTIME_BOUNDS.warm_max_per_replica.max + 2
 
 const temporalWorker =
   temporal && operationStore && turnToolDeps
@@ -602,7 +611,7 @@ const temporalWorker =
           ...sessionGateActivities(temporal.sql),
           ...(sessions ? sessionFinishActivities(temporal.sql, sessions.events) : {}),
           // A place in this replica's warm cache, and its session host queue (§5.2).
-          ...(sessions && turnHost ? acquireActivities({ warm: sessions.warm, hostQueue: SESSION_HOST_QUEUE, identity: replicaIdentity() }) : {}),
+          ...(sessionHosting ? acquireActivities({ warm: sessionHosting.warm, hostQueue: SESSION_HOST_QUEUE, identity: replicaIdentity() }) : {}),
           // A durable turn's plugin and http_request tools (#2320): listed per turn, and
           // each call the `default` activity `turn:<server>__<tool>`.
           ...turnToolActivities(turnToolDeps),
@@ -652,7 +661,7 @@ const sessionWorker =
     : undefined
 // This replica's own queues (temporal/session/hostWorkers.ts): a pinned turn tool's calls
 // (#2320) on HOST_QUEUE, and AgentSession's turns on SESSION_HOST_QUEUE, limited to the warm
-// cache's slots plus two for releases. Their work dies with the pod; a call scheduled after
+// cache's largest setting plus two for releases. Their work dies with the pod; a call scheduled after
 // that fails at its schedule-to-start (a turn) or schedule-to-close (a pinned call) timeout.
 const hostWorkers =
   temporal && operationStore && turnToolDeps
@@ -661,11 +670,15 @@ const hostWorkers =
         namespace: config.temporalNamespace,
         identity: replicaIdentity(),
         pinned: { ...turnToolActivities(turnToolDeps), default: turnToolActivity(turnToolDeps) },
-        ...(sessions && turnHost
+        ...(sessionHosting
           ? {
               sessions: {
-                activities: { ...sessionTurnActivity(turnHost), ...releaseActivities(sessions.warm) },
-                slots: runtime.warm_max_per_replica + 2,
+                activities: { ...sessionTurnActivity(sessionHosting.turnHost), ...releaseActivities(sessionHosting.warm) },
+                // `warm_max_per_replica` may be raised while the replica runs; the slots cannot be.
+                slots: SESSION_HOST_SLOTS,
+                // The turns' own drain and abort wait (TurnHost.stop), so the worker never cuts one first.
+                shutdownGraceMs: TURN_DRAIN_MS + TURN_ABORT_WAIT_MS,
+                shutdownForceMs: TURN_DRAIN_MS + TURN_ABORT_WAIT_MS + 1_000,
               },
             }
           : {}),
@@ -859,14 +872,16 @@ async function stop(): Promise<void> {
   // The agent-tools worker at the same time: it stops polling, its running
   // activities get its 10 s grace and are then cancelled (a fetch's git is killed),
   // and at 15 s it stops regardless: inside the turns' 17 s budget. Both host workers stop
-  // with it; an AgentSession turn cut by the stop fails ShuttingDown, so its workflow places
-  // it on another replica (temporal/session/turnActivity.ts).
-  turnHost?.drain()
+  // with it, the session host worker with the turns' 17 s as its grace. AgentSession turns get
+  // the classic turns' grace (TurnHost.stop); one still running then is cut and fails
+  // ShuttingDown, so its workflow places it on another replica, and one that ended in the grace
+  // keeps its end. The warm processes are closed only once those have ended (stopTurns `others`).
+  const hostedTurns = turnHost?.stop({ graceMs: TURN_DRAIN_MS, abortWaitMs: TURN_ABORT_WAIT_MS })
   await Promise.all([
     temporalWorker?.stop(),
     hostWorkers?.stop(),
     sessionWorker?.stop(),
-    sessions?.stopTurns({ graceMs: TURN_DRAIN_MS, abortWaitMs: TURN_ABORT_WAIT_MS }),
+    sessions?.stopTurns({ graceMs: TURN_DRAIN_MS, abortWaitMs: TURN_ABORT_WAIT_MS, ...(hostedTurns ? { others: hostedTurns } : {}) }),
   ])
   // Kept plugin MCP sessions end with their DELETE while the forwarder still routes it.
   await turnClients.closeAll()

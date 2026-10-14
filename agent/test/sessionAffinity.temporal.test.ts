@@ -2,11 +2,13 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
 import type { Context } from '@temporalio/activity'
+import { defaultPayloadConverter } from '@temporalio/common'
 import { historyToJSON } from '@temporalio/common/lib/proto-utils.js'
 import type { TestWorkflowEnvironment } from '@temporalio/testing'
 import { bundleWorkflowCode, Worker } from '@temporalio/worker'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { z } from 'zod'
+import { AuditLog } from '../src/audit/log.js'
 import { connectDatabase, type Database } from '../src/db.js'
 import { sessionWorkflowId } from '../src/gate/durable.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
@@ -30,7 +32,7 @@ import {
 } from '../src/temporal/session/names.js'
 import { sessionTurnActivity } from '../src/temporal/session/turnActivity.js'
 import { AgentWorker } from '../src/temporal/worker.js'
-import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
+import { type FakeAnthropic, type RecordedRequest, type Reply, REPLY_COST_USD, startFakeAnthropic } from './support/fakeAnthropic.js'
 import { fixedCredentials } from './support/fixedCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, tempPaths } from './support/sessions.js'
@@ -89,6 +91,8 @@ type Replica = {
   tools: AgentWorker
   hosts: HostWorkers
   turnHost: TurnHost
+  /** Its turns' shutdown grace (TurnHost.stop), and the session host worker's past it. */
+  drainMs: number
 }
 
 describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, () => {
@@ -105,6 +109,8 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
   const pools: Database[] = []
   /** The stub tool's calls, and what a call waits on before it answers. */
   let slowCalls: number
+  /** The stub tool's calls that have answered. */
+  let slowReturned: number
   let slowGate: Promise<void>
   /** What `session_settings` answers each turn (the runtime settings, §5.2). */
   let runtimeSettings: typeof RUNTIME_DEFAULTS
@@ -134,6 +140,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     // Set in the database, as no route writes it (sessionRuntimeFlag.pg.test.ts).
     await db.sql`INSERT INTO ai_settings (key, value) VALUES (${SESSION_RUNTIME_SETTING}, ${db.sql.json('unified')})`
     slowCalls = 0
+    slowReturned = 0
     slowGate = Promise.resolve()
     runtimeSettings = RUNTIME_DEFAULTS
     script = () => ({ text: 'ok' })
@@ -156,19 +163,33 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
   const slow = tool('slow', 'Does something slowly', { q: z.string() }, async () => {
     slowCalls++
     await slowGate
+    slowReturned++
     return { content: [{ type: 'text', text: 'slow done' }] }
   })
 
   async function replica(
     name: string,
-    options: { slots?: number; maxEntries?: number; extra?: Partial<SessionManagerDeps>; settings?: Record<string, unknown> } = {},
+    options: {
+      slots?: number
+      maxEntries?: number
+      extra?: Partial<SessionManagerDeps>
+      settings?: Record<string, unknown>
+      /** Its turns' shutdown grace (stopReplica); 1 s by default. */
+      drainMs?: number
+      /** session_turn's heartbeat period (turnActivity.ts HEARTBEAT_MS by default). */
+      heartbeatMs?: number
+      /** Claude Code processes that start and never answer: a placement that dies before the prompt lands. */
+      dead?: boolean
+      /** session_turn never hears its cancellation (its worker cut off from Temporal): only the row can tell it. */
+      deaf?: boolean
+    } = {},
   ): Promise<Replica> {
     const paths = await tempPaths()
     await ensureStateDirs(paths)
     const pool = connectDatabase(url, { searchPath: schema })
     pools.push(pool)
     const hostQueue = sessionHostQueue(name)
-    const r = { name, acquired: 0, refused: 0, spawned: 0, frozen: false } as Replica
+    const r = { name, acquired: 0, refused: 0, spawned: 0, frozen: false, drainMs: options.drainMs ?? 1_000 } as Replica
     r.m = manager({
       sql: pool.sql,
       paths,
@@ -180,11 +201,14 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
       mcpServers: () => ({ stub: createSdkMcpServer({ name: 'stub', tools: [slow] }) }),
       tierOf: (n) => (n === 'mcp__stub__slow' ? 'read' : undefined),
       warm: { maxEntries: options.maxEntries ?? 8 },
+      // Each turn's cost as its own audit row (#1922): what each placement that ended wrote.
+      audit: new AuditLog({ sql: pool.sql }),
       run: (run) =>
         runHarness({
           ...run,
           spawnClaudeCodeProcess: (o) => {
             r.spawned++
+            if (options.dead) return spawn('sleep', ['3600'], { stdio: ['pipe', 'pipe', 'ignore'] })
             return spawn(o.command, o.args, { cwd: o.cwd, env: o.env, stdio: ['pipe', 'pipe', 'ignore'] })
           },
         }),
@@ -224,10 +248,15 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
             beat: (context: Context, beat) => {
               if (!r.frozen) context.heartbeat(beat)
             },
+            ...(options.heartbeatMs ? { heartbeatMs: options.heartbeatMs } : {}),
+            ...(options.deaf ? { cancelled: () => new AbortController().signal } : {}),
           }),
           ...releaseActivities(r.m.warm),
         },
         slots: options.slots ?? 10,
+        // As main.ts: past the turns' own drain and abort wait.
+        shutdownGraceMs: r.drainMs + 1_000,
+        shutdownForceMs: r.drainMs + 2_000,
       },
       shutdownGraceMs: 1_000,
     })
@@ -238,11 +267,38 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     return r
   }
 
-  /** What SIGTERM does to a replica (main.ts): the turn host drains, every worker stops, and the turns and warm processes end. */
+  /**
+   * What SIGTERM does to a replica (main.ts): its AgentSession turns and classic turns get their
+   * grace, every worker stops, and the warm processes are closed once the turns have ended.
+   */
   async function stopReplica(r: Replica): Promise<void> {
-    r.turnHost.drain()
-    await Promise.all([r.tools.stop(), r.hosts.stop(), r.m.stopTurns({ graceMs: 1_000, abortWaitMs: 1_000 })])
+    const limits = { graceMs: r.drainMs, abortWaitMs: 1_000 }
+    const hosted = r.turnHost.stop(limits)
+    await Promise.all([r.tools.stop(), r.hosts.stop(), r.m.stopTurns({ ...limits, others: hosted })])
   }
+
+  /** The session's spend and turns as the row records them. */
+  async function recorded(id: string) {
+    const [row] = await db.sql<{ cost_usd: number; unpriced_cost_usd: number; turns: number }[]>`
+      SELECT cost_usd, unpriced_cost_usd, turns FROM ai_sessions WHERE id = ${id}`
+    return { costUsd: Number(row!.cost_usd), unpricedUsd: Number(row!.unpriced_cost_usd), turns: Number(row!.turns) }
+  }
+  /** The audit rows of the session's turn costs (#1922), what each placement that ended wrote. */
+  async function turnCosts(id: string) {
+    return (
+      await db.sql<{ cost_usd: number }[]>`
+        SELECT cost_usd FROM ai_audit WHERE session_id = ${id} AND kind = 'turn' ORDER BY id`
+    ).map((r) => Number(r.cost_usd))
+  }
+  /** What the session's pending session_turn last heartbeated, as the server holds it. */
+  async function beatOnServer(id: string): Promise<unknown> {
+    const d = await env.client.workflow.getHandle(sessionWorkflowId(id)).describe()
+    const payload = d.raw.pendingActivities?.[0]?.heartbeatDetails?.payloads?.[0]
+    return payload ? defaultPayloadConverter.fromPayload(payload) : undefined
+  }
+  /** Whether any of the session's events says `text`. */
+  const said = async (r: Replica, id: string, text: string) => JSON.stringify(await r.m.events.read(id, 0, 10_000)).includes(text)
+  const userTurns = (r: RecordedRequest, text: string) => conversation(r).split(text).length - 1
 
   /** Starts a unified session with its first turn, as the panel does. */
   async function startOn(r: Replica, prompt: string) {
@@ -425,28 +481,205 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     expect(last).not.toContain(RESTARTED_PROMPT)
   })
 
-  it('a worker that stops answering mid-turn: the heartbeat times out and the turn resumes on another with the restart message', async () => {
+  it('a placement lost before its prompt landed: the next sends the message itself, once, whatever the beat said (I1)', async () => {
+    const a = await replica('a', { dead: true })
+    const { id, turn } = await startOn(a, 'the only copy')
+    // A pushed the message into a process that never answers, and its beat says so.
+    await pollUntil(async () => ((await beatOnServer(id)) as { pushed?: boolean } | undefined)?.pushed === true, true)
+    a.frozen = true
+    await a.tools.stop()
+    const b = await replica('b')
+    expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    // Nothing of the turn was in the transcript, so B sent the message, not the restart notice.
+    const calls = fake.messageCalls()
+    expect(calls).toHaveLength(1)
+    expect(conversation(calls[0]!)).not.toContain(RESTARTED_PROMPT)
+    expect(userTurns(calls[0]!, 'the only copy')).toBe(1)
+    expect(b.acquired).toBe(1)
+    // A was cut off once B held the turn: its process is gone and it wrote nothing.
+    await pollUntil(() => a.turnHost.active, 0)
+    expect(a.m.warm.size()).toBe(0)
+    // One request, billed once: the row and B's turn.
+    const row = await recorded(id)
+    expect(row.costUsd).toBeCloseTo(REPLY_COST_USD, 12)
+    expect(row.turns).toBe(1)
+    expect(await turnCosts(id)).toEqual([expect.closeTo(REPLY_COST_USD, 12)])
+  })
+
+  it('a placement lost after its prompt landed: the next resumes with the restart message, never the message again (I1)', async () => {
     const hold = latch()
     slowGate = hold.promise
     script = (r) => (conversation(r).includes('tool_use') ? { text: 'carried on' } : { toolUse: { name: 'mcp__stub__slow', input: { q: 'x' } } })
     const a = await replica('a')
+    // A never heartbeats at all: the workflow has no word that the message went in.
+    a.frozen = true
     const { id, turn } = await startOn(a, 'do the slow thing')
     const run = await runningRun(id)
     await pollUntil(() => slowCalls, 1)
-    // A stops answering: no more heartbeats, and no more acquires there.
-    a.frozen = true
     await a.tools.stop()
     const b = await replica('b')
     expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
     const timeouts = (await historyTypes(id, run)).filter((e) => e.eventType === 'EVENT_TYPE_ACTIVITY_TASK_TIMED_OUT')
     expect(timeouts.map((e) => e.activityTaskTimedOutEventAttributes?.failure?.timeoutFailureInfo?.timeoutType)).toEqual(['TIMEOUT_TYPE_HEARTBEAT'])
     expect(b.acquired).toBe(1)
-    // B resumed the transcript with the restart message, and never ran the call in flight again.
+    // B read the transcript: the message was in it, so it resumed with the restart message.
     const resumed = fake.messageCalls().at(-1)!
     expect(conversation(resumed)).toContain(RESTARTED_PROMPT)
-    expect(conversation(resumed)).toContain('do the slow thing')
+    expect(userTurns(resumed, 'do the slow thing')).toBe(1)
     expect(slowCalls).toBe(1)
+    await pollUntil(() => a.turnHost.active, 0)
+    // A's request (counted as it went, at the table's prices) and B's, each once.
+    const row = await recorded(id)
+    expect(row.costUsd).toBeCloseTo(2 * REPLY_COST_USD, 12)
+    expect(row.unpricedUsd).toBeCloseTo(REPLY_COST_USD, 12)
+    expect(row.turns).toBe(1)
+    expect(await turnCosts(id)).toEqual([expect.closeTo(REPLY_COST_USD, 12)])
     hold.release()
+  })
+
+  it.each([
+    ['its worker tells it the turn timed out', false],
+    ['only the row tells it (its worker never hears the cancel)', true],
+  ])('a placement alive but stalled is cut off once the turn moves (%s): it writes nothing more, its spend counts once, and the turn avoids it (I3)', async (_how, deaf) => {
+    const hold = latch()
+    slowGate = hold.promise
+    script = (r) => (conversation(r).includes('tool_use') ? { text: 'carried on' } : { toolUse: { name: 'mcp__stub__slow', input: { q: 'x' } } })
+    const a = await replica('a', { deaf })
+    const { id, turn } = await startOn(a, 'do the slow thing')
+    await pollUntil(() => slowCalls, 1)
+    // A's heartbeat stalls; A itself (its process, its agent-tools worker) stays up.
+    a.frozen = true
+    // The heartbeat times out and acquire runs again: A refuses the turn it lost.
+    await pollUntil(() => a.refused >= 1, true, 60_000)
+    expect(a.acquired).toBe(1)
+    const b = await replica('b')
+    expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(b.acquired).toBe(1)
+    // A saw B's placement on the row and cut itself off: its process is gone.
+    await pollUntil(() => a.turnHost.active, 0)
+    expect(a.m.warm.size()).toBe(0)
+    const calls = fake.messageCalls().length
+    // The call A held answers now, into nothing: no event, no request, no spend from A.
+    hold.release()
+    await pollUntil(() => slowReturned, 1)
+    expect(await said(a, id, 'slow done')).toBe(false)
+    expect(fake.messageCalls()).toHaveLength(calls)
+    expect(calls).toBe(2)
+    expect(slowCalls).toBe(1)
+    // A's request and B's, each once: on the row, and in each placement's own cost row (A's only
+    // when it ended still holding the row: told by its worker, before B took it).
+    const row = await recorded(id)
+    expect(row.costUsd).toBeCloseTo(2 * REPLY_COST_USD, 12)
+    expect(row.turns).toBe(1)
+    const costs = await turnCosts(id)
+    expect(costs).toEqual(deaf ? [expect.closeTo(REPLY_COST_USD, 12)] : [expect.closeTo(REPLY_COST_USD, 12), expect.closeTo(REPLY_COST_USD, 12)])
+  })
+
+  it('warm_max_per_replica 0: a turn is admitted and runs cold to its end (I2)', async () => {
+    const a = await replica('a', { maxEntries: 0 })
+    const { id, turn } = await startOn(a, 'first')
+    // Admitted at once: acquire_worker answers (no NoCapacity, which would retry for a minute a cycle).
+    await pollUntil(() => ({ acquired: a.acquired, refused: a.refused }), { acquired: 1, refused: 0 }, 15_000)
+    expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    await settled(id)
+    const second = await a.m.send(id, browser, 'second')
+    expect(await second.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    // A process per turn, none kept.
+    expect(a.spawned).toBe(2)
+    expect(a.m.warm.size()).toBe(0)
+    expect(a.refused).toBe(0)
+  })
+
+  it('a send right after a turn cut at turn_max_seconds runs: the cut placement still here goes first, never WarmBusy (I3)', async () => {
+    script = (r) => (conversation(r).includes('again') ? { text: 'ok' } : { hang: true })
+    runtimeSettings = { ...RUNTIME_DEFAULTS, turn_max_seconds: 5 }
+    // Beats far apart: the cut placement's activity hears of its timeout only well after the next send.
+    const a = await replica('a', { heartbeatMs: 15_000 })
+    const { id, turn } = await startOn(a, 'take too long')
+    expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    await settled(id)
+    expect(a.turnHost.active).toBe(1)
+    const second = await a.m.send(id, browser, 'again')
+    expect(await second.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(await said(a, id, 'WarmBusy')).toBe(false)
+  })
+
+  it('SIGTERM mid-turn: a turn that ends within the grace finishes on its replica, billed once (I4)', async () => {
+    const hold = latch()
+    slowGate = hold.promise
+    script = (r) => (conversation(r).includes('tool_result') ? { text: 'done' } : { toolUse: { name: 'mcp__stub__slow', input: { q: 'x' } } })
+    const a = await replica('a', { drainMs: 20_000 })
+    const { id, turn } = await startOn(a, 'finish in the drain')
+    await pollUntil(() => slowCalls, 1)
+    const b = await replica('b')
+    replicas.splice(replicas.indexOf(a), 1)
+    const stopping = stopReplica(a)
+    await pollUntil(() => a.turnHost.stopping, true)
+    hold.release()
+    const outcome = await turn.done
+    await stopping
+    // Billed once: its two requests, both on A.
+    expect((await recorded(id)).costUsd).toBeCloseTo(2 * REPLY_COST_USD, 12)
+    expect(outcome).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(b.acquired).toBe(0)
+    expect(fake.messageCalls()).toHaveLength(2)
+    const row = await recorded(id)
+    expect(row.costUsd).toBeCloseTo(2 * REPLY_COST_USD, 12)
+    expect(row.unpricedUsd).toBeCloseTo(0, 12)
+    expect(row.turns).toBe(2)
+    expect(await turnCosts(id)).toEqual([expect.closeTo(2 * REPLY_COST_USD, 12)])
+  })
+
+  it('SIGTERM mid-turn: a refusal within the grace keeps its end, never moved and billed again (I4)', async () => {
+    const hold = latch()
+    slowGate = hold.promise
+    script = (r) =>
+      conversation(r).includes(RESTARTED_PROMPT)
+        ? { text: 'ran again' }
+        : conversation(r).includes('tool_result')
+          ? { error: { status: 400, type: 'invalid_request_error', message: 'messages: text content blocks must be non-empty' } }
+          : { toolUse: { name: 'mcp__stub__slow', input: { q: 'x' } } }
+    const a = await replica('a', { drainMs: 20_000 })
+    const { id, turn } = await startOn(a, 'refuse in the drain')
+    await pollUntil(() => slowCalls, 1)
+    const b = await replica('b')
+    replicas.splice(replicas.indexOf(a), 1)
+    const stopping = stopReplica(a)
+    await pollUntil(() => a.turnHost.stopping, true)
+    hold.release()
+    const outcome = await turn.done
+    await stopping
+    // Billed once: the tool call's request; the refused one costs nothing, and nothing ran again.
+    expect((await recorded(id)).costUsd).toBeCloseTo(REPLY_COST_USD, 12)
+    expect(outcome).toMatchObject({ kind: 'failed' })
+    expect(b.acquired).toBe(0)
+    const errors = (await b.m.events.read(id, 0, 10_000)).flatMap((e) => (e.event.type === 'error' ? [e.event.code] : []))
+    expect(errors).toEqual(['api_error'])
+    // The tool call's request, once; the refused one costs nothing.
+    expect(fake.messageCalls().some((r) => conversation(r).includes(RESTARTED_PROMPT))).toBe(false)
+    const row = await recorded(id)
+    expect(row.costUsd).toBeCloseTo(REPLY_COST_USD, 12)
+    expect(await turnCosts(id)).toEqual([expect.closeTo(REPLY_COST_USD, 12)])
+  })
+
+  it('SIGTERM mid-turn: a turn still running past the grace is cut and moves, its spend counted once (I4)', async () => {
+    const hold = latch()
+    slowGate = hold.promise
+    script = (r) => (conversation(r).includes(RESTARTED_PROMPT) ? { text: 'carried on' } : { toolUse: { name: 'mcp__stub__slow', input: { q: 'x' } } })
+    const a = await replica('a', { drainMs: 1_000 })
+    const { id, turn } = await startOn(a, 'outlast the drain')
+    await pollUntil(() => slowCalls, 1)
+    const b = await replica('b')
+    replicas.splice(replicas.indexOf(a), 1)
+    await stopReplica(a)
+    expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(b.acquired).toBe(1)
+    hold.release()
+    // A's request (as A's cut turn wrote it) and B's, each once.
+    // (Its turns are as classic counts a stopped turn's: the interrupted result's.)
+    const row = await recorded(id)
+    expect(row.costUsd).toBeCloseTo(2 * REPLY_COST_USD, 12)
+    expect(await turnCosts(id)).toEqual([expect.closeTo(REPLY_COST_USD, 12), expect.closeTo(REPLY_COST_USD, 12)])
   })
 
   it('a full replica evicts its least recently used idle process for a new session, never one running a turn', async () => {

@@ -14,14 +14,16 @@ import {
   proxyLocalActivities,
   setHandler,
   TimeoutFailure,
+  workflowInfo,
 } from '@temporalio/workflow'
 import { ASK_USER } from '../../gate/entry.js'
 import { END_SIGNAL, INTERRUPT_SIGNAL } from '../../gate/names.js'
-import type { Owner } from '../../sessions/protocol.js'
+import type { Owner, ServerEvent } from '../../sessions/protocol.js'
 import type { RuntimeSettings } from '../../sessions/runtimeSettings.js'
 import { TASK_QUEUE } from '../names.js'
 import { type GateHost, type GateTurn, SessionGate } from './gate.js'
 import {
+  type AcquireInput,
   BUDGET_EXHAUSTED,
   type Continuation,
   type FinishTurnInput,
@@ -69,8 +71,9 @@ import {
 // Affinity (§5.2), Go's Worker Sessions on worker-specific queues: `home` is the session host
 // queue (`agent-sessions.<identity>`) of the replica `acquire_worker` reserved a place on; each
 // turn runs there, and a turn whose home has gone (a timeout, ShuttingDown, NoCapacity) is placed
-// again: acquire on the shared `agent-tools`, then the turn on the new home, resumed from its
-// transcript (`restarted`), at most PLACEMENTS times. An interrupt never moves it. On `end` the
+// again: acquire on the shared `agent-tools` (never one of the homes it was lost on), then the
+// turn on the new home, resumed from its transcript (`restarted`), at most PLACEMENTS times. Each
+// placement carries its attempt id (run id and cycle), so a cut-off one still running stops. An interrupt never moves it. On `end` the
 // workflow releases its place on `home`. Parks (§5.4) are Task 5.3's: a turn that ends
 // `released` is failed here.
 
@@ -110,26 +113,18 @@ export function movesWorker(err: unknown): boolean {
   return cause instanceof ApplicationFailure && (cause.type === SHUTTING_DOWN_FAILURE || cause.type === NO_CAPACITY)
 }
 
-/** Whether the turn's message had gone into Claude Code before its worker was lost (turnActivity.ts `TurnBeat`). */
-function pushedBefore(err: unknown): boolean {
-  const cause = err instanceof ActivityFailure ? err.cause : err
-  const beat = cause instanceof TimeoutFailure ? cause.lastHeartbeatDetails : cause instanceof ApplicationFailure ? cause.details?.[0] : undefined
-  return typeof beat === 'object' && beat !== null && (beat as { pushed?: unknown }).pushed === true
-}
-
 /**
- * The continuation of a turn placed again after `err`: `restarted`, so the next worker resumes
- * the transcript with the restart message, once the message had gone in; else the same one, so
- * the message is sent. A parked continuation keeps its calls (Task 5.5 runs them first).
+ * The continuation of a turn placed again: `restarted`, so the next worker resumes the
+ * transcript, with the restart message only once the message is in it (sessions/turnHost.ts,
+ * which reads the transcript: the cut worker's word cannot be trusted to have reached it). A
+ * parked continuation keeps its calls (Task 5.5 runs them first).
  */
-export function mergeRestarted(continuation: Continuation | undefined, err: unknown): Continuation | undefined {
-  if (continuation?.kind === 'parked') return continuation
-  if (continuation?.kind === 'restarted' || pushedBefore(err)) return { kind: 'restarted' }
-  return continuation
+export function mergeRestarted(continuation: Continuation | undefined): Continuation {
+  return continuation?.kind === 'parked' ? continuation : { kind: 'restarted' }
 }
 
-/** How a turn ended, as `session.finish_turn` writes it. */
-type TurnEnd = { outcome: TurnOutcome; message?: string; code?: string }
+/** How a turn ended, as `session.finish_turn` writes it: the turn's own closing events when its activity built them. */
+type TurnEnd = { outcome: TurnOutcome; message?: string; code?: string; tail?: ServerEvent[] }
 
 const busy = (): ApplicationFailure => ApplicationFailure.nonRetryable('the session is running a turn', 'busy')
 
@@ -200,25 +195,36 @@ export async function AgentSession(start: SessionStart): Promise<void> {
   async function placeTurn(input: SessionTurnInput, settings: RuntimeSettings): Promise<SessionTurnResult> {
     let continuation = input.continuation
     let last: unknown
+    /** The homes this turn was lost on: acquire_worker never places it there again. */
+    const lost: string[] = []
     for (let cycle = 0; cycle < PLACEMENTS; cycle++) {
-      if (!home) home = ((await acquire[ACQUIRE_WORKER_ACTIVITY]!({ sessionId: input.sessionId })) as { hostQueue: string }).hostQueue
-      const onHome = proxyActivities<Activities>({
-        taskQueue: home,
-        scheduleToStartTimeout: '5s',
-        heartbeatTimeout: '20s',
-        startToCloseTimeout: `${settings.turn_max_seconds}s`,
-        retry: { maximumAttempts: 1 },
-        cancellationType: ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
-      })
       const { continuation: _previous, ...rest } = input
       try {
-        return (await onHome[SESSION_TURN_ACTIVITY]!({ ...rest, ...(continuation ? { continuation } : {}) })) as SessionTurnResult
+        // Inside the try: a replica that refuses (NoCapacity past its retries) costs a placement, as a lost one does.
+        if (!home) {
+          const acquired = (await acquire[ACQUIRE_WORKER_ACTIVITY]!({ sessionId: input.sessionId, ...(lost.length ? { exclude: [...lost] } : {}) } satisfies AcquireInput)) as {
+            hostQueue: string
+          }
+          home = acquired.hostQueue
+        }
+        const onHome = proxyActivities<Activities>({
+          taskQueue: home,
+          scheduleToStartTimeout: '5s',
+          heartbeatTimeout: '20s',
+          startToCloseTimeout: `${settings.turn_max_seconds}s`,
+          retry: { maximumAttempts: 1 },
+          cancellationType: ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
+        })
+        // This placement (§5.2): the row records it, and an earlier one that still runs stops.
+        const attempt = `${workflowInfo().runId}:${cycle}`
+        return (await onHome[SESSION_TURN_ACTIVITY]!({ ...rest, attempt, ...(continuation ? { continuation } : {}) })) as SessionTurnResult
       } catch (err) {
         // An interrupt cancels the turn; it never moves the session (BudgetExhausted, CredentialRefused, SessionGone: the turn's end).
         if (isCancellation(err) || interrupted !== undefined || !movesWorker(err)) throw err
         last = err
+        if (home && !lost.includes(home)) lost.push(home)
         home = undefined
-        continuation = mergeRestarted(continuation, err)
+        continuation = mergeRestarted(continuation)
       }
     }
     return { status: 'failed', hostQueue: '', error: `the turn could not be placed on a worker: ${failureText(last)}` }
@@ -256,10 +262,11 @@ export async function AgentSession(start: SessionStart): Promise<void> {
       if (result.hostQueue) home = result.hostQueue
       // The classic turn's error code, when it wrote one (turnCore.ts `tallyTurn`), is the session's too.
       const said = result.code !== undefined ? { code: result.code, ...(result.error !== undefined ? { message: result.error.slice(0, MESSAGE_MAX) } : {}) } : {}
+      const tail = result.tail?.length ? { tail: result.tail } : {}
       if (result.status === 'released') outcome = { outcome: 'failed', message: NO_PARKS }
-      else if (result.status === 'failed') outcome = { outcome: 'failed', message: (result.error ?? 'the turn ended without a result').slice(0, MESSAGE_MAX), ...said }
-      else if (result.status === 'done') outcome = { outcome: 'done', ...said }
-      else outcome = { outcome: result.status }
+      else if (result.status === 'failed') outcome = { outcome: 'failed', message: (result.error ?? 'the turn ended without a result').slice(0, MESSAGE_MAX), ...said, ...tail }
+      else if (result.status === 'done') outcome = { outcome: 'done', ...said, ...tail }
+      else outcome = { outcome: result.status, ...tail }
     } catch (err) {
       if (interrupted !== undefined) outcome = { outcome: 'interrupted' }
       else if (isCancellation(err)) throw err
@@ -283,6 +290,7 @@ export async function AgentSession(start: SessionStart): Promise<void> {
       outcome: result.outcome,
       ...(result.message !== undefined ? { message: result.message } : {}),
       ...(result.code !== undefined ? { code: result.code } : {}),
+      ...(result.tail ? { tail: result.tail } : {}),
     } satisfies FinishTurnInput)
   }
 

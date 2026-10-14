@@ -307,11 +307,11 @@ lack them (§2.3).
 |---|---|---|
 | `workflow.CreateSession(ctx, SessionOptions{CreationTimeout, …})` | the `acquire_worker` activity on the shared queue `agent-tools`, with `scheduleToCloseTimeout: 60s` | any replica |
 | the session's worker-specific queue | `agent-sessions.<hostname>`, returned by `acquire_worker` and stored as `home` | the replica that answered |
-| `MaxConcurrentSessionExecutionSize` | `warm_max_per_replica` (§5.3): when a replica's cache is full `acquire_worker` evicts its least-recently-used *idle* slot rather than refusing; it refuses with `NoCapacity` (retryable) only when every slot is running a turn, so the retry lands on another replica (§6.10) | worker |
+| `MaxConcurrentSessionExecutionSize` | `warm_max_per_replica` (§5.3): when a replica's cache is full `acquire_worker` evicts its least-recently-used *idle* slot rather than refusing; it refuses with `NoCapacity` (retryable) only when every slot is running a turn, so the retry lands on another replica (§6.10). A reservation is not evicted for `RESERVATION_HOLD_MS` (30 s), while its turn is still on its way. At 0 every session is admitted and each turn runs cold | worker |
 | activities run under the session context | `session_turn` (and `release_worker`) scheduled on `home` | `home` |
 | the session heartbeat / `ErrSessionFailed` | `session_turn`'s `heartbeatTimeout: 20s` and `scheduleToStartTimeout: 5s`, both timeout failures the workflow catches | workflow |
-| `workflow.RecreateSession` | on a timeout: `acquire_worker` again, then `session_turn` with `continuation: restarted` (§5.5) | workflow |
-| `workflow.CompleteSession` | `release_worker` on `home`: evicts the warm entry and frees the slot. It runs on end, handoff, archive, forget, and when the workflow moves the session elsewhere | `home` |
+| `workflow.RecreateSession` | on a lost home (`ScheduleToStart`, `Heartbeat`, `ShuttingDown`, `NoCapacity`): `acquire_worker` again, never on a home the turn was lost on (`exclude`), then `session_turn` with `continuation: restarted` (§5.5) | workflow |
+| `workflow.CompleteSession` | `release_worker` on `home`: evicts the warm entry and frees the slot. It runs when the workflow ends (handoff, archive and forget end it). A move releases nothing: the old home is gone, or its placement has cut itself off and closed its process (the fence below) | `home` |
 
 - **Why not `agent-tools.<hostname>`.** That queue carries `DurableSession`'s pinned calls
   (`http_request`, the browser, kept plugin clients, and the `turn_tools` listing with its
@@ -337,10 +337,27 @@ lack them (§2.3).
   - `retry: { maximumAttempts: 1 }`. As the guide says, the workflow never retries on the
     failed worker's queue.
 - **Recovery is a workflow loop**, at most 3 cycles per turn.
-  - **A timeout** (`ScheduleToStart`, `Heartbeat` or `StartToClose`) or a
-    `ShuttingDown`/`NoCapacity` failure means: re-acquire on the shared queue, then run
-    `session_turn` on the new home with `continuation: {kind: 'restarted'}`. That resumes
-    from the checkpoint, the sealed transcript (§5.5, §6.2).
+  - **A lost home** (a `ScheduleToStart` or `Heartbeat` timeout) or a
+    `ShuttingDown`/`NoCapacity` failure means: re-acquire on the shared queue, excluding
+    every home this turn was lost on, then run `session_turn` on the new home with
+    `continuation: {kind: 'restarted'}`. That resumes from the checkpoint, the sealed
+    transcript (§5.5, §6.2). The acquire is inside the cycle: one that fails past its own
+    retries costs a cycle, as a lost home does.
+  - **A `StartToClose` timeout** is the turn's wall clock (D5), not a lost home: the turn is
+    over, and placing it again could triple its spend. It ends idle with the error
+    `turn_max_seconds`, as classic's `error_max_turns` does, and never re-acquires.
+  - **Placements are fenced.** Each placement carries an attempt id (the run id and the
+    cycle), which `session_turn` writes to `ai_sessions.turn_attempt` as it claims the turn.
+    A placement the workflow gave up on may still run (a stalled heartbeat on a live
+    replica). It checks the row every second and is cut off once another placement holds
+    it or the turn is no longer the row's: its process is closed, its transcript appends
+    and events are dropped, and its spend writes are refused by the row. A new placement on
+    the same replica cuts an older one of the session first, so the warm process is free.
+  - **Spend is written as it goes.** A placement adds what its model requests cost at the
+    table's prices (each finished request, and every second) to `cost_usd` and
+    `unpriced_cost_usd`, so the budget sees a placement that dies before its result. At its
+    end it replaces that with the turn's own reckoning (Claude Code's price, or the table's
+    without a result).
   - **A non-retryable application failure** (`BudgetExhausted`, `CredentialRefused`,
     `SessionGone`) ends the turn with that outcome.
   - **After 3 cycles** the turn ends `failed` with the last reason.
@@ -352,14 +369,18 @@ lack them (§2.3).
   replacement pod never polls a dead pod's queue. Work left on a dead queue expires by
   its schedule-to-start; it is never picked up late by a stranger.
 - **The workers.**
-  - `acquire_worker` is registered on the shared `agent-tools` worker.
+  - `acquire_worker` is registered on the shared `agent-tools` worker, only on a replica
+    that also runs the session host worker.
   - `session_turn` and `release_worker` are registered only on a second per-host worker,
     on `agent-sessions.<hostname>`. The `agent-tools.<hostname>` worker and its limit do not
     change.
-  - The session host worker's `maxConcurrentActivityTaskExecutions` is
-    `warm_max_per_replica + 2`: the slots, plus room for releases.
+  - The session host worker's `maxConcurrentActivityTaskExecutions` is the largest
+    `warm_max_per_replica` the setting allows (32) plus 2 for releases. It is fixed when the
+    worker starts, while the setting may change at run time; the warm cache's `reserve`
+    holds a replica to the setting.
   - Both host workers are unversioned, as activity-only queues (no workflow is pinned to
-    them), and stop together on SIGTERM.
+    them), and stop together on SIGTERM. The session host worker's shutdown grace is the
+    turns' own (§5.5 "Deploy"), so it never cancels a turn before the turn host does.
   - A new unified session is ready (`DurableTurns.unready`) only with fresh pollers on the
     `agent-sessions` workflow queue, the shared `agent-tools` activity queue and this
     replica's own `agent-sessions.<hostname>`.
@@ -547,12 +568,18 @@ never did (`questions/service.ts:34-38`).
   - The activity sends one user message: *"The agent service restarted during this turn.
     Calls that were in flight are marked as interrupted; check before repeating any of
     them. Continue the task."*
+  - Only when the turn's prompt is in the transcript. The first placement records the main
+    transcript's last entry (`ai_sessions.turn_mark`); a later one sends the restart message
+    when a user entry landed after that mark, and otherwise sends the turn's own message.
+    The heartbeat's word that the message went in is advisory: a process can take the
+    message and die before Claude Code writes it.
 - **Retries are bounded** by the recovery loop's 3 cycles. After that the turn ends `failed`,
   with the reason, as classic's `interrupted` does today.
 - **Deploy.** On SIGTERM the worker stops polling. A running turn gets up to 12 s
-  (`stopTurns` `graceMs`, `main.ts:691-695`), and is then closed with `q.close()`, which
-  gives E3's graceful synthetic result. The activity fails with `ShuttingDown`, which is
-  retryable, and the new pods resume it as above. `Recreate` means every turn of every
+  (`TurnHost.stop` `graceMs`, beside `stopTurns`), and is then closed with `q.close()`, which
+  gives E3's graceful synthetic result. Only such a cut turn fails with `ShuttingDown`,
+  which is retryable, and the new pods resume it as above. A turn that ends on its own in
+  the grace, a refusal included, keeps its end. The warm processes are closed only after. `Recreate` means every turn of every
   session takes this path at each deploy. Under D6 (decided), the pod moves to
   `RollingUpdate` once its queues are versioned (Phase 11). Then a deploy drains one
   replica at a time and only that replica's turns move.

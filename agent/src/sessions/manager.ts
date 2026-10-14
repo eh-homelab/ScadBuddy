@@ -66,7 +66,7 @@ import { Escalations } from '../flows/escalations.js'
 import { TurnRunner } from './turnRunner.js'
 import { type WarmQuery, WarmSessions } from './warm.js'
 import { notifyWarmEvict } from './warmEvict.js'
-import { CoreTurn, type Refused, tallyTurn, type TurnCoreDeps } from './turnCore.js'
+import { CoreTurn, type Refused, tallyTurn, type TurnCoreDeps, wordTail } from './turnCore.js'
 
 // The session manager (#300, spec §6): durable, shared sessions that a human
 // in the browser, an external agent over /mcp, or an internal flow can start,
@@ -1804,13 +1804,7 @@ export class SessionManager {
     const after = await this.row(id)
     const budgetUsd = after?.budgetUsd ?? session.budgetUsd
     const spent = after?.costUsd ?? costUsd
-    const worded = tail.map((e): ServerEvent => {
-      if (e.type === 'session.result') return { ...e, costUsd: spent, budgetUsd }
-      if (e.type === 'error' && e.code === 'error_max_budget_usd') {
-        return { ...e, message: `this chat used its ${usd(budgetUsd)} budget (${usd(spent)} spent)` }
-      }
-      return e
-    })
+    const worded = wordTail(tail, { spentUsd: spent, budgetUsd })
     await this.events.append(id, worded.map((e) => scrubForLog(e, secrets)))
     // A decision that landed while this turn was finishing saw it still
     // holding the session and took it for parked (approvals/service.ts
@@ -2271,7 +2265,7 @@ export class SessionManager {
    * session was left `running` with no event saying why (2026-09-30, a deploy
    * mid-turn). Resolves once every turn has ended or the waits are up.
    */
-  async stopTurns({ graceMs, abortWaitMs }: { graceMs: number; abortWaitMs: number }): Promise<void> {
+  async stopTurns({ graceMs, abortWaitMs, others }: { graceMs: number; abortWaitMs: number; others?: Promise<void> }): Promise<void> {
     this.drain()
     const ended = () => this.settled()
     const within = (ms: number, work: Promise<unknown>) =>
@@ -2281,6 +2275,9 @@ export class SessionManager {
       this.abortAll()
       await within(abortWaitMs, ended())
     }
+    // The other turns on these warm processes (an AgentSession's, TurnHost.stop), which keep
+    // their own grace and wait: their processes are not closed under them.
+    await others
     // The warm processes go with the pod (spec 2026-10-13 §5.3 "shutdown"): the
     // idle ones, and a stopped turn's that is still winding down past its wait.
     await this.warm.close()

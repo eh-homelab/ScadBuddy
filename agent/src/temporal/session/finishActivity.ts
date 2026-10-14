@@ -2,11 +2,13 @@ import type { Sql } from 'postgres'
 import type { EventLog } from '../../sessions/eventLog.js'
 import { POOL_BUDGET, POOL_COST } from '../../sessions/manager.js'
 import { event, type ServerEvent } from '../../sessions/protocol.js'
+import { wordTail } from '../../sessions/turnCore.js'
 import { MESSAGE_MAX, type FinishTurnInput } from './models.js'
 import { SESSION_FINISH_ACTIVITY } from './names.js'
 
 // A turn's end (`session.finish_turn`), the port of agent-durable's `finish_turn`
-// (session/activities.py): what a classic turn's end writes (manager.ts), as the
+// (session/activities.py): what a classic turn's end writes (manager.ts): the turn's own
+// closing events when its activity built them (`tail`, worded here), else built here, as the
 // `session.result` with the lineage's spend and budget, the error when the turn did not
 // end well, and the final `session.status`, in the transaction that sets the status. It
 // writes only while the session is still running a turn, so a retried activity writes
@@ -43,7 +45,13 @@ export function sessionFinishActivities(sql: Sql, events: EventLog) {
         )
         // Written already, or the session is gone.
         if (!row) return undefined
-        const tail = turnEvents(sessionId, args, Number(row.spent ?? 0), Number(row.budget), Number(row.turns))
+        const spent = Number(row.spent ?? 0)
+        const budget = Number(row.budget)
+        // The turn's own closing events, as a classic turn builds them (turnCore.ts `tallyTurn`), worded
+        // with the row's spend and budget; built here only for an end the workflow decided.
+        const tail = args.tail?.length
+          ? wordTail(args.tail, { spentUsd: spent, budgetUsd: budget, turns: Number(row.turns) })
+          : turnEvents(sessionId, args, spent, budget, Number(row.turns))
         const last = tail.at(-1) as Extract<ServerEvent, { type: 'session.status' }>
         await tx`UPDATE ai_sessions SET status = ${last.status}, durable_turn_id = NULL, updated_at = now() WHERE id = ${sessionId}`
         return { tail, seqs: await events.append(sessionId, tail, tx) }
