@@ -65,7 +65,7 @@ from scadbuddy.library.libraries import (
 from scadbuddy.library.scad import check_source
 from scadbuddy.main import sweep_library_checkouts
 from scadbuddy.workflows.commands import start_command
-from tests.api.conftest import set_fake_env
+from tests.api.conftest import follow_operation, set_fake_env
 from tests.conftest import PgPool, make_library_upstream, open_pg_pool
 from tests.support.operations import press
 from tests.test_library_processes import _age
@@ -1934,11 +1934,7 @@ def test_a_slow_pin_answers_202_and_its_operation_ends_with_the_model(
     monkeypatch.setattr(library_operations, "resolve_pin", slowly)
     started = lib_client.put(f"/api/v1/models/{SLUG}/libraries/BOSL2", json={}, headers=press())
     assert started.status_code == 202, started.text
-    deadline = time.monotonic() + 60
-    op = started.json()
-    while op["status"] == "running" and time.monotonic() < deadline:
-        time.sleep(0.2)
-        op = lib_client.get(f"/api/v1/operations/{op['id']}").json()
+    op = follow_operation(lib_client, started.json())
     assert op["status"] == "succeeded", op
     assert [entry["name"] for entry in op["result"]["libraries"]] == ["BOSL2"]
 
