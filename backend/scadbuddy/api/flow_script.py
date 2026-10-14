@@ -8,12 +8,15 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from scadbuddy.flows.agent_tools import AgentToolsUnavailableError
 from scadbuddy.flows.component import FlowsDep
 from scadbuddy.flows.host_interface import HostInterface, host_interface
-from scadbuddy.flows.manifest import raise_tiers, tiers
 from scadbuddy.flows.typecheck import ScriptProblem, check_script
 
 router = APIRouter(tags=["flows"])
+
+#: What the editor shows in place of the tools when the agent did not list them (#2704).
+TOOLS_UNAVAILABLE = "ScadBuddy's assistant service did not say what its tools are."
 
 
 class ScriptCheck(BaseModel):
@@ -44,10 +47,15 @@ async def check_flow_script(body: ScriptCheck) -> ScriptCheckResult:
 @router.get(
     "/workflow-script/host-functions",
     response_model=HostInterface,
-    summary="The host functions, result types and manifest tools a flow script may use",
+    summary="The host functions, result types and agent tools a flow script may use",
 )
 async def flow_host_functions(flows: FlowsDep) -> HostInterface:
-    """Rendered from the same host functions the type check uses, and the tool manifest
-    `tool(name, args)` reads, each tool at its tier as a run enforces it: Settings'
-    raised tiers applied, as the grant routes check a grant's rules (#2481)."""
-    return host_interface(raise_tiers(tiers(), await flows.store.tool_overrides()))
+    """Rendered from the same host functions the type check uses, and the agent's tools
+    `tool(name, args)` may call, each at its tier as the agent resolves it now (#2704):
+    Settings' raised tiers applied and disabled tools left out, as the grant routes check
+    a grant's rules. When the agent does not answer, no tools, and `tools_unavailable`
+    says why."""
+    try:
+        return host_interface(await flows.agent_tools.tool_tiers())
+    except AgentToolsUnavailableError:
+        return host_interface({}, tools_unavailable=TOOLS_UNAVAILABLE)

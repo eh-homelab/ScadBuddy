@@ -87,6 +87,8 @@ class PrepareResult(BaseModel):
 
 class RenderMainResult(BaseModel):
     plates: int | None = None
+    #: The template's `echo(objects = N)` (#956); defaulted, so older histories read.
+    objects: int | None = None
     log_tail: list[str] = Field(default_factory=list)
     diagnostics: list[Diagnostic] = Field(default_factory=list)
     diagnostics_dropped: int = 0

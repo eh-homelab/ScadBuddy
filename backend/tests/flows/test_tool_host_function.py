@@ -3,8 +3,9 @@ D2): the agent's tools as activities on `agent-tools`, here stand-ins registered
 the agent's names on a test queue. An outward tool waits for a person's approval."""
 
 import asyncio
+import os
 import uuid
-from collections.abc import AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 import pytest
@@ -17,10 +18,10 @@ from temporalio.worker import Worker
 
 from scadbuddy.flows.approval_hash import input_hash
 from scadbuddy.flows.history import outward_since
-from scadbuddy.flows.manifest import use_manifest
 from scadbuddy.flows.operations import FLOW_DECIDE, flow_kinds, request_id
 from tests.flows.fake_api import Outward
-from tests.flows.flows_support import HASH_KEY, Keys, history_payloads, script
+from tests.flows.flows_support import HASH_KEY, AgentTiers, Keys, history_payloads, script
+from tests.flows.test_project_replay import HISTORIES
 
 pytestmark = [pytest.mark.requires_temporal, pytest.mark.requires_postgres]
 
@@ -66,9 +67,10 @@ class Tools:
         return [get_model, send_to_bambuddy, make_thing, broken, snapshot]
 
 
-@pytest.fixture(autouse=True)
-def manifest() -> Iterator[None]:
-    use_manifest(
+@pytest.fixture
+def agent() -> AgentTiers:
+    """The agent's tiers for its stand-in tools, as Settings has them now (#2704)."""
+    return AgentTiers(
         {
             "get_model": "read",
             "send_to_bambuddy": "outward",
@@ -77,15 +79,14 @@ def manifest() -> Iterator[None]:
             "snapshot": "read",
         }
     )
-    yield
-    use_manifest({})
 
 
 @pytest.fixture
-async def tools(outward: Outward) -> AsyncIterator[tuple[Tools, str]]:
+async def tools(outward: Outward, agent: AgentTiers) -> AsyncIterator[tuple[Tools, str]]:
     served = Tools()
     queue = f"agent-tools-{uuid.uuid4().hex[:8]}"
-    async with Worker(outward.client, task_queue=queue, activities=served.all()):
+    activities = [*served.all(), agent.activity()]
+    async with Worker(outward.client, task_queue=queue, activities=activities):
         yield served, queue
 
 
@@ -177,11 +178,28 @@ async def test_a_tools_own_error_reaches_the_script_once(
     ]
 
 
-async def test_the_tiers_are_the_runs_own_from_its_start(
-    outward: Outward, tools: tuple[Tools, str]
+async def test_a_tool_the_agent_raises_in_settings_waits_for_approval(
+    outward: Outward, tools: tuple[Tools, str], agent: AgentTiers
 ) -> None:
-    """A worker on another image, whose manifest differs, runs the call as the run
-    started it: the tiers are in the run's history, not the worker's state."""
+    """#2704: the tier is the agent's as the call runs (its definition with Settings'
+    raised tiers), not one from a file: a read tool raised to outward parks."""
+    served, queue = tools
+    agent.tiers["get_model"] = "outward"
+    run_id = await outward.run(
+        script("return await tool('get_model', {'slug': 'box'})"), tools_queue=queue
+    )
+    parked = await outward.row(run_id, lambda r: any(w.kind == "approval" for w in r.waiting_on))
+    assert [w.fn for w in parked.waiting_on] == ["tool:get_model"]
+    assert [s.outward for s in parked.steps] == [True]
+    assert agent.asked == ["get_model"]
+    assert served.calls == []
+
+
+async def test_the_agents_tier_never_lowers_the_runs_own(
+    outward: Outward, tools: tuple[Tools, str], agent: AgentTiers
+) -> None:
+    """An agent that answers lower than the tiers the run started with (an older replica,
+    a tier lowered since) only raises: the call still waits for approval."""
     served, queue = tools
     run_id = await outward.run(
         script(
@@ -189,15 +207,107 @@ async def test_the_tiers_are_the_runs_own_from_its_start(
             "return await tool('send_to_bambuddy', {'output_id': 'o1'})",
         ),
         tools_queue=queue,
+        tool_tiers={"send_to_bambuddy": "outward"},
     )
     run = await outward.row(run_id, lambda r: r.status == "waiting")
-    use_manifest({"send_to_bambuddy": "read"})
+    agent.tiers["send_to_bambuddy"] = "read"
     await AgentClient(outward.client, run.workflow_id).provide_callback_result(
         run.waiting_on[0].call_id, result={"answer": "yes"}
     )
     parked = await outward.row(run_id, lambda r: any(w.kind == "approval" for w in r.waiting_on))
     assert [w.fn for w in parked.waiting_on] == ["tool:send_to_bambuddy"]
     assert served.calls == []
+
+
+async def test_a_tool_the_agent_no_longer_has_is_refused_whatever_the_run_started_with(
+    outward: Outward, tools: tuple[Tools, str], agent: AgentTiers
+) -> None:
+    served, queue = tools
+    del agent.tiers["get_model"]
+    run_id = await outward.run(
+        script(
+            "try:",
+            "    await tool('get_model', {'slug': 'box'})",
+            "except Exception as e:",
+            "    return str(e)",
+        ),
+        tools_queue=queue,
+        tool_tiers={"get_model": "read"},
+    )
+    run = await outward.finished(run_id)
+    assert "there is no tool 'get_model'" in (run.result or "")
+    assert served.calls == []
+
+
+async def test_a_tool_disabled_in_settings_is_refused_before_it_parks(
+    outward: Outward, tools: tuple[Tools, str], agent: AgentTiers
+) -> None:
+    served, queue = tools
+    agent.disabled.add("send_to_bambuddy")
+    run_id = await outward.run(
+        script(
+            "try:",
+            "    await tool('send_to_bambuddy', {'output_id': 'o1'})",
+            "except Exception as e:",
+            "    return str(e)",
+        ),
+        tools_queue=queue,
+    )
+    run = await outward.finished(run_id)
+    assert "send_to_bambuddy is disabled" in (run.result or "")
+    assert run.steps == []
+    assert served.calls == []
+
+
+async def test_an_agent_that_cannot_say_the_tier_refuses_the_call(
+    outward: Outward, agent: AgentTiers
+) -> None:
+    """No fallback to the tiers the run started with: an agent-tools worker that does
+    not serve `flow_tool_tier` (one from before #2704) refuses every `tool(...)`."""
+    served = Tools()
+    queue = f"agent-tools-{uuid.uuid4().hex[:8]}"
+    async with Worker(outward.client, task_queue=queue, activities=served.all()):
+        run_id = await outward.run(
+            script(
+                "try:",
+                "    await tool('get_model', {'slug': 'box'})",
+                "except Exception as e:",
+                "    return 'refused: ' + str(e)",
+            ),
+            tools_queue=queue,
+            tool_tiers={"get_model": "read"},
+        )
+        run = await outward.finished(run_id)
+    assert (run.result or "").startswith("result: 'refused: ")
+    assert served.calls == []
+
+
+async def test_tooled(outward: Outward, tools: tuple[Tools, str]) -> None:
+    """Records `project_workflow_histories/tooled.json` (test_project_replay.py): a read
+    tool and an approved outward one at the tiers the run started with. Recorded on the
+    workflow before #2704, which never asked the agent, so it replays a run in flight
+    across that change."""
+    served, queue = tools
+    run_id = await outward.run(
+        script(
+            "a = await tool('get_model', {'slug': 'box'})",
+            "b = await tool('send_to_bambuddy', {'output_id': 'o1'})",
+            "return [a, b]",
+        ),
+        tools_queue=queue,
+        tool_tiers={"get_model": "read", "send_to_bambuddy": "outward"},
+    )
+    call_id = await outward.approval(run_id)
+    decide = next(k for k in flow_kinds(outward.store, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
+    request = {"run_id": run_id, "call_id": call_id, "approved": True}
+    env = ActivityEnvironment(client=outward.client)
+    await env.run(decide.run, request, await env.run(decide.check, request))
+    run = await outward.finished(run_id)
+    assert run.result == "result: ['model box', 'sent']"
+    assert [c[0] for c in served.calls] == ["get_model", "send_to_bambuddy"]
+    if os.environ.get("SCADBUDDY_RECORD_HISTORIES") == "1":
+        handle = outward.client.get_workflow_handle(f"flow-{run_id}")
+        (HISTORIES / "tooled.json").write_text((await handle.fetch_history()).to_json())
 
 
 async def test_a_write_tool_runs_once_even_when_its_attempt_fails(

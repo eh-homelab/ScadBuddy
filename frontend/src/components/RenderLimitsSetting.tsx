@@ -38,7 +38,8 @@ function limitsOf(draft: Draft): RenderLimits {
  * overrides by caller, and all of them together. Stored by the agent service
  * (`/api/v1/ai/settings/render-limits`), which reads it live: a change applies at once,
  * to renders already waiting too. A render past a limit waits its turn rather than
- * failing, so there is no cap on how many may queue.
+ * failing, up to the tool's own wait; the agent refuses a call once 100 of that caller's
+ * renders are waiting, or past the per-10-minute cap, which counts waiting renders.
  *
  * Hidden when the agent service or its database is not there, like the chat limits.
  * Save is user-only: an agent must not raise its own limits (AI design spec §8.1).
@@ -202,10 +203,10 @@ export function RenderLimitsSetting() {
         </fieldset>
 
         <p id="render-limits-help" className="text-[12px] text-muted">
-          A render past a limit waits its turn instead of failing, so the assistant and its sub-agents can queue as
-          many as they need. &ldquo;In all&rdquo; counts every caller together; 0 means no limit beyond the render
-          workers&rsquo; own. The per-10-minute cap stops an assistant stuck in a loop; 0 turns it off. Changes apply
-          at once, to renders already waiting too.
+          A render past a limit waits its turn instead of failing, so the assistant and its sub-agents can queue
+          renders (up to 100 per caller). &ldquo;In all&rdquo; counts every caller together; 0 means no limit beyond
+          the render workers&rsquo; own. The per-10-minute cap stops an assistant stuck in a loop and counts renders
+          still waiting; 0 turns it off. Changes apply at once, to renders already waiting too.
         </p>
         <div className="flex items-center gap-3">
           <Button type="submit" variant="primary" size="sm" disabled={!changed || saving} aria-busy={saving} {...USER_ONLY}>

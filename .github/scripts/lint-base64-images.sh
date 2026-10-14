@@ -33,13 +33,13 @@ backend/scadbuddy/workflows/payload_codec.py	return base64.b64encode\(data\)	the
 backend/scadbuddy/flows/operations.py	return base64.b64encode\(seal_bytes	a sealed answer, not an image
 backend/scadbuddy/library/settings_store.py	"(secret|dek)": base64.b64encode\(envelope	a sealed secret, not an image
 frontend/src/agent/tabId.ts	return btoa\(binary\)	the bridge tab id: random bytes as base64url, not an image
+backend/scadbuddy/activity/index.py	return base64.urlsafe_b64encode\(raw.encode\(\)\)	the activity list's opaque cursor (created_at|id), not an image
 agent/src/tools/catalogue.ts	(png|content)_base64: z.string	#2510: binary tool inputs by pointer
 agent/src/tools/customizer.ts	content_base64: z.string	#2510: binary tool inputs by pointer
 agent/src/tools/outputs.ts	png_base64: z.string	#2510: binary tool inputs by pointer
 agent/src/tools/workspace.ts	content_base64: z.string	#2510: binary tool inputs by pointer
 agent/src/tools/meshModels.ts	content_base64: z.string	#2510: binary tool inputs by pointer (a mesh, not an image; workspace_path is the pointer form)
 agent/src/harness/httpRequest.ts	page.toString\('base64'\)	#2511: http_request's binary body as a workspace file
-backend/scadbuddy/api/print_history.py	data:image/jpeg;base64,	#2512: timelapse poster frames by URL
 EOF
 )
 

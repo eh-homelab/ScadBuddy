@@ -82,6 +82,7 @@ import { Client, Connection } from '@temporalio/client'
 import { fileURLToPath } from 'node:url'
 import { AgentCommands } from './operations/run.js'
 import { OperationStore } from './operations/store.js'
+import { activityKindsOf, upsertActivityKinds } from './activity/kinds.js'
 import { packageKinds } from './plugins/packages/operations.js'
 import { operationActivities } from './temporal/operationActivities.js'
 import { PendingActionStore } from './tools/pending.js'
@@ -383,6 +384,11 @@ const stopQuestionSweeper = sessions?.questions.startSweeper(APPROVAL_SWEEP_MS, 
   ...(database ? { ready: database.ready } : {}),
   onError: (err) => console.error('question expiry sweep failed:', (err as Error).message),
 })
+// A flow run's call whose hop at its starting session is over goes to the person (#2482).
+const stopEscalationSweeper = sessions?.escalations.startSweeper(APPROVAL_SWEEP_MS, {
+  ...(database ? { ready: database.ready } : {}),
+  onError: (err) => console.error('escalation hop sweep failed:', (err as Error).message),
+})
 // Now and every 30 s: sessions whose turn died without finishing (a SIGKILL,
 // or a restart that closed the pool under it) say so and stop claiming to run.
 const stopReaper = sessions?.startReaper(SESSION_REAP_MS, {
@@ -406,6 +412,15 @@ if (config.temporalAddress && !database) console.error('agent-tools worker: not 
 if (temporal) Runtime.install({ shutdownSignals: [] })
 const operationStore = temporal ? new OperationStore(temporal.sql) : undefined
 const commandKinds = pluginPackages ? packageKinds({ packages: pluginPackages, installer: packageInstaller }) : []
+// The agent's activity kinds are its command kinds (spec 2026-10-09 §4), read by the backend.
+if (database && commandKinds.length > 0) {
+  void database
+    .ready()
+    .then(async (ok) => {
+      if (ok) await upsertActivityKinds(database.sql, activityKindsOf(commandKinds))
+    })
+    .catch((err: unknown) => console.error('activity kinds: could not record them:', (err as Error).message))
+}
 // Durable subjects' payloads are sealed per subject (spec §6.5): every client and worker
 // that encodes or decodes them carries the codec, which needs the KEK. Without one, a
 // session or flow payload is never sealed here, so no durable session is started (5c Ruling 13).
@@ -684,6 +699,8 @@ const app = createApp({
       return undefined
     }
   },
+  // The tools a flow may call at their tiers now, for the API beside it (#2704, routes/flowTools.ts): loopback only.
+  flowTools: { tools: ALL_TOOLS, services: toolServices },
   // A durable segment's subagents' ScadBuddy tools (#2320, routes/subagentMcp.ts): loopback only.
   ...(database && kek.ok
     ? {
@@ -739,6 +756,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
 async function stop(): Promise<void> {
   stopSweeper?.()
   stopQuestionSweeper?.()
+  stopEscalationSweeper?.()
   stopOrphanSweep?.()
   stopDurableSweep?.()
   stopReaper?.()

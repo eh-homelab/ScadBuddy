@@ -21,6 +21,7 @@ import posixpath
 import re
 import tarfile
 import tempfile
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
@@ -57,6 +58,7 @@ from scadbuddy.core.gitrepo import RevisionRange as RevisionRange
 from scadbuddy.core.gitrepo import git_env as git_env
 from scadbuddy.core.gitrepo import subject_line as subject_line
 from scadbuddy.core.paths import BUILTIN_DIR, BUILTIN_PREFIX, RENDERS_DIR_NAME
+from scadbuddy.core.tracing import span
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +126,9 @@ class ModelHistory(GitRepo):
         #: lock is released -- how the app publishes ``version.committed``. It must
         #: not raise; a failure is logged, never reported as a failed commit.
         self.on_commit: Callable[[str, list[str]], None] | None = None
+        #: `last_commits` as of a HEAD (#2289): the walk is the whole history, over NFS.
+        self._last_commits: tuple[str, dict[str, str]] | None = None
+        self._last_commits_lock = threading.Lock()
 
     def _gitignore_body(self) -> str:
         return _gitignore_body(self.wrapper_prefix)
@@ -290,11 +295,30 @@ class ModelHistory(GitRepo):
         per model grows with every OTHER model's commits too. One `git log` with
         `--name-only`, newest first, answers the whole page: the first time a
         slug appears is by definition its newest commit.
+
+        Kept as of HEAD (#2289): a listing walked the whole history every request,
+        ~11 s over NFS. A commit, here or on another replica, moves HEAD, so it is
+        walked again then and only then.
         """
+        with span("model_history.last_commits") as current:
+            head = self.head()
+            with self._last_commits_lock:
+                kept = self._last_commits
+                if head is not None and kept is not None and kept[0] == head:
+                    current.set_attribute("scadbuddy.cache_hit", True)
+                    return dict(kept[1])
+                current.set_attribute("scadbuddy.cache_hit", False)
+                newest = self._walk_last_commits()
+                if head is not None and newest is not None:
+                    self._last_commits = (head, newest)
+                return dict(newest or {})
+
+    def _walk_last_commits(self) -> dict[str, str] | None:
+        """`last_commits` read from the history; None when git could not read it."""
         completed = self._run("log", "--format=%x1e%H", "--name-only", check=False)
         assert isinstance(completed.stdout, str)
         if completed.returncode != 0:
-            return {}
+            return None
         newest: dict[str, str] = {}
         for record in completed.stdout.split(_RECORD):
             commit, _, paths = record.strip().partition("\n")

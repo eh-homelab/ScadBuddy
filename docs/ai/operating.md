@@ -50,6 +50,11 @@ covers the same ground more briefly.
 - **Shutdown.** On `SIGTERM`/`SIGINT` the listener drains for up to 10 s, then the
   database pool closes. The exit code is non-zero if the drain timed out (`main.ts`;
   [`agent/src/shutdown.ts`](../../agent/src/shutdown.ts)).
+  A restart ends every turn the replica was running, and with it every question and
+  attention request those turns were waiting on: none is asked again. That includes an
+  attention request with `on_timeout: 'wait'`, which otherwise waits up to a day
+  (`WAIT_CEILING_S`, [`agent/src/harness/attention.ts`](../../agent/src/harness/attention.ts))
+  while holding the session's lease and its Claude Code process (#1220).
 
 ### 1.1 Routing the UI's origin to the agent
 
@@ -625,7 +630,14 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   `session_mode`, the mode a new session gets when whoever starts it names none
   (`durable` unless it says `classic`), which Settings → Assistant session mode writes
   through `PUT /api/v1/ai/settings/session-mode`
-  ([`agent/src/routes/sessionMode.ts`](../../agent/src/routes/sessionMode.ts)). A
+  ([`agent/src/routes/sessionMode.ts`](../../agent/src/routes/sessionMode.ts));
+  `durable_subagents`, `{url, peers}`: the URL an `agent-durable` worker gives its
+  subagents for ScadBuddy's tools (null: its `SCADBUDDY_DURABLE_SUBAGENT_MCP_URL`), and
+  the addresses or CIDR ranges besides loopback the agent answers on
+  `/internal/durable/subagent-mcp` (empty: loopback only, a worker in the agent's pod),
+  which Settings → Durable subagents writes through
+  `PUT /api/v1/ai/settings/durable-subagents`
+  ([`agent/src/routes/durableSubagents.ts`](../../agent/src/routes/durableSubagents.ts)). A
   durable session needs Temporal, the KEK and an `agent-durable` worker polling the
   `agent` queue; without them a session whose mode came from this default runs classic
   and says why (`session.started` `modeFallback`, `mode_fallback` on `POST /sessions`
@@ -633,7 +645,7 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   (plan `2026-10-09-durable-phase-5d-mode.md`). Both modes get the same tools, plugins
   (a browser among them, as the `playwright` remote plugin, #2568), packages,
   `http_request`, Hindsight, subagents and settings (#2320, spec 2026-10-01 §6.3b), with
-  these differences: forking is classic-only; a durable subagent has ScadBuddy's own tools
+  two differences: a durable subagent has ScadBuddy's own tools
   only, through the agent's loopback server (`routes/subagentMcp.ts`), since the Temporal
   plugin refuses a subagent the turn's durable tools; and of the built-ins an
   `allow_refused` package names, a durable turn does not offer the ones that work in the
@@ -711,7 +723,11 @@ its $1.00 budget.") and offers:
   into a new session with the current Settings budget, owned by the browser user, and
   the panel switches to it. It counts against the new-session limit (`429`). With
   `up_to` (a reply's panel message id, #793) it copies the conversation only through
-  that reply. Each fork, from this route or the `sessions_fork` tool, is a `resource`
+  that reply. A fork runs in its parent's mode: a durable parent's conversation is read
+  from its workflow (the `fork_point` Query) and the child's workflow starts with a copy,
+  sealed under the child's own key (#2688); its replies are matched to the transcript by
+  their text, and a parent whose turn is running forks at its last finished reply.
+  Each fork, from this route or the `sessions_fork` tool, is a `resource`
   audit row (action `session_fork`), written once the fork is complete; a rename or
   mark-done (`PATCH /api/v1/ai/sessions/:id`) is one with action `session_update`.
 - **Raise this chat's budget**: `POST /api/v1/ai/sessions/:id/budget` `{add_usd}`
@@ -838,7 +854,9 @@ prompt names them (`turnServers.ts` `builtinNote`, carried as the listing's `sys
 - `WebFetch` fetches through `http_request`'s exchange (every hop egress-checked and
   pinned; a cross-host redirect is returned, as Claude Code returns it; http is not
   upgraded), converts the page with turndown and asks a small model (`haiku`) about it in
-  a one-shot Claude Code query with no tools, on the session's credential;
+  a one-shot Claude Code query with no tools, on the session's credential. A classic
+  turn gets this `WebFetch` too, as `mcp__builtin__WebFetch` in place of Claude Code's
+  (#2684), its model call counted in the turn's cost;
 - `WebSearch` runs Claude Code's own WebSearch in a one-shot query that may make only the
   search asked for, and returns its result as it is;
 - `TaskCreate`, `TaskGet`, `TaskList` and `TaskUpdate` keep the task list in the

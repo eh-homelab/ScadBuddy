@@ -135,13 +135,14 @@ async def worker(client: Client, fake: Fake) -> AsyncIterator[str]:
         yield queue
 
 
-def op_input(*, run_attempts: int = 1) -> OperationInput:
+def op_input(*, run_attempts: int = 1, answer_running: bool = False) -> OperationInput:
     return OperationInput(
         kind="test",
         subject="s",
         key=uuid.uuid4().hex,
         request={"archive_id": 5},
         run_attempts=run_attempts,
+        answer_running=answer_running,
     )
 
 
@@ -183,6 +184,21 @@ async def test_a_done_kind_answers_the_finished_operation(
     answer = await start(client, worker, arg)
     assert answer.operation is not None and answer.operation.status == "succeeded"
     assert answer.operation.result == {"queue_item_id": 7} and not answer.repeated
+    assert fake.calls == ["check", "insert", "run", "finish:ok"]
+
+
+async def test_a_kind_that_answers_running_answers_once_recorded(
+    client: Client, worker: str, fake: Fake
+) -> None:
+    """#2462: the dialog's background slice answers with its record while the effect
+    still runs, not after it, which rode out the 10 s command deadline every time."""
+    fake.hold.clear()
+    arg = op_input(answer_running=True)
+    answer = await start(client, worker, arg)
+    assert answer.operation is not None and answer.operation.status == "running"
+    assert "finish:ok" not in fake.calls
+    fake.hold.set()
+    assert (await ended(client, arg)).status == "succeeded"
     assert fake.calls == ["check", "insert", "run", "finish:ok"]
 
 

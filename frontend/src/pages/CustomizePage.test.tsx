@@ -810,6 +810,26 @@ describe('CustomizePage', () => {
     expect(screen.getByText('reopened from Nova')).toBeInTheDocument()
   })
 
+  it('acts on a reopened output once its render is on screen, without saving a duplicate (#2445)', async () => {
+    const saves: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'POST' && new URL(request.url).pathname.endsWith('/outputs')) saves.push(request.url)
+    })
+    const { user } = render(`/m/name-keychain?from=${'c'.repeat(32)}`)
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Nova'),
+    )
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Download 3MF' })).toBeEnabled(), {
+      timeout: 5000,
+    })
+    expect(screen.getByRole('button', { name: 'Send to Bambuddy' })).toBeEnabled()
+    expect(saves).toEqual([])
+
+    // Changed, the values on screen are no longer the output's.
+    await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), '!')
+    expect(screen.getByRole('button', { name: 'Download 3MF' })).toBeDisabled()
+  })
+
   it('renders a pinned revision from its own schema, without restoring it', async () => {
     const seen = watchRequests()
     render(`/m/name-keychain?version=${versionIds.added}`)

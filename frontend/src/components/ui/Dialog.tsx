@@ -19,6 +19,8 @@ interface Props {
   footer?: ReactNode
   /** `wide`: up to the window's width, for an image (#1891). `split`: choices beside a docked pane (#2169). */
   size?: 'md' | 'split' | 'wide'
+  /** `right`: a drawer along the right edge, full height (the activity detail). */
+  placement?: 'center' | 'right'
 }
 
 /** Whether `panel` is the topmost open dialog: a dialog opened from inside another comes later. */
@@ -51,7 +53,7 @@ function besideNow(companion: HTMLElement | null): companion is HTMLElement {
  * `autoFocus` one keeps it), falling back to the panel; Tab and Shift+Tab stay inside;
  * and on closing, focus goes back to whatever had it before the dialog opened.
  */
-export function Dialog({ open, title, description, onClose, children, footer, size = 'md' }: Props) {
+export function Dialog({ open, title, description, onClose, children, footer, size = 'md', placement = 'center' }: Props) {
   const panelRef = useRef<HTMLDivElement>(null)
   const descriptionId = useId()
   const companion = useContext(ModalCompanionContext)
@@ -145,7 +147,7 @@ export function Dialog({ open, title, description, onClose, children, footer, si
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4"
+      className={`fixed inset-0 z-50 flex bg-black/55 ${placement === 'right' ? 'justify-end' : 'items-center justify-center p-4'}`}
       style={companion && reserve ? { right: reserve } : undefined}
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose()
@@ -169,7 +171,7 @@ export function Dialog({ open, title, description, onClose, children, footer, si
         aria-describedby={description ? descriptionId : undefined}
         tabIndex={-1}
         onKeyDown={trapTab}
-        className={`flex max-h-[calc(100dvh-2rem)] w-full ${size === 'wide' ? 'max-w-[1600px]' : size === 'split' ? 'max-w-[1120px]' : 'max-w-lg'} flex-col rounded-lg border border-line bg-surface shadow-2xl outline-none`}
+        className={`flex w-full ${placement === 'right' ? 'h-full max-w-[480px] rounded-none' : `max-h-[calc(100dvh-2rem)] rounded-lg ${size === 'wide' ? 'max-w-[1600px]' : size === 'split' ? 'max-w-[1120px]' : 'max-w-lg'}`} flex-col border border-line bg-surface shadow-2xl outline-none`}
       >
         <header className="shrink-0 border-b border-line px-5 py-3.5">
           <h2 className="text-[15px] font-semibold">{title}</h2>

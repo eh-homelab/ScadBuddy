@@ -9,7 +9,8 @@
    is recorded. A kind with a prelude (#1060) runs ``op.<prelude>.run`` on the
    prelude's own queue first.
 
-Every kind here is ``done`` (§4.2 step 4): the Update answers once the effect ended.
+Every kind is ``done`` (§4.2 step 4), the Update answering once the effect ended, except
+one that ``answer_running``: it answers with the record once it is written (#2462).
 """
 
 from __future__ import annotations
@@ -82,6 +83,8 @@ STATUS = SearchAttributeKey.for_keyword("ScadbuddyStatus")
 class OperationWorkflow:
     def __init__(self) -> None:
         self.done: Operation | None = None
+        #: The record, once written, for a kind that answers while it runs (#2462).
+        self.running: Operation | None = None
         self.refusal: PrintRunError | None = None
         self.updates = 0
         self.search_attributes = False
@@ -90,8 +93,12 @@ class OperationWorkflow:
     async def accepted(self) -> OperationAnswer:
         self.updates += 1
         repeated = self.updates > 1
-        await workflow.wait_condition(lambda: self.done is not None or self.refusal is not None)
-        return OperationAnswer(operation=self.done, refusal=self.refusal, repeated=repeated)
+        await workflow.wait_condition(
+            lambda: self.done is not None or self.refusal is not None or self.running is not None
+        )
+        return OperationAnswer(
+            operation=self.done or self.running, refusal=self.refusal, repeated=repeated
+        )
 
     @workflow.run
     async def run(self, input: OperationInput) -> Operation:
@@ -143,6 +150,8 @@ class OperationWorkflow:
             op = await inserting
             cancelled = True
         self._upsert(STATUS.value_set("running"))
+        if input.answer_running and not cancelled:
+            self.running = op
         finish = (
             # Nothing ran: the cancel came before the effect.
             FinishOp(operation_id=op.id, error=OPERATION_CANCELLED)

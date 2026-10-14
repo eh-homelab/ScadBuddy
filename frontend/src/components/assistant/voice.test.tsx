@@ -137,6 +137,14 @@ describe('voice feature detection', () => {
     expect(screen.queryByText(/Voice input is transcribed by your browser/)).not.toBeInTheDocument()
   })
 
+  it('#2443 — keeps "Read replies aloud" on one line in a row that wraps, so it stays in the panel', async () => {
+    installSpeech()
+    await openPanel()
+    const toggle = screen.getByRole('checkbox', { name: 'Read replies aloud' }).closest('label')!
+    expect(toggle).toHaveClass('whitespace-nowrap', 'shrink-0')
+    expect(screen.getByTestId('composer-actions')).toHaveClass('flex-wrap')
+  })
+
   it('marks the mic and the voice setting user-only', async () => {
     installSpeech()
     await openPanel()
@@ -337,6 +345,8 @@ describe('spoken replies', () => {
     await user.click(toggle)
     expect(window.localStorage.getItem(SPEAK_REPLIES_KEY)).toBe('on')
     unmount()
+    // A new tab: it has the browser's setting, not this tab's open panel (#2372).
+    window.sessionStorage.clear()
     await openPanel()
     expect(screen.getByRole('checkbox', { name: 'Read replies aloud' })).toBeChecked()
   })

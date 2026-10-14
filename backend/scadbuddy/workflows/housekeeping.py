@@ -4,7 +4,8 @@ The API process's periodic loops are two Schedules that start ``Housekeeping`` o
 ``library`` queue: ``scadbuddy-housekeeping-<queue>`` runs every sweep every
 ``SCADBUDDY_ASSET_SWEEP_INTERVAL`` seconds (0: no Schedule), and
 ``scadbuddy-prune-<queue>`` prunes settled render jobs (as the render service's loop
-did) and sweeps old request claims every `PRUNE_INTERVAL`, whatever that interval. The
+did), sweeps old request claims and repairs and prunes the activity record every
+`PRUNE_INTERVAL`, whatever that interval. The
 queue is served in the API process, which holds the data volume the sweeps read. Each
 sweep is best effort, as the loop's were: one that fails is logged, fails its activity
 (the run returns it, and Temporal's UI shows it), the rest still run, and the next tick
@@ -24,7 +25,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Sequence
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from temporalio import workflow
@@ -33,6 +34,7 @@ from temporalio.client import (
     Schedule,
     ScheduleActionStartWorkflow,
     ScheduleAlreadyRunningError,
+    ScheduleHandle,
     ScheduleIntervalSpec,
     ScheduleOverlapPolicy,
     SchedulePolicy,
@@ -56,6 +58,10 @@ HOUSEKEEPING_SCHEDULE = "scadbuddy-housekeeping"
 PRUNE_SCHEDULE = "scadbuddy-prune"
 #: The render service's prune loop's interval: a settled job outlives `job_ttl` by this.
 PRUNE_INTERVAL = 300.0
+#: A boot does not trigger a Schedule that already started a run this recently (or
+#: within its interval, if shorter): each replica of each rollout booting used to run
+#: the daily sweeps again, ~37 times a day (#2352). One run per window converges them.
+BOOT_TRIGGER_WINDOW = 30 * 60.0
 
 
 def schedule_id_for(task_queue: str) -> str:
@@ -89,6 +95,11 @@ PREVIEWS_PATCH = "housekeeping-sweep-preview-slices"
 #: up, which git's own `gc --auto` lets reach thousands. Behind its own patch.
 GIT_SWEEP = "housekeeping_maintain_models_git"
 GIT_PATCH = "housekeeping-maintain-models-git"
+#: Activity retention and repair (spec 2026-10-09 §6). Last: it reads what the sweeps
+#: before it settled.
+ACTIVITY_SWEEP = "housekeeping_activity"
+#: The `workflow.patched` id that adds `ACTIVITY_SWEEP` to a run.
+ACTIVITY_PATCH = "housekeeping-activity"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
 SWEEPS = (
     "housekeeping_prune_jobs",
@@ -101,11 +112,13 @@ SWEEPS = (
     FLOWS_SWEEP,
     PREVIEWS_SWEEP,
     GIT_SWEEP,
+    ACTIVITY_SWEEP,
 )
 #: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs, request claims and
 #: the dialog's background slices, which would otherwise pile up for good with the
-#: sweeps off (review 3c M1).
-PRUNE_SWEEPS = (SWEEPS[0], SWEEPS[4], PREVIEWS_SWEEP)
+#: sweeps off (review 3c M1); and the activity rows, which every start adds to
+#: (retention and repair, spec 2026-10-09 §6).
+PRUNE_SWEEPS = (SWEEPS[0], SWEEPS[4], PREVIEWS_SWEEP, ACTIVITY_SWEEP)
 #: An asset sweep converges with the store over Bambuddy, at length.
 SWEEP_TIMEOUT = timedelta(minutes=30)
 #: Every sweep heartbeats: a worker lost mid-sweep is noticed within this, not after
@@ -126,6 +139,8 @@ PREVIEWS_TIMEOUT = timedelta(minutes=5)
 #: this adds a margin for the count and the kill (#2342). Not imported: the sandbox runs
 #: this module, and `library.history` is not passed through.
 GIT_TIMEOUT = timedelta(minutes=12)
+#: The activity sweep is a repair pass over four tables and one delete.
+ACTIVITY_TIMEOUT = timedelta(minutes=5)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)
 
@@ -140,6 +155,8 @@ def sweep_timeout(sweep: str) -> timedelta:
         return PREVIEWS_TIMEOUT
     if sweep == GIT_SWEEP:
         return GIT_TIMEOUT
+    if sweep == ACTIVITY_SWEEP:
+        return ACTIVITY_TIMEOUT
     return SWEEP_TIMEOUT
 
 
@@ -164,6 +181,8 @@ class Housekeeping:
             if sweep == PREVIEWS_SWEEP and not workflow.patched(PREVIEWS_PATCH):
                 continue
             if sweep == GIT_SWEEP and not workflow.patched(GIT_PATCH):
+                continue
+            if sweep == ACTIVITY_SWEEP and not workflow.patched(ACTIVITY_PATCH):
                 continue
             try:
                 await workflow.execute_activity(
@@ -217,12 +236,20 @@ def _schedule(interval: float, action: ScheduleActionStartWorkflow) -> Schedule:
 
 
 async def ensure_workflow_schedule(
-    client: Client, schedule_id: str, interval: float, action: ScheduleActionStartWorkflow
+    client: Client,
+    schedule_id: str,
+    interval: float,
+    action: ScheduleActionStartWorkflow,
+    *,
+    boot_window: float | None = None,
 ) -> bool:
     """The Schedule starting ``action`` every ``interval`` seconds (0: none), then one
-    run now: the boot's. A Schedule an operator paused stays paused, and is not run:
-    True says so (review #1095 2), since then nothing converges until it resumes.
-    Every Schedule the API keeps (housekeeping, the preview backfill) is made here."""
+    run now: the boot's, unless a run is open or one started within ``boot_window``
+    seconds (default `BOOT_TRIGGER_WINDOW`; or the interval, if shorter), which
+    converges this boot too (#2352). A
+    Schedule an operator paused stays paused, and is not run: True says so (review
+    #1095 2), since then nothing converges until it resumes. Every Schedule the API
+    keeps (housekeeping, the preview backfill) is made here."""
     handle = client.get_schedule_handle(schedule_id)
     if interval <= 0:
         try:
@@ -242,11 +269,23 @@ async def ensure_workflow_schedule(
             return ScheduleUpdate(schedule=schedule)
 
         await handle.update(replace)
-    if not schedule.state.paused:
-        # A run still open (a rollout stopped the old pod mid-run) would SKIP this
-        # one; it queues behind that run instead.
+    window = BOOT_TRIGGER_WINDOW if boot_window is None else boot_window
+    if not schedule.state.paused and not await _ran_lately(handle, min(window, interval)):
+        # A run that opens between the look and this would SKIP this one; it queues
+        # behind that run instead.
         await handle.trigger(overlap=ScheduleOverlapPolicy.BUFFER_ONE)
     return schedule.state.paused
+
+
+async def _ran_lately(handle: ScheduleHandle, window: float) -> bool:
+    """Whether the Schedule has a run open, or started one within ``window`` seconds.
+    An open run's activities move to a live worker when a rollout stops theirs, so it
+    still finishes; another boot's trigger would only run the sweeps twice."""
+    info = (await handle.describe()).info
+    if info.running_actions:
+        return True
+    since = datetime.now(UTC) - timedelta(seconds=window)
+    return any(action.started_at >= since for action in info.recent_actions)
 
 
 async def ensure_schedule(
@@ -256,6 +295,7 @@ async def ensure_schedule(
     *,
     schedule_id: str | None = None,
     sweeps: tuple[str, ...] = SWEEPS,
+    boot_window: float | None = None,
 ) -> bool:
     """The sweeps' Schedule at ``interval`` seconds (0: none), then one run now: the
     boot's converging sweep (`ensure_workflow_schedule`). True when it is paused."""
@@ -267,7 +307,9 @@ async def ensure_schedule(
         task_queue=task_queue,
         execution_timeout=housekeeping_timeout(sweeps),
     )
-    return await ensure_workflow_schedule(client, schedule_id, interval, action)
+    return await ensure_workflow_schedule(
+        client, schedule_id, interval, action, boot_window=boot_window
+    )
 
 
 async def ensure_schedules(client: Client, task_queue: str, interval: float) -> bool:

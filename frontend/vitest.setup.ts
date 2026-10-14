@@ -34,13 +34,15 @@ configure({
 // longer lands inside the first findByRole's 1 s wait in each file (#1485).
 getComputedStyle(document.documentElement)
 
-beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
+beforeAll(() => server.listen({ onUnhandledFrame: 'error' }))
 afterEach(() => {
   server.resetHandlers()
   resetMockState()
   resetDisplayUnit()
   resetRealtime()
   resetAiAvailability()
+  // #2372 — the assistant panel remembers per tab; every test starts in a fresh one.
+  window.sessionStorage.clear()
 })
 afterAll(() => server.close())
 

@@ -153,15 +153,18 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
     ]
     for (const plugin of forwarded?.plugins ?? []) {
       const tiers = pluginTierResolver([plugin])
+      // An unlisted plugin tool is outward (registry.ts), as in a classic turn. One
+      // function for the label, the park and the call, so they cannot disagree (#2838).
+      const tierOf = (name: string) => tiers(name) ?? 'outward'
       const keep = forwarded?.keep?.(plugin.name)
       servers.push({
         name: plugin.name,
         connect: () => connectHttp(plugin.url),
         // Its forwarder URL is new each run; its tools change with what Settings disabled.
         listingKey: JSON.stringify(plugin.disabledTools),
-        // An unlisted plugin tool is outward (registry.ts), as in a classic turn.
-        tierOf: (name) => tiers(name) ?? 'outward',
-        mayPark: (name) => (tiers(name) ?? 'outward') === 'outward',
+        tierOf,
+        mayPark: (name) => tierOf(name) === 'outward',
+        fixedTier: tierOf,
         // Its MCP session is kept for the durable session, on its own route (#2581).
         ...(keep
           ? {
@@ -210,6 +213,8 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
         tierOf: (name, input) => httpTierOf(name, input) ?? 'outward',
         // http_request is outward by its method; only reading a saved body never is.
         mayPark: (name) => name !== HTTP_READ_TOOL_NAME,
+        // http_request's tier is its method's; reading a saved body is always read.
+        fixedTier: (name) => (name === HTTP_READ_TOOL_NAME ? 'read' : undefined),
         pinned: true,
       })
     }
@@ -258,6 +263,9 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
         }
         offered = loaded.loaded.filter((pkg) => !failed.has(pkg.name))
       }
+      // A call (not a listing) builds every loaded package's servers, a failed share's
+      // included: the listing is the guard, since a call can only name a tool the listing
+      // offered, and it offered none of a package that failed to share (#2620).
       servers.push(...localPackageServers(offered, problems))
       const named = [...new Set(offered.filter((p) => p.allowed).flatMap((p) => p.builtinTools))].filter((n) => provided.has(n)).sort()
       const builtins = deps.builtins

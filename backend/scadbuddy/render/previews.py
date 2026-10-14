@@ -34,12 +34,13 @@ from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate
-from scadbuddy.library.previews import PreviewStore, new_work_dir, source_key
+from scadbuddy.library.previews import PreviewRecord, PreviewStore, new_work_dir, source_key
 from scadbuddy.render.jobs import (
     RAW_RENDER_NAME,
     SnapshotPendingError,
     extruder_order,
     library_lease,
+    plate_defines,
     plate_thumbnails,
     resolve_source,
     staged_assets,
@@ -111,7 +112,8 @@ async def render_preview(
     revision: str | None = None,
     fetcher: CheckoutFetcher | None = None,
 ) -> bytes:
-    """The plate image of ``slug`` rendered at its default parameters.
+    """The plate image of ``slug`` rendered at its default parameters: plate 1's, for a
+    template that spreads its parts over several plates (spec §6.4, #453).
 
     The same pipeline as a render job up to its cover image, and no further: no
     closed solids, no 3MF, no output. Its scratch space is its own, under
@@ -131,10 +133,26 @@ async def render_preview(
         try:
             raw = work / RAW_RENDER_NAME
             async with staged_assets(schema, {}, source.scad.parent, assets) as params:
-                await render_3mf(source.scad, schema, params, raw, config=config)
+                drawn = await render_3mf(source.scad, schema, params, raw, config=config)
                 parts = extruder_order(
                     await asyncio.to_thread(split_by_material, raw), schema, params
                 )
+                if (drawn.plates or 1) > 1:
+                    # A multi-plate template draws every plate's parts at once; plate 1
+                    # alone is what its first plate prints, as a job renders it (#453).
+                    first = work / "plate-1" / RAW_RENDER_NAME
+                    first.parent.mkdir()
+                    await render_3mf(
+                        source.scad,
+                        schema,
+                        params,
+                        first,
+                        config=config,
+                        extra_defines=plate_defines(1),
+                    )
+                    parts = extruder_order(
+                        await asyncio.to_thread(split_by_material, first), schema, params
+                    )
         finally:
             await asyncio.to_thread(lambda: shutil.rmtree(work, ignore_errors=True))
     # Rasterising reads the meshes in memory, not the checkouts: out of the lease.
@@ -214,9 +232,11 @@ class PreviewScheduler:
         the lock. One that cannot be looked at is logged and left out; a listing that
         fails raises."""
         due: list[str] = []
+        # Every record read once, not one query per model (#2353).
+        records = self.store.records()
         for slug in self.catalogue.slugs():
             try:
-                if self.needs_refresh(slug):
+                if self._needs_refresh(slug, records.get(slug)):
                     due.append(slug)
             except Exception:
                 logger.exception("could not plan a model's preview", extra={"slug": slug})
@@ -356,10 +376,14 @@ class PreviewScheduler:
     def needs_refresh(self, slug: str) -> bool:
         """Whether `plan` would render ``slug``'s preview or drop it, without doing
         either."""
+        return self._needs_refresh(slug, self.store.record(slug))
+
+    def _needs_refresh(self, slug: str, record: PreviewRecord | None) -> bool:
+        """`needs_refresh`, given ``slug``'s record, read already."""
         if not self._keeps_preview(slug):
-            return self.store.record(slug) is not None
+            return record is not None
         key = source_key(self.catalogue.paths, slug)
-        return key is not None and not self.store.current(slug, key)
+        return key is not None and (record is None or record.key != key)
 
     def _keeps_preview(self, slug: str) -> bool:
         """Whether ``slug`` shows a preview: it exists, with no thumbnail of its own

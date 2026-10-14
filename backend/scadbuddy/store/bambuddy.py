@@ -50,7 +50,7 @@ from scadbuddy.bambuddy.models import FolderCreate
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import RenderStoreSettings, load_render_store_settings
-from scadbuddy.store.content_models import BlobKind, BlobMissingError, BlobScope
+from scadbuddy.store.content_models import BlobData, BlobKind, BlobMissingError, BlobScope
 from scadbuddy.store.content_models import RefusedDeleteError as RefusedDeleteError
 from scadbuddy.store.index import Pool
 
@@ -216,7 +216,7 @@ class BambuddyContentBackend:
 
     # --- ContentBackend ------------------------------------------------------
 
-    async def upload(self, kind: BlobKind, data: bytes, *, name: str, scope: BlobScope) -> str:
+    async def upload(self, kind: BlobKind, data: BlobData, *, name: str, scope: BlobScope) -> str:
         media = _MEDIA_TYPES.get(Path(name).suffix.lower(), "application/octet-stream")
         async with self._client() as (client, inbox):
             for attempt in (1, 2):
