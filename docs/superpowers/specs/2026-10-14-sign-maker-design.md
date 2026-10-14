@@ -554,8 +554,16 @@ Rendering, colour splitting, solids, plates and printing are unchanged.
 ## 8. A sign becomes a template
 
 These are `OperationKind`s on the `library` queue (`backend/scadbuddy/signs/operations.py`,
-exported as `OPERATION_KINDS`), run through `run_operation`. Each one calls the `signs`
-activities from its workflow.
+exported as `OPERATION_KINDS`), run through `run_operation`.
+
+A kind's `run` is itself an activity (`workflows/operation.py`), so it cannot call
+another one. Instead, `OperationKind` gains `service: ServiceCall | None`:
+- `OperationWorkflow` runs the named host-service activity (§7.2's allowlist) on its
+  own queue after the check and before the run, as it already runs a kind's
+  `prelude` on another queue (`operation.py`, `PRELUDE_PATCH`).
+- The run then receives the service's result as `checked["service"]`.
+- This sits behind `workflow.patched("operation-service-3468")`, so histories
+  recorded before it replay unchanged.
 
 ### 8.1 `sign_template_create`
 
