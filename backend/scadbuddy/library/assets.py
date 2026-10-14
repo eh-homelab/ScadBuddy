@@ -278,6 +278,13 @@ def sanitise_svg(data: bytes) -> bytes:
     return cleaned
 
 
+#: In Pillow's ValueErrors for its PNG metadata limits, what tells them from another
+#: ValueError: a text or ICC chunk over ``PngImagePlugin.MAX_TEXT_CHUNK`` once
+#: decompressed (``_safe_zlib_decompress``), and text chunks over ``MAX_TEXT_MEMORY`` in
+#: all (``check_text_memory``). The upload keeps none of that metadata either way.
+PNG_METADATA_LIMITS = ("MAX_TEXT_CHUNK", "MAX_TEXT_MEMORY")
+
+
 def normalise_png(data: bytes) -> tuple[bytes, int, int]:
     """The PNG decoded, capped at `MAX_PNG_SIDE`, and re-encoded without metadata."""
     try:
@@ -310,9 +317,9 @@ def normalise_png(data: bytes) -> tuple[bytes, int, int]:
         raise
     except ValueError as error:
         logger.info("a PNG upload could not be decoded", extra={"error": str(error)})
-        if PNG_CHUNK_LIMIT in str(error):
-            # Pillow's limit on a decompressed text or ICC chunk: metadata the upload
-            # keeps none of anyway, so re-exported without it the PNG reads.
+        if any(limit in str(error) for limit in PNG_METADATA_LIMITS):
+            # One of Pillow's limits on text or ICC chunks: metadata the upload keeps
+            # none of anyway, so re-exported without it the PNG reads.
             raise AssetRejectedError(
                 "the PNG carries metadata too large to read; re-export it without metadata"
             ) from None
@@ -326,11 +333,6 @@ def normalise_png(data: bytes) -> tuple[bytes, int, int]:
         raise AssetRejectedError(
             "the file is not a readable PNG; re-export it as PNG and try again"
         ) from None
-
-
-#: In Pillow's ValueError for a text or ICC chunk over ``PngImagePlugin.MAX_TEXT_CHUNK``
-#: once decompressed (``_safe_zlib_decompress``): what tells it from another ValueError.
-PNG_CHUNK_LIMIT = "MAX_TEXT_CHUNK"
 
 
 def sniff(data: bytes) -> AssetKind:
