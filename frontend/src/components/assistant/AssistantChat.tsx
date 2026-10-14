@@ -48,7 +48,7 @@ import { BudgetMeter, BudgetSpent, usd } from './SessionBudget'
 import { ArchivedSessions } from './ArchivedSessions'
 import { SessionSwitcher } from './SessionSwitcher'
 import { useSkillMenu } from './SkillMenu'
-import { reloaded, rememberSession, rememberedSession, sessionToRestore } from './panelMemory'
+import { rememberSession, rememberedSession, sessionToRestore } from './panelMemory'
 import { SessionBackgroundTasks } from './SessionBackgroundTasks'
 import { SessionFiles } from './SessionFiles'
 import { RunsWaiting } from './RunsWaiting'
@@ -98,6 +98,11 @@ interface Props {
   /** #931 — a session a page asked to open; selected once, then `onOpenHandled` clears it. */
   openRequest?: OpenRequest | null
   onOpenHandled?: () => void
+  /**
+   * #3164 — whether this tab came back from a reload (`panelMemory`'s `reloaded`), read by
+   * the shell before it saves the panel as open. Without it the chat opens as a new tab.
+   */
+  reloaded?: boolean
 }
 
 export interface OpenRequest {
@@ -158,7 +163,15 @@ function readSessionMode(): SessionMode | '' {
   }
 }
 
-export function AssistantChat({ factory, onClose, focusKey, embedded = false, openRequest, onOpenHandled }: Props) {
+export function AssistantChat({
+  factory,
+  onClose,
+  focusKey,
+  embedded = false,
+  openRequest,
+  onOpenHandled,
+  reloaded = false,
+}: Props) {
   const chat = useAgentChat(factory)
   const { state } = chat
   const { pathname } = useLocation()
@@ -419,11 +432,8 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
 
   // #2372 — once the list is in, a reloaded tab shows the chat it showed, else one still
   // under way, rather than a blank new chat beside a turn that is still spending. Only a
-  // reloaded tab (#3164): a new one opens on a new chat. Read as the chat first renders,
-  // before the shell records this panel as open.
+  // reloaded tab (#3164): a new one opens on a new chat.
   const restored = useRef(false)
-  const wasReloaded = useRef<boolean | null>(null)
-  if (wasReloaded.current === null) wasReloaded.current = reloaded()
   useEffect(() => {
     if (restored.current || state.order.length === 0) return
     restored.current = true
@@ -431,11 +441,11 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false, op
       rememberSession(state.activeId)
       return
     }
-    const id = wasReloaded.current ? sessionToRestore(rememberedSession(), state.order, state.sessions) : null
+    const id = reloaded ? sessionToRestore(rememberedSession(), state.order, state.sessions) : null
     if (id) select(id)
     // A remembered chat that is no longer listed, with nothing under way to show instead.
     else rememberSession(null)
-  }, [state.order, state.sessions, state.activeId, state.awaitingStart, openRequest, select])
+  }, [state.order, state.sessions, state.activeId, state.awaitingStart, openRequest, select, reloaded])
   // After the restore, so it does not forget the chat before reading it.
   useEffect(() => {
     if (restored.current) rememberSession(state.activeId)

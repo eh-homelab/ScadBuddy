@@ -42,7 +42,7 @@ import { useGlobalAgentTools } from '../agent/global'
 import { isEmbedded } from '../lib/embed'
 import { ErrorBoundary } from './ErrorBoundary'
 import { retryFailedPages } from '../lib/lazyRetry'
-import { panelWasOpen, rememberPanelOpen, rememberSession } from './assistant/panelMemory'
+import { panelWasOpen, reloaded, rememberPanelOpen, rememberSession } from './assistant/panelMemory'
 import { LiveUpdatesIndicator } from './LiveUpdatesIndicator'
 import { ActivityBell } from './activity/ActivityBell'
 import { Toasts } from './ui/Toasts'
@@ -177,6 +177,9 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
   // #2372 — a reload reopens the panel this tab had open, once the assistant is known to
   // be there, without taking the focus from the page. Remembered from then on.
   const reopen = useRef<boolean | null>(panelWasOpen())
+  // #3164 — read before the `[open]` effect below saves the panel as open: the panel is
+  // a lazy chunk, so its chat first renders after that write and cannot read it itself.
+  const [wasReloaded] = useState(reloaded)
   useEffect(() => {
     if (reopen.current === null || !ai.available) return
     if (reopen.current) {
@@ -426,6 +429,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
                         embedded={embedded}
                         openRequest={openRequest}
                         onOpenHandled={openHandled}
+                        reloaded={wasReloaded}
                       />
                     </Suspense>
                   </ErrorBoundary>

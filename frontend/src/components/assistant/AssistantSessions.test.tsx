@@ -19,9 +19,10 @@ const PARENT_REPLY = 'Done: the bin is now 3 units (21 mm) tall.'
 
 let agent: MockAgentTransport
 
-function renderShell(options: MockAgentOptions = { stepMs: 0 }) {
+/** `transport` is one to reuse, as an agent that outlives the tab does. */
+function renderShell(options: MockAgentOptions = { stepMs: 0 }, transport?: MockAgentTransport) {
   const factory = () => {
-    agent = createMockAgentTransport(options)
+    agent = transport ?? createMockAgentTransport(options)
     return agent
   }
   return renderPage(
@@ -383,6 +384,25 @@ describe('a reload (#2372)', () => {
     await user.click(await screen.findByRole('button', { name: 'Assistant' }))
     expect(await screen.findByText(PARENT_REPLY)).toBeInTheDocument()
     expect(activeTitle()).toHaveTextContent(PARENT)
+  })
+
+  // #3249 review: the panel is a lazy chunk, so the shell has saved it as open before the
+  // chat first renders; a new tab read that as a reload and jumped to the running chat.
+  it('opens a new tab on a new chat, not on one of yours still running (#3164)', async () => {
+    const shared = createMockAgentTransport({ stepMs: 60_000 })
+    const first = renderShell(undefined, shared)
+    await first.user.click(screen.getByRole('button', { name: 'Assistant' }))
+    await first.user.type(await screen.findByRole('textbox', { name: 'Message the assistant' }), 'still going{Enter}')
+    await waitFor(() => expect(activeTitle()).toHaveTextContent('still going'))
+    first.unmount()
+    window.sessionStorage.clear()
+
+    const { user } = renderShell(undefined, shared)
+    await user.click(await screen.findByRole('button', { name: 'Assistant' }))
+    await user.click(await screen.findByRole('button', { name: /^Sessions/ }))
+    expect(await within(picker()).findByRole('button', { name: /^still going/ })).toBeInTheDocument()
+    expect(screen.queryByTestId('active-session-title')).toBeNull()
+    expect(sentOf('session.attach')).toEqual([])
   })
 
   it('forgets a remembered chat that is no longer listed (#2962 review)', async () => {

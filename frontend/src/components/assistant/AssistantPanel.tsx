@@ -14,9 +14,11 @@ interface Props {
   /** #931 — a session a page asked to open (AppShell's AssistantOpener). */
   openRequest?: OpenRequest | null
   onOpenHandled?: () => void
+  /** #3164 — whether this tab came back from a reload, read by the shell at page load. */
+  reloaded?: boolean
 }
 
-export function AssistantPanel({ onClose, focusKey, factory, embedded, openRequest, onOpenHandled }: Props) {
+export function AssistantPanel({ onClose, focusKey, factory, embedded, openRequest, onOpenHandled, reloaded }: Props) {
   const loaded = useAsync(async () => factory ?? (await loadChatTransportFactory()), [factory])
   if (loaded.loading) {
     return (
@@ -47,6 +49,7 @@ export function AssistantPanel({ onClose, focusKey, factory, embedded, openReque
           embedded={embedded}
           openRequest={openRequest}
           onOpenHandled={onOpenHandled}
+          reloaded={reloaded}
         />
       </div>
     </div>

@@ -524,8 +524,12 @@ test.describe('assistant panel header at 768 px (#1038)', () => {
     await expect(title).toBeVisible()
     const row = (await header.boundingBox())!
     const box = (await title.boundingBox())!
+    const padding = await header.evaluate((el) => {
+      const style = getComputedStyle(el)
+      return parseFloat(style.paddingLeft) + parseFloat(style.paddingRight)
+    })
     // 12rem, or the whole row when the row is narrower; less the row's padding.
-    expect(box.width).toBeGreaterThanOrEqual(Math.min(192, row.width - 24) - 0.5)
+    expect(box.width).toBeGreaterThanOrEqual(Math.min(192, row.width - padding) - 0.5)
 
     const edge = (await panel.boundingBox())!
     const actions = panel.getByTestId('composer-actions')

@@ -57,6 +57,7 @@ export function sessionToRestore(
   return (
     order.find((id) => {
       const s = sessions[id]
+      // Any browser owner is "you", as in OwnerBadge: a deployment has one browser principal.
       return s?.origin === 'chat' && s.owner.kind === 'browser' && UNDER_WAY.includes(s.status)
     }) ?? null
   )
