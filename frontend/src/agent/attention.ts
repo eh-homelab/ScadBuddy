@@ -227,7 +227,9 @@ export function attentionDetail(c: PendingCounts | null): string {
  * The tab title: the page's own `title` (#2454, `usePageTitle`), with the waiting count
  * in front of it (`(2) Library · ScadBuddy`), so a background tab shows it in the tab
  * strip. Never prefixed when off, as embedded: inside Bambuddy's frame the tab shows
- * Bambuddy's title, and the frame's own is seen by nobody.
+ * Bambuddy's title, and the frame's own is seen by nobody. On unmount it leaves the
+ * last title it set, deliberately: AppShell, the root, is its only caller, and the next
+ * page's title replaces it.
  */
 export function useAttentionTitle(waiting: number | null, enabled: boolean, title: string): void {
   useEffect(() => {

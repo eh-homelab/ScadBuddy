@@ -23,7 +23,7 @@ async function offscreen(page: Page): Promise<string[]> {
         if (box.width === 0 || box.height === 0) continue
         const style = getComputedStyle(el)
         if (style.visibility === 'hidden') continue
-        // Visually hidden until focused (sr-only: the skip link, #2455): its 1px box sits at
+        // Visually hidden until focused (sr-only: the skip link, #2454): its 1px box sits at
         // -1px, and no one sees it there.
         if (style.clipPath === 'inset(50%)' || style.clip === 'rect(0px, 0px, 0px, 0px)') continue
         // Clipped on purpose by a scroller of its own (a scrolling tab row) is reachable.
