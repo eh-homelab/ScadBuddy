@@ -114,7 +114,9 @@ function harness(script: Script) {
               refusals.push({ failure, ...judged })
               order.push('onRefused')
             },
-            onAttempt: () => attempts.push(messages.length),
+            onAttempt: (_credential, index) => {
+              if (index > 0) attempts.push(messages.length)
+            },
           },
         )) {
           messages.push(m)

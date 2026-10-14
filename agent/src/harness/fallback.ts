@@ -159,14 +159,15 @@ export type FallbackOptions = {
    */
   onRefused?: (failure: FailureEvidence, judged: { probe?: ProbeVerdict['verdict'] }) => void
   /**
-   * Called as each attempt after the first starts, once the caller has seen
-   * every message of the attempts before it. The caller cannot tell otherwise:
-   * only the first attempt's init message is passed on. The session manager
-   * forgets the earlier attempts' unfinished requests then (unpricedSpend.ts, #1666),
-   * and points the turn's own model calls (WebFetch's nested query) at the
-   * credential the turn is now on (#2973).
+   * Called as each attempt starts, the first included (`index` 0), once the
+   * caller has seen every message of the attempts before it. The caller cannot
+   * tell otherwise: only the first attempt's init message is passed on. The
+   * session manager forgets the earlier attempts' unfinished requests on each
+   * attempt after the first (unpricedSpend.ts, #1666), and points the turn's own
+   * model calls (WebFetch's nested query) at the credential the attempt is on
+   * (#2973), so it need not know which candidate comes first (#3508 review).
    */
-  onAttempt?: (credential: PooledCredential) => void
+  onAttempt?: (credential: PooledCredential, index: number) => void
   /**
    * The SDK session every attempt runs in, when the caller fixes it: a warm
    * process is the session's own (sessions/warm.ts, spec 2026-10-13 §5.3), and
@@ -310,7 +311,7 @@ export async function* runWithFallback(
 
   for (let i = 0; i < candidates.length; i++) {
     const current = candidates[i] as PooledCredential
-    if (i > 0) options.onAttempt?.(current)
+    options.onAttempt?.(current, i)
     const next = candidates[i + 1]
     const controller = linked(base.signal)
     const { resume: _resume, sessionId: _sessionId, ...rest } = continuing ? continuationRun(base) : base

@@ -1864,9 +1864,6 @@ export class SessionManager {
       try {
         turn = await this.runner.assemble(session, principal, { parent: traced.context() })
         secrets = turn.secrets
-        // The first attempt is on the first candidate; none in an empty pool, which
-        // runWithFallback refuses before any WebFetch can ask (#3508 review).
-        onCredential.current = turn.candidates[0]
         const gate = this.approvals.gate({
           sessionId: id,
           turnId,
@@ -1953,10 +1950,14 @@ export class SessionManager {
             onRefused: (evidence, judged) => {
               refused = { evidence, ...judged }
             },
-            onAttempt: (credential) => {
+            // Every attempt, the first included: an empty pool starts none, so a
+            // WebFetch there has no credential and fails closed (#3508 review).
+            onAttempt: (credential, index) => {
               onCredential.current = credential
-              continuing = true
-              unpriced.newAttempt()
+              if (index > 0) {
+                continuing = true
+                unpriced.newAttempt()
+              }
             },
           },
         )
