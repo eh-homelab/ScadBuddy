@@ -50,7 +50,9 @@ from scadbuddy.api.operations import (
 )
 from scadbuddy.api.params import schema_of
 from scadbuddy.api.prints import PHOTO_NAME, ArchiveIdPath
+from scadbuddy.attachments.component import PrintAttachmentsDep
 from scadbuddy.bambuddy.archive_cache import ArchiveCache
+from scadbuddy.bambuddy.attachments import Attachment, AttachmentStore
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.component import ArchiveCacheDep
 from scadbuddy.bambuddy.linking import link_library_prints, scan_library_by_hash
@@ -251,7 +253,27 @@ class PrintAttachment(_Response):
     id: int
     kind: Literal["photo", "video"]
     caption: str | None = None
+    #: The file, through ScadBuddy (Range supported).
     url: str
+    #: The file's name as it was added (its extension the type its bytes are).
+    filename: str
+    size_bytes: int
+    #: The templates whose gallery already has a copy (``promote``).
+    promoted_to: list[str] = []
+    created_at: datetime | None = None
+
+
+def attachment_view(attachment: Attachment) -> PrintAttachment:
+    return PrintAttachment(
+        id=attachment.id,
+        kind=attachment.kind,
+        caption=attachment.caption,
+        url=_prints_url(attachment.archive_id, f"attachments/{attachment.id}/file"),
+        filename=attachment.filename,
+        size_bytes=attachment.size_bytes,
+        promoted_to=attachment.promoted_to,
+        created_at=attachment.created_at,
+    )
 
 
 class PrintMedia(_Response):
@@ -800,6 +822,7 @@ async def _bounded[T](calls: Sequence[Awaitable[T]], limit: int) -> list[T]:
 )
 async def list_prints(
     links: PrintLinksDep,
+    attachments: PrintAttachmentsDep,
     uploads: UploadsDep,
     outputs: OutputsDep,
     store: SettingsStoreDep,
@@ -853,7 +876,8 @@ async def list_prints(
             else item.model_copy(update={"params_diff": await defaults.diff(shown[index])})
             for index, item in enumerate(items)
         ]
-        return PrintPage(items=await _named(cache, client, diffed), next_cursor=next_cursor)
+        named = await _named(cache, client, diffed)
+        return PrintPage(items=await _counted(attachments, named), next_cursor=next_cursor)
 
     async with client_for(store.load()) as client:
         files = _LibraryFiles(cache, client)
@@ -922,6 +946,15 @@ async def list_prints(
             if scanned >= MAX_SCANNED:
                 more = bool(await links.page(limit=1, before=before, subjects=subjects))
                 return await page(str(before) if more else None)
+
+
+async def _counted(attachments: AttachmentStore, items: list[PrintSummary]) -> list[PrintSummary]:
+    """Each print with how many photos and videos were added to it (#309)."""
+    counts = await attachments.counts([item.archive_id for item in items])
+    return [
+        item.model_copy(update={"attachment_count": counts.get(item.archive_id, 0)})
+        for item in items
+    ]
 
 
 async def _require_print(links: PrintLinksDep, archive_id: int) -> LinkedPrint:
@@ -1020,7 +1053,7 @@ def _frame_url(archive_id: int, index: int, timelapse_path: str) -> str:
     return _prints_url(archive_id, f"timelapse/frames/{index}?v={version}")
 
 
-def _media(link: LinkedPrint, archive: ArchiveDetail) -> PrintMedia:
+def _media(link: LinkedPrint, archive: ArchiveDetail, added: list[Attachment]) -> PrintMedia:
     timelapse = None
     if archive.timelapse_path is not None:
         timelapse = PrintTimelapse(
@@ -1029,9 +1062,13 @@ def _media(link: LinkedPrint, archive: ArchiveDetail) -> PrintMedia:
             frames_url=_prints_url(archive.id, "timelapse/frames"),
         )
     plate = archive.plate_id if archive.plate_id is not None else link.plate_id
+    # A photo added in ScadBuddy is in the archive's photos too; it is listed once, as
+    # an attachment, with its caption.
+    attached = {each.archive_photo for each in added if each.archive_photo is not None}
     photos = [
         PrintPhoto(name=name, url=_prints_url(archive.id, f"photos/{name}"))
         for name in _photos(archive)
+        if name not in attached
     ]
     finish = next((photo for photo in photos if photo.name == archive.finish_photo), None)
     return PrintMedia(
@@ -1043,6 +1080,7 @@ def _media(link: LinkedPrint, archive: ArchiveDetail) -> PrintMedia:
             if plate is not None and plate >= 1
             else []
         ),
+        attachments=[attachment_view(each) for each in added],
     )
 
 
@@ -1130,6 +1168,7 @@ def _outcome(
 async def get_print(
     archive_id: ArchiveIdPath,
     links: PrintLinksDep,
+    attachments: PrintAttachmentsDep,
     outputs: OutputsDep,
     store: SettingsStoreDep,
     cache: ArchiveCacheDep,
@@ -1159,8 +1198,10 @@ async def get_print(
         media = PrintMedia()
         runs: list[ArchiveRun] = []
         on_printer = None
+        added = await attachments.for_archive(archive_id)
+        summary = summary.model_copy(update={"attachment_count": len(added)})
         if archive is not None:
-            media = _media(link, archive)
+            media = _media(link, archive, added)
             runs = (await cache.runs(client, archive_id)).items
             if media.plate_thumbnails:
                 names = await _plate_names(link, outputs, client)
