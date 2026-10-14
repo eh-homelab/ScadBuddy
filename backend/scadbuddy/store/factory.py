@@ -104,6 +104,7 @@ def build_store(
         max_count=config.store_max_count,
         metrics=metrics,
         downloads=downloads,
+        spool=paths.cache / "blob-spool",
     )
     blobs = CachedBlobStore(
         local,

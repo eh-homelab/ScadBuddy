@@ -14,6 +14,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import tempfile
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import aclosing
@@ -78,6 +79,7 @@ class ContentStore:
         max_count: int = 0,
         metrics: Metrics | None = None,
         downloads: DownloadCache | None = None,
+        spool: Path | None = None,
     ) -> None:
         self.backend = backend
         self.index = index
@@ -86,6 +88,9 @@ class ContentStore:
         #: #2788: whole blobs by sha256, shared by the API's replicas. What one
         #: process put or got is read back from it, not downloaded again.
         self.downloads = downloads
+        #: Where a read's private copy of a cached blob is made: this process's own
+        #: disk, never the shared directory, which holds only entries and fills.
+        self.spool = spool if spool is not None else Path(tempfile.gettempdir())
         #: Copies into `downloads` still being written after the put that made them.
         self._filling: set[asyncio.Task[None]] = set()
         self.max_total_bytes = max_total_bytes
@@ -301,7 +306,7 @@ class ContentStore:
         downloads = self.downloads
         if downloads is not None:
             copy = await asyncio.to_thread(
-                downloads.private_copy, ref.sha256, downloads.root, what="blob"
+                downloads.private_copy, ref.sha256, self.spool, what="blob"
             )
             if copy is not None:
                 async with aclosing(self._read_copy(copy)) as chunks:
@@ -368,7 +373,10 @@ class ContentStore:
                     )
         finally:
             # Not awaited: a consumer gone is a cancelled scope, where an await raises
-            # again before the partial is removed (as in `_kept_as_sent`).
+            # again before the partial is removed (as in `_kept_as_sent`). A cancel
+            # during a `to_thread` write or commit leaves that thread running while this
+            # closes and removes the partial under it: its I/O error is discarded with
+            # the thread and nothing is kept, which is the outcome wanted.
             try:
                 fill_cm.__exit__(None, None, None)
             except OSError:

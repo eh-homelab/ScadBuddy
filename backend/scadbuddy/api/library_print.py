@@ -721,7 +721,10 @@ async def _kept_as_sent(
                 logger.warning("could not keep a library file", extra={"sha256": sha})
     finally:
         # First, and not awaited: a browser gone is a cancelled scope, where every await
-        # raises again and nothing after it runs, which left the partial on disk.
+        # raises again and nothing after it runs, which left the partial on disk. A
+        # cancel during a `to_thread` write or commit leaves that thread running while
+        # this closes and removes the partial under it: its I/O error is discarded with
+        # the thread and nothing is kept, which is the outcome wanted.
         if fill is not None:
             with contextlib.suppress(OSError):
                 fill_cm.__exit__(None, None, None)

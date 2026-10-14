@@ -245,10 +245,20 @@ class DownloadCache:
             handle.close()
             return False
         digest = hashlib.sha256()
+        copied = checked = 0
         with handle:
             while chunk := handle.read(_CHUNK):
+                # Checked again as it grows: copies running at once each passed the
+                # check above, and together could still eat the reserve.
+                if copied - checked >= _ROOM_CHECK_BYTES:
+                    checked = copied
+                    if not self.has_room(out.fileno(), _ROOM_CHECK_BYTES):
+                        out.seek(0)
+                        out.truncate()
+                        return False
                 digest.update(chunk)
                 out.write(chunk)
+                copied += len(chunk)
         out.flush()
         out.seek(0)
         if digest.hexdigest() != sha256:

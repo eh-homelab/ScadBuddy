@@ -11,6 +11,7 @@ import time
 from collections.abc import AsyncGenerator, Iterator
 from contextlib import aclosing
 from pathlib import Path
+from typing import Any
 
 import anyio
 import pytest
@@ -262,6 +263,24 @@ def test_a_copy_that_would_eat_the_reserve_is_a_miss_and_the_entry_kept(
     assert cache.has(_sha(data))
 
 
+def test_a_copy_that_runs_into_the_reserve_midway_stops_as_a_miss(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2821 review: room was checked once for the whole entry, so copies running at
+    once could each pass and together still eat the reserve. It is checked again as the
+    copy grows; one that runs out is a miss, and the entry is kept."""
+    import scadbuddy.store.download_cache as module
+
+    cache = DownloadCache(tmp_path / "shared", max_bytes=1 << 30)
+    data = os.urandom(4 << 20)
+    cache.put(_sha(data), data)
+    monkeypatch.setattr(module, "_ROOM_CHECK_BYTES", 1 << 20)
+    answers = iter([True, True])
+    monkeypatch.setattr(cache, "has_room", lambda fd, size: next(answers, False))
+    assert cache.private_copy(_sha(data), tmp_path / "spool", what="test") is None
+    assert cache.has(_sha(data))
+
+
 def test_a_private_copy_on_a_volume_that_fails_is_a_miss(tmp_path: Path) -> None:
     cache = DownloadCache(tmp_path / "shared", max_bytes=1 << 20)
     data = b"the file"
@@ -357,6 +376,32 @@ async def test_a_blob_downloaded_once_is_read_from_the_cache_after(
     assert await first.read(ref) == data
     assert await second.read(ref) == data
     assert (first_backend.downloads, second_backend.downloads) == (1, 0)
+
+
+@pytest.mark.requires_postgres
+async def test_a_blob_hit_is_copied_on_this_processs_own_disk(
+    tmp_path: Path, pool: Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2821 review: a hit's private copy was made in the shared directory, an NFS
+    share in production, where each open copy leaves a ``.nfs*`` file behind. It is
+    made under the store's own spool."""
+    plain = ContentStore(LocalContentBackend(tmp_path / "remote"), BlobIndex(pool))
+    data = os.urandom(1 << 20)
+    ref = await plain.put("piece", data, name="p", scope=SCOPE)
+    store, _ = _process(tmp_path / "remote", tmp_path / "shared", pool)
+    assert await store.read(ref) == data
+    downloads = store.downloads
+    assert downloads is not None
+    real = downloads.private_copy
+    into: list[Path] = []
+
+    def private_copy(sha256: str | None, directory: Path, *, what: str) -> Any:
+        into.append(directory)
+        return real(sha256, directory, what=what)
+
+    monkeypatch.setattr(downloads, "private_copy", private_copy)
+    assert await store.read(ref) == data
+    assert into and all(not d.is_relative_to(tmp_path / "shared") for d in into)
 
 
 @pytest.mark.requires_postgres
