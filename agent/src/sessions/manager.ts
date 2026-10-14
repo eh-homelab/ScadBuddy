@@ -1080,6 +1080,7 @@ export class SessionManager {
     this.escalations = new Escalations({
       sql: deps.sql,
       durable: () => this.durable,
+      ...(deps.currentTiers ? { currentTiers: deps.currentTiers } : {}),
       // A delivery turn (#2482): as the owner, with the tiers its owner holds now.
       send: async (id, owner, text, tiers) => {
         await this.send(id, owner, text, { tiers })

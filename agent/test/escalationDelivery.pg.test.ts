@@ -181,6 +181,22 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     expect(sent).toEqual([])
   })
 
+  it("reads a token owner's tiers through the session manager's own lookup (#3349)", async () => {
+    // The lookup says read and write, though the token row says 'outward': it, not a query
+    // of the delivery's own, decides the turn's tiers.
+    const asked: Owner[] = []
+    const shared = new Escalations({
+      sql: db.sql,
+      durable: () => undefined,
+      send,
+      currentTiers: async (owner) => (asked.push(owner), owner.id === TOKEN ? ['read', 'write'] : undefined),
+    })
+    await park()
+    expect(await shared.deliver()).toBe(1)
+    expect(asked.map((o) => o.id)).toEqual([TOKEN])
+    expect(sent[0]!.tiers).toEqual(['read', 'write'])
+  })
+
   // Spec §4.4: a script that asks the very session that started the run. That session
   // is in its own turn while the call waits, so it could only wait out the whole hop.
   it("a child that is the starter session is not asked: its call goes to the person at once", async () => {

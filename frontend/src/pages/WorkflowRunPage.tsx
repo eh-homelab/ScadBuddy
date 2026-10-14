@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router'
 import { api, ApiError } from '../api/client'
 import type { FlowPending, FlowQueueEntry, FlowQueueStep, FlowRunView, FlowStep } from '../api/types'
@@ -394,12 +394,30 @@ type EscalationInfo = Pick<FlowPending, 'hop' | 'hop_until' | 'reason' | 'propos
   hops: readonly { hop: string; action: string; actor: string }[]
 }
 
+/** Whether `at` has passed, re-rendering when it does (#3350); false for no time. */
+function usePassed(at: string | null | undefined): boolean {
+  const due = at ? Date.parse(at) : Number.NaN
+  const [passed, setPassed] = useState(() => Number.isFinite(due) && due <= Date.now())
+  useEffect(() => {
+    if (!Number.isFinite(due)) return setPassed(false)
+    const left = due - Date.now()
+    setPassed(left <= 0)
+    if (left <= 0) return
+    // A hop lasts minutes; the cap only keeps setTimeout's 32-bit delay from overflowing.
+    const timer = setTimeout(() => setPassed(true), Math.min(left, 2 ** 31 - 1))
+    return () => clearTimeout(timer)
+  }, [due])
+  return passed
+}
+
 /** #2482 — where a call outside the run's grant waits, why, and what happened to it on the way. */
 function Escalation({ entry }: { entry: EscalationInfo }) {
+  // Gone once the hop's time is up (#3350), not left until the next read moves it on.
+  const hopOver = usePassed(entry.hop_until)
   if (!entry.hop && !entry.reason) return null
   return (
     <div className="text-[12px] text-muted-foreground">
-      {entry.hop === 'parent' && entry.hop_until && (
+      {entry.hop === 'parent' && entry.hop_until && !hopOver && (
         <p>
           With the session that started the run until {hopUntilText(entry.hop_until)}; you may decide
           it now.
@@ -417,6 +435,31 @@ function Escalation({ entry }: { entry: EscalationInfo }) {
         </ol>
       )}
     </div>
+  )
+}
+
+/** A proposal's changes, field by field; a line, not an empty table, when it changes nothing (#3350). */
+function ProposedChange({ changes }: { changes: ReturnType<typeof proposalDiff> }) {
+  if (changes.length === 0) return <p className="mb-2 text-[12px] text-muted-foreground">The proposal changes nothing.</p>
+  return (
+    <table aria-label="Proposed change" className="mb-2 w-full text-left text-[12px]">
+      <thead>
+        <tr>
+          <th className="pr-2 font-medium">Field</th>
+          <th className="pr-2 font-medium">As called</th>
+          <th className="font-medium">As proposed</th>
+        </tr>
+      </thead>
+      <tbody>
+        {changes.map((c) => (
+          <tr key={c.path}>
+            <td className="pr-2 font-mono">{c.path}</td>
+            <td className="pr-2 font-mono">{c.was}</td>
+            <td className="font-mono">{c.now}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   )
 }
 
@@ -449,24 +492,7 @@ function Proposal({ runId, callId, reason, busy, act }: ProposalProps) {
         </div>
       ) : (
         <>
-          <table aria-label="Proposed change" className="mb-2 w-full text-left text-[12px]">
-            <thead className="text-muted-foreground">
-              <tr>
-                <th className="pr-2 font-medium">Field</th>
-                <th className="pr-2 font-medium">As called</th>
-                <th className="font-medium">As proposed</th>
-              </tr>
-            </thead>
-            <tbody>
-              {proposalDiff(data.original, data.proposed).map((c) => (
-                <tr key={c.path}>
-                  <td className="pr-2 font-mono">{c.path}</td>
-                  <td className="pr-2 font-mono">{c.was}</td>
-                  <td className="font-mono">{c.now}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <ProposedChange changes={proposalDiff(data.original, data.proposed)} />
           <Button
             size="sm"
             disabled={busy}

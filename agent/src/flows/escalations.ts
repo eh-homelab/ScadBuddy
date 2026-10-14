@@ -1,6 +1,7 @@
 import type { Sql, TransactionSql } from 'postgres'
 import { ownerOf } from '../approvals/mcp.js'
-import { type Principal, type Tier, TIERS, tiersUpTo } from '../auth/principal.js'
+import { type Principal, type Tier, TIERS } from '../auth/principal.js'
+import { liveTokenTiers, PostgresTokenStore } from '../auth/tokens.js'
 import type { RespondArgs, RespondOutcome } from '../gate/durable.js'
 import { parseRequestId } from '../gate/ids.js'
 import { isUuid } from '../harness/stateDirs.js'
@@ -48,6 +49,13 @@ export type EscalationDeps = {
    * later tick, so a turn that did start late may see it twice; it is never lost.
    */
   claimHoldMs?: number | undefined
+  /**
+   * A token owner's live tiers (`liveTokenTiers`, #3349): the one lookup the session
+   * manager and the tool activities use too, so the three cannot drift apart. Undefined
+   * for an owner that is no token; empty for a revoked or expired one. Defaults to the
+   * token store over `sql`.
+   */
+  currentTiers?: ((owner: Owner) => Promise<readonly Tier[] | undefined>) | undefined
 }
 
 export const CLAIM_HOLD_MS = 30_000
@@ -141,10 +149,12 @@ function step(action: string, actor: string, reason?: string): Record<string, st
 export class Escalations {
   readonly #deps: EscalationDeps
   readonly #queue: FlowQueue
+  readonly #currentTiers: (owner: Owner) => Promise<readonly Tier[] | undefined>
 
   constructor(deps: EscalationDeps) {
     this.#deps = deps
     this.#queue = new FlowQueue(deps.sql)
+    this.#currentTiers = deps.currentTiers ?? liveTokenTiers(new PostgresTokenStore(deps.sql))
   }
 
   /**
@@ -250,7 +260,9 @@ export class Escalations {
     await this.#prune()
     const bySession = new Map<string, { principal: string; call: Waiting }[]>()
     const add = (session: string, principal: string, call: Waiting) => {
-      bySession.set(session, [...(bySession.get(session) ?? []), { principal, call }])
+      const list = bySession.get(session)
+      if (list) list.push({ principal, call })
+      else bySession.set(session, [{ principal, call }])
     }
     const stepsOf = new Map<string, Awaited<ReturnType<FlowQueue['steps']>>>()
     const pastGrace = new Set<string>()
@@ -461,12 +473,11 @@ export class Escalations {
     const owner: Owner = { kind: row.owner_kind, id: row.owner_id, label: row.owner_label }
     const principal = principalHeader(row.owner_id)
     if (owner.kind === 'browser') return { owner, principal, tiers: [...TIERS] }
-    // A token's live tier, as the backend's `parent_tiers` reads it; any other owner `read`.
-    if (owner.kind !== 'bearer' || !owner.id.startsWith('token:')) return { owner, principal, tiers: ['read'] }
-    const [token] = await this.#deps.sql<{ tier: Tier }[]>`
-      SELECT tier FROM ai_mcp_tokens WHERE id::text = ${owner.id.slice('token:'.length)}
-        AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())`
-    return token ? { owner, principal, tiers: tiersUpTo(token.tier) } : undefined
+    // A token's live tiers, as the backend's `parent_tiers` reads them; any other owner
+    // `read`. A revoked or expired token holds none: no parent.
+    const tiers = await this.#currentTiers(owner)
+    if (tiers === undefined) return { owner, principal, tiers: ['read'] }
+    return tiers.length ? { owner, principal, tiers: [...tiers] } : undefined
   }
 
   /**
