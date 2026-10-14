@@ -200,10 +200,15 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
    * #2283 — when the stage on screen began, and the clock it is read against: a stage
    * that runs long shows how long, so a slow save does not read as nothing happening.
    */
-  const stage = useRef<{ message: string | null; at: number }>({ message: null, at: 0 })
+  const stage = useRef<string | null>(null)
+  // In state, next to `progress`, so what render reads of it is state, not a ref.
+  const [stageAt, setStageAt] = useState(0)
   const [clock, setClock] = useState(0)
   const say = (message: string | null) => {
-    if (stage.current.message !== message) stage.current = { message, at: Date.now() }
+    if (stage.current !== message) {
+      stage.current = message
+      setStageAt(Date.now())
+    }
     setProgress(message)
   }
   const [asking, setAsking] = useState(false)
@@ -310,7 +315,7 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
     const tick = setInterval(() => setClock(Date.now()), 1000)
     return () => clearInterval(tick)
   }, [busy])
-  const elapsed = busy && progress ? Math.max(0, Math.floor((clock - stage.current.at) / 1000)) : 0
+  const elapsed = busy && progress ? Math.max(0, Math.floor((clock - stageAt) / 1000)) : 0
 
   /** Read again every file or output whose read failed, as opening the dialog again does. */
   function readAgain() {
@@ -394,6 +399,9 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
           }
           // Keyed by what the user chose, not by the generated name: that changes once the
           // model list answers, and a "Try again" must keep its save key (#2749 review).
+          // The generated name is left out of the key, so "Try again" keeps it. The
+          // server joins a key to the save it already started (`run_operation`), so if
+          // the first attempt did start, its name, generated or blank, is the one kept.
           const signature = JSON.stringify({ ...body, name: name.trim() || null })
           if (attempt.current?.body !== signature) attempt.current = { key: newRequestId(), body: signature }
           const current = attempt.current

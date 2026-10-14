@@ -253,6 +253,8 @@ export function LibraryPage() {
   const files = listing?.files ?? []
   const hidden = listing?.hidden ?? 0
   // #2671 — a sliced file prints, but has no objects to arrange.
+  // #2286 — what Arrange takes. The note below names it ("unsliced 3MF and STL files"):
+  // a change to this filter, or to what the server calls `printable`, changes that too.
   const printable = picked.filter((file) => file.printable && !file.sliced)
   const printing = printParam === null ? null : (files.find((file) => file.id === printParam) ?? null)
   const folderId = wanted?.fileId !== undefined ? (listing?.folder_id ?? null) : (wanted?.folderId ?? null)
