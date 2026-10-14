@@ -147,7 +147,10 @@ def bambuddy_worker(
     replays every open run: a change to a workflow's commands goes behind ``patched``,
     and a new workflow type or activity name is only safe once no old build polls. The
     ``Recreate`` rollout is the usual one and gives that: the old pod stops before the
-    new one starts, and the runs wait for it rather than land on a build without them."""
+    new one starts, and the runs wait for it rather than land on a build without them.
+    Rolled instead, an old replica fails an activity it does not register, and that
+    failure counts against its retry policy: an effect that runs once is recorded
+    ``failed`` ("may have been done") without reaching Bambuddy."""
     return Worker(
         client,
         task_queue=task_queue,
@@ -237,20 +240,12 @@ async def current_routing(
     return current.build_id or None, response.conflict_token
 
 
-async def current_build(
-    client: Client, *, namespace: str, deployment_name: str = DEPLOYMENT_NAME
-) -> str | None:
-    """The deployment's current build, or None while it has none."""
-    build, _ = await current_routing(client, namespace=namespace, deployment_name=deployment_name)
-    return build
-
-
 async def is_current(
     client: Client, *, namespace: str, build_id: str, deployment_name: str = DEPLOYMENT_NAME
 ) -> bool:
     """Whether `build_id` is the deployment's current version. Then any worker of this
     build serves the runs pinned to it, so one that stops need not drain (#874)."""
-    current = await current_build(client, namespace=namespace, deployment_name=deployment_name)
+    current, _ = await current_routing(client, namespace=namespace, deployment_name=deployment_name)
     return current == build_id
 
 
@@ -281,7 +276,7 @@ __all__ = [
     "RENDER_TASK_QUEUE_DEFAULT",
     "bambuddy_worker",
     "connect",
-    "current_build",
+    "current_routing",
     "drained",
     "follow_worker",
     "is_current",
