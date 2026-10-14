@@ -658,10 +658,12 @@ need no anchor for their colour (Paint, below). Sources: the compiler
 volumes summing to the one-colour render's).
 
 Finding where it snaps: render, save the output, and run `analyze_geometry` on it.
-`weak_joints` lists each level section much narrower than the print 2 mm below or above it
-with at least 1 cm³ above (a carrot's neck), narrowest first. For a mesh model each one's
-`suggestion` is a `split_at_plane` edit naming its object, with a `joint` sized to the
-section: send it with `edit_scene`, with a `lay_flat` of the new half (the next object id)
+`weak_joints` lists each level section under a quarter of the wider of the sections 2 mm
+below and above it, with at least 1 cm³ above (a carrot's neck), narrowest first. Each one's
+`suggestion` is a `split_at_plane` edit with a `joint` sized to the section. Its `object`
+is named only for an un-arranged mesh-model render whose output records a revision;
+otherwise (arranged, or model.scad hand-edited) name the object yourself, from
+`get_scene`. Send it with `edit_scene`, with a `lay_flat` of the new half (the next object id)
 in the same call, render, save, and run `analyze_geometry` again; the neck is gone from the
 list. A `joint` of `null` means no peg fits there with two walls round its socket: cut
 where the section is wider, or split without a joint. Sources:
@@ -669,12 +671,14 @@ where the section is wider, or split without a joint. Sources:
 `backend/scadbuddy/render/geometry.py` (`weak_joints`);
 `backend/scadbuddy/meshmodel/locate.py`.
 
-Paint: a part painted in Bambu Studio keeps its codes beside its mesh, and every render
-carries them onto the rendered part: a triangle the render left as it was keeps its
+Paint: a part painted in Bambu Studio keeps its codes beside its mesh, and a model's
+one-plate renders carry them onto the rendered part: a triangle the render left as it was keeps its
 painting exactly, and a new face (a cut, a socket, an `add` carved out of it) takes the
 colour of the painted triangle it lies on when that triangle is one colour, otherwise the
 part's own. A mirrored object (a negative scale) keeps only whole-triangle colours, and
-`get_scene`'s notes say so. A render made before this was released, at the same revision
+`get_scene`'s notes say so. Multi-plate renders are not painted, and neither is a render
+of a hand-edited `model.scad` or with an unreadable paint file (each says so in the render's
+warnings). A render made before this was released, at the same revision
 and parameters, is reused as it was, without paint: any edit renders it afresh. Sources:
 `docs/superpowers/specs/2026-10-11-mesh-models-design.md` §7;
 `backend/scadbuddy/meshmodel/paint.py`; measured on a MakerWorld carrot in

@@ -1040,6 +1040,8 @@ describe('analyze_geometry', () => {
     const t = tool('analyze_geometry')
     expect(t.description).toContain('weak_joints')
     expect(t.description).toContain('split_at_plane')
+    expect(t.description).toContain('un-arranged')
+    expect(t.description).toContain('a quarter of the wider')
   })
 
   it('is a read tool returning the backend analysis', async () => {
