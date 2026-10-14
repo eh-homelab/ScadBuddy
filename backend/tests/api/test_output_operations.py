@@ -114,7 +114,11 @@ def test_only_a_delete_of_the_inbox_copies_waits_on_the_print_worker(client: Tes
 
     assert _prelude(ops, kind, request) is None
     assert _prelude(ops, kind, {**request, "delete_inbox_copies": True}) == PreludeStep(
-        kind="output_inbox_delete", task_queue=ops.queues["bambuddy"], run_attempts=3
+        kind="output_inbox_delete",
+        task_queue=ops.queues["bambuddy"],
+        run_attempts=3,
+        # Its own "where", for a prelude that fails after its effect may have happened.
+        where=ops.kinds["output_inbox_delete"].where,
     )
     assert ops.kinds["output_inbox_delete"].queue == "bambuddy"
 
