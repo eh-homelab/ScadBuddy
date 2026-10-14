@@ -2,7 +2,7 @@ import type { Sql, TransactionSql } from 'postgres'
 import { ownerOf } from '../approvals/mcp.js'
 import { type Principal, type Tier, TIERS } from '../auth/principal.js'
 import { liveTokenTiers, PostgresTokenStore } from '../auth/tokens.js'
-import type { RespondArgs, RespondOutcome } from '../gate/durable.js'
+import { DurableUnavailable, type RespondArgs, type RespondOutcome } from '../gate/durable.js'
 import { parseRequestId } from '../gate/ids.js'
 import { isUuid } from '../harness/stateDirs.js'
 import { wrapUntrustedText } from '../safety/untrusted.js'
@@ -110,6 +110,8 @@ export class EscalationError extends Error {
 
 const NOT_PARENT = 'only the session that started the run may answer for it here, while it still belongs to whoever started the run'
 const WITH_PERSON = 'that call is no longer with the starting session: the person decides it now'
+// A parent's deny holds the entry (`hop_until = 'infinity'`) until it lands (review #3018).
+const DENY_IN_FLIGHT = 'a deny for that call is already in flight: wait for its outcome'
 /**
  * How long a deny's claim may hold its entry before the sweep hands it to the person
  * (review #3018): far past the deny's own Update (`DurableGate`'s 5 s), so only a claim
@@ -121,6 +123,7 @@ type Entry = {
   session_id: string
   hop: 'parent' | 'person' | null
   due: boolean
+  claimed: boolean
   parent_session: string | null
   parent_principal: string | null
 }
@@ -177,6 +180,9 @@ export class Escalations {
     }
     await this.#authorise(caller, entry.parent_session, entry.parent_principal)
     if (entry.hop !== 'parent' || entry.due) throw new EscalationError(409, WITH_PERSON)
+    // Still the parent's, but a deny holds it: neither a pass up nor a second deny is the
+    // person's to be told about (#3518).
+    if (entry.claimed) throw new EscalationError(409, DENY_IN_FLIGHT)
     if (action === 'narrow') {
       throw new EscalationError(422, "an agent tool's call is never narrowed: deny it, or pass it up to the person")
     }
@@ -188,7 +194,7 @@ export class Escalations {
         WHERE request_id = ${requestId} AND hop = 'parent' AND parent_session = ${caller.session}::uuid
           AND hop_until > now() AND hop_until <> 'infinity'
         RETURNING request_id`
-      if (moved.length === 0) throw new EscalationError(409, WITH_PERSON)
+      if (moved.length === 0) throw new EscalationError(409, await this.#lost(requestId))
       return { request_id: requestId, outcome: 'passed_up' }
     }
     const durable = this.#deps.durable()
@@ -206,7 +212,7 @@ export class Escalations {
       WHERE p.request_id = old.request_id AND p.hop = 'parent' AND p.parent_session = ${caller.session}::uuid
         AND p.hop_until > now() AND p.hop_until <> 'infinity'
       RETURNING old.hop_until`
-    if (!claim) throw new EscalationError(409, WITH_PERSON)
+    if (!claim) throw new EscalationError(409, await this.#lost(requestId))
     // Safe on any outcome, an entry the workflow already resolved included: it writes
     // only a row still holding this claim (`hop_until = 'infinity'`), so keep that in
     // the WHERE (review #3018).
@@ -224,7 +230,11 @@ export class Escalations {
         role: 'parent',
       })
     } catch (err) {
-      await release()
+      // Released only when the Update surely did not land: a refusal, or no workflow. One
+      // that timed out may have been accepted, and putting a passed deadline back would let
+      // the sweep hand the entry to the person while the deny lands (#2861). That claim is
+      // left for `CLAIM_LEASE_S` to end (#3518).
+      if (!(err instanceof DurableUnavailable)) await release()
       throw err
     }
     if (out.outcome !== 'denied') await release()
@@ -288,7 +298,8 @@ export class Escalations {
       FROM (
         SELECT *, row_number() OVER (PARTITION BY parent_session ORDER BY created_at) AS nth
         FROM ai_pending_input
-        WHERE hop = 'parent' AND hop_until > now() AND delivered_at IS NULL
+        -- A claimed entry (a deny in flight) is not asked about again (#3517).
+        WHERE hop = 'parent' AND hop_until > now() AND hop_until <> 'infinity' AND delivered_at IS NULL
       ) waiting
       ORDER BY nth, created_at LIMIT 200`) {
       const steps = stepsOf.get(r.flow_run_id) ?? (await this.#queue.steps(r.flow_run_id))
@@ -526,7 +537,7 @@ export class Escalations {
         UPDATE ai_pending_input
         SET hop = 'person', hop_until = NULL,
             hops = hops || ${this.#deps.sql.json([step('pass_up', 'system', 'the starting session cannot be asked')])}
-        WHERE request_id = ANY(${child}) AND hop = 'parent'`
+        WHERE request_id = ANY(${child}) AND hop = 'parent' AND hop_until <> 'infinity'`
     }
     for (const c of calls.filter((c) => c.child_session === undefined)) {
       await this.#deps.sql`
@@ -556,9 +567,15 @@ export class Escalations {
 
   async #entry(requestId: string): Promise<Entry | undefined> {
     const [row] = await this.#deps.sql<Entry[]>`
-      SELECT session_id::text, hop, coalesce(hop_until <= now(), false) AS due, parent_session::text, parent_principal
+      SELECT session_id::text, hop, coalesce(hop_until <= now(), false) AS due, coalesce(hop_until = 'infinity', false) AS claimed,
+             parent_session::text, parent_principal
       FROM ai_pending_input WHERE request_id = ${requestId} AND flow_run_id IS NOT NULL`
     return row
+  }
+
+  /** Why a pass up or a deny found the entry no longer the parent's to answer. */
+  async #lost(requestId: string): Promise<string> {
+    return (await this.#entry(requestId))?.claimed ? DENY_IN_FLIGHT : WITH_PERSON
   }
 
   /** The caller's session is the parent, still owned by the run's starter, and the caller is its owner. */

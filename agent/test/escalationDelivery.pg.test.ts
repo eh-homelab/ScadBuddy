@@ -143,6 +143,18 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     expect(sent).toHaveLength(1)
   })
 
+  it('never asks about an entry a deny holds, and the tick goes on with the rest (#3517)', async () => {
+    const claimed = await park()
+    const waiting = await park()
+    // A parent's deny in flight: `infinity` until it lands, which postgres.js reads as an
+    // Invalid Date, so a tick that selected it threw on toISOString and sent nothing.
+    await db.sql`UPDATE ai_pending_input SET hop_until = 'infinity', hop_claimed_at = now() WHERE request_id = ${claimed}`
+    expect(await escalations.deliver()).toBe(1)
+    const data = JSON.parse(sent[0]!.text.slice(sent[0]!.text.indexOf('{'))) as { untrusted_data: { content: { request_id: string }[] } }
+    expect(data.untrusted_data.content.map((c) => c.request_id)).toEqual([waiting])
+    expect(await hop(claimed)).toEqual({ hop: 'parent', delivered: false })
+  })
+
   it('a busy starter session gets them on a later tick', async () => {
     const id = await park()
     refuse = new SessionError('busy', 'a turn is running')
