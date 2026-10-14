@@ -50,9 +50,10 @@ async function getJob(ctx: ToolContext, id: string) {
 
 /**
  * When a render_model or arrange call's own waits end (`waitsMs`: ACCEPTING_MS +
- * renderWaitMs), as one deadline taken just before the slot wait, after the call's own
- * checks (#2846). The slot wait and the job's wait (`renderWaitMs` at most) both spend
- * from it, so a slot granted late leaves the job less time rather than running the call past `TOOL_DEADLINE_MS`, where
+ * renderWaitMs), as one deadline taken just before the slot wait (in render_model,
+ * after its parameter checks; arrange takes it first thing) (#2846). The slot wait and
+ * the job's wait (`renderWaitMs` at most) both spend from it, so a slot granted late
+ * leaves the job less time rather than running the call past `TOOL_DEADLINE_MS`, where
  * it would be answered as "may have taken effect". Only the submit's own accepting wait
  * (ACCEPTING_MS at most, under `TOOL_DEADLINE_MS`) can still run past it.
  */
