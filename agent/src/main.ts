@@ -11,6 +11,7 @@ import { mcpAuthSettings } from './auth/authenticate.js'
 import { OidcProvider, SettingsOidcConfigRepo } from './auth/oidc.js'
 import { approvalGrantCheck, FailClosedTokenStore, liveTokenTiers, PostgresTokenStore } from './auth/tokens.js'
 import { loadConfig } from './config.js'
+import { BrowserOrigins } from './browser/store.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
 import { CredentialPool } from './harness/fallback.js'
 import { nestedQueries } from './builtins/nested.js'
@@ -490,6 +491,8 @@ const turnToolDeps = temporal
       servers: turnServers({
         ...(durableRemotePlugins ? { remotePlugins: durableRemotePlugins } : {}),
         ...(settings ? { settings } : {}),
+        // The headless browser's lists (#982), as a classic turn's.
+        browserOrigins: new BrowserOrigins(temporal.sql, settings),
         credentialSecrets: durableCredentialSecrets,
         // This pod's own disk, as a classic turn's: the calls are pinned here (hostQueue).
         httpRequest: { saveRoot: path.join(paths.stateDir, DURABLE_TURNS_DIR), sql: temporal.sql, audit, ...(workspace ? { files: workspace } : {}) },
@@ -698,6 +701,8 @@ const app = createApp({
   origins: originPolicy(config.publicUrl, config.trustedProxies, config.allowedOrigins),
   ...(sessions ? { approvals: sessions.approvals, sessions } : {}),
   ...(attachments ? { attachments } : {}),
+  // The headless browser's lists and approvals (#982, routes/browserOrigins.ts).
+  ...(database ? { browserOrigins: new BrowserOrigins(database.sql, settings) } : {}),
   // The panel's Files (#2329, routes/sessionFiles.ts).
   ...(workspace ? { workspace } : {}),
   // The panel's background tasks (routes/backgroundTasks.ts).

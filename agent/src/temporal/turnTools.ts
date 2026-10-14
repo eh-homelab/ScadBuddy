@@ -7,7 +7,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import type { AuditLog } from '../audit/log.js'
 import type { Tier } from '../auth/principal.js'
 import { durableRequestId, flowRequestId } from '../gate/ids.js'
-import type { RiskTier } from '../harness/permissions.js'
+import { type GuardVerdict, judgeInput, type RiskTier, tierAfter } from '../harness/permissions.js'
 import { harnessToolName } from '../plugins/registry.js'
 import { redact } from '../secrets.js'
 import type { Owner } from '../sessions/protocol.js'
@@ -84,6 +84,14 @@ export type TurnServer = {
   connect(): Promise<Client>
   /** The tier of a call by its harness name (`mcp__<server>__<tool>`) and input, as the permission seam resolves it. */
   tierOf(harnessName: string, input: unknown): RiskTier
+  /**
+   * Judges a call by its input before its tier, as a classic turn's input guard does
+   * (harness/permissions.ts; the headless browser's lists, #982): `deny` refuses it,
+   * `outward` or `allow` move its tier (`tierAfter`).
+   */
+  guard?(harnessName: string, input: unknown): Promise<GuardVerdict | undefined>
+  /** The text the model reads instead of a call's result (#982: a page the lists do not let it read), or undefined. */
+  screen?(harnessName: string, input: unknown, text: string): Promise<string | undefined>
   /**
    * Whether some call of the tool could be outward, whatever its input. Listed as
    * `may_park`: only a tool listed so is ever asked about, so a tool whose tier depends
@@ -460,6 +468,15 @@ async function turnCaller(deps: TurnToolsDeps, name: string, toolUseId: string):
   }
 }
 
+/** `server.screen`'s replacement text; a screen that fails withholds the result (fail closed). */
+async function screened(server: TurnServer, harnessName: string, input: unknown, text: string): Promise<string | undefined> {
+  try {
+    return await server.screen!(harnessName, input, text)
+  } catch (err) {
+    return `ScadBuddy withheld this result: the page it came from could not be checked (${(err as Error).message}).`
+  }
+}
+
 function inputObject(input: unknown): Record<string, unknown> {
   return typeof input === 'object' && input !== null && !Array.isArray(input) ? (input as Record<string, unknown>) : {}
 }
@@ -533,7 +550,11 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
         const { server, harnessName } = await resolve(deps, caller.context, set, tool, signal, 'tier')
         // A flow takes its call's queue from here, since it lists nothing (turn_tools).
         const queue = pinned(deps, server) ? { task_queue: deps.hostQueue! } : {}
-        return { tier: server.tierOf(harnessName, input), ...queue }
+        const verdict = server.guard ? await judgeInput(server.guard.bind(server), harnessName, input) : undefined
+        // A refused call is not parked, since no approval could run it: its call refuses
+        // it with the reason (turnToolActivity), so it is answered as not outward here.
+        if (verdict && 'deny' in verdict) return { tier: 'write', ...queue }
+        return { tier: tierAfter(server.tierOf(harnessName, input), verdict), ...queue }
       })
     },
   }
@@ -561,7 +582,8 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
     return withServers(deps, { ...caller.context, signal }, async (set) => {
       const scrub = (text: string) => redact(text, set.secrets)
       const { server, tool, harnessName, client: keptClient } = await resolve(deps, caller.context, set, name, signal, 'call')
-      const tier = server.tierOf(harnessName, input)
+      const verdict = server.guard ? await judgeInput(server.guard.bind(server), harnessName, input) : undefined
+      const tier = tierAfter(server.tierOf(harnessName, input), verdict)
       const startedAt = new Date()
       const record = (outcome: 'ok' | 'error' | 'refused', detail?: string) =>
         deps.audit?.record({
@@ -585,6 +607,7 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
         await record('refused', message)
         throw ApplicationFailure.nonRetryable(message, type)
       }
+      if (verdict && 'deny' in verdict) await refuse(verdict.deny, TOOL_ERROR)
       if (!principal.tiers.includes(tier)) {
         const who = caller.context.flow ? "this flow run's starter" : "this session's turn"
         await refuse(`${name} needs the "${tier}" tier, which ${who} does not hold`, TOOL_ERROR)
@@ -621,6 +644,15 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
       // The images go to the session's blobs, or a flow's to its run's (#2578), never into
       // the payload; their names and the text go through the same scrub.
       const content = (result.content ?? []) as { type: string; text?: string; data?: unknown; mimeType?: unknown }[]
+      // A page the lists do not let the model read is withheld, its images with it, so
+      // none is kept (#982).
+      const raw = content.map((b) => (typeof b.text === 'string' ? b.text : '')).join('\n')
+      const withheld = server.screen ? await screened(server, harnessName, input, raw) : undefined
+      if (withheld !== undefined) {
+        await record(result.isError ? 'error' : 'ok')
+        if (result.isError) throw ApplicationFailure.nonRetryable(withheld, TOOL_ERROR)
+        return withheld
+      }
       const flow = caller.context.flow
       // An errored call keeps no image: nothing would point at it, yet a flow's would count
       // toward its run's FLOW_IMAGES_MAX.

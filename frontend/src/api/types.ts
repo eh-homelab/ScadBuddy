@@ -359,6 +359,27 @@ export interface HttpRequestSetting {
   enabled: boolean
 }
 
+/** #982 — an origin the user let one chat's headless browser open (`once`: one navigation, `session`: the chat). */
+export interface ApprovedBrowserOrigin {
+  session_id: string
+  title: string
+  origin: string
+  scope: 'once' | 'session'
+  approved_at: string
+}
+
+/**
+ * #982 — the headless browser's lists (`GET/PUT /api/v1/ai/settings/browser-origins`,
+ * agent `src/routes/browserOrigins.ts`): rules are an origin, a host, `*.host` or an
+ * address range; deny wins over allow, and an origin on neither list asks the user.
+ */
+export interface BrowserOriginsSetting {
+  allow: string[]
+  deny: string[]
+  defaults: { allow: string[]; deny: string[] }
+  approved: ApprovedBrowserOrigin[]
+}
+
 /**
  * #1911 — the agent service's switch for the assistant's `get_printer_camera` tool
  * (`GET/PUT /api/v1/ai/settings/printer-camera`, agent `src/routes/printerCamera.ts`).

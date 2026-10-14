@@ -6,6 +6,7 @@ import { ApplicationFailure } from '@temporalio/common'
 import { MockActivityEnvironment } from '@temporalio/testing'
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
+import { browserGuard } from '../src/browser/guard.js'
 import type { PluginsForRun } from '../src/plugins/forwarder.js'
 import type { AuditEntry } from '../src/audit/log.js'
 import type { Tier } from '../src/auth/principal.js'
@@ -505,6 +506,101 @@ describe('turn tools in a durable session', () => {
       expect(gone.message).toContain('not offered')
       expect(h.calls).toEqual([])
     })
+  })
+})
+
+describe("the headless browser's lists in a durable turn (#982)", () => {
+  const LISTS = { allow: ['makerworld.com'], deny: ['evil.example'] }
+  const page = (url: string) => `### Page\n- Page URL: ${url}\n\nThe text of ${url}`
+
+  function browserHarness() {
+    const calls: string[] = []
+    const approvals = new Map<string, 'once' | 'session'>()
+    const redirects: Record<string, string> = { 'https://makerworld.com/go': 'https://elsewhere.example/' }
+    const guard = browserGuard({
+      store: {
+        lists: async () => LISTS,
+        approved: async () => new Map(approvals),
+        approve: async (_id, origin, scope) => {
+          if (approvals.get(origin) !== 'session') approvals.set(origin, scope)
+          return true
+        },
+      },
+      sessionId: SESSION,
+      plugins: ['playwright'],
+    })
+    const server: TurnServer = {
+      name: 'playwright',
+      connect: () =>
+        connectInProcess(() => {
+          const mcp = new McpServer({ name: 'playwright', version: '1' })
+          mcp.registerTool('browser_navigate', { description: 'navigate', inputSchema: { url: z.string() } }, async ({ url }) => {
+            calls.push(url)
+            return { content: [{ type: 'text', text: page(redirects[url] ?? url) }] }
+          })
+          return mcp
+        }),
+      tierOf: () => 'outward',
+      guard: (name, input) => guard.check(name, input),
+      screen: (name, input, text) => guard.screen(name, input, text),
+    }
+    const deps: TurnToolsDeps = {
+      sessions: { ownerOf: async (id) => (id === SESSION ? (BROWSER as never) : undefined) },
+      servers: async () => ({ servers: [server], problems: [], secrets: [], release: () => {} }),
+      approvals: { approved: async (requestId) => requestId.endsWith(':toolu_approved') },
+    }
+    const activities = turnToolActivities(deps)
+    return {
+      calls,
+      approvals,
+      tier: (url: string) => env(TURN_TOOL_TIER_ACTIVITY).run(activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: 'playwright__browser_navigate', input: { url } }),
+      call: (url: string, id = 'tool-toolu_01') => env('turn:playwright__browser_navigate', id).run(turnToolActivity(deps), { url }),
+    }
+  }
+
+  it('tiers a navigation by its page: allowed runs unasked, unlisted parks, denied is not parked', async () => {
+    const h = browserHarness()
+    expect(await h.tier('https://makerworld.com/en/models/1')).toEqual({ tier: 'write' })
+    expect(await h.tier('https://example.org/')).toEqual({ tier: 'outward' })
+    expect(await h.tier('https://makerworld.com.evil2.example/')).toEqual({ tier: 'outward' })
+    // No approval could run it, so the user is not asked: its call refuses it.
+    expect(await h.tier('https://evil.example/')).toEqual({ tier: 'write' })
+  })
+
+  it('runs an allowed navigation, refuses a denied one even approved, and an unlisted one until approved', async () => {
+    const h = browserHarness()
+    expect(await h.call('https://makerworld.com/en/models/1')).toContain('The text of https://makerworld.com/en/models/1')
+    const denied = await failure(h.call('https://evil.example/', 'tool-toolu_approved'))
+    expect(denied.message).toContain('deny rule "evil.example"')
+    expect((await failure(h.call('https://example.org/a'))).type).toBe('NotApproved')
+    expect(h.calls).toEqual(['https://makerworld.com/en/models/1'])
+    expect(await h.call('https://example.org/a', 'tool-toolu_approved')).toContain('The text of https://example.org/a')
+    expect(h.approvals.get('https://example.org')).toBe('once')
+  })
+
+  it('withholds a page an allowed navigation was redirected to', async () => {
+    const h = browserHarness()
+    const text = await h.call('https://makerworld.com/go')
+    expect(text).toMatch(/withheld this result: the browser is now on https:\/\/elsewhere\.example/)
+    expect(text).not.toContain('The text of')
+  })
+
+  it("lists a remote plugin's browser tools as may_park, and browser_navigate's tier as the page's", async () => {
+    const forwarded: PluginsForRun = {
+      plugins: [{ name: 'playwright', url: 'http://127.0.0.1:9/forward/pw', toolTiers: { browser_snapshot: 'read' }, disabledTools: [] }],
+      problems: [],
+      secrets: [],
+      release: () => {},
+    }
+    const { servers } = await turnServers({
+      remotePlugins: async () => forwarded,
+      browserOrigins: { lists: async () => LISTS, approved: async () => new Map(), approve: async () => true },
+    })({ session: SESSION, owner: BROWSER, signal: new AbortController().signal, listing: true })
+    const pw = servers.find((s) => s.name === 'playwright')!
+    expect(pw.mayPark?.('mcp__playwright__browser_snapshot')).toBe(true)
+    expect(pw.fixedTier?.('mcp__playwright__browser_snapshot')).toBe('read')
+    expect(pw.fixedTier?.('mcp__playwright__browser_navigate')).toBeUndefined()
+    expect(await pw.guard?.('mcp__playwright__browser_navigate', { url: 'https://makerworld.com/' })).toMatchObject({ allow: expect.any(String) })
   })
 })
 

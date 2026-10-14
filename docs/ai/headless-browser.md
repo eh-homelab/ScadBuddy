@@ -46,9 +46,57 @@ Plugins. A starting point:
 | `outward`, or disabled | `browser_evaluate` and `browser_run_code_unsafe` (they run JavaScript), `browser_file_upload`, anything the server adds later |
 
 Navigation and input stay `outward`: they decide where the browser goes and what it
-does there, and nothing in ScadBuddy tells the browser's requests from a person's.
+does there, and nothing in ScadBuddy tells the browser's requests from a person's. A
+navigation's own tier is then decided by the page it opens (next section), so leave
+`browser_navigate` at `outward`.
 Lower them to `write` only when the server **cannot reach ScadBuddy itself** (next
 section). `browser_tabs` both lists and opens tabs, so it cannot be `read` as a whole.
+
+## Where it may go: the allow and deny lists (#982)
+
+Every navigation a session's browser is asked to make is judged by two lists the user
+keeps in **Settings → Assistant → AI headless browser** (`ai_settings` key
+`browser_origins`, routes `agent/src/routes/browserOrigins.ts`, the rules
+`agent/src/browser/origins.ts`). It applies to any remote plugin's `browser_*` call that
+names a `url` (Playwright MCP's `browser_navigate`), in classic and durable turns alike
+(`agent/src/browser/guard.ts`):
+
+| The page's origin | What happens |
+|---|---|
+| matches a **deny** rule | refused, even if someone would approve it; the refusal names the rule. Deny wins over allow. |
+| matches an **allow** rule, or was approved **for this chat** | opens without asking, whatever the tool's tier. |
+| on neither list | an outward call: it parks for the user. The card shows the full URL and offers **Allow once**, **Allow for this chat** (the origin is recorded for the session, `ai_browser_session_origins`) and **Always allow** (the origin is added to the allow list, a settings write the user makes from the card). **Deny** refuses it. |
+
+Rules are one per line: a host (`makerworld.com`, https on its default port only on the
+allow list), `*.example.com` (its subdomains, never itself), an exact origin
+(`http://printer.lan:8080`), or an address range (`10.0.0.0/8`, for IP-literal URLs). A
+host or wildcard on the deny list matches every scheme and port. Hosts match whole
+labels, so `makerworld.com` never lets `makerworld.com.evil.example` through. The
+defaults allow a few model sites and references (MakerWorld, Printables, Thingiverse,
+GitHub, OpenSCAD, the OpenSCAD wikibook) and deny loopback, link-local and cloud
+metadata addresses, and `*.internal`, `*.svc` and `*.cluster.local` names. A LAN address
+is not denied by default: it asks.
+
+**Pages the browser reaches on its own.** A redirect, a link it clicks, or a new tab
+can take the browser somewhere no navigation named. Playwright MCP reports the page it is
+on in each result (`- Page URL: …`); a result whose page is denied, or on neither list
+and not approved in the session, is replaced before the model reads it (and in the
+transcript) by a note saying where the browser is, so the page's content never reaches
+the model. A classic turn does that with a `PostToolUse` hook's `updatedMCPToolOutput`
+(measured on Claude Code 2.1.296, `agent/test/browserOrigins.e2e.test.ts`), a durable
+turn in its call activity (`agent/src/temporal/turnTools.ts`). To read such a page the
+agent navigates to it, which asks. A navigation approved once is recorded as `once`, so
+the pages of that origin stay readable in the chat while the next navigation there asks
+again. A flow run has no chat to remember it in: only the approved call's own result is
+shown.
+
+Settings lists the origins approved in each chat, with **Revoke**. Page content still
+arrives as untrusted data: the forwarder wraps every plugin result in the envelope
+(`agent/src/plugins/forwarder.ts`).
+
+The lists judge names, not addresses: a permitted name that resolves to a private
+address is not caught by them. The boundary for that stays the network the server runs
+in (next section).
 
 ## What the server can reach
 

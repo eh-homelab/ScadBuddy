@@ -13,6 +13,7 @@ import { AiCredentialSection } from '../components/assistant/AiCredentialSection
 import { AiStatusSection } from '../components/assistant/AiStatusSection'
 import { McpAuthSection } from '../components/McpAuthSection'
 import { HttpRequestSetting } from '../components/HttpRequestSetting'
+import { BrowserOriginsSetting } from '../components/BrowserOriginsSetting'
 import { RenderLimitsSetting } from '../components/RenderLimitsSetting'
 import { ImageSettingsSetting } from '../components/ImageSettingsSetting'
 import { MemorySettingsSetting } from '../components/MemorySettingsSetting'
@@ -213,7 +214,7 @@ export function SettingsPage() {
 const ASSISTANT_GROUPS = [
   { id: 'assistant-credentials', title: 'Status & credentials' },
   { id: 'assistant-browser', title: 'This browser' },
-  { id: 'assistant-tools', title: 'HTTP & camera tools' },
+  { id: 'assistant-tools', title: 'HTTP, browser & camera tools' },
   { id: 'assistant-model', title: 'Model & limits' },
   { id: 'assistant-sessions', title: 'Session mode' },
   { id: 'assistant-mcp', title: 'MCP access' },
@@ -1305,6 +1306,8 @@ function SettingsSections() {
             </SubSection>
             <SubSection id="assistant-tools" title={groupTitle('assistant-tools')}>
               <HttpRequestSetting />
+              {/* #982 — where the assistant's headless browser may go; hidden without the agent's database. */}
+              <BrowserOriginsSetting />
               {/* #1911 — the camera tool's switch; hidden without the agent's database, like the switch above. */}
               <PrinterCameraSetting />
             </SubSection>
