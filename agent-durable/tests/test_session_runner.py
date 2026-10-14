@@ -15,7 +15,7 @@ import os
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import pytest
 from claude_agent_sdk import ProcessError, ResultError
@@ -1016,9 +1016,9 @@ async def test_a_denied_call_is_followed_by_why_in_a_classic_turns_words(
 
 
 class _Answers:
-    """make_runner whose segment answers ``out``, whatever it is asked."""
+    """make_runner whose segment answers ``out``, or raises it, whatever it is asked."""
 
-    def __init__(self, out: SegmentOutput) -> None:
+    def __init__(self, out: SegmentOutput | Exception) -> None:
         self.out = out
         self.budgets: list[float] = []
 
@@ -1028,6 +1028,8 @@ class _Answers:
 
         class Answers:
             async def run(self, inp: SegmentInput, attempt: int) -> SegmentOutput:
+                if isinstance(out, Exception):
+                    raise out
                 return out
 
         return Answers()
@@ -1037,15 +1039,18 @@ def _credential() -> Credential:
     return Credential(id="c1", priority=0, kind="gateway", base_url="http://x", secret=TOKEN)
 
 
-async def _segment(out: SegmentOutput, left: float) -> SegmentOutput:
-    # `_on_credentials` reads neither the connector nor the SegmentInput: the runner it
-    # builds is `_Answers`, which answers `out` whatever it is given. Both are None here.
+def _no_database() -> Any:
+    raise AssertionError("_on_credentials connected to the database: _segment has none")
+
+
+async def _segment(out: SegmentOutput | Exception, left: float) -> SegmentOutput:
+    """`_on_credentials` on one credential whose runner (`_Answers`) answers ``out``. It
+    has no database: a path that charges a refused attempt fails here saying so."""
     answers = _Answers(out)
-    runner = ScadBuddyRunner(cast(Any, None), KEK, cwd="/tmp", make_runner=answers)
+    runner = ScadBuddyRunner(_no_database, KEK, cwd="/tmp", make_runner=answers)
     settings = TurnSettings(long_edge=1568, model=None, own_plugin=False)
-    got = await runner._on_credentials(
-        "s", "wf", cast(Any, None), 1, [_credential()], left, {}, settings
-    )
+    inp = SegmentInput(session_id="s", prompt="hi", tools=[])
+    got = await runner._on_credentials("s", "wf", inp, 1, [_credential()], left, {}, settings)
     assert answers.budgets == [left]
     return got
 
@@ -1066,6 +1071,20 @@ async def test_a_segment_that_reached_its_cap_is_charged_at_least_what_was_left(
     higher. Either way the turn ends as the budget's."""
     out = SegmentOutput(session_id="s", is_error=True, error=error, cost_usd=cost)
     got = await _segment(out, left=1.0)
+    assert got.error == BUDGET_EXHAUSTED
+    assert got.cost_usd == pytest.approx(charged)
+
+
+@pytest.mark.parametrize(("cost", "charged"), [(0.0, 1.0), (1.5, 1.5)])
+async def test_a_raised_cap_ends_the_turn_as_the_budgets_too(cost: float, charged: float) -> None:
+    """#3356: a cap the plugin raises rather than returns is the same cap: charged at
+    least what was left, and ended as the budget's, not failed."""
+    err = ResultError(
+        "Claude Code returned an error result: Reached maximum budget ($1.00)",
+        data={"total_cost_usd": cost},
+        exit_code=1,
+    )
+    got = await _segment(err, left=1.0)
     assert got.error == BUDGET_EXHAUSTED
     assert got.cost_usd == pytest.approx(charged)
 
