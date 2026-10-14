@@ -14,7 +14,7 @@ import { runHarness } from '../src/harness/run.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { SessionBlobs } from '../src/sessions/blobs.js'
 import { DurableTurns } from '../src/sessions/durable.js'
-import { type SessionManager, type SessionManagerDeps, SETTING_SESSION_MODE } from '../src/sessions/manager.js'
+import { type SessionManager, type SessionManagerDeps, SETTING_SESSION_MAX_TURNS, SETTING_SESSION_MODE } from '../src/sessions/manager.js'
 import { RUNTIME_DEFAULTS } from '../src/sessions/runtimeSettings.js'
 import { RESTARTED_PROMPT, TurnHost } from '../src/sessions/turnHost.js'
 import { TASK_QUEUE } from '../src/temporal/names.js'
@@ -106,6 +106,8 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
   /** The stub tool's calls, and what a call waits on before it answers. */
   let slowCalls: number
   let slowGate: Promise<void>
+  /** What `session_settings` answers each turn (the runtime settings, §5.2). */
+  let runtimeSettings: typeof RUNTIME_DEFAULTS
 
   beforeAll(async () => {
     env = await localTemporal()
@@ -114,7 +116,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     workflowWorkers = [
       await make(SESSION_QUEUE, {
         workflowBundle: await bundleWorkflowCode({ workflowsPath: WORKFLOWS }),
-        activities: { [SESSION_SETTINGS_ACTIVITY]: async () => RUNTIME_DEFAULTS },
+        activities: { [SESSION_SETTINGS_ACTIVITY]: async () => runtimeSettings },
       }),
       await make(PINNED_TEST_QUEUE, { workflowsPath: PINNED_WORKFLOWS }),
     ]
@@ -133,6 +135,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     await db.sql`INSERT INTO ai_settings (key, value) VALUES (${SESSION_RUNTIME_SETTING}, ${db.sql.json('unified')})`
     slowCalls = 0
     slowGate = Promise.resolve()
+    runtimeSettings = RUNTIME_DEFAULTS
     script = () => ({ text: 'ok' })
   })
   afterEach(async () => {
@@ -156,7 +159,10 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     return { content: [{ type: 'text', text: 'slow done' }] }
   })
 
-  async function replica(name: string, options: { slots?: number; maxEntries?: number; extra?: Partial<SessionManagerDeps> } = {}): Promise<Replica> {
+  async function replica(
+    name: string,
+    options: { slots?: number; maxEntries?: number; extra?: Partial<SessionManagerDeps>; settings?: Record<string, unknown> } = {},
+  ): Promise<Replica> {
     const paths = await tempPaths()
     await ensureStateDirs(paths)
     const pool = connectDatabase(url, { searchPath: schema })
@@ -168,7 +174,8 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
       paths,
       credentials: fixedCredentials({ kind: 'gateway', baseUrl: fake.url, secret: 'gw-affinity-test-token' }),
       settings: {
-        get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : key === SETTING_SESSION_MODE ? 'durable' : undefined) as T),
+        get: <T>(key: string) =>
+          Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : key === SETTING_SESSION_MODE ? 'durable' : options.settings?.[key]) as T),
       },
       mcpServers: () => ({ stub: createSdkMcpServer({ name: 'stub', tools: [slow] }) }),
       tierOf: (n) => (n === 'mcp__stub__slow' ? 'read' : undefined),
@@ -245,13 +252,27 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
   }
 
   const types = async (r: Replica, id: string) => (await r.m.events.read(id, 0, 10_000)).map((e) => e.event.type)
-  const historyTypes = async (id: string) =>
-    (JSON.parse(historyToJSON(await env.client.workflow.getHandle(sessionWorkflowId(id)).fetchHistory())) as { events: { eventType: string; activityTaskTimedOutEventAttributes?: { failure?: { timeoutFailureInfo?: { timeoutType?: string } } } }[] }).events
+  /**
+   * The run that is running the session's turn now: it continues as new only after the turn has
+   * ended, so read right after the send it is the run whose history holds the turn.
+   */
+  const runningRun = async (id: string) => (await env.client.workflow.getHandle(sessionWorkflowId(id)).describe()).runId
+  /**
+   * The workflow has closed the turn (its `turn` query is empty again): `turn.done` follows the
+   * event log, which `session.finish_turn` writes a moment before the workflow takes the next
+   * message, and a send in between is refused `busy`.
+   */
+  const settled = (id: string) =>
+    pollUntil(() => env.client.workflow.getHandle(sessionWorkflowId(id)).query<string | null>('turn'), null)
+  /** One run's history: the turn's run, never whichever run continued as new after it. */
+  const historyTypes = async (id: string, runId: string) =>
+    (JSON.parse(historyToJSON(await env.client.workflow.getHandle(sessionWorkflowId(id), runId).fetchHistory())) as { events: { eventType: string; activityTaskTimedOutEventAttributes?: { failure?: { timeoutFailureInfo?: { timeoutType?: string } } } }[] }).events
 
   it('the first turn acquires and later turns stay on home, on the warm process', async () => {
     const a = await replica('a')
     const { id, turn } = await startOn(a, 'first')
     expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    await settled(id)
     const second = await a.m.send(id, browser, 'second')
     expect(await second.done).toMatchObject({ kind: 'result', subtype: 'success' })
     expect(a.acquired).toBe(1)
@@ -261,14 +282,29 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     expect(conversation(fake.messageCalls().at(-1)!)).toContain('first')
   })
 
+  /** The session's event types and its final status, for a classic turn and a unified one of the same script. */
+  async function bothPaths(a: Replica, prompt: string) {
+    const classic = await a.m.start(browser, { origin: 'chat', prompt, mode: 'classic' })
+    const classicOutcome = await classic.turn!.done
+    const { id, turn } = await startOn(a, prompt)
+    const unifiedOutcome = await turn.done
+    const status = async (sid: string) => (await db.sql<{ status: string }[]>`SELECT status FROM ai_sessions WHERE id = ${sid}`)[0]?.status
+    const errors = async (r: Replica, sid: string) =>
+      (await r.m.events.read(sid, 0, 10_000)).flatMap((e) => (e.event.type === 'error' ? [e.event.code] : []))
+    return {
+      classic: { types: await types(a, classic.session.id), status: await status(classic.session.id), errors: await errors(a, classic.session.id), outcome: classicOutcome },
+      unified: { types: await types(a, id), status: await status(id), errors: await errors(a, id), outcome: unifiedOutcome },
+      id,
+    }
+  }
+
   it('events match a classic turn of the same script', async () => {
     const a = await replica('a')
-    const classic = await a.m.start(browser, { origin: 'chat', prompt: 'make a box', mode: 'classic' })
-    expect(await classic.turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
-    const { id, turn } = await startOn(a, 'make a box')
-    expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
-    expect(await types(a, id)).toEqual(await types(a, classic.session.id))
-    expect(await types(a, id)).toEqual([
+    const { classic, unified, id } = await bothPaths(a, 'make a box')
+    expect(classic.outcome).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(unified.outcome).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(unified.types).toEqual(classic.types)
+    expect(unified.types).toEqual([
       'session.started',
       'session.status',
       'user.turn',
@@ -283,6 +319,70 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
       SELECT turns, cost_usd, status, durable_turn_id FROM ai_sessions WHERE id = ${id}`
     expect(row).toMatchObject({ turns: 1, status: 'idle', durable_turn_id: null })
     expect(row!.cost_usd).toBeGreaterThan(0)
+  })
+
+  it('events match a classic turn that runs out of turns: error_max_turns, and the session stays idle', async () => {
+    // Every reply asks for the tool again: one turn of the session's one is spent, and Claude Code stops.
+    script = () => ({ toolUse: { name: 'mcp__stub__slow', input: { q: 'x' } } })
+    const a = await replica('a', { settings: { [SETTING_SESSION_MAX_TURNS]: 1 } })
+    const { classic, unified } = await bothPaths(a, 'loop')
+    expect(classic.outcome).toMatchObject({ kind: 'result', subtype: 'error_max_turns' })
+    expect(unified.outcome).toMatchObject({ kind: 'result', subtype: 'error_max_turns' })
+    expect(unified.types).toEqual(classic.types)
+    expect(unified.errors).toEqual(classic.errors)
+    expect(classic.errors).toEqual(['error_max_turns'])
+    expect(unified.status).toBe(classic.status)
+    expect(classic.status).toBe('idle')
+  })
+
+  it('events match a classic turn the API refuses: api_error, and the session fails', async () => {
+    script = () => ({ error: { status: 400, type: 'invalid_request_error', message: 'messages: text content blocks must be non-empty' } })
+    const a = await replica('a')
+    const { classic, unified } = await bothPaths(a, 'refuse me')
+    expect(classic.outcome).toMatchObject({ kind: 'failed' })
+    expect(unified.outcome).toMatchObject({ kind: 'failed' })
+    expect(unified.types).toEqual(classic.types)
+    expect(unified.errors).toEqual(classic.errors)
+    expect(classic.errors).toEqual(['api_error'])
+    expect(unified.status).toBe(classic.status)
+    expect(classic.status).toBe('failed')
+  })
+
+  it('a turn past turn_max_seconds is placed once, never moved, and ends idle as classic`s error_max_turns does', async () => {
+    // A model that never answers holds the turn however long its start takes.
+    script = () => ({ hang: true })
+    // The wall clock is what is tested: 5 s, below the route's minimum of 300, set here only.
+    runtimeSettings = { ...RUNTIME_DEFAULTS, turn_max_seconds: 5 }
+    const a = await replica('a')
+    const { id, turn } = await startOn(a, 'take too long')
+    const run = await runningRun(id)
+    expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    const history = await historyTypes(id, run)
+    const timeouts = history.filter((e) => e.eventType === 'EVENT_TYPE_ACTIVITY_TASK_TIMED_OUT')
+    expect(timeouts.map((e) => e.activityTaskTimedOutEventAttributes?.failure?.timeoutFailureInfo?.timeoutType)).toEqual(['TIMEOUT_TYPE_START_TO_CLOSE'])
+    // Placed once: one acquire, one session_turn, one tool call.
+    expect(a.acquired).toBe(1)
+    const scheduled = history.filter(
+      (e) => e.eventType === 'EVENT_TYPE_ACTIVITY_TASK_SCHEDULED' && (e as { activityTaskScheduledEventAttributes?: { activityType?: { name?: string } } }).activityTaskScheduledEventAttributes?.activityType?.name === 'session_turn',
+    )
+    expect(scheduled).toHaveLength(1)
+    // Its message reached the model at most once: never sent again on another placement.
+    expect(fake.messageCalls().length).toBeLessThanOrEqual(1)
+    const tail = (await types(a, id)).slice(-3)
+    const errors = (await a.m.events.read(id, 0, 10_000)).flatMap((e) => (e.event.type === 'error' ? [e.event.code] : []))
+    expect(errors).toEqual(['turn_max_seconds'])
+    const [row] = await db.sql<{ status: string }[]>`SELECT status FROM ai_sessions WHERE id = ${id}`
+    // As classic's turn that ran out (error_max_turns): the result, the error, and idle.
+    script = () => ({ toolUse: { name: 'mcp__stub__slow', input: { q: 'x' } } })
+    slowGate = Promise.resolve()
+    const c = await replica('c', { settings: { [SETTING_SESSION_MAX_TURNS]: 1 } })
+    const classic = await c.m.start(browser, { origin: 'chat', prompt: 'loop', mode: 'classic' })
+    await classic.turn!.done
+    expect(tail).toEqual((await types(c, classic.session.id)).slice(-3))
+    expect(tail).toEqual(['session.result', 'error', 'session.status'])
+    const [classicRow] = await db.sql<{ status: string }[]>`SELECT status FROM ai_sessions WHERE id = ${classic.session.id}`
+    expect(row?.status).toBe(classicRow?.status)
+    expect(row?.status).toBe('idle')
   })
 
   it('release_worker frees the slot on end', async () => {
@@ -307,12 +407,14 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     replicas.splice(replicas.indexOf(a), 1)
     expect(a.m.warm.size()).toBe(0)
     const b = await replica('b')
+    await settled(id)
     const began = Date.now()
     const second = await b.m.send(id, browser, 'second')
+    const run = await runningRun(id)
     expect(await second.done).toMatchObject({ kind: 'result', subtype: 'success' })
     // The first try waited its 5 s on A's queue, then acquire ran again, on B.
     expect(Date.now() - began).toBeGreaterThanOrEqual(5_000)
-    const timeouts = (await historyTypes(id)).filter((e) => e.eventType === 'EVENT_TYPE_ACTIVITY_TASK_TIMED_OUT')
+    const timeouts = (await historyTypes(id, run)).filter((e) => e.eventType === 'EVENT_TYPE_ACTIVITY_TASK_TIMED_OUT')
     expect(timeouts.map((e) => e.activityTaskTimedOutEventAttributes?.failure?.timeoutFailureInfo?.timeoutType)).toEqual(['TIMEOUT_TYPE_SCHEDULE_TO_START'])
     expect(a.acquired + b.acquired).toBe(2)
     expect(b.acquired).toBe(1)
@@ -329,13 +431,14 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     script = (r) => (conversation(r).includes('tool_use') ? { text: 'carried on' } : { toolUse: { name: 'mcp__stub__slow', input: { q: 'x' } } })
     const a = await replica('a')
     const { id, turn } = await startOn(a, 'do the slow thing')
+    const run = await runningRun(id)
     await pollUntil(() => slowCalls, 1)
     // A stops answering: no more heartbeats, and no more acquires there.
     a.frozen = true
     await a.tools.stop()
     const b = await replica('b')
     expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
-    const timeouts = (await historyTypes(id)).filter((e) => e.eventType === 'EVENT_TYPE_ACTIVITY_TASK_TIMED_OUT')
+    const timeouts = (await historyTypes(id, run)).filter((e) => e.eventType === 'EVENT_TYPE_ACTIVITY_TASK_TIMED_OUT')
     expect(timeouts.map((e) => e.activityTaskTimedOutEventAttributes?.failure?.timeoutFailureInfo?.timeoutType)).toEqual(['TIMEOUT_TYPE_HEARTBEAT'])
     expect(b.acquired).toBe(1)
     // B resumed the transcript with the restart message, and never ran the call in flight again.

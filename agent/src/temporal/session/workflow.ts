@@ -33,6 +33,7 @@ import {
   type SessionTurnInput,
   type SessionTurnResult,
   type TurnOutcome,
+  TURN_MAX_SECONDS,
   type TurnStart,
 } from './models.js'
 import {
@@ -94,10 +95,18 @@ const acquire = proxyActivities<Activities>({
   retry: { initialInterval: '1s', maximumInterval: '10s', maximumAttempts: 10 },
 })
 
+/** Whether the turn ran past `turn_max_seconds` on its home. */
+function overTime(err: unknown): boolean {
+  const cause = err instanceof ActivityFailure ? err.cause : err
+  return cause instanceof TimeoutFailure && cause.timeoutType === 'START_TO_CLOSE'
+}
+
 /** A failure that says the turn's worker is gone or cannot take it: place the turn elsewhere (§5.2). */
 export function movesWorker(err: unknown): boolean {
   const cause = err instanceof ActivityFailure ? err.cause : err
-  if (cause instanceof TimeoutFailure) return true
+  // A home that never started the turn, or stopped answering in it. A turn past its
+  // `turn_max_seconds` (StartToClose) is over, not lost: placing it again could triple its spend.
+  if (cause instanceof TimeoutFailure) return cause.timeoutType === 'SCHEDULE_TO_START' || cause.timeoutType === 'HEARTBEAT'
   return cause instanceof ApplicationFailure && (cause.type === SHUTTING_DOWN_FAILURE || cause.type === NO_CAPACITY)
 }
 
@@ -118,6 +127,9 @@ export function mergeRestarted(continuation: Continuation | undefined, err: unkn
   if (continuation?.kind === 'restarted' || pushedBefore(err)) return { kind: 'restarted' }
   return continuation
 }
+
+/** How a turn ended, as `session.finish_turn` writes it. */
+type TurnEnd = { outcome: TurnOutcome; message?: string; code?: string }
 
 const busy = (): ApplicationFailure => ApplicationFailure.nonRetryable('the session is running a turn', 'busy')
 
@@ -224,7 +236,7 @@ export async function AgentSession(start: SessionStart): Promise<void> {
     home = undefined
   }
 
-  async function runTurn(current: TurnStart, continuation: Continuation | undefined): Promise<{ outcome: TurnOutcome; message?: string }> {
+  async function runTurn(current: TurnStart, continuation: Continuation | undefined): Promise<TurnEnd> {
     // Taken first: a Stop that lands while the settings are read ends the turn before it runs,
     // and its message is spent with it, never run as the next turn (STOPPED_BEFORE_RUN).
     const sent = message
@@ -238,17 +250,22 @@ export async function AgentSession(start: SessionStart): Promise<void> {
       ...(continuation ? { continuation } : {}),
     }
     running = new CancellationScope()
-    let outcome: { outcome: TurnOutcome; message?: string }
+    let outcome: TurnEnd
     try {
       const result = await running.run(() => placeTurn(input, settings))
       if (result.hostQueue) home = result.hostQueue
+      // The classic turn's error code, when it wrote one (turnCore.ts `tallyTurn`), is the session's too.
+      const said = result.code !== undefined ? { code: result.code, ...(result.error !== undefined ? { message: result.error.slice(0, MESSAGE_MAX) } : {}) } : {}
       if (result.status === 'released') outcome = { outcome: 'failed', message: NO_PARKS }
-      else if (result.status === 'failed') outcome = { outcome: 'failed', message: (result.error ?? 'the turn ended without a result').slice(0, MESSAGE_MAX) }
+      else if (result.status === 'failed') outcome = { outcome: 'failed', message: (result.error ?? 'the turn ended without a result').slice(0, MESSAGE_MAX), ...said }
+      else if (result.status === 'done') outcome = { outcome: 'done', ...said }
       else outcome = { outcome: result.status }
     } catch (err) {
       if (interrupted !== undefined) outcome = { outcome: 'interrupted' }
       else if (isCancellation(err)) throw err
       else if (err instanceof ActivityFailure && err.cause instanceof ApplicationFailure && err.cause.type === BUDGET_EXHAUSTED) outcome = { outcome: 'budget_exhausted' }
+      // Past its wall clock: over, idle, and said, as classic's error_max_turns (spec D5).
+      else if (overTime(err)) outcome = { outcome: 'done', code: TURN_MAX_SECONDS, message: `the turn ran past its ${settings.turn_max_seconds} s limit` }
       else outcome = { outcome: 'failed', message: failureText(err) }
     } finally {
       running = undefined
@@ -256,7 +273,7 @@ export async function AgentSession(start: SessionStart): Promise<void> {
     return outcome
   }
 
-  async function closeTurn(current: TurnStart, result: { outcome: TurnOutcome; message?: string }): Promise<void> {
+  async function closeTurn(current: TurnStart, result: TurnEnd): Promise<void> {
     const reason = interrupted ?? 'the turn ended'
     await gate.cancelAll(reason)
     await gate.settle(reason)
@@ -265,6 +282,7 @@ export async function AgentSession(start: SessionStart): Promise<void> {
       turnId: current.turn_id,
       outcome: result.outcome,
       ...(result.message !== undefined ? { message: result.message } : {}),
+      ...(result.code !== undefined ? { code: result.code } : {}),
     } satisfies FinishTurnInput)
   }
 

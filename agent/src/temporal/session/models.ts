@@ -66,11 +66,21 @@ export type SessionTurnResult = {
   hostQueue: string
   parked?: string[]
   error?: string
+  /**
+   * The `error` event's code a classic turn would write for this end (turnCore.ts `tallyTurn`):
+   * `api_error`, a result subtype such as `error_max_turns`, or `turn_failed`. With `done` the
+   * session stays idle and the error is still said (classic's `error_max_turns`).
+   */
+  code?: string
 }
 
 export type TurnOutcome = 'done' | 'interrupted' | 'budget_exhausted' | 'failed'
 
-export type FinishTurnInput = { sessionId: string; turnId: string; outcome: TurnOutcome; message?: string }
+/** `code` and `message`: the turn's `error` event as classic writes it (`SessionTurnResult.code`); with `done`, said before the idle status. */
+export type FinishTurnInput = { sessionId: string; turnId: string; outcome: TurnOutcome; message?: string; code?: string }
+
+/** The `error` code of a turn cut at `turn_max_seconds` (the activity's StartToClose): the session stays idle, as after classic's `error_max_turns`. */
+export const TURN_MAX_SECONDS = 'turn_max_seconds'
 
 /** The ApplicationFailure type a turn that spent the chat's budget raises. */
 export const BUDGET_EXHAUSTED = 'BudgetExhausted'

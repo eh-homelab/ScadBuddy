@@ -526,7 +526,8 @@ export class DurableTurns {
     }
     return {
       kind: 'result',
-      subtype: error?.code === 'error_max_budget_usd' ? 'error_max_budget_usd' : 'success',
+      // A result subtype classic reports for an end that leaves the session idle (AgentSession carries it, turnHost.ts).
+      subtype: error?.code === 'error_max_budget_usd' || error?.code === 'error_max_turns' ? error.code : 'success',
       costUsd: result?.costUsd ?? 0,
       turns: result?.turns ?? 0,
     }

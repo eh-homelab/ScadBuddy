@@ -17,8 +17,9 @@ import { CoreTurn, type TallyInput, tallyTurn, type TurnCoreDeps, type TurnTally
 //   2. assemble (TurnRunner), acquire the warm process, push the message;
 //   3. the events, as a classic turn writes them (sdkEvents.ts);
 //   4. the turn's cost and turns, as increments, so a turn cut by a lost worker and resumed
-//      elsewhere counts what both attempts spent; its end (`session.result`, the status) is
-//      the workflow's `session.finish_turn`.
+//      elsewhere, or cut at its time cap, counts what every attempt spent; its end
+//      (`session.result`, the error classic would write, the status) is the workflow's
+//      `session.finish_turn`, from the code this returns.
 //
 // A `restarted` continuation (§5.5) resumes the transcript with RESTARTED_PROMPT in place of
 // the message, which the cut attempt already sent. Parks (§5.4) are Task 5.3's: until then an
@@ -127,14 +128,19 @@ export class TurnHost {
     return images
   }
 
-  /** The turn's spend and turns on the row (manager.ts `finish`'s columns), its audit row; only while the row runs this turn. */
+  /**
+   * The turn's spend and turns on the row (manager.ts `finish`'s columns), as increments, and its
+   * audit row. Whether or not the row still runs this turn: an attempt the workflow gave up on
+   * (its StartToClose, a lost heartbeat) ends after `session.finish_turn`, and what it spent is
+   * still the session's.
+   */
   async #write(session: ClaimedSession, turnId: string, tally: TurnTally, end: TallyInput): Promise<void> {
     const spent = tally.costUsd - session.ownCostUsd
     const [written] = await this.#deps.sql<{ id: string }[]>`
       UPDATE ai_sessions
       SET cost_usd = cost_usd + ${spent}, turns = turns + ${tally.turns - session.turns},
           unpriced_cost_usd = unpriced_cost_usd + ${end.cutUsd}, updated_at = now()
-      WHERE id = ${session.id} AND durable_turn_id = ${turnId}
+      WHERE id = ${session.id}
       RETURNING id`
     if (!written) return
     // #1922: what the turn cost, as its own audit row (audit/turn.ts turnCostEntry).
@@ -148,14 +154,16 @@ export class TurnHost {
     )
   }
 
+  /** The end as the workflow writes it: classic's error code and status (turnCore.ts `tallyTurn`) carried in `code`. */
   #result(tally: TurnTally): SessionTurnResult {
     const hostQueue = this.#deps.hostQueue
     const o = tally.outcome
     if (o.kind === 'interrupted') return { status: 'interrupted', hostQueue }
-    if (o.kind === 'failed') return { status: 'failed', hostQueue, error: o.message }
-    if (o.subtype === 'success') return { status: 'done', hostQueue }
-    if (o.subtype === 'error_max_budget_usd') return { status: 'budget_exhausted', hostQueue }
-    const error = tally.tail.find((e) => e.type === 'error')
-    return { status: 'failed', hostQueue, error: error?.type === 'error' ? error.message : `the turn stopped (${o.subtype})` }
+    if (o.kind === 'result' && o.subtype === 'success') return { status: 'done', hostQueue }
+    if (o.kind === 'result' && o.subtype === 'error_max_budget_usd') return { status: 'budget_exhausted', hostQueue }
+    const said = tally.tail.find((e) => e.type === 'error')
+    const code = said?.type === 'error' ? said.code : undefined
+    const error = said?.type === 'error' ? said.message : o.kind === 'failed' ? o.message : `the turn stopped (${o.subtype})`
+    return { status: tally.status === 'failed' ? 'failed' : 'done', hostQueue, error, ...(code !== undefined ? { code } : {}) }
   }
 }

@@ -22,7 +22,10 @@ export function turnEvents(sessionId: string, args: FinishTurnInput, spent: numb
   } else if (args.outcome === 'interrupted') {
     events.push(event({ type: 'error', sessionId, code: 'interrupted', message: 'the turn was interrupted' }))
   } else if (args.outcome === 'failed') {
-    events.push(event({ type: 'error', sessionId, code: 'turn_failed', message: (args.message || 'the turn ended without a result').slice(0, MESSAGE_MAX) }))
+    events.push(event({ type: 'error', sessionId, code: args.code ?? 'turn_failed', message: (args.message || 'the turn ended without a result').slice(0, MESSAGE_MAX) }))
+  } else if (args.outcome === 'done' && args.code !== undefined) {
+    // A turn that ended within its limits but said why it stopped (`error_max_turns`, the time cap): idle, as classic leaves it.
+    events.push(event({ type: 'error', sessionId, code: args.code, message: (args.message || `the turn stopped (${args.code})`).slice(0, MESSAGE_MAX) }))
   }
   events.push(event({ type: 'session.status', sessionId, status: args.outcome === 'failed' ? 'failed' : 'idle' }))
   return events
