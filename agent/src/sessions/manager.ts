@@ -15,7 +15,7 @@ import type { Tier } from '../auth/principal.js'
 import type { Credential } from '../credentials.js'
 import { redact } from '../secrets.js'
 import { describeApiFailure, type FailureEvidence, type ProbeVerdict } from '../harness/credentialErrors.js'
-import { carries, type CredentialSource, runWithFallback } from '../harness/fallback.js'
+import { carries, type CredentialSource, type PooledCredential, runWithFallback } from '../harness/fallback.js'
 import type { HarnessPaths } from '../harness/options.js'
 import type { TierResolver } from '../harness/permissions.js'
 import type { BuiltInPolicy } from '../plugins/builtInTools.js'
@@ -1602,10 +1602,19 @@ export class SessionManager {
       // this turn, as the closures it replaced did.
       const slot = createTurnSlot()
       // What the session's own WebFetch model calls cost this turn (classicBuiltinServer, through the slot).
+      // It reaches the session row when the turn finishes, so it is not checked against
+      // the turn's budget while the turn runs. That is bounded, not open-ended: each call
+      // is outward, so it needs its own approval, and each is capped at ASK_BUDGET_USD
+      // (builtins/nested.ts, 0.5 USD) (#2973).
       const nested = { usd: 0 }
+      // The credential the turn is on, moved by each fallback (#2973), for WebFetch's model call.
+      const onCredential: { current: PooledCredential | undefined } = { current: undefined }
       try {
         turn = await this.runner.assemble(session, principal, slot)
         secrets = turn.secrets
+        // The first attempt is on the first candidate; none in an empty pool, which
+        // runWithFallback refuses before any WebFetch can ask (#3508 review).
+        onCredential.current = turn.candidates[0]
         const gate = this.approvals.gate({
           sessionId: id,
           turnId,
@@ -1649,6 +1658,7 @@ export class SessionManager {
           trace: traced,
           http: { turnId, signal: controller.signal },
           nested,
+          credential: onCredential,
           ...(memory ? { memory } : {}),
           signalInterrupt: () => controller.abort(new Error('the turn was interrupted')),
         })
@@ -1667,7 +1677,10 @@ export class SessionManager {
             onRefused: (evidence, judged) => {
               refused = { evidence, ...judged }
             },
-            onAttempt: () => unpriced.newAttempt(),
+            onAttempt: (credential) => {
+              onCredential.current = credential
+              unpriced.newAttempt()
+            },
           },
         )
         for await (const message of attempts) {

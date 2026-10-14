@@ -18,7 +18,7 @@ const SEARCH_BUDGET_USD = 1
 
 export type NestedDeps = {
   paths: HarnessPaths
-  /** The credential a query runs on (the first usable one, as a turn starts on). */
+  /** The credential a query runs on: the one the turn is on when it asks (#2973). */
   credential: () => Promise<Credential>
   /** Adds a query's cost to the session it ran for. */
   spent?: ((costUsd: number) => Promise<void>) | undefined

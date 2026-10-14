@@ -9,7 +9,7 @@
 import path from 'node:path'
 import type { SDKMessage, SessionStore } from '@anthropic-ai/claude-agent-sdk'
 import { ROOT_CONTEXT } from '@opentelemetry/api'
-import type { PooledCredential } from '../harness/fallback.js'
+import { NoUsableCredentialError, type PooledCredential } from '../harness/fallback.js'
 import {
   HTTP_SERVER,
   httpRequestEnabled,
@@ -422,10 +422,15 @@ export class TurnRunner {
                           : {}),
                         web: slotWebContext(
                           {
-                            // The answer's model call, on the turn's first credential; its cost is the turn's.
+                            // The answer's model call, on the credential the turn is on now (#2973);
+                            // its cost is the turn's. None (an empty pool, or no turn) fails closed.
                             nested: (this.deps.nestedQueries ?? nestedQueries)({
                               paths: this.deps.paths,
-                              credential: async () => candidates[0]!.credential,
+                              credential: async () => {
+                                const on = slot.current?.credential?.current
+                                if (!on) throw new NoUsableCredentialError('no Claude credential is usable', undefined)
+                                return on.credential
+                              },
                               spent: async (cost) => {
                                 if (slot.current?.nested) slot.current.nested.usd += cost
                               },

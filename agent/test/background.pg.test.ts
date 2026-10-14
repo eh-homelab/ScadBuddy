@@ -1,18 +1,22 @@
 import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { createServer } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import os from 'node:os'
 import path from 'node:path'
 import { hashTree } from '../src/plugins/packages/hash.js'
-import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk'
+import type { McpSdkServerConfigWithInstance, SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
 import { backgroundActivities, BUSY_GIVE_UP_MS, type FireResult, managerSender } from '../src/background/activities.js'
 import { BackgroundTasks, type TaskRunner } from '../src/background/service.js'
 import { BackgroundTaskStore, MAX_ACTIVE } from '../src/background/store.js'
-import { type BuiltinContext, builtinServer } from '../src/builtins/server.js'
+import { type BuiltinContext, builtinServer, classicBuiltinServer } from '../src/builtins/server.js'
+import type { WebContext } from '../src/builtins/web.js'
 import type { Database } from '../src/db.js'
 import { originPolicy } from '../src/http/origins.js'
 import { SessionError, type SessionManager } from '../src/sessions/manager.js'
+import { unwrapUntrusted } from '../src/safety/untrusted.js'
 import { connectInProcess } from '../src/temporal/turnTools.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -281,6 +285,93 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
     expect(Object.keys(run.mcpServers ?? {})).toContain('builtin')
     expect(run.systemPromptAppend).toContain('WebFetch (mcp__builtin__WebFetch)')
     expect(run.systemPromptAppend).not.toContain('jobs, wakeups')
+    classic.abortAll()
+  })
+
+  it("serves a classic turn's WebFetch through the pinned fetch, refusing loopback unless allowed (#2974)", async () => {
+    const page = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/html' })
+      res.end('<html><body><h1>Pinned</h1></body></html>')
+    })
+    await new Promise<void>((r) => page.listen(0, '127.0.0.1', r))
+    const port = (page.address() as AddressInfo).port
+    const asked: string[] = []
+    const web = (allowLoopback: boolean): WebContext => ({
+      nested: { ask: async (prompt) => (asked.push(prompt), 'the answer'), search: () => Promise.reject(new Error('unused')) },
+      secrets: () => [],
+      actor: browser,
+      signal: new AbortController().signal,
+      resolve: async () => ['127.0.0.1'],
+      allowLoopback,
+    })
+    const fetchVia = async (allowLoopback: boolean, page: string) => {
+      const client = await connectInProcess(() => classicBuiltinServer(['WebFetch'], { web: web(allowLoopback) }).instance)
+      try {
+        const result = (await client.callTool({ name: 'WebFetch', arguments: { url: `http://pages.test:${port}/${page}`, prompt: 'title?' } })) as {
+          content: { text: string }[]
+          isError?: boolean
+        }
+        return { text: result.content[0]?.text ?? '', isError: result.isError === true }
+      } finally {
+        await client.close()
+      }
+    }
+    try {
+      const served = await fetchVia(true, 'a')
+      expect(served.isError).toBe(false)
+      expect(unwrapUntrusted(served.text)).toBe('the answer')
+      expect(asked[0]).toContain('# Pinned')
+      // The name resolves to loopback, which the pinned fetch refuses without the test switch
+      // (another page: WebFetch caches the first).
+      expect(await fetchVia(false, 'b')).toMatchObject({ isError: true })
+      expect(asked).toHaveLength(1)
+    } finally {
+      await new Promise((r) => page.close(r))
+    }
+  })
+
+  it("sends WebFetch's model call on the credential a turn has failed over to (#2973)", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'web-pkg-'))
+    await mkdir(path.join(dir, '.claude-plugin'))
+    await writeFile(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'web' }))
+    const pkg = { name: 'web', contentHash: (await hashTree(dir)).hash, dir, allowed: true, builtinTools: ['WebFetch'] }
+    const pooled = (id: string, secret: string) => ({ id, epoch: 0, label: `credential ${id}`, credential: { kind: 'anthropic_api_key' as const, secret } })
+    let credential: (() => Promise<{ secret: string }>) | undefined
+    const used: string[] = []
+    let attempts = 0
+    const classic = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      packagePlugins: async () => ({ paths: [], allowedPaths: [dir], builtinTools: pkg.builtinTools, loaded: [pkg], problems: [], release: () => {} }),
+      // The first credential is refused after its init; the second attempt's WebFetch asks.
+      run: (run) =>
+        (async function* () {
+          attempts += 1
+          const session_id = run.sessionId ?? run.resume ?? 'unknown'
+          yield { type: 'system', subtype: 'init', session_id, model: 'claude-sonnet-4-5', mcp_servers: [] } as unknown as SDKMessage
+          // Each attempt asks on the credential it is on, not only the last (#3508 review).
+          used.push((await credential!()).secret)
+          if (attempts === 1) {
+            yield { type: 'system', subtype: 'api_retry', attempt: 1, max_retries: 10, retry_delay_ms: 500, error_status: 401, error: 'authentication_failed' } as unknown as SDKMessage
+            return
+          }
+          yield { type: 'result', subtype: 'success', is_error: false, result: 'ok', num_turns: 1, total_cost_usd: 0.01, session_id } as unknown as SDKMessage
+        })(),
+      nestedQueries: (deps) => {
+        credential = deps.credential
+        return { ask: () => Promise.resolve(''), search: () => Promise.reject(new Error('unused')) }
+      },
+      credentials: {
+        candidates: () => Promise.resolve([pooled('a', 'sk-ant-key-aaaa'), pooled('b', 'sk-ant-key-bbbb')]),
+        reporter: () => () => Promise.resolve(),
+      },
+      probe: () => Promise.resolve({ verdict: 'refused', reason: 'HTTP 401 again' }),
+    })
+    const { session } = await classic.start(browser, { origin: 'chat' })
+    const turn = await classic.send(session.id, browser, 'fetch it')
+    expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(attempts).toBe(2)
+    expect(used).toEqual(['sk-ant-key-aaaa', 'sk-ant-key-bbbb'])
     classic.abortAll()
   })
 

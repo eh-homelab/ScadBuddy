@@ -15,6 +15,7 @@
 import type { HookCallbackMatcher, HookEvent } from '@anthropic-ai/claude-agent-sdk'
 import type { TurnAuditor } from '../audit/turn.js'
 import type { WebContext } from '../builtins/web.js'
+import type { PooledCredential } from '../harness/fallback.js'
 import type { HttpRequestContext } from '../harness/httpRequest.js'
 import type { ApprovalGate } from '../harness/permissions.js'
 import type { QuestionGate } from '../harness/questions.js'
@@ -45,6 +46,8 @@ export type TurnContext = {
   http?: HttpState
   /** What the turn's WebFetch model calls cost (builtins/nested.ts), which no result prices (#2684). */
   nested?: { usd: number }
+  /** The credential the turn is on now, which a fallback moves (#2973): WebFetch's model call asks on it. */
+  credential?: { current: PooledCredential | undefined }
   /** #815 §2: how this turn's browser_* calls wait for a missing tab; only with a question gate. */
   waitForTab?: WaitForTab
   /** The turn's automatic memory hooks (memory/hindsight.ts), built for its own prompt. */

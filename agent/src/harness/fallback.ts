@@ -163,9 +163,11 @@ export type FallbackOptions = {
    * Called as each attempt after the first starts, once the caller has seen
    * every message of the attempts before it. The caller cannot tell otherwise:
    * only the first attempt's init message is passed on. The session manager
-   * forgets the earlier attempts' unfinished requests then (unpricedSpend.ts, #1666).
+   * forgets the earlier attempts' unfinished requests then (unpricedSpend.ts, #1666),
+   * and points the turn's own model calls (WebFetch's nested query) at the
+   * credential the turn is now on (#2973).
    */
-  onAttempt?: () => void
+  onAttempt?: (credential: PooledCredential) => void
 }
 
 /**
@@ -301,8 +303,8 @@ export async function* runWithFallback(
   let continuing = false
 
   for (let i = 0; i < candidates.length; i++) {
-    if (i > 0) options.onAttempt?.()
     const current = candidates[i] as PooledCredential
+    if (i > 0) options.onAttempt?.(current)
     const next = candidates[i + 1]
     const controller = linked(base.signal)
     const { resume: _resume, sessionId: _sessionId, ...rest } = continuing ? continuationRun(base) : base
