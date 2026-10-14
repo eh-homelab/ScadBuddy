@@ -5,7 +5,8 @@ from __future__ import annotations
 import io
 import zipfile
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, ClassVar, cast
 
 import numpy as np
 import pytest
@@ -19,6 +20,8 @@ from scadbuddy.bambuddy.clearance import (
     placed_objects,
     placed_objects_by_plate,
 )
+from scadbuddy.bambuddy.print_run import PreparedRun, PrintRunRequest, _sequence_clearance
+from scadbuddy.bambuddy.print_source import PrintSource
 from scadbuddy.render import bambu3mf
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
 from scadbuddy.render.read_budget import ReadBudget
@@ -237,3 +240,29 @@ def test_a_file_placing_more_objects_than_the_budget_is_not_checked() -> None:
     assert len(placed_objects(_repeated_items_3mf(most), 1)) == most
     with pytest.raises(ValueError, match="read budget"):
         placed_objects(_repeated_items_3mf(most + 1), 1)
+
+
+async def test_a_run_s_clearance_is_judged_against_its_resolved_printer(tmp_path: Path) -> None:
+    """#3024 review: the clearance reads the same printer as the plate warnings. 40 mm
+    apart is inside an H2C's 49 mm toolhead radius but clear of an H2S's 30 mm."""
+    payload = two_objects_3mf(tmp_path / "bins.3mf", apart=40)
+
+    class Source:
+        print_settings: ClassVar[dict[str, Any]] = {}
+
+        async def fetched_3mf(self, client: object) -> bytes:
+            return payload
+
+    request = PrintRunRequest.model_construct(print_sequence="by object")
+
+    async def judged(model: str | None) -> list[str]:
+        prepared = SimpleNamespace(plate_ids=[1], printer_model=model)
+        _, warnings = await _sequence_clearance(
+            cast(Any, None), cast(PrintSource, Source()), request, cast(PreparedRun, prepared)
+        )
+        return [warning.message for warning in warnings]
+
+    assert await judged("Bambu Lab H2S") == []
+    assert len(await judged("Bambu Lab H2C")) == 1
+    # A run accepted before the model was kept is judged as before.
+    assert len(await judged(None)) == 1

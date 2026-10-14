@@ -340,6 +340,34 @@ async def test_a_failing_catalogue_still_beats_the_filament_steps_failure(
 
 
 @respx.mock
+async def test_a_failing_catalogue_beats_the_filament_steps_failure_with_no_printer(
+    bambuddy: BambuddyClient, tmp_path: Path
+) -> None:
+    """#2907: with no printer to open on, the catalogue and the filament step are read
+    on the other branch, and its failure still surfaces first there too."""
+    respx.get(f"{API}/printers/").mock(return_value=httpx.Response(200, json=[]))
+    respx.get(f"{API}/inventory/spools").mock(return_value=httpx.Response(500))
+    respx.get(f"{API}/inventory/assignments").mock(return_value=httpx.Response(500))
+    respx.get(f"{API}/library/files/62/filament-requirements").mock(
+        return_value=_ok("filament-requirements.json")
+    )
+    respx.get(f"{API}/slicer/presets").mock(return_value=httpx.Response(500))
+    respx.get(f"{API}/local-presets/").mock(return_value=_ok("local-presets.json"))
+
+    with pytest.raises(ApiError) as raised:
+        await choices_for(
+            bambuddy,
+            _source(),
+            StoredSettings(),
+            remembered=None,
+            printer_id=None,
+            cache=tmp_path,
+        )
+
+    assert "slicer presets" in raised.value.detail
+
+
+@respx.mock
 async def test_the_spools_and_assignments_are_read_together(bambuddy: BambuddyClient) -> None:
     """#2354: the assignments waited for the spools."""
     asked = asyncio.Event()

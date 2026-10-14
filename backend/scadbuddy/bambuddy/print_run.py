@@ -742,7 +742,7 @@ async def check_print(
             *rack_notes,
             *_listed(
                 plate_unlisted_warning(
-                    request.choices.bed_type, PRINTER_MODEL, prepared.printer_name
+                    request.choices.bed_type, prepared.printer_model, prepared.printer_name
                 )
             ),
             # #717: what the run will say of a profile it cannot apply.
@@ -779,7 +779,9 @@ async def _sequence_clearance(
     sequence = request.print_sequence or source.print_settings.get("print_sequence")
     if sequence != "by object":
         return None, []
-    clearance = clearance_for(PRINTER_MODEL)
+    # The resolved printer's, as the plate warnings are (#3024 review); a run accepted
+    # before the model was kept is judged as before.
+    clearance = clearance_for(prepared.printer_model or PRINTER_MODEL)
     try:
         # The source's own read, which the nozzle check made already (#2976).
         payload = await source.fetched_3mf(client)
@@ -988,6 +990,8 @@ class PreparedRun:
     printer_name: str | None = None
     #: What a sliced file's run carries back instead of refusing (#2671).
     warnings: list[FilamentWarning] = field(default_factory=list)
+    #: The resolved printer's model, which the plate warnings are judged against (#2858).
+    printer_model: str | None = None
 
 
 async def prepare_run(
@@ -1064,6 +1068,7 @@ async def prepare_run(
             catalogue=None,
             printer_status=printer_status,
             printer_name=printer.name,
+            printer_model=printer.model,
             warnings=plate_warnings
             + sliced_warnings(source.sliced_profile, printer, printer_status, plate_ids),
         )
@@ -1093,6 +1098,7 @@ async def prepare_run(
         catalogue=catalogue,
         printer_status=printer_status,
         printer_name=printer.name,
+        printer_model=printer.model,
     )
 
 
@@ -1108,6 +1114,9 @@ class PreparedPlates(BaseModel):
     printer_status: PrinterStatus | None = None
     #: A sliced file's warnings (#2671), carried to the run's own.
     warnings: list[FilamentWarning] = Field(default_factory=list)
+    #: As :attr:`PreparedRun.printer_model`. ``None`` in a run accepted before it was
+    #: carried, which then says nothing of an unlisted plate.
+    printer_model: str | None = None
 
     @field_validator("printer_status", mode="after")
     @classmethod
@@ -1124,6 +1133,7 @@ class PreparedPlates(BaseModel):
             printer_id=prepared.printer_id,
             printer_status=prepared.printer_status,
             warnings=prepared.warnings,
+            printer_model=prepared.printer_model,
         )
 
 
@@ -1381,7 +1391,12 @@ async def plan_run(
     planned = [(*plate, sliced) for plate, sliced in zip(ready, reused, strict=True)]
 
     hardware = await _hardware_warnings(
-        client, printer_id, choices, printer_status, printer_name=planned[0][1].printer_name
+        client,
+        printer_id,
+        choices,
+        printer_status,
+        printer_name=planned[0][1].printer_name,
+        printer_model=prepared.printer_model,
     )
     hardware += high_flow_warnings(
         printer_status,
@@ -1677,6 +1692,7 @@ async def _hardware_warnings(
     printer_status: PrinterStatus | None,
     *,
     printer_name: str | None,
+    printer_model: str | None,
 ) -> list[FilamentWarning]:
     """The chosen nozzles and plate against what the printer reports (spec §4.4-4.5).
 
@@ -1694,8 +1710,7 @@ async def _hardware_warnings(
         for size in dict.fromkeys(nozzle.size for nozzle in choices.nozzles)
     ]
     found.append(plate_warning(choices.bed_type, last, printer_name))
-    # The run is only ever for a PRINTER_MODEL printer (_require_resolvable_printer).
-    found.append(plate_unlisted_warning(choices.bed_type, PRINTER_MODEL, printer_name))
+    found.append(plate_unlisted_warning(choices.bed_type, printer_model, printer_name))
     return [warning for warning in found if warning is not None]
 
 
