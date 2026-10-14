@@ -33,7 +33,11 @@ export const rememberSession = (id: string | null): void => write(ACTIVE_KEY, id
 
 const UNDER_WAY: readonly SessionStatus[] = ['running', 'waiting_input', 'waiting_approval']
 
-/** Whether this tab is coming back from a reload: it remembers a chat or an open panel. */
+/**
+ * Whether this tab is coming back from a reload: it remembers a chat or an open panel.
+ * A tab duplicated from this one, or opened by it, starts with a copy of its
+ * sessionStorage, so it counts too and picks up the same chat, as a reload would.
+ */
 export const reloaded = (): boolean => rememberedSession() !== null || panelWasOpen()
 
 /**
@@ -46,14 +50,14 @@ export function sessionToRestore(
   remembered: string | null,
   order: readonly string[],
   sessions: Readonly<
-    Record<string, { status: SessionStatus; origin: Origin; owner?: { kind: string } } | undefined>
+    Record<string, { status: SessionStatus; origin: Origin; owner: { kind: string } } | undefined>
   >,
 ): string | null {
   if (remembered && sessions[remembered]) return remembered
   return (
     order.find((id) => {
       const s = sessions[id]
-      return s?.origin === 'chat' && s.owner?.kind === 'browser' && UNDER_WAY.includes(s.status)
+      return s?.origin === 'chat' && s.owner.kind === 'browser' && UNDER_WAY.includes(s.status)
     }) ?? null
   )
 }

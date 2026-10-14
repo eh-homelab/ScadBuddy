@@ -391,9 +391,10 @@ describe('a reload (#2372)', () => {
 
     renderShell()
     expect(await screen.findByRole('complementary', { name: 'Assistant' })).toBeVisible()
-    await waitFor(() =>
-      expect(window.sessionStorage.getItem('scadbuddy.assistant.session')).not.toBe('a-chat-since-deleted'),
-    )
+    // Forgotten, not swapped for another chat, and the panel opens on a blank one.
+    await waitFor(() => expect(window.sessionStorage.getItem('scadbuddy.assistant.session')).toBeNull())
+    expect(screen.queryByTestId('active-session-title')).toBeNull()
+    expect(screen.getByRole('textbox', { name: 'Message the assistant' })).toHaveValue('')
   })
 })
 
