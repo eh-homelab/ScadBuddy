@@ -15,10 +15,106 @@ type PrintCheck struct {
 	errors []string
 	// The nozzle_plan property
 	nozzle_plan NozzlePlanable
+	// The objects property
+	objects PrintCheck_PrintCheck_objectsable
 	// The rack property
 	rack RackPickViewable
 	// The warnings property
 	warnings []FilamentWarningable
+}
+
+// PrintCheck_PrintCheck_objects composed type wrapper for classes int32, PrintCheck_objectsMember1able
+type PrintCheck_PrintCheck_objects struct {
+	// Composed type representation for type int32
+	integer *int32
+	// Composed type representation for type PrintCheck_objectsMember1able
+	printCheck_objectsMember1 PrintCheck_objectsMember1able
+}
+
+// NewPrintCheck_PrintCheck_objects instantiates a new PrintCheck_PrintCheck_objects and sets the default values.
+func NewPrintCheck_PrintCheck_objects() *PrintCheck_PrintCheck_objects {
+	m := &PrintCheck_PrintCheck_objects{}
+	return m
+}
+
+// CreatePrintCheck_PrintCheck_objectsFromDiscriminatorValue creates a new instance of the appropriate class based on discriminator value
+// returns a Parsable when successful
+func CreatePrintCheck_PrintCheck_objectsFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
+	result := NewPrintCheck_PrintCheck_objects()
+	if parseNode != nil {
+		if val, err := parseNode.GetInt32Value(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetInteger(val)
+		} else if val, err := parseNode.GetObjectValue(CreatePrintCheck_objectsMember1FromDiscriminatorValue); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			if cast, ok := val.(PrintCheck_objectsMember1able); ok {
+				result.SetPrintCheckObjectsMember1(cast)
+			}
+		}
+	}
+	return result, nil
+}
+
+// GetFieldDeserializers the deserialization information for the current model
+// returns a map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error when successful
+func (m *PrintCheck_PrintCheck_objects) GetFieldDeserializers() map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+	return make(map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error)
+}
+
+// GetInteger gets the integer property value. Composed type representation for type int32
+// returns a *int32 when successful
+func (m *PrintCheck_PrintCheck_objects) GetInteger() *int32 {
+	return m.integer
+}
+
+// GetIsComposedType determines if the current object is a wrapper around a composed type
+// returns a bool when successful
+func (m *PrintCheck_PrintCheck_objects) GetIsComposedType() bool {
+	return true
+}
+
+// GetPrintCheckObjectsMember1 gets the PrintCheck_objectsMember1 property value. Composed type representation for type PrintCheck_objectsMember1able
+// returns a PrintCheck_objectsMember1able when successful
+func (m *PrintCheck_PrintCheck_objects) GetPrintCheckObjectsMember1() PrintCheck_objectsMember1able {
+	return m.printCheck_objectsMember1
+}
+
+// Serialize serializes information the current object
+func (m *PrintCheck_PrintCheck_objects) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
+	if m.GetInteger() != nil {
+		err := writer.WriteInt32Value("", m.GetInteger())
+		if err != nil {
+			return err
+		}
+	} else if m.GetPrintCheckObjectsMember1() != nil {
+		err := writer.WriteObjectValue("", m.GetPrintCheckObjectsMember1())
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetInteger sets the integer property value. Composed type representation for type int32
+func (m *PrintCheck_PrintCheck_objects) SetInteger(value *int32) {
+	m.integer = value
+}
+
+// SetPrintCheckObjectsMember1 sets the PrintCheck_objectsMember1 property value. Composed type representation for type PrintCheck_objectsMember1able
+func (m *PrintCheck_PrintCheck_objects) SetPrintCheckObjectsMember1(value PrintCheck_objectsMember1able) {
+	m.printCheck_objectsMember1 = value
+}
+
+type PrintCheck_PrintCheck_objectsable interface {
+	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
+	GetInteger() *int32
+	GetPrintCheckObjectsMember1() PrintCheck_objectsMember1able
+	SetInteger(value *int32)
+	SetPrintCheckObjectsMember1(value PrintCheck_objectsMember1able)
 }
 
 // NewPrintCheck instantiates a new PrintCheck and sets the default values.
@@ -76,6 +172,16 @@ func (m *PrintCheck) GetFieldDeserializers() map[string]func(i878a80d2330e89d268
 		}
 		return nil
 	}
+	res["objects"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreatePrintCheck_PrintCheck_objectsFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetObjects(val.(PrintCheck_PrintCheck_objectsable))
+		}
+		return nil
+	}
 	res["rack"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetObjectValue(CreateRackPickViewFromDiscriminatorValue)
 		if err != nil {
@@ -111,6 +217,12 @@ func (m *PrintCheck) GetNozzlePlan() NozzlePlanable {
 	return m.nozzle_plan
 }
 
+// GetObjects gets the objects property value. The objects property
+// returns a PrintCheck_PrintCheck_objectsable when successful
+func (m *PrintCheck) GetObjects() PrintCheck_PrintCheck_objectsable {
+	return m.objects
+}
+
 // GetRack gets the rack property value. The rack property
 // returns a RackPickViewable when successful
 func (m *PrintCheck) GetRack() RackPickViewable {
@@ -133,6 +245,12 @@ func (m *PrintCheck) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c
 	}
 	{
 		err := writer.WriteObjectValue("nozzle_plan", m.GetNozzlePlan())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteObjectValue("objects", m.GetObjects())
 		if err != nil {
 			return err
 		}
@@ -179,6 +297,11 @@ func (m *PrintCheck) SetNozzlePlan(value NozzlePlanable) {
 	m.nozzle_plan = value
 }
 
+// SetObjects sets the objects property value. The objects property
+func (m *PrintCheck) SetObjects(value PrintCheck_PrintCheck_objectsable) {
+	m.objects = value
+}
+
 // SetRack sets the rack property value. The rack property
 func (m *PrintCheck) SetRack(value RackPickViewable) {
 	m.rack = value
@@ -194,10 +317,12 @@ type PrintCheckable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetErrors() []string
 	GetNozzlePlan() NozzlePlanable
+	GetObjects() PrintCheck_PrintCheck_objectsable
 	GetRack() RackPickViewable
 	GetWarnings() []FilamentWarningable
 	SetErrors(value []string)
 	SetNozzlePlan(value NozzlePlanable)
+	SetObjects(value PrintCheck_PrintCheck_objectsable)
 	SetRack(value RackPickViewable)
 	SetWarnings(value []FilamentWarningable)
 }
