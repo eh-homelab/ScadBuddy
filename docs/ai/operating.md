@@ -917,6 +917,11 @@ untrusted-data envelope every tool result gets
 (what a command prints or a socket sends is data, never the user's words), as the
 session's next message once it is idle (Claude Code
 shows them mid-turn; here they wait for the turn to end), and the watch's end last.
+One message carries at most 64k characters of events (`DELIVER_MAX_CHARS`, `store.ts`)
+and says how many follow; the rest go in the next once the session is idle again.
+A classic session's command runs on one replica's queue, so a rollout that replaces that
+pod ends it as `failed` (its heartbeat stops and it is not retried): re-arm it after a
+deploy. A durable session's command and any WebSocket are not tied to one pod this way.
 `Workflow` and `PushNotification` are not provided yet, and the session says so. The
 Temporal plugin owns the engine's settings, so a durable turn cannot set
 `disableSkillShellExecution`, and skill shell injection follows Claude Code's default

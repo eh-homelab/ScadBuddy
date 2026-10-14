@@ -109,6 +109,31 @@ async def test_expires_and_kills_the_command(tmp_path: Any, signals: list[str]) 
     assert time.monotonic() - started < 5
 
 
+async def test_a_command_that_closes_its_output_still_expires(
+    tmp_path: Any, signals: list[str]
+) -> None:
+    """#2796 review: the wait after stdout's end had no bound, so the command outlived
+    timeoutMs and the watch was reported failed, not expired."""
+    events: list[str] = []
+    cmd = "echo up; exec >&-; sleep 30"
+    acts = _activities(tmp_path, {"command": cmd, "timeoutMs": 1000}, events)
+    started = time.monotonic()
+    result = await asyncio.wait_for(acts.bg_monitor_command({"taskId": "ab12cd34"}), 10)
+    assert result == {"end": {"outcome": "expired"}, "events": 1}
+    assert time.monotonic() - started < 5
+
+
+async def test_a_character_split_across_two_reads_is_kept_whole(
+    tmp_path: Any, signals: list[str]
+) -> None:
+    """#2796 review: each read was decoded alone, so a split character became U+FFFD."""
+    events: list[str] = []
+    cmd = r"printf 'caf\303'; sleep 0.3; printf '\251\n'"
+    acts = _activities(tmp_path, {"command": cmd, "timeoutMs": 10_000}, events)
+    await acts.bg_monitor_command({"taskId": "ab12cd34"})
+    assert events == [event_notice("ab12cd34", "ticks", "café")]
+
+
 async def test_stops_a_monitor_that_makes_too_many_events(
     tmp_path: Any, signals: list[str]
 ) -> None:

@@ -139,6 +139,9 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
       isError: true,
       text: expect.stringContaining('loopback'),
     })
+    expect(
+      await call('Monitor', { description: 'x', timeout_ms: 1000, ws: { url: 'wss://events.example.com/', protocols: ['v1', 'a b'] } }),
+    ).toMatchObject({ isError: true, text: '"a b" is not a WebSocket subprotocol: use only token characters.' })
     expect(JSON.parse((await call('TaskStop', { task_id: id })).text)).toMatchObject({
       message: `Successfully stopped task: ${id} (tail -f deploy.log | grep --line-buffered ERROR)`,
       task_type: 'monitor',

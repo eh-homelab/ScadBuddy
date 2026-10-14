@@ -141,6 +141,9 @@ export async function taskStop(ctx: BackgroundContext, input: { task_id?: string
   }
 }
 
+/** A subprotocol is an RFC 7230 token (RFC 6455 §4.1; schemas.json's Monitor `ws.protocols` pattern). */
+const SUBPROTOCOL = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/
+
 export async function monitor(
   ctx: BackgroundContext,
   input: { description: string; timeout_ms?: number; command?: string; ws?: { url: string; protocols?: string[] } },
@@ -148,6 +151,9 @@ export async function monitor(
   if ((input.command === undefined) === (input.ws === undefined)) return error('Give exactly one of command and ws.')
   if (input.command !== undefined && !ctx.commandQueue) return error('This session cannot run monitor commands; a ws source works.')
   if (input.ws) {
+    // schemas.json's token pattern: a bad one would otherwise fail only once `new WebSocket` throws.
+    const bad = input.ws.protocols?.find((p) => !SUBPROTOCOL.test(p))
+    if (bad !== undefined) return error(`${JSON.stringify(bad)} is not a WebSocket subprotocol: use only token characters.`)
     const refused = await checkSocketUrl(input.ws.url)
     if (refused) return error(refused)
   }
