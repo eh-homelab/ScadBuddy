@@ -1744,8 +1744,9 @@ def test_a_processing_instruction_is_left_to_the_parse() -> None:
 def test_a_paint_code_off_a_triangle_paints_nothing() -> None:
     """The parse reads ``paint_color`` only on a ``<triangle>``; the pattern agrees."""
     data = _object_bytes(_THREE, head=b"<metadata " + PAINT_ATTRIBUTE.encode() + b'="8"/>')
-    read = bambu3mf._written_extents(data)
-    assert read is None or read[1] == frozenset()
+    # The two paint counts differ, so the file is left to the parse (#3254 review): not
+    # read here as unpainted.
+    assert bambu3mf._written_extents(data) is None
 
 
 def test_a_long_coordinate_is_not_copied_into_every_row() -> None:
@@ -1775,11 +1776,48 @@ def test_reading_paint_codes_is_one_pass_over_a_crafted_file(junk: bytes) -> Non
     """Security review of #3254: an unbounded run inside the paint pattern rescanned to
     the end of the file from every ``<triangle``, so 200 KB of them took 14 s. Bounded,
     the scan is linear, and a code it cannot find leaves the file to the parse."""
-    data = junk * 40_000
-    began = time.perf_counter()
-    for _ in bambu3mf._PAINT_CODE.finditer(data):
-        pass
-    assert time.perf_counter() - began < 2
+
+    def scan(repeats: int) -> float:
+        data = junk * repeats
+        best = float("inf")
+        for _ in range(3):
+            began = time.perf_counter()
+            for _ in bambu3mf._PAINT_CODE.finditer(data):
+                pass
+            best = min(best, time.perf_counter() - began)
+        return best
+
+    # Against its own scale, not a wall clock a loaded shard can miss (#3254 review):
+    # four times the input is about four times the scan, where a rescan per tag is
+    # sixteen.
+    assert scan(80_000) < 8 * scan(20_000) + 0.05
+
+
+def test_reading_a_box_makes_no_copy_of_the_file() -> None:
+    """#3254 review: skipping the XML declaration by slicing copied the whole object
+    file (86 MB on #2942's) just to look past it."""
+    padding = b'<metadata name="note">' + b"x" * 32_000_000 + b"</metadata>"
+    data = _object_bytes(_THREE, head=padding)
+    tracemalloc.start()
+    try:
+        assert bambu3mf._written_extents(data) is not None
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < len(data) // 4
+
+
+@pytest.mark.parametrize(
+    "root",
+    [b'<model xmlns="urn:not-3mf">', b'<model xmlns="%s"><x xmlns="urn:other">' % CORE_NS.encode()],
+    ids=["another root namespace", "a default redeclared inside"],
+)
+def test_vertices_outside_the_core_namespace_are_left_to_the_parse(root: bytes) -> None:
+    """#3254 review: a bare ``<vertex>`` is the 3MF's only under the core namespace,
+    which the parse requires; the pattern now asks the same of the root."""
+    data = _object_bytes(_THREE).replace(b'<model xmlns="' + CORE_NS.encode() + b'">', root, 1)
+    assert data != _object_bytes(_THREE)
+    assert bambu3mf._written_extents(data) is None
 
 
 def test_a_paint_code_longer_than_the_bounded_read_is_left_to_the_parse() -> None:
