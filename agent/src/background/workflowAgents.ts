@@ -132,6 +132,7 @@ export function managerAgents(
   return {
     async run(call) {
       const label = call.opts.label ?? call.prompt.split('\n')[0]!.slice(0, 60)
+      if (call.signal.aborted) return { ok: false, result: null, error: 'stopped' }
       const settings = await chatSettings(call.opts, types)
       if (typeof settings === 'string') return { ok: false, result: null, error: settings }
       const child = await manager.startChild(call.sessionId, call.owner, { title: `${call.workflow} · ${label}`, tags: ['workflow'], agent: settings })

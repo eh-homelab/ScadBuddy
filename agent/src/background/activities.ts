@@ -322,9 +322,11 @@ export function backgroundActivities(deps: BackgroundActivityDeps) {
       let running = 0
       const waiting: (() => void)[] = []
       const acquire = async () => {
-        while (running >= WORKFLOW_CONCURRENCY) await new Promise<void>((r) => waiting.push(r))
+        while (running >= WORKFLOW_CONCURRENCY && !signal.aborted) await new Promise<void>((r) => waiting.push(r))
         running += 1
       }
+      // A stopped run (TaskStop, its expiry) starts none of the agents still waiting for a slot.
+      signal.addEventListener('abort', () => waiting.splice(0).forEach((wake) => wake()), { once: true })
       const release = () => {
         running -= 1
         waiting.shift()?.()
@@ -353,6 +355,7 @@ export function backgroundActivities(deps: BackgroundActivityDeps) {
           }
           await acquire()
           try {
+            if (signal.aborted) return null
             const r = await agents.run({ sessionId: t.sessionId, owner: t.createdBy, workflow: name, prompt, opts, signal })
             // Only a result is kept: a failed agent runs again on a retry or a resume.
             if (r.ok) await deps.store.journal(t.id, key, occurrence, { result: r.result, ok: true, childId: r.childId })

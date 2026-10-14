@@ -193,6 +193,14 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a background task's workfl
     expect(await store.get(t.id)).toMatchObject({ state: 'failed', detail: 'expired' })
   }, 60_000)
 
+  it('starts none of the agents still queued when a run is stopped', async () => {
+    // 20 at once: 4 run (WORKFLOW_CONCURRENCY), 16 wait for a slot when the expiry stops the run.
+    const t = await runWorkflow(`return await parallel(Array.from({ length: 20 }, (_, i) => () => agent('hang', { label: 'n' + i })))`, {}, new Date(Date.now() + 1500))
+    expect(await store.get(t.id)).toMatchObject({ state: 'failed', detail: 'expired' })
+    await new Promise((r) => setTimeout(r, 1000))
+    expect(ran).toHaveLength(4)
+  }, 60_000)
+
   it('reports a failed agent as null and a script that throws as failed', async () => {
     agentAnswer = () => ({ ok: false, result: null, error: 'boom' })
     const t = await runWorkflow(`const a = await agent('x'); if (a === null) throw new Error('no answer'); return a`)

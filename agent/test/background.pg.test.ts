@@ -228,6 +228,13 @@ describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (ski
       SELECT agent_model, agent_effort, agent_type FROM ai_sessions WHERE id = ${tuned.childId!}`
     expect(own).toEqual({ agent_model: 'claude-haiku-test', agent_effort: 'low', agent_type: 'model-author' })
     expect(scripted.runs.at(-1)).toMatchObject({ model: 'claude-haiku-test', effort: 'low' })
+    // A stopped run starts no chat.
+    const before = (await db.sql<{ n: number }[]>`SELECT count(*)::int AS n FROM ai_sessions`)[0]!.n
+    expect(await typed.run({ sessionId: parent, owner: browser, workflow: 'p', prompt: 'x', opts: {}, signal: AbortSignal.abort() })).toMatchObject({
+      ok: false,
+      error: 'stopped',
+    })
+    expect((await db.sql<{ n: number }[]>`SELECT count(*)::int AS n FROM ai_sessions`)[0]!.n).toBe(before)
     expect(await typed.run({ sessionId: parent, owner: browser, workflow: 'p', prompt: 'x', opts: { agentType: 'nope' }, signal })).toMatchObject({
       ok: false,
       error: "Agent type 'nope' not found. Available agents: general-purpose, model-author, print-analyst",
