@@ -769,6 +769,7 @@ async def check_print(
                     printer_id=prepared.printer_id,
                     printer_name=prepared.printer_name,
                     status=prepared.printer_status,
+                    nozzle_plan=nozzle_plan,
                 )
                 if inventory is not None
                 else []
@@ -823,6 +824,7 @@ def plan_warnings(
     printer_id: int,
     printer_name: str | None,
     status: PrinterStatus | None,
+    nozzle_plan: NozzlePlan | None = None,
 ) -> list[FilamentWarning]:
     """What the chosen spools themselves say, for Checks (#2722): a spool not loaded in
     this printer, in the picker's own words, and a plan that mixes material families.
@@ -837,7 +839,11 @@ def plan_warnings(
 
     Every slot of ``plan`` counts toward the mix: the dialog's plan holds only the
     chosen plate's slots, or every plate's for "all plates" (``useFilamentPlan``, pinned
-    by its "a plate change seeds only slots new to it" test)."""
+    by its "a plate change seeds only slots new to it" test).
+
+    The warning says each family prints from a nozzle of its own only when
+    ``nozzle_plan`` puts them so; with no plan, or one that shares a side between
+    families (a hand-picked side can), it says only that they mix (#2733 review)."""
     spools, assignments = inventory
     chosen = [slot for slot in plan.slots if tray_of_spool_id(slot.spool_id) is None]
     # No file: only the spools are judged here, so there are no grams or slots of a file.
@@ -854,23 +860,31 @@ def plan_warnings(
     ]
     by_id = {option.spool_id: option for option in options.spools}
     families: list[str] = []
+    families_on: dict[str | None, set[str]] = {}
     for slot in plan.slots:
         tray = tray_material_colour(slot.spool_id, status)
         option = by_id.get(slot.spool_id)
         material = tray[0] if tray else option.material if option else None
         named_family = family(material) if material else None
-        if named_family and named_family not in families:
+        if not named_family:
+            continue
+        if named_family not in families:
             families.append(named_family)
+        side = nozzle_plan.side_of_slot(slot.slot_id) if nozzle_plan is not None else None
+        families_on.setdefault(side, set()).add(named_family)
     if len(families) > 1:
+        mix = f"This print mixes {', '.join(families[:-1])} and {families[-1]}."
+        # "A nozzle of its own" holds for the H2C's two nozzles, the one PRINTER_MODEL
+        # resolves for (resolver.py), and only where the plan puts each family on its
+        # own side: none unplaced, no side shared.
+        separate = None not in families_on and all(len(on) == 1 for on in families_on.values())
         found.append(
             FilamentWarning(
                 kind="mixed-materials",
-                # "A nozzle of its own" holds for the H2C's two nozzles, the one
-                # PRINTER_MODEL resolves for (resolver.py); say it differently before a
-                # printer with one nozzle, or more than two, is planned for.
                 message=(
-                    f"This print mixes {', '.join(families[:-1])} and {families[-1]}. Each "
-                    "prints from a nozzle of its own; check that is what you meant."
+                    f"{mix} Each prints from a nozzle of its own; check that is what you meant."
+                    if separate
+                    else f"{mix} Check that is what you meant."
                 ),
             )
         )

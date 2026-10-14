@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from scadbuddy.bambuddy.filaments import FilamentPlan
 from scadbuddy.bambuddy.models import PrinterStatus, SlotChoice, Spool, SpoolAssignment
+from scadbuddy.bambuddy.nozzle_plan import NozzlePlan
 from scadbuddy.bambuddy.print_run import plan_warnings
 from scadbuddy.bambuddy.trays import tray_spool_id
 from tests.bambuddy.conftest import recording
@@ -135,6 +136,64 @@ def test_a_spool_the_inventory_lacks_or_archived_says_nothing_here() -> None:
     found = plan_warnings(
         plan(1, 2, 99),
         ([spool(1), archived], [loaded(1, 0)]),
+        printer_id=1,
+        printer_name=None,
+        status=None,
+    )
+    assert found == []
+
+
+def sides(*placed: tuple[int, str]) -> NozzlePlan:
+    return NozzlePlan.model_validate(
+        {
+            "slots": [
+                {"slot_id": slot, "side": side, "name": f"slot {slot}"} for slot, side in placed
+            ],
+            "size": "0.4",
+            "left_flow": "standard",
+            "right_flow": "standard",
+            "summary": "",
+        }
+    )
+
+
+def mixed_message(nozzle_plan: NozzlePlan | None) -> str:
+    found = plan_warnings(
+        plan(1, 2),
+        ([spool(1), spool(2, "TPU 95A")], [loaded(1, 0), loaded(2, 1)]),
+        printer_id=1,
+        printer_name=None,
+        status=None,
+        nozzle_plan=nozzle_plan,
+    )
+    assert [w.kind for w in found] == ["mixed-materials"]
+    return found[0].message
+
+
+def test_a_nozzle_of_its_own_is_said_only_where_the_plan_puts_each_family_on_one() -> None:
+    """#2733 review: the sentence was said whatever the plan, and could be wrong."""
+    assert "a nozzle of its own" in mixed_message(sides((1, "L"), (2, "R")))
+    # No plan (not laid out, or no sides offered): it only says they mix.
+    assert mixed_message(None) == "This print mixes PLA and TPU. Check that is what you meant."
+    # Both on one side, as a hand-picked side can put them.
+    assert "a nozzle of its own" not in mixed_message(sides((1, "L"), (2, "L")))
+    # A slot the plan does not place.
+    assert "a nozzle of its own" not in mixed_message(sides((1, "L")))
+
+
+def test_an_offline_printers_tray_adds_no_material_to_the_mix() -> None:
+    """#2733 review: with no status a tray chosen as itself has no known material, so a
+    TPU spool beside it is not called a mix. Silence is intended: the run reads the
+    tray when it has a status, and nothing here can say what the tray holds."""
+    tray_plan = FilamentPlan(
+        slots=[
+            SlotChoice(slot_id=1, spool_id=2),
+            SlotChoice(slot_id=2, spool_id=tray_spool_id(0, 0)),
+        ]
+    )
+    found = plan_warnings(
+        tray_plan,
+        ([spool(2, "TPU 95A")], [loaded(2, 3)]),
         printer_id=1,
         printer_name=None,
         status=None,

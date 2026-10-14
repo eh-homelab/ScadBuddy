@@ -1583,7 +1583,7 @@ def test_a_check_of_a_plan_with_slots_fails_when_the_inventory_cannot_be_read(
 
     check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
 
-    assert check.status_code >= 500, check.text
+    assert check.status_code == 502, check.text
     assert check.headers["content-type"].startswith("application/problem+json")
 
 
