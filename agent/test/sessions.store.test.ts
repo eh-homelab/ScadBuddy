@@ -2,8 +2,10 @@ import { randomUUID } from 'node:crypto'
 import type { SessionStoreEntry } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from '../src/db.js'
+import { type PgPayloadKeys, SubjectForgotten } from '../src/temporal/payloadCodec.js'
 import { PostgresSessionStore } from '../src/sessions/store.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
+import { testPayloadKeys } from './support/payloadKeys.js'
 
 describe.skipIf(!TEST_DATABASE_URL)(
   `PostgresSessionStore${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`,
@@ -11,11 +13,13 @@ describe.skipIf(!TEST_DATABASE_URL)(
     let db: Database
     let drop: () => Promise<void>
     let store: PostgresSessionStore
+    let keys: PgPayloadKeys
 
     beforeEach(async () => {
       ;({ db, drop } = await throwawayDatabase())
       expect(await db.ready()).toBe(true)
-      store = new PostgresSessionStore(db.sql)
+      keys = testPayloadKeys(db.sql)
+      store = new PostgresSessionStore(db.sql, { keys })
     })
     afterEach(async () => {
       await drop()
@@ -101,6 +105,90 @@ describe.skipIf(!TEST_DATABASE_URL)(
       await store.delete({ projectKey, sessionId })
       expect(await store.load({ projectKey, sessionId })).toBeNull()
       expect(await store.listSubkeys({ projectKey, sessionId })).toEqual([])
+    })
+
+    describe('sealing', () => {
+      it('holds no plaintext in the row', async () => {
+        const sessionId = randomUUID()
+        await store.append({ projectKey, sessionId }, [entry('user', { text: 'kumquat' }), { type: 'last-prompt', text: 'kumquat' }])
+        const rows = await db.sql<{ plain: boolean; clean: boolean; entry_type: string }[]>`
+          SELECT entry IS NULL AS plain, position('kumquat' in encode(sealed, 'escape')) = 0 AS clean, entry_type
+          FROM ai_session_entries WHERE session_id = ${sessionId} ORDER BY id`
+        expect(rows.map((r) => [r.plain, r.clean, r.entry_type])).toEqual([
+          [true, true, 'user'],
+          [true, true, 'last-prompt'],
+        ])
+      })
+
+      it('cannot load once its subject is forgotten', async () => {
+        const sessionId = randomUUID()
+        await store.append({ projectKey, sessionId }, [entry('user')])
+        await db.sql`DELETE FROM ai_payload_keys WHERE subject = ${`session-${sessionId}`}`
+        keys.forget(`session-${sessionId}`)
+        await expect(store.load({ projectKey, sessionId })).rejects.toBeInstanceOf(SubjectForgotten)
+      })
+
+      it('reads legacy plaintext rows next to sealed ones', async () => {
+        const sessionId = randomUUID()
+        const old = entry('user', { text: 'before' })
+        await db.sql`
+          INSERT INTO ai_session_entries (project_key, session_id, subpath, uuid, entry)
+          VALUES (${projectKey}, ${sessionId}, '', ${old.uuid as string}, ${JSON.stringify(old)})`
+        const next = entry('assistant')
+        await store.append({ projectKey, sessionId }, [next])
+        expect(await store.load({ projectKey, sessionId })).toEqual([old, next])
+      })
+
+      it('reads legacy plaintext without keys, and refuses to append, naming the key file', async () => {
+        const sessionId = randomUUID()
+        const old = entry('user')
+        await db.sql`
+          INSERT INTO ai_session_entries (project_key, session_id, subpath, uuid, entry)
+          VALUES (${projectKey}, ${sessionId}, '', ${old.uuid as string}, ${JSON.stringify(old)})`
+        const bare = new PostgresSessionStore(db.sql)
+        expect(await bare.load({ projectKey, sessionId })).toEqual([old])
+        await expect(bare.append({ projectKey, sessionId }, [entry('user')])).rejects.toThrow(/SCADBUDDY_SECRET_KEY_FILE/)
+        expect(await bare.load({ projectKey, sessionId })).toEqual([old])
+      })
+
+      it('binds a row to its place: two rows without a uuid cannot be swapped, nor a row moved to another session', async () => {
+        const sessionId = randomUUID()
+        const other = randomUUID()
+        await store.append({ projectKey, sessionId }, [{ type: 'last-prompt', text: 'one' }, { type: 'last-prompt', text: 'two' }])
+        await store.append({ projectKey, sessionId: other }, [entry('user')])
+        const ids = (await db.sql<{ id: string }[]>`SELECT id::text FROM ai_session_entries WHERE session_id = ${sessionId} ORDER BY id`).map((r) => r.id)
+        await db.sql`UPDATE ai_session_entries SET id = -id WHERE id = ${ids[0]!}::bigint`
+        await db.sql`UPDATE ai_session_entries SET id = ${ids[0]!}::bigint WHERE id = ${ids[1]!}::bigint`
+        await db.sql`UPDATE ai_session_entries SET id = ${ids[1]!}::bigint WHERE id = -${ids[0]!}::bigint`
+        await expect(store.load({ projectKey, sessionId })).rejects.toThrow()
+        await db.sql`UPDATE ai_session_entries SET session_id = ${sessionId} WHERE session_id = ${other}`
+        await expect(store.load({ projectKey, sessionId })).rejects.toThrow()
+      })
+
+      it('keeps a mixed batch in order', async () => {
+        const sessionId = randomUUID()
+        const batch = [entry('user'), { type: 'last-prompt', text: 'x' }, entry('assistant'), { type: 'cost-state', totalCostUSD: 1 }]
+        await store.append({ projectKey, sessionId }, batch)
+        expect(await store.load({ projectKey, sessionId })).toEqual(batch)
+      })
+
+      it('keeps append-call order when calls overlap, the key lookup included', async () => {
+        const sessionId = randomUUID()
+        const batches = Array.from({ length: 8 }, (_, i) => [{ type: 'last-prompt', text: String(i) }, entry('user', { text: String(i) })])
+        await Promise.all(batches.map((batch) => store.append({ projectKey, sessionId }, batch)))
+        expect(await store.load({ projectKey, sessionId })).toEqual(batches.flat())
+      })
+
+      it('finds the last entry of a type, sealed or legacy', async () => {
+        const sessionId = randomUUID()
+        await db.sql`
+          INSERT INTO ai_session_entries (project_key, session_id, subpath, entry)
+          VALUES (${projectKey}, ${sessionId}, '', ${JSON.stringify({ type: 'cost-state', totalCostUSD: 1 })})`
+        expect(await store.lastOfType({ projectKey, sessionId }, 'cost-state')).toEqual({ type: 'cost-state', totalCostUSD: 1 })
+        await store.append({ projectKey, sessionId }, [{ type: 'cost-state', totalCostUSD: 2 }, entry('user')])
+        expect(await store.lastOfType({ projectKey, sessionId }, 'cost-state')).toEqual({ type: 'cost-state', totalCostUSD: 2 })
+        expect(await store.lastOfType({ projectKey, sessionId }, 'summary')).toBeNull()
+      })
     })
   },
 )

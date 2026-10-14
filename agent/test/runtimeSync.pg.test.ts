@@ -16,6 +16,7 @@ import { WARM_EVICT_CHANNEL } from '../src/sessions/warmEvict.js'
 import { agentA, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { nextResult } from './support/warm.js'
+import { testPayloadKeys } from './support/payloadKeys.js'
 import { fixedCredentials } from './support/fixedCredentials.js'
 
 // How the warm cache follows the settings and evictions when a NOTIFY never
@@ -62,9 +63,9 @@ describe.skipIf(!TEST_DATABASE_URL)(`the warm cache's resync${TEST_DATABASE_URL 
   beforeEach(async () => {
     ;({ db, drop, url, schema } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
-    store = new PostgresSessionStore(db.sql)
+    store = new PostgresSessionStore(db.sql, { keys: testPayloadKeys(db.sql) })
     scripted = scriptedRunner(() => ({ reply: 'ok', costUsd: 0.02 }))
-    warm = new WarmSessions({ sql: db.sql, maxEntries: 8, idleMs: 600_000, start: scripted.runner })
+    warm = new WarmSessions({ sql: db.sql, store, maxEntries: 8, idleMs: 600_000, start: scripted.runner })
     stops = []
   })
   afterEach(async () => {

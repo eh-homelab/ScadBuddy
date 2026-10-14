@@ -299,11 +299,16 @@ const sessionEvents = database ? new SessionEventPublisher(database.sql) : undef
 // The approval routes and the expiry sweep also serve approvals left pending
 // by a restart.
 const runtime = await readStartSettings({ database, settings }, console.log)
+// The data keys that seal a session's transcript (D7) and, below, its durable payloads: one
+// instance, so forgetting a subject drops its key from the one cache.
+const dataKeys = database && kek.ok ? new PgPayloadKeys(database.sql, kek.kek, { previous: previousKek?.ok ? previousKek.kek : undefined }) : undefined
+if (database && !dataKeys) console.warn('sessions: no secret key, so no session transcript can be written; sessions cannot run')
 const sessions =
   database && credentials
     ? new SessionManager({
         sql: database.sql,
         paths,
+        ...(dataKeys ? { payloadKeys: dataKeys } : {}),
         ...(settings ? { settings } : {}),
         // ScadBuddy's tools and their tiers (tools/harness.ts).
         ...harnessTools(toolServices),
@@ -424,10 +429,7 @@ if (database && commandKinds.length > 0) {
 // Durable subjects' payloads are sealed per subject (spec §6.5): every client and worker
 // that encodes or decodes them carries the codec, which needs the KEK. Without one, a
 // session or flow payload is never sealed here, so no durable session is started (5c Ruling 13).
-const payloadKeys =
-  temporal && kek.ok
-    ? new PgPayloadKeys(temporal.sql, kek.kek, { previous: previousKek?.ok ? previousKek.kek : undefined })
-    : undefined
+const payloadKeys = temporal ? dataKeys : undefined
 // A session's large payloads are files on the data share, by reference (#2243).
 const payloadStore = config.payloadDir ? new FilePayloadStore(config.payloadDir) : undefined
 const dataConverter = payloadKeys ? { payloadCodecs: [new SubjectPayloadCodec(payloadKeys, payloadStore)] } : undefined

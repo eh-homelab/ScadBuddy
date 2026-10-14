@@ -12,6 +12,7 @@ import { createTurnSlot } from '../../src/sessions/turnSlot.js'
 import { type WarmEntry, WarmSessions } from '../../src/sessions/warm.js'
 import { type FakeAnthropic, startFakeAnthropic } from './fakeAnthropic.js'
 import { tempPaths } from './sessions.js'
+import { testPayloadKeys } from './payloadKeys.js'
 import type { Throwaway } from './postgres.js'
 
 // WarmSessions (spec 2026-10-13 §5.3) over the bundled Claude Code, the fake
@@ -41,10 +42,11 @@ export async function warmHarness(db: Throwaway, options: WarmHarnessOptions = {
   })
   const paths = await tempPaths()
   await ensureStateDirs(paths)
-  const store = new PostgresSessionStore(db.db.sql)
+  const store = new PostgresSessionStore(db.db.sql, { keys: testPayloadKeys(db.db.sql) })
   const spawns: Spawned[] = []
   const warm = new WarmSessions({
     sql: options.sql ? options.sql(db.db.sql) : db.db.sql,
+    store,
     maxEntries: options.maxEntries ?? 8,
     idleMs: options.idleMs ?? 600_000,
     ...(options.now ? { now: options.now } : {}),

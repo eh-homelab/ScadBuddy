@@ -1,5 +1,7 @@
 import type { SessionKey, SessionStore, SessionStoreEntry } from '@anthropic-ai/claude-agent-sdk'
 import type { Sql } from 'postgres'
+import { openBytes, sealBytes } from '../secrets.js'
+import type { PayloadKeys } from '../temporal/payloadCodec.js'
 
 // The Agent SDK `SessionStore` adapter on Postgres (#300, spec §6 "Storage"):
 // the SDK mirrors every transcript line here, so any replica can resume a
@@ -49,7 +51,18 @@ import type { Sql } from 'postgres'
 // fresh CLAUDE_CONFIG_DIR sees its history. projectKey is still recorded per
 // row and filters listSessions(projectKey).
 
-type EntryRow = { entry: string }
+// Entries are sealed under the session's data key (`ai_payload_keys`, subject
+// `session-<id>`, unified agent runtime D7): `sealed` holds the JSON, `entry` is
+// NULL, and the AAD binds the bytes to their row, so a row cannot be swapped for
+// another's: `ai_session_entries:<session_id>:<subpath>:<uuid ?? id>`. A row
+// without a uuid is bound by its own id, which append reserves first with
+// nextval (an id is never written twice). Rows written before sealing still hold
+// plaintext `entry` and are read as they are, until the backfill.
+
+type EntryRow = { id: string; uuid: string | null; entry: string | null; sealed: Buffer | null }
+
+const entryContext = (sessionId: string, subpath: string, bound: string): string =>
+  `ai_session_entries:${sessionId}:${subpath}:${bound}`
 
 /** The SDK's key as stored: the main transcript is subpath ''. */
 function subpathOf(key: { subpath?: string }): string {
@@ -58,33 +71,105 @@ function subpathOf(key: { subpath?: string }): string {
 
 export class PostgresSessionStore implements SessionStore {
   private readonly sql: Sql
-  constructor(sql: Sql) {
+  private readonly keys: PayloadKeys | undefined
+  /** `keys` is the data keys of sessions; without them the store reads legacy plaintext but never appends. */
+  constructor(sql: Sql, options: { keys?: PayloadKeys } = {}) {
     this.sql = sql
+    this.keys = options.keys
   }
+
+  private async keyOf(sessionId: string, create: boolean): Promise<Buffer> {
+    if (!this.keys) {
+      throw new Error('the session transcript is sealed and needs SCADBUDDY_SECRET_KEY_FILE; it is not set, so nothing is written')
+    }
+    return this.keys.keyFor(`session-${sessionId}`, create)
+  }
+
+  /** The tail of each session's appends: the contract keeps append-call order, and a call's key lookup and id reservation are not one statement. */
+  private readonly appending = new Map<string, Promise<unknown>>()
 
   async append(key: SessionKey, entries: SessionStoreEntry[]): Promise<void> {
     if (entries.length === 0) return
+    const turn = (this.appending.get(key.sessionId) ?? Promise.resolve()).then(() => this.appendNow(key, entries))
+    const tail = turn.catch(() => {})
+    this.appending.set(key.sessionId, tail)
+    try {
+      await turn
+    } finally {
+      if (this.appending.get(key.sessionId) === tail) this.appending.delete(key.sessionId)
+    }
+  }
+
+  private async appendNow(key: SessionKey, entries: SessionStoreEntry[]): Promise<void> {
     const subpath = subpathOf(key)
-    const rows = entries.map((entry) => ({
-      project_key: key.projectKey,
-      session_id: key.sessionId,
-      subpath,
-      uuid: typeof entry.uuid === 'string' ? entry.uuid : null,
-      entry: JSON.stringify(entry),
-    }))
-    // One statement: rows get ids in array order, so a batch keeps its order.
-    await this.sql`
-      INSERT INTO ai_session_entries ${this.sql(rows, 'project_key', 'session_id', 'subpath', 'uuid', 'entry')}
-      ON CONFLICT (session_id, subpath, uuid) WHERE uuid IS NOT NULL DO NOTHING`
+    const dek = await this.keyOf(key.sessionId, true)
+    try {
+      // Every row's id is reserved first, in order, so a batch keeps its order and a row
+      // without a uuid can be bound by its own id.
+      const ids = await this.sql<{ id: string }[]>`
+        SELECT nextval(pg_get_serial_sequence('ai_session_entries', 'id'))::text AS id FROM generate_series(1, ${entries.length})`
+      const rows = entries.map((entry, i) => {
+        const uuid = typeof entry.uuid === 'string' ? entry.uuid : null
+        const id = ids[i]!.id
+        const json = Buffer.from(JSON.stringify(entry), 'utf8')
+        return {
+          id,
+          project_key: key.projectKey,
+          session_id: key.sessionId,
+          subpath,
+          uuid,
+          entry_type: typeof entry.type === 'string' ? entry.type : null,
+          sealed: sealBytes(dek, json, entryContext(key.sessionId, subpath, uuid ?? id)),
+        }
+      })
+      await this.sql`
+        INSERT INTO ai_session_entries ${this.sql(rows, 'id', 'project_key', 'session_id', 'subpath', 'uuid', 'entry_type', 'sealed')}
+        ON CONFLICT (session_id, subpath, uuid) WHERE uuid IS NOT NULL DO NOTHING`
+    } finally {
+      dek.fill(0)
+    }
   }
 
   async load(key: SessionKey): Promise<SessionStoreEntry[] | null> {
+    const subpath = subpathOf(key)
     const rows = await this.sql<EntryRow[]>`
-      SELECT entry FROM ai_session_entries
-      WHERE session_id = ${key.sessionId} AND subpath = ${subpathOf(key)}
-      ORDER BY id`
+      SELECT id::text AS id, uuid, entry, sealed FROM ai_session_entries
+      WHERE session_id = ${key.sessionId} AND subpath = ${subpath}
+      ORDER BY ai_session_entries.id`
     if (rows.length === 0) return null
-    return rows.map((row) => JSON.parse(row.entry) as SessionStoreEntry)
+    return this.opened(key.sessionId, subpath, rows)
+  }
+
+  /**
+   * The newest row without a uuid of this `type` in the key's transcript, or null. Found by the
+   * plaintext `entry_type`; a row from before sealing has none, so its text is matched instead.
+   */
+  async lastOfType(key: SessionKey, type: string): Promise<SessionStoreEntry | null> {
+    const subpath = subpathOf(key)
+    const rows = await this.sql<EntryRow[]>`
+      SELECT id::text AS id, uuid, entry, sealed FROM ai_session_entries
+      WHERE session_id = ${key.sessionId} AND subpath = ${subpath} AND uuid IS NULL
+        AND (entry_type = ${type} OR (entry_type IS NULL AND entry LIKE ${`%"${type}"%`}))
+      ORDER BY ai_session_entries.id DESC LIMIT 1`
+    return rows.length === 0 ? null : (await this.opened(key.sessionId, subpath, rows))[0]!
+  }
+
+  private async opened(sessionId: string, subpath: string, rows: EntryRow[]): Promise<SessionStoreEntry[]> {
+    // SubjectForgotten when the session's key is gone; no key is made to read.
+    const dek = rows.some((row) => row.sealed) ? await this.keyOf(sessionId, false) : undefined
+    try {
+      return rows.map((row) => {
+        if (!row.sealed) return JSON.parse(row.entry!) as SessionStoreEntry
+        const json = openBytes(dek!, row.sealed, entryContext(sessionId, subpath, row.uuid ?? row.id))
+        try {
+          return JSON.parse(json.toString('utf8')) as SessionStoreEntry
+        } finally {
+          json.fill(0)
+        }
+      })
+    } finally {
+      dek?.fill(0)
+    }
   }
 
   async listSessions(projectKey: string): Promise<{ sessionId: string; mtime: number }[]> {
