@@ -164,6 +164,15 @@ export type FlowGrantRule = Schemas['GrantRule']
 export type FlowGrantArg = Schemas['ArgBound']
 export type FlowGrantView = Schemas['GrantView']
 export type FlowGrantUse = Schemas['GrantUseView']
+/** #2484 — a flow trigger: a schedule or an event that starts runs of a pinned version. */
+export type FlowTrigger = Schemas['TriggerView']
+export type FlowTriggerCreate = Schemas['TriggerCreate']
+export type FlowTriggerUpdate = Schemas['TriggerUpdate']
+export type FlowTriggerSchedule = Schemas['ScheduleTiming']
+export type FlowTriggerEvent = Schemas['EventTiming']
+export type FlowTriggerFire = Schemas['Fire']
+export type FlowStandingGrant = Schemas['StandingGrantView']
+export type FlowRunTrigger = Schemas['RunTrigger']
 /** A route's 202: the operation to follow, `repeated` when an earlier press started it. */
 export type OperationAccepted = Schemas['OperationAccepted']
 

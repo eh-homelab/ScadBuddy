@@ -5,6 +5,8 @@ import type { FlowGrantRule, FlowGrantSpec, FlowGrantView } from '../api/types'
 export const HOUR = 3_600_000
 /** The latest a grant may expire, from now (backend `MAX_EXPIRY`). */
 export const MAX_GRANT_MS = 7 * 24 * HOUR
+/** #2484 — a trigger's standing grant lives at most 30 days (spec 2026-10-11 Ruling 19). */
+export const MAX_STANDING_GRANT_MS = 30 * 24 * HOUR
 const MAX_RULES = 32
 
 export type HostFn = FlowGrantRule['fn']
@@ -41,7 +43,12 @@ function isPointer(path: string): boolean {
  * Every problem the backend would refuse `spec` for (`validate_spec`), as of `now`;
  * empty when it may be sent. `outward` are the tools a rule may name.
  */
-export function grantProblems(spec: FlowGrantSpec, now: Date, outward: ReadonlySet<string>): string[] {
+export function grantProblems(
+  spec: FlowGrantSpec,
+  now: Date,
+  outward: ReadonlySet<string>,
+  maxMs: number = MAX_GRANT_MS,
+): string[] {
   const problems: string[] = []
   const rules = spec.rules ?? []
   if (rules.length > MAX_RULES) problems.push(`A grant has at most ${MAX_RULES} rules.`)
@@ -68,12 +75,14 @@ export function grantProblems(spec: FlowGrantSpec, now: Date, outward: ReadonlyS
   const expires = new Date(spec.expires_at).getTime()
   if (Number.isNaN(expires)) problems.push('The grant needs an expiry.')
   else if (expires <= now.getTime()) problems.push('The grant expires in the past.')
-  else if (expires - now.getTime() > MAX_GRANT_MS) problems.push('The grant expires more than 7 days from now.')
+  else if (expires - now.getTime() > maxMs) {
+    problems.push(`The grant expires more than ${Math.round(maxMs / (24 * HOUR))} days from now.`)
+  }
   return problems
 }
 
 /** The grant's state as one word: revoked and expired are what an approved grant became. */
-export function grantStatus(grant: FlowGrantView): string {
+export function grantStatus(grant: Pick<FlowGrantView, 'revoked_at' | 'status' | 'in_force'>): string {
   if (grant.revoked_at) return 'Revoked'
   if (grant.status === 'requested') return 'Requested'
   if (grant.status === 'declined') return 'Declined'
