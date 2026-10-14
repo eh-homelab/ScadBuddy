@@ -210,6 +210,8 @@ export type PlannedSlot = Schemas['PlannedSlot']
 export type UnknownTray = Schemas['UnknownTray']
 export type PreviewStarted = Schemas['PreviewStarted']
 export type SlicePreview = Schemas['SlicePreview']
+/** #2671 — what a sliced library file was sliced for, read from the file itself. */
+export type SlicedProfile = Schemas['SlicedProfile']
 export type TrayAssigned = Schemas['TrayAssigned']
 export type RackSentPick = Schemas['RackSentPick']
 export type RackAlgorithm = NonNullable<Schemas['ChoicesView']['rack_algorithm']>
@@ -472,6 +474,26 @@ export interface WorkspaceFile {
   source: Record<string, string | number | boolean | null> | null
   created_at: string
   updated_at: string
+}
+
+/**
+ * A session's background task (the agent's `routes/backgroundTasks.ts`): what its
+ * CronCreate or ScheduleWakeup left running, which sends `prompt` to the session when due.
+ */
+export interface BackgroundTask {
+  id: string
+  kind: 'cron' | 'wakeup' | 'monitor' | 'workflow'
+  description: string
+  /** The schedule as words: "Every 5 minutes", "once, 1200 s after it was set". */
+  schedule: string
+  prompt: string
+  state: 'active' | 'done' | 'cancelled' | 'failed'
+  next_at: string | null
+  fired: number
+  last_fired_at: string | null
+  expires_at: string | null
+  detail: string | null
+  created_at: string
 }
 
 export interface WorkspaceFileList {

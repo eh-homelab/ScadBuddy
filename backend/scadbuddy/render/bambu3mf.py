@@ -30,6 +30,7 @@ from scadbuddy.render.plate import (
 )
 from scadbuddy.render.split import PAINT_ATTRIBUTE, ColourPart
 from scadbuddy.render.thumbnail import PlateThumbnails
+from scadbuddy.render.zipcopy import ENCRYPTED, copy_raw, raw_copy_checked
 
 #: Bambu Studio reads ``Metadata/project_settings.config`` only when the root
 #: model's ``Application`` metadata starts with ``BambuStudio-``; otherwise
@@ -980,10 +981,10 @@ def replate_3mf(
             raise ValueError("the 3MF's build item carries no transform to re-place")
         return re.sub(r'\btransform="[^"]*"', f'transform="{transform}"', tag, count=1)
 
-    rewritten: list[tuple[str, bytes]] = []
+    changed: dict[str, bytes] = {}
     for name, data in entries:
         if name == ROOT_MODEL_NAME:
-            data = _ITEM.sub(_replaced, data.decode("utf-8")).encode("utf-8")
+            changed[name] = _ITEM.sub(_replaced, data.decode("utf-8")).encode("utf-8")
         elif name == PROJECT_SETTINGS_NAME:
             # The plate changed, so restate its Z. The other keys the BBL loader
             # needs do not vary by printer and are already in the file.
@@ -999,9 +1000,8 @@ def replate_3mf(
                 settings.update(one_extruder_map(len(settings.get("filament_colour", []))))
             _state_nozzles(settings, nozzle_stats, nozzle_volume_type, filament_map)
             _set_towers(settings, [placement.tower for placement in placements])
-            data = (json.dumps(settings, indent=4) + "\n").encode("utf-8")
-        rewritten.append((name, data))
-    return _zipped(rewritten)
+            changed[name] = (json.dumps(settings, indent=4) + "\n").encode("utf-8")
+    return _rezipped(payload, changed)
 
 
 @dataclass(frozen=True)
@@ -1415,11 +1415,31 @@ def _entry(name: str) -> zipfile.ZipInfo:
     return info
 
 
-def _zipped(entries: Sequence[tuple[str, bytes]]) -> bytes:
+def _rezipped(payload: bytes, changed: Mapping[str, bytes]) -> bytes:
+    """``payload`` with each entry in ``changed`` replaced, written in the writer's policy
+    (:func:`_entry`), so a replated file is byte-identical to one written for this plate
+    directly, covers included.
+
+    An entry left unchanged and already in that policy is copied as its compressed
+    bytes (:func:`~scadbuddy.render.zipcopy.copy_raw`, #2942) rather than inflated and
+    deflated again: those are the mesh objects, nearly all of a large file."""
+    source = io.BytesIO(payload)
     buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as out:
-        for name, data in entries:
-            # Same policy as the writer, so a replated file is byte-identical to
-            # one written for this plate directly — covers included.
-            out.writestr(_entry(name), data)
+    raw_copy = raw_copy_checked()
+    with (
+        zipfile.ZipFile(source) as archive,
+        zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as out,
+    ):
+        for info in archive.infolist():
+            name = info.filename
+            entry = _entry(name)
+            if (
+                raw_copy
+                and name not in changed
+                and info.compress_type == entry.compress_type
+                and not info.flag_bits & ENCRYPTED
+            ):
+                copy_raw(source, info, out, date_time=ZIP_TIMESTAMP)
+                continue
+            out.writestr(entry, changed[name] if name in changed else archive.read(info))
     return buffer.getvalue()

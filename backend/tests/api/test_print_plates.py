@@ -24,7 +24,7 @@ from scadbuddy.core.settings import Settings
 from tests.api.conftest import read_stored, set_plate_image, wait_for_job
 from tests.api.test_print import API
 from tests.api.test_print_filaments import queue_route as filament_queue_route
-from tests.api.test_print_filaments import slice_routes
+from tests.api.test_print_filaments import slice_kept, slice_routes
 from tests.api.test_print_options_picker import queue_route
 from tests.api.test_print_run_choices import body as choices_body
 from tests.api.test_print_run_choices import run_print, run_request, run_routes
@@ -217,6 +217,7 @@ def test_plates_queued_before_a_later_plate_fails_are_still_recorded(
             200, json={"id": 9, "status": "completed", "result": {"library_file_id": 52}}
         )
     )
+    slice_kept(52)
     respx.get(f"{API}/slice-jobs/10").mock(
         return_value=httpx.Response(200, json={"id": 10, "status": "failed", "error": "no fit"})
     )

@@ -17,12 +17,9 @@ import io
 import json
 import os
 import re
-import struct
-import sys
 import zipfile
 from collections.abc import Mapping
 from pathlib import Path
-from typing import BinaryIO
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape
 
@@ -35,6 +32,7 @@ from scadbuddy.library.media import MEDIA_DIR
 from scadbuddy.render.bambu3mf import CORE_NS, PROJECT_SETTINGS_NAME, ZIP_TIMESTAMP
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from scadbuddy.render.zipcopy import ENCRYPTED, copy_raw, raw_copy_checked
 
 SCADBUDDY_NS = "https://github.com/eh-homelab/ScadBuddy"
 NS_PREFIX = "ScadBuddy"
@@ -151,54 +149,6 @@ def with_print_settings(project_settings: bytes, print_settings: Mapping[str, st
     return (json.dumps(settings, indent=4) + "\n").encode("utf-8")
 
 
-#: A local file header's fixed part: signature to extra-field length (APPNOTE 4.3.7).
-_LOCAL_HEADER = struct.Struct("<4s2B4HL2L2H")
-_LOCAL_SIGNATURE = b"PK\x03\x04"
-#: General purpose flag bit 0: the entry is encrypted, so its bytes are not copied as is.
-_ENCRYPTED = 0x1
-
-
-RAW_COPY_CHECKED = (3, 12)
-"""The CPython minor whose `zipfile` internals :func:`_copy_raw` was checked against
-(#2910). On any other, the stamp reads and writes each entry again instead, and
-``test_the_raw_copy_is_checked_on_this_python`` fails until it is checked again."""
-
-
-def _raw_copy_checked() -> bool:
-    return sys.version_info[:2] == RAW_COPY_CHECKED
-
-
-def _copy_raw(source: BinaryIO, info: zipfile.ZipInfo, target: zipfile.ZipFile) -> None:
-    """Append ``info``'s entry to ``target`` as its compressed bytes stand (#2755).
-
-    `zipfile` has no public way to move an entry without inflating and deflating it
-    again, and a saved 3MF is mostly mesh objects the stamp never touches: rewriting
-    them cost seconds of CPU per save (3.5 s for a 14 MB arranged 3MF in the API pod).
-    The entry keeps its CRC and sizes, so a reader verifies it exactly as before. It
-    writes through the `ZipFile`'s own file and bookkeeping, as `writestr` does: private
-    state, which is why it runs only on :data:`RAW_COPY_CHECKED` (#2910)."""
-    source.seek(info.header_offset)
-    header = _LOCAL_HEADER.unpack(source.read(_LOCAL_HEADER.size))
-    if header[0] != _LOCAL_SIGNATURE:
-        raise zipfile.BadZipFile(f"no local header for {info.filename}")
-    source.seek(info.header_offset + _LOCAL_HEADER.size + header[-2] + header[-1])
-    data = source.read(info.compress_size)
-    entry = zipfile.ZipInfo(info.filename, date_time=ZIP_TIMESTAMP)
-    entry.compress_type = info.compress_type
-    entry.CRC = info.CRC
-    entry.compress_size = info.compress_size
-    entry.file_size = info.file_size
-    fp = target.fp
-    assert fp is not None
-    entry.header_offset = fp.tell()
-    fp.write(entry.FileHeader())
-    fp.write(data)
-    target.filelist.append(entry)
-    target.NameToInfo[entry.filename] = entry
-    target.start_dir = fp.tell()
-    target._didModify = True  # type: ignore[attr-defined]  # what writestr sets
-
-
 def stamp(
     path: Path,
     provenance: Provenance,
@@ -224,12 +174,12 @@ def stamp(
             zipfile.ZipFile(raw) as archive,
             zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as written,
         ):
-            raw_copy = _raw_copy_checked()
+            raw_copy = raw_copy_checked()
             for info in archive.infolist():
                 settings = info.filename == PROJECT_SETTINGS_NAME and bool(print_settings)
                 changed = info.filename == ROOT_MODEL or settings
-                if raw_copy and not changed and not info.flag_bits & _ENCRYPTED:
-                    _copy_raw(raw, info, written)
+                if raw_copy and not changed and not info.flag_bits & ENCRYPTED:
+                    copy_raw(raw, info, written, date_time=ZIP_TIMESTAMP)
                     continue
                 payload = archive.read(info.filename)
                 if info.filename == ROOT_MODEL:

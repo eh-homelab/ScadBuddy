@@ -8,13 +8,14 @@ import tracemalloc
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any, BinaryIO
 from xml.etree import ElementTree as ET
 
 import numpy as np
 import pytest
 import trimesh
 
-from scadbuddy.render import bambu3mf
+from scadbuddy.render import bambu3mf, zipcopy
 from scadbuddy.render.bambu3mf import (
     BAMBU_APPLICATION,
     CORE_NS,
@@ -244,6 +245,42 @@ class TestReplate:
         # touches nothing else, so the bytes have to match what a direct write gives.
         direct = _write(tmp_path / "direct.3mf", plate=plate_for("H2C"))
         assert replate_3mf(written.read_bytes(), plate_for("H2C")) == direct.read_bytes()
+
+    def test_replating_copies_an_untouched_entry_as_it_stands(
+        self, written: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#2942: a mesh object is copied as its compressed bytes, not inflated and
+        deflated again, and the file is the same as when every entry is rewritten."""
+        copied: list[str] = []
+        real = zipcopy.copy_raw
+
+        def spy(source: BinaryIO, info: zipfile.ZipInfo, *args: Any, **kwargs: Any) -> None:
+            copied.append(info.filename)
+            real(source, info, *args, **kwargs)
+
+        monkeypatch.setattr(bambu3mf, "copy_raw", spy)
+        moved = replate_3mf(written.read_bytes(), plate_for("H2C"))
+        objects = [name for name in ENTRIES if name.startswith("3D/Objects/")]
+        assert objects and set(objects) <= set(copied)
+        assert not {bambu3mf.ROOT_MODEL_NAME, bambu3mf.PROJECT_SETTINGS_NAME} & set(copied)
+
+        monkeypatch.setattr(bambu3mf, "raw_copy_checked", lambda: False)
+        copied.clear()
+        assert replate_3mf(written.read_bytes(), plate_for("H2C")) == moved
+        assert copied == []
+
+    def test_replating_rewrites_an_entry_compressed_against_the_policy(self, written: Path) -> None:
+        """An object stored uncompressed by someone else is not copied as it stands: the
+        replated file is deflated as the writer deflates it."""
+        stored = io.BytesIO()
+        with (
+            zipfile.ZipFile(written) as source,
+            zipfile.ZipFile(stored, "w", zipfile.ZIP_STORED) as out,
+        ):
+            for info in source.infolist():
+                out.writestr(info.filename, source.read(info))
+        expected = replate_3mf(written.read_bytes(), plate_for("H2C"))
+        assert replate_3mf(stored.getvalue(), plate_for("H2C")) == expected
 
     def test_replating_keeps_every_other_entry(self, written: Path) -> None:
         moved = replate_3mf(written.read_bytes(), plate_for("H2C"))

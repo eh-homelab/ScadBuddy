@@ -30,6 +30,7 @@ from scadbuddy.api.deps import (
     CatalogueDep,
     OutputIdPath,
     OutputsDep,
+    PathsDep,
     PrintCommands,
     PrintLinksDep,
     PrintProgressDep,
@@ -962,6 +963,7 @@ async def get_choices(
     uploads: UploadsDep,
     store: SettingsStoreDep,
     rack: RackUsageDep,
+    paths: PathsDep,
     printer_id: Annotated[int | None, Query()] = None,
 ) -> ChoicesView:
     """Printers, installed nozzles, quality tiers and processes, plates with the last one
@@ -970,7 +972,14 @@ async def get_choices(
     settings = store.load()
     async with client_for(settings) as client:
         return await choices_for_output(
-            client, outputs, uploads, meta, settings, printer_id=printer_id, rack=rack
+            client,
+            outputs,
+            uploads,
+            meta,
+            settings,
+            printer_id=printer_id,
+            cache=paths.cache,
+            rack=rack,
         )
 
 

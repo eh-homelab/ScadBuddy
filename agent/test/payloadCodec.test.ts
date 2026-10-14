@@ -274,3 +274,10 @@ describe('FilePayloadStore', () => {
     }
   })
 })
+
+it("seals a session's background tasks under the session's key", () => {
+  const id = '0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f60'
+  expect(subjectOf(`bgtask-${id}-ab12cd34`)).toBe(`session-${id}`)
+  expect(subjectOf('bgtask-ab12cd34')).toBeUndefined()
+  expect(subjectOf(`bgtask-${id}-ab12cd34x`)).toBeUndefined()
+})

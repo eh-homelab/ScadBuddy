@@ -105,6 +105,8 @@ class Fake:
         self.enqueue_error: ApplicationError | None = None
         self.enqueue_attempted = False
         self.plates = [1]
+        #: Plan plates with no slice plan and no sliced file (#2691 review).
+        self.planless = False
         #: How many of the next `print_insert` attempts fail before one succeeds.
         self.insert_failures = 0
         self.record_error: Exception | None = None
@@ -179,7 +181,10 @@ class Fake:
             nozzle_size="0.4",
             copies=1,
             options=PrintOptions(),
-            plates=[PlatePlan(plate_id=plate, plan=PLAN) for plate in self.plates],
+            plates=[
+                PlatePlan(plate_id=plate, plan=None if self.planless else PLAN)
+                for plate in self.plates
+            ],
         )
 
     @activity.defn(name="print_slice_start")
@@ -1184,6 +1189,21 @@ async def test_a_slice_lost_every_time_ends_the_run_failed_with_nothing_queued(
     assert run.status == "failed" and run.error == LOST and not run.may_have_queued
     assert fake.slice_starts == printing.SLICE_ATTEMPTS
     assert not [call for call in fake.calls if call.startswith("enqueue")]
+
+
+async def test_a_plate_with_nothing_to_slice_fails_the_run_saying_so(
+    client: Client, quick: str, fake: Fake
+) -> None:
+    """#2691 review: a plate with neither a plan nor a sliced file fails the run with a
+    message, never an assert python -O would strip into an AttributeError mid-slice."""
+    fake.planless = True
+    arg = run_input()
+    await start(client, quick, arg)
+    run = await ended(client, arg)
+
+    # Recorded as failed, with nothing sliced; the plate is named in the worker's log.
+    assert run.status == "failed" and run.error is not None
+    assert fake.slice_starts == 0
 
 
 async def test_a_slice_the_slicer_refused_is_not_sliced_again(

@@ -62,7 +62,7 @@ from scadbuddy.bambuddy.models import (
     TimelapseInfo,
 )
 from scadbuddy.bambuddy.print_links import LinkedPrint
-from scadbuddy.bambuddy.print_source import printable
+from scadbuddy.bambuddy.print_source import is_sliced, printable
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
@@ -976,7 +976,8 @@ def _library_files(
     files = [
         PrintFile(kind="library_file", name=file.filename, size=file.file_size, url=f"{base}/file")
     ]
-    if printable(file.file_type):
+    # A sliced file has no mesh ScadBuddy reads (#2671): its preview would be a 422.
+    if printable(file.file_type) and not is_sliced(file.file_type):
         plate = (archive.plate_id if archive is not None else None) or link.plate_id or 1
         stem = PurePosixPath(file.filename).stem or f"library-{file_id}"
         files.append(

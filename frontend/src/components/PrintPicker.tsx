@@ -65,6 +65,8 @@ import { PlateStep } from './print/PlateStep'
 import { PresetOverrides } from './print/PresetOverrides'
 import { PrintSequenceStep } from './print/PrintSequenceStep'
 import { SlicerDefaults } from './print/SlicerDefaults'
+import { SlicedSettings } from './print/SlicedSettings'
+import { slicedEstimate } from '../lib/slicedEstimate'
 import { QualityStep } from './print/QualityStep'
 import { QueuedPanel } from './print/QueuedPanel'
 import { RackNozzleLine, RackNozzleStep } from './print/RackNozzle'
@@ -225,6 +227,22 @@ export function PrintPicker({
     plate,
     carry,
   )
+  /**
+   * #2671 — a sliced file: queued as it is, so its slicer choices are shown read-only
+   * and only the plates it holds G-code for are offered.
+   */
+  const sliced = choices?.sliced ?? null
+  const slicedPlates = useMemo(() => (sliced?.plates ?? []).map((entry) => entry.index), [sliced])
+  const plates = useMemo(
+    () =>
+      slicedPlates.length > 0 ? picker.plates.filter((entry) => slicedPlates.includes(entry.index)) : picker.plates,
+    [picker.plates, slicedPlates],
+  )
+  const { setPlate } = picker
+  useEffect(() => {
+    const first = slicedPlates[0]
+    if (first !== undefined && plate !== 'all' && !slicedPlates.includes(plate)) setPlate(first)
+  }, [slicedPlates, plate, setPlate])
 
   // null until the user sets it, so a remembered quantity is not overridden by the
   // box's own starting value (#124).
@@ -608,15 +626,15 @@ export function PrintPicker({
   useEffect(() => {
     setClickedPlate(null)
   }, [plate, currentKey])
-  const multiPlate = picker.plates.length > 1
-  const previewLabel = plateLabel(picker.plates, previewPlate)
+  const multiPlate = plates.length > 1
+  const previewLabel = plateLabel(plates, previewPlate)
   // The plate the pane shows, sliced on its own: the run's own slice of it when it is
   // the plate chosen to print.
   const previewRequest =
     checkRequest && (allPlates || previewPlate !== plate)
       ? { ...checkRequest, plate_id: previewPlate, all_plates: false }
       : checkRequest
-  const previewSlice = usePreviewSlice(source, sliceable ? previewRequest : null)
+  const previewSlice = usePreviewSlice(source, sliceable && !sliced ? previewRequest : null)
   /** #2164 — filled trays Bambuddy has no spool for, and the ones answered "no". */
   const trays = useDeclinedTrays(printerId, filaments?.trays ?? [])
   // #836 — a hand pick the current check no longer offers (no rack this time, or the
@@ -701,9 +719,11 @@ export function PrintPicker({
       description={
         result || unanswered !== null
           ? undefined
-          : picker.advanced
-            ? 'Choose the spools, nozzles, quality and plate. ScadBuddy picks the Bambu presets, then Bambuddy slices and queues it.'
-            : 'Choose the spools. ScadBuddy picks the Bambu presets, then Bambuddy slices and queues it.'
+          : sliced
+            ? 'This file is sliced already. Choose the spools, and Bambuddy queues it as it is.'
+            : picker.advanced
+              ? 'Choose the spools, nozzles, quality and plate. ScadBuddy picks the Bambu presets, then Bambuddy slices and queues it.'
+              : 'Choose the spools. ScadBuddy picks the Bambu presets, then Bambuddy slices and queues it.'
       }
       onClose={close}
       size={(choices || source) && !result && unanswered === null ? 'split' : 'md'}
@@ -766,7 +786,7 @@ export function PrintPicker({
           printerName={printer?.name ?? null}
           progress={progress}
           polling={polling}
-          plates={picker.plates}
+          plates={plates}
         />
       ) : unanswered !== null ? (
         <p role="alert" className="text-[13px] text-warn" data-testid="run-unanswered">
@@ -849,7 +869,8 @@ export function PrintPicker({
                       </Button>
                     </div>
                   )}
-                  {!picker.advanced && (
+                  {sliced && <SlicedSettings profile={sliced} />}
+                  {!picker.advanced && !sliced && (
                     <FlowChoice value={nozzles[0]?.flow ?? 'standard'} onChange={picker.changeFlow} />
                   )}
                   {printerId !== null &&
@@ -873,7 +894,7 @@ export function PrintPicker({
                       gramsStale={slicedForSlots !== null && previewSlice.stale}
                     />
                   )}
-                  <NozzlePlanLine plan={check.verdict?.nozzle_plan} stale={!check.current} />
+                  {!sliced && <NozzlePlanLine plan={check.verdict?.nozzle_plan} stale={!check.current} />}
                   {target && known && (
                     <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2">
                       <legend className="px-1 text-[13px] text-ink">Arrange</legend>
@@ -926,7 +947,7 @@ export function PrintPicker({
                     </fieldset>
                   )}
 
-                  {picker.advanced && filaments && (filaments.slots ?? []).length > 0 && (
+                  {picker.advanced && !sliced && filaments && (filaments.slots ?? []).length > 0 && (
                     <PresetOverrides
                       size={size}
                       slots={filaments.slots ?? []}
@@ -939,7 +960,7 @@ export function PrintPicker({
               )}
 
               {/* #986 — one plate has no choice to make, but its name still says what prints. */}
-              {picker.plates.length === 1 && picker.plates[0]?.name && (
+              {plates.length === 1 && plates[0]?.name && (
                 <p className="text-[13px]" data-testid="single-plate">
                   <span className="text-muted">Plate:</span>{' '}
                   <button
@@ -948,14 +969,14 @@ export function PrintPicker({
                     className="underline decoration-dotted underline-offset-2 hover:text-accent"
                     title="Show it in the preview"
                   >
-                    {picker.plates[0].name}
+                    {plates[0].name}
                   </button>
                 </p>
               )}
 
-              {picker.plates.length > 1 && source && (
+              {plates.length > 1 && source && (
                 <PlatesToPrint
-                  plates={picker.plates}
+                  plates={plates}
                   value={plate}
                   onChange={picker.setPlate}
                   thumbnailUrl={sourceApi(source).plateThumbnailUrl}
@@ -964,7 +985,7 @@ export function PrintPicker({
                 />
               )}
 
-              {source && (
+              {source && !sliced && (
                 <div>
                   <Button size="sm" variant="ghost" onClick={() => setPreviewOpen(true)} data-testid="plate-preview-open">
                     Preview in 3D
@@ -980,11 +1001,11 @@ export function PrintPicker({
                       label={
                         // An output's preview is the whole output; a library file's, one
                         // plate, the first when every plate prints.
-                        source.kind === 'output' && picker.plates.length > 1
+                        source.kind === 'output' && plates.length > 1
                           ? 'Every plate'
-                          : plate === 'all' && picker.plates.length > 1
-                            ? `${plateLabel(picker.plates, 1)} (first of ${picker.plates.length} plates)`
-                            : plateLabel(picker.plates, plate === 'all' ? 1 : plate)
+                          : plate === 'all' && plates.length > 1
+                            ? `${plateLabel(plates, 1)} (first of ${plates.length} plates)`
+                            : plateLabel(plates, plate === 'all' ? 1 : plate)
                       }
                       colors={previewColors}
                       toolpathUrl={
@@ -1027,57 +1048,61 @@ export function PrintPicker({
                   {/* #768 — Simple mode sends these steps' defaults without showing them. */}
                   {picker.advanced && (
                     <>
-                      <NozzleStep
-                        sizes={choices.nozzle_sizes ?? []}
-                        installed={choices.installed ?? []}
-                        value={nozzles}
-                        onChange={picker.changeNozzles}
-                      />
-                      <NozzlePlanStep plan={check.verdict?.nozzle_plan} sides={selection.sides} onSide={picker.setSide} />
-                      {check.verdict?.rack && (
-                        <RackNozzleStep
-                          rack={check.verdict.rack}
-                          algorithm={rackAlgorithm}
-                          position={rackPosition}
-                          algorithmUnsaved={algorithmUnsaved}
-                          onAlgorithm={changeRackAlgorithm}
-                          onPosition={setRackPosition}
-                        />
-                      )}
-                      <QualityStep
-                        size={size}
-                        tiers={choices.tiers?.[size] ?? []}
-                        processes={choices.processes?.[size] ?? []}
-                        tier={tier}
-                        processName={processName}
-                        onChange={picker.changeQuality}
-                      />
-                      {bedType !== null && (
-                        <PlateStep
-                          bedTypes={
-                            (choices.bed_types ?? []).includes(bedType)
-                              ? (choices.bed_types ?? [])
-                              : [bedType, ...(choices.bed_types ?? [])]
-                          }
-                          labels={choices.bed_type_labels ?? {}}
-                          value={bedType}
-                          lastBedType={choices.last_bed_type ?? null}
-                          printerName={printer?.name ?? null}
-                          onChange={picker.setBedType}
-                        />
-                      )}
+                      {!sliced && (
+                        <>
+                          <NozzleStep
+                            sizes={choices.nozzle_sizes ?? []}
+                            installed={choices.installed ?? []}
+                            value={nozzles}
+                            onChange={picker.changeNozzles}
+                          />
+                          <NozzlePlanStep plan={check.verdict?.nozzle_plan} sides={selection.sides} onSide={picker.setSide} />
+                          {check.verdict?.rack && (
+                            <RackNozzleStep
+                              rack={check.verdict.rack}
+                              algorithm={rackAlgorithm}
+                              position={rackPosition}
+                              algorithmUnsaved={algorithmUnsaved}
+                              onAlgorithm={changeRackAlgorithm}
+                              onPosition={setRackPosition}
+                            />
+                          )}
+                          <QualityStep
+                            size={size}
+                            tiers={choices.tiers?.[size] ?? []}
+                            processes={choices.processes?.[size] ?? []}
+                            tier={tier}
+                            processName={processName}
+                            onChange={picker.changeQuality}
+                          />
+                          {bedType !== null && (
+                            <PlateStep
+                              bedTypes={
+                                (choices.bed_types ?? []).includes(bedType)
+                                  ? (choices.bed_types ?? [])
+                                  : [bedType, ...(choices.bed_types ?? [])]
+                              }
+                              labels={choices.bed_type_labels ?? {}}
+                              value={bedType}
+                              lastBedType={choices.last_bed_type ?? null}
+                              printerName={printer?.name ?? null}
+                              onChange={picker.setBedType}
+                            />
+                          )}
 
-                      <PrintSequenceStep
-                        value={printSequence}
-                        onChange={setPrintSequence}
-                        objects={check.current ? (check.verdict?.objects ?? null) : null}
-                      />
+                          <PrintSequenceStep
+                            value={printSequence}
+                            onChange={setPrintSequence}
+                            objects={check.current ? (check.verdict?.objects ?? null) : null}
+                          />
 
-                      {given?.kind === 'output' && (
-                        <SlicerDefaults
-                          settings={printSettings}
-                          overridden={printSequence !== null ? ['print_sequence'] : []}
-                        />
+                          {given?.kind === 'output' && (
+                            <SlicerDefaults
+                              settings={printSettings}
+                              overridden={printSequence !== null ? ['print_sequence'] : []}
+                            />
+                          )}
+                        </>
                       )}
 
                       <PrintOptionsDisclosure
@@ -1115,26 +1140,33 @@ export function PrintPicker({
 
                   {/* The analyzers judge what the print slices: an output's 3MF, or a library
                       file's, read as a print of it reads it (#1753). */}
-                  <AnalyzerPanel target={analysisTarget} request={analysisRequest} allPlates={allPlates}>
-                    {verdict}
-                  </AnalyzerPanel>
+                  {/* #2671 — a sliced file's mesh is not read, so only the verdict shows. */}
+                  {sliced ? (
+                    verdict
+                  ) : (
+                    <AnalyzerPanel target={analysisTarget} request={analysisRequest} allPlates={allPlates}>
+                      {verdict}
+                    </AnalyzerPanel>
+                  )}
                 </>
               )}
             </div>
             <div className="min-w-0 lg:sticky lg:top-0 lg:self-start">
               <PreviewPane
                 key={previewPlate}
-                url={source ? sourceApi(source).previewUrl(previewPlate, multiPlate) : null}
+                // A sliced file has no mesh ScadBuddy reads: its plate image stands in.
+                url={source && !sliced ? sourceApi(source).previewUrl(previewPlate, multiPlate) : null}
                 thumbnailUrl={source ? sourceApi(source).plateThumbnailUrl(previewPlate) : null}
-                label={multiPlate || picker.plates[0]?.name ? previewLabel : null}
+                label={multiPlate || plates[0]?.name ? previewLabel : null}
                 slots={filaments?.slots ?? []}
                 spools={filaments?.spools ?? []}
                 plan={plan}
                 colors={previewColors}
-                slice={previewSlice.result}
+                slice={sliced ? slicedEstimate(sliced, previewPlate, filaments, plate) : previewSlice.result}
                 nozzlePlan={previewSlice.plan}
                 plateSlots={slicedPlateSlots(filaments?.slots ?? [], {
-                  plates: picker.plates.length,
+                  // The plates offered: a sliced file's own, not every plate Bambuddy lists.
+                  plates: plates.length,
                   chosen: plate,
                   sliced: previewSlice.plateId,
                 })}
