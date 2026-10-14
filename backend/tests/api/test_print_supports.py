@@ -204,6 +204,55 @@ def test_a_setting_the_preset_lacks_is_left_out_and_named(client: TestClient, mo
     assert "support_threshold_angle (the process preset has no value" in warning["message"]
 
 
+@respx.mock
+def test_a_scalar_setting_the_preset_lacks_still_goes(client: TestClient, model: str) -> None:
+    """A preset read that lacks ``support_on_build_plate_only`` sends it as one value, as
+    a failed read does: a sparse preset never prints with less than an unreadable one."""
+    output_id = prepared(client, model)
+    sliced = routes()
+    preset_values({"enable_support": "0", "support_type": "tree(auto)"})
+    supports = {"enabled": True, "on_build_plate_only": True}
+
+    response = run_print(client, output_id, json={**body(), "supports": supports})
+
+    assert response.status_code == 200, response.text
+    assert overrides(sliced) == {
+        "enable_support": "1",
+        "support_type": "tree(auto)",
+        "support_on_build_plate_only": "1",
+    }
+    assert not [w for w in response.json()["warnings"] if w["kind"] == "supports-not-applied"]
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    ("key", "sent"),
+    [
+        ("enable_support", "1"),
+        ("support_type", "normal(auto)"),
+        ("support_on_build_plate_only", "1"),
+        ("support_threshold_angle", "40"),
+    ],
+)
+def test_every_setting_a_preset_stores_as_a_list_goes_as_one(
+    client: TestClient, model: str, key: str, sent: str
+) -> None:
+    output_id = prepared(client, model)
+    sliced = routes()
+    preset_values({**PRESET, key: ["x", "x"]})
+    supports = {
+        "enabled": True,
+        "type": "normal",
+        "threshold_angle": 40,
+        "on_build_plate_only": True,
+    }
+
+    response = run_print(client, output_id, json={**body(), "supports": supports})
+
+    assert response.status_code == 200, response.text
+    assert overrides(sliced)[key] == [sent, sent]
+
+
 @pytest.mark.parametrize(
     "supports",
     [{"enabled": True, "type": "organic"}, {"enabled": True, "threshold_angle": 91}, {}],

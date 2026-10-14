@@ -74,8 +74,9 @@ A template that prints best with a process setting changed says so in `model.jso
   and the one to reach for on an H2C) or `"normal(auto)"`, and optionally the angle and
   `support_on_build_plate_only`. The print dialog and `print_output` start from that
   and can change it per print. The support settings, unlike the others, are written in
-  the shape the print's process preset stores them, so they need its values; when
-  those cannot be read the print goes ahead without supports, with a warning.
+  the shape the print's process preset stores them, so the angle needs its values;
+  when those cannot be read the print goes ahead without the angle, with a warning,
+  and `enable_support`, `support_type` and `support_on_build_plate_only` still go.
 - The print run sends them as the slice's `process_overrides`, over the process preset
   the dialog's choices resolve to (`backend/scadbuddy/bambuddy/dispatch.py`,
   `SlicePlan`). A print's own `print_sequence` (`print_output`, #907) goes over the

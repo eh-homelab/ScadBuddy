@@ -126,6 +126,9 @@ async def support_overrides(
         current = values.get(key)
         if isinstance(current, list) and current:
             overrides[key] = [value] * len(current)
+        elif current is None and key in SCALAR_KEYS:
+            # As when the read fails: one value, whatever the preset leaves out.
+            overrides[key] = value
         elif current is None:
             problems.append(f"{key} (the process preset has no value to write it over)")
         elif isinstance(current, list | dict):
