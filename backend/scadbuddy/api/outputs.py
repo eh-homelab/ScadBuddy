@@ -1057,13 +1057,14 @@ async def get_output_geometry(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"the 3MF of output {output_id!r} cannot be analysed: {error}",
         ) from None
-    return await _attributed(analysis, outputs, output_id, paths=paths, history=history)
+    return await _attributed(analysis, outputs, output_id, plate, paths=paths, history=history)
 
 
 async def _attributed(
     analysis: GeometryAnalysis,
     outputs: OutputStore,
     output_id: str,
+    plate: int,
     *,
     paths: DataPaths,
     history: ModelHistory,
@@ -1071,7 +1072,10 @@ async def _attributed(
     """``analysis`` with its weak joints naming their scene objects, when the output is
     a render of a mesh model (spec 2026-10-11 §9), read at the output's revision. An
     arranged output's objects were moved off the scene's frame, so it is left as it is,
-    as is one whose revision is not a commit or cannot be read."""
+    as is one whose revision is not a commit or cannot be read. A named analysis is
+    cached beside the output's geometry (a revision's scene never changes, and
+    `ANALYSIS_VERSION` moves with the analysis); one left as it is never, since the
+    cause may be a git or disk error that passes."""
     if not analysis.weak_joints:
         return analysis
     if await asyncio.to_thread(outputs.arranged_from, output_id):
@@ -1083,6 +1087,9 @@ async def _attributed(
         # the render, and would name the wrong object.
         logger.info("weak joints of %s left unattributed: no commit recorded", output_id)
         return analysis
+    cached = await asyncio.to_thread(outputs.attributed, output_id, plate, version)
+    if cached is not None:
+        return cached
     try:
         directory, _ = await source_directory(meta.slug, version, paths=paths, history=history)
     except (
@@ -1102,7 +1109,10 @@ async def _attributed(
     if not directory.is_dir():
         logger.warning("weak joints of %s left unattributed: %s is gone", output_id, meta.slug)
         return analysis
-    return await asyncio.to_thread(attribute, analysis, directory)
+    named = await asyncio.to_thread(attribute, analysis, directory)
+    if named is not analysis:
+        await asyncio.to_thread(outputs.write_attributed, output_id, plate, version, named)
+    return named
 
 
 @router.put(

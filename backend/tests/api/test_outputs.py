@@ -931,3 +931,40 @@ def test_a_weak_joint_is_unattributed_when_the_revision_cannot_be_read(
 
     monkeypatch.setattr("scadbuddy.api.outputs.source_directory", refuse)
     assert _joint_object(client, output) is None
+
+
+def test_an_attributed_analysis_is_cached_beside_the_geometry(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second ask reads the cache: no export of the revision, no scene and meshes
+    loaded again, and the same body."""
+    output = _carrot_output(client, model, paths, scene=True)
+    _recorded_at(paths, model, output, COMMIT)
+    asked: list[str] = []
+
+    async def live(slug: str, requested: str | None, **_: Any) -> tuple[Any, str | None]:
+        asked.append(slug)
+        return paths.model_dir(model), requested
+
+    monkeypatch.setattr("scadbuddy.api.outputs.source_directory", live)
+    url = f"/api/v1/outputs/{output}/geometry"
+    first = client.get(url).json()
+    assert first["weak_joints"][0]["suggestion"]["object"] == "o1"
+    assert client.get(url).json() == first
+    assert len(asked) == 1
+
+
+def test_an_unattributed_analysis_is_not_cached(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failure to read the revision may pass: once it can be read, the joint is named."""
+    output = _carrot_output(client, model, paths, scene=True)
+    _recorded_at(paths, model, output, COMMIT)
+
+    async def refuse(*_: Any, **__: Any) -> tuple[Any, str | None]:
+        raise OSError("disk")
+
+    monkeypatch.setattr("scadbuddy.api.outputs.source_directory", refuse)
+    assert _joint_object(client, output) is None
+    _live_directory(monkeypatch, paths, model)
+    assert _joint_object(client, output) == "o1"
