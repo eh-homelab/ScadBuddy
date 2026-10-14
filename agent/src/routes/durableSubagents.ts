@@ -1,8 +1,8 @@
-import type { BlockList } from 'node:net'
+import { BlockList } from 'node:net'
 import type { Hono } from 'hono'
 import { z } from 'zod'
 import { UI_ACTOR } from '../audit/writes.js'
-import { OriginConfigError, type OriginPolicy, parseCidrList } from '../http/origins.js'
+import { OriginConfigError, type OriginPolicy, parseCidr, parseCidrList } from '../http/origins.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import type { SettingsRepo } from './httpRequest.js'
 import { ready, type RouteModule } from './module.js'
@@ -42,6 +42,10 @@ export type DurableSubagentsRouteDeps = {
 }
 
 const MAX_PEERS = 32
+// The broadest range a peer entry may name: a /8 (v4) or /32 (v6). `0.0.0.0/0` would open
+// the route to every network peer, leaving only the token. An IPv6 range over the
+// IPv4-mapped block (MAPPED) takes the IPv4 floor inside it: a /104 (96 + 8).
+const MIN_PREFIX = { 4: 8, 6: 32 } as const
 
 const PutBody = z.strictObject({
   url: z
@@ -56,10 +60,37 @@ const PutBody = z.strictObject({
     }, 'must be an http(s) URL')
     .nullable(),
   peers: z
-    .array(z.string().max(64))
-    .max(MAX_PEERS)
-    .refine((peers) => peerList(peers) !== undefined, 'each entry must be an IP address or CIDR range'),
+    .array(
+      z
+        .string()
+        .max(64)
+        .transform((p) => p.trim())
+        .refine(isPeer, 'each entry must be one IP address or CIDR range, no broader than a /8 (IPv4) or /32 (IPv6)'),
+    )
+    .max(MAX_PEERS),
 })
+
+// IPv4-mapped IPv6 (`::ffff:a.b.c.d`). A BlockList's IPv6 subnet that covers part of it also
+// matches those IPv4 peers, so `::/32` or `::ffff:0.0.0.0/96` would admit every IPv4 peer.
+const MAPPED = { address: '::ffff:0:0', prefix: 96 } as const
+
+/** One address or range, as parseCidrList reads it, and no broader than MIN_PREFIX. */
+function isPeer(entry: string): boolean {
+  const cidr = entry.includes(',') ? undefined : parseCidr(entry)
+  if (!cidr) return false
+  const { address, prefix, family } = cidr
+  if (family === 4) return prefix >= MIN_PREFIX[4]
+  // An IPv6 range that overlaps the mapped block takes the IPv4 floor inside it (96 + 8).
+  const overlapsMapped =
+    prefix <= MAPPED.prefix ? inRange(address, prefix, MAPPED.address) : inRange(MAPPED.address, MAPPED.prefix, address)
+  return prefix >= (overlapsMapped ? MAPPED.prefix + MIN_PREFIX[4] : MIN_PREFIX[6])
+}
+
+function inRange(network: string, prefix: number, address: string): boolean {
+  const list = new BlockList()
+  list.addSubnet(network, prefix, 'ipv6')
+  return list.check(address, 'ipv6')
+}
 
 /** The stored peers as a list, or undefined when any entry is not an address or range. */
 function peerList(peers: readonly string[]): BlockList | undefined {
@@ -81,14 +112,28 @@ function stored(raw: unknown): DurableSubagentsView {
   }
 }
 
+// The last refused stored value warned about, so a refused setting logs once, not per call.
+let warnedRefused: string | undefined
+
 /**
  * The peers besides loopback that the subagent route answers. A stored value this route
- * could not have written answers none (loopback only).
+ * could not have written answers none (loopback only), and says so once in the log.
  */
 export async function subagentPeers(settings: SettingsRepo | undefined): Promise<BlockList | undefined> {
   if (!settings) return undefined
   const { peers } = stored(await settings.get<unknown>(SETTING_DURABLE_SUBAGENTS))
-  return peers.length === 0 ? undefined : peerList(peers)
+  if (peers.length === 0) return undefined
+  const refused = peers.filter((p) => !isPeer(p))
+  if (refused.length === 0) return peerList(peers)
+  const key = refused.join(' ')
+  if (warnedRefused !== key) {
+    warnedRefused = key
+    console.warn(
+      `durable subagents: stored peers ${JSON.stringify(refused)} are not addresses or allowed ranges; ` +
+        'answering loopback only until Settings → Durable subagents is saved again',
+    )
+  }
+  return undefined
 }
 
 const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
@@ -126,7 +171,7 @@ export function registerDurableSubagentsRoutes(app: Hono, deps: DurableSubagents
           : 'body is not valid JSON'
       return c.json({ detail }, 400)
     }
-    const value: DurableSubagentsView = { url: body.url, peers: body.peers.map((p) => p.trim()) }
+    const value: DurableSubagentsView = { url: body.url, peers: body.peers }
     await settings.set(SETTING_DURABLE_SUBAGENTS, value, {
       actor: UI_ACTOR,
       surface: 'http',

@@ -44,6 +44,7 @@ import re
 from collections.abc import Callable, Sequence
 from typing import Literal
 
+from fastapi import status
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
@@ -57,6 +58,7 @@ from scadbuddy.bambuddy.models import (
     Spool,
     SpoolAssignment,
 )
+from scadbuddy.core.problems import ApiError
 
 logger = logging.getLogger(__name__)
 
@@ -201,7 +203,9 @@ class FilamentOptions(BaseModel):
     doing it in the browser would mean shipping every spool's history to do it.
     """
 
-    library_file_id: int
+    #: The library file the slots were read from; ``None`` for an output read from its
+    #: own 3MF, with no copy in Bambuddy yet (#2720).
+    library_file_id: int | None
     printer_id: int | None = None
     printer_name: str | None = None
     slots: list[SlotNeed] = Field(default_factory=list)
@@ -366,7 +370,7 @@ def seed_plan(options: FilamentOptions, remembered: Sequence[SlotChoice]) -> Fil
 
 def build_options(
     *,
-    library_file_id: int,
+    library_file_id: int | None,
     spools: list[Spool],
     assignments: list[SpoolAssignment],
     requirements: list[SlotNeed],
@@ -725,7 +729,7 @@ def queue_filaments(options: FilamentOptions, plan: FilamentPlan) -> QueueFilame
 async def gather_options(
     client: BambuddyClient,
     *,
-    library_file_id: int,
+    library_file_id: int | None,
     printer_id: int | None = None,
     plate_id: int | None = None,
     fallback_colours: list[str] | None = None,
@@ -763,7 +767,7 @@ async def read_inventory(client: BambuddyClient) -> Inventory:
 async def gather_plate_options(
     client: BambuddyClient,
     *,
-    library_file_id: int,
+    library_file_id: int | None,
     printer_id: int | None = None,
     plate_ids: Sequence[int | None],
     fallback_colours: list[str] | None = None,
@@ -819,7 +823,7 @@ async def gather_plate_options(
 
 async def _requirements(
     client: BambuddyClient,
-    library_file_id: int,
+    library_file_id: int | None,
     plate_id: int | None,
     fallback_colours: list[str] | None,
     own_colours: list[str] | None = None,
@@ -831,11 +835,18 @@ async def _requirements(
     ScadBuddy generated does carry. If it ever does not, the output's colour list is
     the same information in the same order, so the picker still opens.
     """
-    answer = (
-        known(plate_id)
-        if known is not None
-        else await client.filament_requirements(library_file_id, plate_id=plate_id)
-    )
+    if known is not None:
+        answer = known(plate_id)
+    else:
+        if library_file_id is None:
+            # Only a source that answered ReadFile(None) without reading its own slots
+            # reaches here; say so rather than fail on an assert.
+            raise ApiError(
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                f"plate {plate_id}'s slots were neither read from the file nor named by a"
+                " library file",
+            )
+        answer = await client.filament_requirements(library_file_id, plate_id=plate_id)
     slots = [
         SlotNeed(
             slot_id=filament.slot_id,
