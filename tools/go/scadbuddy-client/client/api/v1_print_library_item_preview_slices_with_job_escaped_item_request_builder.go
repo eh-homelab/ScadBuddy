@@ -70,6 +70,12 @@ func (m *V1PrintLibraryItemPreviewSlicesWithJob_ItemRequestBuilder) ToGetRequest
 	return requestInfo, nil
 }
 
+// Toolpath the toolpath property
+// returns a *V1PrintLibraryItemPreviewSlicesItemToolpathRequestBuilder when successful
+func (m *V1PrintLibraryItemPreviewSlicesWithJob_ItemRequestBuilder) Toolpath() *V1PrintLibraryItemPreviewSlicesItemToolpathRequestBuilder {
+	return NewV1PrintLibraryItemPreviewSlicesItemToolpathRequestBuilderInternal(m.BaseRequestBuilder.PathParameters, m.BaseRequestBuilder.RequestAdapter)
+}
+
 // WithUrl returns a request builder with the provided arbitrary URL. Using this method means any other path or query parameters are ignored.
 // returns a *V1PrintLibraryItemPreviewSlicesWithJob_ItemRequestBuilder when successful
 func (m *V1PrintLibraryItemPreviewSlicesWithJob_ItemRequestBuilder) WithUrl(rawUrl string) *V1PrintLibraryItemPreviewSlicesWithJob_ItemRequestBuilder {
