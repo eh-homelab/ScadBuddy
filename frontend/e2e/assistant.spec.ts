@@ -525,7 +525,7 @@ test.describe('assistant panel header at 768 px (#1038)', () => {
     const row = (await header.boundingBox())!
     const box = (await title.boundingBox())!
     const padding = await header.evaluate((el) => {
-      const style = getComputedStyle(el)
+      const style = el.ownerDocument.defaultView!.getComputedStyle(el)
       return parseFloat(style.paddingLeft) + parseFloat(style.paddingRight)
     })
     // 12rem, or the whole row when the row is narrower; less the row's padding.
