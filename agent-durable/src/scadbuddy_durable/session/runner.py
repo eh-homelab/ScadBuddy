@@ -111,7 +111,9 @@ NAMED_SCHEMES = frozenset({"file", "javascript", "data", "ftp", "mailto", "ws", 
 
 
 def _url_problem(value: str) -> str:
-    """Why :func:`_http_url` refused ``value``, naming nothing of the URL but its scheme."""
+    """Why :func:`_http_url` refused ``value``, naming nothing of the URL but its scheme.
+    Only for a value it refused: an accepted URL would read as "no host"."""
+    assert not _http_url(value), "only a refused URL has a problem to name"
     try:
         parts = urllib.parse.urlsplit(value)
     except ValueError:
