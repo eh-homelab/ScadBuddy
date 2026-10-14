@@ -11,12 +11,16 @@ export function asSliced(plan: NozzlePlan | null | undefined, slice: SlicePrevie
   if (!plan || !slice) return null
   const sides = new Map((slice.slots ?? []).map((entry) => [entry.slot_id, entry.side]))
   let moved = false
-  const slots = (plan.slots ?? []).map((slot) => {
-    const side = sides.get(slot.slot_id)
-    if (!side || side === slot.side) return slot
-    moved = true
-    return { ...slot, side }
-  })
+  const slots = (plan.slots ?? [])
+    // A slot this plate's slice does not use has no sliced side; its planned one is not
+    // shown on a line that says "as sliced" (#2737 review).
+    .filter((slot) => sides.has(slot.slot_id))
+    .map((slot) => {
+      const side = sides.get(slot.slot_id)
+      if (!side || side === slot.side) return slot
+      moved = true
+      return { ...slot, side }
+    })
   // The plan's summary names the planned sides; the sliced copy has none rather than a wrong one.
   return moved ? { ...plan, slots, summary: '' } : null
 }

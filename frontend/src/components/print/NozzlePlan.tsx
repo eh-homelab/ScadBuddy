@@ -104,8 +104,8 @@ export function NozzlePlanStep({ plan, sides, onSide }: StepProps) {
           sides, as one held to a single side is never regrouped. */}
       {new Set((plan?.slots ?? []).map((slot) => slot.side)).size > 1 && (
         <p className="mt-1.5 text-[12px] text-muted" data-testid="nozzle-side-hint">
-          The slicer groups filaments itself to cut purging, so it may put one on the other side: the preview
-          shows where it went once sliced.
+          The slicer groups filaments itself to cut purging, so it may put one on the other side: once the plate
+          being printed is sliced, its preview shows where each went.
         </p>
       )}
     </fieldset>
