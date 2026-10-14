@@ -147,9 +147,10 @@ async def test_prime_keeps_what_one_list_read_holds(clock: Clock) -> None:
     )
     cache = ArchiveCache(30.0, clock=clock)
     async with client() as bambuddy:
-        await cache.prime(
+        held = await cache.prime(
             bambuddy, [35, 36], date_from=date(2026, 9, 26), date_to=date(2026, 9, 28), limit=8
         )
+        assert held == 1
         found = await cache.archive(bambuddy, 35)
         assert found is not None and found.id == 35
         assert (await cache.archive(bambuddy, 36)) is not None
@@ -167,6 +168,42 @@ async def test_prime_keeps_what_one_list_read_holds(clock: Clock) -> None:
     )
     assert not single.called
     assert other.call_count == 2
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        httpx.Response(500),
+        httpx.ReadTimeout("slow"),
+        # A malformed row of an archive ScadBuddy never linked.
+        httpx.Response(200, json=[{"id": "not-an-id"}]),
+    ],
+    ids=["error", "timeout", "malformed-row"],
+)
+@respx.mock
+async def test_a_failed_list_read_leaves_the_archives_to_single_reads(
+    clock: Clock, answer: httpx.Response | Exception
+) -> None:
+    """#2818: the list read is only an optimisation, so its failure fails no page."""
+    detail = recording("archive-detail.json")
+    respx.get(f"{BASE}/api/v1/archives/").mock(side_effect=[answer])
+    singles = [
+        respx.get(f"{BASE}/api/v1/archives/{archive_id}").mock(
+            return_value=httpx.Response(200, json={**detail, "id": archive_id})
+        )
+        for archive_id in (35, 36)
+    ]
+    cache = ArchiveCache(30.0, clock=clock)
+    async with client() as bambuddy:
+        held = await cache.prime(bambuddy, [35, 36], date_from=None, date_to=None, limit=8)
+        assert held == 0
+        assert [
+            (await cache.archive(bambuddy, archive_id)) is not None for archive_id in (35, 36)
+        ] == [
+            True,
+            True,
+        ]
+    assert [route.call_count for route in singles] == [1, 1]
 
 
 @respx.mock
