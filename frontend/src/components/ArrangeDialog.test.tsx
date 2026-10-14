@@ -433,6 +433,27 @@ describe('ArrangeDialog', () => {
       expect(lastArrangeRequest()?.objects).toEqual([{ output_id: first.id, part: 'piece-wall', count: 2 }])
     })
 
+    it('names the saved arrange by what was arranged, not an output whose re-render failed (#2749 review)', async () => {
+      const bin: Output = { ...first, id: 'b'.repeat(32), slug: 'gridfinity-bin', name: 'Bin', manifest: [] }
+      addMockOutput(bin)
+      server.use(
+        http.post(`/api/v1/outputs/${bin.id}/backfill`, () => problem(422, 'Unprocessable Content', 'revision abc is gone')),
+      )
+      const onArranged = vi.fn()
+      const { user } = renderPage(
+        <ArrangeDialog open sources={fromOutputs([first, bin])} onClose={vi.fn()} onArranged={onArranged} />,
+      )
+      const binName = fixtures.models.find((m) => m.slug === 'gridfinity-bin')!.name
+      // Before Arrange, the stale one is about to be re-rendered: it is in the placeholder.
+      await waitFor(() =>
+        expect(screen.getByLabelText('Name')).toHaveAttribute('placeholder', `Arrange of Name Keychain, ${binName}`),
+      )
+      await user.click(screen.getByRole('button', { name: 'Arrange' }))
+      await user.click(screen.getByRole('button', { name: 'Re-render' }))
+      await waitFor(() => expect(onArranged).toHaveBeenCalledOnce())
+      expect(lastArrangeRequest()?.name).toBe('Arrange of Name Keychain')
+    })
+
     it('opens again without the last alert or prompt', async () => {
       server.use(
         http.post(`/api/v1/outputs/${nova.id}/backfill`, () =>
@@ -727,6 +748,31 @@ describe('ArrangeDialog', () => {
     const [failed, again] = save.mock.calls
     expect(again![1]).toBe(failed![1])
     expect(failed![5]).toBeTruthy()
+    expect(again![5]).toBe(failed![5])
+  })
+
+  it('keeps the save key on Try again when the model list answered in between (#2749 review)', async () => {
+    let answer: (models: typeof fixtures.models) => void = () => {}
+    vi.spyOn(api, 'listModels').mockReturnValue(new Promise((resolve) => (answer = resolve)))
+    const save = vi
+      .spyOn(api, 'createOutput')
+      .mockRejectedValueOnce(
+        new ApiError({ title: 'No answer', status: 0, detail: 'The server did not answer.', may_have_started: true }),
+      )
+      .mockResolvedValueOnce({ ...first, id: 'o-new' })
+    const onArranged = vi.fn()
+    const { user } = renderPage(
+      <ArrangeDialog open sources={fromOutputs([first])} onClose={vi.fn()} onArranged={onArranged} />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Arrange' }))
+    await screen.findByRole('alert')
+    // The default name exists only now, after the first attempt.
+    answer(fixtures.models)
+    await waitFor(() => expect(screen.getByLabelText('Name')).toHaveAttribute('placeholder', 'Arrange of Name Keychain'))
+    await user.click(screen.getByRole('button', { name: 'Try again' }))
+    await waitFor(() => expect(onArranged).toHaveBeenCalled())
+    const [failed, again] = save.mock.calls
+    expect(again![1]).toBe(failed![1])
     expect(again![5]).toBe(failed![5])
   })
 

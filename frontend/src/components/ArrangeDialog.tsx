@@ -178,19 +178,19 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
   /**
    * #2286 — what an unnamed arrange is saved as: "Arrange of Lemon, Bag clip", by the
    * models and files it holds, rather than a hash-like id. Only once the model list has
-   * answered: a slug is not a name (#2541).
+   * answered: a slug is not a name (#2541). `named` are the outputs it holds: before
+   * Arrange, every one shown (a stale one is about to be re-rendered); at the save, only
+   * the ones actually arranged, so one whose re-render failed is not in the name.
    */
-  const defaultName = arrangeName([
-    ...(models && models.length > 0
-      ? templatesOf(outputs.filter((o) => unusable.includes(o) || withRows([o], removed).length > 0)).map((slug) =>
-          modelName(slug),
-        )
-      : []),
-    // A file whose every row was removed is not in the arrange, so not in its name.
-    ...plain
-      .filter(({ file, read }) => fileRowsOf([{ file, read }]).some((row) => !removed.includes(row.key)))
-      .map(({ file }) => stem(file.filename)),
-  ])
+  const nameOf = (named: Output[]) =>
+    arrangeName([
+      ...(models && models.length > 0 ? templatesOf(named).map((slug) => modelName(slug)) : []),
+      // A file whose every row was removed is not in the arrange, so not in its name.
+      ...plain
+        .filter(({ file, read }) => fileRowsOf([{ file, read }]).some((row) => !removed.includes(row.key)))
+        .map(({ file }) => stem(file.filename)),
+    ])
+  const defaultName = nameOf(outputs.filter((o) => unusable.includes(o) || withRows([o], removed).length > 0))
   const [counts, setCounts] = useState<Record<string, number>>({})
   const [goal, setGoal] = useState<ArrangeGoal>('fewest_plates')
   const [name, setName] = useState('')
@@ -389,10 +389,12 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
               })),
             ],
             goal,
-            name: name.trim() || defaultName || null,
+            name: name.trim() || nameOf(withRows(usable, removed)) || null,
             slug,
           }
-          const signature = JSON.stringify(body)
+          // Keyed by what the user chose, not by the generated name: that changes once the
+          // model list answers, and a "Try again" must keep its save key (#2749 review).
+          const signature = JSON.stringify({ ...body, name: name.trim() || null })
           if (attempt.current?.body !== signature) attempt.current = { key: newRequestId(), body: signature }
           const current = attempt.current
           const arranged = await runArrange(slug, body, {
@@ -637,7 +639,8 @@ export function ArrangeDialog({ open, sources: given, onClose, onArranged }: Pro
             Try again
           </Button>
         )}
-        {/* #2286 — re-renders that failed are tried again from here, not by guessing. */}
+        {/* #2286 — re-renders that failed are tried again from here, not by guessing. Straight
+            to submit, with no BackfillPrompt: the user already confirmed these re-renders. */}
         {failures && !error && !busy && !asking && unusable.length > 0 && (
           <Button size="sm" className="self-start" onClick={() => void submit(unusable)}>
             Re-render again

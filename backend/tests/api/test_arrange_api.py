@@ -33,6 +33,7 @@ from scadbuddy.render.jobs import LAYOUT_NAME
 from scadbuddy.render.split import ColourPart
 from scadbuddy.tools.export_openapi import export
 from scadbuddy.workflows.models import ArrangeInputs
+from tests.api.conftest import wait_for_job
 from tests.api.test_print_library import library_file
 from tests.api.test_send import configure
 from tests.support.arrange import copied_output, saved_output
@@ -221,6 +222,27 @@ def test_an_arrange_passes_its_idempotency_key_as_the_request_id(
     )
     assert response.status_code == 202, response.text
     assert arranger.request_ids == ["a" * 32]
+
+
+def test_an_arrange_sent_again_with_its_key_is_the_one_claim_end_to_end(
+    client: TestClient, tmp_path: Path
+) -> None:
+    """#2280, through the real route and `RenderService.arrange` (#2749 review): a
+    re-send with the first request's Idempotency-Key is answered with the first start's
+    job, after that job has finished too, not with a second arrange. Another key is a
+    new request."""
+    _, meta, written = asyncio.run(saved_output(tmp_path))
+    body = {"objects": [{"output_id": meta.id, "part": written.manifest[0].part, "count": 1}]}
+    key = "e" * 32
+    first = client.post("/api/v1/outputs/arrange", json=body, headers={"Idempotency-Key": key})
+    assert first.status_code == 202, first.text
+    assert wait_for_job(client, first.json()["id"])["status"] == "done"
+    again = client.post("/api/v1/outputs/arrange", json=body, headers={"Idempotency-Key": key})
+    assert again.status_code == 202, again.text
+    assert again.json()["id"] == first.json()["id"]
+    other = client.post("/api/v1/outputs/arrange", json=body, headers={"Idempotency-Key": "f" * 32})
+    assert other.status_code == 202, other.text
+    assert other.json()["id"] != first.json()["id"]
 
 
 def test_an_arrange_too_large_to_start_is_a_413_before_any_job(
