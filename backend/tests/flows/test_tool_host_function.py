@@ -336,6 +336,8 @@ class TurnTools:
 
     def __init__(self, host: str) -> None:
         self.host = host
+        #: False: every tool is refused as turned off, as after a plugin is disabled.
+        self.offered = True
         self.tiered: list[str] = []
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
 
@@ -344,7 +346,7 @@ class TurnTools:
         async def turn_tool_tier(args: dict[str, Any]) -> dict[str, Any]:
             name = str(args["tool"])
             self.tiered.append(name)
-            if not name.startswith("scadbuddy_http__"):
+            if not self.offered or not name.startswith("scadbuddy_http__"):
                 raise ApplicationError(
                     f"{name} is not offered any more: its plugin or setting was turned off",
                     type="ToolError",
@@ -454,6 +456,62 @@ async def test_an_approved_turn_tool_runs_on_the_replica_live_once_approved(
     assert served.calls == [
         ("turn:scadbuddy_http__http_request", f"tool-{call_id}", {"method": "POST"})
     ]
+
+
+async def _approve(outward: Outward, run_id: str, call_id: str) -> None:
+    decide = next(k for k in flow_kinds(outward.store, Keys(), HASH_KEY) if k.name == FLOW_DECIDE)
+    request = {"run_id": run_id, "call_id": call_id, "approved": True}
+    env = ActivityEnvironment(client=outward.client)
+    await env.run(decide.run, request, await env.run(decide.check, request))
+
+
+_CAUGHT_POST = (
+    "try:",
+    "    await tool('scadbuddy_http__http_request', {'method': 'POST'})",
+    "except Exception as e:",
+    "    return str(e)",
+)
+
+
+async def test_an_approved_turn_tool_no_replica_picks_up_says_it_needs_approving_again(
+    outward: Outward,
+) -> None:
+    """#3420: an approved call waits `approved_queue_start_s` (longer than a read's), and
+    one nothing picks up says the person will be asked to approve the new call again."""
+    queue = f"agent-tools-{uuid.uuid4().hex[:8]}"
+    served = TurnTools(f"{queue}.gone")
+    async with Worker(outward.client, task_queue=queue, activities=[served.tier()]):
+        run_id = await outward.run(
+            script(*_CAUGHT_POST),
+            tools_queue=queue,
+            host_queue_start_s=1,
+            approved_queue_start_s=2,
+        )
+        call_id = await outward.approval(run_id)
+        await _approve(outward, run_id, call_id)
+        run = await outward.finished(run_id)
+    result = run.result or ""
+    assert "no worker on the agent replica that holds its state picked it up in 2s" in result
+    assert "the new call needs approving again" in result
+    assert served.calls == []
+
+
+async def test_an_approved_turn_tool_turned_off_while_it_waited_says_so(
+    outward: Outward, turn_tools: tuple[TurnTools, str]
+) -> None:
+    """#3420: a tool whose plugin was turned off while its call waited for approval fails
+    as a tool failure that says so, not as "there is no tool"."""
+    served, queue = turn_tools
+    run_id = await outward.run(script(*_CAUGHT_POST), tools_queue=queue)
+    call_id = await outward.approval(run_id)
+    served.offered = False
+    await _approve(outward, run_id, call_id)
+    run = await outward.finished(run_id)
+    assert (
+        "scadbuddy_http__http_request was not run: it is no longer offered since it was approved"
+        in (run.result or "")
+    )
+    assert served.calls == []
 
 
 async def test_a_turn_tool_on_a_gone_replicas_queue_fails_instead_of_waiting(

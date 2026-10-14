@@ -616,6 +616,7 @@ async def _call_tool(
     attempts: int,
     activity: str | None = None,
     queue: str | None = None,
+    approved: bool = False,
 ) -> ToolResult:
     """The agent tool `name` as an activity on the agent's `agent-tools` queue, under the
     activity id `tool-<call id>` the agent reads the call (and its approval) from. A turn
@@ -624,8 +625,11 @@ async def _call_tool(
     task_queue = queue or owner.tools_queue
     # A replica's own queue has no worker once that replica is gone (a deploy replaces
     # it), and an activity, its retries included, never moves queue (#2937).
+    # An approved call waits longer: a live replica with every slot busy frees one, and
+    # failing it would ask the person to approve it a second time (#3420).
+    start_s = owner.approved_queue_start_s if approved else owner.host_queue_start_s
     to_start = (
-        timedelta(seconds=owner.host_queue_start_s)
+        timedelta(seconds=start_s)
         if task_queue != owner.tools_queue and workflow.patched(FLOW_HOST_QUEUE_PATCH)
         else None
     )
@@ -650,10 +654,14 @@ async def _call_tool(
             and err.cause.type == TimeoutType.SCHEDULE_TO_START
         ):
             # Gone in a deploy, or alive with every slot busy: either way nothing ran.
+            again = (
+                "Call it again; the new call needs approving again."
+                if approved
+                else "Call it again."
+            )
             raise ToolFailedError(
                 f"{name} was not run: no worker on the agent replica that holds its state "
-                f"picked it up in {owner.host_queue_start_s}s (it may have been redeployed). "
-                "Call it again."
+                f"picked it up in {start_s}s (it may have been redeployed). {again}"
             ) from None
         raise
     return _tool_result(answer)
@@ -677,11 +685,23 @@ async def approved_turn_tool(call: str, name: str, args: dict[str, Any], queue: 
     await _approved(call)
     if workflow.patched(FLOW_HOST_QUEUE_PATCH):
         # The replica that tiered it may have gone while it waited (#2937): ask again. Only
-        # the queue is taken: a tier raised or a tool disabled since is the `turn:`
-        # activity's to refuse, which checks the call again when it runs.
-        queue = await _turn_queue(name, args)
+        # the queue is taken: a tier raised since is the `turn:` activity's to refuse,
+        # which checks the call again when it runs. A tool no longer offered at all (its
+        # plugin or setting turned off while it waited) is refused here (#3420).
+        try:
+            queue = await _turn_queue(name, args)
+        except ValueError as err:
+            raise ToolFailedError(
+                f"{name} was not run: it is no longer offered since it was approved ({err})."
+            ) from None
     return await _call_tool(
-        call, name, args, attempts=1, activity=f"{TURN_TOOL_PREFIX}{name}", queue=queue
+        call,
+        name,
+        args,
+        attempts=1,
+        activity=f"{TURN_TOOL_PREFIX}{name}",
+        queue=queue,
+        approved=True,
     )
 
 
