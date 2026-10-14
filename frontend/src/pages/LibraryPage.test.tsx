@@ -171,7 +171,9 @@ describe('LibraryPage', () => {
   it("prints a project's file list as one batch, from the folder linked to it (#2724)", async () => {
     const { user } = renderPage(<LibraryPage />, { route: '/library' })
     const folder = await screen.findByTestId('library-folder-14')
-    expect(folder).toHaveAccessibleName('Raegan 3 files project Reagan Keychain')
+    // The visible name alone (#2879); the count and the project are its description.
+    expect(folder).toHaveAccessibleName('Raegan')
+    expect(folder).toHaveAccessibleDescription('3 files, project Reagan Keychain')
     await user.click(folder)
     expect(await screen.findByTestId('library-project')).toHaveTextContent('Project Reagan Keychain')
     await screen.findByTestId('library-file-140')
