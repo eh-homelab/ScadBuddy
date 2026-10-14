@@ -164,7 +164,10 @@ def _pattern(
     validator: Any, pattern: str, instance: Any, schema: dict[str, Any]
 ) -> Iterator[jsonschema.ValidationError]:
     """jsonschema's `pattern`, run with a deadline: past PATTERN_TIMEOUT_S the value is
-    refused rather than left to backtrack on the API's event loop (#2661)."""
+    refused rather than left to backtrack on the API's event loop (#2661).
+
+    The dialect is `regex`'s (VERSION0), not `re`'s or ECMA-262's: it takes syntax `re`
+    refuses (`\\p{L}`, possessive quantifiers), and that is the contract (#3416)."""
     if not validator.is_type(instance, "string"):
         return
     timeout = PATTERN_TIMEOUT_S
@@ -186,7 +189,8 @@ def _pattern(
         yield jsonschema.ValidationError(f"its pattern does not compile: {err}")
         return
     if found is None:
-        yield jsonschema.ValidationError(f"{instance!r} does not match {pattern!r}")
+        # The value is not quoted, as the over-long refusal never quotes it (#3416).
+        yield jsonschema.ValidationError(f"does not match {pattern!r}")
 
 
 #: Draft 2020-12, its `pattern` run by `_pattern`.
