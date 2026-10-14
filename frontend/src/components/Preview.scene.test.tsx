@@ -165,6 +165,9 @@ describe('Preview scene (#364)', () => {
     const clone = placed.clone.bind(placed)
     placed.clone = (recursive?: boolean) => {
       const drawn = clone(recursive)
+      // Stands in for the not-yet-updated matrixWorld: the R3F mock renders <primitive>
+      // as DOM, so the clone stays under this group, where real R3F would re-parent it on
+      // mount. Without it the test measures nothing stale and passes on the old code too.
       const stale = new THREE.Group()
       stale.position.set(-300, 0, 0)
       stale.updateMatrixWorld(true)
