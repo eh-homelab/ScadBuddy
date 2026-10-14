@@ -31,6 +31,7 @@ import type { TabLinkFactory } from './AgentLink'
 import { useGlobalAgentTools } from '../agent/global'
 import { isEmbedded } from '../lib/embed'
 import { ErrorBoundary } from './ErrorBoundary'
+import { retryFailedPages } from '../lib/lazyRetry'
 import { panelWasOpen, rememberPanelOpen, rememberSession } from './assistant/panelMemory'
 import { LiveUpdatesIndicator } from './LiveUpdatesIndicator'
 import { ActivityBell } from './activity/ActivityBell'
@@ -364,11 +365,13 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
               className="min-h-0 min-w-0 flex-1 overflow-hidden focus:outline-none"
             >
               {/* #361 — the last resort: one page that throws never blanks the app, and
-                  leaving it clears the error. Reload, not an in-place retry: what lands
-                  here is mostly a lazy chunk that failed, which React caches as failed. */}
+                  leaving it clears the error. What lands here is mostly a lazy chunk that
+                  failed; `retryFailedPages` drops that failure, so coming back to the
+                  page imports it again (#3241). PageFailed's Reload does it at once. */}
               <ErrorBoundary
                 resetKey={location.pathname}
                 fallback={() => <PageFailed />}
+                onError={retryFailedPages}
               >
                 {/* #2356 — a page's own chunk loading. */}
                 <Suspense fallback={<PageLoading />}>
