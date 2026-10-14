@@ -1064,8 +1064,10 @@ export const printTools: Tool[] = [
                 body,
               }),
         `print ${sourceName(args)}`,
-        ` The print may still have started (request ${requestId}): it has no run id yet for get_print_run, ` +
-          "so check Bambuddy's queue before printing again; calling print_output again would be a second print.",
+        ` The print may still have started (request ${requestId}): it has no run id yet for get_print_run. ` +
+          `get_print_progress for this ${source.kind === 'library' ? 'library file' : 'output'} is safe to repeat and ` +
+          "shows the print once it starts; check it and Bambuddy's queue before printing again, as calling " +
+          'print_output again would be a second print.',
       )
       return runOutcome(await waitForRun(ctx, started), ctx)
     },

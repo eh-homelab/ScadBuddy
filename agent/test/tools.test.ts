@@ -55,7 +55,6 @@ const SCHEMA = {
   ],
 }
 
-
 /** A 202 `accepting` answer (spec 2026-10-13): follow it at `followUrl`, by default its own. */
 function acceptingAnswer(workflowId: string, updateId: string, followUrl = `/api/v1/commands/${workflowId}/updates/${updateId}`) {
   return HttpResponse.json(
@@ -71,6 +70,7 @@ function commandResend() {
     { status: 409 },
   )
 }
+
 describe('print_output still-accepting budget (#1061)', () => {
   it('is the backend CLIENT_ACCEPTING (printing.py), as the frontend printRunPoll.acceptingMs is', () => {
     expect(ACCEPTING_MS).toBe(240_000)
@@ -835,7 +835,8 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       expect(result.isError).toBe(true)
       // No run id to follow yet: the request id, and the queue to check (review #2849).
       expect(firstText(result)).toContain(`may still have started (request ${ids[0]})`)
-      expect(firstText(result)).toContain("check Bambuddy's queue before printing again")
+      expect(firstText(result)).toContain("check it and Bambuddy's queue before printing again")
+      expect(firstText(result)).toContain('get_print_progress for this output is safe to repeat')
       expect(ids).toHaveLength(RUN_REATTEMPTS + 1)
       expect(new Set(ids).size).toBe(1)
     })
@@ -862,8 +863,7 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
 
     // #2795 — spec 2026-10-13: a run no worker has picked up is a 202 to follow, not a 503 to re-send.
     const followUrl = `${BACKEND}/api/v1/commands/print-x/updates/r1`
-    const runAccepting = () =>
-      acceptingAnswer('print-x', 'r1')
+    const runAccepting = () => acceptingAnswer('print-x', 'r1')
 
     it('asks to follow, and follows a 202 accepting to its run without posting the print again (#2795)', async () => {
       const prefer: (string | null)[] = []
@@ -890,9 +890,7 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       const { ids, handler } = posts([runAccepting, () => HttpResponse.json(running, { status: 202 })])
       server.use(
         handler,
-        http.post(followUrl, () =>
-          commandResend(),
-        ),
+        http.post(followUrl, () => commandResend()),
         done,
       )
       const result = await tool('print_output').execute(args, ctx())
@@ -2619,9 +2617,7 @@ describe('a command the backend answers 202 accepting (#2795)', () => {
   it('follows a followed operation that is still running into /operations/{id} (review #2849)', async () => {
     server.use(
       http.get(`${BACKEND}/api/v1/outputs/${OUT}`, () => HttpResponse.json({ slug: 'box' })),
-      http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () =>
-        acceptingAnswer('op-delete_output-x', 'k'),
-      ),
+      http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () => acceptingAnswer('op-delete_output-x', 'k')),
       http.post(`${BACKEND}/api/v1/commands/op-delete_output-x/updates/k`, () =>
         HttpResponse.json({ id: 'op-1', kind: 'delete_output', subject: OUT, status: 'running', created_at: '', repeated: false }, { status: 202 }),
       ),
@@ -2638,9 +2634,7 @@ describe('a command the backend answers 202 accepting (#2795)', () => {
     let follows = 0
     server.use(
       http.get(`${BACKEND}/api/v1/outputs/${OUT}`, () => HttpResponse.json({ slug: 'box' })),
-      http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () =>
-        acceptingAnswer('op-delete_output-x', 'k'),
-      ),
+      http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () => acceptingAnswer('op-delete_output-x', 'k')),
       http.post(`${BACKEND}/api/v1/commands/op-delete_output-x/updates/k`, () => {
         follows += 1
         return acceptingAnswer('op-delete_output-x', 'k')
@@ -2656,9 +2650,7 @@ describe('a command the backend answers 202 accepting (#2795)', () => {
     let follows = 0
     server.use(
       http.get(`${BACKEND}/api/v1/outputs/${OUT}`, () => HttpResponse.json({ slug: 'box' })),
-      http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () =>
-        acceptingAnswer('op-delete_output-x', 'k'),
-      ),
+      http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () => acceptingAnswer('op-delete_output-x', 'k')),
       http.post(`${BACKEND}/api/v1/commands/op-delete_output-x/updates/k`, () => {
         follows += 1
         return acceptingAnswer('op-delete_output-x', 'k')
@@ -2674,6 +2666,25 @@ describe('a command the backend answers 202 accepting (#2795)', () => {
     expect(firstText(result)).toContain('ScadBuddy is still starting it')
     expect(follows).toBe(1)
     expect(performance.now() - began).toBeLessThan(1_000)
+  })
+
+  it('does not re-send past its budget when a follow says command-resend (#3571)', async () => {
+    let sends = 0
+    server.use(
+      http.get(`${BACKEND}/api/v1/outputs/${OUT}`, () => HttpResponse.json({ slug: 'box' })),
+      http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () => {
+        sends += 1
+        return acceptingAnswer('op-delete_output-x', 'k')
+      }),
+      http.post(`${BACKEND}/api/v1/commands/op-delete_output-x/updates/k`, async () => {
+        await new Promise((resolve) => setTimeout(resolve, 60))
+        return commandResend()
+      }),
+    )
+    const result = await runTool({ ...tool('delete_output'), gated: false }, { output_id: OUT }, ctx({ acceptingMs: 30 }))
+    expect(result.isError).toBe(true)
+    expect(firstText(result)).toContain('ScadBuddy is still starting it')
+    expect(sends).toBe(1)
   })
 
   it('re-sends a render the follow says command-resend with its key and preference (#3087)', async () => {
@@ -2740,9 +2751,7 @@ describe('a command the backend answers 202 accepting (#2795)', () => {
     let follows = 0
     server.use(
       http.get(`${BACKEND}/api/v1/outputs/${OUT}`, () => HttpResponse.json({ slug: 'box' })),
-      http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () =>
-        acceptingAnswer('op-delete_output-x', 'k'),
-      ),
+      http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () => acceptingAnswer('op-delete_output-x', 'k')),
       http.post(`${BACKEND}/api/v1/commands/op-delete_output-x/updates/k`, () => {
         follows += 1
         return new HttpResponse('bad gateway', { status: 502 })
@@ -2764,9 +2773,7 @@ describe('a command the backend answers 202 accepting (#2795)', () => {
     let followed = false
     server.use(
       http.get(`${BACKEND}/api/v1/outputs/${OUT}`, () => HttpResponse.json({ slug: 'box' })),
-      http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () =>
-        acceptingAnswer('op-delete_output-x', 'k', '/api/v1/commands/op-other-y/updates/z'),
-      ),
+      http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () => acceptingAnswer('op-delete_output-x', 'k', '/api/v1/commands/op-other-y/updates/z')),
       http.post(`${BACKEND}/api/v1/commands/:wf/updates/:id`, () => {
         followed = true
         return HttpResponse.json({ deleted: OUT })

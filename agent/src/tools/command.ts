@@ -125,8 +125,8 @@ function resendOf(result: FetchResult<unknown>): boolean {
  * the route would have given, for up to `ACCEPTING_MS` as the re-sends were. A follow
  * answered 409 `command-resend` sends the request again, with its key.
  *
- * The budget is checked before each follow and before each pause, so neither starts
- * past it; a follow started just inside it can still outlast it by one server
+ * The budget is checked before each follow, pause and re-send, so none starts past
+ * it; a follow started just inside it can still outlast it by one server
  * long-poll (`FOLLOW_WAIT`, ~10 s), as the request itself is not cut short (#3039).
  */
 export async function answeredFollowing<T>(
@@ -136,15 +136,19 @@ export async function answeredFollowing<T>(
   gaveUp = '',
 ): Promise<FetchResult<T>> {
   const began = performance.now()
+  // Neither a follow, a pause nor a re-send starts past the budget (#3039, #3571):
+  // one check, one error.
+  const within = (extra = 0) => {
+    if (performance.now() - began + extra >= (ctx.acceptingMs ?? ACCEPTING_MS)) {
+      throw new ToolError(`${what}: ScadBuddy is still starting it.${gaveUp}`)
+    }
+  }
   let result = await answered(ctx, send, what, gaveUp, began)
   for (let follows = 0, accepting = acceptingOf(result); accepting; accepting = acceptingOf(result), follows++) {
     // The follow is itself a long-poll, so the first goes at once; a repeat waits only
     // the polling floor, not `retry_after` on top of the server's wait (review #2849).
-    // Neither a follow nor a pause starts past the budget (#3039): one check, one error.
     const pause = follows > 0 ? ctx.pollIntervalMs : 0
-    if (performance.now() - began + pause >= (ctx.acceptingMs ?? ACCEPTING_MS)) {
-      throw new ToolError(`${what}: ScadBuddy is still starting it.${gaveUp}`)
-    }
+    within(pause)
     if (pause > 0) await sleep(pause, undefined, { signal: ctx.signal })
     const { workflow_id, update_id } = accepting
     // Followed by its ids, with the follow URL's query (a render's `supersedes`): the
@@ -165,7 +169,12 @@ export async function answeredFollowing<T>(
       gaveUp,
       began,
     )) as FetchResult<T>
-    result = resendOf(followed) ? await answered(ctx, send, what, gaveUp, began) : followed
+    if (!resendOf(followed)) {
+      result = followed
+      continue
+    }
+    within()
+    result = await answered(ctx, send, what, gaveUp, began)
   }
   return result
 }
