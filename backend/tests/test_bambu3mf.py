@@ -4,6 +4,7 @@ import io
 import json
 import math
 import os
+import re
 import time
 import tracemalloc
 import zipfile
@@ -1818,6 +1819,27 @@ def test_vertices_outside_the_core_namespace_are_left_to_the_parse(root: bytes) 
     data = _object_bytes(_THREE).replace(b'<model xmlns="' + CORE_NS.encode() + b'">', root, 1)
     assert data != _object_bytes(_THREE)
     assert bambu3mf._written_extents(data) is None
+
+
+def test_checking_the_root_namespace_is_one_pass_over_a_crafted_file() -> None:
+    """Security review of #3434's fix: a search for the root re-ran its bounded run
+    from every ``<model`` in a file made of them."""
+
+    data = b'<?xml version="1.0"?>' + b"<model " * 400_000
+
+    def best(read: Callable[[], object]) -> float:
+        fastest = float("inf")
+        for _ in range(3):
+            began = time.perf_counter()
+            read()
+            fastest = min(fastest, time.perf_counter() - began)
+        return fastest
+
+    # Against one plain pass over the same bytes, not a wall clock (#3254 review): a
+    # retry from every tag cost about 150 of them.
+    one_pass = best(lambda: sum(1 for _ in re.finditer(rb"<model ", data)))
+    assert bambu3mf._written_extents(data) is None
+    assert best(lambda: bambu3mf._written_extents(data)) < 10 * one_pass + 0.05
 
 
 def test_a_paint_code_longer_than_the_bounded_read_is_left_to_the_parse() -> None:
