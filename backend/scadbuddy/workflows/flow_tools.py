@@ -1055,16 +1055,56 @@ def inputs_tool(schema: dict[str, Any], values: dict[str, Any] | None = None) ->
     return agent.tool_defn(inherently_safe=True)(_inputs)
 
 
+class ModelChanged(BaseModel):
+    """A template's new revision was committed."""
+
+    kind: Literal["model.changed"]
+    slug: str
+    commit: str
+
+
+class RenderFinished(BaseModel):
+    """A render finished."""
+
+    kind: Literal["render.finished"]
+    slug: str
+    job_id: str
+
+
+def trigger_tool(event: dict[str, Any] | None = None) -> Any:
+    """`trigger()` (#2666): the event a trigger fired this run on, as the fire recorded
+    it, or None. It reads the run's own message, so it records no step. Data only: who
+    the run acts as, and its grant, are the trigger's record (spec 2026-10-11 §12.4)."""
+
+    async def trigger() -> ModelChanged | RenderFinished | None:
+        """The event that started this run: a template changed (`commit`) or a render
+        finished (`job_id`), with its template's `slug`. None for a run started by hand
+        or on a schedule."""
+        if event is None:
+            return None
+        if event.get("kind") == "model.changed":
+            return ModelChanged.model_validate(event)
+        return RenderFinished.model_validate(event)
+
+    return agent.tool_defn(inherently_safe=True)(trigger)
+
+
+#: Every host function a script of a flow without inputs may call, as the type check and
+#: the editor see them.
+HOST_FUNCTIONS: list[Any] = [*SCRIPT_TOOLS, trigger_tool()]
+
+
 def run_flow_tool(
     runner: AgentWorkflowRunner | None = None,
     inputs_schema: dict[str, Any] | None = None,
     inputs: dict[str, Any] | None = None,
+    event: dict[str, Any] | None = None,
 ) -> Any:
-    """The Code Mode tool over the host functions a script may call, with `inputs()`
-    when the flow declares inputs. Outside a workflow (the type check) no runner is
-    injected."""
+    """The Code Mode tool over the host functions a script may call, with `trigger()`,
+    and `inputs()` when the flow declares inputs. Outside a workflow (the type check) no
+    runner is injected."""
     injections = {"runner": runner} if runner is not None else None
-    tools = SCRIPT_TOOLS
+    tools = [*SCRIPT_TOOLS, trigger_tool(event)]
     if inputs_schema is not None:
-        tools = [*SCRIPT_TOOLS, inputs_tool(inputs_schema, inputs)]
+        tools.append(inputs_tool(inputs_schema, inputs))
     return agent.code_mode_tool(tools, name="run_flow", injections=injections)
