@@ -917,7 +917,7 @@ export function PrintPicker({
                       gramsStale={slicedForSlots !== null && previewSlice.stale}
                     />
                   )}
-                  <NozzlePlanLine plan={check.verdict?.nozzle_plan} stale={!check.current} />
+                  {!sliced && <NozzlePlanLine plan={check.verdict?.nozzle_plan} stale={!check.current} />}
                   {target && known && (
                     <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2">
                       <legend className="px-1 text-[13px] text-ink">Arrange</legend>
@@ -971,9 +971,11 @@ export function PrintPicker({
                   )}
 
                   {/* #717: outside Advanced, since a suggested profile is on until switched off. */}
-                  <FilamentProfilesStep suggestions={filamentProfiles.suggestions} onToggle={filamentProfiles.toggle} />
+                  {!sliced && (
+                    <FilamentProfilesStep suggestions={filamentProfiles.suggestions} onToggle={filamentProfiles.toggle} />
+                  )}
 
-                  {picker.advanced && filaments && (filaments.slots ?? []).length > 0 && (
+                  {picker.advanced && !sliced && filaments && (filaments.slots ?? []).length > 0 && (
                     <PresetOverrides
                       size={size}
                       slots={filaments.slots ?? []}
@@ -1122,21 +1124,23 @@ export function PrintPicker({
                             objects={check.current ? (check.verdict?.objects ?? null) : null}
                           />
 
-                      <SupportsStep
-                        value={supports}
-                        onChange={setSupports}
-                        templateSettings={given?.kind === 'output' ? printSettings : undefined}
-                        fromFile={given?.kind !== 'output'}
-                      />
+                          <SupportsStep
+                            value={supports}
+                            onChange={setSupports}
+                            templateSettings={given?.kind === 'output' ? printSettings : undefined}
+                            fromFile={given?.kind !== 'output'}
+                          />
 
-                      {given?.kind === 'output' && (
-                        <SlicerDefaults
-                          settings={printSettings}
-                          overridden={[
-                            ...(printSequence !== null ? ['print_sequence'] : []),
-                            ...overriddenSupportKeys(supports),
-                          ]}
-                        />
+                          {given?.kind === 'output' && (
+                            <SlicerDefaults
+                              settings={printSettings}
+                              overridden={[
+                                ...(printSequence !== null ? ['print_sequence'] : []),
+                                ...overriddenSupportKeys(supports),
+                              ]}
+                            />
+                          )}
+                        </>
                       )}
 
                       <PrintOptionsDisclosure

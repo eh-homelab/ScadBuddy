@@ -96,6 +96,12 @@ WarningKind = Literal[
     # #1899: a support setting left out because the preset's shape for it is unknown:
     # its values could not be read, or it has no value (or an empty one) for that key.
     "supports-not-applied",
+    # A sliced file queued as it is (#2671), never refused: what to set right first.
+    "sliced-other-model",
+    "sliced-nozzle-missing",
+    "sliced-plate-missing",
+    # ScadBuddy's own earlier slice of the same choices queued, nothing sliced (#2955).
+    "slice-reused",
 ]
 
 

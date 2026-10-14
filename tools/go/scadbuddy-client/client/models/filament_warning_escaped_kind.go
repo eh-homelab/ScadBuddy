@@ -24,10 +24,14 @@ const (
 	SEQUENCECLEARANCE_FILAMENTWARNING_KIND
 	PROFILENOTAPPLIED_FILAMENTWARNING_KIND
 	SUPPORTSNOTAPPLIED_FILAMENTWARNING_KIND
+	SLICEDOTHERMODEL_FILAMENTWARNING_KIND
+	SLICEDNOZZLEMISSING_FILAMENTWARNING_KIND
+	SLICEDPLATEMISSING_FILAMENTWARNING_KIND
+	SLICEREUSED_FILAMENTWARNING_KIND
 )
 
 func (i FilamentWarning_kind) String() string {
-	return []string{"not-loaded", "low-filament", "no-choice", "no-preset", "no-fan-out", "mixed-sizes", "no-process", "not-installed", "plate-differs", "plate-not-listed", "hf-unsupported", "hf-mounted", "rack-unsafe-material", "rack-left-to-bambuddy", "rack-manual-partial", "sequence-clearance", "profile-not-applied", "supports-not-applied"}[i]
+	return []string{"not-loaded", "low-filament", "no-choice", "no-preset", "no-fan-out", "mixed-sizes", "no-process", "not-installed", "plate-differs", "plate-not-listed", "hf-unsupported", "hf-mounted", "rack-unsafe-material", "rack-left-to-bambuddy", "rack-manual-partial", "sequence-clearance", "profile-not-applied", "supports-not-applied", "sliced-other-model", "sliced-nozzle-missing", "sliced-plate-missing", "slice-reused"}[i]
 }
 
 func ParseFilamentWarning_kind(v string) (any, error) {
@@ -69,6 +73,14 @@ func ParseFilamentWarning_kind(v string) (any, error) {
 		result = PROFILENOTAPPLIED_FILAMENTWARNING_KIND
 	case "supports-not-applied":
 		result = SUPPORTSNOTAPPLIED_FILAMENTWARNING_KIND
+	case "sliced-other-model":
+		result = SLICEDOTHERMODEL_FILAMENTWARNING_KIND
+	case "sliced-nozzle-missing":
+		result = SLICEDNOZZLEMISSING_FILAMENTWARNING_KIND
+	case "sliced-plate-missing":
+		result = SLICEDPLATEMISSING_FILAMENTWARNING_KIND
+	case "slice-reused":
+		result = SLICEREUSED_FILAMENTWARNING_KIND
 	default:
 		return nil, nil
 	}
