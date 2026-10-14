@@ -1,4 +1,4 @@
-import { CABLE_LABEL_SOURCE, EvalBackend, OUTWARD_ROUTES } from './backend.js'
+import { CABLE_LABEL_SOURCE, CARROT_NECK, EvalBackend, OUTWARD_ROUTES, splitsTheNeck } from './backend.js'
 import { repoSources, scoreCitations, type SuggestionScore } from './citations.js'
 import { isRed, KEYCHAIN_HEIGHTS, keychainProblems, type RenderedJob, type ScenarioBackend } from './render.js'
 import { type Check, type Outcome, registryName, type Scenario } from './runner.js'
@@ -444,4 +444,103 @@ export const citedAdvice: Scenario = {
   ],
 }
 
-export const SCENARIOS: readonly Scenario[] = [customise, authoring, printStops, injection, citedAdvice]
+// ── 6. Fix a carrot whose leaves snap off (spec 2026-10-11 §9, §10) ────────
+
+const EDITS_ROUTE = /^POST \/api\/v1\/models\/carrot\/scene\/edits$/
+
+/** Every edit the backend accepted for the carrot, in order. */
+function carrotEdits(o: Outcome): Record<string, unknown>[] {
+  return o.backend
+    .requests(EDITS_ROUTE)
+    .filter((r) => (r.status ?? 0) < 300)
+    .flatMap((r) => (r.body as { edits?: Record<string, unknown>[] } | undefined)?.edits ?? [])
+}
+
+export const carrotWeakNeck: Scenario = {
+  id: 'mesh-carrot-weak-neck',
+  title: 'Fix a carrot whose leaves snap off at the neck',
+  prepare: (backend) => {
+    const seededBackend = seeded(backend)
+    const { output } = seededBackend.seedCarrot()
+    const next = seededBackend.nextOutputId('carrot')
+    return {
+      prompt:
+        `The leaves of my carrot (the mesh model "carrot"; its last render is saved as output ${output}) snap off ` +
+        'at the neck when I print it. Fix it so it prints strong, then render it again and save the render.',
+      script: [
+        { tool: 'analyze_geometry', input: { output_id: output } },
+        { tool: 'get_scene', input: { slug: 'carrot' } },
+        {
+          tool: 'edit_scene',
+          input: {
+            slug: 'carrot',
+            edits: [
+              {
+                edit: 'split_at_plane',
+                object: 'o1',
+                point: [0, 0, 31.5],
+                normal: [0, 0, 1],
+                joint: { diameter: 3.6, depth: 6, clearance: 0.2, key: 'flat', peg_on: 'above' },
+              },
+              { edit: 'lay_flat', object: 'o2', normal: 'largest_flat' },
+            ],
+            message: 'Split the leaves off at the neck with a keyed peg, and lay them flat',
+          },
+        },
+        { tool: 'render_model', input: { slug: 'carrot', params: {}, save_output: true } },
+        { tool: 'analyze_geometry', input: { output_id: next } },
+        {
+          text:
+            'The neck was the weak joint. I split the leaves off there with a keyed peg on them and a socket in the ' +
+            'body, laid the leaves flat so their layers run along them, and rendered and saved it; the new render ' +
+            'has no weak joint.',
+        },
+      ],
+    }
+  },
+  checks: [
+    ...INVARIANTS,
+    {
+      name: 'split the carrot at its neck with a keyed joint',
+      run: (o) => {
+        const edits = carrotEdits(o)
+        return edits.some((e) => e.object === 'o1' && splitsTheNeck(e))
+          ? true
+          : `no split_at_plane of o1 with a joint, level through z ${CARROT_NECK[0]} to ${CARROT_NECK[1]}; edits: ${JSON.stringify(edits)}`
+      },
+    },
+    {
+      name: 'laid the leaves half flat',
+      run: (o) => {
+        const edits = carrotEdits(o)
+        const split = edits.findIndex((e) => e.object === 'o1' && e.edit === 'split_at_plane')
+        const flat = edits.findIndex((e, i) => i > split && e.edit === 'lay_flat' && e.object !== 'o1')
+        return split >= 0 && flat > split ? true : `edits: ${edits.map((e) => `${String(e.edit)} ${String(e.object)}`).join(', ') || 'none'}`
+      },
+    },
+    {
+      name: 'rendered the carrot after its last scene edit, and saved that render',
+      run: (o) => {
+        const log = o.backend.log
+        const lastEdit = log.findLastIndex((r) => EDITS_ROUTE.test(`${r.method} ${r.path}`) && (r.status ?? 0) < 300)
+        if (lastEdit < 0) return 'no scene edit was made'
+        const render = log.findIndex((r, i) => i > lastEdit && r.method === 'POST' && r.path === '/api/v1/models/carrot/render')
+        if (render < 0) return 'no render after the last edit'
+        const saved = log.findIndex(
+          (r, i) => i > render && r.method === 'POST' && r.path === '/api/v1/models/carrot/outputs' && (r.status ?? 0) < 300,
+        )
+        return saved >= 0 ? true : 'the render after the last edit was not saved'
+      },
+    },
+    {
+      name: 'kept editing it as a scene (no eject_scene, no update_source)',
+      run: (o) => {
+        const hits = o.backend.requests(/^(POST \/api\/v1\/models\/carrot\/scene\/eject|PUT \/api\/v1\/models\/carrot\/source)$/)
+        return hits.length ? `backend received ${hits.map((r) => `${r.method} ${r.path}`).join(', ')}` : true
+      },
+    },
+    noApprovalNeeded,
+  ],
+}
+
+export const SCENARIOS: readonly Scenario[] = [customise, authoring, printStops, injection, citedAdvice, carrotWeakNeck]

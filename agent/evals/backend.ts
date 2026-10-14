@@ -35,9 +35,13 @@ export type EvalModel = {
   schema: { parameters: Record<string, unknown>[]; groups: string[] }
   /** Newest last. The model's current source is the last version's. */
   versions: Version[]
+  /** A mesh model's scene (#2146): what GET /models/{slug}/scene answers. */
+  scene?: { objects: Record<string, unknown>[] } & Record<string, unknown>
+  /** Each successful POST …/scene/edits' edits, in order. */
+  sceneEdits?: Record<string, unknown>[][]
 }
 
-export type EvalJob = { id: string; slug: string; params: Record<string, unknown>; version: string }
+export type EvalJob = { id: string; slug: string; params: Record<string, unknown>; version: string; edits: number }
 
 export type EvalOutput = { id: string; slug: string; job_id: string; name: string }
 
@@ -105,6 +109,69 @@ color("black")
 
 function version(slug: string, n: number, message: string, source: string): Version {
   return { commit: hex(`${slug}:${n}:${source}`, 40), message, source, date: NOW }
+}
+
+/**
+ * The carrot of models/mesh-joint-demo/make.py before its edits: an orange body (r 10, z 0
+ * to 30) and green leaves on a neck (r 3, z 30 to 35, then r 6 to 45), one object.
+ */
+function carrotScene(): NonNullable<EvalModel['scene']> {
+  return {
+    version: 1,
+    generated_sha256: hex('carrot.scad', 64),
+    source: { kind: 'upload', name: 'carrot (made by make.py)', sha256: '0'.repeat(64), file_id: null, output_id: null, licence: null },
+    objects: [
+      {
+        id: 'o1',
+        name: 'Carrot',
+        parts: [
+          { id: 'p1', mesh: 'meshes/o1-p1.3mf', colour: '#F08A24', painted: false, negative: false },
+          { id: 'p2', mesh: 'meshes/o1-p2.3mf', colour: '#3A7D2C', painted: false, negative: false },
+        ],
+        ops: [],
+        transform: { translate: [0, 0, 0], rotate: [0, 0, 0], scale: [1, 1, 1] },
+      },
+    ],
+    notes: [],
+  }
+}
+
+/** The carrot's neck, z from and to (mm). */
+export const CARROT_NECK = [30, 35] as const
+
+/**
+ * What backend/scadbuddy/render/geometry.py `weak_joints` reports for that carrot (the
+ * shape of backend/tests/test_geometry.py's two-colour carrot), its object named as
+ * `GET /outputs/{id}/geometry` names it for a mesh model's un-arranged render.
+ */
+export const CARROT_WEAK_JOINT = {
+  z: 31.5,
+  area_mm2: 28.2,
+  neighbour_area_mm2: 313.7,
+  volume_above_mm3: 1225,
+  centroid: [0, 0, 31.5],
+  room_mm: 2.996,
+  parts: [1, 2],
+  bbox: { min: [-10, -10, 0], max: [10, 10, 45], size: [20, 20, 45] },
+  suggestion: {
+    edit: 'split_at_plane',
+    object: 'o1',
+    point: [0, 0, 31.5],
+    normal: [0, 0, 1],
+    joint: { diameter: 3.6, depth: 6, clearance: 0.2, key: 'flat', peg_on: 'above' },
+  },
+}
+
+/** A `split_at_plane` with a joint whose plane is level (within about 25°) through the neck. */
+export function splitsTheNeck(edit: Record<string, unknown>): boolean {
+  if (edit.edit !== 'split_at_plane' || !edit.joint) return false
+  const point = edit.point
+  const normal = edit.normal
+  if (!Array.isArray(point) || !Array.isArray(normal) || point.length !== 3 || normal.length !== 3) return false
+  const [, , z] = point as number[]
+  const [nx, ny, nz] = normal as number[]
+  const length = Math.hypot(nx!, ny!, nz!)
+  return z! > CARROT_NECK[0] && z! < CARROT_NECK[1] && length > 0 && Math.abs(nz!) / length >= 0.9
 }
 
 function defaultModels(): EvalModel[] {
@@ -248,6 +315,26 @@ export class EvalBackend implements ScenarioBackend {
     return id
   }
 
+  /** The mesh model `carrot` (its leaves snap at the neck) and a saved render of it, as opened. */
+  seedCarrot(): { slug: string; output: string } {
+    this.models.set('carrot', {
+      slug: 'carrot',
+      name: 'Carrot',
+      description: 'A carrot opened from a mesh.',
+      readme: null,
+      schema: { groups: [], parameters: [] },
+      versions: [version('carrot', 0, 'Open carrot.stl', '// Generated from scene.json by ScadBuddy\n')],
+      scene: carrotScene(),
+      sceneEdits: [],
+    })
+    return { slug: 'carrot', output: this.seedOutput('carrot', 'Carrot as opened') }
+  }
+
+  /** The id the next render of `slug` with `params` is saved under, as `startJob` and the outputs route name them. */
+  nextOutputId(slug: string, params: Record<string, unknown> = {}): string {
+    return hex(`output:${hex(`job:${this.jobs.size}:${slug}:${JSON.stringify(params)}`)}`)
+  }
+
   source(slug: string): string {
     return this.models.get(slug)?.versions.at(-1)?.source ?? ''
   }
@@ -277,7 +364,13 @@ export class EvalBackend implements ScenarioBackend {
 
   private startJob(slug: string, params: Record<string, unknown>): EvalJob {
     const id = hex(`job:${this.jobs.size}:${slug}:${JSON.stringify(params)}`)
-    const job: EvalJob = { id, slug, params, version: this.models.get(slug)?.versions.at(-1)?.commit ?? '' }
+    const job: EvalJob = {
+      id,
+      slug,
+      params,
+      version: this.models.get(slug)?.versions.at(-1)?.commit ?? '',
+      edits: this.models.get(slug)?.sceneEdits?.length ?? 0,
+    }
     this.jobs.set(id, job)
     return job
   }
@@ -288,7 +381,7 @@ export class EvalBackend implements ScenarioBackend {
       slug: m.slug,
       name: m.name,
       description: m.description,
-      origin: m.slug === 'cable-label' ? 'user' : 'builtin',
+      origin: m.slug === 'name-keychain' ? 'builtin' : 'user',
       tags: [],
       has_thumbnail: false,
       has_readme: m.readme !== null,
@@ -333,6 +426,24 @@ export class EvalBackend implements ScenarioBackend {
       if (model.readme === null) return problem(404, 'Not Found', `${model.slug} has no README`)
       return new Response(model.readme, { headers: { 'content-type': 'text/markdown; charset=utf-8' } })
     }
+    if (model && sub === 'scene' && !subId && method === 'GET') {
+      if (!model.scene) return problem(404, 'Not Found', `"${model.slug}" is not a mesh model (it has no scene)`)
+      return Response.json({ scene: model.scene, notes: [], hand_edited: false })
+    }
+    if (model && sub === 'scene' && subId === 'edits' && method === 'POST') {
+      if (!model.scene) return problem(404, 'Not Found', `"${model.slug}" is not a mesh model (it has no scene)`)
+      const { edits, message } = (body ?? {}) as { edits?: Record<string, unknown>[]; message?: string }
+      if (!Array.isArray(edits) || edits.length === 0) return problem(422, 'Unprocessable Entity', 'edits is required')
+      model.sceneEdits = [...(model.sceneEdits ?? []), edits]
+      // A split's other half is the next object id (backend/scadbuddy/meshmodel/edits.py).
+      for (const edit of edits) {
+        if (edit.edit === 'split_at_plane') {
+          model.scene.objects.push({ ...model.scene.objects[0], id: `o${model.scene.objects.length + 1}`, name: 'Carrot (top)' })
+        }
+      }
+      model.versions.push(version(model.slug, model.versions.length, message || 'Edit the scene', this.source(model.slug)))
+      return Response.json(this.record(model))
+    }
     if (model && sub === 'versions' && !subId && method === 'GET') {
       return Response.json(
         [...model.versions].reverse().map((v, i) => ({
@@ -376,6 +487,12 @@ export class EvalBackend implements ScenarioBackend {
       if (!out || !job) return problem(404, 'Not Found', `no output "${id}"`)
       return new Response(new Uint8Array(this.render3mf(job)), { headers: { 'content-type': 'model/3mf' } })
     }
+    if (resource === 'outputs' && id && sub === 'geometry' && method === 'GET') {
+      const out = this.outputs.get(id)
+      const job = out ? this.jobs.get(out.job_id) : undefined
+      if (!out || !job) return problem(404, 'Not Found', `no output "${id}"`)
+      return Response.json(this.geometry(job))
+    }
     if (resource === 'outputs' && id && !sub && method === 'GET') {
       const out = this.outputs.get(id)
       return out ? Response.json(this.outputDetail(out)) : problem(404, 'Not Found', `no output "${id}"`)
@@ -399,6 +516,32 @@ export class EvalBackend implements ScenarioBackend {
     })
   }
 
+  /**
+   * A render's analysis (backend/scadbuddy/render/geometry.py, `weak_joints` only of
+   * substance): the carrot's neck is a weak joint until the render follows a split with a
+   * joint through it.
+   */
+  private geometry(job: EvalJob) {
+    const model = this.models.get(job.slug)
+    const edits = (model?.sceneEdits ?? []).slice(0, job.edits).flat()
+    const weak = model?.scene && !edits.some(splitsTheNeck) ? [CARROT_WEAK_JOINT] : []
+    const box = { min: [-10, -10, 0], max: [10, 10, 45], size: [20, 20, 45] }
+    return {
+      version: 3,
+      plate: 1,
+      plates: 1,
+      parts: [],
+      bbox: box,
+      bed_z: 0,
+      height_mm: 45,
+      bed_contact_area_mm2: 314.2,
+      overhangs: [],
+      edges: [],
+      edges_truncated: false,
+      weak_joints: weak,
+    }
+  }
+
   private jobStatus(job: EvalJob) {
     const name = String(job.params.name ?? 'Reagan')
     const failed = this.failRenders
@@ -414,7 +557,12 @@ export class EvalBackend implements ScenarioBackend {
       warnings: [],
       log_tail: ['Rendering Polygon Mesh using Manifold...', 'Total rendering time: 0:00:01.200'],
       bbox_mm: [Math.max(20, name.length * 12), 30, 6.8],
-      colors: job.slug === 'name-keychain' ? [job.params.base_color ?? '#1e1e1e', job.params.text_color ?? '#ffffff'] : ['#ffffff'],
+      colors:
+        job.slug === 'name-keychain'
+          ? [job.params.base_color ?? '#1e1e1e', job.params.text_color ?? '#ffffff']
+          : job.slug === 'carrot'
+            ? ['#F08A24', '#3A7D2C']
+            : ['#ffffff'],
       parts: 2,
       model_version: job.version.slice(0, 7),
       preview_url: `/api/v1/jobs/${job.id}/preview.glb`,

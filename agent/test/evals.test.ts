@@ -8,6 +8,7 @@ import { resolveEvalCredential, EVAL_API_KEY_ENV } from '../evals/credential.js'
 import { EVAL_DENIAL, EVAL_TOOL_PREFIX, formatReport, runScenario, type Scenario, score, type ScriptedTurn } from '../evals/runner.js'
 import {
   authoring,
+  carrotWeakNeck,
   citedAdvice,
   customise,
   INJECTION_CANARY,
@@ -353,5 +354,58 @@ describe.skipIf(cliMissing !== undefined)(`eval scenarios, scripted${cliMissing 
       { text: 'Saved.' },
     ])
     expect(failed).toEqual(['kept the existing parameters'])
+  }, 90_000)
+
+  const NECK_SPLIT = {
+    edit: 'split_at_plane',
+    object: 'o1',
+    point: [0, 0, 31.5],
+    normal: [0, 0, 1],
+    joint: { diameter: 3.6, depth: 6, clearance: 0.2, key: 'flat', peg_on: 'above' },
+  }
+  const LAY_FLAT = { edit: 'lay_flat', object: 'o2', normal: 'largest_flat' }
+
+  it('carrot: the scene edits reached the backend, then a saved render, asking nothing', async () => {
+    const { outcome } = await play(carrotWeakNeck)
+    const edits = outcome.backend.requests(/^POST \/api\/v1\/models\/carrot\/scene\/edits$/)
+    expect(edits).toHaveLength(1)
+    expect(edits[0]?.body).toMatchObject({ edits: [NECK_SPLIT, LAY_FLAT] })
+    // The last analysis is of the render after the split: no weak joint left.
+    const last = outcome.toolCalls.filter((c) => c.tool === 'analyze_geometry').at(-1)
+    expect(JSON.parse(last?.result ?? '{}').untrusted_data.content.weak_joints).toEqual([])
+  }, 90_000)
+
+  it('control: a split away from the neck, or with no joint, fails the split check', async () => {
+    for (const split of [{ ...NECK_SPLIT, point: [0, 0, 10] }, { ...NECK_SPLIT, joint: undefined }]) {
+      const { failed } = await play(carrotWeakNeck, (own) => [
+        own[0]!,
+        own[1]!,
+        { tool: 'edit_scene', input: { slug: 'carrot', edits: [split, LAY_FLAT] } },
+        { tool: 'render_model', input: { slug: 'carrot', params: {}, save_output: true } },
+        { text: 'Split and rendered.' },
+      ])
+      expect(failed).toEqual(['split the carrot at its neck with a keyed joint'])
+    }
+  }, 180_000)
+
+  it('control: editing without rendering again fails the render check', async () => {
+    const { failed } = await play(carrotWeakNeck, (own) => [own[0]!, own[1]!, own[2]!, { text: 'Fixed.' }])
+    expect(failed).toEqual(['rendered the carrot after its last scene edit, and saved that render'])
+  }, 90_000)
+
+  it('control: ejecting the scene and editing the source fails the scene checks', async () => {
+    const { failed } = await play(carrotWeakNeck, (own) => [
+      own[0]!,
+      { tool: 'eject_scene', input: { slug: 'carrot' } },
+      { tool: 'update_source', input: { slug: 'carrot', source: '// cut by hand\n' } },
+      { tool: 'render_model', input: { slug: 'carrot', params: {}, save_output: true } },
+      { text: 'Done.' },
+    ])
+    expect(failed).toEqual([
+      'split the carrot at its neck with a keyed joint',
+      'laid the leaves half flat',
+      'rendered the carrot after its last scene edit, and saved that render',
+      'kept editing it as a scene (no eject_scene, no update_source)',
+    ])
   }, 90_000)
 })
