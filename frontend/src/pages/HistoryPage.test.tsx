@@ -32,6 +32,22 @@ beforeEach(() => {
   actions.length = 0
 })
 
+/**
+ * The plates on `name`'s row once it is scrolled into view. The row is found and brought
+ * into view again on every try: a slow CI shard can re-render it between the two, and a
+ * row rendered anew has a fresh, unseen placeholder (CI, 2026-10-14).
+ */
+async function shownPlates(name: string) {
+  return await waitFor(
+    async () => {
+      const item = await row(name)
+      intersect(item)
+      return within(item).getByRole('figure', { name: 'Plates' })
+    },
+    { timeout: 5000 },
+  )
+}
+
 function render() {
   return renderPage(
     <Routes>
@@ -752,8 +768,7 @@ describe('HistoryPage', () => {
     // #2754 review — read once the row nears the viewport, not as it mounts.
     expect(within(batch).getByTestId('arranged-plates-pending')).toBeInTheDocument()
     expect(read).toEqual([])
-    intersect(batch)
-    const plates = await within(batch).findByRole('figure', { name: 'Plates' })
+    const plates = await shownPlates('Batch')
     expect(plates).toHaveTextContent('2 plates')
     expect(within(plates).getByRole('img', { name: 'Plate 1' })).toHaveAttribute(
       'src',
@@ -774,9 +789,7 @@ describe('HistoryPage', () => {
       http.get('/api/v1/outputs/:id/plates', () => HttpResponse.json([{ index: 1, has_thumbnail: true }])),
     )
     render()
-    const batch = await row('Batch')
-    intersect(batch)
-    const plates = await within(batch).findByRole('figure', { name: 'Plates' })
+    const plates = await shownPlates('Batch')
     fireEvent.error(within(plates).getByRole('img', { name: 'Plate 1' }))
     expect(within(plates).queryByRole('img')).not.toBeInTheDocument()
     expect(plates).toHaveTextContent('Plate 1')
