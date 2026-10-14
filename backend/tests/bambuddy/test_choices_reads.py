@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import ClassVar, cast
 
@@ -19,7 +20,7 @@ import respx
 from scadbuddy.bambuddy import catalogue, choices
 from scadbuddy.bambuddy.catalogue import cached_catalogue
 from scadbuddy.bambuddy.choices import choices_for
-from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.filaments import gather_plate_options, read_inventory
 from scadbuddy.bambuddy.print_source import PrintSource, ReadFile
 from scadbuddy.core.problems import ApiError
@@ -209,6 +210,78 @@ async def test_an_unreadable_kept_catalogue_is_read_again(
 
     assert (await cached_catalogue(bambuddy, tmp_path)).process
     assert presets.call_count == 2
+
+
+@respx.mock
+async def test_a_malformed_refresh_keeps_the_old_catalogue_and_logs_only_its_type(
+    bambuddy: BambuddyClient, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#3446: a body pydantic refuses escaped the task, and its error quoted the body."""
+    presets, _ = _preset_routes()
+    first = await cached_catalogue(bambuddy, tmp_path)
+    _expire(tmp_path)
+    presets.mock(return_value=httpx.Response(200, json={"cloud": "leaked-body-text"}))
+
+    assert await cached_catalogue(bambuddy, tmp_path) == first
+    await asyncio.gather(*catalogue._refreshing.values())
+
+    (record,) = [r for r in caplog.records if "refresh" in r.getMessage()]
+    assert record.__dict__["error"] == "ValidationError"
+    assert "leaked-body-text" not in caplog.text
+    catalogue.forget_catalogues()
+    assert await cached_catalogue(bambuddy, tmp_path) == first
+
+
+@respx.mock
+async def test_a_refresh_still_running_is_stopped_at_shutdown(
+    bambuddy: BambuddyClient, tmp_path: Path
+) -> None:
+    """#3446: a pending refresh was destroyed with the loop, with warnings."""
+    presets, _ = _preset_routes()
+    await cached_catalogue(bambuddy, tmp_path)
+    _expire(tmp_path)
+    presets.mock(side_effect=_after(asyncio.Event(), "slicer-presets-h2c.json"))
+    await cached_catalogue(bambuddy, tmp_path)
+    (task,) = catalogue._refreshing.values()
+
+    async with asyncio.timeout(5):
+        await catalogue.stop_refreshes()
+
+    assert task.cancelled()
+    assert not catalogue._refreshing
+
+
+@respx.mock
+async def test_a_write_that_fails_leaves_no_partial_file(
+    bambuddy: BambuddyClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3447: nothing sweeps the directory, so a half-written file stayed for good."""
+    _preset_routes()
+
+    def full(self: Path, target: Path) -> Path:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(Path, "replace", full)
+
+    assert (await cached_catalogue(bambuddy, tmp_path)).process
+    assert list((tmp_path / catalogue.CATALOGUE_DIRNAME).iterdir()) == []
+
+
+@respx.mock
+async def test_only_the_last_parsed_catalogue_is_held(
+    bambuddy: BambuddyClient, config: BambuddyConfig, tmp_path: Path
+) -> None:
+    """#3447: after a change of Bambuddy key the old one stayed in every replica."""
+    _preset_routes()
+    # Each is kept by its first open and parsed back from its file by its second.
+    for _ in range(2):
+        await cached_catalogue(bambuddy, tmp_path)
+    async with BambuddyClient(replace(config, api_key="rotated")) as rotated:
+        for _ in range(2):
+            await cached_catalogue(rotated, tmp_path)
+
+    (held,) = catalogue._parsed
+    assert held == catalogue._path(tmp_path, replace(config, api_key="rotated"))
 
 
 @respx.mock
