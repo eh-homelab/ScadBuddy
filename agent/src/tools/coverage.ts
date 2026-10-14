@@ -12,6 +12,10 @@ const ANALYZERS_LATER =
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
+    operation: 'GET /api/v1/activity/facets',
+    reason: "The UI's filter bar; activity_list's own filters say the same.",
+  },
+  {
     operation: 'GET /api/v1/prints/{archive_id}/timelapse/frames',
     reason:
       "The print page's timelapse stills and probe, read after the detail so it need not wait on Bambuddy's " +
@@ -253,6 +257,12 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason:
       "Records in Bambuddy which spool is in an untagged tray (#2164), sent only on a person's own answer " +
       "to the print dialog's question; an agent cannot see which spool is physically in the tray.",
+  },
+  {
+    operation: 'GET /api/v1/print/printers/now',
+    reason:
+      "The Prints page's \"Now printing\" strip (#977). An agent already reads each printer's live state, " +
+      'job and progress through get_print_targets, and its camera through get_printer_camera.',
   },
   {
     operation: 'GET /api/v1/print/printers/{printer_id}/rack-usage',

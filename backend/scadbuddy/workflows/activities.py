@@ -218,6 +218,7 @@ def _main_result(output: ProcessOutput) -> RenderMainResult:
         returncode=output.returncode,
         duration_s=output.duration_s,
         plates=output.plates,
+        objects=output.objects,
         log_tail=list(output.log_tail),
         diagnostics=list(output.diagnostics),
         diagnostics_dropped=output.diagnostics_dropped,
@@ -316,6 +317,7 @@ def _process_output(main: RenderMainResult) -> ProcessOutput:
         diagnostics_dropped=main.diagnostics_dropped,
         notes=tuple(main.notes),
         plates=main.plates,
+        objects=main.objects,
     )
 
 

@@ -16,7 +16,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, NoReturn, cast
+from typing import Any, NoReturn, cast, get_args
 
 import httpx
 import psycopg
@@ -60,6 +60,7 @@ from scadbuddy.worker import (
     _drain,
     _on_signal,
     _poll,
+    deployment_writes,
     make_current_until_polled,
     run_inprocess_worker,
     run_worker,
@@ -441,12 +442,15 @@ async def test_is_current_names_the_deployments_current_build() -> None:
                 every=MAKE_CURRENT_EVERY,
                 error_after=MAKE_CURRENT_ERROR_AFTER,
             ),
-            MAKE_CURRENT_ERROR_AFTER,
+            MAKE_CURRENT_WITHIN,
         )
         assert await _is_current_answer(client, build_id)
         assert not await _is_current_answer(client, "other")
 
 
+#: How long a healthy worker start takes to make its build current, with room: the
+#: test's own bound, not the worker's logging policy (`MAKE_CURRENT_ERROR_AFTER`).
+MAKE_CURRENT_WITHIN = 60.0
 #: `is_current`'s attempts and the longest wait between two (`_is_current_answer`).
 IS_CURRENT_ATTEMPTS = 12
 IS_CURRENT_MAX_WAIT = 5.0
@@ -767,6 +771,148 @@ async def test_making_the_build_current_does_not_give_up(
     assert caplog.records[-1].getMessage() == "made this build current"
 
 
+async def _no_current_build(*_: object, **__: object) -> tuple[str | None, bytes]:
+    return None, b""
+
+
+async def test_a_superseded_build_stops_trying_to_be_current(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#2538: an old pod still retrying when the next rollout's worker makes its build
+    current stops, rather than win the last write and skip its drain on SIGTERM."""
+    calls = 0
+    currents = iter(["old", "old", "new"])
+
+    async def set_current() -> None:
+        nonlocal calls
+        calls += 1
+        raise _not_found()
+
+    async def current() -> str | None:
+        return next(currents)
+
+    with caplog.at_level(logging.INFO, logger="scadbuddy.worker"):
+        await asyncio.wait_for(
+            make_current_until_polled(
+                set_current,
+                build_id="mine",
+                backoff=(0.01,),
+                every=0.01,
+                error_after=5,
+                current=current,
+            ),
+            5,
+        )
+    # Read at the start ("old"), before attempt 2 ("old"), before attempt 3 ("new").
+    assert calls == 2
+    assert caplog.records[-1].getMessage() == (
+        "another build was made current; this one no longer tries to be"
+    )
+
+
+async def test_a_build_already_current_or_none_keeps_trying() -> None:
+    """Only a third build stops it: none yet, or this build, or the one current when it
+    began are what a fresh rollout sees."""
+    calls = 0
+    currents = iter([None, None, "mine", "old-is-none"])
+
+    async def set_current() -> None:
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise _not_found()
+
+    async def current() -> str | None:
+        return next(currents)
+
+    await asyncio.wait_for(
+        make_current_until_polled(
+            set_current,
+            build_id="mine",
+            backoff=(0.01,),
+            every=0.01,
+            error_after=5,
+            current=current,
+        ),
+        5,
+    )
+    assert calls == 3
+
+
+class _Deployment:
+    """A workflow service whose deployment a newer rollout changes between reads."""
+
+    def __init__(self) -> None:
+        self.tokens = iter([b"t1", b"t2"])
+        self.builds = iter(["old", "new"])
+        self.written: list[bytes] = []
+
+    async def describe_worker_deployment(self, *_: object, **__: object) -> object:
+        build_id = next(self.builds)
+        return SimpleNamespace(
+            conflict_token=next(self.tokens),
+            worker_deployment_info=SimpleNamespace(
+                routing_config=SimpleNamespace(
+                    current_deployment_version=SimpleNamespace(build_id=build_id)
+                )
+            ),
+        )
+
+    async def set_worker_deployment_current_version(self, request: Any, **_: object) -> None:
+        self.written.append(request.conflict_token)
+        # The deployment changed since that token's read.
+        raise RPCError("conflict token mismatch", RPCStatusCode.FAILED_PRECONDITION, b"")
+
+
+async def test_each_write_carries_its_reads_conflict_token() -> None:
+    """#2538: a rollout landing between the read and the write makes Temporal refuse the
+    write (its token is stale), and the next read sees the new build and stops."""
+    service = _Deployment()
+    client = cast(Client, SimpleNamespace(namespace="default", workflow_service=service))
+    set_current, read_current = deployment_writes(client, "mine", DEPLOYMENT_NAME)
+    await asyncio.wait_for(
+        make_current_until_polled(
+            set_current,
+            build_id="mine",
+            backoff=(0.01,),
+            every=0.01,
+            error_after=5,
+            current=read_current,
+        ),
+        5,
+    )
+    assert service.written == [b"t1"]
+
+
+async def test_a_refusal_past_error_after_retries_once_per_error_every(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """#2538: a persistent failure logs an ERROR at most every ``error_every``, not
+    every ``every``, for the pod's whole life."""
+
+    async def set_current() -> None:
+        raise _not_found()
+
+    with (
+        caplog.at_level(logging.WARNING, logger="scadbuddy.worker"),
+        pytest.raises(TimeoutError),
+    ):
+        await asyncio.wait_for(
+            make_current_until_polled(
+                set_current,
+                build_id="b",
+                backoff=(0.01,),
+                every=0.01,
+                error_after=0.05,
+                error_every=0.5,
+            ),
+            1.2,
+        )
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    # Without the back-off, ~100 errors in that time.
+    assert 1 <= len(errors) <= 4
+
+
 @pytest.mark.requires_temporal
 async def test_a_build_never_made_current_keeps_the_worker_polling(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
@@ -779,9 +925,12 @@ async def test_a_build_never_made_current_keeps_the_worker_polling(
         raise _not_found()
 
     monkeypatch.setattr(worker_module, "make_current", refuses)
+    # No other build takes over meanwhile, whatever another test makes current.
+    monkeypatch.setattr(worker_module, "current_routing", _no_current_build)
     monkeypatch.setattr(worker_module, "MAKE_CURRENT_BACKOFF", (0.01, 0.02))
     monkeypatch.setattr(worker_module, "MAKE_CURRENT_EVERY", 0.05)
     monkeypatch.setattr(worker_module, "MAKE_CURRENT_ERROR_AFTER", 0.3)
+    monkeypatch.setattr(worker_module, "MAKE_CURRENT_ERROR_EVERY", 0.05)
     settings, deps = _in_process_settings(tmp_path)
     stop = asyncio.Event()
 
@@ -828,6 +977,8 @@ async def test_stopping_the_worker_cancels_the_retry(
         raise _not_found()
 
     monkeypatch.setattr(worker_module, "make_current", refuses)
+    # No other build takes over meanwhile, whatever another test makes current.
+    monkeypatch.setattr(worker_module, "current_routing", _no_current_build)
     settings, deps = _in_process_settings(tmp_path)
     stop = asyncio.Event()
     async with temporal_client() as client:
@@ -1174,6 +1325,21 @@ async def test_a_worker_on_an_empty_volume_seeds_the_images_libraries(
         deps.projection.close()
 
 
+@pytest.mark.requires_postgres
+async def test_the_render_workers_projection_writes_activity(
+    settings: Settings, pg_pool: PgPool, tmp_path: Path
+) -> None:
+    """Without it a render's state changes on a worker are missing from activity until
+    the repair sweep."""
+    cfg = settings.model_copy(update={"data_dir": tmp_path / "worker-data"})
+    deps, store = worker_module.build_worker_deps(cfg)
+    try:
+        assert deps.projection.activity is not None
+    finally:
+        await store.aclose()
+        deps.projection.close()
+
+
 @pytest.mark.parametrize(
     ("queue", "service"),
     [
@@ -1204,3 +1370,9 @@ def test_each_worker_reports_under_its_deployments_name(
     worker_module.main()
 
     assert named == [service]
+
+
+def test_every_queue_has_a_service_name() -> None:
+    """#2894: a queue added without a ``service.name`` would fail the worker at start
+    with a bare KeyError; here it fails in CI instead."""
+    assert set(worker_module.SERVICE_NAMES) == set(get_args(worker_module.Queue))

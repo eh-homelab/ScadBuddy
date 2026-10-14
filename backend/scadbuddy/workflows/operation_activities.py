@@ -68,6 +68,7 @@ def operation_activities(
             workflow_run_id=info.workflow_run_id,
             retention=timedelta(seconds=retention) if retention is not None else None,
             idempotency_key=op.idempotency_key,
+            author=op.author,
         )
 
     @activity.defn(name=FINISH_ACTIVITY)
@@ -172,7 +173,9 @@ def _kind_activities(kind: OperationKind) -> list[Callable[..., Any]]:
             # Set before the run's task is made, which copies the context: its commits,
             # in threads, are the agent's that asked (#252).
             with authored_as(
-                None if author is None else AgentAuthor(author.principal, author.session)
+                None
+                if author is None
+                else AgentAuthor(author.principal, author.session, author.tool)
             ):
                 return await _heartbeating(
                     kind.run(input.request, input.checked), where=str(kind.where)

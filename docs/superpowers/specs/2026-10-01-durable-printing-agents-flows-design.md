@@ -148,7 +148,8 @@ Non-goals
         which has ScadBuddy's own tools only (§6.3b), so a subagent run again repeats
         reads and refused outward calls. `Bash` and `PowerShell` run as their own
         activities (`tool_activities`), parked for approval, never in the segment. A
-        package's other built-ins are not offered (#2393).
+        package's other built-ins are the agent's `builtin` turn tools, never the
+        engine's (#2393, `docs/ai/operating.md`).
       - Every tool with an effect is a durable tool (§6.3).
       - `tests/test_session_workflow.py`
         `test_a_package_built_in_parks_runs_once_approved_and_the_runner_gets_the_package`
@@ -783,13 +784,16 @@ subagents, the model setting, credential fallback and MCP sender tiers. The pari
 - **Tool-result images** (#2325): a tool result's images are stored as the session's
   blobs and named in its text; the model reads them with `view_tool_images`.
 
+- **A package's other built-ins** (#2393): the agent's `builtin` turn tools
+  (`agent/src/builtins/`), Claude Code's inputs and wording on the session's workspace and
+  credential, each outward; the turn's system prompt names them.
 - **Fork** (#2688): a durable session forks into a durable child whose workflow starts
   with a copy of the parent's committed conversation (`fork_point`), from the same points
   as a classic fork.
 
 The differences left between the modes: a durable
 subagent has ScadBuddy's own tools only; and of an `allow_refused` package's named
-built-ins only `Bash` and `PowerShell` are offered (#2393).
+built-ins, the background ones (`CronCreate`, `CronDelete`, `CronList`, `ScheduleWakeup`, `Monitor`, `Workflow`, `TaskStop` and `PushNotification`) are not offered.
 
 ### 6.4 Human-in-the-loop
 

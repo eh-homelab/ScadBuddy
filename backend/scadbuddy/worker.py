@@ -27,6 +27,7 @@ from temporalio.client import Client
 from temporalio.service import RPCError
 from temporalio.worker import Worker
 
+from scadbuddy.activity.index import ActivityIndex
 from scadbuddy.bambuddy.archive_cache import ArchiveCache
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.follow import FollowActivities, Follower
@@ -85,6 +86,7 @@ from scadbuddy.workflows.client import (
     PRINT_DEPLOYMENT_NAME,
     bambuddy_worker,
     connect,
+    current_routing,
     drained,
     follow_worker,
     is_current,
@@ -121,6 +123,9 @@ DRAIN_CURRENT_GRACE = 30.0
 MAKE_CURRENT_BACKOFF = (1.0, 2.0, 4.0)
 MAKE_CURRENT_EVERY = 5.0
 MAKE_CURRENT_ERROR_AFTER = 60.0
+#: How often a make-current that is still refused past `MAKE_CURRENT_ERROR_AFTER` tries
+#: again, and so logs its error: once a minute, not every `MAKE_CURRENT_EVERY` (#2538).
+MAKE_CURRENT_ERROR_EVERY = 60.0
 
 
 def build_worker_deps(
@@ -153,6 +158,9 @@ def build_worker_deps(
     # Never migrated here (#601): the worker's own role may not, and in a rollout the
     # API, which does, may not have started yet. Wait for it instead.
     projection.open(migrate_schema=False)
+    # The `project` activity writes `mark_started`/`finish` here: its state changes reach
+    # activity in the same transaction, and NOTIFY on the API's listeners.
+    projection.activity = ActivityIndex(projection.pool, events=events, metrics=metrics)
     # The leases in Postgres, where the API's removals see them (#872).
     checkouts = CheckoutGate(CheckoutLeases(projection.pool, paths.libraries))
     libraries = LibraryStore(paths, max_bytes=config.library_max_bytes)
@@ -279,6 +287,34 @@ async def _drain(
     return polling.result() if not polling.cancelled() else "stopped"
 
 
+def deployment_writes(
+    client: Client, build_id: str, deployment_name: str
+) -> tuple[Callable[[], Awaitable[None]], Callable[[], Awaitable[str | None]]]:
+    """``make_current_until_polled``'s write and read for this build. Each write carries
+    the conflict token of the last read that succeeded (#2538), so a rollout that lands
+    between the read and the write makes Temporal refuse it rather than be overwritten;
+    the next read then sees that rollout's build and the retry stops."""
+    token = b""
+
+    async def read() -> str | None:
+        nonlocal token
+        build, token = await current_routing(
+            client, namespace=client.namespace, deployment_name=deployment_name
+        )
+        return build
+
+    async def write() -> None:
+        await make_current(
+            client,
+            namespace=client.namespace,
+            build_id=build_id,
+            deployment_name=deployment_name,
+            conflict_token=token,
+        )
+
+    return write, read
+
+
 async def make_current_until_polled(
     set_current: Callable[[], Awaitable[None]],
     *,
@@ -286,21 +322,62 @@ async def make_current_until_polled(
     backoff: Sequence[float],
     every: float,
     error_after: float,
+    error_every: float | None = None,
+    current: Callable[[], Awaitable[str | None]] | None = None,
 ) -> None:
     """Make the build current, retrying an `RPCError` until it takes; cancel it to
-    stop. Failures past ``error_after`` seconds log at error level. Any other error
-    propagates."""
+    stop. Failures past ``error_after`` seconds log at error level, and are retried
+    every ``error_every`` (default ``every``). Any other error propagates.
+
+    With ``current`` (the deployment's current build), it stops once a build other than
+    this one and the one current when it began is made current (#2538): a newer
+    rollout's worker has taken over, and a late write here would hand the deployment
+    back to this old build, whose stop then skips its drain because it is current.
+    (``deployment_writes`` closes the gap between the read and the write with the
+    read's conflict token.)
+
+    The build current when it began is what it never takes over from. When that first
+    read fails, the first read that succeeds is taken instead: a newer rollout made
+    current in between is then indistinguishable from the old build, and this one may
+    still take the deployment back. Accepted: it needs a failed read and a rollout in
+    the same few seconds, and the next rollout's worker makes its own build current."""
     loop = asyncio.get_running_loop()
     escalate = loop.time() + error_after
+    unread = object()
+    before: object = unread
+
+    async def read() -> object:
+        assert current is not None
+        try:
+            return await current()
+        except RPCError:
+            logger.warning("could not read the deployment's current build", exc_info=True)
+            return unread
+
+    if current is not None:
+        before = await read()
     attempt = 0
     while True:
         attempt += 1
+        if current is not None and attempt > 1:
+            now = await read()
+            if before is unread:
+                before = now
+            elif now not in (unread, None, build_id, before):
+                logger.info(
+                    "another build was made current; this one no longer tries to be",
+                    extra={"build_id": build_id, "current": now},
+                )
+                return
         try:
             await set_current()
         except RPCError as error:
+            late = loop.time() >= escalate
             delay = backoff[attempt - 1] if attempt <= len(backoff) else every
+            if late and error_every is not None:
+                delay = max(delay, error_every)
             logger.log(
-                logging.ERROR if loop.time() >= escalate else logging.WARNING,
+                logging.ERROR if late else logging.WARNING,
                 "could not make this build current yet",
                 extra={"build_id": build_id, "attempt": attempt, "error": str(error)},
             )
@@ -357,12 +434,10 @@ async def _serve_versioned(
     build_id: str,
     deployment_name: str,
     drain_timeout: float | None,
-    ignore_types: Sequence[str] = (),
     stop_now: asyncio.Event | None = None,
 ) -> None:
     """Run ``workers`` (one deployment version) until ``stop``, making the build current
     beside them; then, unless ``drain_timeout`` is None, drain the build's pinned runs.
-    ``ignore_types`` are AUTO_UPGRADE workflow types the drain does not wait for;
     ``stop_now`` cuts the drain short (#605)."""
 
     async def is_drained() -> bool:
@@ -372,7 +447,6 @@ async def _serve_versioned(
                 namespace=client.namespace,
                 build_id=build_id,
                 deployment_name=deployment_name,
-                ignore_types=ignore_types,
             )
         except RPCError:
             logger.warning("could not count this build's running workflows", exc_info=True)
@@ -395,18 +469,16 @@ async def _serve_versioned(
             await running.enter_async_context(worker)
         # Phase 1 runs one replica: the newest worker is current. Entering the worker
         # started its polling, so the retry runs beside it; stop cancels the retry.
+        set_current, read_current = deployment_writes(client, build_id, deployment_name)
         current = asyncio.create_task(
             make_current_until_polled(
-                lambda: make_current(
-                    client,
-                    namespace=client.namespace,
-                    build_id=build_id,
-                    deployment_name=deployment_name,
-                ),
+                set_current,
                 build_id=build_id,
                 backoff=MAKE_CURRENT_BACKOFF,
                 every=MAKE_CURRENT_EVERY,
                 error_after=MAKE_CURRENT_ERROR_AFTER,
+                error_every=MAKE_CURRENT_ERROR_EVERY,
+                current=read_current,
             )
         )
         stopped = asyncio.create_task(stop.wait())
@@ -701,6 +773,8 @@ class PrintWorkerDeps:
     outputs: RemoteOutputs
     rack: RackUsageStore
     metrics: Metrics
+    print_runs: PrintRunStore
+    operations: OperationStore
     activities: list[Callable[..., Any]]
     follow_print: Callable[..., Any]
 
@@ -748,7 +822,9 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         async with client_for(settings_store.load()) as client:
             return await library_progress(client, subject, links, uploads=uploads)
 
-    print_runs = PrintRunStore(pool, events=events)
+    activity = ActivityIndex(pool, events=events, metrics=metrics)
+    print_runs = PrintRunStore(pool, events=events, activity=activity)
+    operations = OperationStore(pool, events=events, activity=activity)
     follower = Follower(
         outputs=outputs,
         observer=observer,
@@ -783,10 +859,12 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         outputs=outputs,
         rack=rack,
         metrics=metrics,
+        print_runs=print_runs,
+        operations=operations,
         activities=[
             *printing.all(),
             *operation_activities(
-                OperationStore(pool, events=events),
+                operations,
                 settings_store,
                 {kind.name: kind for kind in kinds},
             ),
@@ -976,6 +1054,8 @@ def main() -> None:
     queue = parse_queue()
     settings = Settings()
     configure_logging(settings.log_level)
+    # parse_queue returns a Queue, and SERVICE_NAMES must name every one (#2894).
+    assert queue in SERVICE_NAMES, f"queue {queue!r} has no service name"
     configure_tracing(SERVICE_NAMES[queue], version=settings.version, revision=settings.revision)
     asyncio.run(_main(settings, queue))
 
