@@ -26,8 +26,8 @@ from scadbuddy.bambuddy.library_view import (
 from scadbuddy.bambuddy.print_source import ReadOutOfMemoryError
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.geometry import NoSuchPlateError
-from scadbuddy.render.objects3mf import PlateRead
 from scadbuddy.render.glb import read_glb
+from scadbuddy.render.objects3mf import PlateRead
 from scadbuddy.render.split import ColourPart
 from scadbuddy.store.download_cache import DownloadCache
 from tests.bambuddy.conftest import BASE_URL
