@@ -9,6 +9,7 @@ import io
 import json
 import time
 import zipfile
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.activity.index import ActivityIndex
 from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.api.library_print import _kept_as_sent
 from scadbuddy.bambuddy import clearance, print_run
 from scadbuddy.bambuddy.filaments3mf import SlicedProfile
 from scadbuddy.bambuddy.models import NozzleInfo, Printer, PrinterStatus
@@ -33,6 +35,7 @@ from scadbuddy.render.bambu3mf import (
     write_bambu_3mf,
 )
 from scadbuddy.render.split import ColourPart
+from scadbuddy.store.download_cache import DownloadCache
 from tests.api.test_print_filaments import queue_route, slice_kept, slice_routes
 from tests.api.test_print_progress import watched as watched  # the fixture, shared
 from tests.api.test_print_run_choices import body, follow_run, run_routes
@@ -1867,6 +1870,46 @@ def test_a_library_file_not_yet_kept_is_streamed_while_it_is_kept(
     assert served.content == content
     assert served.headers["etag"] == '"bambuddy"'
     assert download.call_count == 1
+    assert downloads.path(sha).read_bytes() == content
+
+
+@respx.mock
+def test_a_failed_read_of_the_files_hash_is_a_miss_and_the_file_still_served(
+    client: TestClient, app: FastAPI
+) -> None:
+    """The hash read is only for the cache (#2821 review): when it fails, the download
+    is still tried, not failed before it starts."""
+    configure(client)
+    content = library_3mf()
+    respx.get(f"{API}/library/files/89").mock(return_value=httpx.Response(503))
+    download = respx.get(f"{API}/library/files/89/download").mock(
+        return_value=httpx.Response(200, content=content)
+    )
+
+    served = client.get("/api/v1/print/library/89/file")
+
+    assert served.status_code == 200, served.text
+    assert served.content == content
+    assert download.call_count == 1
+
+
+async def test_a_streamed_file_sent_as_memoryviews_is_kept_whole(tmp_path: Path) -> None:
+    """Every chunk goes into the fill, not only `bytes` ones (#2821 review): a
+    memoryview left out would leave it short of its hash, and nothing kept."""
+    downloads = DownloadCache(tmp_path / "downloads", max_bytes=1 << 20)
+    content = b"first half|second half"
+    sha = hashlib.sha256(content).hexdigest()
+
+    async def chunks() -> AsyncIterator[str | bytes | memoryview]:
+        yield memoryview(content[:10])
+        yield content[10:]
+
+    sent = [
+        chunk.encode() if isinstance(chunk, str) else bytes(chunk)
+        async for chunk in _kept_as_sent(downloads, sha, chunks())
+    ]
+
+    assert b"".join(sent) == content
     assert downloads.path(sha).read_bytes() == content
 
 

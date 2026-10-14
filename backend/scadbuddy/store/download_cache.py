@@ -88,7 +88,10 @@ def prune(
             continue  # another prune removed it between the listing and the stat
         if entry.name.startswith("."):
             if now - stat.st_mtime > PARTIAL_MAX_AGE:
-                entry.unlink(missing_ok=True)
+                # A file still open on NFS is a `.nfsXXXX` silly-rename that cannot be
+                # removed (EBUSY): it goes once closed, so a prune never fails on it.
+                with contextlib.suppress(OSError):
+                    entry.unlink(missing_ok=True)
             continue
         used.append((stat.st_mtime, stat.st_size, entry))
     used.sort(key=lambda item: item[0], reverse=True)
@@ -97,7 +100,8 @@ def prune(
         total += size
         over = (keep is not None and index >= keep) or (max_bytes is not None and total > max_bytes)
         if over and now - mtime >= min_age:
-            entry.unlink(missing_ok=True)
+            with contextlib.suppress(OSError):
+                entry.unlink(missing_ok=True)
 
 
 def touch(path: Path) -> None:
@@ -171,6 +175,10 @@ class Fill:
         kept) when they are not, e.g. a file Bambuddy changed after stating its hash."""
         self.file.flush()
         if not self.matches():
+            logger.info(
+                "a download was not the sha256 it was kept under; not kept",
+                extra={"sha256": self.sha256},
+            )
             return False
         # On disk before it has a name a reader finds: after a crash an entry is whole,
         # never a renamed file whose last blocks were never written.

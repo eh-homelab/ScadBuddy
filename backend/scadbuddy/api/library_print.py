@@ -640,10 +640,17 @@ async def _cacheable_hash(
     store: SettingsStore, downloads: DownloadCache, file_id: int
 ) -> str | None:
     """The hash library file ``file_id`` is kept under in the download cache; None for
-    one streamed from Bambuddy as before: no hash stated (#2160), or larger than the
-    cache keeps by its stated size."""
-    async with client_for(store.load()) as client:
-        file = await client.library_file(file_id)
+    one streamed from Bambuddy as before: no hash stated (#2160), larger than the
+    cache keeps by its stated size, or a read of the file that failed. That read is only
+    for the cache, so its failure is a miss and the download is still tried."""
+    try:
+        async with client_for(store.load()) as client:
+            file = await client.library_file(file_id)
+    except ApiError:
+        logger.info(
+            "could not read a library file's hash", extra={"file_id": file_id}, exc_info=True
+        )
+        return None
     sha = (file.file_hash or "").lower()
     if not is_sha256(sha) or (file.file_size or 0) > downloads.max_entry_bytes:
         return None
@@ -665,9 +672,12 @@ async def _kept_as_sent(
         fill = None
     try:
         async for chunk in chunks:
-            if fill is not None and isinstance(chunk, bytes):
+            if fill is not None:
+                # Every chunk is written, a memoryview or str too: one left out would
+                # leave the fill short of its hash, and nothing would be kept.
+                data = chunk.encode() if isinstance(chunk, str) else bytes(chunk)
                 try:
-                    await asyncio.to_thread(fill.write, chunk)
+                    await asyncio.to_thread(fill.write, data)
                 except (TooLargeError, OSError):
                     await asyncio.to_thread(fill_cm.__exit__, None, None, None)
                     fill = None

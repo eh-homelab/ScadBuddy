@@ -122,6 +122,43 @@ def test_a_dead_processs_partial_fill_is_removed_and_a_live_ones_kept(tmp_path: 
     assert [p.name for p in tmp_path.iterdir()] == [".abc.live"]
 
 
+def test_a_file_that_cannot_be_removed_never_fails_a_prune(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An open private copy on NFS is a `.nfsXXXX` silly-rename that answers EBUSY to an
+    unlink (#2821 review): prune leaves it and goes on, so a commit after it never
+    raises."""
+    busy = tmp_path / ".nfs000123"
+    busy.write_bytes(b"x")
+    _aged(busy, PARTIAL_MAX_AGE + 1)
+    real_unlink = Path.unlink
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if self.name.startswith(".nfs"):
+            raise OSError(errno.EBUSY, "Device or resource busy")
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    prune(tmp_path, max_bytes=0)
+    assert [p.name for p in tmp_path.iterdir()] == [".nfs000123"]
+
+
+def test_a_fill_that_is_not_its_hash_says_so(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A Bambuddy file that keeps changing under its stated hash is visible in the log
+    (#2821 review), not silently never kept."""
+    cache = DownloadCache(tmp_path, max_bytes=1 << 20)
+    sha = _sha(b"what Bambuddy said it was")
+    with caplog.at_level("INFO", logger="scadbuddy.store.download_cache"), cache.fill(sha) as fill:
+        fill.write(b"what it sent")
+        assert not fill.commit()
+    assert any(
+        "not the sha256" in record.getMessage() and getattr(record, "sha256", None) == sha
+        for record in caplog.records
+    )
+
+
 def test_a_lookup_is_a_span_saying_hit_or_miss(tmp_path: Path, spans: InMemorySpanExporter) -> None:
     cache = DownloadCache(tmp_path, max_bytes=1 << 20)
     cache.put(_sha(b"x"), b"x")
