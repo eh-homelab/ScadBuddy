@@ -32,6 +32,9 @@ HEARTBEAT_S = 5.0
 # agent/src/background/store.ts MAX_EVENTS, EVENT_MAX_CHARS.
 MAX_EVENTS = 200
 EVENT_MAX_CHARS = 8000
+# store.ts NOTICE_MAX_CHARS: a recorded notice at most, its text cut first (event_notice).
+NOTICE_MAX_CHARS = 16384
+CUT = " […cut]"
 EVENTS_SIGNAL = "bg_events"
 _ENV = ("PATH", "HOME", "LANG", "LC_ALL", "TZ", "TERM")
 
@@ -44,6 +47,8 @@ def workflow_id(session_id: str, task_id: str) -> str:
 
 def event_notice(task_id: str, description: str, text: str) -> str:
     """One event, as agent/src/background/monitor.ts ``eventNotice`` writes it."""
+    if len(text) > EVENT_MAX_CHARS:
+        text = text[: EVENT_MAX_CHARS - len(CUT)] + CUT
     return (
         f"<task-notification>\n<task-id>{task_id}</task-id>\n"
         f'<summary>Monitor event: "{description}"</summary>\n'
@@ -66,7 +71,7 @@ class LineSplitter:
             if not self._dropping:
                 self._line += part
                 if len(self._line) > EVENT_MAX_CHARS:
-                    self._out.append(self._line[:EVENT_MAX_CHARS] + " […cut]")
+                    self._out.append(self._line[: EVENT_MAX_CHARS - len(CUT)] + CUT)
                     self._line = ""
                     self._dropping = True
             if i < len(parts) - 1:
@@ -113,7 +118,7 @@ class MonitorActivities:
                 "INSERT INTO ai_background_events (task_id, text) SELECT %s, %s "
                 "WHERE (SELECT count(*) FROM ai_background_events WHERE task_id = %s) < %s "
                 "RETURNING seq",
-                (task_id, text[:EVENT_MAX_CHARS], task_id, MAX_EVENTS),
+                (task_id, text[:NOTICE_MAX_CHARS], task_id, MAX_EVENTS),
             )
             return await cur.fetchone() is not None
 
@@ -163,6 +168,16 @@ class MonitorActivities:
             deadline: float | None = None
             loop = asyncio.get_running_loop()
 
+            def add(line: str) -> None:
+                # One batch is one event: past EVENT_MAX_CHARS its lines are counted, not kept;
+                # its first line always is.
+                nonlocal chars, dropped
+                if batch and chars + len(line) > EVENT_MAX_CHARS:
+                    dropped += 1
+                else:
+                    batch.append(line)
+                    chars += len(line) + 1
+
             async def flush() -> bool:
                 nonlocal batch, chars, dropped, deadline
                 lines = batch + (
@@ -181,7 +196,7 @@ class MonitorActivities:
                     if chunk == b"":
                         splitter.end()
                     for line in splitter.take():
-                        batch.append(line)
+                        add(line)
                     if not await flush():
                         too_many = True
                         return
@@ -190,12 +205,7 @@ class MonitorActivities:
                     continue
                 splitter.push(chunk.decode("utf-8", "replace"))
                 for line in splitter.take():
-                    # One batch is one event: past EVENT_MAX_CHARS its lines are counted, not kept.
-                    if chars + len(line) > EVENT_MAX_CHARS:
-                        dropped += 1
-                    else:
-                        batch.append(line)
-                        chars += len(line) + 1
+                    add(line)
                     if deadline is None:
                         deadline = loop.time() + BATCH_S
 

@@ -549,6 +549,11 @@ const turnToolDeps = temporal
     }
   : undefined
 
+// One set of background-task activities (src/background/): the shared queue's, and the Monitor command this replica runs.
+const background =
+  backgroundTasks && sessions
+    ? backgroundActivities({ store: backgroundTasks.store, send: managerSender(sessions), tz: agentTimezone(), paths, secrets: toolServices.secrets })
+    : undefined
 const temporalWorker =
   temporal && operationStore && turnToolDeps
     ? AgentWorker.start({
@@ -589,9 +594,7 @@ const temporalWorker =
           // A flow's agent(...) and ask_session(...) (#1057, 6g): beside the tools, never one.
           ...flowSessionActivities({ sql: temporal.sql, flows: new PgFlowRuns(temporal.sql) }),
           ...operationActivities(commandKinds, operationStore),
-          ...(backgroundTasks && sessions
-            ? backgroundActivities({ store: backgroundTasks.store, send: managerSender(sessions), tz: agentTimezone(), paths, secrets: toolServices.secrets })
-            : {}),
+          ...(background ?? {}),
         },
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
         // Bundled by `pnpm build` (scripts/bundle-workflows.mjs).
@@ -612,12 +615,7 @@ const hostWorker =
           ...turnToolActivities(turnToolDeps),
           default: turnToolActivity(turnToolDeps),
           // A classic session's Monitor commands, in its directory on this replica.
-          ...(backgroundTasks && sessions
-            ? {
-                bg_monitor_command: backgroundActivities({ store: backgroundTasks.store, send: managerSender(sessions), tz: agentTimezone(), paths, secrets: toolServices.secrets })
-                  .bg_monitor_command,
-              }
-            : {}),
+          ...(background ? { bg_monitor_command: background.bg_monitor_command } : {}),
         },
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
       })
