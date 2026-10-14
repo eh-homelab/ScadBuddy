@@ -94,6 +94,15 @@ export const SNAPSHOT_PENDING_MAX_SECONDS = 300
  */
 export const READ_RETRIES = 5
 
+/**
+ * #2464 — a render that failed to submit for a reason a retry can fix is sent again on
+ * its own: after 5 s, doubling to at most a minute, up to 8 times (about 5 minutes,
+ * longer than a deploy's restart). "Try again" stays for the impatient.
+ */
+export const RENDER_AUTO_RETRY_MS = 5_000
+export const RENDER_AUTO_RETRY_MAX_MS = 60_000
+export const RENDER_AUTO_RETRIES = 8
+
 /** The wait before a failed read's `n`th retry (0-based): 400 ms doubling, capped. */
 export function readBackoffMs(n: number): number {
   return Math.min(POLL_MS * 2 ** n, 8_000)
@@ -131,6 +140,39 @@ export function canRetry(error: unknown): boolean {
   if (error.problem['code'] === SNAPSHOT_PENDING_CODE) return true
   const { type } = error.problem
   return type === TEMPORAL_UNAVAILABLE || type === STILL_ACCEPTING || type === UNANSWERED || type === OFFLINE
+}
+
+/**
+ * #2464 — a render that could not be submitted (a 503 while the server restarts, no
+ * answer at all) is tried again on its own, at once when the browser comes back online,
+ * so a deploy mid-edit does not leave the page on the previous render for good. At most
+ * RENDER_AUTO_RETRIES tries in a row; the count starts over once a render goes through,
+ * and for new values (`values`), which the server may take where it refused the old.
+ */
+export function useRenderAutoRetry(error: unknown, rendering: boolean, retry: () => void, values: unknown): void {
+  const tries = useRef(0)
+  useEffect(() => {
+    tries.current = 0
+  }, [values])
+  useEffect(() => {
+    if (!error || !canRetry(error)) {
+      // Counted down only once a render has gone through; a retry in flight keeps it.
+      if (!rendering) tries.current = 0
+      return
+    }
+    if (tries.current >= RENDER_AUTO_RETRIES) return
+    const wait = Math.min(RENDER_AUTO_RETRY_MS * 2 ** tries.current, RENDER_AUTO_RETRY_MAX_MS)
+    const again = () => {
+      tries.current += 1
+      retry()
+    }
+    const timer = setTimeout(again, wait)
+    window.addEventListener('online', again)
+    return () => {
+      clearTimeout(timer)
+      window.removeEventListener('online', again)
+    }
+  }, [error, rendering, retry])
 }
 
 /** The problem `code` of a 503 whose template snapshot is still uploading (#1422). */

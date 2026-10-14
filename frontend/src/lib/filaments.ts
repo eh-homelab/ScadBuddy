@@ -223,6 +223,16 @@ export function checkPlan(
   const byId = new Map((options.spools ?? []).map((spool) => [spool.spool_id, spool]))
   const printerId = options.printer_id
   const found: FilamentWarning[] = []
+  // What every slot on one spool needs together, as the server's check (#2851): a spool
+  // two slots share has to cover both, though each fits on its own.
+  const sharing = new Map<number, { slot_id: number; needed: number }[]>()
+  for (const slot of options.slots ?? []) {
+    const choice = plan.find((entry) => entry.slot_id === slot.slot_id)
+    const needed = slotNeed(slot, copies)
+    if (choice && needed !== null) {
+      sharing.set(choice.spool_id, [...(sharing.get(choice.spool_id) ?? []), { slot_id: slot.slot_id, needed }])
+    }
+  }
 
   for (const slot of options.slots ?? []) {
     const choice = plan.find((entry) => entry.slot_id === slot.slot_id)
@@ -269,6 +279,20 @@ export function checkPlan(
           needed,
         )} g.`,
       })
+    } else if (needed !== null && left !== null && left !== undefined) {
+      const on = sharing.get(spool.spool_id) ?? []
+      const together = on.reduce((sum, other) => sum + other.needed, 0)
+      if (on.length > 1 && left < together) {
+        const ids = on.map((other) => other.slot_id).sort((a, b) => a - b)
+        const names = `${ids.slice(0, -1).join(', ')} and ${ids.at(-1)}`
+        found.push({
+          kind: 'low-filament',
+          slot_id: slot.slot_id,
+          message: `${label} has about ${Math.round(left)} g left and slots ${names} need ${Math.round(
+            together,
+          )} g of it between them.`,
+        })
+      }
     }
   }
 

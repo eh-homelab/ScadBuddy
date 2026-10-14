@@ -14,12 +14,14 @@ import pytest
 import respx
 import trimesh
 from fastapi.testclient import TestClient
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.split import ColourPart
 from tests.api.conftest import wait_for_job
+from tests.conftest import wait_for_span
 from tests.support.operations import press
 
 BASE = "https://bambuddy.test"
@@ -381,6 +383,29 @@ def test_the_upload_is_laid_out_for_the_settings_printers_plate(
     assert item is not None
     transform = [float(value) for value in (item.get("transform") or "").split()]
     assert transform[9:11] == [175.0, 160.0]
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+def test_the_uploads_read_and_layout_are_traced(
+    client: TestClient, model: str, spans: InMemorySpanExporter
+) -> None:
+    """#2720: reading the 3MF and laying it out for the printer were a 14-23 s gap with
+    no span in Tempo."""
+    configure(client, printer_id=1)
+    plate_routes(printer_id=1, model="H2C")
+    output_id = make_output(client, model)
+    upload_route()
+
+    assert client.post(
+        f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}, headers=press()
+    ).is_success
+
+    fetch = wait_for_span(spans, lambda s: s.name == "upload.fetch")
+    layout = wait_for_span(spans, lambda s: s.name == "upload.layout")
+    assert fetch.attributes is not None and fetch.attributes["scadbuddy.subject"] == output_id
+    assert layout.parent is not None and fetch.parent is not None
+    assert layout.parent.span_id == fetch.parent.span_id
 
 
 @pytest.mark.requires_postgres

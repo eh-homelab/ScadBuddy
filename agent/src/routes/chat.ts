@@ -120,7 +120,7 @@ export type ChatConnectionOptions = {
   /** SNAPSHOT_MS when omitted. */
   snapshotMs?: number
   /** The browser bridge's tabs (#254); without them `tab.bind` pairs nothing. */
-  tabs?: Pick<TabHub, 'pairSession' | 'sessionHasTab'> | undefined
+  tabs?: Pick<TabHub, 'pairSession' | 'sessionTab' | 'pairSessionIfStill'> | undefined
   /** The client's address, for the audit rows of what it does here (a question's answer, #1075). */
   clientIp?: string | undefined
   /** The panel's uploaded images (#1941), which a `user.message` names by id; without it such a message is refused. */
@@ -139,7 +139,7 @@ export type ChatRouteDeps = {
   /** SNAPSHOT_MS when omitted. */
   snapshotMs?: number
   /** The browser bridge's tabs (#254, bridge/hub.ts). */
-  tabs?: Pick<TabHub, 'pairSession' | 'sessionHasTab'> | undefined
+  tabs?: Pick<TabHub, 'pairSession' | 'sessionTab' | 'pairSessionIfStill'> | undefined
   /** The panel's uploaded images (#1941, attachments/store.ts). */
   attachments?: AttachmentStore | undefined
 }
@@ -204,7 +204,7 @@ export class ChatConnection {
   private readonly buffered: () => number
   private readonly overflow: () => void
   private readonly limits: ChatLimits
-  private readonly tabs: Pick<TabHub, 'pairSession' | 'sessionHasTab'> | undefined
+  private readonly tabs: Pick<TabHub, 'pairSession' | 'sessionTab' | 'pairSessionIfStill'> | undefined
   /** The tab this panel is in, once it said (`tab.bind`). */
   private tabId: string | undefined
   private readonly clientIp: string | undefined
@@ -481,9 +481,14 @@ export class ChatConnection {
 
   /** Pairs this tab with an attached session unless the session's tab is connected to some replica. */
   private async pairUnlessHeld(sessionId: string): Promise<void> {
-    if (!this.tabs || (await this.tabs.sessionHasTab(sessionId))) return
+    if (!this.tabs) return
+    const { tabId: seen, connected } = await this.tabs.sessionTab(sessionId)
+    if (connected) return
     if (this.closed) return // the socket went while the answer came
-    this.pairTab(sessionId)
+    if (this.tabId === undefined) return
+    // Only over the tab the answer was about: a socket that paired the session
+    // while it came made the newer pairing (#2271).
+    await this.tabs.pairSessionIfStill(sessionId, this.tabId, seen)
   }
 
   /**

@@ -375,6 +375,19 @@ describe('extractors', () => {
     ])
   })
 
+  it('records the library file an upload made or an update changed (#2686)', () => {
+    expect(touches('upload_library_file', { filename: 'a.3mf' }, { id: 11, filename: 'a.3mf', folder_id: null }, 'outward')).toEqual([
+      { type: 'bambuddy_file', id: '11', action: 'created' },
+    ])
+    expect(touches('update_library_file', { file_id: 7 }, { id: 7, filename: 'b.3mf', folder_id: null }, 'outward')).toEqual([
+      { type: 'bambuddy_file', id: '7', action: 'modified' },
+    ])
+    const folder = { deleted: [{ id: 5, filename: 'x', trashed: true }], skipped: [{ id: 6, reason: 'busy' }], folders: [2] }
+    expect(touches('delete_library_folder', { folder_id: 2 }, folder, 'outward')).toEqual([
+      { type: 'bambuddy_file', id: '5', action: 'deleted' },
+    ])
+  })
+
   it('records the library files moved, copied and renamed, never a skipped one (#2670)', () => {
     const moved = { folder_id: 4, moved: [{ id: 1, filename: 'a.3mf' }], skipped: [{ id: 2, reason: 'not owned' }] }
     expect(touches('move_library_file', { file_ids: [1, 2] }, moved, 'outward')).toEqual([
