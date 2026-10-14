@@ -139,25 +139,27 @@ export const outputTools: Tool[] = [
     routes: ['GET /api/v1/outputs/{output_id}/preview.glb', 'GET /api/v1/print/library/{file_id}/preview.glb'],
     handler: async ({ plate, ...rest }, ctx) => {
       const source = sourceOf(rest)
-      const query = plate === undefined ? '' : `?plate=${plate}`
-      const plateName = plate === undefined ? '' : `-plate-${plate}`
       if (source.kind === 'library') {
+        // A library file's preview is always one plate, 1 by default: one name per mesh.
         const id = source.id
+        const libraryPlate = plate ?? 1
         return binary(
           ctx.backend.GET('/api/v1/print/library/{file_id}/preview.glb', {
-            params: { path: { file_id: id }, query: { plate } },
+            params: { path: { file_id: id }, query: { plate: libraryPlate } },
             parseAs: 'stream',
           }),
           `get preview of library file ${id}`,
           ctx,
           {
-            path: `/api/v1/print/library/${id}/preview.glb${query}`,
-            name: `library-${id}${plateName}.glb`,
+            path: `/api/v1/print/library/${id}/preview.glb?plate=${libraryPlate}`,
+            name: `library-${id}-plate-${libraryPlate}.glb`,
             fallbackType: 'model/gltf-binary',
           },
-          (bytes, mimeType) => blob(`scadbuddy://print/library/${id}/preview.glb${query}`, bytes, mimeType),
+          (bytes, mimeType) => blob(`scadbuddy://print/library/${id}/preview.glb?plate=${libraryPlate}`, bytes, mimeType),
         )
       }
+      const query = plate === undefined ? '' : `?plate=${plate}`
+      const plateName = plate === undefined ? '' : `-plate-${plate}`
       const output_id = source.id
       return binary(
         ctx.backend.GET('/api/v1/outputs/{output_id}/preview.glb', {

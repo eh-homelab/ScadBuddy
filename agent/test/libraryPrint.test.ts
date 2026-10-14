@@ -223,6 +223,13 @@ describe('the library routes', () => {
       uri: `/api/v1/print/library/${FILE}/preview.glb?plate=2`,
       name: `library-${FILE}-plate-2.glb`,
     })
+    // No plate is plate 1, under plate 1's one name.
+    const first = await tool('get_output_preview').execute({ library_file_id: FILE }, ctx({ maxInlineBytes: 1 }))
+    expect(plate).toBe('1')
+    expect(first.content[0]).toMatchObject({
+      uri: `/api/v1/print/library/${FILE}/preview.glb?plate=1`,
+      name: `library-${FILE}-plate-1.glb`,
+    })
     const file = await tool('download_3mf').execute({ library_file_id: FILE }, ctx({ maxInlineBytes: 16 }))
     expect(file.content).toContainEqual({
       type: 'resource',
