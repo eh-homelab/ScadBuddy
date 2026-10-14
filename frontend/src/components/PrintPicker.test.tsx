@@ -1865,6 +1865,10 @@ describe('PrintPicker · Supports (#1899)', () => {
   })
 
   it("calls a library file's Default the file's or the process's, which the dialog cannot read (#2837 review)", async () => {
+    // A library file's check and analyzer runs start after the dialog settles: waited
+    // for below, or they land in the next test and its own fetch misses MSW (#3381).
+    const check = watch('POST', '/check')
+    const analyzers = watch('POST', '/run', '/api/v1/analyzers/')
     renderPage(
       <PrintPicker
         open
@@ -1878,6 +1882,12 @@ describe('PrintPicker · Supports (#1899)', () => {
     expect(within(screen.getByLabelText('Support type')).getAllByRole('option')[0]).toHaveTextContent(
       'Default (file or process)',
     )
+    await waitFor(() => {
+      expect(check.answered).toBeGreaterThan(0)
+      expect(check.answered).toBe(check.urls.length)
+      expect(analyzers.answered).toBeGreaterThan(0)
+      expect(analyzers.answered).toBe(analyzers.urls.length)
+    })
   })
 
   it('takes only digits for the angle: an exponent form is not a whole number of degrees (#3180)', async () => {
