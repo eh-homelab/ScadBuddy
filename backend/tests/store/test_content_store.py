@@ -21,6 +21,7 @@ from psycopg.errors import DeadlockDetected
 
 from scadbuddy.store.content import (
     BlobCorruptError,
+    BlobData,
     BlobKind,
     BlobMissingError,
     BlobRef,
@@ -258,7 +259,7 @@ class _GatedBackend(LocalContentBackend):
         super().__init__(root)
         self.gate = asyncio.Barrier(2)
 
-    async def upload(self, kind: BlobKind, data: bytes, *, name: str, scope: BlobScope) -> str:
+    async def upload(self, kind: BlobKind, data: BlobData, *, name: str, scope: BlobScope) -> str:
         backend_id = await super().upload(kind, data, name=name, scope=scope)
         await self.gate.wait()
         return backend_id
@@ -304,11 +305,11 @@ class _ReleasedWhileReused(LocalContentBackend):
 class _DistinctIdsReleasedWhileReused(_ReleasedWhileReused):
     """As Bambuddy does: every upload is a new object with its own id."""
 
-    async def upload(self, kind: BlobKind, data: bytes, *, name: str, scope: BlobScope) -> str:
+    async def upload(self, kind: BlobKind, data: BlobData, *, name: str, scope: BlobScope) -> str:
         backend_id = f"{kind}/{uuid.uuid4().hex * 2}"
         path = self._path(backend_id)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
+        path.write_bytes(data if isinstance(data, bytes) else data.read())
         return backend_id
 
 

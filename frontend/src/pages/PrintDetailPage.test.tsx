@@ -76,6 +76,121 @@ describe('PrintDetailPage (#311)', () => {
     expect(runs).toHaveTextContent('Cancelled')
   })
 
+  it('numbers a printer Bambuddy gave no name for as the list does (#2363)', async () => {
+    const done = prints.find((print) => print.archive_id === 35)!
+    server.use(
+      http.get('/api/v1/prints/:id', () =>
+        HttpResponse.json({ ...done, printer_id: 3, printer_name: null, outcome: { ...done.outcome, printer_id: 3, printer_name: null } }),
+      ),
+    )
+    render(35)
+    const outcome = await section('Outcome')
+    const facts = within(outcome.querySelector('dl') as HTMLElement)
+    expect(facts.getByText('Printer 3')).toBeInTheDocument()
+    expect(facts.queryByText('#3')).not.toBeInTheDocument()
+  })
+
+  it('shows what the sliced file says, slot by slot (#1860)', async () => {
+    render(35)
+    const slicing = await section('Slicing')
+    const facts = within(slicing.querySelector('dl') as HTMLElement)
+    expect(facts.getByText('H2C')).toBeInTheDocument()
+    expect(facts.getByText('Textured PEI Plate')).toBeInTheDocument()
+    expect(facts.getByText('86')).toBeInTheDocument()
+    expect(facts.getByText('230 °C')).toBeInTheDocument()
+    // Not length()'s one decimal, which showed 0.08 mm as 0.1 mm.
+    expect(facts.getByText('0.08 mm')).toBeInTheDocument()
+    expect(facts.getByText('0.4 mm')).toBeInTheDocument()
+    expect(facts.getByText('3.57 m')).toBeInTheDocument()
+    const slots = within(slicing).getByRole('list', { name: 'Filament by slot' })
+    expect(within(slots).getAllByRole('listitem').map((slot) => slot.textContent)).toEqual([
+      'Slot 1PLA11.34 g',
+      'Slot 2PLA5.02 g',
+    ])
+    expect(within(slots).getByTitle('#FF9425')).toBeInTheDocument()
+  })
+
+  it('shows Bambuddy’s bookkeeping and every other field it has (#1860)', async () => {
+    const { user } = render(35)
+    const record = await section('In Bambuddy')
+    expect(record).toHaveTextContent('3 keychains')
+    expect(record).toHaveTextContent('87.7%')
+    expect(record).toHaveTextContent('1 succeeded, 0 failed')
+    await user.click(within(record).getByText('All other fields (2)'))
+    expect(within(record).getByLabelText('All other fields')).toHaveTextContent('original_archive_id—')
+  })
+
+  it('rounds a time accuracy Bambuddy answers as a long float', async () => {
+    const done = prints.find((print) => print.archive_id === 35)!
+    server.use(
+      http.get('/api/v1/prints/35', () =>
+        HttpResponse.json({ ...done, record: { ...done.record!, time_accuracy_percent: 87.666666 } }),
+      ),
+    )
+    render(35)
+    const record = await section('In Bambuddy')
+    expect(record).toHaveTextContent('87.7%')
+    expect(record).not.toHaveTextContent('87.666666')
+  })
+
+  it('paints only a hex colour as a swatch (#1860)', async () => {
+    const done = prints.find((print) => print.archive_id === 35)!
+    server.use(
+      http.get('/api/v1/prints/35', () =>
+        HttpResponse.json({
+          ...done,
+          slicing: {
+            ...done.slicing!,
+            filament_slots: [{ slot_id: 1, used_grams: 1, filament_type: 'PLA', color: 'url(https://x.example/t.png)' }],
+          },
+        }),
+      ),
+    )
+    render(35)
+    const slots = within(await section('Slicing')).getByRole('list', { name: 'Filament by slot' })
+    expect(within(slots).getByTitle('url(https://x.example/t.png)')).not.toHaveAttribute('style')
+  })
+
+  it('rounds Bambuddy’s amounts, names whose currency the cost is in, and opens its links (#1860 review)', async () => {
+    const done = prints.find((print) => print.archive_id === 35)!
+    server.use(
+      http.get('/api/v1/prints/35', () =>
+        HttpResponse.json({
+          ...done,
+          record: {
+            ...done.record!,
+            filament_actual_grams: 16.300000001,
+            energy_kwh: 0.123456,
+            energy_cost: 0.5,
+            makerworld_url: 'https://makerworld.com/en/models/1',
+            external_url: 'javascript:alert(1)',
+          },
+        }),
+      ),
+    )
+    const { user } = render(35)
+    const record = await section('In Bambuddy')
+    expect(record).toHaveTextContent('16.3 g')
+    expect(record).not.toHaveTextContent('16.300000001')
+    expect(record).toHaveTextContent('0.12 kWh')
+    expect(record).toHaveTextContent("0.50 (in Bambuddy's currency)")
+    await user.click(within(record).getByRole('button', { name: 'https://makerworld.com/en/models/1' }))
+    expect(openExternal).toHaveBeenCalledWith('https://makerworld.com/en/models/1')
+    expect(within(record).queryByRole('button', { name: 'javascript:alert(1)' })).toBeNull()
+    expect(record).toHaveTextContent('javascript:alert(1)')
+  })
+
+  it('says why a library print has no provenance (#1860)', async () => {
+    const done = prints.find((print) => print.archive_id === 35)!
+    server.use(
+      http.get('/api/v1/prints/35', () =>
+        HttpResponse.json({ ...done, output_id: null, slug: null, library_file_id: 89, provenance: null }),
+      ),
+    )
+    render(35)
+    expect(await section('Provenance')).toHaveTextContent('Printed from a Bambuddy library file, not a ScadBuddy template')
+  })
+
   it('marks a run whose filament reading is not believed (#950)', async () => {
     const done = prints.find((print) => print.archive_id === 35)!
     const [, last] = done.outcome.runs
@@ -140,7 +255,8 @@ describe('PrintDetailPage (#311)', () => {
     // #1755 — with no name for the file (gone from Bambuddy), the breadcrumb says what it
     // was, and still leads to every print of it.
     expect(screen.getByRole('link', { name: 'Bambuddy library file' })).toHaveAttribute('href', '/prints?file=89')
-    expect(screen.queryByRole('region', { name: 'Provenance' })).not.toBeInTheDocument()
+    // #1860 — the section says why it is empty.
+    expect(screen.getByRole('region', { name: 'Provenance' })).toHaveTextContent('not a ScadBuddy template')
     expect(screen.queryByRole('link', { name: 'Customize from this' })).not.toBeInTheDocument()
     expect(screen.queryByRole('region', { name: 'ScadBuddy render' })).not.toBeInTheDocument()
     const files = await section('Files')
@@ -171,7 +287,15 @@ describe('PrintDetailPage (#311)', () => {
         }),
       ),
     )
-    render(90)
+    const { user } = render(90)
+    // #2731 — the plate's image first: its mesh can be megabytes, loaded only when asked.
+    const plate = await section('Library file')
+    expect(within(plate).getByRole('img', { name: 'Plate 2 of the library file' })).toHaveAttribute(
+      'src',
+      '/api/v1/print/library/89/plates/2/thumbnail',
+    )
+    expect(screen.queryByTestId('preview')).not.toBeInTheDocument()
+    await user.click(within(plate).getByRole('button', { name: 'Show in 3D' }))
     expect(await screen.findByTestId('preview')).toHaveAttribute('data-url', preview)
     const files = await section('Files')
     expect(within(files).getByText('Library file')).toBeInTheDocument()
@@ -232,10 +356,41 @@ describe('PrintDetailPage (#311)', () => {
     expect(video).toHaveAttribute('src', '/api/v1/prints/35/timelapse')
     expect(video).toHaveAttribute('controls')
     expect(video).toHaveAttribute('playsinline')
-    expect(video.getAttribute('poster')).toMatch(/^data:image\//)
+    // #2512 — the still by URL, never base64 in the detail's JSON.
+    expect(video).toHaveAttribute('poster', '/api/v1/prints/35/timelapse/frames/0')
     video.currentTime = 3
-    await user.click(within(timelapse).getByRole('button', { name: 'Go to 0:00' }))
+    await user.click(await within(timelapse).findByRole('button', { name: 'Go to 0:00' }))
     expect(video.currentTime).toBe(0)
+    expect(within(timelapse).getByText(/1680×1080/)).toBeInTheDocument()
+  })
+
+  it('shows the print before the timelapse stills arrive, then shows them (#2360)', async () => {
+    let release: () => void = () => undefined
+    const arrived = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http.get('/api/v1/prints/:archiveId/timelapse/frames', async () => {
+        await arrived
+        return HttpResponse.json({
+          info: null,
+          frames: [
+            { timestamp: 0, url: '/api/v1/prints/35/timelapse/frames/0' },
+            { timestamp: 2, url: '/api/v1/prints/35/timelapse/frames/1' },
+          ],
+        })
+      }),
+    )
+    render(35)
+    const timelapse = await section('Timelapse')
+    expect(timelapse.querySelector('video')).toHaveAttribute('poster', '/api/v1/prints/35/timelapse/frames/0')
+    expect(within(timelapse).queryByRole('list', { name: 'Timelapse frames' })).not.toBeInTheDocument()
+    release()
+    const strip = await within(timelapse).findByRole('list', { name: 'Timelapse frames' })
+    expect(within(strip).getByRole('button', { name: 'Go to 0:02' }).querySelector('img')).toHaveAttribute(
+      'src',
+      '/api/v1/prints/35/timelapse/frames/1',
+    )
   })
 
   it('lists every file with its size and downloads it as a blob', async () => {
@@ -244,9 +399,10 @@ describe('PrintDetailPage (#311)', () => {
     const { user } = render(35)
     const files = await section('Files')
     const rows = within(files).getAllByRole('listitem')
-    // The ScadBuddy 3MF, its preview mesh, the sliced file and the parameters.
-    expect(rows).toHaveLength(4)
-    expect(rows[0]).toHaveTextContent('ScadBuddy 3MF')
+    // The editable 3MF, its preview mesh, the sliced file, the parameters, then (#894)
+    // the finish photo and the timelapse.
+    expect(rows).toHaveLength(6)
+    expect(rows[0]).toHaveTextContent('Editable model (3MF)')
     expect(rows[0]).toHaveTextContent('48 kB')
     expect(rows[2]).toHaveTextContent('Sliced file')
     expect(rows[2]).toHaveTextContent('2.1 MB')
@@ -257,6 +413,126 @@ describe('PrintDetailPage (#311)', () => {
     )
     expect(requested).toContain('/api/v1/prints/35/files/sliced')
     server.events.removeAllListeners()
+  })
+
+  it('gives each file an icon of its kind, a friendly label over its name, and a download of its own (#894)', async () => {
+    render(35)
+    const files = await section('Files')
+    const rows = within(files).getAllByRole('listitem')
+    expect(rows.map((row) => row.querySelector('[data-testid^="file-icon-"]')?.getAttribute('data-testid'))).toEqual([
+      'file-icon-output_3mf',
+      'file-icon-preview_glb',
+      'file-icon-sliced',
+      'file-icon-parameters',
+      'file-icon-photo',
+      'file-icon-timelapse',
+    ])
+    expect(
+      within(rows[1]!).getByRole('button', { name: '3D preview, name-keychain-reagan.glb, open' }),
+    ).toBeInTheDocument()
+    expect(within(rows[1]!).getByRole('button', { name: 'Download name-keychain-reagan.glb' })).toBeInTheDocument()
+  })
+
+  it('opens a file in the app without downloading it (#894)', async () => {
+    const { user } = render(35)
+    const files = await section('Files')
+    const open = (name: RegExp) => user.click(within(files).getByRole('button', { name }))
+
+    await open(/^3D preview, .*, open$/)
+    let dialog = await screen.findByRole('dialog', { name: '3D preview' })
+    expect(await within(dialog).findByTestId('preview')).toHaveAttribute('data-url', `/api/v1/outputs/${REAGAN}/preview.glb`)
+    await user.keyboard('{Escape}')
+
+    await open(/^Sliced file, .*, open$/)
+    dialog = await screen.findByRole('dialog', { name: 'Sliced file' })
+    expect(within(dialog).getByRole('img', { name: 'Keychain' })).toHaveAttribute('src', '/api/v1/prints/35/plates/1/thumbnail')
+    expect(within(dialog).getByLabelText('Slicing summary')).toHaveTextContent('Slot 2PLA · 5.02 g')
+    await user.keyboard('{Escape}')
+
+    await open(/^Parameters, .*, open$/)
+    dialog = await screen.findByRole('dialog', { name: 'Parameters' })
+    const table = within(dialog).getByRole('table', { name: 'Parameters' })
+    expect(within(table).getByText('(changed from the default)', { exact: false })).toBeInTheDocument()
+    await user.keyboard('{Escape}')
+
+    await open(/^Photo, .*, open$/)
+    dialog = await screen.findByRole('dialog', { name: 'Photo' })
+    expect(within(dialog).getByRole('img')).toHaveAttribute('src', expect.stringContaining('/api/v1/prints/35/photos/'))
+    await user.keyboard('{Escape}')
+
+    await open(/^Timelapse, .*, open$/)
+    dialog = await screen.findByRole('dialog', { name: 'Timelapse' })
+    expect(within(dialog).getByLabelText('Timelapse')).toHaveAttribute('src', '/api/v1/prints/35/timelapse')
+    expect(downloadBlob).not.toHaveBeenCalled()
+  })
+
+  it('opens the editable 3MF: its mesh and colours, and its plates only when there are several (#894)', async () => {
+    const { user } = render(35)
+    const files = await section('Files')
+    const open = () => user.click(within(files).getByRole('button', { name: /^Editable model \(3MF\), .*, open$/ }))
+
+    await open()
+    let dialog = await screen.findByRole('dialog', { name: 'Editable model (3MF)' })
+    expect(await within(dialog).findByTestId('preview')).toHaveAttribute('data-url', `/api/v1/outputs/${REAGAN}/preview.glb`)
+    const colours = outputs[0]!.colors ?? []
+    expect(colours.length).toBeGreaterThan(0)
+    for (const colour of colours) expect(within(dialog).getByTitle(colour.toUpperCase())).toBeInTheDocument()
+    expect(within(dialog).queryByRole('list', { name: 'Plates' })).not.toBeInTheDocument()
+    await user.keyboard('{Escape}')
+
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: true },
+          { index: 2, has_thumbnail: true },
+        ]),
+      ),
+    )
+    await open()
+    dialog = await screen.findByRole('dialog', { name: 'Editable model (3MF)' })
+    const plates = await within(dialog).findByRole('list', { name: 'Plates' })
+    expect(within(plates).getAllByRole('img').map((img) => img.getAttribute('src'))).toEqual([
+      `/api/v1/outputs/${REAGAN}/plates/1/thumbnail`,
+      `/api/v1/outputs/${REAGAN}/plates/2/thumbnail`,
+    ])
+  })
+
+  it('opens the editable 3MF without a mesh when its 3D preview is gone', async () => {
+    const done = prints.find((print) => print.archive_id === 35)!
+    server.use(
+      http.get('/api/v1/prints/35', () =>
+        HttpResponse.json({ ...done, files: done.files.filter((file) => file.kind !== 'preview_glb') }),
+      ),
+    )
+    const { user } = render(35)
+    const files = await section('Files')
+    await user.click(within(files).getByRole('button', { name: /^Editable model \(3MF\), .*, open$/ }))
+    const dialog = await screen.findByRole('dialog', { name: 'Editable model (3MF)' })
+    await within(dialog).findByTitle((outputs[0]!.colors ?? [])[0]!.toUpperCase())
+    expect(within(dialog).queryByTestId('preview')).not.toBeInTheDocument()
+  })
+
+  it('copies the parameters as JSON, and says so when there is no clipboard', async () => {
+    // user-event stands in a clipboard of its own.
+    const { user } = render(35)
+    const files = await section('Files')
+    await user.click(within(files).getByRole('button', { name: /^Parameters, .*, open$/ }))
+    let dialog = await screen.findByRole('dialog', { name: 'Parameters' })
+    await user.click(within(dialog).getByRole('button', { name: 'Copy JSON' }))
+    expect(await within(dialog).findByRole('button', { name: 'Copied' })).toBeInTheDocument()
+    expect(JSON.parse(await navigator.clipboard.readText())).toMatchObject({ name: 'Reagan' })
+    await user.keyboard('{Escape}')
+
+    const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+    Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true })
+    try {
+      await user.click(within(files).getByRole('button', { name: /^Parameters, .*, open$/ }))
+      dialog = await screen.findByRole('dialog', { name: 'Parameters' })
+      await user.click(within(dialog).getByRole('button', { name: 'Copy JSON' }))
+      expect(within(dialog).getByRole('alert')).toHaveTextContent('could not be copied here')
+    } finally {
+      if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard)
+    }
   })
 
   it('downloads the parameters as JSON', async () => {
@@ -313,6 +589,19 @@ describe('PrintDetailPage (#311)', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Open in queue' }))
     expect(openExternal).toHaveBeenCalledWith('https://bambuddy.example/queue')
     server.events.removeAllListeners()
+  })
+
+  it('offers no Print again while the print is still going (#2736)', async () => {
+    const done = prints.find((print) => print.archive_id === 35)!
+    server.use(
+      http.get('/api/v1/prints/35', () =>
+        HttpResponse.json({ ...done, status: 'printing', outcome: { ...done.outcome, status: 'printing' } }),
+      ),
+    )
+    render(35)
+    await section('Outcome')
+    expect(screen.queryByRole('button', { name: 'Print again' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Open in Bambuddy' })).toBeInTheDocument()
   })
 
   it('says why Bambuddy would not queue it', async () => {

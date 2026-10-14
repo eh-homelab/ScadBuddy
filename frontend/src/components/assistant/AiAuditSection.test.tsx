@@ -240,6 +240,31 @@ describe('AiAuditSection', () => {
     expect(screen.getByRole('option', { name: 'Turns' })).toBeInTheDocument()
   })
 
+  it('#2373 — says a panel action came from the app, and a fork is a session action', async () => {
+    const row = (id: string, fields: Partial<AuditPage['entries'][number]>) => ({ ...AUDIT_FIXTURES[3]!, id, tier: null, ...fields })
+    server.use(
+      http.get('/api/v1/ai/audit', () =>
+        HttpResponse.json<AuditPage>({
+          entries: [
+            row('2', { kind: 'resource', action: 'session_fork', surface: 'http', outcome: 'ok' }),
+            row('1', { kind: 'approval', action: 'denied', surface: 'http', outcome: 'denied' }),
+          ],
+          next: null,
+          retention_days: 90,
+        }),
+      ),
+    )
+    renderPage(<AiAuditSection />)
+    await waitFor(() => expect(rows()).toHaveLength(2))
+    const [fork, approval] = rows()
+    expect(fork).toHaveTextContent('Session fork')
+    expect(fork).toHaveTextContent('via the app')
+    expect(approval).toHaveTextContent('via the app')
+    expect(approval).not.toHaveTextContent('Settings')
+    expect(screen.getByRole('option', { name: 'Sessions & resources' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'MCP resources' })).toBeNull()
+  })
+
   it('lists the log newest first: who, what, tier, outcome and the scrubbed input', async () => {
     renderPage(<AiAuditSection />)
     await waitFor(() => expect(rows()).toHaveLength(AUDIT_FIXTURES.length))

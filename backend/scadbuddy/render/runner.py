@@ -53,6 +53,8 @@ _EXPORT_ERROR = re.compile(r"^EXPORT-ERROR: (?P<message>.*)$")
 
 #: A template's plate count, as `echo(plates = N)` logs it (spec §6.4, #289).
 _PLATES = re.compile(r"^ECHO: plates = (?P<count>\d+)$")
+#: A template's object count, as `echo(objects = N)` logs it (#956).
+_OBJECTS = re.compile(r"^ECHO: objects = (?P<count>\d+)$")
 
 logger = logging.getLogger(__name__)
 
@@ -127,11 +129,19 @@ class ProcessOutput:
     #: Also read off the whole log: an echo at the top of a long model is not in
     #: the tail.
     plates: int | None = None
+    #: The last `echo(objects = N)` the run logged (#956), read as `plates` is.
+    objects: int | None = None
 
 
 def plate_count(line: str) -> int | None:
     """The plate count ``line`` states, if it is a template's `echo(plates = N)`."""
     match = _PLATES.match(line)
+    return int(match["count"]) if match else None
+
+
+def object_count(line: str) -> int | None:
+    """The object count ``line`` states, if it is a template's `echo(objects = N)`."""
+    match = _OBJECTS.match(line)
     return int(match["count"]) if match else None
 
 
@@ -327,6 +337,7 @@ async def _drain(
     diagnostics: DiagnosticCollector,
     plates: list[int],
     export_errors: list[str],
+    objects: list[int],
 ) -> None:
     async for raw in stream:
         line = raw.decode("utf-8", "replace").rstrip("\n")
@@ -341,6 +352,9 @@ async def _drain(
         count = plate_count(line)
         if count is not None:
             plates.append(count)
+        declared = object_count(line)
+        if declared is not None:
+            objects.append(declared)
         export_error = _EXPORT_ERROR.match(line)
         if export_error is not None:
             export_errors.append(export_error["message"])
@@ -412,11 +426,12 @@ async def _run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pr
     missing: list[str] = []
     notes: list[str] = []
     plates: list[int] = []
+    objects: list[int] = []
     export_errors: list[str] = []
     collector = DiagnosticCollector(roots=(cwd, *config.library_path))
     assert process.stdout is not None
     drain = asyncio.create_task(
-        _drain(process.stdout, tail, missing, notes, collector, plates, export_errors)
+        _drain(process.stdout, tail, missing, notes, collector, plates, export_errors, objects)
     )
     try:
         returncode = await asyncio.wait_for(process.wait(), timeout=config.render_timeout)
@@ -460,6 +475,7 @@ async def _run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pr
         diagnostics_dropped=collector.dropped,
         notes=tuple(notes),
         plates=plates[-1] if plates else None,
+        objects=objects[-1] if objects else None,
     )
 
 

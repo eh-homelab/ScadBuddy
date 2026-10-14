@@ -1,5 +1,6 @@
 import { createSdkMcpServer, type McpSdkServerConfigWithInstance, type PermissionResult, tool } from '@anthropic-ai/claude-agent-sdk'
 import { z } from 'zod'
+import { callContext } from './callContext.js'
 import { ATTENTION_DESCRIPTION, ATTENTION_TOOL_NAME, ATTENTION_TOOL_SHAPE, type AttentionSpec, attentionHandler } from './attention.js'
 
 // Structured questions for the user (#940): multiple choice, and a draft to
@@ -161,9 +162,6 @@ export function answersText(answers: Record<string, string>): string {
   return `User has answered your questions: ${pairs.join(', ')}. You can now continue with the user's answers in mind.`
 }
 
-/** What Claude Code puts in an MCP call's `_meta` (measured on 2.1.283 and 2.1.287). */
-const TOOL_USE_ID_META = 'claudecode/toolUseId'
-
 /**
  * ask_user's call timeout. An MCP call is cut off at the server's `timeout`,
  * else MCP_TOOL_TIMEOUT, else 1e8 ms, clamped to 2^31-1 (Claude Code 2.1.283 and 2.1.287;
@@ -177,26 +175,15 @@ const TOOL_USE_ID_META = 'claudecode/toolUseId'
  */
 export const ASK_USER_TIMEOUT_MS = 2_147_483_647
 
-/** The parts of the MCP SDK's RequestHandlerExtra the handler reads. */
-const ExtraSchema = z.object({
-  signal: z.instanceof(AbortSignal),
-  _meta: z.object({ [TOOL_USE_ID_META]: z.string().min(1).optional() }).loose().optional(),
-})
-
 type ToolResult = { content: { type: 'text'; text: string }[]; isError?: boolean }
 
 const failed = (text: string): ToolResult => ({ content: [{ type: 'text', text }], isError: true })
 
 /** ask_user's handler (exported for tests). */
 export async function askUserHandler(gate: QuestionGate, args: unknown, extra: unknown): Promise<ToolResult> {
-  const parsed = ExtraSchema.safeParse(extra)
-  if (!parsed.success) {
-    // A measured fact about Claude Code no longer holds: say which.
-    return failed(`The question was not asked: the call's context is not as expected (${z.prettifyError(parsed.error)}).`)
-  }
-  const toolUseId = parsed.data._meta?.[TOOL_USE_ID_META]
-  if (toolUseId === undefined) return failed('The question was not asked: the call has no tool_use id.')
-  const result = await ask(gate, ASK_USER_TOOL, args, toolUseId, parsed.data.signal)
+  const call = callContext(extra)
+  if (!call.ok) return failed(`The question was not asked: ${call.error}.`)
+  const result = await ask(gate, ASK_USER_TOOL, args, call.toolUseId, call.signal)
   return result.answered ? { content: [{ type: 'text', text: answersText(result.answers) }] } : failed(result.message)
 }
 

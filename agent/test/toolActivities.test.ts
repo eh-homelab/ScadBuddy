@@ -13,7 +13,7 @@ import { answerResult } from '../src/gate/answers.js'
 import { answeredText, timedOutText } from '../src/harness/attention.js'
 import { answersText } from '../src/harness/questions.js'
 import type { FlowRuns } from '../src/temporal/flowRuns.js'
-import { DESCRIBE_CALL_ACTIVITY, gateActivities, TOOL_IMAGES_TOOL, toolActivities, type ToolActivityDeps } from '../src/temporal/toolActivities.js'
+import { DESCRIBE_CALL_ACTIVITY, FLOW_IMAGES_FULL, gateActivities, TOOL_IMAGES_TOOL, toolActivities, type ToolActivityDeps } from '../src/temporal/toolActivities.js'
 import { DURABLE_ONLY_TOOLS } from '../src/tools/answerTools.js'
 import { AUTHOR_SESSION_HEADER } from '../src/tools/authorship.js'
 import { browserTools } from '../src/tools/browser.js'
@@ -128,8 +128,8 @@ async function failure(promise: Promise<unknown>): Promise<ApplicationFailure> {
 }
 
 describe('tool activities', () => {
-  it('registers one activity per tool, under its name', () => {
-    expect(Object.keys(harness().activities).sort()).toEqual(['boom', 'send', 'slow', 'whoami'])
+  it("registers one activity per tool, under its name, and a flow's tier activity (#2704)", () => {
+    expect(Object.keys(harness().activities).sort()).toEqual(['boom', 'flow_tool_tier', 'send', 'slow', 'whoami'])
   })
 
   it("runs the tool as the session's owner, in the session, and returns its content", async () => {
@@ -456,12 +456,19 @@ describe('flow runs in tool activities', () => {
     }),
   })
 
-  function memoryFlowBlobs() {
+  function memoryFlowBlobs(max = Infinity) {
     const rows = new Map<string, { mediaType: 'image/png'; bytes: Buffer }>()
     return {
       rows,
       put: async (subject: string, images: readonly { name: string; mediaType: string; bytes: Buffer }[]) => {
-        for (const i of images) rows.set(`${subject}/${i.name}`, { mediaType: 'image/png', bytes: i.bytes })
+        const kept: string[] = []
+        for (const i of images) {
+          const key = `${subject}/${i.name}`
+          if (!rows.has(key) && rows.size >= max) continue
+          rows.set(key, { mediaType: 'image/png', bytes: i.bytes })
+          kept.push(i.name)
+        }
+        return kept
       },
       get: async (subject: string, name: string) => rows.get(`${subject}/${name}`),
     }
@@ -478,6 +485,13 @@ describe('flow runs in tool activities', () => {
     expect([...flowBlobs.rows.keys()]).toEqual([`${FLOW}/${PNG_NAME}`])
     expect(JSON.stringify(out)).not.toContain(PNG)
     expect(JSON.stringify(out)).not.toContain(PNG.slice(0, 16))
+  })
+
+  it("says so, with no pointer, for an image past the run's cap (#2578)", async () => {
+    const out = await env(FLOW, 'tool-call_1').run(harness({ flows: flowRuns(), flowBlobs: memoryFlowBlobs(0) }, [pic]).activities.pic!, {})
+    expect(typeof out).toBe('string')
+    expect(String(out)).toContain(FLOW_IMAGES_FULL)
+    expect(out).not.toContain('[image ')
   })
 
   it('answers text alone when a flow call returned no image, and a placeholder with no store', async () => {

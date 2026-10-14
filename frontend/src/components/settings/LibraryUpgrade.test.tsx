@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, delay, http } from 'msw'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { BUILTIN_SLUG } from '../../mocks/fixtures'
 import {
   BREAKING_MESSAGE,
@@ -200,23 +200,26 @@ describe('LibraryUpgrade', () => {
   })
 
   it('aborts an in-flight check when the rows unmount, so it stops holding the check permit', async () => {
-    let aborted = false
     let started = false
     server.use(
-      http.post('/api/v1/models/:slug/libraries/:name/check', async ({ request }) => {
+      http.post('/api/v1/models/:slug/libraries/:name/check', async () => {
         started = true
-        request.signal.addEventListener('abort', () => {
-          aborted = true
-        })
         await delay('infinite')
         return undefined
       }),
     )
+    // The signal given to fetch: msw 3 rebuilds the handler's request from the wire, and
+    // does not abort it when the client drops a reused keep-alive connection.
+    const sent = vi.spyOn(globalThis, 'fetch')
+    onTestFinished(() => sent.mockRestore())
     const { user, unmount } = await open()
     await user.click(within(row('Name Keychain')).getByRole('button', { name: 'Check' }))
     await waitFor(() => expect(started).toBe(true))
+    const checks = sent.mock.calls.filter(([url]) => /\/libraries\/[^/]+\/check$/.test(String(url)))
+    expect(checks).toHaveLength(1)
+    const inflight = checks[0]?.[1]?.signal
     unmount()
-    await waitFor(() => expect(aborted).toBe(true))
+    await waitFor(() => expect(inflight?.aborted).toBe(true))
   })
 
   it('disables the Library select while a check or a move runs', async () => {

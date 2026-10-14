@@ -25,11 +25,12 @@ import math
 import struct
 import time
 import zlib
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
+import trimesh
 
 from scadbuddy.render.split import ColourPart
 
@@ -60,6 +61,10 @@ LIGHT_DIRECTION = (0.35, 0.45, 1.0)
 # model made of thousands of large triangles cannot turn into a multi-gigabyte
 # temporary.
 BATCH_PIXELS = 1 << 22
+
+# Triangles projected at a time (#2573). An arranged plate is many pieces joined, so
+# the plate's triangles all at once were the sum of every piece's; this bounds them.
+CHUNK_TRIANGLES = 1 << 18
 
 
 @dataclass(frozen=True)
@@ -140,65 +145,96 @@ def _rasterise(
 
     light = _unit(np.asarray(LIGHT_DIRECTION) @ np.array([right, up, -ahead]))
 
-    triangles: list[np.ndarray] = []
-    shades: list[np.ndarray] = []
+    canvas = _Canvas(size)
     for part, rgb in zip(parts, colours, strict=True):
         base = np.asarray(rgb, dtype=np.float64) / 255
-        vertices = np.asarray(part.mesh.vertices, dtype=np.float64) - centre
-        screen = np.column_stack(
-            (
-                size / 2 + (vertices @ right) * scale,
-                size / 2 - (vertices @ up) * scale,
-                vertices @ ahead,
-            )
-        )
+        vertices = np.asarray(part.mesh.vertices, dtype=np.float64)
         faces = np.asarray(part.mesh.faces)
-        triangles.append(screen[faces])
-        if shaded:
-            normals = np.asarray(part.mesh.face_normals, dtype=np.float64)
-            lit = AMBIENT + (1 - AMBIENT) * np.clip(normals @ light, 0.0, 1.0)
-        else:
-            lit = np.ones(len(faces))
-        shades.append(base * lit[:, None])
+        # A chunk at a time (#2573): an arranged plate joins every copy of a colour
+        # into one part, so a whole part's triangles, normals and fragments at once
+        # were the sum of every piece on the plate.
+        for start in range(0, len(faces), CHUNK_TRIANGLES):
+            corners = vertices[faces[start : start + CHUNK_TRIANGLES]]
+            if shaded:
+                lit = AMBIENT + (1 - AMBIENT) * np.clip(_normals(corners) @ light, 0.0, 1.0)
+            else:
+                lit = np.ones(len(corners))
+            moved = corners - centre
+            screen = np.stack(
+                (
+                    size / 2 + (moved @ right) * scale,
+                    size / 2 - (moved @ up) * scale,
+                    moved @ ahead,
+                ),
+                axis=-1,
+            )
+            canvas.draw(screen, base * lit[:, None])
+    return canvas.image()
 
-    return _draw(
-        np.concatenate(triangles).astype(np.float64),
-        np.concatenate(shades),
-        size,
-    )
+
+def _normals(corners: np.ndarray) -> np.ndarray:
+    """Each triangle's unit normal, zero for a degenerate one: what trimesh's
+    ``face_normals`` gives, computed for one chunk rather than cached on the mesh,
+    where it (and the triangles it is made from) would outlive the render."""
+    normals, valid = trimesh.triangles.normals(corners)
+    if valid.all():
+        return np.asarray(normals, dtype=np.float64)
+    padded = np.zeros((len(corners), 3), dtype=np.float64)
+    padded[valid] = normals
+    return padded
 
 
-def _draw(triangles: np.ndarray, colours: np.ndarray, size: int) -> np.ndarray:
-    """Depth-test every triangle at once and compose the RGBA image.
+class _Canvas:
+    """A depth buffer and the colour of what is nearest in each pixel, drawn into a
+    batch of triangles at a time.
 
     Rasterising one triangle per Python iteration is the obvious shape and costs
     ~140 us a triangle almost regardless of the triangle's size — numpy call
     overhead, not pixels — which puts an 80k-face model at half a minute for
-    three views. So fragments are generated for every triangle first
+    three views. So fragments are generated for many triangles at once
     (`_fragments` batches triangles by the size of their pixel bounding box, so
-    one set of numpy calls covers thousands of them) and resolved here with a
-    painter's pass: sort the fragments far-to-near and scatter-assign, because
-    numpy's fancy-index assignment keeps the LAST write to a repeated index.
-    That is a depth test with no per-pixel loop.
+    one set of numpy calls covers thousands of them), and each batch is resolved
+    into the buffer before the next is made: only the nearest fragment of each pixel
+    is kept, so memory follows the batch (:data:`BATCH_PIXELS`), never the mesh
+    (#2573). Of equally deep fragments the one drawn last wins, so the image stays a
+    pure function of the mesh.
 
     There is no backface cull. It would halve the work on a closed part, but this
     also renders the open split mesh (`UNCOLOURED_WARNING` in `render.jobs`),
     where culling punches holes straight through the model.
     """
-    image = np.zeros((size * size, 4), dtype=np.uint8)
-    pixels, depth, owner = _fragments(triangles, size)
-    if len(pixels) == 0:
-        return image.reshape(size, size, 4)
-    # Stable, so equally deep fragments resolve as a function of the mesh alone
-    # and the PNG bytes stay reproducible.
-    order = np.argsort(-depth, kind="stable")
-    image[pixels[order], :3] = np.rint(np.clip(colours[owner[order]], 0, 1) * 255).astype(np.uint8)
-    image[pixels, 3] = 255
-    return image.reshape(size, size, 4)
+
+    def __init__(self, size: int) -> None:
+        self.size = size
+        self.depth = np.full(size * size, np.inf)
+        self.colour = np.zeros((size * size, 3), dtype=np.uint8)
+
+    def draw(self, triangles: np.ndarray, colours: np.ndarray) -> None:
+        for pixels, depth, owner in _fragments(triangles, self.size):
+            # Pixel by pixel, nearest first: the first of each pixel is its nearest,
+            # the last-listed of equally deep ones, as a later batch beats an earlier.
+            order = np.lexsort((-np.arange(len(pixels)), depth, pixels))
+            pixels, depth, owner = pixels[order], depth[order], owner[order]
+            first = np.ones(len(pixels), dtype=bool)
+            first[1:] = pixels[1:] != pixels[:-1]
+            pixels, depth, owner = pixels[first], depth[first], owner[first]
+            nearer = depth <= self.depth[pixels]
+            pixels, owner = pixels[nearer], owner[nearer]
+            self.depth[pixels] = depth[nearer]
+            self.colour[pixels] = np.rint(np.clip(colours[owner], 0, 1) * 255).astype(np.uint8)
+
+    def image(self) -> np.ndarray:
+        image = np.zeros((self.size * self.size, 4), dtype=np.uint8)
+        image[:, :3] = self.colour
+        image[np.isfinite(self.depth), 3] = 255
+        return image.reshape(self.size, self.size, 4)
 
 
-def _fragments(triangles: np.ndarray, size: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Covered pixel index, depth and triangle index, for every triangle.
+def _fragments(
+    triangles: np.ndarray, size: int
+) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """Covered pixel index, depth and triangle index, a batch of triangles at a time,
+    each batch covering at most :data:`BATCH_PIXELS` candidate pixels.
 
     Triangles are grouped by their pixel bounding box rounded up to a power of
     two on each axis, so every member of a group rasterises in one broadcast
@@ -217,27 +253,19 @@ def _fragments(triangles: np.ndarray, size: int) -> tuple[np.ndarray, np.ndarray
     area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
 
     live = np.flatnonzero((width > 0) & (height > 0) & (area != 0))
-    empty = np.zeros(0, dtype=np.int64)
     if len(live) == 0:
-        return empty, np.zeros(0, dtype=np.float64), empty
+        return
 
     block_w = 1 << np.ceil(np.log2(width[live])).astype(np.int64)
     block_h = 1 << np.ceil(np.log2(height[live])).astype(np.int64)
 
-    pixels: list[np.ndarray] = []
-    depths: list[np.ndarray] = []
-    owners: list[np.ndarray] = []
     for key in np.unique(block_w * (size + 1) + block_h):
         member = (block_w * (size + 1) + block_h) == key
         group = live[member]
         bw, bh = int(block_w[member][0]), int(block_h[member][0])
         batches = max(1, -(-len(group) * bw * bh // BATCH_PIXELS))
         for batch in np.array_split(group, batches):
-            found = _block(triangles, batch, (x0, x1, y0, y1), (bw, bh), size, area)
-            pixels.append(found[0])
-            depths.append(found[1])
-            owners.append(found[2])
-    return np.concatenate(pixels), np.concatenate(depths), np.concatenate(owners)
+            yield _block(triangles, batch, (x0, x1, y0, y1), (bw, bh), size, area)
 
 
 def _block(

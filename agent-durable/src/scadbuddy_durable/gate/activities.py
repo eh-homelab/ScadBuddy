@@ -20,9 +20,11 @@ from temporalio import activity
 from temporalio.common import RetryPolicy
 
 from scadbuddy_durable.gate.store import (
+    DenyInput,
     GrantInput,
     OpenInput,
     ResolveInput,
+    deny_input,
     grant_input,
     open_input,
     resolve_input,
@@ -59,3 +61,8 @@ class GateActivities:
     async def grant_input(self, args: GrantInput) -> bool:
         async with self._connect() as conn:
             return await grant_input(conn, args)
+
+    @activity.defn(name="deny_input")
+    async def deny_input(self, args: DenyInput) -> bool:
+        async with self._connect() as conn:
+            return await deny_input(conn, args)

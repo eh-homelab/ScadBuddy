@@ -12,6 +12,22 @@ const ANALYZERS_LATER =
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
+    operation: 'GET /api/v1/activity/facets',
+    reason: "The UI's filter bar; activity_list's own filters say the same.",
+  },
+  {
+    operation: 'GET /api/v1/prints/{archive_id}/timelapse/frames',
+    reason:
+      "The print page's timelapse stills and probe, read after the detail so it need not wait on Bambuddy's " +
+      'ffmpeg (#2360). An agent watches the timelapse itself through get_print_timelapse.',
+  },
+  {
+    operation: 'GET /api/v1/prints/{archive_id}/timelapse/frames/{index}',
+    reason:
+      "One timelapse still as a JPEG (#2512), the print page's poster and seek strip. An agent watches the " +
+      'timelapse itself through get_print_timelapse.',
+  },
+  {
     operation: 'POST /api/v1/workflow-runs/{run_id}/answer',
     reason:
       "A flow's entries are answered by the browser user on the Workflows page only (spec §6.6, plan 6 " +
@@ -30,13 +46,6 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
     operation: 'POST /api/v1/workflow-runs/{run_id}/grant/decline',
     reason: 'A run grant is approved by the browser user only (amendment §3.2); the route refuses an agent-authored request.',
-  },
-  {
-    operation: 'POST /api/v1/workflow-runs/{run_id}/escalations/{call_id}',
-    reason:
-      "The starting session's deny, narrow or pass up of its run's call outside the run's grant (#2482, " +
-      "amendment §4.4). Reached only through the agent's own escalation route, which names the session " +
-      'from the one the call runs in, never from a tool argument; no tool calls the backend route itself.',
   },
   {
     operation: 'GET /api/v1/workflow-runs/{run_id}/proposals/{call_id}',
@@ -219,6 +228,18 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   },
   ...(
     [
+      'GET /api/v1/print/outputs/{output_id}/preview-slices/{job_id}/toolpath',
+      'GET /api/v1/print/library/{file_id}/preview-slices/{job_id}/toolpath',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      "The background slice's toolpath (#2072): binary float32 segments the plate preview draws as its " +
+      'Speed, Movement and Layers views. It is for drawing, not reading; get the slice\'s grams, time and ' +
+      'filament changes from the print check.',
+  })),
+  ...(
+    [
       'POST /api/v1/print/outputs/{output_id}/preview-slice',
       'POST /api/v1/print/library/{file_id}/preview-slice',
       'GET /api/v1/print/outputs/{output_id}/preview-slices/{job_id}',
@@ -281,5 +302,13 @@ export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: str
   {
     route: 'PUT /api/v1/ai/settings/session-mode',
     reason: 'Changes how every new session runs: an operator decision made in Settings, never by an agent.',
+  },
+  {
+    route: 'GET /api/v1/ai/settings/durable-subagents',
+    reason: "Settings → Durable subagents: deployment wiring for the agent-durable worker, for the operator.",
+  },
+  {
+    route: 'PUT /api/v1/ai/settings/durable-subagents',
+    reason: 'Widens which network peers may call the agent: an operator decision made in Settings, never by an agent.',
   },
 ]

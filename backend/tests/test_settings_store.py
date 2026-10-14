@@ -747,3 +747,13 @@ def test_a_save_that_would_leave_the_store_unready_with_another_waits_and_is_ref
     assert len(errors) == 1 and isinstance(errors[0], StoreNotReadyError)
     loaded = _fresh_load(settings)
     assert (loaded.store_backend, loaded.bambuddy_url) == ("local", None)
+
+
+@pytest.mark.parametrize(
+    "name", ["store_max_total_bytes", "store_max_count", "worker_cache_max_bytes"]
+)
+def test_a_negative_store_cap_is_refused_naming_its_field(name: str) -> None:
+    """#2348: every other runtime number was already bounded; 0 is no limit for these."""
+    with pytest.raises(ValueError, match=f"SCADBUDDY_{name.upper()} must be at least 0"):
+        SettingsPatch.model_validate({name: -1})
+    assert getattr(SettingsPatch.model_validate({name: 0}), name) == 0

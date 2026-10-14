@@ -10,7 +10,8 @@ test.describe('settings', () => {
   test('saves a section, keeps it across navigation, and resets it to the deployment', async ({ page }) => {
     await page.goto('/settings')
     const rendering = page.getByRole('region', { name: 'Rendering' })
-    const timeout = page.getByLabel('Render timeout')
+    // By role: the reset button's name also says "Render timeout" (#2346, label in name).
+    const timeout = page.getByRole('spinbutton', { name: 'Render timeout' })
     const source = page.getByTestId('source-render_timeout')
     await expect(timeout).toHaveValue('300')
     await expect(source).toHaveText(/From SCADBUDDY_RENDER_TIMEOUT/)
@@ -29,7 +30,7 @@ test.describe('settings', () => {
     await expect(timeout).toHaveValue('45')
     await expect(source).toHaveText(/Set here/)
 
-    await source.getByRole('button', { name: /Reset render_timeout/ }).click()
+    await source.getByRole('button', { name: 'Reset to deployment value: Render timeout' }).click()
     await expect(source).toHaveText(/From SCADBUDDY_RENDER_TIMEOUT/)
     await expect(timeout).toHaveValue('300')
   })

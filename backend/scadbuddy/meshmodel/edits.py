@@ -340,7 +340,10 @@ def _has_peg_on(obj: SceneObject, point: Sequence[float], normal: Sequence[float
 
 def _largest_flat(obj: SceneObject, mesh_of: MeshOf) -> np.ndarray:
     """The object-frame outward normal of its largest flat face after its cuts. A cut
-    face carrying a peg is no face to stand on: the peg would go into the bed."""
+    face carrying a peg is no face to stand on: the peg would go into the bed. Measured
+    on the printed parts only (``object_mesh``), so a face a negative part cuts into (a
+    recess in a base) counts at its whole area (#2516): pass ``lay_flat`` a normal where
+    that matters."""
     mesh = object_mesh(obj, mesh_of)
     cuts = _cuts(obj)
     best_area, best = 0.0, None

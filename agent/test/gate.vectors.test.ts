@@ -25,6 +25,7 @@ type Vector = {
     session_creator: Who | null
     questions?: { question: string; multi_select: boolean }[]
     options?: string[]
+    in_run?: boolean
   } | null
   request: { request_id: string; response: unknown; responder: Who; role: Role }
   expect: { ok: true; decision?: string; answers?: string[] } | { refused: string }
@@ -57,6 +58,7 @@ function entryOf(e: NonNullable<Vector['entry']>): GateEntry {
     sessionCreator: e.session_creator,
     ...(e.questions ? { questions: e.questions.map((q) => ({ question: q.question, multiSelect: q.multi_select })) } : {}),
     ...(e.options ? { options: e.options } : {}),
+    ...(e.in_run ? { inRun: true } : {}),
   }
 }
 

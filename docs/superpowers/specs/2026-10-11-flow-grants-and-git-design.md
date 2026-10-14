@@ -368,25 +368,42 @@ it off when approving the grant), an outside call goes there first.
   sends the starter session a turn, authored `system:escalation`, listing every entry of
   that session's runs at hop `parent` that was not yet delivered: run, step, tool, the
   scrubbed summary, the proposal, and for a child's call the child's reasoning (§4.5).
-  It sends only to an idle session. A session in a turn gets the batch when the turn
-  ends. A classic session gets it through `SessionManager.send`, a durable one through
-  `DurableTurns.send`. The turn runs at the owner's default tiers, as a browser turn
-  does (#2320).
+  It sends only to an idle session. A session in a turn gets the batch on a later
+  tick of the agent's 30 s sweep, once the turn has ended. It goes through
+  `SessionManager.send` (classic or durable), as the session's owner: the turn is the
+  owner's, and its text opens with ScadBuddy's own instruction, the calls' details
+  after it in the untrusted-data envelope (#2482; no separate `system:escalation`
+  author). The turn runs with the tiers the owner holds now: the browser user's all of
+  them, a token's its live tier (as the backend's `parent_tiers` reads it), anyone else
+  `read`, which cannot call `escalation_respond` (`write`), so such a session is
+  skipped. A child's entry records its delivery in `ai_pending_input.delivered_at`, a
+  run's own call in `ai_escalation_deliveries`, each claimed before the turn is sent and
+  released if it did not start.
 - **The answer** is one tool, `escalation_respond(request_id, action, input?, reason?)`,
-  `write` tier, with `action` one of `deny`, `narrow`, `pass_up`. Its route,
-  `POST /api/v1/ai/escalations/{request_id}`, dispatches on the id's prefix as the
-  pending-input route does: `durable:` to the child's `respond` Update with role
-  `parent`; `flow:` to the backend's `POST /workflow-runs/{id}/escalations/{call_id}`,
+  `write` tier, with `action` one of `deny`, `narrow`, `pass_up`. It dispatches on the
+  id's prefix as the pending-input route does: `durable:` to the agent's
+  `flows/escalations.ts` (`pass_up` moves the row in Postgres; `deny` is the child's
+  `respond` Update with role `parent`; `narrow` is refused, a tool call is never
+  narrowed); `flow:` to the backend's `POST /workflow-runs/{id}/escalations/{call_id}`,
   sent with the session's author header, which the backend authorises against
-  `started_by.session` and the entry's hop.
+  `started_by.session` and the entry's hop. **There is no HTTP route of its own**
+  (#2482): the caller is the session its turn runs in (the tool context's session, set
+  by the session manager or the session's workflow), which no HTTP request can show,
+  and on `/mcp` the tool refuses for want of one. A child's entry records its parent
+  (`ai_pending_input.parent_session`, `parent_principal`) from `flow_grant_check`'s
+  verdict, which reads the run's `started_by`; the tool requires the caller's session to
+  be it, still owned (not archived, not handed off) by that principal, and the caller to
+  be its owner.
 - **Cost.** Each delivery is a turn of the starter session, paid from its budget
   (`budget_root_id`, #823). A session out of budget, archived, deleted, or whose owner
-  changed by handoff is skipped: its entries go to the person at once.
+  changed by handoff is skipped: a child's entries go to the person at once; a run's own
+  call waits out its hop (its run's timer is the only writer of `waiting_on`).
 - **A child that is the starter session.** A script may `ask_session` the very session
   that started the run. Its outside calls would escalate to itself in the middle of its
   own turn, and it receives escalations only when idle, so they would wait out the whole
   parent hop. So the parent hop is skipped when the child is the starter session: its
-  outside calls go straight to the person.
+  outside calls go to the person on the delivery's next tick, and it is never sent them
+  (#2482).
 - **The escalation turn's text is untrusted.** The summary, the proposal, the outside
   reason and above all the child's reasoning are model or tool output. The turn wraps
   them in the untrusted-data envelope every tool result uses
@@ -440,8 +457,9 @@ its child sessions' parked calls from flow turns, and a requested grant.
   - a flow-own entry: `workflow_runs.waiting_on[]` gains `hop`, `hop_until`,
     `proposal` (narrowed args) and `reason`, written by the backend;
   - a child entry: `ai_pending_input` gains `flow_run_id`, `hop`, `hop_until`,
-    `proposal`, `outside_reason` and `hops`, written by `open_input` and the agent's
-    `EscalationService`.
+    `parent_session`, `parent_principal`, `outside_reason`, `hops` and `delivered_at`,
+    written by `open_input` and the agent's `flows/escalations.ts` (no `proposal`: a
+    child's call is never narrowed).
   So routes authorise on it (§4.2), and nothing in a workflow changes when an entry moves.
 - **Timeouts follow the run's approval timeout at each hop** (`approval_timeout_s`, the
   run's resolved value; 10-01 §7.3 and `workflow_runs.approval_timeout_s`):

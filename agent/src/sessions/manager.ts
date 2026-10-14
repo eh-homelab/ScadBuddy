@@ -6,6 +6,7 @@ import {
   type SDKMessage,
   type SDKResultMessage,
   type SDKUserMessage,
+  type SessionStoreEntry,
 } from '@anthropic-ai/claude-agent-sdk'
 import { type Context, context as otelContext } from '@opentelemetry/api'
 import type { Sql } from 'postgres'
@@ -42,7 +43,7 @@ import {
   HindsightClient,
   type MemoryActivity,
   type MemoryHooks,
-  type MemoryHooksOptions,
+  type MemoryOptions,
   hindsightTarget,
   turnRecallMaxQueryChars,
 } from '../memory/hindsight.js'
@@ -76,7 +77,7 @@ import {
 import { SessionBlobs, sentImageBlobs, type StoredBlob } from './blobs.js'
 import { SessionFiles } from '../workspace/store.js'
 import { SessionEdits } from './edits.js'
-import { blobNames, forkHistory, transcriptCut } from './forkPoint.js'
+import { blobNames, durableReplies, entriesThrough, forkHistory, transcriptCut } from './forkPoint.js'
 import { scrubForLog, SdkEventMapper, ShownCalls, type TitleResolver } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
 import { UnpricedSpend } from './unpricedSpend.js'
@@ -84,8 +85,9 @@ import { userPrompt, type UserImage } from './images.js'
 import { type ResourceRef, SessionResources, type TouchedRecord } from './touched.js'
 import { TurnTrace } from '../telemetry/turn.js'
 import { type DurableGate, DurableUnavailable } from '../gate/durable.js'
-import type { DurableTurns } from './durable.js'
+import type { DurableTurns, ForkedAgent } from './durable.js'
 import { PendingProjection } from '../gate/projection.js'
+import { Escalations } from '../flows/escalations.js'
 import { ownPluginEnabled } from '../plugins/packages/builtins.js'
 
 // The session manager (#300, spec §6): durable, shared sessions that a human
@@ -344,6 +346,18 @@ export function resolveTabWaits(tabs: { onSessionTab: ((sessionId: string) => Pr
   tabs.onSessionTab = (sessionId) => sessions.questions.reconnected(sessionId)
 }
 
+/**
+ * An attention request's `stop` or `wait` timer ended the turn (#815), not a
+ * user's Stop: the session's `interrupted` error says why (#1206).
+ */
+class AttentionStop extends Error {}
+
+/** The `interrupted` error's message: why, when an attention request's timer ended the turn. */
+function interruptedMessage(signal: AbortSignal): string {
+  const reason: unknown = signal.reason
+  return reason instanceof AttentionStop ? `the turn ended: ${reason.message}` : 'the turn was interrupted'
+}
+
 function abortMessage(signal: AbortSignal): string {
   const reason: unknown = signal.reason
   return reason instanceof Error ? reason.message : 'the turn was interrupted'
@@ -418,47 +432,47 @@ export async function recordMemoryActivity(
   a: MemoryActivity,
   secrets: readonly string[],
 ): Promise<void> {
-    const id = session.id
-    const summary = {
-      bank: a.bank,
-      ...(a.documentId ? { document_id: a.documentId } : {}),
-      ...(a.count === undefined ? {} : { results: a.count }),
-      ...(a.tool ? { tool: a.tool } : {}),
-    }
-    const detail = a.reason ? { detail: safeDetail(a.reason, secrets) } : {}
-    await Promise.all([
-      deps.audit?.record({
-        kind: 'memory',
-        action: a.action,
-        surface: 'harness',
-        actor: session.owner,
-        sessionId: id,
-        turnId,
-        ...(a.toolUseId ? { toolUseId: a.toolUseId } : {}),
-        inputSummary: JSON.stringify(summary),
-        outcome: a.outcome === 'ok' ? 'ok' : 'error',
-        ...detail,
-        startedAt: a.startedAt,
-        finishedAt: a.finishedAt,
-      }),
-      deps.events.append(id, [
-        scrubForLog(
-          event({
-            type: 'memory',
-            sessionId: id,
-            turnId,
-            action: a.action,
-            bank: a.bank,
-            outcome: a.outcome,
-            ...(a.count === undefined ? {} : { count: a.count }),
-            ...detail,
-            ...(a.input === undefined ? {} : { input: memoryText(a.input, secrets) }),
-            ...(a.memories === undefined ? {} : { memories: a.memories.map((m) => memoryText(m, secrets)) }),
-          }),
-          secrets,
-        ),
-      ]),
-    ])
+  const id = session.id
+  const summary = {
+    bank: a.bank,
+    ...(a.documentId ? { document_id: a.documentId } : {}),
+    ...(a.count === undefined ? {} : { results: a.count }),
+    ...(a.tool ? { tool: a.tool } : {}),
+  }
+  const detail = a.reason ? { detail: safeDetail(a.reason, secrets) } : {}
+  await Promise.all([
+    deps.audit?.record({
+      kind: 'memory',
+      action: a.action,
+      surface: 'harness',
+      actor: session.owner,
+      sessionId: id,
+      turnId,
+      ...(a.toolUseId ? { toolUseId: a.toolUseId } : {}),
+      inputSummary: JSON.stringify(summary),
+      outcome: a.outcome === 'ok' ? 'ok' : 'error',
+      ...detail,
+      startedAt: a.startedAt,
+      finishedAt: a.finishedAt,
+    }),
+    deps.events.append(id, [
+      scrubForLog(
+        event({
+          type: 'memory',
+          sessionId: id,
+          turnId,
+          action: a.action,
+          bank: a.bank,
+          outcome: a.outcome,
+          ...(a.count === undefined ? {} : { count: a.count }),
+          ...detail,
+          ...(a.input === undefined ? {} : { input: memoryText(a.input, secrets) }),
+          ...(a.memories === undefined ? {} : { memories: a.memories.map((m) => memoryText(m, secrets)) }),
+        }),
+        secrets,
+      ),
+    ]),
+  ])
 }
 
 export class SessionError extends Error {
@@ -518,11 +532,22 @@ export type SessionRecord = {
  * Claude Code never priced (#991, the `unpriced_cost_usd` column): a resumed
  * query's `total_cost_usd` does not hold that part.
  */
-type ClaimedSession = SessionRecord & { unpricedCostUsd: number }
+type ClaimedSession = SessionRecord & {
+  unpricedCostUsd: number
+  /** The claim's `now()` as Postgres wrote it, microseconds kept: `updatedAt` is a JS Date's milliseconds (#1383). */
+  claimedAt: string
+}
 
-const claimed = (row: Row & { unpriced_cost_usd: number }): ClaimedSession => ({
+/**
+ * The claim's `updated_at` as `claimedAt`: ISO 8601 in UTC at Postgres's microseconds,
+ * whatever the connection's `DateStyle` and `TimeZone` (a plain `::text` follows them).
+ */
+export const CLAIMED_AT = `to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS claimed_at`
+
+const claimed = (row: Row & { unpriced_cost_usd: number; claimed_at: string }): ClaimedSession => ({
   ...record(row),
   unpricedCostUsd: row.unpriced_cost_usd,
+  claimedAt: row.claimed_at,
 })
 
 export type TurnOutcome =
@@ -668,7 +693,7 @@ export type SessionManagerDeps = {
    * its transcript retained to that plugin's bank. These are the hook knobs
    * (hooks.py `MemoryHookConfig` and friends); `false` turns it off.
    */
-  memory?: Omit<MemoryHooksOptions, 'client' | 'secrets' | 'log' | 'sessionStore' | 'onActivity'> | false
+  memory?: MemoryOptions | undefined
   /**
    * The assistant's `http_request` tool (#827, harness/httpRequest.ts). A
    * session's turns get it when this is set and the `http_request_enabled`
@@ -919,6 +944,8 @@ export class SessionManager {
   readonly questions: QuestionService
   /** Durable sessions' parked calls as projected in ai_pending_input (spec §6.6). */
   readonly projection: PendingProjection
+  /** A flow run's calls waiting at the session that started it (#2482, flows/escalations.ts). */
+  readonly escalations: Escalations
   /** Renaming a session and marking it done (#795, edits.ts). */
   readonly edits: SessionEdits
   /**
@@ -974,6 +1001,14 @@ export class SessionManager {
       ...(deps.settings ? { settings: deps.settings } : {}),
     })
     this.projection = new PendingProjection(deps.sql)
+    this.escalations = new Escalations({
+      sql: deps.sql,
+      durable: () => this.durable,
+      // A delivery turn (#2482): as the owner, with the tiers its owner holds now.
+      send: async (id, owner, text, tiers) => {
+        await this.send(id, owner, text, { tiers })
+      },
+    })
     this.edits = new SessionEdits({
       sql: deps.sql,
       events: this.events,
@@ -1242,13 +1277,13 @@ export class SessionManager {
       if (!turn) throw await this.whyNotClaimed(id, principal, before)
       return turn
     }
-    const [claim] = await this.deps.sql.unsafe<(Row & { unpriced_cost_usd: number })[]>(
+    const [claim] = await this.deps.sql.unsafe<(Row & { unpriced_cost_usd: number; claimed_at: string })[]>(
       `UPDATE ai_sessions
        SET status = 'running', turn_id = $2, lease_until = now() + ($5 * interval '1 millisecond'),
            interrupt_requested = false, updated_at = now()
        WHERE id = $1 AND owner_kind = $3 AND owner_id = $4 AND status <> 'done' AND archived_at IS NULL
          AND ${POOL_COST} < ${POOL_BUDGET} AND (turn_id IS NULL OR lease_until <= now())
-       RETURNING ${COLUMNS}, unpriced_cost_usd`,
+       RETURNING ${COLUMNS}, unpriced_cost_usd, ${CLAIMED_AT}`,
       [id, turnId, principal.kind, principal.id, this.leaseMs],
     )
     if (!claim) throw await this.whyNotClaimed(id, principal, before)
@@ -1286,13 +1321,13 @@ export class SessionManager {
     if (!approval.sessionId) return { resumed: false, reason: 'the approval has no session' }
     if (this.draining) return { resumed: false, reason: RESTARTING }
     const turnId = randomUUID()
-    const [claim] = await this.deps.sql.unsafe<(Row & { unpriced_cost_usd: number })[]>(
+    const [claim] = await this.deps.sql.unsafe<(Row & { unpriced_cost_usd: number; claimed_at: string })[]>(
       `UPDATE ai_sessions
        SET status = 'running', turn_id = $2, lease_until = now() + ($3 * interval '1 millisecond'),
            interrupt_requested = false, updated_at = now()
        WHERE id = $1 AND status <> 'done' AND archived_at IS NULL AND ${POOL_COST} < ${POOL_BUDGET}
          AND (turn_id IS NULL OR lease_until <= now())
-       RETURNING ${COLUMNS}, unpriced_cost_usd`,
+       RETURNING ${COLUMNS}, unpriced_cost_usd, ${CLAIMED_AT}`,
       [approval.sessionId, turnId, this.leaseMs],
     )
     if (!claim) {
@@ -1490,6 +1525,8 @@ export class SessionManager {
       parent: otelContext.active(),
       // Each tool's tier for its span (TierResolver takes an optional input).
       tierOf: (name) => eventTierOf(name) ?? 'outward',
+      // What finish() subtracts for the audit row, so the span's cost is this turn's (#2376).
+      before: { costUsd: session.ownCostUsd, turns: session.turns },
     })
     // The turn's span ends whatever happens below, even if a cleanup step or
     // finish() throws: segment 0 and its tool bindings never outlive the turn.
@@ -1738,9 +1775,9 @@ export class SessionManager {
               secrets: () => secrets,
               signal: controller.signal,
               // An attention request's `stop`/`wait` timer (#815) ends the turn as an interrupt does.
-              stopTurn: (why) => controller.abort(new Error(why)),
+              stopTurn: (why) => controller.abort(new AttentionStop(why)),
               // The claim set updated_at = now(): the turn's start by the database's clock.
-              turnStartedAt: new Date(session.updatedAt),
+              turnStartedAt: session.claimedAt,
             })
           : undefined
         const run: Omit<HarnessRun, 'credential'> = {
@@ -1855,6 +1892,7 @@ export class SessionManager {
         session,
         turnId,
         stopped,
+        stopped === undefined ? undefined : interruptedMessage(controller.signal),
         result,
         result && stopped === undefined ? refused : undefined,
         failure,
@@ -1934,6 +1972,8 @@ export class SessionManager {
     session: ClaimedSession,
     turnId: string,
     stopped: string | undefined,
+    /** The `interrupted` error's message when `stopped`: an attention timer's says so (#1206). */
+    interrupted: string | undefined,
     result: SDKResultMessage | undefined,
     /** The failed model request `result` reports, when it reports one (fallback.ts `onRefused`). */
     refused: Refused | undefined,
@@ -1993,7 +2033,7 @@ export class SessionManager {
       turns = session.turns + result.num_turns
       status = 'idle'
       tail.push(event({ type: 'session.result', sessionId: id, costUsd, turns }))
-      tail.push(event({ type: 'error', sessionId: id, code: 'interrupted', message: 'the turn was interrupted' }))
+      tail.push(event({ type: 'error', sessionId: id, code: 'interrupted', message: interrupted ?? 'the turn was interrupted' }))
       outcome = { kind: 'interrupted' }
     } else if (result) {
       costUsd = fromTotal(result.total_cost_usd)
@@ -2032,7 +2072,7 @@ export class SessionManager {
         costUsd = session.ownCostUsd + cutUsd
         tail.push(event({ type: 'session.result', sessionId: id, costUsd, turns }))
       }
-      tail.push(event({ type: 'error', sessionId: id, code: 'interrupted', message: 'the turn was interrupted' }))
+      tail.push(event({ type: 'error', sessionId: id, code: 'interrupted', message: interrupted ?? 'the turn was interrupted' }))
       outcome = { kind: 'interrupted' }
     } else {
       status = 'failed'
@@ -2302,20 +2342,23 @@ export class SessionManager {
     const startedAt = new Date()
     const fresh = options.freshBudget === true && principal.kind === 'browser'
     const parent = await this.get(id, principal)
-    if (parent.mode === 'durable') {
-      throw new SessionError(
-        'invalid',
-        `session ${id} is durable: its conversation is held by its workflow and cannot be forked; start a new chat instead`,
-      )
-    }
-    const transcript = await this.store.load({ projectKey: '', sessionId: id })
-    if (!transcript) {
-      throw new SessionError('no_transcript', `session ${id} has no transcript to fork yet; send it a turn first`)
-    }
-    const upToMessageId = options.upTo === undefined ? undefined : transcriptCut(transcript, options.upTo)
-    const history = await forkHistory(this.events, id, options.upTo)
-    if (!history || (options.upTo !== undefined && upToMessageId === undefined)) {
-      throw new SessionError('invalid', `session ${id} has no finished reply ${options.upTo} to fork from`)
+    // A durable parent's conversation is its workflow's (#2688), read before anything is written.
+    const durable = parent.mode === 'durable' ? await this.durableForkPoint(parent, options.upTo) : undefined
+    let classic: { transcript: SessionStoreEntry[]; upToMessageId: string | undefined } | undefined
+    let history: ServerEvent[] | undefined
+    if (durable) {
+      history = durable.history
+    } else {
+      const transcript = await this.store.load({ projectKey: '', sessionId: id })
+      if (!transcript) {
+        throw new SessionError('no_transcript', `session ${id} has no transcript to fork yet; send it a turn first`)
+      }
+      const upToMessageId = options.upTo === undefined ? undefined : transcriptCut(transcript, options.upTo)
+      history = await forkHistory(this.events, id, options.upTo)
+      if (!history || (options.upTo !== undefined && upToMessageId === undefined)) {
+        throw new SessionError('invalid', `session ${id} has no finished reply ${options.upTo} to fork from`)
+      }
+      classic = { transcript, upToMessageId }
     }
     // A fork of a spent lineage could not run a turn; say why now rather than at its first send.
     if (!fresh && parent.costUsd >= parent.budgetUsd) {
@@ -2331,21 +2374,32 @@ export class SessionManager {
     // review). Checked first too, so a refused fork leaves no SDK copy behind; the
     // insert's check under the lock is the one that holds.
     await this.withinNewSessionLimit(principal, this.deps.sql)
-    const { sessionId: childId } = await sdkForkSession(id, {
-      sessionStore: this.store,
-      dir: sessionWorkDir(this.deps.paths, id),
-      title,
-      ...(upToMessageId === undefined ? {} : { upToMessageId }),
-    })
-    const child = await this.insert(childId, principal, {
-      origin: options.origin ?? parent.origin,
-      title,
-      tags: parent.tags,
-      scope: parent.scope,
-      parentId: parent.id,
-      // A fork copies the SDK transcript, which only a classic session has.
-      mode: 'classic',
-    }, { rateLimited: options.rateLimited ?? true, ...(fresh ? {} : { budgetOf: parent }) })
+    const fields = { origin: options.origin ?? parent.origin, title, tags: parent.tags, scope: parent.scope, parentId: parent.id }
+    const insertOptions = { rateLimited: options.rateLimited ?? true, ...(fresh ? {} : { budgetOf: parent }) }
+    let child: SessionRecord
+    if (durable) {
+      // A new durable session whose workflow starts with a copy of the parent's
+      // conversation as it stood at the fork point, under the parent's Claude session
+      // (only ever resumed inside each workflow's own segments, never shared).
+      child = await this.insert(randomUUID(), principal, { ...fields, mode: 'durable' }, insertOptions)
+      try {
+        await durable.turns.startFork(child, durable.agent)
+      } catch (err) {
+        // Nothing else of the child is written yet: it goes, rather than run empty.
+        await this.deps.sql`DELETE FROM ai_sessions WHERE id = ${child.id}`
+        throw err
+      }
+    } else {
+      const { sessionId: forkedId } = await sdkForkSession(id, {
+        sessionStore: this.store,
+        dir: sessionWorkDir(this.deps.paths, id),
+        title,
+        ...(classic?.upToMessageId === undefined ? {} : { upToMessageId: classic.upToMessageId }),
+      })
+      // A classic fork copies the SDK transcript, which only a classic session has.
+      child = await this.insert(forkedId, principal, { ...fields, mode: 'classic' }, insertOptions)
+    }
+    const childId = child.id
     // The images the copied events name (#782, #2150), before the events that name them: the
     // parent's others (a later turn's, past `upTo`) stay the parent's, so a fork chain does not
     // copy every image of every ancestor.
@@ -2383,6 +2437,40 @@ export class SessionManager {
       })
     }
     return child
+  }
+
+  /**
+   * Where a durable session forks (#2688): its workflow's committed conversation through
+   * `upTo`'s reply, or all of it. A parent whose turn is running forks at its last
+   * finished reply, as the conversation past it is not committed yet.
+   */
+  private async durableForkPoint(
+    parent: SessionRecord,
+    upTo: string | undefined,
+  ): Promise<{ turns: DurableTurns; agent: ForkedAgent; history: ServerEvent[] }> {
+    const id = parent.id
+    const turns = this.durableOrRefuse()
+    const source = await turns.forkSource(id)
+    const all = source ? await forkHistory(this.events, id) : undefined
+    if (!source || !all) {
+      throw new SessionError('no_transcript', `session ${id} has no conversation to fork yet; send it a turn first`)
+    }
+    const replies = durableReplies(source.entries, all)
+    const at = upTo ?? (source.busy ? [...replies.keys()].at(-1) : undefined)
+    if (upTo === undefined && source.busy && at === undefined) {
+      throw new SessionError('no_transcript', `session ${id} has no finished reply to fork yet; wait for its turn to answer`)
+    }
+    const cut = at === undefined ? source.checkpoint : replies.get(at)
+    const entries = cut === undefined ? undefined : entriesThrough(source.entries, cut)
+    const history = at === undefined ? all : await forkHistory(this.events, id, at)
+    if (!entries || !history) {
+      throw new SessionError('invalid', `session ${id} has no finished reply ${upTo} to fork from`)
+    }
+    return {
+      turns,
+      agent: { session_id: source.claudeSessionId, checkpoint: entries.at(-1)!.uuid!, conversation: entries.map((e) => JSON.stringify(e)) },
+      history,
+    }
   }
 
   /**

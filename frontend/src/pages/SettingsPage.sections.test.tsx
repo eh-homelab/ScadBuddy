@@ -2,7 +2,7 @@ import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { UserEvent } from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
-import { BrowserRouter, MemoryRouter, Link, Route, Routes, useNavigate } from 'react-router'
+import { BrowserRouter, MemoryRouter, Link, Route, Routes, useLocation, useNavigate } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import type { Settings } from '../api/types'
@@ -39,49 +39,182 @@ function region(name: string): HTMLElement {
 }
 
 // #1307 — a link to a section (`/settings#libraries`, the assistant's Touched list) opens
-// Settings scrolled to it, once the page has loaded.
-describe('SettingsPage section links (#1307)', () => {
-  /** jsdom has no scrollIntoView: the ids it is called on, in order. */
-  function stubScroll(): { scrolled: string[]; restore: () => void } {
-    const scrolled: string[] = []
-    Element.prototype.scrollIntoView = function (this: Element) {
-      scrolled.push(this.id)
+// Settings scrolled to it, once the page has loaded. #2345 — only the pane scrolls, never
+// the window, and the section stays in view while the sections above it load; #2346 — a
+// section link puts its section in the address, focuses it, and marks it current.
+describe('SettingsPage section links (#1307, #2345, #2346)', () => {
+  /**
+   * jsdom lays nothing out: each section is given a top (its id's entry in `tops`, read at
+   * each call), and the pane's scrolls are recorded. `scrollIntoView` must not be called:
+   * it scrolls the window too.
+   */
+  function stubLayout(tops: Record<string, number>) {
+    const scrolls: number[] = []
+    const intoView = vi.fn()
+    const proto = Element.prototype as unknown as Record<string, unknown>
+    const saved = { rect: proto.getBoundingClientRect, scrollTo: proto.scrollTo, intoView: proto.scrollIntoView }
+    proto.getBoundingClientRect = function (this: Element) {
+      const top = tops[this.id] ?? 0
+      return { top, bottom: top, left: 0, right: 0, width: 0, height: 0, x: 0, y: top, toJSON: () => ({}) }
     }
-    return { scrolled, restore: () => delete (Element.prototype as Partial<Element>).scrollIntoView }
+    proto.scrollTo = function (this: Element, options: ScrollToOptions) {
+      if (this.classList.contains('sb-settings')) scrolls.push(options.top ?? 0)
+    }
+    proto.scrollIntoView = intoView
+    const restore = () => {
+      proto.getBoundingClientRect = saved.rect
+      if (saved.scrollTo === undefined) delete proto.scrollTo
+      else proto.scrollTo = saved.scrollTo
+      if (saved.intoView === undefined) delete proto.scrollIntoView
+      else proto.scrollIntoView = saved.intoView
+    }
+    return { scrolls, intoView, restore }
   }
 
-  it('scrolls to the section the URL names once the page has loaded', async () => {
-    const { scrolled, restore } = stubScroll()
+  /** A ResizeObserver jsdom lacks: each one's callback, and whether it was disconnected. */
+  function stubResizeObserver() {
+    const observers: { fire: () => void; disconnected: boolean }[] = []
+    class Fake {
+      entry: { fire: () => void; disconnected: boolean }
+      constructor(callback: () => void) {
+        this.entry = { fire: callback, disconnected: false }
+        observers.push(this.entry)
+      }
+      observe() {}
+      disconnect() {
+        this.entry.disconnected = true
+      }
+    }
+    vi.stubGlobal('ResizeObserver', Fake)
+    return observers
+  }
+
+  /** Where the router is, rendered beside the page. */
+  function Where() {
+    const location = useLocation()
+    return <p data-testid="where">{location.hash}</p>
+  }
+
+  it('scrolls only the pane to the section the URL names, under the nav', async () => {
+    const { scrolls, intoView, restore } = stubLayout({ libraries: 5000 })
     try {
       renderPage(<SettingsPage />, { route: '/settings#libraries' })
       await seeded()
-      await waitFor(() => expect(scrolled).toContain('libraries'))
-      expect(scrolled.filter((id) => id === 'libraries')).toHaveLength(1)
+      // 8 px under the nav (no height in jsdom).
+      await waitFor(() => expect(scrolls).toContain(4992))
+      expect(intoView).not.toHaveBeenCalled()
+      // The sr-only boxes are placed in the pane, so the document is no taller than the window.
+      expect(document.querySelector('.sb-settings')).toHaveClass('relative')
     } finally {
       restore()
     }
   })
 
+  it('keeps a deep-linked section in view while the sections above it load, until the reader scrolls', async () => {
+    const tops = { libraries: 5000 }
+    const { scrolls, restore } = stubLayout(tops)
+    const observers = stubResizeObserver()
+    try {
+      renderPage(<SettingsPage />, { route: '/settings#libraries' })
+      await seeded()
+      await waitFor(() => expect(scrolls).toContain(4992))
+      const observer = observers.at(-1)!
+      // Remembered choices finish loading above it and push it down.
+      tops.libraries = 6900
+      act(() => observer.fire())
+      expect(scrolls.at(-1)).toBe(6892)
+      document.querySelector('.sb-settings')!.dispatchEvent(new Event('wheel'))
+      expect(observer.disconnected).toBe(true)
+    } finally {
+      restore()
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('still opens, unscrolled, at a hash with a malformed escape (#2113)', async () => {
-    const { scrolled, restore } = stubScroll()
+    const { scrolls, restore } = stubLayout({})
     try {
       renderPage(<SettingsPage />, { route: '/settings#%E0%A4%A' })
       await seeded()
-      expect(scrolled).toEqual([])
+      expect(scrolls).toEqual([])
     } finally {
       restore()
     }
   })
 
   it('leaves the page at the top without a hash', async () => {
-    const { scrolled, restore } = stubScroll()
+    const { scrolls, restore } = stubLayout({})
     try {
       renderPage(<SettingsPage />, { route: '/settings' })
       await seeded()
-      expect(scrolled).toEqual([])
+      expect(scrolls).toEqual([])
     } finally {
       restore()
     }
+  })
+
+  it('a section link puts it in the address, focuses its heading and marks it current', async () => {
+    const { scrolls, restore } = stubLayout({ libraries: 5000 })
+    try {
+      const { user } = renderPage(
+        <>
+          <SettingsPage />
+          <Where />
+        </>,
+        { route: '/settings' },
+      )
+      await seeded()
+      const nav = screen.getByRole('navigation', { name: 'Settings sections' })
+      const link = within(nav).getByRole('link', { name: 'Libraries' })
+      await user.click(link)
+      expect(screen.getByTestId('where')).toHaveTextContent('#libraries')
+      await waitFor(() => expect(document.activeElement).toBe(document.getElementById('libraries-heading')))
+      expect(scrolls).toContain(4992)
+      expect(link).toHaveAttribute('aria-current', 'location')
+      expect(within(nav).getByRole('link', { name: 'Connection' })).not.toHaveAttribute('aria-current')
+    } finally {
+      restore()
+    }
+  })
+})
+
+describe('SettingsPage field checks and descriptions (#2347, #2348, #2456)', () => {
+  it('refuses a negative or fractional number before sending, and ties the error to the field', async () => {
+    const put = vi.spyOn(api, 'putSettings')
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    const timeout = screen.getByLabelText('Render timeout')
+    const renders = screen.getByLabelText('Renders at once')
+    // The help is read with the field, before any error.
+    const helpId = timeout.getAttribute('aria-describedby')
+    expect(helpId).toBe('setting-render_timeout-help')
+    expect(document.getElementById(helpId!)).toBeInTheDocument()
+    expect(timeout).not.toHaveAttribute('aria-invalid')
+
+    await user.clear(timeout)
+    await enter(user, timeout, '-5')
+    await user.clear(renders)
+    await enter(user, renders, '1.5')
+    await user.click(within(region('Rendering')).getByRole('button', { name: 'Save Rendering' }))
+
+    expect(await screen.findByText('Enter 0 or more.')).toBeInTheDocument()
+    expect(screen.getByText('Enter a whole number.')).toBeInTheDocument()
+    expect(put).not.toHaveBeenCalled()
+    expect(timeout).toHaveAttribute('aria-invalid', 'true')
+    expect(timeout).toHaveAttribute('aria-describedby', 'setting-render_timeout-help setting-render_timeout-error')
+    expect(document.getElementById('setting-render_timeout-error')).toHaveTextContent('Enter 0 or more.')
+    // The help stays beside the error.
+    expect(document.getElementById('setting-render_timeout-help')).toBeInTheDocument()
+    put.mockRestore()
+  })
+
+  it('names one landmark Assistant: the status inside it is "Assistant status"', async () => {
+    renderPage(<SettingsPage />)
+    await seeded()
+    const assistant = document.getElementById('assistant')!
+    expect(assistant).toHaveAccessibleName('Assistant')
+    const status = document.getElementById('ai-status-heading')!.closest('section')!
+    expect(status).toHaveAccessibleName('Assistant status')
   })
 })
 
@@ -97,7 +230,7 @@ describe('SettingsPage sources (#322)', () => {
     expect(cleared).toHaveTextContent('Cleared')
     expect(cleared).toHaveTextContent('SCADBUDDY_GOOGLE_FONTS_API_KEY is ignored')
     // Only a stored or cleared value has something to reset.
-    expect(within(cleared).getByRole('button', { name: /Reset google_fonts_api_key/ })).toBeInTheDocument()
+    expect(within(cleared).getByRole('button', { name: 'Reset to deployment value: Google Fonts API key' })).toBeInTheDocument()
     expect(within(screen.getByTestId('source-public_url')).queryByRole('button')).toBeNull()
   })
 
@@ -117,7 +250,7 @@ describe('SettingsPage sources (#322)', () => {
 
     const put = vi.spyOn(api, 'putSettings')
     await user.click(
-      within(screen.getByTestId('source-public_url')).getByRole('button', { name: 'Reset public_url to the deployment value' }),
+      within(screen.getByTestId('source-public_url')).getByRole('button', { name: 'Reset to deployment value: ScadBuddy’s own URL' }),
     )
     await waitFor(() => expect(screen.getByTestId('source-public_url')).toHaveTextContent('From SCADBUDDY_PUBLIC_URL'))
     expect(put).toHaveBeenCalledWith({ reset: ['public_url'] })
@@ -128,7 +261,7 @@ describe('SettingsPage sources (#322)', () => {
   it('resets a cleared key so the deployment one applies again', async () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
-    await user.click(within(screen.getByTestId('source-google_fonts_api_key')).getByRole('button', { name: 'Reset google_fonts_api_key to the deployment value' }))
+    await user.click(within(screen.getByTestId('source-google_fonts_api_key')).getByRole('button', { name: 'Reset to deployment value: Google Fonts API key' }))
     await waitFor(() =>
       expect(screen.getByTestId('source-google_fonts_api_key')).toHaveTextContent('From SCADBUDDY_GOOGLE_FONTS_API_KEY'),
     )
@@ -662,7 +795,7 @@ describe('SettingsPage blob store (#426)', () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
     await waitFor(() => expect(screen.getByLabelText('Blob store')).toHaveValue('bambuddy'))
-    await user.click(within(screen.getByTestId('source-bambuddy_url')).getByRole('button', { name: 'Reset bambuddy_url to the deployment value' }))
+    await user.click(within(screen.getByTestId('source-bambuddy_url')).getByRole('button', { name: 'Reset to deployment value: Bambuddy URL' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ reset: ['bambuddy_url'], store_backend: 'local' })
   })
@@ -671,7 +804,7 @@ describe('SettingsPage blob store (#426)', () => {
     const bodies = serve(stored)
     const { user } = renderPage(<SettingsPage />)
     await seeded()
-    await user.click(within(screen.getByTestId('source-bambuddy_url')).getByRole('button', { name: 'Reset bambuddy_url to the deployment value' }))
+    await user.click(within(screen.getByTestId('source-bambuddy_url')).getByRole('button', { name: 'Reset to deployment value: Bambuddy URL' }))
     await waitFor(() => expect(bodies).toHaveLength(1))
     expect(bodies[0]).toEqual({ reset: ['bambuddy_url'] })
   })

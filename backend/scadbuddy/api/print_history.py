@@ -22,11 +22,11 @@ import re
 import xml.etree.ElementTree as ET
 import zipfile
 from collections.abc import Awaitable, Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import PurePosixPath
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Query, Response, status
+from fastapi import APIRouter, Path, Query, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -40,6 +40,7 @@ from scadbuddy.api.deps import (
     SettingsStoreDep,
     UploadsDep,
 )
+from scadbuddy.api.media import THUMBNAIL_VERSION
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
     IdempotencyKey,
@@ -65,6 +66,7 @@ from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.tracing import span
 from scadbuddy.library.deeplink import edit_path
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher
@@ -104,6 +106,15 @@ DEFAULT_LIMIT = 50
 MAX_SCANNED = 200
 #: How many archive reads one list request has in flight at once.
 READ_CONCURRENCY = 8
+#: How many template revisions' defaults one list request reads at once (#2359).
+DEFAULTS_CONCURRENCY = 4
+#: The days either side of a batch's links its archives are looked for in one list
+#: read: Bambuddy dates an archive by its dispatch, a link is seen after it (#2359).
+ARCHIVE_WINDOW_SLACK = timedelta(days=1)
+#: The rows that list read asks for, per linked print in the batch: room for the
+#: prints made outside ScadBuddy in the same days. The ones past it are read singly.
+ARCHIVE_WINDOW_ROWS = 4
+MAX_ARCHIVE_WINDOW = 500
 #: A cursor is the last archive id of the page before; opaque to the client.
 CURSOR_PATTERN = r"^[1-9][0-9]{0,17}$"
 
@@ -121,7 +132,10 @@ class PrintCover(_Response):
     """The image a history card shows: a photo of the print, else Bambuddy's thumbnail."""
 
     kind: Literal["photo", "thumbnail"]
+    #: Sized for the card: a photo shrunk to a WebP (#2355), not the 1680x1080 original.
     url: str
+    #: The image whole, for the lightbox.
+    full_url: str
 
 
 class PrintSummary(_Response):
@@ -144,8 +158,8 @@ class PrintSummary(_Response):
     #: ``deleted_in_bambuddy`` for a linked archive Bambuddy no longer has.
     status: str
     printer_id: int | None
-    #: The printer's name as Bambuddy recorded it on the print's runs; None for a
-    #: deleted archive or one with no run yet.
+    #: The printer's name in Bambuddy now (#2363); in the detail, else as Bambuddy
+    #: recorded it on the print's runs. None for a printer Bambuddy has no longer.
     printer_name: str | None
     started_at: datetime | None
     completed_at: datetime | None
@@ -199,18 +213,27 @@ class PrintPhoto(_Response):
     url: str
 
 
-class PosterFrame(_Response):
-    """A still of the timelapse, inline (Bambuddy's are base64 JPEGs, plan M4)."""
+class TimelapseFrame(_Response):
+    """A still of the timelapse: where it is in the video, and its JPEG (#2512)."""
 
     timestamp: float
-    data_url: str
+    url: str
 
 
 class PrintTimelapse(_Response):
     url: str
+    #: Its first still, to show until it plays. Bambuddy extracts the stills with ffmpeg,
+    #: which took 20-26 s for one print, so the detail does not wait for them (#2360).
+    poster_url: str
+    #: Its stills and Bambuddy's probe of it (`TimelapseFrames`), read after the detail.
+    frames_url: str
+
+
+class TimelapseFrames(_Response):
     #: None when Bambuddy could not probe the video; it still plays.
     info: TimelapseInfo | None
-    poster_frames: list[PosterFrame] = []
+    #: None of them when Bambuddy could not extract them.
+    frames: list[TimelapseFrame] = []
 
 
 class PlateThumbnail(_Response):
@@ -272,6 +295,145 @@ class PrintOutcome(_Response):
     runs: list[PrintedRun] = []
 
 
+class PrintFilamentSlot(_Response):
+    """One filament slot the sliced file used, and how much of it (#1860)."""
+
+    slot_id: int
+    used_grams: float | None = None
+    filament_type: str | None = None
+    #: ``#RRGGBB``.
+    color: str | None = None
+
+
+class PrintSlicing(_Response):
+    """What the sliced file says about the print, as Bambuddy read it (#1860)."""
+
+    #: The printer model the file was sliced for.
+    sliced_for_model: str | None = None
+    bed_type: str | None = None
+    layer_height_mm: float | None = None
+    total_layers: int | None = None
+    nozzle_diameter_mm: float | None = None
+    nozzle_temperature_c: float | None = None
+    bed_temperature_c: float | None = None
+    #: The objects on the plate, by name.
+    objects: list[str] = []
+    filament_used_mm: float | None = None
+    filament_slots: list[PrintFilamentSlot] = []
+
+
+#: Scalars of Bambuddy's archive the detail lists under "other" (#1860): every field it
+#: answers that is not one of these, nor a server path, nor a structure.
+_SHOWN_ELSEWHERE = frozenset(
+    {
+        *ArchiveDetail.model_fields,
+        "file_path",
+        "f3d_path",
+        "duplicates",
+        "duplicate_count",
+        "duplicate_sequence",
+        "created_by_id",
+    }
+)
+
+ScalarValue = str | int | float | bool | None
+
+#: Names of archive fields "other" never passes on, whatever Bambuddy adds: who made it,
+#: where it is on Bambuddy's disk or network, and anything that may be a credential.
+_PRIVATE_FIELD = re.compile(
+    r"(?:^|_)(?:path|dir|file|url|uri|ip|mac|host|address|token|secret|password|passwd"
+    r"|key|apikey|auth|credential|credentials|cookie|session|user|username|email"
+    r"|created_by|owner|code|serial|sn)(?:_|$)",
+    re.IGNORECASE,
+)
+#: Names `_PRIVATE_FIELD` would hide that are known to be harmless: a currency is an ISO
+#: code, not an access code.
+_PUBLIC_FIELD = frozenset({"currency_code"})
+
+
+class PrintRecord(_Response):
+    """Bambuddy's bookkeeping of the print (#1860)."""
+
+    project_id: int | None = None
+    project_name: str | None = None
+    designer: str | None = None
+    makerworld_url: str | None = None
+    external_url: str | None = None
+    notes: str | None = None
+    tags: str | None = None
+    is_favorite: bool | None = None
+    quantity: int = 1
+    #: When Bambuddy made the archive: the print was dispatched.
+    created_at: datetime | None = None
+    last_run_at: datetime | None = None
+    successful_run_count: int = 0
+    failed_run_count: int = 0
+    #: The actual time against the slicer's estimate, in percent.
+    time_accuracy_percent: float | None = None
+    #: What the runs used, by the spools' readings.
+    filament_actual_grams: float | None = None
+    energy_kwh: float | None = None
+    energy_cost: float | None = None
+    #: Every other scalar field Bambuddy's archive answers, by its own name, so a field
+    #: ScadBuddy does not map yet is still shown; never one named for a path, an address,
+    #: a user or a credential (`_PRIVATE_FIELD`).
+    other: dict[str, ScalarValue] = {}
+
+
+def _slicing(archive: ArchiveDetail) -> PrintSlicing:
+    extra = archive.extra_data
+    return PrintSlicing(
+        sliced_for_model=archive.sliced_for_model,
+        bed_type=archive.bed_type,
+        layer_height_mm=archive.layer_height,
+        total_layers=archive.total_layers,
+        nozzle_diameter_mm=archive.nozzle_diameter,
+        nozzle_temperature_c=archive.nozzle_temperature,
+        bed_temperature_c=archive.bed_temperature,
+        objects=list(extra.printable_objects.values()),
+        filament_used_mm=extra.filament_used_mm,
+        filament_slots=[
+            PrintFilamentSlot(
+                slot_id=slot.slot_id,
+                used_grams=slot.used_g,
+                filament_type=slot.type,
+                color=slot.color,
+            )
+            for slot in extra.filament_slots
+        ],
+    )
+
+
+def _record(archive: ArchiveDetail) -> PrintRecord:
+    other = {
+        name: value
+        for name, value in sorted((archive.model_extra or {}).items())
+        if name not in _SHOWN_ELSEWHERE
+        and (name in _PUBLIC_FIELD or not _PRIVATE_FIELD.search(name))
+        and (value is None or isinstance(value, str | int | float | bool))
+    }
+    return PrintRecord(
+        project_id=archive.project_id,
+        project_name=archive.project_name,
+        designer=archive.designer,
+        makerworld_url=archive.makerworld_url,
+        external_url=archive.external_url,
+        notes=archive.notes,
+        tags=archive.tags,
+        is_favorite=archive.is_favorite,
+        quantity=archive.quantity,
+        created_at=archive.created_at,
+        last_run_at=archive.last_run_at,
+        successful_run_count=archive.successful_run_count,
+        failed_run_count=archive.failed_run_count,
+        time_accuracy_percent=archive.time_accuracy,
+        filament_actual_grams=archive.total_filament_actual_grams,
+        energy_kwh=archive.energy_kwh,
+        energy_cost=archive.energy_cost,
+        other=other,
+    )
+
+
 class PrintLinks(_Response):
     #: Bambuddy's archives page; None when the archive is gone from it.
     bambuddy_url: str | None
@@ -288,6 +450,10 @@ class PrintDetail(PrintSummary):
     #: What the archive's printer holds (plan A5); only with ``?printer_media=1``.
     printer_media: PrinterMedia | None = None
     links: PrintLinks
+    #: What the sliced file says (#1860); None once Bambuddy no longer has the archive.
+    slicing: PrintSlicing | None = None
+    #: Bambuddy's bookkeeping of the print (#1860); None once it no longer has it.
+    record: PrintRecord | None = None
 
 
 def _prints_url(archive_id: int, path: str) -> str:
@@ -304,10 +470,30 @@ def _cover(archive: ArchiveDetail) -> PrintCover | None:
     if photos:
         # The one Bambuddy captured at the end of the print, when it did (plan L11).
         chosen = archive.finish_photo if archive.finish_photo in photos else photos[0]
-        return PrintCover(kind="photo", url=_prints_url(archive.id, f"photos/{chosen}"))
+        full = _prints_url(archive.id, f"photos/{chosen}")
+        return PrintCover(
+            kind="photo", url=f"{full}?size=card&v={THUMBNAIL_VERSION}", full_url=full
+        )
     if archive.thumbnail_path:
-        return PrintCover(kind="thumbnail", url=_prints_url(archive.id, "thumbnail"))
+        thumbnail = _prints_url(archive.id, "thumbnail")
+        return PrintCover(kind="thumbnail", url=thumbnail, full_url=thumbnail)
     return None
+
+
+#: Bambuddy's statuses of a print that has not finished: it fills ``completed_at`` on
+#: one still printing, about when it created the archive (#2362).
+UNFINISHED_STATUSES = frozenset({"pending", "queued", "printing", "running", "paused"})
+
+
+def _completed_at(archive: ArchiveDetail) -> datetime | None:
+    """When the print finished: never while it is still going, nor before it started."""
+    finished = archive.completed_at
+    if finished is None or archive.status in UNFINISHED_STATUSES:
+        return None
+    started = archive.started_at
+    if started is not None and _utc(finished) < _utc(started):
+        return None
+    return finished
 
 
 def _summary(
@@ -335,9 +521,9 @@ def _summary(
             if archive is not None and archive.printer_id is not None
             else link.printer_id
         ),
-        printer_name=None,  # From the runs, read only for the prints that are shown.
+        printer_name=None,  # From the printers, read only for the prints that are shown.
         started_at=None if archive is None else archive.started_at,
-        completed_at=None if archive is None else archive.completed_at,
+        completed_at=None if archive is None else _completed_at(archive),
         actual_time_seconds=None if archive is None else archive.actual_time_seconds,
         filament_used_grams=None if archive is None else archive.filament_used_grams,
         cover=None if archive is None else _cover(archive),
@@ -377,6 +563,18 @@ class _Defaults:
         self._fetcher = fetcher
         self._known: dict[tuple[str, str | None], dict[str, ParamValue | None] | None] = {}
 
+    async def read(self, outputs: Sequence[_Output]) -> None:
+        """Read the defaults of a page's template revisions at once, ahead of `diff`:
+        each can take a schema export, and one after another they were most of a
+        page's time (#2359)."""
+        keys = [
+            key
+            for key in dict.fromkeys((o.meta.slug, o.meta.model_version) for o in outputs)
+            if key not in self._known
+        ]
+        found = await _bounded([self._defaults(*key) for key in keys], DEFAULTS_CONCURRENCY)
+        self._known.update(zip(keys, found, strict=True))
+
     async def diff(self, output: _Output) -> dict[str, ParamValue] | None:
         key = (output.meta.slug, output.meta.model_version)
         if key not in self._known:
@@ -397,16 +595,20 @@ class _Defaults:
         # (a version that is a content hash, or a history rewritten under it).
         for requested in dict.fromkeys((version, None)):
             try:
-                _, schema = await schema_of(
-                    slug,
-                    requested,
-                    paths=self._paths,
-                    history=self._history,
-                    config=self._config,
-                    version=requested,
-                    fetcher=self._fetcher,
-                    failure_is_fallback=True,
-                )
+                with span(
+                    "prints.template_defaults",
+                    attributes={"scadbuddy.slug": slug, "scadbuddy.version": requested or ""},
+                ):
+                    _, schema = await schema_of(
+                        slug,
+                        requested,
+                        paths=self._paths,
+                        history=self._history,
+                        config=self._config,
+                        version=requested,
+                        fetcher=self._fetcher,
+                        failure_is_fallback=True,
+                    )
             except (ApiError, OpenSCADError):
                 continue
             return {parameter.name: parameter.initial for parameter in schema.parameters}
@@ -480,19 +682,36 @@ def _printer_name(runs: list[ArchiveRun]) -> str | None:
     return next((run.printer_name for run in runs if run.printer_name), None)
 
 
+async def _printer_names(cache: ArchiveCache, client: BambuddyClient) -> dict[int, str]:
+    """Each printer's name in Bambuddy, the one the filter and the print dialog show
+    (#2363). Advisory: a failed read names none, and the UI numbers them."""
+    try:
+        printers = await cache.printers(client)
+    except (ApiError, ValueError) as error:
+        logger.info("could not read the printers' names", extra={"error": type(error).__name__})
+        return {}
+    return {printer.id: printer.name for printer in printers}
+
+
 async def _named(
-    cache: ArchiveCache, client: BambuddyClient, items: list[PrintSummary], present: set[int]
+    cache: ArchiveCache, client: BambuddyClient, items: list[PrintSummary]
 ) -> list[PrintSummary]:
-    """``items`` with their printers' names: one runs read per print on the page."""
-    shown = [item.archive_id for item in items if item.archive_id in present]
-    runs = await _bounded(
-        [cache.runs(client, archive_id) for archive_id in shown], READ_CONCURRENCY
-    )
-    names = {
-        archive_id: _printer_name(run_list.items)
-        for archive_id, run_list in zip(shown, runs, strict=True)
-    }
-    return [item.model_copy(update={"printer_name": names.get(item.archive_id)}) for item in items]
+    """``items`` with their printers' names: one printers read for the page (#2359)."""
+    names = await _printer_names(cache, client)
+    return [
+        item.model_copy(
+            update={"printer_name": names.get(item.printer_id) if item.printer_id else None}
+        )
+        for item in items
+    ]
+
+
+def _window(batch: Sequence[LinkedPrint]) -> tuple[date | None, date | None]:
+    """The days a batch's archives were created in, for one list read of them (#2359)."""
+    seen = [_utc(link.first_seen) for link in batch if link.first_seen is not None]
+    if not seen:
+        return None, None
+    return (min(seen) - ARCHIVE_WINDOW_SLACK).date(), (max(seen) + ARCHIVE_WINDOW_SLACK).date()
 
 
 class _LibraryFiles:
@@ -598,10 +817,22 @@ async def list_prints(
     known: dict[str, _Output | None] = {}
     before = int(cursor) if cursor is not None else None
     items: list[PrintSummary] = []
-    #: The archives Bambuddy still has, of those in ``items``.
-    present: set[int] = set()
+    #: The outputs of the prints in ``items``, by index, for their ``params_diff``.
+    shown: dict[int, _Output] = {}
 
     scanned = 0
+
+    async def page(next_cursor: str | None = None) -> PrintPage:
+        # Only for the prints that are shown: the first of each template revision can
+        # take a schema export (#609 review), so they are read together (#2359).
+        await defaults.read(list(shown.values()))
+        diffed = [
+            item
+            if index not in shown
+            else item.model_copy(update={"params_diff": await defaults.diff(shown[index])})
+            for index, item in enumerate(items)
+        ]
+        return PrintPage(items=await _named(cache, client, diffed), next_cursor=next_cursor)
 
     async with client_for(store.load()) as client:
         files = _LibraryFiles(cache, client)
@@ -618,6 +849,14 @@ async def list_prints(
             wanted = min(limit, MAX_SCANNED - scanned)
             batch = await links.page(limit=wanted, before=before, subjects=subjects)
             scanned += len(batch)
+            date_from, date_to = _window(batch)
+            await cache.prime(
+                client,
+                [link.archive_id for link in batch],
+                date_from=date_from,
+                date_to=date_to,
+                limit=min(ARCHIVE_WINDOW_ROWS * len(batch), MAX_ARCHIVE_WINDOW),
+            )
             archives = await _bounded(
                 [cache.archive(client, link.archive_id) for link in batch], READ_CONCURRENCY
             )
@@ -643,31 +882,20 @@ async def list_prints(
                 if not _matches(filters, summary, link, archive, output):
                     continue
                 if output is not None:
-                    # Only for a print that is shown: the first of each template
-                    # revision can take a schema export (#609 review).
-                    diff = await defaults.diff(output)
-                    summary = summary.model_copy(update={"params_diff": diff})
+                    shown[len(items)] = output
                 items.append(summary)
-                if archive is not None:
-                    present.add(archive.id)
                 if len(items) == limit:
                     # A further linked row, whether or not it will pass the filters:
                     # one row from Postgres, no Bambuddy read (#609 review).
                     more = index < len(batch) - 1 or bool(
                         await links.page(limit=1, before=before, subjects=subjects)
                     )
-                    return PrintPage(
-                        items=await _named(cache, client, items, present),
-                        next_cursor=str(before) if more else None,
-                    )
+                    return await page(str(before) if more else None)
             if len(batch) < wanted:
-                return PrintPage(items=await _named(cache, client, items, present))
+                return await page()
             if scanned >= MAX_SCANNED:
                 more = bool(await links.page(limit=1, before=before, subjects=subjects))
-                return PrintPage(
-                    items=await _named(cache, client, items, present),
-                    next_cursor=str(before) if more else None,
-                )
+                return await page(str(before) if more else None)
 
 
 async def _require_print(links: PrintLinksDep, archive_id: int) -> LinkedPrint:
@@ -758,22 +986,17 @@ def _output_files(outputs: OutputStore, meta: OutputMeta) -> list[PrintFile]:
     return files
 
 
-async def _media(
-    cache: ArchiveCache, client: BambuddyClient, link: LinkedPrint, archive: ArchiveDetail
-) -> PrintMedia:
+def _frame_url(archive_id: int, index: int) -> str:
+    return _prints_url(archive_id, f"timelapse/frames/{index}")
+
+
+def _media(link: LinkedPrint, archive: ArchiveDetail) -> PrintMedia:
     timelapse = None
     if archive.timelapse_path is not None:
-        info, frames = await asyncio.gather(
-            cache.timelapse_info(client, archive.id),
-            cache.timelapse_thumbnails(client, archive.id),
-        )
         timelapse = PrintTimelapse(
             url=_prints_url(archive.id, "timelapse"),
-            info=info,
-            poster_frames=[
-                PosterFrame(timestamp=at, data_url=f"data:image/jpeg;base64,{jpeg}")
-                for at, jpeg in zip(frames.timestamps, frames.thumbnails, strict=False)
-            ],
+            poster_url=_frame_url(archive.id, 0),
+            frames_url=_prints_url(archive.id, "timelapse/frames"),
         )
     plate = archive.plate_id if archive.plate_id is not None else link.plate_id
     photos = [
@@ -907,19 +1130,21 @@ async def get_print(
         runs: list[ArchiveRun] = []
         on_printer = None
         if archive is not None:
-            media, run_list = await asyncio.gather(
-                _media(cache, client, link, archive), cache.runs(client, archive_id)
-            )
-            runs = run_list.items
+            media = _media(link, archive)
+            runs = (await cache.runs(client, archive_id)).items
             if media.plate_thumbnails:
                 names = await _plate_names(link, outputs, client)
                 media.plate_thumbnails = [
                     thumbnail.model_copy(update={"name": names.get(thumbnail.index)})
                     for thumbnail in media.plate_thumbnails
                 ]
-            summary = summary.model_copy(update={"printer_name": _printer_name(runs)})
             if printer_media:
                 on_printer = await client.printer_media(archive_id)
+        # The name the list and the filter show, else the one Bambuddy recorded on the
+        # print's runs, for a printer it has no longer (#2363).
+        printers = await _printer_names(cache, client)
+        printer_name = printers.get(summary.printer_id) if summary.printer_id else None
+        summary = summary.model_copy(update={"printer_name": printer_name or _printer_name(runs)})
         library = _library_files(link, archive, file) if meta is None else []
         files = await asyncio.to_thread(_files, outputs, meta, archive, library)
         bambuddy_url = client.config.web_url(ARCHIVES_PAGE) if archive is not None else None
@@ -941,10 +1166,100 @@ async def get_print(
         media=media,
         outcome=_outcome(summary, archive, runs),
         printer_media=on_printer,
+        slicing=_slicing(archive) if archive is not None else None,
+        record=_record(archive) if archive is not None else None,
         links=PrintLinks(
             bambuddy_url=bambuddy_url,
             customize_url=f"/m/{output.meta.slug}" if output is not None else None,
         ),
+    )
+
+
+#: A still is the same for as long as its timelapse is: the browser keeps it a day.
+FRAME_CACHE_CONTROL = "private, max-age=86400"
+
+
+async def _timelapse_path(cache: ArchiveCache, client: BambuddyClient, archive_id: int) -> str:
+    archive = await cache.archive(client, archive_id)
+    if archive is None or archive.timelapse_path is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"print {archive_id} has no timelapse")
+    return archive.timelapse_path
+
+
+async def _frames(
+    cache: ArchiveCache, client: BambuddyClient, archive_id: int, path: str
+) -> list[tuple[float, bytes]]:
+    try:
+        return await cache.timelapse_frames(client, archive_id, path)
+    except ApiError as error:
+        logger.info(
+            "could not read a timelapse's stills",
+            extra={"archive_id": archive_id, "status": error.status},
+        )
+        return []
+
+
+@router.get(
+    "/{archive_id}/timelapse/frames",
+    response_model=TimelapseFrames,
+    summary="The timelapse's stills and Bambuddy's probe of it",
+    description=(
+        "Read apart from the detail (#2360): Bambuddy extracts the stills with ffmpeg and "
+        "probes the video with ffprobe, which can take tens of seconds. Each still is a "
+        "JPEG at its `url`. No stills, and no `info`, when Bambuddy could not make them; "
+        "404 when the print has no timelapse."
+    ),
+)
+async def get_timelapse_frames(
+    archive_id: ArchiveIdPath,
+    links: PrintLinksDep,
+    store: SettingsStoreDep,
+    cache: ArchiveCacheDep,
+) -> TimelapseFrames:
+    await _require_print(links, archive_id)
+    async with client_for(store.load()) as client:
+        path = await _timelapse_path(cache, client, archive_id)
+
+        async def probe() -> TimelapseInfo | None:
+            try:
+                return await cache.timelapse_info(client, archive_id, path)
+            except ApiError:
+                return None
+
+        info, frames = await asyncio.gather(probe(), _frames(cache, client, archive_id, path))
+    return TimelapseFrames(
+        info=info,
+        frames=[
+            TimelapseFrame(timestamp=at, url=_frame_url(archive_id, index))
+            for index, (at, _) in enumerate(frames)
+        ],
+    )
+
+
+@router.get(
+    "/{archive_id}/timelapse/frames/{index}",
+    response_class=Response,
+    responses={200: {"content": {"image/jpeg": {}}}},
+    summary="One still of the timelapse",
+    description="A JPEG; 404 past the last one, or when Bambuddy could not make them.",
+)
+async def get_timelapse_frame(
+    archive_id: ArchiveIdPath,
+    index: Annotated[int, Path(ge=0, le=999)],
+    links: PrintLinksDep,
+    store: SettingsStoreDep,
+    cache: ArchiveCacheDep,
+) -> Response:
+    await _require_print(links, archive_id)
+    async with client_for(store.load()) as client:
+        path = await _timelapse_path(cache, client, archive_id)
+        frames = await _frames(cache, client, archive_id, path)
+    if index >= len(frames):
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"the timelapse has no still {index}")
+    return Response(
+        frames[index][1],
+        media_type="image/jpeg",
+        headers={"Cache-Control": FRAME_CACHE_CONTROL},
     )
 
 

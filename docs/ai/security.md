@@ -710,7 +710,10 @@ A turn that loads an allowed pin also gets two more things:
   (`harness/webFetchEgress.ts`) runs `assertHostAllowed` on its URL first, refuses the
   pod's loopback as well (the agent's own services), and denies a call that fails,
   approved or not. Claude Code resolves the name again when it connects, so a name
-  re-pointed in between is not caught (#2684).
+  re-pointed in between is not caught (#2684). A durable session gets the same built-ins
+  as the agent's `builtin` turn tools (#2393, [operating.md](operating.md)), on the
+  session workspace instead of the pod's disk, each parked the same way; its `WebFetch`
+  connects only to the addresses it checked, on every hop.
 - **Shell injection.** Skill shell injection is on (`disableSkillShellExecution`
   false). Only an allowed package can carry it, because the vetting refuses it
   everywhere else. Measured on Claude Code 2.1.287 (`test/pluginPackages.e2e.test.ts`):
@@ -1090,9 +1093,11 @@ process, over `/mcp` and as a Temporal activity, all sharing one limiter):
 - at most **4** of its renders in flight at once (an override per principal may change
   that), and optionally at most N of every principal's together, counted until the
   backend job settles (done, failed or cancelled). A render past either bound **waits**
-  for a slot, first come first served, until its caller aborts, rather than being
-  refused. At most **100** of one principal's renders may wait; past that a call is
-  refused. A render `render_model` hands back still running keeps its slot while the
+  for a slot, first come first served, rather than being refused, until its caller
+  aborts or the tool's own wait passes (`ACCEPTING_MS` + `renderWaitMs`, 14 minutes by
+  default). That wait ends before the tool's deadline, with "not rendered", nothing
+  submitted. At most **100** of one principal's renders may wait; past that a call is
+  refused. A render or arrange handed back still running keeps its slot while the
   agent polls the job in the background, for at most **30 minutes** (PR #752 review).
   Past 30 minutes the slot is freed even if the job still runs, so for a job that long
   this cap is best effort, and only the backend's shared render concurrency bounds it;

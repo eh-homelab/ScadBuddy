@@ -454,7 +454,8 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     const pairs: string[] = []
     const tabs = {
       pairSession: (sessionId: string, tabId: string) => void pairs.push(`${sessionId}:${tabId}`),
-      sessionHasTab: () => new Promise<boolean>(() => {}), // a relay that never answers
+      sessionTab: () => new Promise<{ tabId: string | undefined; connected: boolean }>(() => {}), // a relay that never answers
+      pairSessionIfStill: async () => false,
     }
     const { sessions, sends } = fakeSessions()
     const chat = new ChatConnection(sessions, () => {}, { tabs })
@@ -469,6 +470,63 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     expect(sends).toEqual(['s1'])
     expect(pairs).toEqual([`s1:${TAB}`])
     chat.close()
+  })
+
+  it("does not overwrite a pairing another socket made while the attach's check was out (#2271)", async () => {
+    const { rows } = sharedRows()
+    let release!: (tabId: string | undefined) => void
+    let reads = 0
+    const store: SessionTabStore = {
+      set: async (sessionId, tabId) => {
+        rows.set(sessionId, tabId)
+      },
+      // The attach's read is held; every later one reads the table.
+      get: async (sessionId) =>
+        ++reads === 1 ? new Promise<string | undefined>((resolve) => (release = resolve)) : rows.get(sessionId),
+    }
+    // Two replicas sharing ai_session_tabs: A's socket on `here`, B's on `there`.
+    const here = new TabHub({ sessionTabs: store })
+    const there = new TabHub({ sessionTabs: store })
+    await tab(here, TAB)
+    await tab(there, OTHER_TAB)
+    const { sessions } = fakeSessions()
+    const a = new ChatConnection(sessions, () => {}, { tabs: here })
+    const b = new ChatConnection(sessions, () => {}, { tabs: there })
+    await a.receive(JSON.stringify({ v, type: 'tab.bind', tabId: TAB }))
+    await b.receive(JSON.stringify({ v, type: 'tab.bind', tabId: OTHER_TAB }))
+
+    await a.receive(JSON.stringify({ v, type: 'session.attach', sessionId: 's-new' }))
+    await tick()
+    await b.receive(JSON.stringify({ v, type: 'user.message', sessionId: 's-new', text: 'hi', context }))
+    await tick()
+    expect(rows.get('s-new')).toBe(OTHER_TAB)
+    release(undefined) // A's check: no tab, as it was when A asked
+    await tick()
+    await tick()
+    expect(rows.get('s-new')).toBe(OTHER_TAB)
+    a.close()
+    b.close()
+  })
+
+  it('pairs nothing when the socket closes while the check is out (#2271)', async () => {
+    let answer!: (value: { tabId: string | undefined; connected: boolean }) => void
+    const paired: string[] = []
+    const tabs = {
+      pairSession: (sessionId: string, tabId: string) => void paired.push(`${sessionId}:${tabId}`),
+      sessionTab: () => new Promise<{ tabId: string | undefined; connected: boolean }>((resolve) => (answer = resolve)),
+      pairSessionIfStill: async (sessionId: string, tabId: string) => {
+        paired.push(`${sessionId}:${tabId}`)
+        return true
+      },
+    }
+    const { sessions } = fakeSessions()
+    const chat = new ChatConnection(sessions, () => {}, { tabs })
+    await chat.receive(JSON.stringify({ v, type: 'tab.bind', tabId: TAB }))
+    await chat.receive(JSON.stringify({ v, type: 'session.attach', sessionId: 's1' }))
+    chat.close()
+    answer({ tabId: undefined, connected: false })
+    await tick()
+    expect(paired).toEqual([])
   })
 
   it('pairs nothing before the panel names its tab', async () => {

@@ -72,6 +72,19 @@ export function length(millimetres: number, unit: DisplayUnit): string {
 }
 
 /**
+ * A length well under a millimetre (a layer height, a nozzle), to the display unit: up
+ * to two decimals in mm (`0.08`, `0.25`), three significant digits in inches (`0.00315`).
+ * {@link length}'s one decimal would show 0.08 as 0.1 and every one in inches as 0.00.
+ */
+export function fineLength(millimetres: number, unit: DisplayUnit): string {
+  const format =
+    unit === 'in'
+      ? new Intl.NumberFormat('en-US', { maximumSignificantDigits: 3, useGrouping: false })
+      : new Intl.NumberFormat('en-US', { maximumFractionDigits: 2, useGrouping: false })
+  return format.format(unit === 'in' ? millimetres / MM_PER_INCH : millimetres)
+}
+
+/**
  * A plate's footprint. Millimetres keep the table's own whole numbers (`256 × 256 mm`)
  * rather than {@link length}'s one decimal.
  */

@@ -188,6 +188,29 @@ def test_less_left_than_the_copies_need_is_a_warning_with_the_figures() -> None:
     assert figures == {"remaining": 30, "needed per copy": 20, "copies": 2}
 
 
+def test_a_shared_spools_shortfall_shows_what_the_slots_need_together() -> None:
+    """#2851: each slot's own 20 g fits in 30 g; the evidence has to show the 40 g."""
+    options = FilamentOptions(
+        library_file_id=41,
+        printer_id=1,
+        slots=[
+            SlotNeed(slot_id=1, material="PLA", used_grams=20),
+            SlotNeed(slot_id=2, material="PLA", used_grams=20),
+        ],
+        spools=[SpoolOption(spool_id=2, material="PLA", remaining_g=30)],
+    )
+    plan = FilamentPlan(
+        slots=[SlotChoice(slot_id=1, spool_id=2), SlotChoice(slot_id=2, spool_id=2)]
+    )
+    found = _run(
+        LOW_FILAMENT, filament_options=options, request=AnalysisRequest(filament_plan=plan)
+    )
+    assert [f.key for f in found] == ["SB3002:slot-1", "SB3002:slot-2"]
+    figures = {e.label: e.value for e in found[0].evidence}
+    assert figures["needed with the other slots on this spool"] == 40
+    assert figures["slots on this spool"] == "1, 2"
+
+
 def test_unknown_grams_decline_to_judge() -> None:
     assert (
         _run(

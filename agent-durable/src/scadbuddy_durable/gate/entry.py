@@ -203,6 +203,7 @@ def build_entry(
     session_owner: Principal,
     session_creator: Principal,
     secrets: Sequence[str] = (),
+    in_run: bool = False,
 ) -> BuiltEntry:
     def entry_of(
         questions: tuple[Question, ...] | None = None, options: tuple[str, ...] | None = None
@@ -217,6 +218,7 @@ def build_entry(
             session_creator=session_creator,
             questions=questions,
             options=options,
+            in_run=in_run,
         )
 
     if kind == "approval":

@@ -62,7 +62,8 @@ export class PendingProjection {
       FROM ai_pending_input p JOIN ai_sessions s ON s.id = p.session_id
       WHERE (${filter.sessionId ?? null}::uuid IS NULL OR p.session_id = ${filter.sessionId ?? null}::uuid)
         AND (${owner === undefined}
-             OR (${filter.allApprovals === true} AND p.kind = 'approval')
+             -- A flow run's entries are the person's (#2482, spec 2026-10-11 §4.2): no grant sees them.
+             OR (${filter.allApprovals === true} AND p.kind = 'approval' AND p.flow_run_id IS NULL)
              OR (s.owner_kind = ${owner?.kind ?? null} AND s.owner_id = ${owner?.id ?? null})
              OR (s.creator_kind = ${owner?.kind ?? null} AND s.creator_id = ${owner?.id ?? null}))
       ORDER BY p.created_at, p.request_id
@@ -82,6 +83,13 @@ export class PendingProjection {
       ...(r.attention ? { attention: r.attention } : {}),
       ...(r.expiring ? { expiring: true as const } : {}),
     }))
+  }
+
+  /** Whether the entry is a flow run's (`flow_run_id`): in its run's queue, the person's (#2482). */
+  async inRun(requestId: string): Promise<boolean> {
+    const [row] = await this.#sql<{ n: number }[]>`
+      SELECT 1 AS n FROM ai_pending_input WHERE request_id = ${requestId} AND flow_run_id IS NOT NULL`
+    return row !== undefined
   }
 
   /** The session, or undefined when there is none. */

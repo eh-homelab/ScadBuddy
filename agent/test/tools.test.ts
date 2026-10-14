@@ -5,6 +5,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { PendingActionStore } from '../src/tools/pending.js'
+import { RENDER_LIMITS, RenderLimiter } from '../src/tools/renderLimits.js'
 import { ACCEPTING_MS, COMMAND_FOLLOW_MS } from '../src/tools/command.js'
 import { RUN_REATTEMPTS } from '../src/tools/print.js'
 import { runTool, TOOL_DEADLINE_MS, type Tool, type ToolContext } from '../src/tools/registry.js'
@@ -950,6 +951,33 @@ describe('arrange (#1864)', () => {
   const ARRANGED = 'c'.repeat(32)
   const JOB = 'd'.repeat(32)
   const job = (status: string) => ({ id: JOB, slug: 'lid', created_at: '', status, plates: [{}, {}] })
+
+  it('holds its render slot until a job handed back running settles', async () => {
+    let status = 'running'
+    server.use(
+      http.post(`${BACKEND}/api/v1/outputs/arrange`, () => HttpResponse.json(job('pending'), { status: 202 })),
+      http.get(`${BACKEND}/api/v1/jobs/${JOB}`, () => HttpResponse.json(job(status))),
+    )
+    const limiter = new RenderLimiter({ ...RENDER_LIMITS, concurrent: 1, perWindow: 0 })
+    const result = await runTool(
+      tool('arrange'),
+      { objects: [{ output_id: A }] },
+      ctx({ renderLimiter: limiter, renderWaitMs: 0, pollIntervalMs: 1 }),
+    )
+    expect(firstText(result)).toMatchObject({ job_id: JOB, status: 'running' })
+    // The arrange still runs on the backend: the principal's one slot stays taken.
+    let next = false
+    const waiting = limiter.acquire('test').then((release) => {
+      next = true
+      return release
+    })
+    await new Promise((r) => setTimeout(r, 30))
+    expect(next).toBe(false)
+    expect(limiter.queued).toBe(1)
+    status = 'done'
+    ;(await waiting)()
+    expect(next).toBe(true)
+  })
 
   it('arranges outputs and library files, waits for the job and saves it under its template', async () => {
     let arranged: unknown

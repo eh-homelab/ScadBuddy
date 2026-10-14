@@ -39,6 +39,7 @@ from tests.api.test_print_filaments import (
     prepared,
     queue_route,
     slice_routes,
+    slots_from_bambuddy,
 )
 from tests.api.test_send import (
     BASE,
@@ -243,6 +244,27 @@ def test_the_dialogs_print_sequence_goes_over_the_templates(
         "enable_prime_tower": "1",
         "print_sequence": "by object",
     }
+
+
+@respx.mock
+def test_a_templates_by_object_default_is_checked_as_by_object(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#2976: a template that prints by object, with nothing chosen in the dialog, is
+    checked by object: its objects are counted, as a by-layer print's are not."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    by_layer = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+    declare_print_settings(paths, model, {"print_sequence": "by object"})
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body())
+
+    assert by_layer.status_code == 200, by_layer.text
+    assert by_layer.json()["objects"] is None
+    assert check.status_code == 200, check.text
+    assert check.json()["objects"] == 1
+    assert "print_sequence" not in body()
 
 
 @respx.mock
@@ -854,10 +876,11 @@ def two_plate_output(client: TestClient, model: str, paths: DataPaths) -> str:
 
 @respx.mock
 def test_the_all_plates_filament_read_offers_every_plates_slots(
-    client: TestClient, model: str, paths: DataPaths
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Spec §2 step 1: one row per colour in the model. Plate 1 alone would never show
     slot 2, which only plate 2 uses."""
+    slots_from_bambuddy(monkeypatch)
     output_id = two_plate_output(client, model, paths)
     upload_route()
     split_plates_routes()
@@ -874,11 +897,68 @@ def test_the_all_plates_filament_read_offers_every_plates_slots(
 
 
 @respx.mock
-def test_the_all_plates_filament_read_reads_the_spools_once(
+def test_the_all_plates_filament_read_offers_every_plates_slots_from_the_outputs_own_3mf(
     client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#2720: an output's slots are read per plate from its own 3MF, with nothing
+    uploaded to Bambuddy and none of its per-plate reads asked. The demo model is one
+    colour and ``add_plate``'s second plate is empty, so the file says slot 1 for every
+    plate; ``split_plates_routes`` would have answered slot 2 for plate 2 had it been asked."""
+    output_id = two_plate_output(client, model, paths)
+    uploaded = upload_route()
+    split_plates_routes()
+    hardware_routes()
+
+    one = client.get(f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1").json()
+    every = client.get(
+        f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1&all_plates=true"
+    ).json()
+
+    assert [slot["slot_id"] for slot in one["slots"]] == [1]
+    assert [slot["slot_id"] for slot in every["slots"]] == [1]
+    assert not uploaded.called
+    assert not [c for c in respx.calls if c.request.url.path.endswith("/filament-requirements")]
+
+
+@respx.mock
+def test_the_all_plates_local_read_combines_every_plates_slots(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#2720, the #2780 review: plate 1 uses slot 1 and plate 2 slot 2, so the whole
+    file's read from the output's own 3MF must offer both, and each plate its own."""
+    configure(client)
+    output_id = make_output(client, model)
+    [output_3mf] = paths.outputs.glob(f"*/{output_id}/model.3mf")
+    body = ColourPart(1, "Body", "#FF0000", trimesh.creation.box(extents=(10, 10, 4)))
+    lid = ColourPart(2, "Lid", "#0047BB", trimesh.creation.box(extents=(12, 12, 2)))
+    write_plates_3mf(
+        [PlateParts((body,), (1,)), PlateParts((lid,), (2,))],
+        ["#FF0000", "#0047BB"],
+        output_3mf,
+        thumbnails=None,
+    )
+    uploaded = upload_route()
+    split_plates_routes()
+    hardware_routes()
+
+    def slots(query: str) -> list[int]:
+        answer = client.get(f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1{query}")
+        assert answer.status_code == 200, answer.text
+        return [slot["slot_id"] for slot in answer.json()["slots"]]
+
+    assert slots("&plate_id=1") == [1]
+    assert slots("&plate_id=2") == [2]
+    assert slots("&all_plates=true") == [1, 2]
+    assert not uploaded.called
+
+
+@respx.mock
+def test_the_all_plates_filament_read_reads_the_spools_once(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Two plates, one spool inventory: the spools are the same for every plate, so an
     all-plates read asks for them once (#480)."""
+    slots_from_bambuddy(monkeypatch)
     output_id = two_plate_output(client, model, paths)
     upload_route()
     split_plates_routes()
@@ -1556,6 +1636,7 @@ def test_the_check_gives_the_runs_choice_refusal_word_for_word(
         "warnings": [],
         "rack": None,
         "nozzle_plan": None,
+        "objects": None,
     }
     assert not uploaded.called
     assert not sliced.called
@@ -1582,6 +1663,26 @@ def test_the_check_gives_the_runs_printer_refusal_word_for_word(
         "Workshop is deactivated in Bambuddy. Activate it there, or pick another printer."
     ]
     assert not uploaded.called
+
+
+@pytest.mark.parametrize("plate", ["Cool Plate", "Smooth PEI Plate", "High Temp Plate"])
+@respx.mock
+def test_the_check_warns_of_a_plate_the_printer_does_not_take(
+    client: TestClient, model: str, plate: str
+) -> None:
+    """#2366: the check answered nothing for a plate the H2C does not take."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=body(bed_type=plate))
+
+    assert check.status_code == 200, check.text
+    assert [w["kind"] for w in check.json()["warnings"]].count("plate-not-listed") == 1
+    fine = client.post(
+        f"/api/v1/print/outputs/{output_id}/check", json=body(bed_type="Supertack Plate")
+    )
+    assert "plate-not-listed" not in [w["kind"] for w in fine.json()["warnings"]]
 
 
 @respx.mock
@@ -1771,11 +1872,13 @@ def test_a_slot_error_is_the_checks_error_too(
     plan: list[dict[str, int]] | None,
     overrides: dict[str, Any],
     detail: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#1050: ``/check`` judged only what the choices decide, so a plan the run refuses
     by its slots (no spool, a spool Bambuddy lacks, an override it lacks) passed the
     check, and the run then uploaded the file and failed after its 202. The check now
     makes the run's own slot refusal, in the run's words."""
+    slots_from_bambuddy(monkeypatch)
     output_id = prepared(client, model)
     upload_route()
     run_routes()
@@ -1795,6 +1898,26 @@ def test_a_slot_error_is_the_checks_error_too(
     assert check.status_code == 200, check.text
     assert check.json()["errors"] == [run.json()["detail"]]
     assert not sliced.called
+
+
+@respx.mock
+def test_the_check_judges_an_outputs_slots_with_nothing_uploaded(
+    client: TestClient, model: str
+) -> None:
+    """#2720: the check read slots only from a copy the dialog's choices had uploaded,
+    and passed a plan it could not judge. An output's slots are its own 3MF's now, so
+    it judges them with no copy in Bambuddy and uploads nothing."""
+    output_id = prepared(client, model)
+    upload = upload_route()
+    run_routes()
+
+    check = client.post(
+        f"/api/v1/print/outputs/{output_id}/check", json={**body(), "filament_plan": {"slots": []}}
+    )
+
+    assert check.status_code == 200, check.text
+    assert check.json()["errors"] == ["Slot 1 has no spool chosen."]
+    assert not upload.called
 
 
 @respx.mock

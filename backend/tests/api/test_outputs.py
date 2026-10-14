@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 import trimesh
 from fastapi.testclient import TestClient
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.gitrepo import GitError, GitTimeoutError, RevisionNotFoundError
@@ -28,6 +29,7 @@ from scadbuddy.render.provenance import read as read_provenance
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.split import ColourPart
 from tests.api.conftest import FAIL_WIDTH, PNG_BYTES, wait_for_job
+from tests.conftest import wait_for_span
 from tests.support.operations import press
 from tests.test_geometry import carrot
 
@@ -91,6 +93,23 @@ def test_outputs_are_listed_newest_first(client: TestClient, model: str) -> None
 
     listed = client.get(f"/api/v1/models/{model}/outputs").json()
     assert [row["id"] for row in listed] == [second["id"], first["id"]]
+
+
+def test_a_save_and_a_listing_trace_their_long_steps(
+    client: TestClient, model: str, spans: InMemorySpanExporter
+) -> None:
+    """#2755: the save's fetch and write, and the listing's details, are spans of their
+    own, so a slow one shows in Tempo as itself rather than as a gap."""
+    job_id = _finished_job(client, model)
+    saved = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job_id}, headers=press())
+    assert saved.status_code == 201, saved.text
+    client.get(f"/api/v1/models/{model}/outputs")
+    fetch = wait_for_span(spans, lambda s: s.name == "output.fetch_result")
+    write = wait_for_span(spans, lambda s: s.name == "output.write")
+    details = wait_for_span(spans, lambda s: s.name == "output.details")
+    assert fetch.attributes is not None and fetch.attributes["scadbuddy.job_id"] == job_id
+    assert write.attributes is not None and write.attributes["scadbuddy.job_id"] == job_id
+    assert details.attributes is not None and details.attributes["scadbuddy.outputs"] == 1
 
 
 @pytest.mark.requires_postgres

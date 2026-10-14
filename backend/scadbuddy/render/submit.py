@@ -310,7 +310,7 @@ class RenderService:
         except (CommandStillAcceptingError, CommandClosedError):
             # Re-sent by the client with the same key: pending, not an error (review
             # #1066 (5) 3.1).
-            self.metrics.render_accept_pending.inc()
+            self.metrics.render_accept_pending.labels(start.kind).inc()
             raise
         except Exception:
             # Answered as a 503 or 500, and counted (review #1066 4.1).
@@ -747,8 +747,8 @@ class RenderService:
             self.metrics.store_errors.labels("cancel_workflow").inc()
 
     def _settled(self, job: Job, outcome: RenderOutcome) -> None:
-        self.metrics.render_finished.labels(outcome).inc()
-        self.metrics.job_latency.labels(outcome).observe(
+        self.metrics.render_finished.labels(job.kind, outcome).inc()
+        self.metrics.job_latency.labels(job.kind, outcome).observe(
             max(0.0, ((job.finished_at or now()) - job.created_at).total_seconds())
         )
 

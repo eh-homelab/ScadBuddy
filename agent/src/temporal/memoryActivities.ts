@@ -7,7 +7,7 @@ import {
   HindsightClient,
   hindsightTarget,
   type MemoryHooks,
-  type MemoryHooksOptions,
+  type MemoryOptions,
   type SettingsReader,
   turnRecallMaxQueryChars,
 } from '../memory/hindsight.js'
@@ -44,7 +44,7 @@ export type MemoryRecalled = { context: string | null }
 
 export type MemoryActivityDeps = {
   sessions: SessionOwners
-  events: Pick<EventLog, 'append' | 'read'>
+  events: Pick<EventLog, 'append' | 'read' | 'userTurnText'>
   /** The enabled remote plugins, among them `hindsight` (main.ts `remotePlugins`). */
   remotePlugins: () => Promise<PluginsForRun>
   /** Every usable credential's secret, redacted as a classic turn redacts them. */
@@ -53,7 +53,7 @@ export type MemoryActivityDeps = {
   /** ai_settings, for the recall query's cap, read at each turn as a classic turn reads it. */
   settings?: SettingsReader | undefined
   /** The hook knobs a classic turn takes (SessionManagerDeps.memory); false: memory off. */
-  memory?: Omit<MemoryHooksOptions, 'client' | 'secrets' | 'log' | 'sessionStore' | 'onActivity'> | false
+  memory?: MemoryOptions | undefined
   log?: (line: string) => void
 }
 
@@ -87,6 +87,11 @@ export function transcriptOf(events: readonly LoggedEvent[]): SessionStoreEntry[
       }
       message.content[0]!.text += event.delta
     } else if (event.type === 'tool.call' && event.parent === undefined) {
+      // Text the message goes on with after the call is a new line after it (#2419).
+      // Clearing them all is right because the main agent streams one message at a
+      // time: only the one the call belongs to is open. Subagents' calls carry a
+      // `parent` and never reach here.
+      texts.clear()
       lines.push({ type: 'assistant', message: { content: [{ type: 'tool_use', name: event.name, input: event.input }] } })
     }
   }
@@ -150,9 +155,7 @@ export function memoryActivities(deps: MemoryActivityDeps) {
     async [MEMORY_RECALL_ACTIVITY]({ turn_id }: MemoryArgs): Promise<MemoryRecalled> {
       try {
         const { session, owner } = await durableSession(MEMORY_RECALL_ACTIVITY, deps.sessions)
-        const events = await allEvents(deps.events, session)
-        const turn = events.findLast(({ event }) => event.type === 'user.turn' && event.turnId === turn_id)?.event
-        const prompt = turn?.type === 'user.turn' ? turn.text : ''
+        const prompt = await deps.events.userTurnText(session, turn_id)
         if (!prompt) return { context: null }
         const built = await hooksFor({ id: session, owner }, turn_id, prompt)
         if (!built) return { context: null }

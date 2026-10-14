@@ -140,6 +140,15 @@ class PreviewStore:
             ).fetchone()
         return _record(row) if row is not None else None
 
+    def records(self) -> dict[str, PreviewRecord]:
+        """Every model's record, in ONE query: the backfill's listing reads them all
+        rather than one round trip per model (#2353)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT model_id, source_key, ok, error, rendered_at FROM model_previews"
+            ).fetchall()
+        return {row["model_id"]: _record(row) for row in rows}
+
     def image(self, slug: str) -> bytes | None:
         with self._connect() as conn:
             row = conn.execute(

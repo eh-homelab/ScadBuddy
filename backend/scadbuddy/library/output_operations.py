@@ -26,6 +26,7 @@ from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.send import delete_inbox_copies as remove_inbox_copies
 from scadbuddy.core.events import OutputEvent, emit
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.tracing import span
 from scadbuddy.library.operations import answered_as_routes
 from scadbuddy.library.outputs import hold_parts, release_parts, require_output
 from scadbuddy.operations.claims import ClaimStore
@@ -109,7 +110,10 @@ def output_kinds(state: AppState) -> list[OperationKind]:
         blobs = state.store.blobs
         # The copy reads the job's files, which on the bambuddy backend come through the
         # cache. Not in the check: a fetch from Bambuddy may take longer than its budget.
-        await materialize_result(blobs, result)
+        # #2755: the fetch (a download from Bambuddy when this process has not got the
+        # piece) and the write are the save's two long steps; each is its own span.
+        with span("output.fetch_result", attributes={"scadbuddy.job_id": job.id}):
+            await materialize_result(blobs, result)
         # A piece the store no longer has (aged out, or the Bambuddy store unreachable)
         # is not fetched, and the copy would fail with a server path in its message.
         files = (result.model_3mf, result.preview_glb)
@@ -125,6 +129,8 @@ def output_kinds(state: AppState) -> list[OperationKind]:
                 )
             files_dir = blobs.dir_for(chosen.files_key) / "files"
         public_url = (await asyncio.to_thread(state.settings_store.load)).public_url
+        # Written into the saved 3MF, which a download then serves as it is (#2652).
+        print_settings = await asyncio.to_thread(state.catalogue.print_settings, job.slug)
         # The Parts outlive the job that rendered them: Arrange reads them later (§7).
         # They are held before the write, so a failed hold leaves nothing saved to retry
         # over; inside the `try`, so a hold that fails part way is released too.
@@ -135,17 +141,19 @@ def output_kinds(state: AppState) -> list[OperationKind]:
         sources = ArrangeInputs.model_validate(job.inputs).sources if arranged else []
         try:
             await asyncio.to_thread(hold_parts, state.refs, output_id, manifest, job.slug)
-            meta = await asyncio.to_thread(
-                state.outputs.create,
-                job,
-                name=request["name"],
-                public_url=public_url,
-                inputs={} if arranged else inputs,
-                index=index,
-                files_dir=files_dir,
-                arranged_from=sources,
-                output_id=output_id,
-            )
+            with span("output.write", attributes={"scadbuddy.job_id": job.id}):
+                meta = await asyncio.to_thread(
+                    state.outputs.create,
+                    job,
+                    name=request["name"],
+                    public_url=public_url,
+                    inputs={} if arranged else inputs,
+                    index=index,
+                    files_dir=files_dir,
+                    arranged_from=sources,
+                    output_id=output_id,
+                    print_settings=print_settings,
+                )
         except Exception as error:
             # Not on cancellation: the write's thread cannot be stopped and may still
             # finish, and an output written without its holds loses its Parts at the

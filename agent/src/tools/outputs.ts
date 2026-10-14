@@ -127,10 +127,13 @@ export const outputTools: Tool[] = [
   defineTool({
     name: 'get_output_preview',
     description:
-      "An output's preview mesh, or one plate of a Bambuddy library file (`library_file_id`, `plate` from 1) " +
-      'read from the 3MF a print of it slices, as a binary glTF (model/gltf-binary), embedded as a base64 ' +
-      'resource; when it is too large to inline, a link to fetch it instead.',
-    input: withSource({ plate: z.number().int().min(1).optional().describe("A library file's plate; 1 by default") }),
+      "An output's preview mesh, or with `plate` (from 1) one plate of its 3MF where the file places it; or " +
+      'one plate of a Bambuddy library file (`library_file_id`) read from the 3MF a print of it slices. A binary ' +
+      'glTF (model/gltf-binary), embedded as a base64 resource; when it is too large to inline, a link to fetch it ' +
+      'instead.',
+    input: withSource({
+      plate: z.number().int().min(1).optional().describe("One plate; an output's whole preview, or a library file's plate 1, by default"),
+    }),
     risk: 'read',
     bambuddyScope: ['Manage Library'],
     routes: ['GET /api/v1/outputs/{output_id}/preview.glb', 'GET /api/v1/print/library/{file_id}/preview.glb'],
@@ -154,12 +157,20 @@ export const outputTools: Tool[] = [
         )
       }
       const output_id = source.id
+      const query = plate === undefined ? '' : `?plate=${plate}`
       return binary(
-        ctx.backend.GET('/api/v1/outputs/{output_id}/preview.glb', { params: { path: { output_id } }, parseAs: 'stream' }),
+        ctx.backend.GET('/api/v1/outputs/{output_id}/preview.glb', {
+          params: { path: { output_id }, query: { plate } },
+          parseAs: 'stream',
+        }),
         `get preview of ${output_id}`,
         ctx,
-        { path: `/api/v1/outputs/${output_id}/preview.glb`, name: `${output_id}.glb`, fallbackType: 'model/gltf-binary' },
-        (bytes, mimeType) => blob(`scadbuddy://outputs/${output_id}/preview.glb`, bytes, mimeType),
+        {
+          path: `/api/v1/outputs/${output_id}/preview.glb${query}`,
+          name: plate === undefined ? `${output_id}.glb` : `${output_id}-plate-${plate}.glb`,
+          fallbackType: 'model/gltf-binary',
+        },
+        (bytes, mimeType) => blob(`scadbuddy://outputs/${output_id}/preview.glb${query}`, bytes, mimeType),
       )
     },
   }),

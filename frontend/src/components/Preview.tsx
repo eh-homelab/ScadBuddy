@@ -1,5 +1,6 @@
 import {
   Suspense,
+  useCallback,
   useEffect,
   useId,
   useLayoutEffect,
@@ -10,12 +11,20 @@ import {
   type RefObject,
 } from 'react'
 import { Canvas, useLoader, useThree } from '@react-three/fiber'
-import { Grid, OrbitControls } from '@react-three/drei'
+import { Grid, Html, OrbitControls } from '@react-three/drei'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import * as THREE from 'three'
 import type { BoundingBox, Diagnostic, Job, Plate } from '../api/types'
-import { formatBbox } from '../lib/format'
-import { cameraFraming, framingSpan, sceneOffset, shouldRefit } from '../lib/previewFrame'
+import { formatBbox, formatElapsed, queuePlace } from '../lib/format'
+import {
+  cameraReach,
+  framingSpan,
+  MIN_REACH,
+  modelBox,
+  plateFootprint,
+  sceneOffset,
+  shouldRefit,
+} from '../lib/previewFrame'
 import type { CameraView } from '../lib/framing'
 import { BBOX_OBJECT, captureSnapshot, PLATE_OBJECT, type SnapshotOptions } from '../lib/snapshot'
 import { plateSize, useDisplayUnit } from '../lib/units'
@@ -23,6 +32,16 @@ import { ErrorBoundary } from './ErrorBoundary'
 import { Button } from './ui/Button'
 import { Spinner } from './ui/Spinner'
 import type { RenderStage } from '../lib/useRenderJob'
+
+/** Seconds since ``since``, ticking; the server's clock may run ahead, so never below 0. */
+function RenderElapsed({ since }: { since: string }) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1_000)
+    return () => clearInterval(timer)
+  }, [])
+  return <span data-testid="render-elapsed">· {formatElapsed((now - Date.parse(since)) / 1000)}</span>
+}
 
 const STAGE_LABELS: Record<RenderStage, string> = {
   source: 'reading the model',
@@ -131,6 +150,12 @@ interface Props {
    * if nothing were wrong.
    */
   rejected?: boolean
+  /**
+   * #2444 — why nothing renders now: a value on the form is out of range (or no colour).
+   * The last render stays, marked as not of these values; with none, this is said instead
+   * of "Change a parameter to render.", which reads as if nothing were wrong.
+   */
+  blocked?: string
   /** #937 — where OpenSCAD's warnings point the reader to fix them: the source editor. */
   sourceLink?: ReactNode
 }
@@ -145,8 +170,12 @@ export function Preview({
   controls,
   covered,
   rejected = false,
+  blocked,
   sourceLink,
 }: Props) {
+  // #1638 — the job this render waits on, once read: whether a worker has it yet,
+  // where it waits, and how long since it was submitted.
+  const live = rendering && (job?.status === 'pending' || job?.status === 'running') ? job : undefined
   // The last finished render stays on screen while the next one is in flight (spec §5.3).
   // Its notes and warnings travel with it: they explain the model on screen, not the
   // one rendering.
@@ -159,12 +188,36 @@ export function Preview({
         warnings: string[]
         diagnostics: Diagnostic[]
         plates: number
+        /** #2381 — each plate's box, in the render's coordinates; none for one plate. */
+        plateBoxes: BoundingBox[]
       }
     | undefined
   >()
+  // #2364 — the box of a mesh that came with none, measured once it loaded.
+  const [measuredBox, setMeasuredBox] = useState<{ url: string; bbox: BoundingBox }>()
+  const onMeasured = useCallback((url: string, box: BoundingBox) => setMeasuredBox({ url, bbox: box }), [])
+
+  // #2731 — the one plate of a multi-plate render the viewer chose to see alone, for
+  // that render only; null shows them all.
+  const [chosen, setChosen] = useState<{ jobId: string; plate: number }>()
+  const platesOfJob = job?.status === 'done' ? (job.plates?.length ?? 0) : 0
+  const alone = chosen && job && chosen.jobId === job.id && chosen.plate <= platesOfJob ? chosen.plate : null
 
   useEffect(() => {
-    if (job?.status === 'done' && job.preview_url) {
+    if (job?.status === 'done' && job.preview_url && alone !== null) {
+      // That plate cut from the render's 3MF, where the file places it: it has no box of
+      // the render's, so it is measured when it loads (#2364).
+      setShown({
+        url: withPlate(job.preview_url, alone),
+        bbox: undefined,
+        colors: job.colors ?? [],
+        notes: job.notes ?? [],
+        warnings: job.warnings ?? [],
+        diagnostics: (job.diagnostics ?? []).filter((d) => d.severity !== 'trace'),
+        plates: 1,
+        plateBoxes: [],
+      })
+    } else if (job?.status === 'done' && job.preview_url) {
       setShown({
         url: job.preview_url,
         bbox: job.bbox_mm ?? undefined,
@@ -175,9 +228,12 @@ export function Preview({
         // has its warnings to show, which OpenSCAD logs and goes on past (#937).
         diagnostics: (job.diagnostics ?? []).filter((d) => d.severity !== 'trace'),
         plates: Math.max(job.plates?.length ?? 0, 1),
+        plateBoxes: (job.plates ?? []).map((plate) => plate.bbox_mm),
       })
     }
-  }, [job])
+  }, [job, alone])
+  const bbox = shown?.bbox ?? (measuredBox?.url === shown?.url ? measuredBox?.bbox : undefined)
+  const multiPlate = shown !== undefined && bbox !== undefined && shown.plateBoxes.length > 1
 
   // #364 — the GLB that has been drawn, or failed to load: until one of them is the
   // shown one, the render is not on screen yet, so the spinner stays.
@@ -196,6 +252,7 @@ export function Preview({
   const overlayRef = useRef<HTMLDivElement>(null)
   const size = useBoxSize(overlayRef)
   const compact = size !== null && (size.height < COMPACT_HEIGHT || size.width < COMPACT_WIDTH)
+  const aspect = size ? size.width / Math.max(1, size.height) : 1
   const messages =
     shown && !failed && shown.warnings.length + shown.diagnostics.length + shown.notes.length > 0
       ? shown
@@ -244,7 +301,8 @@ export function Preview({
           // every frame: an idle page otherwise keeps the GPU busy.
           frameloop="demand"
           gl={{ preserveDrawingBuffer: true, antialias: true }}
-          camera={{ position: [210, 170, 230], fov: 35, near: 1, far: 4000 }}
+          // #2381 — far enough for a multi-plate row metres long, framed from further back.
+          camera={{ position: [210, 170, 230], fov: 35, near: 1, far: CAMERA_FAR }}
           onCreated={({ gl, get }) => {
             if (captureRef) {
               captureRef.current = {
@@ -280,14 +338,23 @@ export function Preview({
           <directionalLight position={[180, 320, 140]} intensity={2.1} />
           <directionalLight position={[-220, 140, -180]} intensity={0.7} />
 
-          {plate && <BuildPlate theme={theme} size={plate.size} />}
-          <FitCamera bbox={shown?.bbox} />
+          {/* #2381 — one plate's grid under the middle of a multi-plate row says nothing
+              of where each plate is: each plate gets an outline of its own instead. */}
+          {plate && !multiPlate && <BuildPlate theme={theme} size={plate.size} />}
+          {multiPlate && <PlateOutlines theme={theme} plates={shown.plateBoxes} whole={bbox} />}
+          <FitCamera bbox={bbox} />
 
           {shown && (
             <Suspense fallback={null}>
               {/* #364 — a failed render's outline would describe a model that is not
                   what the parameters now give. */}
-              <Model url={shown.url} bbox={shown.bbox} outline={!failed} onLoaded={setLoadedUrl} />
+              <Model
+                url={shown.url}
+                bbox={bbox}
+                outline={!failed}
+                onLoaded={setLoadedUrl}
+                onMeasured={onMeasured}
+              />
             </Suspense>
           )}
 
@@ -295,7 +362,8 @@ export function Preview({
             makeDefault
             enablePan
             minDistance={40}
-            maxDistance={1200}
+            // #2381 — far enough back to frame the whole model, however long the row.
+            maxDistance={bbox ? cameraReach(bbox.size, aspect).maxDistance : MIN_REACH}
             maxPolarAngle={Math.PI / 2 - 0.02}
             target={[0, 20, 0]}
           />
@@ -324,10 +392,14 @@ export function Preview({
                 data-overlay="chip"
                 className={`flex items-center gap-2 rounded-[6px] border border-line bg-surface/90 text-muted backdrop-blur-sm ${compact ? 'px-2 py-0.5 text-[11px]' : 'px-2.5 py-1 text-[12px]'}`}
               >
-                <Spinner /> Rendering
-                {rendering && stage && !compact && (
+                <Spinner /> {live?.status === 'pending' ? 'Waiting' : 'Rendering'}
+                {live?.status === 'pending' && live.queue_position && !compact && (
+                  <span data-testid="render-queue">· {queuePlace(live.queue_position)}</span>
+                )}
+                {rendering && stage && live?.status !== 'pending' && !compact && (
                   <span data-testid="render-stage">· {STAGE_LABELS[stage]}</span>
                 )}
+                {live && <RenderElapsed since={live.created_at} />}
               </span>
             )}
             {controls}
@@ -351,6 +423,14 @@ export function Preview({
                 </div>
               ))}
             {shown?.bbox && <Dimensions bbox={shown.bbox} plates={shown.plates} compact={compact} />}
+            {job && platesOfJob > 1 && (
+              <PlatePicker
+                plates={platesOfJob}
+                chosen={alone}
+                compact={compact}
+                onChoose={(plate) => setChosen(plate === null ? undefined : { jobId: job.id, plate })}
+              />
+            )}
           </div>
         )}
       </div>
@@ -365,7 +445,20 @@ export function Preview({
         />
       )}
 
-      {!shown && !failed && !rendering && !rejected && (
+      {blocked && (
+        <p
+          data-testid="preview-blocked"
+          className={
+            shown
+              ? 'pointer-events-none absolute inset-x-0 bottom-14 mx-auto w-fit max-w-[90%] rounded-[6px] border border-warn/40 bg-surface/90 px-3 py-1.5 text-center text-[12px] text-warn backdrop-blur-sm'
+              : 'absolute inset-0 flex items-center justify-center px-6 text-center text-[13px] text-warn'
+          }
+          style={clear}
+        >
+          {shown ? `Showing the last render. ${blocked} Fix it to render again.` : `${blocked} Fix it to render.`}
+        </p>
+      )}
+      {!shown && !failed && !rendering && !rejected && !blocked && (
         <p
           className="absolute inset-0 flex items-center justify-center text-[13px] text-faint"
           style={clear}
@@ -373,6 +466,47 @@ export function Preview({
           Change a parameter to render.
         </p>
       )}
+    </div>
+  )
+}
+
+/** `url` asking for one plate: the job's and an output's `preview.glb` both take `plate`. */
+function withPlate(url: string, plate: number): string {
+  return `${url}${url.includes('?') ? '&' : '?'}plate=${plate}`
+}
+
+/** #2731 — every plate together, or one of them alone, as the 3MF's plate images show it. */
+function PlatePicker({
+  plates,
+  chosen,
+  compact,
+  onChoose,
+}: {
+  plates: number
+  chosen: number | null
+  compact: boolean
+  onChoose: (plate: number | null) => void
+}) {
+  const options: (number | null)[] = [null, ...Array.from({ length: plates }, (_, i) => i + 1)]
+  return (
+    <div
+      role="group"
+      aria-label="Plates shown"
+      data-overlay="chip"
+      className={`pointer-events-auto flex max-w-full flex-wrap gap-0.5 rounded-[6px] border border-line bg-surface/90 p-0.5 backdrop-blur-sm ${compact ? 'text-[11px]' : 'text-[12px]'}`}
+    >
+      {options.map((plate) => (
+        <button
+          key={plate ?? 'all'}
+          type="button"
+          aria-pressed={chosen === plate}
+          aria-label={plate === null ? 'All plates' : `Plate ${plate} alone`}
+          onClick={() => onChoose(plate)}
+          className={`sb-num rounded-[4px] px-2 py-0.5 ${chosen === plate ? 'bg-accent text-accent-ink' : 'text-muted hover:text-ink'}`}
+        >
+          {plate === null ? 'All' : plate}
+        </button>
+      ))}
     </div>
   )
 }
@@ -778,22 +912,76 @@ function FitCamera({ bbox }: { bbox?: BoundingBox }) {
   const camera = useThree((state) => state.camera)
   const controls = useThree((state) => state.controls) as { target: THREE.Vector3; update: () => void } | null
   const invalidate = useThree((state) => state.invalidate)
+  const aspect = useThree((state) => (state.size ? state.size.width / Math.max(1, state.size.height) : 1))
   const framedSpan = useRef<number | null>(null)
 
   useEffect(() => {
     if (!bbox || !controls || !shouldRefit(framedSpan.current, bbox.size)) return
     framedSpan.current = framingSpan(bbox.size)
 
-    const { target, distance } = cameraFraming(bbox.size)
+    // #2381 — `OrbitControls` is given the reach this needs (`cameraReach`), so the
+    // update below does not pull the camera back in.
+    const { target, distance } = cameraReach(bbox.size, aspect)
     const direction = new THREE.Vector3(0.78, 0.62, 0.86).normalize()
     camera.position.copy(direction.multiplyScalar(distance))
     controls.target.set(...target)
     camera.lookAt(controls.target)
     controls.update()
     invalidate?.()
-  }, [bbox, camera, controls, invalidate])
+  }, [bbox, aspect, camera, controls, invalidate])
 
   return null
+}
+
+/**
+ * #2381 — where each plate of a multi-plate render is: an outline of its parts'
+ * footprint, labelled with its number, the `plate_id` its print queues.
+ */
+function PlateOutlines({ theme, plates, whole }: { theme: ViewerTheme; plates: BoundingBox[]; whole: BoundingBox }) {
+  return (
+    <group name={PLATE_OBJECT}>
+      {plates.map((box, index) => (
+        <PlateOutline key={index} theme={theme} number={index + 1} {...plateFootprint(box, whole)} />
+      ))}
+    </group>
+  )
+}
+
+/** The margin drawn around a plate's parts, so neighbouring outlines stay apart. */
+const PLATE_OUTLINE_MARGIN = 4
+/** The camera's far plane, in mm: past `cameraReach`'s orbit for a row of several metres. */
+const CAMERA_FAR = 20000
+
+function PlateOutline({
+  theme,
+  number,
+  center,
+  size,
+}: {
+  theme: ViewerTheme
+  number: number
+  center: [number, number]
+  size: [number, number]
+}) {
+  const [width, depth] = [size[0] + PLATE_OUTLINE_MARGIN * 2, size[1] + PLATE_OUTLINE_MARGIN * 2]
+  const outline = useMemo(() => new THREE.BoxGeometry(width, 0.001, depth), [width, depth])
+  useEffect(() => () => outline.dispose(), [outline])
+  return (
+    <group name={`${PLATE_OBJECT}:${number}`} position={[center[0], 0.05, center[1]]}>
+      <lineSegments>
+        <edgesGeometry args={[outline]} attach="geometry" />
+        <lineBasicMaterial color={theme.edge} attach="material" />
+      </lineSegments>
+      <Html position={[0, 0, depth / 2 + 6]} center zIndexRange={[10, 0]}>
+        <span
+          data-testid="plate-label"
+          className="sb-num pointer-events-none rounded-[3px] bg-bg/80 px-1 text-[11px] whitespace-nowrap text-muted select-none"
+        >
+          Plate {number}
+        </span>
+      </Html>
+    </group>
+  )
 }
 
 /**
@@ -808,14 +996,23 @@ function Model({
   bbox,
   outline,
   onLoaded,
+  onMeasured,
 }: {
   url: string
   bbox?: BoundingBox
   outline: boolean
   onLoaded: (url: string) => void
+  onMeasured: (url: string, bbox: BoundingBox) => void
 }) {
   const gltf = useLoader(GLTFLoader, url)
   const scene = useMemo(() => gltf.scene.clone(true), [gltf])
+  // #2364 — a mesh that came with no box (a library file's plate, placed where the 3MF
+  // put it on the bed) is measured, so it is centred and framed like any other.
+  useEffect(() => {
+    if (bbox) return
+    const box = new THREE.Box3().setFromObject(gltf.scene)
+    if (!box.isEmpty()) onMeasured(url, modelBox(box.min.toArray(), box.max.toArray()))
+  }, [bbox, gltf, url, onMeasured])
   const group = useRef<THREE.Group>(null)
   // #364 — the GLB is in OpenSCAD's coordinates; the outline and the camera are
   // centred on the plate. Move the model there, as the slicer will.

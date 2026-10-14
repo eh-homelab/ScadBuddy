@@ -57,12 +57,16 @@ const WARNING_TONE: Record<FilamentWarning['kind'], string> = {
   'no-process': 'text-warn',
   'not-installed': 'text-warn',
   'plate-differs': 'text-muted',
+  // #2366 — a plate the printer's model does not take: it sets the bed temperature.
+  'plate-not-listed': 'text-warn',
   'hf-unsupported': 'text-muted',
   'hf-mounted': 'text-warn',
   // spec 2026-10-01 (#836) — the rack pick's own kinds; plate-wide, from PrintRunResult/check.
   'rack-unsafe-material': 'text-warn',
   'rack-left-to-bambuddy': 'text-muted',
   'rack-manual-partial': 'text-muted',
+  // #956 — a by-object plate the toolhead or the gantry would hit; never a refusal.
+  'sequence-clearance': 'text-warn',
 }
 
 /**
@@ -90,10 +94,11 @@ function grams(value: number): string {
 }
 
 /** What one slot needs, in words. Never "0 g" — see the module comment. */
-function needLabel(slot: SlotNeed, copies: number): string {
+function needLabel(slot: SlotNeed, copies: number, stale: boolean): string {
   const need = slotNeed(slot, copies)
   if (need === null) return 'grams unknown until this is sliced'
-  return `${grams(need)} for ${copies} ${copies === 1 ? 'copy' : 'copies'}`
+  const label = `${grams(need)} for ${copies} ${copies === 1 ? 'copy' : 'copies'}`
+  return stale ? `${label}, from the last slice` : label
 }
 
 export function WarningList({ warnings, testId }: { warnings: FilamentWarning[]; testId: string }) {
@@ -119,6 +124,8 @@ interface Props {
    * to which spool is in them. Any other tray-only row is held back until then.
    */
   offeredTrays?: ReadonlySet<number>
+  /** #2365 — the grams are the last slice's, and a slice for these choices is on its way. */
+  gramsStale?: boolean
 }
 
 export function FilamentPicker({
@@ -127,6 +134,7 @@ export function FilamentPicker({
   onChange,
   copies,
   offeredTrays,
+  gramsStale = false,
 }: Props) {
   const [filters, setFilters] = useState<SpoolFilters>(NO_FILTERS)
   // Slots whose list is open although a spool is chosen. A slot with a spool shows only
@@ -316,7 +324,7 @@ export function FilamentPicker({
                   original
                 </span>
                 {slot.material ? <span className="text-muted">{slot.material}</span> : null}
-                <span className="text-[12px] text-faint">{needLabel(slot, copies)}</span>
+                <span className="text-[12px] text-faint">{needLabel(slot, copies, gramsStale)}</span>
                 {/* The colour this part will actually come out in: the file is recoloured
                     to it before slicing, so the plate thumbnail shows it too (#476). */}
                 {chosenSpool && (

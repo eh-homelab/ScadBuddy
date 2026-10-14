@@ -10,9 +10,11 @@ the new code (``workflows/housekeeping.py``'s docstring). A change to the comman
 recorded by the patched workflow, which also runs ``REAP_SWEEP``. ``flow_runs`` was
 recorded by the workflow with ``FLOWS_PATCH`` too (#1057), which also runs
 ``FLOWS_SWEEP``, and ``preview_slices`` with ``PREVIEWS_PATCH`` (#2169), which also
-runs ``PREVIEWS_SWEEP``, and ``models_git`` with ``GIT_PATCH`` (#2289), which also runs
-``GIT_SWEEP`` (``SCADBUDDY_RECORD_HISTORIES=1`` runs the recording below). Never
-re-record them: a later change adds a history recorded on the changed code beside them.
+runs ``PREVIEWS_SWEEP``, ``models_git`` with ``GIT_PATCH`` (#2289), which also runs
+``GIT_SWEEP``, and ``activity`` with ``ACTIVITY_PATCH`` (spec 2026-10-09 §6), which also
+runs ``ACTIVITY_SWEEP`` (``SCADBUDDY_RECORD_HISTORIES=1`` runs the recording below).
+Never re-record them: a later change adds a history recorded on the changed code beside
+them.
 """
 
 from __future__ import annotations
@@ -35,7 +37,7 @@ HISTORIES = Path(__file__).parent / "fixtures" / "housekeeping_histories"
 
 
 @pytest.mark.parametrize(
-    "name", ["before_reap", "reap", "flow_runs", "preview_slices", "models_git"]
+    "name", ["before_reap", "reap", "flow_runs", "preview_slices", "models_git", "activity"]
 )
 async def test_housekeeping_replays_its_recorded_history(name: str) -> None:
     history = WorkflowHistory.from_json(
@@ -52,7 +54,7 @@ def recording_temporal() -> Iterator[str]:
 
 @pytest.mark.requires_temporal
 @pytest.mark.skipif(os.environ.get("SCADBUDDY_RECORD_HISTORIES") != "1", reason="records a history")
-async def test_record_models_git(recording_temporal: str) -> None:
+async def test_record_activity(recording_temporal: str) -> None:
     """Every sweep a stub, so only the workflow's own commands are recorded."""
 
     def stub(name: str) -> Any:
@@ -81,4 +83,4 @@ async def test_record_models_git(recording_temporal: str) -> None:
         if e.HasField("activity_task_scheduled_event_attributes")
     ]
     assert names == list(SWEEPS)
-    (HISTORIES / "models_git.json").write_text(history.to_json())
+    (HISTORIES / "activity.json").write_text(history.to_json())

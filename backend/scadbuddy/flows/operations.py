@@ -534,6 +534,12 @@ def flow_kinds(
                 responder=actor,
                 hops=hops_of(checked, "deny", actor),
             )
+            held = await store.get_decision(decision.request_id)
+            if held is not None and (held.outcome, held.responder) == ("denied", actor):
+                # A retried attempt after this very denial was recorded (and maybe sent):
+                # the entry may have left `parent` since; send it again, idempotently.
+                await send_approval(checked, held, approved=False, reason=reason)
+                return {**answer, "outcome": "denied"}
             try:
                 recorded = await store.record_decision(decision, at_hop="parent")
             except HopMovedError:
@@ -672,7 +678,8 @@ def flow_kinds(
             raise ApiError(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
                 f"Event {event_id} is not a point a run resets to: name a completed"
-                " workflow task before the run's last event.",
+                " workflow task before the run's last event, and for a finished run,"
+                " one before it recorded its end.",
                 type_=RESET_POINT,
             )
         if any(c.scheduled_event_id > int(request["as_of_event_id"]) for c in preview.calls):

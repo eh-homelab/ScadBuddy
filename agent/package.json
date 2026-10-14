@@ -43,6 +43,7 @@
     "jose": "^6.2.12",
     "openapi-fetch": "^0.17.0",
     "postgres": "^3.4.9",
+    "turndown": "7.2.2",
     "ws": "^8.22.0",
     "yaml": "^2.9.1",
     "zod": "^4.6.5"
@@ -52,6 +53,7 @@
     "@opentelemetry/context-async-hooks": "2.12.0",
     "@temporalio/testing": "1.24.0",
     "@types/node": "^24.19.1",
+    "@types/turndown": "5.0.6",
     "@types/ws": "^8.18.2",
     "eslint": "^10.12.0",
     "globals": "^17.13.0",

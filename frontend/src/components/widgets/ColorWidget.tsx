@@ -1,6 +1,7 @@
 import type { Param } from '../../api/types'
 import { normalizeHex } from '../../lib/format'
 import { Field } from './Field'
+import { FilamentColourPicker } from './FilamentColourPicker'
 
 export function ColorWidget({
   param,
@@ -49,6 +50,7 @@ export function ColorWidget({
           className="sb-field sb-num uppercase"
         />
       </div>
+      <FilamentColourPicker label={param.caption ?? param.name} value={hex} onPick={onChange} />
     </Field>
   )
 }

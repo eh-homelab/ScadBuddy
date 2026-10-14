@@ -55,10 +55,11 @@ import json
 import logging
 import os
 import re
+import urllib.parse
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, replace
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeGuard
 
 import psycopg
 from claude_agent_sdk import AgentDefinition, ResultError, create_sdk_mcp_server, tool
@@ -84,6 +85,18 @@ from scadbuddy_durable.session.package_hash import PackageContentError, hash_tre
 
 Connect = Callable[[], AbstractAsyncContextManager[psycopg.AsyncConnection[Any]]]
 logger = logging.getLogger(__name__)
+
+
+def _http_url(value: object) -> TypeGuard[str]:
+    """Whether ``value`` is an absolute http(s) URL with a host."""
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        parts = urllib.parse.urlsplit(value)
+    except ValueError:
+        return False
+    return parts.scheme in ("http", "https") and bool(parts.hostname)
+
 
 IMAGES_SERVER = "scadbuddy_images"
 VIEW_IMAGES = "view_user_images"
@@ -132,8 +145,15 @@ _FINAL = re.compile(
     re.IGNORECASE,
 )
 # Claude Code's own words when a segment reaches its max_budget_usd (the result's
-# subtype is error_max_budget_usd; its text is "Reached maximum budget ($N)").
-_BUDGET_REACHED = re.compile(r"Reached maximum budget|error_max_budget_usd")
+# subtype is error_max_budget_usd; its text is "Reached maximum budget ($N)"). Only those
+# words with the amount that follows, and only at the start: the SDK raises them as
+# "Claude Code returned an error result: Reached maximum budget ($N) (exit code: 1)"
+# (claude_agent_sdk _internal/query.py), the CLI's own errors first. The rest of an
+# error's text is the session's content, and one that quotes the subtype or the words,
+# even the whole phrase, is not the cap (#2675).
+_BUDGET_REACHED = re.compile(
+    r"(?:Claude Code returned an error result: )?Reached maximum budget \(\$"
+)
 # sessions/images.ts and routes/imageSettings.ts: what one message's images may be.
 IMAGES_MAX = 4
 IMAGE_BYTES_MAX = 5 * 1024 * 1024 * 3 // 4  # 5 MB of base64, the Messages API's limit
@@ -145,6 +165,9 @@ MIN_LONG_EDGE, MAX_LONG_EDGE = 200, 2576
 # plugin's switch (on unless stored false).
 MODEL_KEY = "model"
 OWN_PLUGIN_KEY = "scadbuddy_plugin_enabled"
+# agent/src/routes/durableSubagents.ts SETTING_DURABLE_SUBAGENTS: `{url, peers}`; a string
+# `url` replaces the worker's own subagent URL (an agent-durable outside the agent's pod).
+SUBAGENTS_KEY = "durable_subagents"
 IMAGE_TOO_LARGE = "input too large: "
 # agent/src/temporal/turnPackages.ts sharedName: a package's folder on the shared volume.
 _SHARED_NAME = re.compile(r"[0-9a-f]{64}")
@@ -238,6 +261,7 @@ def declares_remote_servers(root: str) -> bool:
                 maps.append(read(entry, True))
             else:
                 maps.append(entry)
+    # PEP 758 (3.14): both types, unparenthesised; not Python 2's `except E, name`.
     except OSError, ValueError:
         return True
     for m in maps:
@@ -497,8 +521,9 @@ class ScadBuddyRunner:
         )
 
     async def _subagent_tools(self, session: str, extra: dict[str, Any]) -> None:
-        """ScadBuddy's subagents (#2320, subagents.py), each with the agent's loopback
-        server inline and a token for this session's running turn and owner."""
+        """ScadBuddy's subagents (#2320, subagents.py), each with the agent's subagent
+        server inline (the URL Settings names, else this worker's) and a token for this
+        session's running turn and owner."""
         if self._subagent_url is None or self._agents_dir is None:
             return
         async with self._connect() as conn:
@@ -508,12 +533,22 @@ class ScadBuddyRunner:
                 (session,),
             )
             row = await cur.fetchone()
+            cur = await conn.execute(
+                "SELECT value FROM ai_settings WHERE key = %s", (SUBAGENTS_KEY,)
+            )
+            setting = await cur.fetchone()
         if row is None or row[2] is None:
             return
+        stored = setting[0] if setting else None
+        url = stored.get("url") if isinstance(stored, dict) else None
+        if not _http_url(url):
+            # The agent's route stores only an http(s) URL; a row written any other way
+            # does not reach the subagents' definitions (#2883).
+            url = self._subagent_url
         if self._agents is None:
             self._agents = subagents.load_agents(self._agents_dir)
         token = subagents.token_for(self._kek, session, str(row[2]), row[0], row[1])
-        extra["agents"] = subagents.with_server(self._agents, self._subagent_url, token)
+        extra["agents"] = subagents.with_server(self._agents, url, token)
         # Pre-approved for the subagents that have the server; the main agent has none.
         extra["allowed_tools"] = [*extra.get("allowed_tools", []), f"mcp__{subagents.SERVER}"]
 
@@ -529,6 +564,7 @@ class ScadBuddyRunner:
             path = os.path.join(self._package_root, package.dir)
             try:
                 matches = hash_tree(path) == package.content_hash
+            # PEP 758 (3.14): both types, unparenthesised; not Python 2's `except E, name`.
             except OSError, PackageContentError:
                 matches = False
             if not matches:
@@ -586,7 +622,7 @@ class ScadBuddyRunner:
             )
             try:
                 out = await runner.run(inp, attempt)
-                if out.is_error and out.error and _BUDGET_REACHED.search(out.error):
+                if out.is_error and out.error and _BUDGET_REACHED.match(out.error):
                     # The plugin answers a segment that reached its cap with the error's
                     # text only: no subtype, and no cost. Claude Code stops only once the
                     # cost reached the cap, so at least what was left was spent; charged

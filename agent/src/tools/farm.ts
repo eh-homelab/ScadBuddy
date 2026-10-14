@@ -39,6 +39,22 @@ export const farmTools: Tool[] = [
   }),
 
   defineTool({
+    name: 'get_printers_now',
+    description:
+      "What each active printer is doing now, whoever started it (#977): its activity (printing, paused, idle, " +
+      'finished, failed, offline or unknown), the job name, progress, layer and minutes left while it works, its ' +
+      "HMS errors, whether it waits for the plate to be cleared, and Bambuddy's archive of the job. A printer " +
+      'whose status cannot be read is listed with an error rather than dropped.',
+    input: z.object({}),
+    risk: 'read',
+    source: SOURCE,
+    bambuddyScope: ['Read Status'],
+    routes: ['GET /api/v1/print/printers/now'],
+    handler: async (_args, { backend }) =>
+      json(await ok(backend.GET('/api/v1/print/printers/now'), 'read what each printer is doing')),
+  }),
+
+  defineTool({
     name: 'get_print_stats',
     description:
       "The farm's print statistics from Bambuddy: prints by outcome (successful, failed, cancelled), total print " +
@@ -103,5 +119,32 @@ export const farmTools: Tool[] = [
     routes: ['GET /api/v1/farm/inventory'],
     handler: async (query, { backend }) =>
       json(await ok(backend.GET('/api/v1/farm/inventory', { params: { query } }), 'get the spool inventory')),
+  }),
+
+  defineTool({
+    name: 'get_spool_summary',
+    description:
+      "One spool's stock and price (#785): its remaining grams, where it is loaded and Bambuddy's cost per kg, " +
+      "what the filament left on it is worth, and the stock of every unarchived spool of the same filament " +
+      '(material, subtype, brand and colour): how many, their total remaining grams and where each is loaded. ' +
+      "`grams` prices that many grams at this spool's cost, e.g. a plate's use. Every price and cost is null " +
+      'when Bambuddy has no price for the spool; never estimate one.',
+    input: z.object({
+      spool_id: z.number().int().describe('A Bambuddy spool id, as get_spool_inventory lists them'),
+      grams: z.number().min(0).optional(),
+    }),
+    risk: 'read',
+    source: SOURCE,
+    bambuddyScope: ['Read Status'],
+    routes: ['GET /api/v1/farm/spools/{spool_id}/summary'],
+    handler: async ({ spool_id, grams }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/farm/spools/{spool_id}/summary', {
+            params: { path: { spool_id }, query: { grams } },
+          }),
+          `summarise spool ${spool_id}`,
+        ),
+      ),
   }),
 ]

@@ -24,11 +24,23 @@ export type FlowImage = { name: string; mediaType: ImageMediaType; bytes: number
 /** The context an image is sealed in under its run's payload key (backend flows/images.py `blob_context`). */
 export const flowBlobContext = (subject: string, name: string): string => `flow-blob:${subject}:${name}`
 
+/**
+ * The most images one run keeps (#2578): `ai_flow_blobs` has no retention but forgetting
+ * the run, so a flow that loops over an image-returning tool must not grow it without
+ * bound. Each call keeps at most RESULT_IMAGES_MAX (sessions/blobs.ts); past this, a
+ * call's new images are not kept and its result says so.
+ */
+export const FLOW_IMAGES_MAX = 256
+
 const FLOW_SUBJECT = /^flow-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 export interface FlowBlobStore {
-  /** Keeps a run's images; one already there (the same bytes) is left as it is. */
-  put(subject: string, images: readonly SessionImage[]): Promise<void>
+  /**
+   * Keeps a run's images; one already there (the same bytes) is left as it is. Answers
+   * the names the run holds afterwards, of those given: a new one past FLOW_IMAGES_MAX
+   * is not kept.
+   */
+  put(subject: string, images: readonly SessionImage[]): Promise<readonly string[]>
   /** One of the run's images, or undefined: a malformed name is never looked up. */
   get(subject: string, name: string): Promise<StoredBlob | undefined>
 }
@@ -40,15 +52,17 @@ export function flowImageOf(image: SessionImage): FlowImage {
 export class PgFlowBlobs implements FlowBlobStore {
   readonly #sql: Sql
   readonly #keys: PayloadKeys
+  readonly #max: number
 
-  constructor(sql: Sql, keys: PayloadKeys) {
+  constructor(sql: Sql, keys: PayloadKeys, max = FLOW_IMAGES_MAX) {
     this.#sql = sql
     this.#keys = keys
+    this.#max = max
   }
 
-  async put(subject: string, images: readonly SessionImage[]): Promise<void> {
+  async put(subject: string, images: readonly SessionImage[]): Promise<readonly string[]> {
     if (!FLOW_SUBJECT.test(subject)) throw new Error(`${subject} is not a flow run`)
-    if (images.length === 0) return
+    if (images.length === 0) return []
     // SubjectForgotten for a run already forgotten: its key is never made again.
     const key = await this.#keys.keyFor(subject, true)
     try {
@@ -61,16 +75,24 @@ export class PgFlowBlobs implements FlowBlobStore {
       }))
       // Under the lock forgetting takes, and never for a forgotten run: a key this
       // process still caches must not leave rows behind a forget that just committed.
-      const written = await this.#sql.begin(async (tx) => {
+      // The lock also serialises the count: two calls of one run never both take the last room.
+      const kept = await this.#sql.begin(async (tx) => {
         await tx`SELECT pg_advisory_xact_lock(hashtext(${payloadKeyLock(subject)}))`
         const [forgotten] = await tx`SELECT 1 FROM ai_forgotten_subjects WHERE subject = ${subject}`
-        if (forgotten) return false
-        await tx`
-          INSERT INTO ai_flow_blobs ${tx(rows, 'subject', 'name', 'media_type', 'size', 'data')}
-          ON CONFLICT (subject, name) DO NOTHING`
-        return true
+        if (forgotten) return undefined
+        const held = new Set((await tx<{ name: string }[]>`SELECT name FROM ai_flow_blobs WHERE subject = ${subject}`).map((r) => r.name))
+        const fresh = rows.filter((r, i) => !held.has(r.name) && rows.findIndex((o) => o.name === r.name) === i)
+        const taken = fresh.slice(0, Math.max(0, this.#max - held.size))
+        if (taken.length) {
+          await tx`
+            INSERT INTO ai_flow_blobs ${tx(taken, 'subject', 'name', 'media_type', 'size', 'data')}
+            ON CONFLICT (subject, name) DO NOTHING`
+        }
+        for (const r of taken) held.add(r.name)
+        return [...new Set(rows.map((r) => r.name))].filter((name) => held.has(name))
       })
-      if (!written) throw new SubjectForgotten(`${subject} was forgotten; its images are not kept`)
+      if (!kept) throw new SubjectForgotten(`${subject} was forgotten; its images are not kept`)
+      return kept
     } finally {
       key.fill(0)
     }

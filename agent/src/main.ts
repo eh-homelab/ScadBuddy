@@ -13,6 +13,7 @@ import { approvalGrantCheck, FailClosedTokenStore, liveTokenTiers, PostgresToken
 import { loadConfig } from './config.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
 import { CredentialPool } from './harness/fallback.js'
+import { nestedQueries } from './builtins/nested.js'
 import { connectDatabase } from './db.js'
 import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js'
 import { PgEventListener } from './events/pgListener.js'
@@ -30,7 +31,7 @@ import { loadEnabledPlugins, PluginStore } from './plugins/registry.js'
 import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
 import { ApprovalActions } from './approvals/mcp.js'
-import { approvalHashKey } from './approvals/service.js'
+import { approvalHashKey, sweepErrorText } from './approvals/service.js'
 import { AuditLog } from './audit/log.js'
 import { auditedTokenStore } from './audit/writes.js'
 import { TabHub } from './bridge/hub.js'
@@ -42,7 +43,7 @@ import { CHAT_FRAME_MAX, startHeartbeat } from './routes/chat.js'
 import { storedModel } from './routes/model.js'
 import { followSessionEvents, SessionEventPublisher } from './sessions/busEvents.js'
 import { resolveTabWaits, SessionManager, SETTING_MODEL } from './sessions/manager.js'
-import { drainRetains } from './memory/hindsight.js'
+import { drainRetains, type MemoryOptions } from './memory/hindsight.js'
 import { shutdown } from './shutdown.js'
 import { shutdownTelemetry, traceListener } from './telemetry/runtime.js'
 import { harnessTools } from './tools/harness.js'
@@ -75,6 +76,7 @@ import { Client, Connection } from '@temporalio/client'
 import { fileURLToPath } from 'node:url'
 import { AgentCommands } from './operations/run.js'
 import { OperationStore } from './operations/store.js'
+import { activityKindsOf, upsertActivityKinds } from './activity/kinds.js'
 import { packageKinds } from './plugins/packages/operations.js'
 import { operationActivities } from './temporal/operationActivities.js'
 import { PendingActionStore } from './tools/pending.js'
@@ -289,9 +291,15 @@ const sessionEvents = database ? new SessionEventPublisher(database.sql) : undef
 // and the `sessions_*` tools (tools/sessions.ts).
 // The approval routes and the expiry sweep also serve approvals left pending
 // by a restart.
+// Automatic Hindsight memory's hook knobs: one value for classic turns (SessionManager)
+// and durable ones (memoryActivities), so a knob set here applies to both (#2420).
+// Undefined: the defaults.
+const memory: MemoryOptions | undefined = undefined
+
 const sessions =
   database && credentials
     ? new SessionManager({
+        memory,
         sql: database.sql,
         paths,
         ...(settings ? { settings } : {}),
@@ -351,12 +359,17 @@ const stopSessionWake =
   sessions && events && sessionEvents ? followSessionEvents(events, sessions.events, sessionEvents.replica) : undefined
 const stopSweeper = sessions?.approvals.startSweeper(APPROVAL_SWEEP_MS, {
   ...(database ? { ready: database.ready } : {}),
-  onError: (err) => console.error('approval expiry sweep failed:', (err as Error).message),
+  onError: (err) => console.error('approval expiry sweep failed:', sweepErrorText(err)),
 })
 // Questions past `question_expiry_seconds` whose turn is gone (spec §6.6): cancelled, never answered.
 const stopQuestionSweeper = sessions?.questions.startSweeper(APPROVAL_SWEEP_MS, {
   ...(database ? { ready: database.ready } : {}),
   onError: (err) => console.error('question expiry sweep failed:', (err as Error).message),
+})
+// A flow run's call whose hop at its starting session is over goes to the person (#2482).
+const stopEscalationSweeper = sessions?.escalations.startSweeper(APPROVAL_SWEEP_MS, {
+  ...(database ? { ready: database.ready } : {}),
+  onError: (err) => console.error('escalation hop sweep failed:', (err as Error).message),
 })
 // Now and every 30 s: sessions whose turn died without finishing (a SIGKILL,
 // or a restart that closed the pool under it) say so and stop claiming to run.
@@ -381,6 +394,15 @@ if (config.temporalAddress && !database) console.error('agent-tools worker: not 
 if (temporal) Runtime.install({ shutdownSignals: [] })
 const operationStore = temporal ? new OperationStore(temporal.sql) : undefined
 const commandKinds = pluginPackages ? packageKinds({ packages: pluginPackages, installer: packageInstaller }) : []
+// The agent's activity kinds are its command kinds (spec 2026-10-09 §4), read by the backend.
+if (database && commandKinds.length > 0) {
+  void database
+    .ready()
+    .then(async (ok) => {
+      if (ok) await upsertActivityKinds(database.sql, activityKindsOf(commandKinds))
+    })
+    .catch((err: unknown) => console.error('activity kinds: could not record them:', (err as Error).message))
+}
 // Durable subjects' payloads are sealed per subject (spec §6.5): every client and worker
 // that encodes or decodes them carries the codec, which needs the KEK. Without one, a
 // session or flow payload is never sealed here, so no durable session is started (5c Ruling 13).
@@ -459,6 +481,28 @@ const turnToolDeps = temporal
               },
             }
           : {}),
+        // An allowed package's other built-ins (#2393), on the session's workspace and credential.
+        ...(workspace && credentials
+          ? {
+              builtins: {
+                files: workspace,
+                audit,
+                nested: (context: { session: string; flow?: string }) =>
+                  nestedQueries({
+                    paths,
+                    credential: async () => (await new CredentialPool({ repo: credentials, kek, audit }).candidates())[0]!.credential,
+                    // Counted in the session's cost, which its budget reads, as a classic turn counts Claude Code's own calls.
+                    ...(context.flow
+                      ? {}
+                      : {
+                          spent: async (cost: number) => {
+                            await temporal.sql`UPDATE ai_sessions SET cost_usd = cost_usd + ${cost} WHERE id = ${context.session}`
+                          },
+                        }),
+                  }),
+              },
+            }
+          : {}),
       }),
       hostQueue: HOST_QUEUE,
       clients: turnClients,
@@ -466,6 +510,8 @@ const turnToolDeps = temporal
       audit,
       currentTiers: liveTokenTiers(tokens),
       blobs: new SessionBlobs(temporal.sql),
+      // A flow's plugin and http_request calls keep their images as its own tools' do (#2578).
+      ...(payloadKeys ? { flowBlobs: new PgFlowBlobs(temporal.sql, payloadKeys) } : {}),
       ...(sessions
         ? {
             report: async (session: string, problems: readonly string[]) => {
@@ -513,6 +559,7 @@ const temporalWorker =
                 credentialSecrets: durableCredentialSecrets,
                 audit,
                 settings,
+                memory,
               })
             : {}),
           // A flow's agent(...) and ask_session(...) (#1057, 6g): beside the tools, never one.
@@ -621,6 +668,8 @@ const app = createApp({
       return undefined
     }
   },
+  // The tools a flow may call at their tiers now, for the API beside it (#2704, routes/flowTools.ts): loopback only.
+  flowTools: { tools: ALL_TOOLS, services: toolServices },
   // A durable segment's subagents' ScadBuddy tools (#2320, routes/subagentMcp.ts): loopback only.
   ...(database && kek.ok
     ? {
@@ -676,6 +725,7 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
 async function stop(): Promise<void> {
   stopSweeper?.()
   stopQuestionSweeper?.()
+  stopEscalationSweeper?.()
   stopOrphanSweep?.()
   stopDurableSweep?.()
   stopReaper?.()

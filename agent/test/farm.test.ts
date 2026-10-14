@@ -33,8 +33,10 @@ function ctx(overrides: Partial<ToolContext> = {}): ToolContext {
 const FARM_TOOLS = {
   list_print_queue: 'GET /api/v1/farm/queue',
   get_print_stats: 'GET /api/v1/farm/stats',
+  get_printers_now: 'GET /api/v1/print/printers/now',
   list_print_archives: 'GET /api/v1/farm/archives',
   get_spool_inventory: 'GET /api/v1/farm/inventory',
+  get_spool_summary: 'GET /api/v1/farm/spools/{spool_id}/summary',
 } as const
 
 /** The query string each call sent, by path. */
@@ -88,6 +90,15 @@ describe('farm-context tools (#1912)', () => {
     expect(result.isError).toBeFalsy()
     expect(Object.fromEntries(seen[0]!)).toEqual({ date_from: '2026-09-01', date_to: '2026-09-30' })
     expect(firstText(result)).toMatchObject({ total_prints: 104 })
+  })
+
+  it("reads what each printer is doing now, whoever started it (#2929)", async () => {
+    capture('/api/v1/print/printers/now', {
+      printers: [{ printer_id: 2, name: 'P2', activity: 'paused', job_name: 'Bracket', progress: 32, hms: [] }],
+    })
+    const result = await runTool(tool('get_printers_now'), {}, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(firstText(result)).toMatchObject({ printers: [{ printer_id: 2, activity: 'paused', job_name: 'Bracket' }] })
   })
 
   it('refuses a day that is not YYYY-MM-DD', () => {
@@ -165,6 +176,15 @@ describe('farm-context tools (#1912)', () => {
     await runTool(tool('get_spool_inventory'), {}, ctx())
     await runTool(tool('get_spool_inventory'), { include_archived: true, printer_id: 1 }, ctx())
     expect(seen.map((q) => Object.fromEntries(q))).toEqual([{}, { include_archived: 'true', printer_id: '1' }])
+  })
+
+  it('summarises one spool, pricing grams only when asked (#785)', async () => {
+    const seen = capture('/api/v1/farm/spools/15/summary', { spool: { id: 15 }, filament: { spool_count: 2 } })
+    const result = await runTool(tool('get_spool_summary'), { spool_id: 15 }, ctx())
+    await runTool(tool('get_spool_summary'), { spool_id: 15, grams: 12.5 }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(JSON.stringify(firstText(result))).toContain('spool_count')
+    expect(seen.map((q) => Object.fromEntries(q))).toEqual([{}, { grams: '12.5' }])
   })
 
   it("passes the backend's scope problem through", async () => {

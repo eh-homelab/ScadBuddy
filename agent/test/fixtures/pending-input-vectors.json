@@ -1529,6 +1529,355 @@
           "Lid"
         ]
       }
+    },
+    {
+      "name": "escalation: the starting session denies a run's call",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "approval",
+        "state": "pending",
+        "input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "requested_by": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_owner": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_creator": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "in_run": true
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "approval",
+          "decision": "deny"
+        },
+        "responder": {
+          "kind": "session",
+          "id": "00000000-0000-4000-8000-0000000000aa"
+        },
+        "role": "parent"
+      },
+      "expect": {
+        "ok": true,
+        "decision": "deny"
+      }
+    },
+    {
+      "name": "escalation: the starting session never approves",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "approval",
+        "state": "pending",
+        "input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "requested_by": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_owner": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_creator": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "in_run": true
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "approval",
+          "decision": "approve"
+        },
+        "responder": {
+          "kind": "session",
+          "id": "00000000-0000-4000-8000-0000000000aa"
+        },
+        "role": "parent"
+      },
+      "expect": {
+        "refused": "forbidden"
+      }
+    },
+    {
+      "name": "escalation: a parent outside a run decides nothing",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "approval",
+        "state": "pending",
+        "input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "requested_by": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_owner": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_creator": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "in_run": false
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "approval",
+          "decision": "deny"
+        },
+        "responder": {
+          "kind": "session",
+          "id": "00000000-0000-4000-8000-0000000000aa"
+        },
+        "role": "parent"
+      },
+      "expect": {
+        "refused": "forbidden"
+      }
+    },
+    {
+      "name": "escalation: a grant holder never decides a run's call",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "approval",
+        "state": "pending",
+        "input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "requested_by": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_owner": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_creator": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "in_run": true
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "approval",
+          "decision": "approve"
+        },
+        "responder": {
+          "kind": "bearer",
+          "id": "tok-c"
+        },
+        "role": "grant"
+      },
+      "expect": {
+        "refused": "forbidden"
+      }
+    },
+    {
+      "name": "escalation: a grant holder never denies a run's call either",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "approval",
+        "state": "pending",
+        "input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "requested_by": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_owner": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_creator": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "in_run": true
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "approval",
+          "decision": "deny"
+        },
+        "responder": {
+          "kind": "bearer",
+          "id": "tok-c"
+        },
+        "role": "grant"
+      },
+      "expect": {
+        "refused": "forbidden"
+      }
+    },
+    {
+      "name": "escalation: no response carries the run grant",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "approval",
+        "state": "pending",
+        "input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "requested_by": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_owner": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_creator": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "in_run": true
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "approval",
+          "decision": "approve"
+        },
+        "responder": {
+          "kind": "bearer",
+          "id": "tok-c"
+        },
+        "role": "run_grant"
+      },
+      "expect": {
+        "refused": "forbidden"
+      }
+    },
+    {
+      "name": "escalation: the browser user approves a run's call",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "approval",
+        "state": "pending",
+        "input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "requested_by": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_owner": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_creator": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "in_run": true
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "approval",
+          "decision": "approve"
+        },
+        "responder": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "role": "browser"
+      },
+      "expect": {
+        "ok": true,
+        "decision": "approve"
+      }
+    },
+    {
+      "name": "escalation: a parent answers no question",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "answer",
+        "state": "pending",
+        "input_hash": null,
+        "requested_by": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_owner": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "session_creator": {
+          "kind": "browser",
+          "id": "browser"
+        },
+        "questions": [
+          {
+            "question": "Which colour?",
+            "multi_select": false
+          },
+          {
+            "question": "Which parts?",
+            "multi_select": true
+          }
+        ],
+        "in_run": true
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "answer",
+          "answers": {
+            "Which colour?": "Red",
+            "Which parts?": "Lid"
+          }
+        },
+        "responder": {
+          "kind": "session",
+          "id": "00000000-0000-4000-8000-0000000000aa"
+        },
+        "role": "parent"
+      },
+      "expect": {
+        "refused": "forbidden"
+      }
+    },
+    {
+      "name": "escalation: a parent's approval for another input is a mismatch before it is refused",
+      "entry": {
+        "id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "kind": "approval",
+        "state": "pending",
+        "input_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "requested_by": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_owner": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "session_creator": {
+          "kind": "bearer",
+          "id": "tok-a"
+        },
+        "in_run": true
+      },
+      "request": {
+        "request_id": "durable:00000000-0000-4000-8000-000000000001:run-1:toolu_1",
+        "response": {
+          "kind": "approval",
+          "decision": "approve",
+          "input_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        },
+        "responder": {
+          "kind": "session",
+          "id": "00000000-0000-4000-8000-0000000000aa"
+        },
+        "role": "parent"
+      },
+      "expect": {
+        "refused": "input_mismatch"
+      }
     }
   ]
 }

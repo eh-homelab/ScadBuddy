@@ -665,6 +665,60 @@ def test_a_template_s_list_is_checked_and_written_under_the_lock_a_save_takes(
     assert held == [(False, True)]
 
 
+def test_keep_only_reads_the_kept_names_and_trims_every_preset_under_the_lock(
+    store: PresetStore, pg_conninfo: str
+) -> None:
+    """#2631 — a mesh model's preset trim: one lock from reading what the scene keeps to
+    the last write, so a save cannot land between the read and the rewrite."""
+    tall = store.create("m", ParamPresetCreate(name="Tall", params={"height": 3, "width": 2}))
+    wide = store.create("m", ParamPresetCreate(name="Wide", params={"width": 5}))
+    held: list[bool] = []
+
+    def kept() -> list[str]:
+        with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+            row = conn.execute(
+                "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))",
+                (f"{PRESET_LOCK_PREFIX}m",),
+            ).fetchone()
+            assert row is not None
+            held.append(row[0])
+        return ["width"]
+
+    assert store.keep_only("m", kept) == [tall.id]
+    assert held == [False]
+    after = {p.name: p for p in store.saved_presets("m")}
+    assert after["Tall"].params == {"width": 2}
+    assert after["Tall"].inputs["params"] == {"width": 2}
+    assert after["Wide"].params == {"width": 5} and after["Wide"].updated_at == wide.updated_at
+
+
+def test_a_preset_saved_during_a_trim_waits_for_it_and_survives(store: PresetStore) -> None:
+    """#2979 review: the lost update keep_only's lock prevents. A save that comes in
+    while the trim reads what the scene keeps waits for the trim's write, then lands
+    on top of it, rather than being overwritten by a list read before it."""
+    store.create("m", ParamPresetCreate(name="Tall", params={"height": 3, "width": 2}))
+    saving: list[threading.Thread] = []
+    waited: list[bool] = []
+
+    def save() -> None:
+        store.create("m", ParamPresetCreate(name="New", params={"width": 7}))
+
+    def kept() -> list[str]:
+        saver = threading.Thread(target=save)
+        saver.start()
+        saving.append(saver)
+        saver.join(0.5)
+        waited.append(saver.is_alive())
+        return ["width"]
+
+    store.keep_only("m", kept)
+    saving[0].join(10)
+
+    assert waited == [True], "the save waited for the trim's lock"
+    after = {p.name: p.params for p in store.saved_presets("m")}
+    assert after == {"Tall": {"width": 2}, "New": {"width": 7}}
+
+
 @pytest.mark.requires_git
 def test_a_built_in_s_presets_cannot_be_edited(client: TestClient) -> None:
     assert _patch_presets(client, BUILTIN, []).status_code == 403

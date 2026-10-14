@@ -8,7 +8,9 @@ import {
   filterSpools,
   loadedLabel,
   seedPlan,
+  slicedPlateSlots,
   slotNeed,
+  withSlicedGrams,
   spoolLabel,
   warningsFor,
 } from './filaments'
@@ -109,6 +111,21 @@ describe('slotNeed', () => {
     // nothing" would declare every spool sufficient and print "0 g".
     expect(slotNeed(slot({ used_grams: 0 }), 2)).toBeNull()
     expect(slotNeed(slot({ used_grams: null }), 2)).toBeNull()
+  })
+})
+
+describe('withSlicedGrams (#2365)', () => {
+  const options = { slots: [slot({ slot_id: 1, used_grams: null }), slot({ slot_id: 2, used_grams: 0 })] } as FilamentOptions
+
+  it("takes each slot's grams from the slice", () => {
+    const merged = withSlicedGrams(options, { slots: [{ slot_id: 1, grams: 13 }, { slot_id: 2, grams: 0.1 }] })
+    expect(merged.slots?.map((each) => each.used_grams)).toEqual([13, 0.1])
+  })
+
+  it('leaves a slot the slice has no grams for, and everything without a slice', () => {
+    const merged = withSlicedGrams(options, { slots: [{ slot_id: 1, grams: null }] })
+    expect(merged.slots?.map((each) => each.used_grams)).toEqual([null, 0])
+    expect(withSlicedGrams(options, null)).toBe(options)
   })
 })
 
@@ -266,6 +283,24 @@ describe('checkPlan', () => {
     expect(checkPlan(unsliced, [{ slot_id: 1, spool_id: 1 }], 1000)).toEqual([])
   })
 
+  it('warns when slots sharing a spool need more of it between them than it holds (#2851)', () => {
+    const shared = options({
+      slots: [
+        { slot_id: 1, used_grams: 10 },
+        { slot_id: 2, used_grams: 10 },
+        { slot_id: 3, used_grams: 10 },
+        { slot_id: 4, used_grams: 0 },
+      ],
+      spools: [spool({ spool_id: 1, remaining_g: 25, loaded: loaded({}) })],
+    })
+    const plan = [1, 2, 3, 4].map((slot_id) => ({ slot_id, spool_id: 1 }))
+    const found = checkPlan(shared, plan, 1)
+    expect(found.map((w) => w.slot_id)).toEqual([1, 2, 3])
+    expect(found.every((w) => w.message.includes('slots 1, 2 and 3 need 30 g of it between them'))).toBe(true)
+    // Two of them: 20 g of 25.
+    expect(checkPlan(shared, plan.slice(0, 2), 1).filter((w) => w.kind === 'low-filament')).toEqual([])
+  })
+
   it('says so when a slot has nothing chosen', () => {
     expect(checkPlan(options(), [], 1).map((w) => w.kind)).toEqual(['no-choice'])
   })
@@ -347,3 +382,24 @@ describe('carriedPlan', () => {
     ).toEqual(options.suggested)
   })
 })
+
+describe('slicedPlateSlots (#2702 review)', () => {
+  const slots = [1, 2].map((slot_id) => ({ slot_id, colour_matches: [] }))
+
+  it("is unknown for a two-plate file under All plates, or with another plate's slice shown", () => {
+    expect(slicedPlateSlots(slots, { plates: 2, chosen: 'all', sliced: 1 })).toBeNull()
+    expect(slicedPlateSlots(slots, { plates: 2, chosen: 1, sliced: 2 })).toBeNull()
+  })
+
+  it("is unknown while the slice shown is still another plate's, stale (#2702 review)", () => {
+    // Plate 2 just chosen: its slots are read at once, but plate 1's slice stays shown.
+    expect(slicedPlateSlots(slots, { plates: 2, chosen: 2, sliced: 1 })).toBeNull()
+    expect(slicedPlateSlots(slots, { plates: 2, chosen: 2, sliced: null })).toBeNull()
+  })
+
+  it("is the dialog's slots for the chosen plate's own slice, or a one-plate file", () => {
+    expect(slicedPlateSlots(slots, { plates: 2, chosen: 2, sliced: 2 })).toBe(slots)
+    expect(slicedPlateSlots(slots, { plates: 1, chosen: 'all', sliced: 1 })).toBe(slots)
+  })
+})
+

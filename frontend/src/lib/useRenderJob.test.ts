@@ -3,7 +3,18 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 import { ApiError, OFFLINE, STILL_ACCEPTING, TEMPORAL_UNAVAILABLE, UNANSWERED, api } from '../api/client'
 import type { Job, RenderAccepted } from '../api/types'
 import { fakeRealtime } from './realtime.fake'
-import { READ_RETRIES, SNAPSHOT_PENDING_MAX_SECONDS, TRANSIENT_RETRIES, canRetry, useRenderJob } from './useRenderJob'
+import {
+  QUEUE_READ_MS,
+  READ_RETRIES,
+  RENDER_AUTO_RETRIES,
+  RENDER_AUTO_RETRY_MAX_MS,
+  RENDER_AUTO_RETRY_MS,
+  SNAPSHOT_PENDING_MAX_SECONDS,
+  TRANSIENT_RETRIES,
+  canRetry,
+  useRenderAutoRetry,
+  useRenderJob,
+} from './useRenderJob'
 
 const JOB_A = 'a'.repeat(32)
 const JOB_B = 'b'.repeat(32)
@@ -432,8 +443,9 @@ describe('useRenderJob', () => {
   })
 
   describe('following a job (#267)', () => {
-    it('reads the job when the subscription is confirmed and on each event, never on a timer', async () => {
+    it('reads a running job when the subscription is confirmed and on each event, never on a timer', async () => {
       const read = vi.mocked(api.getJob)
+      read.mockImplementation(async (id) => job(id, 'running'))
       const { result } = mount({ slug: 'demo', params: { n: 1 } })
       await settle()
       expect(realtime.following()).toEqual([`job:${JOB_A}`])
@@ -444,7 +456,6 @@ describe('useRenderJob', () => {
       })
       expect(read).toHaveBeenCalledTimes(1)
 
-      read.mockImplementation(async (id) => job(id, 'running'))
       await realtime.signal(`job:${JOB_A}`)
       expect(read).toHaveBeenCalledTimes(2)
       expect(result.current.job?.status).toBe('running')
@@ -453,6 +464,32 @@ describe('useRenderJob', () => {
       await realtime.signal(`job:${JOB_A}`)
       expect(result.current.rendering).toBe(false)
       expect(result.current.job?.status).toBe('done')
+    })
+
+    it('reads a job waiting for a worker again every few seconds, for its queue place (#1638)', async () => {
+      const read = vi.mocked(api.getJob)
+      read.mockImplementation(async (id) => ({ ...job(id, 'pending'), queue_position: 3 }))
+      const { result } = mount({ slug: 'demo', params: { n: 1 } })
+      await settle()
+      expect(read).toHaveBeenCalledTimes(1)
+      expect(result.current.job?.queue_position).toBe(3)
+
+      // No event says another job started: the place moves only on a read.
+      read.mockImplementation(async (id) => ({ ...job(id, 'pending'), queue_position: 1 }))
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(QUEUE_READ_MS + 500)
+      })
+      expect(read).toHaveBeenCalledTimes(2)
+      expect(result.current.job?.queue_position).toBe(1)
+
+      // Once a worker has it, its events are enough.
+      read.mockImplementation(async (id) => job(id, 'running'))
+      await realtime.signal(`job:${JOB_A}`)
+      const reads = read.mock.calls.length
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(QUEUE_READ_MS * 3)
+      })
+      expect(read).toHaveBeenCalledTimes(reads)
     })
 
     it('shows the step a job.progress names without reading the job, and clears it on settle', async () => {
@@ -663,5 +700,70 @@ describe('canRetry (review #1066 (13) 2)', () => {
     [new Error('openscad exited with 1'), false],
   ])('%#: %s is %s', (error, expected) => {
     expect(canRetry(error)).toBe(expected)
+  })
+})
+
+// #2464 — a submit a retry can fix is sent again on its own, with backoff and a cap.
+describe('useRenderAutoRetry', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  /** A failed submit, as a new error object each time, as each failed try gives. */
+  const unanswered = () => new ApiError({ type: UNANSWERED, title: 'No answer', status: 503 })
+
+  function setup(values: unknown = { a: 1 }) {
+    const retry = vi.fn()
+    const view = renderHook(
+      ({ error, values }: { error: unknown; values: unknown }) => useRenderAutoRetry(error, false, retry, values),
+      { initialProps: { error: unanswered() as unknown, values } },
+    )
+    return { retry, view }
+  }
+
+  it(`tries ${RENDER_AUTO_RETRIES} times, doubling the wait to at most a minute, then gives up`, () => {
+    // The same values throughout, as `debounced` keeps its identity until they change.
+    const values = { a: 1 }
+    const { retry, view } = setup(values)
+    for (let n = 0; n < RENDER_AUTO_RETRIES; n++) {
+      const wait = Math.min(RENDER_AUTO_RETRY_MS * 2 ** n, RENDER_AUTO_RETRY_MAX_MS)
+      act(() => vi.advanceTimersByTime(wait - 1))
+      expect(retry).toHaveBeenCalledTimes(n)
+      act(() => vi.advanceTimersByTime(1))
+      expect(retry).toHaveBeenCalledTimes(n + 1)
+      view.rerender({ error: unanswered(), values })
+    }
+    act(() => vi.advanceTimersByTime(RENDER_AUTO_RETRY_MAX_MS * 10))
+    act(() => window.dispatchEvent(new Event('online')))
+    expect(retry).toHaveBeenCalledTimes(RENDER_AUTO_RETRIES)
+  })
+
+  it('tries again at once when the browser comes back online', () => {
+    const { retry } = setup()
+    act(() => window.dispatchEvent(new Event('online')))
+    expect(retry).toHaveBeenCalledTimes(1)
+  })
+
+  it('starts the count over for new values that fail too', () => {
+    const values = { a: 1 }
+    const { retry, view } = setup(values)
+    for (let n = 0; n < RENDER_AUTO_RETRIES; n++) {
+      act(() => window.dispatchEvent(new Event('online')))
+      view.rerender({ error: unanswered(), values })
+    }
+    expect(retry).toHaveBeenCalledTimes(RENDER_AUTO_RETRIES)
+    view.rerender({ error: unanswered(), values: { a: 2 } })
+    act(() => vi.advanceTimersByTime(RENDER_AUTO_RETRY_MS))
+    expect(retry).toHaveBeenCalledTimes(RENDER_AUTO_RETRIES + 1)
+  })
+
+  it('leaves an error a retry cannot fix alone', () => {
+    const retry = vi.fn()
+    renderHook(() => useRenderAutoRetry(new Error('openscad exited with 1'), false, retry, {}))
+    act(() => vi.advanceTimersByTime(RENDER_AUTO_RETRY_MAX_MS * 10))
+    expect(retry).not.toHaveBeenCalled()
   })
 })

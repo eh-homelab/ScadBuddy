@@ -9,6 +9,9 @@ import { useLatest } from './useLatest'
 export const RENDER_DEBOUNCE_MS = 400
 /** Only while the realtime socket is unavailable (#267): otherwise events drive the reads. */
 const POLL_MS = 400
+/** #1638 — how often a job waiting for a worker is read again, for its queue place. No
+ * event says another job started, so the place would otherwise stand still. */
+export const QUEUE_READ_MS = 3_000
 
 /** A render's steps, as `job.progress` names them (backend `core/metrics.py` `RenderStage`). */
 export type RenderStage = 'source' | 'render' | 'split' | 'solids' | 'paint' | 'thumbnail' | 'write'
@@ -91,6 +94,15 @@ export const SNAPSHOT_PENDING_MAX_SECONDS = 300
  */
 export const READ_RETRIES = 5
 
+/**
+ * #2464 — a render that failed to submit for a reason a retry can fix is sent again on
+ * its own: after 5 s, doubling to at most a minute, up to 8 times (about 5 minutes,
+ * longer than a deploy's restart). "Try again" stays for the impatient.
+ */
+export const RENDER_AUTO_RETRY_MS = 5_000
+export const RENDER_AUTO_RETRY_MAX_MS = 60_000
+export const RENDER_AUTO_RETRIES = 8
+
 /** The wait before a failed read's `n`th retry (0-based): 400 ms doubling, capped. */
 export function readBackoffMs(n: number): number {
   return Math.min(POLL_MS * 2 ** n, 8_000)
@@ -128,6 +140,39 @@ export function canRetry(error: unknown): boolean {
   if (error.problem['code'] === SNAPSHOT_PENDING_CODE) return true
   const { type } = error.problem
   return type === TEMPORAL_UNAVAILABLE || type === STILL_ACCEPTING || type === UNANSWERED || type === OFFLINE
+}
+
+/**
+ * #2464 — a render that could not be submitted (a 503 while the server restarts, no
+ * answer at all) is tried again on its own, at once when the browser comes back online,
+ * so a deploy mid-edit does not leave the page on the previous render for good. At most
+ * RENDER_AUTO_RETRIES tries in a row; the count starts over once a render goes through,
+ * and for new values (`values`), which the server may take where it refused the old.
+ */
+export function useRenderAutoRetry(error: unknown, rendering: boolean, retry: () => void, values: unknown): void {
+  const tries = useRef(0)
+  useEffect(() => {
+    tries.current = 0
+  }, [values])
+  useEffect(() => {
+    if (!error || !canRetry(error)) {
+      // Counted down only once a render has gone through; a retry in flight keeps it.
+      if (!rendering) tries.current = 0
+      return
+    }
+    if (tries.current >= RENDER_AUTO_RETRIES) return
+    const wait = Math.min(RENDER_AUTO_RETRY_MS * 2 ** tries.current, RENDER_AUTO_RETRY_MAX_MS)
+    const again = () => {
+      tries.current += 1
+      retry()
+    }
+    const timer = setTimeout(again, wait)
+    window.addEventListener('online', again)
+    return () => {
+      clearTimeout(timer)
+      window.removeEventListener('online', again)
+    }
+  }, [error, rendering, retry])
 }
 
 /** The problem `code` of a 503 whose template snapshot is still uploading (#1422). */
@@ -240,6 +285,9 @@ export function useRenderJob(
       let again = false
       let settled = false
       let failures = 0
+      // Whether the last read found the job waiting, and when it was read (#1638).
+      let waiting = false
+      let readAt = 0
 
       const finish = () => {
         settled = true
@@ -263,6 +311,8 @@ export function useRenderJob(
           const next = await api.getJob(jobId)
           if (isStale()) return
           failures = 0
+          waiting = next.status === 'pending'
+          readAt = Date.now()
           setJob(next)
           setJobFor(params)
           if (next.status === 'done' || next.status === 'failed' || next.status === 'cancelled') finish()
@@ -307,7 +357,10 @@ export function useRenderJob(
         timer = setTimeout(() => {
           if (settled || isStale()) return
           // A failed read's retry is already waiting: polling past it would spend the budget.
-          if (realtime.status === 'unavailable' && !retryTimer) void read()
+          if (!retryTimer) {
+            if (realtime.status === 'unavailable') void read()
+            else if (waiting && Date.now() - readAt >= QUEUE_READ_MS) void read()
+          }
           fallback()
         }, POLL_MS)
       }
