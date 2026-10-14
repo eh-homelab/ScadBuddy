@@ -63,9 +63,12 @@ export function HistoryPage() {
    * output whose last print is older than those falls back to its queue id, as if it
    * had not printed yet.
    */
+  // Read again when any listed output's print moves (#2786 review): a print that
+  // finishes while the page is open says so without a reload.
   const printsState = useAsync(
     () => api.listPrints({ slug }, { limit: 100 }).catch(() => ({ items: [], next_cursor: null })),
     [slug],
+    (outputsState.data ?? []).map((output) => `print:${output.id}`),
   )
   const lastPrints = new Map<string, PrintSummary>()
   // Newest first: the first one seen for an output is its last print.

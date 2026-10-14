@@ -1,11 +1,12 @@
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { delay, HttpResponse, http } from 'msw'
 import { Route, Routes, useLocation, useParams } from 'react-router'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import type { Output } from '../api/types'
-import { bbox, keychainSchema, models, outputs } from '../mocks/fixtures'
+import { bbox, keychainSchema, models, outputs, prints } from '../mocks/fixtures'
 import { addMockOutput, problem } from '../mocks/handlers'
 import { server } from '../mocks/server'
+import { fakeRealtime } from '../lib/realtime.fake'
 import { setDisplayUnit } from '../lib/units'
 import { intersect } from '../test/intersection'
 import { renderPage } from '../test/utils'
@@ -568,6 +569,28 @@ describe('HistoryPage', () => {
     expect(
       await within(await row('Workshop')).findByRole('link', { name: 'Last print: Deleted in Bambuddy' }),
     ).toBeInTheDocument()
+  })
+
+  it('says a print that finishes while the page is open, without a reload (#2786 review)', async () => {
+    // Real time still passes, so the page's own waits run; `signal` advances the fakes.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    onTestFinished(() => {
+      vi.useRealTimers()
+    })
+    const realtime = fakeRealtime({ confirm: false })
+    const nova = outputs.find((o) => o.name === 'Nova')!
+    const print = prints.find((p) => p.archive_id === 37)!
+    const was = print.status
+    onTestFinished(() => {
+      print.status = was
+    })
+    render()
+    const row_ = await row('Nova')
+    expect(await within(row_).findByRole('link', { name: 'Last print: Printing' })).toBeInTheDocument()
+    await waitFor(() => expect(realtime.following()).toContain(`print:${nova.id}`))
+    print.status = 'failed'
+    await realtime.signal(`print:${nova.id}`, 'print.settled')
+    expect(await within(row_).findByRole('link', { name: 'Last print: Failed' })).toBeInTheDocument()
   })
 
   it('keeps the rows when the prints cannot be read (#2288)', async () => {
