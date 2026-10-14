@@ -848,7 +848,7 @@ export function PrintPicker({
       rackAlgorithm: chosenAlgorithm,
     })
     const spools = filaments?.spools ?? []
-    const estimate = sliced ? slicedEstimate(sliced, allPlates ? 1 : plate, filaments) : previewSlice.result
+    const estimate = sliced ? slicedEstimate(sliced, allPlates ? 1 : plate, filaments, plate) : previewSlice.result
     const summary: BatchSummary = {
       printer: printer?.name ?? null,
       plate: allPlates ? 'All plates' : plateLabel(plates, plate),

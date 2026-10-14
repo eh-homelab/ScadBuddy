@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 from scadbuddy.api.deps import PathsDep, PrintRunsDep, ReadBudgetDep, SettingsStoreDep
 from scadbuddy.api.library_print import post_library_run
 from scadbuddy.api.operations import MAY_HAVE_STARTED
+from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.batches.component import PrintBatchesDep
 from scadbuddy.batches.store import (
     BatchChoice,
@@ -70,14 +71,39 @@ def _settled(batch: PrintBatch) -> bool:
     )
 
 
+CHANGE_REFUSED = "This file's print has started, or may have, so its choices cannot change."
+
+
 def _changeable(item: BatchItem) -> None:
     """A started run is Bambuddy's now, and a pending one may be: changing its choices
     would send another request and could print the file twice."""
     if item.outcome is not None and item.outcome.status in ("started", "pending"):
-        raise ApiError(
-            status.HTTP_409_CONFLICT,
-            "This file's print has started, or may have, so its choices cannot change.",
+        raise ApiError(status.HTTP_409_CONFLICT, CHANGE_REFUSED)
+
+
+async def _read_runs(
+    batches: PrintBatchStore, runs: PrintRunStore, batch: PrintBatch
+) -> PrintBatch:
+    """A started file whose run then failed (a slice or an upload, after the 202) is
+    ``failed``: it can be edited and sent again, as a new run (#2718 review). A run that
+    failed after it tried to queue (``may_have_queued``) stays started, as it may be on
+    Bambuddy's queue, and sending it again could print it twice."""
+    changed = False
+    for item in batch.items:
+        outcome = item.outcome
+        if outcome is None or outcome.status != "started" or outcome.run_id is None:
+            continue
+        run = await runs.get(outcome.run_id)
+        if run is None or run.status != "failed" or run.may_have_queued:
+            continue
+        failed = BatchOutcome(
+            status="failed",
+            run_id=outcome.run_id,
+            detail=run.error.detail if run.error is not None else None,
+            attempt=outcome.attempt,
         )
+        changed |= await batches.record_outcome(batch.id, item.position, failed, if_unchanged=item)
+    return await _batch(batches, batch.id) if changed else batch
 
 
 def _open(batch: PrintBatch) -> None:
@@ -102,8 +128,10 @@ async def post_batch(body: NewBatch, batches: PrintBatchesDep) -> PrintBatch:
 
 
 @router.get("/{batch_id}", response_model=PrintBatch, summary="A batch print, to resume it")
-async def get_batch(batch_id: BatchIdPath, batches: PrintBatchesDep) -> PrintBatch:
-    return await _batch(batches, batch_id)
+async def get_batch(
+    batch_id: BatchIdPath, batches: PrintBatchesDep, runs: PrintRunsDep
+) -> PrintBatch:
+    return await _read_runs(batches, runs.store, await _batch(batches, batch_id))
 
 
 @router.put("/{batch_id}/step", response_model=PrintBatch, summary="The step a batch print shows")
@@ -127,18 +155,24 @@ async def put_batch_step(
     summary="One file's choices in a batch print",
 )
 async def put_batch_item(
-    batch_id: BatchIdPath, position: PositionPath, body: BatchChoice, batches: PrintBatchesDep
+    batch_id: BatchIdPath,
+    position: PositionPath,
+    body: BatchChoice,
+    batches: PrintBatchesDep,
+    runs: PrintRunsDep,
 ) -> PrintBatch:
     """What the file's step chose (the run request it would send), or that it is skipped
     or removed, and with ``step`` the step to show next, in the same write. Nothing is
     checked or queued here: Queue all runs each file's own print."""
-    batch = await _batch(batches, batch_id)
+    batch = await _read_runs(batches, runs.store, await _batch(batches, batch_id))
     _open(batch)
     _changeable(_item(batch, position))
     if body.step is not None and body.step > len(batch.items):
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "The batch print has no such step.")
     updated = await batches.choose(batch_id, position, body)
-    assert updated is not None
+    if updated is None:
+        # Queue all marked it pending, or started it, since the read above.
+        raise ApiError(status.HTTP_409_CONFLICT, CHANGE_REFUSED)
     return updated
 
 
@@ -163,15 +197,20 @@ async def post_batch_queue(
 
     The batch stays open, so it can be sent again and its refused files edited, until
     every file kept has a started run."""
-    batch = await _batch(batches, batch_id)
+    batch = await _read_runs(batches, runs.store, await _batch(batches, batch_id))
     for item in batch.items:
         if item.skipped or item.removed:
             continue
         if item.outcome is not None and item.outcome.status == "started":
             continue
-        await batches.record_outcome(
-            batch_id, item.position, await _queue_one(batch_id, item, runs, store, paths, budget)
-        )
+        attempt = _attempt(item)
+        # Pending while it is sent, so a PUT of its choices cannot land under the send:
+        # the choices sent are the ones recorded (#2718 review).
+        sending = BatchOutcome(status="pending", attempt=attempt)
+        if not await batches.record_outcome(batch_id, item.position, sending, if_unchanged=item):
+            continue  # its choices changed since the read: the next Queue all sends them
+        outcome = await _queue_one(batch_id, item, attempt, runs, store, paths, budget)
+        await batches.record_outcome(batch_id, item.position, outcome)
     done = await _batch(batches, batch_id)
     if not _settled(done):
         return done
@@ -179,9 +218,17 @@ async def post_batch_queue(
     return await _batch(batches, batch_id)
 
 
+def _attempt(item: BatchItem) -> int:
+    """A failed run's file is sent as a new run, never re-attached to the failed one."""
+    if item.outcome is None:
+        return 0
+    return item.outcome.attempt + (item.outcome.status == "failed")
+
+
 async def _queue_one(
     batch_id: str,
     item: BatchItem,
+    attempt: int,
     runs: PrintRunsDep,
     store: SettingsStoreDep,
     paths: PathsDep,
@@ -189,7 +236,8 @@ async def _queue_one(
 ) -> BatchOutcome:
     if item.request is None:
         return BatchOutcome(status="unchosen", detail="No choices were made for this file.")
-    request = item.request.model_copy(update={"request_id": batch_request_id(batch_id, item)})
+    request_id = batch_request_id(batch_id, item, attempt)
+    request = item.request.model_copy(update={"request_id": request_id})
     try:
         run = await post_library_run(
             item.library_file_id, request, Response(), runs, store, paths, budget
@@ -200,18 +248,21 @@ async def _queue_one(
         if error.status == status.HTTP_503_SERVICE_UNAVAILABLE or error.extensions.get(
             MAY_HAVE_STARTED
         ):
-            return BatchOutcome(status="pending", detail=error.detail)
-        return BatchOutcome(status="refused", detail=error.detail)
-    return BatchOutcome(status="started", run_id=run.id)
+            return BatchOutcome(status="pending", detail=error.detail, attempt=attempt)
+        return BatchOutcome(status="refused", detail=error.detail, attempt=attempt)
+    return BatchOutcome(status="started", run_id=run.id, attempt=attempt)
 
 
-def batch_request_id(batch_id: str, item: BatchItem) -> str:
+def batch_request_id(batch_id: str, item: BatchItem, attempt: int = 0) -> str:
     """One press per file and choice: the same choices sent again are the same run
-    (#742), while changed choices after a refusal are a new one."""
-    assert item.request is not None
+    (#742), while changed choices after a refusal, or any send after a failed run, are a
+    new one."""
+    if item.request is None:
+        raise ValueError(f"batch file {item.position} has no choices to send")
     chosen = item.request.model_dump(mode="json", exclude={"request_id"}, exclude_unset=True)
     digest = hashlib.sha256(json.dumps(chosen, sort_keys=True).encode()).hexdigest()[:16]
-    return f"batch:{batch_id}:{item.position}:{digest}"
+    retry = f":{attempt}" if attempt else ""
+    return f"batch:{batch_id}:{item.position}:{digest}{retry}"
 
 
 @router.delete("/{batch_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Drop a batch print")

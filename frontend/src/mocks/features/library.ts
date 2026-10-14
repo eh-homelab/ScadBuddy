@@ -500,13 +500,13 @@ function batchHandlers() {
       for (const item of batch.items) {
         if (item.skipped || item.removed || item.outcome?.status === 'started') continue
         if (!item.request) {
-          item.outcome = { status: 'unchosen', run_id: null, detail: 'No choices were made for this file.' }
+          item.outcome = { status: 'unchosen', run_id: null, detail: 'No choices were made for this file.', attempt: 0 }
           continue
         }
         const refused = libraryRefusal(item.library_file_id)
         item.outcome = refused
-          ? { status: 'refused', run_id: null, detail: `${item.filename} cannot be printed.` }
-          : { status: 'started', run_id: startLibraryRun(item.library_file_id, item.request).id, detail: null }
+          ? { status: 'refused', run_id: null, detail: `${item.filename} cannot be printed.`, attempt: 0 }
+          : { status: 'started', run_id: startLibraryRun(item.library_file_id, item.request).id, detail: null, attempt: 0 }
       }
       // Open until every file kept has started, as the backend leaves it (#2718 review).
       const kept = batch.items.filter((item) => !item.skipped && !item.removed)

@@ -102,6 +102,21 @@ export function BatchPrintDialog({ batchId, onClose }: Props) {
     }
   }, [following, readOnce, runs])
 
+  // A run that failed reopens its file, to edit and queue again: read the batch again
+  // for it (#2718 review). One that may have queued stays started, so this reads once.
+  const failedRuns = started.filter((id) => runs[id]?.status === 'failed').join(',')
+  useEffect(() => {
+    if (failedRuns === '') return
+    let live = true
+    api
+      .getPrintBatch(batchId)
+      .then((next) => live && setBatch(next))
+      .catch(() => undefined)
+    return () => {
+      live = false
+    }
+  }, [batchId, failedRuns])
+
   async function save(change: () => Promise<PrintBatch>) {
     setBusy(true)
     setError(null)
@@ -271,7 +286,10 @@ export function BatchPrintDialog({ batchId, onClose }: Props) {
             ? 'Some files are not queued yet. Edit a refused one, then Queue all again: a file still being checked is followed, never queued twice.'
             : 'Check each file, then Queue all. A file that is refused does not stop the rest.'
       }
-      onClose={queued ? close : () => goTo(before(total) ?? 0)}
+      // Escape and ✕ are Cancel, not Back (#2718 review).
+      onClose={() => {
+        if (!queueing) close()
+      }}
       footer={
         queued ? (
           <Button variant="primary" onClick={close}>
@@ -412,14 +430,14 @@ function Outcome({ item, run }: { item: BatchItem; run: PrintRun | undefined }) 
   if (outcome.status === 'pending') {
     return (
       <p role="status" className="text-[12px] text-muted" data-testid={`batch-outcome-${item.position}`}>
-        Still being checked: {outcome.detail} Queue all again to follow it.
+        Still being checked{outcome.detail ? `: ${outcome.detail}` : '.'} Queue all again to follow it.
       </p>
     )
   }
   if (outcome.status !== 'started') {
     return (
       <p role="status" className="text-[12px] text-warn" data-testid={`batch-outcome-${item.position}`}>
-        Not queued: {outcome.detail}
+        Not queued: {outcome.detail ?? 'the print failed before it was queued.'}
       </p>
     )
   }

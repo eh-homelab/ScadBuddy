@@ -11,6 +11,7 @@ import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
+from psycopg.types.json import Jsonb
 
 from scadbuddy.api import library_print, print_batches
 from scadbuddy.api.operations import STILL_ACCEPTING_PROBLEM
@@ -18,7 +19,7 @@ from scadbuddy.api.print_batches import batch_request_id
 from scadbuddy.api.printing import STILL_CHECKING_DETAIL
 from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.batches.component import PRINT_BATCHES
-from scadbuddy.batches.store import BatchItem
+from scadbuddy.batches.store import BatchChoice, BatchItem, BatchOutcome
 from scadbuddy.core.problems import ApiError
 from scadbuddy.main import BATCH_TTL
 from tests.api.test_print_filaments import queue_route, slice_routes
@@ -241,7 +242,7 @@ async def test_only_an_answer_that_is_not_a_refusal_is_pending(
         filename="a",
         request=PrintRunRequest.model_validate(SLICED_RUN),
     )
-    result = await print_batches._queue_one("b1", item, *([None] * 4))  # type: ignore[arg-type]
+    result = await print_batches._queue_one("b1", item, 0, *([None] * 4))  # type: ignore[arg-type]
     assert result.status == outcome
 
 
@@ -313,3 +314,121 @@ async def test_a_batch_nobody_touched_for_a_week_is_forgotten(client: TestClient
 
     assert client.get(f"{BATCHES}/{stale['id']}").status_code == 404
     assert client.get(f"{BATCHES}/{fresh['id']}").status_code == 200
+
+
+def _fail_run(client: TestClient, run_id: str, *, may_have_queued: bool) -> None:
+    """The run failed after the 202 (a slice or an upload), as the workflow records it."""
+    store = _state(client).components.get(PRINT_BATCHES)
+    error = {"status": 502, "title": "Bad Gateway", "detail": "Bambuddy's slice failed."}
+    with store._pool.connection() as conn:
+        conn.execute(
+            "UPDATE print_runs SET status = 'failed', result = NULL, error = %s,"
+            " enqueue_attempted = %s WHERE id = %s",
+            (Jsonb(error), may_have_queued, run_id),
+        )
+
+
+@respx.mock
+def test_a_run_that_failed_after_the_202_can_be_edited_and_sent_again_as_a_new_run(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#2718 review: a started file stayed started when its run then failed, so it could
+    neither change nor be sent again, and the batch never settled."""
+    configure(client)
+    sliced_file(104)
+    run_routes()
+    queued = queue_route()
+    batch = new_batch(client, 104, 105)
+    choose(client, batch["id"], 0, request=SLICED_RUN)
+    real = library_print.post_library_run
+    sent: list[str | None] = []
+
+    async def recorded(file_id: int, request: PrintRunRequest, *rest: Any) -> Any:
+        sent.append(request.request_id)
+        return await real(file_id, request, *rest)
+
+    monkeypatch.setattr(print_batches, "post_library_run", recorded)
+    first = client.post(f"{BATCHES}/{batch['id']}/queue").json()
+    run_id = first["items"][0]["outcome"]["run_id"]
+    follow_run(client, run_id)
+    _fail_run(client, run_id, may_have_queued=False)
+
+    read = client.get(f"{BATCHES}/{batch['id']}").json()
+
+    failed = read["items"][0]["outcome"]
+    assert (failed["status"], failed["run_id"]) == ("failed", run_id)
+    assert failed["detail"] == "Bambuddy's slice failed."
+    # Editable, as a refusal is.
+    choose(client, batch["id"], 0, request=SLICED_RUN)
+
+    again = client.post(f"{BATCHES}/{batch['id']}/queue").json()
+
+    retried = again["items"][0]["outcome"]
+    assert retried["status"] == "started" and retried["run_id"] != run_id
+    assert retried["attempt"] == 1
+    # The same choices, yet a new request_id: never re-attached to the failed run.
+    assert len(sent) == 2 and sent[0] != sent[1]
+    follow_run(client, retried["run_id"])
+    assert queued.call_count == 2
+
+
+@respx.mock
+def test_a_run_that_may_have_queued_before_failing_stays_started(client: TestClient) -> None:
+    """A run that failed after it tried to queue may be on Bambuddy's queue: sending it
+    again could print it twice, so it is not reopened."""
+    configure(client)
+    sliced_file(104)
+    run_routes()
+    queue_route()
+    batch = new_batch(client, 104)
+    choose(client, batch["id"], 0, request=SLICED_RUN)
+    run_id = client.post(f"{BATCHES}/{batch['id']}/queue").json()["items"][0]["outcome"]["run_id"]
+    follow_run(client, run_id)
+    _fail_run(client, run_id, may_have_queued=True)
+
+    read = client.get(f"{BATCHES}/{batch['id']}").json()
+
+    assert read["items"][0]["outcome"]["status"] == "started"
+    assert client.put(f"{BATCHES}/{batch['id']}/items/0", json={}).status_code == 409
+
+
+async def test_queue_all_and_a_choice_never_cross(client: TestClient) -> None:
+    """#2718 review: Queue all read a file, then sent it, so a PUT landing in between
+    changed choices that were never what got sent. Queue all marks the file pending only
+    while it is as read, and a choice never lands on a pending or started file."""
+    batch = new_batch(client, 104)
+    choose(client, batch["id"], 0, request=SLICED_RUN)
+    store = _state(client).components.get(PRINT_BATCHES)
+
+    async def item() -> BatchItem:
+        read = await store.get(batch["id"])
+        assert read is not None
+        return read.items[0]
+
+    read = await item()
+    choose(client, batch["id"], 0, request={**SLICED_RUN, "printer_id": 2})
+
+    sending = BatchOutcome(status="pending")
+    assert not await store.record_outcome(batch["id"], 0, sending, if_unchanged=read)
+    assert (await item()).outcome is None
+
+    now = await item()
+    assert await store.record_outcome(batch["id"], 0, sending, if_unchanged=now)
+    assert await store.choose(batch["id"], 0, BatchChoice(skipped=True)) is None
+    assert (await item()).skipped is False
+
+
+async def test_queue_all_counts_as_touching_the_batch(client: TestClient) -> None:
+    """#2718 review: recording an outcome left ``updated_at`` alone, so a batch last
+    queued a week after its last choice was pruned as untouched."""
+    batch = new_batch(client, 104)
+    store = _state(client).components.get(PRINT_BATCHES)
+    with store._pool.connection() as conn:
+        conn.execute(
+            "UPDATE print_batches SET updated_at = now() - %s WHERE id = %s",
+            (BATCH_TTL + timedelta(hours=1), batch["id"]),
+        )
+
+    await store.record_outcome(batch["id"], 0, BatchOutcome(status="unchosen"))
+
+    assert await store.prune(BATCH_TTL) == 0

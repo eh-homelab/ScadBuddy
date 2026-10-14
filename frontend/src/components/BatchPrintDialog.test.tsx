@@ -307,6 +307,54 @@ describe('BatchPrintDialog (#2672)', () => {
     await step(1, 2)
   })
 
+  it('closes the review on Escape, as Cancel does, rather than going back a step (#2718 review)', async () => {
+    const onClose = vi.fn()
+    const batch = await newBatch(89, 91)
+    await api.putPrintBatchStep(batch.id, 2)
+    const { user } = renderPage(<BatchPrintDialog batchId={batch.id} onClose={onClose} />)
+    await screen.findByRole('dialog', { name: 'Review 2 files' })
+    await user.keyboard('{Escape}')
+    expect(onClose).toHaveBeenCalledOnce()
+    await waitFor(() => expect(api.getPrintBatch(batch.id)).rejects.toMatchObject({ status: 404 }))
+  })
+
+  it('reopens a file whose run failed after it started, to edit and queue again (#2718 review)', async () => {
+    const batch = await newBatch(89)
+    await api.putPrintBatchItem(batch.id, 0, { request: { ...REQUEST }, skipped: false, removed: false })
+    const chosen = await api.putPrintBatchStep(batch.id, 1)
+    const detail = "Bambuddy's slice failed."
+    const started = { ...chosen, items: [{ ...chosen.items[0], outcome: { status: 'started', run_id: 'run-9', detail: null } }] }
+    let failed = false
+    server.use(
+      http.post(`/api/v1/print/batches/${batch.id}/queue`, () => HttpResponse.json(started)),
+      http.get('/api/v1/print/runs/run-9', () => {
+        failed = true
+        return HttpResponse.json({
+          id: 'run-9',
+          subject: 'library:89',
+          output_id: 'library:89',
+          status: 'failed',
+          created_at: '2026-10-13T00:00:00Z',
+          error: { type: 'about:blank', status: 502, title: 'Bad Gateway', detail, extensions: {} },
+        })
+      }),
+      http.get(`/api/v1/print/batches/${batch.id}`, () =>
+        HttpResponse.json(
+          failed
+            ? { ...chosen, items: [{ ...chosen.items[0], outcome: { status: 'failed', run_id: 'run-9', detail, attempt: 0 } }] }
+            : chosen,
+        ),
+      ),
+    )
+    const { user } = renderPage(<BatchPrintDialog batchId={batch.id} onClose={vi.fn()} />)
+    await user.click(await screen.findByTestId('batch-queue-all'))
+
+    const row = screen.getByTestId('batch-row-0')
+    await waitFor(() => expect(within(row).getByRole('button', { name: /^Edit / })).toBeEnabled())
+    expect(screen.getByTestId('batch-outcome-0')).toHaveTextContent(`Not queued: ${detail}`)
+    expect(screen.getByTestId('batch-queue-all')).toHaveTextContent('Queue all (1)')
+  })
+
   it('forgets the batch on Cancel', async () => {
     const onClose = vi.fn()
     const batch = await newBatch(89, 91)
