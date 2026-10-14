@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api, ApiError } from '../../api/client'
 import type { InventorySpool } from '../../api/types'
-import { ClearSwatch, Swatch } from '../../components/print/Swatch'
+import { ClearSwatch, Swatch, UnknownSwatch } from '../../components/print/Swatch'
 import { bambuddyBase } from '../../lib/bambuddyLinks'
 import { spoolColour, spoolName } from '../../lib/filamentColour'
 import { trayPlace } from '../../lib/filaments'
@@ -28,10 +28,15 @@ function where(spool: InventorySpool): string {
   return trayPlace(spool.loaded, { printer: true })
 }
 
-/** The spool's chip: its colour, or a clear one for a clear spool with no tint (never black). */
+/** Bambuddy's RGBA with a zero alpha: a clear spool, as its own record says. */
+const CLEAR_RGBA = /^#?[0-9a-fA-F]{6}00$/
+
+/** The spool's chip: its colour; a clear one only for a spool recorded clear (alpha 00);
+ * otherwise, with no colour recorded or one unreadable, an unknown one. Never black. */
 function colourOf(spool: InventorySpool) {
   const colour = spoolColour(spool)
-  return colour ? <Swatch colour={colour.hex} size="sm" /> : <ClearSwatch size="sm" />
+  if (colour) return <Swatch colour={colour.hex} size="sm" />
+  return CLEAR_RGBA.test((spool.rgba ?? '').trim()) ? <ClearSwatch size="sm" /> : <UnknownSwatch size="sm" />
 }
 
 /**
@@ -47,20 +52,23 @@ export function SpoolInventoryPanel() {
 
   useEffect(() => {
     let live = true
-    // A new read replaces the list: a failed one must not leave the last table, read
-    // for the other checkbox state, under its error.
-    setSpools(null)
-    setError(null)
-    setUnconfigured(false)
+    // The last table stays while the re-read is in flight, so a toggle does not flicker
+    // back to "Reading…"; a failed read clears it, so it never sits under its error.
     api.getSpoolInventory(archived).then(
       (view) => {
         if (!live) return
         setSpools([...(view.spools ?? [])].sort(order))
+        setError(null)
+        setUnconfigured(false)
       },
       (cause: unknown) => {
         if (!live) return
-        if (cause instanceof ApiError && cause.problem.type === NOT_CONFIGURED) setUnconfigured(true)
-        else setError(cause instanceof ApiError ? cause.detail : "Bambuddy's inventory could not be read.")
+        setSpools(null)
+        const notConfigured = cause instanceof ApiError && cause.problem.type === NOT_CONFIGURED
+        setUnconfigured(notConfigured)
+        setError(
+          notConfigured ? null : cause instanceof ApiError ? cause.detail : "Bambuddy's inventory could not be read.",
+        )
       },
     )
     return () => {

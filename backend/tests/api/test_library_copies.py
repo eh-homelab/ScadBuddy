@@ -22,7 +22,7 @@ from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.plate import DEFAULT_PLATE
-from tests.api.test_print_filaments import queue_route, slice_routes
+from tests.api.test_print_filaments import queue_route, slice_routes, slots_from_bambuddy
 from tests.api.test_print_run_choices import allow_reprints, body, run_print, run_routes
 from tests.api.test_send import BASE, configure, make_output
 from tests.support.operations import press
@@ -297,6 +297,8 @@ def test_the_same_folder_and_target_reuses_the_copy(client: TestClient, model: s
 
 
 # --- the filament step reads any copy (#457) -------------------------------------------
+# An output's slots are read from its own 3MF since #2720; these tests cover the copy
+# Bambuddy reads when they cannot be (``slots_from_bambuddy``).
 
 
 def open_dialog(client: TestClient, output_id: str) -> dict[str, Any]:
@@ -307,9 +309,12 @@ def open_dialog(client: TestClient, output_id: str) -> dict[str, Any]:
 
 
 @respx.mock
-def test_a_dialog_open_after_a_run_does_not_upload_again(client: TestClient, model: str) -> None:
+def test_a_dialog_open_after_a_run_does_not_upload_again(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The first open has nothing to read and uploads; the run needs its own layout and
     uploads again, superseding the first. From then on the dialog reads the run's copy."""
+    slots_from_bambuddy(monkeypatch)
     output_id = set_up(client, model)
     upload = uploads(41, 42)
     deletes()
@@ -339,7 +344,10 @@ def test_the_dialog_reads_a_projects_copy_without_moving_it(client: TestClient, 
 
 
 @respx.mock
-def test_a_copy_deleted_in_bambuddy_is_not_read(client: TestClient, model: str) -> None:
+def test_a_copy_deleted_in_bambuddy_is_not_read(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    slots_from_bambuddy(monkeypatch)
     output_id = set_up(client, model)
     upload = uploads(41, 42)
     deletes()
@@ -353,8 +361,11 @@ def test_a_copy_deleted_in_bambuddy_is_not_read(client: TestClient, model: str) 
 
 
 @respx.mock
-def test_a_recolored_copy_still_shows_the_models_colors(client: TestClient, model: str) -> None:
+def test_a_recolored_copy_still_shows_the_models_colors(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The run's copy is in the spools' colors (#476); the dialog shows the model's."""
+    slots_from_bambuddy(monkeypatch)
     output_id = set_up(client, model)
     uploads(41)
     run(client, output_id)

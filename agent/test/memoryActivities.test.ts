@@ -26,6 +26,17 @@ const BANK = 'scadbuddy'
 
 const log = (...events: ServerEvent[]): LoggedEvent[] => events.map((e, i) => ({ seq: i + 1, event: e }))
 
+/** An event log over `events`: EventLog's reads, as the activities use them. */
+function readsOf(events: LoggedEvent[]): Pick<MemoryActivityDeps['events'], 'read' | 'userTurnText'> {
+  return {
+    read: async (_id, after = 0) => events.filter((e) => e.seq > after),
+    userTurnText: async (_id, turnId) => {
+      const turn = events.map((e) => e.event).findLast((e) => e.type === 'user.turn' && e.turnId === turnId)
+      return turn?.type === 'user.turn' ? turn.text : undefined
+    },
+  }
+}
+
 const conversation = log(
   event({ type: 'user.turn', sessionId: SESSION, turnId: 'earlier', text: 'make a box', author: BROWSER }),
   event({ type: 'assistant.text.delta', sessionId: SESSION, messageId: 'm1', delta: 'Rendering ' }),
@@ -43,6 +54,28 @@ describe('transcriptOf', () => {
       { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'render_model', input: { id: 'box' } }] } },
       { type: 'user', message: { content: `what colour was it? ${CREDENTIAL}` } },
     ])
+  })
+
+  it('puts text that follows a tool call after the call, in one message (#2419)', () => {
+    const turn = log(
+      event({ type: 'assistant.text.delta', sessionId: SESSION, messageId: 'm1', delta: 'Rendering.' }),
+      event({ type: 'tool.call', sessionId: SESSION, id: 't1', name: 'render_model', input: { id: 'box' }, risk: 'write' }),
+      event({ type: 'assistant.text.delta', sessionId: SESSION, messageId: 'm1', delta: 'Done.' }),
+    )
+    expect(transcriptOf(turn)).toEqual([
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'Rendering.' }] } },
+      { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'render_model', input: { id: 'box' } }] } },
+      { type: 'assistant', message: { content: [{ type: 'text', text: 'Done.' }] } },
+    ])
+  })
+
+  it("keeps a message on one line across a subagent's call between its deltas (#3089)", () => {
+    const turn = log(
+      event({ type: 'assistant.text.delta', sessionId: SESSION, messageId: 'm1', delta: 'Looking ' }),
+      event({ type: 'tool.call', sessionId: SESSION, id: 't2', name: 'grep', input: { pattern: 'x' }, risk: 'read', parent: 't1' }),
+      event({ type: 'assistant.text.delta', sessionId: SESSION, messageId: 'm1', delta: 'it up.' }),
+    )
+    expect(transcriptOf(turn)).toEqual([{ type: 'assistant', message: { content: [{ type: 'text', text: 'Looking it up.' }] } }])
   })
 })
 
@@ -82,7 +115,7 @@ describe('memory activities in a durable turn', () => {
     return {
       sessions: { ownerOf: async (id) => (id === SESSION ? BROWSER : undefined) },
       events: {
-        read: async (_id, after = 0) => conversation.filter((e) => e.seq > after),
+        ...readsOf(conversation),
         append: async (_id, events) => {
           appended.push(...events)
           return []
@@ -110,13 +143,22 @@ describe('memory activities in a durable turn', () => {
     expect(audits).toEqual([expect.objectContaining({ kind: 'memory', action: 'recall', sessionId: SESSION, turnId: TURN })])
   })
 
+  it("finds the turn's words by its id, never reading the session's whole log (#2419)", async () => {
+    const reads = readsOf(conversation)
+    const acts = memoryActivities(
+      deps({ events: { ...reads, read: () => Promise.reject(new Error('the log was read')), append: async () => [] } }),
+    )
+    const { context } = (await env(MEMORY_RECALL_ACTIVITY).run(acts[MEMORY_RECALL_ACTIVITY], { turn_id: TURN })) as MemoryRecalled
+    expect(context).toContain('1. the box was red')
+  })
+
   it('reads the recall query cap from Settings at each turn, as a classic turn does', async () => {
     const long = 'x'.repeat(1000)
     const events = log(event({ type: 'user.turn', sessionId: SESSION, turnId: TURN, text: long, author: BROWSER }))
     let stored: unknown
     const acts = memoryActivities(
       deps({
-        events: { read: async (_id, after = 0) => events.filter((e) => e.seq > after), append: async () => [] },
+        events: { ...readsOf(events), append: async () => [] },
         settings: { get: async <T>(key: string) => (key === 'memory_recall_max_query_chars' ? (stored as T) : undefined) },
       }),
     )

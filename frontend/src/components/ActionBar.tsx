@@ -66,6 +66,8 @@ interface Props {
    * already-`done` job — this is the only prop that already knows it is stale.
    */
   upToDate?: boolean
+  /** #2444 — why there is nothing to generate: a value on the form to fix. Said on Generate. */
+  blockedReason?: string
   output: Output | undefined
   /** Captures the preview canvas as the output thumbnail (spec §6). */
   capture: () => Promise<Blob | null>
@@ -107,6 +109,7 @@ export function ActionBar({
   job,
   rendering,
   upToDate = true,
+  blockedReason,
   output,
   capture,
   captureImage,
@@ -498,7 +501,7 @@ export function ActionBar({
     />
   )
   const generateButtons = (
-    <div className="flex">
+    <div className="flex items-center">
       <Button
         variant="primary"
         onClick={() => {
@@ -513,6 +516,7 @@ export function ActionBar({
         disabled={!ready || creatingProject}
         aria-disabled={generating || undefined}
         data-testid="generate"
+        aria-describedby={blockedReason ? `${slug}-generate-blocked` : undefined}
         className="rounded-r-none"
       >
         {generating && <Spinner />}
@@ -531,6 +535,11 @@ export function ActionBar({
             : undefined
         }
       />
+      {blockedReason && (
+        <span id={`${slug}-generate-blocked`} data-testid="generate-blocked" className="ml-2 text-[12px] text-warn">
+          {blockedReason}
+        </span>
+      )}
     </div>
   )
   const downloadButton = (

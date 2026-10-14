@@ -1359,7 +1359,7 @@ def test_receive_keeps_a_file_parts_name_and_the_text_parts_asked_for(tmp_path: 
         b"--b\r\nContent-Disposition: form-data; name=other\r\n\r\nskipped\r\n--b--\r\n"
     )
     received = asyncio.run(
-        media_api._receive(_multipart_request(body), tmp_path, fields={"name": 10})
+        media_api.receive_upload(_multipart_request(body), tmp_path, fields={"name": 10})
     )
     try:
         assert received.filenames == {"file": "carrot.stl"}
@@ -1368,6 +1368,8 @@ def test_receive_keeps_a_file_parts_name_and_the_text_parts_asked_for(tmp_path: 
     finally:
         received.discard()
     with pytest.raises(ApiError) as refused:
-        asyncio.run(media_api._receive(_multipart_request(body), tmp_path, fields={"name": 3}))
+        asyncio.run(
+            media_api.receive_upload(_multipart_request(body), tmp_path, fields={"name": 3})
+        )
     assert refused.value.status == 422
     assert not list(tmp_path.iterdir())

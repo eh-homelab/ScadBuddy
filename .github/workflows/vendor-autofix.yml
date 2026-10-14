@@ -1,0 +1,161 @@
+---
+name: Vendor autofix
+
+# Regenerates the Go vendor trees on a Dependabot gomod PR and pushes them back
+# (#2686, spec 2026-10-13 §7.2). Copied from WonderForgeLabs/gooey's
+# vendor-autofix.yml. A bump changes a `require`, and with one root vendor/ for
+# every module in go.work, `go` then refuses with "inconsistent vendoring";
+# the `go` job's drift check (go-module-ci.yml) is the guard, this only saves
+# the round trip.
+#
+# WHY pull_request_target, AND WHAT MAKES IT SAFE HERE
+#
+# A `pull_request` run triggered by Dependabot gets no repository secrets and a
+# read-only token, so it cannot push. pull_request_target runs in the base
+# repo's context, with secrets, which is also the classic way to hand a
+# credential to somebody else's code. Each of these is load-bearing:
+#
+#   * The job runs only for dependabot[bot] on a branch of this repo; a fork PR
+#     never reaches it (and has no secrets, so the token step would fail).
+#   * The checkout is pinned to the head SHA and keeps no credential.
+#   * Against the checkout it runs only `go work vendor` and `go mod vendor`,
+#     under GOTOOLCHAIN=local: they resolve modules and copy files, and do not
+#     build, test or `go generate`. GOTOOLCHAIN=local stops a `toolchain` line
+#     in the PR from making `go` download and re-exec another toolchain.
+#   * No step that runs `go` holds a token. The commit is made without one; the
+#     app token is minted afterwards, with `contents: write` only, and used by
+#     a step that runs nothing but git. Do not add a step that runs anything
+#     from the checkout after the token exists.
+#   * setup-go's cache is off: a pull_request_target run saves its cache in the
+#     base branch's scope, where every later main run would restore it.
+#   * Only the paths `go work vendor` can touch are staged.
+#
+# The push uses the RUNNER_APP token, not GITHUB_TOKEN, because a GITHUB_TOKEN
+# push starts no workflow and CI would never check the new head. Its two
+# secrets are Actions secrets: a Dependabot-triggered pull_request,
+# push or review run gets only Dependabot secrets, but a pull_request_target
+# run whose base is a branch Dependabot did not create (main here) gets the
+# repository's Actions secrets. Not yet seen on a real bump: if they ever come
+# through empty, the step below says so, and the fix is to add RUNNER_APP_ID
+# and RUNNER_APP_PRIVATE_KEY as Dependabot secrets as well. Once a
+# commit that is not Dependabot's lands on its branch, Dependabot stops
+# rebasing that PR; `@dependabot recreate` discards the commit and starts over.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    paths:
+      - "go.mod"
+      - "go.sum"
+      - "**/go.mod"
+      - "**/go.sum"
+      - "go.work"
+      - "go.work.sum"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vendor-autofix-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  autofix:
+    # `github.actor` is who triggered this event: a human pushing to a
+    # Dependabot branch skips the job, the safe direction to be imprecise in.
+    # The PR's author must be Dependabot too, so a PR someone else opened
+    # never runs here whoever triggers the event. The head-repo check keeps it
+    # off forks.
+    if: >-
+      github.actor == 'dependabot[bot]' &&
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      # SHA, not ref: the branch name is attacker-shaped input in general. The
+      # push below still needs the name, so it goes through an env var.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.work
+          cache: false
+
+      # Needs egress: vendor/ makes builds offline, not rebuilding vendor/.
+      - name: Regenerate the vendor directories
+        env:
+          GOTOOLCHAIN: local
+        run: |
+          set -euo pipefail
+          # Which Go wrote these bytes matters: vendor/modules.txt's format has
+          # changed across releases, and the `go` job checks with go.work's
+          # toolchain.
+          want=$(sed -n 's/^toolchain go//p' go.work)
+          have=$(go env GOVERSION)
+          if [ "$have" != "go${want}" ]; then
+            echo "::error::setup-go installed ${have}, go.work's toolchain is go${want}"
+            exit 1
+          fi
+          go work vendor
+          (cd tools/go/scadbuddy-client && GOWORK=off go mod vendor)
+
+      # No token here, and none persisted by the checkout.
+      - name: Commit the result if it changed
+        id: commit
+        run: |
+          set -euo pipefail
+          # Stage first, then ask whether anything is staged: `git diff` misses
+          # a newly added vendored package. A bare `*` in a pathspec matches
+          # `/`, so '*go.sum' covers every module's go.sum.
+          git add -A -- vendor tools/go/scadbuddy-client/vendor '*go.sum'
+          if [ -e go.work.sum ]; then git add go.work.sum; fi
+          if git diff --cached --quiet; then
+            echo "The vendor trees already matched the modules; nothing to push."
+            exit 0
+          fi
+          git -c user.name="scadbuddy-ci" -c user.email="ci@scadbuddy.invalid" \
+            commit -m "build(deps): go work vendor" \
+            -m "Regenerated by .github/workflows/vendor-autofix.yml: the bump changed a require, and the root vendor/ (and the client's own) must move with it."
+          echo "sha=$(git rev-parse --short HEAD)" | tee -a "$GITHUB_OUTPUT"
+
+      - name: The push token's secrets are there
+        if: ${{ steps.commit.outputs.sha != '' }}
+        env:
+          HAVE_ID: ${{ secrets.RUNNER_APP_ID != '' }}
+          HAVE_KEY: ${{ secrets.RUNNER_APP_PRIVATE_KEY != '' }}
+        run: |
+          if [ "$HAVE_ID" != true ] || [ "$HAVE_KEY" != true ]; then
+            echo "::error::RUNNER_APP_ID / RUNNER_APP_PRIVATE_KEY are empty in this Dependabot run; add them as Dependabot secrets (Settings > Secrets > Dependabot)"
+            exit 1
+          fi
+
+      - name: Generate push token
+        id: push-token
+        if: ${{ steps.commit.outputs.sha != '' }}
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.RUNNER_APP_ID }}
+          private-key: ${{ secrets.RUNNER_APP_PRIVATE_KEY }}
+          permission-contents: write
+
+      # Only git runs here. The token is only ever in the URL, and any
+      # extraheader is cleared so git cannot send another credential instead.
+      - name: Push the result
+        if: ${{ steps.commit.outputs.sha != '' }}
+        env:
+          GH_TOKEN: ${{ steps.push-token.outputs.token }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git -c "http.https://github.com/.extraheader=" \
+            push "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" "HEAD:refs/heads/${HEAD_REF}"
+          echo "::notice::Pushed the regenerated vendor trees as ${SHA}; CI runs again on the new head."

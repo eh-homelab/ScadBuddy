@@ -29,17 +29,21 @@ export function NowPrinting() {
 
   useEffect(() => {
     let live = true
+    // A timer read and a visibility read can overlap; only the newest one may land.
+    let sent = 0
     const read = () => {
       if (document.hidden) return
+      const mine = ++sent
+      const current = () => live && mine === sent
       api
         .getPrintersNow()
         .then((now) => {
-          if (!live) return
+          if (!current()) return
           setPrinters(now.printers ?? [])
           setError(null)
         })
         .catch((cause: unknown) => {
-          if (live) setError(cause instanceof ApiError ? cause.detail : 'The printers could not be read.')
+          if (current()) setError(cause instanceof ApiError ? cause.detail : 'The printers could not be read.')
         })
     }
     read()
@@ -129,8 +133,8 @@ function PrinterCard({ printer }: { printer: PrinterNow }) {
           aria-label={`${printer.name} errors`}
           data-testid={`printer-now-hms-${printer.printer_id}`}
         >
-          {hms.map((error) => (
-            <li key={error.code}>
+          {hms.map((error, index) => (
+            <li key={`${index}-${error.code}`}>
               {error.description ?? 'No description from Bambuddy'}{' '}
               <span className="sb-num text-faint">HMS {error.code}</span>
             </li>
@@ -143,14 +147,19 @@ function PrinterCard({ printer }: { printer: PrinterNow }) {
             View this print
           </Link>
         ) : printer.bambuddy_url ? (
-          <a
-            href={bambuddyLink(printer.bambuddy_url)}
-            target="_blank"
-            rel="noreferrer"
-            className="mt-1.5 inline-block text-[12px] text-accent hover:underline"
-          >
-            Open in Bambuddy (archive {printer.archive_id})
-          </a>
+          // Bambuddy has no page per archive, so the link names the page it opens and the
+          // archive to look for there sits beside it (#2930).
+          <p className="mt-1.5 text-[12px] text-muted">
+            <a
+              href={bambuddyLink(printer.bambuddy_url)}
+              target="_blank"
+              rel="noreferrer"
+              className="text-accent hover:underline"
+            >
+              Bambuddy's archives
+            </a>{' '}
+            · archive {printer.archive_id}
+          </p>
         ) : null)}
     </li>
   )

@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 
 from scadbuddy.api.deps import CatalogueDep, SlugPath
-from scadbuddy.api.media import _receive
+from scadbuddy.api.media import receive_upload
 from scadbuddy.api.models import _require_new, _slug_from_name, require_mine, require_model_exists
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
@@ -180,7 +180,7 @@ async def create_from_upload(
     catalogue: CatalogueDep,
     idempotency_key: IdempotencyKey = None,
 ) -> ModelRecord | JSONResponse:
-    received = await _receive(
+    received = await receive_upload(
         request,
         catalogue.paths.cache,
         fields={"name": MAX_NAME_BYTES, "description": MAX_DESCRIPTION_CHARS * 4},
@@ -237,7 +237,10 @@ async def create_from_upload(
 @router.get(
     "/models/{slug}/scene",
     response_model=SceneView,
-    responses={404: {"description": "No such model, or it is not a mesh model"}},
+    responses={
+        404: {"description": "No such model, or it is not a mesh model"},
+        422: {"description": "Its scene.json is not a valid scene: eject it or restore a version"},
+    },
     summary="A mesh model's scene",
 )
 async def get_scene(slug: SlugPath, catalogue: CatalogueDep) -> SceneView:

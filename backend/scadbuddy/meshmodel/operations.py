@@ -127,7 +127,7 @@ def read_scene(directory: Path, slug: str) -> Scene:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"{slug!r} has a scene.json that is not a valid scene ({e.error_count()} "
-            "errors); eject the scene (POST /models/{slug}/scene/eject, the agent's "
+            f"errors); eject the scene (POST /models/{slug}/scene/eject, the agent's "
             "eject_scene) to keep the model as source, or restore an earlier version",
         ) from None
 
