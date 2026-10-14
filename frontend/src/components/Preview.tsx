@@ -150,7 +150,8 @@ interface Props {
    */
   rejected?: boolean
   /**
-   * #2444 — why nothing renders now: a value on the form is out of range (or no colour).
+   * #2444 — why nothing renders now: a value on the form `rangeProblem` refuses (a number
+   * out of range, say).
    * The last render stays, marked as not of these values; with none, this is said instead
    * of "Change a parameter to render.", which reads as if nothing were wrong.
    */

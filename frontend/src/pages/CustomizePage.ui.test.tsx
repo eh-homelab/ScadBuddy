@@ -500,11 +500,14 @@ describe('CustomizePage with a template UI', () => {
   // show; host.generate() waited only for "settled", so it saved that job for new values.
   it('host.generate() waits for the render of the current values, not a stale one after a failed submit', async () => {
     let down = false
+    let refused = 0
     const saved: string[] = []
     server.use(
-      http.post('/api/v1/models/:slug/render', () =>
-        down ? new HttpResponse('upstream connect error', { status: 503 }) : undefined,
-      ),
+      http.post('/api/v1/models/:slug/render', () => {
+        if (!down) return undefined
+        refused += 1
+        return new HttpResponse('upstream connect error', { status: 503 })
+      }),
       http.post('/api/v1/models/:slug/outputs', async ({ request }) => {
         const body = (await request.clone().json()) as { inputs?: { params?: Record<string, unknown> } }
         saved.push(String(body.inputs?.params?.['name']))
@@ -526,8 +529,11 @@ describe('CustomizePage with a template UI', () => {
     const params = host!.inputs.get()['params'] as Record<string, unknown>
     host!.inputs.set({ ...host!.inputs.get(), params: { ...params, name: 'Zed' } })
     await screen.findByText(/not answering right now/, {}, { timeout: 5000 })
+    const tried = refused
     const run = host!.generate()
-    await new Promise((resolve) => setTimeout(resolve, 300))
+    // #3342: wait for the page's own retry of "Zed", refused too. A stale save would go
+    // out at once, long before that retry, so by then it would have landed.
+    await waitFor(() => expect(refused).toBeGreaterThan(tried), { timeout: 15_000 })
     // Nothing saved for the stale job while the render of "Zed" has not happened.
     expect(saved).toHaveLength(1)
 
@@ -810,12 +816,14 @@ describe('the page slot', () => {
       release = resolve
     })
     let schemaServed = false
+    let recordAsked = false
     server.use(
       http.get('/api/v1/models/:slug/schema', () => {
         schemaServed = true
         return HttpResponse.json(keychainSchema)
       }),
       http.get('/api/v1/models/:slug', async () => {
+        recordAsked = true
         await held
         return HttpResponse.json({ ...model, ui: { module: 'ui/index.js', slot: 'page', api: 1 } })
       }),
@@ -837,7 +845,9 @@ describe('the page slot', () => {
     await import('../components/Preview')
     previews.mounts = 0
     open(UI_DEMO_SLUG)
-    await waitFor(() => expect(schemaServed).toBe(true))
+    // #3342: both asked, so the wait below starts once the page has all it gets before
+    // the record lands, not while the schema is still on its way.
+    await waitFor(() => expect(schemaServed && recordAsked).toBe(true))
     await new Promise((resolve) => setTimeout(resolve, 300))
     expect(screen.queryByText('Loading the viewer')).toBeNull()
     expect(screen.queryByTestId('preview')).toBeNull()
