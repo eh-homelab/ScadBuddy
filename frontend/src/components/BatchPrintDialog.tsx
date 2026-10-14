@@ -253,9 +253,10 @@ export function BatchPrintDialog({ batchId, onClose }: Props) {
                 step: after(current.position),
               }),
             ),
-          // Left through the strip: the choices go with the step, as with Next (#2718 review).
+          // Left through the strip: the choices go with the step, as with Next (#2718 review),
+          // unless the file's print has started or may have, whose choices no longer change.
           onJump: (step, choice) =>
-            choice
+            choice && current.outcome?.status !== 'started' && current.outcome?.status !== 'pending'
               ? void save(() =>
                   api.putPrintBatchItem(batchId, current.position, { ...choice, skipped: current.skipped, removed: false, step }),
                 )

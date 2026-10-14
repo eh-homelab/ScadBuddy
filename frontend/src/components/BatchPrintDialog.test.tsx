@@ -445,6 +445,41 @@ describe('BatchPrintDialog (#2672)', () => {
     expect(screen.getByTestId('batch-step-0')).toHaveAttribute('data-state', 'chosen')
   })
 
+  it("leaves a started file's step through the strip without saving it (#2718 review)", async () => {
+    const saved = watchItems()
+    const batch = await newBatch(89, 91)
+    const started = {
+      ...batch,
+      items: [
+        { ...batch.items[0], request: { ...REQUEST }, outcome: { status: 'started', run_id: 'run-0', detail: null, attempt: 0 } },
+        { ...batch.items[1], request: { ...REQUEST }, outcome: { status: 'refused', run_id: null, detail: 'No.', attempt: 0 } },
+      ],
+    }
+    let step0 = 0
+    server.use(
+      http.get(`/api/v1/print/batches/${batch.id}`, () => HttpResponse.json({ ...started, step: step0 })),
+      http.put(`/api/v1/print/batches/${batch.id}/step`, async ({ request }) => {
+        step0 = ((await request.json()) as { step: number }).step
+        return HttpResponse.json({ ...started, step: step0 })
+      }),
+      http.put(`/api/v1/print/batches/${batch.id}/items/0`, () =>
+        HttpResponse.json({ detail: "This file's print has started, or may have, so its choices cannot change." }, { status: 409 }),
+      ),
+      http.get('/api/v1/print/runs/:id', ({ params }) =>
+        HttpResponse.json({ id: params.id, subject: 'library:89', output_id: 'library:89', status: 'running', created_at: '2026-10-13T00:00:00Z' }),
+      ),
+    )
+    const { user } = renderPage(<BatchPrintDialog batchId={batch.id} onClose={vi.fn()} />)
+    await step(1, 2)
+    await loaded()
+
+    await user.click(screen.getByTestId('batch-step-1'))
+
+    await step(2, 2)
+    expect(saved).toEqual([])
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
   it('forgets the batch on Cancel', async () => {
     const onClose = vi.fn()
     const batch = await newBatch(89, 91)
