@@ -1841,7 +1841,7 @@ describe('PrintPicker · Supports (#1899)', () => {
     })
   })
 
-  it('sends no supports when switched off, and an angle out of range is left out', async () => {
+  it('leaves an angle out of range out of the print, says why, and clears it with supports off', async () => {
     const { bodies } = watch('POST', '/run')
     const { user } = renderPicker()
     await loaded()
@@ -1862,6 +1862,35 @@ describe('PrintPicker · Supports (#1899)', () => {
     expect(screen.queryByLabelText('Threshold angle (°)')).toBeNull()
     await user.selectOptions(screen.getByLabelText('Supports'), 'tree')
     expect(screen.getByLabelText('Threshold angle (°)')).toHaveValue(null)
+  })
+
+  it("calls a library file's Default the file's or the process's, which the dialog cannot read (#2837 review)", async () => {
+    renderPage(
+      <PrintPicker
+        open
+        source={{ kind: 'library', file: { id: 89, filename: 'bag-clip.3mf' } }}
+        onClose={vi.fn()}
+        onRan={vi.fn()}
+      />,
+    )
+    await loaded()
+    await showAdvanced()
+    expect(within(screen.getByLabelText('Supports')).getAllByRole('option')[0]).toHaveTextContent(
+      'Default (file or process)',
+    )
+  })
+
+  it('prints with no supports as only `enabled: false` (#2837 review)', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+
+    await user.selectOptions(screen.getByLabelText('Supports'), 'off')
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]?.['supports']).toEqual({ enabled: false })
   })
 
   it('starts On build plate only at the template’s, and keeps it when only the type changes', async () => {

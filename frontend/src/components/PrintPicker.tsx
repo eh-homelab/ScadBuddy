@@ -1099,6 +1099,7 @@ export function PrintPicker({
                         value={supports}
                         onChange={setSupports}
                         templateSettings={given?.kind === 'output' ? printSettings : undefined}
+                        fromFile={given?.kind !== 'output'}
                       />
 
                       {given?.kind === 'output' && (

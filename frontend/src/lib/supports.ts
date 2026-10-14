@@ -1,6 +1,10 @@
 import type { SupportsChoice } from '../api/types'
 
-/** The process keys a choice here sets (backend `bambuddy/supports.py` `SUPPORT_KEYS`). */
+/**
+ * The process keys a choice here sets: a copy of the backend's `SUPPORT_KEYS`
+ * (`bambuddy/supports.py`), which `backend/tests/api/test_print_supports.py` pins.
+ * Keep the two in step; `supports.test.ts` pins this one.
+ */
 export const SUPPORT_KEYS = [
   'enable_support',
   'support_type',

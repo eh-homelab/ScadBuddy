@@ -7,6 +7,8 @@ type Props = {
   onChange: (next: SupportsChoice | null) => void
   /** The template's `print_settings`, for what Default means for this model. */
   templateSettings?: Record<string, string> | undefined
+  /** A library 3MF: its own project settings, unread here, may declare supports. */
+  fromFile?: boolean
 }
 
 type Mode = 'default' | 'off' | 'tree' | 'normal'
@@ -18,14 +20,14 @@ function modeOf(value: SupportsChoice | null): Mode {
 }
 
 /** What Default prints with: the template's declaration, else the process preset's. */
-function defaultLabel(settings: Record<string, string> | undefined): string {
+function defaultLabel(settings: Record<string, string> | undefined, fromFile: boolean): string {
   if (settings?.enable_support === '1') {
     const type = settings.support_type?.startsWith('normal') ? 'normal' : 'tree'
     const angle = settings.support_threshold_angle
     return `Default (template: ${type} supports${angle ? `, ${angle}°` : ''})`
   }
   if (settings?.enable_support === '0') return 'Default (template: no supports)'
-  return 'Default (process)'
+  return fromFile ? 'Default (file or process)' : 'Default (process)'
 }
 
 /**
@@ -34,7 +36,7 @@ function defaultLabel(settings: Record<string, string> | undefined): string {
  * Per print, never remembered. A setting the server cannot write in the preset's shape is
  * left out with a warning on the result, never a refusal.
  */
-export function SupportsStep({ value, onChange, templateSettings }: Props) {
+export function SupportsStep({ value, onChange, templateSettings, fromFile = false }: Props) {
   const mode = modeOf(value)
   const on = value?.enabled === true ? value : null
   // What was typed, kept even when it is not a whole 0–90, so the field explains itself
@@ -56,7 +58,8 @@ export function SupportsStep({ value, onChange, templateSettings }: Props) {
           onChange={(event) => {
             const next = event.target.value as Mode
             if (next === 'default') onChange(null)
-            else if (next === 'off') onChange({ enabled: false, type: 'tree', on_build_plate_only: false })
+            // Only `enabled`: the backend applies nothing else with supports off (#2837 review).
+            else if (next === 'off') onChange({ enabled: false })
             else
               onChange({
                 enabled: true,
@@ -69,7 +72,7 @@ export function SupportsStep({ value, onChange, templateSettings }: Props) {
           }}
           className="sb-field"
         >
-          <option value="default">{defaultLabel(templateSettings)}</option>
+          <option value="default">{defaultLabel(templateSettings, fromFile)}</option>
           <option value="off">No supports</option>
           <option value="tree">Tree supports</option>
           <option value="normal">Normal supports</option>
