@@ -421,7 +421,8 @@ export function Preview({
                   <RenderMessages {...messages} sourceLink={sourceLink} overlay />
                 </div>
               ))}
-            {/* The measured box too (#2866): a library plate framed by it has a size to show. */}
+            {/* The measured box too (#2866): a library plate framed by it has a size to show.
+                `shown` is checked as well only for its plates: there is no box without it. */}
             {shown && bbox && <Dimensions bbox={bbox} plates={shown.plates} compact={compact} />}
             {job && platesOfJob > 1 && (
               <PlatePicker
@@ -1009,13 +1010,17 @@ function Model({
   const gltf = useLoader(GLTFLoader, url)
   const scene = useMemo(() => gltf.scene.clone(true), [gltf])
   // #2364 — a mesh that came with no box (a library file's plate, placed where the 3MF
-  // put it on the bed) is measured, so it is centred and framed like any other.
+  // put it on the bed) is measured, so it is centred and framed like any other. It is
+  // measured on the loader's own scene, never on the drawn clone (#3026 review): the
+  // clone is mounted under the offset group, whose world matrix can still hold the last
+  // render's offset until the next demand frame, and `setFromObject` reads it. The
+  // loader's scene is never mounted, so its box is model space; `clone(true)` copies the
+  // local transforms and shares the geometry, so it is the clone's box too.
   useEffect(() => {
     if (bbox) return
-    // The object drawn, the clone, rather than the loader's own (#2866).
-    const box = new THREE.Box3().setFromObject(scene)
+    const box = new THREE.Box3().setFromObject(gltf.scene)
     if (!box.isEmpty()) onMeasured(url, modelBox(box.min.toArray(), box.max.toArray()))
-  }, [bbox, scene, url, onMeasured])
+  }, [bbox, gltf, url, onMeasured])
   const group = useRef<THREE.Group>(null)
   // #364 — the GLB is in OpenSCAD's coordinates; the outline and the camera are
   // centred on the plate. Move the model there, as the slicer will.
