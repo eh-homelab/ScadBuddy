@@ -129,6 +129,8 @@ async def test_a_segment_gives_its_subagents_the_loopback_server_for_its_turn(
         ('{"url": "http://", "peers": []}', "http://127.0.0.1:1/x", "no host"),
         ('{"url": "http://[::1", "peers": []}', "http://127.0.0.1:1/x", "unparseable"),
         ('{"url": "agent.svc:8081/mcp", "peers": []}', "http://127.0.0.1:1/x", "no scheme"),
+        # urlsplit reads the host as the scheme: not named, as it is part of the URL.
+        ('{"url": "localhost:8081/mcp", "peers": []}', "http://127.0.0.1:1/x", "no scheme"),
         ('{"url": "http:agent.svc/mcp", "peers": []}', "http://127.0.0.1:1/x", "no host"),
     ):
         caplog.clear()
@@ -151,7 +153,24 @@ async def test_a_segment_gives_its_subagents_the_loopback_server_for_its_turn(
                 "etc/passwd" not in message
                 and "alert" not in message
                 and "agent.svc" not in message
+                and "localhost" not in message
             )
+        # The same refused value on the next segment is not warned of again.
+        caplog.clear()
+        await runner._subagent_tools(sid, {})
+        assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+
+    async def warnings_for(stored: str) -> int:
+        caplog.clear()
+        await agent_db.execute(
+            "UPDATE ai_settings SET value = %s::jsonb WHERE key = 'durable_subagents'", (stored,)
+        )
+        await runner._subagent_tools(sid, {})
+        return len([r for r in caplog.records if r.levelno == logging.WARNING])
+
+    # Fixed and then broken the same way again: warned of again.
+    assert await warnings_for('{"url": "http://agent.svc:8081/mcp", "peers": []}') == 0
+    assert await warnings_for('{"url": "http:agent.svc/mcp", "peers": []}') == 1
     # Off, or no definitions: no subagents, whatever Settings names.
     for off_runner in (
         ScadBuddyRunner(connect, kek, cwd=str(tmp_path), agents_dir=str(AGENTS)),

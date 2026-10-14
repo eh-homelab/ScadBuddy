@@ -79,6 +79,16 @@ describe('the durable subagents setting', () => {
     expect(values.get(SETTING_DURABLE_SUBAGENTS)).toEqual({ url: href, peers: [] })
   })
 
+  it('refuses a URL whose stored form is over 2048 characters, though what was sent is not', async () => {
+    const { app, values } = setup()
+    // 421 characters as sent; each é is stored as %C3%A9.
+    const sent = `http://scadbuddy.svc/${'é'.repeat(400)}`
+    expect(sent.length).toBeLessThanOrEqual(2048)
+    expect(new URL(sent).href.length).toBeGreaterThan(2048)
+    expect((await put(app, { url: sent, peers: [] })).status).toBe(400)
+    expect(values.has(SETTING_DURABLE_SUBAGENTS)).toBe(false)
+  })
+
   it('stores a null url and no peers, back to the pod loopback', async () => {
     const { app, values } = setup({ stored: IN_CLUSTER })
     expect((await put(app, { url: null, peers: [] })).status).toBe(200)
