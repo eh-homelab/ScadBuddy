@@ -30,17 +30,17 @@ function commitOf(ref: string): string {
 
 /**
  * #2770 — checkouts on the volume that no model pins any more (an unpin keeps its checkout).
- * The models' own pins are added to them for `GET /libraries/installed`.
+ * The models' own pins are added to them for `GET /libraries/installed`. None by default,
+ * so a test that counts rows sees only what it seeds with `setMockUnusedCheckouts`.
  */
-const UNUSED_SEED: InstalledLibrary[] = [{ name: 'BOSL2', commit: 'c0ffee00'.repeat(5), used_by: [] }]
-let unused: InstalledLibrary[] = [...UNUSED_SEED]
+let unused: InstalledLibrary[] = []
 
 export function setMockUnusedCheckouts(rows: InstalledLibrary[]): void {
   unused = [...rows]
 }
 
 export function reset(): void {
-  unused = [...UNUSED_SEED]
+  unused = []
 }
 
 /** Seeds a pin into a model, built-ins included, as if its model.json said so. */

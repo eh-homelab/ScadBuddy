@@ -474,6 +474,10 @@ function UnusedCheckouts({ installed, onRemoved }: { installed: readonly Install
     setRemoving(key)
     setErrors(({ [key]: _, ...rest }) => rest)
     try {
+      // Each press is a new Idempotency-Key, a press after a failure included: under the
+      // failed attempt's key the server would answer that attempt's refusal again, and the
+      // delete is safe to repeat. A "Try again" for an answer that never came would pass
+      // that attempt's key instead (`command()`'s `key`).
       await api.removeLibraryCheckout(row.name, row.commit)
       onRemoved()
     } catch (caught) {
