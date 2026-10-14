@@ -21,11 +21,17 @@ export interface Toolpath {
 
 export const STRIDE = 8
 export const TRAVEL = 0
+/** The wire format this decodes (`bambuddy/toolpath.py`'s `VERSION`). */
+export const TOOLPATH_VERSION = 1
 
 export function decodeToolpath(buffer: ArrayBuffer): Toolpath {
   const view = new DataView(buffer)
   const size = view.getUint32(0, true)
   const header = JSON.parse(new TextDecoder().decode(new Uint8Array(buffer, 4, size))) as ToolpathHeader
+  // A later format would read as a RangeError or a garbled scene: say so instead.
+  if (header.version !== TOOLPATH_VERSION) {
+    throw new Error(`This toolpath is in format ${String(header.version)}, which this page cannot draw; reload it.`)
+  }
   const segments = new Float32Array(buffer, 4 + size, header.segment_count * STRIDE)
   return { header, segments }
 }
@@ -115,6 +121,23 @@ export function drawnCount(path: Toolpath, layer: number | null): number {
   const { layers, segment_count } = path.header
   if (layer === null || layer >= layers.length - 1) return segment_count
   return layers[layer + 1]!.first_segment
+}
+
+/**
+ * For Layers: how many lines {@link toolpathLines}' Layers view (which drops travel) holds
+ * up to and including each layer, so a layer is shown by a draw range, not new arrays.
+ */
+export function printedUpTo(path: Toolpath): number[] {
+  const { segments, header } = path
+  const counts: number[] = []
+  let count = 0
+  let at = 0
+  for (let layer = 0; layer < header.layers.length; layer++) {
+    const end = drawnCount(path, layer)
+    for (; at < end; at++) if (segments[at * STRIDE + 7] !== TRAVEL) count++
+    counts.push(count)
+  }
+  return counts
 }
 
 /**

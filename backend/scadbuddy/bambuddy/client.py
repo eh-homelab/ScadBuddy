@@ -42,8 +42,10 @@ from scadbuddy.bambuddy.models import (
     AvailableFilament,
     ExternalLink,
     FilamentRequirements,
+    FileUpdate,
     Folder,
     FolderCreate,
+    FolderUpdate,
     InventoryRemain,
     LibraryFile,
     LibraryListRow,
@@ -66,6 +68,7 @@ from scadbuddy.bambuddy.models import (
     SpoolFilamentPreset,
     TimelapseInfo,
     TimelapseThumbnails,
+    TrashedLibraryFile,
 )
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import split_urls
@@ -83,6 +86,11 @@ DEFAULT_TIMEOUT = 30.0
 DEFAULT_UPLOAD_TIMEOUT = 180.0
 DEFAULT_SLICE_TIMEOUT = 600.0
 DEFAULT_SLICE_POLL = 2.0
+#: The largest page ``GET /library/trash`` serves (``limit`` is ``le=500``).
+TRASH_PAGE = 500
+#: The Bambuddy permission that shows a caller every user's trash (``Permission``,
+#: ``backend/app/core/permissions.py`` line 62 at v1.2.5.5).
+LIBRARY_DELETE_ALL = "library:delete_all"
 
 
 #: What a Bambuddy call does, which names its span (``bambuddy.<operation>``, spec
@@ -98,6 +106,8 @@ Operation = Literal[
     "archives.timelapse.info",
     "archives.timelapse.select",
     "archives.timelapse.thumbnails",
+    "auth.me",
+    "auth.status",
     "external_links.create",
     "external_links.list",
     "external_links.update",
@@ -108,16 +118,20 @@ Operation = Literal[
     "library.filament_requirements",
     "library.files.list",
     "library.files.read",
+    "library.files.update",
     "library.folders.by_project",
     "library.folders.create",
+    "library.folders.delete",
     "library.folders.list",
     "library.folders.read",
+    "library.folders.update",
     "library.listing",
     "library.move",
     "library.plate_thumbnail",
     "library.plates",
     "library.rename",
     "library.thumbnail",
+    "library.trash.list",
     "library.trash.restore",
     "library.upload",
     "media.download",
@@ -897,6 +911,43 @@ class BambuddyClient:
         )
         return LibraryFile.model_validate(response.json())
 
+    async def update_library_file(self, file_id: int, update: FileUpdate) -> LibraryFile:
+        """``PUT /library/files/{id}``: rename and/or move. Partial, as
+        :meth:`annotate_library_file` explains."""
+        response = await self._send(
+            "PUT",
+            f"/library/files/{file_id}",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="library.files.update",
+            what=f"update library file {file_id}",
+            json=update.model_dump(mode="json", exclude_none=True),
+        )
+        return LibraryFile.model_validate(response.json())
+
+    async def update_folder(self, folder_id: int, update: FolderUpdate) -> Folder:
+        """``PUT /library/folders/{id}``: rename and/or move; partial, ``parent_id=0``
+        is the top level."""
+        response = await self._send(
+            "PUT",
+            f"/library/folders/{folder_id}",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="library.folders.update",
+            what=f"update library folder {folder_id}",
+            json=update.model_dump(mode="json", exclude_none=True),
+        )
+        return Folder.model_validate(response.json())
+
+    async def delete_folder(self, folder_id: int) -> None:
+        """``DELETE /library/folders/{id}``. The caller empties it first (the folder
+        delete kind), so what this drops is the folder's own record."""
+        await self._send(
+            "DELETE",
+            f"/library/folders/{folder_id}",
+            scope=Scope.MANAGE_LIBRARY,
+            operation="library.folders.delete",
+            what=f"delete library folder {folder_id}",
+        )
+
     async def rename_library_file(self, file_id: int, filename: str) -> LibraryFile:
         """``PUT /library/files/{id}`` with ``filename`` alone (#2670): the same partial
         update as :meth:`annotate_library_file`, under the same id. Bambuddy refuses a
@@ -967,6 +1018,64 @@ class BambuddyClient:
                 f"Bambuddy did not say how many files it deleted when asked to {what}",
             )
         return deleted
+
+    async def trashed_library_files(self) -> list[TrashedLibraryFile]:
+        """``GET /library/trash``: every file in Bambuddy's trash that its API key's user
+        may see, page by page (``limit`` at most 500). Bambuddy v1.2.5.5
+        ``backend/app/api/routes/library_trash.py`` ``list_trash`` (lines 88-150):
+        ``{items, total, retention_days}``, each item with its ``folder_id``; a caller
+        without ``library:delete_all`` sees only its user's files
+        (:meth:`sees_every_users_trash` says which)."""
+        found: list[TrashedLibraryFile] = []
+        while True:
+            response = await self._send(
+                "GET",
+                "/library/trash",
+                scope=Scope.MANAGE_LIBRARY,
+                operation="library.trash.list",
+                what="list Bambuddy's library trash",
+                params={"limit": TRASH_PAGE, "offset": len(found)},
+            )
+            body = response.json()
+            items = [TrashedLibraryFile.model_validate(row) for row in body["items"]]
+            found.extend(items)
+            if not items or len(found) >= body["total"]:
+                return found
+
+    async def sees_every_users_trash(self) -> bool:
+        """Whether :meth:`trashed_library_files` lists every user's trashed files rather
+        than only the key's user's. Bambuddy v1.2.5.5 narrows ``list_trash`` to the
+        caller's own files unless ``require_ownership_permission`` grants
+        ``library:delete_all`` (``backend/app/core/auth.py`` lines 2106-2220), which it
+        grants to every caller while auth is off. So: ``GET /auth/status``
+        (``routes/auth.py`` line 395, public) for ``auth_enabled``, then ``GET /auth/me``
+        (line 662), whose ``permissions`` for an API key are those the key can exercise
+        (``apikey_effective_permissions``, ``core/auth.py`` line 340). Any other shape
+        is a 502, never read as seeing everything."""
+        what = "read whether Bambuddy's API key sees every user's trash"
+        response = await self._send(
+            "GET", "/auth/status", scope=Scope.MANAGE_LIBRARY, operation="auth.status", what=what
+        )
+        body = response.json()
+        enabled = body.get("auth_enabled") if isinstance(body, dict) else None
+        if not isinstance(enabled, bool):
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Bambuddy did not say whether auth is on, asked to {what}",
+            )
+        if not enabled:
+            return True
+        response = await self._send(
+            "GET", "/auth/me", scope=Scope.MANAGE_LIBRARY, operation="auth.me", what=what
+        )
+        body = response.json()
+        permissions = body.get("permissions") if isinstance(body, dict) else None
+        if not isinstance(permissions, list) or not all(isinstance(p, str) for p in permissions):
+            raise ApiError(
+                status.HTTP_502_BAD_GATEWAY,
+                f"Bambuddy did not list the API key's permissions, asked to {what}",
+            )
+        return LIBRARY_DELETE_ALL in permissions
 
     async def restore_library_file(self, file_id: int) -> None:
         """``POST /library/trash/{id}/restore``: a trashed file back where it was. A file

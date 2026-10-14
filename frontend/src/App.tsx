@@ -3,17 +3,27 @@ import { Navigate, Route, Routes } from 'react-router'
 import { AppShell } from './components/AppShell'
 import { ActivityPage } from './pages/ActivityPage'
 import { CataloguePage } from './pages/CataloguePage'
-import { CustomizePage } from './pages/CustomizePage'
-import { EditPage } from './pages/EditPage'
-import { FlowPage } from './pages/FlowPage'
-import { HistoryPage } from './pages/HistoryPage'
-import { LibraryPage } from './pages/LibraryPage'
-import { PrintDetailPage } from './pages/PrintDetailPage'
-import { PrintsPage, TemplatePrintsPage } from './pages/PrintsPage'
-import { SettingsPage } from './pages/SettingsPage'
-import { VersionsPage } from './pages/VersionsPage'
-import { WorkflowRunPage } from './pages/WorkflowRunPage'
-import { WorkflowsPage } from './pages/WorkflowsPage'
+
+// #2356 — every page but the catalogue is its own chunk, so the shell's entry chunk
+// carries no page's dependencies: three.js only loads with a page that draws in 3D.
+// The shell's Suspense (`AppShell`) shows while a page's chunk loads: on a first visit.
+// A navigation does not blank the page it leaves, as `BrowserRouter` applies a location
+// change inside `startTransition` (react-router 8, unless `useTransitions={false}`), so
+// React keeps the old page up until the next one's chunk is in.
+const CustomizePage = lazy(async () => ({ default: (await import('./pages/CustomizePage')).CustomizePage }))
+const EditPage = lazy(async () => ({ default: (await import('./pages/EditPage')).EditPage }))
+const FlowPage = lazy(async () => ({ default: (await import('./pages/FlowPage')).FlowPage }))
+const HistoryPage = lazy(async () => ({ default: (await import('./pages/HistoryPage')).HistoryPage }))
+const LibraryPage = lazy(async () => ({ default: (await import('./pages/LibraryPage')).LibraryPage }))
+const PrintDetailPage = lazy(async () => ({ default: (await import('./pages/PrintDetailPage')).PrintDetailPage }))
+// Two pages of one module, so one chunk.
+const loadPrints = () => import('./pages/PrintsPage')
+const PrintsPage = lazy(async () => ({ default: (await loadPrints()).PrintsPage }))
+const TemplatePrintsPage = lazy(async () => ({ default: (await loadPrints()).TemplatePrintsPage }))
+const SettingsPage = lazy(async () => ({ default: (await import('./pages/SettingsPage')).SettingsPage }))
+const VersionsPage = lazy(async () => ({ default: (await import('./pages/VersionsPage')).VersionsPage }))
+const WorkflowRunPage = lazy(async () => ({ default: (await import('./pages/WorkflowRunPage')).WorkflowRunPage }))
+const WorkflowsPage = lazy(async () => ({ default: (await import('./pages/WorkflowsPage')).WorkflowsPage }))
 
 // Monaco is the biggest thing in the bundle and only these two routes want it, so
 // they are split out: opening the customizer never downloads an editor. A flow's page

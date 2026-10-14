@@ -38,6 +38,19 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow images${TEST_DATABASE_URL ? '' : ` (sk
     expect(await blobs.get(subject, '../x.png')).toBeUndefined()
   })
 
+  it("keeps at most the run's cap, and answers the names it holds (#2578)", async () => {
+    const subject = `flow-${randomUUID()}`
+    const blobs = new PgFlowBlobs(db.sql, new PgPayloadKeys(db.sql, kek), 1)
+    const png = sessionImage('image/png', PNG)
+    const other = sessionImage('image/png', Buffer.concat([PNG, Buffer.from([0])]))
+    expect(await blobs.put(subject, [png])).toEqual([NAME])
+    expect(await blobs.put(subject, [other, png])).toEqual([NAME])
+    const rows = await db.sql<{ name: string }[]>`SELECT name FROM ai_flow_blobs WHERE subject = ${subject}`
+    expect(rows.map((r) => r.name)).toEqual([NAME])
+    // Another run has its own room.
+    expect(await blobs.put(`flow-${randomUUID()}`, [other])).toEqual([other.name])
+  })
+
   it('deletes them with the run, and keeps none for a forgotten run', async () => {
     const subject = `flow-${randomUUID()}`
     const keys = new PgPayloadKeys(db.sql, kek)

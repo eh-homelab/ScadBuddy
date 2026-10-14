@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { demoToolpath, encodeToolpath } from '../mocks/toolpath'
-import { PRINT_MOVE, TRAVEL_MOVE, decodeToolpath, drawnCount, featureColour, speedColour, toolpathLines } from './toolpath'
+import { PRINT_MOVE, TRAVEL_MOVE, decodeToolpath, drawnCount, featureColour, printedUpTo, speedColour, toolpathLines } from './toolpath'
 
 describe('toolpath (#2072)', () => {
   it('decodes the header and the float32 segments after it', () => {
@@ -45,6 +45,21 @@ describe('toolpath (#2072)', () => {
     const first = toolpathLines(path, 'layers', 0)
     expect(first.count).toBe(3)
     expect(Array.from(first.colours.subarray(12, 15))).toEqual(featureColour('Sparse infill', 1).map(Math.fround))
+  })
+
+  it('counts the lines Layers draws up to each layer, for its draw range', () => {
+    const path = decodeToolpath(demoToolpath())
+    // Layer 0 is four segments, one of them travel; layer 1 adds two prints.
+    expect(printedUpTo(path)).toEqual([toolpathLines(path, 'layers', 0).count, toolpathLines(path, 'layers', 1).count])
+    expect(printedUpTo(path)).toEqual([3, 5])
+  })
+
+  it('refuses a format it does not know, saying so', () => {
+    const buffer = encodeToolpath({ features: [], layers: [], max_speed: 1, truncated: false }, [])
+    const bytes = new Uint8Array(buffer)
+    const text = new TextDecoder().decode(bytes)
+    const bumped = new TextEncoder().encode(text.replace('"version":1', '"version":2'))
+    expect(() => decodeToolpath(bumped.buffer)).toThrow(/format 2/)
   })
 
   it('draws a feature past the header’s list in a fallback colour rather than failing', () => {

@@ -40,7 +40,7 @@ describe.skipIf(skip !== '')(`the images-by-pointer migration${skip}`, () => {
     await migrate(db.sql, MIGRATIONS)
     const [row] = await db.sql<{ preview: Buffer }[]>`SELECT preview FROM ai_attachments WHERE id = ${id}`
     expect(Buffer.from(row!.preview).equals(JPEG)).toBe(true)
-    const columns = await db.sql`SELECT column_name FROM information_schema.columns WHERE table_name = 'ai_attachments' AND column_name = 'preview_data'`
+    const columns = await db.sql`SELECT column_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'ai_attachments' AND column_name = 'preview_data'`
     expect(columns).toHaveLength(0)
   })
 

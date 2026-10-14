@@ -47,7 +47,7 @@ import {
   HindsightClient,
   type MemoryActivity,
   type MemoryHooks,
-  type MemoryHooksOptions,
+  type MemoryOptions,
   hindsightTarget,
   turnRecallMaxQueryChars,
 } from '../memory/hindsight.js'
@@ -79,6 +79,7 @@ import {
   type SessionStatus,
 } from './protocol.js'
 import { SessionBlobs, sentImageBlobs, type StoredBlob } from './blobs.js'
+import { PgHttpBodies } from './httpBodies.js'
 import { SessionFiles } from '../workspace/store.js'
 import { SessionEdits } from './edits.js'
 import { blobNames, durableReplies, entriesThrough, forkHistory, transcriptCut } from './forkPoint.js'
@@ -437,47 +438,47 @@ export async function recordMemoryActivity(
   a: MemoryActivity,
   secrets: readonly string[],
 ): Promise<void> {
-    const id = session.id
-    const summary = {
-      bank: a.bank,
-      ...(a.documentId ? { document_id: a.documentId } : {}),
-      ...(a.count === undefined ? {} : { results: a.count }),
-      ...(a.tool ? { tool: a.tool } : {}),
-    }
-    const detail = a.reason ? { detail: safeDetail(a.reason, secrets) } : {}
-    await Promise.all([
-      deps.audit?.record({
-        kind: 'memory',
-        action: a.action,
-        surface: 'harness',
-        actor: session.owner,
-        sessionId: id,
-        turnId,
-        ...(a.toolUseId ? { toolUseId: a.toolUseId } : {}),
-        inputSummary: JSON.stringify(summary),
-        outcome: a.outcome === 'ok' ? 'ok' : 'error',
-        ...detail,
-        startedAt: a.startedAt,
-        finishedAt: a.finishedAt,
-      }),
-      deps.events.append(id, [
-        scrubForLog(
-          event({
-            type: 'memory',
-            sessionId: id,
-            turnId,
-            action: a.action,
-            bank: a.bank,
-            outcome: a.outcome,
-            ...(a.count === undefined ? {} : { count: a.count }),
-            ...detail,
-            ...(a.input === undefined ? {} : { input: memoryText(a.input, secrets) }),
-            ...(a.memories === undefined ? {} : { memories: a.memories.map((m) => memoryText(m, secrets)) }),
-          }),
-          secrets,
-        ),
-      ]),
-    ])
+  const id = session.id
+  const summary = {
+    bank: a.bank,
+    ...(a.documentId ? { document_id: a.documentId } : {}),
+    ...(a.count === undefined ? {} : { results: a.count }),
+    ...(a.tool ? { tool: a.tool } : {}),
+  }
+  const detail = a.reason ? { detail: safeDetail(a.reason, secrets) } : {}
+  await Promise.all([
+    deps.audit?.record({
+      kind: 'memory',
+      action: a.action,
+      surface: 'harness',
+      actor: session.owner,
+      sessionId: id,
+      turnId,
+      ...(a.toolUseId ? { toolUseId: a.toolUseId } : {}),
+      inputSummary: JSON.stringify(summary),
+      outcome: a.outcome === 'ok' ? 'ok' : 'error',
+      ...detail,
+      startedAt: a.startedAt,
+      finishedAt: a.finishedAt,
+    }),
+    deps.events.append(id, [
+      scrubForLog(
+        event({
+          type: 'memory',
+          sessionId: id,
+          turnId,
+          action: a.action,
+          bank: a.bank,
+          outcome: a.outcome,
+          ...(a.count === undefined ? {} : { count: a.count }),
+          ...detail,
+          ...(a.input === undefined ? {} : { input: memoryText(a.input, secrets) }),
+          ...(a.memories === undefined ? {} : { memories: a.memories.map((m) => memoryText(m, secrets)) }),
+        }),
+        secrets,
+      ),
+    ]),
+  ])
 }
 
 export class SessionError extends Error {
@@ -707,7 +708,7 @@ export type SessionManagerDeps = {
    * its transcript retained to that plugin's bank. These are the hook knobs
    * (hooks.py `MemoryHookConfig` and friends); `false` turns it off.
    */
-  memory?: Omit<MemoryHooksOptions, 'client' | 'secrets' | 'log' | 'sessionStore' | 'onActivity'> | false
+  memory?: MemoryOptions | undefined
   /**
    * The assistant's `http_request` tool (#827, harness/httpRequest.ts). A
    * session's turns get it when this is set and the `http_request_enabled`
@@ -1023,7 +1024,14 @@ export class SessionManager {
       ...(deps.settings ? { settings: deps.settings } : {}),
     })
     this.projection = new PendingProjection(deps.sql)
-    this.escalations = new Escalations({ sql: deps.sql, durable: () => this.durable })
+    this.escalations = new Escalations({
+      sql: deps.sql,
+      durable: () => this.durable,
+      // A delivery turn (#2482): as the owner, with the tiers its owner holds now.
+      send: async (id, owner, text, tiers) => {
+        await this.send(id, owner, text, { tiers })
+      },
+    })
     this.edits = new SessionEdits({
       sql: deps.sql,
       events: this.events,
@@ -1080,7 +1088,7 @@ export class SessionManager {
   /** `id` is the saved response's id as `savedBody` checked it: a UUID, safe in a header or a path. */
   async httpBody(id: string, saved: string, principal: Owner): Promise<{ id: string; meta: SavedMeta; bytes: Buffer }> {
     await this.get(id, principal)
-    const body = await savedBody(path.join(sessionWorkDir(this.deps.paths, id), 'http'), saved)
+    const body = await savedBody(new PgHttpBodies(this.deps.sql, id), saved)
     if (!body) throw new SessionError('not_found', `no saved response ${saved} in session ${id}`)
     return { id: saved, ...body }
   }
@@ -1791,7 +1799,8 @@ export class SessionManager {
         const http =
           this.deps.httpRequest && httpRequestEnabled(httpSetting)
             ? httpRequestServer({
-                saveDir: path.join(cwd, 'http'),
+                // In Postgres, so any replica serves it, after a deploy too (#2374).
+                saved: new PgHttpBodies(this.deps.sql, id),
                 // save_to_workspace (#2329): the body becomes one of the session's files.
                 workspace: { files: this.files, ref: { kind: 'session', sessionId: id } },
                 secrets: () => secrets,

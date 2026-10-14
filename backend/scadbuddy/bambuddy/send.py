@@ -30,6 +30,7 @@ from scadbuddy.bambuddy.models import ExternalLink, LibraryFile, LibraryListRow
 from scadbuddy.bambuddy.options import PrintOptions, resolve
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
 from scadbuddy.core.problems import ApiError
+from scadbuddy.core.tracing import span
 from scadbuddy.library.deeplink import edit_url, merge_edit_note
 from scadbuddy.library.outputs import OutputFiles, OutputMeta, download_filename
 from scadbuddy.library.settings_store import StoredSettings
@@ -436,9 +437,13 @@ async def upload_copy(
     no duplicate in the folder.
     """
     target = target if target is not None else await target_for(client, settings)
+    # Traced (#2720): the read and the layout were a ~20 s gap with no span in Tempo.
+    with span("upload.fetch", attributes={"scadbuddy.subject": printable.key}):
+        fetched = await printable.fetch()
     # Re-plating is mesh work that took ~23 s on a big output, on the event loop every
     # other request shares (#2354).
-    payload = await asyncio.to_thread(_laid_out_for, await printable.fetch(), target)
+    with span("upload.layout", attributes={"scadbuddy.subject": printable.key}):
+        payload = await asyncio.to_thread(_laid_out_for, fetched, target)
     folder = folder_id if folder_id is not None else settings.library_folder_id
     project_stem = (
         stem if stem is not None and folder is not None and not is_inbox(folder, settings) else None

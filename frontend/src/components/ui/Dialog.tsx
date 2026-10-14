@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from 'react'
 import { ModalCompanionContext, focusInto, focusables } from '../../lib/modal'
+import { Button } from './Button'
 
 interface Props {
   open: boolean
@@ -182,11 +183,15 @@ export function Dialog({ open, title, description, onClose, children, footer, si
           )}
         </header>
         <div className="overflow-y-auto px-5 py-4">{children}</div>
-        {footer && (
-          <footer className="flex shrink-0 items-center justify-end gap-2 border-t border-line px-5 py-3">
-            {footer}
-          </footer>
-        )}
+        {/* #2386 — a dialog with no actions of its own still has a way out that is not
+            Esc or the backdrop: touch has no Esc, and on a phone there is little backdrop. */}
+        <footer className="flex shrink-0 items-center justify-end gap-2 border-t border-line px-5 py-3">
+          {footer ?? (
+            <Button variant="ghost" onClick={onClose}>
+              Close
+            </Button>
+          )}
+        </footer>
       </div>
     </div>
   )

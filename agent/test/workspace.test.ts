@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
-import { runHttpRequest, withDefaults } from '../src/harness/httpRequest.js'
+import { dirBodies, runHttpRequest, withDefaults } from '../src/harness/httpRequest.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { DURABLE_TOOLS } from '../src/tools/manifest.js'
 import { runTool, type ToolContext } from '../src/tools/registry.js'
@@ -95,6 +95,7 @@ describe('uploads take a workspace file (#2329 part 2)', () => {
   const byName = (name: string) => ALL_TOOLS.find((t) => t.name === name)!
   const UPLOADS = [
     'upload_asset',
+    'upload_library_file',
     'add_model_media',
     'set_model_thumbnail',
     'set_output_thumbnail',
@@ -114,6 +115,7 @@ describe('uploads take a workspace file (#2329 part 2)', () => {
     }
     expect(Object.fromEntries(UPLOADS.map((n) => [n, byName(n).risk]))).toEqual({
       upload_asset: 'write',
+      upload_library_file: 'outward',
       add_model_media: 'write',
       set_model_thumbnail: 'write',
       set_output_thumbnail: 'write',
@@ -139,7 +141,7 @@ describe('uploads take a workspace file (#2329 part 2)', () => {
 
 describe('http_request save_to_workspace, before anything is sent', () => {
   const base = {
-    saveDir: '/nonexistent',
+    saved: dirBodies('/nonexistent'),
     secrets: () => [],
     actor: { kind: 'browser' as const, id: 'user', label: 'User' },
   }

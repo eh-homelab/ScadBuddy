@@ -37,6 +37,12 @@ dev = [
     "ruff>=0.8",
 ]
 
+[tool.uv]
+# #2677: uv.lock is lockfile revision 5, which uv reads from 0.6, but uv first installs
+# the final Python 3.14.0 (not a 3.14 pre-release) at 0.9.0. Older uv stops here and
+# names the version, rather than failing `uv run --frozen` opaquely.
+required-version = ">=0.9.0"
+
 [tool.ruff]
 line-length = 100
 target-version = "py314"

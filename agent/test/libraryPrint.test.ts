@@ -215,7 +215,20 @@ describe('the library routes', () => {
     expect(plate).toBe('2')
     expect(preview.content).toContainEqual({
       type: 'resource',
-      resource: { uri: `scadbuddy://print/library/${FILE}/preview.glb`, mimeType: 'model/gltf-binary', blob: 'AQI=' },
+      resource: { uri: `scadbuddy://print/library/${FILE}/preview.glb?plate=2`, mimeType: 'model/gltf-binary', blob: 'AQI=' },
+    })
+    const plateLink = await tool('get_output_preview').execute({ library_file_id: FILE, plate: 2 }, ctx({ maxInlineBytes: 1 }))
+    expect(plateLink.content[0]).toMatchObject({
+      type: 'resource_link',
+      uri: `/api/v1/print/library/${FILE}/preview.glb?plate=2`,
+      name: `library-${FILE}-plate-2.glb`,
+    })
+    // No plate is plate 1, under plate 1's one name.
+    const first = await tool('get_output_preview').execute({ library_file_id: FILE }, ctx({ maxInlineBytes: 1 }))
+    expect(plate).toBe('1')
+    expect(first.content[0]).toMatchObject({
+      uri: `/api/v1/print/library/${FILE}/preview.glb?plate=1`,
+      name: `library-${FILE}-plate-1.glb`,
     })
     const file = await tool('download_3mf').execute({ library_file_id: FILE }, ctx({ maxInlineBytes: 16 }))
     expect(file.content).toContainEqual({
@@ -239,7 +252,11 @@ describe('the library routes', () => {
       resource: { uri: `scadbuddy://outputs/${OUT}/preview.glb?plate=2`, mimeType: 'model/gltf-binary', blob: 'AQI=' },
     })
     const link = await tool('get_output_preview').execute({ output_id: OUT, plate: 2 }, ctx({ maxInlineBytes: 1 }))
-    expect(link.content[0]).toMatchObject({ type: 'resource_link', uri: `/api/v1/outputs/${OUT}/preview.glb?plate=2` })
+    expect(link.content[0]).toMatchObject({
+      type: 'resource_link',
+      uri: `/api/v1/outputs/${OUT}/preview.glb?plate=2`,
+      name: `${OUT}-plate-2.glb`,
+    })
   })
 
   it('lists one folder of the library, paged', async () => {
@@ -378,6 +395,70 @@ describe('deleting library files (#2167)', () => {
     )
     const result = firstText(await tool('restore_library_files').execute({ file_ids: [1] }, ctx()))
     expect(result).toEqual({ restored: [1], skipped: [] })
+  })
+})
+
+describe('library writes for the mount (#2686)', () => {
+  it('deleting a folder is outward and sends a key', async () => {
+    let key: string | null = null
+    server.use(
+      http.post(`${BACKEND}/api/v1/print/library/folders/4/delete`, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json({ deleted: [], skipped: [], folders: [4] })
+      }),
+    )
+    expect(tool('delete_library_folder').risk).toBe('outward')
+    const result = firstText(await tool('delete_library_folder').execute({ folder_id: 4 }, ctx())) as { folders: number[] }
+    expect(key).toBeTruthy()
+    expect(result.folders).toEqual([4])
+  })
+
+  it('renames a file with only the fields given', async () => {
+    let sent: unknown
+    server.use(
+      http.patch(`${BACKEND}/api/v1/print/library/7`, async ({ request }) => {
+        sent = await request.json()
+        return HttpResponse.json({ id: 7, filename: 'b.3mf', folder_id: null })
+      }),
+    )
+    await tool('update_library_file').execute({ file_id: 7, filename: 'b.3mf' }, ctx())
+    expect(sent).toEqual({ filename: 'b.3mf' })
+  })
+
+  it('makes a folder', async () => {
+    let sent: unknown
+    server.use(
+      http.post(`${BACKEND}/api/v1/print/library/folders`, async ({ request }) => {
+        sent = await request.json()
+        return HttpResponse.json({ id: 9, name: 'Parts', parent_id: 2 })
+      }),
+    )
+    await tool('create_library_folder').execute({ name: 'Parts', parent_id: 2 }, ctx())
+    expect(sent).toEqual({ name: 'Parts', parent_id: 2 })
+  })
+
+  it('renames and moves a folder with only the fields given', async () => {
+    let sent: unknown
+    server.use(
+      http.patch(`${BACKEND}/api/v1/print/library/folders/9`, async ({ request }) => {
+        sent = await request.json()
+        return HttpResponse.json({ id: 9, name: 'Bits', parent_id: null })
+      }),
+    )
+    await tool('update_library_folder').execute({ folder_id: 9, name: 'Bits' }, ctx())
+    expect(sent).toEqual({ name: 'Bits' })
+  })
+
+  it('every one is outward, so a human approves it', () => {
+    for (const name of ['upload_library_file', 'update_library_file', 'create_library_folder', 'update_library_folder', 'delete_library_folder']) {
+      expect(tool(name).risk).toBe('outward')
+    }
+  })
+
+  it('every one asks for Manage Library', () => {
+    for (const name of ['upload_library_file', 'update_library_file', 'create_library_folder', 'update_library_folder', 'delete_library_folder']) {
+      expect(tool(name).bambuddyScope).toEqual(['Manage Library'])
+    }
   })
 })
 

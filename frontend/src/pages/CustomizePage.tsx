@@ -61,7 +61,13 @@ import { temporalWorkflowUrl } from '../lib/temporal'
 import { useAsync } from '../lib/useAsync'
 import { useDebounced } from '../lib/useDebounced'
 import { useFullscreen } from '../lib/useFullscreen'
-import { RENDER_DEBOUNCE_MS, type RenderBusy, useRenderJob, canRetry } from '../lib/useRenderJob'
+import {
+  RENDER_DEBOUNCE_MS,
+  type RenderBusy,
+  useRenderAutoRetry,
+  useRenderJob,
+  canRetry,
+} from '../lib/useRenderJob'
 
 /** One shared empty map, so "nothing yet" keeps a stable identity across renders. */
 const NOTHING: ParamValues = Object.freeze({})
@@ -368,6 +374,7 @@ export function CustomizePage() {
     jobFor,
     stage: renderStage,
   } = useRenderJob(slug, settled && seed && !invalid ? debounced : undefined, version, extra)
+  useRenderAutoRetry(renderError, rendering, retryRender, debounced)
   // One object per refusal, so a font field's install error answers this one only (#2215).
   const fontRefusal = useMemo(() => missingFonts(renderError), [renderError])
   // #1293 — a render still running or one that failed links to its workflow in the
@@ -393,6 +400,11 @@ export function CustomizePage() {
   // The job on screen is the render of the values on screen — not the previous one,
   // which is all `settled && !rendering` can promise for a frame after a change.
   const upToDate = settled && settledFor === debounced && !rendering && !invalid
+  // #2464 — and the job on show ran with these values. A submit that failed before it
+  // made a job (a 503 during a deploy) settles the new values but leaves the previous
+  // job on screen: Generate must not save it as if it were theirs.
+  const shownIsCurrent = jobFor === debounced
+  const current = upToDate && shownIsCurrent
 
   // A parameter change invalidates the saved output — Generate has to run again. So does
   // a UI-state-only change (#848): it starts no render, but the output records the old state.
@@ -504,7 +516,7 @@ export function CustomizePage() {
     extra,
     inputs,
     upToDate,
-    ready: job?.status === 'done' && !rendering && settled && upToDate,
+    ready: job?.status === 'done' && !rendering && settled && current,
     job,
     output,
     reloadOutputs: outputsState.reload,
@@ -888,6 +900,7 @@ export function CustomizePage() {
         // The flyout lies over the scene; the readouts move clear of it.
         covered={full && flyout ? FLYOUT_WIDTH : undefined}
         rejected={Boolean(renderError)}
+        blocked={invalid ?? undefined}
       />
     </Suspense>
   )
@@ -907,7 +920,8 @@ export function CustomizePage() {
           // `hostDeps.generate` runs one save at a time and keeps `uiGenerate` (this
           // button's state and its error) for every caller.
           onClick={() => void hostDeps.generate().catch(() => undefined)}
-          disabled={uiGenerate.generating || rendering || !settled || Boolean(invalid) || job?.status !== 'done'}
+          disabled={uiGenerate.generating || !current || job?.status !== 'done'}
+          title={invalid ?? undefined}
         >
           {uiGenerate.generating
             ? 'Generating…'
@@ -932,7 +946,11 @@ export function CustomizePage() {
       slug={slug}
       job={job}
       rendering={rendering || !settled}
-      upToDate={upToDate}
+      upToDate={current}
+      // A template UI may show no field by that name: its problem is said as it stands.
+      blockedReason={
+        unrenderable ? (customUi ? (invalid ?? undefined) : `Fix ${unrenderable.caption || unrenderable.name} first`) : undefined
+      }
       output={output}
       capture={capture}
       captureImage={captureImage}
@@ -1304,6 +1322,20 @@ export function CustomizePage() {
           {invalid && templateUi && (
             <p role="alert" className="border-t border-warn/40 bg-warn/8 px-3 py-2 text-[12px] text-warn">
               {invalid}
+            </p>
+          )}
+          {/* #2444 — the field says why, but it may be on another tab: say so here too,
+              with the way to it. A status, as the field's own alert already announced it. */}
+          {invalid && !templateUi && unrenderable && (
+            <p
+              role="status"
+              data-testid="render-blocked"
+              className="border-t border-warn/40 bg-warn/8 px-3 py-2 text-[12px] text-warn"
+            >
+              Not rendering: {invalid}{' '}
+              <Button size="sm" onClick={() => setReveal({ name: unrenderable.name })}>
+                Show the field
+              </Button>
             </p>
           )}
           {renderError && (

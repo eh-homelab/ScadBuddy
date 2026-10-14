@@ -54,6 +54,14 @@ export function traceparentOf(span: Span): string | undefined {
  * not only the write. An abort (a superseded or abandoned action) sets only
  * `scadbuddy.outcome` `abandoned`. A failure records the exception, sets `ERROR` and
  * `scadbuddy.failure_class`, and is rethrown unchanged.
+ *
+ * The `arrange` action is started from two places (the Arrange dialog and the Print
+ * picker's re-arrange); both set, so one Tempo query reads both (#2891, #2892):
+ * - `scadbuddy.output_id`: the arranged output, once saved;
+ * - `scadbuddy.rerendered`: how many sources were re-rendered first;
+ * - `scadbuddy.outcome` `nothing_arranged`: it ended with nothing arranged.
+ * What each knows of its sources differs: the dialog sets `scadbuddy.outputs` and
+ * `scadbuddy.library_files` (counts), the picker `scadbuddy.source_output_id`.
  */
 export async function traceAction<T>(
   name: string,

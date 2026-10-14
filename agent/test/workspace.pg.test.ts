@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createBackendClient } from '../src/api/backend.js'
 import { tiersUpTo } from '../src/auth/principal.js'
 import type { Database } from '../src/db.js'
-import { HTTP_SERVER, HTTP_TOOL, runHttpRequest, withDefaults } from '../src/harness/httpRequest.js'
+import { dirBodies, HTTP_SERVER, HTTP_TOOL, runHttpRequest, withDefaults } from '../src/harness/httpRequest.js'
 import { turnToolActivity } from '../src/temporal/turnTools.js'
 import { turnServers } from '../src/temporal/turnServers.js'
 import { unwrapUntrusted } from '../src/safety/untrusted.js'
@@ -282,6 +282,22 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       expect(file.type).toBe('image/svg+xml')
       expect(Buffer.from(await file.arrayBuffer()).equals(svg)).toBe(true)
       expect(result).toMatchObject({ id: 'a'.repeat(64), workspace_file: { path: 'downloads/logo.svg', size_bytes: svg.length, sha256: info.sha256 } })
+    })
+
+    it('upload_library_file sends a workspace file with its folder, named by filename', async () => {
+      const bytes = Buffer.from('3mf-bytes')
+      const info = await files.write(ws, 'out/cube.3mf', bytes)
+      const { c, seen } = upload(() => Response.json({ id: 11, filename: 'part.3mf', folder_id: 3 }, { status: 201 }))
+      const result = firstText(
+        // outward: runTool would park it for approval, which is the gate's own test
+        await tool('upload_library_file').execute({ folder_id: 3, filename: 'part.3mf', workspace_path: 'out/cube.3mf', workspace_sha256: info.sha256 }, c),
+      ) as Record<string, unknown>
+      expect(seen[0]).toMatchObject({ method: 'POST', path: '/api/v1/print/library/files' })
+      expect(seen[0]!.form!.get('folder_id')).toBe('3')
+      const file = seen[0]!.form!.get('file') as File
+      expect(file.name).toBe('part.3mf')
+      expect(Buffer.from(await file.arrayBuffer()).equals(bytes)).toBe(true)
+      expect(result).toMatchObject({ id: 11 })
     })
 
     it('refuses a changed file, a path without its sha256, and both or neither of the two', async () => {
@@ -561,7 +577,7 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
       const deps = {
         sessions: { ownerOf: async (id: string) => (id === sessionId ? browser : undefined) },
         servers: turnServers({
-          httpRequest: { saveRoot: (await tempPaths()).stateDir, files },
+          httpRequest: { saveRoot: (await tempPaths()).stateDir, sql: db.sql, files },
           settings: { get: async <T,>() => true as T },
         }),
       }
@@ -588,7 +604,7 @@ describe.skipIf(skip !== undefined)(`the session workspace${skip ? ` (skipped: $
     }
 
     const context = (dir: string) => ({
-      saveDir: dir,
+      saved: dirBodies(dir),
       secrets: () => [],
       actor: browser,
       workspace: { files, ref: ws },

@@ -1,7 +1,7 @@
 import { useId, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import type { CustomizerSchema, FontFamily, InstalledFamily, ParamValue } from '../api/types'
 import { missingFamiliesOf, type MissingFonts } from '../lib/fonts'
-import { diffFromDefaults, extrudersIn, extrudersOf, groupsOf, type ParamValues } from '../lib/params'
+import { diffFromDefaults, extrudersIn, extrudersOf, groupsOf, rangeProblem, type ParamValues } from '../lib/params'
 import { ParamWidget } from './widgets/ParamWidget'
 import { Button } from './ui/Button'
 
@@ -137,6 +137,9 @@ export function ParameterPanel({
       >
         {tabs.map((group, index) => {
           const selected = group.name === current?.name
+          // #2444 — a tab holding a value nothing can render is marked, so the field that
+          // stops the render can be found from any other tab.
+          const flagged = group.params.some((param) => rangeProblem(param, values[param.name]) !== null)
           return (
             <button
               key={group.name}
@@ -158,6 +161,14 @@ export function ParameterPanel({
               }`}
             >
               {group.name}
+              {flagged && (
+                <>
+                  <span aria-hidden="true" data-testid="tab-flagged" className="ml-1 text-warn">
+                    •
+                  </span>
+                  <span className="sr-only"> (a value to fix)</span>
+                </>
+              )}
             </button>
           )
         })}

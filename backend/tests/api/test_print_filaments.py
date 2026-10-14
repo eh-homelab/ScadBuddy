@@ -18,6 +18,7 @@ import respx
 from fastapi.testclient import TestClient
 
 from scadbuddy.bambuddy import send
+from scadbuddy.bambuddy.print_source import OutputSource
 from tests.api.test_print import presets_routes
 from tests.api.test_send import BASE, configure, make_output, upload_route
 from tests.bambuddy.conftest import recording
@@ -78,6 +79,16 @@ def queue_route(item_id: int = 51) -> respx.Route:
     )
 
 
+def slots_from_bambuddy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The output's 3MF read as one its slots cannot be read from (#2720), so the slots
+    come from Bambuddy's ``filament-requirements``, which the test answers."""
+
+    async def unreadable(self: OutputSource) -> None:
+        return None
+
+    monkeypatch.setattr(OutputSource, "read_local", unreadable)
+
+
 def prepared(client: TestClient, model: str) -> str:
     configure(client)
     return make_output(client, model)
@@ -86,8 +97,9 @@ def prepared(client: TestClient, model: str) -> str:
 @pytest.mark.requires_postgres
 @respx.mock
 def test_the_filament_step_answers_with_the_inventory_and_a_suggestion(
-    client: TestClient, model: str
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    slots_from_bambuddy(monkeypatch)
     output_id = prepared(client, model)
     upload_route()
     presets_routes()
@@ -161,6 +173,31 @@ def test_the_filament_step_shows_the_mounted_nozzles(client: TestClient, model: 
 
 @pytest.mark.requires_postgres
 @respx.mock
+def test_an_outputs_filament_step_reads_its_own_3mf_and_uploads_nothing(
+    client: TestClient, model: str
+) -> None:
+    """#2720: the slots came from Bambuddy reading an uploaded copy, and laying that copy
+    out and uploading it kept an output's first dialog waiting ~20 s. The output's own
+    3MF has the same slots."""
+    output_id = prepared(client, model)
+    upload = upload_route()
+    inventory_routes()
+    nozzle_routes()
+
+    response = client.get(f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert [slot["slot_id"] for slot in body["slots"]] == [1]
+    assert body["library_file_id"] is None
+    assert not upload.called
+    assert not [
+        call for call in respx.calls if call.request.url.path.endswith("/filament-requirements")
+    ]
+
+
+@pytest.mark.requires_postgres
+@respx.mock
 def test_the_upload_is_laid_out_off_the_event_loop(
     client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -178,6 +215,7 @@ def test_the_upload_is_laid_out_off_the_event_loop(
         return real(payload, target)
 
     monkeypatch.setattr(send, "_laid_out_for", watched)
+    slots_from_bambuddy(monkeypatch)
     output_id = prepared(client, model)
     upload_route()
     inventory_routes()

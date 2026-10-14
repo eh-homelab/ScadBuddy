@@ -5,7 +5,8 @@ import type { AuditSink } from '../audit/log.js'
 import { BACKGROUND_BUILTINS, BUILTIN_SERVER, builtinServer, PROVIDED } from '../builtins/server.js'
 import type { BackgroundTasks } from '../background/service.js'
 import type { NestedQueries } from '../builtins/web.js'
-import { HTTP_READ_TOOL_NAME, HTTP_SERVER, httpRequestEnabled, httpRequestServer, httpTierOf, SETTING_HTTP_REQUEST } from '../harness/httpRequest.js'
+import { dirBodies, HTTP_READ_TOOL_NAME, HTTP_SERVER, httpRequestEnabled, httpRequestServer, httpTierOf, type SavedBodies, SETTING_HTTP_REQUEST } from '../harness/httpRequest.js'
+import { PgHttpBodies } from '../sessions/httpBodies.js'
 import type { HttpLimits } from '../harness/httpRequest.js'
 import type { Resolver } from '../http/egress.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
@@ -79,13 +80,14 @@ export type TurnServerDeps = {
   /** Every usable credential's secret (fallback.ts candidates): never in a request, never in a result. */
   credentialSecrets?: (() => Promise<readonly string[]>) | undefined
   /**
-   * http_request, as a classic turn has it; its saved bodies under `saveRoot/<session>/http`,
-   * on this pod's own disk as a classic turn's are (never the shared payload volume), so
-   * the server is pinned to this replica.
+   * http_request, as a classic turn has it. A session's saved bodies are in Postgres
+   * (`sql`, #2374), as a classic turn's are; a flow's, which has no session, under
+   * `saveRoot/flow-<run>/http` on this pod's own disk (never the shared payload volume).
    */
   httpRequest?:
     | {
         saveRoot: string
+        sql: Sql
         audit?: AuditSink | undefined
         resolve?: Resolver
         limits?: Partial<HttpLimits>
@@ -186,15 +188,19 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
     }
     const http = deps.httpRequest
     if (http && httpRequestEnabled(await deps.settings?.get<unknown>(SETTING_HTTP_REQUEST))) {
-      const saveDir = path.join(http.saveRoot, context.session, 'http')
-      await mkdir(saveDir, { recursive: true })
+      let saved: SavedBodies
+      if (context.flow) {
+        const saveDir = path.join(http.saveRoot, context.session, 'http')
+        await mkdir(saveDir, { recursive: true })
+        saved = dirBodies(saveDir)
+      } else saved = new PgHttpBodies(http.sql, context.session)
       servers.push({
         name: HTTP_SERVER,
         connect: () =>
           connectInProcess(
             () =>
               httpRequestServer({
-                saveDir,
+                saved,
                 secrets: () => secrets,
                 audit: http.audit,
                 actor: context.owner,

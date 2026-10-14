@@ -1,10 +1,8 @@
-import { mkdir, writeFile } from 'node:fs/promises'
-import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
 import type { Database } from '../src/db.js'
-import { sessionWorkDir } from '../src/harness/stateDirs.js'
 import { originPolicy } from '../src/http/origins.js'
+import { PgHttpBodies } from '../src/sessions/httpBodies.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -49,16 +47,16 @@ describe.skipIf(skip !== undefined)(`saved HTTP response bodies${skip ? ` (skipp
     await drop()
   })
 
-  /** A session of `owner`'s with one body saved as http_request saves it. */
+  /** A session of `owner`'s with one body saved as http_request saves it (#2374: in
+   *  Postgres, so the replica serving the UI need not be the one that ran the turn). */
   async function withBody(contentType: string | null, bytes: Buffer, owner = browser): Promise<string> {
     const { session } = await m.start(owner, { origin: 'chat' })
-    const dir = path.join(sessionWorkDir(paths, session.id), 'http')
-    await mkdir(dir, { recursive: true })
-    await writeFile(path.join(dir, `${SAVED}.body`), bytes)
-    await writeFile(
-      path.join(dir, `${SAVED}.json`),
-      JSON.stringify({ content_type: contentType, size_bytes: bytes.length, complete: true, url: 'https://example.com/x' }),
-    )
+    await new PgHttpBodies(db.sql, session.id).save(SAVED, bytes, {
+      content_type: contentType,
+      size_bytes: bytes.length,
+      complete: true,
+      url: 'https://example.com/x',
+    })
     return session.id
   }
 
