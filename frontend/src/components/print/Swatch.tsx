@@ -29,3 +29,18 @@ export function ClearSwatch({ size = 'md' }: { size?: 'sm' | 'md' }) {
     />
   )
 }
+
+/** A spool with no colour recorded, or one ScadBuddy can't read: an empty dashed chip,
+ * never black and never "clear", which says something the spool did not. */
+export function UnknownSwatch({ size = 'md' }: { size?: 'sm' | 'md' }) {
+  return (
+    <span
+      aria-hidden="true"
+      title="colour not recorded"
+      data-testid="unknown-swatch"
+      className={`inline-block shrink-0 rounded-[3px] border border-dashed border-black/35 ${
+        size === 'sm' ? 'size-4' : 'size-5'
+      }`}
+    />
+  )
+}

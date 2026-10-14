@@ -30,6 +30,7 @@ from scadbuddy.activity.index import (
 from scadbuddy.api import (
     health,
     libraries,
+    library_print,
     media,
     mesh_models,
     metrics,
@@ -42,6 +43,7 @@ from scadbuddy.api.cross_site import CrossSiteGate
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state
 from scadbuddy.api.limits import (
     BODY_LIMITS,
+    LIBRARY_UPLOAD_PATH,
     MEDIA_UPLOAD_PATH,
     MESH_UPLOAD_PATH,
     BodySizeGate,
@@ -1301,6 +1303,13 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
                 "a mesh upload",
                 "the library download cap (bambuddy/print_source.py MAX_DOWNLOAD_BYTES)",
             ),
+            RouteLimit(
+                "POST",
+                LIBRARY_UPLOAD_PATH,
+                MAX_DOWNLOAD_BYTES + 64 * 1024,  # the file plus the form's framing
+                "a library upload",
+                "the library download cap (bambuddy/print_source.py MAX_DOWNLOAD_BYTES)",
+            ),
             # The browser trace relay's 256 KiB (spec 2026-10-01 §5.2).
             telemetry.RELAY_ROUTE_LIMIT,
         ],
@@ -1328,6 +1337,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         models.PastedSource,
         media.MediaUpload,
         mesh_models.MeshUpload,
+        library_print.LibraryFileUploadForm,
         outputs.NeedsBackfillProblem,
     )
 

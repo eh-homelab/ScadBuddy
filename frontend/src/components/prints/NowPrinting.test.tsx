@@ -40,10 +40,12 @@ describe('NowPrinting (#977)', () => {
     expect(errors).toHaveTextContent('No description from Bambuddy HMS 0700220000020025')
     expect(errors).toHaveClass('text-warn')
     // Started from Bambuddy: its archive there, not a ScadBuddy print.
-    expect(within(paused).getByRole('link', { name: 'Open in Bambuddy (archive 90)' })).toHaveAttribute(
+    // Bambuddy has no page per archive: the link names the page, and the archive sits beside it (#2930).
+    expect(within(paused).getByRole('link', { name: "Bambuddy's archives" })).toHaveAttribute(
       'href',
       'http://bambuddy.local/archives',
     )
+    expect(paused).toHaveTextContent("Bambuddy's archives · archive 90")
 
     const linked = screen.getByTestId('printer-now-2')
     expect(within(linked).getByRole('link', { name: 'View this print' })).toHaveAttribute('href', '/prints/35')
@@ -62,7 +64,7 @@ describe('NowPrinting (#977)', () => {
     renderPage(<NowPrinting />)
 
     const paused = await screen.findByTestId('printer-now-1')
-    expect(within(paused).getByRole('link', { name: 'Open in Bambuddy (archive 90)' })).toHaveAttribute(
+    expect(within(paused).getByRole('link', { name: "Bambuddy's archives" })).toHaveAttribute(
       'href',
       'http://bambuddy.lan:8000/archives',
     )
@@ -89,6 +91,54 @@ describe('NowPrinting (#977)', () => {
     )
     renderPage(<NowPrinting />)
     expect(await screen.findByTestId('now-printing-error')).toHaveTextContent('could not reach Bambuddy')
+  })
+
+  it('keeps the newest read when an older one answers last (#2750 review)', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let release = () => {}
+    let reads = 0
+    server.use(
+      http.get('/api/v1/print/printers/now', async () => {
+        reads += 1
+        const stale = reads === 2
+        const printers = PRINTERS_NOW.map((printer) =>
+          printer.printer_id === 2 ? { ...printer, progress: stale ? 70 : reads === 1 ? 66 : 90 } : printer,
+        )
+        // The timer's read hangs until the visibility read has answered.
+        if (stale) await new Promise<void>((resolve) => (release = resolve))
+        return HttpResponse.json({ printers })
+      }),
+    )
+    renderPage(<NowPrinting />)
+    expect(await screen.findByText('66%')).toBeInTheDocument()
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(NOW_POLL_MS)
+    })
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'))
+    })
+    expect(await screen.findByText('90%')).toBeInTheDocument()
+    await act(async () => {
+      release()
+      await vi.advanceTimersByTimeAsync(50)
+    })
+    expect(screen.getByTestId('printer-now-2')).toHaveTextContent('90%')
+    expect(screen.queryByText('70%')).toBeNull()
+  })
+
+  it('lists an HMS code reported twice twice (#2750 review)', async () => {
+    const twice = { code: '0C008042', description: 'Spaghetti detected: check the print.' }
+    setPrintersNow(
+      PRINTERS_NOW.map((printer) => (printer.printer_id === 1 ? { ...printer, hms: [twice, twice] } : printer)),
+    )
+    const errors = vi.spyOn(console, 'error')
+    renderPage(<NowPrinting />)
+
+    const list = await screen.findByTestId('printer-now-hms-1')
+    expect(within(list).getAllByRole('listitem')).toHaveLength(2)
+    expect(errors.mock.calls.flat().join(' ')).not.toMatch(/same key/)
+    errors.mockRestore()
   })
 
   it('is absent with no printers', async () => {

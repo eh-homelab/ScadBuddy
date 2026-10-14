@@ -10,7 +10,7 @@ test.describe('workflows (#1057)', () => {
     await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Workflows' }).click()
     await expect(page).toHaveURL(/\/workflows$/)
     const runs = page.getByRole('list', { name: 'Flow runs' })
-    await expect(runs.locator('[data-run]')).toHaveCount(4)
+    await expect(runs.locator('[data-run]')).toHaveCount(5)
     await expect(page.locator('[data-run="run-ask"]')).toContainText('Waiting for your answer: Swap to pink?')
 
     await page.locator('[data-run="run-ask"]').getByRole('link', { name: 'swap v1' }).click()
@@ -210,7 +210,7 @@ for (const { name, viewport } of [
       await expect(dialog.getByRole('button', { name: 'Forget run' })).toBeInViewport()
       await dialog.getByRole('button', { name: 'Forget run' }).click()
       await expect(page).toHaveURL(/\/workflows$/)
-      await expect(page.locator('[data-run]')).toHaveCount(3)
+      await expect(page.locator('[data-run]')).toHaveCount(4)
       await expect(page.locator('[data-run="run-done"]')).toHaveCount(0)
     })
 

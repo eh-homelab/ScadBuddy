@@ -161,6 +161,41 @@ function defaults(): FlowRun[] {
       result: 'result: 7',
       created_at: at(1),
     }),
+    // #2482: a run started from a session, one call at its starter session and one
+    // narrowed by it, waiting at the person as a proposal.
+    run('run-escalated', {
+      status: 'waiting',
+      steps: [step(1, 'queue_print', 'running', false), step(2, 'arrange', 'running', false)],
+      waiting_on: [
+        {
+          call_id: 'call-parent',
+          kind: 'approval',
+          fn: 'queue_print',
+          since: at(1),
+          hop: 'parent',
+          hop_until: at(11),
+          reason: 'print limit reached',
+          proposed: false,
+          hops: [{ hop: 'parent', action: 'parked', actor: 'flow', at: at(1), reason: 'print limit reached' }],
+        },
+        {
+          call_id: 'call-narrowed',
+          kind: 'approval',
+          fn: 'arrange',
+          since: at(2),
+          hop: 'person',
+          reason: 'no rule admits it',
+          proposed: true,
+          hops: [
+            { hop: 'parent', action: 'parked', actor: 'flow', at: at(2), reason: 'no rule admits it' },
+            { hop: 'parent', action: 'narrow', actor: 'session:sess-escalated', at: at(3), reason: 'no rule admits it' },
+            { hop: 'person', action: 'pass_up', actor: 'system', at: at(3) },
+          ],
+        },
+      ],
+      started_by: { kind: 'agent', principal: 'p', session: 'sess-escalated' },
+      created_at: at(4),
+    }),
     // #2483: a run of a flow with inputs, recorded with its defaults filled in.
     run('run-coasters', {
       definition_id: 'def-coasters',
@@ -838,4 +873,19 @@ export const handlers = [
   ),
   http.post('/api/v1/workflow-runs/:id/answer', respond(() => 'answered')),
   http.post('/api/v1/workflow-runs/:id/decide', respond((body) => (body['approved'] ? 'approved' : 'denied'))),
+  // #2482: a parent's proposal beside the call it narrows, for the person only.
+  http.get('/api/v1/workflow-runs/:id/proposals/:callId', ({ params }) => {
+    const found = runs.find((r) => r.id === params['id'])
+    const entry = found?.waiting_on.find((w) => w.call_id === params['callId'] && w.proposed)
+    if (!entry) return HttpResponse.json({ detail: 'No such proposal.' }, { status: 404 })
+    return HttpResponse.json({
+      call_id: entry.call_id,
+      fn: entry.fn,
+      tool: null,
+      original: { request: { objects: [{ output_id: 'a', count: 3 }, { output_id: 'b' }], goal: 'fewest_plates' } },
+      proposed: { request: { objects: [{ output_id: 'a', count: 2 }], goal: 'fewest_plates' } },
+      proposal_hash: 'f'.repeat(64),
+      proposed_by: 'session:sess-escalated',
+    })
+  }),
 ]

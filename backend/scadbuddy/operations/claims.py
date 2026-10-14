@@ -24,6 +24,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
+from typing import BinaryIO
 
 #: Far past any run's timeout: a claim swept under a running operation fails it.
 CLAIM_MAX_AGE = timedelta(days=1)
@@ -104,6 +105,14 @@ class ClaimStore:
     def get(self, name: str) -> bytes:
         try:
             return self._path(name).read_bytes()
+        except FileNotFoundError:
+            raise LookupError(f"claim {name} is gone") from None
+
+    def open(self, name: str) -> BinaryIO:
+        """The claim ``name`` open for reading, for a run that streams it on rather than
+        reading it whole. The open file outlives a release or sweep of the claim."""
+        try:
+            return self._path(name).open("rb")
         except FileNotFoundError:
             raise LookupError(f"claim {name} is gone") from None
 
