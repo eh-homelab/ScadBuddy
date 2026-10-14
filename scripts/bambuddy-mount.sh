@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Mount Bambuddy's library (through ScadBuddy's API) as a FUSE filesystem (#2686).
 #
-#   bambuddy-mount [mount] [--ro] [--allow-other] [--api URL] [--dir DIR] [-- extra bambuddy-fs flags]
+#   bambuddy-mount [mount] [--ro] [--allow-other|--no-allow-other] [--api URL] [--dir DIR] [-- extra bambuddy-fs flags]
 #   bambuddy-mount umount [--dir DIR]
 #   bambuddy-mount status [--dir DIR]
 #   bambuddy-mount build
@@ -9,9 +9,10 @@
 # Lives in the repo as scripts/bambuddy-mount.sh; copy or symlink it onto PATH, e.g.
 #   ln -s "$PWD/scripts/bambuddy-mount.sh" ~/bin/bambuddy-mount
 #
-# --allow-other (or BAMBUDDY_FS_ALLOW_OTHER=1) lets other users and processes in, which
-# Windows Explorer (\\wsl$) needs; it also lets every local user rename, overwrite and
-# delete library files, so it is off unless asked for.
+# allow_other lets other users and processes in, which Windows Explorer (\\wsl$) needs;
+# it also lets every local user rename, overwrite and delete library files. It is on
+# whenever /etc/fuse.conf has user_allow_other; --no-allow-other (or
+# BAMBUDDY_FS_ALLOW_OTHER=0) turns it off, and --allow-other (or =1) insists on it.
 #
 # The log, $XDG_STATE_HOME/bambuddy-fs/mount.log, is appended to, each mount after a
 # banner, so the lines naming unsent writes survive the next mount.
@@ -87,6 +88,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --ro) ro=(--ro); shift ;;
     --allow-other) allow_other=1; shift ;;
+    --no-allow-other) allow_other=0; shift ;;
     --api) value "$@"; API="$2"; shift 2 ;;
     --dir) value "$@"; DIR="$2"; shift 2 ;;
     --) shift; extra=("$@"); break ;;
@@ -121,12 +123,14 @@ case "$cmd" in
     allow=()
     # Windows Explorer (\\wsl$) and other users only see the mount with allow_other,
     # which FUSE permits a non-root user only when /etc/fuse.conf says so.
-    if [[ -n "$allow_other" ]]; then
-      grep -qx 'user_allow_other' /etc/fuse.conf 2>/dev/null \
-        || die "--allow-other needs user_allow_other uncommented in /etc/fuse.conf"
+    if [[ "$allow_other" == 0 ]]; then
+      :
+    elif grep -qx 'user_allow_other' /etc/fuse.conf 2>/dev/null; then
       allow=(--allow-other)
+    elif [[ -n "$allow_other" ]]; then
+      die "--allow-other needs user_allow_other uncommented in /etc/fuse.conf"
     else
-      printf '%s\n' 'note: only you see the mount; pass --allow-other to see it from Windows (\\wsl$), which also lets every local user change it' >&2
+      printf '%s\n' 'note: only you see the mount; uncomment user_allow_other in /etc/fuse.conf to see it from Windows (\\wsl$)' >&2
     fi
     start=1
     if [[ -f "$LOG" ]]; then start=$(($(wc -l <"$LOG") + 1)); fi

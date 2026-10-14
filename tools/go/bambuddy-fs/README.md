@@ -28,21 +28,22 @@ A helper that builds from the checkout it lives in and mounts at `~/bambuddy` is
 `ln -s "$PWD/scripts/bambuddy-mount.sh" ~/bin/bambuddy-mount`:
 
 ```bash
-scripts/bambuddy-mount.sh [mount] [--ro] [--api URL] [--dir DIR] [-- extra flags]
+scripts/bambuddy-mount.sh [mount] [--ro] [--allow-other|--no-allow-other] [--api URL] [--dir DIR] [-- extra flags]
 scripts/bambuddy-mount.sh umount
 scripts/bambuddy-mount.sh status
 ```
 
 `SCADBUDDY_REPO`, `BAMBUDDY_FS_API` and `BAMBUDDY_FS_DIR` override its defaults. It
-passes `--allow-other` only when given `--allow-other` (or `BAMBUDDY_FS_ALLOW_OTHER=1`),
-for the reason below. It appends to `$XDG_STATE_HOME/bambuddy-fs/mount.log`, each mount
+passes `--allow-other` whenever `/etc/fuse.conf` has `user_allow_other` (see below for
+what that allows); `--no-allow-other` (or `BAMBUDDY_FS_ALLOW_OTHER=0`) turns it off, and
+`--allow-other` (or `=1`) fails instead of mounting without it. It appends to `$XDG_STATE_HOME/bambuddy-fs/mount.log`, each mount
 after a `===` banner, so the lines naming unsent writes outlive the next mount; `status`
 checks both the mount and its process.
 
 ### WSL and Windows
 
 Windows Explorer reaches a WSL mount only when other users may see it. Uncomment
-`user_allow_other` in `/etc/fuse.conf`, mount with `--allow-other`, then open
+`user_allow_other` in `/etc/fuse.conf` (the helper then mounts with `--allow-other`), then open
 `\\wsl$\<distro>\home\<you>\bambuddy`.
 
 `--allow-other` has a cost: the mount does not check permissions (no
