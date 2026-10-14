@@ -108,7 +108,25 @@ it('cuts a line that never ends instead of holding it', () => {
   const lines = lineSplitter((l) => out.push(l))
   for (let i = 0; i < 100; i++) lines.push('x'.repeat(1000))
   lines.push('\nnext\n')
-  expect(out).toEqual([`${'x'.repeat(EVENT_CHARS)} […cut]`, 'next'])
+  expect(out).toEqual([`${'x'.repeat(EVENT_CHARS - 7)} […cut]`, 'next'])
+})
+
+it('makes a line longer than an event one event, cut, and starts the next batch afresh', async () => {
+  const events: string[] = []
+  const end = await runCommand({
+    command: `printf 'y%.0s' $(seq 20000); echo; sleep 0.5; echo after`,
+    cwd: os.tmpdir(),
+    timeoutMs: 10_000,
+    signal: new AbortController().signal,
+    onEvent: async (t) => (events.push(t), true),
+  })
+  expect(end).toEqual({ outcome: 'exited', code: 0 })
+  expect(events).toEqual([`${'y'.repeat(EVENT_CHARS - 7)} […cut]`, 'after'])
+})
+
+it('cuts an event\'s text, never its notice', () => {
+  const notice = eventNotice('ab12cd34', 'ticks', 'z'.repeat(EVENT_CHARS + 50))
+  expect(notice).toContain(`<event>${'z'.repeat(EVENT_CHARS - 7)} […cut]</event>\n</task-notification>`)
 })
 
 it('connects a socket only to the addresses the check passed', async () => {

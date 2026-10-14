@@ -143,4 +143,23 @@ def test_a_line_without_a_newline_is_cut_not_held() -> None:
         lines.push("x" * 1000)
     lines.push("\nnext\n")
     out = lines.take()
-    assert out == ["x" * EVENT_MAX_CHARS + " […cut]", "next"]
+    assert out == ["x" * (EVENT_MAX_CHARS - 7) + " […cut]", "next"]
+
+
+async def test_a_line_longer_than_an_event_is_one_event_cut(
+    tmp_path: Any, signals: list[str]
+) -> None:
+    events: list[str] = []
+    cmd = "printf 'y%.0s' $(seq 20000); echo; sleep 0.5; echo after"
+    acts = _activities(tmp_path, {"command": cmd, "timeoutMs": 10_000}, events)
+    result = await acts.bg_monitor_command({"taskId": "ab12cd34"})
+    assert result == {"end": {"outcome": "exited", "code": 0}, "events": 2}
+    assert events == [
+        event_notice("ab12cd34", "ticks", "y" * (EVENT_MAX_CHARS - 7) + " […cut]"),
+        event_notice("ab12cd34", "ticks", "after"),
+    ]
+
+
+def test_an_events_text_is_cut_never_its_notice() -> None:
+    notice = event_notice("ab12cd34", "ticks", "z" * (EVENT_MAX_CHARS + 50))
+    assert notice.endswith("z" * (EVENT_MAX_CHARS - 7) + " […cut]</event>\n</task-notification>")

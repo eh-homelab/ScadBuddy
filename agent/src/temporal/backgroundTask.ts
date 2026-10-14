@@ -104,22 +104,34 @@ async function monitor(taskId: string, retryMs: number): Promise<void> {
   })
   const sources = proxyActivities<Record<string, Source>>({
     taskQueue: plan.queue,
+    // A classic command's queue is one replica's: if it is gone before it starts the source, the monitor fails.
+    scheduleToStartTimeout: '5 minutes',
     startToCloseTimeout: plan.timeoutMs + 120_000,
     heartbeatTimeout: '30 seconds',
     retry: { maximumAttempts: 1 },
   })
   let ended: MonitorEnd | undefined
-  void sources[plan.activity]!({ taskId }).then(
-    (r) => (ended = r.end),
-    (err: unknown) => {
-      if (!isCancellation(err)) ended = { outcome: 'failed', reason: err instanceof Error ? err.message : String(err) }
-    },
-  )
+  const scope = new CancellationScope()
+  const source = scope
+    .run(() => sources[plan.activity]!({ taskId }))
+    .then(
+      (r) => (ended = r.end),
+      (err: unknown) => {
+        if (!isCancellation(err)) ended = { outcome: 'failed', reason: err instanceof Error ? err.message : String(err) }
+      },
+    )
   let waitingSince: number | undefined
   while (ended === undefined) {
     await condition(() => pending || ended !== undefined, waitingSince === undefined ? undefined : retryMs)
     pending = false
     const sent = await acts.bg_deliver({ taskId, waitedMs: waitingSince === undefined ? 0 : Date.now() - waitingSince })
+    if (sent.result === 'end') {
+      // The session takes no more messages (or stayed busy past the give-up): the watch ends with it.
+      scope.cancel()
+      await source
+      await acts.bg_finish({ taskId, state: sent.state, detail: sent.reason })
+      return
+    }
     // Busy: ask again after retryMs, events or not; delivered (or nothing): wait for the next.
     waitingSince = sent.result === 'busy' ? (waitingSince ?? Date.now()) : undefined
   }

@@ -1,4 +1,7 @@
 import type { TestWorkflowEnvironment } from '@temporalio/testing'
+import { mkdtemp, readFile } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { backgroundActivities, type FireResult } from '../src/background/activities.js'
@@ -184,6 +187,28 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a background task's workfl
     expect(notice).toContain('<status>failed</status>\n<summary>Dynamic workflow "probe it" failed</summary>\n<error>Error: no answer</error>')
     expect(notice).toContain('<agents_error>1</agents_error>')
     expect(await store.get(t.id)).toMatchObject({ state: 'failed' })
+  }, 60_000)
+
+  it('stops a running watch, killing its command, when the session takes no more messages', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'watch-'))
+    const t = (await store.create({
+      sessionId,
+      kind: 'monitor',
+      description: 'tail',
+      spec: { description: 'tail', command: `echo $$ > ${dir}/pid; while true; do echo x; sleep 0.3; done`, queue: TASK_QUEUE, timeoutMs: 60_000 },
+      createdBy: browser,
+    }))!
+    answers = [{ result: 'end', state: 'failed', reason: 'not sent: the session is archived' }]
+    await (
+      await env.client.workflow.start(BACKGROUND_WORKFLOW, {
+        workflowId: backgroundWorkflowId(sessionId, t.id),
+        taskQueue: TASK_QUEUE,
+        args: [{ taskId: t.id, kind: 'monitor', retryMs: 200 }],
+      })
+    ).result()
+    expect(await store.get(t.id)).toMatchObject({ state: 'failed', detail: 'not sent: the session is archived' })
+    const pid = Number((await readFile(path.join(dir, 'pid'), 'utf8')).trim())
+    await expect.poll(() => { try { process.kill(pid, 0); return true } catch { return false } }, { timeout: 10_000 }).toBe(false)
   }, 60_000)
 
   it('is cancelled while it waits, through the service, and never fires', async () => {
