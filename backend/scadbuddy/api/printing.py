@@ -57,6 +57,7 @@ from scadbuddy.api.operations import (
     temporal_refused,
     temporal_unavailable,
 )
+from scadbuddy.bambuddy.catalogue import catalogue_name_key
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
 from scadbuddy.bambuddy.client import MJPEG_TYPE, client_for
 from scadbuddy.bambuddy.filament_ids import filament_material, filament_name
@@ -1102,6 +1103,7 @@ async def get_choices(
             settings,
             printer_id=printer_id,
             cache=paths.cache,
+            catalogue_key=catalogue_name_key(store.kek),
             rack=rack,
         )
 

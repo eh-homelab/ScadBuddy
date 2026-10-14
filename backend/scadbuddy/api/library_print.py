@@ -49,6 +49,7 @@ from scadbuddy.api.operations import (
 from scadbuddy.api.outputs import OutputPlate, live_outputs_for_files, read_plain_files
 from scadbuddy.api.printing import PRINT_RUN_PROBLEMS, accept_run, failed_before_queueing
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
+from scadbuddy.bambuddy.catalogue import catalogue_name_key
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, client_for
 from scadbuddy.bambuddy.filaments import MAX_PLATES, FilamentOptions
@@ -911,6 +912,7 @@ async def get_library_choices(
             remembered=remembered,
             printer_id=printer_id,
             cache=paths.cache,
+            catalogue_key=catalogue_name_key(store.kek),
             rack=rack,
         )
 
