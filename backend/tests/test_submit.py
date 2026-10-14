@@ -143,10 +143,6 @@ class ProjectingActivities(FakeActivities):
         return await self._real.project(projection)
 
 
-#: The render series of a counter labelled by job kind.
-RENDER = {"kind": "render"}
-
-
 #: The labels of a render submit's series (#2294).
 RENDER = {"kind": "render"}
 
@@ -1132,6 +1128,29 @@ async def test_deleting_its_model_cancels_a_legacy_row_whatever_claims_it_holds(
     dropped = await asyncio.to_thread(projection.read, old.id)
     assert dropped.state == "cancelled"
     assert not await asyncio.to_thread(projection.has_unfinished, SLUG)
+
+
+def test_an_arrange_the_api_settles_is_counted_as_arrange(
+    make_service: ServiceFactory, projection: JobProjection
+) -> None:
+    """#2294, #2889: a superseded or failed arrange that the API side settles
+    (``RenderService._settled``) counts under ``kind="arrange"``; the render series
+    stay where they were."""
+    service = make_service(None, "unused")
+    arrange = _legacy(projection).model_copy(update={"kind": "arrange"})
+
+    for outcome in ("superseded", "failed"):
+        service._settled(arrange, outcome)
+
+    sample = service.metrics.registry.get_sample_value
+    for outcome in ("superseded", "failed"):
+        labels = {"kind": "arrange", "outcome": outcome}
+        assert sample("scadbuddy_render_jobs_finished_total", labels) == 1
+        assert sample("scadbuddy_render_job_latency_seconds_count", labels) == 1
+        rendered = {"kind": "render", "outcome": outcome}
+        # Registered at zero by Metrics, so == 0 also catches a series never registered.
+        assert sample("scadbuddy_render_jobs_finished_total", rendered) == 0
+        assert sample("scadbuddy_render_job_latency_seconds_count", rendered) == 0
 
 
 async def test_superseding_a_legacy_row_cancels_its_workflow_the_old_way(
