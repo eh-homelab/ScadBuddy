@@ -103,6 +103,7 @@ class FakeActivities:
         #: then does: "hit", "miss" or "fail".
         self.geometry_key = geometry_key
         self.reuse = reuse
+        self.finished_keys: list[str | None] = []
         #: Rows the API settled before the run's first step (#603).
         self.settled_rows = settled_rows
         self.projections: list[Projection] = []
@@ -180,6 +181,7 @@ class FakeActivities:
         self, req: PieceRequest, prepared: PrepareResult, main: RenderMainResult
     ) -> PieceResult:
         self.calls.append("finish_piece")
+        self.finished_keys.append(prepared.geometry_key)
         return PieceResult(
             result=JobResult(
                 model_3mf=f"blobs/{req.piece_key}/model.3mf",
@@ -418,6 +420,8 @@ async def test_a_piece_whose_geometry_is_reused_is_only_recoloured_and_finished(
                 TemplatePipeline.run, start_of(job), id=f"render-{job.id}", task_queue=queue
             )
         assert acts.calls == ["prepare", "reuse_geometry", "finish_piece"]
+        # A recoloured piece is finished unrecorded: only a rendered one names the geometry.
+        assert acts.finished_keys == [None]
         last = acts.projections[-1]
         assert last.state == "done" and last.log_tail == ["reused"]
 
@@ -440,6 +444,7 @@ async def test_a_geometry_miss_or_a_failed_reuse_renders_the_piece() -> None:
                 "render_solids",
                 "finish_piece",
             ], reuse
+            assert acts.finished_keys == ["g" * 64], reuse
             assert acts.projections[-1].state == "done"
 
 

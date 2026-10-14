@@ -93,6 +93,10 @@ def test_a_literal_colour_in_the_templates_source_is_found(tmp_path: Path) -> No
     assert has_literal_colour(tmp_path)
     (tmp_path / "parts" / "a.scad").write_text("color(c = [1, 0, 0]) cube();\n")
     assert has_literal_colour(tmp_path)
+    (tmp_path / "parts" / "a.scad").write_text('color(alpha=0.5, c="red") cube();\n')
+    assert has_literal_colour(tmp_path)
+    (tmp_path / "parts" / "a.scad").write_text("color(alpha=0.5, c=body) cube();\n")
+    assert not has_literal_colour(tmp_path)
 
 
 # ── the recolour ───────────────────────────────────────────────────────────────
@@ -275,7 +279,8 @@ async def test_a_piece_in_other_colours_is_recoloured_without_rendering(
     assert again.geometry_key == prepared.geometry_key
     reused = await env.run(acts.reuse_geometry, second, again)
     assert reused is not None and reused == main
-    piece = await env.run(acts.finish_piece, second, again, reused)
+    unrecorded = again.model_copy(update={"geometry_key": None})  # as `RenderPiece` does
+    piece = await env.run(acts.finish_piece, second, unrecorded, reused)
     assert _exports(binary) == rendered  # no openscad run
 
     work = acts.deps.blobs.dir_for(second.piece_key)
@@ -297,9 +302,28 @@ async def test_a_piece_in_other_colours_is_recoloured_without_rendering(
     # The source piece is untouched, and its own answer still stands.
     source = await env.run(acts.cached_piece, first)
     assert source is not None and source.result.colors == ["#FF0000", "#00FF00"]
-    # And the recoloured piece is now the newest one with that geometry.
+    # The row still names the rendered piece, whose raw render holds its colours.
     row = index.get(prepared.geometry_key)
-    assert row is not None and row.piece_key == second.piece_key
+    assert row is not None and row.piece_key == first.piece_key
+
+    # A third colour-only change is recoloured from the rendered piece, not the second.
+    third = _request(width=12, body="#FFFF00")
+    prepared3 = await env.run(acts.prepare, third)
+    reused3 = await env.run(acts.reuse_geometry, third, prepared3)
+    assert reused3 is not None
+    unrecorded3 = prepared3.model_copy(update={"geometry_key": None})
+    piece3 = await env.run(acts.finish_piece, third, unrecorded3, reused3)
+    assert _exports(binary) == rendered
+    scene3 = trimesh.load(acts.deps.paths.root / piece3.result.preview_glb)
+    assert isinstance(scene3, trimesh.Scene)
+    assert [g.metadata[COLOUR_EXTRA] for g in scene3.geometry.values()] == [
+        "#FFFF00",
+        "#00FF00",
+    ]
+    assert [(p.colour, p.extruder) for p in piece3.result.parts] == [
+        ("#FFFF00", 1),
+        ("#00FF00", 2),
+    ]
 
 
 @pytest.mark.requires_postgres

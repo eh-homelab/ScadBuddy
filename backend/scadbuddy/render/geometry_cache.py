@@ -26,6 +26,12 @@ What a key cannot see, and so what reuse refuses or assumes:
   not to change the geometry. Equality between two colour parameters is safe: the
   classes keep it. A value that is not a colour (`colour_hex` is None) stays in the key
   as it is.
+
+A recoloured piece is published only with its source's `RenderMainResult`: its log
+tail, diagnostics and notes are the source render's, so an `echo()` of a colour
+parameter shows the source's value. Only a piece that was rendered is recorded
+(`RenderPiece` finishes a recoloured one without its key), so a source's raw render
+always holds the colours its row lists.
 """
 
 from __future__ import annotations
@@ -49,8 +55,8 @@ from scadbuddy.render.split import ColourPart, split_by_material
 GEOMETRY_VERSION = 1
 #: Material 0 is OpenSCAD's "Default": geometry no `color()` call reached.
 UNCOLOURED_MATERIAL_INDEX = 0
-#: A `color()` call whose first argument is a string or vector literal.
-_LITERAL_COLOUR = re.compile(r"\bcolor\s*\(\s*(?:c\s*=\s*)?[\"\[]")
+#: A `color()` call whose colour is a string or vector literal: first, or named ``c``.
+_LITERAL_COLOUR = re.compile(r"\bcolor\s*\(\s*(?:[^()]*?\bc\s*=\s*)?[\"\[]")
 _HEX = re.compile(r"#[0-9A-Fa-f]{6}\b")
 
 

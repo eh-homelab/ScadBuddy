@@ -649,7 +649,8 @@ class RenderActivities:
         )
         if d.geometry is not None and prepared.geometry_key is not None:
             # A cache's hint, after the piece is published: losing it costs a later
-            # recolour its shortcut, never this render.
+            # recolour its shortcut, never this render. A recoloured piece comes with
+            # no key: its copied raw render keeps its source's colours.
             try:
                 await asyncio.to_thread(
                     d.geometry.put,

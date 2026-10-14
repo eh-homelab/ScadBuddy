@@ -305,7 +305,10 @@ class RenderPiece:
                     raise
                 workflow.logger.warning("reusing the geometry failed; rendering it: %s", error)
             if reused is not None:
-                return await self._finish(req, prepared, reused)
+                # Unrecorded: the row must name a piece that was rendered, whose raw
+                # render holds the colours the row lists.
+                unrecorded = prepared.model_copy(update={"geometry_key": None})
+                return await self._finish(req, unrecorded, reused)
         main: RenderMainResult = await workflow.execute_activity(
             "render_main",
             args=[req, prepared],
