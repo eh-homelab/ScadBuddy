@@ -3,7 +3,7 @@ import type { JsonObject } from '../lib/inputs'
 type Props = {
   inputs: JsonObject
   error: string
-  /** Fewer where a capped row holds it (the page slot, #1811), so the textarea scrolls, not its row too. */
+  /** 12 by default; fewer where a capped row holds it (the page slot, #1811), so the textarea scrolls, not its row too. */
   rows?: number
   /**
    * Held to 30vh (the page slot's row, #3074): only the error scrolls, beside the

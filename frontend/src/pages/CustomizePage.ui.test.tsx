@@ -797,8 +797,10 @@ describe('the page slot', () => {
     await user.selectOptions(preset(), 'Old')
 
     const workspace = screen.getByTestId('workspace')
-    expect(await within(workspace).findByRole('alert')).toHaveTextContent('could not be brought up to this template version: defines no migrate')
-    const saved = within(workspace).getByRole<HTMLTextAreaElement>('textbox', { name: 'Saved inputs' })
+    const saved = await within(workspace).findByRole<HTMLTextAreaElement>('textbox', { name: 'Saved inputs' })
+    // The textarea's own alert, not whichever alert the row holds (a render error may be another).
+    const alert = saved.closest<HTMLElement>('[role="alert"]')
+    expect(alert).toHaveTextContent('could not be brought up to this template version: defines no migrate')
     expect(saved).toHaveAttribute('readonly')
     // Its value, what the user sees; textContent is only the initial value React mirrored.
     expect(saved.value).toContain('"name": "Old"')
@@ -806,9 +808,8 @@ describe('the page slot', () => {
     expect(saved).toHaveAttribute('rows', '4')
     // #3074: the cap is on the alert, and only its error text scrolls; no scroll
     // container around the textarea, and no overflow-hidden to clip a long error.
-    const alert = within(workspace).getByRole('alert')
     expect(alert).toHaveClass('max-h-[30vh]')
-    expect(alert.querySelector('p')).toHaveClass('overflow-auto')
+    expect(alert?.querySelector('p')).toHaveClass('overflow-auto')
     for (let node: HTMLElement | null = saved.parentElement; node && node !== workspace; node = node.parentElement) {
       expect(node.className).not.toMatch(/overflow-(auto|hidden|scroll)/)
     }
