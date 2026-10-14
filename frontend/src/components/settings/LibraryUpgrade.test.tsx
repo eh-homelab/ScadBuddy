@@ -462,10 +462,15 @@ describe('LibraryUpgrade', () => {
     await user.click(within(list).getByRole('button', { name: 'Remove BOSL2 deadbee' }))
     expect(await within(list).findByRole('alert')).toHaveTextContent('a running render reads BOSL2 deadbeef')
     await user.click(within(list).getByRole('button', { name: 'Remove BOSL2 feedfac' }))
-    await waitFor(() => expect(screen.queryByRole('listitem', { name: 'BOSL2 feedfac' })).toBeNull())
-    const left = screen.getByRole('list', { name: 'Checkouts no model uses' })
-    expect(within(left).getByRole('listitem', { name: 'BOSL2 deadbee' })).toBeInTheDocument()
-    expect(within(left).queryByRole('alert')).toBeNull()
+    // The reload shows its loading state first, which has no list at all: wait for the
+    // re-listed rows, not merely for the removed one to be gone.
+    await waitFor(() => {
+      const left = screen.getByRole('list', { name: 'Checkouts no model uses' })
+      expect(within(left).getAllByRole('listitem').map((item) => item.getAttribute('aria-label'))).toEqual([
+        'BOSL2 deadbee',
+      ])
+    })
+    expect(screen.queryByRole('alert')).toBeNull()
   })
 
   it("says why a removal was refused, and keeps the row", async () => {
