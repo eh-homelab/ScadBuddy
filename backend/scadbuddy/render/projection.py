@@ -220,9 +220,8 @@ class JobProjection:
         return listener
 
     def _announce(self, conn: Connection[Any], job_id: str, slug: str, kind: JobKind) -> None:
-        # The activity row before the event: a publish holds the event log's lock to
-        # commit, and a row written after it waits on others' rows while holding it
-        # (a deadlock with the activity row's own publish).
+        # The activity row, then the event: `upsert_in` takes the event log's lock
+        # before the row (pg_events.py, "Lock order"), and the publish reuses it.
         if self.activity is not None:
             from scadbuddy.render.activity import row_of  # activity imports this module
 
