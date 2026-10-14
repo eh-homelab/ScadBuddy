@@ -151,18 +151,56 @@ describe.skipIf(!TEST_DATABASE_URL)(
         expect(await bare.load({ projectKey, sessionId })).toEqual([old])
       })
 
-      it('binds a row to its place: two rows without a uuid cannot be swapped, nor a row moved to another session', async () => {
+      it('binds a row to its place: two rows without a uuid cannot be swapped', async () => {
         const sessionId = randomUUID()
-        const other = randomUUID()
         await store.append({ projectKey, sessionId }, [{ type: 'last-prompt', text: 'one' }, { type: 'last-prompt', text: 'two' }])
-        await store.append({ projectKey, sessionId: other }, [entry('user')])
-        const ids = (await db.sql<{ id: string }[]>`SELECT id::text FROM ai_session_entries WHERE session_id = ${sessionId} ORDER BY id`).map((r) => r.id)
+        const ids = (await db.sql<{ id: string }[]>`SELECT id::text FROM ai_session_entries WHERE session_id = ${sessionId} ORDER BY id::bigint`).map((r) => r.id)
         await db.sql`UPDATE ai_session_entries SET id = -id WHERE id = ${ids[0]!}::bigint`
         await db.sql`UPDATE ai_session_entries SET id = ${ids[0]!}::bigint WHERE id = ${ids[1]!}::bigint`
         await db.sql`UPDATE ai_session_entries SET id = ${ids[1]!}::bigint WHERE id = -${ids[0]!}::bigint`
         await expect(store.load({ projectKey, sessionId })).rejects.toThrow()
-        await db.sql`UPDATE ai_session_entries SET session_id = ${sessionId} WHERE session_id = ${other}`
+      })
+
+      it('binds a row to its session: one row moved to another session is refused', async () => {
+        const sessionId = randomUUID()
+        const other = randomUUID()
+        await store.append({ projectKey, sessionId }, [entry('user'), entry('assistant')])
+        await store.append({ projectKey, sessionId: other }, [entry('user')])
+        await db.sql`
+          UPDATE ai_session_entries SET session_id = ${other}
+          WHERE id = (SELECT min(id) FROM ai_session_entries WHERE session_id = ${sessionId})`
+        await expect(store.load({ projectKey, sessionId: other })).rejects.toThrow()
+      })
+
+      it('binds a row without a uuid by its id behind a #, so a uuid equal to that id is another binding', async () => {
+        const sessionId = randomUUID()
+        await store.append({ projectKey, sessionId }, [{ type: 'last-prompt', text: 'x' }])
+        await db.sql`UPDATE ai_session_entries SET uuid = id::text WHERE session_id = ${sessionId}`
         await expect(store.load({ projectKey, sessionId })).rejects.toThrow()
+      })
+
+      it('stores entry_type only for a short token-like type', async () => {
+        const sessionId = randomUUID()
+        await store.append({ projectKey, sessionId }, [
+          { type: 'x'.repeat(10000) },
+          { type: 'Has Space' },
+          { type: 'UPPER' },
+          { type: 'cost-state' },
+        ])
+        const rows = await db.sql<{ entry_type: string | null }[]>`SELECT entry_type FROM ai_session_entries WHERE session_id = ${sessionId} ORDER BY id`
+        expect(rows.map((r) => r.entry_type)).toEqual([null, null, null, 'cost-state'])
+        expect(await store.lastOfType({ projectKey, sessionId }, 'cost-state')).toEqual({ type: 'cost-state' })
+      })
+
+      it('refuses to append, and to look up the last of a type, once the subject is forgotten', async () => {
+        const sessionId = randomUUID()
+        await store.append({ projectKey, sessionId }, [{ type: 'cost-state', totalCostUSD: 1 }])
+        const subject = `session-${sessionId}`
+        await db.sql`DELETE FROM ai_payload_keys WHERE subject = ${subject}`
+        await db.sql`INSERT INTO ai_forgotten_subjects (subject) VALUES (${subject})`
+        keys.forget(subject)
+        await expect(store.append({ projectKey, sessionId }, [entry('user')])).rejects.toBeInstanceOf(SubjectForgotten)
+        await expect(store.lastOfType({ projectKey, sessionId }, 'cost-state')).rejects.toBeInstanceOf(SubjectForgotten)
       })
 
       it('keeps a mixed batch in order', async () => {

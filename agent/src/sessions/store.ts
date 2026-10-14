@@ -54,10 +54,14 @@ import type { PayloadKeys } from '../temporal/payloadCodec.js'
 // Entries are sealed under the session's data key (`ai_payload_keys`, subject
 // `session-<id>`, unified agent runtime D7): `sealed` holds the JSON, `entry` is
 // NULL, and the AAD binds the bytes to their row, so a row cannot be swapped for
-// another's: `ai_session_entries:<session_id>:<subpath>:<uuid ?? id>`. A row
-// without a uuid is bound by its own id, which append reserves first with
-// nextval (an id is never written twice). Rows written before sealing still hold
+// another's: `ai_session_entries:<session_id>:<subpath>:<uuid ?? #id>`. A row
+// without a uuid is bound by its own id behind a '#', which append reserves first with
+// nextval (an id is never written twice); the '#' keeps a CLI uuid of "5" from
+// colliding with row id 5. Rows written before sealing still hold
 // plaintext `entry` and are read as they are, until the backfill.
+
+// `entry_type` is plaintext, so only a short token-like type is stored; anything else is NULL, never content.
+const ENTRY_TYPE = /^[a-z][a-z0-9_-]{0,63}$/
 
 type EntryRow = { id: string; uuid: string | null; entry: string | null; sealed: Buffer | null }
 
@@ -118,8 +122,8 @@ export class PostgresSessionStore implements SessionStore {
           session_id: key.sessionId,
           subpath,
           uuid,
-          entry_type: typeof entry.type === 'string' ? entry.type : null,
-          sealed: sealBytes(dek, json, entryContext(key.sessionId, subpath, uuid ?? id)),
+          entry_type: typeof entry.type === 'string' && ENTRY_TYPE.test(entry.type) ? entry.type : null,
+          sealed: sealBytes(dek, json, entryContext(key.sessionId, subpath, uuid ?? `#${id}`)),
         }
       })
       await this.sql`
@@ -160,7 +164,7 @@ export class PostgresSessionStore implements SessionStore {
     try {
       return rows.map((row) => {
         if (!row.sealed) return JSON.parse(row.entry!) as SessionStoreEntry
-        const json = openBytes(dek!, row.sealed, entryContext(sessionId, subpath, row.uuid ?? row.id))
+        const json = openBytes(dek!, row.sealed, entryContext(sessionId, subpath, row.uuid ?? `#${row.id}`))
         try {
           return JSON.parse(json.toString('utf8')) as SessionStoreEntry
         } finally {
