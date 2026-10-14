@@ -513,7 +513,7 @@ export function LibraryPage() {
                         type="button"
                         className="text-accent underline"
                         data-testid={`library-project-folder-${folder.id}`}
-                        onClick={() => tree && navigate(libraryPath(tree, folder.id))}
+                        onClick={() => tree && navigate({ pathname: libraryPath(tree, folder.id), search: location.search })}
                       >
                         {folder.name}
                       </button>

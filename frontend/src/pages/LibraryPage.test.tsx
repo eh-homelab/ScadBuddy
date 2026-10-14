@@ -216,7 +216,10 @@ describe('LibraryPage', () => {
     // Bambuddy links it to a second folder too: named, and one click away.
     expect(screen.getByTestId('library-project')).toHaveTextContent('Also linked to it: Raegan spares.')
     await user.click(screen.getByTestId('library-project-folder-15'))
-    await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent('/library/Raegan%20spares'))
+    // The batch open beside it goes along (#2757 review).
+    await waitFor(() =>
+      expect(screen.getByTestId('where')).toHaveTextContent(`/library/Raegan%20spares?batch=${batch.id}`),
+    )
   })
 
   it('follows and drops a second link to the project already open (#3112)', async () => {
