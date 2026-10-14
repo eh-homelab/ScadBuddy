@@ -77,6 +77,16 @@ export function SpoolInventoryPanel() {
     }
   }, [archived])
 
+  // #3357: every re-read goes through here, so none skips the reset. The last answer's
+  // error or setup note is not this read's; the result stays, marked as being read
+  // again, until the new one answers.
+  const showArchived = (next: boolean) => {
+    setArchived(next)
+    setReading(true)
+    setError(null)
+    setUnconfigured(false)
+  }
+
   const base = bambuddyBase()
   const total = (spools ?? []).filter((spool) => !spool.archived).reduce((sum, spool) => sum + spool.remaining_g, 0)
   return (
@@ -86,14 +96,7 @@ export function SpoolInventoryPanel() {
           <input
             type="checkbox"
             checked={archived}
-            onChange={(event) => {
-              setArchived(event.target.checked)
-              // #3357: the last answer's error or setup note is not this read's; the
-              // table stays, marked as being read again, until the new one answers.
-              setReading(true)
-              setError(null)
-              setUnconfigured(false)
-            }}
+            onChange={(event) => showArchived(event.target.checked)}
           />
           Include archived spools
         </label>
@@ -116,17 +119,18 @@ export function SpoolInventoryPanel() {
       {spools === null && !error && !unconfigured && (
         <p className="text-[12px] text-muted">Reading Bambuddy's inventory…</p>
       )}
-      {spools !== null && spools.length === 0 && <p className="text-[12px] text-muted">Bambuddy has no spools.</p>}
-      {spools !== null && spools.length > 0 && (
-        <>
+      {spools !== null && (
+        // #3486 review: the total and the empty note are the last selection's too, so the
+        // whole result is marked as being read again, not the table alone.
+        <div data-testid="spool-inventory-result" aria-busy={reading} className={reading ? 'opacity-60' : undefined}>
+          {spools.length === 0 && <p className="text-[12px] text-muted">Bambuddy has no spools.</p>}
+          {spools.length > 0 && (
+            <>
           <p className="sb-num mb-2 text-[12px] text-muted" data-testid="spool-inventory-total">
             {spools.filter((spool) => !spool.archived).length} spools, {(total / 1000).toFixed(2)} kg left
           </p>
           <div className="overflow-x-auto">
-            <table
-              className={`w-full text-left text-[12.5px]${reading ? ' opacity-60' : ''}`}
-              aria-busy={reading}
-            >
+            <table className="w-full text-left text-[12.5px]">
               <thead className="text-[11.5px] text-muted">
                 <tr>
                   <th scope="col" className="py-1 pr-3 font-normal">
@@ -167,7 +171,9 @@ export function SpoolInventoryPanel() {
               </tbody>
             </table>
           </div>
-        </>
+            </>
+          )}
+        </div>
       )}
     </div>
   )

@@ -6,6 +6,8 @@ describe('spoolChip (#3358)', () => {
     expect(spoolChip({ rgba: 'F5547CFF' })).toEqual({ kind: 'colour', hex: '#F5547C', translucent: false })
     expect(spoolChip({ rgba: '#F5547C80' })).toEqual({ kind: 'colour', hex: '#F5547C', translucent: true })
     expect(spoolChip({ rgba: 'F5547C' })).toEqual({ kind: 'colour', hex: '#F5547C', translucent: false })
+    // #3486 review: a leading # and surrounding space, as the removed CLEAR_RGBA took.
+    expect(spoolChip({ rgba: ' #F5547C ' })).toEqual({ kind: 'colour', hex: '#F5547C', translucent: false })
   })
 
   it('tells a spool recorded clear from one with no readable colour', () => {

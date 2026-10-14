@@ -1,4 +1,4 @@
-import { screen, within } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it } from 'vitest'
 import { resetBambuddyLinks, setBambuddyLinks } from '../../lib/bambuddyLinks'
@@ -104,12 +104,30 @@ describe('SpoolInventoryPanel (#2351)', () => {
     await user.click(screen.getByRole('checkbox', { name: 'Include archived spools' }))
     expect(screen.getByTestId('spool-15')).toBeInTheDocument()
     expect(screen.queryByText("Reading Bambuddy's inventory…")).toBeNull()
-    // Marked as the last selection's while the re-read is out (#3357).
-    expect(screen.getByRole('table')).toHaveAttribute('aria-busy', 'true')
+    // Marked as the last selection's while the re-read is out (#3357), the total with the
+    // table (#3486 review).
+    const result = screen.getByTestId('spool-inventory-result')
+    expect(result).toHaveAttribute('aria-busy', 'true')
+    expect(result).toContainElement(screen.getByTestId('spool-inventory-total'))
+    expect(result).toContainElement(screen.getByRole('table'))
 
     answer()
     expect(await screen.findByText('Bambuddy has no spools.')).toBeInTheDocument()
     expect(screen.queryByRole('table')).toBeNull()
+    expect(screen.getByTestId('spool-inventory-result')).toHaveAttribute('aria-busy', 'false')
+
+    // An empty answer is the last selection's too while the next re-read is out.
+    server.use(
+      http.get('/api/v1/farm/inventory', async () => {
+        await new Promise<void>((resolve) => (answer = resolve))
+        return HttpResponse.json({ spools: [], slots: [] })
+      }),
+    )
+    await user.click(screen.getByRole('checkbox', { name: 'Include archived spools' }))
+    expect(screen.getByTestId('spool-inventory-result')).toContainElement(screen.getByText('Bambuddy has no spools.'))
+    expect(screen.getByTestId('spool-inventory-result')).toHaveAttribute('aria-busy', 'true')
+    answer()
+    await waitFor(() => expect(screen.getByTestId('spool-inventory-result')).toHaveAttribute('aria-busy', 'false'))
   })
 
   it("clears a failed read's error as soon as a toggle reads again (#3357)", async () => {
