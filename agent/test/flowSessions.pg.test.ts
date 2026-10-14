@@ -126,8 +126,17 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow session activities${TEST_DATABASE_URL 
     const sid = await session()
     const owner = { kind: 'browser' as const, id: 'browser', label: 'You' }
     await log.append(sid, [event({ type: 'user.turn', sessionId: sid, turnId: 't1', text: 'go', author: owner }), ...say(sid, 'm1', 'working')])
-    const waiting = turn(sid, 't1')
-    await new Promise((r) => setTimeout(r, 60))
+    // The wait's reads of the log, counted, so the delete lands once it is polling: a
+    // timer cannot tell that it has started at all.
+    let reads = 0
+    const counted = Object.assign((...args: Parameters<typeof t.db.sql>) => {
+      if (args[0].join('').includes('ai_session_events')) reads += 1
+      return t.db.sql(...args)
+    }, t.db.sql) as unknown as typeof t.db.sql
+    const watched = flowSessionActivities({ sql: counted, flows: new PgFlowRuns(t.db.sql), pollMs: 20 })
+    const waiting = env().run(watched[FLOW_SESSION_TURN]!, { session_id: sid, turn_id: 't1' })
+    // Its first read found the turn; the second is the loop, polling past it.
+    await expect.poll(() => reads).toBeGreaterThanOrEqual(2)
     await t.db.sql`DELETE FROM ai_sessions WHERE id = ${sid}`
     const err = await failure(waiting)
     expect([err.type, err.nonRetryable, err.message]).toEqual([SESSION_REFUSED, true, `session ${sid} is gone; its turn t1 will not finish`])

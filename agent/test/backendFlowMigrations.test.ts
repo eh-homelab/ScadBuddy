@@ -18,8 +18,13 @@ describe('backend flow migration fixtures', () => {
   })
 
   // A backend flow migration with no copy here tests the agent against a schema without it.
-  it('include every backend workflow_* and flow_* migration', () => {
-    const backend = readdirSync(BACKEND).filter((name) => /^\d{8}T\d{4}Z_(workflow|flow)_.*\.sql$/.test(name))
+  // Found by what it touches, not its name: a migration on these tables named otherwise
+  // (`_run_grants_index.sql`, say) needs a copy too.
+  it('include every backend migration that touches the flow tables', () => {
+    const touches = /\b(workflow_definitions|workflow_runs|workflow_run_decisions|workflow_run_proposals|workflow_flow_states|flow_grants|flow_grant_uses)\b/
+    const backend = readdirSync(BACKEND).filter(
+      (name) => name.endsWith('.sql') && touches.test(readFileSync(`${BACKEND}${name}`, 'utf8')),
+    )
     expect(backend.length).toBeGreaterThan(0)
     expect(backend.filter((name) => !names.includes(name))).toEqual([])
   })
