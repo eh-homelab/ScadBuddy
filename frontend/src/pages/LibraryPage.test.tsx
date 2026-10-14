@@ -341,11 +341,12 @@ describe('LibraryPage, item context (#975)', () => {
     const tree = screen.getByRole('tree', { name: 'Library folders' })
     expect(within(tree).getByRole('treeitem', { name: 'Top level' })).toHaveAttribute('aria-selected', 'true')
 
-    const bulk = within(tree).getByRole('treeitem', { name: 'Bulk 300 files' })
+    const bulk = within(tree).getByRole('treeitem', { name: 'Bulk' })
+    expect(bulk).toHaveAccessibleDescription('300 files')
     await user.click(bulk)
     expect(bulk).toHaveAttribute('aria-selected', 'true')
     expect(within(tree).getByRole('treeitem', { name: 'Top level' })).toHaveAttribute('aria-selected', 'false')
-    expect(within(tree).getByRole('treeitem', { name: 'MakerWorld 2 files' })).toBeInTheDocument()
+    expect(within(tree).getByRole('treeitem', { name: 'MakerWorld' })).toHaveAccessibleDescription('2 files')
   })
 
   it('opens and closes folders with the keyboard, others starting closed (#2165)', async () => {
