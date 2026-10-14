@@ -38,7 +38,7 @@ import time
 from pathlib import Path
 
 from scadbuddy.core.paths import DataPaths, revalidate_dirs
-from scadbuddy.core.pg_listener import PgListener
+from scadbuddy.core.pg_listener import DEFAULT_CHECK_INTERVAL, PgListener
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.repo_lock import HEAD_CHANNEL, decode_change
@@ -55,6 +55,9 @@ class ModelsHeadFollower:
         self.paths = paths
         self.history = history
         self.catalogue: Catalogue | None = None
+        #: A refresh slower than this is logged as a warning, and said while it runs: it
+        #: holds up every channel on the shared listener (pg_listener.py).
+        self.slow_after: float = DEFAULT_CHECK_INTERVAL
         #: The last HEAD announced here.
         self.head: str | None = None
         listener.listen(HEAD_CHANNEL, on_notify=self._received, on_connect=self._connected)
@@ -82,17 +85,26 @@ class ModelsHeadFollower:
         # Not cancellable: a listener cancelled at shutdown leaves the walk running on
         # the default executor until it ends, and the loop's close joins it.
         started = time.monotonic()
-        await asyncio.to_thread(self.revalidate, model_ids)
+        walk = asyncio.ensure_future(asyncio.to_thread(self.revalidate, model_ids))
+        try:
+            await asyncio.wait_for(asyncio.shield(walk), self.slow_after)
+        except TimeoutError:
+            # No limit on the walk itself: moving on before it ends would name a HEAD
+            # this replica has not revalidated for (#2617). A hung hard-mounted NFS is
+            # said instead, since every channel on the shared listener waits for it.
+            logger.warning(
+                "the models library refresh is still walking the mount; the event bus"
+                " and the listener's liveness check wait for it",
+                extra={"models": _count(model_ids), "seconds": self.slow_after},
+            )
+            await walk
         if self.catalogue is not None:
             self.catalogue.forget(model_ids)
-        # It holds up every channel on the shared listener (pg_listener.py): a slow mount
-        # shows here.
-        logger.debug(
+        took = round(time.monotonic() - started, 3)
+        logger.log(
+            logging.WARNING if took > self.slow_after else logging.DEBUG,
             "refreshed the models library",
-            extra={
-                "models": None if model_ids is None else len(model_ids),
-                "seconds": round(time.monotonic() - started, 3),
-            },
+            extra={"models": _count(model_ids), "seconds": took},
         )
 
     def revalidate(self, model_ids: list[str] | None) -> None:
@@ -105,6 +117,10 @@ class ModelsHeadFollower:
         else:
             directories += [self.paths.model_dir(model_id) for model_id in model_ids]
         revalidate_dirs(*directories)
+
+
+def _count(model_ids: list[str] | None) -> int | None:
+    return None if model_ids is None else len(model_ids)
 
 
 def _template_dirs(parent: Path) -> list[Path]:

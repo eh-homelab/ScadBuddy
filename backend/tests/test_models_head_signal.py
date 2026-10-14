@@ -266,6 +266,36 @@ async def test_the_follower_refreshes_off_the_loop_and_moves_head_after(
     assert follower.head == "c" * 40
 
 
+async def test_a_slow_refresh_is_said_while_it_runs_and_when_it_ends(
+    paths: DataPaths, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#2617 review: a stuck mount holds up the shared listener, so it is a warning, not
+    a debug line no default level shows; a quick refresh stays at debug."""
+    history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX)
+    follower = ModelsHeadFollower(paths, history, cast(PgListener, _NoListener()))
+    follower.slow_after = 0.05
+    delay = 0.3
+
+    def revalidate(model_ids: list[str] | None) -> None:
+        time.sleep(delay)
+
+    follower.revalidate = revalidate  # type: ignore[method-assign]
+    with caplog.at_level(logging.DEBUG, logger="scadbuddy.library.repo_signal"):
+        await follower.refresh(["keychain"])
+    said = [(r.levelno, r.getMessage()) for r in caplog.records]
+    assert [level for level, _ in said] == [logging.WARNING, logging.WARNING]
+    assert "still walking" in said[0][1]
+    assert said[1][1] == "refreshed the models library"
+
+    caplog.clear()
+    delay = 0.0
+    with caplog.at_level(logging.DEBUG, logger="scadbuddy.library.repo_signal"):
+        await follower.refresh(["keychain"])
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (logging.DEBUG, "refreshed the models library")
+    ]
+
+
 async def test_the_listener_awaits_a_callback_before_the_next(pg_conninfo: str) -> None:
     """A callback's awaitable (slow work moved to a thread) is awaited in delivery
     order: what is NOTIFYed after it is not handed on before it finishes."""
