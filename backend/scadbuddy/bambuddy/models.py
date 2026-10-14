@@ -533,6 +533,23 @@ class FolderCreate(BambuddyModel):
     project_id: int | None = None
 
 
+class FileUpdate(BambuddyModel):
+    """``PUT /api/v1/library/files/{id}``: a partial update. Only the fields given are
+    sent, and ``folder_id=0`` moves the file to the top level (Bambuddy's sentinel;
+    see `BambuddyClient.annotate_library_file`)."""
+
+    filename: str | None = None
+    folder_id: int | None = None
+
+
+class FolderUpdate(BambuddyModel):
+    """``PUT /api/v1/library/folders/{id}``: a partial update; ``parent_id=0`` moves the
+    folder to the top level."""
+
+    name: str | None = None
+    parent_id: int | None = None
+
+
 class LibraryFile(BambuddyModel):
     """``POST /api/v1/library/files`` (``FileUploadResponse``) — the uploaded file —
     and ``GET /api/v1/library/files/{id}`` (``FileResponse``). ``folder_id`` and
@@ -558,6 +575,16 @@ class LibraryFile(BambuddyModel):
     #: A file Bambuddy only indexes from an external folder: a delete drops its record
     #: for good instead of moving it to the trash (#2167).
     is_external: bool = False
+
+
+class TrashedLibraryFile(BambuddyModel):
+    """An item of ``GET /api/v1/library/trash`` (Bambuddy's ``TrashFile``, v1.2.5.5
+    ``backend/app/schemas/library_trash.py``). ``folder_id`` is the folder the file was
+    in when it was trashed, which Bambuddy's folder delete still cascades to."""
+
+    id: int
+    filename: str
+    folder_id: int | None = None
 
 
 class LibraryListRow(BambuddyModel):

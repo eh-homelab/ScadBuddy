@@ -127,7 +127,7 @@ class MediaCover(BaseModel):
 
 
 @dataclass
-class _Received:
+class ReceivedUpload:
     """The parts of an upload: the file parts on disk, the caption in memory."""
 
     files: dict[str, FilePath] = field(default_factory=dict)
@@ -137,7 +137,7 @@ class _Received:
     #: Each file part's name as the client sent it, or "" (#2146: a mesh's type).
     filenames: dict[str, str] = field(default_factory=dict)
     caption: bytearray = field(default_factory=bytearray)
-    #: The other text parts the route asked ``_receive`` for, by name.
+    #: The other text parts the route asked ``receive_upload`` for, by name.
     fields: dict[str, bytearray] = field(default_factory=dict)
 
     def discard(self) -> None:
@@ -149,7 +149,9 @@ class _Received:
 class _Receiver:
     """`MultipartParser` callbacks writing ``file`` and ``poster`` to ``directory``."""
 
-    def __init__(self, directory: FilePath, received: _Received, fields: Mapping[str, int]) -> None:
+    def __init__(
+        self, directory: FilePath, received: ReceivedUpload, fields: Mapping[str, int]
+    ) -> None:
         self.directory = directory
         self.received = received
         #: The text parts to keep, each with its cap in bytes.
@@ -235,16 +237,16 @@ def _boundary(request: Request) -> bytes:
     return boundary
 
 
-async def _receive(
+async def receive_upload(
     request: Request, directory: FilePath, *, fields: Mapping[str, int] | None = None
-) -> _Received:
+) -> ReceivedUpload:
     """Stream the body's parts to ``directory``. On any failure the files written
     so far are removed and the error raised -- including the gate's, when the
     body passes the limit part-way. ``fields`` names the text parts besides the
     caption to keep, each with its cap in bytes."""
     boundary = _boundary(request)
     directory.mkdir(parents=True, exist_ok=True)
-    received = _Received()
+    received = ReceivedUpload()
     receiver = _Receiver(directory, received, fields or {})
     parser = MultipartParser(
         boundary,
@@ -278,7 +280,7 @@ async def _receive(
     return received
 
 
-def _staged(received: _Received, part: str) -> StagedMedia | None:
+def _staged(received: ReceivedUpload, part: str) -> StagedMedia | None:
     """The part as typed media, or None when it was not sent (or sent empty, as a
     form with no file chosen sends it). 415 when its bytes are not media."""
     path = received.files.get(part)
@@ -299,7 +301,7 @@ def _staged(received: _Received, part: str) -> StagedMedia | None:
     return StagedMedia(path=path, kind=kind, extension=extension)
 
 
-def _upload_parts(received: _Received) -> tuple[StagedMedia, str, StagedMedia | None]:
+def _upload_parts(received: ReceivedUpload) -> tuple[StagedMedia, str, StagedMedia | None]:
     upload = _staged(received, "file")
     if upload is None:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "the upload has no `file` part")
@@ -728,7 +730,7 @@ async def upload_media(
     idempotency_key: IdempotencyKey = None,
 ) -> ModelRecord | JSONResponse:
     require_model_exists(catalogue, slug)
-    received = await _receive(request, catalogue.paths.cache)
+    received = await receive_upload(request, catalogue.paths.cache)
     claims = ClaimStore(catalogue.paths.claims)
     held: list[Held] = []
     try:
