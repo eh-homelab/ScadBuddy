@@ -839,7 +839,9 @@ describe('changed parameters markup (#2457)', () => {
       expect(Array.from(child.children).map((node) => node.tagName)).toEqual(['DT', 'DD'])
     }
     expect(dl).not.toHaveTextContent('more')
-    expect(screen.getByTestId('params-more')).toHaveTextContent('+2 more')
+    // Found as a user sees it, beside the list and outside the <dl> (#2457, #2878).
+    const more = within(dl.parentElement!).getByText('+2 more')
+    expect(dl).not.toContainElement(more)
   })
 })
 
