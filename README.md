@@ -193,7 +193,10 @@ on shutdown.
     paused across restarts, and a start does not trigger it: while it is paused nothing
     sweeps the uploads or reconciles them with the store, and a start only backfills
     them to the Bambuddy store. Settled render jobs are pruned every 300 s by a second
-    Schedule, `scadbuddy-prune-library`, which 0 leaves alone. Both ids end in the
+    Schedule, `scadbuddy-prune-library`, which 0 leaves alone; it also sweeps request
+    claims, the activity record and the files of print runs' lost slice starts. The
+    print dialog's background slices are removed from Bambuddy's library (6 hours after
+    no run queued them) only by the first Schedule, so 0 leaves them there. Both ids end in the
     library queue's name: changing `SCADBUDDY_TEMPORAL_TASK_QUEUE_LIBRARY` leaves the
     old two Schedules starting runs on a queue nothing serves, so delete them by hand
     (`temporal schedule delete --schedule-id scadbuddy-housekeeping-<old queue>`, and
@@ -223,6 +226,10 @@ on shutdown.
     `git gc` on `/data/models` once it holds 256 loose objects or 20 packs, since git's
     own `gc --auto` waits for 6700 and every model listing walks the whole history. It
     needs the same `Recreate` rollout. Its first run is the boot's.
+  - **This release adds a sweep**, `housekeeping_sweep_lost_slices`: the files of print
+    runs' lost slice starts (#2715), split out of `housekeeping_sweep_preview_slices`
+    so it stays on the prune Schedule while the background-slice sweep obeys 0. It
+    needs the same `Recreate` rollout.
   - Settings shows the usage under "Uploaded files"; so do
     `GET /api/v1/assets/usage` and the `scadbuddy_assets_*` metrics.
 - **Template media** (images and videos, in `/data/models/<slug>/media`):
