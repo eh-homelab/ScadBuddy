@@ -710,7 +710,10 @@ A turn that loads an allowed pin also gets two more things:
   (`harness/webFetchEgress.ts`) runs `assertHostAllowed` on its URL first, refuses the
   pod's loopback as well (the agent's own services), and denies a call that fails,
   approved or not. Claude Code resolves the name again when it connects, so a name
-  re-pointed in between is not caught (#2684).
+  re-pointed in between is not caught (#2684). A durable session gets the same built-ins
+  as the agent's `builtin` turn tools (#2393, [operating.md](operating.md)), on the
+  session workspace instead of the pod's disk, each parked the same way; its `WebFetch`
+  connects only to the addresses it checked, on every hop.
 - **Shell injection.** Skill shell injection is on (`disableSkillShellExecution`
   false). Only an allowed package can carry it, because the vetting refuses it
   everywhere else. Measured on Claude Code 2.1.287 (`test/pluginPackages.e2e.test.ts`):
