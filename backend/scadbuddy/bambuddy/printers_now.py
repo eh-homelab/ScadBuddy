@@ -13,7 +13,7 @@ import asyncio
 import logging
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import HmsError, Printer, PrinterStatus
@@ -22,7 +22,9 @@ from scadbuddy.core.problems import ApiError
 
 logger = logging.getLogger(__name__)
 
-#: Bambuddy's archives page, where a job ScadBuddy did not start is found.
+#: Bambuddy's archives page, where a job ScadBuddy did not start is found. Bambuddy has
+#: no page per archive (``App.tsx`` at 14da007, as ``api/print_history.py`` records),
+#: so the card names the archive beside this link rather than in it.
 ARCHIVES_PAGE = "/archives"
 
 Activity = Literal["printing", "paused", "idle", "finished", "failed", "offline", "unknown"]
@@ -102,6 +104,17 @@ async def printer_now(
         logger.info("printer status unreadable", extra={"printer_id": printer.id})
         return PrinterNow(
             printer_id=printer.id, name=printer.name, activity="unknown", error=error.detail
+        )
+    except (ValidationError, ValueError):
+        # A shape the model cannot take, or a body that is not JSON at all
+        # (``JSONDecodeError`` is a ``ValueError``), is this printer's card, not the
+        # strip's 500.
+        logger.warning("printer status malformed", extra={"printer_id": printer.id})
+        return PrinterNow(
+            printer_id=printer.id,
+            name=printer.name,
+            activity="unknown",
+            error="Bambuddy's status for this printer is in a shape ScadBuddy can't read.",
         )
     activity = _activity(status)
     working = activity in ("printing", "paused")
