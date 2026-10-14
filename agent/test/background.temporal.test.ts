@@ -241,7 +241,8 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a background task's workfl
 
   it('starts none of the agents still queued when a run is stopped', async () => {
     // 20 at once: 4 run (WORKFLOW_CONCURRENCY), 16 wait for a slot when the expiry stops the run.
-    const t = await runWorkflow(`return await parallel(Array.from({ length: 20 }, (_, i) => () => agent('hang', { label: 'n' + i })))`, {}, new Date(Date.now() + 1500))
+    // The expiry leaves the first 4 time to start, even on a slow worker.
+    const t = await runWorkflow(`return await parallel(Array.from({ length: 20 }, (_, i) => () => agent('hang', { label: 'n' + i })))`, {}, new Date(Date.now() + 5000))
     expect(await store.get(t.id)).toMatchObject({ state: 'failed', detail: 'expired' })
     await new Promise((r) => setTimeout(r, 1000))
     expect(ran).toHaveLength(4)

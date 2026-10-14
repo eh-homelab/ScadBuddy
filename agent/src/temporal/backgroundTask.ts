@@ -1,4 +1,5 @@
 import {
+  ActivityCancellationType,
   CancellationScope,
   condition,
   continueAsNew,
@@ -106,6 +107,9 @@ async function monitor(taskId: string, retryMs: number): Promise<void> {
     taskQueue: plan.queue,
     // A classic command's queue is one replica's: if it is gone before it starts the source, the monitor fails.
     scheduleToStartTimeout: '5 minutes',
+    // A stopped watch ends only once its source has stopped (it hears the cancel at its next
+    // heartbeat, throttled to most of heartbeatTimeout), so its command never outlives the task.
+    cancellationType: ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
     startToCloseTimeout: plan.timeoutMs + 120_000,
     heartbeatTimeout: '30 seconds',
     retry: { maximumAttempts: 1 },
