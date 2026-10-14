@@ -1542,11 +1542,15 @@ def test_a_queue_without_a_service_name_stops_the_worker_saying_so(
         lambda: SimpleNamespace(log_level="INFO", version="", revision=""),
     )
 
-    def past_the_guard(*_: object, **__: object) -> None:
+    def past_the_guard(*args: object, **__: object) -> None:
+        for arg in args:
+            if asyncio.iscoroutine(arg):
+                arg.close()  # never awaited, so no warning beside the failure (#3491 review)
         raise AssertionError("main() went past the service-name check")
 
-    # Should the check regress, the test fails here rather than starting a worker
-    # (#3354): tracing and the worker's run are where main() goes next.
+    # A backstop, not the first point of failure: should the check regress, building
+    # tracing's arguments likely fails on the missing name first. Either way the test
+    # fails rather than starting a worker (#3354, #3491 review).
     monkeypatch.setattr(worker_module, "configure_tracing", past_the_guard)
     monkeypatch.setattr(asyncio, "run", past_the_guard)
 
