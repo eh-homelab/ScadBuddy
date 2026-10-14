@@ -20,8 +20,8 @@ type PlainRow = { id: string; session_id: string; subpath: string; uuid: string 
 /**
  * Seals every plaintext row, one transaction per batch, each under the lock, walking ids upward so a row
  * it skips is not read again; returns what it sealed, deleted and found malformed (counted in sealed too). A row whose text is not JSON
- * is sealed too, as opaque text (only its id is logged), and still fails in load as it did. The rows of a session with no `ai_sessions` row, or of a forgotten
- * one, are deleted, so no key is made for either.
+ * is sealed too, as opaque text (only its id is logged), and still fails in load as it did. The rows of a forgotten session, and those of a session with no `ai_sessions` row
+ * that are over 10 minutes old, are deleted, so no key is made for either.
  */
 export async function sealBackfill(
   sql: Sql,
@@ -46,15 +46,22 @@ export async function sealBackfill(
       )
       for (const sessionId of sessions) {
         let dek: Buffer | undefined
+        let forgotten = false
         if (live.has(sessionId)) {
           try {
             dek = await keys.keyFor(`session-${sessionId}`, true)
           } catch (err) {
             if (!(err instanceof SubjectForgotten)) throw err
+            forgotten = true
           }
         }
         if (!dek) {
-          const gone = await tx`DELETE FROM ai_session_entries WHERE session_id = ${sessionId} AND sealed IS NULL AND entry IS NOT NULL`
+          // A session with no row may be one a replica is still creating (a rolling update): only old rows go.
+          const gone = forgotten
+            ? await tx`DELETE FROM ai_session_entries WHERE session_id = ${sessionId} AND sealed IS NULL AND entry IS NOT NULL`
+            : await tx`
+                DELETE FROM ai_session_entries WHERE session_id = ${sessionId} AND sealed IS NULL AND entry IS NOT NULL
+                  AND created_at < now() - interval '10 minutes'`
           total.deleted += gone.count
           continue
         }

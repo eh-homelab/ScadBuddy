@@ -100,9 +100,15 @@ describe.skipIf(!TEST_DATABASE_URL)(
     it('deletes the rows of a session with no ai_sessions row and makes no key for it', async () => {
       const orphan = randomUUID()
       const kept = randomUUID()
+      const young = randomUUID()
       await plain(orphan, 3, '', true)
+      await db.sql`UPDATE ai_session_entries SET created_at = now() - interval '11 minutes'`
+      await plain(young, 2, '', true)
+      await db.sql`UPDATE ai_session_entries SET created_at = now() - interval '1 minute' WHERE session_id = ${young}`
       await plain(kept, 2)
       expect(await sealBackfill(db.sql, keys)).toEqual({ sealed: 2, deleted: 3, malformed: 0 })
+      expect((await db.sql`SELECT 1 FROM ai_session_entries WHERE session_id = ${young} AND entry IS NOT NULL`).length).toBe(2)
+      expect((await db.sql`SELECT 1 FROM ai_payload_keys WHERE subject = ${`session-${young}`}`).length).toBe(0)
       expect((await db.sql`SELECT 1 FROM ai_session_entries WHERE session_id = ${orphan}`).length).toBe(0)
       expect((await db.sql`SELECT 1 FROM ai_payload_keys WHERE subject = ${`session-${orphan}`}`).length).toBe(0)
     })
