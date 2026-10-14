@@ -26,6 +26,7 @@ function pane(
   result: SlicePreview | null,
   nozzlePlan: NozzlePlan | null = plan,
   plateSlots: readonly SlotNeed[] | null = slots,
+  stale = false,
 ) {
   render(
     <PreviewPane
@@ -38,7 +39,7 @@ function pane(
       slice={result}
       nozzlePlan={nozzlePlan}
       plateSlots={plateSlots}
-      stale={false}
+      stale={stale}
       slicing={false}
       sliceError={null}
     />,
@@ -46,6 +47,19 @@ function pane(
 }
 
 describe('PreviewPane: where the slice departs from the plan (#2449)', () => {
+  it('says nothing of a stale slice, which the next slice may contradict (#3208)', () => {
+    pane(
+      slice([
+        { slot_id: 1, grams: 14.5, side: 'R' },
+        { slot_id: 3, grams: 4.5, side: 'L' },
+      ]),
+      plan,
+      slots,
+      true,
+    )
+    expect(screen.queryByTestId('slice-departures')).toBeNull()
+  })
+
   it('names a planned colour the sliced plate dropped, and a filament moved to the other nozzle', () => {
     // Preview-slice 32: slot 2 too fine to slice, and the other two regrouped.
     pane(
