@@ -1,6 +1,5 @@
 import { execFileSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { existsSync } from 'node:fs'
 import postgres, { type Sql } from 'postgres'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { durableRequestId } from '../src/gate/ids.js'
@@ -131,6 +130,16 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(await statusOf(sql, sid)).toBe('running')
     })
 
+    it("audits started_at at the entry's own microsecond", async () => {
+      const sid = await newSession(sql)
+      const args = open(sid)
+      await openInput(sql, args)
+      const [pending] = await sql<{ created: string }[]>`SELECT created_at::text AS created FROM ai_pending_input`
+      await resolveInput(sql, { requestId: args.requestId, outcome: 'approved', responder: ME_RESPONDER })
+      const [audited] = await sql<{ started: string }[]>`SELECT started_at::text AS started FROM ai_audit`
+      expect(audited?.started).toBe(pending?.created)
+    })
+
     it('an open retried after its resolution opens nothing', async () => {
       const sid = await newSession(sql)
       const args = open(sid)
@@ -228,6 +237,21 @@ describe.skipIf(!TEST_DATABASE_URL)(
       }
     })
 
+    it("a Reset's cancel of the old run's entry notifies too", async () => {
+      const listener = postgres(t.url, { max: 1, onnotice: () => {} })
+      try {
+        const heard: string[] = []
+        await listener.listen(INPUT_CHANNEL, (payload) => heard.push(payload))
+        const sid = await newSession(sql)
+        const before = open(sid, 'run-1')
+        await openInput(sql, before)
+        await openInput(sql, open(sid, 'run-2'))
+        await expect.poll(() => heard, { timeout: 5000 }).toEqual([before.requestId])
+      } finally {
+        await listener.end({ timeout: 5 })
+      }
+    })
+
     it('deny records the flow refusal once, audited', async () => {
       const sid = await newSession(sql)
       const args = {
@@ -300,7 +324,6 @@ describe.skipIf(!TEST_DATABASE_URL)(
     })
 
     describe('parity with agent-durable store.py', () => {
-      const python = new URL('../../agent-durable/.venv/bin/python', import.meta.url).pathname
       const script = new URL('./support/gate_store_parity.py', import.meta.url).pathname
       const cwd = new URL('../../agent-durable/', import.meta.url).pathname
 
@@ -322,13 +345,23 @@ describe.skipIf(!TEST_DATABASE_URL)(
             SELECT session_id, seq, event FROM ai_session_events ORDER BY session_id, seq`).map((r) => ({ ...r })),
           audit: await s`
             SELECT kind, action, surface, principal_kind, principal_id, principal_label, session_id, tool_use_id,
-                   tier, input_hash, input_summary, request_id, outcome, detail
+                   tier, input_hash, input_summary, request_id, outcome, detail,
+                   duration_ms = GREATEST(0, (extract(epoch FROM finished_at - started_at) * 1000)::int) AS duration_from_started
             FROM ai_audit ORDER BY request_id, action`,
           sessions: await s`SELECT id, status, event_seq FROM ai_sessions ORDER BY id`,
         })
       }
 
-      it.skipIf(!existsSync(python))('writes the same rows and events for the same calls', async () => {
+      const hasUv = (): boolean => {
+        try {
+          execFileSync('uv', ['--version'], { stdio: 'ignore' })
+          return true
+        } catch {
+          return false
+        }
+      }
+
+      it.skipIf(!hasUv())('writes the same rows and events for the same calls', { timeout: 180_000 }, async () => {
         const s1 = '11111111-1111-4111-8111-111111111111'
         const s2 = '22222222-2222-4222-8222-222222222222'
         const s3 = '33333333-3333-4333-8333-333333333333'
@@ -393,7 +426,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
             else if (step.op === 'resolve') await resolveInput(sql, a)
             else await denyInput(sql, a)
           }
-          execFileSync(python, [script, py.url, py.schema], { cwd, input: JSON.stringify(steps), stdio: ['pipe', 'inherit', 'inherit'] })
+          execFileSync('uv', ['run', '--frozen', 'python', script, py.url, py.schema], { cwd, input: JSON.stringify(steps), stdio: ['pipe', 'inherit', 'inherit'] })
           const ts = await dump(sql)
           const reference = await dump(py.db.sql)
           expect(ts).toEqual(reference)

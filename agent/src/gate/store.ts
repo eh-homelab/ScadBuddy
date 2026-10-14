@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
 import type { InputEntry, InputOutcome, Owner, ServerEvent } from '../sessions/protocol.js'
+import { busKindOf } from '../sessions/busEvents.js'
 import { parseRequestId } from './ids.js'
 
 // Every write about a durable entry (durable-agents spec §6.6, "How a durable entry
@@ -11,22 +12,22 @@ import { parseRequestId } from './ids.js'
 //   _resolved :236, _audit :324                   -> resolved, audit
 //   openInput :368, grantInput :478, denyInput :536, resolveInput :577
 //   run_grant_responder :115, flow_responder :119, _actor :132
-// Python's Outcome/Kind/_WAITING/_SETTLED are InputOutcome, InputEntry['kind'] and the
-// two lists below. Each function returns what Python's returns: false when nothing was
+// Python's Outcome and Kind are InputOutcome and InputEntry['kind']; _WAITING/_SETTLED are
+// busKindOf's (sessions/busEvents.ts). Each function returns what Python's returns: false when nothing was
 // written (already open or resolved, gone, or the grant does not hold).
 //
-// Beyond Python: resolveInput also sends `NOTIFY scadbuddy_input, <request id>`, in the
+// Beyond Python: every resolution (resolveInput, and the Reset cancel in openInput) also sends `NOTIFY scadbuddy_input, <request id>`, in the
 // transaction that deletes the row, so a waiter learns of a resolution without polling.
 // The channel is new; Python does not send it.
 
 const PROTOCOL_VERSION = 1
 const PG_CHANNEL = 'scadbuddy_events'
 export const INPUT_CHANNEL = 'scadbuddy_input'
+// A foreign id on purpose: this agent's own LISTEN consumer then wakes its local followers, since
+// this file does not write through EventLog.append. If the gate ever does, use the publisher's id.
 const REPLICA = 'agent-durable'
 const SYSTEM: Responder = { kind: 'system', id: 'scadbuddy', label: 'ScadBuddy' }
 const APPROVAL_SUMMARY_MAX = 500
-const WAITING = ['waiting_approval', 'waiting_input']
-const SETTLED = ['idle', 'done', 'failed']
 
 export type Responder = { kind: string; id: string; label: string }
 type Hop = { hop: string; action: string; actor: string; at: string; reason?: string }
@@ -105,7 +106,7 @@ const HOP_ACTIONS: Record<string, string> = {
   cancelled: 'cancelled',
 }
 
-/** What `ai_pending_input` returns for `RETURNING *`. */
+/** What `ai_pending_input` returns for `RETURNING *`, with `created_at::text`. */
 type PendingRow = {
   request_id: string
   session_id: string
@@ -118,6 +119,8 @@ type PendingRow = {
   responders: ('browser' | 'grant')[]
   attention: { reason: string; on_timeout: string | null } | null
   created_at: Date
+  /** `created_at::text`: microseconds, which a Date loses. */
+  created_at_text: string
   expires_at: Date
   flow_run_id: string | null
   hop: 'parent' | 'person' | null
@@ -132,7 +135,8 @@ type Audited = {
   tool: string
   input_hash: string | null
   summary: string
-  created_at: Date
+  /** Microsecond text (`created_at::text`); `::text::timestamptz` below, since postgres.js sends a timestamptz param as a Date, in milliseconds. */
+  created_at: string
 }
 
 function actor(responder: Responder): string {
@@ -198,14 +202,7 @@ async function append(tx: TransactionSql, sessionId: string, events: ServerEvent
     RETURNING seq`
   if (rows.length !== texts.length) throw new Error(`session ${sessionId} does not exist`)
   const seqs = rows.map((r) => Number(r.seq))
-  const statuses = events.flatMap((e) => (e.type === 'session.status' ? [e.status as string] : []))
-  const status = statuses.at(-1)
-  const kind =
-    status !== undefined && WAITING.includes(status)
-      ? 'session.waiting'
-      : status !== undefined && SETTLED.includes(status)
-        ? 'session.done'
-        : 'session.message'
+  const { kind, status } = busKindOf(events)
   const payload = {
     id: randomUUID().replaceAll('-', ''),
     at: iso(new Date()),
@@ -280,7 +277,8 @@ async function resolved(
     RETURNING status`
   if (running.length > 0) events.push(event({ type: 'session.status', sessionId: sid, status: 'running' }))
   await append(tx, sid, events)
-  if (row.kind === 'approval') await audit(tx, row, outcome, responder, reason)
+  await tx`SELECT pg_notify(${INPUT_CHANNEL}, ${rid})`
+  if (row.kind === 'approval') await audit(tx, { ...row, created_at: row.created_at_text }, outcome, responder, reason)
 }
 
 /** The `approval` row ApprovalService writes for a classic decision (audit/log.ts). */
@@ -306,7 +304,7 @@ async function audit(
     VALUES ('approval', ${outcome}, ${person ? 'http' : 'system'}, ${cut(by.kind, 50)}, ${cut(by.id, 200)},
             ${cut(by.label, 200)}, ${String(row.session_id)}, ${toolUseId}, 'outward', ${row.input_hash},
             ${cut(row.summary, 1000)}, ${row.request_id}, ${auditOutcome}, ${cut(detail, 500)},
-            ${started}, now(), GREATEST(0, (extract(epoch FROM now() - ${started}::timestamptz) * 1000)::int))`
+            ${started}::text::timestamptz, now(), GREATEST(0, (extract(epoch FROM now() - ${started}::text::timestamptz) * 1000)::int))`
 }
 
 /**
@@ -320,7 +318,7 @@ export async function openInput(sql: Sql, args: OpenInput): Promise<boolean> {
   await sql.begin(async (tx) => {
     const stale = await tx<PendingRow[]>`
       DELETE FROM ai_pending_input WHERE session_id = ${args.sessionId} AND workflow_run_id <> ${args.workflowRunId}
-      RETURNING *`
+      RETURNING *, created_at::text AS created_at_text`
     for (const old of stale) await resolved(tx, old, 'cancelled', SYSTEM, null, 'reset')
   })
   return await sql.begin(async (tx) => {
@@ -341,7 +339,7 @@ export async function openInput(sql: Sql, args: OpenInput): Promise<boolean> {
       -- A retried open that lands after its entry was resolved opens nothing.
       WHERE NOT EXISTS (SELECT 1 FROM ai_input_responses WHERE request_id = ${args.requestId})
       ON CONFLICT (request_id) DO NOTHING
-      RETURNING *`
+      RETURNING *, created_at::text AS created_at_text`
     const row = inserted[0]
     if (row === undefined) return false
     const sid = args.sessionId
@@ -417,7 +415,7 @@ export async function grantInput(sql: Sql, args: GrantInput): Promise<boolean> {
       if (held === undefined) return false
       return held.outcome === 'approved' && sameResponder(held.responder, responder)
     }
-    await audit(tx, { ...stand(args), created_at: new Date() }, 'approved', responder, null)
+    await audit(tx, { ...stand(args), created_at: new Date().toISOString() }, 'approved', responder, null)
     return true
   })
 }
@@ -437,7 +435,7 @@ export async function denyInput(sql: Sql, args: DenyInput): Promise<boolean> {
               ${args.reason}, ${tx.json([hop('person', 'deny', 'flow', args.reason)])})
       ON CONFLICT (request_id) DO NOTHING RETURNING request_id`
     if (inserted.length === 0) return false
-    await audit(tx, { ...stand(args), created_at: new Date() }, 'denied', responder, args.reason)
+    await audit(tx, { ...stand(args), created_at: new Date().toISOString() }, 'denied', responder, args.reason)
     return true
   })
 }
@@ -460,11 +458,10 @@ function sameResponder(a: Responder, b: Responder): boolean {
 /** Resolves the entry; false when it was gone (resolved by another, or never opened). */
 export async function resolveInput(sql: Sql, args: ResolveInput): Promise<boolean> {
   return await sql.begin(async (tx) => {
-    const deleted = await tx<PendingRow[]>`DELETE FROM ai_pending_input WHERE request_id = ${args.requestId} RETURNING *`
+    const deleted = await tx<PendingRow[]>`DELETE FROM ai_pending_input WHERE request_id = ${args.requestId} RETURNING *, created_at::text AS created_at_text`
     const row = deleted[0]
     if (row === undefined) return false
     await resolved(tx, row, args.outcome, args.responder, args.response, args.reason ?? null)
-    await tx`SELECT pg_notify(${INPUT_CHANNEL}, ${args.requestId})`
     return true
   })
 }
