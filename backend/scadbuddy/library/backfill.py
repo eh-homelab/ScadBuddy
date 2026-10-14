@@ -41,7 +41,13 @@ _unreadable_jobs: set[str] = set()
 
 class AmbiguousOutputError(ValueError):
     """Several of the re-render's outputs were built from the output's Parts, and the
-    output does not record which one it was."""
+    output does not record which one it was, or records one that is not among them."""
+
+    def __init__(self, parts: list[str], recorded_index: int | None) -> None:
+        super().__init__(parts)
+        #: The index the output was saved with, or None if it was saved before outputs
+        #: recorded one.
+        self.recorded_index = recorded_index
 
 
 def choose_output(job: Job, record: OutputRecord | None) -> PipelineOutput | None:
@@ -49,7 +55,8 @@ def choose_output(job: Job, record: OutputRecord | None) -> PipelineOutput | Non
     built from the same Parts. A Part's key is its slug, revision, file and params, so
     the same inputs at the same revision give the same keys. Two outputs of one job with
     the same Parts are told apart by the index the output recorded when it was saved;
-    one saved before that was recorded is refused rather than given either (#1007 item 2).
+    one saved before that was recorded, or whose index is not among them, is refused
+    rather than given either (#1007 item 2).
     """
     if len(job.outputs) == 1:
         return job.outputs[0]
@@ -60,7 +67,7 @@ def choose_output(job: Job, record: OutputRecord | None) -> PipelineOutput | Non
     if record.output_index is not None and record.output_index in same:
         return job.outputs[record.output_index]
     if len(same) > 1:
-        raise AmbiguousOutputError(record.parts)
+        raise AmbiguousOutputError(record.parts, record.output_index)
     return job.outputs[same[0]] if same else None
 
 
@@ -81,7 +88,11 @@ def attach_backfills(
     database, the disk) is left for the next pass. Either outcome is announced as
     ``output.updated`` on ``events`` (#1970). Once ``stop`` is set it attaches no
     further output: the boot's pass runs in a thread the shutdown cannot cancel (#2128)."""
-    return _attach_all(outputs, refs, read_job, outputs.pending_backfills(), events, stop)
+    pending = outputs.pending_backfills()
+    # A job no output waits on any more (its outputs deleted, or failed another way) is
+    # never read again, so nothing else would drop it.
+    _unreadable_jobs.intersection_update(state.job_id for _, state in pending)
+    return _attach_all(outputs, refs, read_job, pending, events, stop)
 
 
 def attach_job_backfills(
@@ -280,12 +291,17 @@ def _attach(
         chosen = choose_output(job, outputs.record(output_id))
     except OutputNotFoundError:
         return False  # deleted while it was re-rendering: nothing to attach to
-    except AmbiguousOutputError:
+    except AmbiguousOutputError as error:
+        why = (
+            "it was saved before outputs recorded which one they were"
+            if error.recorded_index is None
+            else "the one it was saved as is not among them"
+        )
         outputs.fail_backfill(
             output_id,
             job.id,
-            "the re-render wrote several outputs from this output's objects, and it was"
-            " saved before outputs recorded which one they were; save it again",
+            f"the re-render wrote several outputs from this output's objects, and {why};"
+            " save it again",
         )
         return False
     if chosen is None or not chosen.manifest:
