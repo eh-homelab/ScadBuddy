@@ -349,7 +349,8 @@ fallback when there is no UI.
 The routes without `/entries` are the single-credential routes from #1000. They act on
 the first credential by priority, for scripts written against them. They are
 **deprecated** (#2768): the UI no longer uses them, and every answer carries
-`Deprecation: true` and a `Link` header naming `/api/v1/ai/credentials/entries` as the
+`Deprecation: @1791936000` (RFC 9745: deprecated at 2026-10-14T00:00:00Z) and a `Link`
+header naming `/api/v1/ai/credentials/entries` as the
 successor. The `/entries` and `/order` routes manage every credential (#1093); use them
 in anything new.
 
@@ -380,13 +381,15 @@ It reads the new entry's `id` with `jq`; where the shell has no `jq`, read `id` 
 the `POST`'s JSON answer by hand. The `POST` adds a credential every time it runs, so
 running it again leaves a duplicate: to replace an existing key, `PUT` it to
 `/api/v1/ai/credentials/entries/{id}` instead, taking its `id` from
-`GET /api/v1/ai/credentials/entries`.
+`GET /api/v1/ai/credentials/entries`. `jq -e` fails when the `POST` was refused (a
+`403`, `400` or `503` has no `id`), so the test runs only for a credential that was
+added; rerun the `POST` without `| jq` to read why it was refused.
 
 ```bash
 id=$(curl -sS -X POST http://localhost:8081/api/v1/ai/credentials/entries \
   -H 'Origin: http://localhost:8081' -H 'Content-Type: application/json' \
-  -d '{"kind":"anthropic_api_key","secret":"sk-ant-…"}' | jq -r .id)
-curl -sS -X POST "http://localhost:8081/api/v1/ai/credentials/entries/$id/test" -H 'Origin: http://localhost:8081'
+  -d '{"kind":"anthropic_api_key","secret":"sk-ant-…"}' | jq -er .id) &&
+  curl -sS -X POST "http://localhost:8081/api/v1/ai/credentials/entries/$id/test" -H 'Origin: http://localhost:8081'
 # Replacing that key later, rather than adding another:
 curl -sS -X PUT "http://localhost:8081/api/v1/ai/credentials/entries/$id" \
   -H 'Origin: http://localhost:8081' -H 'Content-Type: application/json' \

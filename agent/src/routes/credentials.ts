@@ -122,6 +122,11 @@ const NOT_READY = 'the AI database is unreachable or its migrations have not app
 export const DEFAULT_TEST_COOLDOWN_MS = 10_000
 /** The largest credential body read: a secret and a base URL, with room to spare. */
 const BODY_MAX = 16 * 1024
+/**
+ * The `Deprecation` value of the single-credential routes (#2768): RFC 9745's Structured
+ * Field Date for 2026-10-14T00:00:00Z, when they were deprecated.
+ */
+export const LEGACY_CREDENTIALS_DEPRECATED = '@1791936000'
 
 function cannotSave(kek: KekStatus): string | null {
   // `reason` is the public one (no file path or errno; secrets.ts `loadKek`).
@@ -234,6 +239,17 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
   })
   const kekOrUndefined = kek.ok ? kek.kek : undefined
 
+  // Deprecated (#2768): every answer from the single-credential routes says so, a guard's
+  // 403 included (so registered before the guards), and names the routes that replace
+  // them. RFC 9745's form: a Structured Field Date, `@` and the Unix seconds of when.
+  const deprecated: MiddlewareHandler = async (c, next) => {
+    await next()
+    c.header('Deprecation', LEGACY_CREDENTIALS_DEPRECATED)
+    c.header('Link', `<${entries}>; rel="successor-version"`)
+  }
+  app.on(['GET', 'PUT', 'DELETE'], base, deprecated)
+  app.post(`${base}/test`, deprecated)
+
   // Every write is outward tier; see guard.ts for what is and is not checked.
   app.on(['PUT', 'DELETE', 'POST'], [base, `${base}/*`], async (c, next) => {
     const problem = uiRequestProblem(c, deps.origins, deps.remoteAddress)
@@ -249,14 +265,6 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
   const limit = jsonBodyLimit(BODY_MAX)
 
   // --- The single-credential routes (#255): the first credential by priority.
-  // Deprecated (#2768): each answer says so, and names the routes that replace them.
-  const deprecated: MiddlewareHandler = async (c, next) => {
-    await next()
-    c.header('Deprecation', 'true')
-    c.header('Link', `<${entries}>; rel="successor-version"`)
-  }
-  app.on(['GET', 'PUT', 'DELETE'], base, deprecated)
-  app.post(`${base}/test`, deprecated)
 
   app.get(base, (c) => withStore(c, async (repo) => c.json(view(await repo.get(), kek))))
 
