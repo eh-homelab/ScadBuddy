@@ -114,13 +114,13 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser pairings${TEST_DATABASE_URL ? '' : 
       // #1814: the query itself, so its own outcome shows it was never cancelled (a
       // cancelled one rejects with 57014); "no lock waiter left" alone cannot tell.
       const sent: PromiseLike<unknown>[] = []
-      // Only the tagged-template call is wrapped, which is all `pairedTab` uses; a
-      // `pairedTab` that reaches for `sql.begin` or `sql.unsafe` needs them added here.
-      const watched = ((...args: Parameters<typeof db.sql>) => {
+      // Only the tagged-template call is recorded; the helpers (`sql.begin`, `sql.unsafe`, ...)
+      // are forwarded unrecorded, so a `pairedTab` that starts using one still runs.
+      const watched = Object.assign((...args: Parameters<typeof db.sql>) => {
         const query = db.sql(...args)
         sent.push(query)
         return query
-      }) as unknown as typeof db.sql
+      }, db.sql) as unknown as typeof db.sql
       const lookup = new PostgresPairingStore(watched).pairedTab(agent, stop.signal)
       // This database's backends other than the admin's own: another test's lock wait cannot count.
       const waiting = async () =>

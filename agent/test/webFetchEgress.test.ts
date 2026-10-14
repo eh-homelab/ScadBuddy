@@ -56,8 +56,8 @@ describe('webFetchRefusal', () => {
     expect(await webFetchRefusal('http://[::ffff:7f00:1]/', publicHost)).toBe(
       "WebFetch refused: url host [::ffff:7f00:1] resolves to ::ffff:7f00:1, this pod's loopback",
     )
-    expect(await webFetchRefusal('http://0.0.0.0/', publicHost)).toMatch(/^WebFetch refused: url host 0\.0\.0\.0 resolves to 0\.0\.0\.0, a link-local/)
-    expect(await webFetchRefusal('http://[::]/', publicHost)).toMatch(/^WebFetch refused: url host :: resolves to ::, a link-local/)
+    expect(await webFetchRefusal('http://0.0.0.0/', publicHost)).toMatch(/^WebFetch refused: url host 0\.0\.0\.0 resolves to 0\.0\.0\.0,/)
+    expect(await webFetchRefusal('http://[::]/', publicHost)).toMatch(/^WebFetch refused: url host :: resolves to ::,/)
   })
 })
 

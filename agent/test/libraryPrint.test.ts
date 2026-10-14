@@ -1,6 +1,6 @@
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { NOT_A_TOOL } from '../src/tools/coverage.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
@@ -111,11 +111,15 @@ describe('the library routes', () => {
       http.get(`${LIB}/choices`, () => HttpResponse.json({ printer_id: 1 })),
       http.get(`${LIB}/plates`, () => HttpResponse.json({ detail: 'Bambuddy could not read the plates' }, { status: 502 })),
     )
+    const warned = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    onTestFinished(() => warned.mockRestore())
     expect(firstText(await tool('get_print_choices').execute({ library_file_id: FILE }, ctx()))).toEqual({
       printer_id: 1,
       plates: [],
       plates_error: expect.stringMatching(/get plates of library file .* failed \(HTTP 502\).*Bambuddy could not read the plates/s),
     })
+    // #1814: the log names the error; its message (the model sees it above) is not logged.
+    expect(warned.mock.calls).toEqual([['get_print_choices: the plates could not be read (ToolError)']])
   })
 
   it("says why an output's plates could not be read, a missing scope included (#2107)", async () => {

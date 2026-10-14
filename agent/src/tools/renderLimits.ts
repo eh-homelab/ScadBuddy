@@ -261,7 +261,8 @@ export class RenderLimiter {
       this.current = await this.source()
     } catch (err) {
       // The last limits read stand: a settings read that fails must not stop renders.
-      console.warn(`render limits: could not read the settings, keeping the last: ${(err as Error).message}`)
+      // #1814: only the error's name; its message can quote a connection string or a query.
+      console.warn(`render limits: could not read the settings, keeping the last (${err instanceof Error ? err.name : typeof err})`)
     }
     return this.current
   }

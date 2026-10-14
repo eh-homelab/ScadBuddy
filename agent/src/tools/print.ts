@@ -284,7 +284,8 @@ export const printTools: Tool[] = [
         getChoices(ctx, source, args.printer_id),
         getPlates(ctx, source).catch((err: unknown) => {
           platesError = err instanceof ToolError ? toolErrorText(err, 'get_print_choices') : String(err)
-          console.warn(`get_print_choices: ${err instanceof Error ? err.message : String(err)}`)
+          // #1814: only the error's name; its message can quote a connection string (telemetry/scrub.ts).
+          console.warn(`get_print_choices: the plates could not be read (${err instanceof Error ? err.name : typeof err})`)
           return []
         }),
       ])
