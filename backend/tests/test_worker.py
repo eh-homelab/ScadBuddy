@@ -465,11 +465,15 @@ async def _write_refusal(
     A transient error can come after the server applied the write: sent again, the same
     token is stale by then and refused. So before each retry the routing is read, and a
     build already current is the write accepted. A server busy through every attempt is
-    said as such, not returned as a status that reads like the wrong refusal."""
+    said as such, not returned as a status that reads like the wrong refusal.
+
+    That check is best-effort. Just after a write the deployment's own workflow is still
+    propagating it (`_routing_once_current`), so the routing is read a few times before
+    the retry; a read the busy server refuses counts as "not known current" (#3293)."""
     attempts = IS_CURRENT_ATTEMPTS if attempts is None else attempts
     max_wait = IS_CURRENT_MAX_WAIT if max_wait is None else max_wait
     for attempt in range(attempts):
-        if attempt > 0 and await routing() == build_id:
+        if attempt > 0 and await _known_current(routing, build_id, every=min(0.25, max_wait)):
             return None
         try:
             await write()
@@ -484,6 +488,27 @@ async def _write_refusal(
         else:
             return None
     raise AssertionError("unreachable")
+
+
+async def _known_current(
+    routing: Callable[[], Awaitable[str | None]],
+    build_id: str,
+    *,
+    reads: int | None = None,
+    every: float = 0.25,
+) -> bool:
+    """Whether ``build_id`` is seen current within ``reads`` reads of the routing. A
+    transient refusal of a read is a read that saw nothing; any other error is raised."""
+    for read in range(ROUTING_READS if reads is None else reads):
+        if read > 0:
+            await asyncio.sleep(every)
+        try:
+            if await routing() == build_id:
+                return True
+        except RPCError as error:
+            if error.status not in IS_CURRENT_TRANSIENT:
+                raise
+    return False
 
 
 async def _routing_once_current(
@@ -579,6 +604,8 @@ IS_CURRENT_MAX_WAIT = 5.0
 #: How Temporal refuses a deployment write carrying a conflict token read before another
 #: write (#2538): what `deployment_writes` relies on.
 STALE_TOKEN_REFUSAL = RPCStatusCode.FAILED_PRECONDITION
+#: How many times `_write_refusal` reads the routing before it resends a write.
+ROUTING_READS = 3
 #: What a busy server answers meanwhile; anything else is a real error, raised at once.
 IS_CURRENT_TRANSIENT = frozenset(
     {
@@ -1557,6 +1584,8 @@ async def test_a_server_busy_through_every_attempt_is_said_not_returned_as_a_ref
 
 
 async def test_a_conflict_is_returned_as_the_refusal() -> None:
+    """#3293: a refusal that is not transient is handed back at once."""
+
     async def write() -> None:
         raise RPCError("stale", RPCStatusCode.FAILED_PRECONDITION, b"")
 
@@ -1564,3 +1593,39 @@ async def test_a_conflict_is_returned_as_the_refusal() -> None:
         return "new"
 
     assert await _write_refusal(write, routing, "old", max_wait=0) == STALE_TOKEN_REFUSAL
+
+
+async def test_a_busy_routing_read_is_not_known_current_and_the_write_is_resent() -> None:
+    """#3293 review: the busy server can refuse the routing read too; that is a read that
+    saw nothing, not a failed test."""
+    sent: list[int] = []
+
+    async def write() -> None:
+        sent.append(1)
+        if len(sent) == 1:
+            raise _transient()
+
+    async def routing() -> str | None:
+        raise _transient()
+
+    assert await _write_refusal(write, routing, "old", max_wait=0) is None
+    assert len(sent) == 2
+
+
+async def test_a_write_still_propagating_is_seen_before_it_is_resent() -> None:
+    """#3293 review: just after a write the routing can still name the old build; a few
+    reads see the write land rather than resending a token it has made stale."""
+    reads: list[str] = ["new", "old"]
+    sent: list[int] = []
+
+    async def write() -> None:
+        sent.append(1)
+        if len(sent) == 1:
+            raise _transient()
+        raise RPCError("stale", RPCStatusCode.FAILED_PRECONDITION, b"")
+
+    async def routing() -> str | None:
+        return reads.pop(0) if len(reads) > 1 else reads[0]
+
+    assert await _write_refusal(write, routing, "old", max_wait=0) is None
+    assert len(sent) == 1
