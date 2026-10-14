@@ -34,7 +34,13 @@ from session_support import (
     until,
 )
 from temporalio import activity
-from temporalio.claude_agent_sdk import AgentState, ClaudeAgentPlugin, follow_agent
+from temporalio.claude_agent_sdk import (
+    AgentState,
+    ClaudeAgentPlugin,
+    SegmentInput,
+    SegmentOutput,
+    follow_agent,
+)
 from temporalio.claude_agent_sdk.testing import Final, HistoryItem, ScriptedClaude, ToolCall
 from temporalio.client import (
     Client,
@@ -62,6 +68,7 @@ from scadbuddy_durable.secrets import kek_from_base64
 from scadbuddy_durable.session import tools
 from scadbuddy_durable.session.activities import SessionActivities
 from scadbuddy_durable.session.models import (
+    BUDGET_EXHAUSTED,
     FORK_POINT_QUERY,
     SEGMENT_CONTEXT_QUERY,
     TOOLS_QUEUE,
@@ -126,6 +133,7 @@ class Harness:
     payload_dir: Path = Path()
     session_activities: SessionActivities | None = None
     gate_activities: GateActivities | None = None
+    claude: ScriptedClaude | None = None
 
     async def session(self, conn: Conn) -> tuple[str, WorkflowHandle[Any, Any]]:
         sid = await insert_session(conn)
@@ -137,7 +145,7 @@ class Harness:
         self.agent = build_worker(
             self.client,
             self.connect,
-            ScriptedClaude(policy),
+            self.claude or ScriptedClaude(policy),
             task_queue=self.queue,
             session=self.session_activities,
             gate=self.gate_activities,
@@ -532,6 +540,39 @@ class HeldFinish(SessionActivities):
         self.entered.set()
         await self.release.wait()
         return await super().finish_turn(args)
+
+
+class FailingClaude(ScriptedClaude):
+    """A runner whose segment answers a failure with the prompt's text after "fail: "."""
+
+    async def run(self, inp: SegmentInput, attempt: int) -> SegmentOutput:
+        _, asked, error = (inp.prompt or "").partition("fail: ")
+        if asked:
+            return SegmentOutput(session_id=inp.session_id, is_error=True, error=error)
+        return await super().run(inp, attempt)
+
+
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (BUDGET_EXHAUSTED, "error_max_budget_usd"),
+        (f"the notes say {BUDGET_EXHAUSTED} last time", "turn_failed"),
+        (f"{BUDGET_EXHAUSTED} was quoted first", "turn_failed"),
+    ],
+)
+async def test_only_the_budgets_own_failure_ends_a_turn_as_the_budgets(
+    harness: Harness, agent_db: Conn, connect: Connect, error: str, code: str
+) -> None:
+    """#3353: a segment's failure that only quotes the budget's words, anywhere in its
+    text, is the turn's failure, not the budget's."""
+    await harness.agent.shutdown()
+    harness.claude = FailingClaude(policy)
+    async with harness.restart_agent():
+        sid, handle = await harness.session(agent_db)
+        await send(handle, f"fail: {error}")
+        await settled(connect, sid)
+    log = await events(agent_db, sid)
+    assert [e["code"] for e in log if e["type"] == "error"] == [code]
 
 
 async def test_a_send_while_a_turn_is_finishing_is_refused_busy(

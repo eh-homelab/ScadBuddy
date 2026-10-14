@@ -240,6 +240,17 @@ def _joined(append: str | None, note: str | None) -> str | None:
     return "\n\n".join(parts) if parts else None
 
 
+# What the plugin raises when a segment answered BUDGET_EXHAUSTED (``_fail`` with
+# ``f"Claude run failed: {seg.error}"``): that message exactly, with no cause. A failure
+# that only quotes the constant, amid other text or in a cause, is the session's content
+# and ends the turn failed (#3353).
+_BUDGET_FAILURE = f"Claude run failed: {BUDGET_EXHAUSTED}"
+
+
+def _budget_exhausted(err: FailureError) -> bool:
+    return err.cause is None and err.message == _BUDGET_FAILURE
+
+
 @workflow.defn(name=WORKFLOW)
 class DurableSession:
     @workflow.init
@@ -409,7 +420,9 @@ class DurableSession:
             text = f"{err}: {err.cause}" if err.cause else str(err)
             if self._interrupted is not None:
                 outcome = "interrupted"
-            elif BUDGET_EXHAUSTED in text:
+            elif _budget_exhausted(err):
+                # Decides only _finish's arguments, never which commands run, so an old
+                # history replays the same without a workflow.patched() (#3353).
                 outcome = "budget_exhausted"
             else:
                 outcome, message = "failed", text[:MESSAGE_MAX]

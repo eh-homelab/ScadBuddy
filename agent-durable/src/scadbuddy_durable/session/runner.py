@@ -153,9 +153,10 @@ _FINAL = re.compile(
 # subtype is error_max_budget_usd; its text is "Reached maximum budget ($N)"). Only those
 # words with the amount that follows, and only at the start: the SDK raises them as
 # "Claude Code returned an error result: Reached maximum budget ($N) (exit code: 1)"
-# (claude_agent_sdk _internal/query.py), the CLI's own errors first. The rest of an
-# error's text is the session's content, and one that quotes the subtype or the words,
-# even the whole phrase, is not the cap (#2675).
+# (claude-agent-sdk 0.2.164, the pin in pyproject.toml: claude_agent_sdk/_internal/
+# query.py:523 builds that prefix; check it on every bump), the CLI's own errors first.
+# The rest of an error's text is the session's content, and one that quotes the subtype
+# or the words, even the whole phrase, is not the cap (#2675).
 _BUDGET_REACHED = re.compile(
     r"(?:Claude Code returned an error result: )?Reached maximum budget \(\$"
 )
@@ -679,6 +680,16 @@ class ScadBuddyRunner:
                     type(err).__name__,
                     len(error_text(err).encode()),
                 )
+                if _BUDGET_REACHED.match(str(err)):
+                    # The cap raised rather than returned: today the plugin returns it,
+                    # but a raised one is the same cap, charged and ended the same way
+                    # as the returned one above, never a failure (#3356).
+                    return SegmentOutput(
+                        session_id=inp.session_id,
+                        is_error=True,
+                        error=BUDGET_EXHAUSTED,
+                        cost_usd=max(_cost(err), left),
+                    )
                 if credentials_fault(err) and i + 1 < len(credentials):
                     if held is not None:
                         # Mostly the refusal notice. A fault mid-segment also drops real
