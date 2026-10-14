@@ -1,8 +1,12 @@
+import type { ChildProcess } from 'node:child_process'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { userMessage } from '../src/harness/inbox.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, type Throwaway, throwawayDatabase } from './support/postgres.js'
+import { PluginForwarder } from '../src/plugins/forwarder.js'
+import type { AssembledTurn } from '../src/sessions/turnRunner.js'
 import { WarmBusyError } from '../src/sessions/warm.js'
+import { type FakeMcp, startFakeMcp } from './support/fakeMcp.js'
 import { warmHarness } from './support/warm.js'
 
 // WarmSessions against the bundled Claude Code (spec 2026-10-13 §5.3): one process
@@ -140,4 +144,57 @@ describe.skipIf(skip !== undefined)(`WarmSessions${skip ? ` (skipped: ${skip})` 
     expect(h.warm.size()).toBe(0)
     for (const t of turns) expect(t.release).toHaveBeenCalledTimes(1)
   }, 60_000)
+
+  describe('a plugin over Streamable HTTP with session ids', () => {
+    let mcp: FakeMcp
+    let forwarder: PluginForwarder
+    beforeEach(async () => {
+      mcp = await startFakeMcp({ sessions: true })
+      forwarder = await PluginForwarder.start()
+    })
+    afterEach(async () => {
+      await forwarder.close()
+      await mcp.close()
+    })
+
+    /** An assembly whose Claude Code is given the plugin through a forwarder route, as TurnRunner does. */
+    const withPlugin = (assembly: AssembledTurn): AssembledTurn => {
+      const plugin = { name: 'memory', url: mcp.url, header: { name: 'X-Api-Key', value: 'k-1' }, toolTiers: {}, disabledTools: [] }
+      const registration = forwarder.register(plugin, '127.0.0.1')
+      assembly.run.remotePlugins = [{ name: 'memory', url: registration.url, toolTiers: {}, disabledTools: [] }]
+      assembly.terminate = registration.terminate
+      assembly.release = vi.fn(registration.release)
+      return assembly
+    }
+    const exited = (child: ChildProcess) => child.exitCode !== null || child.signalCode !== null
+
+    it("evicting a warm entry deletes its upstream MCP session", async () => {
+      h = await warmHarness(db)
+      const id = h.newSession()
+      await h.turn(id, withPlugin(h.assembled()), 1)
+      await expect.poll(() => mcp.issued.length).toBe(1)
+      expect(mcp.deletes).toEqual([])
+
+      await h.warm.evict(id, 'test')
+      expect(mcp.deletes).toHaveLength(1)
+      expect(mcp.deletes[0]?.sessionId).toBe(mcp.issued[0])
+      expect(mcp.deletes[0]?.headers['x-api-key']).toBe('k-1')
+      // After the process ended, not before.
+      expect(exited(h.spawns[0]!.child)).toBe(true)
+    }, 60_000)
+
+    it("a fingerprint recycle deletes the old process's session, once", async () => {
+      h = await warmHarness(db)
+      const id = h.newSession()
+      const one = await h.turn(id, withPlugin(h.assembled()), 1)
+      await expect.poll(() => mcp.issued.length).toBe(1)
+      const two = await h.turn(id, withPlugin(h.assembled({ credentialUpdatedAt: '2' })), 1 - one.result.total_cost_usd, h.credential('gw-new-key-9999'))
+      expect(two).toMatchObject({ outcome: 'recycle', reason: 'fingerprint' })
+      await expect.poll(() => mcp.deletes.length).toBe(1)
+      expect(mcp.deletes[0]?.sessionId).toBe(mcp.issued[0])
+      expect(exited(h.spawns[0]!.child)).toBe(true)
+      await expect.poll(() => mcp.issued.length).toBe(2)
+      expect(mcp.deletes).toHaveLength(1)
+    }, 60_000)
+  })
 })

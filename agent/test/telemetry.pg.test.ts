@@ -87,6 +87,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`turn tracing${TEST_DATABASE_URL ? '' : ` (s
           plugins: [],
           problems: [],
           secrets: [],
+          terminate: async () => {},
           release: () => {
             throw new RangeError('release failed')
           },

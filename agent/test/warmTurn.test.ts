@@ -42,6 +42,7 @@ function assembly(): AssembledTurn {
     eventTierOf: () => undefined,
     shownTierOf: () => undefined,
     observe: () => Promise.resolve(),
+    terminate: vi.fn(async () => {}),
     release: vi.fn(),
   }
 }

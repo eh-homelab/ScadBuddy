@@ -531,7 +531,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         // it is enabled and its endpoint passed the egress check this turn.
         let loaded: CheckedPlugin | undefined = hindsight
         const remotePlugins = (): Promise<PluginsForRun> =>
-          Promise.resolve({ plugins: [], problems: [], secrets: [], ...(loaded ? { hindsight: loaded } : {}), release: () => {} })
+          Promise.resolve({ plugins: [], problems: [], secrets: [], ...(loaded ? { hindsight: loaded } : {}), terminate: async () => {}, release: () => {} })
         const context = '<page_context>\n{"route":"/"}\n</page_context>'
         const m = manager({ sql: db.sql, paths, run: runner, remotePlugins })
         const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'Make a box', context })
@@ -567,7 +567,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
           address: '127.0.0.1',
         }
         const remotePlugins = (): Promise<PluginsForRun> =>
-          Promise.resolve({ plugins: [], problems: [], secrets: [], hindsight, release: () => {} })
+          Promise.resolve({ plugins: [], problems: [], secrets: [], hindsight, terminate: async () => {}, release: () => {} })
         const settings = new SettingsStore(db.sql)
         const m = manager({ sql: db.sql, paths, run: runner, remotePlugins, settings, memory: { hookConfig: { autoRetain: false } } })
         // Each turn's process fires the recall (test/support/sessions.ts); a changed cap is
@@ -596,7 +596,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
           address: '127.0.0.1',
         }
         const remotePlugins = (): Promise<PluginsForRun> =>
-          Promise.resolve({ plugins: [], problems: [], secrets: [], hindsight, release: () => {} })
+          Promise.resolve({ plugins: [], problems: [], secrets: [], hindsight, terminate: async () => {}, release: () => {} })
         const audit = new AuditLog({ sql: db.sql })
         const pooled = (id: string, secret: string) => ({
           id,
@@ -674,7 +674,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
           address: '127.0.0.1',
         }
         const remotePlugins = (): Promise<PluginsForRun> =>
-          Promise.resolve({ plugins: [], problems: [], secrets: [], hindsight, release: () => {} })
+          Promise.resolve({ plugins: [], problems: [], secrets: [], hindsight, terminate: async () => {}, release: () => {} })
         const failures: unknown[] = []
         const audit = new AuditLog({ sql: db.sql, onError: (err) => failures.push(err) })
         const m = manager({ sql: db.sql, paths, run: runner, remotePlugins, audit })

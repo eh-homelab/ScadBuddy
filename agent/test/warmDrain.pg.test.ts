@@ -65,6 +65,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`closing a warm process${TEST_DATABASE_URL ?
       eventTierOf: () => undefined,
       shownTierOf: () => undefined,
       observe: () => Promise.resolve(),
+      terminate: vi.fn(async () => {}),
       release: vi.fn(),
     }
   }

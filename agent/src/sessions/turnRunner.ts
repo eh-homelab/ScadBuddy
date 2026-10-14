@@ -126,6 +126,12 @@ export type AssembledTurn = {
   observe(message: SDKMessage): Promise<void>
   /** The turn's automatic memory hooks, recalled against `userText`; only when a Hindsight plugin is loaded. */
   memory?: (userText: string, turnId: string) => MemoryHooks
+  /**
+   * Ends the upstream MCP sessions the plugins' routes saw, then releases the routes: Claude
+   * Code sends no session DELETE when its process ends (spec 2026-10-13 §5.3 E7), so the
+   * owner of a process that has ended calls this before `release`. Bounded (5 s); never rejects.
+   */
+  terminate(): Promise<void>
   /** Releases the plugins' forwarder routes and the packages' directories: when the turn has ended. */
   release(): void
 }
@@ -481,6 +487,9 @@ export class TurnRunner {
         shownTierOf,
         observe: pluginCheck,
         ...(memory ? { memory: memory.hooks } : {}),
+        terminate: async () => {
+          await Promise.all([forwarded?.terminate(), packageServers?.terminate()])
+        },
         release,
       }
     } catch (err) {

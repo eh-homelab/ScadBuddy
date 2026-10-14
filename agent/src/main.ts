@@ -1,7 +1,6 @@
 import { ATTACHMENT_SWEEP_MS, AttachmentStore } from './attachments/store.js'
 import { serve, upgradeWebSocket } from '@hono/node-server'
 import { WebSocketServer } from 'ws'
-import os from 'node:os'
 import path from 'node:path'
 import { event } from './sessions/protocol.js'
 import { getConnInfo } from '@hono/node-server/conninfo'
@@ -22,6 +21,7 @@ import { ensureStateDirs, removeLegacyBrowserDir, StateDirError } from './harnes
 import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
 import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
+import { PluginSessions, replicaIdentity, runPluginSessionSweep } from './plugins/pluginSessions.js'
 import { GitFetcher } from './plugins/packages/git.js'
 import { loadPackagesForRun, PackageInstaller } from './plugins/packages/install.js'
 import { PackageStore } from './plugins/packages/store.js'
@@ -196,7 +196,10 @@ const plugins = database ? new PluginStore(database.sql) : undefined
 const builtInTools = new BuiltInTools(settings)
 // Plugin traffic (connection tests, and each session turn's enabled plugins)
 // goes through this loopback forwarder (plugins/forwarder.ts).
-const pluginForwarder = await PluginForwarder.start()
+const pluginForwarder = await PluginForwarder.start({
+  ...(database ? { sessions: new PluginSessions(database.sql) } : {}),
+  log: (message) => console.error(message),
+})
 const backend = createBackendClient(config.backendUrl)
 
 // The event bus (spec §7, #264): LISTEN on `scadbuddy_events` on a connection
@@ -432,7 +435,7 @@ if (database) {
 // classic turn would hand Claude Code, built again for every listing and call. One whose
 // state lives on this pod (http_request's saved bodies) runs its calls on this replica's
 // own queue, HOST_QUEUE, served by `hostWorker` below.
-const HOST_QUEUE = `${TASK_QUEUE}.${os.hostname()}`
+const HOST_QUEUE = `${TASK_QUEUE}.${replicaIdentity()}`
 // The enabled remote plugins and every usable credential's secret, as a classic turn
 // reads them, for a durable turn's tools and its automatic memory.
 const durableRemotePlugins = plugins
@@ -586,6 +589,29 @@ const stopOrphanSweep =
         },
       )
     : undefined
+// At start and every 5 min: the upstream MCP sessions of replicas that no longer poll
+// agent-tools (plugins/pluginSessions.ts); skipped, and logged, when Temporal cannot say who polls.
+const PLUGIN_SESSION_SWEEP_MS = 5 * 60_000
+const stopPluginSessionSweep =
+  database && plugins
+    ? (() => {
+        const sweep = async () => {
+          if (!(await database.ready())) return
+          await runPluginSessionSweep({
+            sql: database.sql,
+            client: temporalClient,
+            plugins,
+            kek: kek.ok ? kek.kek : undefined,
+            log: (message) => console.error(message),
+          })
+        }
+        const run = () => void sweep().catch((err: unknown) => console.error('plugin session sweep failed:', (err as Error).message))
+        run()
+        const timer = setInterval(run, PLUGIN_SESSION_SWEEP_MS)
+        timer.unref()
+        return () => clearInterval(timer)
+      })()
+    : undefined
 const commands =
   temporalClient && operationStore
     ? new AgentCommands({
@@ -686,6 +712,7 @@ async function stop(): Promise<void> {
   stopSweeper?.()
   stopQuestionSweeper?.()
   stopOrphanSweep?.()
+  stopPluginSessionSweep?.()
   stopDurableSweep?.()
   stopReaper?.()
   stopRetention?.()

@@ -39,7 +39,7 @@ afterAll(async () => {
   await forwarder.close()
 })
 
-const none = async (): Promise<PackageServers> => ({ plugins: [], problems: [], secrets: [], release: () => {} })
+const none = async (): Promise<PackageServers> => ({ plugins: [], problems: [], secrets: [], terminate: async () => {}, release: () => {} })
 
 describe('plugin packages in a durable turn', () => {
   it('shares a package by its content hash, once, and replaces a copy that does not match', async () => {

@@ -89,6 +89,7 @@ export async function warmHarness(db: Throwaway, options: WarmHarnessOptions = {
     eventTierOf: () => undefined,
     shownTierOf: () => undefined,
     observe: () => Promise.resolve(),
+    terminate: vi.fn(async () => {}),
     release: vi.fn(),
   })
   /** One turn on an acquired entry: push, read to the `result`, settle. */

@@ -504,6 +504,12 @@ export class WarmSessions {
         this.log(`warm: closing session ${id}'s process failed: ${err instanceof Error ? err.message : String(err)}`)
       }
       try {
+        // The process has ended: its plugin sessions go now, since it sent no DELETE of its own.
+        await slot.entry.turn.terminate()
+      } catch (err) {
+        this.log(`warm: ending session ${id}'s plugin sessions failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+      try {
         slot.entry.turn.release()
       } catch (err) {
         // A route or directory that would not go is the forwarder's or the
