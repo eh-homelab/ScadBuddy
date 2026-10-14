@@ -172,6 +172,8 @@ type Slot = {
   entry: WarmEntry
   /** sha256 of the credential it was spawned with (`credentialHash`): the secret itself is not kept. */
   credential: string
+  /** The pool candidate it was spawned on, when the turn's candidates held it: what a resync looks for again. */
+  candidate: { id: string; epoch: number } | undefined
   mirror: MirroredTranscript | undefined
   /** What the transcript's last `cost-state` held at spawn: what a resume restores (manager.ts `finish`). */
   carriedUsd: number
@@ -333,6 +335,8 @@ export class WarmSessions {
    * Drops each idle process that a fresh assembly of its session would not
    * reuse it for: the reuse rule of `acquire` (`mismatch`), so a revoked
    * credential or changed tiers end a process that no NOTIFY reached. The
+   * credential is the one the process was spawned on (same pool id, epoch and
+   * secret), not the pool's first: a healthy process on a fallback stays. The
    * budget is taken as the process expects it. A session `assemble` gives
    * nothing for, or fails to assemble, loses its process: it could not be
    * vouched for. One that is acquired meanwhile is left to its turn.
@@ -346,16 +350,19 @@ export class WarmSessions {
         if (!fresh) reason = 'its session is gone'
         else {
           try {
-            const credential = fresh.candidates[0]?.credential
             const entry = slot.entry
-            if (!credential) reason = 'fingerprint'
+            // The credential it was spawned on, as the pool has it now (a fallback's too), and every other
+            // fingerprint input: the pool's first candidate is not this process's business.
+            const spawned = fresh.candidates.find(
+              (c) =>
+                credentialHash(c.credential) === slot.credential &&
+                (slot.candidate === undefined || (c.id === slot.candidate.id && c.epoch === slot.candidate.epoch)),
+            )
+            const apart = (parts: FingerprintParts) => fingerprint({ ...parts, credentialId: '', credentialUpdatedAt: '' })
+            if (!spawned) reason = 'credential'
+            else if (apart(fresh.fingerprintParts) !== apart(entry.turn.fingerprintParts)) reason = 'fingerprint'
             else
-              reason = await this.mismatch(
-                slot,
-                fingerprint(fresh.fingerprintParts),
-                credential,
-                entry.capUsd - (entry.lastTotalUsd - entry.costAtSpawnUsd),
-              )
+              reason = await this.mismatch(slot, entry.fingerprint, spawned.credential, entry.capUsd - (entry.lastTotalUsd - entry.costAtSpawnUsd))
           } finally {
             fresh.release()
           }
@@ -494,7 +501,18 @@ export class WarmSessions {
       lastTotalUsd: carriedUsd,
       lastUsedAt: this.now(),
     }
-    this.slots.set(sessionId, { entry, credential: credentialHash(credential), mirror, carriedUsd, settled: false, busy: true, closed: false })
+    const hash = credentialHash(credential)
+    const on = turn.candidates.find((c) => credentialHash(c.credential) === hash)
+    this.slots.set(sessionId, {
+      entry,
+      credential: hash,
+      candidate: on ? { id: on.id, epoch: on.epoch } : undefined,
+      mirror,
+      carriedUsd,
+      settled: false,
+      busy: true,
+      closed: false,
+    })
     return entry
   }
 

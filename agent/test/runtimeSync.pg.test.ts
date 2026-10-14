@@ -71,10 +71,13 @@ describe.skipIf(!TEST_DATABASE_URL)(`the warm cache's resync${TEST_DATABASE_URL 
     await drop()
   })
 
-  async function assembled(credentialId = 'c1'): Promise<AssembledTurn> {
+  async function assembled(
+    credentialId = 'c1',
+    candidates: AssembledTurn['candidates'] = [{ id: credentialId, epoch: 0, label: 'test', credential }],
+  ): Promise<AssembledTurn> {
     return {
       run: { paths: await tempPaths(), sessionStore: store, maxTurns: 5 },
-      candidates: [{ id: credentialId, epoch: 0, label: 'test', credential }],
+      candidates,
       fingerprintParts: {
         credentialId,
         credentialUpdatedAt: '1',
@@ -207,6 +210,35 @@ describe.skipIf(!TEST_DATABASE_URL)(`the warm cache's resync${TEST_DATABASE_URL 
     const kept = await warm.acquire(fresh, await assembled(), credential, 1 - 0.02)
     expect(kept.outcome).toBe('hit')
     warm.leave(kept.entry)
+  })
+
+  it('checks an idle process against the credential it was spawned on: a healthy one on a fallback stays, a removed or changed one goes', async () => {
+    const primary = { id: 'c0', epoch: 0, label: 'first', credential: { kind: 'anthropic_api_key' as const, secret: 'sk-ant-first' } }
+    const fallback = { id: 'c1', epoch: 0, label: 'second', credential: { kind: 'anthropic_api_key' as const, secret: 'sk-ant-second' } }
+    const spawn = async (id: string) => {
+      // The turn fell back to the second candidate; its fingerprint is the first's (turnRunner.ts).
+      const acquired = await warm.acquire(id, await assembled('c0', [primary, fallback]), fallback.credential, 1)
+      acquired.entry.inbox.push(userMessage('hello'))
+      await warm.settle(acquired.entry, await nextResult(acquired.entry.iterator))
+    }
+    const [healthy, changed, removed] = [randomUUID(), randomUUID(), randomUUID()]
+    for (const id of [healthy, changed, removed]) await spawn(id)
+    expect(warm.size()).toBe(3)
+    const rotated = { ...fallback, epoch: 1 }
+    await warm.revalidate(async (entry) =>
+      entry.sessionId === removed
+        ? assembled('c0', [primary])
+        : entry.sessionId === changed
+          ? assembled('c0', [primary, rotated])
+          : assembled('c0', [primary, fallback]),
+    )
+    expect(warm.size()).toBe(1)
+    const kept = await warm.acquire(healthy, await assembled('c0', [primary, fallback]), fallback.credential, 1 - 0.02)
+    expect(kept.outcome).toBe('hit')
+    warm.leave(kept.entry)
+    // The pool's first candidate changing does not touch it either.
+    await warm.revalidate(() => assembled('c9', [{ ...primary, id: 'c9', epoch: 4 }, fallback]))
+    expect(warm.size()).toBe(1)
   })
 
   it('the resync re-reads the settings, and leaves a process that is running', async () => {
