@@ -1869,7 +1869,7 @@ describe('PrintPicker · Supports (#1899)', () => {
     // for below, or they land in the next test and its own fetch misses MSW (#3381).
     const check = watch('POST', '/check')
     const analyzers = watch('POST', '/run', '/api/v1/analyzers/')
-    renderPage(
+    const { user } = renderPage(
       <PrintPicker
         open
         source={{ kind: 'library', file: { id: 89, filename: 'bag-clip.3mf' } }}
@@ -1882,6 +1882,9 @@ describe('PrintPicker · Supports (#1899)', () => {
     expect(within(screen.getByLabelText('Support type')).getAllByRole('option')[0]).toHaveTextContent(
       'Default (file or process)',
     )
+    // The file may carry its own angle, so the empty field does not say "Preset" either.
+    await user.selectOptions(screen.getByLabelText('Support type'), 'tree')
+    expect(screen.getByLabelText('Threshold angle (°)')).toHaveAttribute('placeholder', 'Default')
     await waitFor(() => {
       expect(check.answered).toBeGreaterThan(0)
       expect(check.answered).toBe(check.urls.length)
@@ -1980,7 +1983,7 @@ describe('PrintPicker · Supports (#1899)', () => {
     const second = fixtures.outputs[1] as Output
     rerender(<PrintPicker open source={{ kind: 'output', output: second }} onClose={vi.fn()} onRan={vi.fn()} />)
     await loaded()
-    if (!screen.queryByLabelText('Supports')) await showAdvanced()
+    if (!screen.queryByLabelText('Support type')) await showAdvanced()
     expect(screen.getByLabelText('Support type')).toHaveValue('default')
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await waitFor(() => expect(bodies).toHaveLength(1))
@@ -1997,7 +2000,7 @@ describe('PrintPicker · Supports (#1899)', () => {
     await user.click(screen.getByRole('button', { name: 'Cancel' }))
     await user.click(screen.getByRole('button', { name: 'Reopen' }))
     await loaded()
-    if (!screen.queryByLabelText('Supports')) await showAdvanced()
+    if (!screen.queryByLabelText('Support type')) await showAdvanced()
     expect(screen.getByLabelText('Support type')).toHaveValue('default')
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await waitFor(() => expect(bodies).toHaveLength(1))
