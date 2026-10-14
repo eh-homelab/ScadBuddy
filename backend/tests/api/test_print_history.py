@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -21,7 +22,9 @@ from fastapi.testclient import TestClient
 from scadbuddy.api import print_history
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.api.params import schema_of
+from scadbuddy.api.print_history import FINISHED_STATUSES, UNFINISHED_STATUSES
 from scadbuddy.bambuddy import linking
+from scadbuddy.bambuddy.component import ARCHIVE_CACHE
 from scadbuddy.bambuddy.models import ArchiveDetail, ArchiveRun
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore, PrintSend
 from scadbuddy.bambuddy.subject import PrintSubject
@@ -84,6 +87,12 @@ def mock_archive(archive_id: int, **fields: Any) -> respx.Route:
     return respx.get(f"{API}/archives/{archive_id}").mock(
         return_value=httpx.Response(200, json=archive(archive_id, **fields))
     )
+
+
+def still_version(path: str | None = None) -> str:
+    """The ``v`` a still's URL carries: its timelapse's path, hashed (#2903)."""
+    timelapse = path or recording("archive-detail.json")["timelapse_path"]
+    return hashlib.sha256(timelapse.encode()).hexdigest()[:12]
 
 
 def other_model(paths: DataPaths) -> str:
@@ -579,7 +588,7 @@ def test_the_detail_joins_provenance_files_media_and_outcome(
     # #2360: the stills and the probe are read after the detail, never by it.
     assert media["timelapse"] == {
         "url": "/api/v1/prints/35/timelapse",
-        "poster_url": "/api/v1/prints/35/timelapse/frames/0",
+        "poster_url": f"/api/v1/prints/35/timelapse/frames/0?v={still_version()}",
         "frames_url": "/api/v1/prints/35/timelapse/frames",
     }
     assert not routes["info"].called
@@ -790,7 +799,7 @@ def test_the_timelapse_stills_are_jpegs_by_url_with_the_probe(
     assert body["info"]["duration"] == pytest.approx(5.208256)
     assert body["frames"][0] == {
         "timestamp": recorded["timestamps"][0],
-        "url": "/api/v1/prints/35/timelapse/frames/0",
+        "url": f"/api/v1/prints/35/timelapse/frames/0?v={still_version()}",
     }
     assert len(body["frames"]) == len(recorded["thumbnails"])
     assert "base64" not in json.dumps(body)
@@ -823,12 +832,34 @@ def test_a_timelapse_bambuddy_cannot_describe_still_plays(client: TestClient, mo
 
     assert response.status_code == 200
     assert response.json() == {"info": None, "frames": []}
+    # #2903: the failure is kept a minute, so the poster's request (and the next view)
+    # answer at once rather than having Bambuddy run ffmpeg again.
     assert client.get("/api/v1/prints/35/timelapse/frames/0").status_code == 404
-    # A failure is not kept: the next look asks Bambuddy again.
-    routes["thumbnails"].mock(
-        return_value=httpx.Response(200, json=recording("timelapse-thumbnails.json"))
+    assert routes["thumbnails"].call_count == 1
+
+
+@respx.mock
+def test_a_replaced_timelapse_gives_its_stills_new_urls(client: TestClient, model: str) -> None:
+    """#2903: the browser keeps a still a day, so a new timelapse's stills (and poster)
+    are at new URLs, not the old ones'."""
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 35)
+    route = mock_archive(35)
+    mock_detail_reads()
+    before = client.get("/api/v1/prints/35").json()["media"]["timelapse"]["poster_url"]
+    route.mock(
+        return_value=httpx.Response(200, json=archive(35, timelapse_path="archive/35/redone.mp4"))
     )
-    assert client.get("/api/v1/prints/35/timelapse/frames/0").status_code == 200
+    # As a changed archive is, once the cache's 30 s is up.
+    state(client).components.get(ARCHIVE_CACHE)._entries.clear()
+
+    after = client.get("/api/v1/prints/35").json()["media"]["timelapse"]["poster_url"]
+
+    assert before != after
+    assert (
+        after == f"/api/v1/prints/35/timelapse/frames/0?v={still_version('archive/35/redone.mp4')}"
+    )
 
 
 @respx.mock
@@ -1339,3 +1370,11 @@ def test_one_library_files_history_finds_its_reprints_made_inside_bambuddy(
 
     assert listed.status_code == 200, listed.text
     assert [item["archive_id"] for item in listed.json()["items"]] == [92]
+
+
+def test_every_recorded_archive_status_is_known() -> None:
+    """#2904: a status Bambuddy starts writing that is in neither list fails here, rather
+    than a running print quietly reading "Finished"."""
+    statuses = {row["status"] for row in recording("archives-full.json")}
+    assert statuses <= UNFINISHED_STATUSES | FINISHED_STATUSES, statuses
+    assert "printing" in statuses & UNFINISHED_STATUSES
