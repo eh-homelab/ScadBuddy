@@ -9,6 +9,8 @@ import json
 import socket
 import uuid
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -201,14 +203,30 @@ def test_a_changed_row_predicate_replaces_the_old_policy(
         mine = [
             r["policyname"]
             for r in conn.execute(
-                "SELECT policyname FROM pg_policies WHERE tablename = 'activity'"
-                " AND policyname LIKE %s",
-                (f"only_{role}%",),
+                "SELECT policyname FROM pg_policies WHERE schemaname = current_schema()"
+                " AND tablename = 'activity' AND starts_with(policyname, %s)",
+                (f"only_{role}",),
             )
         ]
     assert len(mine) == 1
     with granted.connection() as conn:
         assert [r["id"] for r in conn.execute("SELECT id FROM activity")] == ["render:x1"]
+
+
+def test_the_grant_waits_for_another_replicas(owner: Pool, role: str, pg_conninfo: str) -> None:
+    with psycopg.connect(pg_conninfo) as other:  # not autocommit: the lock holds till commit
+        other.execute("SELECT pg_advisory_xact_lock(%s)", (worker_role.GRANT_LOCK,))
+        with ThreadPoolExecutor(1) as pool:
+
+            def grant() -> bool:
+                with owner.connection() as conn:
+                    return grant_render_role(conn, role)
+
+            granting = pool.submit(grant)
+            with pytest.raises(FuturesTimeout):
+                granting.result(timeout=1.0)
+            other.commit()
+            assert granting.result(timeout=30.0)
 
 
 def test_the_role_cannot_migrate(granted: Pool) -> None:
