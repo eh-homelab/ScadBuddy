@@ -322,6 +322,51 @@ export class WarmSessions {
     this.trim()
   }
 
+  /** Closes every process with no turn running, letting it end on its own first (`drop`); a running turn is never touched. */
+  evictIdle(reason: string): Promise<void> {
+    const closing: Promise<void>[] = []
+    for (const slot of [...this.slots.values()]) if (!slot.busy) closing.push(this.drop(slot, reason))
+    return Promise.all(closing).then(() => {})
+  }
+
+  /**
+   * Drops each idle process that a fresh assembly of its session would not
+   * reuse it for: the reuse rule of `acquire` (`mismatch`), so a revoked
+   * credential or changed tiers end a process that no NOTIFY reached. The
+   * budget is taken as the process expects it. A session `assemble` gives
+   * nothing for, or fails to assemble, loses its process: it could not be
+   * vouched for. One that is acquired meanwhile is left to its turn.
+   */
+  async revalidate(assemble: (entry: WarmEntry) => Promise<AssembledTurn | undefined>): Promise<void> {
+    for (const slot of [...this.slots.values()]) {
+      if (slot.busy || slot.closed) continue
+      let reason: string | undefined
+      try {
+        const fresh = await assemble(slot.entry)
+        if (!fresh) reason = 'its session is gone'
+        else {
+          try {
+            const credential = fresh.candidates[0]?.credential
+            const entry = slot.entry
+            if (!credential) reason = 'fingerprint'
+            else
+              reason = await this.mismatch(
+                slot,
+                fingerprint(fresh.fingerprintParts),
+                credential,
+                entry.capUsd - (entry.lastTotalUsd - entry.costAtSpawnUsd),
+              )
+          } finally {
+            fresh.release()
+          }
+        }
+      } catch (err) {
+        reason = `the check failed: ${err instanceof Error ? err.message : String(err)}`
+      }
+      if (reason !== undefined && !slot.busy && !slot.closed) void this.drop(slot, `revalidated: ${reason}`)
+    }
+  }
+
   size(): number {
     return this.slots.size
   }

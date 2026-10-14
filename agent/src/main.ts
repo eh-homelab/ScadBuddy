@@ -42,8 +42,7 @@ import { CHAT_FRAME_MAX, startHeartbeat } from './routes/chat.js'
 import { storedModel } from './routes/model.js'
 import { followSessionEvents, SessionEventPublisher } from './sessions/busEvents.js'
 import { resolveTabWaits, SessionManager, SETTING_MODEL } from './sessions/manager.js'
-import { readRuntimeSettings, resizeOnNotify, RUNTIME_DEFAULTS, SETTINGS_CHANNEL } from './sessions/runtimeSettings.js'
-import { evictOnNotify, WARM_EVICT_CHANNEL } from './sessions/warmEvict.js'
+import { readStartSettings, wireRuntimeSync } from './sessions/runtimeSync.js'
 import { drainRetains } from './memory/hindsight.js'
 import { shutdown } from './shutdown.js'
 import { shutdownTelemetry, traceListener } from './telemetry/runtime.js'
@@ -297,10 +296,7 @@ const sessionEvents = database ? new SessionEventPublisher(database.sql) : undef
 // and the `sessions_*` tools (tools/sessions.ts).
 // The approval routes and the expiry sweep also serve approvals left pending
 // by a restart.
-const runtime =
-  database && settings && (await database.ready())
-    ? await readRuntimeSettings(settings).catch(() => RUNTIME_DEFAULTS)
-    : RUNTIME_DEFAULTS
+const runtime = await readStartSettings({ database, settings }, console.log)
 const sessions =
   database && credentials
     ? new SessionManager({
@@ -350,9 +346,16 @@ const sessions =
 // A credential, plugin or package change on any replica, and a session handed
 // off, marked done, archived or forgotten, evict warm processes everywhere
 // (sessions/warmEvict.ts): on the event bus's connection, like the relays above.
-if (sessions && events) events.listenAlso(WARM_EVICT_CHANNEL, evictOnNotify(sessions.warm))
-// The runtime settings (sessions/runtimeSettings.ts): the warm cache is resized, never evicted for.
-if (sessions && settings && events) events.listenAlso(SETTINGS_CHANNEL, resizeOnNotify(settings, sessions.warm, console.log))
+const stopWarmSync =
+  sessions && settings && events
+    ? wireRuntimeSync({
+        settings,
+        warm: sessions.warm,
+        revalidate: () => sessions.revalidateWarm(),
+        events,
+        log: console.log,
+      })
+    : undefined
 // MCP prepare/confirm on ai_approvals (approvals/mcp.ts); with no database,
 // the in-memory store above, whose actions are never confirmed.
 if (sessions) toolServices.pending = new ApprovalActions(sessions.approvals)
@@ -729,6 +732,7 @@ async function stop(): Promise<void> {
   stopRetention?.()
   stopAttachmentSweep?.()
   stopWorkspaceSweep?.()
+  stopWarmSync?.()
   // Running turns first, while the panel's socket, the paired tab and the pool
   // are all still up: no new turn starts, running ones may finish, the rest are
   // aborted and record that they were (SessionManager.stopTurns). Aborted

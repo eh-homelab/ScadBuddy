@@ -75,6 +75,8 @@ export class PgEventListener implements EventSource {
   readonly #seen = new Set<string>()
   /** Other channels LISTENed on this connection, and who hears them (`listenAlso`). */
   readonly #channels = new Map<string, (payload: string) => void>()
+  /** Who is told when the connection is back after a drop (`onReconnect`). */
+  readonly #reconnects: (() => void)[] = []
   readonly #retryMin: number
   readonly #retryMax: number
   readonly #checkMs: number
@@ -155,6 +157,15 @@ export class PgEventListener implements EventSource {
     }
   }
 
+  /**
+   * Calls `fn` each time LISTEN is back after a drop, once the channels are
+   * listened again. Whatever was sent on `listenAlso`'s channels meanwhile is
+   * lost, so its user re-reads what it needs.
+   */
+  onReconnect(fn: () => void): void {
+    this.#reconnects.push(fn)
+  }
+
   async close(): Promise<void> {
     this.#closed = true
     clearInterval(this.#timer)
@@ -194,7 +205,10 @@ export class PgEventListener implements EventSource {
         else this.#adopt(await this.#maxSeq())
         this.#everListened = true
         // After the replay: NOTIFY-only kinds (bus.ts `onReconnect`) are re-read now.
-        if (reconnected) this.#followers.reconnected()
+        if (reconnected) {
+          this.#followers.reconnected()
+          for (const fn of this.#reconnects) fn()
+        }
         return
       } catch (err) {
         this.#listening = false

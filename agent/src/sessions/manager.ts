@@ -1045,6 +1045,24 @@ export class SessionManager {
     return row ? record(row) : undefined
   }
 
+  /**
+   * Drops each idle warm process that a fresh assembly of its session would
+   * not reuse (warm.ts `revalidate`): the periodic backstop for a NOTIFY that
+   * never arrived (sessions/runtimeSync.ts). The session's owner and the
+   * process's own tiers and retry bound stand in for the turn's, as they are
+   * all fingerprint inputs a turn does not change.
+   */
+  revalidateWarm(): Promise<void> {
+    return this.warm.revalidate(async (entry) => {
+      const session = await this.row(entry.sessionId)
+      if (!session) return undefined
+      const parts = entry.turn.fingerprintParts
+      const fresh = await this.runner.assemble({ ...session, unpricedCostUsd: 0 }, parts.tiers ? { tiers: parts.tiers as Tier[] } : {})
+      fresh.fingerprintParts.transientRetries = parts.transientRetries
+      return fresh
+    })
+  }
+
   /** The session if the principal may see it; otherwise not_found (existence is not revealed). */
   async get(id: string, principal: Owner): Promise<SessionRecord> {
     const session = await this.row(id)

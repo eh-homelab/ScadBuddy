@@ -8,6 +8,7 @@ import { registerSessionRuntimeRoutes, SESSION_RUNTIME_PATH } from '../src/route
 import {
   readRuntimeSettings,
   resizeOnNotify,
+  runtimeResizer,
   RUNTIME_BOUNDS,
   RUNTIME_DEFAULTS,
   RUNTIME_PAYLOAD,
@@ -148,12 +149,67 @@ describe('the settings notification consumer', () => {
   it('re-reads and resizes on `session-runtime`, and ignores any other payload', async () => {
     const resize = vi.fn()
     const values: Record<string, unknown> = { warm_max_per_replica: 3, warm_idle_seconds: 90 }
-    const notified = resizeOnNotify({ get: <T>(key: string) => Promise.resolve(values[key] as T) }, { resize }, () => {})
+    const notified = resizeOnNotify(runtimeResizer({ get: <T>(key: string) => Promise.resolve(values[key] as T) }, { resize }, () => {}))
     notified('other')
     notified('')
     notified('session-runtime; DROP TABLE ai_settings')
     notified(RUNTIME_PAYLOAD)
     await vi.waitFor(() => expect(resize).toHaveBeenCalledTimes(1))
     expect(resize).toHaveBeenCalledWith(3, 90_000)
+  })
+
+  it('applies re-reads in the order asked: an older read that resolves last cannot resize to stale values', async () => {
+    const resize = vi.fn()
+    let reads = 0
+    // The first read is slow and sees 2; the second is quick and sees 5.
+    const settings = {
+      get: async <T>(key: string): Promise<T | undefined> => {
+        if (key !== 'warm_max_per_replica') return undefined
+        const n = ++reads
+        if (n === 1) await new Promise((r) => setTimeout(r, 80))
+        return (n === 1 ? 2 : 5) as T
+      },
+    }
+    const again = runtimeResizer(settings, { resize }, () => {})
+    await Promise.all([again(), again()])
+    expect(resize.mock.calls.map((c) => c[0])).toEqual([2, 5])
+  })
+
+  it('logs a failed read and still serves the next one', async () => {
+    const resize = vi.fn()
+    const log = vi.fn()
+    let fail = true
+    const again = runtimeResizer(
+      { get: <T>() => (fail ? Promise.reject(new Error('down')) : Promise.resolve(4 as T)) },
+      { resize },
+      log,
+    )
+    await again()
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('down'))
+    fail = false
+    await again()
+    expect(resize).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('the routes without a database, or before it is ready', () => {
+  const built = (options: { settings: boolean; ready: boolean }) => {
+    const repo = { get: () => Promise.resolve(undefined), set: () => Promise.resolve() }
+    const app = new Hono()
+    registerSessionRuntimeRoutes(app, {
+      settings: options.settings ? repo : undefined,
+      writer: options.settings ? { setMany: () => Promise.resolve(true) } : undefined,
+      ready: () => Promise.resolve(options.ready),
+      remoteAddress: () => '10.0.0.7',
+      origins: originPolicy('https://scadbuddy.example', '10.0.0.0/8'),
+    })
+    return app
+  }
+
+  it('answers 503 to GET and PUT', async () => {
+    for (const app of [built({ settings: false, ready: true }), built({ settings: true, ready: false })]) {
+      expect((await get(app)).status).toBe(503)
+      expect((await put(app, { warm_max_per_replica: 2 })).status).toBe(503)
+    }
   })
 })

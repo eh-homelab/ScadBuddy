@@ -65,17 +65,33 @@ export async function notifyRuntimeSettings(sql: Sql | TransactionSql): Promise<
   await sql`SELECT pg_notify(${SETTINGS_CHANNEL}, ${RUNTIME_PAYLOAD})`
 }
 
-/** The LISTEN consumer (main.ts): re-reads on `session-runtime` and ignores any other payload. */
-export function resizeOnNotify(
+/**
+ * Re-reads the settings and resizes `warm`, one at a time in the order asked:
+ * each read starts after the one before has resized, so an older read that
+ * resolves last can never resize to values already superseded.
+ */
+export function runtimeResizer(
   settings: Pick<SettingsRepo, 'get'>,
   warm: Pick<WarmSessions, 'resize'>,
   log: (message: string) => void,
-): (payload: string) => void {
+): () => Promise<void> {
+  let tail: Promise<void> = Promise.resolve()
+  return () => {
+    tail = tail.then(async () => {
+      try {
+        const s = await readRuntimeSettings(settings)
+        warm.resize(s.warm_max_per_replica, s.warm_idle_seconds * 1000)
+      } catch (err) {
+        log(`warm: re-reading the runtime settings failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
+    })
+    return tail
+  }
+}
+
+/** The LISTEN consumer (runtimeSync.ts): re-reads on `session-runtime` and ignores any other payload. */
+export function resizeOnNotify(resize: () => Promise<void>): (payload: string) => void {
   return (payload) => {
-    if (payload !== RUNTIME_PAYLOAD) return
-    void readRuntimeSettings(settings).then(
-      (s) => warm.resize(s.warm_max_per_replica, s.warm_idle_seconds * 1000),
-      (err: unknown) => log(`warm: re-reading the runtime settings failed: ${err instanceof Error ? err.message : String(err)}`),
-    )
+    if (payload === RUNTIME_PAYLOAD) void resize()
   }
 }
