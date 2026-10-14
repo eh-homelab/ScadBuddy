@@ -138,18 +138,14 @@ export async function answeredFollowing<T>(
   const began = performance.now()
   let result = await answered(ctx, send, what, gaveUp, began)
   for (let follows = 0, accepting = acceptingOf(result); accepting; accepting = acceptingOf(result), follows++) {
-    if (performance.now() - began >= (ctx.acceptingMs ?? ACCEPTING_MS)) {
-      throw new ToolError(`${what}: ScadBuddy is still starting it.${gaveUp}`)
-    }
     // The follow is itself a long-poll, so the first goes at once; a repeat waits only
     // the polling floor, not `retry_after` on top of the server's wait (review #2849).
-    // A pause that would end past the budget is not taken (#3039).
-    if (follows > 0) {
-      if (performance.now() - began + ctx.pollIntervalMs >= (ctx.acceptingMs ?? ACCEPTING_MS)) {
-        throw new ToolError(`${what}: ScadBuddy is still starting it.${gaveUp}`)
-      }
-      await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
+    // Neither a follow nor a pause starts past the budget (#3039): one check, one error.
+    const pause = follows > 0 ? ctx.pollIntervalMs : 0
+    if (performance.now() - began + pause >= (ctx.acceptingMs ?? ACCEPTING_MS)) {
+      throw new ToolError(`${what}: ScadBuddy is still starting it.${gaveUp}`)
     }
+    if (pause > 0) await sleep(pause, undefined, { signal: ctx.signal })
     const { workflow_id, update_id } = accepting
     // Followed by its ids, with the follow URL's query (a render's `supersedes`): the
     // URL's path must name the same Update, or this would follow another one quietly.

@@ -55,6 +55,22 @@ const SCHEMA = {
   ],
 }
 
+
+/** A 202 `accepting` answer (spec 2026-10-13): follow it at `followUrl`, by default its own. */
+function acceptingAnswer(workflowId: string, updateId: string, followUrl = `/api/v1/commands/${workflowId}/updates/${updateId}`) {
+  return HttpResponse.json(
+    { status: 'accepting', workflow_id: workflowId, update_id: updateId, follow_url: followUrl, retry_after: 0 },
+    { status: 202 },
+  )
+}
+
+/** A follow's 409 `command-resend`: the Update is not known, so send the request again. */
+function commandResend() {
+  return HttpResponse.json(
+    { type: 'https://scadbuddy.dev/problems/command-resend', title: 'Conflict', status: 409, detail: 'send it again' },
+    { status: 409 },
+  )
+}
 describe('print_output still-accepting budget (#1061)', () => {
   it('is the backend CLIENT_ACCEPTING (printing.py), as the frontend printRunPoll.acceptingMs is', () => {
     expect(ACCEPTING_MS).toBe(240_000)
@@ -847,10 +863,7 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     // #2795 — spec 2026-10-13: a run no worker has picked up is a 202 to follow, not a 503 to re-send.
     const followUrl = `${BACKEND}/api/v1/commands/print-x/updates/r1`
     const runAccepting = () =>
-      HttpResponse.json(
-        { status: 'accepting', workflow_id: 'print-x', update_id: 'r1', follow_url: '/api/v1/commands/print-x/updates/r1', retry_after: 0 },
-        { status: 202 },
-      )
+      acceptingAnswer('print-x', 'r1')
 
     it('asks to follow, and follows a 202 accepting to its run without posting the print again (#2795)', async () => {
       const prefer: (string | null)[] = []
@@ -878,7 +891,7 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       server.use(
         handler,
         http.post(followUrl, () =>
-          HttpResponse.json({ type: 'https://scadbuddy.dev/problems/command-resend', title: 'Conflict', status: 409, detail: 'send it again' }, { status: 409 }),
+          commandResend(),
         ),
         done,
       )
@@ -2592,10 +2605,7 @@ describe('a command the backend answers 202 accepting (#2795)', () => {
       http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, ({ request }) => {
         deletes += 1
         prefer = request.headers.get('Prefer')
-        return HttpResponse.json(
-          { status: 'accepting', workflow_id: 'op-delete_output-x', update_id: 'k', follow_url: '/api/v1/commands/op-delete_output-x/updates/k', retry_after: 0 },
-          { status: 202 },
-        )
+        return acceptingAnswer('op-delete_output-x', 'k')
       }),
       http.post(`${BACKEND}/api/v1/commands/op-delete_output-x/updates/k`, () => HttpResponse.json({ deleted: OUT })),
     )
@@ -2610,10 +2620,7 @@ describe('a command the backend answers 202 accepting (#2795)', () => {
     server.use(
       http.get(`${BACKEND}/api/v1/outputs/${OUT}`, () => HttpResponse.json({ slug: 'box' })),
       http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () =>
-        HttpResponse.json(
-          { status: 'accepting', workflow_id: 'op-delete_output-x', update_id: 'k', follow_url: '/api/v1/commands/op-delete_output-x/updates/k', retry_after: 0 },
-          { status: 202 },
-        ),
+        acceptingAnswer('op-delete_output-x', 'k'),
       ),
       http.post(`${BACKEND}/api/v1/commands/op-delete_output-x/updates/k`, () =>
         HttpResponse.json({ id: 'op-1', kind: 'delete_output', subject: OUT, status: 'running', created_at: '', repeated: false }, { status: 202 }),
@@ -2632,17 +2639,11 @@ describe('a command the backend answers 202 accepting (#2795)', () => {
     server.use(
       http.get(`${BACKEND}/api/v1/outputs/${OUT}`, () => HttpResponse.json({ slug: 'box' })),
       http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () =>
-        HttpResponse.json(
-          { status: 'accepting', workflow_id: 'op-delete_output-x', update_id: 'k', follow_url: '/api/v1/commands/op-delete_output-x/updates/k', retry_after: 0 },
-          { status: 202 },
-        ),
+        acceptingAnswer('op-delete_output-x', 'k'),
       ),
       http.post(`${BACKEND}/api/v1/commands/op-delete_output-x/updates/k`, () => {
         follows += 1
-        return HttpResponse.json(
-          { status: 'accepting', workflow_id: 'op-delete_output-x', update_id: 'k', follow_url: '/api/v1/commands/op-delete_output-x/updates/k', retry_after: 0 },
-          { status: 202 },
-        )
+        return acceptingAnswer('op-delete_output-x', 'k')
       }),
     )
     const result = await runTool({ ...tool('delete_output'), gated: false }, { output_id: OUT }, ctx({ acceptingMs: 30 }))
@@ -2656,17 +2657,11 @@ describe('a command the backend answers 202 accepting (#2795)', () => {
     server.use(
       http.get(`${BACKEND}/api/v1/outputs/${OUT}`, () => HttpResponse.json({ slug: 'box' })),
       http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () =>
-        HttpResponse.json(
-          { status: 'accepting', workflow_id: 'op-delete_output-x', update_id: 'k', follow_url: '/api/v1/commands/op-delete_output-x/updates/k', retry_after: 0 },
-          { status: 202 },
-        ),
+        acceptingAnswer('op-delete_output-x', 'k'),
       ),
       http.post(`${BACKEND}/api/v1/commands/op-delete_output-x/updates/k`, () => {
         follows += 1
-        return HttpResponse.json(
-          { status: 'accepting', workflow_id: 'op-delete_output-x', update_id: 'k', follow_url: '/api/v1/commands/op-delete_output-x/updates/k', retry_after: 0 },
-          { status: 202 },
-        )
+        return acceptingAnswer('op-delete_output-x', 'k')
       }),
     )
     const began = performance.now()
@@ -2681,12 +2676,6 @@ describe('a command the backend answers 202 accepting (#2795)', () => {
     expect(performance.now() - began).toBeLessThan(1_000)
   })
 
-  const resend = () =>
-    HttpResponse.json(
-      { type: 'https://scadbuddy.dev/problems/command-resend', title: 'Conflict', status: 409, detail: 'send it again' },
-      { status: 409 },
-    )
-
   it('re-sends a render the follow says command-resend with its key and preference (#3087)', async () => {
     const sent: { key: string | null; prefer: string | null }[] = []
     server.use(
@@ -2694,13 +2683,10 @@ describe('a command the backend answers 202 accepting (#2795)', () => {
       http.post(`${BACKEND}/api/v1/models/box/render`, ({ request }) => {
         sent.push({ key: request.headers.get('Idempotency-Key'), prefer: request.headers.get('Prefer') })
         return sent.length === 1
-          ? HttpResponse.json(
-              { status: 'accepting', workflow_id: 'render-x', update_id: 'k', follow_url: '/api/v1/commands/render-x/updates/k', retry_after: 0 },
-              { status: 202 },
-            )
+          ? acceptingAnswer('render-x', 'k')
           : HttpResponse.json({ job_id: 'j', status_url: '' }, { status: 202 })
       }),
-      http.post(`${BACKEND}/api/v1/commands/render-x/updates/k`, resend),
+      http.post(`${BACKEND}/api/v1/commands/render-x/updates/k`, commandResend),
       http.get(`${BACKEND}/api/v1/jobs/j`, () => HttpResponse.json({ id: 'j', slug: 'box', created_at: '', status: 'done' })),
     )
     const result = await runTool(tool('render_model'), { slug: 'box' }, ctx())
@@ -2718,13 +2704,10 @@ describe('a command the backend answers 202 accepting (#2795)', () => {
       http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, ({ request }) => {
         sent.push({ key: request.headers.get('Idempotency-Key'), prefer: request.headers.get('Prefer') })
         return sent.length === 1
-          ? HttpResponse.json(
-              { status: 'accepting', workflow_id: 'op-delete_output-x', update_id: 'k', follow_url: '/api/v1/commands/op-delete_output-x/updates/k', retry_after: 0 },
-              { status: 202 },
-            )
+          ? acceptingAnswer('op-delete_output-x', 'k')
           : HttpResponse.json({ deleted: OUT })
       }),
-      http.post(`${BACKEND}/api/v1/commands/op-delete_output-x/updates/k`, resend),
+      http.post(`${BACKEND}/api/v1/commands/op-delete_output-x/updates/k`, commandResend),
     )
     const result = await tool('delete_output').execute({ output_id: OUT }, ctx())
     expect(result.isError).toBeFalsy()
@@ -2758,10 +2741,7 @@ describe('a command the backend answers 202 accepting (#2795)', () => {
     server.use(
       http.get(`${BACKEND}/api/v1/outputs/${OUT}`, () => HttpResponse.json({ slug: 'box' })),
       http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () =>
-        HttpResponse.json(
-          { status: 'accepting', workflow_id: 'op-delete_output-x', update_id: 'k', follow_url: '/api/v1/commands/op-delete_output-x/updates/k', retry_after: 0 },
-          { status: 202 },
-        ),
+        acceptingAnswer('op-delete_output-x', 'k'),
       ),
       http.post(`${BACKEND}/api/v1/commands/op-delete_output-x/updates/k`, () => {
         follows += 1
@@ -2785,10 +2765,7 @@ describe('a command the backend answers 202 accepting (#2795)', () => {
     server.use(
       http.get(`${BACKEND}/api/v1/outputs/${OUT}`, () => HttpResponse.json({ slug: 'box' })),
       http.delete(`${BACKEND}/api/v1/outputs/${OUT}`, () =>
-        HttpResponse.json(
-          { status: 'accepting', workflow_id: 'op-delete_output-x', update_id: 'k', follow_url: '/api/v1/commands/op-other-y/updates/z', retry_after: 0 },
-          { status: 202 },
-        ),
+        acceptingAnswer('op-delete_output-x', 'k', '/api/v1/commands/op-other-y/updates/z'),
       ),
       http.post(`${BACKEND}/api/v1/commands/:wf/updates/:id`, () => {
         followed = true
