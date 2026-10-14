@@ -702,3 +702,15 @@ describe('font', () => {
     expect(await screen.findByRole('textbox', { name: 'Sample text' })).toHaveValue('Reagan')
   })
 })
+
+// #3287 — a field whose caption is empty is labelled by its name, as its messages are.
+describe('a parameter with an empty caption', () => {
+  it.each<Param>([
+    { group: 'Main', name: 'text_size', type: 'number', initial: 14, caption: '' },
+    { group: 'Main', name: 'text_size', type: 'slider', initial: 14, caption: '', min: 6, max: 28, step: 1 },
+    { group: 'Main', name: 'text_size', type: 'color', initial: '#FF0000', caption: '' },
+  ])('$type is labelled by its name', (param) => {
+    setup(param, param.initial as ParamValue)
+    expect(screen.getAllByLabelText(/^text_size/).length).toBeGreaterThan(0)
+  })
+})

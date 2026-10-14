@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { Param } from '../../api/types'
-import { colourHex, rangeProblem } from '../../lib/params'
+import { colourHex, paramLabel, rangeProblem } from '../../lib/params'
 import { Field } from './Field'
 import { FilamentColourPicker } from './FilamentColourPicker'
 
@@ -52,7 +52,7 @@ export function ColorWidget({
   return (
     <Field
       id={id}
-      label={param.caption ?? param.name}
+      label={paramLabel(param)}
       name={param.name}
       error={error}
       readout={
@@ -69,14 +69,14 @@ export function ColorWidget({
           type="color"
           // The picker takes only #rrggbb; while the text is no colour it shows black.
           value={(colour ?? '#000000').toLowerCase()}
-          aria-label={param.caption ?? param.name}
+          aria-label={paramLabel(param)}
           onChange={(event) => commit(event.target.value)}
           className="size-8 shrink-0 cursor-pointer rounded-[4px] border border-line bg-surface-2 p-0.5"
         />
         <input
           type="text"
           value={draft ?? hex}
-          aria-label={`${param.caption ?? param.name} hex`}
+          aria-label={`${paramLabel(param)} hex`}
           aria-invalid={error ? true : undefined}
           aria-describedby={error ? `${id}-error` : undefined}
           spellCheck={false}
@@ -89,7 +89,7 @@ export function ColorWidget({
           className="sb-field sb-num uppercase"
         />
       </div>
-      <FilamentColourPicker label={param.caption ?? param.name} value={hex} onPick={onChange} />
+      <FilamentColourPicker label={paramLabel(param)} value={hex} onPick={onChange} />
     </Field>
   )
 }
