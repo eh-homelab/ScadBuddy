@@ -194,6 +194,19 @@ describe('CustomizePage', () => {
     expect(within(dialog).getByLabelText('Add images or videos')).toBeInTheDocument()
   })
 
+  it('opens the README of a template that has one (#1074)', async () => {
+    const { user } = render()
+    await user.click(await screen.findByRole('button', { name: 'README' }))
+    const dialog = screen.getByRole('dialog', { name: 'README' })
+    expect(await within(dialog).findByText(/A name in raised letters on a base plate/)).toBeInTheDocument()
+  })
+
+  it('offers no README for a template without one (#1074)', async () => {
+    render(`/m/${encodeURIComponent(BUILTIN_SLUG)}`)
+    expect(await screen.findByRole('button', { name: 'Media' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'README' })).not.toBeInTheDocument()
+  })
+
   it("opens a built-in's media to add to, what it ships read-only (#279, #722)", async () => {
     const { user } = render(`/m/${encodeURIComponent(BUILTIN_SLUG)}`)
     await user.click(await screen.findByRole('button', { name: 'Media' }))

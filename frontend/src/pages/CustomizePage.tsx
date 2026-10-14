@@ -11,6 +11,7 @@ import { ActionBar, type ActionBarHandle } from '../components/ActionBar'
 import { DeleteModelButton } from '../components/DeleteModelButton'
 import { DuplicatedFrom, DuplicateModelButton } from '../components/DuplicateModelButton'
 import { EditDetailsButton } from '../components/EditDetailsButton'
+import { ReadmeButton } from '../components/readme/ReadmeButton'
 import { MediaButton } from '../components/media/MediaButton'
 import { FlyoutHeader, FullscreenButton, ParametersButton } from '../components/FullscreenControls'
 import { ModelLibrariesButton } from '../components/ModelLibrariesButton'
@@ -1111,6 +1112,7 @@ export function CustomizePage() {
           {modelState.data && origin && (
             <MediaButton model={modelState.data} onChanged={modelState.setData} />
           )}
+          {modelState.data?.has_readme && <ReadmeButton slug={slug} />}
           {origin && (
             <DuplicateModelButton slug={slug} name={displayName} />
           )}

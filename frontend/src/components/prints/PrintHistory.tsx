@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { type Ref, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { useLatest } from '../../lib/useLatest'
 import { api } from '../../api/client'
@@ -18,6 +18,7 @@ import { timeAgo } from '../../lib/format'
 import { libraryOptionsScope } from '../../lib/printSource'
 import { useAsync } from '../../lib/useAsync'
 import { usePrintProgress } from '../../lib/usePrintProgress'
+import { useSeen } from '../../lib/useSeen'
 import { MediaLightbox } from '../media/MediaLightbox'
 import type { Slide } from '../media/slides'
 import { Button } from '../ui/Button'
@@ -402,6 +403,7 @@ function LibraryWaiting({
   }
   return (
     <ul aria-label="Waiting for Bambuddy" className="mb-3 flex flex-col gap-2">
+      {/* Read on mount, unlike OutputWaitingRow: one row, not a list to read lazily (#1014). */}
       <WaitingRow name={name ?? `Library file ${fileId}`} progress={progress} />
     </ul>
   )
@@ -421,15 +423,23 @@ const SETTLED_LABEL: Partial<Record<PrintStage, string>> = {
  * live, as the progress panel does, so the row changes without a reload.
  */
 function OutputWaitingRow({ output }: { output: Output }) {
-  const { progress } = usePrintProgress(output.id, true)
-  return <WaitingRow name={output.name ?? output.id.slice(0, 8)} progress={progress} generated={output.created_at} />
+  // #1014 — each read is a Bambuddy read: a template with many waiting outputs reads
+  // only the rows that come into view, not every one each time the tab opens.
+  const row = useRef<HTMLLIElement>(null)
+  const seen = useSeen(row)
+  const { progress } = usePrintProgress(output.id, seen)
+  return (
+    <WaitingRow ref={row} name={output.name ?? output.id.slice(0, 8)} progress={progress} generated={output.created_at} />
+  )
 }
 
 function WaitingRow({
+  ref,
   name,
   progress,
   generated,
 }: {
+  ref?: Ref<HTMLLIElement>
   name: string
   progress: PrintProgress | null
   /** When the output was made; a library file's print has no such time. */
@@ -437,7 +447,9 @@ function WaitingRow({
 }) {
   const settled = progress?.settled ? progress : null
   return (
-    <li className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-[6px] border border-dashed border-line-strong bg-surface px-3 py-2 text-[13px]">
+    <li
+      ref={ref}
+      className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-[6px] border border-dashed border-line-strong bg-surface px-3 py-2 text-[13px]">
       <span className="text-ink">{name}</span>
       {settled ? (
         settled.route === 'run' ? (
