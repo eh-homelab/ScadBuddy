@@ -10,6 +10,7 @@ import pytest
 from scadbuddy.flows.inputs import (
     MAX_PATTERNED_LENGTH,
     PATTERN_TIMEOUT_S,
+    PATTERNS_BUDGET_S,
     InputsError,
     inputs_model,
     resolve_inputs,
@@ -165,6 +166,26 @@ def test_a_pattern_on_another_type_is_not_supported_and_asks_no_max_length(
     problems = schema_problems({"type": "object", "properties": {"s": prop}})
     assert any("'pattern' is not supported" in p for p in problems), problems
     assert not any("maxLength" in p for p in problems), problems
+
+
+def test_many_slow_values_share_one_budget() -> None:
+    """Each value's deadline alone would let an array of slow items hold the loop for
+    each: the run's patterns share PATTERNS_BUDGET_S."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "s": {
+                "type": "array",
+                "items": {"type": "string", "pattern": "^(a|aa)+$", "maxLength": 64},
+            }
+        },
+    }
+    started = time.monotonic()
+    with pytest.raises(InputsError) as err:
+        resolve_inputs(schema, {"s": ["a" * 60 + "!"] * 40})
+    assert time.monotonic() - started < PATTERNS_BUDGET_S + 0.5
+    assert len(err.value.problems) == 40
+    assert any("took over" in p and "together" in p for p in err.value.problems)
 
 
 def test_an_exponential_pattern_within_its_max_length_is_cut_off() -> None:

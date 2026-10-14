@@ -23,7 +23,9 @@ import copy
 import json
 import keyword
 import re
+import time
 from collections.abc import Iterable, Iterator
+from contextvars import ContextVar
 from typing import Any, Final, Literal
 
 import jsonschema
@@ -40,6 +42,11 @@ MAX_PATTERNED_LENGTH = 1024
 #: How long a pattern may take on one value before the value is refused (#2661): a bounded
 #: `maxLength` bounds a linear pattern's work, not an exponential one's (`^(a|aa)+$`).
 PATTERN_TIMEOUT_S: Final = 0.1
+#: How long all of one run's patterns may take together: the per-value deadline alone
+#: lets an array of many items, or many patterned inputs, hold the event loop for each.
+PATTERNS_BUDGET_S: Final = 0.5
+#: When the patterns `resolve_inputs` runs must be done by (monotonic), None outside it.
+_patterns_deadline: ContextVar[float | None] = ContextVar("_patterns_deadline", default=None)
 #: The type the script's `inputs()` returns, in the stubs and the editor's help.
 INPUTS_TYPE = "FlowInputs"
 
@@ -160,8 +167,16 @@ def _pattern(
     refused rather than left to backtrack on the API's event loop (#2661)."""
     if not validator.is_type(instance, "string"):
         return
+    timeout = PATTERN_TIMEOUT_S
+    if (deadline := _patterns_deadline.get()) is not None:
+        timeout = min(timeout, deadline - time.monotonic())
+    if timeout <= 0:
+        yield jsonschema.ValidationError(
+            f"is refused: the run's patterns took over {PATTERNS_BUDGET_S}s to check together"
+        )
+        return
     try:
-        found = regex.search(pattern, instance, timeout=PATTERN_TIMEOUT_S)
+        found = regex.search(pattern, instance, timeout=timeout)
     except TimeoutError:
         yield jsonschema.ValidationError(
             f"is refused: its pattern took over {PATTERN_TIMEOUT_S}s to check it"
@@ -262,6 +277,14 @@ def resolve_inputs(schema: dict[str, Any] | None, values: dict[str, Any] | None)
     """A run's inputs: ``values`` with every default filled in and every input the run
     was not given set to None, checked against ``schema``. :class:`InputsError` when they
     do not fit; a flow with no schema takes none."""
+    token = _patterns_deadline.set(time.monotonic() + PATTERNS_BUDGET_S)
+    try:
+        return _resolve_inputs(schema, values)
+    finally:
+        _patterns_deadline.reset(token)
+
+
+def _resolve_inputs(schema: dict[str, Any] | None, values: dict[str, Any] | None) -> dict[str, Any]:
     given = dict(values or {})
     if schema is None:
         if given:
