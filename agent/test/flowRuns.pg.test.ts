@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { readdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
@@ -6,6 +6,7 @@ import { ApplicationFailure } from '@temporalio/common'
 import { MockActivityEnvironment } from '@temporalio/testing'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { z } from 'zod'
+import { inputHash } from '../src/approvals/service.js'
 import { flowRequestId } from '../src/gate/ids.js'
 import { PgFlowRuns } from '../src/temporal/flowRuns.js'
 import { connectInProcess, turnToolActivity } from '../src/temporal/turnTools.js'
@@ -125,7 +126,9 @@ describe.skipIf(!TEST_DATABASE_URL)(`PgFlowRuns${TEST_DATABASE_URL ? '' : ` (set
       })
       return s
     }
-    const hash = (tool: string, input: Record<string, unknown>) => `${tool}:${JSON.stringify(input)}`
+    // The audit's own hashing, as the worker wires it (#2871: not a stand-in).
+    const key = randomBytes(32)
+    const hash = (tool: string, input: Record<string, unknown>) => inputHash(key, tool, input)
     const call = turnToolActivity({
       sessions: { ownerOf: async () => undefined },
       servers: async () => ({
@@ -158,6 +161,28 @@ describe.skipIf(!TEST_DATABASE_URL)(`PgFlowRuns${TEST_DATABASE_URL ? '' : ` (set
       )
     expect(refused).toBeInstanceOf(ApplicationFailure)
     expect((refused as ApplicationFailure).type).toBe('NotApproved')
+    expect(calls).toEqual(['x'])
+
+    // #2871: a call the run's grant approved, revoked since, is refused as GrantRevoked.
+    await t.db.sql`
+      INSERT INTO flow_grants (id, run_id, status, spec, requested_by, approved_by, approved_at, expires_at, revoked_at, revoked_by)
+      VALUES ('g1', ${id}, 'approved', '{}', '{"kind": "browser"}', 'browser', now(), now() + interval '1 hour', now(), 'browser')`
+    await t.db.sql`
+      INSERT INTO workflow_run_decisions (request_id, run_id, workflow_run_id, call_id, kind, outcome, responder, input_hash)
+      VALUES (${flowRequestId(id, 'wr1', 'c2')}, ${id}, 'wr1', 'c2', 'approval', 'approved', 'grant:g1',
+        ${hash('notes__post', { body: 'z' })})`
+    const lapsed = await new MockActivityEnvironment({
+      activityId: 'tool-c2',
+      activityType: 'turn:notes__post',
+      workflowExecution: { workflowId: `flow-${id}`, runId: 'wr1' },
+      taskQueue: 'agent-tools',
+    })
+      .run(call, { body: 'z' })
+      .then(
+        () => undefined,
+        (e: unknown) => e,
+      )
+    expect((lapsed as ApplicationFailure).type).toBe('GrantRevoked')
     expect(calls).toEqual(['x'])
   })
 })

@@ -381,6 +381,70 @@ describe('deleting library files (#2167)', () => {
   })
 })
 
+describe('library writes for the mount (#2686)', () => {
+  it('deleting a folder is outward and sends a key', async () => {
+    let key: string | null = null
+    server.use(
+      http.post(`${BACKEND}/api/v1/print/library/folders/4/delete`, ({ request }) => {
+        key = request.headers.get('Idempotency-Key')
+        return HttpResponse.json({ deleted: [], skipped: [], folders: [4] })
+      }),
+    )
+    expect(tool('delete_library_folder').risk).toBe('outward')
+    const result = firstText(await tool('delete_library_folder').execute({ folder_id: 4 }, ctx())) as { folders: number[] }
+    expect(key).toBeTruthy()
+    expect(result.folders).toEqual([4])
+  })
+
+  it('renames a file with only the fields given', async () => {
+    let sent: unknown
+    server.use(
+      http.patch(`${BACKEND}/api/v1/print/library/7`, async ({ request }) => {
+        sent = await request.json()
+        return HttpResponse.json({ id: 7, filename: 'b.3mf', folder_id: null })
+      }),
+    )
+    await tool('update_library_file').execute({ file_id: 7, filename: 'b.3mf' }, ctx())
+    expect(sent).toEqual({ filename: 'b.3mf' })
+  })
+
+  it('makes a folder', async () => {
+    let sent: unknown
+    server.use(
+      http.post(`${BACKEND}/api/v1/print/library/folders`, async ({ request }) => {
+        sent = await request.json()
+        return HttpResponse.json({ id: 9, name: 'Parts', parent_id: 2 })
+      }),
+    )
+    await tool('create_library_folder').execute({ name: 'Parts', parent_id: 2 }, ctx())
+    expect(sent).toEqual({ name: 'Parts', parent_id: 2 })
+  })
+
+  it('renames and moves a folder with only the fields given', async () => {
+    let sent: unknown
+    server.use(
+      http.patch(`${BACKEND}/api/v1/print/library/folders/9`, async ({ request }) => {
+        sent = await request.json()
+        return HttpResponse.json({ id: 9, name: 'Bits', parent_id: null })
+      }),
+    )
+    await tool('update_library_folder').execute({ folder_id: 9, name: 'Bits' }, ctx())
+    expect(sent).toEqual({ name: 'Bits' })
+  })
+
+  it('every one is outward, so a human approves it', () => {
+    for (const name of ['upload_library_file', 'update_library_file', 'create_library_folder', 'update_library_folder', 'delete_library_folder']) {
+      expect(tool(name).risk).toBe('outward')
+    }
+  })
+
+  it('every one asks for Manage Library', () => {
+    for (const name of ['upload_library_file', 'update_library_file', 'create_library_folder', 'update_library_folder', 'delete_library_folder']) {
+      expect(tool(name).bambuddyScope).toEqual(['Manage Library'])
+    }
+  })
+})
+
 describe('copying, moving and renaming library files (#2670)', () => {
   it('moves by folder path with an Idempotency-Key, and names the folder in its approval line', async () => {
     let sent: { body: unknown; key: string | null } | undefined

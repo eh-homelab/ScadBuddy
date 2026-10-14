@@ -252,10 +252,11 @@ class PrintRunResult(BaseModel):
 
 
 def known_slots(source: PrintSource) -> Callable[[int | None], FilamentRequirements] | None:
-    """A library file's slots as read from the file itself, for every plate (#2550):
-    every copy of it has the same slots, so they answer for whichever copy is read.
-    ``None`` when they came from Bambuddy, which is then asked per plate."""
-    if isinstance(source, LibrarySource) and source.local is not None:
+    """A library file's (#2550) or an output's (#2720) slots as read from the file
+    itself, for every plate: every copy of it has the same slots, so they answer for
+    whichever copy is read. ``None`` when they came from Bambuddy, which is then asked
+    per plate."""
+    if isinstance(source, LibrarySource | OutputSource) and source.local is not None:
         return source.local.for_plate
     return None
 
@@ -578,9 +579,10 @@ async def _slot_errors(
 ) -> list[str]:
     """The run's slot refusals for ``request``, judged before anything is uploaded for it
     (#1050): read from a copy Bambuddy already has, which has the same slots as the one
-    the run prints, as :func:`filament_options` reads them. The dialog's own choices read
-    made one; with none (an API caller that never read the choices) there is nothing to
-    read without an upload, and the run still judges the slots after its own."""
+    the run prints, as :func:`filament_options` reads them. An output's slots and a
+    library file's are read from the file itself (#2720, #2550); with neither and no copy
+    there is nothing to read without an upload, and the run still judges the slots
+    after its own."""
     read_file = await source.file_read_already(client)
     if read_file is None:
         return []
@@ -1209,6 +1211,8 @@ async def plan_run(
         plate_ids=plate_ids,
         fallback_colours=list(source.colours),
         inventory=inventory,
+        # The file's own slots when it was read (#2550, #2720): a plate's colours are the
+        # model's, not the run's recoloured copy's, as the dialog showed them. Intended.
         known=known_slots(source),
     )
     per_plate = [with_trays(options, printer_status, printer_id) for options in per_plate]

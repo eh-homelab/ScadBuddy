@@ -11,7 +11,7 @@ import { PrintPicker } from './PrintPicker'
 
 // #2072 — what the background slice came to, set per test.
 const slice = vi.hoisted(() => ({
-  state: { result: null, plan: null, stale: false, slicing: false, error: null } as PreviewSliceState,
+  state: { result: null, plateId: 1, plan: null, stale: false, slicing: false, error: null } satisfies PreviewSliceState as PreviewSliceState,
 }))
 vi.mock('../lib/usePreviewSlice', async (actual) => ({
   ...(await actual<typeof PreviewSliceModule>()),

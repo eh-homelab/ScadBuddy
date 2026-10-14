@@ -1001,7 +1001,14 @@ export class SessionManager {
       ...(deps.settings ? { settings: deps.settings } : {}),
     })
     this.projection = new PendingProjection(deps.sql)
-    this.escalations = new Escalations({ sql: deps.sql, durable: () => this.durable })
+    this.escalations = new Escalations({
+      sql: deps.sql,
+      durable: () => this.durable,
+      // A delivery turn (#2482): as the owner, with the tiers its owner holds now.
+      send: async (id, owner, text, tiers) => {
+        await this.send(id, owner, text, { tiers })
+      },
+    })
     this.edits = new SessionEdits({
       sql: deps.sql,
       events: this.events,
