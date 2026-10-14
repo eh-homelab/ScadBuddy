@@ -416,6 +416,25 @@ describe('a reload (#2372)', () => {
     expect(screen.queryByTestId('active-session-title')).toBeNull()
     expect(screen.getByRole('textbox', { name: 'Message the assistant' })).toHaveValue('')
   })
+
+  it('forgets a remembered chat when the viewer has no chats left (#3616)', async () => {
+    window.sessionStorage.setItem('scadbuddy.assistant.open', '1')
+    window.sessionStorage.setItem('scadbuddy.assistant.session', 'a-chat-since-deleted')
+    const inner = createMockAgentTransport({ stepMs: 0 })
+    const noChats: MockAgentTransport = {
+      ...inner,
+      connect: (h) =>
+        inner.connect({
+          ...h,
+          onFrame: (frame) =>
+            h.onFrame((frame as { type?: string }).type === 'sessions.snapshot' ? ({ ...(frame as object), sessions: [] } as never) : frame),
+        }),
+    }
+
+    renderShell(undefined, noChats)
+    expect(await screen.findByRole('complementary', { name: 'Assistant' })).toBeVisible()
+    await waitFor(() => expect(window.sessionStorage.getItem('scadbuddy.assistant.session')).toBeNull())
+  })
 })
 
 describe('the chat header (#2380)', () => {

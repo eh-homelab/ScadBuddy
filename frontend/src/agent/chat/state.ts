@@ -177,6 +177,8 @@ export interface ChatState {
   /** The panel sent a first turn and waits for its `session.started`. */
   awaitingStart: boolean
   connected: boolean
+  /** #3616 — a session list has come in, so an empty `order` means the viewer has no chats. */
+  listed: boolean
   /** Errors not tied to a session (a dropped connection, a malformed frame). */
   notice: string | null
 }
@@ -217,6 +219,7 @@ export const initialChatState: ChatState = {
   activeId: null,
   awaitingStart: false,
   connected: false,
+  listed: false,
   notice: null,
 }
 
@@ -322,7 +325,7 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
       // the rest keep their place.
       const fresh = event.sessions.map((s) => s.sessionId).filter((id) => !(id in state.sessions))
       const kept = state.order.filter((id) => id in sessions)
-      return { ...state, sessions, order: [...fresh, ...kept] }
+      return { ...state, sessions, order: [...fresh, ...kept], listed: true }
     }
 
     case 'session.started': {

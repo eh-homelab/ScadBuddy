@@ -435,7 +435,7 @@ export function AssistantChat({
   // reloaded tab (#3164): a new one opens on a new chat.
   const restored = useRef(false)
   useEffect(() => {
-    if (restored.current || state.order.length === 0) return
+    if (restored.current || !state.listed) return
     restored.current = true
     if (state.activeId || state.awaitingStart || openRequest) {
       rememberSession(state.activeId)
@@ -445,7 +445,7 @@ export function AssistantChat({
     if (id) select(id)
     // A remembered chat that is no longer listed, with nothing under way to show instead.
     else rememberSession(null)
-  }, [state.order, state.sessions, state.activeId, state.awaitingStart, openRequest, select, reloaded])
+  }, [state.listed, state.order, state.sessions, state.activeId, state.awaitingStart, openRequest, select, reloaded])
   // After the restore, so it does not forget the chat before reading it.
   useEffect(() => {
     if (restored.current) rememberSession(state.activeId)
